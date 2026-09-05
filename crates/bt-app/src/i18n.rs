@@ -367,6 +367,14 @@ pub enum Text {
     /// Names the surface it changes — Explorer's menu — rather than the thing it
     /// writes, which is a registry key nobody asked to hear about.
     RowContextMenu,
+    /// **The same verb, on the page Windows 11 opens first** (§7.4a), directly
+    /// under [`Self::RowContextMenu`].
+    ///
+    /// Names the page rather than the mechanism: what a reader is choosing is
+    /// where the entry appears, and "sparse MSIX package" is a sentence about
+    /// how rather than about what. The row is not drawn at all below Windows 11,
+    /// where there is no such page.
+    RowExplorerFirstPage,
     /// **The one row in this dialog that governs a network request** (§7.51),
     /// last on the General page.
     RowUpdateCheck,
@@ -392,6 +400,17 @@ pub enum Text {
     /// Where the entry will be found, which on Windows 11 is the surprising
     /// half — see [`Self::ContextMenuVerb`].
     DescContextMenu,
+    /// What the first-page row adds, and the one thing about it a reader has to
+    /// know: it registers a package for this account.
+    DescExplorerFirstPage,
+    /// The same row when `folio.msix` is not beside the executable — which is
+    /// the state of a machine where somebody moved `folio.exe` out of the folder
+    /// they extracted, and the reason the switch has nothing to press.
+    DescExplorerFirstPageNoPackage,
+    /// And when the registration names a folder that is not this one. The launch
+    /// repairs this on its own; the sentence exists for the seconds before it
+    /// has, and for the machine where the repair could not run.
+    DescExplorerFirstPageElsewhere,
     /// The sentence the row wears while there is nothing newer — what the check
     /// does, and the bound on what it can do. The other sentence names a version
     /// and is composed by [`update_row_available_in`].
@@ -473,6 +492,28 @@ pub enum Text {
     /// worth making: a path invented here would be a menu entry that launches
     /// whatever happens to be at it.
     ContextMenuNoExecutable,
+
+    // ── the first page of Windows 11's menu (§7.4a) ────────────────────────
+    /// **What Explorer draws on the first page**, asked for per call by
+    /// `IExplorerCommand::GetTitle`.
+    ///
+    /// **Not [`Self::ContextMenuVerb`]'s words in English**, and deliberately:
+    /// that entry sits under *Show more options* among third-party verbs that
+    /// all end in `here`, and this one sits between `Copy` and `Rename` among
+    /// Windows' own, where the house form is `Open in …`. In Chinese both are
+    /// 「在 Folio 中打开」, because Chinese has one form and it is already the
+    /// one that fits both places.
+    ExplorerCommandVerb,
+    /// The card raised when the package is registered.
+    ExplorerFirstPageAddedToast,
+    /// And when it is taken back off.
+    ExplorerFirstPageRemovedToast,
+    /// The refusal when `folio.msix` is not beside the executable.
+    ///
+    /// A statement about the folder rather than an instruction: the file ships in
+    /// the archive, so its absence means an extraction that left it behind or a
+    /// binary that was moved on its own.
+    ExplorerFirstPageNoPackage,
 
     // ── the `˅` profile menu ───────────────────────────────────────────────
     /// Lower case is deliberate: it is an annotation, not a label.
@@ -2261,6 +2302,10 @@ impl Text {
             Self::RowInlineFormulas => pick(lang, "Inline formulas", "行内公式"),
             Self::RowGitPanel => pick(lang, "Git panel", "Git 面板"),
             Self::RowContextMenu => pick(lang, "Explorer context menu", "资源管理器菜单"),
+            // Names the page, which is the thing the row above it cannot reach.
+            // 「一级菜单」is what Windows 11's first page is called in Chinese
+            // writing about it, and there is no shorter true name.
+            Self::RowExplorerFirstPage => pick(lang, "First page of that menu", "一级菜单"),
             Self::RowTabLayout => pick(lang, "Tab layout", "标签布局"),
             Self::RowSidebar => pick(lang, "Sidebar", "侧栏"),
             Self::RowSplitDirection => pick(lang, "Split direction", "拆分方向"),
@@ -2323,6 +2368,26 @@ impl Text {
                 lang,
                 "Adds Open Folio here to Explorer's right-click menu. Windows 11 files it under Show more options.",
                 "在资源管理器的右键菜单里加上「在 Folio 中打开」。Windows 11 把它收在「显示更多选项」下面。",
+            ),
+            // Two facts and no opinion, `DescContextMenu`'s own discipline:
+            // what lands where, and what has to be registered for it to. The
+            // package is named because it is a file the reader can see in the
+            // folder they extracted, and because "registers a package" is the
+            // part of this switch that deleting a registry key does not undo.
+            Self::DescExplorerFirstPage => pick(
+                lang,
+                "Puts Open in Folio on the page Windows 11 opens first. It registers folio.msix, the file beside folio.exe, for this account.",
+                "把「在 Folio 中打开」放到 Windows 11 先打开的那一页。它为这个账户登记 folio.msix，也就是 folio.exe 旁边的那个文件。",
+            ),
+            Self::DescExplorerFirstPageNoPackage => pick(
+                lang,
+                "folio.msix is not in this folder. It ships in the archive beside folio.exe, and this page needs it.",
+                "这个文件夹里没有 folio.msix。它随压缩包发在 folio.exe 旁边，这一页需要它。",
+            ),
+            Self::DescExplorerFirstPageElsewhere => pick(
+                lang,
+                "The entry on that page points at another folder. Folio puts it back on the next launch that can.",
+                "那一页上的条目指向另一个文件夹。Folio 会在下一次能做到的启动里把它改回来。",
             ),
             Self::DescTabLayout => pick(
                 lang,
@@ -2507,6 +2572,29 @@ impl Text {
                 lang,
                 "Windows did not say where folio.exe is",
                 "Windows 没有说出 folio.exe 的位置",
+            ),
+
+            // ── the first page of Windows 11's menu (§7.4a) ────────────────
+            //
+            // `ExplorerCommandVerb` is length-sensitive for `ContextMenuVerb`'s
+            // reason and for one more: the first page is a short menu of short
+            // verbs, and an entry longer than `Open with` widens it for
+            // everything else standing on it.
+            Self::ExplorerCommandVerb => pick(lang, "Open in Folio", "在 Folio 中打开"),
+            Self::ExplorerFirstPageAddedToast => pick(
+                lang,
+                "Open in Folio is on the first page of Explorer's menu",
+                "「在 Folio 中打开」已在资源管理器菜单的第一页",
+            ),
+            Self::ExplorerFirstPageRemovedToast => pick(
+                lang,
+                "Taken off the first page of Explorer's menu",
+                "已从资源管理器菜单的第一页移除",
+            ),
+            Self::ExplorerFirstPageNoPackage => pick(
+                lang,
+                "folio.msix is not beside folio.exe",
+                "folio.exe 旁边没有 folio.msix",
             ),
 
             // ── the `˅` profile menu ───────────────────────────────────────
@@ -3937,7 +4025,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 568] = [
+    pub const ALL: [Self; 576] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3978,6 +4066,7 @@ impl Text {
         Self::RowGitPanel,
         Self::RowUpdateCheck,
         Self::RowContextMenu,
+        Self::RowExplorerFirstPage,
         Self::RowTabLayout,
         Self::RowSidebar,
         Self::RowSplitDirection,
@@ -3993,6 +4082,9 @@ impl Text {
         Self::DescGitPanel,
         Self::DescUpdateCheck,
         Self::DescContextMenu,
+        Self::DescExplorerFirstPage,
+        Self::DescExplorerFirstPageNoPackage,
+        Self::DescExplorerFirstPageElsewhere,
         Self::DescTabLayout,
         Self::DescSidebar,
         Self::DescSplitDirection,
@@ -4025,6 +4117,10 @@ impl Text {
         Self::ContextMenuAddedToast,
         Self::ContextMenuRemovedToast,
         Self::ContextMenuNoExecutable,
+        Self::ExplorerCommandVerb,
+        Self::ExplorerFirstPageAddedToast,
+        Self::ExplorerFirstPageRemovedToast,
+        Self::ExplorerFirstPageNoPackage,
         Self::ProfileHintDefault,
         Self::ProfileHintUnavailable,
         Self::ProfileHintCurrent,
@@ -4964,6 +5060,21 @@ pub fn context_menu_failed(message: &str) -> String {
     match current() {
         Lang::English => format!("Could not change Explorer's menu: {message}"),
         Lang::Chinese => format!("修改资源管理器菜单失败：{message}"),
+    }
+}
+
+/// The same, for the package the first page needs (§7.4a).
+///
+/// A sentence of its own rather than that one with a different word, because the
+/// two failures are different things a reader can act on: one is a registry key
+/// that would not open, and this is a deployment Windows refused — and what it
+/// refused is carried through verbatim, since on the machine where it fires
+/// nobody else can see it.
+#[must_use]
+pub fn explorer_first_page_failed(message: &str) -> String {
+    match current() {
+        Lang::English => format!("Windows would not register the package: {message}"),
+        Lang::Chinese => format!("Windows 拒绝登记这个包：{message}"),
     }
 }
 

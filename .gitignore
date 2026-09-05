@@ -9,6 +9,11 @@
 !design/assets/file-icons-r2/*.png
 !design/assets/file-icons-r3/*.png
 !design/assets/app-icon/*.png
+# The three logos `packaging/msix/AppxManifest.xml` names. Checked in, and
+# not generated at packaging time, because a release must not need a Python
+# to build; `design/assets/app-icon/make-msix-logos.py` is how they can be
+# checked rather than how they are obtained.
+!packaging/msix/images/*.png
 !docs/spikes/artifacts/03-visual/comparison.png
 !docs/spikes/artifacts/multiwindow/*.png
 !docs/spikes/artifacts/webview2/*.png

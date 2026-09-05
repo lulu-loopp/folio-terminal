@@ -2337,6 +2337,26 @@ pub enum SettingsRow {
     /// at all, it is another program's menu. `General` is where the rows about
     /// what this product *is on this machine* already are.
     ContextMenu,
+    /// **The same verb on the page Windows 11 opens first** (§7.4a) — the
+    /// General page's fifth row, directly under [`Self::ContextMenu`].
+    ///
+    /// **The fourth row in this dialog whose answer is a fact about the machine
+    /// rather than a line in `settings.json`**, and the first whose answer takes
+    /// long enough to fetch that it cannot be fetched while a frame is being
+    /// drawn: what is being decided is whether an MSIX package is registered for
+    /// this user, and `PackageManager` is a service. So the tick comes from
+    /// `explorer_menu`'s cached answer, refreshed on a thread of its own at the
+    /// three moments it can change — the launch, a registration and a removal —
+    /// which is `ContextMenu`'s discipline with the read moved off this thread.
+    ///
+    /// **Not drawn at all below Windows 11** ([`visible_rows_for`]): the page it
+    /// puts an entry on does not exist there, so a switch for it would be a
+    /// control whose On and Off look identical.
+    ///
+    /// Directly under the row it refines rather than beside `Update check`,
+    /// because the pair reads as one subject — Explorer's menu — asked twice:
+    /// whether Folio is in it, and whether it is on the page that opens first.
+    ExplorerFirstPage,
     /// **Whether this build asks the releases page whether a newer one exists**
     /// (§7.51) — the General page's last row.
     ///
@@ -2832,6 +2852,7 @@ impl SettingsRow {
             | Self::KeyHints
             | Self::SearchEngine
             | Self::ContextMenu
+            | Self::ExplorerFirstPage
             // And the row that is about what this product does off this machine
             // rather than on it — see the variant.
             | Self::UpdateCheck => SettingsCategory::General,
@@ -2910,6 +2931,7 @@ impl SettingsRow {
             Self::GitPanel => Text::RowGitPanel.text(),
             Self::KeyHints => Text::RowKeyHints.text(),
             Self::ContextMenu => Text::RowContextMenu.text(),
+            Self::ExplorerFirstPage => Text::RowExplorerFirstPage.text(),
             Self::UpdateCheck => Text::RowUpdateCheck.text(),
             // Mock-up 2360.
             Self::TabLayout => Text::RowTabLayout.text(),
@@ -3070,6 +3092,11 @@ impl SettingsRow {
             // because without it a reader switches this on, right-clicks a
             // folder, sees the short menu, and concludes the switch is broken.
             Self::ContextMenu => crate::context_menu::row_description(),
+            // **Not a constant either**, and for a stronger version of the row
+            // above's reason: which of three sentences is true depends on
+            // whether `folio.msix` is in this folder and on where the
+            // registration points, and neither is a thing this table can know.
+            Self::ExplorerFirstPage => crate::explorer_menu::row_description(),
             // **Not a constant**, on the row above's footing: the sentence names
             // the version the releases page named, and a row that only said "a
             // newer version is out" would send the reader to the page to find
@@ -3350,6 +3377,10 @@ impl SettingsRow {
             // reader who wants Folio in their right-click menu has no reason to
             // guess that the answer is behind a disclosure.
             | Self::ContextMenu
+            // Nor this one, on the row above's measure exactly: it is the row a
+            // reader who could not find Folio on the first page comes looking
+            // for, and behind a disclosure it is a row they report as missing.
+            | Self::ExplorerFirstPage
             // A reader who wants to know what this product talks to must not
             // have to open a disclosure to find the row that answers it.
             | Self::UpdateCheck
@@ -3473,6 +3504,7 @@ impl SettingsRow {
             | Self::GitPanel
             | Self::KeyHints
             | Self::ContextMenu
+            | Self::ExplorerFirstPage
             | Self::PsReadLine
             | Self::CopyOnSelect
             | Self::Notifications
@@ -3554,6 +3586,7 @@ impl SettingsRow {
             | Self::GitPanel
             | Self::KeyHints
             | Self::ContextMenu
+            | Self::ExplorerFirstPage
             | Self::PsReadLine
             | Self::CopyOnSelect
             | Self::Notifications
@@ -3952,6 +3985,12 @@ impl SettingsRow {
             Self::ContextMenu => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.context_menu),
+            // The deployment database's answer, and never a stored one — the
+            // row above's rule over the one store on this machine that a
+            // `settings.json` copy could disagree with silently.
+            Self::ExplorerFirstPage => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.explorer_first_page),
             Self::TabLayout => TAB_LAYOUT_OPTIONS
                 .iter()
                 .position(|it| *it == values.tab_layout),
@@ -4075,6 +4114,19 @@ impl SettingsRow {
 /// `every_page_puts_its_everyday_rows_above_its_advanced_ones`.
 #[must_use]
 pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
+    visible_rows_for(tab_layout, crate::explorer_menu::supported())
+}
+
+/// The same list, with the machine's own answer handed in.
+///
+/// **The second conditional row is a fact about this Windows** and not about
+/// this window (§7.4a): the page a package registration puts an entry on exists
+/// from build 22000, and below it the row would be a switch whose two positions
+/// look the same. A parameter rather than a call inside, on `machine_path_kind`'s
+/// footing — so the shape of both machines can be pinned by a test rather than by
+/// whichever machine the test happens to run on.
+#[must_use]
+pub fn visible_rows_for(tab_layout: TabLayoutMode, first_page: bool) -> Vec<SettingsRow> {
     // ── Appearance, everyday ──
     //
     // The order is the user's own (2026-08-17), and it is the order of a
@@ -4169,6 +4221,12 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // something **outside this window**: the three above it say how Folio
     // behaves, and this one says what another program's menu contains.
     rows.push(SettingsRow::ContextMenu);
+    // Directly under it, because the two are one subject asked twice — whether
+    // Folio is in Explorer's menu, and whether it is on the page that opens
+    // first. Only on a Windows that has such a page (§7.4a).
+    if first_page {
+        rows.push(SettingsRow::ExplorerFirstPage);
+    }
     // **Last**, on the row above's measure taken one step further: that row
     // reaches another program on this machine, and this one is the only row in
     // the whole dialog that reaches off it. A reader who opens this page to find
@@ -4593,6 +4651,14 @@ pub struct SettingsValues {
     /// uninstalled from another folder or a restored backup all move this row
     /// rather than leaving it claiming something that is no longer true.
     pub context_menu: bool,
+    /// Whether Folio's package is registered for this user, which is what puts
+    /// the verb on the page Windows 11 opens first (§7.4a).
+    ///
+    /// The field above's rule over the deployment database, with one difference
+    /// that shows here: the answer takes tens of milliseconds to fetch, so what
+    /// this carries is `explorer_menu`'s cached one and a window that has just
+    /// started shows `Off` for as long as the first probe takes.
+    pub explorer_first_page: bool,
     /// Whether the user's own Claude Code configuration calls `folio attention`.
     ///
     /// Read off that file rather than stored here, for [`Self::context_menu`]'s reason.
@@ -4792,6 +4858,7 @@ impl SettingsValues {
             // A machine that never installed the verb, which is what a fresh
             // one is.
             context_menu: false,
+            explorer_first_page: false,
             claude_hooks: false,
             codex_notify: false,
             copilot_hooks: false,
@@ -8224,6 +8291,18 @@ pub fn git_panel_requested(target: SettingsTarget) -> Option<bool> {
 pub fn context_menu_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::ContextMenu, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// Whether the first page of Explorer's menu was asked for the verb, or asked
+/// to give it back (§7.4a).
+#[must_use]
+pub fn explorer_first_page_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::ExplorerFirstPage, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
@@ -13576,6 +13655,26 @@ mod tests {
         dialog_around(page_height_disclosed(on_page))
             .min(capped_dialog_height())
             .round()
+    }
+
+    /// **[`super::visible_rows`] with the machine's own answer pinned**, and it
+    /// deliberately shadows that function for the whole of this module.
+    ///
+    /// One row in this dialog is drawn only where the operating system has a
+    /// first page to put a menu item on (§7.4a), so the free function reads the
+    /// build number. A test suite that did the same would be a suite whose row
+    /// list — and therefore every keyboard walk, every page order and every
+    /// height in this file — depended on which Windows it happened to run on: it
+    /// would pass on a Windows 11 and fail on a developer's Windows 10, saying
+    /// nothing true about either.
+    ///
+    /// So every claim below is stated against the Windows 11 shape, and the
+    /// Windows 10 one is pinned in exactly one place, by
+    /// `windows_ten_has_no_row_about_a_page_it_does_not_have`, which calls
+    /// [`super::visible_rows_for`] with both answers and holds that the two
+    /// lists differ by that one row and nothing else.
+    fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
+        visible_rows_for(tab_layout, true)
     }
 
     /// The rows a dialog holds with the tabs across the top — the state the app
@@ -21165,6 +21264,60 @@ mod tests {
         );
     }
 
+    /// RED (§7.4a) — **a Windows with no first page has no row about one, and
+    /// nothing else about the dialog moves.**
+    ///
+    /// The second conditional row in this file, and the first whose condition is
+    /// a fact about the *operating system* rather than about this window. What it
+    /// must not do is disturb anything else: the General page's order, the two
+    /// rows it stands between, and every other page are the same list with one
+    /// entry removed — because a row that took its neighbours' places with it
+    /// would move every keyboard walk in this dialog on one machine and not on
+    /// another.
+    ///
+    /// It is pinned against `visible_rows_for` and not against `visible_rows`
+    /// deliberately: the latter reads the machine the test happens to be running
+    /// on, and a shape that is only checked on Windows 11 is a shape nobody
+    /// checks on Windows 10.
+    ///
+    /// MUTATION: push the row unconditionally and the first assertion goes red,
+    /// which is a switch on Windows 10 whose On and Off look identical.
+    #[test]
+    fn windows_ten_has_no_row_about_a_page_it_does_not_have() {
+        for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
+            let eleven = visible_rows_for(layout, true);
+            let ten = visible_rows_for(layout, false);
+            assert!(
+                !ten.contains(&SettingsRow::ExplorerFirstPage),
+                "{layout:?}: the row is about a page this Windows does not have"
+            );
+            assert!(eleven.contains(&SettingsRow::ExplorerFirstPage));
+            let without: Vec<SettingsRow> = eleven
+                .iter()
+                .copied()
+                .filter(|row| *row != SettingsRow::ExplorerFirstPage)
+                .collect();
+            assert_eq!(
+                ten, without,
+                "{layout:?}: the row is the only difference between the two \
+                 machines, and it takes nothing with it"
+            );
+            // Where it stands is part of the pin: the pair reads as one subject
+            // asked twice, so it is directly under the row it refines.
+            let at = eleven
+                .iter()
+                .position(|row| *row == SettingsRow::ExplorerFirstPage)
+                .expect("it is on the Windows 11 list");
+            assert_eq!(eleven[at - 1], SettingsRow::ContextMenu);
+            assert_eq!(eleven[at + 1], SettingsRow::UpdateCheck);
+            assert_eq!(
+                SettingsRow::ExplorerFirstPage.category(),
+                SettingsCategory::General
+            );
+            assert!(!SettingsRow::ExplorerFirstPage.advanced());
+        }
+    }
+
     /// RED (§7.54) — **a summon nobody can call up says so on its own row, and
     /// says nothing when the key is fine.**
     ///
@@ -21246,7 +21399,7 @@ mod tests {
     #[test]
     fn the_sidebar_row_is_only_in_the_dialog_while_the_tabs_run_down_the_side() {
         assert_eq!(
-            visible_rows(TabLayoutMode::Horizontal),
+            visible_rows_for(TabLayoutMode::Horizontal, true),
             [
                 SettingsRow::Theme,
                 SettingsRow::LightScheme,
@@ -21283,6 +21436,9 @@ mod tests {
                 SettingsRow::SearchEngine,
                 SettingsRow::DefaultProfile,
                 SettingsRow::ContextMenu,
+                // Under it since 2026-09-05 (§7.4a): the same verb, and the
+                // question of which page of the menu it is on.
+                SettingsRow::ExplorerFirstPage,
                 // Last on General: the only row in the dialog that reaches off
                 // the machine (§7.51).
                 SettingsRow::UpdateCheck,
@@ -21308,7 +21464,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            visible_rows(TabLayoutMode::Vertical),
+            visible_rows_for(TabLayoutMode::Vertical, true),
             [
                 SettingsRow::Theme,
                 SettingsRow::LightScheme,
@@ -21338,6 +21494,9 @@ mod tests {
                 SettingsRow::SearchEngine,
                 SettingsRow::DefaultProfile,
                 SettingsRow::ContextMenu,
+                // Under it since 2026-09-05 (§7.4a): the same verb, and the
+                // question of which page of the menu it is on.
+                SettingsRow::ExplorerFirstPage,
                 // Last on General: the only row in the dialog that reaches off
                 // the machine (§7.51).
                 SettingsRow::UpdateCheck,
@@ -22388,15 +22547,17 @@ mod tests {
         lacking.default_profile = profiles::fallback_profile();
 
         let mut panel = keyboarded_on(SettingsRow::DefaultProfile.category());
-        // `End` and then two steps back: `Update check` closes this page
-        // (§7.51), `Explorer context menu` stands above it (§7.4), and
-        // `Default profile` above that. The summoned terminal's rows used to
-        // stand between them and moved to a page of their own on 2026-09-05
-        // (§7.54e ⑤), which is why this walk is four presses shorter than it
-        // was. The assertion below is what keeps the presses honest — a page
-        // reordered under this test lands the ring somewhere else and says so.
+        // `End` and then three steps back: `Update check` closes this page
+        // (§7.51), `First page of that menu` stands above it (§7.4a),
+        // `Explorer context menu` above that (§7.4), and `Default profile` above
+        // that. The summoned terminal's rows used to stand between them and
+        // moved to a page of their own on 2026-09-05 (§7.54e ⑤), which is why
+        // this walk is four presses shorter than it was; the first-page row
+        // arrived the same day and gave one of them back. The assertion below is
+        // what keeps the presses honest — a page reordered under this test lands
+        // the ring somewhere else and says so.
         panel.key(SettingsKey::End, content(&flat, &lines), &lacking);
-        for _ in 0..2 {
+        for _ in 0..3 {
             panel.key(SettingsKey::Up, content(&flat, &lines), &lacking);
         }
         assert_eq!(

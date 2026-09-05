@@ -60,8 +60,12 @@ try {
     $mail_re = [regex]"[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.([A-Za-z]{2,24}))"
     $checkout_re = [regex]"(?i)Developer[\\/]{1,2}BetterTerminal"
     $author_re = [regex]"(?i)weiyi|umich\.edu"
-    # The one sentence the name above may appear in — see the loop below.
+    # The two sentences the name above may appear in — see the loop below.
     $copyright_re = [regex]"(?i)copyright\b.*\bweiyi shi\b"
+    # A signed package's identity: the `Publisher` of `packaging/msix/`, the
+    # publisher-scoped package name, and the two relative distinguished names the
+    # holder appears as inside a certificate subject.
+    $publisher_re = [regex]"(?i)\b(?:CN|O)=Weiyi Shi\b|PublisherDisplayName|\bWeiyiShi\.Folio"
 
     $problems = New-Object System.Collections.Generic.List[string]
 
@@ -83,8 +87,20 @@ try {
         # allowed on a line that is a copyright notice for it, and refused on
         # every other line in the tree. The address is never allowed — a mailbox
         # is not a holder, and no licence asks for one.
+        #
+        # **A package's publisher is the same kind of sentence** (§7.4a). Windows
+        # compares the `Publisher` in `packaging/msix/AppxManifest.xml` against
+        # the subject of the certificate that signed the package and refuses a
+        # mismatch, so that string is not this project's to choose or to
+        # abbreviate: it is the certificate authority's rendering of the holder,
+        # character for character, and `bt_platform::msix` has to carry the same
+        # one in order to check it. It is already public on every release — the
+        # SmartScreen prompt names it, and so does the Properties page of every
+        # signed file — and, like a copyright notice, it says who published this
+        # and nothing whatever about the machine it was built on. The package
+        # name is scoped by publisher for the same reason and is the same fact.
         foreach ($line in ($text -split "`n")) {
-            $notice = $copyright_re.IsMatch($line)
+            $notice = $copyright_re.IsMatch($line) -or $publisher_re.IsMatch($line)
             foreach ($m in $author_re.Matches($line)) {
                 if ($notice -and $m.Value -notmatch "(?i)umich") { continue }
                 $problems.Add("$rel names the author: $($m.Value)")

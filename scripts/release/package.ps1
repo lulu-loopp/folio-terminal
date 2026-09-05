@@ -4,8 +4,8 @@
     exactly the list.
 
 .DESCRIPTION
-    The archive is seven files and the list of them is the point. Two of the
-    seven are a runtime contract rather than a convenience:
+    The archive is eight files and the list of them is the point. Two of the
+    eight are a runtime contract rather than a convenience:
 
       * `conpty.dll` and `OpenConsole.exe` must sit in `folio.exe`'s OWN
         directory. `vendor/conpty/portable-pty/src/win/psuedocon.rs` looks for
@@ -15,6 +15,24 @@
         package's native-targets layout mirrors the binary into that
         subdirectory, and this loader never reads it — carrying it would be 1.7
         MiB of a second copy nothing opens.
+
+    One of the eight is not copied from anywhere: `folio.msix` is packed here,
+    out of `packaging/msix/`. It is a **sparse** package and there is no program
+    inside it — it is the identity and the COM class that put "Open in Folio" on
+    the first page of the Windows 11 right-click menu, and the program it names
+    lives at an external location, which is whatever folder the recipient
+    extracted this archive into. That is why it ships beside `folio.exe` rather
+    than being downloaded separately: the package and the executable it points at
+    have to arrive in the same folder or the registration names a path with
+    nothing at it. It is inert until somebody turns the row on in
+    `Settings ▸ General ▸ First page of that menu`, which registers it for that user and
+    needs no elevation. Nothing here registers anything on the machine that built
+    it.
+
+    The copy it is packed as stays in the output directory as well as going into
+    the zip. `SHA256SUMS.txt` covers it there, and it is the file
+    `smoke.ps1 -ExpectSigned` opens to read the package identity out of — which
+    it could not do to a copy that only exists inside an archive.
 
     There is deliberately no `README.md` in it. Every relative link and every
     image in that file resolves against the repository, and inside a zip it
@@ -37,6 +55,9 @@
       * every name on the list is present, and nothing else is in the archive;
       * `folio.exe`'s own `VERSIONINFO` says the version being packaged, which
         is what makes the file's name and the file's contents one claim;
+      * `AppxManifest.xml` in the tree still says `Version="0.0.0.0"`, so the
+        version that reaches the package is this run's and not a second one
+        somebody wrote down;
       * every entry in the archive is byte-for-byte the size of what went in.
 
     Run it by hand exactly as the release workflow runs it. That is the whole
@@ -62,9 +83,17 @@
     `sbom.ps1` before this runs ends up covered.
 
 .PARAMETER Sign
-    Sign `folio.exe` with the Artifact Signing certificate profile before it goes
-    into the archive, and check that the two ConPTY files still carry
-    Microsoft's own signature.
+    Sign `folio.exe` and `folio.msix` with the Artifact Signing certificate
+    profile before they go into the archive, and check that the two ConPTY files
+    still carry Microsoft's own signature.
+
+    The package needs the signature more than the executable does. An unsigned
+    `folio.exe` is a program Windows warns about and runs; an unsigned
+    `folio.msix` cannot be registered at all, so the Explorer menu row is a row
+    that fails for everyone who turns it on. It is still packed without `-Sign`,
+    on the same bargain the unsigned executable already makes: a file that is
+    real and says what it is, rather than a script that cannot be exercised
+    without a credential.
 
     **Off by default, and the archive is a real archive without it.** Signing
     needs somebody signed in to Azure, and the two places this script runs — a
@@ -121,6 +150,13 @@ if (-not $Version) { $Version = Get-WorkspaceVersion }
 # require to ship.
 $manifest = @(
     @{ Name = 'folio.exe';                From = $Binaries },
+    # The sparse package that puts "Open in Folio" on the first page of the
+    # right-click menu. Packed further down out of `packaging/msix/` rather than
+    # copied from a build directory, which is why it is marked `Packed` — it is
+    # the one entry that does not exist yet when the list is checked. It is inert
+    # in the archive: nothing registers until a user switches the row on in
+    # `Settings ▸ General ▸ First page of that menu`.
+    @{ Name = 'folio.msix';               From = $Output; Packed = $true },
     @{ Name = 'conpty.dll';               From = $Binaries },
     @{ Name = 'OpenConsole.exe';          From = $Binaries },
     @{ Name = 'LICENSE-MIT';              From = $Documents },
@@ -129,9 +165,14 @@ $manifest = @(
     @{ Name = 'TRADEMARK.md';             From = $Documents }
 )
 
+# What has to be there already, which is everything some other step produced: a
+# build, a checkout. The one entry this script packs itself cannot be asked for
+# here, because it does not exist yet — makeappx's exit code is what says it was
+# made, a few lines further down.
 $missing = @()
 foreach ($item in $manifest) {
     $item.Path = Join-Path $item.From $item.Name
+    if ($item.ContainsKey('Packed')) { continue }
     if (-not (Test-Path -LiteralPath $item.Path -PathType Leaf)) { $missing += $item.Path }
 }
 if ($missing.Count -gt 0) {
@@ -156,21 +197,174 @@ if ($info.ProductVersion.Trim() -ne $Version) {
     throw "folio.exe's ProductVersion string is '$($info.ProductVersion)'; expected '$Version'"
 }
 
+# ── the sparse package ───────────────────────────────────────────────────────
+#
+# Packed after the check above and before the signing below, and the order is
+# the whole of the reasoning:
+#
+#   * after the `VERSIONINFO` check, because a tree whose binary and whose
+#     manifest disagree about the version is a tree nothing should be packed out
+#     of. The cheapest disagreement to catch is the one already caught;
+#   * before `-Sign`, because the package is signed too, and a file has to exist
+#     before it can be signed;
+#   * and the two signatures do not order each other. `folio.exe` is not inside
+#     this package — that is what "sparse" means — so packing does not copy the
+#     executable's bytes and a signature applied to either afterwards cannot
+#     invalidate the other. Were the exe a payload of the package, it would have
+#     to be signed first and this sequence would be a requirement rather than a
+#     preference.
+
+# **`makeappx.exe`, found the way `sign.ps1` finds `signtool.exe`.** They come
+# out of the same Windows SDK install and neither is on anybody's PATH: the SDK
+# puts its tools under `Windows Kits\10\bin\<sdk version>\<arch>\` and adds
+# nothing to the environment. The newest is taken because a kit left behind by an
+# older Visual Studio is still on most machines that have a new one, and the
+# question "which one" has to have an answer that does not depend on the order
+# `Get-ChildItem` returns directories in.
+function Get-FileVersionNumber {
+    param([string] $Path)
+
+    $info = (Get-Item -LiteralPath $Path).VersionInfo
+    return [version] ('{0}.{1}.{2}.{3}' -f
+        $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart)
+}
+
+function Find-MakeAppx {
+    # x64, for the same reason `sign.ps1` takes the x64 signtool: it is the
+    # architecture this release is built and packaged on, and a kit that has an
+    # arm64 directory has an x64 one beside it.
+    $roots = @("${env:ProgramFiles(x86)}\Windows Kits\10\bin", "$env:ProgramFiles\Windows Kits\10\bin")
+    $candidates = @()
+    foreach ($root in $roots) {
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+        foreach ($sdk in (Get-ChildItem -LiteralPath $root -Directory)) {
+            $exe = Join-Path (Join-Path $sdk.FullName 'x64') 'makeappx.exe'
+            if (Test-Path -LiteralPath $exe -PathType Leaf) { $candidates += $exe }
+        }
+    }
+    if ($candidates.Count -eq 0) {
+        throw ('no x64 makeappx.exe under any Windows Kit. Install the Windows SDK — the same ' +
+               'install sign.ps1 takes signtool.exe from, and the signing tools feature is enough.')
+    }
+
+    $newest = $candidates |
+        Sort-Object -Property @{ Expression = { Get-FileVersionNumber -Path $_ } } -Descending |
+        Select-Object -First 1
+    Write-Host "makeappx: $newest ($(Get-FileVersionNumber -Path $newest))"
+    return $newest
+}
+
+$packaging = Join-Path $root 'packaging\msix'
+$layout = Join-Path $Output 'msix-layout'
+if (Test-Path -LiteralPath $layout) { Remove-Item -LiteralPath $layout -Recurse -Force }
+[System.IO.Directory]::CreateDirectory((Join-Path $layout 'images')) | Out-Null
+
+# **The manifest is edited as a document and not as text.** The attribute that
+# changes is `Version` on `<Identity>`, and the string `0.0.0.0` appears twice in
+# that file — once as the attribute and once in the comment above it that
+# explains why the attribute is a placeholder. A substitution over the text would
+# rewrite the explanation as well, and the copy that reached the package would be
+# the one nobody reads until something has already gone wrong.
+#
+# `PreserveWhitespace` before the load, because a document reloaded without it is
+# saved with .NET's own indentation and every comment in that file — what the
+# package is for, why `Publisher` may not be edited, why `AppListEntry` is
+# `none` — moves. With it, the copy in the package is the file from the tree with
+# one attribute changed, and it is worth reading when a registration fails. The
+# one thing it cannot keep is where a start tag broke its line between two
+# attributes: that spacing is markup rather than a node, and `<Identity>` and
+# `<Package>` come back out on one line each.
+$document = New-Object System.Xml.XmlDocument
+$document.PreserveWhitespace = $true
+$document.Load((Join-Path $packaging 'AppxManifest.xml'))
+
+$namespaces = New-Object System.Xml.XmlNamespaceManager($document.NameTable)
+$namespaces.AddNamespace('m', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+$identity = $document.SelectSingleNode('/m:Package/m:Identity', $namespaces)
+if (-not $identity) { throw "packaging\msix\AppxManifest.xml has no <Identity> element" }
+
+# **The placeholder is checked before it is replaced.** `0.0.0.0` in the tree is
+# the statement that this file holds no version of its own; anything else there
+# is a second version number somebody has written down, and it would be
+# overwritten here without ever being read.
+$placeholder = $identity.GetAttribute('Version')
+if ($placeholder -ne '0.0.0.0') {
+    throw ("packaging\msix\AppxManifest.xml says Version=`"$placeholder`". It is 0.0.0.0 in the " +
+           'tree on purpose: the version is injected here out of Cargo.toml, and a real number in ' +
+           'that file is a second one, free to disagree with the binary it ships beside.')
+}
+
+# **Four parts, and the fourth is zero.** A package version is four numbers and
+# nothing else — no `-preview`, no `+meta`, and never three parts — so the
+# suffix is cut off exactly the way the `VERSIONINFO` check above cuts it, and
+# `$core` is that cut already made. What a pre-release ships is a package that
+# says `0.2.1.0` beside a binary that says `0.2.1-preview`: the package identity
+# is a version Windows compares, not a name a person reads.
+$packageVersion = "$core.0"
+$identity.SetAttribute('Version', $packageVersion)
+$document.Save((Join-Path $layout 'AppxManifest.xml'))
+
+# The three logos the manifest names, by name. A wildcard copy would carry
+# whatever else ends up in that directory into the package, and the manifest is
+# the list of what the package holds rather than a description of it.
+foreach ($logo in @('Square44x44Logo.png', 'Square150x150Logo.png', 'StoreLogo.png')) {
+    Copy-Item -LiteralPath (Join-Path (Join-Path $packaging 'images') $logo) `
+              -Destination (Join-Path (Join-Path $layout 'images') $logo) -Force
+}
+
+$makeappx = Find-MakeAppx
+$msix = Join-Path $Output 'folio.msix'
+
+# **`/nv`, and it is not a shortcut.** makeappx's semantic validation checks that
+# every file a manifest names is in the package, and the whole point of a sparse
+# package is that `folio.exe` is not: without the flag it refuses with
+# `The file name "folio.exe" declared for element ".../Application" doesn't exist
+# in the package`, which is a description of the design rather than a fault in
+# it. Microsoft's own instructions for granting identity by external location
+# pass it for this reason. The manifest's *structure* is still checked — a
+# misspelled element or a namespace that is not declared fails with the flag on.
+#
+# **makeappx's exit code is read, not raised.** PowerShell 7 turns a native
+# command's non-zero exit into a terminating error on its own while
+# `$ErrorActionPreference` is `Stop`, which would throw one line before the check
+# below and throw away everything makeappx said about which element it disliked.
+# Turned off inside this scope only, so nothing else in this script changes
+# behaviour; `sign.ps1` turns it off for the same reason and for the whole of
+# itself.
+$packing = & {
+    $PSNativeCommandUseErrorActionPreference = $false
+    & $makeappx pack /d $layout /p $msix /o /nv 2>&1
+}
+if ($LASTEXITCODE -ne 0) {
+    $packing | ForEach-Object { Write-Host "  $_" }
+    throw "makeappx pack exited $LASTEXITCODE"
+}
+Remove-Item -LiteralPath $layout -Recurse -Force
+Write-Host "folio.msix: a sparse package, identity version $packageVersion"
+
 # **Signing, before anything is measured or copied.** A signature is appended to
 # the file, so it changes both the length and the hash: everything below this
 # line — the lengths the archive is checked against, the archive itself,
 # `SHA256SUMS.txt` — has to be taken from the signed bytes, and the only way to
 # be sure of that is to sign first.
 #
-# `folio.exe` alone. `conpty.dll` and `OpenConsole.exe` are Microsoft's, and they
-# arrive signed by Microsoft; putting our signature over that would replace a
-# statement Windows already trusts with a newer and weaker one. What is checked
-# about them is that the signature they came with is still valid and still time
-# stamped — an unsigned ConPTY in the archive means the build pulled it from
-# somewhere other than the package it is supposed to come from.
+# That holds for the package as much as for the executable: a signature goes into
+# an msix as a `AppxSignature.p7x` part, so the file it is added to is a
+# different length and a different hash afterwards, and it is packed above this
+# line and measured below it for exactly that reason.
+#
+# `folio.exe` and `folio.msix`, in one call — `signtool` signs a package with the
+# command line it signs an executable with, and asking for both at once is one
+# request to the service rather than two. `conpty.dll` and `OpenConsole.exe` are
+# Microsoft's, and they arrive signed by Microsoft; putting our signature over
+# that would replace a statement Windows already trusts with a newer and weaker
+# one. What is checked about them is that the signature they came with is still
+# valid and still time stamped — an unsigned ConPTY in the archive means the
+# build pulled it from somewhere other than the package it is supposed to come
+# from.
 if ($Sign) {
     $signScript = Join-Path $PSScriptRoot 'sign.ps1'
-    & $signScript -Files @(Join-Path $Binaries 'folio.exe')
+    & $signScript -Files @((Join-Path $Binaries 'folio.exe'), $msix)
     Write-Host ''
     Write-Host 'the two ConPTY files, which are Microsoft-signed and not re-signed here:'
     & $signScript -VerifyOnly -Files @(

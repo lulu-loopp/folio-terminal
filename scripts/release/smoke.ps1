@@ -1,7 +1,7 @@
 ﻿<#
 .SYNOPSIS
-    Start the built `folio.exe` for real and check the six things a build can be
-    green and still be broken about.
+    Start the built `folio.exe` for real and check the seven things a build can
+    be green and still be broken about.
 
 .DESCRIPTION
     Every other gate in this repository runs inside `cargo test`, which means it
@@ -25,6 +25,13 @@
          opened on. Stated as an agreement rather than as "96", so the same
          check is the 200% check on a machine set to 200%.
       6. It shuts down when asked, rather than being killed.
+      7. The file a bug report actually arrives as — `diagnostics.log`, written
+         by an ordinary run with no trace variable set — opens with the same
+         build line `--version` printed.
+
+    `-ExpectSigned` adds a check before all seven, over the two artefacts rather
+    than over anything running: the executable's signature, and the sparse
+    package beside it that carries the same publisher and the same certificate.
 
     A picture of the window and every trace file are written to `-Artifacts`
     whatever happens, because the CI run that fails is the one nobody can
@@ -46,14 +53,24 @@
 .PARAMETER ExpectSigned
     Also check, before starting anything, that this executable carries a valid,
     time-stamped Authenticode signature naming the holder it says it is
-    copyright of. Pass it when the exe under test came out of
-    `package.ps1 -Sign`; leave it off otherwise, because an unsigned build is
-    what an ordinary `cargo build` produces and this script has to keep working
-    on one.
+    copyright of, and that `folio.msix` is signed by the same certificate and
+    declares that certificate's subject as its `Publisher`. Pass it when the
+    artefacts under test came out of `package.ps1 -Sign`; leave it off
+    otherwise, because an unsigned build is what an ordinary `cargo build`
+    produces and this script has to keep working on one.
 
 .PARAMETER SignerSubject
     Who the certificate has to name, if not the holder named in the executable's
     own `LegalCopyright`. Only read when `-ExpectSigned` is given.
+
+.PARAMETER Msix
+    The sparse package to check under `-ExpectSigned`. Defaults to `folio.msix`
+    beside `-Exe`, which is where it is once somebody extracts the archive —
+    both files are in it, and the package names the executable at the folder it
+    was extracted into. It is somewhere else in exactly one place: straight out
+    of `package.ps1`, which builds the executable's copy in `target/release` and
+    the package in `target/release-package`. Name it there rather than moving a
+    file so that the two paths can be checked without either being copied.
 #>
 
 [CmdletBinding()]
@@ -62,7 +79,8 @@ param(
     [string] $Artifacts,
     [int] $TimeoutSeconds = 90,
     [switch] $ExpectSigned,
-    [string] $SignerSubject
+    [string] $SignerSubject,
+    [string] $Msix
 )
 
 $ErrorActionPreference = 'Stop'
@@ -90,6 +108,12 @@ $root = (Resolve-Path (Join-Path (Join-Path $here '..') '..')).Path
 if (-not $Exe) { $Exe = Join-Path $root 'target\release\folio.exe' }
 if (-not $Artifacts) { $Artifacts = Join-Path $root 'target\smoke' }
 if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) { throw "no folio.exe at $Exe" }
+# Beside the executable, resolved from the executable rather than from `$root`:
+# the arrangement being checked is the one a recipient has, which is one folder
+# holding both files.
+if (-not $Msix) {
+    $Msix = Join-Path (Split-Path -Parent (Resolve-Path -LiteralPath $Exe).Path) 'folio.msix'
+}
 
 [System.IO.Directory]::CreateDirectory($Artifacts) | Out-Null
 
@@ -187,6 +211,141 @@ if ($ExpectSigned) {
     }
     Write-Host "signed by: $subject"
     Write-Host "stamped by: $($signature.TimeStamperCertificate.Subject)"
+}
+
+# ── 0, continued: the package beside it names the same publisher ─────────────
+#
+# **The failure this catches is invisible everywhere else.** Windows compares the
+# `Publisher` in a package's `<Identity>` against the subject of the certificate
+# the package was signed with, at the moment somebody registers it — and it
+# refuses a mismatch with a message that names neither of the two strings it
+# compared. Nothing in the build fails. Nothing in a smoke test that only starts
+# the executable fails. The first person to turn the Explorer menu row on gets a
+# registration error about a package they cannot inspect, on a machine nobody
+# here is sitting at. It costs one file read to know before the release leaves.
+#
+# It is asked of the package that shipped rather than of `packaging/msix/`: the
+# file in the tree is an input, the copy in the package is what a user registers,
+# and the version injected between them proves the two are not the same bytes.
+
+# **A distinguished name is compared as a name and not as a string.**
+# `CN=Weiyi Shi, O=Weiyi Shi` and `CN=Weiyi Shi,O=Weiyi Shi` are the same name
+# written twice: the space after a separating comma is spelling and not content,
+# and which of the two a certificate authority, a Windows API and a person
+# editing XML each produce is not something this check gets to decide. Compared
+# as text they differ, and the failure sends somebody to edit a file that was
+# already correct — which is worse than not checking at all, because it teaches
+# people to distrust the check.
+#
+# So each side is cut into its relative names at the commas that separate them,
+# and only at those: a comma inside a value is written `\,` or sits inside a
+# quoted value, and neither of those separates anything. Attribute types are
+# compared without case, because `cn` and `CN` are one attribute. Values are
+# compared with it, because `CN=Weiyi Shi` and `CN=WEIYI SHI` are two things a
+# certificate authority issued on purpose and this is not the place to decide
+# they are one person. Order is kept, because the order of the relative names is
+# part of the name.
+function Split-DistinguishedName {
+    param([string] $Name)
+
+    $parts = @()
+    $current = New-Object System.Text.StringBuilder
+    $quoted = $false
+    for ($i = 0; $i -lt $Name.Length; $i++) {
+        $character = $Name[$i]
+        # A backslash spells the next character literally. It is how a comma, a
+        # plus or a quotation mark appears inside a value, and the character it
+        # protects is kept while the backslash itself is not — the two sides are
+        # then comparable however each of them chose to write it.
+        if ($character -eq '\' -and $i + 1 -lt $Name.Length) {
+            [void] $current.Append($Name[$i + 1])
+            $i++
+            continue
+        }
+        if ($character -eq '"') { $quoted = -not $quoted; continue }
+        if ($character -eq ',' -and -not $quoted) {
+            $parts += $current.ToString()
+            [void] $current.Clear()
+            continue
+        }
+        [void] $current.Append($character)
+    }
+    $parts += $current.ToString()
+
+    return @($parts | ForEach-Object {
+        $rdn = $_.Trim()
+        $equals = $rdn.IndexOf('=')
+        if ($equals -lt 0) { return $rdn }
+        '{0}={1}' -f $rdn.Substring(0, $equals).Trim().ToUpperInvariant(), $rdn.Substring($equals + 1).Trim()
+    })
+}
+
+function Test-SameDistinguishedName {
+    param([string] $Left, [string] $Right)
+
+    # Named apart from the parameters on purpose: PowerShell's variable names do
+    # not distinguish case, so a `$left` here would be the `$Left` above, and the
+    # second line would be splitting an array it had already replaced.
+    $first = Split-DistinguishedName -Name $Left
+    $second = Split-DistinguishedName -Name $Right
+    if ($first.Count -ne $second.Count) { return $false }
+    for ($i = 0; $i -lt $first.Count; $i++) {
+        if ($first[$i] -cne $second[$i]) { return $false }
+    }
+    return $true
+}
+
+if ($ExpectSigned) {
+    if (-not (Test-Path -LiteralPath $Msix -PathType Leaf)) {
+        throw ("there is no folio.msix at $Msix. It is what puts ""Open in Folio"" on the " +
+               'right-click menu, and it ships in the archive beside the executable, so a signed ' +
+               'release without one is a release missing a file rather than a check that does not ' +
+               'apply. Name it with -Msix if it is somewhere else.')
+    }
+
+    # The package's own signature, held to what the executable's is held to. A
+    # package signed without a time stamp registers for three days and then
+    # stops, and it stops on somebody else's machine.
+    $packageSignature = Get-AuthenticodeSignature -LiteralPath $Msix
+    if ($packageSignature.Status -ne 'Valid') {
+        throw "the signature on $Msix is $($packageSignature.Status): $($packageSignature.StatusMessage)"
+    }
+    if (-not $packageSignature.TimeStamperCertificate) {
+        throw 'the package signature carries no time stamp, so it stops verifying with the certificate that made it'
+    }
+
+    # **An msix is a zip, and `MakeAppx` leaves `AppxManifest.xml` in it as plain
+    # XML.** Read that way rather than through the packaging API, because this
+    # has to run on a clean Windows with nothing installed on it and because the
+    # question — what does one attribute in one file say — does not need a
+    # package reader to answer.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $package = [System.IO.Compression.ZipFile]::OpenRead($Msix)
+    try {
+        $entry = $package.GetEntry('AppxManifest.xml')
+        if (-not $entry) { throw "$Msix holds no AppxManifest.xml; it is not a package" }
+        $reader = New-Object System.IO.StreamReader($entry.Open())
+        try { $manifestText = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    }
+    finally { $package.Dispose() }
+
+    $publisher = ([xml] $manifestText).Package.Identity.Publisher
+    $packageSubject = $packageSignature.SignerCertificate.Subject
+    if (-not (Test-SameDistinguishedName -Left $publisher -Right $packageSubject)) {
+        throw ("the package declares Publisher=""$publisher"" and is signed by ""$packageSubject"". " +
+               'Windows compares exactly those two when the package is registered and refuses ' +
+               'without naming either; packaging/msix/AppxManifest.xml has to carry the ' +
+               'certificate subject character for character.')
+    }
+
+    # And the same certificate as the executable, which is what makes the two
+    # files one release rather than two things that happen to be in one folder.
+    if (-not (Test-SameDistinguishedName -Left $packageSubject -Right $subject)) {
+        throw "folio.msix is signed by $packageSubject and folio.exe by $subject"
+    }
+
+    Write-Host "package publisher: $publisher"
+    Write-Host "package stamped by: $($packageSignature.TimeStamperCertificate.Subject)"
 }
 
 # ── 1 and 2: the front door ──────────────────────────────────────────────────

@@ -2532,9 +2532,35 @@ else                           { Flash }    // 被压住了,但任务栏还在,�
 
 **卸载只删自己造的那一个键，一个不多。** `RegDeleteTreeW` 掉 `…\shell\Folio`（连同它的 `command` 子键），`Directory\shell`、`Directory\Background\shell`、`Directory` 一律**原样留着，哪怕它们此刻是空的**。这一条是被实测改过来的，不是偏好：本片写下时先导出了这台机器的注册表，`HKCU\Software\Classes\Directory\Background\shell` 与 `HKCU\Software\Classes\Drive\shell` **在 Folio 从未运行过之前就已经存在、并且已经是空的**。一个「顺手清理空祖先」的卸载会把这两个别人先建的键删掉——那比它想避免的问题更糟：删别人的键不叫整洁，而「我看的时候它是空的」根本不是「它是我建的」的证据。真正一个祖先都没有的机器上，卸完剩下的是一个无值的空容器键——Windows 自己到处都是这个形状，Explorer 看不见它，下一次安装直接复用它。删不存在的键不是失败——这个函数回答的是「确保它不在」。
 
-**Windows 11 顶层菜单：调研结论，本片不做。** 经典 `shell\<verb>` 注册在 Win11 上一律落在「显示更多选项」（Shift+F10 的那份经典菜单），primary 菜单里那些第三方项（Windows Terminal 的「在终端中打开」、VS Code、TortoiseSVN）**每一个都是通过 sparse MSIX 包注册的 `IExplorerCommand`**——spike §4 在这台机器上逐张截图确认过。上顶层的代价是完整的一套包身份：一个 `AppxManifest.xml` 声明 `<Extension Category="windows.fileExplorerContextMenus">`、一个实现 `IExplorerCommand` 的进程内 COM DLL（不能是 exe：Explorer 要在自己进程里加载它）、**一张代码签名证书**（sparse 包必须签名才能注册，自签名证书要求用户先信任它，等于把一步安装换成三步）、以及 `Add-AppxPackage -ExternalLocation` 的注册／注销流程。也就是说它不是「再写一个注册表键」，而是「这个产品从此有了包身份」——那是一个应当为通知（slice 3 的 AUMID 其实不需要它）、为商店分发、为自动更新一起决定的事，不该由一条右键菜单单独推动。**裁决：本片走经典路线，与 Git 的放置一致；顶层留到 Folio 因别的理由需要包身份的那一天，届时 `IExplorerCommand` 与这两棵经典树可以并存（包在时 Windows 用包的，不在时用经典的）。**
+**Windows 11 顶层菜单：调研结论，本片不做。** 经典 `shell\<verb>` 注册在 Win11 上一律落在「显示更多选项」（Shift+F10 的那份经典菜单），primary 菜单里那些第三方项（Windows Terminal 的「在终端中打开」、VS Code、TortoiseSVN）**每一个都是通过 sparse MSIX 包注册的 `IExplorerCommand`**——spike §4 在这台机器上逐张截图确认过。上顶层的代价是完整的一套包身份：一个 `AppxManifest.xml` 声明 `<Extension Category="windows.fileExplorerContextMenus">`、一个实现 `IExplorerCommand` 的进程内 COM DLL（不能是 exe：Explorer 要在自己进程里加载它）、**一张代码签名证书**（sparse 包必须签名才能注册，自签名证书要求用户先信任它，等于把一步安装换成三步）、以及 `Add-AppxPackage -ExternalLocation` 的注册／注销流程。也就是说它不是「再写一个注册表键」，而是「这个产品从此有了包身份」——那是一个应当为通知（slice 3 的 AUMID 其实不需要它）、为商店分发、为自动更新一起决定的事，不该由一条右键菜单单独推动。**裁决：本片走经典路线，与 Git 的放置一致；顶层留到 Folio 因别的理由需要包身份的那一天，届时 `IExplorerCommand` 与这两棵经典树可以并存（包在时 Windows 用包的，不在时用经典的）。**〔**2026-09-05 已落地，见 §7.4a**：证书到位之后「别的理由」就是签名本身，这一片说的「并存」被原样兑现——两棵经典树一行没删，一个开关也没合并。〕
 
 **顺带修掉的一处：`bt_platform::win32_io_error` 建错了错误。** 它把 `windows::core::Error` 的 `HRESULT` 原样交给 `std::io::Error::from_raw_os_error`，而 Windows 上 `std` 是按 **Win32 码**分类的：`ERROR_FILE_NOT_FOUND` 经 `HRESULT_FROM_WIN32` 到达时是 `0x8007_0002`，`std` 认得 `2` 而完全不认得 `0x8007_0002`，于是每一个这样的错误都答 `ErrorKind::Uncategorized`。后果是 `DirWatch::start` 对不存在的文件夹**永远不可能**返回 `NotFound`，`scheme_watch` 那条为「fresh install 上 `%APPDATA%\Folio\schemes` 本来就不存在」写的静默臂**从来没有被命中过**，每一次全新安装都在 stderr 上打一行关于「本该不存在的文件夹不存在」的话。修法是把 `FACILITY_WIN32`（`0x8007_xxxx`）的低 16 位取回来，其余 `HRESULT` 原样透传（它们不是穿着 HRESULT 外衣的 Win32 码，截 16 位得到的不是任何错误码）。红测两层：`win32_code` 的纯映射，与 `DirWatch::start` 对缺失文件夹／缺失父目录都答 `NotFound`；`scheme_watch` 那条臂的测试**不构造错误**，用的就是 `DirWatch::start` 真给出来的那一个——构造出来的 `NotFound` 在过去七周里每一天都会通过。`storage_watch`（本片改名前叫 `profile_watch`，见 §7.5）故意**没有**这条臂：`%APPDATA%\Folio\` 由第一个打开的 store 建出来，它不在才是值得说的那一半。
+
+### 7.4a Windows 11 的一级右键菜单（sparse MSIX，2026-09-05，已落地）
+
+**一句话。** Windows 11 先打开的那一页只认**包**声明的 `IExplorerCommand`，所以这一片买的不是第二个右键动词，而是同一个动词换个地方站所需要的**身份**。落在 `packaging/msix/AppxManifest.xml`（清单）、`bt_platform::msix`（身份字符串＋登记调用）、`bt_platform::explorer_command`（COM 服务器）与 `bt-app` 的 `explorer_menu.rs`（词、图标、状态、那一行）四处。
+
+**为什么是 sparse 包。** 完整 MSIX 意味着 Windows 决定程序装在哪；而 Folio 的全部分发方式是一个 zip，用户想放哪就放哪，`conpty.dll` 与 `OpenConsole.exe` 还必须留在 `folio.exe` 身边（package.ps1 头部那一条）。sparse 包是唯一形状对得上的东西：包里**一个程序都没有**，清单里 `uap10:AllowExternalContent` 打开，登记时把**外部位置**指向用户解压出来的那个文件夹。`folio.msix` 因此进 zip，和 `folio.exe` 躺在一起——它单独存在是没有意义的，它说的每一句话都是关于旁边那个 exe 的。
+
+**为什么老菜单一行不删。** 三个理由，每一个单独都够：Windows 10 上根本没有那一页；没登记包的机器上一级菜单里什么都没有；而 Windows 自己就是这么设计的——包在时把包的项放第一页，经典树照旧躺在「显示更多选项」里，两边互不知道对方存在。所以这不是"新的取代旧的"，是**一个动词两处户口**，两个开关各写各的存储，谁也不碰谁的。设置页上因此是**两行**而不是一行三态：一行问「Folio 在不在资源管理器菜单里」，紧挨着的第二行问「它在不在先打开的那一页」，第二行在 build < 22000 的机器上**根本不画**（`visible_rows_for` 的第二个条件行），因为那台机器上它的开与关看起来一模一样。
+
+**`Publisher` 必须一字不差是证书主题。** `CN=Weiyi Shi, O=Weiyi Shi, L=Ann Arbor, S=mi, C=US`。Windows 在登记时比对这两个字符串，**而拒绝的那句话两个都不说**——这是这一片唯一一件构建期什么都察觉不到、到用户机器上才炸的事。所以它有两道闸：`bt_platform::msix::publisher_matches_subject` 是纯函数（能在没有证书的机器上跑），`scripts/release/smoke.ps1` 在成品上做同一次比对。**比的是可分辨名而不是字符串**：Windows 打印证书主题用它自己的空格，`CN=A, O=B` 与 `CN=A,O=B` 是同一个名字写了两遍，`==` 会为一个空格毙掉一次发布；反过来**属性值的大小写不折**，因为 `S=MI` 对 Windows 就是另一个名字，折了就变成"这边过、那边炸"。清单的 `Version` 是 `0.0.0.0` 占位，由 `package.ps1` 从 workspace 的那一行注入四段式——一个真版本号写在清单里就是这个产品的第二处版本，正是单一来源规则要防的那件事。
+
+**ExeServer 而不是 DLL。** 通行做法是进程内 DLL 挂 surrogate（Windows Terminal 就是），这里声明的是**进程外服务器**，就是 `folio.exe` 自己带 `--explorer-command` 起来。理由是另一条路要多一个二进制：一个 `.dll` 得自带菜单的词、自己的版本、自己的签名、自己在压缩包里的位置，而且它要替一个**它无法确认自己在它旁边**的 `folio.exe` 回答问题。一个二进制以自己的身份回答。代价是每次菜单一次进程启动，这就是 `IDLE_LINGER` 存在的原因：最后一个引用放掉之后再等十秒，因为右键之后通常还有下一次右键，而一台机器上留着一个没人认识的 `folio.exe` 是泄漏。
+
+**COM 那一侧只担三件事。** 公寓（STA，而且**有真的消息泵**——没有泵的 STA 不会报错，它只是让菜单项永远不出现）、生命期（别人决定的）、以及字符串的分配器（`GetTitle` 交出去的必须是 `CoTaskMemAlloc` 的，交别的堆的内存是 Explorer 里的堆损坏而不是任何人看得见的错误）。词、图标和点击的意思一概不在这里，交给 `explorer_menu` —— §7.4 把 `ContextMenuShape` 和注册表写入分开的同一条理由：这里唯一会错的三件事没有一件因为中间夹一张字符串表而更容易看清。
+
+**`Invoke` 取哪个文件夹。** 手上那个 `IShellItemArray` 的第一项，`Directory` 与 `Directory\Background` 都是这么来的——这正是一个 CLSID 能同时答两种 item type 的原因。取第一项而不是全部：菜单项是单数的，选中四个文件夹开出四扇窗是这个动词在做没人要求的事。拿到路径之后：**是文件夹就是它，是文件就是它的父目录，什么都不是就什么都不开**（`explorer_menu::folder_for`，纯函数，`PathKind` 是唯一那个不纯的输入）。然后 `folio.exe --cwd <dir>` 起新进程——`--cwd` 不是装饰，被 shell 启动的进程的工作目录是 exe 自己的目录（§7.4 同一条，spike 探针量过）。
+
+**那一行是异步的，这是本对话框头一个。** `PackageManager` 是服务上的 WinRT 对象：建一个加一次查询是几十毫秒，一次部署是一到三秒。两样都不能在窗口线程上——所以这一行的勾来自 `explorer_menu` 缓存的答案，由自己的线程在它唯一能变的三个时刻刷新（启动、登记、注销），走 `install_wake` ＋ `AppEvent::ExplorerPackageChanged`，和更新检查、PSReadLine 探针同一副骨架。多出来的一态是 `PackageState::Unknown`（`copilot_readiness` 的先例）：**它不是"没登记"**，把它读成没登记，那一行上的一次按下就会去登记一个可能已经登记过的包。卡片落在**按下的那扇窗**上（`explorer_package_asked_by`），因为三秒之后还在等这个答案的只有那个人。
+
+**exe 被搬走的自愈。** 外部位置记的是绝对文件夹，而 Folio 是个会被人从 `Downloads` 拖到 `C:\Tools` 的程序。搬完之后包还登记着、项还在第一页上、点下去找不到东西——比 §7.4 那个同形的失败更糟，因为那是 Windows 自己在策展的一页。所以启动时修：登记指向别的文件夹就照当前这个重登记一遍，静默，因为这是**用户自己的登记被改成他早就要求它说的话**（`context_menu::reassert` 同一条规则搬到一个更重的机制上）。从没登记过的机器启动一百次也不会突然多出一个包。修需要 `folio.msix` 在 exe 旁边；文件没跟着搬过来的机器上，那一行说的就是这件事，而且没有可按的。`same_folder` 先规范化再比，因为一个尾随反斜杠或者一个大写的盘符被读成"搬家了"就是**每次启动付三秒部署**。
+
+**英文两个词面，是有意的。** 经典那条是 `Open Folio here`，它躺在一堆第三方 `… here` 动词中间；这一条是 `Open in Folio`，它站在 `Copy` 和 `Rename` 之间，那里 Windows 自己的句式是 `Open in …`。中文两边都是「在 Folio 中打开」，因为中文只有一种说法而且它两边都合身。
+
+**红测七处。** 清单 `Publisher` 与证书主题的可分辨名比对（含转义逗号、大小写、顺序、空主题五种不匹配）、清单与代码那四个字符串一致（包名、发布者、CLSID 声明一次被两个 item type 各指一次）、Win11 build 边界、`--explorer-command` 只认第一个词（`-Embedding` 必须放行，`--cwd X --explorer-command` 必须**不**放行）、`Invoke` 取目录的三条、`Elsewhere` 照样读作 On、以及 Windows 10 的那份行表恰好是 Windows 11 那份减掉一行、别的一个不动。
+
+**明确划在界外的。** `Drive`（右键盘符）——清单里加第三个 `desktop5:ItemType` 就是全部改动，与 §7.4 把 `Drive\shell` 留在界外是同一笔账，同一天补两处或者两处都不补。文件的右键菜单——这个动词的名字是「在这里打开」，而不是「用 Folio 打开这个文件」，后者是另一个动词、另一个 verb id、另一次讨论。以及**通知的 AUMID**：包身份现在有了，`Notifier` 那条 `REG_SZ` 因此可以退休了——但那是 §7.22 的账，不是这一片顺手能改对的东西。
 
 ### 7.5 files 列的「进去」与「钉住」（files 小单，2026-08-19，已落地）
 

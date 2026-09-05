@@ -8,6 +8,7 @@ to draw it or to argue about it.
 | --- | --- |
 | `folio.ico` | The icon in the binary. **Still the placeholder**: a sheet folded once, drawn so `folio.exe,0` had something to point at. |
 | `make-folio-ico.py` | How that placeholder is drawn — geometry in code, no input file. |
+| `make-msix-logos.py` | The same drawing at the three sizes `packaging/msix/AppxManifest.xml` names. It owns no geometry; it imports the file above. |
 | `candidates/{a..e}.svg` | Five directions for the real mark, hand-set in plain SVG. |
 | `candidates/{a..e}.ico` | Each of those five built out to all nine sizes, ready to drop in. |
 | `candidates-2026-08-28.png` | The contact sheet the choice is made from. |

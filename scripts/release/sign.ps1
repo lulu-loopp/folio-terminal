@@ -143,14 +143,27 @@ $MinimumSignTool = [version] '10.0.22621.755'
 
 # ── the files ────────────────────────────────────────────────────────────────
 
-function Test-PortableExecutable {
+# The file extensions of the one container that carries a signature without
+# being a PE image.
+#
+# A package's signature lives in `AppxSignature.p7x` inside the archive rather
+# than in a certificate table, so the two-byte test below cannot be the only one:
+# an `.msix` opens with `PK`, and so does every other zip on the machine. The
+# extension is checked *as well as* the magic, so that a `.zip` handed here by
+# mistake is still refused where the mistake was made — which is the whole
+# purpose of this function.
+$PackageExtensions = @('.msix', '.msixbundle', '.appx', '.appxbundle')
+
+function Test-Signable {
     param([string] $Path)
 
     $stream = [IO.File]::OpenRead($Path)
     try {
         $head = New-Object byte[] 2
         if ($stream.Read($head, 0, 2) -ne 2) { return $false }
-        return ($head[0] -eq 0x4D -and $head[1] -eq 0x5A) # 'MZ'
+        if ($head[0] -eq 0x4D -and $head[1] -eq 0x5A) { return $true }  # 'MZ'
+        if ($head[0] -ne 0x50 -or $head[1] -ne 0x4B) { return $false }  # 'PK'
+        return $PackageExtensions -contains [IO.Path]::GetExtension($Path).ToLowerInvariant()
     }
     finally { $stream.Dispose() }
 }
@@ -159,10 +172,11 @@ $sources = @()
 foreach ($file in $Files) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "there is no file at $file" }
     $path = (Resolve-Path -LiteralPath $file).Path
-    # A signature goes into a PE image's own certificate table. Handing this a
-    # `.md` is a mistake refused where it was made.
-    if (-not (Test-PortableExecutable -Path $path)) {
-        throw "$path is not a PE image (no MZ header); only executables and libraries can carry a signature"
+    # A signature goes into a PE image's own certificate table, or into an
+    # `AppxSignature.p7x` inside a package. Handing this a `.md` is a mistake
+    # refused where it was made.
+    if (-not (Test-Signable -Path $path)) {
+        throw "$path is not a PE image (no MZ header) and not an MSIX package; only executables, libraries and packages can carry a signature"
     }
     $sources += $path
 }

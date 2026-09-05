@@ -6,8 +6,8 @@ order, and each of them can be run by hand exactly as it runs there:
 | script | what it produces |
 | --- | --- |
 | `scripts/release/sbom.ps1` | the bill of materials, written into the output directory |
-| `scripts/release/package.ps1` | `folio-<version>-windows-x64.zip`, the MPL-2.0 crate archive, and `SHA256SUMS.txt` over everything beside them |
-| `scripts/release/smoke.ps1` | starts the executable that was built and checks the six things a green build can still be broken about |
+| `scripts/release/package.ps1` | `folio.msix`, `folio-<version>-windows-x64.zip` with the package and the executable both in it, the MPL-2.0 crate archive, and `SHA256SUMS.txt` over everything beside them |
+| `scripts/release/smoke.ps1` | starts the executable that was built and checks the seven things a green build can still be broken about |
 
 Everything below is about the one step that is not in that workflow, because it
 needs a person: signing.
@@ -25,12 +25,19 @@ Azure says may use the certificate profile.
 
 ### What signs, and what is only checked
 
-`folio.exe` is signed. `conpty.dll` and `OpenConsole.exe` are Microsoft's, and
-they arrive from Microsoft's own package already signed by Microsoft; putting our
-signature over theirs would replace a statement Windows already trusts with a
-newer and weaker one. `package.ps1 -Sign` checks that the signature they came
-with is still valid and still time stamped, and signs neither. The four text
-files in the archive carry no signature because no text file can.
+`folio.exe` and `folio.msix` are signed, in one call to `sign.ps1` — `signtool`
+signs a package with the command line it signs an executable with. `conpty.dll`
+and `OpenConsole.exe` are Microsoft's, and they arrive from Microsoft's own
+package already signed by Microsoft; putting our signature over theirs would
+replace a statement Windows already trusts with a newer and weaker one.
+`package.ps1 -Sign` checks that the signature they came with is still valid and
+still time stamped, and signs neither. The four text files in the archive carry
+no signature because no text file can.
+
+The package needs its signature more than the executable needs its own. An
+unsigned `folio.exe` is a program Windows warns about and then runs; an unsigned
+`folio.msix` **cannot be registered at all**, so a release that ships one has an
+Explorer menu row that fails for everybody who turns it on.
 
 ### One-time preparation
 
@@ -40,6 +47,10 @@ files in the archive carry no signature because no text file can.
    older one by name. An older `signtool` does not fail loudly: it ignores the
    signing library, looks in the machine's own certificate store instead, and
    reports that it found no certificate there.
+
+   The same install is where `makeappx.exe` comes from, and `package.ps1` finds
+   it the same way — so a machine that can sign a release can also pack one, and
+   a machine with no SDK is refused by both with a sentence naming the SDK.
 
 2. **The .NET 8 runtime, x64.** The signing library is a .NET 8 assembly hosted
    inside `signtool`'s native process. Missing, it is the failure Microsoft's own
@@ -87,17 +98,27 @@ az login --use-device-code                       # once per few hours
 cargo build --release
 ./scripts/release/sbom.ps1
 ./scripts/release/package.ps1 -Sign
-./scripts/release/smoke.ps1 -Exe target/release/folio.exe -ExpectSigned
+./scripts/release/smoke.ps1 -Exe target/release/folio.exe -ExpectSigned `
+    -Msix target/release-package/folio.msix
 ```
 
-`package.ps1 -Sign` signs `folio.exe` where the build left it, *before* the
-archive is built and before `SHA256SUMS.txt` is written, so the hash published
-beside the archive is the hash of the signed bytes and the executable `smoke.ps1`
-starts afterwards is the executable that ships.
+`package.ps1 -Sign` signs `folio.exe` where the build left it and `folio.msix`
+where it packed it, *before* the archive is built and before `SHA256SUMS.txt` is
+written, so the hash published beside the archive is the hash of the signed bytes
+and the executable `smoke.ps1` starts afterwards is the executable that ships.
+
+`-Msix` is needed on that last line and nowhere else. `smoke.ps1` looks for the
+package beside the executable, because that is where it is for everybody who
+receives one — the archive holds both files in one folder. Straight out of a
+build they are two directories apart, `target/release` and
+`target/release-package`, so the path is given rather than a file copied to make
+a default true.
 
 `-ExpectSigned` makes `smoke.ps1` refuse an executable that is not signed, is
-signed by somebody else, or is signed without a time stamp. Leave it off for an
-ordinary build, which is unsigned and is meant to be.
+signed by somebody else, or is signed without a time stamp, and refuse a package
+that is unsigned, untimestamped, signed by a different certificate than the
+executable, or declaring a `Publisher` that is not that certificate's subject.
+Leave it off for an ordinary build, which is unsigned and is meant to be.
 
 To sign something without touching the original — a build in `dist/`, say —
 `sign.ps1` takes `-OutDir` and signs copies placed there:
@@ -175,3 +196,103 @@ resolves by name afterwards, and that a run with no sign-in refuses early and
 names the command to run. It reaches no network, signs nothing, and reads the
 sign-in state from an empty `AZURE_CONFIG_DIR` so it says the same thing on a
 machine somebody is signed in on. Run it after changing either script.
+
+## The sparse MSIX package
+
+`folio.msix` is packed by `package.ps1` out of `packaging/msix/`, and it ships
+**inside the archive**, in the same folder as `folio.exe`.
+
+### What it is, and what it is not
+
+It is an identity. There is no program in it: no executable, no library, nothing
+but `AppxManifest.xml` and three logos, which is what "sparse" means and why the
+whole file is a few kilobytes. What that identity buys is one thing — a verb on
+the **first** page of the Windows 11 right-click menu, which is a page only a
+packaged application is allowed to put anything on.
+
+The program the manifest names lives at an **external location**, and that
+location is the folder the recipient extracted the archive into. This is the
+reason the two files travel together: a package registered against a folder with
+no `folio.exe` in it names a path with nothing at it.
+
+Nothing happens when somebody extracts the archive. The package is inert until a
+user turns the row on in `Settings ▸ General ▸ First page of that menu`, and that
+registration is per-user and needs no elevation — no administrator, no installer,
+no service. **Nothing in this repository registers a package on the machine that
+built it.** A build that registered its own output would be a build that changed
+the developer's Explorer menu and left it changed, and it would test the
+registration on the one machine where it cannot fail interestingly.
+
+The classic `HKCU\Software\Classes` verb — the one that reaches the "Show more
+options" page and Windows 10 — is not replaced by this and stays where it is.
+`docs/DESIGN.md` §7.4a is where that decision is written down.
+
+### `Publisher` is the certificate subject, character for character
+
+`<Identity Publisher="…">` in `packaging/msix/AppxManifest.xml` reads:
+
+```
+CN=Weiyi Shi, O=Weiyi Shi, L=Ann Arbor, S=mi, C=US
+```
+
+which is the subject of the certificate the release is signed with, spelled the
+same way. Windows compares those two strings when the package is registered, and
+**refuses a mismatch with a message that names neither of them**: the user is
+told that a package could not be registered, and there is nothing in front of
+them to compare. Nothing earlier fails — not the build, not the packing, not a
+signature check, not a smoke test that only starts the executable.
+
+That is the failure `smoke.ps1 -ExpectSigned` exists to catch, and it catches it
+on the artefact: it opens the packed `folio.msix`, reads `Publisher` out of the
+`AppxManifest.xml` inside it, and compares it with the subject of the certificate
+that actually signed that package — as a distinguished name rather than as a
+string, so that the space Windows puts after a comma and the one the manifest
+does not are the same name and not a failure to go and edit a correct file. It
+then checks that the same certificate signed `folio.exe`.
+
+Change the certificate and this file changes with it. There is no way to derive
+one from the other at packing time — the certificate does not exist until the
+service issues one, three days at a time — so the two are written down once and
+checked against each other on every signed release.
+
+### The version in the manifest is `0.0.0.0` on purpose
+
+The checked-in manifest carries `Version="0.0.0.0"`, and `package.ps1` replaces
+it in a copy at packing time with the workspace version from `Cargo.toml`, in the
+four-part form a package identity is spelled in: `0.1.1` becomes `0.1.1.0`, and a
+pre-release suffix is cut off first, so `0.2.1-preview` also becomes `0.2.1.0`.
+The manifest in the tree is never edited by the build.
+
+A real version number in that file would be a second place this product's version
+is written, free to disagree with the binary it ships beside — the exact failure
+the single-source rule in `Cargo.toml` exists to prevent. `package.ps1` refuses
+to pack a manifest whose `Version` is anything but `0.0.0.0`, so the placeholder
+cannot quietly become a value.
+
+The substitution is done on the parsed XML and not with a search over the text,
+because `0.0.0.0` appears twice in that file: once as the attribute and once in
+the comment explaining why the attribute is a placeholder.
+
+### `makeappx.exe`
+
+`makeappx.exe` comes from the Windows SDK — the same install `signtool.exe` comes
+from, at
+`C:\Program Files (x86)\Windows Kits\10\bin\<sdk version>\x64\makeappx.exe`.
+`package.ps1` takes the newest x64 one under `Windows Kits\10\bin`, prints the
+full path of the one it chose, and refuses with a sentence naming the SDK when
+there is none.
+
+It is run as `makeappx pack /d <layout> /p <output>\folio.msix /o /nv`, and the
+`/nv` is load-bearing rather than lax. Semantic validation checks that every file
+a manifest names is in the package, and the point of a sparse package is that
+`folio.exe` is not; without the flag makeappx refuses with
+
+```
+error: Manifest validation error: … The file name "folio.exe" declared for
+element "…/Application" doesn't exist in the package.
+```
+
+which is a description of the design rather than a fault in it. Microsoft's own
+instructions for granting identity with an external location pass it for this
+reason. The manifest's structure is still validated: a misspelled element or an
+undeclared namespace fails with the flag on.
