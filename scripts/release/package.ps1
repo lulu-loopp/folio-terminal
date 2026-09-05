@@ -4,8 +4,8 @@
     exactly the list.
 
 .DESCRIPTION
-    The archive is seven files and the list of them is the point. Two of the
-    seven are a runtime contract rather than a convenience:
+    The archive is eight files and the list of them is the point. Two of the
+    eight are a runtime contract rather than a convenience:
 
       * `conpty.dll` and `OpenConsole.exe` must sit in `folio.exe`'s OWN
         directory. `vendor/conpty/portable-pty/src/win/psuedocon.rs` looks for
@@ -55,6 +55,10 @@
     Where the two licences, the third-party notices and the trademark notice
     are. Defaults to the repository root.
 
+.PARAMETER Packaging
+    Where the files that exist only to be shipped are. Defaults to
+    `packaging/`. Today that is `folio-here.cmd`.
+
 .PARAMETER Output
     Where the archive and `SHA256SUMS.txt` are written. Defaults to
     `target/release-package`. Anything already there is hashed into
@@ -83,6 +87,7 @@ param(
     [string] $Version,
     [string] $Binaries,
     [string] $Documents,
+    [string] $Packaging,
     [string] $Output,
     [switch] $Sign
 )
@@ -93,6 +98,7 @@ Set-StrictMode -Version Latest
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
 if (-not $Binaries) { $Binaries = Join-Path $root 'target\release' }
 if (-not $Documents) { $Documents = $root }
+if (-not $Packaging) { $Packaging = Join-Path $root 'packaging' }
 if (-not $Output) { $Output = Join-Path $root 'target\release-package' }
 
 function Get-WorkspaceVersion {
@@ -119,10 +125,19 @@ if (-not $Version) { $Version = Get-WorkspaceVersion }
 # images, which is worse than no page at all. It is read where it works - the
 # repository and the releases page - and what ships here is what the licences
 # require to ship.
+#
+# `folio-here.cmd` is here because it only works from here. It is one line —
+# `folio.exe --cwd` on the directory it was started in — and `%~dp0` is what
+# makes it a sibling reference rather than a path somebody has to edit: a
+# program that opens an external terminal by running a command with no
+# arguments (VS Code's `terminal.external.windowsExec` is the one it was
+# written for) has nowhere to say which folder it means, and this says it for
+# them. Outside the folder `folio.exe` was unpacked into it names nothing.
 $manifest = @(
     @{ Name = 'folio.exe';                From = $Binaries },
     @{ Name = 'conpty.dll';               From = $Binaries },
     @{ Name = 'OpenConsole.exe';          From = $Binaries },
+    @{ Name = 'folio-here.cmd';           From = $Packaging },
     @{ Name = 'LICENSE-MIT';              From = $Documents },
     @{ Name = 'LICENSE-APACHE';           From = $Documents },
     @{ Name = 'THIRD-PARTY-NOTICES.md';   From = $Documents },
@@ -199,7 +214,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive,
     [System.IO.Compression.CompressionLevel]::Optimal,
     # The folder goes in, so that extracting into a downloads directory produces
-    # one folder and not seven loose files — three of which only work while they
+    # one folder and not eight loose files — four of which only work while they
     # are beside each other.
     $true)
 Remove-Item -LiteralPath $staging -Recurse -Force
