@@ -90,9 +90,18 @@ function Invoke-Sign {
     }
     try {
         $output = & $pwsh -NoLogo -NoProfile -Command $command 2>&1
+        $text = ($output | Out-String)
         return [pscustomobject]@{
             ExitCode = $LASTEXITCODE
-            Text     = ($output | Out-String)
+            Text     = $text
+            # **The same text put back into one line.** A message inside a
+            # PowerShell error report is re-wrapped to the width of whatever
+            # console it is printed on, and each continuation is given a `|`
+            # gutter — so a sentence this file looks for arrives broken in a
+            # different place on every machine, with a bar in the break.
+            # Dropping the gutter and flattening the blanks asks about the words
+            # rather than about the terminal.
+            Flat     = ((($text -split "`n" | ForEach-Object { $_ -replace '^\s*\|\s?', '' }) -join ' ') -replace '\s+', ' ')
         }
     }
     finally {
@@ -147,13 +156,13 @@ Write-Host 'sign.ps1'
 Test-Case 'a file that is not there is refused, and the exit code says so' {
     $result = Invoke-Sign @{ DlibDir = $stubDlib; Files = (Join-Path $scratch 'absent.exe') }
     if ($result.ExitCode -eq 0) { throw 'it exited 0' }
-    if ($result.Text -notmatch 'there is no file at') { throw "the refusal did not name the reason: $($result.Text)" }
+    if ($result.Flat -notmatch 'there is no file at') { throw "the refusal did not name the reason: $($result.Text)" }
 }
 
 Test-Case 'a file that is not a PE image is refused before any tool is asked' {
     $result = Invoke-Sign @{ DlibDir = $stubDlib; Files = $notAnImage }
     if ($result.ExitCode -eq 0) { throw 'it exited 0' }
-    if ($result.Text -notmatch 'is not a PE image') { throw "the refusal did not say what was wrong: $($result.Text)" }
+    if ($result.Flat -notmatch 'is not a PE image') { throw "the refusal did not say what was wrong: $($result.Text)" }
 }
 
 # The signtool `sign.ps1` chose, read out of its own output. The verification
@@ -251,15 +260,15 @@ Test-Case 'two files of the same name cannot both be signed into one -OutDir' {
         Files  = @((Join-Path $one 'same.exe'), (Join-Path $two 'same.exe'))
     }
     if ($result.ExitCode -eq 0) { throw 'it exited 0' }
-    if ($result.Text -notmatch 'are named same\.exe') { throw "the refusal did not name the clash: $($result.Text)" }
+    if ($result.Flat -notmatch 'are named same\.exe') { throw "the refusal did not name the clash: $($result.Text)" }
 }
 
 Test-Case '-VerifyOnly passes a file that is signed and time stamped, and says by whom' {
     if (-not $signTool) { throw 'the earlier case found no signtool.exe to judge' }
     $result = Invoke-Sign @{ VerifyOnly = $true; Files = $signTool }
     if ($result.ExitCode -ne 0) { throw "verifying signtool.exe exited $($result.ExitCode): $($result.Text)" }
-    if ($result.Text -notmatch 'signed by\s+CN=Microsoft Corporation') { throw 'it did not print the signer' }
-    if ($result.Text -notmatch 'stamped by') { throw 'it did not print the time stamper' }
+    if ($result.Flat -notmatch 'signed by\s+CN=Microsoft Corporation') { throw 'it did not print the signer' }
+    if ($result.Flat -notmatch 'stamped by') { throw 'it did not print the time stamper' }
 }
 
 Test-Case '-VerifyOnly refuses a file whose bytes no longer match its signature' {
@@ -273,17 +282,84 @@ Test-Case '-VerifyOnly refuses a file whose bytes no longer match its signature'
     if ($result.ExitCode -eq 0) { throw 'it called a broken signature valid' }
 }
 
-Test-Case 'signing with nobody signed in refuses early and names the command to run' {
-    # Its counterpart is the case above: verification runs with no credential at
-    # all. Skipped rather than passed on a machine that *is* signed in — this is
-    # about the message, and there is no message when the credential is there.
-    $result = Invoke-Sign @{ DlibDir = $stubDlib; Files = $anImage }
-    if ($result.ExitCode -eq 0) {
-        Write-Host '        (this machine is signed in to Azure; the refusal could not be provoked)'
-        return
+# The Azure CLI's own directory, found the way `sign.ps1` finds it when the PATH
+# does not name it. The three cases after this need it; on a machine without the
+# CLI installed they say so instead of pretending.
+$cliDirectory = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } |
+    ForEach-Object { Join-Path $_ 'Microsoft SDKs\Azure\CLI2\wbin' } |
+    Where-Object { Test-Path -LiteralPath (Join-Path $_ 'az.cmd') -PathType Leaf } |
+    Select-Object -First 1
+
+# A PATH with the CLI's directory taken out of it, and one with it put in.
+$withoutCli = (($env:PATH -split ';' | Where-Object { $_ -and $_ -ne $cliDirectory }) -join ';')
+$noCredentials = @{
+    AZURE_TENANT_ID = ''; AZURE_CLIENT_ID = ''
+    AZURE_CLIENT_SECRET = ''; AZURE_CLIENT_CERTIFICATE_PATH = ''
+}
+
+Test-Case 'the plan names the Azure CLI the signing library will run' {
+    if (-not $cliDirectory) { Write-Host '        (no Azure CLI on this machine)'; return }
+    $environment = $noCredentials.Clone()
+    $environment['PATH'] = $cliDirectory + ';' + $withoutCli
+    $result = Invoke-Sign -Parameters @{ DryRun = $true; DlibDir = $stubDlib; Files = $anImage } -Environment $environment
+    if ($result.ExitCode -ne 0) { throw "a dry run exited $($result.ExitCode): $($result.Text)" }
+    if ($result.Flat -notmatch 'credential: the Azure CLI at ') { throw "it named no CLI: $($result.Text)" }
+    if ($result.Flat -match 'not on PATH') { throw 'it repaired a PATH that did not need repairing' }
+}
+
+Test-Case 'an Azure CLI that is installed but not on PATH is put in front of PATH' {
+    # The failure this is about is not an error message: the library runs `az` by
+    # name from inside signtool, and a signtool that cannot find it stops on a
+    # prompt nobody is watching. Finding it on the disk is not enough — the
+    # directory has to reach the child process.
+    if (-not $cliDirectory) { Write-Host '        (no Azure CLI on this machine)'; return }
+    $environment = $noCredentials.Clone()
+    $environment['PATH'] = $withoutCli
+    $result = Invoke-Sign -Parameters @{ DryRun = $true; DlibDir = $stubDlib; Files = $anImage } -Environment $environment
+    if ($result.ExitCode -ne 0) { throw "a dry run exited $($result.ExitCode): $($result.Text)" }
+    if ($result.Flat -notmatch [regex]::Escape((Join-Path $cliDirectory 'az.cmd'))) {
+        throw "it did not find the CLI in its install location: $($result.Text)"
     }
-    if ($result.Text -notmatch 'az login --use-device-code') { throw 'the refusal did not say what to run' }
-    if ($result.Text -notmatch 'not signed in to Azure') { throw 'the refusal did not name itself' }
+    if ($result.Flat -notmatch 'its directory was not on PATH') { throw 'it did not say it repaired the PATH' }
+    # The claim that matters is not that a variable was set but that the name
+    # resolves afterwards, which is what a child of signtool will do.
+    if ($result.Flat -notmatch ('az now resolves by name to ' +
+            [regex]::Escape((Join-Path $cliDirectory 'az.cmd')))) {
+        throw "az did not become resolvable by name: $($result.Text)"
+    }
+}
+
+Test-Case 'a CLI put on PATH is then run, and a signed-out one stops the run before signtool' {
+    if (-not $cliDirectory) { Write-Host '        (no Azure CLI on this machine)'; return }
+    # **The repaired PATH is asked to do the thing the repair is for.** The case
+    # above proves the message; this one proves the CLI is then reachable by
+    # name, because `sign.ps1` goes on to run it and comes back with what it
+    # said rather than with "there is no Azure CLI here".
+    #
+    # `AZURE_CONFIG_DIR` at an empty directory is a signed-out machine, so this
+    # reads the same on a machine somebody has signed in on. Reaching for the
+    # real profile instead would let the case pass by being unable to run.
+    $environment = $noCredentials.Clone()
+    $environment['PATH'] = $withoutCli
+    $environment['AZURE_CONFIG_DIR'] = Join-Path $scratch 'empty-azure-config'
+    [IO.Directory]::CreateDirectory($environment['AZURE_CONFIG_DIR']) | Out-Null
+
+    # A copy, so that a regression which signs where it should refuse damages a
+    # file in a temporary directory rather than the PowerShell this runs on.
+    $subject = Join-Path $scratch 'unsigned-subject.exe'
+    Copy-Item -LiteralPath $anImage -Destination $subject -Force
+    $before = (Get-FileHash -LiteralPath $subject -Algorithm SHA256).Hash
+
+    $result = Invoke-Sign -Parameters @{ DlibDir = $stubDlib; Files = $subject } -Environment $environment
+    if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+    if ($result.Flat -notmatch 'its directory was not on PATH') { throw 'the PATH was never repaired' }
+    if ($result.Flat -notmatch 'az login --use-device-code') { throw 'the refusal did not say what to run' }
+    if ($result.Flat -notmatch 'not signed in to Azure') {
+        throw "it did not get an answer out of the CLI it had just put on PATH: $($result.Text)"
+    }
+    if ((Get-FileHash -LiteralPath $subject -Algorithm SHA256).Hash -ne $before) {
+        throw 'it wrote to the file it was refusing to sign'
+    }
 }
 
 Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue

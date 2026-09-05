@@ -51,6 +51,16 @@ files in the archive carry no signature because no text file can.
    also reads a service principal out of `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and
    `AZURE_CLIENT_SECRET` — but it is the way a person at a laptop does it.
 
+   **A shell opened before the CLI was installed does not have it on PATH**, and
+   that is not an error you get to read: the library runs `az` by name from
+   inside `signtool`, and a `signtool` that cannot find it stops on a prompt
+   nobody is watching until somebody kills the run. It happened on the first
+   signature this project made. `sign.ps1` now looks in the CLI's standard
+   install location when the name does not resolve, puts that directory in front
+   of this process's PATH, checks that the name resolves afterwards, and says so.
+   With no CLI on the PATH and none in that location it refuses and names what to
+   install, rather than starting a run that will hang.
+
 4. **Sign in, as the account that holds the role.** Signing is authorised by the
    **Artifact Signing Certificate Profile Signer** role on the certificate
    profile, granted in the Azure portal to whoever is going to sign. That account,
@@ -140,13 +150,16 @@ a 403 and not with a redirect.
 
 ### When it will not sign
 
-`sign.ps1 -DryRun` resolves every tool, writes the metadata, prints the exact
+`sign.ps1 -DryRun` resolves every tool, says which credential the library is
+going to find, writes the metadata, prints the exact
 `signtool` command it would run, and stops. Almost everything that can be
 misconfigured is visible in that output without asking the service anything.
 
 | what you see | what it is |
 | --- | --- |
-| `not signed in to Azure` | nothing here has a credential. The script prints the `az login` line to run. |
+| `not signed in to Azure` | the CLI is here but nobody is signed in. The script prints the `az login` line to run. |
+| `no Azure CLI and no service principal` | nothing here can authorise anything. Install the CLI and open a new shell. Refused rather than started, because the alternative is a run that hangs. |
+| a run that hangs with no output | this is what the two rows above exist to prevent. If it still happens, `signtool` is waiting on a credential prompt: kill it, and check that `az` resolves by name in the same shell. |
 | HTTP 401 | the sign-in expired. `az login --use-device-code` again. |
 | HTTP 403 | the account is signed in but may not use this profile: check the role assignment, the account and profile names, and that the endpoint's region matches the account's. |
 | `no certificates were found that met all the given criteria` | `signtool` never loaded the signing library and fell back to the local certificate store — an SDK older than 10.0.22621.755, or the wrong architecture. |
@@ -154,9 +167,11 @@ misconfigured is visible in that output without asking the service anything.
 
 ### Testing the integration without signing anything
 
-`scripts/release/sign-tests.ps1` runs twelve cases against `sign.ps1` — the
+`scripts/release/sign-tests.ps1` runs fourteen cases against `sign.ps1` — the
 metadata it assembles, the flags it passes, that `-OutDir` never writes back over
 what it was given, that verification passes a signed file and refuses a tampered
-one, and that a run with no credential refuses early and names the command to
-run. It reaches no network and needs no sign-in. Run it after changing either
-script.
+one, that an Azure CLI which is installed but not on the PATH is put there and
+resolves by name afterwards, and that a run with no sign-in refuses early and
+names the command to run. It reaches no network, signs nothing, and reads the
+sign-in state from an empty `AZURE_CONFIG_DIR` so it says the same thing on a
+machine somebody is signed in on. Run it after changing either script.

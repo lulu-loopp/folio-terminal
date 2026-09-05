@@ -55,10 +55,11 @@
     Azure sign-in, because it asks Windows and not the service.
 
 .PARAMETER DryRun
-    Resolve the tools, write the metadata, print the command that would run, and
-    stop before running it. Everything here that can be wrong without a network —
-    a wrong endpoint, a wrong profile name, the wrong architecture of signing
-    library — is visible in the output of this.
+    Resolve the tools, write the metadata, say which credential the library is
+    going to find, print the command that would run, and stop before running it.
+    Everything here that can be wrong without a network — a wrong endpoint, a
+    wrong profile name, the wrong architecture of signing library, an Azure CLI
+    that is installed but not on the PATH — is visible in the output of this.
 
 .PARAMETER Endpoint
     The regional service endpoint. Defaults to `FOLIO_SIGN_ENDPOINT`, then to
@@ -346,39 +347,107 @@ function Assert-DotnetRuntime {
 
 # ── who Azure will think is asking ───────────────────────────────────────────
 
-function Find-AzureCredential {
-    # The two that `DefaultAzureCredential` looks for which a person or a build
-    # can be sure about from outside the process. It also tries managed identity,
-    # Visual Studio and others; those are not asserted here, because a machine
-    # that has one of them signs successfully and this check would only be in the
-    # way.
+# **`az` has to be on the PATH, not merely on the disk.** The credential the
+# library ends up using runs `az` as a program by name, from inside `signtool`'s
+# process — so a machine where the Azure CLI is installed but its directory is
+# not on this shell's PATH is a machine where the sign-in exists, this script
+# could find it by looking, and `signtool` cannot. What happens then is not an
+# error: the run stops on a prompt nobody is watching, and the release waits until
+# somebody kills it. It happened on the first real signature this script made,
+# minutes after the CLI was installed and before any shell had a PATH with it in.
+#
+# So the directory is put in front of this process's PATH, which every child
+# inherits, and the CLI is found the same way twice rather than probed at one
+# path and called from another.
+function Resolve-AzureCli {
+    $onPath = @(Get-Command -Name az -CommandType Application, ExternalScript -ErrorAction SilentlyContinue)
+    if ($onPath.Count -gt 0) { return $onPath[0].Source }
+
+    $roots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
+    foreach ($root in $roots) {
+        $directory = Join-Path $root 'Microsoft SDKs\Azure\CLI2\wbin'
+        $az = Join-Path $directory 'az.cmd'
+        if (-not (Test-Path -LiteralPath $az -PathType Leaf)) { continue }
+        $env:PATH = $directory + [IO.Path]::PathSeparator + $env:PATH
+
+        # **Asked again by name, rather than assumed to have worked.** The whole
+        # point of the line above is that a child process can find `az` without
+        # being told where it is, and the only statement of that is the name
+        # resolving. A repair that set a variable and changed nothing would
+        # otherwise be reported as a repair.
+        $byName = @(Get-Command -Name az -CommandType Application, ExternalScript -ErrorAction SilentlyContinue)
+        if ($byName.Count -eq 0) {
+            throw "$az is on the disk, but az still does not resolve by name after $directory was put in front of PATH"
+        }
+        Write-Host "azure cli: $az"
+        Write-Host '  its directory was not on PATH; it is in front of PATH for this run, because'
+        Write-Host '  the signing library runs az by name and waits forever when it cannot find it.'
+        Write-Host "  az now resolves by name to $($byName[0].Source)"
+        return $byName[0].Source
+    }
+    return $null
+}
+
+# What `DefaultAzureCredential` is going to find, decided before `signtool` is
+# started rather than discovered by watching it not finish. The chain also tries
+# managed identity, Visual Studio and others; those are not asserted, because a
+# machine that has one of them signs successfully and a check for them would only
+# be in the way.
+function Get-CredentialPlan {
     if ($env:AZURE_TENANT_ID -and $env:AZURE_CLIENT_ID -and
         ($env:AZURE_CLIENT_SECRET -or $env:AZURE_CLIENT_CERTIFICATE_PATH)) {
-        return 'the AZURE_* environment variables of a service principal'
+        return [pscustomobject]@{ Kind = 'service principal'; Az = $null }
     }
+    return [pscustomobject]@{ Kind = 'azure cli'; Az = (Resolve-AzureCli) }
+}
 
-    $found = @(Get-Command -Name az -CommandType Application, ExternalScript -ErrorAction SilentlyContinue)
-    $path = if ($found.Count -gt 0) { $found[0].Source }
-            else { Join-Path $env:ProgramFiles 'Microsoft SDKs\Azure\CLI2\wbin\az.cmd' }
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+function Show-CredentialPlan {
+    param($Plan)
 
-    $shown = & $path account show --output json 2>$null
-    if ($LASTEXITCODE -ne 0) { return $null }
-    $subscription = ($shown | Out-String | ConvertFrom-Json).name
-    return "an Azure CLI sign-in (subscription '$subscription')"
+    if ($Plan.Kind -eq 'service principal') {
+        Write-Host 'credential: the AZURE_* environment variables of a service principal'
+        return
+    }
+    if (-not $Plan.Az) {
+        Write-Host 'credential: no Azure CLI on PATH or in its standard install location'
+        return
+    }
+    Write-Host "credential: the Azure CLI at $($Plan.Az)"
 }
 
 function Assert-AzureCredential {
-    $found = Find-AzureCredential
-    if ($found) {
-        Write-Host "credential: $found"
+    param($Plan)
+
+    if ($Plan.Kind -eq 'service principal') {
+        Write-Host 'credential: the AZURE_* environment variables of a service principal'
+        return
+    }
+
+    if (-not $Plan.Az) {
+        Write-Host ''
+        Write-Host 'There is no Azure CLI on PATH or in its standard install location, and no'
+        Write-Host 'service principal in the environment, so nothing here can authorise a signature.'
+        Write-Host 'Refused now rather than started: signtool asks for a credential it cannot get and'
+        Write-Host 'then waits, and a run that waits forever is worse than one that stops.'
+        Write-Host ''
+        Write-Host '    winget install -e --id Microsoft.AzureCLI'
+        Write-Host ''
+        Write-Host 'Open a new shell afterwards, or this one will still not have it on PATH.'
+        Write-Host ''
+        throw 'no Azure CLI and no service principal'
+    }
+
+    $shown = & $Plan.Az account show --output json 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $subscription = ($shown | Out-String | ConvertFrom-Json).name
+        Write-Host "credential: an Azure CLI sign-in (subscription '$subscription')"
         return
     }
 
     Write-Host ''
-    Write-Host 'Nothing here is signed in to Azure, so the signing service has nobody to authorise.'
-    Write-Host 'Sign in with the account holding the Artifact Signing Certificate Profile Signer'
-    Write-Host "role on the $CertificateProfile profile, and run this again:"
+    Write-Host 'The Azure CLI is here but nothing is signed in, so the signing service has nobody'
+    Write-Host 'to authorise. Sign in with the account holding the Artifact Signing Certificate'
+    Write-Host "Profile Signer role on the $CertificateProfile profile, and run this again:"
     Write-Host ''
     Write-Host '    az login --use-device-code'
     Write-Host ''
@@ -406,6 +475,12 @@ if ($VerifyOnly) {
 
 Assert-DotnetRuntime
 $dlib = Find-Dlib
+
+# Resolved with the other two tools, and before the metadata is written, because
+# repairing the PATH is part of getting the tools ready rather than part of
+# asking for a signature. `-DryRun` reports what it found and stops; the signing
+# path below refuses on it.
+$credential = Get-CredentialPlan
 
 # The metadata file names somebody's account, so it goes to a directory of its
 # own under TEMP and is removed when the run ends rather than being left in the
@@ -443,11 +518,12 @@ try {
     Write-Host ''
 
     if ($DryRun) {
+        Show-CredentialPlan -Plan $credential
         Write-Host 'dry run: nothing was signed.'
         return
     }
 
-    Assert-AzureCredential
+    Assert-AzureCredential -Plan $credential
 
     & $tool @arguments
     if ($LASTEXITCODE -ne 0) { throw "signtool sign exited $LASTEXITCODE" }
