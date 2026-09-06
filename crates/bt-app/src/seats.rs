@@ -235,6 +235,81 @@ pub const TAB_LAND_RING_ALPHA: f32 = 0.45;
 /// The `1.5px` of that inset ring, in logical pixels.
 pub const TAB_LAND_RING_LOGICAL_PX: f32 = 1.5;
 
+/// **The insertion line's thickness** (user ruling 2026-09-06: 「2px 强调色」), in
+/// logical pixels.
+pub const TAB_INSERT_LINE_LOGICAL_PX: f32 = 2.0;
+/// **How wide the dot at each end of that line is** (同 ruling: 「带两端小圆点」),
+/// in logical pixels.
+pub const TAB_INSERT_DOT_LOGICAL_PX: f32 = 6.0;
+
+/// **The line that says "a new entry lands here"** — the user's 2026-09-06
+/// ruling, drawn once for all three tab surfaces.
+///
+/// The stand-in slot ([`ChromeContent::strip_preview`]) already says *what* is
+/// about to arrive: it is a whole entry wearing the landing wash, dressed in the
+/// payload's own name and mark. What it does not say is **where the join is**,
+/// and that is the sentence the ruling asks for — the list has opened a space
+/// and the reader is entitled to see which two neighbours it opened between,
+/// rather than infer it from a box whose edges look like every other entry's.
+///
+/// It is a line across the run's *cross* axis at the leading edge of `body`,
+/// because that edge is the seam: a vertical bar down the strip, a horizontal
+/// one across the rail and the card column. One function and one geometry, for
+/// [`TabRun`]'s own reason — three painters that each drew their own caret would
+/// be three carets that eventually stopped agreeing about what a caret is.
+///
+/// **The dots are inset by their own radius rather than centred on the line's
+/// ends.** Centred, they would hang half a dot outside the entry's box, which on
+/// the rail is outside the panel and on the strip is over the caption bar — and
+/// both of those are surfaces with their own clip. Inset, the whole mark lives
+/// inside the rectangle the caller has already decided is on screen.
+#[must_use]
+pub fn insertion_line_sprites(
+    body: [f32; 4],
+    axis: Axis,
+    scale: f32,
+    ink: [u8; 3],
+) -> [ChromeSprite; 3] {
+    let thickness = (TAB_INSERT_LINE_LOGICAL_PX * scale).round().max(1.0);
+    let dot = (TAB_INSERT_DOT_LOGICAL_PX * scale).round().max(thickness);
+    let radius = (dot / 2.0).round().max(1.0) as u32;
+    let half = thickness / 2.0;
+    let dot_box = |centre_x: f32, centre_y: f32| {
+        [
+            centre_x - dot / 2.0,
+            centre_y - dot / 2.0,
+            centre_x + dot / 2.0,
+            centre_y + dot / 2.0,
+        ]
+    };
+    let (line, head, tail) = match axis {
+        Axis::Row => {
+            let seam = body[0].round();
+            (
+                [seam - half, body[1], seam + half, body[3]],
+                dot_box(seam, body[1] + dot / 2.0),
+                dot_box(seam, body[3] - dot / 2.0),
+            )
+        }
+        Axis::Col => {
+            let seam = body[1].round();
+            (
+                [body[0], seam - half, body[2], seam + half],
+                dot_box(body[0] + dot / 2.0, seam),
+                dot_box(body[2] - dot / 2.0, seam),
+            )
+        }
+    };
+    [
+        // A rectangle wants [`ChromeMark::Fill`] and not a quad: quads are drawn
+        // under every mark, and this one has to land on top of the stand-in's own
+        // wash and ring.
+        ChromeSprite::new(ChromeMark::Fill, line, ink),
+        ChromeSprite::new(ChromeMark::ControlPill { radius_px: radius }, head, ink),
+        ChromeSprite::new(ChromeMark::ControlPill { radius_px: radius }, tail, ink),
+    ]
+}
+
 // ── What a thing in flight looks like (§7.1.6b″) ─────────────────────────────
 //
 // **One rule, one implementation, three surfaces.** The strip reorders tabs, the
@@ -7058,6 +7133,97 @@ impl PaneOffers {
     };
 }
 
+/// **How wide the seam between two entries is, as a target** (user ruling
+/// 2026-09-06), in logical pixels either side of the join.
+///
+/// The band exists because the two verbs a tab list offers an arriving pane are
+/// not the same size on the glass. "Into this tab" is a whole tab wide; "between
+/// these two" was, until this ruling, the few pixels of padding the solver
+/// happens to leave between two bodies — and on the vertical rail there is
+/// no padding at all, so the seam was a *line* and the user's report is the
+/// arithmetic consequence: 「很容易就直接进入那两个 tab 了」. A gesture whose two
+/// meanings differ a hundredfold in target size is one meaning with a rare
+/// accident beside it.
+///
+/// Sixteen logical pixels of seam is still much less than a tab, so "into" stays
+/// the ordinary answer and the seam stays the deliberate one.
+pub const TAB_SEAM_BAND_LOGICAL_PX: f32 = 8.0;
+/// **How far the pointer must leave the seam before the seam lets go** (same
+/// ruling): the band's own half-width plus 4px of hysteresis.
+///
+/// Two radii and not one because a single threshold makes the answer a function
+/// of a coordinate the hand cannot hold still. A pointer resting exactly
+/// [`TAB_SEAM_BAND_LOGICAL_PX`] from a join flips between the insertion line and
+/// the tab wash on every jitter of a pixel, and those two are the loudest pair
+/// of pictures this surface can draw. Entering costs 8, leaving costs 12, so the
+/// 4px in between is a state that cannot be arrived at by noise.
+pub const TAB_SEAM_RELEASE_LOGICAL_PX: f32 = 12.0;
+
+/// **What a pointer over a tab list is aiming at** — the whole of the user's
+/// 2026-09-06 ruling, as two words and no window.
+///
+/// The distinction [`TabRun::slot_at`] alone cannot make. `slot_at` answers
+/// "whose body am I standing on", which is total over every entry and says
+/// nothing about *where* on it — so a pointer one pixel inside tab 2's leading
+/// edge and a pointer in the middle of tab 2 were one answer, and the seam
+/// between tab 1 and tab 2 had only the solver's padding to live in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StripAim {
+    /// The pointer is in a seam's band: a new entry lands at this index, and
+    /// the entries on either side are not being aimed at at all.
+    Insert(usize),
+    /// The pointer is on this entry's own body, clear of every seam.
+    Into(usize),
+}
+
+/// **Which seam the pointer is resting in**, with the ruling's hysteresis —
+/// [`StripAim`]'s scalar half, stated once for both axes.
+///
+/// * `seams` — every join in the run, in order, on the run's own axis
+///   ([`TabRun::seams`]): one before the first entry, one after the last, and
+///   one between each neighbouring pair.
+/// * `pos` — the pointer on that same axis.
+/// * `enter` — how close the pointer must come to a seam it is not already in.
+/// * `leave` — how far it must go to fall out of the one it is in. The caller
+///   passes the wider of the two; nothing here checks that it is wider, because
+///   a caller that passed the narrower would be asking for a band that is
+///   harder to keep than to reach, and that is a sentence this function has no
+///   business rewriting.
+/// * `latched` — the seam the previous move answered, or `None`.
+///
+/// **The latch is consulted before the walk and not folded into it.** Widening
+/// the search radius for one candidate inside a nearest-seam walk would let a
+/// *different* seam win while the latched one is still comfortably in reach, on
+/// a hand that has not left the seam it is in — the flicker the hysteresis is
+/// there to prevent, arrived at by a different road.
+#[must_use]
+pub fn seam_at(
+    seams: &[f32],
+    pos: f32,
+    enter: f32,
+    leave: f32,
+    latched: Option<usize>,
+) -> Option<usize> {
+    if let Some(index) = latched
+        && let Some(seam) = seams.get(index)
+        && (pos - seam).abs() <= leave
+    {
+        return Some(index);
+    }
+    // Nearest wins, and ties go to the lower index — `min_by` keeps the first of
+    // equal elements. A tie is a pointer exactly halfway between two joins,
+    // which only happens when a tab is narrower than the band; the answer has to
+    // be *an* answer rather than a good one, and it has to be the same one every
+    // frame.
+    seams
+        .iter()
+        .enumerate()
+        .map(|(index, seam)| (index, (pos - seam).abs()))
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .filter(|(_, distance)| *distance <= enter)
+        .map(|(index, _)| index)
+}
+
 impl TabRun {
     /// The pointer's coordinate on this run's axis.
     #[must_use]
@@ -7180,6 +7346,76 @@ impl TabRun {
         self.slots
             .iter()
             .position(|slot| contains(*slot, x as f32, y as f32))
+    }
+
+    /// **Every join in this run, on its own axis** — `slots.len() + 1` of them
+    /// when the list holds anything, and none when it does not.
+    ///
+    /// Seam `i` is where an entry inserted at index `i` would go, so the head of
+    /// the list and the tail past the last entry are seams like any other
+    /// (user ruling 2026-09-06: 「列表首尾各留同宽的插入带」). That numbering is
+    /// [`insert_index_at`]'s own, which is what lets the band's answer be handed
+    /// straight to the same clamp the midpoint walk's answer goes through.
+    ///
+    /// A join between two entries is the *middle* of whatever lies between them
+    /// rather than either edge, because the two surfaces disagree about whether
+    /// anything lies between them at all: the strip's solver leaves a gap
+    /// between bodies and the rail's rows sit flush, and a seam measured from
+    /// one edge would sit half a gap off centre on the surface that has one.
+    /// Where the bodies touch, the midpoint *is* the shared edge.
+    #[must_use]
+    pub fn seams(&self) -> Vec<f32> {
+        let mut seams = Vec::with_capacity(self.slots.len() + 1);
+        let mut previous_end = None;
+        for slot in &self.slots {
+            let (start, end) = self.span(*slot);
+            seams.push(match previous_end {
+                Some(previous) => (previous + start) / 2.0,
+                None => start,
+            });
+            previous_end = Some(end);
+        }
+        if let Some(end) = previous_end {
+            seams.push(end);
+        }
+        seams
+    }
+
+    /// **What the pointer is aiming at, seam before entry** (user ruling
+    /// 2026-09-06) — the run's whole answer to a payload that is not in it yet.
+    ///
+    /// The seam is asked first and its answer is final, which is the ruling
+    /// read literally: 「优先级高于「并入 tab」」. The band overlaps the entries
+    /// either side of every join by design — there is nowhere else for it to be
+    /// on a rail whose rows sit flush — so an order that asked the entry first
+    /// would be a band that never fired anywhere except the strip's own padding,
+    /// which is the state the user reported.
+    ///
+    /// **The clip box gates the seam exactly as it gates the entry.** A run that
+    /// is scrolled has joins above its own viewport, and 缺陷 #188's sentence is
+    /// the same one here: what is cropped away is not there to be pointed at.
+    /// Asked once, at the top, so the seam and the entry cannot answer about two
+    /// different surfaces.
+    ///
+    /// `latched` is the seam the previous pointer move answered; see
+    /// [`seam_at`].
+    #[must_use]
+    pub fn aim(&self, x: f64, y: f64, scale: f32, latched: Option<usize>) -> Option<StripAim> {
+        let [start, end] = self.viewport;
+        let position = self.pos(x, y);
+        if position < start || position >= end {
+            return None;
+        }
+        if let Some(seam) = seam_at(
+            &self.seams(),
+            position,
+            TAB_SEAM_BAND_LOGICAL_PX * scale,
+            TAB_SEAM_RELEASE_LOGICAL_PX * scale,
+            latched,
+        ) {
+            return Some(StripAim::Insert(seam));
+        }
+        self.slot_at(x, y).map(StripAim::Into)
     }
 }
 
@@ -10697,6 +10933,18 @@ fn window_tab_strip(
                 ring.opacity = TAB_LAND_RING_ALPHA * landing;
                 sprites.push(ring);
             }
+            // **And the join the stand-in opened** (user ruling 2026-09-06) — see
+            // [`insertion_line_sprites`]. Only the stand-in wears it: a tab that
+            // has *landed* is running the same wash on its way to nothing and is
+            // not a seam any more.
+            if strip_preview == Some(index) && within_strip(viewport, tab.body) {
+                sprites.extend(insertion_line_sprites(
+                    tab.body,
+                    Axis::Row,
+                    scale,
+                    palette.accent,
+                ));
+            }
             let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
             let content_gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
             // `.tab.squeezed { justify-content: center; padding: 0 4px }` — the mark
@@ -11698,6 +11946,28 @@ fn rail_chrome(
                 ring.opacity = TAB_LAND_RING_ALPHA * landing;
                 sprites.push(ring);
             }
+            // **And the join the stand-in opened** (user ruling 2026-09-06) — the
+            // strip's own line turned onto this axis by
+            // [`insertion_line_sprites`], which is the whole of what a rail has
+            // to say about it.
+            //
+            // The row's box is handed over **unclipped**, and the guard is on the
+            // seam itself rather than on the row: `clip_to_list` moves the top
+            // edge down to the list's, and the top edge is exactly the coordinate
+            // this mark is *about* — a clipped row would draw its line at the
+            // foot of the scroller, naming a join that is not there.
+            if preview == Some(index)
+                && in_panel(row.body)
+                && row.body[1] >= list_top
+                && row.body[1] < list_bottom
+            {
+                sprites.extend(insertion_line_sprites(
+                    row.body,
+                    Axis::Col,
+                    scale,
+                    palette.accent,
+                ));
+            }
             // ── the mark slot, which is the strip's own machinery unchanged ──
             //
             // T2's three branches, in the strip's own order and with the strip's own
@@ -12677,6 +12947,20 @@ fn focus_rail_chrome(
             );
             ring.opacity = TAB_LAND_RING_ALPHA * landing;
             sprites.push(ring);
+        }
+        // **And the join the stand-in opened** (user ruling 2026-09-06) — the
+        // strip's own line on the column's axis, by
+        // [`insertion_line_sprites`]. The ruling names the card column
+        // explicitly (「卡片模式若有拖放同样适用」), and it has drag since
+        // 2026-08-29, so this is the third caller of one function rather than a
+        // third caret.
+        if preview == Some(index) {
+            sprites.extend(insertion_line_sprites(
+                body,
+                Axis::Col,
+                scale,
+                palette.accent,
+            ));
         }
         // ── the breath: `@keyframes fcard-wait` (§7.1.5b, §7.1.6b′ F3) ──
         //
@@ -41897,6 +42181,320 @@ mod tests {",
             run.slot_at(f64::from((first[0] + first[2]) / 2.0), above),
             None,
             "and the title bar above it belongs to the strip, not to the tab"
+        );
+    }
+
+    // ══ The seam band (user ruling 2026-09-06) ══
+    //
+    // The ruling in one sentence: the join between two entries is a **band**
+    // sixteen logical pixels wide, a pointer inside it is inserting rather than
+    // joining, and it takes four more pixels to leave the band than to enter it.
+    // Everything below is that sentence and nothing else, asked of both axes,
+    // because [`TabRun::aim`] is one function and the surfaces differ only in
+    // which coordinate it reads.
+
+    /// The pointer, in the window's coordinates, at `pos` along the run's axis
+    /// and `cross` across it.
+    fn on_axis(run: &TabRun, cross: f32, pos: f32) -> (f64, f64) {
+        match run.axis {
+            Axis::Row => (f64::from(pos), f64::from(cross)),
+            Axis::Col => (f64::from(cross), f64::from(pos)),
+        }
+    }
+
+    /// A coordinate across the run that is inside every entry's body — the
+    /// middle of the first slot's cross extent, which every slot shares because
+    /// neither surface staggers its entries.
+    fn across(run: &TabRun) -> f32 {
+        let slot = run.slots[0];
+        match run.axis {
+            Axis::Row => (slot[1] + slot[3]) / 2.0,
+            Axis::Col => (slot[0] + slot[2]) / 2.0,
+        }
+    }
+
+    /// The two runs this ruling has to hold on, so every case below is stated
+    /// once and asked twice.
+    fn both_runs() -> [TabRun; 2] {
+        [
+            strip_run(&tab_strip_geometry(1_600.0, 1.0, &resting(4), 0, 0.0), 1.0),
+            rail_run(&rail_of(expanded_rail(), &resting(4), 0)),
+        ]
+    }
+
+    /// **Every join in a tab list is a seam, the head and the tail included** —
+    /// the ruling's 「列表首尾各留同宽的插入带」.
+    ///
+    /// [`TabRun::seams`] is the geometry the band is measured from, and the
+    /// numbering has to be [`insert_index_at`]'s or the band's answer could not
+    /// be handed to the same clamp: seam `i` is where an entry inserted at index
+    /// `i` goes, so there are `slots + 1` of them and the last one is past the
+    /// last entry.
+    ///
+    /// Red gate: number the seams from the entries instead of from the joins —
+    /// one per slot, at its leading edge — and the tail seam disappears, so a
+    /// pane let go past the last tab can never be an insertion at the end.
+    #[test]
+    fn a_run_has_one_more_seam_than_it_has_entries() {
+        for run in both_runs() {
+            let seams = run.seams();
+            assert_eq!(
+                seams.len(),
+                run.slots.len() + 1,
+                "one join before the first, one after the last, one between each pair"
+            );
+            assert_eq!(
+                seams[0],
+                run.start(0).expect("a first entry"),
+                "the head seam is the first entry's own leading edge"
+            );
+            let last = run.slots.len() - 1;
+            let (_, end) = run.span(run.slots[last]);
+            assert_eq!(seams[last + 1], end, "and the tail seam is the last's foot");
+            assert!(
+                seams.windows(2).all(|pair| pair[0] < pair[1]),
+                "the seams run the way the list does: {seams:?}"
+            );
+            for (pair, seam) in run.slots.windows(2).zip(seams.iter().skip(1)) {
+                let (_, before) = run.span(pair[0]);
+                let (after, _) = run.span(pair[1]);
+                assert_eq!(
+                    *seam,
+                    (before + after) / 2.0,
+                    "an interior seam is the middle of whatever lies between two entries"
+                );
+            }
+        }
+        assert!(
+            TabRun {
+                axis: Axis::Row,
+                slots: Vec::new(),
+                viewport: [0.0, 100.0],
+                band: [0.0, 0.0, 100.0, 30.0],
+                pane_offers: PaneOffers::BOTH,
+                max_scroll: 0.0,
+            }
+            .seams()
+            .is_empty(),
+            "a list holding nothing has no join to insert at"
+        );
+    }
+
+    /// **Inside the band the answer is the seam; outside it, the entry** — the
+    /// whole of the user's 2026-09-06 ruling, on both axes.
+    ///
+    /// This is the report it came from: 「很容易就直接进入那两个 tab 了」. Before
+    /// the band, "between these two" lived in whatever padding the solver left
+    /// between two bodies — which on the rail is *nothing at all*, because rows
+    /// sit flush — so the gesture existed arithmetically and could not be
+    /// performed. What the band asserts is that the eight pixels either side of
+    /// every join belong to the seam even though an entry's body is drawn there.
+    ///
+    /// Asked at the band's own edge rather than "somewhere near the join",
+    /// because a threshold tested loosely is a threshold that can drift to any
+    /// other number and stay green.
+    ///
+    /// Red gate: ask [`TabRun::slot_at`] before the seam — the order this code
+    /// had before the ruling — and every one of the `Insert` assertions comes
+    /// back `Into`, because the band lies on top of the bodies by construction.
+    #[test]
+    fn a_pointer_in_a_joins_band_is_inserting_and_a_pointer_clear_of_it_is_joining() {
+        let band = TAB_SEAM_BAND_LOGICAL_PX;
+        for run in both_runs() {
+            let cross = across(&run);
+            let aim = |pos: f32| {
+                let (x, y) = on_axis(&run, cross, pos);
+                run.aim(x, y, 1.0, None)
+            };
+            let seams = run.seams();
+            let last = run.slots.len() - 1;
+            // The clip box is the surface, here as everywhere (缺陷 #188): the
+            // head seam of an unscrolled list sits at the scroller's own leading
+            // edge, so the outer half of its band is off the surface and is not
+            // the band's business. Skipped rather than asserted either way, and
+            // the head and the tail are then asserted explicitly below so this
+            // cannot quietly become a loop that skips everything.
+            let on_surface = |pos: f32| pos >= run.viewport[0] && pos < run.viewport[1];
+            for (index, seam) in seams.iter().enumerate() {
+                for reach in [-band, -band / 2.0, 0.0, band / 2.0, band] {
+                    if !on_surface(seam + reach) {
+                        continue;
+                    }
+                    assert_eq!(
+                        aim(seam + reach),
+                        Some(StripAim::Insert(index)),
+                        "{reach} from seam {index} is still inside its band ({:?})",
+                        run.axis
+                    );
+                }
+            }
+            // And a pointer one pixel past the band is back to naming the entry
+            // it is standing on — the entry *before* the seam below it, the entry
+            // *after* the seam above it.
+            for (index, seam) in seams.iter().enumerate() {
+                if index > 0 {
+                    assert_eq!(
+                        aim(seam - band - 1.0),
+                        Some(StripAim::Into(index - 1)),
+                        "a pixel below seam {index}'s band is entry {}'s body ({:?})",
+                        index - 1,
+                        run.axis
+                    );
+                }
+                if index <= last {
+                    assert_eq!(
+                        aim(seam + band + 1.0),
+                        Some(StripAim::Into(index)),
+                        "and a pixel above it is entry {index}'s ({:?})",
+                        run.axis
+                    );
+                }
+            }
+            // The head and the tail are bands like any other, which is the half
+            // of the ruling a run with padding at both ends could otherwise pass
+            // by accident.
+            assert_eq!(
+                aim(seams[0] + band),
+                Some(StripAim::Insert(0)),
+                "the head band reaches into the first entry ({:?})",
+                run.axis
+            );
+            assert_eq!(
+                aim(seams[last + 1] - band),
+                Some(StripAim::Insert(last + 1)),
+                "and the tail band back into the last ({:?})",
+                run.axis
+            );
+        }
+    }
+
+    /// **The band is measured in logical pixels and drawn on a scaled surface**
+    /// — the ruling says 「±8 逻辑像素」 and a run's rectangles are device pixels.
+    ///
+    /// Red gate: drop the `* scale` and a 150% display gets a band two thirds
+    /// the size the ruling states, which is the very complaint this slice exists
+    /// to answer, arrived at again by rounding.
+    #[test]
+    fn the_bands_eight_pixels_are_logical_ones() {
+        let run = rail_run(&rail_of(expanded_rail(), &resting(4), 0));
+        let cross = across(&run);
+        let seam = run.seams()[1];
+        let reach = TAB_SEAM_BAND_LOGICAL_PX + 4.0;
+        let aim = |scale: f32| {
+            let (x, y) = on_axis(&run, cross, seam + reach);
+            run.aim(x, y, scale, None)
+        };
+        assert_eq!(
+            aim(1.0),
+            Some(StripAim::Into(1)),
+            "twelve device pixels is outside an eight-pixel band at 100%"
+        );
+        assert_eq!(
+            aim(2.0),
+            Some(StripAim::Insert(1)),
+            "and inside the same band at 200%, where eight logical pixels are sixteen"
+        );
+    }
+
+    /// **It takes four more pixels to leave a seam than to enter it** — the
+    /// ruling's 「4px 滞回(进入带 ±8,离开带要 ±12)」, asked on both sides of the
+    /// join and on both axes.
+    ///
+    /// Without it the two loudest pictures this surface can draw — the insertion
+    /// line and the wash on a whole tab — trade places on every pixel of jitter
+    /// a hand resting at exactly eight pixels produces, which is the flicker the
+    /// ruling names (「不闪烁」).
+    ///
+    /// Red gate: pass one radius for both — the shape this had before the
+    /// hysteresis — and the latched assertions come back `Into`, because a
+    /// pointer at ten pixels is outside an eight-pixel band whatever it was
+    /// doing a frame ago.
+    #[test]
+    fn a_seam_is_harder_to_leave_than_to_enter() {
+        let enter = TAB_SEAM_BAND_LOGICAL_PX;
+        let leave = TAB_SEAM_RELEASE_LOGICAL_PX;
+        assert!(leave > enter, "or there is no hysteresis to test");
+        for run in both_runs() {
+            let cross = across(&run);
+            let aim = |pos: f32, latched: Option<usize>| {
+                let (x, y) = on_axis(&run, cross, pos);
+                run.aim(x, y, 1.0, latched)
+            };
+            let seam = run.seams()[1];
+            // Both directions out of the same join, because a band with one-sided
+            // hysteresis is a band that sticks on the way down the list and not
+            // on the way up it.
+            for direction in [1.0_f32, -1.0] {
+                let held = seam + direction * (enter + leave) / 2.0;
+                assert_eq!(
+                    aim(held, None),
+                    Some(StripAim::Into(if direction > 0.0 { 1 } else { 0 })),
+                    "a hand that was not in the seam does not reach it from there \
+                     ({:?}, direction {direction})",
+                    run.axis
+                );
+                assert_eq!(
+                    aim(held, Some(1)),
+                    Some(StripAim::Insert(1)),
+                    "but a hand that is in it has not left yet ({:?}, direction {direction})",
+                    run.axis
+                );
+                let gone = seam + direction * (leave + 1.0);
+                assert_eq!(
+                    aim(gone, Some(1)),
+                    Some(StripAim::Into(if direction > 0.0 { 1 } else { 0 })),
+                    "and past twelve it has ({:?}, direction {direction})",
+                    run.axis
+                );
+            }
+            // The latch widens *that* seam and no other: a hand held at seam 1
+            // while standing next to seam 2 must not be reported as still being
+            // in seam 1.
+            let far = run.seams()[3];
+            assert_eq!(
+                aim(far, Some(1)),
+                Some(StripAim::Insert(3)),
+                "a stale latch does not outrank the seam the hand is actually in ({:?})",
+                run.axis
+            );
+        }
+    }
+
+    /// **What the scroller cropped away is not a seam either** (缺陷 #188's
+    /// sentence, asked of the band).
+    ///
+    /// [`TabRun::slot_at`] has answered `None` outside the clip box since that
+    /// defect, and the band has to answer the same way for the same reason: the
+    /// tail seam of a rail whose list is scrolled sits below the scroller's
+    /// foot, and a pointer parked in the panel's own padding below it would
+    /// otherwise be told it is standing in a join that is drawn nowhere.
+    ///
+    /// Red gate: drop the viewport guard from [`TabRun::aim`] and the pointer
+    /// below the clip box comes back naming the tail seam.
+    #[test]
+    fn a_seam_outside_the_clip_box_is_not_there_to_be_pointed_at() {
+        let run = rail_run(&rail_of(expanded_rail(), &resting(4), 0));
+        let cross = across(&run);
+        let [_, list_bottom] = run.viewport;
+        let (x, y) = on_axis(&run, cross, list_bottom + 1.0);
+        assert_eq!(
+            run.slot_at(x, y),
+            None,
+            "the entry question already answers nothing past the clip"
+        );
+        assert!(
+            (run.seams()[4] - (list_bottom + 1.0)).abs() <= TAB_SEAM_BAND_LOGICAL_PX,
+            "and the tail seam is close enough that a band with no guard would claim it"
+        );
+        assert_eq!(
+            run.aim(x, y, 1.0, None),
+            None,
+            "past the clip there is nothing"
+        );
+        assert_eq!(
+            run.aim(x, y, 1.0, Some(4)),
+            None,
+            "and a latch does not reach across it either"
         );
     }
 
