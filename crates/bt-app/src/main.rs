@@ -16840,10 +16840,10 @@ impl ControlClickHint {
         }
     }
 
-    fn text(self) -> &'static str {
+    fn text(self, lang: i18n::Lang) -> &'static str {
         match self {
-            Self::DefaultApp => i18n::Text::HyperlinkControlOpensExternally.text(),
-            Self::Explorer => i18n::Text::HyperlinkControlReveals.text(),
+            Self::DefaultApp => i18n::Text::HyperlinkControlOpensExternally.in_lang(lang),
+            Self::Explorer => i18n::Text::HyperlinkControlReveals.in_lang(lang),
         }
     }
 }
@@ -16949,15 +16949,32 @@ impl HyperlinkHover {
         self.active.take().is_some()
     }
 
+    /// **The line, cut to a number of terminal cells and not a number of
+    /// characters** (user report, 2026-09-05).
+    ///
+    /// `columns` is the grid's width, so every budget on this line is spent in
+    /// grid cells. A translated aside spends two of them per ideograph, and
+    /// counting characters here bought the aside room it did not have: the row
+    /// that draws this then had to lay a line wider than the grid onto the grid,
+    /// and what it dropped was the head of the address — the one fact the line
+    /// exists to carry. Measuring in cells is also what makes the "print the
+    /// aside only when the whole address is already on the line" rule below mean
+    /// what it says in every language.
     fn status_text(&self, columns: usize) -> Option<String> {
-        let uri = printable_address(&self.active.as_ref()?.uri)
-            .chars()
-            .collect::<Vec<_>>();
+        self.status_text_in(columns, i18n::current())
+    }
+
+    /// The same line in a named language — [`i18n::Text::in_lang`]'s own reason,
+    /// which is that how wide this line is depends on which column of that table
+    /// it was drawn from, and a test that cannot name the column cannot ask.
+    fn status_text_in(&self, columns: usize, lang: i18n::Lang) -> Option<String> {
+        let uri = printable_address(&self.active.as_ref()?.uri);
         if columns == 0 {
             return None;
         }
+        let uri_columns = bt_unicode::text_width(&uri);
         let suffix = if self.blocked {
-            i18n::Text::HyperlinkBlockedSuffix.text()
+            i18n::Text::HyperlinkBlockedSuffix.in_lang(lang)
         } else {
             // **The aside about `Ctrl` is printed only when it costs the target
             // nothing** (丙3). A verdict is the answer to a press somebody
@@ -16967,32 +16984,48 @@ impl HyperlinkHover {
             // it is not. A path truncated to make room for a lesson would lose
             // the one fact the line exists to carry.
             self.hands_on
-                .map(ControlClickHint::text)
-                .filter(|hint| uri.len() + hint.chars().count() <= columns)
+                .map(|hint| hint.text(lang))
+                .filter(|hint| uri_columns + bt_unicode::text_width(hint) <= columns)
                 .unwrap_or("")
         };
-        let suffix_len = suffix.chars().count();
-        if columns <= suffix_len {
-            return Some(
-                i18n::Text::HyperlinkBlocked
-                    .text()
-                    .chars()
-                    .take(columns)
-                    .collect(),
-            );
+        let suffix_columns = bt_unicode::text_width(suffix);
+        if columns <= suffix_columns {
+            return Some(head_within_columns(
+                i18n::Text::HyperlinkBlocked.in_lang(lang),
+                columns,
+            ));
         }
-        let target_columns = columns - suffix_len;
-        let mut status = if uri.len() > target_columns {
-            uri.into_iter()
-                .take(target_columns.saturating_sub(1))
-                .chain(['…'])
-                .collect::<String>()
+        let target_columns = columns - suffix_columns;
+        let mut status = if uri_columns > target_columns {
+            // The ellipsis is one cell, and it is the cell the address gives up.
+            let mut head = head_within_columns(&uri, target_columns.saturating_sub(1));
+            head.push('…');
+            head
         } else {
-            uri.into_iter().collect()
+            uri
         };
         status.push_str(suffix);
         Some(status)
     }
+}
+
+/// The longest prefix of `text` that stands in `columns` terminal cells.
+///
+/// Whole clusters, because half a cluster is not text and a full-width cluster
+/// straddling the budget's last cell would be a character the grid has no room
+/// to draw at its own size — the defect [`HyperlinkHover::status_text`] names.
+fn head_within_columns(text: &str, columns: usize) -> String {
+    let mut used = 0;
+    let mut end = 0;
+    for cluster in bt_unicode::graphemes(text) {
+        let cells = bt_unicode::cluster_width(cluster);
+        if used + cells > columns {
+            break;
+        }
+        used += cells;
+        end += cluster.len();
+    }
+    text[..end].to_owned()
 }
 
 /// What a settled hover is a hover *of*. Two shapes reach the flyout, and they differ in exactly
@@ -107909,6 +107942,93 @@ mod tests {
         assert_eq!(
             refused.status_text(120).as_deref(),
             Some("file:///C:/notes/readme.md · blocked")
+        );
+    }
+
+    /// RED (user report, 2026-09-05) — **this line's budget is counted in grid
+    /// cells, in every language.**
+    ///
+    /// 「 · Ctrl+点击在资源管理器中显示」 is fifteen characters and twenty-six
+    /// cells. Counted as characters, the aside was printed onto a grid that had
+    /// no room for it, and the row that draws the line then dropped whatever ran
+    /// off the left — the head of the address, which is the one fact this line
+    /// exists to carry. The cell-shrinking half of the same defect is
+    /// `bt_render`'s `a_translated_status_line_is_laid_out_in_cells_and_not_in_characters`.
+    ///
+    /// MUTATIONS: ① count the aside in characters and the 40-column case takes
+    /// an aside eleven cells too wide for it; ② count the address in characters
+    /// and the truncated Chinese path comes back over budget; ③ cut the address
+    /// at a byte or a character rather than a cluster and the ellipsis lands
+    /// after half a glyph.
+    #[test]
+    fn the_hover_line_spends_grid_cells_and_not_characters() {
+        fn settled(uri: &str, directory: bool) -> HyperlinkHover {
+            let start = Instant::now();
+            let mut hover = HyperlinkHover::default();
+            hover.observe(Some(hyperlink_hit(uri)), start);
+            assert!(
+                hover.activate_if_due(start + Duration::from_millis(300), &|_: &Path| directory)
+            );
+            hover
+        }
+        let cells = |line: &str| bt_unicode::text_width(line);
+
+        // ① The reported hover, in the language it was reported in. A grid wide
+        // enough for the address and the aside prints both, and the whole line
+        // fits the grid it was measured against.
+        let folder = settled("file:///D:/Demo", true);
+        let wide = folder
+            .status_text_in(60, i18n::Lang::Chinese)
+            .expect("a settled hover has a line");
+        assert_eq!(wide, "file:///D:/Demo · Ctrl+点击在资源管理器中显示");
+        assert!(
+            cells(&wide) <= 60,
+            "{} cells on a 60-column grid",
+            cells(&wide)
+        );
+
+        // ② One column short of that, the aside goes whole rather than eating
+        // the head of the address. The nineteen *characters* of the same aside
+        // would have fit, which is the whole of the reported defect.
+        assert_eq!(cells(&wide), 45);
+        assert_eq!(wide.chars().count(), 34);
+        assert_eq!(
+            folder.status_text_in(44, i18n::Lang::Chinese).as_deref(),
+            Some("file:///D:/Demo"),
+            "an address cut short to make room for an aside is the wrong trade"
+        );
+        // The English column of the same table is its own width, measured the
+        // same way.
+        assert_eq!(
+            folder.status_text_in(49, i18n::Lang::English).as_deref(),
+            Some("file:///D:/Demo · Ctrl+click shows it in Explorer")
+        );
+        assert_eq!(
+            folder.status_text_in(48, i18n::Lang::English).as_deref(),
+            Some("file:///D:/Demo")
+        );
+
+        // ③ An address of ideographs is cut to cells and at a cluster boundary,
+        // ellipsis included.
+        let deep = settled("file:///D:/文档/项目/笔记/读我.md", false);
+        let cut = deep
+            .status_text_in(20, i18n::Lang::Chinese)
+            .expect("a settled hover has a line");
+        assert!(cells(&cut) <= 20, "{cut:?} is {} cells wide", cells(&cut));
+        assert_eq!(cut, "file:///D:/文档/项…");
+
+        // ④ The verdict is still printed on a grid too narrow for anything else,
+        // and it too is measured in cells.
+        let mut refused = settled("file:///D:/Demo", true);
+        refused.show_blocked(hyperlink_hit("file:///D:/Demo"));
+        assert_eq!(
+            refused.status_text_in(3, i18n::Lang::Chinese).as_deref(),
+            Some("已"),
+            "three cells hold one and a half ideographs, so they hold one"
+        );
+        assert_eq!(
+            refused.status_text_in(60, i18n::Lang::Chinese).as_deref(),
+            Some("file:///D:/Demo · 已拦截")
         );
     }
 

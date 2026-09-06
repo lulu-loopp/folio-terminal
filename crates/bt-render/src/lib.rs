@@ -11005,23 +11005,6 @@ pub fn text_row_cells(
     Ok(frame.cells.chunks_exact(frame.columns.get() as usize))
 }
 
-/// The status overlay's row of cells, dressed in the floating tag's own colours.
-///
-/// # Why the cells carry explicit colours instead of the defaults
-///
-/// Until 2026-08-27 they were [`CapturedCell::plain`], i.e. `Named(16)`/
-/// `Named(17)` — "the scheme's default ink on the scheme's default paper". The
-/// paper part was a lie: the chip under them is not the canvas, it is a chip,
-/// and it was drawn in a hard-coded dark grey. So `resolve_colors` picked an ink
-/// to read against the **terminal's** background and then that ink was printed
-/// on something else entirely. On the dark canvas the two happened to be close
-/// enough; on the light canvas the scheme's near-black ink landed on a near-black
-/// slab and the tag became an unreadable smear — the reported defect.
-///
-/// Naming both ends closes it at the source rather than at the paint: the ink is
-/// the tag's, the ground is the tag's face, and `resolve_colors`'s contrast floor
-/// — the reader's own `Minimum contrast` row — is finally being handed the pair
-/// that is actually on the glass.
 /// The five boxes one floating chip is drawn from — the face, then its four
 /// hairline edges — each paired with the colour it is painted in.
 ///
@@ -11042,18 +11025,91 @@ fn float_tag_boxes(
     ]
 }
 
+/// The tail of a status line that fits in `columns` cells, and the cells it takes.
+///
+/// **Measured through the grid's own width oracle rather than by counting
+/// characters** (user report, 2026-09-05). A status line is UI copy, UI copy is
+/// translated, and 「点击在资源管理器中显示」 is eleven characters standing in
+/// twenty-two cells. Counting characters put each of those eleven in a one-cell
+/// slot, and a one-cell slot is a promise the shaper keeps:
+/// [`narrow_fallback_em_scale`] shrinks a fallback face's em until its ink fits
+/// the cell it was given, so every CJK glyph on this line came out at about
+/// half the em of the Latin half beside it. Nothing was wrong with the fallback
+/// — the row it was laid on had lied about how much room the text needed.
+fn status_overlay_tail(status: &str, columns: usize) -> (&str, usize) {
+    let mut width = 0;
+    let mut start = status.len();
+    for cluster in graphemes(status).collect::<Vec<_>>().into_iter().rev() {
+        let cells = cluster_width(cluster);
+        if width + cells > columns {
+            break;
+        }
+        width += cells;
+        start -= cluster.len();
+    }
+    (&status[start..], width)
+}
+
+/// The status overlay's row of cells, dressed in the floating tag's own colours.
+///
+/// # Why a cluster and not a character
+///
+/// The grid this row is shaped on is the terminal's, so the row is laid out by
+/// the terminal's rule: one extended grapheme cluster per slot, a full-width
+/// cluster owning two cells with a spacer behind it, exactly as
+/// [`overlay_preedit_cells`] lays out an IME preedit and as `bt-viewport` lays
+/// out history. [`status_overlay_tail`] carries the reason this matters here.
+/// The spacer wears the lead's style so the chip's face stays one slab rather
+/// than striping between the halves of every wide glyph.
+///
+/// # Why the cells carry explicit colours instead of the defaults
+///
+/// Until 2026-08-27 they were [`CapturedCell::plain`], i.e. `Named(16)`/
+/// `Named(17)` — "the scheme's default ink on the scheme's default paper". The
+/// paper part was a lie: the chip under them is not the canvas, it is a chip,
+/// and it was drawn in a hard-coded dark grey. So `resolve_colors` picked an ink
+/// to read against the **terminal's** background and then that ink was printed
+/// on something else entirely. On the dark canvas the two happened to be close
+/// enough; on the light canvas the scheme's near-black ink landed on a near-black
+/// slab and the tag became an unreadable smear — the reported defect.
+///
+/// Naming both ends closes it at the source rather than at the paint: the ink is
+/// the tag's, the ground is the tag's face, and `resolve_colors`'s contrast floor
+/// — the reader's own `Minimum contrast` row — is finally being handed the pair
+/// that is actually on the glass.
 fn status_overlay_cells(columns: usize, status: &str, tag: FloatTagInk) -> Vec<CapturedCell> {
     let mut displayed = vec![CapturedCell::default(); columns];
-    let characters = status.chars().collect::<Vec<_>>();
-    let shown = characters.len().min(displayed.len());
-    let start = displayed.len() - shown;
-    for (cell, character) in displayed[start..]
-        .iter_mut()
-        .zip(characters[characters.len() - shown..].iter())
-    {
-        *cell = CapturedCell::plain(character.to_string());
-        cell.style.foreground = TerminalColor::Rgb(tag.ink[0], tag.ink[1], tag.ink[2]);
-        cell.style.background = TerminalColor::Rgb(tag.face[0], tag.face[1], tag.face[2]);
+    let (tail, width) = status_overlay_tail(status, columns);
+    let ink = TerminalColor::Rgb(tag.ink[0], tag.ink[1], tag.ink[2]);
+    let face = TerminalColor::Rgb(tag.face[0], tag.face[1], tag.face[2]);
+    let mut column = columns - width;
+    let mut previous_lead: Option<usize> = None;
+    for cluster in graphemes(tail) {
+        let cells = cluster_width(cluster);
+        if cells == 0 {
+            // A zero-width cluster owns no slot of its own and belongs to the
+            // one before it, which is where the shaper has to see it.
+            if let Some(lead) = previous_lead {
+                displayed[lead].text.push_str(cluster);
+            }
+            continue;
+        }
+        let mut cell = CapturedCell::plain(cluster.to_owned());
+        cell.style.foreground = ink;
+        cell.style.background = face;
+        if cells == 2 {
+            cell.style.flags.insert(CellFlags::WIDE_CHAR);
+            let mut spacer_style = cell.style.clone();
+            spacer_style.flags.remove(CellFlags::WIDE_CHAR);
+            displayed[column + 1] = CapturedCell {
+                wide_spacer: true,
+                style: spacer_style,
+                ..CapturedCell::default()
+            };
+        }
+        displayed[column] = cell;
+        previous_lead = Some(column);
+        column += cells;
     }
     displayed
 }
@@ -11083,7 +11139,10 @@ fn status_overlay_geometry(
     let visible_columns = ((seat_width_px - 2.0 * metrics.padding_px) / metrics.cell_width_px)
         .floor()
         .clamp(0.0, u16::MAX as f32) as usize;
-    let shown = status.chars().count().min(columns.min(visible_columns));
+    // Cells, not characters, and through the same tail [`status_overlay_cells`]
+    // laid out — the chip is as wide as the row it is drawn behind, and a
+    // translated line is wider than its character count says.
+    let shown = status_overlay_tail(status, columns.min(visible_columns)).1;
     if shown == 0 {
         return None;
     }
@@ -14287,6 +14346,245 @@ mod tests {
             "one definition and two call sites — a chip that struck its own \
              colours would be a fourth"
         );
+    }
+
+    /// RED (user report, 2026-09-05) — **a status line's cells are counted the
+    /// way the grid counts them.**
+    ///
+    /// Hovering a folder printed a hint whose Latin half was the terminal's own
+    /// type and whose Chinese half came out at about six tenths of it. The
+    /// fallback face was innocent: this row laid one *character* per cell, so
+    /// every ideograph was handed a one-cell slot, and a one-cell slot is a
+    /// promise `narrow_fallback_em_scale` keeps by shrinking the em until the
+    /// ink fits. The whole of the defect is the arithmetic below.
+    ///
+    /// MUTATIONS: ① lay the row out by `chars()` again and the wide slots
+    /// vanish — the assertion that 「示」 owns two columns goes red; ② drop the
+    /// spacer and the chip's face stripes — the spacer's background assertion
+    /// goes red; ③ measure the tail in characters and a line that is too wide
+    /// for the grid eats its own head — the right-alignment assertion goes red.
+    #[test]
+    fn a_translated_status_line_is_laid_out_in_cells_and_not_in_characters() {
+        let tag = DARK_CHROME.float_tag();
+        let ink = TerminalColor::Rgb(tag.ink[0], tag.ink[1], tag.ink[2]);
+        let face = TerminalColor::Rgb(tag.face[0], tag.face[1], tag.face[2]);
+        // The reported line, in the language it was reported in.
+        let status = "file:///D:/Demo · Ctrl+点击在资源管理器中显示";
+        let width = bt_unicode::text_width(status);
+        assert!(
+            width > status.chars().count(),
+            "the fixture has to be a line the two counts disagree about"
+        );
+
+        let columns = 80;
+        let cells = status_overlay_cells(columns, status, tag);
+        assert_eq!(cells.len(), columns);
+
+        // ① Right-aligned by cells: the line ends at the last column and starts
+        // exactly `width` columns before it.
+        assert!(
+            cells[..columns - width]
+                .iter()
+                .all(|cell| cell.text.as_str().is_empty() && !cell.wide_spacer),
+            "nothing is printed left of the line's own first column"
+        );
+        assert_eq!(cells[columns - width].text.as_str(), "f");
+
+        // ② Every cluster stands in as many columns as the grid gives it, and a
+        // wide one is a lead plus a spacer wearing the lead's ground.
+        let mut column = columns - width;
+        for cluster in bt_unicode::graphemes(status) {
+            let owned = bt_unicode::cluster_width(cluster);
+            let cell = &cells[column];
+            assert_eq!(cell.text.as_str(), cluster, "at column {column}");
+            assert_eq!(cell.style.foreground, ink);
+            assert_eq!(cell.style.background, face);
+            assert_eq!(
+                cell.style.flags.contains(CellFlags::WIDE_CHAR),
+                owned == 2,
+                "{cluster:?} at column {column} must declare the slot it owns"
+            );
+            if owned == 2 {
+                let spacer = &cells[column + 1];
+                assert!(
+                    spacer.wide_spacer,
+                    "{cluster:?} must be followed by a spacer"
+                );
+                assert!(!spacer.style.flags.contains(CellFlags::WIDE_CHAR));
+                assert_eq!(
+                    spacer.style.background, face,
+                    "a spacer wearing another ground stripes the chip"
+                );
+            }
+            column += owned;
+        }
+        assert_eq!(column, columns);
+
+        // ③ The wide half really is the CJK half, and it is half the clusters.
+        let wide = cells
+            .iter()
+            .filter(|cell| cell.style.flags.contains(CellFlags::WIDE_CHAR))
+            .count();
+        assert_eq!(wide, "点击在资源管理器中显示".chars().count());
+
+        // ④ A grid too narrow for the whole line keeps its tail whole: the head
+        // goes, never half a cluster, and the chip is as wide as what is left.
+        assert_eq!(
+            status_overlay_tail(status, 22),
+            ("点击在资源管理器中显示", 22)
+        );
+        assert_eq!(
+            status_overlay_tail(status, 21),
+            ("击在资源管理器中显示", 20),
+            "an odd budget cannot hold half a glyph, and it does not print one"
+        );
+
+        // ⑤ The chip drawn behind the words is as wide as the words: geometry
+        // and cells read the same tail, so neither can drift from the other.
+        let metrics = CellMetrics {
+            cell_width_px: 10.0,
+            cell_height_px: 20.0,
+            font_size_px: 16.0,
+            padding_px: 8.0,
+            scale_factor: 1.0,
+            ascii_baseline_px: 15.0,
+            primary_advance_px: 10.0,
+            primary_cap_height_px: 11.0,
+            primary_cap_center_y_px: 9.0,
+        };
+        let rows = 4_usize;
+        let frame = ViewportFrame {
+            columns: NonZeroU32::new(columns as u32).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(columns as u32),
+            grid_rows: NonZeroU32::new(rows as u32).unwrap(),
+            rows: NonZeroU32::new(rows as u32).unwrap(),
+            presentation_offset_subpixels: 0,
+            cells: vec![CapturedCell::default(); columns * rows],
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 0,
+                visible: false,
+            },
+            cell_anchors: test_cell_anchors(columns * rows),
+            row_map: test_row_map(rows as u32),
+            selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
+            math_blocks: Vec::new(),
+            math_failures: Vec::new(),
+            status_text: Some(status.to_owned()),
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(columns as u32),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+        let seat = fitting_seat_width(metrics, &frame);
+        let geometry = status_overlay_geometry(metrics, &frame, status, seat).unwrap();
+        assert_eq!(geometry.first_column, columns - width);
+        assert!(
+            ((geometry.rect[2] - geometry.rect[0]) - width as f32 * metrics.cell_width_px).abs()
+                <= 0.01,
+            "the chip must span the cells the line was laid into"
+        );
+    }
+
+    /// RED (user report, 2026-09-05) — **the Chinese half of a status line is
+    /// set at the same size and on the same baseline as the Latin half.**
+    ///
+    /// The screenshot that opened this: `file:///D:/Demo · Ctrl+` in the
+    /// terminal's own type, and 「点击在资源管理器中显示」 beside it at roughly
+    /// six tenths of the height. This is that screenshot as a number. The Latin
+    /// yardstick is a capital's ink height, because a cap and an ideograph are
+    /// the two things a reader actually compares when they say one line is
+    /// smaller than the other; an ideograph fills more of its em than a cap
+    /// fills of its, so a correctly set line is comfortably *above* the floor
+    /// and the shrunken one is far below it.
+    ///
+    /// MUTATIONS (both measured): ① lay the row out one character per cell
+    /// again — the CJK clusters go down the narrow path,
+    /// `narrow_fallback_em_scale` squeezes each into one cell and 「点」 comes
+    /// out at 0.70 of a capital; ② stop declaring `WIDE_CHAR` on the lead and
+    /// the same 0.70 comes back with the spacer still in place; ③ drop the wide
+    /// slot's baseline alignment and the second assertion goes red.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_cjk_half_of_a_status_line_is_set_at_the_latin_half_s_size_and_baseline() {
+        fn baseline_px(buffer: &Buffer) -> f32 {
+            buffer
+                .layout_runs()
+                .next()
+                .expect("a shaped status glyph has a run")
+                .line_y
+        }
+
+        let mut font_system = terminal_font_system();
+        let mut swash_cache = SwashCache::new();
+        let tag = DARK_CHROME.float_tag();
+        for scale_factor in [1.0, 1.5, 2.0] {
+            let metrics = CellMetrics::measure(&mut font_system, scale_factor).unwrap();
+
+            // The Latin yardstick, shaped through the very same door.
+            let cap = shape_narrow_for_test(&[CapturedCell::plain("H")], &mut font_system, metrics);
+            let [_, cap_top, _, cap_bottom] =
+                glyph_ink_bounds(&cap[0].buffer, &mut font_system, &mut swash_cache)
+                    .expect("a capital rasterises");
+            let cap_height_px = cap_bottom - cap_top;
+            let cap_baseline_px = cap[0].top_offset_px + baseline_px(&cap[0].buffer);
+
+            let status = "file:///D:/Demo · Ctrl+点击在资源管理器中显示";
+            let cells = status_overlay_cells(80, status, tag);
+            // **Both routes, and the cells say which cluster each slot holds.**
+            // Asking only the two-cell shaper would let a mutation that sends
+            // the ideographs down the one-cell route pass by shaping nothing at
+            // all: this line's claim is about the glyph on the glass, whichever
+            // door it came through.
+            let narrow = shape_narrow_for_test(&cells, &mut font_system, metrics);
+            let wide = shape_wide_for_test(&cells, &mut font_system, metrics);
+            let shaped = narrow
+                .iter()
+                .map(|glyph| (glyph.column, &glyph.buffer, glyph.top_offset_px))
+                .chain(
+                    wide.iter()
+                        .map(|glyph| (glyph.column, &glyph.buffer, glyph.top_offset_px)),
+                )
+                .collect::<Vec<_>>();
+
+            let mut ideographs = 0;
+            for (column, buffer, top_offset_px) in &shaped {
+                let text = cells[*column].text.as_str().to_owned();
+                if !text
+                    .chars()
+                    .all(|character| ('\u{4e00}'..='\u{9fff}').contains(&character))
+                {
+                    // The Latin half keeps the primary face at the grid's own
+                    // em, so the line is one size and not two that agree.
+                    assert!(
+                        (first_layout_glyph(buffer).font_size - metrics.font_size_px).abs() <= 0.01,
+                        "at ×{scale_factor} {text:?} left the grid's own em"
+                    );
+                    continue;
+                }
+                ideographs += 1;
+                let [_, top, _, bottom] =
+                    glyph_ink_bounds(buffer, &mut font_system, &mut swash_cache)
+                        .expect("an ideograph rasterises");
+                let ratio = (bottom - top) / cap_height_px;
+                assert!(
+                    ratio >= 0.9,
+                    "at ×{scale_factor} {text:?} stands {ratio:.2} of a capital's \
+                     height — the reported shrink was about 0.6"
+                );
+                assert!(
+                    (top_offset_px + baseline_px(buffer) - cap_baseline_px).abs() <= 0.51,
+                    "at ×{scale_factor} the two halves of one line sit on two baselines"
+                );
+            }
+            assert_eq!(
+                ideographs,
+                "点击在资源管理器中显示".chars().count(),
+                "every ideograph on the line must have been measured"
+            );
+        }
     }
 
     #[test]
