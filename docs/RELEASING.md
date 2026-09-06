@@ -54,6 +54,38 @@ run by hand exactly as it runs there:
 | `scripts/release/package.ps1` | `folio.msix`, `folio-<version>-windows-x64.zip` with the package and the executable both in it, the MPL-2.0 crate archive, and `SHA256SUMS.txt` over everything beside them |
 | `scripts/release/smoke.ps1` | starts the executable that was built and checks the seven things a green build can still be broken about |
 
+## What gets published
+
+`target/release-package` is the whole of it. The draft-release step reads that
+directory and attaches **every file in it**, so what the three scripts leave
+there is exactly what a reader downloads — there is no second list anywhere
+naming assets, and nothing is hand-picked out of `dist/`.
+
+| asset | what it is |
+| --- | --- |
+| `folio-<version>-windows-x64.zip` | the nine files, in one folder |
+| `folio.msix` | **an asset of its own as well as a file in the zip** |
+| `option-ext-<version>.crate` | the MPL-2.0 source offer, made good by this release |
+| `folio-<version>.cdx.json` | the CycloneDX bill of materials `sbom.ps1` writes |
+| `SHA256SUMS.txt` | one line for each of the four above, in the format `sha256sum -c` reads |
+
+`folio.msix` being both is deliberate and is not a duplicate to tidy away. It
+has to be **in the zip**, because the package names the folder it was extracted
+into and a registration against a folder with no `folio.exe` in it names a path
+with nothing at it. It stays **beside the zip** because that copy is the one
+`smoke.ps1 -ExpectSigned` opens to read the package identity out of, and because
+`SHA256SUMS.txt` is written over the directory: a hash somebody can check
+against the file they were handed. Both copies are the same bytes — one file,
+packed once, signed once, then copied into the archive.
+
+`scripts/release/smoke-tests.ps1` is `smoke.ps1`'s own self-test, and it is
+about the one part of that script a green release does not exercise: the paths
+it is handed. It builds nothing, signs nothing and starts nothing — each case
+runs `smoke.ps1` in a child shell that was started in the repository and then
+walked into a scratch folder, which is the one arrangement under which a
+relative path has two answers, and reads the path the refusal names. Run it
+after changing how `smoke.ps1` reads its arguments.
+
 Everything below is about the one step that is not in that workflow, because it
 needs a person: signing.
 
@@ -159,6 +191,17 @@ receives one — the archive holds both files in one folder. Straight out of a
 build they are two directories apart, `target/release` and
 `target/release-package`, so the path is given rather than a file copied to make
 a default true.
+
+A relative path there is read from the directory the shell is standing in, and
+so are `-Exe` and `-Artifacts`: all three are made absolute before anything
+reads them. They have to be, because a relative path has two answers on Windows
+— PowerShell resolves one against `$PWD` and .NET resolves it against the
+process's own directory, which `Set-Location` never moves — and a shell that
+walked into a second checkout gets one answer from the check that the file is
+there and the other from the reader two hundred lines later. That is how the
+line above failed in a worktree on the 0.2.1 run, naming a folder nobody typed.
+A `-Msix` naming a file that is not there is now refused at the door rather than
+carried on.
 
 `-ExpectSigned` makes `smoke.ps1` refuse an executable that is not signed, is
 signed by somebody else, or is signed without a time stamp, and refuse a package

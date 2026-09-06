@@ -28,12 +28,26 @@ exactly the picture JPEG is worst at.
   is on you.
 - **The window is the whole picture.** No desktop, no wallpaper, no taskbar.
   Include the window's own shadow only if it is a clean edge. **`quake-*` is the
-  one exception, and it is the exception the rule is for**: the whole subject of
+  first exception, and it is the exception the rule is for**: the whole subject of
   the summoned terminal is that it comes down *over* something, so its frame is a
   rectangle of the screen rather than of a window. What is under it is a window
   of ours, opened on the same throwaway project for the purpose, so that the
   picture is of this program and a File Explorer and of nothing else that
-  happened to be on the desk.
+  happened to be on the desk. **`context-menu.png` is the second, and its window
+  belongs to Explorer rather than to us** — the subject is a row Windows draws,
+  so the frame is Explorer's window and the desktop around it is cropped off.
+- **`context-menu.png` is 786 × 593 at 100%, is one shot rather than a pair, and
+  is not photographed here at all.** It is the only shot that cannot be: the row
+  it shows exists only where `folio.msix` is registered, and **nothing in this
+  repository registers a package on the machine that builds a release** —
+  `docs/RELEASING.md` says why. So it comes off the clean Windows 11 virtual
+  machine the first-page menu is verified on, at that machine's own 1024 × 768
+  and 100%, cropped to Explorer's window. Do not scale it up to match the
+  others: an upsampled screenshot is a screenshot of the resampler, and this
+  file's job is to show that the row is on the first page, which it does at the
+  size it was taken. It is one shot and not a light/dark pair because the menu
+  in it is Windows' own and carries the *guest's* theme, not a Folio palette —
+  a second file would differ in a setting that is not this program's.
 - **`quake-*` is 1920 × 1200 and not 3200 × 2000, and the scale is the same.**
   It is the one shot framed on the 2880 × 1800 panel rather than the 3840 × 2160
   one, because the wide panel had a page on it that raises itself over anything
@@ -71,6 +85,7 @@ exactly the picture JPEG is worst at.
 | `quake-dark.png` | The same, dark. |
 | `palette-light.png` | The palette (`Ctrl+Shift+P`) open over a three-column window, with all five of its sections carrying rows: actions, panes and tabs, commands, files and settings. Five is the point of the picture, so a shot missing one of them is the wrong shot. |
 | `palette-dark.png` | The same, dark. |
+| `context-menu.png` | The first page of the Windows 11 right-click menu on a folder, with `Open in Folio` on it, above `Show more options` and not under it. Explorer's window and nothing else — no desktop, no taskbar, no evaluation watermark. Taken on the verification VM; see the two notes above. |
 
 ## What is committed
 
@@ -98,15 +113,18 @@ can be told from one that was retaken on purpose.
 | `quake-dark.png` | 1920 x 1200 | 2026-09-05 | `9a1a2f4025da3797a919d387566fd91fe7bc7c37ad83ccb5ea99432e73053307` |
 | `palette-light.png` | 3200 x 2000 | 2026-09-05 | `a79617f8ec4bde9d5f1a4778c44be21f06a973f8015b13ac7aac23f94e9b98d0` |
 | `palette-dark.png` | 3200 x 2000 | 2026-09-05 | `61eafe6499d825d3ab46f125b6049b7482c42575dbe9c89c51d8c2aa5ed13e6a` |
+| `context-menu.png` | 786 x 593 | 2026-09-05 | `e7e82a4ffe3a94dc1d52f8f38cabe48f61e1a39d9d2cc1c5dc17f5e5ed662faf` |
 
-The eighteen come to 3.26 MiB after `oxipng`; `docs/plans/release/large-files.md`
-carries that number beside everything else a clone has to fetch.
+The eighteen the two READMEs point at come to 3.26 MiB after `oxipng`, and
+`context-menu.png` adds 54 KiB to that; `docs/plans/release/large-files.md`
+carries the number beside everything else a clone has to fetch.
 
 ## What was in front of the camera
 
-The eighteen committed here were taken from `target\release\folio.exe` against a
-throwaway project — `C:\Projects\aurora`, a small library with a five-commit
-history, a README with a table and a display formula in it, a PDF and a page —
+The eighteen the two READMEs point at were taken from `target\release\folio.exe`
+against a throwaway project — `C:\Projects\aurora`, a small library with a
+five-commit history, a README with a table and a display formula in it, a PDF
+and a page —
 and through an `%APPDATA%` and `%LOCALAPPDATA%` of their own, so the machine's
 real settings, session and profiles were neither read nor written. Each pane is
 a shell profile whose command line runs one command and then leaves an ordinary

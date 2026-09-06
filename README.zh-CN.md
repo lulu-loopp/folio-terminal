@@ -9,7 +9,7 @@ Folio 是一款 Windows 终端：命令输出的公式在其打印位置排版�
 
 [English](README.md) · [快捷键](docs/shortcuts.md) · [安全](SECURITY.md) · [更新记录](CHANGELOG.md)
 
-> **预览版。** 0.2.0 为预览版本，已由 Weiyi Shi 签名，详见下方 [SmartScreen](#smartscreen)。
+> **预览版。** 0.2.1 为预览版本，已由 Weiyi Shi 签名，详见下方 [SmartScreen](#smartscreen)。
 
 ---
 
@@ -138,6 +138,7 @@ Folio 是一款 Windows 终端：命令输出的公式在其打印位置排版�
 </picture>
 
 - 「在此处打开 Folio」位于资源管理器右键菜单的「显示更多选项」之下。
+- **设置 > General > 一级菜单** 把「在 Folio 中打开」放到 Windows 11 先打开的那一页，右键即可看到，无需再点「显示更多选项」。该页只收签名包声明的条目，因此这个开关会为当前账户登记 `folio.msix`——压缩包内 `folio.exe` 旁边的那个文件：无需提权，该账户之外不写入任何内容，同一个开关也负责取消。该行仅在 Windows 11 上出现，且不改动上一行那个条目。
 - Windows PowerShell 5.1 自带 PSReadLine 2.0.0，该版本在窗口改变大小后会错放输入行。Folio 内置一份已修补的 2.4.6 版本，用户可按需将其安装至模块目录。当机器的执行策略仍为出厂默认的 `Restricted` 时，开关会说明原因，并提供 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` 命令。
 
 ### 与 Visual Studio Code 的配合
@@ -162,7 +163,9 @@ Folio 不能作为 VS Code 内嵌的终端面板。该面板运行的是一个�
 
 ## 下载
 
-从 releases 页面获取 `folio-0.2.0-windows-x64.zip`，解压至存放程序的目录，运行 `folio.exe`。无安装程序；运行之前，解压目录之外不会写入任何内容。`SHA256SUMS.txt` 为所下载文件的哈希值。需 **Windows 10 1809 或更高版本，或 Windows 11，64 位**。
+从 releases 页面获取 `folio-0.2.1-windows-x64.zip`，解压至存放程序的目录，运行 `folio.exe`。无安装程序；运行之前，解压目录之外不会写入任何内容。`SHA256SUMS.txt` 为所下载文件的哈希值。需 **Windows 10 1809 或更高版本，或 Windows 11，64 位**。
+
+压缩包内为同一目录下的九个文件，它们须放在一起：`folio.exe`，以及缺之则无法启动 shell 的 `conpty.dll` 与 `OpenConsole.exe`；`folio.msix`——一级菜单开关所登记的那个几 KB 的包，它指向自身被解压到的目录；供 VS Code 使用的 `folio-here.cmd`；再加上两份许可、第三方声明与商标说明。
 
 网页预览需 **WebView2 运行时**。Windows 11 自带该运行时；Windows 10 通常亦已安装，若未安装，可从此处获取 [Evergreen 运行时](https://developer.microsoft.com/microsoft-edge/webview2/)。缺少该运行时，除网页预览外的所有功能均正常，预览窗格会说明缺失项。
 
@@ -200,7 +203,6 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Folio\WebView2"
 ## 已知问题
 
 - **曾有窗口移至第二显示器后上半部分显示为黑色的报告，未能复现。** 如遇此问题，请附上 `%APPDATA%\Folio\diagnostics.log`。
-- **「在此处打开 Folio」不在 Windows 11 右键菜单的首层。** 首层菜单除签名外还要求程序已打包，该功能计划于 0.2.1 实现。
 - **`.webm` 需要 Microsoft Store 的 VP9 或 AV1 视频扩展。** 出厂 Windows 两者均未安装；缺少扩展时，首帧与播放均不可用。
 - 其余问题见 [`CHANGELOG.md`](CHANGELOG.md)。
 

@@ -105,14 +105,48 @@ if (-not $here) {
     throw 'smoke.ps1 cannot tell where it is; run it as a file (-File, or &), not from a pasted body'
 }
 $root = (Resolve-Path (Join-Path (Join-Path $here '..') '..')).Path
+
+# **Every path this script was handed is made absolute here, before anything
+# reads it.** A relative path has two answers on Windows and they are allowed to
+# differ: PowerShell resolves one against `$PWD`, and .NET resolves it against
+# the *process's* current directory, which `Set-Location` does not move. A shell
+# started in one checkout and pointed at another therefore has `Test-Path` find
+# a file that `[System.IO.Compression.ZipFile]::OpenRead` two hundred lines
+# later cannot, and the failure names a folder nobody typed. That is exactly how
+# `-Msix target\release-package\folio.msix` — the line `docs/RELEASING.md` tells
+# people to run — failed on the 0.2.1 packaging run, in a worktree, against the
+# main checkout's path. Resolving once, at the door, is the fix that holds for
+# every reader below rather than for the ones somebody remembered.
+#
+# `GetUnresolvedProviderPathFromPSPath` is the resolution `$PWD` implies and it
+# answers for a path that does not exist yet — which `$Artifacts` does not, on
+# the first run, and which a mistyped `-Exe` never will.
+function Resolve-GivenPath {
+    param([string] $Path)
+    return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+}
+
 if (-not $Exe) { $Exe = Join-Path $root 'target\release\folio.exe' }
 if (-not $Artifacts) { $Artifacts = Join-Path $root 'target\smoke' }
+$Exe = Resolve-GivenPath $Exe
+$Artifacts = Resolve-GivenPath $Artifacts
 if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) { throw "no folio.exe at $Exe" }
-# Beside the executable, resolved from the executable rather than from `$root`:
-# the arrangement being checked is the one a recipient has, which is one folder
-# holding both files.
-if (-not $Msix) {
-    $Msix = Join-Path (Split-Path -Parent (Resolve-Path -LiteralPath $Exe).Path) 'folio.msix'
+if ($Msix) {
+    # **A path somebody named has to be there, and is said so at the door.**
+    # Naming `-Msix` is asking for that file; whether the checks that read it
+    # are switched on is a separate question, and a named path that is quietly
+    # carried past this line is one that surfaces much later as a reader failing
+    # on a folder the operator never wrote.
+    $Msix = Resolve-GivenPath $Msix
+    if (-not (Test-Path -LiteralPath $Msix -PathType Leaf)) {
+        throw "-Msix names $Msix, and there is no file there"
+    }
+}
+else {
+    # Beside the executable, resolved from the executable rather than from
+    # `$root`: the arrangement being checked is the one a recipient has, which
+    # is one folder holding both files.
+    $Msix = Join-Path (Split-Path -Parent $Exe) 'folio.msix'
 }
 
 [System.IO.Directory]::CreateDirectory($Artifacts) | Out-Null

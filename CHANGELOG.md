@@ -4,7 +4,12 @@ All notable changes to Folio are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.2.1-preview (unreleased)
+
+Fixes and polish for 0.2.0-preview. The one thing that is new is the one 0.2.0
+said was coming: `Open in Folio` on the page Windows 11 opens first. Nothing
+here changes a setting, a file on disk or a key: a `settings.json` and a
+`session.json` written by 0.2.0 are read as they stand.
 
 ### Added
 
@@ -13,9 +18,9 @@ All notable changes to Folio are recorded here. The format follows
   only entries declared by a signed package on the page that opens first, so
   switching this on registers `folio.msix` — the file that now ships beside
   `folio.exe` in the archive — for your account alone, with no elevation and
-  nothing written outside it. Right-clicking a folder, or the empty space inside
-  an open one, then gives you `Open in Folio` without pressing `Show more
-  options` first. It takes a second or two and the switch says so when it is
+  nothing written outside that account. Right-clicking a folder, or the empty
+  space inside an open one, then gives you `Open in Folio` without pressing
+  `Show more options` first. It takes a second or two and the switch says so when it is
   done.
   - The old entry stays exactly where it was. `Open Folio here` under
     `Show more options` is still its own switch, still just two registry keys,
@@ -59,6 +64,16 @@ All notable changes to Folio are recorded here. The format follows
     out onto a grid too narrow for it and the start of the address fell off the
     left.
 
+- **Both of a pane's clearing verbs do what they say.** `Clear screen` used to
+  leave the pane blank with no prompt in it, and the next characters typed
+  appeared on their own, part-way across an empty pane. It now keeps the row you
+  are typing on, moves it to the top, and puts the rows that were above it into
+  the scrollback, where they can still be scrolled back to, searched and copied.
+  The shell is told the same thing, so it goes on drawing where the window does.
+  Those rows used to be thrown away rather than kept, which is why
+  `Clear scrollback…` on the same pane then appeared to do nothing at all, and
+  why the marks down the right-hand edge went on pointing at lines that were no
+  longer anywhere. Both verbs are on a pane's right-click menu.
 - **A sentence's own punctuation is no longer part of the file it names.** A line
   ending `see docs/notes.md.` opened `notes.md.` — a name nothing on the disk
   holds and the preview could make nothing of. An ASCII stop, comma, semicolon,
@@ -66,7 +81,26 @@ All notable changes to Folio are recorded here. The format follows
   string is still asked about first and a file that really carries one still
   wins, but where it does not, the name without it does.
 
-## 0.2.0-preview (unreleased)
+### Known issues
+
+- **A new signature has no reputation yet.** SmartScreen can still raise "Windows
+  protected your PC" on the first run of a freshly signed build. **More info**
+  names Weiyi Shi as the publisher and `folio.exe` as the application; **Run
+  anyway** is the way through, and switching SmartScreen off is not.
+- **Folio cannot be a panel inside Visual Studio Code.** That panel takes a
+  process speaking a protocol, not a terminal; `folio-here.cmd` in the archive
+  makes Folio the external terminal VS Code opens instead.
+- **A window saved on a monitor that enumerates late** comes back on the primary
+  display. The displays are counted once, before the window is made, and a second
+  monitor can take a few seconds to appear after a cold start.
+- **A window was once reported drawing its top half black** after a move to a
+  second monitor, unreproduced. Attach `%APPDATA%\Folio\diagnostics.log` if you
+  hit it.
+- **`.webm` needs the VP9 or AV1 Video Extension** from the Microsoft Store. A
+  stock Windows has neither, and without one there is no still and no playback.
+  The other six containers play on a stock Windows.
+
+## 0.2.0-preview — 2026-09-05
 
 Two surfaces that were not there before — a terminal that comes down on a key
 from anywhere, and one box that searches everything this window knows about —
@@ -147,15 +181,6 @@ and the first release that carries a signature.
 
 ### Fixed
 
-- **`Clear screen` leaves the prompt where you can see it.** The row you are
-  typing on now stays and moves to the top, and the rows above it go into the
-  scrollback, where they can still be found and searched. Before this, the whole
-  screen went — including the prompt, which nothing was ever going to draw
-  again, so the pane stayed blank and the next characters typed appeared on
-  their own where the prompt used to end. The rows it cleared were being thrown
-  away rather than kept, which is also why `Clear scrollback…` on the same pane
-  appeared to do nothing at all and why the marks beside it went on pointing at
-  lines that were no longer anywhere.
 - **The summon key no longer types itself.** ``Win+` `` used to leave a
   `` ` `` sitting at the prompt of the terminal it had just called up, because
   the window reports every key that is physically down at the moment it takes

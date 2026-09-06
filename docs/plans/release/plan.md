@@ -29,7 +29,7 @@
 - 版本 `0.1.0` 一处定、四处一致:`Cargo.toml`、`--version`(新增;`--help` 已有)、PE `VERSIONINFO`+图标(`build.rs` 资源)、三类诊断文件头。
 - `[profile.release]`(现只有 profile.test):LTO/codegen-units/strip 量体积与启动;保留 unwind 直到 panic 策略另定。
 - CRT:**先做实验再定**——独立目录 `+crt-static` release 构建(webview2-com-sys 静态链 `WebView2LoaderStatic.lib`)→ PE 导入表无 `VCRUNTIME140*` → 干净 VM 启动;三步过才采用,否则 README 写明需 VC++ Redistributable(winget 有独立拒收标签 `Validation-VCRuntime-Dependency`,runner 预装 VC++ 故 CI 绿灯对此零证明力)。
-- zip 精确清单**七个文件**:`folio.exe`、根目录 `conpty.dll` + `OpenConsole.exe`(加载器只读根目录;`x64\` 副本不带)、`LICENSE-MIT`、`LICENSE-APACHE`、`THIRD-PARTY-NOTICES.md`、`TRADEMARK.md`。**README 不进 zip**(用户裁 2026-08-27:相对链接与截图在 zip 里全死)。zip 之外的 release 附件:`SHA256SUMS.txt`、SBOM、`option-ext-0.2.0.crate`(MPL-2.0 源码可得性)。由 tag 触发的 release workflow 自动产出并校验清单/尺寸/哈希,打包前自己跑 `check-notices.ps1` + `check-vendor-notices.ps1`,**禁止从 dist/ 手挑**。
+- zip 精确清单**九个文件**:`folio.exe`、根目录 `conpty.dll` + `OpenConsole.exe`(加载器只读根目录;`x64\` 副本不带)、`folio.msix`(0.2.1 起,一级菜单开关登记的稀疏包)、`folio-here.cmd`(0.2.0 起,VS Code 外部终端)、`LICENSE-MIT`、`LICENSE-APACHE`、`THIRD-PARTY-NOTICES.md`、`TRADEMARK.md`。**README 不进 zip**(用户裁 2026-08-27:相对链接与截图在 zip 里全死)。zip 之外的 release 附件:`SHA256SUMS.txt`、SBOM、`option-ext-0.2.0.crate`(MPL-2.0 源码可得性),以及 `folio.msix` 本身——它既在 zip 里也是独立资产,理由写在 `docs/RELEASING.md`「What gets published」。由 tag 触发的 release workflow 自动产出并校验清单/尺寸/哈希,打包前自己跑 `check-notices.ps1` + `check-vendor-notices.ps1`,**禁止从 dist/ 手挑**。
 - panic:双击用户要看到可见提示 + 日志路径(`%TEMP%\bt-app-panic.log` 现在无提示);三类诊断文件含版本与 commit。
 - 签名:v0.1 **不签**(EV 即时放行 2024 已取消;SignPath 要求「已发布过」),README 写 SmartScreen 说明(MOTW 触发,不教绕);v0.2 首选 SignPath Foundation(免费、OV、基金会名下);**一旦签就不能换身份**。
 
