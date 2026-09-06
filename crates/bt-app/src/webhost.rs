@@ -671,6 +671,34 @@ pub(crate) fn web_presence(body: Option<[f32; 4]>, obstructed: bool) -> WebPrese
     })
 }
 
+/// **What the compositor is owed about a page's pair**, or `None` when it is
+/// already holding it.
+///
+/// `wanted` is where the window wants the page's floor and visual this frame and
+/// `told` is what the compositor was last given, `None` meaning nothing at all —
+/// which is the state a seat is born in, the state a rebuilt pair comes back in,
+/// and the state a seat that has moved to another window is put back into.
+///
+/// **Both answers are said, and that is the whole of this function** (§7.14d).
+/// The pair used to be cached as a rectangle, so `Hidden` was not something the
+/// compositor could be *told* — only something it was never told — and a page
+/// that left the glass left its floor standing where it last stood. A floor is
+/// an opaque slab of the window's ground colour and every page's floor sits
+/// under every page opened after it, so one left standing is a pane of `--termbg`
+/// over a page that is on the glass. The hole obeys exactly this sentence
+/// already ([`crate::hole_for`]); this is the floor obeying it too.
+///
+/// Compared the way [`rasterization_owed`] compares its number, and for its
+/// reason: what is asked and what was said travel from the same source, so
+/// equality is what says "the compositor already has this" without a COM call
+/// sixty times a second.
+pub(crate) fn placement_owed(
+    wanted: WebPresence,
+    told: Option<WebPresence>,
+) -> Option<WebPresence> {
+    (told != Some(wanted)).then_some(wanted)
+}
+
 /// **The rasterization scale a page is owed**, or `None` when the engine is
 /// already holding it.
 ///
@@ -1521,19 +1549,27 @@ pub(crate) struct WebSeat {
     /// Forgotten wherever the controller is, because this records what a
     /// *controller* was told and a new one has been told nothing.
     rastered: Option<f64>,
-    /// **The rectangle the compositor was last given for this page's pair** —
-    /// its floor and, once there is one, its visual.
+    /// **What the compositor was last told about this page's pair** — its floor
+    /// and, once there is one, its visual.
     ///
     /// The third cache of exactly the kind the two above are, and it exists for
     /// the same reason: since the first-open ruling of 2026-08-25 the placement
     /// is made on the pane's clock rather than on presence transitions, so it is
     /// asked every frame and must cost one comparison when nothing moved.
     ///
+    /// **A presence and not a rectangle, since 2026-09-05 (§7.14d).** It used to
+    /// hold `Option<WebBounds>`, which could say "standing at this rectangle"
+    /// and "never placed" and had no way at all to say **"off the glass"** — so
+    /// the hidden arm of [`WebSeat::stand_on_the_floor`] made no call, and a
+    /// page that left the glass left its opaque floor standing at the last
+    /// rectangle it had, over whatever page was underneath. Same three states as
+    /// [`Self::presence`], for the same reason and read the same way.
+    ///
     /// Cleared in the one place the pair itself changes — the page's visual
     /// joining the tree in [`WebSeat::step`]'s `InstallEvents` arm — because a
     /// visual that has just arrived has been placed nowhere, however well
     /// placed the floor beneath it already is.
-    placed: Option<WebBounds>,
+    placed: Option<WebPresence>,
     /// Which buttons the page believes are down.
     ///
     /// Kept here and nowhere else because it is derived from the very events
@@ -2580,29 +2616,37 @@ impl WebSeat {
     /// stands, and the hole is cut on that answer and on nothing else.
     ///
     /// [`Self::placed`] is why this is cheap enough to run every frame: a
-    /// rectangle that has not moved is not placed again, exactly as a size that
+    /// placement that has not moved is not made again, exactly as a size that
     /// has not changed is not re-sent.
+    ///
+    /// **And a page that leaves the glass says so** (§7.14d, user report
+    /// 2026-09-05). The hidden arm used to do nothing at all, on the reading
+    /// that a page nobody can see costs nothing wherever its visuals are. That
+    /// reading is wrong about the *floor*: it is an opaque slab of the window's
+    /// ground colour, it is under every page opened after this one, and it was
+    /// last placed by the frame that last showed this page. Left standing it is
+    /// `--termbg` painted over a page that is on the glass — a band down one
+    /// side of a pane, or the whole pane, depending on how the two rectangles
+    /// lie. So both arms go through [`placement_owed`] and both arms tell the
+    /// compositor.
     fn stand_on_the_floor(&mut self, compositor: &bt_platform::Compositor) -> Result<bool, String> {
-        let floored = match self.wanted {
-            // A hidden page has no rectangle to stand anything on, and the
-            // caller cuts no hole for it either.
-            WebPresence::Hidden => false,
-            WebPresence::Shown(bounds) => {
-                if self.placed != Some(bounds) {
-                    compositor.place_web_visual(
-                        self.address.page,
-                        (bounds.x, bounds.y),
-                        (0.0, 0.0, bounds.width as f32, bounds.height as f32),
-                    )?;
-                    // Only once the call has returned: the cache says "the
-                    // compositor was told this", and a refusal told it nothing.
-                    self.placed = Some(bounds);
-                }
-                true
+        if let Some(placement) = placement_owed(self.wanted, self.placed) {
+            match placement {
+                // A hidden page has no rectangle to stand anything on, the
+                // caller cuts no hole for it, and its pair comes off the glass.
+                WebPresence::Hidden => compositor.hide_web_visual(self.address.page)?,
+                WebPresence::Shown(bounds) => compositor.place_web_visual(
+                    self.address.page,
+                    (bounds.x, bounds.y),
+                    (0.0, 0.0, bounds.width as f32, bounds.height as f32),
+                )?,
             }
-        };
+            // Only once the call has returned: the cache says "the compositor
+            // was told this", and a refusal told it nothing.
+            self.placed = Some(placement);
+        }
         self.apply_presence()?;
-        Ok(floored)
+        Ok(matches!(self.wanted, WebPresence::Shown(_)))
     }
 
     /// **The window this page stands in is at this scale factor now.**
@@ -2685,9 +2729,34 @@ impl WebSeat {
         if let Some(bounds) = self.wanted_bounds
             && self.bounded != self.wanted_bounds
         {
+            let was = self.bounded;
             self.host
                 .set_bounds(bounds.x, bounds.y, bounds.width, bounds.height)?;
             self.bounded = Some(bounds);
+            // **`BT_WEB_TRACE`'s sixth station** — the rectangle the *engine* was
+            // given, which is the one number the fifth station could not see. The
+            // `place` line says where the window put the pane; this says what the
+            // page inside it was sized to. The 2026-09-05 report (§7.14d) was a
+            // pane drawn in a band, and the first thing it needed was to know
+            // whether those two had come apart — this is what let the answer be
+            // "they never did, over a dozen paths", which is what sent the hunt
+            // to the floor instead of to the rectangle. Written only when it
+            // moves, on this method's own cache, so a still page is silent here.
+            crate::web_trace::line(|| {
+                format!(
+                    "bounds {} x={} y={} w={} h={} was={} shown={}",
+                    crate::web_trace::seat(self.address.page),
+                    bounds.x,
+                    bounds.y,
+                    bounds.width,
+                    bounds.height,
+                    was.map_or_else(
+                        || String::from("none"),
+                        |old| format!("{},{},{}x{}", old.x, old.y, old.width, old.height)
+                    ),
+                    u8::from(matches!(self.wanted, WebPresence::Shown(_))),
+                )
+            });
         }
         if self.presence == Some(self.wanted) {
             return Ok(());
@@ -4459,6 +4528,113 @@ mod rasterization_tests {
             Some(rectangle),
             "what the window wants is untouched; only what was said is forgotten"
         );
+    }
+}
+
+/// **A page's floor stands exactly while the page is on the glass** (§7.14d).
+///
+/// A floor is one texel of the window's ground colour stretched over the page's
+/// rectangle, and it is opaque. Every page's floor is added at the beginning of
+/// the window's DirectComposition child list with its own page directly above
+/// it, so a window holding two pages stacks them
+/// `[ground₂, web₂, ground₁, web₁, gpu]` — **the floor of the page opened first
+/// is above every page opened after it.** That costs nothing while both are on
+/// the glass, because two panes do not overlap; it costs everything the moment
+/// one goes off the glass, because its floor was placed by the last frame that
+/// showed it and, before this section, nothing ever took it down.
+///
+/// Photographed on the machine (release, isolated profile, two tabs each holding
+/// the same `.pdf`, user report of 2026-09-05): the page in front stood at
+/// `x 2428..3400` and the page behind had left its floor at `x 2680..3400`, and
+/// the reader saw the document in a 252 px band down the left of a 972 px pane
+/// with the window's ground colour over the rest of it.
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+
+    fn rectangle(x: i32, width: u32) -> WebBounds {
+        WebBounds {
+            x,
+            y: 196,
+            width,
+            height: 1804,
+        }
+    }
+
+    /// RED — **a page that has left the glass owes the compositor its absence.**
+    ///
+    /// This is the whole of the report. `Hidden` used to be unsayable: the cache
+    /// was the rectangle a page stood at, so "off the glass" and "never placed"
+    /// were one value and the hidden arm made no call at all. The floor stayed
+    /// where the last showing frame put it.
+    ///
+    /// MUTATION: answer `None` for a hidden page — the shipped shape — and a
+    /// window whose second tab is in front draws that tab's page through
+    /// whatever the first tab's floor leaves uncovered.
+    #[test]
+    fn a_page_that_has_left_the_glass_owes_the_compositor_its_absence() {
+        let stood_at = WebPresence::Shown(rectangle(2680, 720));
+        assert_eq!(
+            placement_owed(WebPresence::Hidden, Some(stood_at)),
+            Some(WebPresence::Hidden),
+            "the floor that was standing at the old rectangle has to be told to \
+             stop standing there"
+        );
+        assert_eq!(
+            placement_owed(WebPresence::Hidden, None),
+            Some(WebPresence::Hidden),
+            "and a pair the compositor has been told nothing about is owed the \
+             same answer, because a rebuilt visual arrives uncropped"
+        );
+    }
+
+    /// RED — **a page that has come back onto the glass is owed its rectangle
+    /// again**, whichever way it left.
+    ///
+    /// The other half of the same transition, and the one that would make the
+    /// cure worse than the disease if it were missing: a pair cropped to nothing
+    /// stays cropped to nothing until something says otherwise, so a page whose
+    /// tab comes back to the front would be a permanently blank pane.
+    #[test]
+    fn a_page_that_has_come_back_is_owed_its_rectangle_again() {
+        let here = WebPresence::Shown(rectangle(2428, 972));
+        assert_eq!(
+            placement_owed(here, Some(WebPresence::Hidden)),
+            Some(here),
+            "coming back onto the glass is a placement like any other"
+        );
+        assert_eq!(
+            placement_owed(here, None),
+            Some(here),
+            "and so is a first open"
+        );
+    }
+
+    /// RED — **a placement that has not moved is never made twice.**
+    ///
+    /// This is what lets both arms sit on the frame path: the placement is asked
+    /// every frame, on the pane's own clock, and sixty identical COM calls a
+    /// second is what a missing cache looks like. Both arms, because the hidden
+    /// one is now a call too — a page on a background tab must not re-crop its
+    /// pair sixty times a second for the whole time that tab is behind.
+    #[test]
+    fn a_placement_that_has_not_moved_is_never_made_twice() {
+        let here = WebPresence::Shown(rectangle(2428, 972));
+        assert_eq!(placement_owed(here, Some(here)), None);
+        assert_eq!(
+            placement_owed(WebPresence::Hidden, Some(WebPresence::Hidden)),
+            None
+        );
+    }
+
+    /// RED — **a rectangle that moved is owed, and moving is the whole of the
+    /// test**: a pair standing at one rectangle and asked for another is asked
+    /// for the new one even though both are `Shown`.
+    #[test]
+    fn a_pair_that_moved_is_owed_where_it_moved_to() {
+        let was = WebPresence::Shown(rectangle(2680, 720));
+        let now = WebPresence::Shown(rectangle(2428, 972));
+        assert_eq!(placement_owed(now, Some(was)), Some(now));
     }
 }
 

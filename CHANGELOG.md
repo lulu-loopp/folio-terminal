@@ -32,6 +32,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A page keeps the whole pane it is in, whatever else the window has open.**
+  With more than one page open in a window — a `.pdf` in one tab and a page in
+  another, say — the one you were looking at could come up drawn in a narrow
+  strip down the left of its pane, with the rest of the pane in the window's own
+  colour, or blank from edge to edge. Under every hosted page there is a plate of
+  the window's colour that keeps the desktop from showing through while the page
+  is still arriving, and a page that went out of view left its plate lying where
+  it last stood, over the top of any page opened after it. A plate is now down
+  only while the page it belongs to is on screen.
+
 - **The Chinese half of a hover line is the same size as the Latin half.**
   Pointing at a folder printed `file:///D:/Demo · Ctrl+点击在资源管理器中显示`
   with the Chinese set at about six tenths of the height of the address beside
