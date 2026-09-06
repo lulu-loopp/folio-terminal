@@ -54,6 +54,30 @@ run by hand exactly as it runs there:
 | `scripts/release/package.ps1` | `folio.msix`, `folio-<version>-windows-x64.zip` with the package and the executable both in it, the MPL-2.0 crate archive, and `SHA256SUMS.txt` over everything beside them |
 | `scripts/release/smoke.ps1` | starts the executable that was built and checks the seven things a green build can still be broken about |
 
+## What gets published
+
+`target/release-package` is the whole of it. The draft-release step reads that
+directory and attaches **every file in it**, so what the three scripts leave
+there is exactly what a reader downloads — there is no second list anywhere
+naming assets, and nothing is hand-picked out of `dist/`.
+
+| asset | what it is |
+| --- | --- |
+| `folio-<version>-windows-x64.zip` | the nine files, in one folder |
+| `folio.msix` | **an asset of its own as well as a file in the zip** |
+| `option-ext-<version>.crate` | the MPL-2.0 source offer, made good by this release |
+| `folio-<version>.cdx.json` | the CycloneDX bill of materials `sbom.ps1` writes |
+| `SHA256SUMS.txt` | one line for each of the four above, in the format `sha256sum -c` reads |
+
+`folio.msix` being both is deliberate and is not a duplicate to tidy away. It
+has to be **in the zip**, because the package names the folder it was extracted
+into and a registration against a folder with no `folio.exe` in it names a path
+with nothing at it. It stays **beside the zip** because that copy is the one
+`smoke.ps1 -ExpectSigned` opens to read the package identity out of, and because
+`SHA256SUMS.txt` is written over the directory: a hash somebody can check
+against the file they were handed. Both copies are the same bytes — one file,
+packed once, signed once, then copied into the archive.
+
 Everything below is about the one step that is not in that workflow, because it
 needs a person: signing.
 

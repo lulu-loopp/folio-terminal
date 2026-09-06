@@ -5688,7 +5688,7 @@ RES 容器是一串对齐的记录,`VS_VERSIONINFO` 是一棵对齐的块树,两
 
 ### 12.7 归档:清单就是契约
 
-`scripts/release/package.ps1` 产出的 zip 是七个文件,其中两个是运行时契约而不是方便:`conpty.dll` 与 `OpenConsole.exe` 必须在 `folio.exe` **自己那一层**,因为 `vendor/conpty/portable-pty/src/win/psuedocon.rs` 只看 `current_exe()` 的父目录。NuGet 的 native-targets 布局还会把 `OpenConsole.exe` 镜像一份到 `x64\`——那条路径这个加载器从不读,带上就是 1.7 MiB 的第二份。
+`scripts/release/package.ps1` 产出的 zip 是九个文件(0.2.0 加 `folio-here.cmd`、0.2.1 加 `folio.msix`),其中两个是运行时契约而不是方便:`conpty.dll` 与 `OpenConsole.exe` 必须在 `folio.exe` **自己那一层**,因为 `vendor/conpty/portable-pty/src/win/psuedocon.rs` 只看 `current_exe()` 的父目录。NuGet 的 native-targets 布局还会把 `OpenConsole.exe` 镜像一份到 `x64\`——那条路径这个加载器从不读,带上就是 1.7 MiB 的第二份。
 
 脚本检查的是**产出的东西**而不是打算产出的东西:archive 里的名字集合必须与清单相等(多一个也红)、每个条目的字节数必须等于源文件、并且 `folio.exe` 自己 PE 资源里的版本必须等于 archive 名字上的版本——「一处定四处一致」这条规矩唯一能在成品上验的地方就是这里。
 

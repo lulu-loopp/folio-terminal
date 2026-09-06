@@ -105,6 +105,12 @@ profile. Do not put a secret in one.
 ### Elsewhere
 
 - `%TEMP%\bt-app-panic.log` — appended to if Folio panics.
+- The two Explorer context-menu switches, when you switch them on. "Explorer
+  context menu" writes two keys under `HKEY_CURRENT_USER\Software\Classes` and
+  nothing else. "First page of that menu" registers `folio.msix` for your account
+  — that is a Windows package registration, not a file of ours, and it is what
+  `Settings > Apps > Installed apps` then lists. Both are per-user, need no
+  elevation, and are undone by the same switch.
 - The three agent installers, when you switch them on, write one file each into
   Claude Code's, Codex's and Copilot CLI's own configuration directories. A dated
   copy of the file as it stood is kept beside it first. `SECURITY.md` has the
@@ -204,6 +210,11 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Folio\WebView2"
 ### 其它位置
 
 - `%TEMP%\bt-app-panic.log` —— Folio 崩溃时追加。
+- 资源管理器右键菜单的两个开关打开时。「资源管理器菜单」只在
+  `HKEY_CURRENT_USER\Software\Classes` 下写两个键，此外什么都不写；「一级菜单」为当前
+  账户登记 `folio.msix`——那是一次 Windows 包登记，不是我们的文件，也正是此后
+  「设置 > 应用 > 已安装的应用」中列出的那一条。两者都只作用于当前用户、无需提权，且都由
+  同一个开关撤销。
 - 三个 agent 安装行打开时，各写一个文件到 Claude Code、Codex、Copilot CLI 自己的配置
   目录里；写之前先在旁边留一份带日期的原件副本。细节见 `SECURITY.md`。
 - 若干 `BT_*` 环境变量会让 Folio 把终端内容写到你指定的文件——`BT_PTY_DUMP` 写的是每个

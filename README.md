@@ -15,7 +15,7 @@ files preview beside the prompt, and an agent that is waiting for you says so.
 [中文说明](README.zh-CN.md) · [Shortcuts](docs/shortcuts.md) ·
 [Security](SECURITY.md) · [Changes](CHANGELOG.md)
 
-> **Preview.** 0.2.0 is a preview build, signed by Weiyi Shi — see
+> **Preview.** 0.2.1 is a preview build, signed by Weiyi Shi — see
 > [SmartScreen](#smartscreen) below.
 
 ---
@@ -215,6 +215,13 @@ One box answers five questions at once, and `Enter` goes straight there.
 </picture>
 
 - "Open Folio here" is in the Explorer context menu, under "Show more options".
+- **Settings > General > First page of that menu** puts "Open in Folio" on the
+  page Windows 11 opens first, where a right-click gives it to you without
+  "Show more options". That page takes entries only from a signed package, so
+  the switch registers `folio.msix` — the file beside `folio.exe` in the archive
+  — for your account: no elevation, nothing written outside that account, and
+  the same switch takes it off again. The row is Windows 11 only, and it leaves
+  the entry above exactly where it is.
 - Windows PowerShell 5.1 ships PSReadLine 2.0.0, which misplaces the input line
   after the window is resized. Folio carries a patched 2.4.6 and installs it into
   your module path on request. On a machine whose execution policy is still the
@@ -248,10 +255,16 @@ command with no arguments, and `--cwd` is how Folio is told where to start.
 
 ## Download
 
-Take `folio-0.2.0-windows-x64.zip` from the releases page, unpack it wherever you
+Take `folio-0.2.1-windows-x64.zip` from the releases page, unpack it wherever you
 keep programs, and run `folio.exe`. There is no installer, and nothing is written
 outside that folder until you run it. `SHA256SUMS.txt` is the hash of what you
 downloaded. Needs **Windows 10 1809 or newer, or Windows 11, 64-bit**.
+
+The archive holds nine files in one folder, and they belong together: `folio.exe`,
+`conpty.dll` and `OpenConsole.exe`, which it will not start a shell without;
+`folio.msix`, the few-kilobyte package the first-page menu row registers, which
+names the folder it was extracted into; `folio-here.cmd` for VS Code; and the two
+licences, the third-party notices and the trademark note.
 
 The web preview needs the **WebView2 Runtime**. Windows 11 has it; Windows 10
 usually does, and if it does not, the Evergreen Runtime is
@@ -324,9 +337,6 @@ What is in each file, and why a full address ends up in `session.json`, is in
 - **A window was once reported drawing its top half black** after a move to a
   second monitor, unreproduced. Attach `%APPDATA%\Folio\diagnostics.log` if you
   hit it.
-- **"Open Folio here" is not on the first page** of the Windows 11 context menu.
-  That page needs a packaged application as well as a signed one; it is planned
-  for 0.2.1.
 - **`.webm` needs the VP9 or AV1 Video Extension** from the Microsoft Store. A
   stock Windows has neither, and without one there is no still and no playback.
 - The rest are in [`CHANGELOG.md`](CHANGELOG.md).

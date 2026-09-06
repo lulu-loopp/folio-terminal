@@ -256,7 +256,7 @@ switch ($Phase) {
         if (Test-Path -LiteralPath $unpacked) { Remove-Item -LiteralPath $unpacked -Recurse -Force }
         Expand-Archive -LiteralPath $Zip -DestinationPath $unpacked -Force
 
-        # The archive holds one folder holding seven files (`package.ps1`). Lift
+        # The archive holds one folder holding nine files (`package.ps1`). Lift
         # them so `folio.exe` and its ConPTY sidecar sit where the rest of this
         # script expects, and so the folder photographed in Explorer is the one a
         # person actually gets.
