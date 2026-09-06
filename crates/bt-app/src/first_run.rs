@@ -32,7 +32,7 @@ use bt_persist::FirstRunCardV1;
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_RADIUS_LOGICAL_PX,
     FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad, chrome_palette, rounded_overlay_fill,
-    rounded_overlay_halo,
+    rounded_overlay_halo, rounded_overlay_shadow,
 };
 
 use crate::{
@@ -1379,11 +1379,24 @@ fn push_switch(
         knob_left + px(SWITCH_KNOB_LOGICAL_PX),
         rect[1] + inset + px(SWITCH_KNOB_LOGICAL_PX),
     ];
-    // `box-shadow: 0 1px 3px rgba(0,0,0,.25)` — one ring under the knob, offset
-    // by its one logical pixel, drawn with the restraint every other lift in
-    // this window is drawn with.
+    // `box-shadow: 0 1px 3px rgba(0,0,0,.25)` — the knob's lift, offset by its
+    // one logical pixel, drawn through the same door every other lift in this
+    // window is drawn through.
+    //
+    // **A falloff, not a stroke** (user report 2026-09-06, a photograph of the
+    // card at 150% in the light theme: every switch that is off wearing a grey
+    // band round its knob). A blur's three pixels are a gradient — the quarter
+    // alpha stands against the knob and is gone by the time it has travelled
+    // its reach. `rounded_overlay_halo` puts the whole quarter on all three of
+    // them, and three logical pixels is five physical ones at 150%, which is
+    // wider than the two that separate the knob from the track's own edge: the
+    // ring stood proud of the track at the top and the bottom and read as a
+    // second solid shape laid over the switch rather than as a shadow under
+    // its knob. `rounded_overlay_halo`'s own doc names which of the two it is
+    // — the exact uniform ring an outline needs, and the one thing a shadow
+    // must not be — and `rounded_overlay_shadow` is the falloff beside it.
     quads.extend(clip_quads(
-        rounded_overlay_halo(
+        rounded_overlay_shadow(
             [knob[0], knob[1] + px(1.0), knob[2], knob[3] + px(1.0)],
             px(SWITCH_KNOB_LOGICAL_PX) / 2.0,
             px(SWITCH_KNOB_SHADOW_LOGICAL_PX),
@@ -2260,6 +2273,208 @@ mod tests {
                 .all(|(_, rect)| rect[2] <= row.switch[0]),
             "a description line runs under the control"
         );
+    }
+
+    /// Every quad of the card, small enough to be part of a switch and near
+    /// `switch`, drawn in the knob's shadow ink.
+    ///
+    /// The scrim is the same ink and it is the whole window, so size is what
+    /// separates them: nothing a switch draws can be wider than its own track
+    /// plus the shadow's reach on both sides.
+    fn knob_shadow_quads(
+        layers: &[OverlayLayer],
+        switch: [f32; 4],
+        reach: f32,
+    ) -> Vec<OverlayQuad> {
+        let near = |rect: [f32; 4]| {
+            rect[0] < switch[2] + 4.0 * reach
+                && rect[2] > switch[0] - 4.0 * reach
+                && rect[1] < switch[3] + 4.0 * reach
+                && rect[3] > switch[1] - 4.0 * reach
+        };
+        let small = |rect: [f32; 4]| {
+            rect[2] - rect[0] <= (switch[2] - switch[0]) + 4.0 * reach
+                && rect[3] - rect[1] <= (switch[3] - switch[1]) + 4.0 * reach
+        };
+        layers
+            .iter()
+            .flat_map(|layer| layer.quads.iter())
+            .filter(|quad| {
+                quad.color == SWITCH_KNOB_SHADOW_INK
+                    && quad.alpha > 0.0
+                    && near(quad.rect)
+                    && small(quad.rect)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The rect the knob's shadow hangs on — the knob, offset by its one logical
+    /// pixel — snapped to the pixel grid the coverage pass snaps it to.
+    fn knob_lift(switch: [f32; 4], on: bool) -> [f32; 4] {
+        let px = |value: f32| value * SCALE;
+        let inset = px(SWITCH_KNOB_INSET_LOGICAL_PX);
+        let side = px(SWITCH_KNOB_LOGICAL_PX);
+        let left = if on {
+            switch[2] - inset - side
+        } else {
+            switch[0] + inset
+        };
+        [
+            left.round(),
+            (switch[1] + inset + px(1.0)).round(),
+            (left + side).round(),
+            (switch[1] + inset + side + px(1.0)).round(),
+        ]
+    }
+
+    /// PIN (§7.56 §3, user report 2026-09-06 — 「这里这个 switch 的阴影是不是有
+    /// 问题呢」, a screenshot of the card at 150% in the light theme) — **the
+    /// knob's lift is a falloff under the knob and nothing else on the track.**
+    ///
+    /// `box-shadow: 0 1px 3px rgba(0,0,0,.25)` is a *blur*: darkest right
+    /// against the knob and gone by the time it has travelled its reach. Drawn
+    /// as `rounded_overlay_halo` it is instead a stroke — the whole three
+    /// logical pixels at the full quarter-alpha, which at 1.5× is a five-pixel
+    /// grey band ringing the knob on every side, wider than the gap between the
+    /// knob and the track's own edge, so it spills off the track top and bottom
+    /// and reads as a second solid shape sitting on the switch. That is what
+    /// the report is a picture of, and `rounded_overlay_halo`'s own doc says as
+    /// much: it is the exact uniform ring an outline needs and a shadow must
+    /// not be.
+    ///
+    /// MUTATIONS:
+    /// ① draw the lift with `rounded_overlay_halo` again and the profile down
+    ///    the knob's flank is flat — every band at the full alpha, which is the
+    ///    grey blob that was reported;
+    /// ② hang the ring on the track instead of on the knob and the ink runs to
+    ///    the far end of a track that should carry nothing but its own fill;
+    /// ③ drop the one-pixel offset and the knob sits in a ring rather than over
+    ///    a shadow.
+    #[test]
+    fn the_knob_s_shadow_falls_off_and_leaves_the_rest_of_the_track_alone() {
+        let px = |value: f32| value * SCALE;
+        let reach = px(SWITCH_KNOB_SHADOW_LOGICAL_PX).round();
+        let mut content = measured(&rows(&every_row()), 3);
+        // Both answers, on rows that are not the first: the body is clipped to
+        // its viewport, the first row's switch stands a pixel or two above its
+        // own title line, and half a shadow cut off by that clip is not the
+        // shape under test.
+        for (index, row) in content.rows.iter_mut().enumerate() {
+            row.on = index % 2 == 1;
+        }
+        let placed = layout(&content, SURFACE.0, SURFACE.1, SCALE, 0.0);
+        let layers = build(&placed, SURFACE, None, None);
+        let whole = |row: &&RowRects| {
+            row.switch[1] - reach >= placed.viewport[1]
+                && row.switch[3] + reach <= placed.viewport[3]
+        };
+        let off = placed
+            .rows
+            .iter()
+            .filter(whole)
+            .find(|row| !row.on)
+            .expect("no switch that is off stands clear of the fade");
+        let on = placed
+            .rows
+            .iter()
+            .filter(whole)
+            .find(|row| row.on)
+            .expect("no switch that is on stands clear of the fade");
+
+        for row in [off, on] {
+            let lift = knob_lift(row.switch, row.on);
+            let ink = knob_shadow_quads(&layers, row.switch, reach);
+            assert!(
+                !ink.is_empty(),
+                "the knob carries no shadow at all (on = {})",
+                row.on
+            );
+            // ── it sits on the knob, and on nothing else ──────────────────
+            for quad in &ink {
+                assert!(
+                    quad.rect[0] >= lift[0] - reach - 0.01
+                        && quad.rect[1] >= lift[1] - reach - 0.01
+                        && quad.rect[2] <= lift[2] + reach + 0.01
+                        && quad.rect[3] <= lift[3] + reach + 0.01,
+                    "shadow ink at {:?} is outside the knob's own reach {:?} (on = {})",
+                    quad.rect,
+                    lift,
+                    row.on
+                );
+            }
+            // The end of the track the knob is not at carries the track's fill
+            // and nothing over it.
+            let empty = if row.on {
+                [row.switch[0], row.switch[1], lift[0] - reach, row.switch[3]]
+            } else {
+                [lift[2] + reach, row.switch[1], row.switch[2], row.switch[3]]
+            };
+            assert!(
+                empty[2] - empty[0] >= px(SWITCH_WIDTH_LOGICAL_PX) / 4.0,
+                "the shadow's reach covers the track end to end, so an empty end is not a fact \
+                 about it"
+            );
+            assert!(
+                !ink.iter().any(|quad| quad.rect[0] < empty[2]
+                    && quad.rect[2] > empty[0]
+                    && quad.rect[1] < empty[3]
+                    && quad.rect[3] > empty[1]),
+                "shadow ink lies on the empty end {empty:?} of the track (on = {})",
+                row.on
+            );
+
+            // ── and it is a blur, not a stroke ────────────────────────────
+            //
+            // Read straight down the knob's bottom flank, where the ring's
+            // coverage is exactly one, so each sample is its band's own alpha.
+            let column = (lift[0] + lift[2]) / 2.0;
+            let profile: Vec<f32> = (0..reach as usize)
+                .map(|distance| {
+                    let y = lift[3] + distance as f32 + 0.5;
+                    ink.iter()
+                        .filter(|quad| {
+                            quad.rect[0] <= column
+                                && column < quad.rect[2]
+                                && quad.rect[1] <= y
+                                && y < quad.rect[3]
+                        })
+                        .map(|quad| quad.alpha)
+                        .fold(0.0_f32, f32::max)
+                })
+                .collect();
+            assert!(
+                (profile[0] - SWITCH_KNOB_SHADOW_ALPHA).abs() < 0.01,
+                "the shadow is not at its full strength against the knob: {profile:?}"
+            );
+            assert!(
+                profile.windows(2).all(|pair| pair[1] < pair[0]),
+                "the shadow does not fall off with distance — it is a stroke round the knob \
+                 rather than a blur under it: {profile:?} (on = {})",
+                row.on
+            );
+            assert!(
+                profile[profile.len() - 1] <= SWITCH_KNOB_SHADOW_ALPHA / 8.0,
+                "the shadow has not run out by the end of its reach: {profile:?}"
+            );
+            // Offset down by its one logical pixel: it reaches further below the
+            // knob than above it.
+            let above = ink
+                .iter()
+                .map(|quad| quad.rect[1])
+                .fold(f32::INFINITY, f32::min);
+            let below = ink
+                .iter()
+                .map(|quad| quad.rect[3])
+                .fold(f32::NEG_INFINITY, f32::max);
+            let knob_top = lift[1] - px(1.0);
+            let knob_bottom = lift[3] - px(1.0);
+            assert!(
+                below - knob_bottom > knob_top - above,
+                "the shadow is a ring round the knob rather than a lift under it (on = {})",
+                row.on
+            );
+        }
     }
 
     /// PIN (§7.56 §9) — **480 logical, clamped to 92% of a window narrower than
