@@ -17,19 +17,29 @@ carries it; only the tag and the release page do.
 ## The workflow
 
 `.github/workflows/release.yml` has one job, `archive`, and two ways in.
+**Neither of them publishes anything**, and the job holds no permission that
+would let it. It builds, runs the licensing gates against the tree it is
+building, writes the bill of materials, packs the archive, starts the executable
+it just packed, and keeps what it made as a **workflow artifact**.
 
-**A tag push** is the real one: it builds, runs the licensing gates against the
-tree it is building, writes the bill of materials, packs the archive, starts the
-executable it just packed, and files a **draft** release for a person to read and
-publish. Nothing is ever published without that person.
+**A tag push** is the one that matters: it says that this commit — the one
+somebody named — builds green and packs a complete archive. What it leaves
+behind is not the release. The release is signed and the artifact is not, and
+both carry the same file names, so the artifact stays inside the run where
+nobody arrives at it by following a download link.
+
+It used to draft the release and attach that artifact to it. On 0.2.1 the draft
+that appeared on the tag held the runner's unsigned files under the exact names
+the signed ones carry, and it was one button away from being published as the
+real thing; it was deleted, and the release was rebuilt by hand from the signed
+files. The step is gone rather than repaired, because there is no version of
+"attach the unsigned build to the release page" worth leaving in a file.
 
 **A manual run** — Actions → Release → Run workflow, or
-`gh workflow run release.yml --ref <branch>` — does every one of those steps
-except the last. It drafts nothing, because the draft step asks whether this run
-is of a tag and a manual run is not; the branch it runs is the branch you point
-it at. It takes one optional input, `tag`: give it `v0.2.0-preview` and the
-tag-versus-manifest check runs exactly as it would on the real tag, which is how
-a tag that would be refused is found out about before it is pushed; leave it
+`gh workflow run release.yml --ref <branch>` — does the same thing on the branch
+you point it at. It takes one optional input, `tag`: give it `v0.2.0-preview` and
+the tag-versus-manifest check runs exactly as it would on the real tag, which is
+how a tag that would be refused is found out about before it is pushed; leave it
 empty and nothing is claimed, so the run is just a rehearsal of the archive.
 
 Use it before every release, and after touching anything the job depends on.
@@ -56,10 +66,19 @@ run by hand exactly as it runs there:
 
 ## What gets published
 
-`target/release-package` is the whole of it. The draft-release step reads that
-directory and attaches **every file in it**, so what the three scripts leave
-there is exactly what a reader downloads — there is no second list anywhere
-naming assets, and nothing is hand-picked out of `dist/`.
+**Every asset on a release page comes off the machine that signed it, and none
+of it comes out of CI.** `target/release-package` on that machine is the whole of
+it: what the three scripts leave there, after `package.ps1 -Sign` has signed the
+executable and the package, is exactly what a reader downloads. `gh release
+create` is handed that directory and no list is written down anywhere, so there
+is no second naming of assets to disagree with it, and nothing is hand-picked out
+of `dist/`.
+
+The workflow builds the same directory on a runner and keeps it as a workflow
+artifact. That copy is unsigned and its file names are identical, so it is never
+uploaded anywhere a stranger can reach. It is there to be compared against — the
+same file list, the same notices, the same version, from the same commit — and
+then left where it is.
 
 | asset | what it is |
 | --- | --- |
@@ -156,13 +175,22 @@ Explorer menu row that fails for everybody who turns it on.
    and no other:
 
    ```
-   az login --use-device-code
+   az login --scope "https://management.core.windows.net//.default"
    az account set --subscription <the subscription the signing account is in>
    ```
 
-   The second line is only needed when the account can see more than one
-   subscription. Nothing about this sign-in is written into the repository: no
-   token, no subscription, no address.
+   That opens a browser and asks for the second factor. **`--use-device-code` is
+   not an alternative here**: this tenant refuses the device code flow, and what
+   comes back from it is a sign-in that `az account show` answers for and that
+   cannot get a token — which is the failure below. The second line is only
+   needed when the account can see more than one subscription. Nothing about this
+   sign-in is written into the repository: no token, no subscription, no
+   address.
+
+   **A sign-in lasts hours, not days.** When it lapses, `sign.ps1` says so and
+   prints the pair of lines to run, with this machine's tenant already in them;
+   it asks for a token before it starts `signtool` precisely because `signtool`
+   does not report an expired sign-in, it waits on one.
 
 5. **Microsoft's signing library** is fetched by `sign.ps1` itself, from
    nuget.org, into `%LOCALAPPDATA%\Folio\artifact-signing\<version>\`. It is
@@ -172,7 +200,7 @@ Explorer menu row that fails for everybody who turns it on.
 ### Every release
 
 ```powershell
-az login --use-device-code                       # once per few hours
+az login --scope "https://management.core.windows.net//.default"   # once per few hours
 cargo build --release
 ./scripts/release/sbom.ps1
 ./scripts/release/package.ps1 -Sign
@@ -261,30 +289,74 @@ a 403 and not with a redirect.
 ### When it will not sign
 
 `sign.ps1 -DryRun` resolves every tool, says which credential the library is
-going to find, writes the metadata, prints the exact
-`signtool` command it would run, and stops. Almost everything that can be
-misconfigured is visible in that output without asking the service anything.
+going to find, asks that credential for the two tokens a real run needs, writes
+the metadata, prints the exact `signtool` command it would run, and stops.
+Everything that can be misconfigured before a signature is asked for is visible
+in that output, and the signing service is never asked for one. A dry run reports
+the token and does not refuse on it: it answers questions and decides nothing.
 
 | what you see | what it is |
 | --- | --- |
-| `not signed in to Azure` | the CLI is here but nobody is signed in. The script prints the `az login` line to run. |
+| `not signed in to Azure` | the CLI is here but nobody is signed in at all. The script prints the `az login` line to run. |
 | `no Azure CLI and no service principal` | nothing here can authorise anything. Install the CLI and open a new shell. Refused rather than started, because the alternative is a run that hangs. |
-| a run that hangs with no output | this is what the two rows above exist to prevent. If it still happens, `signtool` is waiting on a credential prompt: kill it, and check that `az` resolves by name in the same shell. |
-| HTTP 401 | the sign-in expired. `az login --use-device-code` again. |
+| `the Azure sign-in cannot get a token` | the CLI still has a profile, but it has expired — `az account show` answers and a token request does not. `sign.ps1` asks for one before it starts `signtool`, because `signtool` does not report this and waits instead. The refusal prints the two lines to run, with this machine's tenant already in them. |
+| a browser sign-in that is asked for and never arrives | this tenant **refuses the device code flow**, so `az login --use-device-code` produces a sign-in that cannot get a token. Use `az logout` and then `az login --tenant <the tenantId az account show prints> --scope "https://management.core.windows.net//.default"`, which opens a browser and asks for the second factor. |
+| `the signing service did not respond` | `signtool` was still running `-TimeoutSeconds` after it started — 180 seconds by default — and was killed. Nothing was signed. A signature that is going to be made is made in seconds, so this is a run that was waiting for something it was never going to get. |
+| a run that hangs with no output | this is what the rows above exist to prevent, and the timeout bounds what is left of it. If it still happens, `signtool` is waiting on a credential prompt: kill it, and check that `az` resolves by name in the same shell. |
+| HTTP 401 | the sign-in expired between the token check and the request. Sign in again with the `az login` line above. |
 | HTTP 403 | the account is signed in but may not use this profile: check the role assignment, the account and profile names, and that the endpoint's region matches the account's. |
 | `no certificates were found that met all the given criteria` | `signtool` never loaded the signing library and fell back to the local certificate store — an SDK older than 10.0.22621.755, or the wrong architecture. |
 | nothing at all, and a failure | the .NET 8 runtime is missing. `sign.ps1` checks for it, so this only happens if the check is bypassed with `-DlibDir`. |
 
 ### Testing the integration without signing anything
 
-`scripts/release/sign-tests.ps1` runs fourteen cases against `sign.ps1` — the
+`scripts/release/sign-tests.ps1` runs twenty cases against `sign.ps1` — the
 metadata it assembles, the flags it passes, that `-OutDir` never writes back over
 what it was given, that verification passes a signed file and refuses a tampered
 one, that an Azure CLI which is installed but not on the PATH is put there and
-resolves by name afterwards, and that a run with no sign-in refuses early and
-names the command to run. It reaches no network, signs nothing, and reads the
-sign-in state from an empty `AZURE_CONFIG_DIR` so it says the same thing on a
-machine somebody is signed in on. Run it after changing either script.
+resolves by name afterwards, that a run with no sign-in refuses early and names
+the command to run, that a sign-in which can no longer get a token is refused
+with this machine's own tenant in the command it prints, and that a `signtool`
+which never answers is killed and reported.
+
+**It signs nothing.** Three of the cases hand it a `signtool` that is not one — a
+few lines of C#, compiled by the compiler that ships with the .NET Framework,
+which writes down the arguments it was given and sleeps when it is told to. That
+is what lets a case say "signtool was never started" and mean it, and what lets
+the timeout be tested without waiting three minutes for a real one.
+
+It reads the sign-in state out of an `AZURE_CONFIG_DIR` it writes itself, so it
+says the same thing on a machine somebody is signed in on. The token cases do
+reach the sign-in service, because asking for a token is the thing under test;
+they reach nothing else, and a machine with no network reads them as a refusal,
+which is the same answer.
+
+### Making the release page
+
+Last, and only from the machine that just signed: the release is created by hand,
+out of the directory the signed files are in.
+
+```powershell
+$assets = @(Get-ChildItem target/release-package -File | ForEach-Object { $_.FullName })
+$arguments = @('release', 'create', 'v0.2.1-preview') + $assets + @(
+    '--draft', '--prerelease',
+    '--title', 'Folio 0.2.1',
+    '--notes-file', 'docs/plans/release/release-note-v0.2.1-preview.md')
+& gh @arguments
+```
+
+The list is built and splatted rather than written on one line: `gh` is a native
+command, and an array interpolated into one takes its own view of quoting the day
+a path has a space in it. `--draft` because a person reads the page and presses
+the button; `--prerelease` because every release so far has been one, and because
+the update check reads the list endpoint for exactly that reason.
+
+**The assets are whatever is in that directory, and the directory is the signed
+build.** Nothing is typed out, so nothing can be left out; nothing is fetched
+from a workflow run, so an unsigned file cannot arrive under a signed file's
+name. Compare the two if you like — the workflow artifact from the tag's run has
+the same file list, the same notices and the same version — but upload the local
+one.
 
 ## The sparse MSIX package
 

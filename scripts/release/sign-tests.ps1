@@ -1,22 +1,23 @@
 <#
 .SYNOPSIS
-    Everything about `sign.ps1` that can be true or false without a network and
-    without anybody being signed in to Azure.
+    Everything about `sign.ps1` that can be true or false without signing
+    anything and without anybody being signed in to Azure.
 
 .DESCRIPTION
     The one thing `sign.ps1` does that cannot be tested here is the signing
     itself: that needs a person, a sign-in and a service. Everything around it
     can be wrong on its own, and each of those failures is quiet — a metadata
     file naming the wrong profile, an invocation missing `/tr`, an `-OutDir` that
-    writes back over what it was given. So each is asserted here rather than
-    noticed on a release day.
+    writes back over what it was given, a sign-in that has expired and a
+    `signtool` waiting on it. So each is asserted here rather than noticed on a
+    release day.
 
     **Every case runs `sign.ps1` as a child process and reads its exit code**,
     rather than dot-sourcing it and calling functions. The exit code is what
     `package.ps1` and a workflow read, and a script that prints a refusal and
     exits 0 is exactly the failure worth catching.
 
-    The two fixtures are both already on the machine, so this reaches nothing:
+    Three fixtures, none of which is a signature:
 
       * a directory holding an empty `Azure.CodeSigning.Dlib.dll`, handed to
         `-DlibDir`. `-DryRun` stops before the library is loaded, so a file of no
@@ -26,6 +27,17 @@
         which `sign.ps1` has to find anyway. The verification path is given a
         file whose signature is not in question, and then the same file with a
         byte added to it.
+      * a `signtool.exe` that is not one, compiled here out of a few lines of C#.
+        It records the arguments it was handed and sleeps when it is told to,
+        which is what lets a case say "signtool was never started" and mean it,
+        and what lets the timeout be asserted without waiting three minutes.
+
+    **What this reaches.** Nothing, except the sign-in service, and only where
+    asking it something is the thing under test: `sign.ps1` now asks for a token
+    before it starts `signtool`, so the cases about that ask for one too. They
+    are given an `AZURE_CONFIG_DIR` this file writes, never the real one, so they
+    say the same thing on a machine somebody is signed in on — and on a machine
+    with no network they read the same refusal from the other side.
 #>
 
 [CmdletBinding()]
@@ -159,6 +171,49 @@ $notAPackage = Join-Path $scratch 'archive.zip'
 [IO.File]::WriteAllBytes($notAPackage, [byte[]] (0x50, 0x4B, 0x05, 0x06))
 $aPackage = Join-Path $scratch 'folio.msix'
 [IO.File]::WriteAllBytes($aPackage, [byte[]] (0x50, 0x4B, 0x05, 0x06))
+
+# **A signtool that is not one.** Three of the cases at the end are about what
+# happens *around* the call rather than inside it: two ask that the call never
+# happened at all, and one asks that a call which never returns is ended. Each
+# needs a program `sign.ps1` will start, and none needs it to sign anything.
+#
+# It has to be a real PE image: `sign.ps1` starts signtool without a shell, and
+# `CreateProcess` cannot run a batch file. So one is compiled here, by the C#
+# compiler that ships with the .NET Framework and is therefore on every Windows
+# machine. It writes down the arguments it was handed — which is how a case can
+# say "signtool was never started" and mean it — and sleeps for as long as the
+# environment tells it to.
+$fakeSignTool = Join-Path $scratch 'fake-signtool.exe'
+$csc = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+if (Test-Path -LiteralPath $csc -PathType Leaf) {
+    $fakeSource = Join-Path $scratch 'fake-signtool.cs'
+    [IO.File]::WriteAllText($fakeSource, @'
+using System;
+using System.IO;
+using System.Threading;
+
+static class FakeSignTool
+{
+    static int Main(string[] args)
+    {
+        string marker = Environment.GetEnvironmentVariable("FOLIO_TEST_SIGNTOOL_MARKER");
+        if (!string.IsNullOrEmpty(marker))
+            File.AppendAllText(marker, string.Join(" ", args) + Environment.NewLine);
+
+        int seconds;
+        if (int.TryParse(Environment.GetEnvironmentVariable("FOLIO_TEST_SIGNTOOL_SLEEP"), out seconds))
+            Thread.Sleep(seconds * 1000);
+
+        return 0;
+    }
+}
+'@)
+    & $csc /nologo /target:exe "/out:$fakeSignTool" $fakeSource | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "the fake signtool did not compile" }
+}
+else {
+    $fakeSignTool = $null
+}
 
 Write-Host 'sign.ps1'
 
@@ -374,12 +429,177 @@ Test-Case 'a CLI put on PATH is then run, and a signed-out one stops the run bef
     $result = Invoke-Sign -Parameters @{ DlibDir = $stubDlib; Files = $subject } -Environment $environment
     if ($result.ExitCode -eq 0) { throw 'it exited 0' }
     if ($result.Flat -notmatch 'its directory was not on PATH') { throw 'the PATH was never repaired' }
-    if ($result.Flat -notmatch 'az login --use-device-code') { throw 'the refusal did not say what to run' }
+    if ($result.Flat -notmatch 'az login --scope') { throw 'the refusal did not say what to run' }
+    if ($result.Flat -notmatch 'refuses the device code flow') {
+        throw 'the refusal offered the device code flow this tenant will not accept'
+    }
     if ($result.Flat -notmatch 'not signed in to Azure') {
         throw "it did not get an answer out of the CLI it had just put on PATH: $($result.Text)"
     }
     if ((Get-FileHash -LiteralPath $subject -Algorithm SHA256).Hash -ne $before) {
         throw 'it wrote to the file it was refusing to sign'
+    }
+}
+
+Test-Case 'a dry run says what the sign-in can and cannot still get a token for' {
+    $result = Invoke-Sign @{ DryRun = $true; DlibDir = $stubDlib; Files = $anImage }
+    if ($result.ExitCode -ne 0) { throw "a dry run exited $($result.ExitCode): $($result.Text)" }
+    # Either answer is a pass. What is being asserted is that the question was
+    # asked and reported, on a signed-in machine and a signed-out one alike —
+    # a dry run that stayed silent about the token would be a dry run that had
+    # nothing to say about the failure this check exists for.
+    if ($result.Flat -notmatch 'token: (the sign-in (can still get one|CANNOT get one)|not asked for)') {
+        throw "the dry run reported nothing about a token: $($result.Text)"
+    }
+}
+
+Test-Case 'a run with no sign-in stops before signtool, which is never started' {
+    if (-not $fakeSignTool) { Write-Host '        (no C# compiler to build a fake signtool with)'; return }
+
+    # The refusal was already asserted above by its words. This asserts it by its
+    # consequence, which is the thing that actually matters: `signtool` is a
+    # program that gets started, and a refusal printed after it was started would
+    # be a refusal that came too late to prevent anything.
+    $marker = Join-Path $scratch 'never-started.txt'
+    $environment = $noCredentials.Clone()
+    $environment['AZURE_CONFIG_DIR'] = Join-Path $scratch 'empty-azure-config'
+    $environment['FOLIO_TEST_SIGNTOOL_MARKER'] = $marker
+    [IO.Directory]::CreateDirectory($environment['AZURE_CONFIG_DIR']) | Out-Null
+
+    $subject = Join-Path $scratch 'never-signed.exe'
+    Copy-Item -LiteralPath $anImage -Destination $subject -Force
+    $before = (Get-FileHash -LiteralPath $subject -Algorithm SHA256).Hash
+
+    $result = Invoke-Sign -Parameters @{
+        DlibDir = $stubDlib; SignTool = $fakeSignTool; Files = $subject
+    } -Environment $environment
+
+    if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+    if (Test-Path -LiteralPath $marker) {
+        throw "signtool was started anyway, with $((Get-Content -LiteralPath $marker -Raw).Trim())"
+    }
+    if ((Get-FileHash -LiteralPath $subject -Algorithm SHA256).Hash -ne $before) {
+        throw 'it wrote to the file it was refusing to sign'
+    }
+}
+
+Test-Case 'a sign-in that can no longer get a token is refused, and names the tenant to sign into' {
+    if (-not $cliDirectory) { Write-Host '        (no Azure CLI on this machine)'; return }
+    if (-not $fakeSignTool) { Write-Host '        (no C# compiler to build a fake signtool with)'; return }
+
+    # **A machine that looks signed in.** The case above is a machine with no
+    # sign-in at all, and that one is refused a step earlier, by `az account
+    # show`. What cost the 0.2.1 release twenty minutes was the other thing: a
+    # profile still on disk with an expired refresh token behind it, where
+    # `az account show` answers with a subscription and only asking for a token
+    # says otherwise.
+    #
+    # The profile written here is that machine. It names a tenant that does not
+    # exist, so the CLI reads the file and answers `show`, and cannot get a token
+    # for anything. The identifiers in it are zeros: this reaches the sign-in
+    # service and nothing else, and it says nothing about whoever runs it.
+    $config = Join-Path $scratch 'azure-config-on-paper'
+    [IO.Directory]::CreateDirectory($config) | Out-Null
+    $tenant = '00000000-0000-0000-0000-000000000003'
+    [IO.File]::WriteAllText((Join-Path $config 'azureProfile.json'), @"
+{
+  "installationId": "00000000-0000-0000-0000-000000000001",
+  "subscriptions": [
+    {
+      "id": "00000000-0000-0000-0000-000000000002",
+      "name": "a subscription that is only on paper",
+      "state": "Enabled",
+      "user": { "name": "someone@example.com", "type": "user" },
+      "isDefault": true,
+      "tenantId": "$tenant",
+      "environmentName": "AzureCloud",
+      "homeTenantId": "$tenant",
+      "managedByTenants": []
+    }
+  ]
+}
+"@)
+
+    $marker = Join-Path $scratch 'never-started-without-a-token.txt'
+    $environment = $noCredentials.Clone()
+    $environment['PATH'] = $cliDirectory + ';' + $withoutCli
+    $environment['AZURE_CONFIG_DIR'] = $config
+    $environment['FOLIO_TEST_SIGNTOOL_MARKER'] = $marker
+
+    $subject = Join-Path $scratch 'never-signed-without-a-token.exe'
+    Copy-Item -LiteralPath $anImage -Destination $subject -Force
+    $before = (Get-FileHash -LiteralPath $subject -Algorithm SHA256).Hash
+
+    $result = Invoke-Sign -Parameters @{
+        DlibDir = $stubDlib; SignTool = $fakeSignTool; Files = $subject
+    } -Environment $environment
+
+    if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+    # The step before this one has to pass, or the case is asserting the wrong
+    # refusal: the CLI answered `account show`, and the token is what was missing.
+    if ($result.Flat -notmatch 'credential: an Azure CLI sign-in') {
+        throw "it never got past the sign-in check, so this is not the failure under test: $($result.Text)"
+    }
+    if ($result.Flat -notmatch 'CANNOT get one for the signing service') {
+        throw "it did not say which token was refused: $($result.Text)"
+    }
+    if (Test-Path -LiteralPath $marker) {
+        throw "signtool was started anyway, with $((Get-Content -LiteralPath $marker -Raw).Trim())"
+    }
+    if ((Get-FileHash -LiteralPath $subject -Algorithm SHA256).Hash -ne $before) {
+        throw 'it wrote to the file it was refusing to sign'
+    }
+    # The line the person is meant to run, in full. The device code flow is the
+    # one that does not work against this tenant, so the refusal has to say so
+    # and hand over the one that does — with the tenant read off this machine,
+    # which is the only part of it nobody can guess.
+    if ($result.Flat -notmatch 'device code') { throw 'it did not say the device code flow is refused' }
+    if ($result.Flat -notmatch 'az logout') { throw 'it did not say to sign out first' }
+    if ($result.Flat -notmatch [regex]::Escape("az login --tenant $tenant --scope")) {
+        throw "it did not name this machine's tenant in the command to run: $($result.Text)"
+    }
+    if ($result.Flat -notmatch [regex]::Escape('"https://management.core.windows.net//.default"')) {
+        throw "it did not name the scope to sign in for: $($result.Text)"
+    }
+}
+
+Test-Case 'a signtool that never answers is killed, and the run says the service did not respond' {
+    if (-not $fakeSignTool) { Write-Host '        (no C# compiler to build a fake signtool with)'; return }
+
+    # **The one failure that has no message of its own.** A signtool waiting on
+    # a credential prompt prints nothing and exits never; before this, the only
+    # thing that ended such a run was a person noticing.
+    #
+    # The credential here is a service principal, so that the case is about the
+    # wait and not about a sign-in: `sign.ps1` reads `AZURE_*` as an answer and
+    # asks the CLI nothing, which is also what a build with nobody at it does.
+    $marker = Join-Path $scratch 'started-and-hung.txt'
+    $environment = @{
+        AZURE_TENANT_ID     = '00000000-0000-0000-0000-000000000003'
+        AZURE_CLIENT_ID     = '00000000-0000-0000-0000-000000000004'
+        AZURE_CLIENT_SECRET = 'not a secret and not used: nothing here reaches a service'
+        FOLIO_TEST_SIGNTOOL_MARKER = $marker
+        FOLIO_TEST_SIGNTOOL_SLEEP  = '120'
+    }
+
+    $subject = Join-Path $scratch 'hung.exe'
+    Copy-Item -LiteralPath $anImage -Destination $subject -Force
+
+    $started = Get-Date
+    $result = Invoke-Sign -Parameters @{
+        DlibDir = $stubDlib; SignTool = $fakeSignTool; TimeoutSeconds = 2; Files = $subject
+    } -Environment $environment
+    $waited = ((Get-Date) - $started).TotalSeconds
+
+    if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+    if (-not (Test-Path -LiteralPath $marker)) {
+        throw "signtool was never started, so this case did not test the wait: $($result.Text)"
+    }
+    if ($result.Flat -notmatch 'the signing service did not respond') {
+        throw "the refusal did not say what happened: $($result.Text)"
+    }
+    if ($waited -ge 60) {
+        throw "it waited $([int] $waited) seconds for a child told to sleep 120; the timeout did not end it"
     }
 }
 

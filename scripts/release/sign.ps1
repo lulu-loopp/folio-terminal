@@ -56,10 +56,19 @@
 
 .PARAMETER DryRun
     Resolve the tools, write the metadata, say which credential the library is
-    going to find, print the command that would run, and stop before running it.
-    Everything here that can be wrong without a network — a wrong endpoint, a
+    going to find, ask that credential for the two tokens a real run needs, print
+    the command that would run, and stop before running it. Everything that can
+    be wrong before the service is asked for a signature — a wrong endpoint, a
     wrong profile name, the wrong architecture of signing library, an Azure CLI
-    that is installed but not on the PATH — is visible in the output of this.
+    that is installed but not on the PATH, a sign-in that has quietly expired —
+    is visible in the output of this. A dry run reports the token and does not
+    refuse on it: it answers questions, it does not decide anything.
+
+.PARAMETER TimeoutSeconds
+    How long `signtool` is given to answer before it is killed and the run fails.
+    Defaults to 180. A signature that is going to be made is made in seconds;
+    what runs longer is a `signtool` waiting on something it will never be given,
+    and that is the failure this bounds. See `Invoke-SignTool`.
 
 .PARAMETER Endpoint
     The regional service endpoint. Defaults to `FOLIO_SIGN_ENDPOINT`, then to
@@ -104,7 +113,8 @@ param(
     [string] $CertificateProfile,
     [string] $SignTool,
     [string] $DlibDir,
-    [string] $ClientVersion = '1.0.128'
+    [string] $ClientVersion = '1.0.128',
+    [int] $TimeoutSeconds = 180
 )
 
 $ErrorActionPreference = 'Stop'
@@ -140,6 +150,19 @@ $TimestampUrl = 'http://timestamp.acs.microsoft.com'
 
 # The oldest `signtool.exe` that can load the signing library at all.
 $MinimumSignTool = [version] '10.0.22621.755'
+
+# The two tokens a real run needs, asked for before `signtool` is started rather
+# than by `signtool` where nobody can see the answer. See `Assert-AzureToken`.
+#
+# Two and not one, because they fail apart. The first is what the signing library
+# asks for and is the token the signature is actually made with. The second is
+# the one an ordinary Azure sign-in is refreshed against, and it is here so that
+# an expired sign-in and a missing role read differently: neither token means the
+# sign-in is gone, only the first means the sign-in is fine and the role is not.
+$TokenScopes = @(
+    [pscustomobject]@{ Name = 'the signing service';    Scope = 'https://codesigning.azure.net/.default' }
+    [pscustomobject]@{ Name = 'Azure Resource Manager'; Scope = 'https://management.azure.com/.default' }
+)
 
 # ── the files ────────────────────────────────────────────────────────────────
 
@@ -429,12 +452,15 @@ function Show-CredentialPlan {
     Write-Host "credential: the Azure CLI at $($Plan.Az)"
 }
 
+# Hands back what `az account show` said, so that the token check after it can
+# name this machine's tenant in the command somebody has to run, rather than
+# printing a placeholder for them to go and look up.
 function Assert-AzureCredential {
     param($Plan)
 
     if ($Plan.Kind -eq 'service principal') {
         Write-Host 'credential: the AZURE_* environment variables of a service principal'
-        return
+        return $null
     }
 
     if (-not $Plan.Az) {
@@ -451,11 +477,16 @@ function Assert-AzureCredential {
         throw 'no Azure CLI and no service principal'
     }
 
+    # Not `$account`: `$Account` is this script's own parameter, the name of the
+    # Artifact Signing account, and it is declared `[string]`. PowerShell's
+    # variables are case-insensitive and a type constraint outlives an
+    # assignment, so a sign-in put into a variable of that name reaches the
+    # caller as the string a sign-in prints as, and every property on it is gone.
     $shown = & $Plan.Az account show --output json 2>$null
     if ($LASTEXITCODE -eq 0) {
-        $subscription = ($shown | Out-String | ConvertFrom-Json).name
-        Write-Host "credential: an Azure CLI sign-in (subscription '$subscription')"
-        return
+        $signIn = ($shown | Out-String | ConvertFrom-Json)
+        Write-Host "credential: an Azure CLI sign-in (subscription '$($signIn.name)')"
+        return $signIn
     }
 
     Write-Host ''
@@ -463,7 +494,12 @@ function Assert-AzureCredential {
     Write-Host 'to authorise. Sign in with the account holding the Artifact Signing Certificate'
     Write-Host "Profile Signer role on the $CertificateProfile profile, and run this again:"
     Write-Host ''
-    Write-Host '    az login --use-device-code'
+    Write-Host '    az login --scope "https://management.core.windows.net//.default"'
+    Write-Host ''
+    Write-Host 'That opens a browser and asks for the second factor. `--use-device-code` is not'
+    Write-Host 'an alternative here: this tenant refuses the device code flow, and what it gives'
+    Write-Host 'back is a sign-in that cannot get a token. Add `--tenant <id>` if the account can'
+    Write-Host 'see more than one tenant.'
     Write-Host ''
     Write-Host 'If that account can see more than one subscription, select the one the'
     Write-Host "$Account account is in as well:"
@@ -474,6 +510,184 @@ function Assert-AzureCredential {
     Write-Host 'AZURE_CLIENT_ID and AZURE_CLIENT_SECRET are read as a sign-in too.'
     Write-Host ''
     throw 'not signed in to Azure'
+}
+
+# ── and whether that credential can still get a token ────────────────────────
+
+# **A sign-in that exists is not a sign-in that still works.** The Azure CLI
+# keeps its profile on disk, so `az account show` goes on naming a subscription
+# and a tenant long after the refresh token behind it has expired — which means
+# the check above passes on a machine that cannot sign anything.
+#
+# What happens then has no error message in it. `signtool` asks the signing
+# library for a credential, the library runs this same CLI, the CLI cannot
+# refresh, and the tenant this project signs into refuses the device code flow —
+# so what is waited on is a browser sign-in that nobody opened. `signtool` prints
+# nothing at all while that goes on. On the 0.2.1 release it went on for twenty
+# minutes before somebody killed it.
+#
+# So the token is asked for here, by this script, before `signtool` is started,
+# where the answer is a sentence somebody reads.
+
+function Get-TokenProbe {
+    param($Plan)
+
+    # A service principal is not asked. There is no CLI holding its sign-in —
+    # the library reads `AZURE_*` itself — and a wrong secret there is refused in
+    # milliseconds rather than waited on, because there is no prompt a build
+    # could be shown.
+    if ($Plan.Kind -ne 'azure cli' -or -not $Plan.Az) { return @() }
+
+    $results = @()
+    foreach ($scope in $TokenScopes) {
+        # `--output none`, always: the answer to this question is a bearer token,
+        # and a bearer token belongs in neither a console nor a workflow log.
+        # What is read is the exit code, and what is kept is whatever the CLI
+        # said on its way out.
+        $said = & $Plan.Az account get-access-token --scope $scope.Scope --output none 2>&1
+        $results += [pscustomobject]@{
+            Name  = $scope.Name
+            Scope = $scope.Scope
+            Ok    = ($LASTEXITCODE -eq 0)
+            Said  = (($said | Out-String).Trim())
+        }
+    }
+    return $results
+}
+
+function Show-TokenProbe {
+    param($Plan, $Results)
+
+    if ($Plan.Kind -eq 'service principal') {
+        Write-Host 'token: not asked for; the library reads the service principal itself'
+        return
+    }
+    if (-not $Plan.Az) {
+        Write-Host 'token: not asked for; there is no Azure CLI here to ask'
+        return
+    }
+    foreach ($result in @($Results)) {
+        if ($result.Ok) {
+            Write-Host "token: the sign-in can still get one for $($result.Name)"
+            continue
+        }
+        Write-Host "token: the sign-in CANNOT get one for $($result.Name) ($($result.Scope))"
+        if ($result.Said) {
+            $result.Said -split "`n" | ForEach-Object { Write-Host "  $($_.TrimEnd())" }
+        }
+    }
+}
+
+function Assert-AzureToken {
+    param($Plan, $SignIn)
+
+    $results = Get-TokenProbe -Plan $Plan
+    Show-TokenProbe -Plan $Plan -Results $results
+
+    $refused = @($results | Where-Object { -not $_.Ok })
+    if ($refused.Count -eq 0) { return }
+
+    # The tenant is read off this machine's own sign-in rather than written down
+    # here, because it is the one part of that command line nobody can guess and
+    # because a tenant identifier in a public script is a fact about a person.
+    $tenant = if ($SignIn) { $SignIn.tenantId } else { '<the tenantId az account show prints>' }
+    $names = @($refused | ForEach-Object { $_.Name }) -join ' or '
+
+    Write-Host ''
+    Write-Host 'The Azure CLI still has a profile on disk, but it can no longer get a token for'
+    Write-Host "$names. The sign-in has expired."
+    Write-Host ''
+    Write-Host 'Refused here rather than started. signtool does not report this: it asks the'
+    Write-Host 'signing library for a credential, the library asks this same CLI, and the run'
+    Write-Host 'then waits on a sign-in nobody opened, printing nothing while it waits.'
+    Write-Host ''
+    Write-Host 'This tenant refuses the device code flow, so `az login --use-device-code` is not'
+    Write-Host 'the line that fixes it. Sign in through a browser, with the second factor, and'
+    Write-Host 'name the tenant and the scope:'
+    Write-Host ''
+    Write-Host '    az logout'
+    Write-Host "    az login --tenant $tenant --scope `"https://management.core.windows.net//.default`""
+    Write-Host ''
+    Write-Host 'Then run this again. If the token comes back and the service still refuses, the'
+    Write-Host 'sign-in is fine and the role is not: see the 403 row in docs/RELEASING.md.'
+    Write-Host ''
+    throw 'the Azure sign-in cannot get a token'
+}
+
+# ── running signtool, with an end to it ──────────────────────────────────────
+
+# **One command line, quoted once.** The line that is printed and the line that
+# is run are the same string, built by the rule `CommandLineToArgvW` reads back:
+# a run of backslashes is doubled only where a quote follows it, and an argument
+# is wrapped only when it holds a space or a quote. So a path with a space in it
+# arrives as one argument, and the command printed above the run is one that can
+# be pasted.
+function ConvertTo-CommandLineArgument {
+    param([string] $Value)
+
+    if ($Value -ne '' -and $Value -notmatch '[\s"]') { return $Value }
+
+    $quoted = New-Object Text.StringBuilder
+    [void] $quoted.Append('"')
+    $backslashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq [char] '\') { $backslashes++; continue }
+        if ($character -eq [char] '"') {
+            [void] $quoted.Append([char] '\', $backslashes * 2 + 1)
+            [void] $quoted.Append([char] '"')
+        }
+        else {
+            [void] $quoted.Append([char] '\', $backslashes)
+            [void] $quoted.Append($character)
+        }
+        $backslashes = 0
+    }
+    [void] $quoted.Append([char] '\', $backslashes * 2)
+    [void] $quoted.Append('"')
+    return $quoted.ToString()
+}
+
+function ConvertTo-CommandLine {
+    param([string[]] $Arguments)
+    return (@($Arguments | ForEach-Object { ConvertTo-CommandLineArgument -Value $_ }) -join ' ')
+}
+
+# **A request that is going to be answered is answered in seconds.** What takes
+# longer than that is not a slow service; it is a `signtool` stopped on something
+# it is never going to be given — the sign-in prompt above, or a connection that
+# was accepted and then said nothing. Neither of those ends on its own, and a
+# release step whose failure looks exactly like its success-in-progress is one
+# nobody can read. So it is given an end.
+#
+# `Process.Start` and `WaitForExit(ms)` rather than the call operator, because
+# the call operator waits for as long as the child cares to take and there is no
+# argument that changes that. The child is handed this process's own console
+# instead of a redirected pipe, so `signtool`'s output still appears as it
+# happens and still reaches a workflow log.
+function Invoke-SignTool {
+    param([string] $Tool, [string[]] $Arguments, [int] $Seconds)
+
+    $info = New-Object Diagnostics.ProcessStartInfo
+    $info.FileName = $Tool
+    $info.Arguments = ConvertTo-CommandLine -Arguments $Arguments
+    $info.WorkingDirectory = $PWD.ProviderPath
+    $info.UseShellExecute = $false
+    $process = [Diagnostics.Process]::Start($info)
+
+    if ($process.WaitForExit($Seconds * 1000)) { return $process.ExitCode }
+
+    # `az` runs as a child of `signtool`, and in the failure this exists for it
+    # is the child that is holding the prompt. So the tree goes, on a runtime
+    # that can kill a tree.
+    $killTree = $process.GetType().GetMethod('Kill', [type[]] @([bool]))
+    if ($killTree) { $killTree.Invoke($process, @($true)) } else { $process.Kill() }
+    $process.WaitForExit()
+
+    throw ("the signing service did not respond: signtool was still running $Seconds seconds after " +
+           'it was started, and has been killed. Nothing was signed. A signature that is going to ' +
+           'be made is made in seconds, so this is a run that was waiting for something it was ' +
+           'never going to get — check that az account get-access-token still answers, and pass ' +
+           '-TimeoutSeconds if a slow link really does need longer.')
 }
 
 # ── run ──────────────────────────────────────────────────────────────────────
@@ -524,23 +738,30 @@ try {
     Write-Host "metadata.json ($metadataPath):"
     $json -split "`n" | ForEach-Object { Write-Host "  $($_.TrimEnd())" }
     Write-Host ''
-    # Printed so it can be read, and so it can be pasted: an argument with a
-    # space in it is shown quoted, which is how it reaches signtool anyway.
-    $printable = @($arguments | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } })
+    # Printed so it can be read, and so it can be pasted. It is the same string
+    # the run below hands to the process, quoted by the same function, so what is
+    # printed is not a rendering of the command — it is the command.
     Write-Host 'command:'
-    Write-Host "  `"$tool`" $($printable -join ' ')"
+    Write-Host "  `"$tool`" $(ConvertTo-CommandLine -Arguments $arguments)"
     Write-Host ''
 
     if ($DryRun) {
         Show-CredentialPlan -Plan $credential
+        # The token as well, because an expired sign-in is the one thing on this
+        # list that costs a run rather than a message, and a dry run that
+        # reported everything except it would have had nothing to say about the
+        # twenty minutes of silence on the 0.2.1 release. Reported, not enforced:
+        # a dry run answers questions and decides nothing.
+        Show-TokenProbe -Plan $credential -Results (Get-TokenProbe -Plan $credential)
         Write-Host 'dry run: nothing was signed.'
         return
     }
 
-    Assert-AzureCredential -Plan $credential
+    $signIn = Assert-AzureCredential -Plan $credential
+    Assert-AzureToken -Plan $credential -SignIn $signIn
 
-    & $tool @arguments
-    if ($LASTEXITCODE -ne 0) { throw "signtool sign exited $LASTEXITCODE" }
+    $code = Invoke-SignTool -Tool $tool -Arguments $arguments -Seconds $TimeoutSeconds
+    if ($code -ne 0) { throw "signtool sign exited $code" }
 }
 finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue

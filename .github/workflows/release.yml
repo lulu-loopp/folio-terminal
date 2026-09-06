@@ -1,15 +1,25 @@
 name: Release
 
-# A tag, and nothing else, is what *publishes*. The archive a person downloads has
-# to be traceable to one commit that somebody named, which a workflow that also
-# ran on every push could not promise.
+# A tag, and nothing else, is what this runs *for*. The archive a person
+# downloads has to be traceable to one commit that somebody named, which a
+# workflow that also ran on every push could not promise.
 #
-# A manual run is the same job with nothing at the end of it. Several of these
-# steps exist nowhere else, so before this trigger the only way to find out
-# whether the workflow still worked was to tag a release and watch — which is how
-# it stayed broken across three tags. A manual run builds, gates, packs and
-# starts the executable exactly as a tag does, and drafts nothing: the draft step
-# asks for a tag ref, not for an event name.
+# **Nothing this job produces is ever attached to a release, on a tag or
+# otherwise.** It used to be: on a tag this workflow drafted the release and
+# uploaded what it had just built into it — unsigned files, under exactly the
+# names the signed ones carry. On 0.2.1 that draft was one button away from being
+# published as the real thing, and the only thing between it and a stranger
+# downloading an unsigned build was that somebody remembered. A release is signed
+# on the one machine that can sign, so that machine is the only place a release
+# is made from; `docs/RELEASING.md` is the whole of that procedure. What leaves
+# here is a workflow artifact, which nobody can mistake for a download and which
+# is what the signed build is checked against.
+#
+# So both ways in do the same thing. Several of these steps exist nowhere else,
+# so before the manual trigger the only way to find out whether the workflow
+# still worked was to tag a release and watch — which is how it stayed broken
+# across three tags. A manual run builds, gates, packs and starts the executable
+# exactly as a tag does.
 on:
   push:
     tags:
@@ -36,9 +46,11 @@ jobs:
   archive:
     runs-on: windows-2025
     timeout-minutes: 90
-    permissions:
-      # The one thing this job may do beyond reading: file the draft release.
-      contents: write
+    # No `contents: write` anywhere in this file. This job files nothing, uploads
+    # nothing to a release and has no token that could; the only write it is
+    # capable of is the workflow artifact at the end, which needs no permission
+    # beyond the run's own. A workflow that cannot publish cannot publish the
+    # wrong thing.
     steps:
       # A clean checkout, and no build cache anywhere in this job. What is being
       # produced is the artefact people will run; a cache is a set of files from
@@ -70,8 +82,8 @@ jobs:
       # What is being claimed comes from the ref when a tag was pushed, and from
       # the input when a person started the run by hand. A manual run with the
       # input left empty claims nothing, and the version is simply read out of
-      # the manifest so the rest of the job has one; nothing downstream drafts a
-      # release, so there is no claim for it to be wrong about.
+      # the manifest so the rest of the job has one — it names the artifact and
+      # nothing else.
       - name: the tag names the version in the manifest
         shell: pwsh
         env:
@@ -88,7 +100,7 @@ jobs:
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           $tag = $env:CLAIMED_TAG
           if ([string]::IsNullOrWhiteSpace($tag)) {
-            Write-Host "no tag is claimed: this is a rehearsal of $version from ${{ github.ref_name }}, and it will draft nothing"
+            Write-Host "no tag is claimed: this is a rehearsal of $version from ${{ github.ref_name }}"
           } else {
             $accepted = @("v$version", "v$version-preview")
             if ($accepted -notcontains $tag) {
@@ -168,6 +180,14 @@ jobs:
         shell: pwsh
         run: ./scripts/release/smoke.ps1 -Exe target/release/folio.exe -Artifacts target/smoke -TimeoutSeconds 300
 
+      # **What is built here leaves as a workflow artifact and never as a release
+      # asset.** A workflow artifact is a zip inside a run, downloadable by
+      # whoever can already read this page; a release asset is what a stranger
+      # downloads and runs. These files are unsigned and carry exactly the names
+      # the signed ones carry, so where they are is the only thing that tells the
+      # two apart — which is why they stay here. This copy exists to be compared
+      # against the signed build made on the signing machine: the same file list,
+      # the same notices, the same version, from the same commit.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: folio-${{ env.VERSION }}
@@ -181,37 +201,7 @@ jobs:
           path: target/smoke
           if-no-files-found: warn
 
-      # A draft, never a publish. Somebody reads the notes, checks the archive
-      # and presses the button; a release that appears without a person in the
-      # loop is a release nobody has looked at.
-      #
-      # `gh` and not a third-party action: it is on the image, it takes the
-      # job's own token, and it is one fewer piece of code with write access to
-      # this repository's releases.
-      # `github.ref_type`, not the event name: what decides whether anything is
-      # published is whether this run is *of a tag*. A manual run has no tag to
-      # publish under and never reaches this step, however it was started.
-      - name: draft the release
-        if: github.ref_type == 'tag'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $assets = @(
-            Get-ChildItem -LiteralPath target/release-package -File |
-              Sort-Object Name |
-              ForEach-Object { $_.FullName }
-          )
-          if ($assets.Count -eq 0) { throw "there is nothing to publish" }
-          $assets | Write-Host
-          # Built as one list and splatted through the call operator rather than
-          # written out on a line: `gh` is a native command, and an assets array
-          # interpolated into one takes its own view of quoting the day a path
-          # has a space in it.
-          $arguments = @('release', 'create', '${{ github.ref_name }}') + $assets + @(
-            '--draft',
-            '--title', 'Folio ${{ env.VERSION }}',
-            '--notes', 'Windows x64 preview. SHA256SUMS.txt lists every asset, and folio.exe carries the same version in its own resources.'
-          )
-          & gh @arguments
-          if ($LASTEXITCODE -ne 0) { throw "gh release create exited $LASTEXITCODE" }
+      # And that is the end of it. The release itself — the tag's page, its notes
+      # and the five signed assets on it — is made by hand from the machine that
+      # signed them, with `gh release create`. `docs/RELEASING.md` has the
+      # command. Nothing above this line is part of it.
