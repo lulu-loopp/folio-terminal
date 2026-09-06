@@ -8,6 +8,25 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A pane you drag over a web preview can now be dropped there.** The landing
+  outline was drawn correctly over the page, but letting go did nothing: the
+  press router handed every mouse button inside a page to the browser, releases
+  included, and every gesture that spends a release — the drop, the divider, the
+  video scrubber, the preview thumbs and pans, the terminal's own selection — is
+  answered below that line. A hand that is already carrying something no longer
+  counts as a hand hovering a page, so the release reaches the gesture that
+  started it. While you are carrying something the page also stops lighting its
+  own links under the pointer and stops replacing the drag cursor with its own.
+
+- **A window holds as many web previews as it has preview panes.** Opening a
+  second page in one tab used to navigate the first pane and leave the new one
+  standing on its empty placeholder. A page now lands where every other preview
+  lands — the first preview pane that is not locked, or a new one when there is
+  none — so locking a page and opening another puts them side by side, each with
+  its own engine, sharing the one browser profile they always shared. A page that
+  cannot be reached or downloaded shows its card over its own pane rather than
+  over the first page in the tab.
+
 - **A formula on the screen of a program that repaints itself now gets
   typeset.** A full-screen redraw writes every row, so every row arrives as a
   change even when not one byte of it moved, and a display block (`$$ ... $$`)

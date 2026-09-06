@@ -3706,6 +3706,42 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 同 v3 表格，关键修订：**alacritty_terminal 稳态配置 scrollback=0**。vendor seam 包含既有上滚事件钩子，以及窄事务操作：打开 primary native history、查询行数、在 coalesced final viewport 上用 vendor row/WRAPLINE/cursor 重新评估高度、一次性 `take_history(oldest→newest)`、清空并恢复 limit=0，以及只针对唯一未闭合 staging candidate 的 `restore_history(oldest→newest)`；没有可独立呈现的 transcript snapshot/backing 镜像，也不复制 reflow 算法。事务期 vendor grid 是 mutable tail 唯一权威；收割后转录层拥有 staging ID/配额/定稿权，vendor 只保留该候选的原生 row escrow 供下一事务无损交还。升级必须 diff `grid/resize.rs`/history 语义，跑 vendor 181 项与完整生命周期矩阵。
 
+#### 7.14e 一只已经拿着东西的手不是一只悬停的手,而一扇窗里的页有多少块预览窗格就可以有多少张(用户实机报 0.2.2 两桩,2026-09-06,已落地;`crates/bt-app/src/main.rs`)
+
+**两桩同属网页宿主,而它们的真因各自只有一行。** 单子开工时的假设是「WebView2 是子 HWND,指针进了它的矩形 Folio 就收不到 `WM_MOUSEMOVE`/`WM_LBUTTONUP`」——**这条假设当场被本仓的事实推翻**。本产品的引擎走的是 `CreateCoreWebView2CompositionController` + `SetRootVisualTarget`(§7.8 ①),页面根本没有自己的窗口:**每一下鼠标都是 Folio 自己收到之后经 `SendMouseInput` 送进去的**(§7.8 ⑤)。所以既没有 airspace,也不需要 `WS_EX_TRANSPARENT`、`IsVisible` 切换或一层透明捕获窗——那三样东西在这个宿主上各自都是一个没有对应病的药。真正的问题在**我们自己的那座梯子上**。
+
+#### ① 拖放落不下去:页吃掉了那一记松手
+
+**用户截图:从 files 列拖 `README.md`,虚线落点框已经在网页窗格右半画出来了,松手之后什么也没发生。** 取证结论是两半一好一坏:指针那一半从来没坏过——`pointer_moved` 把 `drive_web_pointer` 排在最前面但**不返回**,所以 `drive_drag` 照常重算落点、照常画预览;坏的是**松手**。`mouse_input` 那座梯子上写着一句「落在页里的按压是页的」(网页预览片①),而它对 `ElementState` **一个字都没问**:按下与抬起同走一条路,都交给 `press_web_page` 并当场 `return`。而**所有会花掉一次松手的手势都在这一行下面**:拖放的 `release_drag` 在 `chrome_mouse_input` 里,分隔条、视频进度条、预览的拇指与图片平移、终端自己的选区也都在。于是指针一进页面的矩形,那一记抬起就进了浏览器,手势永远完不了。
+
+**裁决只需要一句话,而且它已经是这扇窗自己的规矩:「一个在飞的手势不是一次悬停」。** `⌄` 的钟、工具提示、布局瞄孔早就按它办事;本片把同一句话说给唯一一块不是本窗画的表面。落点是 `Runtime::web_page_at` —— 它本来就是「哪一张页在这个点下面」的**唯一一扇门**,已经在里面减掉了搜索胶囊、下载卡与 tab 列三块压在页上的表面(§7.7 ②④、next23 #211)。本片只是把第四项减法排在它们前面,而且是唯一一项不看坐标的:`a_gesture_holds_the_pointer()` 为真时,任何点都不在任何一张页上。
+
+- **一处减法而不是四处守卫**,与它下面三项同理:按压、滚轮、悬停、光标问的是同一句话。于是拖放期间一并得到的有:页上的链接不再在被抬着的手下面亮起来(`drive_web_pointer` 当场给每一张页补一记 `(-1,-1)` 的 move——引擎不收 `LEAVE`,这是 §7.8 ⑤ 早写下的唯一说法),以及光标不再是页面的 I 字而是拖放的那只合上的手。**恢复不需要第二个动作**:谓词一假,下一次指针移动就把页面接回去了。
+- **列的是每一种携带,不只是拖放。** 报的是拖 pane,但梯子上分隔条、视频进度条、四种预览拖拽、两种终端缩图拖拽、瞄卡的拇指、以及终端自己的选区都在同一行下面。一枚谓词而不是一手势一条子句,才能让下一个手势不必重新发现这件事。
+- **`MouseRoute::Forward` 故意不在表里。** 那一按是交给 pane 里的程序的、用那块 pane 的格子说的,它的松手由一次格子查找路由——而一块装着页的 pane 没有格子。它也是这里唯一一个「松手不一定清得掉」的闩(落在没有格子的地方就留着,本片之前就如此),而一个会卡住的谓词就是一个能把整扇窗的网页永久关掉的谓词。
+
+**红门两扇(`page_under_a_laden_hand_tests`,读源码文本,理由与 `page_under_the_tab_list_tests` 逐字相同:修的就是「一个问题在哪里被问」)。** ① `the_hand_is_asked_before_any_page_is` —— 谓词在扫描 `self.window.web` 之前被问(变异:删掉这一臂或挪到扫描之后,当场红);② `every_carry_this_window_can_hold_is_named_by_the_one_predicate` —— 把 `WindowRuntime` 与 `TabState` 两层的每一个 `…_drag` 字段从源码里读出来,逐个要求谓词叫得出名字(变异:删任一臂,它报出删的是哪一个)。
+
+#### ② 第二个网页 pane 是空白的:一条「每 tab 单例」把它吃掉了
+
+**用户截图:同一扇窗里开第二个网页预览 pane,中间那块是「点击带虚线下划线的路径,即可在此预览」的空占位,而不是页面。** 不是单例引擎,不是 UDF 锁,也不是摆位:`WindowRuntime::web` 从 F1b′ 起就是按 `LeafId` 做键的 `BTreeMap`,`ENVIRONMENT` 本就是进程内共享的一份,`advance_web_page`、`revive_web_pages`、地板与洞全部早就是复数的。**单例只在一个地方:一张新页落在哪块 pane 上。** `open_web_page_with` 先问 `web_seat_of_tab()`——`plan.md` §0 ②「每 tab 单例」的化身——它返回**本 tab 树序里第一块已经拿着页的 pane**,于是新开的那块永远拿不到地址,而旧的那块被导航。截图里两件事同时成立:中间空白,右边那张正是刚刚被点开的那一份。
+
+**裁决(用户,2026-09-06):一扇窗允许任意多个网页 pane,各自独立 WebView,共享同一 environment/UDF。** 落法是**把那一臂拿掉**,而不是在它旁边再写一条规则:一张页是一个预览缓冲(§7.9),那么它落在哪里就与任何其它东西落在哪里是同一个问题——`preview_landing_surface`,也就是**第一块没上锁的预览 pane**,没有就开一块。读者不必学一条新规矩:锁住一张页,下一张就开在它旁边;不锁,下一张就接替它。一个 tab 拿得下几块预览 pane 就拿得下几张页,每一张一个 controller、一个 visual、一块自己的地板。
+
+- **`web_seat_among` / `web_seat_of_tab` 整个退役**,连同它们那两条钉住单例的红测。接手的是 `page_on_the_landing_pane()`——「落点那块 pane 上的页,如果它拿着一张」——它不回答「本 tab 有没有页」这个已经不再存在的问题。两个读者:地址和弦的分叉(新建空页还是给现有的那张开地址栏),以及那张空白页的回执。
+- **下载卡也跟着变成复数的**——它是单例规则最后一个藏身处。一张卡站在它自己那张页的正文上,两张页同时有卡就是两块 pane 里各一张;`web_sheet_layout` 从一个 `Option` 改成一张表,画、悬停、按压三处各自按它自己那张卡的矩形回答。**Esc 把本 tab 站着的卡全收走**:一次敲键没有指针可以点名,而「敲两下收两张」是一个没人看得见的次序;要一张一张收就按卡上那枚 `×`,它叫得出自己那张页的名字。
+
+**红门四扇(`pages_are_plural_tests`)。** `a_page_lands_on_the_pane_a_file_would`(变异:把复用臂放回去,第二块 pane 永远拿不到页——就是这桩缺陷);`a_pane_with_no_engine_has_one_built_for_it`(两臂:有 controller 的导航、没有的建一个,中间不问窗里已经有几张);`the_blank_pages_receipt_names_the_pane_the_landing_rule_chose`;`every_page_of_this_tab_draws_and_answers_for_its_own_sheet`。
+
+**实机(debug 版,`APPDATA`/`LOCALAPPDATA`/WebView2 profile 全隔离到临时目录,`BT_MOUSE_TRACE`、`BT_PTY_DUMP`、`BT_WEB_TRACE`,不出外网;1500×1000 @200%)。** 探针**从头到尾没有取过前台**:窗口用 `SetWindowPos(HWND_TOPMOST, …, SWP_NOACTIVATE)` 抬起来但不激活,手势用 `PostMessage` 投递(`scripts/dev/post-probe.ps1` 的那条法律),两桩证据各一跑。
+
+- **拖放落座**:一枚终端 pane 的头拖到网页窗格上松手。举着的那一帧里,来源 pane 穿着它的虚线「家」框、网页那一块被落点框整块点亮、幽灵吊在指针下(**落点预览照旧画在 GPU 层,一个字没改**);松手之后两块 pane 当场对调——网页到了左边、终端到了右边。`BT_MOUSE_TRACE` 上那一行是这一桩的全部:`mouse_input state=Released … pointer=930,600` 紧接着 `chrome_mouse_input taken=1 at=release-drag-drop`,也就是**一记落在页面矩形里的抬起,走完了 `release_drag`**。修之前同一跑的同一行读作 `pane_press seat=none`——那记抬起进了浏览器。
+- **两页同屏**:files 列拖到 `demo`、点终端里的第一条路径开出 `PAGE ONE`、按住那块 pane 头上的**锁**、再点第二条路径——`PAGE TWO` 开在**一块新的预览 pane** 里,两张页各自一个 controller、各自一块地板,并排站在同一扇窗的玻璃上(左边那块头上挂着锁)。修之前第二条路径导航的是第一块 pane,新 pane 根本不会出生。
+
+**探针自己撞上的两条,记在这里给下一个人**:① 投递的移动会让 winit 调 `TrackMouseEvent`,而真光标不在窗上,于是 Windows 立刻回一记 `WM_MOUSELEAVE`——**松手到达时 `pointer=none`**,一个手势永远结不掉。把真光标停在窗内(不激活、不注入)整趟手势就正常了。② 一枚**文件行**落在预览 pane 的正中是被布局的动词表拒绝的(不是本片的事),要新开一块 pane 得落在边缘带或空处。
+
+**挂账。** ① §7.14d 的 ⓐ 在本片之后变得容易碰到一点:一扇窗里的两张页现在是寻常局面,而不是两个 tab 才有的局面——静止时两块 pane 永不重叠所以结论不变,FLIP 中途那两百毫秒照旧挂着。② `MouseRoute::Forward` 在没有格子的地方松手会把闩留着——本片之前就如此,本片因为不把它拉进谓词而没有放大它,如实记在这里。
+
 ### 7.17 七件交互裁决，一批落地（2026-08-25 用户裁决 B1/B4/B5/B7/B9/B10 + Cards 改名；`crates/bt-app/src/{main,seats,profiles,restore,shortcuts,i18n,webhost}.rs`、`crates/bt-layout/src/tree.rs`）
 
 **一句话：一个模式换了名字，一个中心投放换了含义,一个退出卡换了形状,两个动词第一次有了自己的门,一枚菜单第一次能指向另一扇窗,而一次换 tab 第一次把菜单也带走。**
