@@ -5812,17 +5812,26 @@ impl DualPlaneSession {
             TerminalDamage::Rows(rows) => rows,
         };
         for row in damaged {
-            let needs_fingerprint = self
-                .live_decorations
-                .values()
-                .any(|record| record.band_start_row <= row && row <= record.band_end_row);
-            let content_fingerprint = needs_fingerprint
-                .then(|| self.terminal.visible_row_fingerprint(row))
-                .flatten();
+            // Damage is "a cell was written", not "a cell changed": a TUI that repaints its whole
+            // screen writes every row every frame, and the vendor reports every one of them. The
+            // row's own fingerprint is what separates the two — it hashes exactly the vendor fields
+            // a capture reads, so two rows it calls equal are equal everywhere this workspace looks
+            // (it is already the key of the capture cache in `TerminalAdapter::visible_row`, and
+            // reused here rather than measured a second way). **Asked of every damaged row, not
+            // only of rows a decoration already covers.** Scoping it to decorated rows made a
+            // reprint free for a block that was already rendered and full price for one that was
+            // not: `last_damage_at` restarted on every no-op frame, so under any application that
+            // repaints faster than `LIVE_MATH_STABLE_INTERVAL` a *pending* block never accumulated
+            // its 200 ms of quiet and stayed at source for as long as the screen was on show, while
+            // a block that happened to be proven during a lull stayed rendered beside it. That is
+            // the "the same Claude Code output typesets in one pane and not in the other" report of
+            // 2026-09-06 (docs/DESIGN.md §4.6); the asymmetry, not the interval, was the bug — a
+            // row rewritten with the bytes it already had did not change, whoever is looking at it.
+            let content_fingerprint = self.terminal.visible_row_fingerprint(row);
             let Some(state) = self.live_rows.get_mut(row as usize) else {
                 continue;
             };
-            if needs_fingerprint && state.content_fingerprint == content_fingerprint {
+            if content_fingerprint.is_some() && state.content_fingerprint == content_fingerprint {
                 continue;
             }
             state.content_fingerprint = content_fingerprint;
@@ -14905,6 +14914,204 @@ mod tests {
                 && !record.span.render_source.contains("narrative")
                 && record.span.render_source.contains(r"\sigma")
         }));
+    }
+
+    /// One repaint of a Claude-Code-shaped frame: a DEC 2026 synchronized update that homes and
+    /// rewrites every row with erase-to-EOL. `body` is the block's single body row and `tick` the
+    /// status row's changing tail, so a caller can hold the whole screen byte-identical or change
+    /// exactly one row of it.
+    fn claude_code_frame(body: &str, tick: u64) -> Vec<u8> {
+        format!(
+            "\x1b[?2026h\x1b[H\x1b[Kprose\r\n\x1b[K$$\r\n\x1b[K{body}\r\n\x1b[K$$\r\n\x1b[Kstatus {tick}\r\n\x1b[K\x1b[?2026l"
+        )
+        .into_bytes()
+    }
+
+    /// Drive `frames` repaints `cadence` apart, running the stability timer exactly as the event
+    /// loop does — only when `live_stability_deadline` says it is due — and completing whatever the
+    /// worker was handed. Returns how many live rasters were accepted.
+    fn drive_repaint_storm(
+        session: &mut DualPlaneSession,
+        start: Instant,
+        cadence: Duration,
+        frames: u64,
+        mut frame: impl FnMut(u64) -> Vec<u8>,
+    ) -> usize {
+        let mut now = start;
+        let mut rendered = 0;
+        for tick in 1..=frames {
+            if let Some(deadline) = session.live_stability_deadline()
+                && deadline <= now + cadence
+            {
+                session.advance_live_stability(deadline);
+                rendered += complete_detected_live_tasks(session, synthetic_raster(40, 18));
+            }
+            now += cadence;
+            session.feed_at(&frame(tick), now).unwrap();
+        }
+        rendered
+    }
+
+    /// §4.6. A full-screen repaint writes every row, so every row arrives as damage — but damage
+    /// is "a cell was written", not "a cell changed". A frame that rewrites the screen with the
+    /// bytes already on it has moved nothing, and must not restart a pending block's 200 ms
+    /// stability clock. Before 2026-09-06 the row fingerprint that says so was asked only of rows an
+    /// existing decoration covered, so any application repainting faster than
+    /// `LIVE_MATH_STABLE_INTERVAL` — Claude Code among them — kept every not-yet-proven block at
+    /// source for as long as it was on screen.
+    ///
+    /// The grid shapes are part of the claim, because "the pane was narrower" was the other
+    /// candidate the report offered: a wide pane, a pane narrow enough that the block's body soft
+    /// wraps across two physical rows, and a short one. The alternate screen applies no height
+    /// limit at all (`sync_live_math_artifacts` is expand-only there), and the scan reads logical
+    /// lines, so none of the three may change the answer — under every cadence and every shape the
+    /// block is a picture.
+    #[test]
+    fn a_byte_identical_reprint_does_not_restart_a_pending_blocks_stability_clock() {
+        // (columns, rows, body) — the third wraps at 24 columns into two physical rows.
+        let shapes = [
+            (100_u32, 24_u32, "x + y"),
+            (40, 6, "x + y"),
+            (24, 8, "x + y + z + w + v + u"),
+        ];
+        for cadence_ms in [16_u64, 50, 100, 199] {
+            for (columns, rows, body) in shapes {
+                let start = Instant::now();
+                let mut session = DualPlaneSession::new(nz(columns), nz(rows));
+                session
+                    .feed_at(
+                        &[b"\x1b[?1049h".as_slice(), &claude_code_frame(body, 0)].concat(),
+                        start,
+                    )
+                    .unwrap();
+                hide_cursor(&mut session, start);
+                let rendered = drive_repaint_storm(
+                    &mut session,
+                    start,
+                    Duration::from_millis(cadence_ms),
+                    40,
+                    |_| claude_code_frame(body, 0),
+                );
+                assert_eq!(
+                    rendered, 1,
+                    "a block on a {columns}x{rows} screen repainted every {cadence_ms}ms never reached the worker"
+                );
+                assert_eq!(session.live_decorations.len(), 1);
+            }
+        }
+    }
+
+    /// The same rule with the one row that genuinely does change on every frame — a status line
+    /// carrying a clock. Only that row's clock may restart; the block's rows are untouched bytes and
+    /// must settle on schedule.
+    #[test]
+    fn a_ticking_status_row_does_not_starve_the_block_above_it() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(6));
+        session
+            .feed_at(
+                &[b"\x1b[?1049h".as_slice(), &claude_code_frame("x + y", 0)].concat(),
+                start,
+            )
+            .unwrap();
+        hide_cursor(&mut session, start);
+        let rendered =
+            drive_repaint_storm(&mut session, start, Duration::from_millis(50), 40, |tick| {
+                claude_code_frame("x + y", tick)
+            });
+        assert_eq!(rendered, 1);
+        assert_eq!(session.live_decorations.len(), 1);
+    }
+
+    /// The reported shape: the same output typesets one block and leaves the next at source. A
+    /// block proven during a lull was immune to the repaint storm (its rows had a decoration, so
+    /// they had a fingerprint), while a block that arrived during the storm never was — so the two
+    /// stood side by side, one a picture and one its own source. Both are pictures now.
+    #[test]
+    fn a_block_arriving_during_a_repaint_storm_typesets_beside_one_proven_before_it() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        let frame = |tick: u64| {
+            let second = if tick >= 8 {
+                "\x1b[Ksecond\r\n\x1b[K$$\r\n\x1b[Ka - b\r\n\x1b[K$$\r\n"
+            } else {
+                "\x1b[K\r\n\x1b[K\r\n\x1b[K\r\n\x1b[K\r\n"
+            };
+            format!(
+                "\x1b[?2026h\x1b[H\x1b[Kprose\r\n\x1b[K$$\r\n\x1b[Kx + y\r\n\x1b[K$$\r\n\x1b[K\r\n{second}\x1b[K\r\n\x1b[Kstatus {tick}\r\n\x1b[K\x1b[?2026l"
+            )
+            .into_bytes()
+        };
+        session
+            .feed_at(&[b"\x1b[?1049h".as_slice(), &frame(0)].concat(), start)
+            .unwrap();
+        hide_cursor(&mut session, start);
+        let rendered =
+            drive_repaint_storm(&mut session, start, Duration::from_millis(50), 60, frame);
+        assert_eq!(rendered, 2, "both blocks must reach the worker");
+        assert_eq!(session.live_decorations.len(), 2);
+        let sources = session
+            .live_decorations
+            .values()
+            .map(|record| record.span.render_source.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            sources.iter().any(|source| source.contains("x + y"))
+                && sources.iter().any(|source| source.contains("a - b")),
+            "one block typeset while the other stayed at source: {sources:?}"
+        );
+    }
+
+    /// The other half of the same rule, which is what keeps it from being a licence to ignore
+    /// output: a reprint that changes a row's characters restarts that row's clock to the
+    /// microsecond, and a reprint that changes only its colours does too — the fingerprint is the
+    /// whole captured row, not its text.
+    #[test]
+    fn a_reprint_that_changes_a_row_restarts_exactly_that_rows_clock() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(6));
+        session
+            .feed_at(
+                &[b"\x1b[?1049h".as_slice(), &claude_code_frame("x + y", 0)].concat(),
+                start,
+            )
+            .unwrap();
+        hide_cursor(&mut session, start);
+        let first = session.live_rows[2].last_damage_at;
+        assert!(first.is_some());
+
+        let quiet = start + Duration::from_millis(50);
+        session
+            .feed_at(&claude_code_frame("x + y", 0), quiet)
+            .unwrap();
+        assert_eq!(
+            session.live_rows[2].last_damage_at, first,
+            "an unchanged body row must keep the clock it already had"
+        );
+
+        let changed = start + Duration::from_millis(100);
+        session
+            .feed_at(&claude_code_frame("x + z", 0), changed)
+            .unwrap();
+        assert_eq!(
+            session.live_rows[2].last_damage_at,
+            Some(changed),
+            "a rewritten body row must restart its clock"
+        );
+
+        // Same characters, different SGR: still a change, because the row a reader sees changed.
+        let recoloured = start + Duration::from_millis(150);
+        session
+            .feed_at(
+                b"\x1b[?2026h\x1b[H\x1b[Kprose\r\n\x1b[K$$\r\n\x1b[K\x1b[31mx + z\x1b[m\r\n\x1b[K$$\r\n\x1b[Kstatus 0\r\n\x1b[K\x1b[?2026l",
+                recoloured,
+            )
+            .unwrap();
+        assert_eq!(
+            session.live_rows[2].last_damage_at,
+            Some(recoloured),
+            "a recoloured row is a changed row"
+        );
     }
 
     #[test]

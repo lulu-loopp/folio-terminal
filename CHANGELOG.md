@@ -4,6 +4,25 @@ All notable changes to Folio are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- **A formula on the screen of a program that repaints itself now gets
+  typeset.** A full-screen redraw writes every row, so every row arrives as a
+  change even when not one byte of it moved, and a display block (`$$ ... $$`)
+  is only typeset once the rows it sits on have been still for a moment. A
+  program that redraws more often than that — Claude Code redraws at a median of
+  106 ms, and the wait is 200 ms — kept restarting the wait, so a block that
+  landed on the screen while the program was busy stayed as its own source text
+  for as long as it was there, sitting beside another block that had been drawn
+  during a lull and was a picture. Both are pictures now: a row rewritten with
+  the bytes it already had counts as unchanged, whether or not there is already
+  a formula on it, and a row that really does change — a character or a colour —
+  still restarts its wait exactly as before. Markdown tables and the pictures
+  drawn under image paths wait on the same stillness, so they come back on those
+  screens too.
+
 ## 0.2.1-preview (unreleased)
 
 Fixes and polish for 0.2.0-preview. The one thing that is new is the one 0.2.0
