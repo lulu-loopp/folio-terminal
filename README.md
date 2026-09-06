@@ -15,7 +15,7 @@ files preview beside the prompt, and an agent that is waiting for you says so.
 [中文说明](README.zh-CN.md) · [Shortcuts](docs/shortcuts.md) ·
 [Security](SECURITY.md) · [Changes](CHANGELOG.md)
 
-> **Preview.** 0.2.1 is a preview build, signed by Weiyi Shi — see
+> **Preview.** 0.2.2 is a preview build, signed by Weiyi Shi — see
 > [SmartScreen](#smartscreen) below.
 
 ---
@@ -97,6 +97,9 @@ application.
   too, once the file is confirmed to exist.
 - A web address follows the same rule: a click opens it in the preview pane,
   `Ctrl`+click hands it to the browser.
+- A window holds as many pages as it has preview panes. A second page opens on a
+  pane of its own instead of navigating the first, so a page can be locked and
+  another opened beside it.
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
@@ -135,6 +138,10 @@ be seen at once.
 - `Alt+Shift+-` splits a pane across, `Alt+Shift+=` splits it down. A tab or a
   single pane can be dragged out into a window of its own, and the panes it did
   not touch keep their widths.
+- A pane dropped on the join between two tabs becomes a tab *between* them, with
+  a line drawn across the join to say where it will land; dropped on a tab
+  itself it joins that tab's layout. The horizontal strip, the vertical rail and
+  the card column all read the join the same way.
 - `Ctrl+Shift+Z` turns the tab strip into a column of cards, one per tab, each
   drawing that tab's own panes in the layout they have.
 - `Ctrl+Shift+G` turns the files column into a Git panel: branch, working tree,
@@ -255,7 +262,7 @@ command with no arguments, and `--cwd` is how Folio is told where to start.
 
 ## Download
 
-Take `folio-0.2.1-windows-x64.zip` from the releases page, unpack it wherever you
+Take `folio-0.2.2-windows-x64.zip` from the releases page, unpack it wherever you
 keep programs, and run `folio.exe`. There is no installer, and nothing is written
 outside that folder until you run it. `SHA256SUMS.txt` is the hash of what you
 downloaded. Needs **Windows 10 1809 or newer, or Windows 11, 64-bit**.
@@ -291,6 +298,20 @@ to put **Open in Folio** in Explorer's right-click menu, whether to install the
 PowerShell integration, and one row for each of Claude Code, Codex and Copilot CLI
 that this machine actually has. Nothing about theme, font, size, language or
 layout — those are one click away and cost nothing while they are wrong.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="docs/screenshots/first-run-dark.png">
+  <img src="docs/screenshots/first-run-light.png" width="100%"
+       alt="The First things card in the middle of a window that has just
+       started. Check for a new version once a day is on; Open any folder in
+       Folio from Explorer and Install the PowerShell integration are off, each
+       with a sentence under it saying what it does. Under a heading reading
+       AGENTS FOUND ON THIS MACHINE there is a row for Claude Code and a row for
+       Codex, both off, each naming the file its switch writes into. At the foot,
+       a line saying every row here is also a row in Settings, then Open
+       settings, Not now and Done. Behind the card, one tab and a prompt.">
+</picture>
 
 **Every row on that card is also a row in Settings**, so nothing on it is a last
 chance. **Done** applies the rows that are on; **Not now** and `Esc` close it with

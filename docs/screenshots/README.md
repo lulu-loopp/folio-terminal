@@ -85,6 +85,8 @@ exactly the picture JPEG is worst at.
 | `quake-dark.png` | The same, dark. |
 | `palette-light.png` | The palette (`Ctrl+Shift+P`) open over a three-column window, with all five of its sections carrying rows: actions, panes and tabs, commands, files and settings. Five is the point of the picture, so a shot missing one of them is the wrong shot. |
 | `palette-dark.png` | The same, dark. |
+| `first-run-light.png` | The **First things** card standing over a window that has just started: one tab, one shell, a prompt and nothing run yet, which is what a first launch is. The card is photographed as it comes up and nothing on it is pressed — the update check on and every other row off, the agent heading over the agents this machine really has. |
+| `first-run-dark.png` | The same, dark. |
 | `context-menu.png` | The first page of the Windows 11 right-click menu on a folder, with `Open in Folio` on it, above `Show more options` and not under it. Explorer's window and nothing else — no desktop, no taskbar, no evaluation watermark. Taken on the verification VM; see the two notes above. |
 
 ## What is committed
@@ -113,18 +115,20 @@ can be told from one that was retaken on purpose.
 | `quake-dark.png` | 1920 x 1200 | 2026-09-05 | `9a1a2f4025da3797a919d387566fd91fe7bc7c37ad83ccb5ea99432e73053307` |
 | `palette-light.png` | 3200 x 2000 | 2026-09-05 | `a79617f8ec4bde9d5f1a4778c44be21f06a973f8015b13ac7aac23f94e9b98d0` |
 | `palette-dark.png` | 3200 x 2000 | 2026-09-05 | `61eafe6499d825d3ab46f125b6049b7482c42575dbe9c89c51d8c2aa5ed13e6a` |
+| `first-run-light.png` | 3200 x 2000 | 2026-09-06 | `496d18db0b1579165c35890cefc82beca4589bdf3164e914dc53ac0fd54a224d` |
+| `first-run-dark.png` | 3200 x 2000 | 2026-09-06 | `957736afb48431f44185e75fb99b8a95b22a701c9d75a67f8ce5ba503414116b` |
 | `context-menu.png` | 786 x 593 | 2026-09-05 | `e7e82a4ffe3a94dc1d52f8f38cabe48f61e1a39d9d2cc1c5dc17f5e5ed662faf` |
 
-The eighteen the two READMEs point at come to 3.26 MiB after `oxipng`, and
+The twenty the two READMEs point at come to 3.52 MiB after `oxipng`, and
 `context-menu.png` adds 54 KiB to that; `docs/plans/release/large-files.md`
 carries the number beside everything else a clone has to fetch.
 
 ## What was in front of the camera
 
-The eighteen the two READMEs point at were taken from `target\release\folio.exe`
-against a throwaway project — `C:\Projects\aurora`, a small library with a
-five-commit history, a README with a table and a display formula in it, a PDF
-and a page —
+Eighteen of the twenty the two READMEs point at were taken from
+`target\release\folio.exe` against a throwaway project — `C:\Projects\aurora`, a
+small library with a five-commit history, a README with a table and a display
+formula in it, a PDF and a page —
 and through an `%APPDATA%` and `%LOCALAPPDATA%` of their own, so the machine's
 real settings, session and profiles were neither read nor written. Each pane is
 a shell profile whose command line runs one command and then leaves an ordinary
@@ -184,6 +188,29 @@ second one to 100% for the length of the run and putting it back afterwards.
 Photographing the scale a display already has is both truer and one moving part
 fewer, and the file that comes out has a pixel per pixel to give on the screens
 a README is actually read on.
+
+**`first-run-*` is the pair taken from the packed archive rather than from
+`target\release\folio.exe`**, and the reason is on the card itself: the Explorer
+row is worded one way where `folio.msix` is standing beside the executable and
+another way where it is not, and the wording a reader gets is the first one. So
+the zip that was just built is unpacked and photographed, which is the same
+arrangement they will have. It carries the other two rules the rest carry — an
+`%APPDATA%` and `%LOCALAPPDATA%` of its own, and `-NoProfile` on the shell
+behind the card, because this machine's own PowerShell profile prints this
+machine's own directories.
+
+The card appears once per machine and never again, so it is raised with
+`BT_FIRST_RUN_CARD` — the gate `docs/BT-ENVIRONMENT.md` describes, which
+overrides the appearance test and nothing else. **Nothing on the card is
+pressed**: the window is closed rather than answered, so what is in the picture
+is the card as it arrives — the update check on, every other row off, and the
+agent heading standing over the agents this machine really has.
+
+The top two rows of a Folio window are its own alpha edge and show what is
+behind it, which is true of every shot here — theirs are the desktop. This one
+was taken with another window filling the panel, so it is parked over a band of
+that window which is one flat colour all the way across, and the two rows are
+that colour rather than a piece of somebody else's tab.
 
 ## Alt text
 
