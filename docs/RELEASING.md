@@ -78,6 +78,14 @@ with nothing at it. It stays **beside the zip** because that copy is the one
 against the file they were handed. Both copies are the same bytes — one file,
 packed once, signed once, then copied into the archive.
 
+`scripts/release/smoke-tests.ps1` is `smoke.ps1`'s own self-test, and it is
+about the one part of that script a green release does not exercise: the paths
+it is handed. It builds nothing, signs nothing and starts nothing — each case
+runs `smoke.ps1` in a child shell that was started in the repository and then
+walked into a scratch folder, which is the one arrangement under which a
+relative path has two answers, and reads the path the refusal names. Run it
+after changing how `smoke.ps1` reads its arguments.
+
 Everything below is about the one step that is not in that workflow, because it
 needs a person: signing.
 
@@ -183,6 +191,17 @@ receives one — the archive holds both files in one folder. Straight out of a
 build they are two directories apart, `target/release` and
 `target/release-package`, so the path is given rather than a file copied to make
 a default true.
+
+A relative path there is read from the directory the shell is standing in, and
+so are `-Exe` and `-Artifacts`: all three are made absolute before anything
+reads them. They have to be, because a relative path has two answers on Windows
+— PowerShell resolves one against `$PWD` and .NET resolves it against the
+process's own directory, which `Set-Location` never moves — and a shell that
+walked into a second checkout gets one answer from the check that the file is
+there and the other from the reader two hundred lines later. That is how the
+line above failed in a worktree on the 0.2.1 run, naming a folder nobody typed.
+A `-Msix` naming a file that is not there is now refused at the door rather than
+carried on.
 
 `-ExpectSigned` makes `smoke.ps1` refuse an executable that is not signed, is
 signed by somebody else, or is signed without a time stamp, and refuse a package
