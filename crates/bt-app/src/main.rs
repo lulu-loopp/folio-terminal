@@ -2399,8 +2399,9 @@ struct NoticeStrip {
 /// **Where in the strip the tab a preview surface belongs to is standing** —
 /// found by the tab's own name and by nothing else (§7.12 ⓑ).
 ///
-/// A free function and not a method, for [`web_seat_among`]'s reason: what is
-/// under test is the *lookup*, and a `Runtime` is a surface, a compositor and
+/// A free function and not a method for the reason every lookup in this file
+/// that is pinned by value is one: what is under test is the *lookup*, and a
+/// `Runtime` is a surface, a compositor and
 /// four Win32 bridges. It is one line, and being one line is the finding — the
 /// line it replaced walked the window asking each tab's tree whether it held a
 /// seat with this number, which answered "yes" from any tab that happened to
@@ -9052,14 +9053,20 @@ struct WindowRuntime {
     /// caption with `Open in default app`: one stored width would size every
     /// button to whichever card was drawn last.
     preview_card_verbs: BTreeMap<SeatId, seats::PreviewCardButton>,
-    /// **The download sheet's boxes as they were last drawn** (§7.7 ④), and
-    /// which seat they belong to.
+    /// **The download sheets' boxes as they were last drawn** (§7.7 ④), each
+    /// beside the seat it belongs to.
     ///
     /// Stored for the search capsule's own reason: the press router is `&self`
     /// and cannot lay anything out, so "the button you can press is the button
     /// you can see" has to be true by one number rather than by two functions
     /// agreeing.
-    web_sheet_layout: Option<(SeatId, websheet::SheetLayout)>,
+    ///
+    /// **A list and not one box, since a tab may hold several pages** (user
+    /// ruling 2026-09-06). A sheet stands over the body of the page it came from
+    /// and nowhere else, so two pages showing one at once are two cards in two
+    /// panes; a singleton here would have drawn the first page's card and left
+    /// the second's unpressable — the singleton page rule's last hiding place.
+    web_sheet_layouts: Vec<(SeatId, websheet::SheetLayout)>,
     /// How wide one character of the mini transcript's face is drawn, in physical
     /// pixels (§7.1.6b′ F2).
     ///
@@ -9267,10 +9274,11 @@ struct WindowRuntime {
     ///
     /// **Keyed by the pane and not by the tab, because the pane is what owns the
     /// engine**: a controller renders into one visual at one rectangle, and a
-    /// window with a page on two tabs has two of both. The singleton rule the
-    /// plan states (§0 ②「每 tab 单例」) is one level up and is a rule about where
-    /// a *new* page lands — see [`Runtime::web_seat_of_tab`] — not about what
-    /// this window can hold.
+    /// window with a page on two panes has two of both. Where a *new* page lands
+    /// is one level up and is the preview landing rule — see
+    /// [`Runtime::page_on_the_landing_pane`] — not a limit on what this window
+    /// can hold. The plan's per-tab singleton (§0 ②「每 tab 单例」) was retired by
+    /// the user ruling of 2026-09-06; this map never held it.
     ///
     /// **A [`LeafId`] and not a bare `SeatId`, since F1b′.** A seat number is
     /// unique only inside its tab (`seats::Seats::lone_seat` starts every
@@ -11781,8 +11789,8 @@ mod tab_identity_tests {
     }
 
     /// The same for a `fn` in **column zero** — a free function, which is what a
-    /// lookup written to be pinned by value tends to be (`web_seat_among`,
-    /// `preview_tab_index_among`). It is a second reader rather than a parameter
+    /// lookup written to be pinned by value tends to be
+    /// (`preview_tab_index_among`). It is a second reader rather than a parameter
     /// on the first because the two are closed by different `}`s, and a reader
     /// that guessed which would be a pin that reads the wrong text.
     fn top_level_fn_body(name: &str) -> &'static str {
@@ -27132,36 +27140,6 @@ fn switcher_rows(
         .collect()
 }
 
-/// **The seat a page opens on in this tab** — the singleton rule (`plan.md` §0
-/// ②「每 tab 单例」).
-///
-/// The tab's own preview seats are what is walked, and the window's hosted set is
-/// only asked *about* them: a window holds a page per pane and its panes span
-/// every tab, so a rule written against that map alone would let a page open on
-/// tab 2 be what tab 1 navigates.
-///
-/// **`tab` is what makes that sentence true rather than nearly true (F1b′).**
-/// The walk was always over one tab's seats, but the set it asked was keyed by
-/// bare seat numbers, and a seat number restarts at one in every tab
-/// (`seats::Seats::lone_seat`). So the guard passed a tab's own numbers into a
-/// window-wide set and got another tab's page back: opening one `.html` into a
-/// tab of its own twice made the second tab's address bar navigate the first
-/// tab's engine, with no move and no second window involved.
-///
-/// `None` means this tab has no page yet, and the caller lands one the ordinary
-/// way — on `preview_landing_surface`, which is the same address rule a file
-/// opening obeys.
-fn web_seat_among(
-    tab: TabId,
-    preview_seats: &[SeatId],
-    hosted: &BTreeSet<LeafId>,
-) -> Option<SeatId> {
-    preview_seats
-        .iter()
-        .copied()
-        .find(|seat| hosted.contains(&LeafId { tab, seat: *seat }))
-}
-
 /// **Where a switcher row's target actually goes**, or `None` for one this
 /// window will not go to (`plan.md` §3「钉不是授权」).
 ///
@@ -31198,7 +31176,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         table_paints: HashMap::new(),
         preview_button_width: 0.0,
         preview_card_verbs: BTreeMap::new(),
-        web_sheet_layout: None,
+        web_sheet_layouts: Vec::new(),
         preview_opened_at: None,
         pending_frames: LatestFrameSlot::default(),
         modifiers: ModifiersState::default(),
@@ -37824,65 +37802,72 @@ impl Runtime<'_> {
     /// reason: the press router is `&self` and cannot lay anything out, so the
     /// box you can press has to be the box that was drawn.
     fn web_sheet_layers(&mut self) -> Vec<marks::OverlayLayer> {
-        self.window.web_sheet_layout = None;
-        // **This tab's page and no other** (`plan.md` §0 ②「每 tab 单例」). The
-        // map spans the window, and a sheet is drawn over the page it came from:
-        // a page open on a tab that is not on the glass has no body rectangle
-        // here to stand on.
-        let Some((seat, say, detail, verb)) = self
-            .web_seat_of_tab()
-            .and_then(|seat| self.web_on(seat).map(|web| (seat, web)))
-            .and_then(|(seat, web)| web.fault().map(|fault| (seat, fault)))
-            .filter(|(_, fault)| fault.stands_over_the_page())
-            .map(|(seat, fault)| {
-                (
-                    seat,
-                    fault.say(),
-                    fault.detail().unwrap_or_default().to_owned(),
-                    fault.verb_text().text().to_owned(),
-                )
+        self.window.web_sheet_layouts.clear();
+        // **Every page of *this tab* that is showing one** (user ruling
+        // 2026-09-06). A sheet is drawn over the body of the page it came from,
+        // so the walk is this tab's own preview seats: the window's map spans
+        // every tab, and a page on a tab that is not on the glass has no body
+        // rectangle here to stand on. Two pages side by side are two cards, each
+        // in its own pane — the same sentence the pane heads, the switchers and
+        // the search capsules already say once per seat.
+        let standing: Vec<(SeatId, String, String, String)> = self
+            .seats
+            .preview_seats()
+            .into_iter()
+            .filter_map(|seat| {
+                let fault = self.web_on(seat)?.fault()?;
+                fault.stands_over_the_page().then(|| {
+                    (
+                        seat,
+                        fault.say(),
+                        fault.detail().unwrap_or_default().to_owned(),
+                        fault.verb_text().text().to_owned(),
+                    )
+                })
             })
-        else {
-            return Vec::new();
-        };
+            .collect();
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        let Some(body) = seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)
-        else {
-            return Vec::new();
-        };
-        let width = self.window.renderer.measure_chrome_text(
-            &mut self.app.gpu,
-            &verb,
-            websheet::verb_font_px(scale),
-        );
-        // **The sentence is wrapped before the card is laid out**, because how
-        // many lines it takes is what decides how tall the card is. The wrap is
-        // `restore::wrap` — the one in this window that knows a Latin word may
-        // not be broken and a run of ideographs may — because a second one would
-        // be a second answer about where a line ends.
-        let say_font = websheet::say_font_px(scale);
-        let say_width = websheet::say_width(body, scale);
-        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-        let say_lines = restore::wrap(&say, say_width, |text| {
-            renderer.measure_chrome_text(gpu, text, say_font)
-        });
-        let layout = websheet::lay_out(body, width, say_lines.len(), !detail.is_empty(), scale);
         let palette = bt_render::chrome_palette();
-        let layer = websheet::build(
-            &layout,
-            websheet::SheetContent {
-                say: &say_lines,
-                detail: &detail,
-                verb: &verb,
-                verb_hovered: self.window.seat_pointer.hover
-                    == Some(seats::ChromeTarget::PreviewFaultVerb(seat)),
-                close_hovered: self.window.seat_pointer.hover
-                    == Some(seats::ChromeTarget::PreviewSheetClose(seat)),
-            },
-            &palette,
-        );
-        self.window.web_sheet_layout = Some((seat, layout));
-        vec![layer]
+        let mut layers = Vec::new();
+        for (seat, say, detail, verb) in standing {
+            let Some(body) =
+                seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)
+            else {
+                continue;
+            };
+            let width = self.window.renderer.measure_chrome_text(
+                &mut self.app.gpu,
+                &verb,
+                websheet::verb_font_px(scale),
+            );
+            // **The sentence is wrapped before the card is laid out**, because
+            // how many lines it takes is what decides how tall the card is. The
+            // wrap is `restore::wrap` — the one in this window that knows a Latin
+            // word may not be broken and a run of ideographs may — because a
+            // second one would be a second answer about where a line ends.
+            let say_font = websheet::say_font_px(scale);
+            let say_width = websheet::say_width(body, scale);
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            let say_lines = restore::wrap(&say, say_width, |text| {
+                renderer.measure_chrome_text(gpu, text, say_font)
+            });
+            let layout = websheet::lay_out(body, width, say_lines.len(), !detail.is_empty(), scale);
+            layers.push(websheet::build(
+                &layout,
+                websheet::SheetContent {
+                    say: &say_lines,
+                    detail: &detail,
+                    verb: &verb,
+                    verb_hovered: self.window.seat_pointer.hover
+                        == Some(seats::ChromeTarget::PreviewFaultVerb(seat)),
+                    close_hovered: self.window.seat_pointer.hover
+                        == Some(seats::ChromeTarget::PreviewSheetClose(seat)),
+                },
+                &palette,
+            ));
+            self.window.web_sheet_layouts.push((seat, layout));
+        }
+        layers
     }
 
     /// Show a settled tip, and keep paying the fade's frames until it lands.
@@ -76151,9 +76136,9 @@ impl Runtime<'_> {
         // two doors onto one press.
         let hover = self
             .window
-            .web_sheet_layout
-            .as_ref()
-            .and_then(|(seat, layout)| {
+            .web_sheet_layouts
+            .iter()
+            .find_map(|(seat, layout)| {
                 websheet::hit(layout, *seat, position.x as f32, position.y as f32)
             })
             .or_else(|| self.chrome_target_at(position));
@@ -86052,24 +86037,31 @@ impl Runtime<'_> {
         self.open_web_page(url)
     }
 
-    /// **The web seat this tab already has, if it has one** — the singleton rule
-    /// (`plan.md` §0 ②「每 tab 单例」).
+    /// **The page the landing rule would reuse, if that pane holds one** (user
+    /// ruling 2026-09-06: 一扇窗允许任意多个网页 pane).
     ///
-    /// One page per tab, and the reuse target is that page's seat: opening a
-    /// second address in a tab that already holds one is a *navigation on the
-    /// seat you are looking at*, not a second pane and not a second controller.
-    /// The plan's own words for what the alternative would be are one line up
-    /// from that clause: "不做预览内多标签(多页靠无终端 tab 片)".
+    /// The singleton rule this replaces (`plan.md` §0 ②「每 tab 单例」) said the
+    /// reuse target was *whichever* pane of this tab held a page, first in tree
+    /// order. That is what made a second page impossible: a reader who split a
+    /// second preview pane and then clicked a path got the **first** pane
+    /// navigated and the new pane left standing on its empty placeholder — the
+    /// screenshot in the report, and the sentence under it ("一个窗口只能有一个
+    /// 网页预览 pane 吗").
     ///
-    /// Asked of the tab's own tree and not of `self.window.web`, because that map
-    /// spans every tab in the window: a page open on tab 2 must not be what tab 1
-    /// navigates when you press a switcher row.
-    fn web_seat_of_tab(&self) -> Option<SeatId> {
-        web_seat_among(
-            self.id,
-            &self.seats.preview_seats(),
-            &self.window.web.keys().copied().collect(),
-        )
+    /// So a page lands where anything else a reader opens lands: on
+    /// [`seats::Seats::landing_preview`], the first preview pane that is not
+    /// locked. Every consequence the reader already knows follows from a rule
+    /// they already know — lock a page and the next one opens beside it, leave it
+    /// unlocked and the next one replaces it — and a tab may hold as many pages
+    /// as it holds preview panes, each with its own controller on its own visual.
+    ///
+    /// `None` when the landing pane holds no page, which is what makes the two
+    /// arms of the verbs below fork: navigate the page that is there, or make
+    /// one.
+    fn page_on_the_landing_pane(&self) -> Option<SeatId> {
+        self.seats
+            .landing_preview()
+            .filter(|seat| self.seat_holds_a_page(*seat))
     }
 
     /// **Go to a page in this tab** — the one door, whatever asked.
@@ -86091,16 +86083,17 @@ impl Runtime<'_> {
     /// its call site and has nothing further to declare, while a controlled file
     /// entry carries the one `file:` URL it minted all the way to the engine.
     fn open_web_page_with(&mut self, url: &str, minted: webnav::Mint) -> Result<()> {
-        let seat = match self.web_seat_of_tab() {
-            Some(seat) => seat,
-            None => {
-                let Some(PreviewSurface::Seat(leaf)) = self.preview_landing_surface() else {
-                    eprintln!("BT_WEB no preview seat could be opened for {url}");
-                    return Ok(());
-                };
-                leaf.seat
-            }
+        // **The landing rule and nothing else** (user ruling 2026-09-06). A page
+        // is a preview buffer (§7.9), so where a new one goes is the question
+        // `preview_landing_surface` already answers for every other kind: the
+        // first unlocked preview pane, or a freshly split one when this tab has
+        // none. The arm that used to stand here — "whichever pane of this tab
+        // already holds a page" — is what made a second page unreachable.
+        let Some(PreviewSurface::Seat(leaf)) = self.preview_landing_surface() else {
+            eprintln!("BT_WEB no preview seat could be opened for {url}");
+            return Ok(());
         };
+        let seat = leaf.seat;
         self.open_web_page_on(self.leaf_here(seat), url, minted)?;
         self.focus_seat(seat)
     }
@@ -86424,7 +86417,7 @@ impl Runtime<'_> {
         // below is asked of the tab as it stands rather than as it stood: a
         // press that takes back a blank page has to find the tab without one.
         self.finish_rename(RenameExit::Blur)?;
-        match self.web_seat_of_tab() {
+        match self.page_on_the_landing_pane() {
             Some(seat) => {
                 let leaf = self.leaf_here(seat);
                 self.open_web_address_on(leaf)
@@ -86459,11 +86452,12 @@ impl Runtime<'_> {
         });
         let back = blank_page_return(landing.is_some(), was_showing);
         self.open_minted_page(webnav::Mint::Blank)?;
-        // The seat the landing rule chose, asked of the tab rather than
-        // remembered from above: `open_minted_page` is allowed to decline (no
-        // pane could be opened), and a receipt for a page that was never made
-        // would be a door with nothing behind it.
-        let Some(seat) = self.web_seat_of_tab() else {
+        // The seat the landing rule chose, asked again rather than remembered
+        // from above: `open_minted_page` is allowed to decline (no pane could be
+        // opened), and a receipt for a page that was never made would be a door
+        // with nothing behind it. Asked *again* and not reused from `landing`,
+        // because `landing` is `None` in exactly the case a pane was minted.
+        let Some(seat) = self.page_on_the_landing_pane() else {
             return Ok(());
         };
         let leaf = self.leaf_here(seat);
@@ -86654,16 +86648,23 @@ impl Runtime<'_> {
 
     /// A press anywhere on the download sheet. Returns whether it landed there.
     fn press_web_sheet(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let Some((seat, layout)) = self.window.web_sheet_layout.clone() else {
+        let (x, y) = (position.x as f32, position.y as f32);
+        // **The card the press landed in, and no other.** With a card per page
+        // the scrim is a card's own and stops at that page's body, so a press is
+        // asked of each in the order they were drawn and spent by the first that
+        // covers it.
+        let Some((seat, layout)) = self
+            .window
+            .web_sheet_layouts
+            .iter()
+            .find(|(_, layout)| websheet::covers(layout, x, y))
+            .cloned()
+        else {
             return Ok(false);
         };
-        let (x, y) = (position.x as f32, position.y as f32);
-        if !websheet::covers(&layout, x, y) {
-            return Ok(false);
-        }
         match websheet::hit(&layout, seat, x, y) {
             Some(seats::ChromeTarget::PreviewSheetClose(_)) => {
-                self.dismiss_web_sheet()?;
+                self.dismiss_web_sheet_on(seat)?;
             }
             Some(_) => self.run_web_fault_verb(seat)?,
             None => {}
@@ -86671,17 +86672,41 @@ impl Runtime<'_> {
         Ok(true)
     }
 
-    /// Take the download sheet away. The one card with an Escape, and the
+    /// Take one page's download sheet away — the `×` on the card itself, which
+    /// names the page it is standing on.
+    fn dismiss_web_sheet_on(&mut self, seat: SeatId) -> Result<bool> {
+        let dismissed = self
+            .web_on_mut(seat)
+            .is_some_and(webhost::WebSeat::dismiss_sheet);
+        if dismissed {
+            self.refresh_chrome();
+            self.present_chrome_change()?;
+        }
+        Ok(dismissed)
+    }
+
+    /// Take the download sheets away. The one card with an Escape, and the
     /// reason is that there is a page under it to come back to.
     ///
-    /// Asked of this tab's page, on `web_sheet_layers`' own argument: the sheet
-    /// that an Escape can be about is the sheet that is on the glass, and the
-    /// window's map spans tabs nobody is looking at.
+    /// Asked of this tab's pages, on `web_sheet_layers`' own argument: the sheet
+    /// an Escape can be about is a sheet that is on the glass, and the window's
+    /// map spans tabs nobody is looking at.
+    ///
+    /// **Every card standing in this tab, and not one of them** (user ruling
+    /// 2026-09-06). Escape has no pointer to name a card with, and there is no
+    /// keyboard focus on a card either — so the key means what it means to every
+    /// other layer of this window: take away what is standing in front of the
+    /// thing I am looking at. Pressing it twice to clear two cards would be a
+    /// hidden order nobody can see; the `×` on each card is the way to spend
+    /// them one at a time, and it names its own page.
     fn dismiss_web_sheet(&mut self) -> Result<bool> {
-        let dismissed = self
-            .web_seat_of_tab()
-            .and_then(|seat| self.web_on_mut(seat))
-            .is_some_and(webhost::WebSeat::dismiss_sheet);
+        let seats = self.seats.preview_seats();
+        let mut dismissed = false;
+        for seat in seats {
+            dismissed |= self
+                .web_on_mut(seat)
+                .is_some_and(webhost::WebSeat::dismiss_sheet);
+        }
         if dismissed {
             self.refresh_chrome();
             self.present_chrome_change()?;
@@ -86813,14 +86838,37 @@ impl Runtime<'_> {
     /// the rail covers; a page is the same case with a different painter.
     fn web_page_at(&self, position: PhysicalPosition<f64>) -> Option<LeafId> {
         let (x, y) = (position.x as f32, position.y as f32);
+        // **And a hand that is already carrying something is not a hand the page
+        // can have** (user report, 0.2.2: a pane dragged over a page could not be
+        // let go of).
+        //
+        // First of the subtractions, because it does not depend on where the
+        // pointer is at all. A gesture of this window's is a press that has not
+        // finished: the release that ends it is owed to whatever the press began
+        // on, and every one of those endings — the drop, the divider, the
+        // scrubber, the thumb, the selection — is answered *below* the ladder's
+        // page arm in [`Self::mouse_input`]. So a page that answered here
+        // swallowed the release and the gesture stayed latched to the hand: the
+        // landing was drawn, the pane never moved, and the next pointer move went
+        // on dragging something nobody was holding any more.
+        //
+        // It is one subtraction and not a guard at each of the four askers for
+        // the reason the three below it are one: the press, the wheel, the hover
+        // and the cursor all ask this same question, and a page that is not under
+        // the hand must not be under any of them either — a link lighting up
+        // beneath a carried pane, or the page's own I-beam standing in for the
+        // closed hand, are the same answer read on a different instrument.
+        if self.a_gesture_holds_the_pointer() {
+            return None;
+        }
         if self.tab_list_target_at(position).is_some() {
             return None;
         }
         if self
             .window
-            .web_sheet_layout
-            .as_ref()
-            .is_some_and(|(_, layout)| websheet::covers(layout, x, y))
+            .web_sheet_layouts
+            .iter()
+            .any(|(_, layout)| websheet::covers(layout, x, y))
         {
             return None;
         }
@@ -86845,6 +86893,56 @@ impl Runtime<'_> {
     /// Whether a point is inside any page this frame.
     fn point_is_on_the_web_page(&self, position: PhysicalPosition<f64>) -> bool {
         self.web_page_at(position).is_some()
+    }
+
+    /// **Whether a gesture of this window's is holding the pointer** — the one
+    /// fact [`Self::web_page_at`] subtracts before it looks at any rectangle.
+    ///
+    /// "A gesture in flight is not a hover" is already this window's rule for
+    /// the chevron clocks, the tooltip and the layout peek; this is the same
+    /// sentence said to the one surface this window does not paint. A hosted
+    /// page is a document inside a pane, and a document answers the pointer when
+    /// the pointer is *over* it — but a pointer with a press still open on it
+    /// belongs to whatever that press began on, wherever it has since travelled.
+    ///
+    /// **Every carry, and not only the drop.** The reported defect was a pane
+    /// carried over a page, but the ladder in [`Self::mouse_input`] answers the
+    /// divider, the video scrubber, the preview thumbs, the picture pan and the
+    /// terminal's own selection *below* its page arm too, so all of them ended
+    /// the same way — a release the page ate and a gesture that never finished.
+    /// One predicate rather than one clause per gesture is what stops the next
+    /// one being written without this line.
+    ///
+    /// **`MouseRoute::Forward` is deliberately not here.** That press was handed
+    /// to the program in the pane, spoken in that pane's cells, and its release
+    /// is routed by a cell lookup — a pane holding a page has no cells, so that
+    /// gesture cannot end on one however this answers. Its latch is also the one
+    /// state here that a release does not always clear (a release with no cell
+    /// under it leaves it standing, which it already did before this line
+    /// existed), and a predicate that could stick is a predicate that could
+    /// switch every page in the window off for good.
+    fn a_gesture_holds_the_pointer(&self) -> bool {
+        self.window.drag.is_some()
+            || self.window.divider_drag.is_some()
+            || self.window.float_drag.is_some()
+            || self.window.video_bar_drag.is_some()
+            || self.window.settings_slider_drag.is_some()
+            || self.window.settings_menu_bar_drag.is_some()
+            || self.preview_block_drag.is_some()
+            || self.preview_body_drag.is_some()
+            || self.preview_text_drag.is_some()
+            || self.preview_image_drag.is_some()
+            || self.terminal_thumb_drag.is_some()
+            || self.terminal_column_drag.is_some()
+            || self
+                .window
+                .file_peek
+                .as_ref()
+                .is_some_and(|peek| peek.thumb_grab.is_some())
+            || matches!(
+                self.window.mouse_route,
+                Some(MouseRoute::Local(_) | MouseRoute::MathBlock)
+            )
     }
 
     /// Forward one mouse event to a page, in the window's own coordinates.
@@ -89923,6 +90021,215 @@ mod focus_column_notch_tests {
             writes,
             vec![format!("leaf.{needle}aimed;")],
             "a card's window is aimed from one place and no other"
+        );
+    }
+}
+
+/// **A window holds as many pages as it holds preview panes** (user ruling
+/// 2026-09-06: 一扇窗允许任意多个网页 pane,各自独立 WebView,共享同一
+/// environment/UDF).
+///
+/// The report: a second web preview pane in one tab came up as the empty
+/// placeholder ("点击带虚线下划线的路径,即可在此预览") while the *first* pane
+/// navigated. The cause was one arm — a page's landing door asked whether any
+/// pane of this tab already held a page and reused it — so what these pin is
+/// that the door has no such arm any more and that the map underneath it was
+/// never the limit.
+///
+/// Read as text for [`page_under_a_laden_hand_tests`]' reason: the repair is
+/// *which question one door asks*, and a `WindowRuntime` is a compositor and a
+/// browser, so "a second controller was built" is not a sentence this process can
+/// say without a screen. What it can say is which door calls which.
+#[cfg(test)]
+mod pages_are_plural_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// **A page lands on the pane a file would land on, and asks nothing else.**
+    ///
+    /// Red gate: this is the defect. Put the reuse arm back — "the seat of this
+    /// tab that already holds a page, if there is one" — and the second pane a
+    /// reader opens can never receive a page, because the first one answers for
+    /// every address the tab is ever given.
+    #[test]
+    fn a_page_lands_on_the_pane_a_file_would() {
+        let door = body("    fn open_web_page_with(");
+        assert!(
+            door.contains("self.preview_landing_surface()"),
+            "a page no longer lands by the rule every other preview lands by:\n{door}"
+        );
+        assert!(
+            !door.contains("page_on_the_landing_pane") && !door.contains("web_seat_of_tab"),
+            "the page door still chooses its pane by asking whether one already \
+             holds a page:\n{door}"
+        );
+    }
+
+    /// **A second pane means a second engine, because the map is keyed by the
+    /// pane.**
+    ///
+    /// The two arms of the one door: a pane that already has a controller is
+    /// *navigated*, a pane that has none has one built for it. Nothing between
+    /// them asks how many the window already holds.
+    #[test]
+    fn a_pane_with_no_engine_has_one_built_for_it() {
+        let door = body("    fn open_web_page_on(");
+        assert!(
+            door.contains("self.window.web.contains_key(&leaf)")
+                && door.contains("webhost::WebSeat::open(")
+                && door.contains("self.window.web.insert(leaf, web);"),
+            "the door no longer forks on whether *this pane* has an engine:\n{door}"
+        );
+    }
+
+    /// **The address chord and its receipt both read the landing rule.**
+    ///
+    /// `mint_a_blank_page_and_open_its_address` used to find the page it had just
+    /// made by asking "which seat of this tab holds one" — an answer that names
+    /// the wrong pane the moment a tab holds two.
+    #[test]
+    fn the_blank_pages_receipt_names_the_pane_the_landing_rule_chose() {
+        let mint = body("    fn mint_a_blank_page_and_open_its_address(");
+        assert!(
+            mint.contains("self.page_on_the_landing_pane()"),
+            "the receipt names a pane by some other rule than the one that \
+             chose it:\n{mint}"
+        );
+    }
+
+    /// **One card per page, and each is pressed where it is drawn.**
+    ///
+    /// The sheet was the singleton rule's last hiding place: it walked to "this
+    /// tab's page" and stored one box, so with two pages the second page's card
+    /// would have been neither drawn nor pressable.
+    ///
+    /// Red gate: walk to one page instead of the tab's seats, or store one box
+    /// instead of the list, and this names whichever half went back.
+    #[test]
+    fn every_page_of_this_tab_draws_and_answers_for_its_own_sheet() {
+        let layers = body("    fn web_sheet_layers(");
+        assert!(
+            layers.contains(".preview_seats()")
+                && layers.contains("self.window.web_sheet_layouts.push((seat, layout));"),
+            "the sheets are not laid out one per page of this tab:\n{layers}"
+        );
+        let press = body("    fn press_web_sheet(");
+        assert!(
+            press.contains(".web_sheet_layouts")
+                && press.contains("websheet::covers(layout, x, y)"),
+            "a press is not matched against the card it landed in:\n{press}"
+        );
+    }
+}
+
+/// **A page does not answer for a hand that is already carrying something**
+/// (user report, 0.2.2: a pane dragged over a page could not be let go of).
+///
+/// The whole of the repair is *one subtraction at one door*, and the whole of
+/// the defect was that the door had no such subtraction: the drop's landing was
+/// drawn over the page correctly, the pointer survey answered correctly, and the
+/// release that was to spend it went into the browser instead. So these read the
+/// file as text for [`page_under_the_tab_list_tests`]' reason and it is the same
+/// failure mode — a call that wandered back out of `web_page_at` would still
+/// compile and still pass every rectangle test the drop owns.
+#[cfg(test)]
+mod page_under_a_laden_hand_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// The field lines of a top-level `struct <name> { … }`.
+    fn struct_fields(name: &str) -> &'static str {
+        let head = ["\nstruct ", name, " {\n"].concat();
+        let start = SOURCE
+            .find(head.as_str())
+            .unwrap_or_else(|| panic!("`struct {name}` is declared at the top level"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find("\n}\n")
+                .expect("the struct is closed by a `}` in column zero");
+        &SOURCE[start..end]
+    }
+
+    /// **The carry is asked, and asked before any rectangle is.**
+    ///
+    /// Red gate: this is the defect. Before the repair `web_page_at` subtracted
+    /// the tab list, the download sheet and the search capsule — three surfaces
+    /// standing *over* the page — and nothing at all about the hand, so a
+    /// release that ended a drop over a page was handed to the engine and the
+    /// drop was never spent.
+    ///
+    /// MUTATION: delete the `a_gesture_holds_the_pointer` arm, or move it below
+    /// the scan, and this goes red by name.
+    #[test]
+    fn the_hand_is_asked_before_any_page_is() {
+        let web_page_at = body("    fn web_page_at(");
+        let asked = web_page_at
+            .find("self.a_gesture_holds_the_pointer()")
+            .expect("the page's door subtracts a hand that is already carrying");
+        let scan = web_page_at
+            .find("self.window.web")
+            .expect("the page's door scans the pages it knows about");
+        assert!(
+            asked < scan,
+            "a page was claimed before anybody asked whether the hand was full"
+        );
+    }
+
+    /// **Every carry this window can hold is named by the one predicate.**
+    ///
+    /// The repair is only as wide as the list, and the list is exactly the
+    /// window's and the tab's own `…_drag` fields: each of them is a press that
+    /// has not finished, and each of their endings is answered below the page
+    /// arm of the press ladder. A thirteenth gesture added without a line here
+    /// would be a thirteenth gesture that cannot be let go of over a page, which
+    /// is the defect coming back under a new name.
+    ///
+    /// MUTATION: drop any one `…_drag` arm from the predicate and this names it.
+    #[test]
+    fn every_carry_this_window_can_hold_is_named_by_the_one_predicate() {
+        let predicate = body("    fn a_gesture_holds_the_pointer(");
+        let mut found = 0;
+        for owner in ["WindowRuntime", "TabState"] {
+            for line in struct_fields(owner).lines() {
+                let field = line.trim_start();
+                let Some((name, _)) = field.split_once(": Option<") else {
+                    continue;
+                };
+                if !(name == "drag" || name.ends_with("_drag")) || name.contains(' ') {
+                    continue;
+                }
+                found += 1;
+                assert!(
+                    predicate.contains(&[name, ".is_some()"].concat()),
+                    "{owner}::{name} is a carry the pages are never told about"
+                );
+            }
+        }
+        assert!(
+            found >= 12,
+            "only {found} carries were read out of the two layers, so this pin is \
+             reading the wrong text"
         );
     }
 }
@@ -135453,81 +135760,6 @@ otes.md"
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **One page per tab, and the second address is a navigation rather than a
-    /// second pane** (`plan.md` §0 ②「每 tab 单例」).
-    ///
-    /// And the other half, which is why the tab's own seats are walked rather than
-    /// the window's map: a page open on another tab is not this tab's, so it must
-    /// not be what this tab navigates.
-    ///
-    /// Red gate: ask the hosted set for its first entry instead of walking the
-    /// tab's seats and the second case answers seat 11 — a press in this tab
-    /// steering a page in another one.
-    #[test]
-    fn a_tab_has_at_most_one_page_and_it_is_one_of_its_own_seats() {
-        let here = TabId(1);
-        let seats = |ids: &[u64]| ids.iter().map(|id| SeatId(*id)).collect::<Vec<_>>();
-        let hosted: BTreeSet<LeafId> = [7, 11]
-            .into_iter()
-            .map(|seat| LeafId {
-                tab: here,
-                seat: SeatId(seat),
-            })
-            .collect();
-        assert_eq!(
-            web_seat_among(here, &seats(&[3, 7, 9]), &hosted),
-            Some(SeatId(7)),
-            "the tab's page is the seat of its own that holds one"
-        );
-        assert_eq!(
-            web_seat_among(here, &seats(&[3, 9]), &hosted),
-            None,
-            "a tab with no page of its own has none, whatever the window holds"
-        );
-        assert_eq!(
-            web_seat_among(here, &seats(&[7, 11]), &hosted),
-            Some(SeatId(7)),
-            "and a tab that somehow held two is answered by the first in tree \
-             order, so the reuse target is stable rather than whichever the map \
-             happened to yield"
-        );
-        assert_eq!(web_seat_among(here, &[], &hosted), None);
-    }
-
-    /// PIN (F1b′) — **two tabs each numbering their seats from one are two
-    /// tabs, and the second one's address does not steer the first one's
-    /// page.**
-    ///
-    /// The live defect this slice repairs, in the smallest form that holds it.
-    /// Every tab a pane is torn out into starts its seat numbering again at
-    /// `SeatId(1)` (`seats::Seats::lone_seat`), so a window whose pages are
-    /// filed under a bare `SeatId` files two tabs' pages under one name. Open
-    /// the same `.html` into a tab of its own twice and the second tab's
-    /// address bar navigates the *first* tab's engine.
-    ///
-    /// MUTATION: file the window's pages under `leaf.seat` instead of the whole
-    /// [`LeafId`] — which is what they were filed under until this slice — and
-    /// the first assertion answers `Some(SeatId(1))`: a page belonging to a tab
-    /// that is not this one, handed over as this tab's to navigate.
-    #[test]
-    fn a_page_in_another_tab_is_not_this_tabs_page_however_the_seats_are_numbered() {
-        let first = TabId(1);
-        let second = TabId(2);
-        let seat = SeatId(1);
-        let hosted: BTreeSet<LeafId> = [LeafId { tab: first, seat }].into_iter().collect();
-        assert_eq!(
-            web_seat_among(second, &[seat], &hosted),
-            None,
-            "the second tab holds no page of its own, and the first tab's page \
-             is not made its by the two of them having numbered a seat the same"
-        );
-        assert_eq!(
-            web_seat_among(first, &[seat], &hosted),
-            Some(seat),
-            "while the tab that does hold it is answered with it"
-        );
-    }
-
     /// **The switcher's identity is the recovery machine's field, and there is no
     /// second account of it** (`plan.md` §3 与 §4).
     ///
@@ -135733,10 +135965,11 @@ otes.md"
 
         let door = body("    fn open_address_here(");
         assert!(
-            door.contains("self.web_seat_of_tab()")
+            door.contains("self.page_on_the_landing_pane()")
                 && door.contains("self.open_web_address_on(leaf)")
                 && door.contains("self.mint_a_blank_page_and_open_its_address()"),
-            "the chord does not fork on whether this tab already has a page:\n{door}"
+            "the chord does not fork on whether the pane a page would land on \
+             already holds one:\n{door}"
         );
 
         let mint = body("    fn mint_a_blank_page_and_open_its_address(");
