@@ -32,6 +32,17 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A hover card over a PDF from LaTeX now says how many pages it has, and its
+  pages turn.** A document written by `pdflatex` — most of them — packs its
+  catalogue, its page tree and every page object into compressed streams, and
+  the reader that counted pages read the file's bytes without inflating
+  anything, so it found nothing to count. The card drew the first page and
+  printed the size, the page count never arrived, and because the column of
+  pages is as long as the count says, the wheel had nothing to turn. The count
+  now falls back to the same reader that draws the page, which inflates those
+  streams and answers off the document's own page list. Files whose structure
+  is in the clear are still counted without being parsed.
+
 - **The Chinese half of a hover line is the same size as the Latin half.**
   Pointing at a folder printed `file:///D:/Demo · Ctrl+点击在资源管理器中显示`
   with the Chinese set at about six tenths of the height of the address beside

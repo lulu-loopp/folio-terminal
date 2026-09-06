@@ -4,7 +4,9 @@
 //! Two answers live here and they are answered two very different ways:
 //!
 //! * [`page_count`] — **how many pages the file holds**, read off its own
-//!   structure by a tokenizer that renders, decompresses and resolves nothing.
+//!   structure by a tokenizer that renders, decompresses and resolves nothing,
+//!   and — for the documents whose structure is compressed out of a tokenizer's
+//!   reach — off the page list of a parse (2026-09-05).
 //! * [`page_raster`] — **what the first page looks like**, rasterised.
 //!
 //! # Why the count exists at all
@@ -15,10 +17,10 @@
 //! two: how large the file is, and how many pages are in it. The first is a
 //! `metadata` call. The second is [`page_count`].
 //!
-//! Its answer's type carries the ruling's own fallback: when the structure does
-//! not yield a count, the answer is `None` and the card states the size alone. A
-//! wrong number would be worse than no number, so every place that scan cannot
-//! see is a `None` rather than a guess.
+//! Its answer's type carries the ruling's own fallback: when neither reader can
+//! say how many pages there are, the answer is `None` and the card states the
+//! size alone. A wrong number would be worse than no number, so every place
+//! neither reader can see is a `None` rather than a guess.
 //!
 //! # And why a picture arrived beside it
 //!
@@ -63,21 +65,42 @@
 //! 2. **The page objects themselves.** With no `/Pages` node in reach, every
 //!    `/Type /Page` dictionary is one page, counted.
 //!
-//! # What it cannot see, and says so
+//! # What the scan cannot see, and who answers instead (2026-09-05)
 //!
 //! **Object streams** (PDF 1.5+): a file may pack its catalogue, its page tree
 //! and its page objects into compressed streams, and none of the three is
-//! readable without inflating them. The scan then finds neither a `/Count` nor a
-//! `/Page`, answers `None`, and the card states the size — which is the ruling's
-//! own instruction for exactly this case. Inflating an object stream is a
-//! decompressor, an xref parse and a cross-reference resolver, which is a PDF
-//! reader; this window has one already and it is the engine a double click
-//! opens.
+//! readable without inflating them. The scan finds neither a `/Count` nor a
+//! `/Page` in such a file and has nothing to say about it.
+//!
+//! It said `None` for a year, and `None` reached the card as **a page with no
+//! page count and a column that would not turn** — `peek_page_column_max_scroll`
+//! is computed from the count, so a document whose count is unknown is a
+//! document one page long. That is most of the world, and it was measured
+//! rather than assumed: over the 1622 PDFs on one disk (2026-09-05), 180 came
+//! out of pdfTeX or LaTeX and 172 of those carry object streams — 159 of them
+//! do not contain the four characters `/Count` anywhere at all — while all 60
+//! written by Skia (headless Edge, Chromium's print) are in the clear. The
+//! fixture beside this crate is countable only because it is one of the second
+//! kind.
+//!
+//! So the count has **a second reader behind the scan**, and it is the
+//! rasteriser already linked into this binary: [`hayro`] inflates the object
+//! streams, resolves the cross-reference stream and hands over its page list,
+//! whose length is the count. The order is the point —
+//!
+//! 1. the byte scan, which costs [`CHUNK_BYTES`] of memory over a file of any
+//!    size and answers every document whose structure is in the clear;
+//! 2. and only when that says nothing, the parse, which costs the file resident
+//!    (bounded by [`MAX_RASTER_BYTES`], the same bound the raster is under) and
+//!    takes a millisecond on a small paper, fifteen on a 2MB book of slides.
+//!
+//! Both run on the preview worker, never on the thread that draws.
 //!
 //! **A `/Count` written as an indirect reference** (`/Count 12 0 R`) is legal
-//! and is read here as the object number it begins with. It is not written by
-//! any producer this window has met, and the alternative — resolving references
-//! — is the same reader again.
+//! and is read by the scan as the object number it begins with — a number that
+//! is not a page count. It is not written by any producer this window has met,
+//! and a file that did would be answered wrongly by the scan rather than passed
+//! to the reader, because the scan's answer wins when it has one.
 
 use std::io::Read;
 use std::path::Path;
@@ -108,22 +131,67 @@ const HEADER_WINDOW_BYTES: usize = 1024;
 /// over it costs only the `/Count` of something nested past any real document.
 const MAX_DICT_DEPTH: usize = 64;
 
-/// How many pages the PDF at `path` holds, or `None` when its structure does not
-/// say — see the module's own note for the three ways that happens.
+/// How many pages the PDF at `path` holds, or `None` when neither of its two
+/// readers can say — see the module's own note for what each of them reads.
+///
+/// The scan first, because it is a stream over the file and answers most
+/// documents; the parse behind it, because a document that packs its structure
+/// into object streams is unreadable to any scan and is not thereby a document
+/// without pages.
 #[must_use]
 pub fn page_count(path: &Path) -> Option<u32> {
     let file = std::fs::File::open(path).ok()?;
-    count_pages(file)
+    if let Some(count) = count_pages(file) {
+        return Some(count);
+    }
+    parse_page_count(read_capped(path)?)
 }
 
-/// **The largest file [`page_raster`] will raster.**
+/// [`page_count`]'s second reader: the page list of a parsed document.
 ///
-/// The count above is a stream: it reads [`CHUNK_BYTES`] at a time and a
+/// `None` for everything [`page_raster`] refuses for — this is the same parse,
+/// and a file that cannot be read has no count to give — and for a document
+/// whose page list is empty, so that the card states the size alone rather than
+/// "0 pages".
+fn parse_page_count(bytes: Vec<u8>) -> Option<u32> {
+    let pdf = hayro::hayro_syntax::Pdf::new(bytes).ok()?;
+    u32::try_from(pdf.pages().len())
+        .ok()
+        .filter(|count| *count > 0)
+}
+
+/// **The file at `path`, read whole and bounded by [`MAX_RASTER_BYTES`]** — what
+/// both of the parsing lanes need and neither may exceed.
+///
+/// The length is asked of the handle the bytes are then read through, and the
+/// read is bounded by the cap rather than by that length: a file being appended
+/// to between the two calls is a file this window may not be handed
+/// unboundedly much of.
+fn read_capped(path: &Path) -> Option<Vec<u8>> {
+    let file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len == 0 || len > MAX_RASTER_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(len).ok()?);
+    (&file)
+        .take(MAX_RASTER_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Some(bytes)
+}
+
+/// **The largest file this module will parse** — [`page_raster`], and the
+/// second reader [`page_count`] falls back on.
+///
+/// The count's *scan* is a stream: it reads [`CHUNK_BYTES`] at a time and a
 /// hundred-megabyte file costs it a hundred megabytes of *reading* and sixty-four
-/// kilobytes of memory. A rasteriser cannot be written that way — a PDF is read
+/// kilobytes of memory. A parse cannot be written that way — a PDF is read
 /// through a cross-reference table that points anywhere in the file, so the
 /// bytes have to be resident — and the number below is what keeps a hover from
-/// being able to ask this process for arbitrarily much of them.
+/// being able to ask this process for arbitrarily much of them. A file over the
+/// cap is answered by the scan or not at all, which is the honest shape: the
+/// window will not spend a hundred megabytes to print a number.
 ///
 /// It is set where real documents are not: a 128MiB PDF is a scan of a book, and
 /// the card answers one by drawing its ground and printing its size, which is
@@ -177,20 +245,7 @@ pub struct PageRaster {
 /// window puts CPU work that answers a pointer.
 #[must_use]
 pub fn page_raster(path: &Path, index: u32, fit_width: u32, fit_height: u32) -> Option<PageRaster> {
-    let file = std::fs::File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
-    if len == 0 || len > MAX_RASTER_BYTES {
-        return None;
-    }
-    let mut bytes = Vec::with_capacity(usize::try_from(len).ok()?);
-    // Read through the handle the length was asked of and bounded by the cap
-    // rather than by that length: a file being appended to between the two calls
-    // is a file this hover may not be handed unboundedly much of.
-    (&file)
-        .take(MAX_RASTER_BYTES)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    raster_page(bytes, index, fit_width, fit_height)
+    raster_page(read_capped(path)?, index, fit_width, fit_height)
 }
 
 /// [`page_raster`] over bytes already in hand — the seam the tests feed.
@@ -595,8 +650,21 @@ mod tests {
     /// headless Edge.
     const FIXTURE: &[u8] = include_bytes!("../../../test-assets/folio-pdf-test.pdf");
 
+    /// The fixture the 2026-09-05 report was answered with — five pages, all of
+    /// its structure inside one compressed object stream, so that nothing a scan
+    /// looks for is anywhere in the bytes.
+    const OBJSTM_FIXTURE: &[u8] = include_bytes!("../../../test-assets/folio-pdf-objstm-test.pdf");
+
     fn count(bytes: &[u8]) -> Option<u32> {
         count_pages(bytes)
+    }
+
+    /// A fixture's path on this disk — what [`page_count`] takes, since its
+    /// second reader opens the file itself.
+    fn fixture_path(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-assets")
+            .join(name)
     }
 
     /// The card's own box at scale 1, so the assertions below are about the
@@ -854,6 +922,96 @@ mod tests {
     #[test]
     fn the_shipped_fixture_holds_three_pages() {
         assert_eq!(count(FIXTURE), Some(3));
+    }
+
+    /// PIN — **a document that compresses its structure is still counted**
+    /// (user report 2026-09-05; `docs/DESIGN.md` §7.10 ⑥).
+    ///
+    /// The reported file was a four-page paper out of `pdflatex`, whose card
+    /// showed its first page and the size and no page count at all — and a card
+    /// with no count has a column one page long, so the wheel had nothing to
+    /// turn either. The fixture here is that file's shape with none of its
+    /// content: catalogue, page tree and all five pages inside one Flate
+    /// `/Type /ObjStm`, reached through a cross-reference stream
+    /// (`scripts/dev/make-objstm-pdf.py` writes it).
+    ///
+    /// Both halves are asserted, because the defect was that the first half is
+    /// the *whole* answer:
+    ///
+    /// * the scan finds nothing in it — no `/Type /Pages`, no `/Count`, no
+    ///   `/Type /Page` survives compression;
+    /// * and [`page_count`] answers 5 anyway, off the parse behind the scan.
+    ///
+    /// RED GATE: delete the `parse_page_count` arm from [`page_count`] and this
+    /// goes back to `None`, which is the bug exactly.
+    #[test]
+    fn a_document_with_its_structure_in_an_object_stream_is_counted() {
+        assert_eq!(
+            count(OBJSTM_FIXTURE),
+            None,
+            "the scan cannot read a compressed page tree, and must not pretend to"
+        );
+        assert_eq!(
+            page_count(&fixture_path("folio-pdf-objstm-test.pdf")),
+            Some(5)
+        );
+    }
+
+    /// PIN — **the scan's answer is the one that stands when it has one.**
+    ///
+    /// The parse is behind the scan and not in front of it: the Skia fixture's
+    /// structure is in the clear, so its count is read off [`CHUNK_BYTES`] of
+    /// memory rather than off a resident copy of the file, and the number is the
+    /// same three the scan has always said.
+    ///
+    /// MUTATION: put the parse first and this still passes — the two agree —
+    /// which is why the assertion below is about the *scan* answering on its
+    /// own, and it is `the_shipped_fixture_holds_three_pages` next door that
+    /// pins it.
+    #[test]
+    fn a_document_in_the_clear_is_counted_without_being_parsed() {
+        let path = fixture_path("folio-pdf-test.pdf");
+        assert_eq!(count(FIXTURE), Some(3), "the scan answers this one alone");
+        assert_eq!(page_count(&path), Some(3));
+    }
+
+    /// PIN — **a document with nothing in it is `None` through both readers.**
+    ///
+    /// The parse was added behind the scan, so every refusal the scan used to
+    /// make now has a second chance to become a wrong answer. It may not: a
+    /// `.pdf` that is prose, an empty file, a missing one, and **a well-formed
+    /// document whose page tree is empty** are all the same silence, and the
+    /// card states the size it already has.
+    ///
+    /// RED GATE: drop the `> 0` filter from `parse_page_count` and the last row
+    /// is a card that says "0 pages" — hayro parses that file happily and
+    /// answers with an empty page list (measured 2026-09-05), so the filter is
+    /// the only thing between a document with no pages and a fact about it that
+    /// is not one.
+    #[test]
+    fn neither_reader_invents_a_count_for_what_is_not_a_document() {
+        let dir = std::env::temp_dir().join("folio-pdf-count-none-3f1a");
+        std::fs::create_dir_all(&dir).expect("a directory under the temp dir");
+        for (name, bytes) in [
+            (
+                "not-a-pdf.pdf",
+                &b"this file is prose and calls itself a pdf"[..],
+            ),
+            ("empty.pdf", &b""[..]),
+            (
+                "no-pages.pdf",
+                &b"%PDF-1.4\n\
+                   1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+                   2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n\
+                   trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n"[..],
+            ),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).expect("a fixture written under the temp dir");
+            assert_eq!(page_count(&path), None, "{name}");
+        }
+        assert_eq!(page_count(&dir.join("no-such-file.pdf")), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// PIN — **the page tree's own `/Count` is the answer when it is there.**

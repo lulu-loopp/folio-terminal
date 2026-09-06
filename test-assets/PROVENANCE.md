@@ -1,6 +1,6 @@
 # Where the files in `test-assets/` came from
 
-28 tracked files: 10 here and 18 under `preview-samples/`. Each is one of three
+29 tracked files: 11 here and 18 under `preview-samples/`. Each is one of three
 things — **own** (written here), **upstream** (someone else's, under someone
 else's licence), or **generated** (produced from something else in this
 directory).
@@ -13,12 +13,13 @@ Several are compiled into the test binaries with `include_bytes!` /
 `include_str!` (`crates/bt-app/src/pdf.rs`, `preview.rs`, `main.rs`), so they are
 not merely files in a folder: they are part of what the test suite asserts on.
 
-## The ten at the top
+## The eleven at the top
 
 | File | | |
 |---|---|---|
 | `folio-pdf-test.html` | **own** | The source document for the PDF beside it. Its own HTML comment says so and gives the command to remake it. |
 | `folio-pdf-test.pdf` | **generated** | Printed from `folio-pdf-test.html` with headless Edge (`msedge --headless=new --print-to-pdf`). The file's own metadata agrees: `/Producer (Skia/PDF m151)`. It replaced an earlier fixture in 2026-08 whose relative asset references made the preview fail with `ERR_FILE_NOT_FOUND` — the story is in `docs/DESIGN.md`. |
+| `folio-pdf-objstm-test.pdf` | **generated** | Written by `scripts/dev/make-objstm-pdf.py`, which is in this repository and is the whole recipe: `python scripts/dev/make-objstm-pdf.py` writes the same 428 bytes on any machine. Five empty pages whose catalogue, page tree and page objects all sit inside one Flate `/Type /ObjStm`, reached through a cross-reference stream — the shape every `pdfTeX` document has, and the shape a byte scan cannot read. Nothing is drawn on any page: the fixture is about structure. It exists because a real four-page paper showed its first page on a hover card with no page count at all (2026-09-05; `docs/DESIGN.md` §7.10 ⑥⁗). |
 | `latex-render-check.md` | **own** | The formula-rendering acceptance corpus. Its contents are standard mathematical notation — the quadratic formula, an integral, a matrix — which is not anyone's copyrightable expression. |
 | `md-formula-check.md` | **own** | The markdown-preview formula corpus, positive and negative cases. |
 
