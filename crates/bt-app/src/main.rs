@@ -10856,6 +10856,27 @@ impl ApplicationChange {
     }
 }
 
+/// What a pseudoconsole's answer to "clear your own buffer" means for this window.
+///
+/// A free function so the one decision in `Runtime::clear_pane_screen` that cannot be seen from
+/// the screen is testable on its own: **`Ok(false)` is not a failure**, it is the operating
+/// system's inbox pseudoconsole saying it exports no clear at all, and an error is a call that
+/// really was made and really did not work. Both mean the same thing to the screen — there is a
+/// buffer out there still laid out the old way — and both must therefore stop this window moving
+/// any rows.
+fn host_screen_after(answer: Result<bool, bt_pty::PtyError>) -> bt_term::HostScreen {
+    match answer {
+        Ok(true) => bt_term::HostScreen::Cleared,
+        Ok(false) => bt_term::HostScreen::Untold,
+        Err(error) => {
+            // Said rather than swallowed: this window's screen is still going to be right, and
+            // the only thing lost is the host's agreement about the rows above.
+            eprintln!("BT_CLEAR host buffer not cleared: {error}");
+            bt_term::HostScreen::Untold
+        }
+    }
+}
+
 struct Runtime<'a> {
     app: &'a mut App,
     window: &'a mut WindowRuntime,
@@ -65065,20 +65086,24 @@ impl Runtime<'_> {
             return Ok(());
         };
         let alternate = leaf.session.terminal_modes().alternate_screen;
+        // **The host is asked first, because its answer is what decides the shape.** Not for
+        // tidiness: a window that moved rows and only then discovered it had nobody to tell would
+        // have already made the screen the 2026-09-05 report describes.
+        //
+        // **Not on the alternate screen**: that buffer belongs to the program drawing it, which
+        // repaints its own canvas with absolute addresses and needs no help keeping in step.
+        let host = if alternate {
+            bt_term::HostScreen::Cleared
+        } else {
+            match leaf.pty.as_ref() {
+                // No child, so no second buffer to disagree with this one.
+                None => bt_term::HostScreen::Cleared,
+                Some(pty) => host_screen_after(pty.clear_host_buffer(true)),
+            }
+        };
         leaf.session
-            .clear_screen_keeping_cursor_row()
+            .clear_screen_keeping_cursor_row(host)
             .context("clear one pane's screen locally")?;
-        // **Not on the alternate screen**: that buffer belongs to the program
-        // drawing it, which repaints it itself and has no prompt row to keep.
-        if !alternate
-            && let Some(pty) = leaf.pty.as_ref()
-            && let Err(error) = pty.clear_host_buffer(true)
-        {
-            // The host refusing is not a reason to leave the window uncleared:
-            // this window's own screen is already right, and the only thing lost
-            // is the host's agreement about the rows above. Say so and go on.
-            eprintln!("BT_CLEAR host buffer not cleared: {error}");
-        }
         // The live selection goes with the screen it was drawn on (§7.1.6). Not
         // because the anchors would dangle — they name rows that are now in
         // history — but because a highlight left standing over cleared cells is
@@ -136592,6 +136617,57 @@ mod palette_wiring_tests {
     /// open the settings dialog by setting `window.settings` directly, scroll a
     /// pane by writing its anchor — and the call named here disappears from the
     /// body, which goes red.
+    /// PIN (2026-09-06, CI red on `windows-2025`) — **what a pseudoconsole answers about clearing
+    /// its own buffer, and what this window is then allowed to move.**
+    ///
+    /// The one decision in `Runtime::clear_pane_screen` that no screen can show. `Ok(false)` is
+    /// not a failure: it is the operating system's inbox pseudoconsole saying it exports no clear
+    /// call at all, which the packaged one does. Both that and a call that really failed leave a
+    /// second buffer out there still laid out the old way, addressing its rows by their old
+    /// numbers — so both must stop this window moving any row, or the next thing the host draws
+    /// lands beside the one that moved. That is the 2026-09-05 report, and it is what a GitHub
+    /// runner produced when the two halves were allowed to disagree.
+    ///
+    /// MUTATION: read `Ok(false)` as `Cleared` — "there was nothing to do, so carry on" — and the
+    /// middle row of this table goes red, which is the whole defect in one arm.
+    #[test]
+    fn a_pseudoconsole_that_cannot_clear_its_buffer_stops_this_window_moving_rows() {
+        use crate::host_screen_after;
+
+        assert_eq!(host_screen_after(Ok(true)), bt_term::HostScreen::Cleared);
+        assert_eq!(host_screen_after(Ok(false)), bt_term::HostScreen::Untold);
+        assert_eq!(
+            host_screen_after(Err(bt_pty::PtyError::RingClosed)),
+            bt_term::HostScreen::Untold
+        );
+    }
+
+    /// PIN (2026-09-06) — **the menu row asks the host before it moves anything, and hands the
+    /// answer on.**
+    ///
+    /// The order is the fix: a window that moved rows and only then discovered it had nobody to
+    /// tell would already have made the broken screen. Pinned in the body rather than through the
+    /// screen because both orders produce the same picture on a machine that *can* be told, which
+    /// is every machine this is developed on — the runner is the one that could tell them apart,
+    /// and a gate that needs a particular runner is not a gate.
+    ///
+    /// MUTATION: clear locally first and then ask, or drop `host_screen_after` and pass
+    /// `HostScreen::Cleared` unconditionally, and the pair named here is no longer in the body.
+    #[test]
+    fn the_clear_screen_row_asks_the_host_first_and_spends_its_answer() {
+        let run = body("    fn clear_pane_screen(&mut self, seat: SeatId) -> Result<()> {");
+        let asked = run
+            .find("host_screen_after(pty.clear_host_buffer(true))")
+            .expect("the row asks the pseudoconsole through the one mapping there is");
+        let cleared = run
+            .find(".clear_screen_keeping_cursor_row(host)")
+            .expect("and hands that answer to the session rather than deciding twice");
+        assert!(
+            asked < cleared,
+            "the host is asked before this window moves anything"
+        );
+    }
+
     #[test]
     fn every_palette_verb_reaches_a_door_this_window_already_had() {
         let run = body("fn run_palette_row(&mut self) -> Result<()> {");
