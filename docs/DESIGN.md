@@ -807,6 +807,33 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 **钉子(`crates/bt-term/src/session.rs`)**:`a_byte_identical_reprint_does_not_restart_a_pending_blocks_stability_clock`(16/50/100/199ms 四种节奏各排出一个块)、`a_ticking_status_row_does_not_starve_the_block_above_it`(唯一真变的那一行只拨自己的钟)、`a_block_arriving_during_a_repaint_storm_typesets_beside_one_proven_before_it`(截图里那个形状:先证成的与后到的必须都是图)、`a_reprint_that_changes_a_row_restarts_exactly_that_rows_clock`(反面:改字、改色都算改动)。**变异红证**:把指纹改回只问装饰盖着的行 → 四条全红;改成「凡是有过指纹的行一律不再拨钟」→ 后两条红(后到的那个块永远到不了 worker);把颜色从指纹里拿掉 → 只有「改色也算改动」那一条红。
 
 
+### 4.6a 一行折在哪一列是窗宽的事,不是文本的事:软折行的那一格空格属于这一行(公式宽度单,2026-09-06,已落地;`crates/bt-term/src/session.rs`)
+
+**由头是用户对 `dist\folio-next38.exe` 的验收:同一段 Claude Code 输出里,`p(x)` 和贝叶斯两块排出来了,带约束的优化那块是源码;把窗口拉窄以后倒过来——那块排出来了,另外两块变成源码。** 用户的话是「在 2.8K 屏幕上不渲染,甚至有时候窗口再小一些其它公式没渲染了它反而渲染了」,4K 上全都排得出来。这不是「窄了就不行」,所以也不能用任何一条阈值去解释它。
+
+**真因是一处一半的规矩。** 一行比 pane 宽的时候,终端把它折到下一行(vendor 的 `WRAPLINE`),检测器再把这些物理行**拼回逻辑行**来扫。拼的时候每一行都走 `captured_row_text_and_boundaries`——它把行尾的空白裁掉。**对一个结束了逻辑行的行,这是对的**:那些空格是右边缘的填充,从来没有人写过它们;**对一个还要接下去的行,这是错的**——折点由窗宽决定,它完全可以正好落在一个空格上,而那个空格是这一行的一个字符。裁掉它,两半就被焊在一起:`\quad g_i(\mathbf{x})` 在那个空格上折断,读回来是 `\quadg_i(\mathbf{x})`,MiTeX 答 `unknown command: \quadg`,整块掉回源码——**只在那一个窗宽上**。
+
+**量出来的,不是推的。** 用户报告里那三块公式原样喂进 30 行的活屏,列宽从 20 扫到 60:
+- 24 列:`\quad \text{s.t.} \quad` 正好是 24 个字符(含末尾那个空格),折点落在它上面,优化块 `failure_reason = "MiTeX conversion failed: error: unknown command: \quadg"`,源码。
+- 同一台上 100 列:三块全是图。
+- 贝叶斯块更阴:24 列时折点落在 `\frac{P(B ` 的空格上,`P(B \mid A)` 读成 `P(B\mid A)`——**LaTeX 认这个写法,所以它照样排出来了,只是排的不是屏幕上那行字**。一条「排出来了没有」的断言看不见这一桩,所以钉子比的是**源码字符串**,不是图片张数。
+
+**实机 A/B(`dist\folio-next38.exe` 对本片的 debug 构建,同一台、同一份脚本、同一扇 900×800 的窗 = 48 列,隔离 `APPDATA`,`BT_DECOR_TRACE` 逐帧记录)。** 脚本印三块只差一两个字符的公式,`x+x+…+x` 填到指定长度再接 `\quad g(x)=0`:C1 整行放得下,C2 让折点正好落在 `\quad` 后面那个空格上,C3 让它早一列。
+- **修前**:C1、C3 `state=rendered`;C2 `state=failed reason=MiTeX conversion failed: error: unknown command: \quadg`,记下的源码是 `…xx\quadg(x)=0`——**空格没了**,屏幕上是源码。
+- **修后**:同一份脚本、同一扇窗,三块全是 `state=rendered`,三条源码都是 `…\quad g(x)=0`。
+
+同一段文本、同一扇窗、同一帧——**一列窗宽就是全部的差别**。
+
+**一句诚实的界限。** 截图只留下屏幕上的字,留不下 Claude Code 真正写进 PTY 的那串字节(它自己的缩进、自己的换行、以及它那一遍 markdown 把 `\;` 吃成 `;` 之后到底剩几个空格),所以「那一扇 2.8K 的窗当时正好折在哪个空格上」无法从图里证明。能证明的是:**这条缺口本身会按窗宽逐列地把 `$$` 块在「图」和「源码」之间翻面**,而且它就在用户看到那三块公式的那条路上。修完之后,同样那三块在 20–60 列的每一档都是图,源码逐字相同——那一档窗宽落在哪里都不再有第二种答案。
+
+**裁决:一行折在哪一列是窗宽的事,不是文本的事。任何把 WRAPLINE 连起来的物理行拼成逻辑行的地方,一个「还要接下去」的行保留它真实的行尾空白,一个「结束了逻辑行」的行照旧丢掉右边缘填充。** 这条规矩本来就写在原先那只 `captured_row_text_and_boundaries_preserving_trailing_glyphs` 包装的文档注释上(它现在并入下面那个函数,不再单独存在),而且本地图片路径那两个拼接器(`live_logical_line_containing`、`for_each_live_logical_line`)一直在遵守它——**公式/表格的检测上下文 `live_detection_context` 没有**,于是同一条规矩在四个拼接器里只落实了两个。现在它是**一个函数** `captured_row_logical_text_and_boundaries(row)`(`row.continues` 就是那个问题的答案),四个拼接器都读它,加上 `visible_text_between` 与 `semantic_reflow_text` 两只 OSC 133 见证——后者的文档注释自己写着「纯宽度 reflow 不改变这个字符串」,而裁空白恰恰让它改变。行内那两处 `if captured.continues {...} else {...}` 一并收进这个函数,规矩不再有第二个写法。
+
+**这条规矩不是新立的,冻结那一侧一直在遵守它。** `bt-transcript` 把物理行冻成一条 transcript 行的地方写着一模一样的话——「A WRAPLINE fragment owns every cell through its wrap boundary. In particular a space in the final column is source text, not padding; trimming it turns "find path" into "findpath" when logical rows are later rejoined.」——并且只在 `!continues` 时才削右边缘。**所以真正的缺口是:同一句话,冻结面写下了,活屏的检测上下文没有。** 这一片做的事就是让活屏读到冻结面早就在读的那条线。
+
+**没有动检测器、没有动阈值、没有为公式开例外。** 折点落在空格上是终端的正常行为,不是一种要被特判的输入;要改的是「同一次拼接对两种行两种读法」这件事本身。代价为零:同一个 `captured_row_text_and_boundaries_with_trailing_glyphs`,只是它的第二个参数从常量变成了行自己的 `continues`。
+
+**钉子(`crates/bt-term/src/session.rs`)**:`a_block_soft_wrapped_on_a_space_keeps_the_space_and_typesets`(24 列的优化块必须带着 `\quad g_i`、无 `failure_reason`、有 artifact)、`a_wrapped_block_reads_the_same_source_at_every_pane_width`(20–60 列每一档的三块源码必须与 100 列逐字相同,并且都排得出来——贝叶斯那桩只有这一条抓得住)。**变异红证**:把那个参数改回常量 `false`(修前的行为)→ 两条全红,第一条报 `\quad \text{s.t.} \quadg_i(\mathbf{x})`,第二条在 20 列就报 `g_i(\mathbf{x})\le 0,;`。
+
 ## 5. 数学渲染管线（M-1 spike）
 
 同 v3（三路径、300+ 样本含恶意输入、进程隔离开销验证、缓存键含 detection_rev + LayoutKey）。
