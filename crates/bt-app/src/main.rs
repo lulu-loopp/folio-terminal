@@ -64124,6 +64124,10 @@ impl Runtime<'_> {
         // are separate fields of `app` and the split borrow is what lets the
         // menu be measured and read from the same expression.
         let shortcuts = &self.app.shortcuts;
+        // **The machine**, on the shortcut table's own footing and for the
+        // ruling of 2026-09-06: it decides which rows the `Split with ▸` child
+        // has, so the menu cannot be measured without it.
+        let programs = &self.app.profile_programs;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(profiles::term_menu_layout(
@@ -64132,6 +64136,7 @@ impl Runtime<'_> {
             scale,
             &look,
             shortcuts,
+            programs,
             &mut measure,
         ))
     }
@@ -65300,6 +65305,9 @@ impl Runtime<'_> {
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let windows = self.other_window_rows();
         let shortcuts = &self.app.shortcuts;
+        // **The machine**, on `windows`' own footing (user ruling 2026-09-06):
+        // both decide how many rows a child has, not merely how wide it is.
+        let programs = &self.app.profile_programs;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(profiles::pane_menu_layout(
@@ -65310,6 +65318,7 @@ impl Runtime<'_> {
             zoomed,
             &windows,
             shortcuts,
+            programs,
             &mut measure,
         ))
     }
