@@ -235,81 +235,6 @@ pub const TAB_LAND_RING_ALPHA: f32 = 0.45;
 /// The `1.5px` of that inset ring, in logical pixels.
 pub const TAB_LAND_RING_LOGICAL_PX: f32 = 1.5;
 
-/// **The insertion line's thickness** (user ruling 2026-09-06: 「2px 强调色」), in
-/// logical pixels.
-pub const TAB_INSERT_LINE_LOGICAL_PX: f32 = 2.0;
-/// **How wide the dot at each end of that line is** (同 ruling: 「带两端小圆点」),
-/// in logical pixels.
-pub const TAB_INSERT_DOT_LOGICAL_PX: f32 = 6.0;
-
-/// **The line that says "a new entry lands here"** — the user's 2026-09-06
-/// ruling, drawn once for all three tab surfaces.
-///
-/// The stand-in slot ([`ChromeContent::strip_preview`]) already says *what* is
-/// about to arrive: it is a whole entry wearing the landing wash, dressed in the
-/// payload's own name and mark. What it does not say is **where the join is**,
-/// and that is the sentence the ruling asks for — the list has opened a space
-/// and the reader is entitled to see which two neighbours it opened between,
-/// rather than infer it from a box whose edges look like every other entry's.
-///
-/// It is a line across the run's *cross* axis at the leading edge of `body`,
-/// because that edge is the seam: a vertical bar down the strip, a horizontal
-/// one across the rail and the card column. One function and one geometry, for
-/// [`TabRun`]'s own reason — three painters that each drew their own caret would
-/// be three carets that eventually stopped agreeing about what a caret is.
-///
-/// **The dots are inset by their own radius rather than centred on the line's
-/// ends.** Centred, they would hang half a dot outside the entry's box, which on
-/// the rail is outside the panel and on the strip is over the caption bar — and
-/// both of those are surfaces with their own clip. Inset, the whole mark lives
-/// inside the rectangle the caller has already decided is on screen.
-#[must_use]
-pub fn insertion_line_sprites(
-    body: [f32; 4],
-    axis: Axis,
-    scale: f32,
-    ink: [u8; 3],
-) -> [ChromeSprite; 3] {
-    let thickness = (TAB_INSERT_LINE_LOGICAL_PX * scale).round().max(1.0);
-    let dot = (TAB_INSERT_DOT_LOGICAL_PX * scale).round().max(thickness);
-    let radius = (dot / 2.0).round().max(1.0) as u32;
-    let half = thickness / 2.0;
-    let dot_box = |centre_x: f32, centre_y: f32| {
-        [
-            centre_x - dot / 2.0,
-            centre_y - dot / 2.0,
-            centre_x + dot / 2.0,
-            centre_y + dot / 2.0,
-        ]
-    };
-    let (line, head, tail) = match axis {
-        Axis::Row => {
-            let seam = body[0].round();
-            (
-                [seam - half, body[1], seam + half, body[3]],
-                dot_box(seam, body[1] + dot / 2.0),
-                dot_box(seam, body[3] - dot / 2.0),
-            )
-        }
-        Axis::Col => {
-            let seam = body[1].round();
-            (
-                [body[0], seam - half, body[2], seam + half],
-                dot_box(body[0] + dot / 2.0, seam),
-                dot_box(body[2] - dot / 2.0, seam),
-            )
-        }
-    };
-    [
-        // A rectangle wants [`ChromeMark::Fill`] and not a quad: quads are drawn
-        // under every mark, and this one has to land on top of the stand-in's own
-        // wash and ring.
-        ChromeSprite::new(ChromeMark::Fill, line, ink),
-        ChromeSprite::new(ChromeMark::ControlPill { radius_px: radius }, head, ink),
-        ChromeSprite::new(ChromeMark::ControlPill { radius_px: radius }, tail, ink),
-    ]
-}
-
 // ── What a thing in flight looks like (§7.1.6b″) ─────────────────────────────
 //
 // **One rule, one implementation, three surfaces.** The strip reorders tabs, the
@@ -7153,9 +7078,10 @@ pub const TAB_SEAM_BAND_LOGICAL_PX: f32 = 8.0;
 ///
 /// Two radii and not one because a single threshold makes the answer a function
 /// of a coordinate the hand cannot hold still. A pointer resting exactly
-/// [`TAB_SEAM_BAND_LOGICAL_PX`] from a join flips between the insertion line and
-/// the tab wash on every jitter of a pixel, and those two are the loudest pair
-/// of pictures this surface can draw. Entering costs 8, leaving costs 12, so the
+/// [`TAB_SEAM_BAND_LOGICAL_PX`] from a join flips between the slot the list
+/// opens for the stand-in and the tab wash on every jitter of a pixel, and those
+/// two are the loudest pair of pictures this surface can draw — a whole entry
+/// appearing and a whole entry lighting up. Entering costs 8, leaving costs 12, so the
 /// 4px in between is a state that cannot be arrived at by noise.
 pub const TAB_SEAM_RELEASE_LOGICAL_PX: f32 = 12.0;
 
@@ -10933,18 +10859,10 @@ fn window_tab_strip(
                 ring.opacity = TAB_LAND_RING_ALPHA * landing;
                 sprites.push(ring);
             }
-            // **And the join the stand-in opened** (user ruling 2026-09-06) — see
-            // [`insertion_line_sprites`]. Only the stand-in wears it: a tab that
-            // has *landed* is running the same wash on its way to nothing and is
-            // not a seam any more.
-            if strip_preview == Some(index) && within_strip(viewport, tab.body) {
-                sprites.extend(insertion_line_sprites(
-                    tab.body,
-                    Axis::Row,
-                    scale,
-                    palette.accent,
-                ));
-            }
+            // **And nothing else** (user ruling 2026-09-06, §7.1.6k⁶). A line
+            // along the seam with a dot at either end was drawn here for one
+            // day; the wash and the ring above are the whole of what an
+            // insertion looks like, on this surface and on the other two.
             let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
             let content_gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
             // `.tab.squeezed { justify-content: center; padding: 0 4px }` — the mark
@@ -11946,28 +11864,11 @@ fn rail_chrome(
                 ring.opacity = TAB_LAND_RING_ALPHA * landing;
                 sprites.push(ring);
             }
-            // **And the join the stand-in opened** (user ruling 2026-09-06) — the
-            // strip's own line turned onto this axis by
-            // [`insertion_line_sprites`], which is the whole of what a rail has
-            // to say about it.
-            //
-            // The row's box is handed over **unclipped**, and the guard is on the
-            // seam itself rather than on the row: `clip_to_list` moves the top
-            // edge down to the list's, and the top edge is exactly the coordinate
-            // this mark is *about* — a clipped row would draw its line at the
-            // foot of the scroller, naming a join that is not there.
-            if preview == Some(index)
-                && in_panel(row.body)
-                && row.body[1] >= list_top
-                && row.body[1] < list_bottom
-            {
-                sprites.extend(insertion_line_sprites(
-                    row.body,
-                    Axis::Col,
-                    scale,
-                    palette.accent,
-                ));
-            }
+            // **And nothing else** (user ruling 2026-09-06, §7.1.6k⁶) — the row
+            // standing in the list, wearing the wash and the ring above, is the
+            // whole of what this rail has to say about an insertion. The line
+            // the strip drew along the seam for one day was drawn here too, on
+            // this axis, and went with it.
             // ── the mark slot, which is the strip's own machinery unchanged ──
             //
             // T2's three branches, in the strip's own order and with the strip's own
@@ -12948,20 +12849,11 @@ fn focus_rail_chrome(
             ring.opacity = TAB_LAND_RING_ALPHA * landing;
             sprites.push(ring);
         }
-        // **And the join the stand-in opened** (user ruling 2026-09-06) — the
-        // strip's own line on the column's axis, by
-        // [`insertion_line_sprites`]. The ruling names the card column
-        // explicitly (「卡片模式若有拖放同样适用」), and it has drag since
-        // 2026-08-29, so this is the third caller of one function rather than a
-        // third caret.
-        if preview == Some(index) {
-            sprites.extend(insertion_line_sprites(
-                body,
-                Axis::Col,
-                scale,
-                palette.accent,
-            ));
-        }
+        // **And nothing else** (user ruling 2026-09-06, §7.1.6k⁶) — the card
+        // holding the slot, in the wash and the ring above, is the whole of the
+        // column's insertion picture, exactly as it is on the strip and the
+        // rail. The line that was drawn along the seam for one day is gone from
+        // all three.
         // ── the breath: `@keyframes fcard-wait` (§7.1.5b, §7.1.6b′ F3) ──
         //
         // A second ring, `0 0 0 3px` *outside* the border and at `24%` of the
@@ -30314,6 +30206,73 @@ mod tests {",
                 .color,
             palette.accent
         );
+    }
+
+    /// **The stand-in entry is the whole insertion picture** — user ruling
+    /// 2026-09-06, §7.1.6k⁶.
+    ///
+    /// The band that decides *where* a dropped pane lands stays; the mark that
+    /// was drawn on top of the stand-in — a 2px accent rule along the seam with
+    /// a dot inset at each end — is struck on all three surfaces. So the only
+    /// accent this frame carries over the stand-in's slot is the pair the
+    /// landing has always worn: `.drop-preview`'s wash and its inset ring.
+    ///
+    /// Both halves are asserted per surface, because the mark was three call
+    /// sites and one of them surviving is exactly the failure a single-surface
+    /// test would miss: no `Fill` in the accent anywhere in the run (the rule),
+    /// and no accent pill small enough to be one of its end dots.
+    #[test]
+    fn a_stand_in_says_where_a_tab_lands_without_a_line_across_it() {
+        const SLOT: usize = 1;
+        let palette = chrome_palette();
+        let mut tabs = plain_tabs(2);
+        tabs.insert(
+            SLOT,
+            TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
+                title: "stand-in".to_owned(),
+                ..TabContent::default()
+            },
+        );
+        for (surface, state) in [
+            ("the strip", RailState::default()),
+            ("the vertical rail", expanded_rail()),
+            ("the focus card column", focus_rail(TabLayoutMode::Vertical)),
+        ] {
+            let (_, _, sprites) = rail_paint_of_in(
+                TALL_FIXTURE_HEIGHT,
+                1.0,
+                &tabs,
+                2,
+                None,
+                Some(SLOT),
+                state,
+                None,
+            );
+            let accent = |sprite: &ChromeSprite| sprite.color == palette.accent;
+            assert!(
+                !sprites
+                    .iter()
+                    .any(|sprite| accent(sprite) && matches!(sprite.mark, ChromeMark::Fill)),
+                "{surface}: the stand-in wears no accent rule along its seam"
+            );
+            assert!(
+                !sprites.iter().any(|sprite| accent(sprite)
+                    && matches!(sprite.mark, ChromeMark::ControlPill { .. })
+                    && sprite.rect[2] - sprite.rect[0] <= TAB_SEAM_BAND_LOGICAL_PX
+                    && sprite.rect[3] - sprite.rect[1] <= TAB_SEAM_BAND_LOGICAL_PX),
+                "{surface}: and no dot at either end of one"
+            );
+            let worn = |alpha: f32| {
+                sprites
+                    .iter()
+                    .any(|sprite| accent(sprite) && (sprite.opacity - alpha).abs() < 1e-6)
+            };
+            assert!(
+                worn(TAB_LAND_WASH_ALPHA) && worn(TAB_LAND_RING_ALPHA),
+                "{surface}: what it does wear is the landing's own wash and ring"
+            );
+        }
     }
 
     #[test]

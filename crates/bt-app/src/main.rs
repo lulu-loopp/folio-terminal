@@ -77486,7 +77486,9 @@ impl Runtime<'_> {
         // `over` is the entry being aimed at, and the band's whole effect is that
         // it is `None` inside a seam: an insertion and a hand-over are the two
         // pictures this surface can draw and the ruling says they are exclusive
-        // (「插入线与并入预览互斥」), so the seam does not merely outrank the
+        // (「插入线与并入预览互斥」 — the line named there was struck the same
+        // day, §7.1.6k⁶, and the picture left standing for an insertion is the
+        // stand-in's own slot), so the seam does not merely outrank the
         // hand-over, it withholds the fact the hand-over is built out of.
         //
         // `insert_at` is where a new entry would land. Inside a seam it is the

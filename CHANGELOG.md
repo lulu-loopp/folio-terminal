@@ -41,11 +41,11 @@ All notable changes to Folio are recorded here. The format follows
 - **Dropping a pane *between* two tabs is now a target you can hit.** The join
   between two entries in the tab list is a band eight logical pixels either
   side, and a pointer inside it makes the pane a new tab there rather than
-  handing it to the tab it happens to be over — with a line drawn across the
-  join to say where it will land. It takes four more pixels to leave the band
-  than to enter it, so the line and the tab highlight do not trade places under
-  a hand that is holding still. The horizontal tab strip, the vertical rail and
-  the card column all read the same rule.
+  handing it to the tab it happens to be over — the list opens a slot and the
+  pane stands in it, which is where releasing puts it. It takes four more pixels
+  to leave the band than to enter it, so the open slot and the tab highlight do
+  not trade places under a hand that is holding still. The horizontal tab strip,
+  the vertical rail and the card column all read the same rule.
 
 ### Changed
 
