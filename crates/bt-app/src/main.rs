@@ -24504,6 +24504,21 @@ struct Drag {
     /// from the frame it came back on, which is the same reading of "resting
     /// here" [`SpringGate::observe`] takes one field above.
     autoscroll_ticked_at: Option<Instant>,
+    /// **Which seam of the tab list this hand is currently in**, or `None` while
+    /// it is not in one (user ruling 2026-09-06).
+    ///
+    /// The hysteresis's whole memory, and the only thing the seam band needs to
+    /// remember: [`seats::seam_at`] widens its reach for exactly this index and
+    /// for no other. It lives on the drag rather than on the window for
+    /// [`Self::spring`]'s reason — it is a fact about *this gesture* and has to
+    /// die with it. A latch that outlived the drag would hand the next one a
+    /// band it had never entered.
+    ///
+    /// It is the *raw* seam and not the slot the release will insert at: the
+    /// pinned partition's clamp ([`strip_insert_slot`]) can send two different
+    /// seams to one slot, and a latch that remembered the slot would then be
+    /// unable to say which seam the hand is actually standing in.
+    seam: Option<usize>,
 }
 
 /// **The spring-loaded switch's clock** (§7.1.6k, user ruling 2026-08-20): rest a
@@ -76690,6 +76705,7 @@ impl Runtime<'_> {
             home,
             spring: SpringGate::default(),
             autoscroll_ticked_at: None,
+            seam: None,
         });
         // Hover goes quiet for the whole gesture: while something is in your hand
         // the chrome has nothing to offer the pointer, and a `×` lighting up
@@ -76768,8 +76784,16 @@ impl Runtime<'_> {
         source: &DragSource,
         home: Option<[f32; 4]>,
         position: PhysicalPosition<f64>,
+        seam: &mut Option<usize>,
     ) -> Option<DropLanding> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
+        // **The seam latch is cleared here and set in exactly one place below**
+        // (user ruling 2026-09-06). A hand that has left the tab list altogether
+        // — for the layout, for another window's glass, for its own home ground
+        // — is not standing in any seam, and a latch that survived the departure
+        // would give the widened reach of [`seats::TAB_SEAM_RELEASE_LOGICAL_PX`]
+        // to a re-entry that has not earned it.
+        *seam = None;
         // **P86 — home ground, asked before anything else.** A payload let go
         // over the very rectangle it was picked up from has landed nowhere, in
         // any zone and on any surface. It is K135's sentence for a source that
@@ -76782,7 +76806,7 @@ impl Runtime<'_> {
         if let Some(run) = self.tab_run(Instant::now())
             && run.contains(position.x, position.y)
         {
-            return self.survey_strip(source, &run, position);
+            return self.survey_strip(source, &run, position, seam);
         }
         let showing = self.window.tabs[self.window.active_tab].id;
         // K129 — dragging the active tab onto its own layout is meaningless.
@@ -76840,8 +76864,63 @@ impl Runtime<'_> {
         source: &DragSource,
         run: &seats::TabRun,
         position: PhysicalPosition<f64>,
+        seam: &mut Option<usize>,
     ) -> Option<DropLanding> {
         let slot_mids = run.mids();
+        // **The seam band, asked once for both arriving payloads** (user ruling
+        // 2026-09-06).
+        //
+        // Read here rather than inside each arm because it is one sentence about
+        // one pointer, and because the two arms below must not be able to
+        // disagree about which seam the hand is in: the latch is a single number
+        // and a second reader that re-derived it would be a second hysteresis
+        // with its own history.
+        //
+        // **A tab already in the run is not asked it at all.** That arm is a
+        // reorder — a body sliding along the list, judged against its neighbours
+        // rather than against the pointer ([`seats::reorder_target`]) — and it
+        // has no "into that tab" verb for the seam to have priority over. The
+        // ruling is about the two verbs a list offers something that is *not* in
+        // it yet, so a tab's drag leaves the latch empty rather than filling it
+        // with a number nothing downstream will read.
+        let aim = (!matches!(source, DragSource::Tab(_)))
+            .then(|| {
+                run.aim(
+                    position.x,
+                    position.y,
+                    self.window.renderer.metrics().scale_factor as f32,
+                    *seam,
+                )
+            })
+            .flatten();
+        *seam = match aim {
+            Some(seats::StripAim::Insert(index)) => Some(index),
+            Some(seats::StripAim::Into(_)) | None => None,
+        };
+        // **What the pointer names, in the two shapes the arms below want it in.**
+        //
+        // `over` is the entry being aimed at, and the band's whole effect is that
+        // it is `None` inside a seam: an insertion and a hand-over are the two
+        // pictures this surface can draw and the ruling says they are exclusive
+        // (「插入线与并入预览互斥」), so the seam does not merely outrank the
+        // hand-over, it withholds the fact the hand-over is built out of.
+        //
+        // `insert_at` is where a new entry would land. Inside a seam it is the
+        // seam's own index — the two numberings are one numbering, which is why
+        // [`seats::TabRun::seams`] counts the head and the tail — and outside one
+        // it is the midpoint walk that has always answered here, unchanged, so
+        // every pointer the band does not claim gets exactly the answer it got
+        // before this ruling.
+        let over = match aim {
+            Some(seats::StripAim::Into(index)) => self.window.tabs.get(index).map(|tab| tab.id),
+            Some(seats::StripAim::Insert(_)) | None => None,
+        };
+        let insert_at = match aim {
+            Some(seats::StripAim::Insert(index)) => index,
+            Some(seats::StripAim::Into(_)) | None => {
+                seats::insert_index_at(&slot_mids, run.pos(position.x, position.y))
+            }
+        };
         match source {
             DragSource::Tab(tab) => {
                 let tab = *tab;
@@ -76903,15 +76982,12 @@ impl Runtime<'_> {
             //
             // **Two offers, and which one this pointer is asking for is
             // [`pane_strip_landing`]'s** (§7.1.6k). The run answers both questions
-            // off the slots it already carries: `slot_at` for "whose tab is under
-            // my hand" — the third surface to be asked it, and it answers the
-            // column's cards off the same boxes it reorders them by —
-            // `insert_index_at` for "between which two would a new one land".
+            // off the slots it already carries, and since 2026-09-06 it answers
+            // them as one — [`seats::TabRun::aim`] above, which is `slot_at`
+            // ("whose tab is under my hand") and `insert_index_at` ("between
+            // which two would a new one land") with the seam band deciding which
+            // of the two the pointer is asking.
             DragSource::Pane(leaf) => {
-                let over = run
-                    .slot_at(position.x, position.y)
-                    .and_then(|index| self.window.tabs.get(index))
-                    .map(|tab| tab.id);
                 pane_strip_landing(
                     run.pane_offers,
                     over,
@@ -76932,7 +77008,7 @@ impl Runtime<'_> {
                         // the caret the user watches and the slot the release
                         // inserts at are one number — see [`strip_insert_slot`].
                         strip_insert_slot(
-                            seats::insert_index_at(&slot_mids, run.pos(position.x, position.y)),
+                            insert_at,
                             &self
                                 .window
                                 .tabs
@@ -76966,28 +77042,22 @@ impl Runtime<'_> {
             // than at the release, which is M147's ordering: refuse at the
             // release and the tab stays lit right up until the hand opens on
             // nothing.
-            DragSource::Row(payload) => {
-                let over = run
-                    .slot_at(position.x, position.y)
-                    .and_then(|index| self.window.tabs.get(index))
-                    .map(|tab| tab.id);
-                row_strip_landing(
-                    over,
-                    over.is_some_and(|tab| self.row_adopt_fits(payload.kind, tab)),
-                    // N158's clamp, here rather than at the commit, so the caret
-                    // the user watches and the slot the release inserts at are
-                    // one number — see [`strip_insert_slot`].
-                    strip_insert_slot(
-                        seats::insert_index_at(&slot_mids, run.pos(position.x, position.y)),
-                        &self
-                            .window
-                            .tabs
-                            .iter()
-                            .map(|tab| tab.pinned)
-                            .collect::<Vec<_>>(),
-                    ),
-                )
-            }
+            DragSource::Row(payload) => row_strip_landing(
+                over,
+                over.is_some_and(|tab| self.row_adopt_fits(payload.kind, tab)),
+                // N158's clamp, here rather than at the commit, so the caret
+                // the user watches and the slot the release inserts at are
+                // one number — see [`strip_insert_slot`].
+                strip_insert_slot(
+                    insert_at,
+                    &self
+                        .window
+                        .tabs
+                        .iter()
+                        .map(|tab| tab.pinned)
+                        .collect::<Vec<_>>(),
+                ),
+            ),
         }
     }
 
@@ -77550,9 +77620,18 @@ impl Runtime<'_> {
         // sitting on top of it. What the target offers is the *target's* to say,
         // and it says it through [`FolioApp::drive_drag_broker`].
         let ours = self.pointer_is_on_our_own_glass(position);
+        // Borrowed out of the clone so the survey can keep `&self`: the seam
+        // latch is state of *this gesture* and the runtime holds none of it.
+        let mut seam = drag.seam;
         drag.landing = ours
-            .then(|| self.survey_drop(&drag.source, drag.home, position))
+            .then(|| self.survey_drop(&drag.source, drag.home, position, &mut seam))
             .flatten();
+        // **A hand on another window's glass is in no seam of this one.** `ours`
+        // is false there and the survey never runs, so the latch has to be
+        // cleared by the same fact that skipped it — otherwise a hand that left
+        // over a seam and came back would re-enter it with the widened reach it
+        // had not earned.
+        drag.seam = if ours { seam } else { None };
         self.publish_to_broker(&drag, position, ours);
         // **§7.1.6k — the spring is told what the survey answered, not where the
         // pointer is.** One reading of the geometry per move, and the dwell then
@@ -119574,6 +119653,7 @@ mod tests {
             home: None,
             spring: SpringGate::default(),
             autoscroll_ticked_at: None,
+            seam: None,
         }
     }
 
@@ -132854,6 +132934,16 @@ mod tests {
     /// below the last one are the strip's own three answers on the column's
     /// rectangles.
     ///
+    /// **The two questions moved above the `match` on 2026-09-06 and are still
+    /// the run's** (§7.1.6k⁵, the seam band). They used to be asked inside this
+    /// arm and inside the pane's, once each; the band made that a hazard rather
+    /// than a duplication, because the hysteresis it carries is *one* latch and
+    /// two readers of it would be two hysteresis with their own histories. So
+    /// they are asked once, of the same run, and both arriving payloads are
+    /// handed the answers — which is the same sentence this test has always
+    /// made, one indentation further out. What the arm still owns is N158's
+    /// clamp.
+    ///
     /// Mutation: read `window.focus_mode` here and the column grows a second set
     /// of rules ①'s whole argument forbids; drop the `strip_insert_slot` and a
     /// file dropped after a pinned tab makes an unpinned tab inside the pinned
@@ -132861,26 +132951,36 @@ mod tests {
     #[test]
     fn a_rows_strip_arm_asks_the_run_and_never_the_window() {
         let survey = row_strip_method("survey_strip");
-        let arm = survey
-            .split_once("DragSource::Row(payload) => {")
+        let (asked, arms) = survey
+            .split_once("match source {")
+            .expect("survey_strip chooses on what is in the hand");
+        assert!(
+            asked.contains("run.aim("),
+            "\"whose tab is under my hand\" and \"which join am I in\" are the \
+             run's own questions, asked once:\n{asked}"
+        );
+        assert!(
+            asked.contains("seats::insert_index_at("),
+            "and so is \"between which two would a new one land\", for every \
+             pointer the band does not claim:\n{asked}"
+        );
+        let arm = arms
+            .split_once("DragSource::Row(payload) => ")
             .expect("survey_strip answers a row")
             .1;
-        assert!(
-            arm.contains(".slot_at("),
-            "\"whose tab is under my hand\" is the run's own question:\n{arm}"
-        );
-        assert!(
-            arm.contains("seats::insert_index_at("),
-            "and so is \"between which two would a new one land\":\n{arm}"
-        );
         assert!(
             arm.contains("strip_insert_slot("),
             "N158: the caret the reader watches is the slot the release inserts \
              at, clamped on this run's own pinned partition:\n{arm}"
         );
+        // Asked of the arm and of the questions above it, and deliberately not
+        // of the whole method: the *pane* arm names `window.focus_mode` in a
+        // comment explaining why it does not read it, and a test that could not
+        // tell a sentence about a field from a use of it would be a test nobody
+        // could write that sentence beside.
         assert!(
-            !arm.contains("focus_mode"),
-            "the surface is chosen once, in `tab_run`, and never re-read here"
+            !asked.contains("focus_mode") && !arm.contains("focus_mode"),
+            "the surface is chosen once, in `tab_run`, and never re-read here:\n{asked}\n{arm}"
         );
     }
 

@@ -4,6 +4,19 @@ All notable changes to Folio are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **Dropping a pane *between* two tabs is now a target you can hit.** The join
+  between two entries in the tab list is a band eight logical pixels either
+  side, and a pointer inside it makes the pane a new tab there rather than
+  handing it to the tab it happens to be over — with a line drawn across the
+  join to say where it will land. It takes four more pixels to leave the band
+  than to enter it, so the line and the tab highlight do not trade places under
+  a hand that is holding still. The horizontal tab strip, the vertical rail and
+  the card column all read the same rule.
+
 ## 0.2.1-preview (unreleased)
 
 Fixes and polish for 0.2.0-preview. The one thing that is new is the one 0.2.0
