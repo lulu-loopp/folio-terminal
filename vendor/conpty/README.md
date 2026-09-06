@@ -116,6 +116,17 @@ the documented default creation flags (`0`), matching Microsoft's `node-pty` sid
 portable-pty's private `0x2`/`0x4` flags remain confined to the inbox-system compatibility path.
 After attaching the child, the package path also calls its required `ConptyReleasePseudoConsole`
 API; the final `ConptyClosePseudoConsole` remains owned by the existing RAII handle.
+
+The patch also binds **`ConptyClearPseudoConsole(HPCON, BOOL keepCursorRow)`**, which `conpty.h`
+declares and the packaged DLL exports, and exposes it as
+`portable_pty::win::conpty::clear_host_buffer`. It is the call Windows Terminal's own
+`clearBuffer` spends, and Folio needs it for the same reason: a terminal on Windows does not own
+the screen its child draws on, so a clear performed only on this side desynchronises the two and
+the host has no reason to redraw a prompt it believes is still displayed. There is **no
+counterpart in `kernel32`** — the operating system's inbox ConPTY exports no clear at all — so the
+system path answers `Ok(false)` ("there was no host to tell") rather than an error, and the caller
+falls back to clearing only what it can see. Measured 2026-09-05 against the pinned sidecar: the
+call emits no bytes of its own, and after it the host addresses the kept row as row 1.
 `BT_CONPTY_FORCE_SYSTEM=1` is reserved for the ignored upstream-regression oracle.
 
 The workspace uses an exact `portable-pty = "=0.9.0"` requirement plus `[patch.crates-io]`. This

@@ -12,7 +12,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::{mem, ptr};
-use winapi::shared::minwindef::DWORD;
+use winapi::shared::minwindef::{BOOL, DWORD, FALSE, TRUE};
 use winapi::shared::winerror::{HRESULT, S_OK};
 use winapi::um::handleapi::*;
 use winapi::um::processthreadsapi::*;
@@ -55,6 +55,11 @@ shared_library!(SidecarConPtyFuncs,
         hpc: *mut HPCON
     ) -> HRESULT,
     pub fn ConptyResizePseudoConsole(hpc: HPCON, size: COORD) -> HRESULT,
+    // `conpty.h` spells the second parameter `BOOL keepCursorRow`: the console host clears its
+    // own buffer and repaints, keeping the row the cursor is on when asked to. There is no
+    // counterpart in `kernel32` — the inbox ConPTY exports no clear at all — which is why this
+    // one appears in the sidecar list only and `ConPtyFuncs::clear` answers `None` for System.
+    pub fn ConptyClearPseudoConsole(hpc: HPCON, keep_cursor_row: BOOL) -> HRESULT,
     pub fn ConptyReleasePseudoConsole(hpc: HPCON) -> HRESULT,
     pub fn ConptyClosePseudoConsole(hpc: HPCON),
 );
@@ -131,6 +136,22 @@ impl ConPtyFuncs {
             match self {
                 Self::Sidecar(funcs) => (funcs.ConptyResizePseudoConsole)(con, size),
                 Self::System(funcs) => (funcs.ResizePseudoConsole)(con, size),
+            }
+        }
+    }
+
+    /// Ask the console host to clear its own buffer, and report `None` when the selected
+    /// implementation has no such call.
+    ///
+    /// `None` is not a failure and must not be reported as one: the operating system's inbox
+    /// ConPTY exports no clear, so a caller on that path has to fall back to clearing only its own
+    /// screen. A `Some(HRESULT)` is the host's answer to a call that really was made.
+    fn clear(&self, con: HPCON, keep_cursor_row: bool) -> Option<HRESULT> {
+        let keep = if keep_cursor_row { TRUE } else { FALSE };
+        unsafe {
+            match self {
+                Self::Sidecar(funcs) => Some((funcs.ConptyClearPseudoConsole)(con, keep)),
+                Self::System(_) => None,
             }
         }
     }
@@ -238,6 +259,23 @@ impl PsuedoCon {
             result
         );
         Ok(())
+    }
+
+    /// Clear the console host's own buffer, keeping the cursor's row when asked to.
+    ///
+    /// `Ok(false)` means the selected implementation has no clear call — the inbox ConPTY exports
+    /// none — and is the honest answer to "was the host told", not an error.
+    pub fn clear(&self, keep_cursor_row: bool) -> Result<bool, Error> {
+        let Some(result) = CONPTY.funcs.clear(self.con, keep_cursor_row) else {
+            return Ok(false);
+        };
+        ensure!(
+            result == S_OK,
+            "failed to clear the pseudo console (keep_cursor_row={}): HRESULT: {}",
+            keep_cursor_row,
+            result
+        );
+        Ok(true)
     }
 
     pub fn spawn_command(&self, cmd: CommandBuilder) -> anyhow::Result<WinChild> {
