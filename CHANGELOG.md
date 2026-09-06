@@ -111,6 +111,21 @@ All notable changes to Folio are recorded here. The format follows
   drawn under image paths wait on the same stillness, so they come back on those
   screens too.
 
+- **A formula the pane was too narrow to hold on one row now gets typeset too.**
+  When a line is longer than the pane, the terminal folds it onto the next row,
+  and the fold can land on a space. Folio read each row on the screen with its
+  right-hand blanks removed — right for a row that ends a line, wrong for one
+  that carries on — so the two halves were welded together and the space between
+  them was lost. `\quad g_i(x)` folded at that space read back as `\quadg_i(x)`,
+  which is not a command, and the whole block stayed as its own source text at
+  that one pane width while typesetting at every other. One column of window
+  width was the whole difference, which is why the same answer from Claude Code
+  drew some of its formulas and not others, and why making the window smaller
+  could bring back a formula while taking away the one beside it. A line is now
+  read as the line the program printed, wherever the pane happened to fold it —
+  so a wider or narrower window changes where the fold falls and nothing else.
+  Markdown tables and the pictures drawn under image paths are read the same way.
+
 - **A picture stays in its own preview pane when a second preview pane is open.**
   Open an image, then open a page or a text file beside it, and the picture went
   somewhere else: drawn over the other pane's contents, or — where the other pane
