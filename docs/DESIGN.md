@@ -834,6 +834,25 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 **钉子(`crates/bt-term/src/session.rs`)**:`a_block_soft_wrapped_on_a_space_keeps_the_space_and_typesets`(24 列的优化块必须带着 `\quad g_i`、无 `failure_reason`、有 artifact)、`a_wrapped_block_reads_the_same_source_at_every_pane_width`(20–60 列每一档的三块源码必须与 100 列逐字相同,并且都排得出来——贝叶斯那桩只有这一条抓得住)。**变异红证**:把那个参数改回常量 `false`(修前的行为)→ 两条全红,第一条报 `\quad \text{s.t.} \quadg_i(\mathbf{x})`,第二条在 20 列就报 `g_i(\mathbf{x})\le 0,;`。
 
+
+### 4.6b 一扇窗从一个块的中间开头,不需要先有一段历史才算数(公式活性单第三片,2026-09-06,已落地;`crates/bt-detect/src/lib.rs`)
+
+**由头是用户对 `dist\folio-next39.exe`(= `46dc96c`,§4.6 与 §4.6a 两修都在里面)的验收:同一段 Claude Code 输出里,麦克斯韦、正态密度、贝叶斯三块都是图,最后那块带约束的优化仍旧是源码。** 这一次用户交了 `BT_DECOR_TRACE`,于是不必再猜。
+
+**取证:那个块不是「排失败」,是根本没被看见。** 逐帧记录里最后那一屏(frame 184–208,`screen=Alternate`)每一帧的 LIVE 名单都只有三条——`\begin{aligned}` 的 `rendered`、`p(x)` 的 `rendered`、`P(A \mid B)` 的 `stale`——而屏幕上明明还有第四个块。**全文件没有一条 `state=failed`。** 更早的两段能对上因果:同一个块在 Primary 那一段(log 131–155)是 `row=32 band=32-35 state=rendered`,在 Alternate 的 frame 91–103 也是 `row=32 band=32-35 state=rendered`;frame 104 一次 resize 之后内容整体上移九行(`p(x)` 20-22 → 8-11、`P(A \mid B)` 24-26 → 15-17,同一个 −9),从那一刻起,这块屏上**再没有任何一个块被新证成过**——三张图全是移位保留下来的旧记录,那条 `stale` 就是「还挂着旧光栅、重排再没落地」的样子。
+
+**真因是一处证据的挂靠点。** `clipped_open_index` 就是为这个拓扑写的:活屏第 0 行落在一个块的**正文**里,它的开定界符已经不在屏上了,于是屏上第一个 `$$` 其实是那个块的**闭**定界符;把它读成「开」,后面每一个 `$$` 都被挪了一位,`$$…$$` 每一对夹住的都是一行标题而不是公式,逐对被当成散文否掉,而屏幕最下面那个真块**连配对都轮不到**。这条证据本来是对的,但它的第二个参数一直是 `live_grid_boundary_index`——**冻结→活屏的那道接缝**,而那个函数对「第一条逻辑行就是 grid」的窗口明写返回 `None`。于是:**这个拓扑唯一会自己发生的那块屏,恰好是唯一说不出这句话的那块屏。** 备用屏上的程序占着整扇窗,内容上移是它自己重画出来的,不是滚出去的——没有行被移除,`alternate_detection_context` 无从被推进,第 0 行就这么落在了一个块的中间;而备用屏没有冻结前缀,`live_grid_boundary_index` 返回 `None`,剪口证据当场失效。
+
+**裁决:剪口问的是「这块屏是不是从一个块的中间开头」,这句话和它前面站没站着一段冻结历史无关。** 证据改挂 `live_grid_first_index`(第一条带 grid 片段的逻辑行,不加 `> 0` 过滤);接缝那一个仍旧是 `live_grid_boundary_index`,一个字没动——它服务的是另一条规矩(幻影开定界符的放弃),那条规矩确实只在有冻结前缀可被污染时才有东西要修,而「备用屏那截合法截断的前缀照旧自己配对」也正是靠它保持不变。**同一个坐标上问的是两个问题,现在它们各有各的函数。**
+
+**判据本身要收紧,因为它现在够得到的屏幕多了一整类。** 剪口判据原先只问「`$$` 前面那几行像不像一段 display 正文」,而 `valid_display_body` 只会否掉散文;`prose` 这样一个不含空格的独词读起来不像散文,于是「一行普通文字 + 一个块」的屏幕会被判成剪口,把那个块自己的开定界符当成上方块的闭定界符吃掉——`cargo test --workspace` 当场十条红,包括 §4.6 与 §4.6a 自己的钉子(`a_wrapped_block_reads_the_same_source_at_every_pane_width` 报的是三块只剩 `{"prose"}`)。**补上的是这个仓库自己已经用了两遍的那条收敛守卫**(`grid_dollars_opens_valid_block`,幻影开定界符见证的后一半):一个对称的 `$$` 永远不靠猜来改读法,只有在**当前读法被证伪**时才改。当前读法就是「它是一个普通的开定界符」——如果照这个读法往前配,配得出一个合法的块,那就没有任何东西需要修,剪口一律沉默,不管它上面那几行长什么样。而一个真的剪口**在构造上**过不了这一关:剪口闭定界符后面的那个 `$$` 是下一个块的**开**,从闭定界符往前配只会把两者之间的标题夹进来,当场被否。
+
+**顺带补上剪口判据里另一个此前够不到的假阳性。** 判据要求 `$$` 前面那几行构成一段合法的 display 正文,而 `valid_display_body` 只会否掉散文;一行光秃秃的 ```` ``` ```` 是一个不含空格的 token,读起来不像散文——于是一段代码围栏里的 `$$` 会被判成剪口的闭定界符。围栏在扫描器里是整段跳过的,围栏里的 `$$` 是惰性文本,所以判据现在多问一句:候选 `$$` 之前那几行里不许有 CommonMark 围栏起始。**这条不是新规矩,是把扫描器早就在遵守的那条写进判据**——此前它够不到,只因为那条路在备用屏上从来没走通过。
+
+**钉子**:`crates/bt-detect/src/lib.rs` `a_grid_only_clipped_open_closer_is_contained_and_the_block_below_re_pairs`(纯 grid 窗口:剪口被当作 above-window closer 收下,下面那个块重新配上对并被检出);`crates/bt-term/src/session.rs` `a_block_below_a_clipped_open_block_typesets_on_the_alternate_screen`(用户那一屏原样重建——一个开定界符已不在屏上的块的尾巴,后面跟着报告里那三块,52 列备用屏,真引擎:三块都要有 artifact、都不许有 `failure_reason`)。**变异红证**:把剪口证据改回挂 `live_grid_boundary_index`(修前的行为)→ 两条全红,session 那条报的是 `live_decorations` 为 `[]`——**整屏一个块都没有**,与 trace 里那三条全是旧记录、第四块一条 LIVE 都没有的形状逐字对上;把围栏那一句拿掉 → `code_fenced_dollars_is_a_legitimate_code_context_rejection` 红(围栏里的 `$$` 被误判成剪口孤儿);把收敛守卫拿掉 → `cargo test --workspace` 十条红,其中 §4.6 与 §4.6a 自己的四条钉子在列。
+
+**一句诚实的界限。** 用户那次的 `BT_PTY_DUMP` 只留下了第一块 pane 的字节:`BT_PTY_DUMP` 指的是**这一轮第一份录音**的文件名,后开的每一块 pane 各自取 `<path>.2`、`<path>.3`(`crates/bt-pty/src/lib.rs`),而 Claude Code 那块 pane 不是第一块。所以「Claude Code 当时到底往 PTY 里写了哪几个字节」这一层没有被证,被证的是:**这个拓扑本身会把备用屏上一整屏的 `$$` 块从「图」翻成「源码」,而且它就在用户那条 trace 的形状上。**
+
 ## 5. 数学渲染管线（M-1 spike）
 
 同 v3（三路径、300+ 样本含恶意输入、进程隔离开销验证、缓存键含 detection_rev + LayoutKey）。

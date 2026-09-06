@@ -15129,6 +15129,83 @@ mod tests {
         }
     }
 
+    /// The reported screen of 2026-09-06, rebuilt: Claude Code runs on the **alternate** screen and
+    /// redraws its whole window in place, so when its transcript moves up the rows that leave the
+    /// top are overwritten rather than removed. Nothing scrolls, nothing advances the alternate
+    /// context, and grid row 0 simply begins inside the body of the topmost block, whose opening
+    /// `$$` is no longer anywhere on the grid — the tail of a `\begin{aligned}` block, its
+    /// `\end{aligned}` and its closing `$$`, and then the rest of the answer beneath it.
+    ///
+    /// The block at the bottom is the one the user reported as source. Everything above it is
+    /// exactly the answer it arrived in, at the 52-column width the pane had, with Claude Code's own
+    /// two-space indent and the `\;` → `;` its markdown pass had already eaten.
+    fn alternate_screen_clipped_at_the_top() -> DualPlaneSession {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(52), nz(30));
+        seat_inline_metrics(&mut session);
+        let mut feed = String::from("\x1b[?1049h\x1b[2J\x1b[H");
+        let mut row = |text: &str| {
+            feed.push_str(text);
+            feed.push_str("\r\n");
+        };
+        // The tail of a block whose opener is above the window: two body rows and its closer.
+        row(r"  \nabla \times \mathbf{B} &= \mu_0\mathbf{J}");
+        row(r"  \end{aligned}");
+        row("  $$");
+        for block in reported_formula_blocks() {
+            row("");
+            row("  a heading before the block");
+            row("");
+            row("  $$");
+            for line in block {
+                row(&format!("  {line}"));
+            }
+            row("  $$");
+        }
+        session.feed_at(feed.as_bytes(), start).unwrap();
+        hide_cursor(&mut session, start);
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        complete_live_math_for_real(&mut session);
+        session
+    }
+
+    /// §4.6b. A block below a clipped-open block on the alternate screen is still a block.
+    ///
+    /// The clip resync exists for exactly this topology — grid row 0 inside a block whose opener is
+    /// gone, so the first `$$` on the grid is that block's CLOSER and reading it as an opener shifts
+    /// every `$$` below it by one. It was keyed to the frozen→live seam, which a grid-only window
+    /// does not have, so on the alternate screen it could never fire: the first `$$` opened a
+    /// spurious block that swallowed the heading beneath it, the pairing walked out of phase, and
+    /// the last block on the screen — the constrained-optimisation one the user reported — was never
+    /// paired at all. Not failed, not rejected: never seen.
+    #[test]
+    fn a_block_below_a_clipped_open_block_typesets_on_the_alternate_screen() {
+        let session = alternate_screen_clipped_at_the_top();
+        let sources = session
+            .live_decorations
+            .values()
+            .map(|record| record.span.render_source.clone())
+            .collect::<Vec<_>>();
+        for needle in [r"\min_", "p(x)", r"P(A \mid B)"] {
+            assert!(
+                sources.iter().any(|source| source.contains(needle)),
+                "the block containing {needle:?} is below a clipped-open block, not inside one: {sources:?}"
+            );
+        }
+        assert!(
+            session
+                .live_decorations
+                .values()
+                .all(|record| record.artifact.is_some() && record.failure_reason.is_none()),
+            "every block below the clip typesets: {:?}",
+            session
+                .live_decorations
+                .values()
+                .map(|record| record.failure_reason.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
     /// The same rule with the one row that genuinely does change on every frame — a status line
     /// carrying a clock. Only that row's clock may restart; the block's rows are untouched bytes and
     /// must settle on schedule.

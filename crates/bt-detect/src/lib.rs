@@ -2282,7 +2282,12 @@ pub fn live_detection_isolation_gap(
 ) -> usize {
     let logical = live_logical_lines(inputs);
     let boundary = live_grid_boundary_index(&logical, inputs);
-    let clipped = clipped_open_index(&logical, boundary, &initial_context, options);
+    let clipped = clipped_open_index(
+        &logical,
+        live_grid_first_index(&logical, inputs),
+        &initial_context,
+        options,
+    );
     let full = detect_live_math_blocks_in_context(
         logical.iter().map(|line| (line.id, line.text.as_str())),
         initial_context,
@@ -2343,7 +2348,12 @@ pub fn live_detection_ownership_ledger(
 ) -> OwnershipLedger {
     let logical = live_logical_lines(inputs);
     let boundary = live_grid_boundary_index(&logical, inputs);
-    let clipped = clipped_open_index(&logical, boundary, &initial_context, options);
+    let clipped = clipped_open_index(
+        &logical,
+        live_grid_first_index(&logical, inputs),
+        &initial_context,
+        options,
+    );
 
     // Lineage: a logical line's source row is its first physical fragment's input source.
     let source_of = |index: u32| -> Option<MathSourceLine> {
@@ -2385,13 +2395,20 @@ pub fn live_detection_ownership_ledger(
 /// carried). Returns the logical index of the first grid `$$` — really the clipped block's closer —
 /// so the ledger can mark it a `ClippedOpen` orphan. Decidable purely from the reconstructed rows
 /// and the parser phase at the boundary; hold-independent, exactly what `isolation_gap` cannot see.
+///
+/// `first_grid` is [`live_grid_first_index`] and **not** the frozen→live seam: whether a screen
+/// begins inside a block has nothing to do with whether any frozen line stands in front of it, and
+/// keying the evidence to the seam left the one screen where this topology arises on its own —
+/// a full-screen program's alternate screen, which owns its window and moves its content by
+/// redrawing rather than scrolling, so no row is ever removed and nothing advances that screen's
+/// context — unable to state it at all (§4.6b).
 fn clipped_open_index(
     logical: &[LiveLogicalLine],
-    boundary: Option<usize>,
+    first_grid: Option<usize>,
     initial_context: &DetectionContext,
     options: DetectionOptions,
 ) -> Option<u32> {
-    let b = boundary?;
+    let b = first_grid?;
     // Parser phase at the seam. If a Dollars opener is carried in (`opening.is_some()`) the block's
     // opener is accounted above the window (a genuine bridge / carry, not a clip); if inside a code
     // fence there is no structural math. Only a CLOSED phase at the seam can misread a clipped
@@ -2420,12 +2437,35 @@ fn clipped_open_index(
     if (b..first_dollars).any(|i| opening_delimiter(logical[i].text.as_str()).is_some()) {
         return None;
     }
+    // Nor may a CommonMark fence open among them. The scanner skips a fenced region whole, so a
+    // `$$` reached inside one is inert text and the rows above it are code, not a block body — and
+    // `valid_display_body` cannot say so, because a bare fence marker is a single token with no
+    // whitespace in it and reads as math rather than prose.
+    if (b..first_dollars).any(|i| commonmark_fence_marker(logical[i].text.as_str()).is_some()) {
+        return None;
+    }
     let body = logical[b..first_dollars]
         .iter()
         .map(|line| line.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    valid_display_body(&body, &body, options).then_some(first_dollars as u32)
+    if !valid_display_body(&body, &body, options) {
+        return None;
+    }
+    // The convergence guard, the same one the two resyncs use: a symmetric `$$` is never re-read on
+    // a guess, only when the reading in force is provably broken. Reading this one as an ordinary
+    // opener is the reading in force, so if it pairs forward into a valid block there is nothing to
+    // repair and the clip must stay inert — whatever the rows above happen to look like. A genuine
+    // clip fails it by construction: the `$$` after a clipped closer is the *next* block's opener,
+    // so pairing forward from the closer encloses the prose between them and is refused. Without
+    // this, one row of ordinary text above a block — a single word, which is not enough whitespace
+    // to read as prose — was enough to eat that block's opening `$$` as an above-window closer.
+    let lines = logical
+        .iter()
+        .map(|line| (line.id, line.text.as_str()))
+        .collect::<Vec<_>>();
+    (!grid_dollars_opens_valid_block(&lines, first_dollars, options))
+        .then_some(first_dollars as u32)
 }
 
 /// Run the authoritative detector on a worker-owned frozen snapshot. The session thread only
@@ -2520,7 +2560,7 @@ pub fn resolve_live_detection_task(task: &mut LiveDetectionTask) -> bool {
     let live_grid_boundary = live_grid_boundary_index(&logical, &task.inputs);
     let clipped = clipped_open_index(
         &logical,
-        live_grid_boundary,
+        live_grid_first_index(&logical, &task.inputs),
         &task.initial_context,
         task.options,
     );
@@ -2554,7 +2594,12 @@ pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
     let logical = live_logical_lines(&inputs);
     let row_to_logical = live_grid_logical_ids(&logical, &inputs);
     let live_grid_boundary = live_grid_boundary_index(&logical, &inputs);
-    let clipped = clipped_open_index(&logical, live_grid_boundary, &initial_context, options);
+    let clipped = clipped_open_index(
+        &logical,
+        live_grid_first_index(&logical, &inputs),
+        &initial_context,
+        options,
+    );
     let blocks = detect_live_math_blocks_in_context(
         logical.iter().map(|line| (line.id, line.text.as_str())),
         initial_context.clone(),
@@ -2648,6 +2693,27 @@ fn apply_live_detected_block(
     true
 }
 
+/// Index of the first logical line that carries a live-grid fragment, whether or not anything
+/// precedes it.
+///
+/// This is where the scanned window stops being frozen text and starts being the screen, and two
+/// different questions are asked at that coordinate. [`live_grid_boundary_index`] asks the narrower
+/// one; [`clipped_open_index`] asks this one, because "does this screen begin inside a block" is a
+/// question a window with no frozen prefix at all can be asked just as well.
+fn live_grid_first_index(
+    logical: &[LiveLogicalLine],
+    inputs: &[LiveDetectionInput],
+) -> Option<usize> {
+    logical.iter().position(|line| {
+        line.fragments.iter().any(|fragment| {
+            matches!(
+                inputs[fragment.input_index].source,
+                LiveDetectionSource::Grid { .. }
+            )
+        })
+    })
+}
+
 /// Index of the first logical line that carries a live-grid fragment, when at least one frozen
 /// history line precedes it — i.e. a real frozen→live seam. Returns `None` when the first logical
 /// line is already grid (a pure alternate-screen context, or a primary with empty history): there
@@ -2657,17 +2723,7 @@ fn live_grid_boundary_index(
     logical: &[LiveLogicalLine],
     inputs: &[LiveDetectionInput],
 ) -> Option<usize> {
-    logical
-        .iter()
-        .position(|line| {
-            line.fragments.iter().any(|fragment| {
-                matches!(
-                    inputs[fragment.input_index].source,
-                    LiveDetectionSource::Grid { .. }
-                )
-            })
-        })
-        .filter(|&boundary| boundary > 0)
+    live_grid_first_index(logical, inputs).filter(|&boundary| boundary > 0)
 }
 
 fn live_grid_logical_ids(
@@ -4513,7 +4569,7 @@ abla f",
         let boundary = live_grid_boundary_index(&logical, &inputs);
         let clipped = clipped_open_index(
             &logical,
-            boundary,
+            live_grid_first_index(&logical, &inputs),
             &DetectionContext::default(),
             DetectionOptions::default(),
         );
@@ -4888,6 +4944,45 @@ abla f",
         assert_eq!(
             verdict.detected, 1,
             "the block below the clip re-pairs and is detected"
+        );
+    }
+
+    /// The same clip, on the screen where it actually happens: a **pure grid** context, with no
+    /// frozen line in front of it at all. An alternate-screen TUI owns its whole window and redraws
+    /// it in place, so when its content moves up the rows that leave the top are overwritten rather
+    /// than removed — no scroll event, nothing to advance the alternate context, and grid row 0
+    /// simply begins inside a block whose opener is gone. That is this topology and nothing else,
+    /// yet every clip fixture above carries a `hist` line, and the clip evidence was keyed to the
+    /// frozen→live seam, which a grid-only window does not have. Without the clip the first grid
+    /// `$$` reads as an opener and swallows the prose beneath it, and every `$$` below is shifted by
+    /// one — so the genuine block at the bottom of the window is never paired at all.
+    #[test]
+    fn a_grid_only_clipped_open_closer_is_contained_and_the_block_below_re_pairs() {
+        let ledger = ledger_of(
+            &[
+                grid(0, r"\nabla \times \mathbf{B} &= \mu_0\mathbf{J}"),
+                grid(1, r"\end{aligned}"),
+                grid(2, "$$"), // clipped block's closer — consumed as an above-window closer
+                grid(3, ""),
+                grid(4, "prose between two blocks"),
+                grid(5, ""),
+                grid(6, "$$"), // a fresh block below the clip...
+                grid(7, r"\gamma = 2"),
+                grid(8, "$$"), // ...re-pairs cleanly and is detected
+            ],
+            DetectionContext::default(),
+        );
+        let verdict = ledger.containment(&[]);
+        assert!(
+            has_reason(&ledger, LegitimateRejection::OpenerAboveWindow),
+            "a grid-only window's clipped closer is contained as an above-window closer"
+        );
+        assert_eq!(verdict.orphans, 0, "the clip does not spill an orphan");
+        assert!(!verdict.red);
+        assert!(!verdict.clipped_open);
+        assert_eq!(
+            verdict.detected, 1,
+            "the block below the clip re-pairs and is detected on a grid-only window"
         );
     }
 
