@@ -881,23 +881,6 @@ impl TerminalAdapter {
         self.drain_transcript_events()
     }
 
-    /// `Clear screen`: the rows above the cursor scroll away into the transcript, the row the
-    /// cursor is on becomes the top row, everything below it is erased.
-    ///
-    /// Mirrored into the resize transaction's canonical terminal for the same reason bytes are
-    /// (`advance_terminal_bytes`): the shadow grid is the one a reconcile reads back, and a screen
-    /// operation it never saw would reappear when the transaction closes.
-    pub fn clear_screen_keeping_cursor_row(&mut self) -> Vec<AdapterEvent> {
-        self.term.clear_screen_keeping_cursor_row();
-        if let Some(canonical) = self.resize_canonical.as_mut() {
-            canonical.term.clear_screen_keeping_cursor_row();
-            discard_listener_output(&canonical.listener);
-            let _ = canonical.term.take_input_writes();
-        }
-        self.cursor_row_positioned_explicitly = false;
-        self.drain_transcript_events()
-    }
-
     pub fn begin_resize_transaction(&mut self) -> usize {
         if self.resize_canonical.is_some() {
             return 0;

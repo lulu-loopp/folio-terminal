@@ -2615,23 +2615,43 @@ impl DualPlaneSession {
         result
     }
 
-    /// `Clear screen` (§7.1.6): **the rows above the cursor scroll out into the transcript, the
-    /// row the cursor is on stays and becomes the top row, and everything below it is erased.**
+    /// `Clear screen` (§7.1.6, §7.1.6l): **the rows above the cursor scroll out into the
+    /// transcript, the row the cursor is on stays and becomes the top row, and everything below it
+    /// is erased.**
     ///
-    /// A screen operation rather than bytes fed to this session's own parser, and the difference
-    /// is not stylistic. ED2 clears the *whole* screen — including the row the shell is drawing
-    /// its prompt on — and nothing is going to draw that prompt again: the shell was never told,
-    /// and on Windows it could not act on it if it had been, because the console host owns the
-    /// buffer this window mirrors and sends only the difference against what it believes is shown.
+    /// ED2 is not this. It clears the *whole* screen — including the row the shell is drawing its
+    /// prompt on — and nothing is going to draw that prompt again: the shell was never told, and
+    /// on Windows it could not act on it if it had been, because the console host owns the buffer
+    /// this window mirrors and sends only the difference against what it believes is shown.
     /// Keeping the cursor's row is what every terminal's clear-screen row does, and it is the half
-    /// of the operation that this window performs; `PtySession::clear_host_buffer` is the other
-    /// half, and the two agree on where the kept row ends up (the top).
+    /// of the operation this window performs; `PtySession::clear_host_buffer` is the other half,
+    /// and the two agree on where the kept row ends up (the top).
     ///
-    /// Not expressible as an escape sequence, which is why it is not one: no sequence says "scroll
-    /// away exactly the rows above the cursor, through the ordinary output path, whatever scroll
-    /// region is set". `ESC [ M` says something close and is classified as a local delete that
-    /// never enters canonical history (§3.1); linefeeds at the bottom of the screen say it only
-    /// while no program has narrowed the scroll region.
+    /// **Spelled in escapes, and each one is load-bearing.**
+    ///
+    /// * `ESC [ r` — the scroll region back to the whole screen. The only route that puts rows
+    ///   into the transcript is an ordinary output scroll (`ScrollOutCause::Normal` with
+    ///   `ScrollRegionScope::FullScreen`), and inside a region a program has narrowed there is no
+    ///   such thing: rows leaving a partial region are `Partial` and §3.1 keeps them out of
+    ///   canonical history, and a region whose top is not row 0 never moves the cursor's row to
+    ///   the top at all. So the region goes, and it goes for a reason a reader would accept: the
+    ///   rows it described are the ones being cleared.
+    /// * `ESC [ <rows> ; 1 H` and then one linefeed per row above the cursor — a linefeed at the
+    ///   bottom of the screen *is* the ordinary output scroll, so the rows leave through the
+    ///   mechanism that already reports them, joins continued logical lines, and moves every
+    ///   anchor that named them (a command mark included) from Live to Staging. One mechanism, so
+    ///   the grid and the transcript cannot disagree about what left.
+    /// * `ESC [ 2 ; 1 H` `ESC [ J` — everything below the kept row, which is now the top row.
+    /// * `ESC [ 1 ; <column> H` — the cursor back where it was, on the row it kept.
+    ///
+    /// What is deliberately **not** here is a change to ED2 itself. `ESC [ H` `ESC [ 2 J` is also
+    /// how a full-screen program repaints, byte for byte, and reading each repaint as a scroll
+    /// would put another copy of the screen into history on every frame
+    /// (`ed2_is_a_repaint_boundary_and_never_grows_the_transcript`). Nothing in the bytes tells
+    /// the two apart; what tells them apart is who asked, and only this window knows that.
+    ///
+    /// On the alternate screen there is no transcript behind the grid (§3.2's separate namespace)
+    /// and no prompt row to keep, so the plain clear is the honest answer there.
     pub fn clear_screen_keeping_cursor_row(&mut self) -> Result<(), SessionError> {
         self.clear_screen_keeping_cursor_row_at(Instant::now())
     }
@@ -2641,15 +2661,34 @@ impl DualPlaneSession {
         &mut self,
         observed_at: Instant,
     ) -> Result<(), SessionError> {
-        self.screen_revision = self.screen_revision.wrapping_add(1);
-        self.cursor_logical_line_memory = None;
-        let events = self.terminal.clear_screen_keeping_cursor_row();
-        let damage = self.terminal.take_damage();
-        self.apply_events(events, observed_at)?;
-        self.observe_live_damage(damage, observed_at);
-        self.sync_staging_tail();
-        self.remember_visible_cursor_logical_line();
-        Ok(())
+        self.feed_at(
+            &self.clear_screen_keeping_cursor_row_sequence(),
+            observed_at,
+        )
+    }
+
+    /// The escapes [`Self::clear_screen_keeping_cursor_row`] feeds, as a value, so a test can read
+    /// what this window says to itself rather than infer it from what changed.
+    #[must_use]
+    pub fn clear_screen_keeping_cursor_row_sequence(&self) -> Vec<u8> {
+        let cursor = self.terminal.cursor();
+        if self.terminal.modes().alternate_screen {
+            return b"\x1b[2J\x1b[H".to_vec();
+        }
+        let rows = self.terminal.dimensions().1.get();
+        let mut bytes = Vec::new();
+        // The scroll region back to the whole screen: an ordinary output scroll is the only thing
+        // that reaches the transcript, and a narrowed region has no such thing in it.
+        bytes.extend_from_slice(b"\x1b[r");
+        if cursor.row > 0 {
+            bytes.extend_from_slice(format!("\x1b[{rows};1H").as_bytes());
+            bytes.extend(std::iter::repeat_n(b'\n', cursor.row as usize));
+        }
+        if rows > 1 {
+            bytes.extend_from_slice(b"\x1b[2;1H\x1b[J");
+        }
+        bytes.extend_from_slice(format!("\x1b[1;{}H", cursor.column.saturating_add(1)).as_bytes());
+        bytes
     }
 
     fn selection_touches_mutable_source(&self) -> bool {
@@ -18300,6 +18339,136 @@ mod tests {
             session.scrollback_line_count(),
             0,
             "the ED3 that follows is what empties the transcript, and it is the only thing that does"
+        );
+    }
+
+    /// PIN (clear-screen ruling 2026-09-05) — **`CSI S` moves the screen and tells the transcript
+    /// nothing, so it cannot be what `Clear screen` scrolls with.**
+    ///
+    /// Written down because it is the obvious candidate and it is wrong. `ESC [ <n> S` scrolls the
+    /// whole screen up by `n` in one call, which is exactly the movement the menu row wants — but
+    /// the vendored terminal classifies it as `ScrollOperation::ExplicitScreen` and deliberately
+    /// emits no removal payload for it, because a TUI collapse or repaint loop can issue one every
+    /// frame and cloning every removed cell into the transcript seam would both pollute canonical
+    /// history and make an animation an allocation storm. `CSI S` therefore takes the rows off the
+    /// screen and destroys them here, where the vendored scrollback is pinned to zero.
+    ///
+    /// A linefeed at the bottom of the screen is the same movement through
+    /// `ScrollOperation::Output`, which does report — so that is what
+    /// [`DualPlaneSession::clear_screen_keeping_cursor_row_sequence`] spends.
+    ///
+    /// MUTATION: swap the linefeeds in that sequence for `ESC [ <n> S` and the second half of this
+    /// test is what the menu row becomes — a clear that loses everything above the prompt.
+    #[test]
+    fn csi_s_scrolls_the_screen_without_telling_the_transcript() {
+        let mut session = DualPlaneSession::new(nz(16), nz(4));
+        session.feed(b"one\r\ntwo\r\nthree\r\nPS> ").unwrap();
+        assert_eq!(session.scrollback_line_count(), 0);
+
+        session.feed(b"\x1b[3S").unwrap();
+
+        assert_eq!(
+            session.terminal().visible_text()[0].trim_end(),
+            "PS>",
+            "the screen did move: three rows up, and the prompt is on top"
+        );
+        assert_eq!(
+            session.scrollback_line_count(),
+            0,
+            "and the three rows it moved off the top are simply gone"
+        );
+
+        // The linefeed spelling of the same movement, for the difference.
+        let mut session = DualPlaneSession::new(nz(16), nz(4));
+        session.feed(b"one\r\ntwo\r\nthree\r\nPS> ").unwrap();
+        session.feed(b"\x1b[4;1H\n\n\n").unwrap();
+        assert_eq!(
+            session.terminal().visible_text()[0].trim_end(),
+            "PS>",
+            "the same three rows of movement"
+        );
+        assert_eq!(
+            session.scrollback_line_count(),
+            3,
+            "reported, captured, and still there to be scrolled back to"
+        );
+    }
+
+    /// PIN (clear-screen ruling 2026-09-05) — **what `Clear screen` says to this window, verbatim.**
+    ///
+    /// The sequence is the design, so it is read here rather than inferred from what changed. The
+    /// `ESC [ r` is the part a reader would not guess: a scroll region a program narrowed has no
+    /// full-screen output scroll in it, and a full-screen output scroll is the only movement §3.1
+    /// lets into canonical history. The rows that region described are the rows being cleared, so
+    /// it goes with them.
+    ///
+    /// MUTATION: drop the `ESC [ r` and
+    /// `clear_screen_inside_a_narrowed_scroll_region_still_clears_the_whole_screen` goes red.
+    #[test]
+    fn the_clear_screen_sequence_resets_the_region_scrolls_and_puts_the_cursor_back() {
+        let mut session = DualPlaneSession::new(nz(16), nz(4));
+        session.feed(b"one\r\ntwo\r\nthree\r\nPS> ").unwrap();
+        assert_eq!(
+            session.clear_screen_keeping_cursor_row_sequence(),
+            b"\x1b[r\x1b[4;1H\n\n\n\x1b[2;1H\x1b[J\x1b[1;5H".to_vec(),
+            "region, park, one linefeed per row above the cursor, erase below, cursor back"
+        );
+
+        // The cursor already on the top row has nothing to scroll out, and says so.
+        let mut session = DualPlaneSession::new(nz(16), nz(4));
+        session.feed(b"PS> ").unwrap();
+        assert_eq!(
+            session.clear_screen_keeping_cursor_row_sequence(),
+            b"\x1b[r\x1b[2;1H\x1b[J\x1b[1;5H".to_vec()
+        );
+
+        // The alternate screen has no transcript behind it and no prompt row to keep.
+        let mut session = DualPlaneSession::new(nz(16), nz(4));
+        session.feed(b"\x1b[?1049hdrawing").unwrap();
+        assert_eq!(
+            session.clear_screen_keeping_cursor_row_sequence(),
+            b"\x1b[2J\x1b[H".to_vec()
+        );
+    }
+
+    /// PIN (clear-screen ruling 2026-09-05) — **a program's scroll region does not narrow a clear
+    /// screen.**
+    ///
+    /// `Clear screen` is about the screen, and so is ED2: neither of them is bounded by a region a
+    /// program set for its own scrolling. Without the `ESC [ r` the linefeeds would scroll inside
+    /// that region instead — the rows leaving it would be `Partial` and kept out of canonical
+    /// history by §3.1, and with a region whose top is not row 0 the cursor's row would never
+    /// reach the top at all, which is a clear that did not clear.
+    ///
+    /// MUTATION: drop the `ESC [ r` from the sequence and both halves go red — nothing in the
+    /// transcript, and the prompt still sitting where it was.
+    #[test]
+    fn clear_screen_inside_a_narrowed_scroll_region_still_clears_the_whole_screen() {
+        let mut session = DualPlaneSession::new(nz(16), nz(6));
+        session
+            .feed(b"one\r\ntwo\r\nthree\r\nfour\r\nPS> ")
+            .unwrap();
+        // A status-line program: rows 3..5 scroll, the rest is fixed.
+        session.feed(b"\x1b[3;5r\x1b[5;5H").unwrap();
+        let cursor = session.terminal().cursor();
+        assert_eq!((cursor.row, cursor.column), (4, 4));
+
+        session.clear_screen_keeping_cursor_row().unwrap();
+
+        let rows = session.terminal().visible_text();
+        assert_eq!(
+            rows[0].trim_end(),
+            "PS>",
+            "the kept row is the top row, region or no region: {rows:?}"
+        );
+        assert!(
+            rows[1..].iter().all(|row| row.trim_end().is_empty()),
+            "and the whole screen below it is clear: {rows:?}"
+        );
+        assert_eq!(
+            session.scrollback_line_count(),
+            4,
+            "the four rows above it went into the transcript, not into a region's private scroll"
         );
     }
 
