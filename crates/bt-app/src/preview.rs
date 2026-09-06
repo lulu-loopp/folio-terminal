@@ -4629,8 +4629,10 @@ pub enum PreviewWant {
     /// drawing thread can answer.
     ///
     /// It reads the file's own structure ([`crate::pdf::page_count`]), which is
-    /// a walk over as many bytes as the file has, so it is a question for the
-    /// disk's lane and never for the frame.
+    /// a walk over as many bytes as the file has — and, for a document that
+    /// compressed that structure out of a walk's reach, a parse of it
+    /// (2026-09-05) — so it is a question for the disk's lane and never for the
+    /// frame.
     ///
     /// **It used to carry the file's size with it** and stopped on 2026-08-29:
     /// the card states its facts on one line now, and the size on that line is

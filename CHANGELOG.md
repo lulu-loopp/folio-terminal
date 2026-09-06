@@ -32,6 +32,17 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A hover card over a PDF from LaTeX now says how many pages it has, and its
+  pages turn.** A document written by `pdflatex` — most of them — packs its
+  catalogue, its page tree and every page object into compressed streams, and
+  the reader that counted pages read the file's bytes without inflating
+  anything, so it found nothing to count. The card drew the first page and
+  printed the size, the page count never arrived, and because the column of
+  pages is as long as the count says, the wheel had nothing to turn. The count
+  now falls back to the same reader that draws the page, which inflates those
+  streams and answers off the document's own page list. Files whose structure
+  is in the clear are still counted without being parsed.
+
 - **A sentence's own punctuation is no longer part of the file it names.** A line
   ending `see docs/notes.md.` opened `notes.md.` — a name nothing on the disk
   holds and the preview could make nothing of. An ASCII stop, comma, semicolon,
