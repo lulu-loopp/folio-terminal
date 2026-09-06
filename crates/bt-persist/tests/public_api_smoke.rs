@@ -73,6 +73,8 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         quake_startup_command: "fastfetch".to_owned(),
         quake_top_gap: 0,
         quake_restore: bt_persist::QuakeRestoreV1::Folders,
+        first_run_card: bt_persist::FirstRunCardV1::Shown,
+        powershell_install_pending: true,
     };
     write_settings_atomic(&path, &settings).unwrap();
 

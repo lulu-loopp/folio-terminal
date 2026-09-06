@@ -3055,7 +3055,17 @@ impl SettingsRow {
             Self::CopyOnSelect => Text::DescCopyOnSelect.text(),
             Self::Notifications => Text::DescNotifications.text(),
             Self::TurnEndNotifications => Text::DescTurnEndNotifications.text(),
-            Self::PowerShellOffer => Text::DescPowerShellOffer.text(),
+            // **The one row on this page whose line is a function of something
+            // that is not its own answer** (§7.56). An intent recorded on the
+            // first-run card is outstanding until a PowerShell says where its
+            // `$PROFILE` is, and until then this row is neither installed nor
+            // off — so it says which, rather than reading `Off` over a write
+            // that is coming.
+            Self::PowerShellOffer => {
+                crate::first_run::pending_row_line(values.powershell_install_pending)
+                    .unwrap_or(Text::DescPowerShellOffer)
+                    .text()
+            }
             // Two facts and no opinion, `Explorer context menu`'s shape: what
             // is written, and where. The second is there because a reader who
             // does not know a terminal is about to edit a file belonging to
@@ -4638,6 +4648,15 @@ pub struct SettingsValues {
     /// Whether a PowerShell pane with no integration is offered one — the row
     /// the notice strip's `Don't show again` writes (§7.1.6j).
     pub powershell_integration_offer: bool,
+    /// **Whether the first-run card's PowerShell row is still waiting for a
+    /// shell to name its own `$PROFILE`** (§7.56).
+    ///
+    /// It changes what the row above says and nothing else. The row is neither
+    /// "installed" nor "off" while this is true, and its sentence says which —
+    /// [`Text::ShellIntegrationPending`]. Read from `settings.json` like the row
+    /// itself, because an intent is a thing a reader recorded rather than a fact
+    /// about the machine.
+    pub powershell_install_pending: bool,
     /// Whether the Files column offers its Git page at all.
     pub git_panel: bool,
     /// Whether a modifier held on its own raises the card that lists what it
@@ -4853,6 +4872,7 @@ impl SettingsValues {
             terminal_notifications: true,
             turn_end_notification: true,
             powershell_integration_offer: true,
+            powershell_install_pending: false,
             git_panel: true,
             key_hints: true,
             // A machine that never installed the verb, which is what a fresh

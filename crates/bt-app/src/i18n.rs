@@ -2218,6 +2218,83 @@ pub enum Text {
     OptionQuakeRestoreNothing,
     OptionQuakeRestoreFolders,
     OptionQuakeRestoreFoldersAndCommands,
+
+    // ── the first-run card (§7.56, user ruling 2026-09-06) ─────────────────
+    //
+    // **Every explanation here is a result, and the address of the reader's own
+    // file where there is one.** The card asks the four questions whose answers
+    // write something outside `%APPDATA%\Folio`, so what it owes each row is one
+    // sentence of what the reader gets and — only where the switch writes a file
+    // that belongs to them — one short sentence saying where. Our method, our
+    // files, the scope of our registry writes and the environment variables that
+    // move these directories are all deliberately absent: see the design's own
+    // list of what the rule excludes.
+    //
+    // **No sentence on this card describes an absence.** A row Folio would have
+    // to refuse is not listed at all, because the refusal has an explaining
+    // sentence on the Settings page already and that is where a sentence of that
+    // shape belongs.
+    /// The card's title. Two words about the moment rather than about the
+    /// program: this is the first thing, and it is over in one card.
+    FirstRunTitle,
+    /// The heading over the agent rows. It names the machine because that is
+    /// what decided which rows are under it.
+    FirstRunAgentGroup,
+    /// The line above the two verbs. It is the card's only promise, and it is a
+    /// fact: every row here has a row in Settings.
+    FirstRunFootnote,
+    /// The link beside it.
+    FirstRunOpenSettings,
+    /// The refusal. **`Not now` / 「暂不」 everywhere in this window** (user
+    /// ruling 2026-09-06) — the PSReadLine invitation's own refusal was worded
+    /// differently and now is not, because two surfaces that ask a reader to
+    /// defer must not spend two words on it.
+    FirstRunLater,
+    /// The verb that applies every row that is on, and closes.
+    FirstRunDone,
+    /// The update row. The frequency is in the title, so the sentence does not
+    /// repeat it.
+    FirstRunRowUpdate,
+    /// Its sentence: the result and nothing else. No file of the reader's is
+    /// touched, so it is one sentence and stops.
+    FirstRunDescUpdate,
+    /// The Explorer row — one switch for both registrations on Windows 11, and
+    /// for the classic entry alone anywhere else.
+    FirstRunRowExplorer,
+    /// Its Windows 11 sentence: what a right-click gets you, and where the entry
+    /// is on a machine that shows two pages of menu. `Show more options` is left
+    /// in English because Windows shows it in English on a Chinese machine too.
+    FirstRunDescExplorer11,
+    /// Its Windows 10 sentence — the same result, one place. Also the sentence a
+    /// Windows 11 machine with no `folio.msix` beside `folio.exe` reads, because
+    /// there the switch can only mean the classic entry and the row says what it
+    /// can mean.
+    FirstRunDescExplorer10,
+    /// The PowerShell row.
+    FirstRunRowPowerShell,
+    /// Its sentence: the four results, then the address. `$PROFILE` and its
+    /// dated copy are on the card because they are the reader's own file and a
+    /// thing they will find beside it.
+    FirstRunDescPowerShell,
+    /// The Claude Code row, listed only on a machine that has `claude`.
+    FirstRunRowClaude,
+    /// Its sentence: the result, then the reader's own configuration file.
+    FirstRunDescClaude,
+    /// The Codex row. The title says **a turn has ended** and not "is waiting",
+    /// which is the distinction its Settings row is already careful about.
+    FirstRunRowCodex,
+    /// Its sentence, on the row above's shape.
+    FirstRunDescCodex,
+    /// The Copilot CLI row.
+    FirstRunRowCopilot,
+    /// Its sentence, on the same shape.
+    FirstRunDescCopilot,
+    /// **What the Terminal page's PowerShell row says while an intent is
+    /// outstanding** (§7.56). The row is neither installed nor off; it says
+    /// which. Where `$PROFILE` is comes from the shell and is never computed
+    /// here, so a row left on when the card was answered is a row waiting for a
+    /// shell to name its own file.
+    ShellIntegrationPending,
 }
 
 impl Text {
@@ -2543,7 +2620,12 @@ impl Text {
                 "修复缩放后输入行错位？",
             ),
             Self::PsReadLineInstall => pick(lang, "Install", "安装"),
-            Self::PsReadLineNotNow => pick(lang, "Not now", "以后再说"),
+            // **One word for deferring, everywhere** (user ruling 2026-09-06).
+            // The Chinese used to be its own phrase; the first-run card asks a
+            // reader to defer too, and two surfaces spending two words on one
+            // idea is the drift this table exists to stop. The English never
+            // moved.
+            Self::PsReadLineNotNow => pick(lang, "Not now", "暂不"),
             Self::PsReadLineRemovedToast => pick(
                 lang,
                 "Removed. New PowerShell sessions use the module Windows ships",
@@ -4010,6 +4092,107 @@ impl Text {
                 "The summoned terminal goes away when the keyboard moves to another window.",
                 "键盘转到其他窗口时，唤出的终端随即收起。",
             ),
+
+            // ── the first-run card (§7.56) ─────────────────────────────────
+            //
+            // **Every Chinese line below was written for this card**, from an
+            // English brief with no Chinese copy of any kind in front of the
+            // writer — not this table's, not the README's. They are reproduced
+            // here exactly as the design's own copy file holds them.
+            Self::FirstRunTitle => pick(lang, "First things", "首次配置"),
+            // **Upper-cased at the source**, `AdvancedGroup`'s ruling: this
+            // wears `.group-label`'s type, the chrome text path has no
+            // `text-transform`, and 「大写是内容不是样式」 — a `to_uppercase`
+            // here would be a rule somebody has to remember does not apply to
+            // the Chinese beside it.
+            Self::FirstRunAgentGroup => {
+                pick(lang, "AGENTS FOUND ON THIS MACHINE", "本机检测到的 agent")
+            }
+            Self::FirstRunFootnote => pick(
+                lang,
+                "Every row here is also a row in Settings, where you can change it later.",
+                "这里的每一项也出现在设置中，方便之后调整。",
+            ),
+            Self::FirstRunOpenSettings => pick(lang, "Open settings", "打开设置"),
+            Self::FirstRunLater => pick(lang, "Not now", "暂不"),
+            Self::FirstRunDone => pick(lang, "Done", "完成"),
+            Self::FirstRunRowUpdate => {
+                pick(lang, "Check for a new version once a day", "每天检查新版本")
+            }
+            Self::FirstRunDescUpdate => pick(
+                lang,
+                "When a new version is out, Settings names it and offers the releases page.",
+                "有新版时，设置会列出并给出打开发布页的按钮。",
+            ),
+            Self::FirstRunRowExplorer => pick(
+                lang,
+                "Open any folder in Folio from Explorer",
+                "从资源管理器用 Folio 打开",
+            ),
+            Self::FirstRunDescExplorer11 => pick(
+                lang,
+                "Right-click a folder, or the space inside one, to open it in Folio — on the \
+                 page Windows 11 shows first, and under Show more options.",
+                "右键文件夹或其中空白处，即可在 Folio 中打开。入口在 Windows 11 首先显示的菜单页，\
+                 也见于 Show more options。",
+            ),
+            Self::FirstRunDescExplorer10 => pick(
+                lang,
+                "Right-click a folder, or the space inside one, to open it in Folio — under \
+                 Show more options.",
+                "右键文件夹或其中空白处，即可在 Folio 中打开。入口位于 Show more options。",
+            ),
+            Self::FirstRunRowPowerShell => pick(
+                lang,
+                "Install the PowerShell integration",
+                "安装 PowerShell 集成",
+            ),
+            Self::FirstRunDescPowerShell => pick(
+                lang,
+                "Jump between commands with Ctrl+Shift+↑/↓, spot a failed one by its red mark, \
+                 start a new tab or file column in the current folder, and see $…$ in output \
+                 typeset. It adds one line to your $PROFILE, keeping a dated copy.",
+                "用 Ctrl+Shift+↑/↓ 在命令间跳转，失败的有红标记，新标签页或文件列在当前目录打开，\
+                 命令输出的 $…$ 按公式排版。$PROFILE 加一行并留日期副本。",
+            ),
+            Self::FirstRunRowClaude => pick(
+                lang,
+                "Claude Code tells this window when it is waiting",
+                "Claude Code 等待时通知窗口",
+            ),
+            Self::FirstRunDescClaude => pick(
+                lang,
+                "Its tab carries a mark the moment Claude Code needs an answer. The hook goes \
+                 into ~/.claude/settings.json.",
+                "Claude Code 需要输入时，其标签页出现标记。钩子写入 ~/.claude/settings.json。",
+            ),
+            Self::FirstRunRowCodex => pick(
+                lang,
+                "Codex tells this window when a turn has ended",
+                "Codex 回合结束时通知窗口",
+            ),
+            Self::FirstRunDescCodex => pick(
+                lang,
+                "Its tab carries a mark as soon as a turn ends. The notify program goes into \
+                 ~/.codex/config.toml.",
+                "Codex 回合结束时，其标签页出现标记。notify 程序写入 ~/.codex/config.toml。",
+            ),
+            Self::FirstRunRowCopilot => pick(
+                lang,
+                "Copilot CLI tells this window when it is waiting",
+                "Copilot CLI 等待时通知窗口",
+            ),
+            Self::FirstRunDescCopilot => pick(
+                lang,
+                "Its tab carries a mark the moment Copilot CLI needs an answer. The hook file \
+                 goes into ~/.copilot/hooks/folio.json.",
+                "Copilot CLI 需要输入时，其标签页出现标记。钩子文件为 ~/.copilot/hooks/folio.json。",
+            ),
+            Self::ShellIntegrationPending => pick(
+                lang,
+                "Joins the next PowerShell that starts",
+                "下次启动 PowerShell 时生效",
+            ),
         }
     }
 
@@ -4025,7 +4208,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 576] = [
+    pub const ALL: [Self; 596] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4602,6 +4785,26 @@ impl Text {
         Self::OptionQuakeRestoreNothing,
         Self::OptionQuakeRestoreFolders,
         Self::OptionQuakeRestoreFoldersAndCommands,
+        Self::FirstRunTitle,
+        Self::FirstRunAgentGroup,
+        Self::FirstRunFootnote,
+        Self::FirstRunOpenSettings,
+        Self::FirstRunLater,
+        Self::FirstRunDone,
+        Self::FirstRunRowUpdate,
+        Self::FirstRunDescUpdate,
+        Self::FirstRunRowExplorer,
+        Self::FirstRunDescExplorer11,
+        Self::FirstRunDescExplorer10,
+        Self::FirstRunRowPowerShell,
+        Self::FirstRunDescPowerShell,
+        Self::FirstRunRowClaude,
+        Self::FirstRunDescClaude,
+        Self::FirstRunRowCodex,
+        Self::FirstRunDescCodex,
+        Self::FirstRunRowCopilot,
+        Self::FirstRunDescCopilot,
+        Self::ShellIntegrationPending,
     ];
 
     /// The entries whose two columns are allowed to be the same string.

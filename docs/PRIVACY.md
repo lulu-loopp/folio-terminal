@@ -27,7 +27,7 @@ Nothing is downloaded and nothing is replaced.
 | **What is sent** | One header: `User-Agent: Folio`. No version, no build, no operating system, no identifier, no cookie. GitHub refuses a request with no user agent at all, which is why the header is not empty. |
 | **How often** | At most once every 24 hours, across every Folio window on the machine. A failure - no network, a proxy, a rate limit - counts as the attempt for that day and is not retried. |
 | **Where the answer goes** | `%APPDATA%\Folio\update-check.json`: when the page was last asked, the tag it named, and the tag you have already been shown. |
-| **How to switch it off** | Settings > General > **Update check**, or `"update_check": false` in `settings.json`. Off, no thread is started, no request is made and `update-check.json` is never written. |
+| **How to switch it off** | Settings > General > **Update check**, or `"update_check": false` in `settings.json`. On a machine that has never run Folio it is also the first row of the first-run card, where it arrives on and can be switched off before it has ever run. Off, no thread is started, no request is made and `update-check.json` is never written. |
 
 GitHub receives the request the way it receives any request: your IP address and
 the time. Folio adds nothing to that. The request goes through Windows' own HTTP
@@ -115,6 +115,14 @@ profile. Do not put a secret in one.
   Claude Code's, Codex's and Copilot CLI's own configuration directories. A dated
   copy of the file as it stood is kept beside it first. `SECURITY.md` has the
   details.
+- The PowerShell integration, when you ask for it, appends one line to the
+  `$PROFILE` a PowerShell names for itself, after copying that file as it stood
+  to a dated backup beside it. Delete the line to undo it.
+- **All five of those, and the update check, are what the first-run card asks
+  about.** It is shown once, on a machine that has never run Folio, and it writes
+  nothing on its own: pressing **Done** presses the same Settings rows listed
+  above, and **Not now** presses none of them. The only thing the card itself
+  records is that it has been shown.
 - Several `BT_*` environment variables make Folio write terminal content to a
   file you name — `BT_PTY_DUMP` writes every byte of every pane. None is set
   unless you set it. `docs/BT-ENVIRONMENT.md` lists all of them.
@@ -141,7 +149,7 @@ Folio 向 GitHub 询问是否存在更新的版本，对答案只做一件事：
 | **发送的内容** | 一个请求头：`User-Agent: Folio`。不含版本号、构建号、操作系统、任何标识符或 cookie。GitHub 拒绝不带 user agent 的请求，这是该请求头不为空的原因。 |
 | **频率** | 每 24 小时至多一次，本机所有 Folio 窗口合计。失败——无网络、代理、限流——计入当天的那一次，不重试。 |
 | **答案存放位置** | `%APPDATA%\Folio\update-check.json`：上次询问的时间、返回的 tag，以及你已看到过的 tag。 |
-| **如何关闭** | 设置 > General > **检查新版**，或在 `settings.json` 中写 `"update_check": false`。关闭后不启动线程、不发出请求，也不写 `update-check.json`。 |
+| **如何关闭** | 设置 > General > **检查新版**，或在 `settings.json` 中写 `"update_check": false`；在从未运行过 Folio 的机器上，它也是首次配置卡的第一行，在那里它出生即开，且可在第一次请求之前关掉。关闭后不启动线程、不发出请求，也不写 `update-check.json`。 |
 
 GitHub 收到该请求的方式与收到任何请求相同：你的 IP 地址与时间。Folio 不在此之上附加任何
 内容。请求走 Windows 自带的 HTTP 栈，因此遵循本机的代理设置与证书存储。
@@ -217,5 +225,10 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Folio\WebView2"
   同一个开关撤销。
 - 三个 agent 安装行打开时，各写一个文件到 Claude Code、Codex、Copilot CLI 自己的配置
   目录里；写之前先在旁边留一份带日期的原件副本。细节见 `SECURITY.md`。
+- PowerShell 整合被要求时，在 PowerShell 自己报出的 `$PROFILE` 末尾追加一行，追加前先
+  在旁边留一份带日期的原件副本。删除该行可撤销。
+- **以上五项加上更新检查，正是首次配置卡所问的全部。** 它在从未运行过 Folio 的机器上
+  出现一次，自己什么也不写：按下**完成**按的就是上面列举的那几行设置，而**暂不**一行
+  也不按。卡本身记下的只有一件事：它已经出现过。
 - 若干 `BT_*` 环境变量会让 Folio 把终端内容写到你指定的文件——`BT_PTY_DUMP` 写的是每个
   窗格的每一个字节。你不设，它们就都不生效。全部列在 `docs/BT-ENVIRONMENT.md`。

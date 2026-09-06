@@ -66,6 +66,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (28, migrate_settings_v28_to_v29),
     (29, migrate_settings_v29_to_v30),
     (30, migrate_settings_v30_to_v31),
+    (31, migrate_settings_v31_to_v32),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -715,6 +716,40 @@ fn migrate_settings_v30_to_v31(mut value: Value) -> Value {
             serde_json::to_value(crate::DEFAULT_QUAKE_RESTORE)
                 .unwrap_or_else(|_| Value::from("FoldersAndPinnedCommands")),
         );
+    }
+    value
+}
+
+/// v31 -> v32: the first-run card's two keys, and the rule that an upgrading reader never meets it
+/// (user ruling, 2026-09-06, `docs/DESIGN.md` §7.56).
+///
+/// **This step is the rule, not a default.** `first_run_card` is written `Shown` — the state the
+/// card is never raised from — into every document that reaches this rung, and that one line is the
+/// whole of "somebody who was already here does not get asked". The alternative was a second probe
+/// at startup asking whether this reader looked like an old one, which is a second opinion about a
+/// fact this ladder already knows: a file at v31 was written by a build that had no card, so its
+/// owner has been answering these four questions one row at a time for as long as they have had
+/// this program.
+///
+/// It is therefore neither the v13-v16 shape (a default for something that did not exist) nor the
+/// v28 shape (overwriting a value the file already carries). Nothing here is overwritten, and the
+/// value written is not the shipped default — `FirstRunCardV1::NotShown` is — because the shipped
+/// default is the answer for a *new* machine and this step is only ever walked by an old one.
+///
+/// `powershell_install_pending` is the v13-v16 shape and is written `false`: an intent is something
+/// a reader records by leaving a row of the card on, and this step's whole subject is readers who
+/// never saw it.
+///
+/// See [`crate::FirstRunCardV1`] and `SettingsV1::powershell_install_pending`.
+fn migrate_settings_v31_to_v32(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(32));
+        object.insert(
+            "first_run_card".to_owned(),
+            serde_json::to_value(crate::FirstRunCardV1::Shown)
+                .unwrap_or_else(|_| Value::from("Shown")),
+        );
+        object.insert("powershell_install_pending".to_owned(), Value::from(false));
     }
     value
 }
@@ -2272,6 +2307,78 @@ mod tests {
         );
         assert_eq!(migrated["quake_width"], json!(100));
         assert_eq!(migrated["quake_height"], json!(65));
+    }
+
+    /// PIN (§7.56, user ruling 2026-09-06) — **the step from 31 is where "an upgrading reader
+    /// never meets the first-run card" is written down, and it is written down once.**
+    ///
+    /// The card asks the four questions whose answers write something outside `%APPDATA%\Folio`,
+    /// and every one of those questions already has a row a reader who was here before has been
+    /// answering for months. So the value this step writes is not the shipped default: a new
+    /// machine starts at `NotShown` and this document is walked only by a machine that is not new.
+    ///
+    /// MUTATIONS:
+    /// ① write `NotShown`, or drop the insert and let serde's default answer — every existing
+    ///    reader is shown a first-run card on their next launch, which is the one thing this
+    ///    feature promised not to do;
+    /// ② write `true` for the pending intent — an upgrading reader's `$PROFILE` is edited by a
+    ///    card they never saw, on the strength of a row they never left on;
+    /// ③ forget the `schema_version` line and the ladder never leaves this rung, so the step runs
+    ///    again on every read.
+    #[test]
+    fn real_settings_v31_to_v32_migration_tells_an_existing_reader_the_card_has_been_shown() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 31,
+                "update_check": false,
+                "psreadline_invite": "Dismissed"
+            }),
+            31,
+            32,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(32));
+        assert_eq!(
+            migrated["first_run_card"],
+            json!("Shown"),
+            "a reader who has been using this program for months is shown a card that asks them \
+             about four switches they can already see the state of"
+        );
+        assert_eq!(
+            migrated["powershell_install_pending"],
+            json!(false),
+            "a card nobody saw recorded an intent, and the next PowerShell to start edits a \
+             $PROFILE nobody asked it to"
+        );
+        assert_eq!(
+            migrated["update_check"],
+            json!(false),
+            "the one answer on that card this file already carries is overwritten by the step \
+             that was supposed to leave it alone"
+        );
+        assert_eq!(migrated["psreadline_invite"], json!("Dismissed"));
+    }
+
+    /// PIN (§7.56) — **the card's own state is the only thing the card writes, and a brand-new
+    /// file starts on the one value it appears from.**
+    ///
+    /// The pair to the test above, and the reason the two are not one: that one is about the road
+    /// from an old document, this one is about the document a new machine writes. They can only
+    /// disagree in one direction, and it is the direction that matters.
+    ///
+    /// MUTATION: give [`crate::FirstRunCardV1`] `Shown` as its `#[default]` and no machine ever
+    /// sees the card at all.
+    #[test]
+    fn a_settings_file_written_from_nothing_has_never_shown_the_card() {
+        let fresh = crate::SettingsV1::default();
+        assert_eq!(fresh.first_run_card, crate::FirstRunCardV1::NotShown);
+        assert!(!fresh.powershell_install_pending);
+        assert_eq!(
+            crate::FirstRunCardV1::default(),
+            crate::FirstRunCardV1::NotShown,
+            "the default has to be the one a migrated file cannot land on by accident"
+        );
     }
 
     #[test]

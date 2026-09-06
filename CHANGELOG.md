@@ -8,6 +8,36 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
+- **First things: one card, once, on a machine that has never run Folio.** It
+  asks every question whose answer writes something outside `%APPDATA%\Folio`,
+  and it asks them together, because they are one decision about how much of this
+  machine Folio may touch. Four kinds of row: check for a new version once a day,
+  which is the only one that arrives on; open any folder in Folio from Explorer,
+  which on Windows 11 puts the entry both on the page that opens first and under
+  `Show more options`; install the PowerShell integration; and one row for each
+  of Claude Code, Codex and Copilot CLI that this machine actually has, so that
+  their tabs carry a mark when they are waiting for you. **Done** applies the
+  rows that are on. **Not now** and `Esc` close the card with the shipped values
+  and change nothing. The shell behind it has been running the whole time.
+  - **Every row on the card is a row in Settings**, and the card presses those
+    rows rather than doing anything of its own — so nothing on it is a last
+    chance, and the switch you find in Settings an hour later is the same switch
+    in the same place on the same shape of row.
+  - A row is only offered if it can be honoured. An agent that is not on this
+    machine, or whose configuration already calls Folio, is not listed at all,
+    and when none of the three is there the heading goes with them. On Windows 11
+    unpacked without `folio.msix`, the Explorer row still offers the entry it
+    can offer, worded for it.
+  - The PowerShell row records an intent rather than acting: where your
+    `$PROFILE` is comes from the shell, so the line is added by the next
+    PowerShell that starts, and `Settings > Terminal` says so until it does. As
+    always, the file as it stood is copied to a dated backup beside it first.
+  - Success is silent — you asked for these a moment ago and the Settings rows
+    now show it. Anything that fails still says so, in the same words it says it
+    in on the Settings page, and the card still closes.
+  - **If you were already using Folio, you never see it.** The step that brings
+    your `settings.json` up to date is what records that.
+
 - **Dropping a pane *between* two tabs is now a target you can hit.** The join
   between two entries in the tab list is a band eight logical pixels either
   side, and a pointer inside it makes the pane a new tab there rather than

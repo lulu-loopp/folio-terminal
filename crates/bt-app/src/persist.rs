@@ -476,6 +476,16 @@ pub struct SettingsStore {
     path: PathBuf,
     settings: SettingsV1,
     failures: WriteFailureTracker,
+    /// Whether there was no `settings.json` at all when this store opened.
+    ///
+    /// Kept rather than thrown away with the rest of the report, because it is
+    /// the one thing `loaded()` cannot say afterwards: a file that was there and
+    /// could not be read hands back the same defaults a machine with no file
+    /// does, and only one of those two is a machine nobody has ever configured.
+    /// The first-run card is the reader of this (`crate::first_run`), and it
+    /// reads it beside the stored `first_run_card` rather than instead of it —
+    /// a damaged file must not be mistaken for a new machine.
+    missing: bool,
 }
 
 impl SettingsStore {
@@ -496,12 +506,22 @@ impl SettingsStore {
             path,
             settings,
             failures: WriteFailureTracker::new(),
+            missing: report == ReadReport::NotFound,
         }
     }
 
     /// The settings as they currently stand.
     pub fn loaded(&self) -> &SettingsV1 {
         &self.settings
+    }
+
+    /// Whether this machine had no `settings.json` when the process started.
+    ///
+    /// Still true after the first write: it is a fact about the launch, not
+    /// about the file, and the surface that asks it (the first-run card) is
+    /// raised after the card's own state has already been written down.
+    pub fn was_missing(&self) -> bool {
+        self.missing
     }
 
     /// Record a change and put it on disk now. Returns whether anything changed,

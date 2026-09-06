@@ -56,6 +56,7 @@ mod favicon;
 mod file_peek;
 mod files;
 mod files_watch;
+mod first_run;
 mod float;
 mod focus_thumb;
 mod git;
@@ -8261,6 +8262,26 @@ impl LeafWake {
     }
 }
 
+/// **Whether a switch that did what it was asked is worth saying so** (§7.56).
+///
+/// One question, asked once, at the only place the two callers of
+/// [`Runtime::apply_settings_choice_announcing`] differ. A switch flipped on the
+/// Settings page has no nearby request to confirm it and its card is how a
+/// reader knows a registration finished; four rows answered together on the
+/// first-run card were all asked for in one press, and four cards for one press
+/// is noise. **Failure speaks either way**, in the same words: a surface that
+/// closed and pretended would be this product lying about a file it had just
+/// failed to touch.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum Announce {
+    /// The Settings dialog's answer: a card when it worked, a card when it did
+    /// not.
+    #[default]
+    Everything,
+    /// The first-run card's: silence when it worked.
+    OnlyFailures,
+}
+
 /// **What is true of this program, whatever window you are looking at**
 /// (multiwindow slice B, `docs/spikes/spike-multiwindow.md` 片 B).
 ///
@@ -8508,6 +8529,14 @@ struct App {
     /// closed simply raises no card: the row it would have reported to is not
     /// there any more.
     explorer_package_asked_by: Option<WindowId>,
+    /// **Whether that deployment's success is worth a card**, carried beside the
+    /// address for the same reason the address is carried (§7.56).
+    ///
+    /// It travels with the request rather than being read when the answer lands,
+    /// because by then the surface that asked may be gone — and a card raised on
+    /// the strength of "whatever the window is showing now" would report a first
+    /// run's silent registration as if somebody had just flipped a switch.
+    explorer_package_announce: Announce,
     /// **Whether the user's own Claude Code configuration calls this program.**
     ///
     /// The same shape as the field above and for its reason: the state lives in a file, the row
@@ -10320,6 +10349,15 @@ struct WindowRuntime {
     /// The PSReadLine invitation, when the probe has found a shell that would
     /// benefit (§7.1.6c-3b).
     psreadline_invite: psreadline::Invite,
+    /// The first-run card, on the first window of a machine that has never run
+    /// Folio (§7.56).
+    ///
+    /// A window's own field and not the application's, and there is exactly one
+    /// window that ever fills it: the card goes up on the first window opened in
+    /// the process, and a second window opened while it is up gets no card of
+    /// its own. The state that says "once, ever" is in `settings.json`; this is
+    /// only the surface.
+    first_run: first_run::Card,
     /// Whether the size row has been answered since the invitation was refused.
     ///
     /// The one exception in the trigger table, and it is deliberately *not*
@@ -31404,6 +31442,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         root_menu: profiles::RootMenu::default(),
         dirty_gate: restore::DirtyGate::default(),
         psreadline_invite: psreadline::Invite::default(),
+        first_run: first_run::Card::default(),
         psreadline_size_changed: false,
         window_close_requested: false,
         preview_menu: profiles::PreviewMenu::default(),
@@ -32170,6 +32209,7 @@ impl Runtime<'_> {
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
             explorer_package_asked_by: None,
+            explorer_package_announce: Announce::Everything,
             // Read once, and *only* read: see the field for why this one is not repaired.
             claude_hooks_installed: attention_hooks::state() == attention_hooks::State::Installed,
             // The same, over codex's own file — see the field above's note, which holds word for
@@ -37317,6 +37357,17 @@ impl Runtime<'_> {
         // whole of the reconciliation, and it cannot go stale because nothing
         // between the two lines can reach the field.
         let mut already_asked = self.app.powershell_integration_asked;
+        // **The intent the first-run card left behind, and the shell that
+        // finally answers it** (§7.56 §4.3). Where a `$PROFILE` is comes from
+        // the shell and is never computed here, so a row left on when the card
+        // was answered is a row waiting for exactly this moment: the first
+        // PowerShell in this process to name its own profile.
+        //
+        // Not gated on `offering`: the intent is an instruction the reader gave,
+        // and whether *strips* are offered is a different question they answered
+        // on the same card.
+        let pending = self.app.settings_store.loaded().powershell_install_pending;
+        let mut named_profile: Option<PathBuf> = None;
         let mut presence = std::collections::BTreeSet::new();
         let mut states: std::collections::BTreeMap<NoticeHost, notice::Notice> =
             std::collections::BTreeMap::new();
@@ -37338,6 +37389,19 @@ impl Runtime<'_> {
                     ));
                 }
             }
+            // Asked of every PowerShell pane rather than only of the ones the
+            // strip is computed for, because the probe is cached per program and
+            // the intent is owed an answer even on a machine whose reader has
+            // switched the strip off. The first answer wins; the rest cost a
+            // lookup.
+            if pending && named_profile.is_none() {
+                named_profile = leaf
+                    .program
+                    .as_deref()
+                    .filter(|program| shell_integration::is_powershell(program))
+                    .and_then(shell_integration::profile_probe)
+                    .flatten();
+            }
             let showing = offering
                 .then_some(leaf.integration_offer.as_ref())
                 .flatten()
@@ -37353,6 +37417,12 @@ impl Runtime<'_> {
             }
         }
         self.app.powershell_integration_asked = already_asked;
+        // **The intent is spent here, after the borrow ends**, because writing
+        // it down is a write to the settings store and the loop above holds the
+        // panes.
+        if let Some(profile) = named_profile {
+            self.spend_powershell_intent(&profile);
+        }
         // **And the previews, on exactly the same terms** (user ruling
         // 2026-08-29). A document whose file moved under unsaved edits, and one
         // whose file is gone, each owe their reader a sentence — and the band
@@ -38841,6 +38911,7 @@ impl Runtime<'_> {
                 .settings_store
                 .loaded()
                 .powershell_integration_offer,
+            powershell_install_pending: self.app.settings_store.loaded().powershell_install_pending,
             git_panel: self.app.settings_store.loaded().git_panel,
             update_check: self.app.settings_store.loaded().update_check,
             key_hints: self.app.settings_store.loaded().key_hints,
@@ -39173,6 +39244,22 @@ impl Runtime<'_> {
                     &layout,
                     (width as f32, height as f32),
                     self.window.dirty_gate.hover(),
+                ),
+                ModalBand::Fixed,
+            )
+        } else if let Some(layout) = self.first_run_layout() {
+            // **Under the gate and over everything else this window can raise**
+            // (§7.56). It is the first thing a machine ever shows, and while it
+            // is up it is the top of the Escape ladder; what stands above it is
+            // only the two surfaces that stand in front of something already
+            // under way, which on a first launch cannot be up at all.
+            let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+            (
+                first_run::build(
+                    &layout,
+                    (width as f32, height as f32),
+                    self.window.first_run.hover(),
+                    self.window.first_run.focus_ring(),
                 ),
                 ModalBand::Fixed,
             )
@@ -41147,6 +41234,22 @@ impl Runtime<'_> {
     /// them is a verb that half works, and the half that would have been missed
     /// here is the half the keyboard was built for.
     fn apply_settings_choice(&mut self, target: settings::SettingsTarget) -> Result<()> {
+        self.apply_settings_choice_announcing(target, Announce::Everything)
+    }
+
+    /// The same dispatcher, told **who asked**.
+    ///
+    /// One parameter and not a second dispatcher, because there is only one
+    /// question the two callers answer differently and it is not "what does this
+    /// press do": a switch flipped on the Settings page has no nearby request to
+    /// confirm it, so a success is worth a card; a row on the first-run card was
+    /// asked for half a second ago along with three others, so four cards is
+    /// noise. Every failure still speaks, on both surfaces, in the same words.
+    fn apply_settings_choice_announcing(
+        &mut self,
+        target: settings::SettingsTarget,
+        announce: Announce,
+    ) -> Result<()> {
         if let Some(action) = settings::profile_action_requested(target) {
             self.apply_profile_action(action)?;
         }
@@ -41207,19 +41310,19 @@ impl Runtime<'_> {
             self.apply_powershell_integration_offer(enabled)?;
         }
         if let Some(install) = settings::context_menu_requested(target) {
-            self.apply_context_menu(install)?;
+            self.apply_context_menu(install, announce)?;
         }
         if let Some(install) = settings::explorer_first_page_requested(target) {
-            self.apply_explorer_first_page(install);
+            self.apply_explorer_first_page(install, announce);
         }
         if let Some(install) = settings::claude_hooks_requested(target) {
-            self.apply_claude_hooks(install)?;
+            self.apply_claude_hooks(install, announce)?;
         }
         if let Some(install) = settings::codex_notify_requested(target) {
-            self.apply_codex_notify(install)?;
+            self.apply_codex_notify(install, announce)?;
         }
         if let Some(install) = settings::copilot_hooks_requested(target) {
-            self.apply_copilot_hooks(install)?;
+            self.apply_copilot_hooks(install, announce)?;
         }
         if let Some(engine) = settings::search_engine_requested(target) {
             self.apply_search_engine(engine)?;
@@ -45949,10 +46052,11 @@ impl Runtime<'_> {
     ///
     /// A failure carries the operating system's own sentence, because on the
     /// machine where it fires nobody else can see it.
-    fn apply_context_menu(&mut self, install: bool) -> Result<bool> {
+    fn apply_context_menu(&mut self, install: bool, announce: Announce) -> Result<bool> {
         let outcome = context_menu::apply(install);
         self.app.context_menu_installed = context_menu::installed(context_menu::state());
         match outcome {
+            Ok(()) if announce == Announce::OnlyFailures => Ok(true),
             Ok(()) => {
                 self.toast(
                     toast::ToastKind::Ok,
@@ -45992,8 +46096,12 @@ impl Runtime<'_> {
     /// Nothing is said here. A card raised now would be a card about what was
     /// asked for rather than about what happened, and the thing that happened
     /// arrives on `AppEvent::ExplorerPackageChanged`.
-    fn apply_explorer_first_page(&mut self, install: bool) {
+    fn apply_explorer_first_page(&mut self, install: bool, announce: Announce) {
         self.app.explorer_package_asked_by = Some(self.window_id());
+        // Carried with the request rather than read at the far end, because by
+        // the time the answer lands the card that asked has closed and there
+        // would be nothing left to ask.
+        self.app.explorer_package_announce = announce;
         if !explorer_menu::request(install) {
             // A press while the last one is still running. The machine is
             // already going where this press wanted it, or it is going the other
@@ -46012,6 +46120,9 @@ impl Runtime<'_> {
     /// guess.
     fn report_explorer_package(&mut self, outcome: Result<bool, String>) -> Result<()> {
         match outcome {
+            // The first-run card asked for this beside three others and the
+            // Settings row now reads On; a card for each is noise (§7.56 §8).
+            Ok(_) if self.app.explorer_package_announce == Announce::OnlyFailures => Ok(()),
             Ok(registered) => self.toast(
                 toast::ToastKind::Ok,
                 toast::ToastAnchor::Window,
@@ -46045,12 +46156,17 @@ impl Runtime<'_> {
     /// A refusal carries a sentence, because on the machine where it fires nobody else can see it.
     /// The one that matters is a settings file this build cannot read: it is left exactly as it is,
     /// because it belongs to somebody who wrote it.
-    fn apply_claude_hooks(&mut self, install: bool) -> Result<bool> {
+    fn apply_claude_hooks(&mut self, install: bool, announce: Announce) -> Result<bool> {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("folio.exe"));
         let outcome = attention_hooks::apply(install, &exe);
         self.app.claude_hooks_installed =
             attention_hooks::state() == attention_hooks::State::Installed;
         match outcome {
+            attention_hooks::Outcome::Installed | attention_hooks::Outcome::Removed
+                if announce == Announce::OnlyFailures =>
+            {
+                Ok(true)
+            }
             attention_hooks::Outcome::Installed => {
                 self.toast(
                     toast::ToastKind::Ok,
@@ -46095,12 +46211,17 @@ impl Runtime<'_> {
     /// The refusal this one has that the other does not is **somebody else's `notify`**. There is
     /// one such key in that file, so installing over it would delete a program this build cannot
     /// give back — see `attention_codex`'s header.
-    fn apply_codex_notify(&mut self, install: bool) -> Result<bool> {
+    fn apply_codex_notify(&mut self, install: bool, announce: Announce) -> Result<bool> {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("folio.exe"));
         let outcome = attention_codex::apply(install, &exe);
         self.app.codex_notify_installed =
             attention_codex::state() == attention_codex::State::Installed;
         match outcome {
+            attention_codex::Outcome::Installed | attention_codex::Outcome::Removed
+                if announce == Announce::OnlyFailures =>
+            {
+                Ok(true)
+            }
             attention_codex::Outcome::Installed => {
                 self.toast(
                     toast::ToastKind::Ok,
@@ -46148,13 +46269,18 @@ impl Runtime<'_> {
     /// The readiness is re-read after the press for the reason the installed flag is: the sentence
     /// under the row is a fact about the machine, and a press is one of the moments a fact about
     /// the machine can have changed.
-    fn apply_copilot_hooks(&mut self, install: bool) -> Result<bool> {
+    fn apply_copilot_hooks(&mut self, install: bool, announce: Announce) -> Result<bool> {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("folio.exe"));
         let outcome = attention_copilot::apply(install, &exe);
         self.app.copilot_hooks_installed =
             attention_copilot::state() == attention_copilot::State::Installed;
         self.app.copilot_readiness = attention_copilot::readiness();
         match outcome {
+            attention_copilot::Outcome::Installed | attention_copilot::Outcome::Removed
+                if announce == Announce::OnlyFailures =>
+            {
+                Ok(true)
+            }
             attention_copilot::Outcome::Installed => {
                 self.toast(
                     toast::ToastKind::Ok,
@@ -46284,6 +46410,423 @@ impl Runtime<'_> {
             ),
         };
         Some(restore::invite_layout(&content, width, height, scale))
+    }
+
+    /// Put the first-run card up, once, on a machine that has never run Folio
+    /// (§7.56).
+    ///
+    /// Polled from the event loop for `raise_psreadline_invite_if_due`'s reason
+    /// — raising a modal is a change to the window and the window is this
+    /// thread's — and for one more of its own: the copilot row cannot be offered
+    /// until the version question has been answered, and that answer arrives on
+    /// another thread.
+    ///
+    /// **`Shown` is written the moment it goes up, not when it is answered.** A
+    /// crash, an `Alt+F4`, or a process killed while the card is on screen must
+    /// not bring it back.
+    fn raise_first_run_if_due(&mut self) -> Result<()> {
+        if self.window.first_run.is_open() {
+            return Ok(());
+        }
+        let store = &self.app.settings_store;
+        // **`BT_FIRST_RUN_CARD` raises it over a machine that has already
+        // answered**, `BT_PSREADLINE_PROBE`'s door and for its reason: this card
+        // is shown once per machine, ever, so without a door there is no way to
+        // photograph it in a second language or to look at it again after a
+        // change. It overrides **the gate and nothing else** — which rows are
+        // offered, what `Done` spends, what is written down are all exactly what
+        // they would be on a real first run, which is what makes a picture taken
+        // through it worth anything.
+        if !first_run::due(store.was_missing(), store.loaded().first_run_card)
+            && !diagnostics::switched_on(std::env::var_os("BT_FIRST_RUN_CARD"))
+        {
+            return Ok(());
+        }
+        // The one row whose offer depends on a version, and the version comes
+        // off another process. Starting the probe here rather than waiting for
+        // the Agents page is what makes the wait finite; the card holds until it
+        // lands, because a row offered on a copilot too old to honour it is a
+        // row whose `Done` would raise a failure toast for a refusal that was
+        // knowable before it was pressed.
+        let copilot_on_path = self.agent_is_on_this_machine("copilot");
+        if copilot_on_path {
+            attention_copilot::begin_probe();
+            if !attention_copilot::probe_settled() {
+                return Ok(());
+            }
+        }
+        let machine = first_run::Machine {
+            // Both halves of the first page: a Windows that shows one, and the
+            // file that can be registered on it shipped beside the executable.
+            explorer_first_page_available: explorer_menu::supported()
+                && explorer_menu::package_file().is_some(),
+            claude_found: self.agent_is_on_this_machine("claude"),
+            claude_installable: attention_hooks::state() == attention_hooks::State::Absent,
+            codex_found: self.agent_is_on_this_machine("codex"),
+            codex_installable: attention_codex::state() == attention_codex::State::Absent,
+            copilot_found: copilot_on_path,
+            copilot_installable: attention_copilot::state() == attention_copilot::State::Absent
+                && attention_copilot::readiness() == attention_copilot::Readiness::Ready,
+            // Unknown on this launch, and honestly so: no shell has said where
+            // its `$PROFILE` is yet. A reader whose file already carries the
+            // line has their recorded intent cleared by the shell that reports
+            // it — `first_run::pending_step`.
+            powershell_integration_installed: false,
+        };
+        let rows = first_run::rows(&machine);
+        let shape = first_run::explorer_shape(&machine);
+        self.record_first_run_card(bt_persist::FirstRunCardV1::Shown);
+        self.window.first_run.open(rows, shape);
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Whether one of the built-in agent profiles has its program on this
+    /// machine.
+    ///
+    /// **The same lookup the picker greys a row with**, and deliberately not a
+    /// second one: `ProfilePrograms` already asked the machine, once, where
+    /// `claude.cmd`, `codex.cmd` and `copilot.cmd` are, and a card that answered
+    /// the question a different way could offer a row for a program the picker
+    /// says is not installed.
+    fn agent_is_on_this_machine(&self, id: &str) -> bool {
+        // `position_of` and not `index_of_id`: that one must answer with *some*
+        // profile because a pane has to start something, and "this table has no
+        // such row" is exactly the answer this question needs.
+        profiles::position_of(id).is_some_and(|index| self.app.profile_programs.is_available(index))
+    }
+
+    /// Write down that the card has been up. Nothing shows it again.
+    fn record_first_run_card(&mut self, state: bt_persist::FirstRunCardV1) {
+        if self.app.settings_store.loaded().first_run_card == state {
+            return;
+        }
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.first_run_card = state;
+        self.app.settings_store.store(settings);
+    }
+
+    /// Record, or clear, the intent the PowerShell row leaves behind.
+    fn record_powershell_install_pending(&mut self, pending: bool) {
+        if self.app.settings_store.loaded().powershell_install_pending == pending {
+            return;
+        }
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.powershell_install_pending = pending;
+        self.app.settings_store.store(settings);
+    }
+
+    /// The card, measured against a real font, or nothing while it is shut.
+    fn first_run_layout(&mut self) -> Option<first_run::Layout> {
+        if !self.window.first_run.is_open() {
+            return None;
+        }
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let (width, height) = (width as f32, height as f32);
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let rows: Vec<first_run::Row> = self.window.first_run.rows().to_vec();
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
+        let room = first_run::text_width(width, scale);
+        let row_contents = rows
+            .iter()
+            .map(|row| first_run::RowContent {
+                group: row.group.map(|label| label.text().to_owned()),
+                title: row.title.text().to_owned(),
+                description_lines: restore::wrap(row.description.text(), room, |line| {
+                    measure(line, first_run::MEASURED_DESC_FONT_LOGICAL_PX * scale)
+                }),
+                on: row.on,
+            })
+            .collect();
+        let open_settings = i18n::Text::FirstRunOpenSettings.text();
+        let open_settings_width = measure(
+            open_settings,
+            first_run::MEASURED_FOOTNOTE_FONT_LOGICAL_PX * scale,
+        );
+        let footnote_lines = restore::wrap(
+            i18n::Text::FirstRunFootnote.text(),
+            first_run::footnote_width(width, scale, open_settings_width),
+            |line| measure(line, first_run::MEASURED_FOOTNOTE_FONT_LOGICAL_PX * scale),
+        );
+        let footnote_last_line_width = footnote_lines.last().map_or(0.0, |line| {
+            measure(line, first_run::MEASURED_FOOTNOTE_FONT_LOGICAL_PX * scale)
+        });
+        let later = i18n::Text::FirstRunLater.text();
+        let done = i18n::Text::FirstRunDone.text();
+        let content = first_run::Content {
+            title: i18n::Text::FirstRunTitle.text().to_owned(),
+            rows: row_contents,
+            footnote_lines,
+            footnote_last_line_width,
+            open_settings: open_settings.to_owned(),
+            open_settings_width,
+            later: later.to_owned(),
+            later_width: measure(later, first_run::MEASURED_BUTTON_FONT_LOGICAL_PX * scale),
+            done: done.to_owned(),
+            done_width: measure(done, first_run::MEASURED_BUTTON_FONT_LOGICAL_PX * scale),
+        };
+        Some(first_run::layout(
+            &content,
+            width,
+            height,
+            scale,
+            self.window.first_run.scroll(),
+        ))
+    }
+
+    /// One press on the card, or the key that stands for one.
+    fn answer_first_run(&mut self, target: first_run::Target) -> Result<()> {
+        self.window.first_run.press(target);
+        match target {
+            first_run::Target::Panel => return Ok(()),
+            first_run::Target::Switch(index) => {
+                if !self.window.first_run.flip(index) {
+                    return Ok(());
+                }
+                if self.refresh_overlay() {
+                    self.present_chrome_change()?;
+                }
+                return Ok(());
+            }
+            // **The link is `Not now` with a destination.** A reader who
+            // presses it is saying they would rather do this in Settings, so the
+            // card spends what `Not now` spends — nothing — and the page the
+            // footnote names is opened behind it. Leaving the card standing over
+            // that page was the other reading and it is not available: this card
+            // is modal, so a settings dialog under it is a dialog nobody can
+            // press.
+            first_run::Target::OpenSettings => {
+                let spent = first_run::declined();
+                self.apply_first_run(&spent)?;
+                self.window.first_run.close();
+                return self.open_settings_on_row(settings::SettingsRow::UpdateCheck);
+            }
+            // **Both verbs go through the same door**, and the difference
+            // between them is entirely in what comes back from
+            // [`first_run`]. Spelling `Not now` as "do not call the applier"
+            // would put the rule in a branch here as well as in that module,
+            // and the two would be free to disagree.
+            first_run::Target::Later => {
+                let spent = first_run::declined();
+                self.apply_first_run(&spent)?;
+            }
+            first_run::Target::Done => {
+                let spent = self.window.first_run.done();
+                self.apply_first_run(&spent)?;
+            }
+        }
+        self.window.first_run.close();
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Spend what `Done` decided, **through the Settings dialog's own door**.
+    ///
+    /// Five of the six answers leave [`first_run`] as the press the Settings
+    /// page sends, and are applied by handing that press to
+    /// [`Self::apply_settings_choice`] — the same funnel, the same row readers,
+    /// the same `apply_*` method. The card therefore cannot grow a second way to
+    /// install anything, and a row that moves on the Settings page moves here
+    /// without anybody remembering to come and look.
+    ///
+    /// **Success is silent** ([`Announce::OnlyFailures`]). The reader asked for
+    /// these half a second ago and the Settings rows now read On; four success
+    /// toasts stacked on a new install is noise. A failure still raises its own
+    /// existing card, because a card that closed and pretended would be this
+    /// product lying about a file it had just failed to touch.
+    ///
+    /// **A partial `Done` still closes.** Three rows that worked and one that
+    /// did not is three rows that worked, and holding the card open over one
+    /// toast-sized fact would make the reader dismiss it twice.
+    fn apply_first_run(&mut self, spent: &[first_run::Application]) -> Result<()> {
+        for application in spent {
+            if let Some(target) = first_run::settings_target(*application) {
+                self.apply_settings_choice_announcing(target, Announce::OnlyFailures)?;
+            } else {
+                // The one answer that is not a row: an intent about a `$PROFILE`
+                // no shell has named yet.
+                debug_assert_eq!(*application, first_run::Application::PowerShellIntent);
+                self.record_powershell_install_pending(true);
+            }
+        }
+        Ok(())
+    }
+
+    /// One key while the first-run card is up (§7.56 §6).
+    ///
+    /// **`Enter` presses `Done` from any switch**, which is the one place this
+    /// card parts company with the PSReadLine invitation beside it: that dialog
+    /// refuses `Enter` because its affirmative writes files and it can appear
+    /// under somebody's hands mid-sentence. This one appears on a machine's
+    /// first launch, with focus on a row nobody has touched and every row that
+    /// writes anything switched off — so the `Enter` this card can receive by
+    /// accident does what `Not now` does.
+    ///
+    /// Every other key is swallowed rather than typed into a shell behind a
+    /// scrim.
+    fn press_first_run_key(&mut self, key: &Key, shift: bool) -> Result<()> {
+        let switches = self.window.first_run.rows().len();
+        self.window.first_run.light_the_ring();
+        let focus = self.window.first_run.focus();
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                return self.answer_first_run(first_run::Target::Later);
+            }
+            Key::Named(NamedKey::Enter) => {
+                return self.answer_first_run(match focus {
+                    Some(first_run::Focus::Later) => first_run::Target::Later,
+                    Some(first_run::Focus::OpenSettings) => first_run::Target::OpenSettings,
+                    // From a switch, and from `Done` itself.
+                    _ => first_run::Target::Done,
+                });
+            }
+            // **A switch flipped by the keyboard keeps its ring.**
+            // `answer_first_run` routes a *pointer* press, and a pointer press
+            // is what puts the ring away — so a Space that went through it would
+            // extinguish the very focus that answered it. The three other
+            // targets close the card, so what their ring does afterwards is
+            // moot and they go the ordinary way.
+            Key::Named(NamedKey::Space) => {
+                if let Some(first_run::Focus::Switch(index)) = focus {
+                    self.window.first_run.flip(index);
+                } else {
+                    return self.answer_first_run(match focus {
+                        Some(first_run::Focus::OpenSettings) => first_run::Target::OpenSettings,
+                        Some(first_run::Focus::Later) => first_run::Target::Later,
+                        Some(first_run::Focus::Done) => first_run::Target::Done,
+                        _ => first_run::Target::Panel,
+                    });
+                }
+            }
+            Key::Named(NamedKey::Tab) => {
+                if let Some(focus) = focus {
+                    let next = first_run::stepped(focus, switches, !shift);
+                    self.window.first_run.move_focus(next);
+                }
+            }
+            Key::Named(NamedKey::ArrowDown | NamedKey::ArrowUp) => {
+                if let Some(focus) = focus {
+                    let down = matches!(key, Key::Named(NamedKey::ArrowDown));
+                    let next = first_run::arrowed(focus, switches, down);
+                    self.window.first_run.move_focus(next);
+                }
+            }
+            // Off and on for the focused switch, the platform idiom.
+            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight) => {
+                if let Some(first_run::Focus::Switch(index)) = focus {
+                    let on = matches!(key, Key::Named(NamedKey::ArrowRight));
+                    self.window.first_run.set(index, on);
+                }
+            }
+            Key::Named(NamedKey::PageDown | NamedKey::PageUp | NamedKey::Home | NamedKey::End) => {
+                if let Some(layout) = self.first_run_layout() {
+                    let to = match key {
+                        Key::Named(NamedKey::PageDown) => layout.scrolled_by(layout.page()),
+                        Key::Named(NamedKey::PageUp) => layout.scrolled_by(-layout.page()),
+                        Key::Named(NamedKey::Home) => 0.0,
+                        _ => layout.scroll_extent(),
+                    };
+                    self.window.first_run.scroll_to(to);
+                }
+            }
+            _ => return Ok(()),
+        }
+        // **A ring below the fold is a focus the reader cannot see**, so the
+        // walk brings it back into view. Asked of a layout built after the move,
+        // because where a row stands is a fact about the card as it now is.
+        self.follow_first_run_focus();
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Scroll the body so that whatever has the ring is inside it.
+    fn follow_first_run_focus(&mut self) {
+        let Some(focus) = self.window.first_run.focus() else {
+            return;
+        };
+        let Some(layout) = self.first_run_layout() else {
+            return;
+        };
+        let to = layout.scroll_showing(focus);
+        self.window.first_run.scroll_to(to);
+    }
+
+    /// Spend the first-run card's PowerShell intent against the profile a shell
+    /// has just named (§7.56 §4.3).
+    ///
+    /// **The write goes through `shell_integration::install_into_profile`** —
+    /// the same call the strip's own `Add to $PROFILE` makes, with the same
+    /// dated copy taken first. The intent is cleared either way and never
+    /// retried: on a failure the strip is left standing with the same verb on
+    /// it, which is the path that already handles a `$PROFILE` this program
+    /// could not write and the reason this row cannot fail on the card.
+    ///
+    /// A profile that already loads the script clears the intent without
+    /// writing, because that is the reader having the thing they asked for.
+    fn spend_powershell_intent(&mut self, profile: &std::path::Path) {
+        // The flag is read here rather than passed in as a `true` the caller
+        // already checked: this function asks whether there is an intent, it
+        // does not assert that there is one.
+        let pending = self.app.settings_store.loaded().powershell_install_pending;
+        let offer = shell_integration::offer_for(profile);
+        match first_run::pending_step(pending, Some(&offer)) {
+            first_run::PendingStep::Wait => return,
+            first_run::PendingStep::Clear => {}
+            first_run::PendingStep::Write(path) => {
+                match shell_integration::install_into_profile(&path, std::time::SystemTime::now()) {
+                    Ok(written) => {
+                        eprintln!("BT_SHELL_INTEGRATION first-run intent wrote {written:?}");
+                        // The file now declares the integration, so every pane
+                        // that was owed a strip about it is owed nothing. Said
+                        // here rather than left to the next reconciliation,
+                        // because the offer each of those panes holds was read
+                        // before the line existed.
+                        for leaf in self.sessions.values_mut() {
+                            if matches!(
+                                leaf.integration_offer,
+                                Some(shell_integration::Offer::Owed(_))
+                            ) {
+                                leaf.integration_offer = Some(shell_integration::Offer::Silent);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        // Silent on screen, `Runtime::add_to_profile`'s own
+                        // discipline: the strip stays exactly as it was, showing
+                        // the verb that would try again.
+                        eprintln!("BT_SHELL_INTEGRATION first-run intent failed: {error}");
+                    }
+                }
+            }
+        }
+        self.record_powershell_install_pending(false);
+    }
+
+    /// How tall one page of the card's body is, for the wheel's own travel rule.
+    fn first_run_page(&mut self) -> f32 {
+        self.first_run_layout().map_or(0.0, |layout| layout.page())
+    }
+
+    /// One wheel notch over the card.
+    fn scroll_first_run(&mut self, delta: f32) -> Result<()> {
+        let Some(layout) = self.first_run_layout() else {
+            return Ok(());
+        };
+        if !layout.scrolls() {
+            return Ok(());
+        }
+        let to = layout.scrolled_by(-delta);
+        if self.window.first_run.scroll_to(to) && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     /// One press on the invitation, or Esc.
@@ -52364,6 +52907,7 @@ impl Runtime<'_> {
             // answer.
             menu_or_dialog: self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
                 || self.window.dirty_gate.is_open()
+                || self.window.first_run.is_open()
                 || self.window.psreadline_invite.is_open()
                 || self.window.settings.is_open()
                 || popup_takes_the_key(self.popups_up()).is_some(),
@@ -75181,6 +75725,16 @@ impl Runtime<'_> {
         // hover, no divider, no hyperlink, no peek settle behind the scrim.
         // The invitation takes the pointer outright, scrim included, in the
         // order it is drawn: under the gate, over the dialog.
+        // The first-run card first, in the order it is drawn.
+        if let Some(layout) = self.first_run_layout() {
+            let over = first_run::hit(&layout, position.x, position.y);
+            if self.window.first_run.set_hover(Some(over)) && self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+            self.note_tooltip(None)?;
+            self.update_chrome_hover_target(None)?;
+            return Ok(());
+        }
         if let Some(layout) = self.psreadline_invite_layout() {
             let over = restore::invite_hit(&layout, position.x, position.y);
             if self.window.psreadline_invite.set_hover(Some(over)) && self.refresh_overlay() {
@@ -80023,6 +80577,19 @@ impl Runtime<'_> {
             }
             return Ok(());
         }
+        // The first-run card, in the order it is drawn. Every press is
+        // swallowed, its own scrim included; a press on the face answers
+        // nothing, and a press on a switch is not an answer to the card, only to
+        // that row.
+        if let (Some(layout), Some(position)) =
+            (self.first_run_layout(), self.window.pointer_position)
+        {
+            if state == ElementState::Pressed && button == MouseButton::Left {
+                let target = first_run::hit(&layout, position.x, position.y);
+                self.answer_first_run(target)?;
+            }
+            return Ok(());
+        }
         // The invitation, in the order it is drawn. Every press is swallowed,
         // its own scrim included, and a press on a disabled Install lands on
         // `Panel` and answers nothing.
@@ -83345,6 +83912,14 @@ impl Runtime<'_> {
         // no longer always fits: `max-height` plus `overflow-y` is a scroller,
         // and a wheel over a scroller scrolls it, which is the same sentence the
         // strip and the rail are already answering below.
+        // The first-run card's body is a scroller too, and a notch anywhere over
+        // the card is its own — the dialog's rule above, over a card whose foot
+        // is pinned so that the two verbs never scroll away (§7.56).
+        if self.window.first_run.is_open() {
+            let page = self.first_run_page();
+            let travel = self.vertical_wheel_travel(delta, page);
+            return self.scroll_first_run(travel);
+        }
         if let Some(layout) = self.settings_layout() {
             return self.scroll_settings(&layout, delta);
         }
@@ -83969,6 +84544,16 @@ impl Runtime<'_> {
                     }
                     _ => {}
                 }
+            }
+            return Ok(());
+        }
+        // **The first-run card owns the keyboard**, in the order it is drawn,
+        // and it is a form rather than a question — so it has a focus order and
+        // not two verbs (§7.56).
+        if self.window.first_run.is_open() {
+            if !event.repeat {
+                let shift = self.window.modifiers.shift_key();
+                self.press_first_run_key(&event.logical_key, shift)?;
             }
             return Ok(());
         }
@@ -85806,6 +86391,7 @@ impl Runtime<'_> {
     fn a_modal_covers_the_window(&self) -> bool {
         self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
             || self.window.dirty_gate.is_open()
+            || self.window.first_run.is_open()
             || self.window.psreadline_invite.is_open()
             || self.window.settings.is_open()
             || self.window.restore_prompt.is_open()
@@ -87890,6 +88476,11 @@ impl Runtime<'_> {
         self.settle_preview_rails()?;
         // Polled here rather than pushed from the probe's thread: raising a
         // modal is a change to the window, and the window is this thread's.
+        //
+        // **The first-run card is asked first**, because it is the one surface
+        // that can be owed on a launch where nothing has happened yet, and
+        // because its own gate closes the moment it goes up.
+        self.raise_first_run_if_due()?;
         self.raise_psreadline_invite_if_due()?;
         self.advance_cursor_blink_if_due(now)?;
         if application_clocks {
