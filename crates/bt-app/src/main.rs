@@ -17632,6 +17632,42 @@ fn preview_raster_lane(
     })
 }
 
+/// **Which pane's rectangle this frame draws the picture against** (user report
+/// 2026-09-06, two of them; §7.1.6k⁵).
+///
+/// [`preview_raster_lane`]'s reader, and the third member of the lane's family:
+/// that one decides *who holds* the lane when the panes change, and this one
+/// answers the question every frame of every flight asks — **whose box do the
+/// pixels go in.** They have to be the same seat, because
+/// [`Runtime::refit_preview_picture`] fits the raster to the lane surface's body
+/// and [`Runtime::pane_draws`] then moves it; two answers is a picture fitted to
+/// one pane and painted over another.
+///
+/// It was not one function until this day, and the frame's half asked
+/// [`seats::Seats::preview`] — "the first preview leaf in the tree". While a tab
+/// could hold a single preview pane the two readings named the same seat, and
+/// slice 5's pin made a tab able to hold several without this call site hearing
+/// about it. What the user photographed is both halves of that one sentence: a
+/// picture pane with a **page** pane opened to its left lost its picture
+/// entirely — the pixels were placed on the page's rectangle and the web plate
+/// under §7.14d stands over them — and a picture pane with a **text** pane
+/// inserted between it and the shell had its picture drawn over that text, while
+/// its own pane kept nothing but the meta line. One defect, two costumes, and
+/// the costume is only which pane happens to come first in the tree.
+///
+/// The tab is asked as well for [`Runtime::refit_preview_picture`]'s reason: the
+/// lane is a `LeafId` and a leaf names its tab, so a lane belonging to a tab that
+/// is not the one being drawn has no rectangle here and must not be given one of
+/// somebody else's. A float is not a seat and never comes down this road — its
+/// picture rides its own overlay layer — so it answers `None` too.
+#[must_use]
+fn picture_lane_seat(lane: Option<PreviewSurface>, tab: TabId) -> Option<SeatId> {
+    match lane {
+        Some(PreviewSurface::Seat(leaf)) if leaf.tab == tab => Some(leaf.seat),
+        _ => None,
+    }
+}
+
 /// **What one preview surface is showing**, in the three shapes the recording
 /// sweep can act on (user report 2026-08-28; `docs/DESIGN.md` §7.44 ⑬).
 ///
@@ -85281,7 +85317,7 @@ impl Runtime<'_> {
                 })
             })
             .collect();
-        // **U8 — the preview seat's picture, re-placed on every animated frame.**
+        // **U8 — the picture's pane, re-placed on every animated frame.**
         //
         // Its pane FLIPs with the rest, and the pair of rectangles it is drawn
         // through is a function of the clock; `refresh_preview_for_layout` runs
@@ -85289,7 +85325,11 @@ impl Runtime<'_> {
         // placement is touched here — the raster, its key and the extent it was
         // fitted to belong to the commit, and re-deciding those per frame is the
         // resample storm R2 exists to forbid.
-        if let Some(preview_seat) = self.seats.preview()
+        //
+        // **And the seat is the one holding the lane, never "the preview seat"**
+        // (§7.1.6k⁵). See [`picture_lane_seat`] for what asking `seats.preview()`
+        // here cost once a tab could hold more than one preview pane.
+        if let Some(preview_seat) = picture_lane_seat(self.preview_raster, self.id)
             && let Some(placement) = preview_image_placement(
                 &self.seats,
                 &self.seat_layout,
@@ -118842,6 +118882,110 @@ mod tests {
             (landed.seat, landed.clip),
             (landed.body, landed.body),
             "and both converge on the solver's answer"
+        );
+    }
+
+    /// RED GATE — §7.1.6k⁵. **A picture is placed against the pane that holds
+    /// it, and never against whichever preview leaf comes first in the tree**
+    /// (user report 2026-09-06, two of them).
+    ///
+    /// The frame's re-place asked [`seats::Seats::preview`] from the day U8 wrote
+    /// it, which was the same seat as the lane's for exactly as long as a tab
+    /// could hold one preview pane. Slice 5's pin ended that, and what the reader
+    /// then photographed was the picture painted on the *other* preview pane's
+    /// rectangle: over a text preview's prose in one shot, and under a hosted
+    /// page's plate — invisible — in the other.
+    ///
+    /// The fixture is the minimum that can tell the two apart: two preview panes,
+    /// the lane on the second. `seats.preview()` answers the first, so the two
+    /// rectangles must differ and the placement must be the second's.
+    ///
+    /// MUTATIONS:
+    /// ① put `self.seats.preview()` back in `pane_draws` — modelled here by
+    ///    placing against `seats.preview()` — and the first of the three
+    ///    rectangle assertions goes red with the picture on its neighbour's
+    ///    corner (measured: `x: 534` where the pane holding the picture starts
+    ///    at 1066);
+    /// ② drop the `leaf.tab == tab` guard in [`picture_lane_seat`] and the
+    ///    assertion about another tab's lane goes red with `Some(SeatId(3))`
+    ///    against `None`: a background tab's lane would be handed this tab's
+    ///    geometry, which is the seat-number collision §7.12 ⓑ named `LeafId`
+    ///    for.
+    #[test]
+    fn a_picture_is_placed_against_the_pane_that_holds_it_not_the_first_preview_leaf() {
+        let metrics = seats::seat_metrics(1_000);
+        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000), 0);
+        let mut seats = seats::Seats::lone_terminal();
+        let first = seats.add_preview(&metrics).expect("the preview lands");
+        // Locked, so the next one is a second leaf beside it rather than a reuse
+        // of this one — which is the only way a tab comes to hold two (P95).
+        assert!(seats.toggle_preview_lock(first), "the lock turns over");
+        let second = seats.add_preview(&metrics).expect("a second preview lands");
+        assert_ne!(
+            first, second,
+            "or the fixture is one pane wearing two names"
+        );
+        assert_eq!(
+            seats.preview(),
+            Some(first),
+            "`preview()` is the first preview leaf in the tree, which is exactly \
+             the wrong answer this gate is about"
+        );
+        let layout = seats
+            .solve(viewport, &metrics, SizePolicy::Lawful)
+            .expect("three panes solve");
+
+        let tab = TabId(7);
+        let lane = Some(PreviewSurface::Seat(LeafId { tab, seat: second }));
+        assert_eq!(
+            picture_lane_seat(lane, tab),
+            Some(second),
+            "the seat the frame places against is the one holding the lane"
+        );
+
+        let placed = preview_image_placement(
+            &seats,
+            &layout,
+            picture_lane_seat(lane, tab).expect("the lane names a seat of this tab"),
+            1.0,
+            PaneTransform::IDENTITY,
+        )
+        .expect("the picture's pane has a body");
+        let neighbour = preview_image_placement(
+            &seats,
+            &layout,
+            seats.preview().expect("the first preview leaf"),
+            1.0,
+            PaneTransform::IDENTITY,
+        )
+        .expect("the other preview pane has a body too");
+        assert_eq!(
+            placed.seat.x,
+            pane_box_of(&layout, second)[0] as u32,
+            "the pixels land on the left edge of the pane that is holding them: \
+             {placed:?} against the neighbour's {neighbour:?}"
+        );
+        assert_eq!(
+            neighbour.seat.x,
+            pane_box_of(&layout, first)[0] as u32,
+            "and the corner the broken code used is the other pane's, which is \
+             what makes the assertion above able to fail"
+        );
+        assert_ne!(
+            placed.seat, neighbour.seat,
+            "or the two panes are in the same place and nothing here is decidable"
+        );
+
+        assert_eq!(
+            picture_lane_seat(lane, TabId(8)),
+            None,
+            "and a lane belonging to another tab is given no rectangle here — a \
+             seat number is unique only inside its own tab (§7.12 ⓑ)"
+        );
+        assert_eq!(
+            picture_lane_seat(Some(PreviewSurface::Float(1)), tab),
+            None,
+            "nor is a float, which paints its picture on its own overlay layer"
         );
     }
 

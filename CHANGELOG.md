@@ -4,6 +4,20 @@ All notable changes to Folio are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- **A picture stays in its own preview pane when a second preview pane is open.**
+  Open an image, then open a page or a text file beside it, and the picture went
+  somewhere else: drawn over the other pane's contents, or — where the other pane
+  held a web page — hidden underneath it, leaving nothing but the size line where
+  the picture should have been. The same thing happened when a preview pane was
+  inserted between the picture and the terminal. Every frame moved the picture to
+  whichever preview pane came first in the window, which was the picture's own
+  only while a tab had a single one of them. It now travels with the pane that is
+  holding it, through splits, insertions, divider drags and tab switches alike.
+
 ## 0.2.1-preview (unreleased)
 
 Fixes and polish for 0.2.0-preview. The one thing that is new is the one 0.2.0
