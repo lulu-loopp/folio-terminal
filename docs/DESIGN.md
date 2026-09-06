@@ -3760,6 +3760,45 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 **挂账。** ① §7.14d 的 ⓐ 在本片之后变得容易碰到一点:一扇窗里的两张页现在是寻常局面,而不是两个 tab 才有的局面——静止时两块 pane 永不重叠所以结论不变,FLIP 中途那两百毫秒照旧挂着。② `MouseRoute::Forward` 在没有格子的地方松手会把闩留着——本片之前就如此,本片因为不把它拉进谓词而没有放大它,如实记在这里。
 
+#### 7.14f 一张页开在它被放下的那块 pane 上(用户实机报 next38,2026-09-06,已落地;`crates/bt-app/src/main.rs`)
+
+**用户实机(`dist\folio-next38.exe` = `448e6e8`)报两桩,原话是「这两个网页 pane 还是存在问题,一个是第二个网页 pane 的落点和我想要的位置不一样,另一个是原来在的预览就不见了」。两桩是同一根。** 从 files 列把 `page.html` 拖到一处落点上松手:落点框画在哪里,新 pane 就开在哪里——这一半从头到尾是对的;可页开在了**别处**,而且是开在读者正读着的那块预览 pane 上,把里面的 `README.md` 顶掉了,刚铸出来的那块 pane 留着「点击带虚线下划线的路径,即可在此预览」的空占位。**「落点不对」与「原来的预览不见了」是同一次导航的两面**:一张页开到了另一块 pane 上,那块 pane 里原本的东西当然就没了。
+
+**真因是一句话被写在了不该写的地方。** 一枚文件行落在边缘带上,`commit_layout_drop` 铸出叶子,`fill_row_leaf` 拿着**这个座位**走 `open_preview_onto` → `open_preview_file_on` → `open_preview_source_on` —— 一路上表面都是明写的。到了页分叉那一句,它把手里的表面**扔了**:
+
+```rust
+return match surface {
+    PreviewSurface::Float(id) => self.open_preview_web_file_on_float(id, path),
+    _ => self.open_preview_web_file(path),   // ← 表面在这一行丢掉
+};
+```
+
+`open_preview_web_file` 是**没有表面的那扇门**,它当然要问落点规则,于是 `open_web_page_with` 再问一次 `preview_landing_surface`——答案是「树序里第一块没上锁的预览 pane」,也就是读者那块。实机取证(debug,`APPDATA`/`LOCALAPPDATA`/WebView2 profile 全隔离到临时目录,`BT_MOUSE_TRACE`,2800×1560 @200%,不出外网)把这两行连在一起了:
+
+```text
+open_preview_web_file enter path=D:\Demo\page.html
+preview_landing_surface seat=SeatId(4) reused=1
+```
+
+`reused=1` 就是整桩缺陷的那一格:一次**指名了 pane 的**投放,被一块**替它作主**的 pane 接了下来。旁边那句注释当时还写着「座位是单例规则的而不是调用者选的:一个 tab 只有一张页,冲着第二块 pane 的投放不买第二个浏览器」——那正是 §7.14e ② 当天退役掉的那条每 tab 单例的最后一具残骸:规则从 `open_web_page_with` 里拿走了,这一处却还照着它的旧理由在丢表面。
+
+**修法是把 `open_preview_image_on` 早就写着的那句话,原样说给第三条道。** 那句话是:*「一次预览的中心把它显示在这里」指的就是这块 pane,落点规则不许被重问——你瞄的那块 pane 就是接住这个文件的那块,不论它是不是一次寻常打开会选中的那块。* 图片道从 P84 起就是这么写的,文档道也是;页道从来没有。所以:
+
+- **`open_preview_web_file_on(surface, path)` 是新的那一半**:canonicalize、`Mint::file`、两条拒绝、再按表面分叉——`Seat(leaf)` 走 `open_minted_page_on`,`Float(id)` 走 `open_minted_page_on_float`(§7.39 那扇门原样,只是不再自己去问磁盘),`Peek` 一张悬停卡不起引擎(§7.14a 的理由逐字成立)、写一行取证就返回。**两条拒绝也落在调用者给的表面上**,与 §7.39 给浮窗定的是同一条:磁盘那句话属于读者正在看的地方,也就是他瞄的地方。`land_page_refusal` 那个自己挑座位的孪生门因此整个退役。
+- **`open_preview_web_file(path)` 只剩「没有表面的那扇门」该做的事**:问一次落点规则,再把答案交给上面那一半。**它也保留了原来那一记 `focus_seat`**——`open_web_page_with` 一直是「选 pane 的门顺手把键盘给它」这一对,而一张拒绝卡不是一张页,不动键盘。改法特意让**行为一个字没变**的是这条路:双击一个 `.html`、终端里点一条 `.html` 路径、把 `notes.md` 改名成 `notes.html`,三者照旧落在同一块 pane 上、照旧拿到键盘。
+- **`open_preview_source_on` 的页分叉收成一行** `return self.open_preview_web_file_on(surface, path);`。一张页是一个预览缓冲(§7.9),那么它落在哪里**根本不是页道的问题**:上游每一扇门都已经答过了。浮窗那一臂不再是「例外」,而是同一句话的第二条臂。
+
+**这一改顺手治好的,不只是拖到边缘带那一种。** 同一条分叉底下站着的还有:落在一块**上了锁**的预览 pane 正中的 retarget(`retarget_row_drop`,动词表 `RowVerb::Retarget`)、悬停卡抬成浮窗时的页(§7.39)、以及任何未来拿着表面进来的门。**改名那扇门也一并归队**(`rename_preview_file`):它手里一直有表面——那是它可能要挂 toast 的地方——而把一块**上了锁**的 pane 里的 `notes.md` 改成 `notes.html`,从前会把页开到别处去,留下那块 pane 指着一个磁盘上已经没有的名字。一处减法说一次,而不是一处调用点记一次。
+
+**红门四扇(`a_page_lands_where_it_was_aimed_tests`,读源码文本,理由与 `pages_are_plural_tests` 逐字相同:修的就是「一个问题在哪扇门被问」,而 `WindowRuntime` 是一台合成器加一台浏览器,「页落在了铸出来的那个座位上」不是这个进程没有屏幕时说得出的句子)。** 本模块的 `body()` 与邻居的**不一样**:它切到函数**自己**第四列的 `}`,而不是切到下一个 `fn`——后者会把下一个函数的文档注释吞进来,而这四扇钉的全是「一个函数体**没有**说什么」。① `a_door_that_was_told_a_surface_never_chooses_another`——十扇「被告知了表面」的门,逐个不许出现 `preview_landing_surface`,也不许调用七种「自己挑表面」的拼写(变异:把 `_ => self.open_preview_web_file(path)` 放回去,它当场点名是哪扇门、哪个拼写);② `the_page_lane_opens_on_the_surface_it_was_handed`——池子那扇门把表面整个传下去;③ `the_named_page_door_opens_on_the_surface_and_refuses_on_it_too`——两条臂各在,且两条拒绝**都**落在给定表面上(`land_page_refusal_on` 恰好两次);④ `the_doors_with_no_surface_are_the_ones_that_ask_the_landing_rule`——**落点规则没有被删掉,只是搬到了没有表面的那四扇门上**,这是单纯做减法会做错的另一半。
+
+**实机复验(同一套隔离环境与同一条手势)。** 修前后各跑一次,同一序列:`--cwd D:\Demo` 起窗 → `Ctrl+Shift+B` 开 files 列 → 双击 `paper.pdf`(页开在铸出来的落点 pane 上)→ 把 `README.md` 拖到窗左侧 rim(文档道,落在铸出来的那块,树序第一)→ 把 `page.html` 拖到终端 pane 的下边缘带。修前:页开在最左边那块 README 的 pane 上、README 没了,下边缘那块空着。修后:页开在下边缘刚铸出来的那块 pane 上,最左边那块 README 一字未动。
+
+**探针自己撞上的一条,记在这里给下一个人。** 一扇 1920×1200 物理 @200%(=960×600 逻辑)的窗子里,**第四块 pane 塞不下**:`plan.fits()` 为假,投放走 `settle_home`,从外面看就是「松手什么也没发生」,而这与本单要查的缺陷长得一模一样。把窗子放大到 2800×1560 之后同一条手势立刻成立。量落点的手势,先量窗子够不够宽。
+
+**挂账。** §7.14d 的 ⓐ 与 §7.14e 的两笔原样挂着;本片不新增。
+
+
 ### 7.17 七件交互裁决，一批落地（2026-08-25 用户裁决 B1/B4/B5/B7/B9/B10 + Cards 改名；`crates/bt-app/src/{main,seats,profiles,restore,shortcuts,i18n,webhost}.rs`、`crates/bt-layout/src/tree.rs`）
 
 **一句话：一个模式换了名字，一个中心投放换了含义,一个退出卡换了形状,两个动词第一次有了自己的门,一枚菜单第一次能指向另一扇窗,而一次换 tab 第一次把菜单也带走。**
