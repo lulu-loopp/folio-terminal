@@ -136,6 +136,16 @@ All notable changes to Folio are recorded here. The format follows
   only while a tab had a single one of them. It now travels with the pane that is
   holding it, through splits, insertions, divider drags and tab switches alike.
 
+- **Two preview panes can show two pictures at once.** With an image open,
+  dragging a video in from the file column beside it left the image pane with
+  nothing but its size line, and doing it the other way round left the video
+  pane blank instead; closing the pane that arrived did not bring the first one
+  back. A window could hold one picture texture, so a tab elected one preview
+  pane to it and starved the rest, and a video pane counts as a picture until
+  you press play. Every preview pane holding a picture now draws it, so an
+  image, a recording and a third picture beside them are three pictures on the
+  screen.
+
 ## 0.2.1-preview (unreleased)
 
 Fixes and polish for 0.2.0-preview. The one thing that is new is the one 0.2.0

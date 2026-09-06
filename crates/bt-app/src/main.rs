@@ -7953,27 +7953,6 @@ struct TabState {
     /// `Seats::landing_preview`, which answers "which pane would a newly opened
     /// file replace" and is free to answer "none of them".
     preview_panes: PreviewPanes,
-    /// **Which _seat_ is on the texture lane** — the one pane whose picture is
-    /// rasterised through `bt_render`'s single `set_preview_image` slot.
-    ///
-    /// Every *identity* a picture has is per surface already
-    /// ([`PreviewPane::image`]), so a second picture in a second pane keeps its
-    /// head, its foot and its meta line and loses only its pixels; what it
-    /// cannot have is the texture, because the renderer holds one slot. Making
-    /// that lane plural is a `bt-render` change of its own and is not this
-    /// slice's — so the limit is written down here rather than hidden in
-    /// whichever call site happened to win the race.
-    ///
-    /// **A float is not in this competition, and the 2026-08-17 report is why.**
-    /// The slot is painted in the seat pass, a whole pass below the overlay
-    /// layers a floating window is drawn in, so a picture in a window could
-    /// never have used it: handed to the lane it would be drawn *behind* the
-    /// window that contains it. A float paints its picture on its own layer
-    /// instead ([`Runtime::preview_float_layer`]), where its document already
-    /// rides for exactly the same z-order reason — which is why this field is
-    /// only ever a [`PreviewSurface::Seat`], and why tearing a picture off a pane
-    /// gives the lane back without taking the picture away.
-    preview_raster: Option<PreviewSurface>,
     /// This tab's shared pool of live preview buffers (`DESIGN.md` §7.1.3).
     ///
     /// **On the tab, because that is who owns it.** The 2026-07-17 ruling moved
@@ -13407,6 +13386,39 @@ impl TabState {
         PreviewSurface::Seat(self.leaf_here(seat))
     }
 
+    /// **Every pane of this tab that is putting a picture on the glass**, in
+    /// tree order (§7.1.6k⁷).
+    ///
+    /// The whole of the rule, and it is one sentence: *a preview pane holding a
+    /// picture draws it.* There was a second sentence until 2026-09-06 — "… if it
+    /// is the one pane this tab elected to the texture lane" — and the election
+    /// existed for no reason of the reader's: `bt_render` held a single
+    /// `set_preview_image` slot, and a tab that can hold several preview panes
+    /// (slice 5's pin) therefore had to starve all but one of them. What the
+    /// user photographed is the starving: a picture pane and a recording pane
+    /// side by side, the second one dropped in from the file column, and the
+    /// first left with its head, its foot and "1870 × 1122 · PNG · 381 KB · Fit"
+    /// over nothing at all. The slot is a list now
+    /// ([`bt_render::WindowRenderer::set_preview_images`]) and the sentence is
+    /// the whole rule.
+    ///
+    /// Seats only, and this tab's. A float paints its picture on its own overlay
+    /// layer a whole pass above this one ([`Runtime::preview_float_layer`]) and
+    /// never comes down this channel; a pane of another tab is not on the glass
+    /// and has no rectangle here.
+    fn seat_pictures(&self) -> Vec<PreviewSurface> {
+        self.seats
+            .preview_seats()
+            .into_iter()
+            .map(|seat| self.preview_here(seat))
+            .filter(|surface| {
+                self.preview_panes
+                    .get(*surface)
+                    .is_some_and(|pane| pane.image.is_some())
+            })
+            .collect()
+    }
+
     /// **This tab's name for one of its own seats** (F1b′).
     ///
     /// The window's pages span every tab and a seat number is unique only inside
@@ -17464,7 +17476,7 @@ struct PreviewImageState {
     ///
     /// It is filed on the picture rather than recomputed by whoever draws it,
     /// because a picture has **two** hosts and only one of them is a seat. A
-    /// seat's pixels go down `bt_render`'s one `set_preview_image` slot, which is
+    /// seat's pixels go down `bt_render`'s `set_preview_images` channel, which is
     /// handed a viewport and works the rectangle out for itself; a float's ride
     /// its window's own mark channel, which is handed a rectangle. Writing the
     /// rectangle down once, where the zoom and the clamp already are, is what
@@ -17604,113 +17616,27 @@ const IMAGE_ZOOM_STEP: f32 = 1.25;
 const IMAGE_ZOOM_MIN: f32 = 0.10;
 const IMAGE_ZOOM_MAX: f32 = 8.0;
 
-/// **Who holds the one texture lane once a view has landed on a surface.**
+/// **Which picture a placement is about**, as
+/// [`bt_render::PreviewImage::owner`] spells it (§7.1.6k⁷).
 ///
-/// `bt_render` has a single `set_preview_image` slot and it is painted in the
-/// seat pass, so the lane is a *seat's* and at most one seat can have it
-/// ([`TabState::preview_raster`]). Every door that puts a view down on a surface
-/// — a file opened onto a pane, a window docked back into one — asks this, and
-/// that is the point: the rule used to be spelled out at the opening door and
-/// simply forgotten at the docking one, which is the second half of the
-/// 2026-08-17 report ("dock it back and the picture still never loads").
+/// The seat channel is a list, so the per-frame door that moves a picture
+/// through its pane's FLIP ([`bt_render::WindowRenderer::place_preview_image`])
+/// has to name one of several. A **seat number** is that name: the pictures the
+/// renderer is holding are the panes of the tab on the glass, and a seat number
+/// is unique inside its own tab (§7.12 ⓑ) — the property that makes `SeatId` the
+/// right half of `LeafId` to carry here, and the reason a lane belonging to
+/// another tab was refused a rectangle before this list existed.
 ///
-/// Three answers, and each is one sentence:
-///
-/// * a **float** changes nothing — it paints its picture on its own overlay
-///   layer, so it neither needs the slot nor may take it from a pane that does;
-/// * a **picture** landing on a seat takes the lane outright, because the view
-///   that was on that surface has just been overwritten and there is no
-///   incumbent left whose pixels could be taken away;
-/// * a **document** landing on a seat that *held* the lane gives it back, or the
-///   slot would go on showing a picture the surface no longer has.
-fn preview_lane_after_landing(
-    lane: Option<PreviewSurface>,
-    landing: PreviewSurface,
-    landed_a_picture: bool,
-) -> Option<PreviewSurface> {
-    match landing {
-        PreviewSurface::Float(_) | PreviewSurface::Peek => lane,
-        PreviewSurface::Seat(_) if landed_a_picture => Some(landing),
-        PreviewSurface::Seat(_) => lane.filter(|held| *held != landing),
-    }
-}
-
-/// **Who holds the one texture lane once the tab's set of panes has changed**
-/// (user report on `next22`, defects #202/#204; §7.1.6k⁗).
-///
-/// [`preview_lane_after_landing`]'s opposite number, and the pair covers the two
-/// kinds of event there are: that one is asked when a *view* lands on a surface
-/// that already exists, this one when the *surfaces themselves* change. A move
-/// is the second kind and had no answer at all — it neither lands a view nor
-/// builds a tab, so the two doors that write the lane both missed it, and the
-/// tab a picture was torn out of went on naming a pane it no longer has.
-///
-/// The rule is one sentence: **the lane belongs to a seat of this tab whose pane
-/// is holding a picture, and it stays with the one that has it.** So:
-///
-/// * an incumbent that is still such a surface keeps the lane — which is
-///   §7.1.6k's own ruling that "a picture the target was already showing does
-///   not lose its pixels to one that has just moved in", now stated as a
-///   property of the tab rather than as a `get_or_insert` at one call site;
-/// * anything else is re-derived exactly the way [`assemble_tab_state`] derives
-///   it at birth — the first picture in insertion order, because the slot is one
-///   — which is what releases a lane pointing at a pane that has left and hands
-///   it to the picture that is actually standing there.
-///
-/// A float never holds it (it paints on its own overlay layer) and neither does
-/// the glance card, which is why the walk is over seats alone.
+/// A float never comes down this channel — its picture rides its own overlay
+/// layer — so nothing it could be given here would ever be looked up. It answers
+/// all the same, because a function that can only be called about some of its
+/// input is a rule waiting to be broken; the number is out of every seat's
+/// range and therefore matches nothing.
 #[must_use]
-fn preview_raster_lane(
-    panes: &PreviewPanes,
-    incumbent: Option<PreviewSurface>,
-) -> Option<PreviewSurface> {
-    let holds_a_picture = |surface: PreviewSurface| {
-        matches!(surface, PreviewSurface::Seat(_))
-            && panes.get(surface).is_some_and(|pane| pane.image.is_some())
-    };
-    incumbent.filter(|held| holds_a_picture(*held)).or_else(|| {
-        panes
-            .iter()
-            .find(|(surface, pane)| {
-                matches!(surface, PreviewSurface::Seat(_)) && pane.image.is_some()
-            })
-            .map(|(surface, _)| surface)
-    })
-}
-
-/// **Which pane's rectangle this frame draws the picture against** (user report
-/// 2026-09-06, two of them; §7.1.6k⁵).
-///
-/// [`preview_raster_lane`]'s reader, and the third member of the lane's family:
-/// that one decides *who holds* the lane when the panes change, and this one
-/// answers the question every frame of every flight asks — **whose box do the
-/// pixels go in.** They have to be the same seat, because
-/// [`Runtime::refit_preview_picture`] fits the raster to the lane surface's body
-/// and [`Runtime::pane_draws`] then moves it; two answers is a picture fitted to
-/// one pane and painted over another.
-///
-/// It was not one function until this day, and the frame's half asked
-/// [`seats::Seats::preview`] — "the first preview leaf in the tree". While a tab
-/// could hold a single preview pane the two readings named the same seat, and
-/// slice 5's pin made a tab able to hold several without this call site hearing
-/// about it. What the user photographed is both halves of that one sentence: a
-/// picture pane with a **page** pane opened to its left lost its picture
-/// entirely — the pixels were placed on the page's rectangle and the web plate
-/// under §7.14d stands over them — and a picture pane with a **text** pane
-/// inserted between it and the shell had its picture drawn over that text, while
-/// its own pane kept nothing but the meta line. One defect, two costumes, and
-/// the costume is only which pane happens to come first in the tree.
-///
-/// The tab is asked as well for [`Runtime::refit_preview_picture`]'s reason: the
-/// lane is a `LeafId` and a leaf names its tab, so a lane belonging to a tab that
-/// is not the one being drawn has no rectangle here and must not be given one of
-/// somebody else's. A float is not a seat and never comes down this road — its
-/// picture rides its own overlay layer — so it answers `None` too.
-#[must_use]
-fn picture_lane_seat(lane: Option<PreviewSurface>, tab: TabId) -> Option<SeatId> {
-    match lane {
-        Some(PreviewSurface::Seat(leaf)) if leaf.tab == tab => Some(leaf.seat),
-        _ => None,
+fn picture_channel_owner(surface: PreviewSurface) -> u64 {
+    match surface {
+        PreviewSurface::Seat(leaf) => leaf.seat.0,
+        PreviewSurface::Float(_) | PreviewSurface::Peek => u64::MAX,
     }
 }
 
@@ -29572,24 +29498,6 @@ fn assemble_tab_state(
         sessions.is_empty() || sessions.contains_key(&focused_leaf),
         "a tab that holds shells holds one for its focused leaf"
     );
-    // **The texture lane, read off the panes rather than passed in.** The one
-    // seat whose picture the renderer's single `set_preview_image` slot is spent
-    // on ([`TabState::preview_raster`]). Every door that lands a picture on a
-    // pane has to claim it ([`preview_lane_after_landing`]), and *being born
-    // holding one* is such a door: a restored session came back saying
-    // "Loading …" for good, because nothing ever named its pane as the lane's
-    // and the refit therefore never ran. Derived here so that no birth path can
-    // forget it — which is the same argument this whole function is.
-    //
-    // The first picture in insertion order when a tab arrives with two, because
-    // the slot is one; the tab merge already decides it that way.
-    //
-    // **Through [`preview_raster_lane`] with no incumbent**, since §7.1.6k⁗: a
-    // tab being born has nobody holding the lane, so the two callers of that
-    // function differ in exactly that argument and the derivation itself is
-    // written once. A second spelling of "which pane has the pixels" is how the
-    // constructor and the mover came to disagree in the first place.
-    let preview_raster = preview_raster_lane(&preview_panes, None);
     let tab = TabState {
         id,
         sessions,
@@ -29628,7 +29536,6 @@ fn assemble_tab_state(
         seat_layout,
         seat_overflow,
         preview_panes,
-        preview_raster,
         preview_pool,
         preview_edit_focus: None,
         preview_views: PreviewViewStore::default(),
@@ -29811,13 +29718,6 @@ fn pane_into_new_tab(
         .remove(&was)
         .map(|view| BTreeMap::from([(now, view)]))
         .unwrap_or_default();
-    // **The lane the departing pane may have been holding** (§7.1.6k⁗). The tab
-    // being built derives its own in [`assemble_tab_state`]; this is the other
-    // end of the same journey, and without it the tab left behind names a
-    // surface it no longer has — which the moment that pane is dragged back
-    // turns into an incumbent that refuses the picture. See
-    // [`preview_raster_lane`].
-    from.preview_raster = preview_raster_lane(&from.preview_panes, from.preview_raster);
     from.refocus_after_losing(seat.id);
     let (seat_layout, seat_overflow) = solve(&seats);
     let mut tab = assemble_tab_state(
@@ -30063,32 +29963,6 @@ fn move_seat_content(
         }
         *target.preview_panes.entry(arrived) = pane;
     }
-    // **And the texture lane on both sides of the journey** (user report on
-    // `next22`, defects #202/#204; §7.1.6k⁗).
-    //
-    // This used to be one line inside the block above — `target.preview_raster
-    // .get_or_insert(arrived)` — and it was half of the rule. The half it stated
-    // is still stated, by [`preview_raster_lane`]'s incumbent clause: a picture
-    // the target was already showing does not lose its pixels to one that has
-    // just moved in. The half it left out is that **the tab a picture leaves
-    // goes on naming it**, because nothing here ever released the lane; so a
-    // picture torn into a tab of its own and dragged back met an incumbent that
-    // was its own departed address, `get_or_insert` kept it, and
-    // [`Runtime::preview_picture_hosts`] filtered the returning pane straight
-    // out. On the glass: a blank body under a head and a fact line that had
-    // travelled with the pane — *「1440 × 900 · PNG · 36 KB · Fit」* over nothing.
-    //
-    // Asked of both tabs and asked unconditionally, because both of them just
-    // changed which panes they hold and neither of them can answer for the
-    // other. It is a walk of a list that is never longer than a tab's preview
-    // panes, and it is idempotent — which is what lets [`absorb_tab_sessions`]
-    // call this function once per arriving seat without the answer depending on
-    // the order they arrive in.
-    //
-    // The decode lane needs nothing: it is keyed by path and belongs to the
-    // window, so the picture itself needs no more than its new address.
-    source.preview_raster = preview_raster_lane(&source.preview_panes, source.preview_raster);
-    target.preview_raster = preview_raster_lane(&target.preview_panes, target.preview_raster);
     forget_work_in_flight_for_seat(target, now);
 }
 
@@ -48672,10 +48546,12 @@ impl Runtime<'_> {
         // file somewhere in its own top-left corner for no reason anybody could
         // reconstruct.
         self.preview_pane_mut(surface).zoom = ImageZoom::FIT;
-        // A picture has landed: the lane is this surface's if this surface is a
-        // pane, and untouched if it is a window ([`preview_lane_after_landing`]).
-        self.preview_raster = preview_lane_after_landing(self.preview_raster, surface, true);
-        self.window.renderer.set_preview_image(None);
+        // **Nothing to claim.** A picture landing used to take a one-seat texture
+        // lane off whichever pane was holding it, which is how a recording pane
+        // dropped beside a picture pane blanked the picture (user report
+        // 2026-09-06; §7.1.6k⁷). The channel is plural now, so the picture that
+        // has just landed is simply one more entry in the list
+        // [`Self::refresh_preview_for_layout`] rebuilds below.
         self.refresh_preview_for_layout();
         self.refresh_chrome();
         self.present_chrome_change()
@@ -49213,19 +49089,15 @@ impl Runtime<'_> {
         self.refresh_preview_body();
     }
 
-    /// Take this surface's picture down, and the texture with it if the texture
-    /// was its.
+    /// Take this surface's picture down.
     ///
-    /// The raster lane names one surface at a time ([`TabState::preview_raster`]),
-    /// so clearing it is only right when the picture going away is the one that
-    /// filled it — otherwise a second preview closing would blank the first one's
-    /// pixels.
+    /// The pixels go with it because the picture channel is rebuilt from the
+    /// panes on the next refit ([`Self::refresh_preview_for_layout`]) and a pane
+    /// with no `image` contributes nothing to it. There is no lane to release
+    /// and therefore no way for one preview closing to blank another's, which is
+    /// exactly what the release this replaced had to be careful about.
     fn clear_preview_image(&mut self, surface: PreviewSurface) {
         self.preview_pane_mut(surface).image = None;
-        if self.preview_raster == Some(surface) {
-            self.preview_raster = None;
-            self.window.renderer.set_preview_image(None);
-        }
     }
 
     /// The same, told **which tab** the surface's view lives in — the twin of
@@ -49234,20 +49106,10 @@ impl Runtime<'_> {
     ///
     /// A page opening on a tab that is not in front is the caller
     /// ([`Self::open_web_page_on`], since F1b′): `preview_pane_mut` resolves a
-    /// seat number against the first tab whose tree holds it, and the raster slot
-    /// is a field of `TabState`, so both of them answer for a tab that is not
-    /// this page's when two tabs number a preview seat the same.
+    /// seat number against the first tab whose tree holds it, so it answers for a
+    /// tab that is not this page's when two tabs number a preview seat the same.
     fn clear_preview_image_in(&mut self, index: usize, surface: PreviewSurface) {
         self.window.tabs[index].preview_panes.entry(surface).image = None;
-        if self.window.tabs[index].preview_raster == Some(surface) {
-            self.window.tabs[index].preview_raster = None;
-            // Only the tab on the glass owns what the renderer is holding; a
-            // background tab clearing it would blank the picture the reader is
-            // looking at.
-            if index == self.window.active_tab {
-                self.window.renderer.set_preview_image(None);
-            }
-        }
     }
 
     /// This surface is about to stop showing whatever it is showing. **File the
@@ -55471,35 +55333,39 @@ impl Runtime<'_> {
 
     /// **Every picture on screen, and nothing that is not one.**
     ///
-    /// Two hosts, and the asymmetry in this list is the whole of the difference
-    /// between them. A *seat's* pixels go down `bt_render`'s one
-    /// `set_preview_image` slot, so at most one seat is here and
-    /// [`TabState::preview_raster`] says which. A *float's* do not need that slot
-    /// at all: its window is an overlay layer drawn a whole pass later, and its
-    /// picture rides that layer's own mark channel exactly as its document rides
-    /// the layer's body ([`Self::preview_float_layer`]) — so every float is here,
-    /// and none of them can be starved of a lane by a pane.
+    /// **One rule for both hosts, since §7.1.6k⁷: a surface holding a picture is
+    /// a picture on screen.** It used to be two rules, and the asymmetry was the
+    /// renderer's and not the reader's — a *float's* pixels ride its own overlay
+    /// layer ([`Self::preview_float_layer`]), so every float was here, while a
+    /// *seat's* went down `bt_render`'s single `set_preview_image` slot, so at
+    /// most one seat was, and [`PreviewPane::image`] on every other pane meant a
+    /// head, a foot and a meta line over nothing at all. That slot is a list now
+    /// ([`bt_render::WindowRenderer::set_preview_images`]) and the election it
+    /// forced is gone with it.
     ///
     /// Every float, not only this tab's, for [`Self::preview_surfaces`]' reason:
     /// a window torn out of another tab is still standing, and a picture that
     /// stopped being refit the moment you looked somewhere else would freeze at
     /// whatever size it was last seen at.
     fn preview_picture_hosts(&self) -> Vec<PreviewSurface> {
-        self.preview_surfaces()
-            .into_iter()
-            .filter(|surface| match surface {
-                PreviewSurface::Seat(_) => self.preview_raster == Some(*surface),
-                PreviewSurface::Float(_) => true,
+        // The seat half is the tab's own rule, asked of the tab
+        // ([`TabState::seat_pictures`]), because that is the answer
+        // [`Self::pane_draws`] has to agree with frame by frame and two
+        // spellings of it is how the last two defects in this family began.
+        let mut hosts = self.seat_pictures();
+        hosts.extend(
+            self.preview_surfaces()
+                .into_iter()
                 // The glance card mirrors a picture through its own path
-                // ([`Self::file_peek_picture`]) and holds no `PreviewImageState`
-                // to refit.
-                PreviewSurface::Peek => false,
-            })
-            .filter(|surface| {
-                self.preview_pane(*surface)
-                    .is_some_and(|pane| pane.image.is_some())
-            })
-            .collect()
+                // ([`Self::file_peek_picture`]) and holds no
+                // `PreviewImageState` to refit.
+                .filter(|surface| matches!(surface, PreviewSurface::Float(_)))
+                .filter(|surface| {
+                    self.preview_pane(*surface)
+                        .is_some_and(|pane| pane.image.is_some())
+                }),
+        );
+        hosts
     }
 
     /// **Ask the decoration worker for one file's native pixels**, down whichever of the two
@@ -55546,8 +55412,10 @@ impl Runtime<'_> {
     /// One door for every refusal below — the decode is still out, the body has
     /// no extent, the host has no rectangle to give — because the two hosts stop
     /// drawing in two different ways and no refusal should have to know which of
-    /// them it is talking to. The seat lane is emptied; a float's `drawn` is
-    /// taken away, which is the same sentence said to the layer that reads it.
+    /// them it is talking to. Taking `drawn` away is the whole of it: it is the
+    /// sentence the float layer reads, and it is what
+    /// [`Self::refit_preview_picture`] answers `None` with, so this surface is
+    /// simply not among the pictures the seat pass is handed this frame.
     ///
     /// The pixels themselves are **kept**. A refusal is about this frame, and a
     /// raster thrown away here is a raster the worker is asked for again the
@@ -55556,9 +55424,6 @@ impl Runtime<'_> {
     fn hide_preview_picture(&mut self, surface: PreviewSurface) {
         if let Some(picture) = self.preview_picture_mut(surface) {
             picture.drawn = None;
-        }
-        if self.preview_raster == Some(surface) {
-            self.window.renderer.set_preview_image(None);
         }
     }
 
@@ -55652,19 +55517,19 @@ impl Runtime<'_> {
         if self.heal_preview_scroll() {
             self.refresh_preview_body();
         }
-        let hosts = self.preview_picture_hosts();
-        // The one `set_preview_image` slot, emptied when no seat is holding it —
-        // the lane is a seat's, and a frame in which no seat has a picture is a
-        // frame in which the slot must not still be showing the last one's.
-        if !hosts
-            .iter()
-            .any(|surface| self.preview_raster == Some(*surface))
-        {
-            self.window.renderer.set_preview_image(None);
+        // **The seat pass's pictures, all of them, rebuilt from the panes.** The
+        // whole list every time for `set_preview_bodies`' reason — these
+        // rectangles come out of the layout anyway — and it is what empties the
+        // channel too: a pane that has stopped holding a picture stops
+        // contributing one, so nothing has to remember to release anything
+        // (§7.1.6k⁷).
+        let mut pictures: Vec<PreviewImage> = Vec::new();
+        for surface in self.preview_picture_hosts() {
+            if let Some(picture) = self.refit_preview_picture(surface) {
+                pictures.push(picture);
+            }
         }
-        for surface in hosts {
-            self.refit_preview_picture(surface);
-        }
+        self.window.renderer.set_preview_images(pictures);
     }
     /// **Every playing recording, as this frame's video layers** (user ruling
     /// 2026-08-28, route B slice ②; `docs/DESIGN.md` §7.44 ③).
@@ -55942,18 +55807,25 @@ impl Runtime<'_> {
     }
 
     /// Fit **one** picture to the body its host gives it this frame, ask the
-    /// worker for the raster that box wants, and hand the pixels to the channel
-    /// that host draws on.
+    /// worker for the raster that box wants, and answer with the pixels the seat
+    /// pass is to draw — or with `None`, which is every other case there is.
     ///
     /// **Everything about a picture except where its pixels land is the same on
     /// both hosts** — the same path-keyed decode, the same zoom, the same
-    /// [`image_destination`], the same request ledger — so the fork is the two
-    /// arms at the bottom and not a second copy of this function. That is the
+    /// [`image_destination`], the same request ledger — so the fork is the one
+    /// `match` at the bottom and not a second copy of this function. That is the
     /// whole of the 2026-08-17 report: this arithmetic used to run for a seat
     /// only, so a preview pane torn off into a window kept its head, its foot and
     /// its meta line and showed nothing at all, and the request it had left in
     /// flight was then answered to nobody.
-    fn refit_preview_picture(&mut self, surface: PreviewSurface) {
+    ///
+    /// **It returns the picture rather than writing it** (§7.1.6k⁷). The seat
+    /// channel is a list, and a function that wrote into it one surface at a
+    /// time would be back to the election that list exists to end: whichever
+    /// pane refit last would be the only one on the glass. The caller collects
+    /// the whole walk and hands it over once, exactly as it does for the
+    /// documents and the videos.
+    fn refit_preview_picture(&mut self, surface: PreviewSurface) -> Option<PreviewImage> {
         // **A frame is not drawn over the thing it was a picture of** (user
         // ruling 2026-08-27; §7.23 ⑩). Once the play verb has put an engine on
         // this pane, the pane's body is a hole with a browser composed under it,
@@ -55975,7 +55847,7 @@ impl Runtime<'_> {
         // other, and the one on top is the one that does not move.
         if self.surface_is_playing_a_video(surface) || self.animation_running_on(surface) {
             self.hide_preview_picture(surface);
-            return;
+            return None;
         }
         let scale = self.window.renderer.metrics().scale_factor as f32;
         // **U8 — a seat's box travels with its pane's tween**, and carries the
@@ -56006,7 +55878,7 @@ impl Runtime<'_> {
                     .flatten()
                 else {
                     self.hide_preview_picture(surface);
-                    return;
+                    return None;
                 };
                 Some(placement)
             }
@@ -56025,14 +55897,14 @@ impl Runtime<'_> {
             .or_else(|| self.preview_surface_body_rect(surface, scale))
         else {
             self.hide_preview_picture(surface);
-            return;
+            return None;
         };
         let Some(path) = self
             .preview_picture(surface)
             .map(|picture| picture.path.clone())
         else {
             self.hide_preview_picture(surface);
-            return;
+            return None;
         };
         let cache_key = normalized_local_image_path_key(&path);
         let decoded = match self.window.peek_cache.get(&cache_key) {
@@ -56044,7 +55916,7 @@ impl Runtime<'_> {
             }) => Some((key.clone(), Arc::clone(rgba), *width_px, *height_px)),
             Some(PeekCacheEntry::Pending) => {
                 self.hide_preview_picture(surface);
-                return;
+                return None;
             }
             Some(PeekCacheEntry::Failed) => {
                 // **A video that would not decode is not a failure of this pane** (user ruling
@@ -56063,7 +55935,7 @@ impl Runtime<'_> {
                     });
                 }
                 self.hide_preview_picture(surface);
-                return;
+                return None;
             }
             None => None,
         };
@@ -56085,7 +55957,7 @@ impl Runtime<'_> {
                 if let Some(picture) = self.preview_picture_mut(surface) {
                     picture.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
                 }
-                return;
+                return None;
             }
             if self.request_peek_pixels(&path) {
                 self.window
@@ -56094,7 +55966,7 @@ impl Runtime<'_> {
             } else if let Some(picture) = self.preview_picture_mut(surface) {
                 picture.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
             }
-            return;
+            return None;
         };
         // `.pv-image svg { max-width: 86%; max-height: 70% }` (mock-up 606).
         //
@@ -56124,7 +55996,7 @@ impl Runtime<'_> {
                 picture.failure = Some(i18n::Text::PreviewFailedSeatTooSmall.text().to_owned());
             }
             self.hide_preview_picture(surface);
-            return;
+            return None;
         }
         let image_px = [native_width, native_height];
         // **Re-clamped on the way out, and written back.** A pane made narrower
@@ -56184,7 +56056,7 @@ impl Runtime<'_> {
                 picture.failure = Some(i18n::Text::PreviewFailedSeatTooSmall.text().to_owned());
             }
             self.hide_preview_picture(surface);
-            return;
+            return None;
         };
         let target = (content_key.clone(), raster_width, raster_height);
         let exact_raster = self
@@ -56207,42 +56079,42 @@ impl Runtime<'_> {
                     raster.height_px,
                 )
             });
-        match (placement, held) {
-            (Some(placement), Some((key, rgba, width_px, height_px))) => {
-                self.window.renderer.set_preview_image(Some(PreviewImage {
-                    seat: placement.seat,
-                    clip: placement.clip,
-                    key,
-                    rgba,
-                    width_px,
-                    height_px,
-                    display_width_px: display_width,
-                    display_height_px: display_height,
-                    pan_px: [clamped_pan[0].round(), clamped_pan[1].round()],
-                }));
-            }
-            (Some(_), None) => {
-                self.window.renderer.set_preview_image(None);
-            }
-            // A float paints from the rectangle filed just below: its window is
-            // an overlay layer a whole pass above the seat lane, so handing this
-            // picture to `set_preview_image` would draw it *behind* the very
-            // window that contains it — the same sentence
-            // [`Self::refresh_preview_body`] already makes about a float's
-            // document.
-            (None, _) => {}
-        }
+        // **What this surface contributes to the seat pass**, and `None` at both
+        // of the other two answers. A pane whose raster has not arrived yet
+        // contributes nothing — it is not "the slot, emptied", it is one entry
+        // missing from a list, so a neighbour that does have its pixels keeps
+        // them. And a float contributes nothing here at all: its window is an
+        // overlay layer a whole pass above the seat pass, so a picture handed
+        // down this channel would be drawn *behind* the very window that
+        // contains it — the same sentence [`Self::refresh_preview_body`] already
+        // makes about a float's document. It paints from the rectangle filed
+        // just below instead.
+        let produced = match (placement, held) {
+            (Some(placement), Some((key, rgba, width_px, height_px))) => Some(PreviewImage {
+                owner: picture_channel_owner(surface),
+                seat: placement.seat,
+                clip: placement.clip,
+                key,
+                rgba,
+                width_px,
+                height_px,
+                display_width_px: display_width,
+                display_height_px: display_height,
+                pan_px: [clamped_pan[0].round(), clamped_pan[1].round()],
+            }),
+            (Some(_), None) | (None, _) => None,
+        };
         if let Some(picture) = self.preview_picture_mut(surface) {
             picture.drawn = Some(drawn);
         }
         if exact_raster {
-            return;
+            return produced;
         }
         if self.preview_picture(surface).is_some_and(|picture| {
             picture.pending.as_ref() == Some(&target) || picture.scale_settle_deadline.is_some()
         }) || !self.app.math_worker_running
         {
-            return;
+            return produced;
         }
         // **Every exact-size question this surface puts to the resample lane.**
         // One line per Lanczos3 pass asked for, with the size asked and the size
@@ -56279,6 +56151,7 @@ impl Runtime<'_> {
         } else if let Some(picture) = self.preview_picture_mut(surface) {
             picture.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
         }
+        produced
     }
 
     /// Re-solve after a tree edit and carry the consequences to the terminal.
@@ -70663,10 +70536,10 @@ impl Runtime<'_> {
         // **The picture, on this window's own mark channel** (user report,
         // 2026-08-17: "undock an image preview and the picture disappears").
         //
-        // A seat's picture is drawn by `bt_render`'s one `set_preview_image`
-        // slot, which paints in the seat pass — a whole pass *below* the
+        // A seat's picture is drawn through `bt_render`'s `set_preview_images`
+        // channel, which paints in the seat pass — a whole pass *below* the
         // overlays, which is where this window's own face is drawn. So a picture
-        // handed to that lane by a float would be behind the very window that
+        // handed to that channel by a float would be behind the very window that
         // contains it, and the honest answer is the one this layer's document
         // already uses: ride the layer. The glance card draws its thumbnail on
         // exactly this channel ([`file_peek::build`]), so a window's picture is
@@ -71301,15 +71174,6 @@ impl Runtime<'_> {
             self.sessions.insert(arrived, session);
             self.focused_leaf = arrived;
         }
-        // The texture lane is a *seat's* ([`TabState::preview_raster`]), so a
-        // picture carried into a window gives the lane back and paints on its
-        // window's own layer from there ([`Self::preview_float_layer`]) — it
-        // keeps its pixels along with its head, its foot and its meta line, and
-        // the raster it is already holding travels with the pane.
-        if self.preview_raster == Some(surface) {
-            self.preview_raster = None;
-            self.window.renderer.set_preview_image(None);
-        }
         let placed = match anchor {
             Some(anchor) => float::float_placement(anchor, size, viewport, scale),
             None => {
@@ -71431,28 +71295,6 @@ impl Runtime<'_> {
                 .git_graph_view
                 .insert(landing, view);
         }
-        // **The texture lane, taken back** (user report, 2026-08-17).
-        // `pop_out_preview` hands it in because a float paints its own picture
-        // and has no use for the slot; docking is that move run backwards and
-        // has to ask for it again, or the pane that has just landed keeps its
-        // head, its foot and its meta line and never gets its pixels. Written
-        // unconditionally rather than `get_or_insert`: the line above has
-        // already overwritten whatever view was on this surface, so there is no
-        // incumbent left whose pixels this could be taking away. And released
-        // when what docked is a *document*, for the same reason read the other
-        // way — a lane pointing at a surface with no picture on it would go on
-        // showing the last picture that was there.
-        let index = self.preview_tab_index(landing);
-        let landed_a_picture = self.window.tabs[index]
-            .preview_panes
-            .get(landing)
-            .is_some_and(|pane| pane.image.is_some());
-        self.window.tabs[index].preview_raster = preview_lane_after_landing(
-            self.window.tabs[index].preview_raster,
-            landing,
-            landed_a_picture,
-        );
-        self.window.renderer.set_preview_image(None);
         if let PreviewSurface::Seat(leaf) = landing {
             // `DOCK` is a button and this is the click on it: the pane you just
             // put down is the one you are looking at — which is why the leaf it
@@ -86012,32 +85854,39 @@ impl Runtime<'_> {
                 })
             })
             .collect();
-        // **U8 — the picture's pane, re-placed on every animated frame.**
+        // **U8 — every picture's pane, re-placed on every animated frame.**
         //
-        // Its pane FLIPs with the rest, and the pair of rectangles it is drawn
-        // through is a function of the clock; `refresh_preview_for_layout` runs
-        // once per commit and cannot answer for the frames in between. Only the
-        // placement is touched here — the raster, its key and the extent it was
-        // fitted to belong to the commit, and re-deciding those per frame is the
-        // resample storm R2 exists to forbid.
+        // Their panes FLIP with the rest, and the pair of rectangles each is
+        // drawn through is a function of the clock; `refresh_preview_for_layout`
+        // runs once per commit and cannot answer for the frames in between. Only
+        // the placement is touched here — the raster, its key and the extent it
+        // was fitted to belong to the commit, and re-deciding those per frame is
+        // the resample storm R2 exists to forbid.
         //
-        // **And the seat is the one holding the lane, never "the preview seat"**
-        // (§7.1.6k⁵). See [`picture_lane_seat`] for what asking `seats.preview()`
-        // here cost once a tab could hold more than one preview pane.
-        if let Some(preview_seat) = picture_lane_seat(self.preview_raster, self.id)
-            && let Some(placement) = preview_image_placement(
+        // **Each against its own pane, and all of them** (§7.1.6k⁵, §7.1.6k⁷).
+        // This asked `seats.preview()` — the first preview leaf in the tree —
+        // until a tab could hold two, and then it asked which single pane held
+        // the one texture lane. Both were the same defect a slice apart: a
+        // picture fitted against one pane and placed against another, or not
+        // placed at all. The panes of this tab that are holding pictures are the
+        // pictures the renderer is holding, so the walk is over them.
+        for surface in self.seat_pictures() {
+            let PreviewSurface::Seat(leaf) = surface else {
+                continue;
+            };
+            if let Some(placement) = preview_image_placement(
                 &self.seats,
                 &self.seat_layout,
-                preview_seat,
+                leaf.seat,
                 scale,
-                self.window
-                    .pane_motion
-                    .transform_of(preview_seat, now, motion),
-            )
-        {
-            self.window
-                .renderer
-                .place_preview_image(placement.seat, placement.clip);
+                self.window.pane_motion.transform_of(leaf.seat, now, motion),
+            ) {
+                self.window.renderer.place_preview_image(
+                    picture_channel_owner(surface),
+                    placement.seat,
+                    placement.clip,
+                );
+            }
         }
         // And the hosted page, on the same clock and for the same reason: a web
         // seat is a pane, it FLIPs with its neighbours, and a rectangle that is
@@ -112170,48 +112019,6 @@ mod tests {
         );
     }
 
-    /// RED before the fix: `dock_preview_float` moved the view back onto a pane
-    /// and never asked for the texture lane again, so the re-docked picture was
-    /// never rasterised — head, foot and meta line, and no pixels. The rule is
-    /// one function now precisely because it has to be the same at both doors.
-    #[test]
-    fn docking_a_picture_takes_the_texture_lane_back_and_a_document_gives_it_up() {
-        let seat = seat_of(TAB_ONE, SeatId(11));
-        let other = seat_of(TAB_ONE, SeatId(12));
-        let window = PreviewSurface::Float(4_u64);
-
-        assert_eq!(
-            preview_lane_after_landing(None, seat, true),
-            Some(seat),
-            "a picture docked into a pane is the picture on the lane"
-        );
-        assert_eq!(
-            preview_lane_after_landing(Some(other), seat, true),
-            Some(seat),
-            "and it is the pane it landed on, not the one that had the lane"
-        );
-        assert_eq!(
-            preview_lane_after_landing(Some(seat), seat, false),
-            None,
-            "a document landing where the lane's picture was gives the lane up"
-        );
-        assert_eq!(
-            preview_lane_after_landing(Some(other), seat, false),
-            Some(other),
-            "and takes nothing from a pane that was not this one"
-        );
-        assert_eq!(
-            preview_lane_after_landing(Some(other), window, true),
-            Some(other),
-            "a window paints its own picture and never takes the lane"
-        );
-        assert_eq!(
-            preview_lane_after_landing(None, window, true),
-            None,
-            "not even when the lane is free"
-        );
-    }
-
     /// The other half of the ledger's contract: an outstanding question belongs
     /// to a *surface*, so it goes away with it. A pending target that outlived
     /// its pane would be an answer routed to a host that no longer exists — and,
@@ -120082,34 +119889,34 @@ mod tests {
         );
     }
 
-    /// RED GATE — §7.1.6k⁵. **A picture is placed against the pane that holds
-    /// it, and never against whichever preview leaf comes first in the tree**
-    /// (user report 2026-09-06, two of them).
+    /// RED GATE — §7.1.6k⁵/§7.1.6k⁷. **Every preview pane holding a picture
+    /// draws it, and each is placed against its own pane** (user reports
+    /// 2026-09-06, three of them).
     ///
-    /// The frame's re-place asked [`seats::Seats::preview`] from the day U8 wrote
-    /// it, which was the same seat as the lane's for exactly as long as a tab
-    /// could hold one preview pane. Slice 5's pin ended that, and what the reader
-    /// then photographed was the picture painted on the *other* preview pane's
-    /// rectangle: over a text preview's prose in one shot, and under a hosted
-    /// page's plate — invisible — in the other.
+    /// Two defects one slice apart, and one fixture separates both. The frame's
+    /// re-place asked [`seats::Seats::preview`] — *the first preview leaf in the
+    /// tree* — from the day U8 wrote it, which was the right seat for exactly as
+    /// long as a tab could hold one preview pane; slice 5's pin ended that, and
+    /// the reader photographed a picture painted on its neighbour's rectangle.
+    /// The mend elected one pane to a one-slot texture lane, and the reader then
+    /// photographed the *other* half of the same scarcity: a recording pane
+    /// dropped in beside a picture pane, the picture gone, "1870 × 1122 · PNG ·
+    /// 381 KB · Fit" over nothing.
     ///
-    /// The fixture is the minimum that can tell the two apart: two preview panes,
-    /// the lane on the second. `seats.preview()` answers the first, so the two
-    /// rectangles must differ and the placement must be the second's.
+    /// So the fixture is two preview panes **both holding a picture** — the
+    /// user's own arrangement, and the minimum that can tell "the first leaf",
+    /// "the elected one" and "each its own" apart — and the claims are that the
+    /// tab names both of them and that each one's rectangle is its own pane's.
     ///
     /// MUTATIONS:
-    /// ① put `self.seats.preview()` back in `pane_draws` — modelled here by
-    ///    placing against `seats.preview()` — and the first of the three
-    ///    rectangle assertions goes red with the picture on its neighbour's
-    ///    corner (measured: `x: 534` where the pane holding the picture starts
-    ///    at 1066);
-    /// ② drop the `leaf.tab == tab` guard in [`picture_lane_seat`] and the
-    ///    assertion about another tab's lane goes red with `Some(SeatId(3))`
-    ///    against `None`: a background tab's lane would be handed this tab's
-    ///    geometry, which is the seat-number collision §7.12 ⓑ named `LeafId`
-    ///    for.
+    /// ① keep only the first entry of [`TabState::seat_pictures`] (the one-slot
+    ///    election this replaced) — the count assertion goes red at 1 against 2,
+    ///    which is the user's photograph;
+    /// ② place against `seats.preview()` instead of against the surface being
+    ///    walked — modelled here by the neighbour's placement — and the second
+    ///    pane's left-edge assertion goes red with the first pane's corner.
     #[test]
-    fn a_picture_is_placed_against_the_pane_that_holds_it_not_the_first_preview_leaf() {
+    fn every_picture_is_placed_against_the_pane_that_holds_it() {
         let metrics = seats::seat_metrics(1_000);
         let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000), 0);
         let mut seats = seats::Seats::lone_terminal();
@@ -120132,57 +119939,67 @@ mod tests {
             .solve(viewport, &metrics, SizePolicy::Lawful)
             .expect("three panes solve");
 
+        // A picture on each: `figure.png` on one pane and the recording the
+        // reader dropped beside it on the other. A video's still goes down this
+        // very channel ([`Runtime::refit_preview_picture`]), which is why the
+        // arrival of one could take the other's pixels away.
         let tab = TabId(7);
-        let lane = Some(PreviewSurface::Seat(LeafId { tab, seat: second }));
-        assert_eq!(
-            picture_lane_seat(lane, tab),
-            Some(second),
-            "the seat the frame places against is the one holding the lane"
+        let mut panes = PreviewPanes::default();
+        panes
+            .entry(PreviewSurface::Seat(LeafId { tab, seat: first }))
+            .image = Some(PreviewImageState::new(PathBuf::from(r"D:\Demo\figure.png")));
+        panes
+            .entry(PreviewSurface::Seat(LeafId { tab, seat: second }))
+            .image = Some(PreviewImageState::new(PathBuf::from(r"D:\Demo\clip.mp4")));
+        let focused = seats.identity();
+        let state = assemble_tab_state(
+            tab,
+            BTreeMap::from([(focused, leaf_saying("SHELL"))]),
+            BTreeMap::new(),
+            preview::PreviewPool::default(),
+            panes,
+            BTreeMap::new(),
+            focused,
+            TabSeed::default(),
+            seats,
+            layout.clone(),
+            None,
         );
 
-        let placed = preview_image_placement(
-            &seats,
-            &layout,
-            picture_lane_seat(lane, tab).expect("the lane names a seat of this tab"),
-            1.0,
-            PaneTransform::IDENTITY,
-        )
-        .expect("the picture's pane has a body");
-        let neighbour = preview_image_placement(
-            &seats,
-            &layout,
-            seats.preview().expect("the first preview leaf"),
-            1.0,
-            PaneTransform::IDENTITY,
-        )
-        .expect("the other preview pane has a body too");
+        let drawn = state.seat_pictures();
         assert_eq!(
-            placed.seat.x,
-            pane_box_of(&layout, second)[0] as u32,
-            "the pixels land on the left edge of the pane that is holding them: \
-             {placed:?} against the neighbour's {neighbour:?}"
+            drawn,
+            vec![
+                PreviewSurface::Seat(LeafId { tab, seat: first }),
+                PreviewSurface::Seat(LeafId { tab, seat: second }),
+            ],
+            "both panes are holding a picture, so both are drawing one — a tab \
+             that answered with one of them is the user's blank pane"
         );
-        assert_eq!(
-            neighbour.seat.x,
-            pane_box_of(&layout, first)[0] as u32,
-            "and the corner the broken code used is the other pane's, which is \
-             what makes the assertion above able to fail"
-        );
+
+        for surface in drawn {
+            let PreviewSurface::Seat(leaf) = surface else {
+                unreachable!("seat_pictures answers with seats");
+            };
+            let placement = preview_image_placement(
+                &state.seats,
+                &layout,
+                leaf.seat,
+                1.0,
+                PaneTransform::IDENTITY,
+            )
+            .expect("a pane holding a picture has a body");
+            assert_eq!(
+                placement.seat.x,
+                pane_box_of(&layout, leaf.seat)[0] as u32,
+                "the pixels land on the left edge of the pane that is holding \
+                 them, and not on a neighbour's: {placement:?}"
+            );
+        }
         assert_ne!(
-            placed.seat, neighbour.seat,
+            pane_box_of(&layout, first)[0],
+            pane_box_of(&layout, second)[0],
             "or the two panes are in the same place and nothing here is decidable"
-        );
-
-        assert_eq!(
-            picture_lane_seat(lane, TabId(8)),
-            None,
-            "and a lane belonging to another tab is given no rectangle here — a \
-             seat number is unique only inside its own tab (§7.12 ⓑ)"
-        );
-        assert_eq!(
-            picture_lane_seat(Some(PreviewSurface::Float(1)), tab),
-            None,
-            "nor is a float, which paints its picture on its own overlay layer"
         );
     }
 
@@ -131617,33 +131434,51 @@ mod tests {
         (tab, preview_seat)
     }
 
-    /// The file a lane is spent on, as the picture the pane is holding names it.
-    fn lane_shows(tab: &TabState) -> Option<&Path> {
-        let lane = tab.preview_raster?;
-        Some(tab.preview_panes.get(lane)?.image.as_ref()?.path.as_path())
+    /// The two files this family of gates is written about, spelled once.
+    const SHOT_PATH: &str = r"D:\shots\B1-rest.png";
+    const STANDING_PATH: &str = r"D:\shots\standing.png";
+
+    /// The files this tab is drawing, as the pictures its panes are holding
+    /// name them — [`TabState::seat_pictures`] read through to the disk.
+    fn pictures_drawn(tab: &TabState) -> Vec<&Path> {
+        tab.seat_pictures()
+            .into_iter()
+            .filter_map(|surface| {
+                Some(
+                    tab.preview_panes
+                        .get(surface)?
+                        .image
+                        .as_ref()?
+                        .path
+                        .as_path(),
+                )
+            })
+            .collect()
     }
 
-    /// RED ① — **the tab a picture left gives the texture lane back**
+    /// RED ① — **the tab a picture left stops drawing it**
     /// (user report on `next22`, defects #202/#204).
     ///
-    /// [`TabState::preview_raster`] names the one seat whose pixels go down
-    /// `bt_render`'s single `set_preview_image` slot, and until this branch the
-    /// only doors that wrote it were the ones that *land* a view on a surface
-    /// ([`preview_lane_after_landing`]) and the constructor
-    /// ([`assemble_tab_state`], which derives it). A **move** is neither: it
-    /// changes which panes a tab holds without landing anything, so the tab a
-    /// picture was torn out of went on naming a surface it no longer has.
+    /// The tab named one seat as the holder of `bt_render`'s single
+    /// `set_preview_image` slot, and the only doors that wrote that name were
+    /// the ones that *land* a view on a surface and the constructor. A **move**
+    /// is neither: it changes which panes a tab holds without landing anything,
+    /// so the tab a picture was torn out of went on naming a surface it no
+    /// longer has, and the picture dragged back met its own departed address as
+    /// an incumbent. The name is gone with the slot (§7.1.6k⁷) and what is
+    /// asserted here is the property it was standing in for, read off the panes
+    /// themselves.
     ///
-    /// RED GATE: take the `heal_preview_raster` call out of
-    /// [`pane_into_new_tab`] and the lane still names `SeatId(2)` of a tab whose
-    /// preview pane has gone.
+    /// RED GATE: make [`TabState::seat_pictures`] answer from a remembered seat
+    /// rather than from the panes and this goes red — the tab left behind draws
+    /// a picture it has not got.
     #[test]
-    fn the_tab_a_picture_left_gives_the_texture_lane_back() {
-        let (mut origin, picture_seat) = tab_with_a_picture(1, r"D:\shots\B1-rest.png");
+    fn the_tab_a_picture_left_stops_drawing_it() {
+        let (mut origin, picture_seat) = tab_with_a_picture(1, SHOT_PATH);
         assert_eq!(
-            lane_shows(&origin),
-            Some(Path::new(r"D:\shots\B1-rest.png")),
-            "the starting state: the tab is spending its one lane on the picture"
+            pictures_drawn(&origin),
+            vec![Path::new(SHOT_PATH)],
+            "the starting state: the tab is drawing the picture"
         );
 
         let torn = tear_pane_into_tab(
@@ -131658,13 +131493,13 @@ mod tests {
         .expect("a picture may become a tab of its own");
 
         assert_eq!(
-            lane_shows(&torn),
-            Some(Path::new(r"D:\shots\B1-rest.png")),
-            "the tab it became draws it — `assemble_tab_state` derives the lane"
+            pictures_drawn(&torn),
+            vec![Path::new(SHOT_PATH)],
+            "the tab it became draws it"
         );
-        assert_eq!(
-            origin.preview_raster, None,
-            "and the tab it left is holding a lane for a pane that has gone"
+        assert!(
+            pictures_drawn(&origin).is_empty(),
+            "and the tab it left has no picture to draw"
         );
     }
 
@@ -131673,17 +131508,17 @@ mod tests {
     ///
     /// Open a `.png` on a pane, tear the pane into a tab of its own, drag it
     /// back. Both halves of the pane's address changed twice, and the tab it
-    /// returns to is still naming the address it had the first time — so
+    /// returns to used to still be naming the address it had the first time — so
     /// `get_or_insert` found an incumbent, kept it, and the arriving picture was
     /// filtered straight out of [`Runtime::preview_picture_hosts`]. On the glass
     /// that is a blank body under a head and a fact line that travelled with the
     /// pane: *「1440 × 900 · PNG · 36 KB · Fit」* over nothing.
     ///
-    /// RED GATE: put `target.preview_raster.get_or_insert(arrived)` back in
-    /// [`move_seat_content`] and the returning picture never reaches the lane.
+    /// RED GATE: filter [`TabState::seat_pictures`] down to one remembered seat
+    /// and the returning pane is not among the pictures this tab draws.
     #[test]
     fn a_picture_dragged_back_into_the_tab_it_left_is_drawn_again() {
-        let (mut origin, picture_seat) = tab_with_a_picture(1, r"D:\shots\B1-rest.png");
+        let (mut origin, picture_seat) = tab_with_a_picture(1, SHOT_PATH);
         let mut alone = tear_pane_into_tab(
             &mut origin,
             &cross_metrics(),
@@ -131706,28 +131541,36 @@ mod tests {
         .expect("the lone pane of a tab may still be moved");
 
         assert_eq!(
-            origin.preview_raster,
-            Some(seat_of(TabId(1), moved.landed)),
-            "the lane names the pane the picture is standing in now"
+            origin.seat_pictures(),
+            vec![seat_of(TabId(1), moved.landed)],
+            "the tab draws the pane the picture is standing in now"
         );
         assert_eq!(
-            lane_shows(&origin),
-            Some(Path::new(r"D:\shots\B1-rest.png")),
+            pictures_drawn(&origin),
+            vec![Path::new(SHOT_PATH)],
             "which is the picture being on the glass again rather than a head \
              and a fact line over nothing"
         );
     }
 
-    /// **A picture that moves in does not take the lane off the picture that was
-    /// already there** — the rule §7.1.6k stated when it wrote `get_or_insert`,
-    /// kept while the stale half of it goes.
+    /// RED ③ — **two pictures in one tab are both drawn** (user report
+    /// 2026-09-06, the `next38` acceptance: a recording pane dragged in from the
+    /// file column beside a picture pane, and the picture gone).
     ///
-    /// RED GATE: drop the incumbent clause from [`preview_raster_lane`] and the
-    /// tab re-derives from insertion order, which the arriving pane can win.
+    /// The rule §7.1.6k stated when it wrote `get_or_insert` — "a picture the
+    /// target was already showing does not lose its pixels to one that has just
+    /// moved in" — was as much as one texture slot could give. It bought the
+    /// incumbent's pixels by refusing the newcomer's, and the reader who dropped
+    /// the newcomer in is looking at whichever of the two lost. Both draw now
+    /// (§7.1.6k⁷), which is the same sentence with the scarcity taken out.
+    ///
+    /// RED GATE: keep only the first entry of [`TabState::seat_pictures`] — the
+    /// election this replaced — and the arriving picture is missing from the
+    /// list, which is the user's photograph.
     #[test]
-    fn a_picture_moving_in_does_not_take_the_lane_from_the_one_already_there() {
-        let (mut from, travelling) = tab_with_a_picture(1, r"D:\shots\B1-rest.png");
-        let (mut into, _) = tab_with_a_picture(2, r"D:\shots\standing.png");
+    fn two_pictures_in_one_tab_are_both_drawn() {
+        let (mut from, travelling) = tab_with_a_picture(1, SHOT_PATH);
+        let (mut into, standing) = tab_with_a_picture(2, STANDING_PATH);
 
         let moved = cross_move(
             &mut from,
@@ -131737,18 +131580,22 @@ mod tests {
             true,
         )
         .expect("the picture pane moves into the other tab");
-        assert!(
-            into.preview_panes
-                .get(into.preview_here(moved.landed))
-                .is_some()
+        assert_ne!(
+            moved.landed, standing,
+            "or the fixture is one pane wearing two names"
         );
 
-        assert_eq!(
-            lane_shows(&into),
-            Some(Path::new(r"D:\shots\standing.png")),
-            "the incumbent keeps its pixels; the arriving picture keeps its \
-             head, its foot and its meta line and waits for the lane"
+        let drawn = pictures_drawn(&into);
+        assert!(
+            drawn.contains(&Path::new(STANDING_PATH)),
+            "the incumbent keeps its pixels: {drawn:?}"
         );
+        assert!(
+            drawn.contains(&Path::new(SHOT_PATH)),
+            "and the arriving picture is drawn too, rather than keeping its \
+             head, its foot and its meta line over nothing: {drawn:?}"
+        );
+        assert_eq!(drawn.len(), 2, "two panes, two pictures: {drawn:?}");
     }
 
     /// **The third media lane, and the finding is that it needed nothing**
@@ -131800,8 +131647,8 @@ mod tests {
         .expect("an animated picture may become a tab of its own");
         let lone_seat = alone.seats.preview_seats()[0];
         assert_eq!(
-            lane_shows(&alone),
-            Some(Path::new(r"D:\shots\folio-anim-test.gif")),
+            pictures_drawn(&alone),
+            vec![Path::new(r"D:\shots\folio-anim-test.gif")],
             "the file crossed the tear-out"
         );
 
@@ -134197,7 +134044,7 @@ mod tests {
     /// rectangles.
     ///
     /// **The two questions moved above the `match` on 2026-09-06 and are still
-    /// the run's** (§7.1.6k⁶, the seam band). They used to be asked inside this
+    /// the run's** (§7.1.6k⁷, the seam band). They used to be asked inside this
     /// arm and inside the pane's, once each; the band made that a hazard rather
     /// than a duplication, because the hysteresis it carries is *one* latch and
     /// two readers of it would be two hysteresis with their own histories. So
