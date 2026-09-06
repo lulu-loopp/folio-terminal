@@ -515,6 +515,16 @@ pub enum TooltipAnchorId {
     /// edit that moves the token does change the offset, and that is correct:
     /// the text under the pointer is then a different piece of text.
     PreviewHex(crate::PreviewSurface, usize),
+    /// One row of the first-run card (§7.56, v4, user ruling 2026-09-06).
+    ///
+    /// **The whole row and not its switch**, which is what the card fills with
+    /// `--hover` and what it hit-tests: three boxes that are one box to the
+    /// reader are one box here too.
+    ///
+    /// The card is modal, so while it is up this is the *only* kind of anchor
+    /// registered — a tip about a tab behind a scrim would be the window
+    /// explaining something nobody can reach.
+    FirstRunRow(usize),
     Settings,
     /// `.panel-toggle` — the rail's fold-away button, which the vertical layout
     /// puts at the far left of the title bar.

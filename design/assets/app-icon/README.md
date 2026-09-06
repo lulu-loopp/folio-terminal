@@ -1,21 +1,46 @@
 # The application icon
 
 What `folio.exe` wears in the taskbar, in Alt-Tab, on the desktop and in the
-Start menu. One file is shipped — `folio.ico` — and everything else here exists
-to draw it or to argue about it.
+Start menu — and, since the first-run card was built, the mark at the top of the
+first thing a new reader ever sees (`docs/DESIGN.md` §7.56 ⑦). One file is
+shipped — `folio.ico` — and everything else here exists to draw it or to record
+the round that was run before it was kept.
+
+**`folio.ico` is the icon** (user ruling, 2026-09-06). It was drawn as a
+placeholder, it was put on a contact sheet against five hand-set candidates, and
+the ruling on that sheet was to keep it. Nothing here is waiting on a decision
+any more: the five candidates below are history, kept because the argument they
+carry is worth reading and because a mark that was chosen over something is
+easier to defend than one that was never compared.
+
+Two consequences worth stating plainly, because they are what "shipped" means
+for a file this small:
+
+* **Changing it changes the first impression twice over.** The taskbar icon and
+  the first-run card read the same file, and `first_run.rs` `include_bytes!`s it
+  so that they cannot drift.
+* **The nine sizes are load-bearing.** `first_run.rs` picks the smallest
+  uncompressed entry that is at least as wide as the box it needs, so an `.ico`
+  rebuilt with fewer entries would make the card's mark an upscale.
 
 | File | What it is |
 | --- | --- |
-| `folio.ico` | The icon in the binary. **Still the placeholder**: a sheet folded once, drawn so `folio.exe,0` had something to point at. |
-| `make-folio-ico.py` | How that placeholder is drawn — geometry in code, no input file. |
+| `folio.ico` | **The icon.** A sheet folded once, which is what a folio is. Drawn by the script below, kept by the ruling of 2026-09-06. |
+| `make-folio-ico.py` | How it is drawn — geometry in code, no input file. It is the source of record for the mark. |
 | `make-msix-logos.py` | The same drawing at the three sizes `packaging/msix/AppxManifest.xml` names. It owns no geometry; it imports the file above. |
-| `candidates/{a..e}.svg` | Five directions for the real mark, hand-set in plain SVG. |
-| `candidates/{a..e}.ico` | Each of those five built out to all nine sizes, ready to drop in. |
-| `candidates-2026-08-28.png` | The contact sheet the choice is made from. |
+| `candidates/{a..e}.svg` | **Retired.** Five directions for a replacement mark, hand-set in plain SVG, none of them chosen. |
+| `candidates/{a..e}.ico` | **Retired.** Each of those five built out to all nine sizes. |
+| `candidates-2026-08-28.png` | The contact sheet the choice was made from. |
 | `make-ico.py` | One SVG in, one nine-size `.ico` out. |
 | `make-candidates-board.py` | Redraws the contact sheet from the five SVGs. |
 
-## The five
+## The five that were not chosen
+
+**Retired on 2026-09-06**, when the ruling was to keep the drawing that was
+already in the binary. Nothing below is a live option; it is kept because the
+five arguments are the record of what the mark was weighed against, and because
+the last section — what each one costs at 16 pixels — is the part a future round
+should start from rather than rediscover.
 
 ![The five candidates at 256, 48, 32 and 16 pixels, on a light and a dark taskbar](candidates-2026-08-28.png)
 
@@ -50,14 +75,16 @@ sitting in the place the letter already left empty.
 so that the two half-pages make the shape of a chevron. A folio *is* a sheet
 folded once; a prompt *is* a chevron; this is the one drawing where those are
 not two ideas next to each other but the same shape read twice. The half turned
-away from the light is the darker paper, as in the placeholder, and the fold
+away from the light is the darker paper, as in the shipped mark, and the fold
 runs out to the point.
 
 ## What the colours are, and why there are so few
 
-Two papers and a graphite, taken from the placeholder and from the hero:
+Two papers and a graphite, taken from the shipped mark and from the hero:
 `#F4F1EA` for the half facing the light, `#DDD7C9` (E: `#D5CEBE`) for the half
-turned away, `#202027` for the tile. **No accent colour anywhere**, which is the
+turned away, `#202027` for the tile — which is seven levels off the dark card's
+own `#202020`, and the reason the first-run card gives the mark an edge there
+(`docs/DESIGN.md` §7.56 ⑦). **No accent colour anywhere**, which is the
 standing decision from the wordmark study (`design/assets/wordmark-r2/DECISION.md`):
 in every option tried there, the cobalt was the first stroke that looked
 borrowed. A tile that is graphite in all five is not a lack of imagination
@@ -95,9 +122,9 @@ drawing.
 
 **A note on A's corner.** The wordmark study put the turned-down corner out of
 bounds for the signature mark — it is the shape every document icon in the world
-already uses. A is on the sheet anyway, because the brief for these five asked
+already uses. A was on the sheet anyway, because the brief for these five asked
 for it and because the question is worth putting to the eye rather than settling
-from the record. If A wins, that earlier call is the thing to revisit first.
+from the record. A did not win, so that earlier call stands untouched.
 
 ## Building an `.ico` from one of these
 
@@ -151,6 +178,6 @@ Two things to know about the swap:
   clears the shell's cache; a fresh `folio.exe` in a fresh directory always
   shows the truth.
 
-Once a candidate is chosen, its SVG becomes the source of record: keep it in
-`candidates/`, or move it beside `folio.ico` and retire `make-folio-ico.py`,
-which draws the placeholder and nothing else.
+No candidate was chosen, so **`make-folio-ico.py` is the source of record** and
+stays where it is. If a future round ever does replace the mark, the winner's
+SVG takes that role and this script retires with the drawing it makes.

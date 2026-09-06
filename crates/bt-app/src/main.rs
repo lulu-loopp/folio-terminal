@@ -34928,6 +34928,15 @@ impl Runtime<'_> {
     /// [`tooltip::TooltipAnchors`] and the phantom was pushed first, so hovering
     /// the visible toggle answered with some tab's name.
     fn rebuild_tooltip_anchors(&mut self, scale: f32, width: f32, now: Instant) {
+        // **A modal card owns every anchor there is.** The first-run card is
+        // drawn over a scrim that swallows the pointer outright, so a tip about
+        // a tab or a pane head under it would be this window explaining
+        // something the reader cannot reach — the same instruction "do not tip
+        // this" always is here: a list with nothing else in it.
+        if self.window.first_run.is_open() {
+            self.rebuild_first_run_tip_anchors();
+            return;
+        }
         let mut anchors = tooltip::TooltipAnchors::default();
         // A drag owns the pointer outright and everything else goes quiet for the
         // length of the gesture — the same rule hover, the peek flyout and the
@@ -46359,6 +46368,7 @@ impl Runtime<'_> {
         let shape = first_run::explorer_shape(&machine);
         self.record_first_run_card(bt_persist::FirstRunCardV1::Shown);
         self.window.first_run.open(rows, shape);
+        self.rebuild_first_run_tip_anchors();
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -46400,6 +46410,29 @@ impl Runtime<'_> {
         self.app.settings_store.store(settings);
     }
 
+    /// **The card's rows, as the only things this window is willing to talk
+    /// about while the card is up** (§7.56 v4, user ruling 2026-09-06).
+    ///
+    /// Every row carries the mechanism sentence v3 printed under its title: the
+    /// reader is still owed the address of their own files, and a tooltip is
+    /// where that is owed without being shown unasked. It is the window's own
+    /// `.tip` — same host, same clock, same box — because a second popup would
+    /// be a second clock over one pointer, which is how a window ends up
+    /// showing two boxes at once ([`tooltip::TipFace`]).
+    ///
+    /// Called from the anchor rebuild and from the two places that move the
+    /// body under a pointer that has not itself moved, because an anchor is
+    /// only ever allowed to describe a box the card is actually drawing.
+    fn rebuild_first_run_tip_anchors(&mut self) {
+        let mut anchors = tooltip::TooltipAnchors::default();
+        if let Some(layout) = self.first_run_layout() {
+            for (index, rect, text) in layout.tips() {
+                anchors.push(tooltip::TooltipAnchorId::FirstRunRow(index), rect, text);
+            }
+        }
+        self.window.tooltip_anchors = anchors;
+    }
+
     /// The card, measured against a real font, or nothing while it is shut.
     fn first_run_layout(&mut self) -> Option<first_run::Layout> {
         if !self.window.first_run.is_open() {
@@ -46411,40 +46444,34 @@ impl Runtime<'_> {
         let rows: Vec<first_run::Row> = self.window.first_run.rows().to_vec();
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
-        let room = first_run::text_width(width, scale);
+        // **Nothing here is wrapped except the faint line.** A row is one line
+        // by construction in v4, so there is no measuring to do on it and no
+        // font under which it can quietly become two.
         let row_contents = rows
             .iter()
             .map(|row| first_run::RowContent {
-                group: row.group.map(|label| label.text().to_owned()),
-                title: row.title.text().to_owned(),
-                description_lines: restore::wrap(row.description.text(), room, |line| {
-                    measure(line, first_run::MEASURED_DESC_FONT_LOGICAL_PX * scale)
-                }),
+                divider_above: row.divider_above,
+                line: row.line.text().to_owned(),
+                tip: row.tip.text().to_owned(),
                 on: row.on,
             })
             .collect();
-        let open_settings = i18n::Text::FirstRunOpenSettings.text();
-        let open_settings_width = measure(
-            open_settings,
-            first_run::MEASURED_FOOTNOTE_FONT_LOGICAL_PX * scale,
+        let settings_lines = restore::wrap(
+            i18n::Text::FirstRunSettingsLine.text(),
+            first_run::settings_line_width(width, scale),
+            |line| {
+                measure(
+                    line,
+                    first_run::MEASURED_SETTINGS_LINE_FONT_LOGICAL_PX * scale,
+                )
+            },
         );
-        let footnote_lines = restore::wrap(
-            i18n::Text::FirstRunFootnote.text(),
-            first_run::footnote_width(width, scale, open_settings_width),
-            |line| measure(line, first_run::MEASURED_FOOTNOTE_FONT_LOGICAL_PX * scale),
-        );
-        let footnote_last_line_width = footnote_lines.last().map_or(0.0, |line| {
-            measure(line, first_run::MEASURED_FOOTNOTE_FONT_LOGICAL_PX * scale)
-        });
         let later = i18n::Text::FirstRunLater.text();
         let done = i18n::Text::FirstRunDone.text();
         let content = first_run::Content {
             title: i18n::Text::FirstRunTitle.text().to_owned(),
             rows: row_contents,
-            footnote_lines,
-            footnote_last_line_width,
-            open_settings: open_settings.to_owned(),
-            open_settings_width,
+            settings_lines,
             later: later.to_owned(),
             later_width: measure(later, first_run::MEASURED_BUTTON_FONT_LOGICAL_PX * scale),
             done: done.to_owned(),
@@ -46464,7 +46491,11 @@ impl Runtime<'_> {
         self.window.first_run.press(target);
         match target {
             first_run::Target::Panel => return Ok(()),
-            first_run::Target::Switch(index) => {
+            // **The whole row, and not the switch alone** (v4). The band that
+            // lights under the pointer and carries the tooltip is the band that
+            // answers the press; anything else is this window drawing a promise
+            // it will not keep (§7.1.5f).
+            first_run::Target::Row(index) => {
                 if !self.window.first_run.flip(index) {
                     return Ok(());
                 }
@@ -46472,19 +46503,6 @@ impl Runtime<'_> {
                     self.present_chrome_change()?;
                 }
                 return Ok(());
-            }
-            // **The link is `Not now` with a destination.** A reader who
-            // presses it is saying they would rather do this in Settings, so the
-            // card spends what `Not now` spends — nothing — and the page the
-            // footnote names is opened behind it. Leaving the card standing over
-            // that page was the other reading and it is not available: this card
-            // is modal, so a settings dialog under it is a dialog nobody can
-            // press.
-            first_run::Target::OpenSettings => {
-                let spent = first_run::declined();
-                self.apply_first_run(&spent)?;
-                self.window.first_run.close();
-                return self.open_settings_on_row(settings::SettingsRow::UpdateCheck);
             }
             // **Both verbs go through the same door**, and the difference
             // between them is entirely in what comes back from
@@ -46501,7 +46519,14 @@ impl Runtime<'_> {
             }
         }
         self.window.first_run.close();
-        if self.refresh_overlay() {
+        // **The card's anchors go out with the card.** While it was up this
+        // window's whole tooltip list was its six rows (see
+        // [`Self::rebuild_first_run_tip_anchors`]); leaving them standing would
+        // leave six boxes of text hung on air, and rebuilding the chrome is
+        // what puts the strip's own anchors back.
+        self.note_tooltip(None)?;
+        let chrome = self.refresh_chrome();
+        if self.refresh_overlay() || chrome {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -46562,7 +46587,6 @@ impl Runtime<'_> {
             Key::Named(NamedKey::Enter) => {
                 return self.answer_first_run(match focus {
                     Some(first_run::Focus::Later) => first_run::Target::Later,
-                    Some(first_run::Focus::OpenSettings) => first_run::Target::OpenSettings,
                     // From a switch, and from `Done` itself.
                     _ => first_run::Target::Done,
                 });
@@ -46578,7 +46602,6 @@ impl Runtime<'_> {
                     self.window.first_run.flip(index);
                 } else {
                     return self.answer_first_run(match focus {
-                        Some(first_run::Focus::OpenSettings) => first_run::Target::OpenSettings,
                         Some(first_run::Focus::Later) => first_run::Target::Later,
                         Some(first_run::Focus::Done) => first_run::Target::Done,
                         _ => first_run::Target::Panel,
@@ -46637,7 +46660,9 @@ impl Runtime<'_> {
             return;
         };
         let to = layout.scroll_showing(focus);
-        self.window.first_run.scroll_to(to);
+        if self.window.first_run.scroll_to(to) {
+            self.rebuild_first_run_tip_anchors();
+        }
     }
 
     /// Spend the first-run card's PowerShell intent against the profile a shell
@@ -46705,8 +46730,13 @@ impl Runtime<'_> {
             return Ok(());
         }
         let to = layout.scrolled_by(-delta);
-        if self.window.first_run.scroll_to(to) && self.refresh_overlay() {
-            self.present_chrome_change()?;
+        if self.window.first_run.scroll_to(to) {
+            // The rows moved under a pointer that did not, so what is tippable
+            // moved with them.
+            self.rebuild_first_run_tip_anchors();
+            if self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
         }
         Ok(())
     }
@@ -75608,7 +75638,13 @@ impl Runtime<'_> {
             if self.window.first_run.set_hover(Some(over)) && self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
-            self.note_tooltip(None)?;
+            // **The one overlay that does talk about itself.** Every other
+            // modal here answers `None` because it has nothing under the
+            // pointer worth a second box; this card's rows each carry the
+            // sentence that says which of the reader's files a switch writes,
+            // and that sentence lives in the window's own `.tip`.
+            let anchor = self.tooltip_anchor_at(position);
+            self.note_tooltip(anchor)?;
             self.update_chrome_hover_target(None)?;
             return Ok(());
         }

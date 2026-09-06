@@ -2234,17 +2234,15 @@ pub enum Text {
     // to refuse is not listed at all, because the refusal has an explaining
     // sentence on the Settings page already and that is where a sentence of that
     // shape belongs.
-    /// The card's title. Two words about the moment rather than about the
-    /// program: this is the first thing, and it is over in one card.
+    /// The card's greeting. **The product's own name, not a task name** (v4,
+    /// user ruling 2026-09-06): a first impression is met by the thing you
+    /// opened, and the Folio mark stands beside this line saying the same.
     FirstRunTitle,
-    /// The heading over the agent rows. It names the machine because that is
-    /// what decided which rows are under it.
-    FirstRunAgentGroup,
-    /// The line above the two verbs. It is the card's only promise, and it is a
-    /// fact: every row here has a row in Settings.
-    FirstRunFootnote,
-    /// The link beside it.
-    FirstRunOpenSettings,
+    /// The faintest line on the card, just above the two verbs. It is the
+    /// card's only promise and it is a fact: every row here has a row in
+    /// Settings. **A statement and not an affordance** — the `Open settings`
+    /// link went with v3 (v4 §5), so nothing on this line is pressable.
+    FirstRunSettingsLine,
     /// The refusal. **`Not now` / 「暂不」 everywhere in this window** (user
     /// ruling 2026-09-06) — the PSReadLine invitation's own refusal was worded
     /// differently and now is not, because two surfaces that ask a reader to
@@ -2252,43 +2250,60 @@ pub enum Text {
     FirstRunLater,
     /// The verb that applies every row that is on, and closes.
     FirstRunDone,
-    /// The update row. The frequency is in the title, so the sentence does not
-    /// repeat it.
+    // ── the six row lines ──────────────────────────────────────────────────
+    //
+    // **One line each, and the line is the result** (v4, user ruling
+    // 2026-09-06 —「字太多，不够美观，毕竟这是第一次就会跳出来，是第一印象」).
+    // v3 gave every row a bold title and a sentence of explanation under it,
+    // which is seven paragraphs of prose in a card the reader meets four
+    // seconds into the product. Every one of those explanations is now the
+    // row's *tooltip* below: the reader is still owed the address of their own
+    // files, and owed is not the same as shown unasked.
+    /// The update row.
     FirstRunRowUpdate,
-    /// Its sentence: the result and nothing else. No file of the reader's is
-    /// touched, so it is one sentence and stops.
-    FirstRunDescUpdate,
-    /// The Explorer row — one switch for both registrations on Windows 11, and
-    /// for the classic entry alone anywhere else.
-    FirstRunRowExplorer,
-    /// Its Windows 11 sentence: what a right-click gets you, and where the entry
-    /// is on a machine that shows two pages of menu. `Show more options` is left
-    /// in English because Windows shows it in English on a Chinese machine too.
-    FirstRunDescExplorer11,
-    /// Its Windows 10 sentence — the same result, one place. Also the sentence a
-    /// Windows 11 machine with no `folio.msix` beside `folio.exe` reads, because
-    /// there the switch can only mean the classic entry and the row says what it
-    /// can mean.
-    FirstRunDescExplorer10,
-    /// The PowerShell row.
+    /// The Explorer row on a Windows that shows a first page of its own, and
+    /// has the package beside `folio.exe` to register on it. One switch means
+    /// both registrations there, so the line does not say where the entry is.
+    FirstRunRowExplorer11,
+    /// The same row where the switch can only mean the classic entry — Windows
+    /// 10, and a Windows 11 with no `folio.msix` beside `folio.exe`. Here the
+    /// line has to say where the entry is. `Show more options` is left in
+    /// English because Windows shows it in English on a Chinese machine too.
+    FirstRunRowExplorer10,
+    /// The PowerShell row. **The line carries the integration's own name**
+    /// (user ruling 2026-09-06): the reader who later goes looking for this in
+    /// Settings has to know what it is called, so the name comes first and the
+    /// result follows it on the same short line.
     FirstRunRowPowerShell,
-    /// Its sentence: the four results, then the address. `$PROFILE` and its
-    /// dated copy are on the card because they are the reader's own file and a
-    /// thing they will find beside it.
-    FirstRunDescPowerShell,
     /// The Claude Code row, listed only on a machine that has `claude`.
     FirstRunRowClaude,
-    /// Its sentence: the result, then the reader's own configuration file.
-    FirstRunDescClaude,
-    /// The Codex row. The title says **a turn has ended** and not "is waiting",
-    /// which is the distinction its Settings row is already careful about.
+    /// The Codex row. It says **a turn has ended** and not "is waiting", which
+    /// is the distinction its Settings row is already careful about.
     FirstRunRowCodex,
-    /// Its sentence, on the row above's shape.
-    FirstRunDescCodex,
     /// The Copilot CLI row.
     FirstRunRowCopilot,
-    /// Its sentence, on the same shape.
-    FirstRunDescCopilot,
+    // ── the six tooltips ───────────────────────────────────────────────────
+    //
+    // Where v3's explanations went (v4 §3). Each names the mechanism, and where
+    // the switch writes a file the reader owns it names that file and says the
+    // copy is dated — v3 §10.1's rule, moved rather than dropped. The Settings
+    // page keeps its own long-form descriptions untouched; these were never
+    // those strings.
+    /// The update row's tooltip.
+    FirstRunTipUpdate,
+    /// The Explorer row's tooltip. One sentence for both shapes of that switch:
+    /// where the entry lands is the row's own line, and what a press registers
+    /// — an entry for this Windows account — is the same either way.
+    FirstRunTipExplorer,
+    /// The PowerShell row's tooltip: the reader's own `$PROFILE`, and the dated
+    /// copy taken beside it first.
+    FirstRunTipPowerShell,
+    /// The Claude Code row's tooltip.
+    FirstRunTipClaude,
+    /// The Codex row's tooltip.
+    FirstRunTipCodex,
+    /// The Copilot CLI row's tooltip.
+    FirstRunTipCopilot,
     /// **What the Terminal page's PowerShell row says while an intent is
     /// outstanding** (§7.56). The row is neither installed nor off; it says
     /// which. Where `$PROFILE` is comes from the shell and is never computed
@@ -4099,94 +4114,78 @@ impl Text {
             // English brief with no Chinese copy of any kind in front of the
             // writer — not this table's, not the README's. They are reproduced
             // here exactly as the design's own copy file holds them.
-            Self::FirstRunTitle => pick(lang, "First things", "首次配置"),
-            // **Upper-cased at the source**, `AdvancedGroup`'s ruling: this
-            // wears `.group-label`'s type, the chrome text path has no
-            // `text-transform`, and 「大写是内容不是样式」 — a `to_uppercase`
-            // here would be a rule somebody has to remember does not apply to
-            // the Chinese beside it.
-            Self::FirstRunAgentGroup => {
-                pick(lang, "AGENTS FOUND ON THIS MACHINE", "本机检测到的 agent")
-            }
-            Self::FirstRunFootnote => pick(
+            Self::FirstRunTitle => pick(lang, "Welcome to Folio", "欢迎使用 Folio"),
+            Self::FirstRunSettingsLine => pick(
                 lang,
-                "Every row here is also a row in Settings, where you can change it later.",
-                "这里的每一项也出现在设置中，方便之后调整。",
+                "Every row here is also a row in Settings.",
+                "所有选项都可在设置中更改",
             ),
-            Self::FirstRunOpenSettings => pick(lang, "Open settings", "打开设置"),
             Self::FirstRunLater => pick(lang, "Not now", "暂不"),
             Self::FirstRunDone => pick(lang, "Done", "完成"),
-            Self::FirstRunRowUpdate => {
-                pick(lang, "Check for a new version once a day", "每天检查新版本")
-            }
-            Self::FirstRunDescUpdate => pick(
+            Self::FirstRunRowUpdate => pick(
                 lang,
-                "When a new version is out, Settings names it and offers the releases page.",
-                "有新版时，设置会列出并给出打开发布页的按钮。",
+                "Get told when a new version of Folio is out",
+                "有 Folio 新版本时提醒",
             ),
-            Self::FirstRunRowExplorer => pick(
+            Self::FirstRunRowExplorer11 => pick(
                 lang,
-                "Open any folder in Folio from Explorer",
-                "从资源管理器用 Folio 打开",
+                "Open any folder in Folio from its right-click menu",
+                "在右键菜单中用 Folio 打开文件夹",
             ),
-            Self::FirstRunDescExplorer11 => pick(
+            Self::FirstRunRowExplorer10 => pick(
                 lang,
-                "Right-click a folder, or the space inside one, to open it in Folio — on the \
-                 page Windows 11 shows first, and under Show more options.",
-                "右键文件夹或其中空白处，即可在 Folio 中打开。入口在 Windows 11 首先显示的菜单页，\
-                 也见于 Show more options。",
-            ),
-            Self::FirstRunDescExplorer10 => pick(
-                lang,
-                "Right-click a folder, or the space inside one, to open it in Folio — under \
-                 Show more options.",
-                "右键文件夹或其中空白处，即可在 Folio 中打开。入口位于 Show more options。",
+                "Open any folder in Folio under Show more options",
+                "在 Show more options 中用 Folio 打开文件夹",
             ),
             Self::FirstRunRowPowerShell => pick(
                 lang,
-                "Install the PowerShell integration",
-                "安装 PowerShell 集成",
-            ),
-            Self::FirstRunDescPowerShell => pick(
-                lang,
-                "Jump between commands with Ctrl+Shift+↑/↓, spot a failed one by its red mark, \
-                 start a new tab or file column in the current folder, and see $…$ in output \
-                 typeset. It adds one line to your $PROFILE, keeping a dated copy.",
-                "用 Ctrl+Shift+↑/↓ 在命令间跳转，失败的有红标记，新标签页或文件列在当前目录打开，\
-                 命令输出的 $…$ 按公式排版。$PROFILE 加一行并留日期副本。",
+                "PowerShell integration lets you jump between commands",
+                "PowerShell 整合让你在已运行命令间跳转",
             ),
             Self::FirstRunRowClaude => pick(
                 lang,
-                "Claude Code tells this window when it is waiting",
-                "Claude Code 等待时通知窗口",
-            ),
-            Self::FirstRunDescClaude => pick(
-                lang,
-                "Its tab carries a mark the moment Claude Code needs an answer. The hook goes \
-                 into ~/.claude/settings.json.",
-                "Claude Code 需要输入时，其标签页出现标记。钩子写入 ~/.claude/settings.json。",
+                "Its tab lights up when Claude Code is waiting",
+                "Claude Code 等待时标签页高亮",
             ),
             Self::FirstRunRowCodex => pick(
                 lang,
-                "Codex tells this window when a turn has ended",
-                "Codex 回合结束时通知窗口",
-            ),
-            Self::FirstRunDescCodex => pick(
-                lang,
-                "Its tab carries a mark as soon as a turn ends. The notify program goes into \
-                 ~/.codex/config.toml.",
-                "Codex 回合结束时，其标签页出现标记。notify 程序写入 ~/.codex/config.toml。",
+                "Its tab lights up when a Codex turn ends",
+                "Codex 回合结束时标签页高亮",
             ),
             Self::FirstRunRowCopilot => pick(
                 lang,
-                "Copilot CLI tells this window when it is waiting",
-                "Copilot CLI 等待时通知窗口",
+                "Its tab lights up when Copilot CLI is waiting",
+                "Copilot CLI 等待时标签页高亮",
             ),
-            Self::FirstRunDescCopilot => pick(
+            Self::FirstRunTipUpdate => pick(
                 lang,
-                "Its tab carries a mark the moment Copilot CLI needs an answer. The hook file \
-                 goes into ~/.copilot/hooks/folio.json.",
-                "Copilot CLI 需要输入时，其标签页出现标记。钩子文件为 ~/.copilot/hooks/folio.json。",
+                "When a new version is out, Settings names it and offers the releases page.",
+                "设置显示新版本号并提供发布页",
+            ),
+            Self::FirstRunTipExplorer => pick(
+                lang,
+                "Registers the menu entry for this Windows account.",
+                "为当前 Windows 账户注册此菜单项",
+            ),
+            Self::FirstRunTipPowerShell => pick(
+                lang,
+                "Takes a dated copy of your $PROFILE, then appends one line to it.",
+                "先做带日期的副本，再追加一行到 $PROFILE",
+            ),
+            Self::FirstRunTipClaude => pick(
+                lang,
+                "Takes a dated copy of ~/.claude/settings.json, then writes the hook.",
+                "先做带日期的副本，再写入 ~/.claude/settings.json",
+            ),
+            Self::FirstRunTipCodex => pick(
+                lang,
+                "Takes a dated copy of ~/.codex/config.toml, then writes the notify program.",
+                "先做带日期的副本，再写入 ~/.codex/config.toml",
+            ),
+            Self::FirstRunTipCopilot => pick(
+                lang,
+                "Takes a dated copy of ~/.copilot/hooks/folio.json, then writes the hook.",
+                "先做带日期的副本，再写入 ~/.copilot/hooks/folio.json",
             ),
             Self::ShellIntegrationPending => pick(
                 lang,
@@ -4208,7 +4207,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 596] = [
+    pub const ALL: [Self; 594] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4786,24 +4785,22 @@ impl Text {
         Self::OptionQuakeRestoreFolders,
         Self::OptionQuakeRestoreFoldersAndCommands,
         Self::FirstRunTitle,
-        Self::FirstRunAgentGroup,
-        Self::FirstRunFootnote,
-        Self::FirstRunOpenSettings,
+        Self::FirstRunSettingsLine,
         Self::FirstRunLater,
         Self::FirstRunDone,
         Self::FirstRunRowUpdate,
-        Self::FirstRunDescUpdate,
-        Self::FirstRunRowExplorer,
-        Self::FirstRunDescExplorer11,
-        Self::FirstRunDescExplorer10,
+        Self::FirstRunRowExplorer11,
+        Self::FirstRunRowExplorer10,
         Self::FirstRunRowPowerShell,
-        Self::FirstRunDescPowerShell,
         Self::FirstRunRowClaude,
-        Self::FirstRunDescClaude,
         Self::FirstRunRowCodex,
-        Self::FirstRunDescCodex,
         Self::FirstRunRowCopilot,
-        Self::FirstRunDescCopilot,
+        Self::FirstRunTipUpdate,
+        Self::FirstRunTipExplorer,
+        Self::FirstRunTipPowerShell,
+        Self::FirstRunTipClaude,
+        Self::FirstRunTipCodex,
+        Self::FirstRunTipCopilot,
         Self::ShellIntegrationPending,
     ];
 

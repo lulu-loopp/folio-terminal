@@ -7271,9 +7271,26 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 - **忘只在有答案落地的那一刻发生。** `retain_file_indexes` 挂在 `apply_file_index_results` 上,所以一个「开过面板、随后关掉文件列、再也没开过面板」的根,它那份索引会一直留到下一份索引落地为止。留着的量是有界的(一个根至多三万条),而且它本来就是在那一列开着的时候付过的;要做得更干净,得给「谁还想要这个根」找一个不依赖答案到达的时刻。记明账。
 - **面板不带自己的进出动画的第二段。** 它按 `Travel::Down` 进,`arrival::Passages` 照常给它一次退场;但它不是从任何控件里长出来的,所以那个方向是一句约定而不是一次推导。
 
-### 7.56 一张只出现一次的卡:把「这台机器允许 Folio 碰多少」四个问题合成一次问,答案仍旧走设置页那一扇门(0.2.2 初次设置卡,用户裁决 2026-09-06,已落地;`crates/bt-app/src/first_run.rs`(新)、`crates/bt-app/src/{main,settings,i18n,persist,attention_copilot}.rs`、`crates/bt-persist/src/{settings,migrate,lib}.rs`)
+### 7.56 一张只出现一次的卡:把「这台机器允许 Folio 碰多少」四个问题合成一次问,答案仍旧走设置页那一扇门(0.2.2 初次设置卡,用户裁决 2026-09-06,已落地;**v4 改版 2026-09-06**,见 ⓪;`crates/bt-app/src/first_run.rs`(新)、`crates/bt-app/src/{main,settings,i18n,persist,tooltip,attention_copilot}.rs`、`crates/bt-persist/src/{settings,migrate,lib}.rs`)
 
 `profiles.rs` 里那句话在这一节之前一直是真的:仓里没有 `first_run`、没有 `onboarding`、没有 `seen_once`,整个教学面就是提示条、菜单行、贴士卡和设置页里的五句话——**一个没有行的动词只能靠意外被学会**。这一节把其中会在 `%APPDATA%\Folio` **之外**留下痕迹的那几个,合成一张窗内模态卡,在一台从没跑过 Folio 的机器上出现一次。
+
+#### ⓪ v4:字太多(用户裁决 2026-09-06,同日改版)
+
+v3 那张卡按本节其余各段的样子落地进了未发布的 0.2.2,读者当天看了实机,裁决只有一句:
+
+> 字太多，不够美观，毕竟这是第一次就会跳出来，是第一印象
+
+一句话两半——**字太多**,以及**这是第一印象**——下面每一条都从这里来。v3 给六行里的每一行配一个粗体标题加一到两行解释,于是一张读者用了四秒钟就会撞上的卡上摊着七段散文。它是对的,而且没法读。
+
+1. **一个头。** 22 逻辑像素的 Folio 标记 + `Welcome to Folio` /「欢迎使用 Folio」。**标题下面那一行淡句被撤掉**(同日第二次裁决):一张只有六行短句的卡不需要先解释一句自己为什么在。标记就是 `design/assets/app-icon/folio.ico`——`build.rs` 链进 `folio.exe` 的那一枚,不是重画的(见 ⑦)。
+2. **一行一句,而这一句就是结果。** 粗体标题与它下面的解释合成一条 13px 的行:*Get told when a new version of Folio is out*。这是「字太多」那半句的全部。v3 立的规矩(先说结果、再给读者自己那份文件的地址)**说对了要说什么、说错了要说多少**:地址是真的,但它不是第一印象该拿的东西。
+3. **机制搬进逐行 tooltip。** 每一句点名 `$PROFILE`、`~/.claude/settings.json` 或一份日期副本的话,现在住在那一行的 tooltip 里,用这扇窗自己的 `.tip`(`tooltip.rs`,同一个宿主、同一口钟、同一只盒子)。**读者仍旧被欠着他自己文件的地址**——v3 §10.1 立的那条今天照样成立——**但欠着不等于不问自来地摊开**。设置页那份长文一字未动。
+4. **agent 行不画标记,组标题删掉。** `AGENTS FOUND ON THIS MACHINE` /「本机检测到的 agent」**删除**,换成一道 `--border` 细线,上下各留 9px 空气,把 Folio 自己的三行与 agent 三行分开。v4 的第一稿曾在三条 agent 行头上各画一枚 16px 剪影,当日被裁掉:**六行统一左对齐在同一个 x 上**。理由不是省像素——一枚重复三次、只靠颜色区分的剪影,对一个色盲读者等于零,而行里已经用字写着是哪个 agent。
+5. **脚是两个按钮加一句最淡的话。** `Every row here is also a row in Settings.` /「所有选项都可在设置中更改」,11px `--ink3`;`Open settings` 那条强调色链接**撤掉**,脚上那道细线也撤掉。于是那一行是一句**陈述**而不是一个可按的东西,`Tab` 环也随之少一站(见 ⑧)。
+6. **440 而不是 480,行高 42 且行间有细线。**(见 ⑦)
+
+**一个可量的副作用:卡不再滚了。** v3 在参照窗上需要 376 逻辑像素的身体而只有 315 的地方,于是每一个读者的第一次启动都是一张开着就已经被裁掉的卡;v4 需要 273、有 308。滚动机制原样留着,但它从此是短窗的事而不是常态(见 ⑦、⑨)。
 
 #### ① 它问的是一个决定,不是四个
 
@@ -7294,7 +7311,7 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 一行 Folio 只能拒绝的行,根本不列。拒绝的解释句设置页上已经有了(`DescExplorerFirstPageNoPackage`、`DescCopilotHooksTooOld`、`DescCopilotHooksDisabled`),而那一页正是这种形状的句子该待的地方。**卡上任何一句话都不描述一件不存在的事**。
 
 - **资源管理器**:一个开关。Windows 11 且 `folio.msix` 就在 `folio.exe` 旁边时,它同时是首页项和 `Show more options` 里的老菜单项;否则只是老菜单项,句子换成 Windows 10 那一句。**没有包时这一行仍然出现**——开关于是意味着它能意味的那一半,而不是把一台解包时漏了 `.msix` 的 Windows 11 连老菜单一起剥夺。
-- **agent**:只列在这台机器上找得到、且它自己的配置文件里还没有 Folio 的。「找得到」用的是 picker 给行置灰用的同一次查找(`ProfilePrograms::is_available`),不是第二次;写第二次查找的代价是卡可以为一个 picker 说没装的程序开一行。三个都没有时,组标题连同它的行一起消失,卡短四行,而不是空四行。
+- **agent**:只列在这台机器上找得到、且它自己的配置文件里还没有 Folio 的。「找得到」用的是 picker 给行置灰用的同一次查找(`ProfilePrograms::is_available`),不是第二次;写第二次查找的代价是卡可以为一个 picker 说没装的程序开一行。三个都没有时,**那道分组细线连同它的行一起消失**,卡短三行,而不是空三行——这条规矩 v4 一字未改,变的只是挂在第一条 agent 行上的东西:v3 挂的是组标题,v4 挂的是一道细线(`Row::divider_above`,⓪ 第 4 条)。
 - **copilot 那一行等探测**。`1.0.26` 以下的 copilot 会被 `attention_copilot::apply` 拒绝,而**在按下之前就知道的拒绝从来不是一次失败**(见 ⑤)——所以卡在 `copilot` 在 PATH 上时先起 `begin_probe()`,等 `probe_settled()` 才升起。`probe()` 把「还没回来」和「回来了但什么都没有」折成同一个 `None`(对 `readiness_from` 是对的:两者都不是拒绝),只有这一个调用者要把它们分开,所以 `probe_settled` 是为它加的。
 
 #### ④ PowerShell 那一行记的是意图,不是答案
@@ -7323,25 +7340,45 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 
 红门是逐行断言的,而且是拿 `crate::settings` **自己的**行读取器断言的:一个指错行、或把 `FORMULA_OPTIONS`(`[true, false]`,所以答案就是它自己的下标)索引反了的目标,会以 `None` 或以 `false` 回来。
 
-#### ⑦ 几何:`restore.rs` 的手艺,设置页的行形
+#### ⑦ 几何:`restore.rs` 的手艺,设置页的行形(v4,2026-09-06 重写)
 
-同一张 `push_float_window` 的面、同一对 `.btn`、同一个 `restore::wrap`。行形是**设置页的**——句子在左、控件在右——因为一个刚被交了六行这种形状的读者,下次打开设置去改其中一行时该遇到同一种形状;它也把整张卡的宽度交给句子,而不是让每一行都缩进过一个控件列。控件是 `.aswitch`,到像素:30 × 18、圆角 9,轨道关时 `--active`、开时 `--accent`,滑块 14 × 14 内缩 2、`--menu` 面、`0 1px 3px rgba(0,0,0,.25)`;右边缘落在卡自己的 padding 上,**竖直居中于该行标题的第一行**,所以一行三句的句子不会把它的控件拖下去。
+同一张 `push_float_window` 的面、同一对 `.btn`、同一个 `restore::wrap`。行形是**设置页的**——句子在左、控件在右——因为一个刚被交了六行这种形状的读者,下次打开设置去改其中一行时该遇到同一种形状。
+
+**头。** 22 × 22 的 Folio 标记,左缘落在卡自己的 padding 上、竖直居中于标题的行盒;10px 之后是 15px/600 的标题。标题下面**没有第三样东西**(⓪ 第 1 条)。头之下 18px,然后是第一行。
+
+**标记是 `folio.ico` 本身,不是照着它重画的一份。** `crates/bt-app/build.rs` 读的就是 `design/assets/app-icon/folio.ico` 这一条路径并把它链成图标组 1;在一个新读者见到的第一样东西的顶上画别的,等于让第一印象和他刚双击过的那枚图标不一致。所以 `first_run.rs` `include_bytes!` 那份文件,按目录项里**未压缩的那几条**(16…64,`.ico` 只把 128 与 256 存成 PNG)取**不小于目标物理边长的最小一条**——Windows 自己挑图标的规矩,也正是 `make-folio-ico.py` 解九个尺寸而不是解一个的理由——把 BGRA、自下而上的 DIB 翻成 RGBA 交给 `ChromeIcon`。在 Rust 里把那份几何再写一遍会是第二个可以和文件走散的源头,所以读的是文件。
+
+**暗色下标记要保住自己的底板**(用户裁决 2026-09-06)。图标的地是 `#202027`,暗色卡的地是 `#202020`:差七级,于是底板消失、只剩里面那张纸悬在空处——一个无头的标记,在一个读者见到的第一样东西的顶上。裁下来的做法是**给它这张卡自己的边**:一道 `--border` 细线,圆角取底板自己的 `GROUND_RADIUS`(0.22 × 边长,与 `make-folio-ico.py` 同一个数)。亮色主题什么都不画——白地上的石墨底板不需要帮忙,一道边只会是噪音。
+
+**行。** 42 逻辑像素高,里面一条 13px 的行竖直居中,**六行全部左对齐在同一个 x 上**(⓪ 第 4 条)。同组两行之间一道 1 物理像素的 `--border-soft`;Folio 三行与 agent 三行之间一道 1 物理像素的 `--border`,上下各 9px 空气。
+
+**指针停在一行上,那一行整条亮起,而那一条整条也回答按下。** `--hover` 填充,圆角 5,向两侧各溢出 8px——那 8px **是这条带子的一部分**,不是画出来又被裁掉的边角料:亮的、能按的、挂 tip 的都是同一个 `RowRects::band`,它横向被卡自己的边界住(`Layout::body_clip`)、纵向被滚动体界住,而不是被文本列界住。**不是只有开关**——这扇窗有一条立着的规矩,§7.1.5f 立、§7.1.5g 抄了一遍:**一个只答 hover 不答 click 的记号等于本窗在对自己画的东西说谎**。一条亮起来、还挂着一句关于自己的 tooltip 的带子,如果按下去只有右端 30 像素管用,就正是那句谎。所以 `Target::Row(index)`:亮的那条 = 挂 tip 的那条 = 按下去翻开关的那条,一个矩形。
+
+**tooltip 是这扇窗自己的 `.tip`,不是第二只盒子。** `TooltipAnchorId::FirstRunRow(usize)` 进 `tooltip.rs` 已有的锚点表,于是延时(`TOOLTIP_DELAY` 380ms)、淡入、定位、材质全部是这扇窗里其它 tip 的那一套——`TipFace` 自己的文档写着为什么只能有一口钟:一个指针上两口钟,是一扇窗同时举起两只盒子的走法。**卡是模态的,所以它开着的时候锚点表里只有它的六条**:scrim 底下那些 tab 和 pane 头不该被解释,读者按不到它们。身体一滚、焦点一走,锚点跟着重建——一个锚点不许描述一个卡没在画的盒子。
+
+**控件是 `.aswitch`,到像素**:30 × 18、圆角 9,轨道关时 `--active`、开时 `--accent`,滑块 14 × 14 内缩 2、`0 1px 3px rgba(0,0,0,.25)`;右边缘落在卡自己的 padding 上,**竖直居中于整条行**(v4:行只有一句,所以居中于行与居中于第一行标题是同一件事)。
 
 **滑块那道 `0 1px 3px` 是一次模糊,不是一道描边**(用户报告 2026-09-06,一张 150% 亮色主题下的卡的照片:每个关着的开关的滑块外面围着一圈灰带)。模糊的三个像素是一条梯度——那四分之一的 alpha 贴着滑块,走完自己的射程就没了。`rounded_overlay_halo` 把整个四分之一发给全部三个像素,而三个逻辑像素在 150% 上是五个物理像素,比滑块与轨道边缘之间那两个还宽:那圈环于是从轨道的上下两边探出去,读作压在开关上的第二个实心形状,而不是滑块底下的一片影。`rounded_overlay_halo` 自己的文档就写着它是哪一个——一道轮廓需要的那种精确均匀的环,也正是一片影绝不能是的东西;`rounded_overlay_shadow` 是它旁边那条落差,这张卡与这扇窗里其它每一次抬起走同一扇门。
 
-这里唯一新的东西是**一个会滚的身体**。头(标题)与脚(细线、脚注、两个动词)钉住,中间滚:卡永不超过 `surface_height − 2 · 34` 逻辑像素,3px 的条画在右侧 padding 里(所以它出现时没有一行字会移动),被裁到的那一行在 20 逻辑像素上**淡进卡自己的地**,于是读者永远不会被展示半个字形。**钉住的脚正是滚动之所以安全的原因**:「完成」「暂不」和那句「这里的每一项也出现在设置中」永远不是滚走的那个东西。一个被裁到视口外的开关也**不再回答按下**——裁剪线是它停止被画的地方,也就是它停止回答的地方。
+**关着的滑块在暗色下换面**(用户裁决 2026-09-06)。`.aswitch i` 两个主题都是 `--menu`,而暗色里那是 `#2A2A2A`、坐在解析成 `#343434` 的 `--active` 轨道上:六个关着的开关,每一个左端都像被戳了一个洞,而且是在这个产品迄今把它们摆过的最响的一个面上。Fluent 的暗色开关正是反过来答的——**滑块是墨**,亮色主题里是浅轨上的深滑块,暗色主题里是深轨上的浅滑块——所以关着的滑块在暗色取 `--ink`(`dialog_title_text`),也就是它旁边那行字的颜色,**不是一个新颜色**。亮色一动不动:白滑块在近白的轨道上,靠 `0 1px 3px` 那一抬分开,和小样里一样。**开着的滑块两个主题都还是 `--menu`**,这也是 Fluent 的答案:暗色的强调色是一片淡蓝,再配一个浅滑块等于把开关的状态擦掉。判据是 `background_is_light(palette.dialog_surface)`,问的是滑块实际坐着的那个平面。
+
+**脚。** 身体之下 16px,**没有细线**(v3 有一道;行自己已经带着细线了,再来一道会读成一个底下什么都没有的行边界),然后 11px `--ink3` 的那一句、14px、两个按钮、16px padding。
+
+**会滚的身体**留着,机制一字未改:头(标记、标题)与脚(那一句、两个动词)钉住,中间滚;卡永不超过 `surface_height − 2 · 34` 逻辑像素,3px 的条画在右侧 padding 里(所以它出现时没有一行字会移动),被裁到的那一行在 20 逻辑像素上**淡进卡自己的地**。**钉住的脚正是滚动之所以安全的原因**:「完成」「暂不」和那句「所有选项都可在设置中更改」永远不是滚走的那个东西。一个被裁到视口外的行也**不再回答按下、也不再有 tooltip**——裁剪线是它停止被画的地方,也就是它停止回答的地方。**在参照窗上它不滚**(⓪ 末段),所以这套机制现在扛的是短窗,以及将来某天长出来的第七行。
 
 **那道淡入与那根条是自己一层,而这不是整洁。** 一层的填充在它的字之前就收了口(`OverlayLayer` 自己的注记:「一层的三个通道在下一层的通道打开之前就完成」),所以推进同一层的淡入会铺在它本该带走的那句话**下面**。第二层于是把它放到字的上面,条又在淡入的上面——它们站的就是这个顺序。两端都淡:规格画的是脚,因为一张静止的卡裁的是那一端;身体一滞,头以完全相同的方式在裁,而半个字形不因为在哪一端被切而不是半个字形。
 
-宽 480 逻辑像素(`min(480 · scale, surface_width · 0.92)`),不是 `.restore` 的 400:开关列从句子列里拿走 42 逻辑像素,而 v1 量的 15+10 复选框列只拿走 25,480 把「搬到设置行形」花掉的那 20 像素句子原样还回来。
+**宽 440 逻辑像素**(`min(440 · scale, surface_width · 0.92)`),不是 v3 的 480。v3 那 480 是给**每行标题下面那句话**买的;句子搬进 tooltip 之后,剩下的 354 逻辑像素文本列在两种语言下都装得下每一条行句,还有富余。
 
 #### ⑧ 键盘
 
 焦点开在**第一个开关**上,不是「完成」:这是一张表单,落在主按钮上会让一次盲目的 `Enter` 答完一张没人读过的卡(`restore.rs` 的 `FOCUSED_ANSWER` 把焦点放在动词上,因为那个对话框是一个问题而不是一张表单)。环开着的时候不画——一张出生就带环的卡,是在宣称一个没人用过的键盘。
 
-`Tab`/`Shift+Tab` 按视觉序走每个开关 → 「打开设置」→「暂不」→「完成」→ 回绕;卡是模态的,焦点永不离开它。`↑`/`↓` 只在开关之间走,列表就是列表;从按钮进入列表,从它来的那一端进。`空格` 翻焦点上的开关,或按下焦点上的按钮/链接。`←`/`→` 是该开关的关/开,平台惯例。`Enter` 从任何一个开关按下「完成」——这是它与旁边那张 PSReadLine 邀请卡分道的唯一一处:那张卡拒绝 `Enter`,因为它的肯定项会写文件而它可能在人打字打到一半时出现;这一张出现在一台机器的第一次启动上,焦点在一行没人碰过的行上、每一行会写东西的开关都关着——所以它可能意外收到的那个 `Enter` 做的是「暂不」做的事。`Esc` 正好是「暂不」,一次按下。`Alt+F4` 走 winit 自己那条关窗路不经过这里,而它按构造算「暂不」:`Shown` 在卡升起时就写了,而在按下「完成」之前什么也没被兑现,所以不存在一条能留下半个决定的路。本产品没有 `Ctrl+W`——`Ctrl+Shift+W` 关的是 pane——所以那一条无处可落。焦点走到折叠线以下的行会把它滚进来:一个读者看不见的环不是焦点。
+`Tab`/`Shift+Tab` 按视觉序走每个开关 →「暂不」→「完成」→ 回绕;卡是模态的,焦点永不离开它。**「打开设置」不再是一站**(v4 §5:脚上剩下的是一句陈述,一句陈述不是键盘能落上去的东西)。`↑`/`↓` 只在开关之间走,列表就是列表;从按钮进入列表,从它来的那一端进。`空格` 翻焦点上的开关,或按下焦点上的按钮。`←`/`→` 是该开关的关/开,平台惯例。`Enter` 从任何一个开关按下「完成」——这是它与旁边那张 PSReadLine 邀请卡分道的唯一一处:那张卡拒绝 `Enter`,因为它的肯定项会写文件而它可能在人打字打到一半时出现;这一张出现在一台机器的第一次启动上,焦点在一行没人碰过的行上、每一行会写东西的开关都关着——所以它可能意外收到的那个 `Enter` 做的是「暂不」做的事。`Esc` 正好是「暂不」,一次按下。`Alt+F4` 走 winit 自己那条关窗路不经过这里,而它按构造算「暂不」:`Shown` 在卡升起时就写了,而在按下「完成」之前什么也没被兑现,所以不存在一条能留下半个决定的路。本产品没有 `Ctrl+W`——`Ctrl+Shift+W` 关的是 pane——所以那一条无处可落。焦点走到折叠线以下的行会把它滚进来:一个读者看不见的环不是焦点。
 
-「打开设置」**是带了一个去处的「暂不」**:按它的读者在说他宁愿到设置里去做,于是卡花掉「暂不」花掉的那些东西——什么也不花——然后打开脚注点名的那一页。把卡留在那一页上面站着是另一种读法,而它不可用:这张卡是模态的,盖在它下面的设置对话框是一个没人能按的对话框。
+**【2026-09-06 v4 撤】** 这里原本站着「打开设置」那条链接,读作「带了一个去处的『暂不』」。裁决是「脚 = 两个按钮」,而一条链接既不是按钮也不是那句淡话,于是它连同它在 `Tab` 环里的那一站一起撤掉;`Focus::OpenSettings` 与 `Target::OpenSettings` 都不再存在。脚上那句话因此是一句**陈述**:它说设置页有这些行,读者用平常的路过去。`Text::FirstRunFootnote` 与 `Text::FirstRunOpenSettings` 随之从 `i18n.rs` 删除——它们没有第二个读者,而一条谁都不显示的翻译比删掉它更糟。
+
+**tooltip 是指针的,不是键盘的。** 小样里设想过让带焦点的行也举起自己的 tooltip;这扇窗里的 `.tip` 从来只由指针驱动(一只宿主、一口钟、`observe` 收的是指针底下的锚点),为这一张卡加一条键盘驱动的路会是那口钟的第二个主人。地址没有因此丢:设置页那份长文一字未动,而卡上任何一行不靠它的 tooltip 也读得通——行句是决定,tooltip 是收据。
 
 #### ⑧′ 一扇拍照用的门
 
@@ -7355,16 +7392,42 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 
 #### ⑩ 文案
 
-中文全部由 DeepSeek 从英文事实简报写出,提示里没有本仓任何一句现成中文(不是 `i18n.rs` 的、不是 `README.zh-CN.md` 的),十轮,每一轮反馈都用英文并且只点名一个事实、一个长度或一处含糊。规则一句:**一句话说读者得到什么;然后,仅在这个开关会写一份属于读者的文件时,一句短话说写在哪里**。因此在卡上的有 `$PROFILE` 和它的日期副本、`~/.claude/settings.json`、`~/.codex/config.toml`、`~/.copilot/hooks/folio.json`;不在卡上的有「每天一次请求」「注册 `folio.msix`」「为本账户」「`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `COPILOT_HOME`」「`folio.ps1`」——前两类是我们的方法和我们的文件,第三类是我们那次写入的范围,第四类是一个设过它的读者本来就知道、没设过的读者根本没有的变量。
+中文全部由 DeepSeek 从英文事实简报写出,提示里没有本仓任何一句现成中文(不是 `i18n.rs` 的、不是 `README.zh-CN.md` 的、也不是上一版自己的),每一轮反馈都用英文并且只点名一个事实、一个长度或一处含糊。规则一句:**一句话说读者得到什么;然后,仅在这个开关会写一份属于读者的文件时,一句短话说写在哪里**——**v4 把这两句拆到两个表面上**:前一句是行,后一句是那一行的 tooltip(⓪ 第 3 条)。因此在卡的行上一个文件路径都没有,而在 tooltip 里有 `$PROFILE` 和它的日期副本、`~/.claude/settings.json`、`~/.codex/config.toml`、`~/.copilot/hooks/folio.json`;两处都不在的有「每天一次请求」「注册 `folio.msix`」「`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `COPILOT_HOME`」「`folio.ps1`」——前两类是我们的方法和我们的文件,第三类是一个设过它的读者本来就知道、没设过的读者根本没有的变量。
+
+**PowerShell 那一行带着整合自己的名字**(用户裁决 2026-09-06)。卡上其余五行只说结果,这一行不许:一个日后要去设置里改它的读者必须知道这东西叫什么,而这张卡是他唯一会被告知的地方。所以名字在前、结果在后,同一条短行——英文 `PowerShell integration lets you jump between commands`,中文「PowerShell 整合让你在已运行命令间跳转」。四条好处里只放得下一条,放的是「在跑过的命令之间跳」;公式排版那一条留在设置页那句长的里。
+
+**v4 的两句是第二次单独问出来的**(`scratchpad/firstrun/brief-v4b-en.md`、`ds_copy_v4b.py`、`ds_transcript_v4b.json`,三轮):PowerShell 那一行,以及更新那条 tooltip——它上一版把 `RELEASES_PAGE` 实际打开的那一页叫成「下载页」,而本仓其余地方一律叫**发布页**,一页两名是这两稿之间唯一一处实质分歧。其余每一句(标题、五条行句、脚上那句、其余五条 tooltip、暂不/完成)含义未变,原样从 `copy-zh-v4.json` 抄过来,**没有再送进提示**——把一句模型自己写过的中文再送回去让它改,正是这条规矩要防的事。
 
 **全站一个词:「暂不」**。PSReadLine 邀请卡的中文原来是另一句,现在不是了——两个请读者推迟的表面不该在这件事上花两个词。英文 `Not now` 一个字没动。
 
 #### ⑪ 门
 
-`the_card_is_due_only_when_there_was_no_settings_file_and_it_has_never_been_up`、`only_the_rows_this_machine_can_honour_are_offered`、`the_update_check_is_the_only_row_that_arrives_on_and_it_arrives_first`、`the_explorer_row_says_only_what_its_switch_can_mean`、`every_answer_leaves_this_card_as_the_press_the_settings_page_sends`(逐行、拿 `crate::settings` 自己的读取器断言)、`done_spends_the_rows_that_are_on_and_the_two_answers_that_are_answers`、`declining_writes_nothing_outside_the_card_s_own_state`、`the_recorded_intent_is_spent_by_the_first_shell_that_names_its_profile`、`the_settings_row_says_the_write_is_waiting_for_a_shell`、`the_focus_walks_the_card_in_a_ring_and_the_arrows_stay_in_the_list`、`the_card_opens_on_its_first_switch_with_the_ring_put_away`、`a_switch_changes_the_card_and_nothing_else_until_done`、`the_body_scrolls_and_the_two_verbs_never_do`、`walking_onto_a_row_below_the_fold_brings_it_into_view`、`a_press_outside_the_body_is_not_a_press_on_a_row`、`the_switch_is_settings_own_control_in_settings_own_row_shape`、`the_card_is_four_hundred_and_eighty_logical_or_the_window_s_own_share`(以上 `first_run.rs`);`real_settings_v31_to_v32_migration_tells_an_existing_reader_the_card_has_been_shown` 与 `a_settings_file_written_from_nothing_has_never_shown_the_card`(`bt-persist/src/migrate.rs`)。滑块那片影另有一道:`the_knob_s_shadow_falls_off_and_leaves_the_rest_of_the_track_alone`(`first_run.rs`)——沿滑块下缘一路读下去,量每一个物理像素上的 alpha:贴着滑块的那一格是满值,往外每一格都比前一格轻,走到射程尽头已剩不到八分之一;两种答案各量一次,而滑块不在的那一端只有轨道自己的填充。写成描边时这条侧写是 `[0.25, 0.25, 0.25, 0.25, 0.25]`。
+**卡自己的事实**:`the_card_is_due_only_when_there_was_no_settings_file_and_it_has_never_been_up`、`only_the_rows_this_machine_can_honour_are_offered`、`the_update_check_is_the_only_row_that_arrives_on_and_it_arrives_first`、`the_explorer_row_says_only_what_its_switch_can_mean`、`every_answer_leaves_this_card_as_the_press_the_settings_page_sends`(逐行、拿 `crate::settings` 自己的读取器断言)、`done_spends_the_rows_that_are_on_and_the_two_answers_that_are_answers`、`declining_writes_nothing_outside_the_card_s_own_state`、`the_recorded_intent_is_spent_by_the_first_shell_that_names_its_profile`、`the_settings_row_says_the_write_is_waiting_for_a_shell`、`the_focus_walks_the_card_in_a_ring_and_the_arrows_stay_in_the_list`、`the_card_opens_on_its_first_switch_with_the_ring_put_away`、`a_switch_changes_the_card_and_nothing_else_until_done`;`real_settings_v31_to_v32_migration_tells_an_existing_reader_the_card_has_been_shown` 与 `a_settings_file_written_from_nothing_has_never_shown_the_card`(`bt-persist/src/migrate.rs`)。
+
+**几何**:`the_body_scrolls_and_the_two_verbs_never_do`、`six_rows_fit_the_reference_window_without_a_bar`(参照窗上不滚,也不画条——⓪ 末段那句话的门)、`walking_onto_a_row_below_the_fold_brings_it_into_view`、`a_press_anywhere_on_a_row_is_a_press_on_its_switch_and_the_fade_ends_it`(整条带子回答按下,包括离开关最远的那一端;裁到视口外的行不回答)、`the_switch_is_settings_own_control_in_settings_own_row_shape`、`the_card_is_four_hundred_and_forty_logical_or_the_window_s_own_share`、`the_knob_s_shadow_falls_off_and_leaves_the_rest_of_the_track_alone`(沿滑块下缘一路读下去,量每一个物理像素上的 alpha:贴着滑块的那一格是满值,往外每一格都比前一格轻,走到射程尽头已剩不到八分之一;两种答案各量一次,而滑块不在的那一端只有轨道自己的填充。写成描边时这条侧写是 `[0.25, 0.25, 0.25, 0.25, 0.25]`)。
+
+**v4 自己的六道**(全部 `first_run.rs`):
+
+- `every_row_line_starts_on_one_x_and_the_only_picture_is_the_folio_mark` —— 六条行句的左缘是同一个数,且整张卡一枚 sprite 都不画、只有一张图片而那张就是头上的标记。红过:三条 agent 行画标记时,它们的左缘比另外三条多 26 物理像素,而 `images` 里躺着七张。
+- `the_header_is_the_shipped_mark_and_the_greeting_beside_it` —— 标记是 22 逻辑的正方、左缘在 padding 上、与标题共一个竖直中心、标题让开 22+10;取到的 `.ico` 条目不小于目标框(**只缩不放**),解出来的方阵在中间比在顶上亮 40 以上——一张淡纸压在石墨底板上,也就是说 BGRA 与自下而上两件事都翻对了。
+- `a_dark_card_gives_the_mark_the_edge_its_own_ground_takes_away` —— 暗色画那道边、亮色不画,并且那道边合成出来比它坐着的卡面亮 8 以上。
+- `every_row_hands_the_tooltip_the_file_that_row_writes` —— 每一行都有话说、话挂在**整条带子**上、四条会写读者文件的行各自点名自己那一份、六句互不相同;身体一滚,被裁到视口外的行**不再供 tooltip**,而供出来的每一个盒子都落在视口内。
+- `a_knob_that_is_off_stands_against_its_track_in_both_themes` —— 暗色里关着的滑块比它的轨道亮 24 以上;亮色那一枚原地不动仍是 `--menu`(那边分开两者的是 `0 1px 3px` 那一抬,归它自己那道门管);开着的滑块两个主题都还是 `--menu`。
+- `the_powershell_row_carries_the_integration_s_name_in_both_languages` —— 两种语言里那一行都以整合的名字**开头**,且不止那个名字。
+
+**证过是红的**(逐条变异跑过,`cargo test -p bt-app first_run`):
+
+| 变异 | 报的话 |
+| --- | --- |
+| 行句左缘按 v4 初稿为 agent 行让出 16+10 | `row 3's line starts at 593.5 while the first starts at 554.5 — the card has grown a second text column` |
+| tooltip 的锚点从 `band` 改挂到 `switch` | `row 0's tip is hung on something narrower than the band that lights up` |
+| 关着的滑块在暗色下退回 `--menu` | `a dark off knob at 42 on a track at 51.999996 is a hole in the switch rather than a control standing in it` |
+| 标记那道边两个主题都画 | `the light card is ringing a mark that stands out on its own` |
 
 #### ⑫ 挂账
 
 - **PSReadLine 补丁不进这张卡**(用户裁决)。它是这个产品里最深入的一件事,而它**已经有自己的窗内模态**,并且那张模态的聪明之处正在于它到得晚:它欠读者的那一次额外出现,就在改字号之后——bug 可见的那一刻。于是一台新的 Windows PowerShell 机器会先见到这张卡,再在第一次缩放或改字号时见到第二张。两张模态,但第二张在它的症状到达的那一刻到达,这正是它当初被那样设计的原因。
 - **卡不带自己的进出动画。** 它按 `ModalBand::Fixed` 走,和 gate、退出卡、邀请卡一样。
+- **`.aswitch` 目前只有这一张卡在用,所以关着的滑块那条暗色规则也只写在这里**(v4 ⑦)。设置页用的是下拉行,不是开关;哪天第二个表面长出开关,`knob_face` 是要跟着搬走的那一段,而不是要抄第二遍的那一段。
+- **卡上第七行会让它重新开始滚。** 参照窗上 v4 是 273 在 308 里,一行 42;再加一行就是 315 在 308。地方是有的(548 高的窗里卡才 445),但只剩一行深。今天什么都不用定,记在这里是为了下一行是有意加的。
 - **一次部分完成之后,卡上那些行的最终状态只在设置页可见。** 这是有意的(⑤),但意味着一个四行全开、其中一行失败的读者,拿到的是一张失败卡加三行静默;哪三行成了要去设置页数。给成功也发卡会把这件事说全,代价是新装第一分钟里的四张卡。
