@@ -62,6 +62,21 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A `$$` block under a formula whose top has gone off the screen is drawn
+  again.** A full-screen program owns its whole window and moves its transcript
+  up by redrawing it, not by scrolling, so the topmost formula's opening `$$`
+  can leave the window without a single row being removed and without anything
+  noticing. The first `$$` still on screen is then that formula's *closing* one,
+  and reading it as an opening shifted every `$$` below it by one place: each
+  pair then enclosed a heading instead of a formula and was refused as ordinary
+  text, and the last block on the screen — the one in the report — was never
+  even paired. It showed its own source with nothing recorded against it, not
+  even a failure. Folio already knew how to read a screen that begins in the
+  middle of a formula, but it could only say so when a line of scrollback stood
+  in front of that screen, which in a program of this kind never happens. That
+  question is now asked of any window, however it begins, so the formulas under
+  a half-visible one are typeset like all the others.
+
 - **A pane you drag over a web preview can now be dropped there.** The landing
   outline was drawn correctly over the page, but letting go did nothing: the
   press router handed every mouse button inside a page to the browser, releases
