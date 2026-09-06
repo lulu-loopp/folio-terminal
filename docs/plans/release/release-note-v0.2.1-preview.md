@@ -51,6 +51,24 @@ Fixes and polish for 0.2.0-preview, and the one thing 0.2.0 said was coming:
 - The printed string is still asked about first, so a file that really carries
   one still wins; where no such file exists, the name without it does.
 
+## A PDF from LaTeX has a page count, and its pages turn
+
+- A document written by `pdflatex` packs its page tree into compressed streams,
+  and the reader that counted pages read the file's bytes without inflating
+  anything, so the card drew the first page, printed the size, and never said
+  how many pages there were — and with no count, the wheel had nothing to turn.
+  The count now falls back to the reader that draws the page. Documents whose
+  structure is in the clear are still counted without being parsed.
+
+## The Chinese half of a hover line is the same size as the Latin half
+
+- Pointing at a folder printed `file:///D:/Demo · Ctrl+点击在资源管理器中显示`
+  with the Chinese set at about six tenths of the height of the address beside
+  it. That line is laid on the terminal's own grid, and it was laid out one
+  character per cell; a full-width character now takes the two cells it owns.
+  The same line carries the `N rows above` count, so that reads at full size
+  too.
+
 ## Upgrading from 0.2.0
 
 **Nothing to do.** There is no migration in this release: `settings.json`,
@@ -117,6 +135,14 @@ The full list is in `CHANGELOG.md` in the repository.
 
 - 以 `see docs/notes.md.` 结尾的一行此前打开的是 `notes.md.`——磁盘上没有这个名字，预览也无从处理。现在名字末尾的 ASCII 句点、逗号、分号、冒号与引号被读作句子的标点。
 - 打印出来的字符串仍然先问一遍磁盘，因此真带这个字符的文件依旧胜出；只有在没有这样的文件时，去掉标点的名字才作数。
+
+## LaTeX 生成的 PDF 有页数了，也能翻页
+
+- `pdflatex` 写出的文档把页面结构压在压缩流里，而数页数的读取器只扫字节、不解压，于是卡片画出第一页、标出大小，页数却始终不来——没有页数，滚轮也就无从翻页。现在扫不到时改由画页面的那个解析器来数。结构以明文写出的文档照旧不解析就能数出来。
+
+## 悬停提示行的中文与拉丁部分同一字号
+
+- 指向一个文件夹时打印的 `file:///D:/Demo · Ctrl+点击在资源管理器中显示`，中文只有旁边地址约六成的高度。这一行铺在终端自己的网格上，此前按一字一格铺；现在全角字符占它应占的两格。同一行还承载「上方还有 N 行」的计数，也随之恢复正常大小。
 
 ## 从 0.2.0 升级
 
