@@ -4142,10 +4142,16 @@ impl Text {
                  Show more options.",
                 "右键文件夹或其中空白处，即可在 Folio 中打开。入口位于 Show more options。",
             ),
+            // 「整合」, on `CapNone`'s ruling above and for its reason: the
+            // notice strip and the Settings row have called this object
+            // 「PowerShell 整合」 since 2026-08-29, and one object may only have
+            // one name. This row was written 「集成」 and was the only place in
+            // the product that disagreed; it is corrected before it ever
+            // reaches anybody (user ruling 2026-09-06).
             Self::FirstRunRowPowerShell => pick(
                 lang,
                 "Install the PowerShell integration",
-                "安装 PowerShell 集成",
+                "安装 PowerShell 整合",
             ),
             Self::FirstRunDescPowerShell => pick(
                 lang,
