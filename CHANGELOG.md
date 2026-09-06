@@ -32,6 +32,22 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **The Chinese half of a hover line is the same size as the Latin half.**
+  Pointing at a folder printed `file:///D:/Demo · Ctrl+点击在资源管理器中显示`
+  with the Chinese set at about six tenths of the height of the address beside
+  it. The fallback face was fine; the row it was laid on was not. That line is
+  the one place window text is set on the terminal's own grid, and it was laid
+  out one character per cell — a full-width character in a one-cell slot is
+  shrunk until it fits. It now takes the two cells it owns, exactly as typed
+  Chinese and Chinese scrolled into history always have. The same line carries
+  the `N rows above` count and the notices a lost background thread raises, so
+  those read at full size too.
+  - The line's own budget is counted in cells now as well. The aside about
+    `Ctrl` is printed only when the whole address is already on the line, and in
+    Chinese that test was being answered by counting characters — the aside went
+    out onto a grid too narrow for it and the start of the address fell off the
+    left.
+
 - **A sentence's own punctuation is no longer part of the file it names.** A line
   ending `see docs/notes.md.` opened `notes.md.` — a name nothing on the disk
   holds and the preview could make nothing of. An ASCII stop, comma, semicolon,
