@@ -5,34 +5,37 @@
 Fixes and polish for 0.2.1-preview, and one card: a machine that has never run
 Folio is asked its boundary questions once, together, in one place.
 
-## First things, once, on a machine that has never run Folio
+## Welcome to Folio, once, on a machine that has never run it
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="https://raw.githubusercontent.com/lulu-loopp/folio-terminal/v0.2.2-preview/docs/screenshots/first-run-dark.png">
   <img src="https://raw.githubusercontent.com/lulu-loopp/folio-terminal/v0.2.2-preview/docs/screenshots/first-run-light.png" width="100%"
-       alt="The First things card in the middle of a window that has just started: a row for checking for a new version once a day, on; rows for opening any folder in Folio from Explorer and for installing the PowerShell integration, off; under a heading reading AGENTS FOUND ON THIS MACHINE, a row for Claude Code and a row for Codex; and at the foot Open settings, Not now and Done.">
+       alt="The card over a window that has just started: Folio's mark beside Welcome to Folio, then six rows of one line each with a switch at the right of every one. Get told when a new version of Folio is out is on; Open any folder in Folio from its right-click menu and PowerShell integration lets you jump between commands are off; below a hairline, Its tab lights up when Claude Code is waiting, when a Codex turn ends, and when Copilot CLI is waiting, all three off. At the foot, a faint line reading Every row here is also a row in Settings, then Not now and Done.">
 </picture>
 
 - The card asks every question whose answer writes something **outside**
   `%APPDATA%\Folio`, and it asks them together, because they are one decision
-  about how much of this machine Folio may touch: check for a new version once a
-  day, which is the only row that arrives on; open any folder in Folio from
-  Explorer; install the PowerShell integration; and one row for each of Claude
-  Code, Codex and Copilot CLI that this machine actually has. Nothing about
-  theme, font, size, language or layout — those are one click away and cost
-  nothing while they are wrong.
+  about how much of this machine Folio may touch. Six rows of one line each, and
+  the line is what you get: be told when a new version is out, which is the only
+  row that arrives on; open any folder in Folio from its right-click menu; the
+  PowerShell integration; and a tab that lights up for each of Claude Code,
+  Codex and Copilot CLI this machine actually has. Nothing about theme, font,
+  size, language or layout — those are one click away and cost nothing while
+  they are wrong.
+- **Rest the pointer on a row and it says how**, including which of your own
+  files the switch writes and that the file is copied to a dated backup first.
 - **Every row on the card is a row in Settings**, and the card presses those rows
   rather than doing anything of its own. Nothing on it is a last chance, and the
   switch you find in Settings an hour later is the same switch, in the same
   place, on the same shape of row.
-- **Done** applies the rows that are on. **Not now**, `Esc` and **Open settings**
-  close the card with the shipped values — the update check on, the rest off —
-  and change nothing. Either way it does not come back, and the shell behind it
+- **Done** applies the rows that are on. **Not now** and `Esc` close the card
+  with the shipped values — the update check on, the rest off — and change
+  nothing. Either way it does not come back, and the shell behind it
   has been running the whole time.
 - A row is only offered if it can be honoured. An agent that is not on this
   machine, or whose configuration already calls Folio, is not listed, and when
-  none of the three is there the heading goes with them. On Windows 11 unpacked
+  none of the three is there the rule above them goes with them. On Windows 11 unpacked
   without `folio.msix`, the Explorer row still offers the entry it can offer,
   worded for it.
 - The PowerShell row records an intent rather than acting: where your `$PROFILE`
@@ -46,10 +49,11 @@ Folio is asked its boundary questions once, together, in one place.
 
 - The join between two entries in the tab list is a band eight logical pixels
   either side, and a pointer inside it makes the pane a new tab there rather than
-  handing it to the tab it happens to be over. A line is drawn across the join to
-  say where it will land.
-- It takes four more pixels to leave the band than to enter it, so the line and
-  the tab highlight do not trade places under a hand that is holding still.
+  handing it to the tab it happens to be over. The list opens a slot and the pane
+  stands in it, which is where letting go puts it — the picture is the row
+  itself, and nothing is drawn across the join.
+- It takes four more pixels to leave the band than to enter it, so the open slot
+  and the tab highlight do not trade places under a hand that is holding still.
 - The horizontal tab strip, the vertical rail and the card column all read the
   same rule.
 
@@ -115,6 +119,23 @@ Folio is asked its boundary questions once, together, in one place.
   It now travels with the pane that is holding it, through splits, insertions,
   divider drags and tab switches alike.
 
+## Also fixed
+
+- **A page dropped on a pane opens on that pane.** Dragging an `.html` or a
+  `.pdf` onto a pane of its own split the layout where you aimed and then opened
+  the page somewhere else, over whatever the first preview pane was showing.
+- **A formula the pane was too narrow to hold on one row is typeset too.** A
+  line the terminal folded lost the space the fold landed on, so `\quad g_i(x)`
+  read back as `\quadg_i(x)` and the block stayed as source at that one width.
+- **A `$$` block whose opening `$$` has been pushed off the top of a full-screen
+  program is drawn again.** Every block below it was reading the wrong
+  delimiter, and the last one on the screen was never paired at all.
+- **Two preview panes can show two pictures at once.** An image and a video
+  side by side left one of the two panes with nothing but its size line,
+  whichever arrived second.
+- **The knob on the card's switches wears a shadow rather than a ring**, drawn
+  with the same falloff as every other lift in the window.
+
 ## Upgrading from 0.2.1
 
 **Nothing to do.** `settings.json` gains the card's two keys and is brought up to
@@ -172,27 +193,28 @@ The full list is in `CHANGELOG.md` in the repository.
 
 对 0.2.1-preview 的修复与打磨，另加一张卡：从未运行过 Folio 的机器，其边界问题会在一个地方一次性问完。
 
-## 首次配置：在从未运行过 Folio 的机器上，只问一次
+## 欢迎使用 Folio——在从未运行过它的机器上第一次出现
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="https://raw.githubusercontent.com/lulu-loopp/folio-terminal/v0.2.2-preview/docs/screenshots/first-run-dark.png">
   <img src="https://raw.githubusercontent.com/lulu-loopp/folio-terminal/v0.2.2-preview/docs/screenshots/first-run-light.png" width="100%"
-       alt="首次配置卡位于刚启动的窗口中央：一行「每天检查新版本」，处于开启状态；「从资源管理器用 Folio 打开」与「安装 PowerShell 整合」两行，处于关闭状态；标题「本机检测到的 agent」下方，有 Claude Code 与 Codex 两行；底部为「打开设置」、「暂不」与「完成」三个按钮。">
+       alt="刚启动的窗口上方的一张卡：Folio 的标记旁写着欢迎使用 Folio，下方六行，每行只有一句话，右侧有一个开关。有 Folio 新版本时提醒处于开启；在右键菜单中用 Folio 打开文件夹和 PowerShell 整合让你在已运行命令间跳转处于关闭；分隔线之下是 Claude Code 等待时、Codex 回合结束时和 Copilot CLI 等待时标签页高亮，三项均关闭。底部一行浅色文字写着所有选项都可在设置中更改，然后是暂不与完成。">
 </picture>
 
-- 这张卡把所有答案会写入 `%APPDATA%\Folio` **之外**的问题集中到一起问，因为它们是同一个决定——Folio 可以触碰这台机器的多少部分：每天检查新版本（唯一默认开启的一行）、从资源管理器用 Folio 打开、安装 PowerShell 整合，以及这台机器上实际装有的 Claude Code、Codex、Copilot CLI 各一行。主题、字体、字号、语言或布局一概不问——那些只需一次点击即可调整，在调对之前也不会有任何代价。
-- **卡上的每一行，在设置里也有对应的一行**，卡只是去按那些行，自己不做任何额外的事。卡上没有任何一项是「最后机会」；一小时后在设置里看到的开关，与卡上的是同一个开关、同一个位置、同一种行样式。
-- **完成**会应用所有处于开启状态的行。**暂不**、`Esc` 与**打开设置**则按出厂值关闭卡——更新检查开启，其余关闭——不改动任何东西。无论哪种方式，卡都不会再出现，其背后的 shell 一直在运行。
-- 只有能够兑现的行才会被列出。不在本机、或其配置已经调用 Folio 的 agent 不会被列出；当三者都不存在时，标题也一并消失。在解压时没有把 `folio.msix` 一起带上的 Windows 11 上，资源管理器那一行仍会给出它所能给出的条目，并按相应措辞显示。
-- PowerShell 那一行记录的是意图而非直接执行：`$PROFILE` 的位置来自 shell，因此这一行由下一个启动的 PowerShell 添加，**设置 > 终端**在此之前会如实说明。原有文件会像往常一样，先复制一份带日期的备份到旁边。
-- **已经在用 Folio 的用户永远不会看到它。** 更新 `settings.json` 的那一步正是用来记录「已展示过此卡」的。
+- 这张卡一次性把所有问题放在一起问，因为它们其实是同一个决定：允许 Folio 触及这台机器的多少部分。答案写入 `%APPDATA%\Folio` **之外**的文件。六行，每行只有一句话，那句话说的就是打开它之后得到的东西：有 Folio 新版本时提醒——唯一默认开启的一行；在右键菜单中用 Folio 打开文件夹；PowerShell 整合；以及本机实际装有的 Claude Code、Codex、Copilot CLI 各一行，开着且处于等待（Codex 是一回合结束）时，其所在标签页高亮。主题、字体、字号、语言和布局一概不涉及——那些只需一次点击即可更改，暂时不对也无任何代价。
+- **指针停在某一行上时，会说明其作用**，包括该开关写入用户自己的哪个文件，以及该文件先复制一份带日期的备份。
+- **卡上每一行都是设置中的一行**，这张卡只是在按这些行，并不做任何自己的事。卡上没有任何「最后一次机会」，一小时后在设置中找到的开关，与卡上的是同一个开关、同一处位置、同一行样式。
+- **完成**应用已开启的行。**暂不**和 `Esc` 以出厂值关闭这张卡——更新检查开启、其余关闭——并且不改动任何东西。无论哪条路，它都不再出现，而它背后的 shell 一直在运行。
+- 只有做得到的行才出现。这台机器上没有的、或配置里已经调用 Folio 的 agent 不被列出；三者都不存在时，上方的规则也随之消失。在解压压缩包时没有把 `folio.msix` 一起带上的 Windows 11 机器上，资源管理器那一行仍提供它能提供的入口，并按它的措辞来写。
+- PowerShell 行记录的是一个意图而非直接行动：`$PROFILE` 的位置来自 shell，所以那一行要等下一个 PowerShell 启动时才被加入，**设置 > 终端**一直注明这一点，直到它加入为止。原有文件一如既往地先复制一份带日期的备份。
+- **已经用过 Folio 的用户看不到这张卡。**把 `settings.json` 更新到最新版本的那个步骤，同时也就是记录这一点的动作。
 
-## 窗格可以拖放到两个标签页*之间*
+## 窗格可以拖到两个标签页*之间*
 
-- 标签页列表中两个条目之间的接缝是一条两侧各 8 逻辑像素的带状区域，指针落入其中时，窗格会在那里成为新标签页，而不是交给恰好位于其下的那个标签页。接缝上会画出一条线，标示将落下的位置。
-- 离开这条带状区域比进入它需要再多移动 4 像素，因此当手静止不动时，落点线与标签高亮不会来回交替。
-- 横向标签条、竖向标签栏与卡片列都遵循同一条规则。
+- 标签页列表中两项之间的接缝是一条两侧各八逻辑像素的带，指针在其中时，窗格成为那个位置的一个新标签页，而不是交给它恰好悬停在上面的那个标签页。列表空出一个槽位，窗格就落在那里面——松手即落在那里——图片本身就是那一行，不会有任何内容画在接缝上。
+- 离开这条带需要比进入多移动四个像素，因此当手静止不动时，空出的槽位和标签页高亮不互换位置。
+- 横排标签条、竖排标签栏和卡片列都遵循同一条规则。
 
 ## 启动 shell 的菜单只列出本机能够启动的项
 
@@ -219,6 +241,14 @@ The full list is in `CHANGELOG.md` in the repository.
 
 - 打开一张图片，再在旁边打开页面或文本文件，图片就跑去了别处：绘制到其他窗格的内容之上，或者——当另一窗格是网页时——藏在网页底下，只留下尺寸行，图片本该在的位置空空如也。在图片与终端之间插入一个预览窗格时，也会发生同样的情况。
 - 此前每一帧都会把图片移到窗口中顺序最靠前的预览窗格；只有当标签页只有一个预览窗格时，那才恰好是图片自己的窗格。现在图片跟随承载它的窗格移动，无论是拆分、插入、拖动分隔条还是切换标签页。
+
+## 其他修复
+
+- **拖到窗格上的页面在该窗格打开。**把 `.html` 或 `.pdf` 从文件列拖出来、让它单独占一个窗格时，布局确实在用户瞄准的位置分开了，但页面却在别处打开，盖住第一个预览窗格当时显示的内容。
+- **窗格宽度不足以单行容纳的公式也被排版。**终端折叠某一行时把折行处那个空格也丢掉，所以 `\quad g_i(x)` 读成 `\quadg_i(x)`，在那一个宽度下该块就一直以源代码形式显示。
+- **全屏程序中，开头的 `$$` 已被推出屏幕顶部的 `$$` 块重新绘制。**它下面的每个块此前都在读错误的定界符，而屏幕上最后一个块根本没有配对。
+- **两个预览窗格可以同时显示两幅图片。**图片和视频并排时，两个窗格中总有一个只剩下尺寸行——后到达的那个是谁都一样。
+- **卡上开关的旋钮现在带阴影而不是圆环**，阴影的衰减方式与窗口中其他所有凸起元素一致。
 
 ## 从 0.2.1 升级
 

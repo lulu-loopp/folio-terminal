@@ -807,6 +807,52 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 **钉子(`crates/bt-term/src/session.rs`)**:`a_byte_identical_reprint_does_not_restart_a_pending_blocks_stability_clock`(16/50/100/199ms 四种节奏各排出一个块)、`a_ticking_status_row_does_not_starve_the_block_above_it`(唯一真变的那一行只拨自己的钟)、`a_block_arriving_during_a_repaint_storm_typesets_beside_one_proven_before_it`(截图里那个形状:先证成的与后到的必须都是图)、`a_reprint_that_changes_a_row_restarts_exactly_that_rows_clock`(反面:改字、改色都算改动)。**变异红证**:把指纹改回只问装饰盖着的行 → 四条全红;改成「凡是有过指纹的行一律不再拨钟」→ 后两条红(后到的那个块永远到不了 worker);把颜色从指纹里拿掉 → 只有「改色也算改动」那一条红。
 
 
+### 4.6a 一行折在哪一列是窗宽的事,不是文本的事:软折行的那一格空格属于这一行(公式宽度单,2026-09-06,已落地;`crates/bt-term/src/session.rs`)
+
+**由头是用户对 `dist\folio-next38.exe` 的验收:同一段 Claude Code 输出里,`p(x)` 和贝叶斯两块排出来了,带约束的优化那块是源码;把窗口拉窄以后倒过来——那块排出来了,另外两块变成源码。** 用户的话是「在 2.8K 屏幕上不渲染,甚至有时候窗口再小一些其它公式没渲染了它反而渲染了」,4K 上全都排得出来。这不是「窄了就不行」,所以也不能用任何一条阈值去解释它。
+
+**真因是一处一半的规矩。** 一行比 pane 宽的时候,终端把它折到下一行(vendor 的 `WRAPLINE`),检测器再把这些物理行**拼回逻辑行**来扫。拼的时候每一行都走 `captured_row_text_and_boundaries`——它把行尾的空白裁掉。**对一个结束了逻辑行的行,这是对的**:那些空格是右边缘的填充,从来没有人写过它们;**对一个还要接下去的行,这是错的**——折点由窗宽决定,它完全可以正好落在一个空格上,而那个空格是这一行的一个字符。裁掉它,两半就被焊在一起:`\quad g_i(\mathbf{x})` 在那个空格上折断,读回来是 `\quadg_i(\mathbf{x})`,MiTeX 答 `unknown command: \quadg`,整块掉回源码——**只在那一个窗宽上**。
+
+**量出来的,不是推的。** 用户报告里那三块公式原样喂进 30 行的活屏,列宽从 20 扫到 60:
+- 24 列:`\quad \text{s.t.} \quad` 正好是 24 个字符(含末尾那个空格),折点落在它上面,优化块 `failure_reason = "MiTeX conversion failed: error: unknown command: \quadg"`,源码。
+- 同一台上 100 列:三块全是图。
+- 贝叶斯块更阴:24 列时折点落在 `\frac{P(B ` 的空格上,`P(B \mid A)` 读成 `P(B\mid A)`——**LaTeX 认这个写法,所以它照样排出来了,只是排的不是屏幕上那行字**。一条「排出来了没有」的断言看不见这一桩,所以钉子比的是**源码字符串**,不是图片张数。
+
+**实机 A/B(`dist\folio-next38.exe` 对本片的 debug 构建,同一台、同一份脚本、同一扇 900×800 的窗 = 48 列,隔离 `APPDATA`,`BT_DECOR_TRACE` 逐帧记录)。** 脚本印三块只差一两个字符的公式,`x+x+…+x` 填到指定长度再接 `\quad g(x)=0`:C1 整行放得下,C2 让折点正好落在 `\quad` 后面那个空格上,C3 让它早一列。
+- **修前**:C1、C3 `state=rendered`;C2 `state=failed reason=MiTeX conversion failed: error: unknown command: \quadg`,记下的源码是 `…xx\quadg(x)=0`——**空格没了**,屏幕上是源码。
+- **修后**:同一份脚本、同一扇窗,三块全是 `state=rendered`,三条源码都是 `…\quad g(x)=0`。
+
+同一段文本、同一扇窗、同一帧——**一列窗宽就是全部的差别**。
+
+**一句诚实的界限。** 截图只留下屏幕上的字,留不下 Claude Code 真正写进 PTY 的那串字节(它自己的缩进、自己的换行、以及它那一遍 markdown 把 `\;` 吃成 `;` 之后到底剩几个空格),所以「那一扇 2.8K 的窗当时正好折在哪个空格上」无法从图里证明。能证明的是:**这条缺口本身会按窗宽逐列地把 `$$` 块在「图」和「源码」之间翻面**,而且它就在用户看到那三块公式的那条路上。修完之后,同样那三块在 20–60 列的每一档都是图,源码逐字相同——那一档窗宽落在哪里都不再有第二种答案。
+
+**裁决:一行折在哪一列是窗宽的事,不是文本的事。任何把 WRAPLINE 连起来的物理行拼成逻辑行的地方,一个「还要接下去」的行保留它真实的行尾空白,一个「结束了逻辑行」的行照旧丢掉右边缘填充。** 这条规矩本来就写在原先那只 `captured_row_text_and_boundaries_preserving_trailing_glyphs` 包装的文档注释上(它现在并入下面那个函数,不再单独存在),而且本地图片路径那两个拼接器(`live_logical_line_containing`、`for_each_live_logical_line`)一直在遵守它——**公式/表格的检测上下文 `live_detection_context` 没有**,于是同一条规矩在四个拼接器里只落实了两个。现在它是**一个函数** `captured_row_logical_text_and_boundaries(row)`(`row.continues` 就是那个问题的答案),四个拼接器都读它,加上 `visible_text_between` 与 `semantic_reflow_text` 两只 OSC 133 见证——后者的文档注释自己写着「纯宽度 reflow 不改变这个字符串」,而裁空白恰恰让它改变。行内那两处 `if captured.continues {...} else {...}` 一并收进这个函数,规矩不再有第二个写法。
+
+**这条规矩不是新立的,冻结那一侧一直在遵守它。** `bt-transcript` 把物理行冻成一条 transcript 行的地方写着一模一样的话——「A WRAPLINE fragment owns every cell through its wrap boundary. In particular a space in the final column is source text, not padding; trimming it turns "find path" into "findpath" when logical rows are later rejoined.」——并且只在 `!continues` 时才削右边缘。**所以真正的缺口是:同一句话,冻结面写下了,活屏的检测上下文没有。** 这一片做的事就是让活屏读到冻结面早就在读的那条线。
+
+**没有动检测器、没有动阈值、没有为公式开例外。** 折点落在空格上是终端的正常行为,不是一种要被特判的输入;要改的是「同一次拼接对两种行两种读法」这件事本身。代价为零:同一个 `captured_row_text_and_boundaries_with_trailing_glyphs`,只是它的第二个参数从常量变成了行自己的 `continues`。
+
+**钉子(`crates/bt-term/src/session.rs`)**:`a_block_soft_wrapped_on_a_space_keeps_the_space_and_typesets`(24 列的优化块必须带着 `\quad g_i`、无 `failure_reason`、有 artifact)、`a_wrapped_block_reads_the_same_source_at_every_pane_width`(20–60 列每一档的三块源码必须与 100 列逐字相同,并且都排得出来——贝叶斯那桩只有这一条抓得住)。**变异红证**:把那个参数改回常量 `false`(修前的行为)→ 两条全红,第一条报 `\quad \text{s.t.} \quadg_i(\mathbf{x})`,第二条在 20 列就报 `g_i(\mathbf{x})\le 0,;`。
+
+
+### 4.6b 一扇窗从一个块的中间开头,不需要先有一段历史才算数(公式活性单第三片,2026-09-06,已落地;`crates/bt-detect/src/lib.rs`)
+
+**由头是用户对 `dist\folio-next39.exe`(= `46dc96c`,§4.6 与 §4.6a 两修都在里面)的验收:同一段 Claude Code 输出里,麦克斯韦、正态密度、贝叶斯三块都是图,最后那块带约束的优化仍旧是源码。** 这一次用户交了 `BT_DECOR_TRACE`,于是不必再猜。
+
+**取证:那个块不是「排失败」,是根本没被看见。** 逐帧记录里最后那一屏(frame 184–208,`screen=Alternate`)每一帧的 LIVE 名单都只有三条——`\begin{aligned}` 的 `rendered`、`p(x)` 的 `rendered`、`P(A \mid B)` 的 `stale`——而屏幕上明明还有第四个块。**全文件没有一条 `state=failed`。** 更早的两段能对上因果:同一个块在 Primary 那一段(log 131–155)是 `row=32 band=32-35 state=rendered`,在 Alternate 的 frame 91–103 也是 `row=32 band=32-35 state=rendered`;frame 104 一次 resize 之后内容整体上移九行(`p(x)` 20-22 → 8-11、`P(A \mid B)` 24-26 → 15-17,同一个 −9),从那一刻起,这块屏上**再没有任何一个块被新证成过**——三张图全是移位保留下来的旧记录,那条 `stale` 就是「还挂着旧光栅、重排再没落地」的样子。
+
+**真因是一处证据的挂靠点。** `clipped_open_index` 就是为这个拓扑写的:活屏第 0 行落在一个块的**正文**里,它的开定界符已经不在屏上了,于是屏上第一个 `$$` 其实是那个块的**闭**定界符;把它读成「开」,后面每一个 `$$` 都被挪了一位,`$$…$$` 每一对夹住的都是一行标题而不是公式,逐对被当成散文否掉,而屏幕最下面那个真块**连配对都轮不到**。这条证据本来是对的,但它的第二个参数一直是 `live_grid_boundary_index`——**冻结→活屏的那道接缝**,而那个函数对「第一条逻辑行就是 grid」的窗口明写返回 `None`。于是:**这个拓扑唯一会自己发生的那块屏,恰好是唯一说不出这句话的那块屏。** 备用屏上的程序占着整扇窗,内容上移是它自己重画出来的,不是滚出去的——没有行被移除,`alternate_detection_context` 无从被推进,第 0 行就这么落在了一个块的中间;而备用屏没有冻结前缀,`live_grid_boundary_index` 返回 `None`,剪口证据当场失效。
+
+**裁决:剪口问的是「这块屏是不是从一个块的中间开头」,这句话和它前面站没站着一段冻结历史无关。** 证据改挂 `live_grid_first_index`(第一条带 grid 片段的逻辑行,不加 `> 0` 过滤);接缝那一个仍旧是 `live_grid_boundary_index`,一个字没动——它服务的是另一条规矩(幻影开定界符的放弃),那条规矩确实只在有冻结前缀可被污染时才有东西要修,而「备用屏那截合法截断的前缀照旧自己配对」也正是靠它保持不变。**同一个坐标上问的是两个问题,现在它们各有各的函数。**
+
+**判据本身要收紧,因为它现在够得到的屏幕多了一整类。** 剪口判据原先只问「`$$` 前面那几行像不像一段 display 正文」,而 `valid_display_body` 只会否掉散文;`prose` 这样一个不含空格的独词读起来不像散文,于是「一行普通文字 + 一个块」的屏幕会被判成剪口,把那个块自己的开定界符当成上方块的闭定界符吃掉——`cargo test --workspace` 当场十条红,包括 §4.6 与 §4.6a 自己的钉子(`a_wrapped_block_reads_the_same_source_at_every_pane_width` 报的是三块只剩 `{"prose"}`)。**补上的是这个仓库自己已经用了两遍的那条收敛守卫**(`grid_dollars_opens_valid_block`,幻影开定界符见证的后一半):一个对称的 `$$` 永远不靠猜来改读法,只有在**当前读法被证伪**时才改。当前读法就是「它是一个普通的开定界符」——如果照这个读法往前配,配得出一个合法的块,那就没有任何东西需要修,剪口一律沉默,不管它上面那几行长什么样。而一个真的剪口**在构造上**过不了这一关:剪口闭定界符后面的那个 `$$` 是下一个块的**开**,从闭定界符往前配只会把两者之间的标题夹进来,当场被否。
+
+**顺带补上剪口判据里另一个此前够不到的假阳性。** 判据要求 `$$` 前面那几行构成一段合法的 display 正文,而 `valid_display_body` 只会否掉散文;一行光秃秃的 ```` ``` ```` 是一个不含空格的 token,读起来不像散文——于是一段代码围栏里的 `$$` 会被判成剪口的闭定界符。围栏在扫描器里是整段跳过的,围栏里的 `$$` 是惰性文本,所以判据现在多问一句:候选 `$$` 之前那几行里不许有 CommonMark 围栏起始。**这条不是新规矩,是把扫描器早就在遵守的那条写进判据**——此前它够不到,只因为那条路在备用屏上从来没走通过。
+
+**钉子**:`crates/bt-detect/src/lib.rs` `a_grid_only_clipped_open_closer_is_contained_and_the_block_below_re_pairs`(纯 grid 窗口:剪口被当作 above-window closer 收下,下面那个块重新配上对并被检出);`crates/bt-term/src/session.rs` `a_block_below_a_clipped_open_block_typesets_on_the_alternate_screen`(用户那一屏原样重建——一个开定界符已不在屏上的块的尾巴,后面跟着报告里那三块,52 列备用屏,真引擎:三块都要有 artifact、都不许有 `failure_reason`)。**变异红证**:把剪口证据改回挂 `live_grid_boundary_index`(修前的行为)→ 两条全红,session 那条报的是 `live_decorations` 为 `[]`——**整屏一个块都没有**,与 trace 里那三条全是旧记录、第四块一条 LIVE 都没有的形状逐字对上;把围栏那一句拿掉 → `code_fenced_dollars_is_a_legitimate_code_context_rejection` 红(围栏里的 `$$` 被误判成剪口孤儿);把收敛守卫拿掉 → `cargo test --workspace` 十条红,其中 §4.6 与 §4.6a 自己的四条钉子在列。
+
+**一句诚实的界限。** 用户那次的 `BT_PTY_DUMP` 只留下了第一块 pane 的字节:`BT_PTY_DUMP` 指的是**这一轮第一份录音**的文件名,后开的每一块 pane 各自取 `<path>.2`、`<path>.3`(`crates/bt-pty/src/lib.rs`),而 Claude Code 那块 pane 不是第一块。所以「Claude Code 当时到底往 PTY 里写了哪几个字节」这一层没有被证,被证的是:**这个拓扑本身会把备用屏上一整屏的 `$$` 块从「图」翻成「源码」,而且它就在用户那条 trace 的形状上。**
+
 ## 5. 数学渲染管线（M-1 spike）
 
 同 v3（三路径、300+ 样本含恶意输入、进程隔离开销验证、缓存键含 detection_rev + LayoutKey）。
@@ -2367,17 +2413,17 @@ else                           { Flash }    // 被压住了,但任务栏还在,�
 
 **裁决:交界处 ±8 逻辑像素是插入带,带内一律判插入,优先级高于并入。** 竖向列按 `y`、横向条按 `x`——这是 R3 那句「一个判断,换一个坐标」原样再用一次,所以 `TabRun::aim` 是一个函数、三张面(条、列、卡片列)各调一次,没有第二套规矩。**列表首尾各留同宽的带**:`TabRun::seams` 数的是**缝**而不是条目,`slots + 1` 条,编号与 `insert_index_at` 的编号是同一套,所以带给出的答案能原样交给 `strip_insert_slot` 那道 N158 钳位——读者看的那条线和松手插进去的那个槽仍是一个数。**带外一个像素都没变**:不在带里就走中点走位,与这条裁决之前逐字相同。
 
-**互斥不是画法上的约定,是把「并入」赖以成立的那件事扣住。** 带内时 `over` 直接是 `None`——不是「先算出手底下是谁、再决定不画」,而是并入这个动词赖以成立的那个事实根本没被答出来。裁决的原话是「插入线与并入预览互斥」,而两幅画同时不出现的唯一稳当写法,是它们读的是同一个 `aim` 的两个互斥分支。
+**互斥不是画法上的约定,是把「并入」赖以成立的那件事扣住。** 带内时 `over` 直接是 `None`——不是「先算出手底下是谁、再决定不画」,而是并入这个动词赖以成立的那个事实根本没被答出来。裁决的原话是「插入线与并入预览互斥」——那条线当日稍晚被同一位用户撤掉(见下一段),互斥的两幅画因此是**替身槽**与并入预览,而这条纪律一个字未变:两幅画同时不出现的唯一稳当写法,是它们读的是同一个 `aim` 的两个互斥分支。
 
-**滞回 4px,而它必须有状态。** 进带 ±8、出带 ±12。手停在正好 8px 上时,一像素的抖动会让这张面上**最响的两幅画**——一条插入线和一整枚 tab 的落点洗色——逐帧对调,那正是裁决里「不闪烁」三个字说的事。记忆只有一个数:`Drag::seam`,存的是**生的缝号**而不是钳位后的槽号(钳位会把两条缝并成一个槽,记槽号就说不清手到底站在哪条缝里);它挂在 `Drag` 上而不是窗口上,理由与 `Drag::spring` 一样——这是**这一次手势**的事实,必须与它一同死掉。手离开 tab 列(去了正文、去了别扇窗的玻璃、回到自己的原地)时 `survey_drop` 把它清空,否则一次「出去又回来」会白拿那 12px 的宽赦。
+**滞回 4px,而它必须有状态。** 进带 ±8、出带 ±12。手停在正好 8px 上时,一像素的抖动会让这张面上**最响的两幅画**——列表为替身开出来的那个槽和一整枚 tab 的落点洗色——逐帧对调,那正是裁决里「不闪烁」三个字说的事。记忆只有一个数:`Drag::seam`,存的是**生的缝号**而不是钳位后的槽号(钳位会把两条缝并成一个槽,记槽号就说不清手到底站在哪条缝里);它挂在 `Drag` 上而不是窗口上,理由与 `Drag::spring` 一样——这是**这一次手势**的事实,必须与它一同死掉。手离开 tab 列(去了正文、去了别扇窗的玻璃、回到自己的原地)时 `survey_drop` 把它清空,否则一次「出去又回来」会白拿那 12px 的宽赦。
 
-**插入线:2px 强调色,竖列画横线、横条画竖线,两端各一枚小圆点。** `insertion_line_sprites` 一处几何,三张面各调一次——三个各画各的插入记号,迟早会变成三种插入记号。圆点按自己的半径**内缩**而不是骑在线的两端上:骑着会有半枚点掉到条目框外,而那在列上是面板外、在条上是标题栏,两处都各有自己的裁切。线画在替身槽的**前缘**,也就是缝本身;替身说的是「什么要来」,这条线说的是「缝在哪儿」。裁切照各面既有的那一句:条上沿用 `within_strip`,列上**看缝自己在不在 clip 里**而不是看整行(`clip_to_list` 会把上缘推到列底,而上缘正是这枚记号所指的那个坐标)。
+**插入的画面只有替身自己,没有第二枚记号(用户裁决 2026-09-06,当日立当日撤;`4208a77` 的这半件从未随任何版本发出)。** 这一节最初还画了一枚记号:替身槽前缘一条 2px 强调色的线、两端各一枚内缩的小圆点,`insertion_line_sprites` 一处几何三张面各调一次。用户在 `dist\folio-next38.exe` 的实机验收里逐字判掉它——「这条两段带点的蓝色横线是哪里来的,我记得以前不是这样的,这个太丑了」。**裁决:三张面(条、列、卡片列)一律撤,替身连同它的落点洗色与内环就是插入的全部画面**,与 `4208a77` 之前逐像素相同。撤的**只是**这一枚记号:上面那条带、`TabRun::seams` / `TabRun::aim`、`StripAim`、`Drag::seam` 的滞回一个字未动,用户验收通过的正是它们。这不留下缺口,因为「插在哪两枚之间」这句话本来就是替身**自己站的那个槽**说出的——它站在哪儿,松手就插在哪儿,而那是一整枚条目那么大的一句话,不是一条两像素的线。`insertion_line_sprites` 与 `TAB_INSERT_LINE_LOGICAL_PX` / `TAB_INSERT_DOT_LOGICAL_PX` 随之删除,三处调用点一并撤回。
 
 **明说没做的一件:跨窗那条路照旧。** `foreign_strip_landing` 里仍是中点走位,一个字未改。理由不是省事:滞回是**手上的**状态,而那条路上握着手势的是**另一扇窗**,目标窗每收到一次询问都是无记忆的一次;把带装上去而没有滞回,就是把「不闪烁」那半句裁决在跨窗时反着做一遍。要做它得先给 broker 一处存缝号的地方,那是它自己的一片。
 
-**红线(`seats.rs`)。** `a_run_has_one_more_seam_than_it_has_entries`(缝数、首尾、内缝取中点、空列表无缝)、`a_pointer_in_a_joins_band_is_inserting_and_a_pointer_clear_of_it_is_joining`(带内→`Insert`、带外一像素→`Into`、首尾带,两轴各一遍)、`the_bands_eight_pixels_are_logical_ones`(乘 scale)、`a_seam_is_harder_to_leave_than_to_enter`(滞回两向 + 陈旧的 latch 不越过手真正所在的缝)、`a_seam_outside_the_clip_box_is_not_there_to_be_pointed_at`(缺陷 #188 那句话问在带上)。
+**红线(`seats.rs`)。** `a_run_has_one_more_seam_than_it_has_entries`(缝数、首尾、内缝取中点、空列表无缝)、`a_pointer_in_a_joins_band_is_inserting_and_a_pointer_clear_of_it_is_joining`(带内→`Insert`、带外一像素→`Into`、首尾带,两轴各一遍)、`the_bands_eight_pixels_are_logical_ones`(乘 scale)、`a_seam_is_harder_to_leave_than_to_enter`(滞回两向 + 陈旧的 latch 不越过手真正所在的缝)、`a_seam_outside_the_clip_box_is_not_there_to_be_pointed_at`(缺陷 #188 那句话问在带上)、以及撤线那一条 `a_stand_in_says_where_a_tab_lands_without_a_line_across_it`(三张面各问一遍:没有强调色的 `Fill`、没有小到只能是端点的强调色 `ControlPill`,而替身的洗色与内环仍在)。
 
-**日期:2026-09-06 用户实机报缺并当日裁决、当日落地。**
+**日期:2026-09-06 用户实机报缺并当日裁决、当日落地;同日晚用户实机验收 `dist\folio-next38.exe`,撤掉插入线,带保留。**
 
 **7.1.6l 单 pane 缩放(zoom;Claude 定 2026-08-24,§7.1.6b′ 特意留空的那个手势兑现;`crates/bt-app/src/{seats,profiles,main,marks,i18n}.rs`、`design/ui-mockup.html` 同日回写)。** **这一块只有一句话:zoom 是视口姿势,不是树手术。** 分屏里把一枚 pane 临时放大占满整个舞台,再来一次还原;树一个字不动。它落在这里而不是别处,是因为 §7.1.6b′「撤除的两扇门」那一段在撤掉双击 pane 头时,同一口气点了名:「这个手势因此被特意留空:它天生是**单 pane 缩放**的形状,那个功能的布局原语(`bt-layout` 的 `LayoutMode::Focus` / `solve_focused`)正为它留着不删,落地时就落在这里。」本节就是那句话的兑现——原语一行没改,`main.rs` 那条「When it lands, this is where it goes」的注释被真的代码换掉了。
 
@@ -2525,6 +2571,16 @@ else                           { Flash }    // 被压住了,但任务栏还在,�
 - **红门 `a_picture_is_placed_against_the_pane_that_holds_it_not_the_first_preview_leaf`。** 夹具是能把两个答案分开的最小值:开一枚预览 pane、**上锁**、再开一枚(锁正是让一张 tab 能有两枚的那件事),`seats.preview()` 于是答第一枚而道指着第二枚。三句断言:`picture_lane_seat` 给出第二枚;按它算出的矩形左边 == 第二枚 pane 的左边;而第一枚的矩形左边 == 第一枚 pane 的左边(这一句是让上一句**能红**的那一句)。**变异红证**:① 把 `pane_draws` 改回 `seats.preview()`(测里以「按 `seats.preview()` 摆放」建模)→ 第三句红,图落在邻居的角上;② 删掉 `picture_lane_seat` 里的 `leaf.tab == tab` → 最后一句红,后台 tab 的道会被交上本 tab 的几何。
 - **实机复验(隔离 `APPDATA`/`LOCALAPPDATA` + `BT_PTY_DUMP`,副屏 `SWP_NOACTIVATE`)。** 修前修后各走用户那条动线:开 `figure.png` → 在它旁边开 `page.html`(网页)/在它与 shell 之间插 `wait.ps1`(文本)→ 拖分隔条 → 切 tab 回来。修前两条动线各自复现出①与②;修后图始终在自己那枚 pane 的正中,分隔条拖动与 tab 往返之后仍然是。截图存在工作区之外。
 - **没做的,如实记。** `seats.preview()` 的其余读者**没有**一并改:`current_preview_buffer`(tab 标题)、卡片按钮的两处命中测试、`preview_body_rect` 都仍然是「树里第一枚预览 pane」的意思。它们中有些确实该是这个意思(标题只取一枚),有些是同一条「单枚年代」的欠账(卡片按钮的命中在两枚预览 pane 时也会答错那一枚)——但那是另一件事的另一张单子,本片只查了、只记了,没有顺手改。
+
+**7.1.6k⁷ 图片这条道从来不该只有一条:每一枚手上有画的预览 pane 都把自己的画交给渲染器(用户实机报第三桩,0.2.2 缺陷单,2026-09-06,已落地;`crates/bt-app/src/main.rs`、`crates/bt-render/src/lib.rs`)。** 用户的报告一句话:一枚开着 `figure.png` 的图片 pane,**从文件列把 `clip.mp4` 拖到它右边成为一枚视频 pane 之后,图整个不见了**,那枚 pane 里只剩元信息那一行「1870 × 1122 · PNG · 381 KB · Fit」。实机复现(隔离 `APPDATA`/`LOCALAPPDATA` + `BT_PTY_DUMP`,`ui-probe` 真拖拽)**两个次序都塌**:先图后视频塌的是图,先视频后图塌的是视频的首帧——同一条病的两件衣服。第三个事实更露骨:**把后来那枚 pane 关掉,先前那枚也不会自己回来**,因为让位的那一下把道置空了,而重新推导只发生在「生」与「搬家」两扇门上。
+
+- **真因:槽只有一个,而这不是 §7.1.6k⁵ 没修干净,是它上一层的那件事。** k⁵ 修的是「这一帧把像素摆进谁的盒子」;这一桩根本轮不到摆放——那枚图**压根没有进过渲染器**。`bt_render` 的 `set_preview_image` 是一个 `Option`,所以 `TabState::preview_raster` 记着「本 tab 哪一枚座位的像素走这条道」,`preview_picture_hosts` 据此把别的 pane **整个滤掉**,`refit_preview_picture` 对它们一次都不跑。而**视频的首帧走的正是图片这条道**(`refit_preview_picture` 里 `fitted_as_a_video` 那一支,§7.42),于是一枚 `.mp4` 落到 pane 上就是「一张图落到座上」,`preview_lane_after_landing` 照规矩把道**整个拿走**(`crates/bt-app/src/main.rs`,`open_preview_image_on`)——邻居的画就此下台。**这条稀缺从来只是渲染器的,不是读者的**:`TabState::preview_raster` 的注释自己写着「把这条道变成复数是 `bt-render` 自己的一片,不是本片的」。本片就是那一片。
+- **修法:把图片这条道改成一份名单,和文档、视频那两条一样。** `set_preview_body` 早在 slice 5 就从 `Option` 变成了 `Vec`(理由逐字相同:一张 tab 能同时开好几枚预览 pane),`set_video_layers` 生下来就是 `Vec`;只有图片这条道被落下了一整片。于是:①`WindowRenderer::set_preview_image(Option)` → **`set_preview_images(Vec<PreviewImage>)`**,整份名单每次重交——这也是它**清空**的方式,一枚不再有画的 pane 就是名单里少一条,没有谁需要记得去释放什么;②`prepare_preview_draws` 一张图一个 **stage**(视口是每张图自己的 pane 坐标,两张图不可能共用一次 `set_viewport`),顶点仍进同一个缓冲;③`PreviewImage` 多一个 **`owner`**,因为逐帧那扇门(`place_preview_image`,U8 的 FLIP)现在要在好几张里点名一张,而 `key` 是**内容**的身份——同一个文件同一尺寸开在两枚 pane 上就是同一个 `key`,拿它点名会搬错人;`owner` 由 `picture_channel_owner` 铸,取的是**座位号**(渲染器手上的图恒是台面那张 tab 的 pane,而座位号在自己 tab 里唯一,§7.12 ⓑ)。
+- **app 那半边整条道随之作废,而作废的东西比留下的多。** `TabState::preview_raster`、`preview_lane_after_landing`、`preview_raster_lane`、`picture_lane_seat` 四样一并删掉:它们全部是「谁赢得那一个槽」的推导,而现在没有谁需要赢。剩下的规则收成 `TabState::seat_pictures()` 一句话——**本 tab 里手上有画的预览 pane,按树序**——`preview_picture_hosts`(合身那一趟)与 `pane_draws`(逐帧摆放那一趟)**读同一句**,这正是 §7.1.6k⁗ 与 §7.1.6k⁵ 两桩缺陷各自的成因(同一个问题写了两遍,两处答得不一样)在这里被一次性拆掉。`refit_preview_picture` 从「往槽里写」改成「**答出这一枚该画什么**」(`Option<PreviewImage>`),由调用者收成名单一次交出去;一个还在往槽里逐枚写的函数就是选举本身换个写法——最后一枚合身的那位会是屏上唯一一位。
+- **解码与重采样一个字都不用改**(第三次出现):`peek_cache` 按路径做键、重采样按 `(内容键, 目标宽, 目标高)` 做键,两处都不含「哪枚 pane」;两枚 pane 开同一个文件本来就共用同一份解码。
+- **红门两道,一道在决定处一道在玻璃上。** ① `every_picture_is_placed_against_the_pane_that_holds_it`(`bt-app`,由 §7.1.6k⁵ 那道改写而来):两枚上了锁的预览 pane **各拿一张画**(一张 `figure.png`、一张 `clip.mp4`,正是用户的摆法),断言 `seat_pictures()` 给出**两枚**、且每一枚的矩形左边等于它自己 pane 的左边。**变异红证**:把 `seat_pictures()` 截成只留第一枚(也就是把那个选举放回去)→ 数量断言 1 vs 2 红,那正是用户的照片;把摆放改回 `seats.preview()` → 第二枚的左边断言红。② `every_picture_handed_over_is_drawn_in_its_own_pane`(`bt-render`,真适配器、真回读):两张纯色图交给渲染器,分居左右两个 pane,断言两种颜色**都**在屏上、且像素数相等(各自按自己的 pane 合身、谁也没被对方的裁剪框切掉),并当场验 `place_preview_image` 按 `owner` 点名(点不到的 owner 搬不动任何东西)。**变异红证**:`prepare_preview_draws` 只留第一条 stage → 绿色那半归零。
+- **实机复验(隔离 `APPDATA`/`LOCALAPPDATA` + `BT_PTY_DUMP`,`ui-probe` 真双击与真拖拽,窗口用 `SWP_NOACTIVATE` 挪到空闲显示器)。** 修前:图 → 拖入视频,图没了;视频 → 拖入图,视频首帧没了;关掉后来那枚,先前那枚仍旧空着。修后:同样两条动线,两枚 pane 各画各的,一枚也不掉。截图存在工作区之外。
+- **没做的,如实记。** §7.1.6k⁵ 结尾记的那笔账原样留着:`seats.preview()` 的其余读者(`current_preview_buffer`、卡片按钮的两处命中测试、`preview_body_rect`)**仍然**是「树里第一枚预览 pane」的意思,本片一个都没碰。另外,`picture_channel_owner` 对浮窗与卡片答 `u64::MAX`——它们从不下这条道,这个数只是让那个函数对每一种输入都有答案,而不是一条真的地址。
 
 **7.1.6b⁵ 卡片上的图就画那张图,而它一张也不去取(缺陷 #205,用户在 `next22` 上实机;用户裁决 2026-08-30,是 0820「第二投影加高加忠实」的延伸,已落地;`crates/bt-app/src/{focus_thumb,seats,main}.rs`)。** 用户的报告一句话:聚焦卡片模式里,含图片或视频 pane 的那张卡,该 pane 的位置画的是简化占位——文件名与 `PNG` 两个词——而不是真实画面。
 
@@ -3759,6 +3815,45 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 **探针自己撞上的两条,记在这里给下一个人**:① 投递的移动会让 winit 调 `TrackMouseEvent`,而真光标不在窗上,于是 Windows 立刻回一记 `WM_MOUSELEAVE`——**松手到达时 `pointer=none`**,一个手势永远结不掉。把真光标停在窗内(不激活、不注入)整趟手势就正常了。② 一枚**文件行**落在预览 pane 的正中是被布局的动词表拒绝的(不是本片的事),要新开一块 pane 得落在边缘带或空处。
 
 **挂账。** ① §7.14d 的 ⓐ 在本片之后变得容易碰到一点:一扇窗里的两张页现在是寻常局面,而不是两个 tab 才有的局面——静止时两块 pane 永不重叠所以结论不变,FLIP 中途那两百毫秒照旧挂着。② `MouseRoute::Forward` 在没有格子的地方松手会把闩留着——本片之前就如此,本片因为不把它拉进谓词而没有放大它,如实记在这里。
+
+#### 7.14f 一张页开在它被放下的那块 pane 上(用户实机报 next38,2026-09-06,已落地;`crates/bt-app/src/main.rs`)
+
+**用户实机(`dist\folio-next38.exe` = `448e6e8`)报两桩,原话是「这两个网页 pane 还是存在问题,一个是第二个网页 pane 的落点和我想要的位置不一样,另一个是原来在的预览就不见了」。两桩是同一根。** 从 files 列把 `page.html` 拖到一处落点上松手:落点框画在哪里,新 pane 就开在哪里——这一半从头到尾是对的;可页开在了**别处**,而且是开在读者正读着的那块预览 pane 上,把里面的 `README.md` 顶掉了,刚铸出来的那块 pane 留着「点击带虚线下划线的路径,即可在此预览」的空占位。**「落点不对」与「原来的预览不见了」是同一次导航的两面**:一张页开到了另一块 pane 上,那块 pane 里原本的东西当然就没了。
+
+**真因是一句话被写在了不该写的地方。** 一枚文件行落在边缘带上,`commit_layout_drop` 铸出叶子,`fill_row_leaf` 拿着**这个座位**走 `open_preview_onto` → `open_preview_file_on` → `open_preview_source_on` —— 一路上表面都是明写的。到了页分叉那一句,它把手里的表面**扔了**:
+
+```rust
+return match surface {
+    PreviewSurface::Float(id) => self.open_preview_web_file_on_float(id, path),
+    _ => self.open_preview_web_file(path),   // ← 表面在这一行丢掉
+};
+```
+
+`open_preview_web_file` 是**没有表面的那扇门**,它当然要问落点规则,于是 `open_web_page_with` 再问一次 `preview_landing_surface`——答案是「树序里第一块没上锁的预览 pane」,也就是读者那块。实机取证(debug,`APPDATA`/`LOCALAPPDATA`/WebView2 profile 全隔离到临时目录,`BT_MOUSE_TRACE`,2800×1560 @200%,不出外网)把这两行连在一起了:
+
+```text
+open_preview_web_file enter path=D:\Demo\page.html
+preview_landing_surface seat=SeatId(4) reused=1
+```
+
+`reused=1` 就是整桩缺陷的那一格:一次**指名了 pane 的**投放,被一块**替它作主**的 pane 接了下来。旁边那句注释当时还写着「座位是单例规则的而不是调用者选的:一个 tab 只有一张页,冲着第二块 pane 的投放不买第二个浏览器」——那正是 §7.14e ② 当天退役掉的那条每 tab 单例的最后一具残骸:规则从 `open_web_page_with` 里拿走了,这一处却还照着它的旧理由在丢表面。
+
+**修法是把 `open_preview_image_on` 早就写着的那句话,原样说给第三条道。** 那句话是:*「一次预览的中心把它显示在这里」指的就是这块 pane,落点规则不许被重问——你瞄的那块 pane 就是接住这个文件的那块,不论它是不是一次寻常打开会选中的那块。* 图片道从 P84 起就是这么写的,文档道也是;页道从来没有。所以:
+
+- **`open_preview_web_file_on(surface, path)` 是新的那一半**:canonicalize、`Mint::file`、两条拒绝、再按表面分叉——`Seat(leaf)` 走 `open_minted_page_on`,`Float(id)` 走 `open_minted_page_on_float`(§7.39 那扇门原样,只是不再自己去问磁盘),`Peek` 一张悬停卡不起引擎(§7.14a 的理由逐字成立)、写一行取证就返回。**两条拒绝也落在调用者给的表面上**,与 §7.39 给浮窗定的是同一条:磁盘那句话属于读者正在看的地方,也就是他瞄的地方。`land_page_refusal` 那个自己挑座位的孪生门因此整个退役。
+- **`open_preview_web_file(path)` 只剩「没有表面的那扇门」该做的事**:问一次落点规则,再把答案交给上面那一半。**它也保留了原来那一记 `focus_seat`**——`open_web_page_with` 一直是「选 pane 的门顺手把键盘给它」这一对,而一张拒绝卡不是一张页,不动键盘。改法特意让**行为一个字没变**的是这条路:双击一个 `.html`、终端里点一条 `.html` 路径、把 `notes.md` 改名成 `notes.html`,三者照旧落在同一块 pane 上、照旧拿到键盘。
+- **`open_preview_source_on` 的页分叉收成一行** `return self.open_preview_web_file_on(surface, path);`。一张页是一个预览缓冲(§7.9),那么它落在哪里**根本不是页道的问题**:上游每一扇门都已经答过了。浮窗那一臂不再是「例外」,而是同一句话的第二条臂。
+
+**这一改顺手治好的,不只是拖到边缘带那一种。** 同一条分叉底下站着的还有:落在一块**上了锁**的预览 pane 正中的 retarget(`retarget_row_drop`,动词表 `RowVerb::Retarget`)、悬停卡抬成浮窗时的页(§7.39)、以及任何未来拿着表面进来的门。**改名那扇门也一并归队**(`rename_preview_file`):它手里一直有表面——那是它可能要挂 toast 的地方——而把一块**上了锁**的 pane 里的 `notes.md` 改成 `notes.html`,从前会把页开到别处去,留下那块 pane 指着一个磁盘上已经没有的名字。一处减法说一次,而不是一处调用点记一次。
+
+**红门四扇(`a_page_lands_where_it_was_aimed_tests`,读源码文本,理由与 `pages_are_plural_tests` 逐字相同:修的就是「一个问题在哪扇门被问」,而 `WindowRuntime` 是一台合成器加一台浏览器,「页落在了铸出来的那个座位上」不是这个进程没有屏幕时说得出的句子)。** 本模块的 `body()` 与邻居的**不一样**:它切到函数**自己**第四列的 `}`,而不是切到下一个 `fn`——后者会把下一个函数的文档注释吞进来,而这四扇钉的全是「一个函数体**没有**说什么」。① `a_door_that_was_told_a_surface_never_chooses_another`——十扇「被告知了表面」的门,逐个不许出现 `preview_landing_surface`,也不许调用七种「自己挑表面」的拼写(变异:把 `_ => self.open_preview_web_file(path)` 放回去,它当场点名是哪扇门、哪个拼写);② `the_page_lane_opens_on_the_surface_it_was_handed`——池子那扇门把表面整个传下去;③ `the_named_page_door_opens_on_the_surface_and_refuses_on_it_too`——两条臂各在,且两条拒绝**都**落在给定表面上(`land_page_refusal_on` 恰好两次);④ `the_doors_with_no_surface_are_the_ones_that_ask_the_landing_rule`——**落点规则没有被删掉,只是搬到了没有表面的那四扇门上**,这是单纯做减法会做错的另一半。
+
+**实机复验(同一套隔离环境与同一条手势)。** 修前后各跑一次,同一序列:`--cwd D:\Demo` 起窗 → `Ctrl+Shift+B` 开 files 列 → 双击 `paper.pdf`(页开在铸出来的落点 pane 上)→ 把 `README.md` 拖到窗左侧 rim(文档道,落在铸出来的那块,树序第一)→ 把 `page.html` 拖到终端 pane 的下边缘带。修前:页开在最左边那块 README 的 pane 上、README 没了,下边缘那块空着。修后:页开在下边缘刚铸出来的那块 pane 上,最左边那块 README 一字未动。
+
+**探针自己撞上的一条,记在这里给下一个人。** 一扇 1920×1200 物理 @200%(=960×600 逻辑)的窗子里,**第四块 pane 塞不下**:`plan.fits()` 为假,投放走 `settle_home`,从外面看就是「松手什么也没发生」,而这与本单要查的缺陷长得一模一样。把窗子放大到 2800×1560 之后同一条手势立刻成立。量落点的手势,先量窗子够不够宽。
+
+**挂账。** §7.14d 的 ⓐ 与 §7.14e 的两笔原样挂着;本片不新增。
+
 
 ### 7.17 七件交互裁决，一批落地（2026-08-25 用户裁决 B1/B4/B5/B7/B9/B10 + Cards 改名；`crates/bt-app/src/{main,seats,profiles,restore,shortcuts,i18n,webhost}.rs`、`crates/bt-layout/src/tree.rs`）
 
@@ -7176,9 +7271,26 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 - **忘只在有答案落地的那一刻发生。** `retain_file_indexes` 挂在 `apply_file_index_results` 上,所以一个「开过面板、随后关掉文件列、再也没开过面板」的根,它那份索引会一直留到下一份索引落地为止。留着的量是有界的(一个根至多三万条),而且它本来就是在那一列开着的时候付过的;要做得更干净,得给「谁还想要这个根」找一个不依赖答案到达的时刻。记明账。
 - **面板不带自己的进出动画的第二段。** 它按 `Travel::Down` 进,`arrival::Passages` 照常给它一次退场;但它不是从任何控件里长出来的,所以那个方向是一句约定而不是一次推导。
 
-### 7.56 一张只出现一次的卡:把「这台机器允许 Folio 碰多少」四个问题合成一次问,答案仍旧走设置页那一扇门(0.2.2 初次设置卡,用户裁决 2026-09-06,已落地;`crates/bt-app/src/first_run.rs`(新)、`crates/bt-app/src/{main,settings,i18n,persist,attention_copilot}.rs`、`crates/bt-persist/src/{settings,migrate,lib}.rs`)
+### 7.56 一张只出现一次的卡:把「这台机器允许 Folio 碰多少」四个问题合成一次问,答案仍旧走设置页那一扇门(0.2.2 初次设置卡,用户裁决 2026-09-06,已落地;**v4 改版 2026-09-06**,见 ⓪;`crates/bt-app/src/first_run.rs`(新)、`crates/bt-app/src/{main,settings,i18n,persist,tooltip,attention_copilot}.rs`、`crates/bt-persist/src/{settings,migrate,lib}.rs`)
 
 `profiles.rs` 里那句话在这一节之前一直是真的:仓里没有 `first_run`、没有 `onboarding`、没有 `seen_once`,整个教学面就是提示条、菜单行、贴士卡和设置页里的五句话——**一个没有行的动词只能靠意外被学会**。这一节把其中会在 `%APPDATA%\Folio` **之外**留下痕迹的那几个,合成一张窗内模态卡,在一台从没跑过 Folio 的机器上出现一次。
+
+#### ⓪ v4:字太多(用户裁决 2026-09-06,同日改版)
+
+v3 那张卡按本节其余各段的样子落地进了未发布的 0.2.2,读者当天看了实机,裁决只有一句:
+
+> 字太多，不够美观，毕竟这是第一次就会跳出来，是第一印象
+
+一句话两半——**字太多**,以及**这是第一印象**——下面每一条都从这里来。v3 给六行里的每一行配一个粗体标题加一到两行解释,于是一张读者用了四秒钟就会撞上的卡上摊着七段散文。它是对的,而且没法读。
+
+1. **一个头。** 22 逻辑像素的 Folio 标记 + `Welcome to Folio` /「欢迎使用 Folio」。**标题下面那一行淡句被撤掉**(同日第二次裁决):一张只有六行短句的卡不需要先解释一句自己为什么在。标记就是 `design/assets/app-icon/folio.ico`——`build.rs` 链进 `folio.exe` 的那一枚,不是重画的(见 ⑦)。
+2. **一行一句,而这一句就是结果。** 粗体标题与它下面的解释合成一条 13px 的行:*Get told when a new version of Folio is out*。这是「字太多」那半句的全部。v3 立的规矩(先说结果、再给读者自己那份文件的地址)**说对了要说什么、说错了要说多少**:地址是真的,但它不是第一印象该拿的东西。
+3. **机制搬进逐行 tooltip。** 每一句点名 `$PROFILE`、`~/.claude/settings.json` 或一份日期副本的话,现在住在那一行的 tooltip 里,用这扇窗自己的 `.tip`(`tooltip.rs`,同一个宿主、同一口钟、同一只盒子)。**读者仍旧被欠着他自己文件的地址**——v3 §10.1 立的那条今天照样成立——**但欠着不等于不问自来地摊开**。设置页那份长文一字未动。
+4. **agent 行不画标记,组标题删掉。** `AGENTS FOUND ON THIS MACHINE` /「本机检测到的 agent」**删除**,换成一道 `--border` 细线,上下各留 9px 空气,把 Folio 自己的三行与 agent 三行分开。v4 的第一稿曾在三条 agent 行头上各画一枚 16px 剪影,当日被裁掉:**六行统一左对齐在同一个 x 上**。理由不是省像素——一枚重复三次、只靠颜色区分的剪影,对一个色盲读者等于零,而行里已经用字写着是哪个 agent。
+5. **脚是两个按钮加一句最淡的话。** `Every row here is also a row in Settings.` /「所有选项都可在设置中更改」,11px `--ink3`;`Open settings` 那条强调色链接**撤掉**,脚上那道细线也撤掉。于是那一行是一句**陈述**而不是一个可按的东西,`Tab` 环也随之少一站(见 ⑧)。
+6. **440 而不是 480,行高 42 且行间有细线。**(见 ⑦)
+
+**一个可量的副作用:卡不再滚了。** v3 在参照窗上需要 376 逻辑像素的身体而只有 315 的地方,于是每一个读者的第一次启动都是一张开着就已经被裁掉的卡;v4 需要 273、有 308。滚动机制原样留着,但它从此是短窗的事而不是常态(见 ⑦、⑨)。
 
 #### ① 它问的是一个决定,不是四个
 
@@ -7199,7 +7311,7 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 一行 Folio 只能拒绝的行,根本不列。拒绝的解释句设置页上已经有了(`DescExplorerFirstPageNoPackage`、`DescCopilotHooksTooOld`、`DescCopilotHooksDisabled`),而那一页正是这种形状的句子该待的地方。**卡上任何一句话都不描述一件不存在的事**。
 
 - **资源管理器**:一个开关。Windows 11 且 `folio.msix` 就在 `folio.exe` 旁边时,它同时是首页项和 `Show more options` 里的老菜单项;否则只是老菜单项,句子换成 Windows 10 那一句。**没有包时这一行仍然出现**——开关于是意味着它能意味的那一半,而不是把一台解包时漏了 `.msix` 的 Windows 11 连老菜单一起剥夺。
-- **agent**:只列在这台机器上找得到、且它自己的配置文件里还没有 Folio 的。「找得到」用的是 picker 给行置灰用的同一次查找(`ProfilePrograms::is_available`),不是第二次;写第二次查找的代价是卡可以为一个 picker 说没装的程序开一行。三个都没有时,组标题连同它的行一起消失,卡短四行,而不是空四行。
+- **agent**:只列在这台机器上找得到、且它自己的配置文件里还没有 Folio 的。「找得到」用的是 picker 给行置灰用的同一次查找(`ProfilePrograms::is_available`),不是第二次;写第二次查找的代价是卡可以为一个 picker 说没装的程序开一行。三个都没有时,**那道分组细线连同它的行一起消失**,卡短三行,而不是空三行——这条规矩 v4 一字未改,变的只是挂在第一条 agent 行上的东西:v3 挂的是组标题,v4 挂的是一道细线(`Row::divider_above`,⓪ 第 4 条)。
 - **copilot 那一行等探测**。`1.0.26` 以下的 copilot 会被 `attention_copilot::apply` 拒绝,而**在按下之前就知道的拒绝从来不是一次失败**(见 ⑤)——所以卡在 `copilot` 在 PATH 上时先起 `begin_probe()`,等 `probe_settled()` 才升起。`probe()` 把「还没回来」和「回来了但什么都没有」折成同一个 `None`(对 `readiness_from` 是对的:两者都不是拒绝),只有这一个调用者要把它们分开,所以 `probe_settled` 是为它加的。
 
 #### ④ PowerShell 那一行记的是意图,不是答案
@@ -7228,23 +7340,45 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 
 红门是逐行断言的,而且是拿 `crate::settings` **自己的**行读取器断言的:一个指错行、或把 `FORMULA_OPTIONS`(`[true, false]`,所以答案就是它自己的下标)索引反了的目标,会以 `None` 或以 `false` 回来。
 
-#### ⑦ 几何:`restore.rs` 的手艺,设置页的行形
+#### ⑦ 几何:`restore.rs` 的手艺,设置页的行形(v4,2026-09-06 重写)
 
-同一张 `push_float_window` 的面、同一对 `.btn`、同一个 `restore::wrap`。行形是**设置页的**——句子在左、控件在右——因为一个刚被交了六行这种形状的读者,下次打开设置去改其中一行时该遇到同一种形状;它也把整张卡的宽度交给句子,而不是让每一行都缩进过一个控件列。控件是 `.aswitch`,到像素:30 × 18、圆角 9,轨道关时 `--active`、开时 `--accent`,滑块 14 × 14 内缩 2、`--menu` 面、`0 1px 3px rgba(0,0,0,.25)`;右边缘落在卡自己的 padding 上,**竖直居中于该行标题的第一行**,所以一行三句的句子不会把它的控件拖下去。
+同一张 `push_float_window` 的面、同一对 `.btn`、同一个 `restore::wrap`。行形是**设置页的**——句子在左、控件在右——因为一个刚被交了六行这种形状的读者,下次打开设置去改其中一行时该遇到同一种形状。
 
-这里唯一新的东西是**一个会滚的身体**。头(标题)与脚(细线、脚注、两个动词)钉住,中间滚:卡永不超过 `surface_height − 2 · 34` 逻辑像素,3px 的条画在右侧 padding 里(所以它出现时没有一行字会移动),被裁到的那一行在 20 逻辑像素上**淡进卡自己的地**,于是读者永远不会被展示半个字形。**钉住的脚正是滚动之所以安全的原因**:「完成」「暂不」和那句「这里的每一项也出现在设置中」永远不是滚走的那个东西。一个被裁到视口外的开关也**不再回答按下**——裁剪线是它停止被画的地方,也就是它停止回答的地方。
+**头。** 22 × 22 的 Folio 标记,左缘落在卡自己的 padding 上、竖直居中于标题的行盒;10px 之后是 15px/600 的标题。标题下面**没有第三样东西**(⓪ 第 1 条)。头之下 18px,然后是第一行。
+
+**标记是 `folio.ico` 本身,不是照着它重画的一份。** `crates/bt-app/build.rs` 读的就是 `design/assets/app-icon/folio.ico` 这一条路径并把它链成图标组 1;在一个新读者见到的第一样东西的顶上画别的,等于让第一印象和他刚双击过的那枚图标不一致。所以 `first_run.rs` `include_bytes!` 那份文件,按目录项里**未压缩的那几条**(16…64,`.ico` 只把 128 与 256 存成 PNG)取**不小于目标物理边长的最小一条**——Windows 自己挑图标的规矩,也正是 `make-folio-ico.py` 解九个尺寸而不是解一个的理由——把 BGRA、自下而上的 DIB 翻成 RGBA 交给 `ChromeIcon`。在 Rust 里把那份几何再写一遍会是第二个可以和文件走散的源头,所以读的是文件。
+
+**暗色下标记要保住自己的底板**(用户裁决 2026-09-06)。图标的地是 `#202027`,暗色卡的地是 `#202020`:差七级,于是底板消失、只剩里面那张纸悬在空处——一个无头的标记,在一个读者见到的第一样东西的顶上。裁下来的做法是**给它这张卡自己的边**:一道 `--border` 细线,圆角取底板自己的 `GROUND_RADIUS`(0.22 × 边长,与 `make-folio-ico.py` 同一个数)。亮色主题什么都不画——白地上的石墨底板不需要帮忙,一道边只会是噪音。
+
+**行。** 42 逻辑像素高,里面一条 13px 的行竖直居中,**六行全部左对齐在同一个 x 上**(⓪ 第 4 条)。同组两行之间一道 1 物理像素的 `--border-soft`;Folio 三行与 agent 三行之间一道 1 物理像素的 `--border`,上下各 9px 空气。
+
+**指针停在一行上,那一行整条亮起,而那一条整条也回答按下。** `--hover` 填充,圆角 5,向两侧各溢出 8px——那 8px **是这条带子的一部分**,不是画出来又被裁掉的边角料:亮的、能按的、挂 tip 的都是同一个 `RowRects::band`,它横向被卡自己的边界住(`Layout::body_clip`)、纵向被滚动体界住,而不是被文本列界住。**不是只有开关**——这扇窗有一条立着的规矩,§7.1.5f 立、§7.1.5g 抄了一遍:**一个只答 hover 不答 click 的记号等于本窗在对自己画的东西说谎**。一条亮起来、还挂着一句关于自己的 tooltip 的带子,如果按下去只有右端 30 像素管用,就正是那句谎。所以 `Target::Row(index)`:亮的那条 = 挂 tip 的那条 = 按下去翻开关的那条,一个矩形。
+
+**tooltip 是这扇窗自己的 `.tip`,不是第二只盒子。** `TooltipAnchorId::FirstRunRow(usize)` 进 `tooltip.rs` 已有的锚点表,于是延时(`TOOLTIP_DELAY` 380ms)、淡入、定位、材质全部是这扇窗里其它 tip 的那一套——`TipFace` 自己的文档写着为什么只能有一口钟:一个指针上两口钟,是一扇窗同时举起两只盒子的走法。**卡是模态的,所以它开着的时候锚点表里只有它的六条**:scrim 底下那些 tab 和 pane 头不该被解释,读者按不到它们。身体一滚、焦点一走,锚点跟着重建——一个锚点不许描述一个卡没在画的盒子。
+
+**控件是 `.aswitch`,到像素**:30 × 18、圆角 9,轨道关时 `--active`、开时 `--accent`,滑块 14 × 14 内缩 2、`0 1px 3px rgba(0,0,0,.25)`;右边缘落在卡自己的 padding 上,**竖直居中于整条行**(v4:行只有一句,所以居中于行与居中于第一行标题是同一件事)。
+
+**滑块那道 `0 1px 3px` 是一次模糊,不是一道描边**(用户报告 2026-09-06,一张 150% 亮色主题下的卡的照片:每个关着的开关的滑块外面围着一圈灰带)。模糊的三个像素是一条梯度——那四分之一的 alpha 贴着滑块,走完自己的射程就没了。`rounded_overlay_halo` 把整个四分之一发给全部三个像素,而三个逻辑像素在 150% 上是五个物理像素,比滑块与轨道边缘之间那两个还宽:那圈环于是从轨道的上下两边探出去,读作压在开关上的第二个实心形状,而不是滑块底下的一片影。`rounded_overlay_halo` 自己的文档就写着它是哪一个——一道轮廓需要的那种精确均匀的环,也正是一片影绝不能是的东西;`rounded_overlay_shadow` 是它旁边那条落差,这张卡与这扇窗里其它每一次抬起走同一扇门。
+
+**关着的滑块在暗色下换面**(用户裁决 2026-09-06)。`.aswitch i` 两个主题都是 `--menu`,而暗色里那是 `#2A2A2A`、坐在解析成 `#343434` 的 `--active` 轨道上:六个关着的开关,每一个左端都像被戳了一个洞,而且是在这个产品迄今把它们摆过的最响的一个面上。Fluent 的暗色开关正是反过来答的——**滑块是墨**,亮色主题里是浅轨上的深滑块,暗色主题里是深轨上的浅滑块——所以关着的滑块在暗色取 `--ink`(`dialog_title_text`),也就是它旁边那行字的颜色,**不是一个新颜色**。亮色一动不动:白滑块在近白的轨道上,靠 `0 1px 3px` 那一抬分开,和小样里一样。**开着的滑块两个主题都还是 `--menu`**,这也是 Fluent 的答案:暗色的强调色是一片淡蓝,再配一个浅滑块等于把开关的状态擦掉。判据是 `background_is_light(palette.dialog_surface)`,问的是滑块实际坐着的那个平面。
+
+**脚。** 身体之下 16px,**没有细线**(v3 有一道;行自己已经带着细线了,再来一道会读成一个底下什么都没有的行边界),然后 11px `--ink3` 的那一句、14px、两个按钮、16px padding。
+
+**会滚的身体**留着,机制一字未改:头(标记、标题)与脚(那一句、两个动词)钉住,中间滚;卡永不超过 `surface_height − 2 · 34` 逻辑像素,3px 的条画在右侧 padding 里(所以它出现时没有一行字会移动),被裁到的那一行在 20 逻辑像素上**淡进卡自己的地**。**钉住的脚正是滚动之所以安全的原因**:「完成」「暂不」和那句「所有选项都可在设置中更改」永远不是滚走的那个东西。一个被裁到视口外的行也**不再回答按下、也不再有 tooltip**——裁剪线是它停止被画的地方,也就是它停止回答的地方。**在参照窗上它不滚**(⓪ 末段),所以这套机制现在扛的是短窗,以及将来某天长出来的第七行。
 
 **那道淡入与那根条是自己一层,而这不是整洁。** 一层的填充在它的字之前就收了口(`OverlayLayer` 自己的注记:「一层的三个通道在下一层的通道打开之前就完成」),所以推进同一层的淡入会铺在它本该带走的那句话**下面**。第二层于是把它放到字的上面,条又在淡入的上面——它们站的就是这个顺序。两端都淡:规格画的是脚,因为一张静止的卡裁的是那一端;身体一滞,头以完全相同的方式在裁,而半个字形不因为在哪一端被切而不是半个字形。
 
-宽 480 逻辑像素(`min(480 · scale, surface_width · 0.92)`),不是 `.restore` 的 400:开关列从句子列里拿走 42 逻辑像素,而 v1 量的 15+10 复选框列只拿走 25,480 把「搬到设置行形」花掉的那 20 像素句子原样还回来。
+**宽 440 逻辑像素**(`min(440 · scale, surface_width · 0.92)`),不是 v3 的 480。v3 那 480 是给**每行标题下面那句话**买的;句子搬进 tooltip 之后,剩下的 354 逻辑像素文本列在两种语言下都装得下每一条行句,还有富余。
 
 #### ⑧ 键盘
 
 焦点开在**第一个开关**上,不是「完成」:这是一张表单,落在主按钮上会让一次盲目的 `Enter` 答完一张没人读过的卡(`restore.rs` 的 `FOCUSED_ANSWER` 把焦点放在动词上,因为那个对话框是一个问题而不是一张表单)。环开着的时候不画——一张出生就带环的卡,是在宣称一个没人用过的键盘。
 
-`Tab`/`Shift+Tab` 按视觉序走每个开关 → 「打开设置」→「暂不」→「完成」→ 回绕;卡是模态的,焦点永不离开它。`↑`/`↓` 只在开关之间走,列表就是列表;从按钮进入列表,从它来的那一端进。`空格` 翻焦点上的开关,或按下焦点上的按钮/链接。`←`/`→` 是该开关的关/开,平台惯例。`Enter` 从任何一个开关按下「完成」——这是它与旁边那张 PSReadLine 邀请卡分道的唯一一处:那张卡拒绝 `Enter`,因为它的肯定项会写文件而它可能在人打字打到一半时出现;这一张出现在一台机器的第一次启动上,焦点在一行没人碰过的行上、每一行会写东西的开关都关着——所以它可能意外收到的那个 `Enter` 做的是「暂不」做的事。`Esc` 正好是「暂不」,一次按下。`Alt+F4` 走 winit 自己那条关窗路不经过这里,而它按构造算「暂不」:`Shown` 在卡升起时就写了,而在按下「完成」之前什么也没被兑现,所以不存在一条能留下半个决定的路。本产品没有 `Ctrl+W`——`Ctrl+Shift+W` 关的是 pane——所以那一条无处可落。焦点走到折叠线以下的行会把它滚进来:一个读者看不见的环不是焦点。
+`Tab`/`Shift+Tab` 按视觉序走每个开关 →「暂不」→「完成」→ 回绕;卡是模态的,焦点永不离开它。**「打开设置」不再是一站**(v4 §5:脚上剩下的是一句陈述,一句陈述不是键盘能落上去的东西)。`↑`/`↓` 只在开关之间走,列表就是列表;从按钮进入列表,从它来的那一端进。`空格` 翻焦点上的开关,或按下焦点上的按钮。`←`/`→` 是该开关的关/开,平台惯例。`Enter` 从任何一个开关按下「完成」——这是它与旁边那张 PSReadLine 邀请卡分道的唯一一处:那张卡拒绝 `Enter`,因为它的肯定项会写文件而它可能在人打字打到一半时出现;这一张出现在一台机器的第一次启动上,焦点在一行没人碰过的行上、每一行会写东西的开关都关着——所以它可能意外收到的那个 `Enter` 做的是「暂不」做的事。`Esc` 正好是「暂不」,一次按下。`Alt+F4` 走 winit 自己那条关窗路不经过这里,而它按构造算「暂不」:`Shown` 在卡升起时就写了,而在按下「完成」之前什么也没被兑现,所以不存在一条能留下半个决定的路。本产品没有 `Ctrl+W`——`Ctrl+Shift+W` 关的是 pane——所以那一条无处可落。焦点走到折叠线以下的行会把它滚进来:一个读者看不见的环不是焦点。
 
-「打开设置」**是带了一个去处的「暂不」**:按它的读者在说他宁愿到设置里去做,于是卡花掉「暂不」花掉的那些东西——什么也不花——然后打开脚注点名的那一页。把卡留在那一页上面站着是另一种读法,而它不可用:这张卡是模态的,盖在它下面的设置对话框是一个没人能按的对话框。
+**【2026-09-06 v4 撤】** 这里原本站着「打开设置」那条链接,读作「带了一个去处的『暂不』」。裁决是「脚 = 两个按钮」,而一条链接既不是按钮也不是那句淡话,于是它连同它在 `Tab` 环里的那一站一起撤掉;`Focus::OpenSettings` 与 `Target::OpenSettings` 都不再存在。脚上那句话因此是一句**陈述**:它说设置页有这些行,读者用平常的路过去。`Text::FirstRunFootnote` 与 `Text::FirstRunOpenSettings` 随之从 `i18n.rs` 删除——它们没有第二个读者,而一条谁都不显示的翻译比删掉它更糟。
+
+**tooltip 是指针的,不是键盘的。** 小样里设想过让带焦点的行也举起自己的 tooltip;这扇窗里的 `.tip` 从来只由指针驱动(一只宿主、一口钟、`observe` 收的是指针底下的锚点),为这一张卡加一条键盘驱动的路会是那口钟的第二个主人。地址没有因此丢:设置页那份长文一字未动,而卡上任何一行不靠它的 tooltip 也读得通——行句是决定,tooltip 是收据。
 
 #### ⑧′ 一扇拍照用的门
 
@@ -7258,16 +7392,42 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 
 #### ⑩ 文案
 
-中文全部由 DeepSeek 从英文事实简报写出,提示里没有本仓任何一句现成中文(不是 `i18n.rs` 的、不是 `README.zh-CN.md` 的),十轮,每一轮反馈都用英文并且只点名一个事实、一个长度或一处含糊。规则一句:**一句话说读者得到什么;然后,仅在这个开关会写一份属于读者的文件时,一句短话说写在哪里**。因此在卡上的有 `$PROFILE` 和它的日期副本、`~/.claude/settings.json`、`~/.codex/config.toml`、`~/.copilot/hooks/folio.json`;不在卡上的有「每天一次请求」「注册 `folio.msix`」「为本账户」「`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `COPILOT_HOME`」「`folio.ps1`」——前两类是我们的方法和我们的文件,第三类是我们那次写入的范围,第四类是一个设过它的读者本来就知道、没设过的读者根本没有的变量。
+中文全部由 DeepSeek 从英文事实简报写出,提示里没有本仓任何一句现成中文(不是 `i18n.rs` 的、不是 `README.zh-CN.md` 的、也不是上一版自己的),每一轮反馈都用英文并且只点名一个事实、一个长度或一处含糊。规则一句:**一句话说读者得到什么;然后,仅在这个开关会写一份属于读者的文件时,一句短话说写在哪里**——**v4 把这两句拆到两个表面上**:前一句是行,后一句是那一行的 tooltip(⓪ 第 3 条)。因此在卡的行上一个文件路径都没有,而在 tooltip 里有 `$PROFILE` 和它的日期副本、`~/.claude/settings.json`、`~/.codex/config.toml`、`~/.copilot/hooks/folio.json`;两处都不在的有「每天一次请求」「注册 `folio.msix`」「`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `COPILOT_HOME`」「`folio.ps1`」——前两类是我们的方法和我们的文件,第三类是一个设过它的读者本来就知道、没设过的读者根本没有的变量。
+
+**PowerShell 那一行带着整合自己的名字**(用户裁决 2026-09-06)。卡上其余五行只说结果,这一行不许:一个日后要去设置里改它的读者必须知道这东西叫什么,而这张卡是他唯一会被告知的地方。所以名字在前、结果在后,同一条短行——英文 `PowerShell integration lets you jump between commands`,中文「PowerShell 整合让你在已运行命令间跳转」。四条好处里只放得下一条,放的是「在跑过的命令之间跳」;公式排版那一条留在设置页那句长的里。
+
+**v4 的两句是第二次单独问出来的**(`scratchpad/firstrun/brief-v4b-en.md`、`ds_copy_v4b.py`、`ds_transcript_v4b.json`,三轮):PowerShell 那一行,以及更新那条 tooltip——它上一版把 `RELEASES_PAGE` 实际打开的那一页叫成「下载页」,而本仓其余地方一律叫**发布页**,一页两名是这两稿之间唯一一处实质分歧。其余每一句(标题、五条行句、脚上那句、其余五条 tooltip、暂不/完成)含义未变,原样从 `copy-zh-v4.json` 抄过来,**没有再送进提示**——把一句模型自己写过的中文再送回去让它改,正是这条规矩要防的事。
 
 **全站一个词:「暂不」**。PSReadLine 邀请卡的中文原来是另一句,现在不是了——两个请读者推迟的表面不该在这件事上花两个词。英文 `Not now` 一个字没动。
 
 #### ⑪ 门
 
-`the_card_is_due_only_when_there_was_no_settings_file_and_it_has_never_been_up`、`only_the_rows_this_machine_can_honour_are_offered`、`the_update_check_is_the_only_row_that_arrives_on_and_it_arrives_first`、`the_explorer_row_says_only_what_its_switch_can_mean`、`every_answer_leaves_this_card_as_the_press_the_settings_page_sends`(逐行、拿 `crate::settings` 自己的读取器断言)、`done_spends_the_rows_that_are_on_and_the_two_answers_that_are_answers`、`declining_writes_nothing_outside_the_card_s_own_state`、`the_recorded_intent_is_spent_by_the_first_shell_that_names_its_profile`、`the_settings_row_says_the_write_is_waiting_for_a_shell`、`the_focus_walks_the_card_in_a_ring_and_the_arrows_stay_in_the_list`、`the_card_opens_on_its_first_switch_with_the_ring_put_away`、`a_switch_changes_the_card_and_nothing_else_until_done`、`the_body_scrolls_and_the_two_verbs_never_do`、`walking_onto_a_row_below_the_fold_brings_it_into_view`、`a_press_outside_the_body_is_not_a_press_on_a_row`、`the_switch_is_settings_own_control_in_settings_own_row_shape`、`the_card_is_four_hundred_and_eighty_logical_or_the_window_s_own_share`(以上 `first_run.rs`);`real_settings_v31_to_v32_migration_tells_an_existing_reader_the_card_has_been_shown` 与 `a_settings_file_written_from_nothing_has_never_shown_the_card`(`bt-persist/src/migrate.rs`)。
+**卡自己的事实**:`the_card_is_due_only_when_there_was_no_settings_file_and_it_has_never_been_up`、`only_the_rows_this_machine_can_honour_are_offered`、`the_update_check_is_the_only_row_that_arrives_on_and_it_arrives_first`、`the_explorer_row_says_only_what_its_switch_can_mean`、`every_answer_leaves_this_card_as_the_press_the_settings_page_sends`(逐行、拿 `crate::settings` 自己的读取器断言)、`done_spends_the_rows_that_are_on_and_the_two_answers_that_are_answers`、`declining_writes_nothing_outside_the_card_s_own_state`、`the_recorded_intent_is_spent_by_the_first_shell_that_names_its_profile`、`the_settings_row_says_the_write_is_waiting_for_a_shell`、`the_focus_walks_the_card_in_a_ring_and_the_arrows_stay_in_the_list`、`the_card_opens_on_its_first_switch_with_the_ring_put_away`、`a_switch_changes_the_card_and_nothing_else_until_done`;`real_settings_v31_to_v32_migration_tells_an_existing_reader_the_card_has_been_shown` 与 `a_settings_file_written_from_nothing_has_never_shown_the_card`(`bt-persist/src/migrate.rs`)。
+
+**几何**:`the_body_scrolls_and_the_two_verbs_never_do`、`six_rows_fit_the_reference_window_without_a_bar`(参照窗上不滚,也不画条——⓪ 末段那句话的门)、`walking_onto_a_row_below_the_fold_brings_it_into_view`、`a_press_anywhere_on_a_row_is_a_press_on_its_switch_and_the_fade_ends_it`(整条带子回答按下,包括离开关最远的那一端;裁到视口外的行不回答)、`the_switch_is_settings_own_control_in_settings_own_row_shape`、`the_card_is_four_hundred_and_forty_logical_or_the_window_s_own_share`、`the_knob_s_shadow_falls_off_and_leaves_the_rest_of_the_track_alone`(沿滑块下缘一路读下去,量每一个物理像素上的 alpha:贴着滑块的那一格是满值,往外每一格都比前一格轻,走到射程尽头已剩不到八分之一;两种答案各量一次,而滑块不在的那一端只有轨道自己的填充。写成描边时这条侧写是 `[0.25, 0.25, 0.25, 0.25, 0.25]`)。
+
+**v4 自己的六道**(全部 `first_run.rs`):
+
+- `every_row_line_starts_on_one_x_and_the_only_picture_is_the_folio_mark` —— 六条行句的左缘是同一个数,且整张卡一枚 sprite 都不画、只有一张图片而那张就是头上的标记。红过:三条 agent 行画标记时,它们的左缘比另外三条多 26 物理像素,而 `images` 里躺着七张。
+- `the_header_is_the_shipped_mark_and_the_greeting_beside_it` —— 标记是 22 逻辑的正方、左缘在 padding 上、与标题共一个竖直中心、标题让开 22+10;取到的 `.ico` 条目不小于目标框(**只缩不放**),解出来的方阵在中间比在顶上亮 40 以上——一张淡纸压在石墨底板上,也就是说 BGRA 与自下而上两件事都翻对了。
+- `a_dark_card_gives_the_mark_the_edge_its_own_ground_takes_away` —— 暗色画那道边、亮色不画,并且那道边合成出来比它坐着的卡面亮 8 以上。
+- `every_row_hands_the_tooltip_the_file_that_row_writes` —— 每一行都有话说、话挂在**整条带子**上、四条会写读者文件的行各自点名自己那一份、六句互不相同;身体一滚,被裁到视口外的行**不再供 tooltip**,而供出来的每一个盒子都落在视口内。
+- `a_knob_that_is_off_stands_against_its_track_in_both_themes` —— 暗色里关着的滑块比它的轨道亮 24 以上;亮色那一枚原地不动仍是 `--menu`(那边分开两者的是 `0 1px 3px` 那一抬,归它自己那道门管);开着的滑块两个主题都还是 `--menu`。
+- `the_powershell_row_carries_the_integration_s_name_in_both_languages` —— 两种语言里那一行都以整合的名字**开头**,且不止那个名字。
+
+**证过是红的**(逐条变异跑过,`cargo test -p bt-app first_run`):
+
+| 变异 | 报的话 |
+| --- | --- |
+| 行句左缘按 v4 初稿为 agent 行让出 16+10 | `row 3's line starts at 593.5 while the first starts at 554.5 — the card has grown a second text column` |
+| tooltip 的锚点从 `band` 改挂到 `switch` | `row 0's tip is hung on something narrower than the band that lights up` |
+| 关着的滑块在暗色下退回 `--menu` | `a dark off knob at 42 on a track at 51.999996 is a hole in the switch rather than a control standing in it` |
+| 标记那道边两个主题都画 | `the light card is ringing a mark that stands out on its own` |
 
 #### ⑫ 挂账
 
 - **PSReadLine 补丁不进这张卡**(用户裁决)。它是这个产品里最深入的一件事,而它**已经有自己的窗内模态**,并且那张模态的聪明之处正在于它到得晚:它欠读者的那一次额外出现,就在改字号之后——bug 可见的那一刻。于是一台新的 Windows PowerShell 机器会先见到这张卡,再在第一次缩放或改字号时见到第二张。两张模态,但第二张在它的症状到达的那一刻到达,这正是它当初被那样设计的原因。
 - **卡不带自己的进出动画。** 它按 `ModalBand::Fixed` 走,和 gate、退出卡、邀请卡一样。
+- **`.aswitch` 目前只有这一张卡在用,所以关着的滑块那条暗色规则也只写在这里**(v4 ⑦)。设置页用的是下拉行,不是开关;哪天第二个表面长出开关,`knob_face` 是要跟着搬走的那一段,而不是要抄第二遍的那一段。
+- **卡上第七行会让它重新开始滚。** 参照窗上 v4 是 273 在 308 里,一行 42;再加一行就是 315 在 308。地方是有的(548 高的窗里卡才 445),但只剩一行深。今天什么都不用定,记在这里是为了下一行是有意加的。
 - **一次部分完成之后,卡上那些行的最终状态只在设置页可见。** 这是有意的(⑤),但意味着一个四行全开、其中一行失败的读者,拿到的是一张失败卡加三行静默;哪三行成了要去设置页数。给成功也发卡会把这件事说全,代价是新装第一分钟里的四张卡。

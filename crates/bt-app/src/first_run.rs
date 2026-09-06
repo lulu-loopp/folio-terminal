@@ -32,7 +32,7 @@ use bt_persist::FirstRunCardV1;
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_RADIUS_LOGICAL_PX,
     FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad, chrome_palette, rounded_overlay_fill,
-    rounded_overlay_halo,
+    rounded_overlay_halo, rounded_overlay_shadow,
 };
 
 use crate::{
@@ -95,12 +95,16 @@ pub enum ExplorerShape {
 }
 
 impl ExplorerShape {
-    /// Which sentence this shape reads under its title.
+    /// Which line this shape's row reads.
+    ///
+    /// **The line, and no sentence under it** (v4): where the entry lands is
+    /// the only thing that differs between the two shapes, so it is the only
+    /// thing the two strings differ about.
     #[must_use]
-    pub fn description(self) -> Text {
+    pub fn line(self) -> Text {
         match self {
-            Self::FirstPageAndClassic => Text::FirstRunDescExplorer11,
-            Self::ClassicOnly => Text::FirstRunDescExplorer10,
+            Self::FirstPageAndClassic => Text::FirstRunRowExplorer11,
+            Self::ClassicOnly => Text::FirstRunRowExplorer10,
         }
     }
 }
@@ -140,10 +144,22 @@ pub struct Machine {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Row {
     pub kind: RowKind,
-    /// The group heading that stands **above** this row, when it opens one.
-    pub group: Option<Text>,
-    pub title: Text,
-    pub description: Text,
+    /// **The hairline that stands above this row**, when the row opens the
+    /// agent group.
+    ///
+    /// v3 hung a caps heading here — `AGENTS FOUND ON THIS MACHINE` — and v4
+    /// deletes it rather than restyling it (user ruling 2026-09-06): a group of
+    /// three rows separated from the three above them by a rule does not need a
+    /// label to say it is a group, and the heading was the one string on the
+    /// card that described our own act of looking. Hung on the row and not on
+    /// the group, for the heading's own reason: a machine with no agents draws
+    /// no divider, because there is no row for it to stand above.
+    pub divider_above: bool,
+    /// The row's one line, and it is the result the reader gets.
+    pub line: Text,
+    /// What the pointer resting on the row says: the mechanism, and the address
+    /// of the reader's own file where there is one.
+    pub tip: Text,
     /// Whether the switch is on. The card is the only thing that changes this.
     pub on: bool,
 }
@@ -157,30 +173,30 @@ pub struct Row {
 /// agents.
 ///
 /// **A row Folio would have to refuse is not listed at all.** If none of the
-/// three agents is found the group label and its rows are both absent, and the
-/// card never says that it looked and found nothing.
+/// three agents is found the divider and its rows are both absent, and the card
+/// never says that it looked and found nothing.
 #[must_use]
 pub fn rows(machine: &Machine) -> Vec<Row> {
     let mut rows = vec![Row {
         kind: RowKind::Update,
-        group: None,
-        title: Text::FirstRunRowUpdate,
-        description: Text::FirstRunDescUpdate,
+        divider_above: false,
+        line: Text::FirstRunRowUpdate,
+        tip: Text::FirstRunTipUpdate,
         on: true,
     }];
     rows.push(Row {
         kind: RowKind::Explorer,
-        group: None,
-        title: Text::FirstRunRowExplorer,
-        description: explorer_shape(machine).description(),
+        divider_above: false,
+        line: explorer_shape(machine).line(),
+        tip: Text::FirstRunTipExplorer,
         on: false,
     });
     if !machine.powershell_integration_installed {
         rows.push(Row {
             kind: RowKind::PowerShell,
-            group: None,
-            title: Text::FirstRunRowPowerShell,
-            description: Text::FirstRunDescPowerShell,
+            divider_above: false,
+            line: Text::FirstRunRowPowerShell,
+            tip: Text::FirstRunTipPowerShell,
             on: false,
         });
     }
@@ -189,31 +205,31 @@ pub fn rows(machine: &Machine) -> Vec<Row> {
             RowKind::Claude,
             machine.claude_found && machine.claude_installable,
             Text::FirstRunRowClaude,
-            Text::FirstRunDescClaude,
+            Text::FirstRunTipClaude,
         ),
         (
             RowKind::Codex,
             machine.codex_found && machine.codex_installable,
             Text::FirstRunRowCodex,
-            Text::FirstRunDescCodex,
+            Text::FirstRunTipCodex,
         ),
         (
             RowKind::Copilot,
             machine.copilot_found && machine.copilot_installable,
             Text::FirstRunRowCopilot,
-            Text::FirstRunDescCopilot,
+            Text::FirstRunTipCopilot,
         ),
     ];
     let mut opened = false;
-    for (kind, offered, title, description) in agents {
+    for (kind, offered, line, tip) in agents {
         if !offered {
             continue;
         }
         rows.push(Row {
             kind,
-            group: (!opened).then_some(Text::FirstRunAgentGroup),
-            title,
-            description,
+            divider_above: !opened,
+            line,
+            tip,
             on: false,
         });
         opened = true;
@@ -410,8 +426,7 @@ impl Card {
     pub fn press(&mut self, target: Target) {
         self.focus_visible = false;
         self.focus = match target {
-            Target::Switch(index) => Some(Focus::Switch(index)),
-            Target::OpenSettings => Some(Focus::OpenSettings),
+            Target::Row(index) => Some(Focus::Switch(index)),
             Target::Later => Some(Focus::Later),
             Target::Done => Some(Focus::Done),
             Target::Panel => self.focus,
@@ -457,7 +472,7 @@ impl Card {
     }
 }
 
-/// What `Not now`, `Esc`, `Open settings` and shutting the window spend.
+/// What `Not now`, `Esc` and shutting the window spend.
 ///
 /// **Nothing.** The card closes with the factory values — the rows off, the
 /// update check on — writes nothing outside `settings.json`, and does not come
@@ -527,18 +542,21 @@ pub fn pending_row_line(pending: bool) -> Option<Text> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Focus {
     Switch(usize),
-    OpenSettings,
     Later,
     Done,
 }
 
-/// The focus order, as a ring: every switch in visual order, then the link, then
-/// the two verbs. The card is modal, so focus never leaves it.
+/// The focus order, as a ring: every switch in visual order, then the two
+/// verbs. The card is modal, so focus never leaves it.
+///
+/// **`Open settings` is not a stop any more** (v4 §5): the footer is the two
+/// buttons and one faint line, and a line that states a fact is not something
+/// a keyboard can land on.
 #[must_use]
 pub fn focus_order(switches: usize) -> Vec<Focus> {
     (0..switches)
         .map(Focus::Switch)
-        .chain([Focus::OpenSettings, Focus::Later, Focus::Done])
+        .chain([Focus::Later, Focus::Done])
         .collect()
 }
 
@@ -574,43 +592,49 @@ pub fn arrowed(focus: Focus, switches: usize, down: bool) -> Focus {
 
 // ── geometry ───────────────────────────────────────────────────────────────
 
-/// `min(480px, 92%)` — wider than `.restore`'s 400, which is too narrow on both
-/// axes for a form of six rows.
+/// `min(440px, 92%)`.
 ///
-/// 480 and not v1's 460: the switch column takes 42 logical pixels out of the
-/// text column where a checkbox column cost 25, and 480 hands back exactly the
-/// 20 pixels of sentence that moving to Settings' row shape spent.
-pub const MAX_WIDTH_LOGICAL_PX: f32 = 480.0;
+/// **440 and not v3's 480** (v4 §2, user ruling 2026-09-06). A card of one-line
+/// rows does not need 480 of measure: v3 bought its width for a *sentence*
+/// under every title, and with the sentence moved to the row's tooltip the 354
+/// of text column left here holds every line in both languages with room over.
+pub const MAX_WIDTH_LOGICAL_PX: f32 = 440.0;
 const WIDTH_RATIO: f32 = 0.92;
 
 /// How much of the window's height the card may take. The head and the foot are
 /// pinned inside whatever is left and the body between them scrolls.
 const SURFACE_MARGIN_LOGICAL_PX: f32 = 34.0;
 
-const PADDING_TOP_LOGICAL_PX: f32 = 22.0;
+/// 20 and not `.restore`'s 22: the mark's line box is taller than a bare title,
+/// so the optical top of the card is a couple of pixels lower than the metric
+/// one.
+const PADDING_TOP_LOGICAL_PX: f32 = 20.0;
 const PADDING_X_LOGICAL_PX: f32 = 22.0;
 const PADDING_BOTTOM_LOGICAL_PX: f32 = 16.0;
 
+/// The Folio mark on the header line — `design/assets/app-icon/folio.ico`, the
+/// icon `build.rs` links into `folio.exe` as group 1.
+const MARK_LOGICAL_PX: f32 = 22.0;
+const MARK_GAP_LOGICAL_PX: f32 = 10.0;
+
 const TITLE_FONT_LOGICAL_PX: f32 = 15.0;
 const TITLE_LINE_LOGICAL_PX: f32 = 21.0;
-/// **16, and then the first row.** Not `.restore`'s 5 + sub + 17: with nothing
-/// between the title and the list, one step is the whole of the relationship.
-const TITLE_MARGIN_BOTTOM_LOGICAL_PX: f32 = 16.0;
+/// **18, and then the first row.** v3's 16 under a bare title; the header is one
+/// line taller in feel now that a mark stands on it, so the step under it grows
+/// with it.
+const HEADER_MARGIN_BOTTOM_LOGICAL_PX: f32 = 18.0;
 
+/// **One 13px line, vertically centred in 42** (v4 §2). The extra height per row
+/// is what "looser rhythm" buys once the second line is gone.
+const ROW_HEIGHT_LOGICAL_PX: f32 = 42.0;
 const ROW_FONT_LOGICAL_PX: f32 = 13.0;
-const ROW_LINE_LOGICAL_PX: f32 = 19.0;
-const DESC_FONT_LOGICAL_PX: f32 = 11.5;
-const DESC_LINE_LOGICAL_PX: f32 = 16.5;
-const DESC_MARGIN_TOP_LOGICAL_PX: f32 = 2.0;
-const ROW_GAP_LOGICAL_PX: f32 = 13.0;
-/// Tighter inside the agent group: three rows about one idea, under one heading.
-const GROUP_ROW_GAP_LOGICAL_PX: f32 = 7.0;
-
-const GROUP_LABEL_FONT_LOGICAL_PX: f32 = 11.0;
-const GROUP_LABEL_LINE_LOGICAL_PX: f32 = 13.0;
-const GROUP_LABEL_TRACKING_EM: f32 = 0.05;
-const GROUP_LABEL_MARGIN_TOP_LOGICAL_PX: f32 = 11.0;
-const GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX: f32 = 3.0;
+/// How far the row's `--hover` fill bleeds past the content column on each side,
+/// so that a hovered row reads as a band and not as a box drawn round the type.
+const ROW_HOVER_BLEED_LOGICAL_PX: f32 = 8.0;
+const ROW_HOVER_RADIUS_LOGICAL_PX: f32 = 5.0;
+/// The air above and below the one rule that separates Folio's own rows from the
+/// agent rows.
+const GROUP_DIVIDER_AIR_LOGICAL_PX: f32 = 9.0;
 
 /// `.aswitch`, to the pixel.
 const SWITCH_WIDTH_LOGICAL_PX: f32 = 30.0;
@@ -620,16 +644,16 @@ const SWITCH_KNOB_INSET_LOGICAL_PX: f32 = 2.0;
 const SWITCH_KNOB_SHADOW_LOGICAL_PX: f32 = 3.0;
 const SWITCH_KNOB_SHADOW_INK: [u8; 3] = [0, 0, 0];
 const SWITCH_KNOB_SHADOW_ALPHA: f32 = 0.25;
-/// The gap between the sentence column and the switch.
+/// The gap between the line's column and the switch.
 const SWITCH_GAP_LOGICAL_PX: f32 = 12.0;
 
-const HAIRLINE_MARGIN_TOP_LOGICAL_PX: f32 = 16.0;
-const HAIRLINE_MARGIN_BOTTOM_LOGICAL_PX: f32 = 12.0;
-const FOOTNOTE_FONT_LOGICAL_PX: f32 = 11.5;
-const FOOTNOTE_LINE_LOGICAL_PX: f32 = 16.5;
-const FOOTNOTE_LINK_GAP_LOGICAL_PX: f32 = 6.0;
-const FOOTNOTE_MARGIN_BOTTOM_LOGICAL_PX: f32 = 14.0;
-const LINK_UNDERLINE_ALPHA: f32 = 0.45;
+/// **16, and no hairline** (v4 §2): the rows already carry hairlines of their
+/// own, and a seventh one under the last of them would read as a row boundary
+/// with nothing under it.
+const FOOT_GAP_LOGICAL_PX: f32 = 16.0;
+const SETTINGS_LINE_FONT_LOGICAL_PX: f32 = 11.0;
+const SETTINGS_LINE_LINE_LOGICAL_PX: f32 = 15.0;
+const SETTINGS_LINE_MARGIN_BOTTOM_LOGICAL_PX: f32 = 14.0;
 
 const BUTTON_PADDING_X_LOGICAL_PX: f32 = 14.0;
 const BUTTON_PADDING_Y_LOGICAL_PX: f32 = 6.0;
@@ -662,8 +686,15 @@ const FOCUS_RING_TIGHT_OFFSET_LOGICAL_PX: f32 = 1.0;
 pub enum Target {
     /// The card's own face, its scrim, and anything else that answers nothing.
     Panel,
-    Switch(usize),
-    OpenSettings,
+    /// **The whole row, switch included** (v4 §2, §8).
+    ///
+    /// Not the switch alone, which is what v3 hit-tested. A hovered row is
+    /// filled with `--hover` end to end and carries a tooltip about itself, and
+    /// this window has a standing rule about exactly that shape: a mark that
+    /// answers a hover and not a click is the window lying about what it drew
+    /// (§7.1.5f, quoted again in §7.1.5g). So the band that lights is the band
+    /// that answers, and what it answers is the switch drawn in it.
+    Row(usize),
     Later,
     Done,
 }
@@ -676,23 +707,19 @@ pub fn card_width(surface_width: f32, scale: f32) -> f32 {
         .round()
 }
 
-/// The width one row's sentence is wrapped to: the card, less its padding, less
-/// the switch column and the gap before it.
-#[must_use]
-pub fn text_width(surface_width: f32, scale: f32) -> f32 {
-    card_width(surface_width, scale)
-        - 2.0 * FLOAT_WINDOW_BORDER_LOGICAL_PX.max(1.0 / scale) * scale
-        - 2.0 * PADDING_X_LOGICAL_PX * scale
-        - (SWITCH_WIDTH_LOGICAL_PX + SWITCH_GAP_LOGICAL_PX) * scale
-}
-
-/// One row, measured against a real font.
+/// One row, as the card draws it.
+///
+/// **No `description_lines`, and that is the whole of v4**: what a row says is
+/// one line by construction, so nothing here has to be wrapped and nothing here
+/// can grow a second line under somebody's font.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RowContent {
-    pub group: Option<String>,
-    pub title: String,
-    /// The sentence, already broken to lines that fit [`text_width`].
-    pub description_lines: Vec<String>,
+    /// The hairline that separates Folio's rows from the agent rows stands
+    /// above this one.
+    pub divider_above: bool,
+    pub line: String,
+    /// What the pointer resting on this row says.
+    pub tip: String,
     pub on: bool,
 }
 
@@ -701,12 +728,8 @@ pub struct RowContent {
 pub struct Content {
     pub title: String,
     pub rows: Vec<RowContent>,
-    pub footnote_lines: Vec<String>,
-    /// How wide the **last** footnote line is, so the link can finish that line
-    /// rather than stand out on the card's own edge with a hole beside it.
-    pub footnote_last_line_width: f32,
-    pub open_settings: String,
-    pub open_settings_width: f32,
+    /// The faint line above the two verbs, already broken to lines that fit.
+    pub settings_lines: Vec<String>,
     pub later: String,
     pub later_width: f32,
     pub done: String,
@@ -715,9 +738,17 @@ pub struct Content {
 
 #[derive(Clone, Debug, PartialEq)]
 struct RowRects {
-    group: Option<(String, [f32; 4])>,
-    title: (String, [f32; 4]),
-    description: Vec<(String, [f32; 4])>,
+    /// The whole band — the content column plus the eight pixels the `--hover`
+    /// fill bleeds past it on each side. **What lights under the pointer, what
+    /// answers a press, and what the tooltip hangs off, and it is one rectangle
+    /// for all three** because it is one rectangle to the reader.
+    band: [f32; 4],
+    /// The hairline above this row — `--border` where it opens the agent group,
+    /// `--border-soft` between two rows of the same group, and `None` for the
+    /// first row of all.
+    rule: Option<([f32; 4], bool)>,
+    line: (String, [f32; 4]),
+    tip: String,
     switch: [f32; 4],
     on: bool,
 }
@@ -727,18 +758,24 @@ struct RowRects {
 pub struct Layout {
     scale: f32,
     frame: [f32; 4],
+    /// The Folio mark, square, centred on the title's line box.
+    mark: [f32; 4],
     title: (String, [f32; 4]),
-    /// The clip the scrolling body is seen through.
+    /// The clip the scrolling body is seen through — the content column.
     viewport: [f32; 4],
+    /// The same two horizontal lines, out to the card's own edge.
+    ///
+    /// A row's lit band runs wider than the text column by design, so the thing
+    /// that bounds it is the card and not the column; what bounds it vertically
+    /// is still the scroller, and those are the two facts this rectangle is.
+    body_clip: [f32; 4],
     /// How tall the body is in full, so a caller can clamp a scroll.
     body_height: f32,
     scroll: f32,
     rows: Vec<RowRects>,
     thumb: Option<[f32; 4]>,
     track: Option<[f32; 4]>,
-    hairline: [f32; 4],
-    footnote: Vec<(String, [f32; 4])>,
-    link: (String, [f32; 4]),
+    settings_line: Vec<(String, [f32; 4])>,
     later: (String, [f32; 4]),
     done: (String, [f32; 4]),
 }
@@ -756,8 +793,8 @@ impl Layout {
         self.scroll_extent() > 0.0
     }
 
-    /// The scroll that brings a switch fully into view, or the one already in
-    /// force when it is there.
+    /// The scroll that brings a row fully into view, or the one already in force
+    /// when it is there.
     ///
     /// **`Tab` and `↓` into a row below the fold scroll it in**, which is the
     /// whole reason this is a function of the layout rather than of the press: a
@@ -770,16 +807,8 @@ impl Layout {
         let Some(row) = self.rows.get(index) else {
             return self.scroll;
         };
-        let top = row
-            .group
-            .as_ref()
-            .map_or(row.title.1[1], |(_, rect)| rect[1]);
-        let bottom = row
-            .description
-            .last()
-            .map_or(row.title.1[3], |(_, rect)| rect[3])
-            .max(row.switch[3]);
         let ring = FOCUS_RING_TIGHT_OFFSET_LOGICAL_PX * self.scale + FOCUS_RING_WIDTH_LOGICAL_PX;
+        let (top, bottom) = (row.band[1], row.band[3]);
         if top - ring < self.viewport[1] {
             return (self.scroll - (self.viewport[1] - (top - ring))).max(0.0);
         }
@@ -800,6 +829,23 @@ impl Layout {
     pub fn page(&self) -> f32 {
         self.viewport[3] - self.viewport[1]
     }
+
+    /// **What every row offers the tooltip host**: the band the pointer has to
+    /// be in, and the sentence it earns.
+    ///
+    /// The band is cut to the body, so a row scrolled under the fade is not a
+    /// row anything can be said about — the same rule [`hit`] applies to a
+    /// press, stated once for both.
+    #[must_use]
+    pub fn tips(&self) -> Vec<(usize, [f32; 4], String)> {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                clipped(row.band, self.body_clip).map(|shown| (index, shown, row.tip.clone()))
+            })
+            .collect()
+    }
 }
 
 /// Where every part of the card lands in a window this size.
@@ -815,20 +861,18 @@ pub fn layout(
     let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
     let width = card_width(surface_width, scale);
 
-    let head = px(PADDING_TOP_LOGICAL_PX + TITLE_LINE_LOGICAL_PX + TITLE_MARGIN_BOTTOM_LOGICAL_PX);
+    let head = px(PADDING_TOP_LOGICAL_PX + TITLE_LINE_LOGICAL_PX + HEADER_MARGIN_BOTTOM_LOGICAL_PX);
     let button_height =
         2.0 * border + px(2.0 * BUTTON_PADDING_Y_LOGICAL_PX + BUTTON_LINE_LOGICAL_PX);
-    let foot = px(HAIRLINE_MARGIN_TOP_LOGICAL_PX)
-        + border
-        + px(HAIRLINE_MARGIN_BOTTOM_LOGICAL_PX)
-        + content.footnote_lines.len().max(1) as f32 * px(FOOTNOTE_LINE_LOGICAL_PX)
-        + px(FOOTNOTE_MARGIN_BOTTOM_LOGICAL_PX)
+    let foot = px(FOOT_GAP_LOGICAL_PX)
+        + content.settings_lines.len().max(1) as f32 * px(SETTINGS_LINE_LINE_LOGICAL_PX)
+        + px(SETTINGS_LINE_MARGIN_BOTTOM_LOGICAL_PX)
         + button_height
         + px(PADDING_BOTTOM_LOGICAL_PX);
 
-    let body_height = body_extent(content, scale);
+    let body_height = body_extent(content, scale, border);
     let room = (surface_height - 2.0 * px(SURFACE_MARGIN_LOGICAL_PX) - 2.0 * border - head - foot)
-        .max(px(ROW_LINE_LOGICAL_PX));
+        .max(px(ROW_HEIGHT_LOGICAL_PX));
     let viewport_height = body_height.min(room);
     let scroll = scroll.clamp(0.0, (body_height - viewport_height).max(0.0));
 
@@ -842,16 +886,22 @@ pub fn layout(
     let text_right = content_right - px(SWITCH_WIDTH_LOGICAL_PX + SWITCH_GAP_LOGICAL_PX);
 
     let mut cursor = frame[1] + border + px(PADDING_TOP_LOGICAL_PX);
-    let title = (
-        content.title.clone(),
-        [
-            content_left,
-            cursor,
-            content_right,
-            cursor + px(TITLE_LINE_LOGICAL_PX),
-        ],
-    );
-    cursor = title.1[3] + px(TITLE_MARGIN_BOTTOM_LOGICAL_PX);
+    let title_box = [
+        content_left + px(MARK_LOGICAL_PX + MARK_GAP_LOGICAL_PX),
+        cursor,
+        content_right,
+        cursor + px(TITLE_LINE_LOGICAL_PX),
+    ];
+    // Centred on the title's line box, left edge on the card's own padding.
+    let mark_top = (cursor + (px(TITLE_LINE_LOGICAL_PX) - px(MARK_LOGICAL_PX)) / 2.0).round();
+    let mark = [
+        content_left.round(),
+        mark_top,
+        content_left.round() + px(MARK_LOGICAL_PX),
+        mark_top + px(MARK_LOGICAL_PX),
+    ];
+    let title = (content.title.clone(), title_box);
+    cursor = title.1[3] + px(HEADER_MARGIN_BOTTOM_LOGICAL_PX);
 
     let viewport = [
         content_left,
@@ -862,60 +912,49 @@ pub fn layout(
     let mut rows = Vec::with_capacity(content.rows.len());
     let mut walk = viewport[1] - scroll;
     for (index, row) in content.rows.iter().enumerate() {
-        if index > 0 {
-            walk += px(gap_above(&content.rows, index));
-        }
-        let group = row.group.as_ref().map(|label| {
-            walk += px(GROUP_LABEL_MARGIN_TOP_LOGICAL_PX);
-            let rect = [
-                content_left,
-                walk,
-                content_right,
-                walk + px(GROUP_LABEL_LINE_LOGICAL_PX),
-            ];
-            walk = rect[3] + px(GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX);
-            (label.clone(), rect)
+        let rule = (index > 0).then(|| {
+            if row.divider_above {
+                walk += px(GROUP_DIVIDER_AIR_LOGICAL_PX);
+            }
+            let rect = [content_left, walk, content_right, walk + border];
+            walk = rect[3];
+            if row.divider_above {
+                walk += px(GROUP_DIVIDER_AIR_LOGICAL_PX);
+            }
+            (rect, row.divider_above)
         });
-        let title_rect = [
-            content_left,
+        let band = [
+            content_left - px(ROW_HOVER_BLEED_LOGICAL_PX),
             walk,
-            text_right,
-            walk + px(ROW_LINE_LOGICAL_PX),
+            content_right + px(ROW_HOVER_BLEED_LOGICAL_PX),
+            walk + px(ROW_HEIGHT_LOGICAL_PX),
         ];
-        // **Centred on the row's first title line**, so a row whose sentence
-        // runs to three lines does not drag its control down the card.
-        let switch_top = (title_rect[1] + title_rect[3] - px(SWITCH_HEIGHT_LOGICAL_PX)) / 2.0;
+        let switch_top = (band[1] + band[3] - px(SWITCH_HEIGHT_LOGICAL_PX)) / 2.0;
         let switch = [
             content_right - px(SWITCH_WIDTH_LOGICAL_PX),
             switch_top,
             content_right,
             switch_top + px(SWITCH_HEIGHT_LOGICAL_PX),
         ];
-        walk = title_rect[3] + px(DESC_MARGIN_TOP_LOGICAL_PX);
-        let description = row
-            .description_lines
-            .iter()
-            .map(|line| {
-                let rect = [
-                    content_left,
-                    walk,
-                    text_right,
-                    walk + px(DESC_LINE_LOGICAL_PX),
-                ];
-                walk = rect[3];
-                (line.clone(), rect)
-            })
-            .collect();
+        walk = band[3];
         rows.push(RowRects {
-            group,
-            title: (row.title.clone(), title_rect),
-            description,
+            band,
+            rule,
+            // **Every row's line starts on the same x** (user ruling
+            // 2026-09-06): the three agent rows carried a coloured silhouette
+            // in v4's first drawing and no longer do, so there is one text
+            // column on this card and not two.
+            line: (
+                row.line.clone(),
+                [content_left, band[1], text_right, band[3]],
+            ),
+            tip: row.tip.clone(),
             switch,
             on: row.on,
         });
     }
 
-    // **In the right padding, not in the sentence column**: the bar is the one
+    // **In the right padding, not in the line's column**: the bar is the one
     // piece of chrome this card grows, and it grows into the margin so that no
     // line of type moves when it appears.
     let (track, thumb) = if body_height > viewport_height {
@@ -944,45 +983,27 @@ pub fn layout(
         (None, None)
     };
 
-    let mut cursor = viewport[3] + px(HAIRLINE_MARGIN_TOP_LOGICAL_PX);
-    let hairline = [content_left, cursor, content_right, cursor + border];
-    cursor = hairline[3] + px(HAIRLINE_MARGIN_BOTTOM_LOGICAL_PX);
-    let footnote: Vec<(String, [f32; 4])> = content
-        .footnote_lines
+    let cursor = viewport[3] + px(FOOT_GAP_LOGICAL_PX);
+    let settings_line: Vec<(String, [f32; 4])> = content
+        .settings_lines
         .iter()
         .enumerate()
         .map(|(index, line)| {
-            let line_top = cursor + index as f32 * px(FOOTNOTE_LINE_LOGICAL_PX);
+            let line_top = cursor + index as f32 * px(SETTINGS_LINE_LINE_LOGICAL_PX);
             (
                 line.clone(),
                 [
                     content_left,
                     line_top,
                     content_right,
-                    line_top + px(FOOTNOTE_LINE_LOGICAL_PX),
+                    line_top + px(SETTINGS_LINE_LINE_LOGICAL_PX),
                 ],
             )
         })
         .collect();
-    // Immediately after the sentence rather than out on the card's own edge: it
-    // finishes the line it belongs to.
-    let last = footnote
-        .last()
-        .map_or([content_left, cursor, content_left, cursor], |(_, rect)| {
-            *rect
-        });
-    let link_left = (last[0] + content.footnote_last_line_width + px(FOOTNOTE_LINK_GAP_LOGICAL_PX))
-        .min(content_right - content.open_settings_width);
-    let link = (
-        content.open_settings.clone(),
-        [
-            link_left,
-            last[1],
-            link_left + content.open_settings_width,
-            last[3],
-        ],
-    );
-    cursor = last[3] + px(FOOTNOTE_MARGIN_BOTTOM_LOGICAL_PX);
+    let cursor = cursor
+        + content.settings_lines.len().max(1) as f32 * px(SETTINGS_LINE_LINE_LOGICAL_PX)
+        + px(SETTINGS_LINE_MARGIN_BOTTOM_LOGICAL_PX);
 
     let button_width =
         |text_width: f32| 2.0 * border + 2.0 * px(BUTTON_PADDING_X_LOGICAL_PX) + text_width;
@@ -1002,51 +1023,38 @@ pub fn layout(
     Layout {
         scale,
         frame,
+        mark,
         title,
         viewport,
+        body_clip: [
+            frame[0] + border,
+            viewport[1],
+            frame[2] - border,
+            viewport[3],
+        ],
         body_height,
         scroll,
         rows,
         thumb,
         track,
-        hairline,
-        footnote,
-        link,
+        settings_line,
         later: (content.later.clone(), later_rect),
         done: (content.done.clone(), done_rect),
     }
 }
 
-/// The air above the row at `index`.
-///
-/// **13, and 7 inside the agent group.** A row that opens a group takes the
-/// ordinary gap and then its heading's own margins on top of that; a row that
-/// merely stands under one sits closer to the row above it, because three rows
-/// about one idea under one heading are a block and not three neighbours.
-fn gap_above(rows: &[RowContent], index: usize) -> f32 {
-    let under_a_heading = rows[..index].iter().rev().any(|row| row.group.is_some());
-    if rows[index].group.is_none() && under_a_heading {
-        GROUP_ROW_GAP_LOGICAL_PX
-    } else {
-        ROW_GAP_LOGICAL_PX
-    }
-}
-
 /// How tall the body is in full, before any of it is hidden.
-fn body_extent(content: &Content, scale: f32) -> f32 {
+fn body_extent(content: &Content, scale: f32, border: f32) -> f32 {
     let px = |value: f32| value * scale;
     let mut height = 0.0;
     for (index, row) in content.rows.iter().enumerate() {
         if index > 0 {
-            height += px(gap_above(&content.rows, index));
+            height += border;
+            if row.divider_above {
+                height += 2.0 * px(GROUP_DIVIDER_AIR_LOGICAL_PX);
+            }
         }
-        if row.group.is_some() {
-            height += px(GROUP_LABEL_MARGIN_TOP_LOGICAL_PX
-                + GROUP_LABEL_LINE_LOGICAL_PX
-                + GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX);
-        }
-        height += px(ROW_LINE_LOGICAL_PX + DESC_MARGIN_TOP_LOGICAL_PX);
-        height += row.description_lines.len() as f32 * px(DESC_LINE_LOGICAL_PX);
+        height += px(ROW_HEIGHT_LOGICAL_PX);
     }
     height
 }
@@ -1061,14 +1069,11 @@ pub fn hit(layout: &Layout, x: f64, y: f64) -> Target {
     if contains(layout.later.1, x, y) {
         return Target::Later;
     }
-    if contains(layout.link.1, x, y) {
-        return Target::OpenSettings;
-    }
-    // A switch scrolled out of the viewport is not a switch anybody can press:
-    // the clip is where it stops being drawn, so it is where it stops answering.
+    // A row scrolled out of the viewport is not a row anybody can press: the
+    // clip is where it stops being drawn, so it is where it stops answering.
     for (index, row) in layout.rows.iter().enumerate() {
-        if contains(row.switch, x, y) && contains(layout.viewport, x, y) {
-            return Target::Switch(index);
+        if contains(row.band, x, y) && contains(layout.body_clip, x, y) {
+            return Target::Row(index);
         }
     }
     Target::Panel
@@ -1087,6 +1092,92 @@ fn clipped(rect: [f32; 4], clip: [f32; 4]) -> Option<[f32; 4]> {
         rect[3].min(clip[3]),
     ];
     (cut[0] < cut[2] && cut[1] < cut[3]).then_some(cut)
+}
+
+// ── the Folio mark ─────────────────────────────────────────────────────────
+
+/// The shipped icon's own bytes.
+///
+/// **The mark on this card is the mark on the taskbar, and there is one copy of
+/// it** (v4 §3, user ruling 2026-09-06 — `folio.ico` is the final icon and not
+/// a placeholder). `crates/bt-app/build.rs` reads this exact path and links it
+/// into `folio.exe` as icon group 1; drawing anything else at the top of the
+/// first thing a new reader ever sees would make the first impression disagree
+/// with the icon they just double-clicked. Restating the drawing's geometry in
+/// Rust would be a second source free to drift from the file, so the file is
+/// what is read.
+const FOLIO_ICO: &[u8] = include_bytes!("../../../design/assets/app-icon/folio.ico");
+
+/// One entry of `folio.ico`, decoded.
+struct MarkEntry {
+    side: u32,
+    rgba: std::sync::Arc<[u8]>,
+}
+
+/// Every uncompressed entry of `folio.ico`, smallest first.
+///
+/// **The classic-DIB entries only** — 16 through 64. `.ico` stores 128 and 256
+/// as PNG, and this card never wants them: the mark is 22 logical pixels, so
+/// even a 300% monitor asks for 66, and a decoder for two entries nothing on
+/// this card can use would be a dependency bought for nothing.
+fn mark_entries() -> &'static [MarkEntry] {
+    static ENTRIES: std::sync::OnceLock<Vec<MarkEntry>> = std::sync::OnceLock::new();
+    ENTRIES.get_or_init(|| {
+        let mut entries = Vec::new();
+        let count = u16::from_le_bytes([FOLIO_ICO[4], FOLIO_ICO[5]]) as usize;
+        for index in 0..count {
+            let at = 6 + 16 * index;
+            let length =
+                u32::from_le_bytes(FOLIO_ICO[at + 8..at + 12].try_into().unwrap()) as usize;
+            let offset =
+                u32::from_le_bytes(FOLIO_ICO[at + 12..at + 16].try_into().unwrap()) as usize;
+            let image = &FOLIO_ICO[offset..offset + length];
+            // A PNG entry opens with the signature; a DIB entry opens with the
+            // 40-byte `BITMAPINFOHEADER`. That first word is the whole test.
+            if u32::from_le_bytes(image[0..4].try_into().unwrap()) != 40 {
+                continue;
+            }
+            let side = i32::from_le_bytes(image[4..8].try_into().unwrap()) as u32;
+            let depth = u16::from_le_bytes(image[14..16].try_into().unwrap());
+            if depth != 32 {
+                continue;
+            }
+            // BGRA, bottom-up, with the mandatory AND mask after it — which a
+            // 32-bit icon's transparency does not use and this does not read.
+            let pixels = &image[40..];
+            let mut rgba = vec![0_u8; (side * side * 4) as usize];
+            let stride = (side * 4) as usize;
+            for row in 0..side {
+                let source = ((side - 1 - row) * side * 4) as usize;
+                let target = (row * side * 4) as usize;
+                rgba[target..target + stride].copy_from_slice(&pixels[source..source + stride]);
+                // BGRA to RGBA: blue and red change places, and the two the
+                // swap does not touch are already where they belong.
+                for column in 0..side as usize {
+                    rgba.swap(target + column * 4, target + column * 4 + 2);
+                }
+            }
+            entries.push(MarkEntry {
+                side,
+                rgba: rgba.into(),
+            });
+        }
+        entries.sort_by_key(|entry| entry.side);
+        entries
+    })
+}
+
+/// The entry to draw a mark this many physical pixels wide.
+///
+/// The smallest one that is at least as big, so the sampler only ever shrinks —
+/// Windows' own rule for picking an icon, and the reason `make-folio-ico.py`
+/// solves nine sizes instead of one.
+fn mark_entry(side_px: f32) -> Option<&'static MarkEntry> {
+    let entries = mark_entries();
+    entries
+        .iter()
+        .find(|entry| entry.side as f32 >= side_px)
+        .or_else(|| entries.last())
 }
 
 /// The card as one overlay layer, **scrim and all**.
@@ -1108,6 +1199,7 @@ pub fn build(
         alpha: alpha(palette.modal_scrim_alpha),
     }];
     let mut labels = Vec::new();
+    let mut images = Vec::new();
 
     push_float_window(
         &mut quads,
@@ -1122,6 +1214,36 @@ pub fn build(
         palette.menu_border,
         alpha(palette.menu_border_alpha),
     );
+
+    // **The mark keeps its tile on a dark card** (user ruling 2026-09-06). The
+    // icon's ground is `#202027` and the dark card's is `#202020`: at seven
+    // levels apart the tile is gone and only the paper sheet inside it is
+    // visible, which is a headless mark at the top of the first thing a reader
+    // ever sees. It is given the card's own edge — one hairline of `--border`,
+    // at the tile's own corner radius — so the tile ends where the card says
+    // its own surfaces end. Nothing is drawn in the light theme, where a
+    // graphite tile on white needs no help and an edge would be noise.
+    if !bt_render::background_is_light(palette.dialog_surface) {
+        quads.extend(rounded_overlay_halo(
+            layout.mark,
+            px(MARK_LOGICAL_PX) * MARK_TILE_RADIUS_UNITS,
+            border,
+            palette.menu_border,
+            alpha(palette.menu_border_alpha),
+        ));
+    }
+    if let Some(entry) = mark_entry(layout.mark[2] - layout.mark[0]) {
+        images.push(bt_render::ChromeIcon {
+            key: format!("first-run-folio-mark-{}", entry.side),
+            rect: layout.mark,
+            rgba: std::sync::Arc::clone(&entry.rgba),
+            width_px: entry.side,
+            height_px: entry.side,
+            opacity: 1.0,
+            clip: None,
+            above_text: false,
+        });
+    }
 
     labels.push(ChromeLabel {
         mono: false,
@@ -1139,48 +1261,46 @@ pub fn build(
 
     let viewport = layout.viewport;
     for (index, row) in layout.rows.iter().enumerate() {
-        if let Some((text, rect)) = &row.group
-            && let Some(shown) = clipped(*rect, viewport)
+        if let Some((rect, group)) = row.rule
+            && let Some(shown) = clipped(rect, viewport)
         {
-            labels.push(ChromeLabel {
-                mono: false,
-                text: text.clone(),
-                rect: *rect,
-                font_size_px: px(GROUP_LABEL_FONT_LOGICAL_PX),
-                color: palette.dialog_muted_text,
-                align_right: false,
-                align_center: false,
-                letter_spacing_em: GROUP_LABEL_TRACKING_EM,
-                weight: ChromeLabelWeight::SemiBold,
-                tabular_numerals: false,
-                clip: Some(shown),
+            quads.push(OverlayQuad {
+                rect: shown,
+                color: palette.menu_border,
+                alpha: if group {
+                    alpha(palette.menu_border_alpha)
+                } else {
+                    // `--border-soft`: the same ink at rather less than
+                    // `--border`, which is what separates two rows of one group
+                    // from the one rule that separates the groups.
+                    alpha(palette.menu_border_alpha) * ROW_RULE_SOFTNESS
+                },
             });
         }
-        if let Some(shown) = clipped(row.title.1, viewport) {
+        if hover == Some(Target::Row(index)) {
+            let lit = row.band;
+            // **Clipped by the body's top and bottom, not by the text column.**
+            // The fill's whole shape is that it runs eight pixels wider than
+            // the column on each side; clipping it to the viewport would cut
+            // exactly the part that makes it a band. What it may not cross is
+            // the card's own edge, and what it may not escape is the scroller.
+            quads.extend(clip_quads(
+                rounded_overlay_fill(
+                    lit,
+                    px(ROW_HOVER_RADIUS_LOGICAL_PX),
+                    palette.dialog_hover,
+                    1.0,
+                ),
+                layout.body_clip,
+            ));
+        }
+        if let Some(shown) = clipped(row.line.1, viewport) {
             labels.push(ChromeLabel {
                 mono: false,
-                text: row.title.0.clone(),
-                rect: row.title.1,
+                text: row.line.0.clone(),
+                rect: row.line.1,
                 font_size_px: px(ROW_FONT_LOGICAL_PX),
                 color: palette.dialog_title_text,
-                align_right: false,
-                align_center: false,
-                letter_spacing_em: 0.0,
-                weight: ChromeLabelWeight::Regular,
-                tabular_numerals: false,
-                clip: Some(shown),
-            });
-        }
-        for (text, rect) in &row.description {
-            let Some(shown) = clipped(*rect, viewport) else {
-                continue;
-            };
-            labels.push(ChromeLabel {
-                mono: false,
-                text: text.clone(),
-                rect: *rect,
-                font_size_px: px(DESC_FONT_LOGICAL_PX),
-                color: palette.dialog_muted_text,
                 align_right: false,
                 align_center: false,
                 letter_spacing_em: 0.0,
@@ -1243,17 +1363,12 @@ pub fn build(
         ));
     }
 
-    quads.push(OverlayQuad {
-        rect: layout.hairline,
-        color: palette.menu_border,
-        alpha: alpha(palette.menu_border_alpha),
-    });
-    for (text, rect) in &layout.footnote {
+    for (text, rect) in &layout.settings_line {
         labels.push(ChromeLabel {
             mono: false,
             text: text.clone(),
             rect: *rect,
-            font_size_px: px(FOOTNOTE_FONT_LOGICAL_PX),
+            font_size_px: px(SETTINGS_LINE_FONT_LOGICAL_PX),
             color: palette.dialog_muted_text,
             align_right: false,
             align_center: false,
@@ -1262,40 +1377,6 @@ pub fn build(
             tabular_numerals: false,
             clip: None,
         });
-    }
-    labels.push(ChromeLabel {
-        mono: false,
-        text: layout.link.0.clone(),
-        rect: layout.link.1,
-        font_size_px: px(FOOTNOTE_FONT_LOGICAL_PX),
-        color: palette.accent,
-        align_right: false,
-        align_center: false,
-        letter_spacing_em: 0.0,
-        weight: ChromeLabelWeight::Regular,
-        tabular_numerals: false,
-        clip: None,
-    });
-    // The underline a link wears, at the weight the rest of this window's links
-    // wear it: present, and not as loud as the word.
-    let underline_top = (layout.link.1[3] - px(FOOTNOTE_LINE_LOGICAL_PX) * 0.18).round();
-    quads.push(OverlayQuad {
-        rect: [
-            layout.link.1[0],
-            underline_top,
-            layout.link.1[2],
-            underline_top + border,
-        ],
-        color: palette.accent,
-        alpha: LINK_UNDERLINE_ALPHA,
-    });
-    if focus == Some(Focus::OpenSettings) {
-        quads.extend(focus_ring(
-            layout.link.1,
-            scale,
-            FOCUS_RING_TIGHT_OFFSET_LOGICAL_PX,
-            palette.accent,
-        ));
     }
 
     push_button(
@@ -1335,6 +1416,7 @@ pub fn build(
         OverlayLayer {
             quads,
             labels,
+            images,
             ..Default::default()
         },
         OverlayLayer {
@@ -1343,6 +1425,17 @@ pub fn build(
         },
     ]
 }
+
+/// `--border-soft` as a fraction of `--border`: `.055` of ink where the border
+/// is `.088` in the light theme, `.06` of white where it is `.094` in the dark.
+/// One ratio, because the mock-up's two pairs are the same ratio to within a
+/// hundredth and a second constant would be a number nobody could check.
+const ROW_RULE_SOFTNESS: f32 = 0.63;
+
+/// The tile's corner radius as a fraction of its side — `GROUND_RADIUS` in
+/// `design/assets/app-icon/make-folio-ico.py`, which is the file that draws
+/// `folio.ico`.
+const MARK_TILE_RADIUS_UNITS: f32 = 0.22;
 
 /// `.aswitch` — a 30 × 18 track with a 14 × 14 knob two pixels in.
 fn push_switch(
@@ -1379,11 +1472,24 @@ fn push_switch(
         knob_left + px(SWITCH_KNOB_LOGICAL_PX),
         rect[1] + inset + px(SWITCH_KNOB_LOGICAL_PX),
     ];
-    // `box-shadow: 0 1px 3px rgba(0,0,0,.25)` — one ring under the knob, offset
-    // by its one logical pixel, drawn with the restraint every other lift in
-    // this window is drawn with.
+    // `box-shadow: 0 1px 3px rgba(0,0,0,.25)` — the knob's lift, offset by its
+    // one logical pixel, drawn through the same door every other lift in this
+    // window is drawn through.
+    //
+    // **A falloff, not a stroke** (user report 2026-09-06, a photograph of the
+    // card at 150% in the light theme: every switch that is off wearing a grey
+    // band round its knob). A blur's three pixels are a gradient — the quarter
+    // alpha stands against the knob and is gone by the time it has travelled
+    // its reach. `rounded_overlay_halo` puts the whole quarter on all three of
+    // them, and three logical pixels is five physical ones at 150%, which is
+    // wider than the two that separate the knob from the track's own edge: the
+    // ring stood proud of the track at the top and the bottom and read as a
+    // second solid shape laid over the switch rather than as a shadow under
+    // its knob. `rounded_overlay_halo`'s own doc names which of the two it is
+    // — the exact uniform ring an outline needs, and the one thing a shadow
+    // must not be — and `rounded_overlay_shadow` is the falloff beside it.
     quads.extend(clip_quads(
-        rounded_overlay_halo(
+        rounded_overlay_shadow(
             [knob[0], knob[1] + px(1.0), knob[2], knob[3] + px(1.0)],
             px(SWITCH_KNOB_LOGICAL_PX) / 2.0,
             px(SWITCH_KNOB_SHADOW_LOGICAL_PX),
@@ -1396,11 +1502,35 @@ fn push_switch(
         rounded_overlay_fill(
             knob,
             px(SWITCH_KNOB_LOGICAL_PX) / 2.0,
-            palette.menu_surface,
+            knob_face(palette, on),
             1.0,
         ),
         clip,
     ));
+}
+
+/// What the knob is made of.
+///
+/// **`--menu`, except on a dark card with the switch off** (user ruling
+/// 2026-09-06). `.aswitch i` is `--menu` in both themes with no dark override,
+/// and in the dark that is `#2A2A2A` on an `--active` track that resolves to
+/// `#343434`: six off switches, each with a hole punched in the left end of it,
+/// on the loudest surface this program has ever put them on. Fluent's own dark
+/// toggle answers this the other way round from its light one — the knob is the
+/// *ink*, dark on the light theme's light track and light on the dark theme's
+/// dark one — so the off knob takes `--ink`, the card's own strongest ink and
+/// the colour of the very line beside it. **No new colour, and the light theme
+/// is untouched**: there, `--menu` is white on a near-white track and the
+/// knob's `0 1px 3px` lift is what separates them, exactly as the mock-up has
+/// it. A knob that is *on* stays `--menu` in both themes, which is also
+/// Fluent's answer: the dark theme's accent is a pale blue, and a pale knob on
+/// it would be the switch with its state rubbed out.
+fn knob_face(palette: bt_render::ChromePalette, on: bool) -> [u8; 3] {
+    if on || bt_render::background_is_light(palette.dialog_surface) {
+        palette.menu_surface
+    } else {
+        palette.dialog_title_text
+    }
 }
 
 /// Every quad of `source`, cut to `clip`, with the ones outside it dropped.
@@ -1546,22 +1676,17 @@ fn brightened(color: [u8; 3], factor: f32) -> [u8; 3] {
 }
 
 /// The font sizes a caller has to measure with, so nothing else has to know
-/// them. The row's own title is never measured: it is one line by construction,
-/// and the switch beside it is the thing that is placed against it.
-pub const MEASURED_DESC_FONT_LOGICAL_PX: f32 = DESC_FONT_LOGICAL_PX;
-pub const MEASURED_FOOTNOTE_FONT_LOGICAL_PX: f32 = FOOTNOTE_FONT_LOGICAL_PX;
+/// them. A row's own line is never measured: it is one line by construction,
+/// and the switch beside it is placed against the row rather than against it.
+pub const MEASURED_SETTINGS_LINE_FONT_LOGICAL_PX: f32 = SETTINGS_LINE_FONT_LOGICAL_PX;
 pub const MEASURED_BUTTON_FONT_LOGICAL_PX: f32 = BUTTON_FONT_LOGICAL_PX;
 
-/// The width the footnote is wrapped to, which is the sentence's room less what
-/// the link beside it takes.
+/// The width the faint line above the buttons is wrapped to — the card's whole
+/// content column, since v4 took the `Open settings` link off the end of it.
 #[must_use]
-pub fn footnote_width(surface_width: f32, scale: f32, link_width: f32) -> f32 {
+pub fn settings_line_width(surface_width: f32, scale: f32) -> f32 {
     let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
-    card_width(surface_width, scale)
-        - 2.0 * border
-        - 2.0 * PADDING_X_LOGICAL_PX * scale
-        - FOOTNOTE_LINK_GAP_LOGICAL_PX * scale
-        - link_width
+    card_width(surface_width, scale) - 2.0 * border - 2.0 * PADDING_X_LOGICAL_PX * scale
 }
 
 #[cfg(test)]
@@ -1657,8 +1782,8 @@ mod tests {
             [RowKind::Update, RowKind::Explorer, RowKind::PowerShell]
         );
         assert!(
-            offered.iter().all(|row| row.group.is_none()),
-            "the card is showing a heading over a group with nothing in it"
+            offered.iter().all(|row| !row.divider_above),
+            "the card is drawing the rule that opens a group with nothing in it"
         );
         let configured = Machine {
             claude_installable: false,
@@ -1675,10 +1800,13 @@ mod tests {
             ],
             "a row is being offered for a configuration that already calls Folio"
         );
-        assert_eq!(
-            rows(&configured)[3].group,
-            Some(Text::FirstRunAgentGroup),
-            "the heading moved off the first agent row that is actually shown"
+        assert!(
+            rows(&configured)[3].divider_above,
+            "the rule moved off the first agent row that is actually shown"
+        );
+        assert!(
+            rows(&configured)[..3].iter().all(|row| !row.divider_above),
+            "a rule is being drawn inside Folio's own three rows"
         );
     }
 
@@ -1721,19 +1849,13 @@ mod tests {
     fn the_explorer_row_says_only_what_its_switch_can_mean() {
         let both = every_row();
         assert_eq!(explorer_shape(&both), ExplorerShape::FirstPageAndClassic);
-        assert_eq!(
-            explorer_shape(&both).description(),
-            Text::FirstRunDescExplorer11
-        );
+        assert_eq!(explorer_shape(&both).line(), Text::FirstRunRowExplorer11);
         let classic = Machine {
             explorer_first_page_available: false,
             ..both
         };
         assert_eq!(explorer_shape(&classic), ExplorerShape::ClassicOnly);
-        assert_eq!(
-            explorer_shape(&classic).description(),
-            Text::FirstRunDescExplorer10
-        );
+        assert_eq!(explorer_shape(&classic).line(), Text::FirstRunRowExplorer10);
         assert!(
             rows(&classic)
                 .iter()
@@ -1935,17 +2057,21 @@ mod tests {
         assert_eq!(pending_row_line(false), None);
     }
 
-    /// PIN (§7.56 §6) — **the focus order is every switch, then the link, then
-    /// the two verbs, and it is a ring.**
+    /// PIN (§7.56 §6, v4 §5) — **the focus order is every switch and then the
+    /// two verbs, and it is a ring.**
     ///
     /// The card is modal, so focus never leaves it. `↑`/`↓` move between
-    /// switches only, because the list is a list.
+    /// switches only, because the list is a list. **There is no third stop in
+    /// the foot**: v4 took the `Open settings` link off the card, and what
+    /// stands there now is a statement of fact rather than an affordance.
     ///
     /// MUTATIONS:
     /// ① let `Tab` fall off either end and the keyboard leaves a modal card,
     ///    landing in a shell behind a scrim;
     /// ② let the arrows walk onto the buttons and `↓` from the last row presses
-    ///    nothing while looking as though it might.
+    ///    nothing while looking as though it might;
+    /// ③ leave the link in the ring and `Tab` stops on a faint line that
+    ///    nothing can press.
     #[test]
     fn the_focus_walks_the_card_in_a_ring_and_the_arrows_stay_in_the_list() {
         assert_eq!(
@@ -1954,12 +2080,11 @@ mod tests {
                 Focus::Switch(0),
                 Focus::Switch(1),
                 Focus::Switch(2),
-                Focus::OpenSettings,
                 Focus::Later,
                 Focus::Done
             ]
         );
-        assert_eq!(stepped(Focus::Switch(2), 3, true), Focus::OpenSettings);
+        assert_eq!(stepped(Focus::Switch(2), 3, true), Focus::Later);
         assert_eq!(
             stepped(Focus::Done, 3, true),
             Focus::Switch(0),
@@ -1982,7 +2107,7 @@ mod tests {
             Focus::Switch(2),
             "an arrow from a verb enters the list at the end it came from"
         );
-        assert_eq!(arrowed(Focus::OpenSettings, 3, true), Focus::Switch(0));
+        assert_eq!(arrowed(Focus::Later, 3, true), Focus::Switch(0));
     }
 
     /// PIN (§7.56 §6) — **the card opens with the ring on the first switch and
@@ -2070,27 +2195,29 @@ mod tests {
 
     // ── geometry ───────────────────────────────────────────────────────────
 
-    /// The window `card-v3-*.png` were composed on: a 1133 × 548 logical window
+    /// The window `card-v4-*.png` were composed on: a 1133 × 548 logical window
     /// at 1.5×.
     const SURFACE: (f32, f32) = (1699.0, 822.0);
+    /// A window short enough that six rows do not fit in it. **v4's body does
+    /// not scroll at the reference window** — that is the one measurable side
+    /// effect of taking the sentences off the rows (v4 §0) — so the machinery
+    /// has to be exercised where it actually fires.
+    const SHORT_SURFACE: (f32, f32) = (1699.0, 560.0);
     const SCALE: f32 = 1.5;
 
-    fn measured(rows: &[Row], lines_each: usize) -> Content {
+    fn measured(rows: &[Row]) -> Content {
         Content {
             title: Text::FirstRunTitle.text().to_owned(),
             rows: rows
                 .iter()
                 .map(|row| RowContent {
-                    group: row.group.map(|label| label.text().to_owned()),
-                    title: row.title.text().to_owned(),
-                    description_lines: vec!["a measured line".to_owned(); lines_each],
+                    divider_above: row.divider_above,
+                    line: row.line.text().to_owned(),
+                    tip: row.tip.text().to_owned(),
                     on: row.on,
                 })
                 .collect(),
-            footnote_lines: vec![Text::FirstRunFootnote.text().to_owned()],
-            footnote_last_line_width: 300.0,
-            open_settings: Text::FirstRunOpenSettings.text().to_owned(),
-            open_settings_width: 90.0,
+            settings_lines: vec![Text::FirstRunSettingsLine.text().to_owned()],
             later: Text::FirstRunLater.text().to_owned(),
             later_width: 50.0,
             done: Text::FirstRunDone.text().to_owned(),
@@ -2098,11 +2225,18 @@ mod tests {
         }
     }
 
+    /// Relative luminance, near enough for "which of these two is lighter".
+    fn luma(colour: [u8; 3]) -> f32 {
+        0.2126 * f32::from(colour[0])
+            + 0.7152 * f32::from(colour[1])
+            + 0.0722 * f32::from(colour[2])
+    }
+
     /// PIN (§7.56 §9) — **the head and the foot are pinned and the body between
     /// them scrolls.**
     ///
     /// The pinned foot is why the scroll is safe: `Done`, `Not now` and the one
-    /// sentence that says every row is in Settings are never the thing that
+    /// line that says every row is in Settings are never the thing that
     /// scrolled away.
     ///
     /// MUTATIONS:
@@ -2112,17 +2246,23 @@ mod tests {
     ///    before they can press them.
     #[test]
     fn the_body_scrolls_and_the_two_verbs_never_do() {
-        let content = measured(&rows(&every_row()), 3);
-        let tall = layout(&content, SURFACE.0, SURFACE.1, SCALE, 0.0);
+        let content = measured(&rows(&every_row()));
+        let tall = layout(&content, SHORT_SURFACE.0, SHORT_SURFACE.1, SCALE, 0.0);
         assert!(
             tall.scrolls(),
-            "seven entries of three lines each fitted a 548 logical window without scrolling"
+            "six rows did not scroll in a window 373 logical pixels tall"
         );
         assert!(
-            tall.frame[3] - tall.frame[1] <= SURFACE.1,
+            tall.frame[3] - tall.frame[1] <= SHORT_SURFACE.1,
             "the card is taller than the window it is drawn in"
         );
-        let scrolled = layout(&content, SURFACE.0, SURFACE.1, SCALE, tall.scroll_extent());
+        let scrolled = layout(
+            &content,
+            SHORT_SURFACE.0,
+            SHORT_SURFACE.1,
+            SCALE,
+            tall.scroll_extent(),
+        );
         assert_eq!(
             scrolled.later.1, tall.later.1,
             "`Not now` moved when the body was scrolled"
@@ -2130,16 +2270,47 @@ mod tests {
         assert_eq!(scrolled.done.1, tall.done.1);
         assert_eq!(scrolled.title.1, tall.title.1);
         assert_eq!(
-            scrolled.footnote[0].1, tall.footnote[0].1,
-            "the one sentence that says where these rows live scrolled away"
+            scrolled.mark, tall.mark,
+            "the product's own mark scrolled off the top of its own card"
+        );
+        assert_eq!(
+            scrolled.settings_line[0].1, tall.settings_line[0].1,
+            "the one line that says where these rows live scrolled away"
         );
         assert!(
-            scrolled.rows[0].title.1[1] < tall.rows[0].title.1[1],
+            scrolled.rows[0].band[1] < tall.rows[0].band[1],
             "the body did not move"
         );
-        let short = measured(&rows(&every_row())[..2], 1);
+    }
+
+    /// PIN (§7.56, v4 §0) — **at the reference window the card does not
+    /// scroll.**
+    ///
+    /// This is what taking the sentences off the rows bought, and it is worth a
+    /// gate of its own: v3 needed 376 logical pixels of body in 315 of room and
+    /// clipped every reader on their first launch, on the very card that is
+    /// meant to be the first impression.
+    ///
+    /// MUTATION: put a sentence back under any row — or give a row a second
+    /// line under somebody's font — and the first thing a new machine shows is
+    /// a scrollbar.
+    #[test]
+    fn six_rows_fit_the_reference_window_without_a_bar() {
+        let placed = layout(
+            &measured(&rows(&every_row())),
+            SURFACE.0,
+            SURFACE.1,
+            SCALE,
+            0.0,
+        );
         assert!(
-            !layout(&short, SURFACE.0, SURFACE.1, SCALE, 0.0).scrolls(),
+            !placed.scrolls(),
+            "the card that is a machine's first impression opens already clipped"
+        );
+        assert!(
+            build(&placed, SURFACE, None, None)
+                .iter()
+                .all(|layer| layer.quads.iter().all(|quad| quad.color != SCROLLBAR_INK)),
             "a card that fits grew a scrollbar"
         );
     }
@@ -2153,17 +2324,17 @@ mod tests {
     /// card that looks as though nothing happened.
     #[test]
     fn walking_onto_a_row_below_the_fold_brings_it_into_view() {
-        let content = measured(&rows(&every_row()), 3);
-        let placed = layout(&content, SURFACE.0, SURFACE.1, SCALE, 0.0);
+        let content = measured(&rows(&every_row()));
+        let placed = layout(&content, SHORT_SURFACE.0, SHORT_SURFACE.1, SCALE, 0.0);
         let last = placed.rows.len() - 1;
         let to = placed.scroll_showing(Focus::Switch(last));
         assert!(
             to > 0.0,
             "the ring walked onto a row that is under the fade and nothing moved"
         );
-        let after = layout(&content, SURFACE.0, SURFACE.1, SCALE, to);
+        let after = layout(&content, SHORT_SURFACE.0, SHORT_SURFACE.1, SCALE, to);
         assert!(
-            after.rows[last].switch[3] <= after.viewport[3],
+            after.rows[last].band[3] <= after.viewport[3],
             "the row the ring is on is still below the fold"
         );
         assert_eq!(
@@ -2178,26 +2349,44 @@ mod tests {
         );
     }
 
-    /// PIN (§7.56) — **a switch scrolled out of the body cannot be pressed.**
+    /// PIN (§7.56, v4 §2 / §8) — **the whole row answers a press, and a row
+    /// scrolled out of the body answers nothing.**
     ///
-    /// The clip is where a control stops being drawn, so it is where it stops
-    /// answering. Anything else is a press on a row the reader cannot see.
+    /// A hovered row is filled end to end with `--hover` and carries a tooltip
+    /// about itself; this window's standing rule is that a mark which answers a
+    /// hover and not a click is the window lying about what it drew (§7.1.5f,
+    /// §7.1.5g). So the band that lights is the band that answers, and the clip
+    /// is where both stop.
     ///
-    /// MUTATION: drop the viewport check in `hit` and a click on the footnote's
-    /// own line flips whichever row happens to be under the foot.
+    /// MUTATIONS:
+    /// ① hit-test the switch alone and five sixths of a lit row does nothing
+    ///    when it is pressed;
+    /// ② drop the viewport check and a click on the faint line flips whichever
+    ///    row happens to be under the foot.
     #[test]
-    fn a_press_outside_the_body_is_not_a_press_on_a_row() {
-        let content = measured(&rows(&every_row()), 3);
-        let placed = layout(&content, SURFACE.0, SURFACE.1, SCALE, 0.0);
-        let first = placed.rows[0].switch;
+    fn a_press_anywhere_on_a_row_is_a_press_on_its_switch_and_the_fade_ends_it() {
+        let content = measured(&rows(&every_row()));
+        let placed = layout(&content, SHORT_SURFACE.0, SHORT_SURFACE.1, SCALE, 0.0);
         let middle = |rect: [f32; 4]| {
             (
                 f64::from((rect[0] + rect[2]) / 2.0),
                 f64::from((rect[1] + rect[3]) / 2.0),
             )
         };
-        let (x, y) = middle(first);
-        assert_eq!(hit(&placed, x, y), Target::Switch(0));
+        let first = &placed.rows[0];
+        let (x, y) = middle(first.switch);
+        assert_eq!(hit(&placed, x, y), Target::Row(0));
+        // The far left of the same band — where the line's first glyph is, and
+        // as far from the switch as the row goes.
+        assert_eq!(
+            hit(
+                &placed,
+                f64::from(first.band[0] + 1.0),
+                f64::from((first.band[1] + first.band[3]) / 2.0)
+            ),
+            Target::Row(0),
+            "the lit band answered a hover and not a press"
+        );
         let last = placed.rows.len() - 1;
         let (x, y) = middle(placed.rows[last].switch);
         assert_eq!(
@@ -2209,8 +2398,6 @@ mod tests {
         assert_eq!(hit(&placed, x, y), Target::Done);
         let (x, y) = middle(placed.later.1);
         assert_eq!(hit(&placed, x, y), Target::Later);
-        let (x, y) = middle(placed.link.1);
-        assert_eq!(hit(&placed, x, y), Target::OpenSettings);
         assert_eq!(
             hit(&placed, 4.0, 4.0),
             Target::Panel,
@@ -2218,36 +2405,308 @@ mod tests {
         );
     }
 
+    /// PIN (v4, user ruling 2026-09-06 — 「六行统一左对齐，agent 行不画标记」)
+    /// — **every row's line starts on the same x, and nothing is drawn in front
+    /// of any of them.**
+    ///
+    /// v4's first drawing put a 16px coloured silhouette at the head of each of
+    /// the three agent rows, which indented those three lines by 26 pixels and
+    /// made the card two text columns instead of one. The marks are struck: the
+    /// row names its agent in words, the rule above the group already says the
+    /// three belong together, and one repeated silhouette in three colours gave
+    /// a colour-blind reader nothing at all.
+    ///
+    /// MUTATIONS:
+    /// ① indent the agent rows past a mark and the six lines stand on two
+    ///    different lefts, which is the thing that was reported;
+    /// ② push the marks back as sprites or images and the card carries seven
+    ///    pictures where it should carry one.
+    #[test]
+    fn every_row_line_starts_on_one_x_and_the_only_picture_is_the_folio_mark() {
+        let placed = layout(
+            &measured(&rows(&every_row())),
+            SURFACE.0,
+            SURFACE.1,
+            SCALE,
+            0.0,
+        );
+        let left = placed.rows[0].line.1[0];
+        for (index, row) in placed.rows.iter().enumerate() {
+            assert!(
+                (row.line.1[0] - left).abs() < 0.01,
+                "row {index}'s line starts at {} while the first starts at {left} — the card has \
+                 grown a second text column",
+                row.line.1[0]
+            );
+        }
+        let layers = build(&placed, SURFACE, None, None);
+        assert!(
+            layers.iter().all(|layer| layer.sprites.is_empty()),
+            "the card is drawing marks it has none of"
+        );
+        let images: Vec<_> = layers
+            .iter()
+            .flat_map(|layer| layer.images.iter())
+            .collect();
+        assert_eq!(
+            images.len(),
+            1,
+            "the card draws {} pictures; the Folio mark is the only one it has",
+            images.len()
+        );
+        assert_eq!(
+            images[0].rect, placed.mark,
+            "the one picture on the card is not the mark in the header"
+        );
+    }
+
+    /// PIN (v4 §1, user ruling 2026-09-06) — **the header is the shipped icon
+    /// and the greeting, and the greeting stands clear of the mark.**
+    ///
+    /// `design/assets/app-icon/folio.ico` is what `build.rs` links into
+    /// `folio.exe`, so the first thing a reader sees agrees with the icon they
+    /// just double-clicked. There is no third line: v4 dropped the muted
+    /// sentence under the title (user ruling), so the header is two things.
+    ///
+    /// MUTATIONS:
+    /// ① set the title on the card's own padding and it is drawn over the mark;
+    /// ② hand the sampler an entry smaller than the box and the mark on a 200%
+    ///    monitor is an upscale of a 24-pixel drawing.
+    #[test]
+    fn the_header_is_the_shipped_mark_and_the_greeting_beside_it() {
+        let placed = layout(
+            &measured(&rows(&every_row())),
+            SURFACE.0,
+            SURFACE.1,
+            SCALE,
+            0.0,
+        );
+        let side = placed.mark[2] - placed.mark[0];
+        assert!(
+            (side - MARK_LOGICAL_PX * SCALE).abs() < 0.51,
+            "the mark is {side} physical pixels wide, not 22 logical"
+        );
+        assert!(
+            (placed.mark[3] - placed.mark[1] - side).abs() < 0.01,
+            "not square"
+        );
+        assert!(
+            placed.title.1[0] >= placed.mark[2],
+            "the greeting is set over the mark"
+        );
+        assert!(
+            (placed.title.1[0] - placed.mark[2] - MARK_GAP_LOGICAL_PX * SCALE).abs() < 0.51,
+            "the gap between the mark and the greeting is not the one the spec names"
+        );
+        // The mark's own line box is the title's, so the two share a centre.
+        assert!(
+            ((placed.mark[1] + placed.mark[3]) / 2.0
+                - (placed.title.1[1] + placed.title.1[3]) / 2.0)
+                .abs()
+                < 1.01,
+            "the mark is not centred on the greeting's line"
+        );
+        let entry = mark_entry(side).expect("folio.ico carries no uncompressed entry");
+        assert!(
+            entry.side as f32 >= side,
+            "the mark is being upscaled from a {}px entry into a {side}px box",
+            entry.side
+        );
+        assert_eq!(
+            entry.rgba.len(),
+            (entry.side * entry.side * 4) as usize,
+            "the decoded entry is not a square of RGBA"
+        );
+        // Decoded the right way up and the right way round: `make-folio-ico.py`
+        // puts the graphite tile in the corners and the paper across the middle.
+        let at = |x: u32, y: u32| {
+            let index = ((y * entry.side + x) * 4) as usize;
+            [
+                entry.rgba[index],
+                entry.rgba[index + 1],
+                entry.rgba[index + 2],
+            ]
+        };
+        let middle = at(entry.side / 2, entry.side / 2);
+        let corner = at(entry.side / 2, 2);
+        assert!(
+            luma(middle) > luma(corner) + 40.0,
+            "the mark decoded to {middle:?} in the middle and {corner:?} at the top, which is not \
+             a pale sheet on a graphite tile"
+        );
+    }
+
+    /// PIN (v4 §3, user ruling 2026-09-06 — the dark card's tile) — **on a dark
+    /// plane the mark is given the card's own edge.**
+    ///
+    /// The icon's ground is `#202027` and the dark card's is `#202020`: seven
+    /// levels apart, so the tile disappears and only the paper sheet inside it
+    /// is left standing on nothing. One hairline of `--border`, at the tile's
+    /// own corner radius, puts the edge back where the drawing has one. Nothing
+    /// is drawn in the light theme, where a graphite tile on white needs no
+    /// help.
+    ///
+    /// MUTATION: draw the edge in both themes and the light card carries a ring
+    /// round a mark that already had one.
+    #[test]
+    fn a_dark_card_gives_the_mark_the_edge_its_own_ground_takes_away() {
+        let placed = layout(
+            &measured(&rows(&every_row())),
+            SURFACE.0,
+            SURFACE.1,
+            SCALE,
+            0.0,
+        );
+        // The edge is `--border` ink laid inside the mark's own box, which no
+        // other quad on this card is: the rows' rules run the whole content
+        // width and the card's own border is drawn round the frame.
+        let edge = |palette: bt_render::ChromePalette| {
+            let mut quads = Vec::new();
+            if !bt_render::background_is_light(palette.dialog_surface) {
+                quads.extend(rounded_overlay_halo(
+                    placed.mark,
+                    MARK_LOGICAL_PX * SCALE * MARK_TILE_RADIUS_UNITS,
+                    (FLOAT_WINDOW_BORDER_LOGICAL_PX * SCALE).max(1.0),
+                    palette.menu_border,
+                    f32::from(palette.menu_border_alpha) / 255.0,
+                ));
+            }
+            quads
+        };
+        assert!(
+            !edge(bt_render::DARK_CHROME).is_empty(),
+            "the dark card's mark has no edge, so its tile is the card"
+        );
+        assert!(
+            edge(bt_render::LIGHT_CHROME).is_empty(),
+            "the light card is ringing a mark that stands out on its own"
+        );
+        // And the edge is actually lighter than both grounds it stands between,
+        // which is the whole point of taking `--border` rather than a shadow.
+        let dark = bt_render::DARK_CHROME;
+        let over = |ink: [u8; 3], alpha: f32, ground: [u8; 3]| {
+            let mix = |a: u8, b: u8| f32::from(b) + (f32::from(a) - f32::from(b)) * alpha;
+            luma([
+                mix(ink[0], ground[0]).round() as u8,
+                mix(ink[1], ground[1]).round() as u8,
+                mix(ink[2], ground[2]).round() as u8,
+            ])
+        };
+        let edge_luma = over(
+            dark.menu_border,
+            f32::from(dark.menu_border_alpha) / 255.0,
+            dark.dialog_surface,
+        );
+        assert!(
+            edge_luma > luma(dark.dialog_surface) + 8.0,
+            "the edge {edge_luma} is not distinguishable from the card it is drawn on"
+        );
+    }
+
+    /// PIN (v4 §3 / §8, user ruling 2026-09-06) — **every row hands the tooltip
+    /// its own mechanism sentence, over the whole band, and a row under the
+    /// fade hands it nothing.**
+    ///
+    /// This is where v3's explanations went. The reader is owed the address of
+    /// their own files — v3 §10.1 — and owed is not the same as shown unasked;
+    /// the row line is the decision and the tooltip is the receipt.
+    ///
+    /// MUTATIONS:
+    /// ① hang the tip on the switch and the sentence is unreachable from five
+    ///    sixths of the band that lights up to promise it;
+    /// ② hand every row the same string and the card names one file six times;
+    /// ③ skip the clip and a row scrolled under the foot answers a hover that
+    ///    landed on the buttons.
+    #[test]
+    fn every_row_hands_the_tooltip_the_file_that_row_writes() {
+        let placed = layout(
+            &measured(&rows(&every_row())),
+            SURFACE.0,
+            SURFACE.1,
+            SCALE,
+            0.0,
+        );
+        let tips = placed.tips();
+        assert_eq!(tips.len(), placed.rows.len(), "a row has nothing to say");
+        for (index, rect, text) in &tips {
+            assert_eq!(
+                *rect, placed.rows[*index].band,
+                "row {index}'s tip is hung on something narrower than the band that lights up"
+            );
+            assert!(!text.trim().is_empty());
+        }
+        // Each of the four rows that writes a file the reader owns names that
+        // file, and no two rows name the same one.
+        for (row, named) in [
+            (2_usize, "$PROFILE"),
+            (3, "~/.claude/settings.json"),
+            (4, "~/.codex/config.toml"),
+            (5, "~/.copilot/hooks/folio.json"),
+        ] {
+            assert!(
+                tips[row].2.contains(named),
+                "the row that writes {named} does not name it: {:?}",
+                tips[row].2
+            );
+        }
+        let said: std::collections::BTreeSet<&str> =
+            tips.iter().map(|(_, _, text)| text.as_str()).collect();
+        assert_eq!(said.len(), tips.len(), "two rows say the same sentence");
+        // Under the fade there is nothing to hover, so there is nothing to say.
+        let short = layout(
+            &measured(&rows(&every_row())),
+            SHORT_SURFACE.0,
+            SHORT_SURFACE.1,
+            SCALE,
+            0.0,
+        );
+        assert!(short.scrolls());
+        assert!(
+            short.tips().len() < short.rows.len(),
+            "a row scrolled out of the body is still offering a tooltip"
+        );
+        for (_, rect, _) in short.tips() {
+            assert!(
+                rect[1] >= short.viewport[1] - 0.01 && rect[3] <= short.viewport[3] + 0.01,
+                "a tip is hung on a box that runs outside the body it is drawn in"
+            );
+        }
+    }
+
     /// PIN (§7.56 §3) — **the switch is 30 × 18 with a 14 × 14 knob two pixels
-    /// in, its right edge on the card's padding, centred on the row's first
-    /// title line.**
+    /// in, its right edge on the card's padding, centred on its row.**
     ///
     /// Settings' own row shape: the sentence on the left, the control on the
     /// right. A reader handed six rows of that shape must meet the same shape
     /// when they next open Settings to change one.
     ///
     /// MUTATIONS:
-    /// ① centre the switch on the whole row and a row whose sentence runs to
-    ///    three lines drags its control down the card;
-    /// ② let the sentence run under the switch and every long line collides with
-    ///    it.
+    /// ① let the line's column run under the switch and every long line
+    ///    collides with it;
+    /// ② hang the switch off the row's top and it stops sitting on the line it
+    ///    is about.
     #[test]
     fn the_switch_is_settings_own_control_in_settings_own_row_shape() {
-        let content = measured(&rows(&every_row()), 3);
-        let placed = layout(&content, SURFACE.0, SURFACE.1, SCALE, 0.0);
+        let placed = layout(
+            &measured(&rows(&every_row())),
+            SURFACE.0,
+            SURFACE.1,
+            SCALE,
+            0.0,
+        );
         let row = &placed.rows[0];
         let px = |value: f32| value * SCALE;
         assert!((row.switch[2] - row.switch[0] - px(SWITCH_WIDTH_LOGICAL_PX)).abs() < 0.01);
         assert!((row.switch[3] - row.switch[1] - px(SWITCH_HEIGHT_LOGICAL_PX)).abs() < 0.01);
         let switch_middle = (row.switch[1] + row.switch[3]) / 2.0;
-        let title_middle = (row.title.1[1] + row.title.1[3]) / 2.0;
+        let band_middle = (row.band[1] + row.band[3]) / 2.0;
         assert!(
-            (switch_middle - title_middle).abs() < 0.51,
-            "the switch is not centred on the row's first title line"
+            (switch_middle - band_middle).abs() < 0.51,
+            "the switch is not centred on its own row"
         );
         assert!(
-            row.title.1[2] <= row.switch[0],
-            "the sentence column runs under the control"
+            row.line.1[2] <= row.switch[0],
+            "the line's column runs under the control"
         );
         let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * SCALE).max(1.0);
         assert!(
@@ -2255,36 +2714,316 @@ mod tests {
             "the switch's right edge is not on the card's own padding"
         );
         assert!(
-            row.description
-                .iter()
-                .all(|(_, rect)| rect[2] <= row.switch[0]),
-            "a description line runs under the control"
+            (row.band[3] - row.band[1] - px(ROW_HEIGHT_LOGICAL_PX)).abs() < 0.01,
+            "a row is not 42 logical pixels tall"
         );
     }
 
-    /// PIN (§7.56 §9) — **480 logical, clamped to 92% of a window narrower than
-    /// that.**
+    /// PIN (v4 §7 ⑦, user ruling 2026-09-06 — 「关着的开关在暗色下像个洞」) —
+    /// **a knob that is off stands against its own track in both themes.**
     ///
-    /// MUTATION: keep `.restore`'s 400 and the three agent sentences each take a
-    /// second line, which is the measurement the width was chosen from.
+    /// `.aswitch i` was `--menu` in both, and in the dark that is `#2A2A2A` on
+    /// an `--active` track that resolves to `#343434`: six off switches with a
+    /// hole punched in the left end of each, on the loudest surface this
+    /// program has ever put them on. Fluent answers this the other way round
+    /// from its light theme — the knob is the *ink* — so the dark off knob
+    /// takes `--ink`, which is the colour of the very line beside it and not a
+    /// new one.
+    ///
+    /// MUTATIONS:
+    /// ① give the dark theme `--menu` back and the knob is darker than the
+    ///    track it sits in, which is the report;
+    /// ② give the light theme `--ink` and a white card grows six black pills;
+    /// ③ light the *on* knob as well and the dark theme's pale accent carries a
+    ///    pale knob, with the switch's state rubbed out.
     #[test]
-    fn the_card_is_four_hundred_and_eighty_logical_or_the_window_s_own_share() {
-        // **The number, not the constant.** Asserting against
-        // `MAX_WIDTH_LOGICAL_PX` would be the constant agreeing with itself, and
-        // a card retuned to `.restore`'s 400 would walk straight through it —
-        // which is exactly the mutation this line was written to catch.
+    fn a_knob_that_is_off_stands_against_its_track_in_both_themes() {
+        // **The two themes are separated by different things, and that is the
+        // ruling.** In the light theme `--menu` is white on a near-white track
+        // — eighteen levels apart — and what makes it a control is the
+        // `0 1px 3px` under it, which the spec says in as many words and
+        // `the_knob_s_shadow_falls_off_and_leaves_the_rest_of_the_track_alone`
+        // is the gate for. In the dark theme the same shadow is invisible
+        // against a dark track, so the ink has to do it, and there the gap is
+        // the fact.
+        let dark = bt_render::DARK_CHROME;
+        let (track, knob) = (luma(dark.float_row_selected), luma(knob_face(dark, false)));
         assert!(
-            (card_width(2000.0, 1.0) - 480.0).abs() < 0.51,
-            "the width the three agent sentences were measured to fit on one line each is not \
-             the width the card takes"
+            knob > track + 24.0,
+            "a dark off knob at {knob} on a track at {track} is a hole in the switch rather \
+             than a control standing in it"
+        );
+        assert_eq!(
+            knob_face(bt_render::LIGHT_CHROME, false),
+            bt_render::LIGHT_CHROME.menu_surface,
+            "the light theme's knob moved, and nothing was reported about it"
+        );
+        for palette in [bt_render::LIGHT_CHROME, bt_render::DARK_CHROME] {
+            assert_eq!(
+                knob_face(palette, true),
+                palette.menu_surface,
+                "a knob that is on left `--menu`, so the accent under it is carrying a knob of \
+                 its own brightness"
+            );
+        }
+    }
+
+    /// Every quad of the card, small enough to be part of a switch and near
+    /// `switch`, drawn in the knob's shadow ink.
+    ///
+    /// The scrim is the same ink and it is the whole window, so size is what
+    /// separates them: nothing a switch draws can be wider than its own track
+    /// plus the shadow's reach on both sides.
+    fn knob_shadow_quads(
+        layers: &[OverlayLayer],
+        switch: [f32; 4],
+        reach: f32,
+    ) -> Vec<OverlayQuad> {
+        let near = |rect: [f32; 4]| {
+            rect[0] < switch[2] + 4.0 * reach
+                && rect[2] > switch[0] - 4.0 * reach
+                && rect[1] < switch[3] + 4.0 * reach
+                && rect[3] > switch[1] - 4.0 * reach
+        };
+        let small = |rect: [f32; 4]| {
+            rect[2] - rect[0] <= (switch[2] - switch[0]) + 4.0 * reach
+                && rect[3] - rect[1] <= (switch[3] - switch[1]) + 4.0 * reach
+        };
+        layers
+            .iter()
+            .flat_map(|layer| layer.quads.iter())
+            .filter(|quad| {
+                quad.color == SWITCH_KNOB_SHADOW_INK
+                    && quad.alpha > 0.0
+                    && near(quad.rect)
+                    && small(quad.rect)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The rect the knob's shadow hangs on — the knob, offset by its one logical
+    /// pixel — snapped to the pixel grid the coverage pass snaps it to.
+    fn knob_lift(switch: [f32; 4], on: bool) -> [f32; 4] {
+        let px = |value: f32| value * SCALE;
+        let inset = px(SWITCH_KNOB_INSET_LOGICAL_PX);
+        let side = px(SWITCH_KNOB_LOGICAL_PX);
+        let left = if on {
+            switch[2] - inset - side
+        } else {
+            switch[0] + inset
+        };
+        [
+            left.round(),
+            (switch[1] + inset + px(1.0)).round(),
+            (left + side).round(),
+            (switch[1] + inset + side + px(1.0)).round(),
+        ]
+    }
+
+    /// PIN (§7.56 §3, user report 2026-09-06 — 「这里这个 switch 的阴影是不是有
+    /// 问题呢」, a screenshot of the card at 150% in the light theme) — **the
+    /// knob's lift is a falloff under the knob and nothing else on the track.**
+    ///
+    /// `box-shadow: 0 1px 3px rgba(0,0,0,.25)` is a *blur*: darkest right
+    /// against the knob and gone by the time it has travelled its reach. Drawn
+    /// as `rounded_overlay_halo` it is instead a stroke — the whole three
+    /// logical pixels at the full quarter-alpha, which at 1.5× is a five-pixel
+    /// grey band ringing the knob on every side, wider than the gap between the
+    /// knob and the track's own edge, so it spills off the track top and bottom
+    /// and reads as a second solid shape sitting on the switch. That is what
+    /// the report is a picture of, and `rounded_overlay_halo`'s own doc says as
+    /// much: it is the exact uniform ring an outline needs and a shadow must
+    /// not be.
+    ///
+    /// MUTATIONS:
+    /// ① draw the lift with `rounded_overlay_halo` again and the profile down
+    ///    the knob's flank is flat — every band at the full alpha, which is the
+    ///    grey blob that was reported;
+    /// ② hang the ring on the track instead of on the knob and the ink runs to
+    ///    the far end of a track that should carry nothing but its own fill;
+    /// ③ drop the one-pixel offset and the knob sits in a ring rather than over
+    ///    a shadow.
+    #[test]
+    fn the_knob_s_shadow_falls_off_and_leaves_the_rest_of_the_track_alone() {
+        let px = |value: f32| value * SCALE;
+        let reach = px(SWITCH_KNOB_SHADOW_LOGICAL_PX).round();
+        let mut content = measured(&rows(&every_row()));
+        // Both answers, on rows clear of either end of the viewport, so that
+        // half a shadow cut off by the clip is not the shape under test.
+        for (index, row) in content.rows.iter_mut().enumerate() {
+            row.on = index % 2 == 1;
+        }
+        let placed = layout(&content, SURFACE.0, SURFACE.1, SCALE, 0.0);
+        let layers = build(&placed, SURFACE, None, None);
+        let whole = |row: &&RowRects| {
+            row.switch[1] - reach >= placed.viewport[1]
+                && row.switch[3] + reach <= placed.viewport[3]
+        };
+        let off = placed
+            .rows
+            .iter()
+            .filter(whole)
+            .find(|row| !row.on)
+            .expect("no switch that is off stands clear of the fade");
+        let on = placed
+            .rows
+            .iter()
+            .filter(whole)
+            .find(|row| row.on)
+            .expect("no switch that is on stands clear of the fade");
+
+        for row in [off, on] {
+            let lift = knob_lift(row.switch, row.on);
+            let ink = knob_shadow_quads(&layers, row.switch, reach);
+            assert!(
+                !ink.is_empty(),
+                "the knob carries no shadow at all (on = {})",
+                row.on
+            );
+            // ── it sits on the knob, and on nothing else ──────────────────
+            for quad in &ink {
+                assert!(
+                    quad.rect[0] >= lift[0] - reach - 0.01
+                        && quad.rect[1] >= lift[1] - reach - 0.01
+                        && quad.rect[2] <= lift[2] + reach + 0.01
+                        && quad.rect[3] <= lift[3] + reach + 0.01,
+                    "shadow ink at {:?} is outside the knob's own reach {:?} (on = {})",
+                    quad.rect,
+                    lift,
+                    row.on
+                );
+            }
+            // The end of the track the knob is not at carries the track's fill
+            // and nothing over it.
+            let empty = if row.on {
+                [row.switch[0], row.switch[1], lift[0] - reach, row.switch[3]]
+            } else {
+                [lift[2] + reach, row.switch[1], row.switch[2], row.switch[3]]
+            };
+            assert!(
+                empty[2] - empty[0] >= px(SWITCH_WIDTH_LOGICAL_PX) / 4.0,
+                "the shadow's reach covers the track end to end, so an empty end is not a fact \
+                 about it"
+            );
+            assert!(
+                !ink.iter().any(|quad| quad.rect[0] < empty[2]
+                    && quad.rect[2] > empty[0]
+                    && quad.rect[1] < empty[3]
+                    && quad.rect[3] > empty[1]),
+                "shadow ink lies on the empty end {empty:?} of the track (on = {})",
+                row.on
+            );
+
+            // ── and it is a blur, not a stroke ────────────────────────────
+            //
+            // Read straight down the knob's bottom flank, where the ring's
+            // coverage is exactly one, so each sample is its band's own alpha.
+            let column = (lift[0] + lift[2]) / 2.0;
+            let profile: Vec<f32> = (0..reach as usize)
+                .map(|distance| {
+                    let y = lift[3] + distance as f32 + 0.5;
+                    ink.iter()
+                        .filter(|quad| {
+                            quad.rect[0] <= column
+                                && column < quad.rect[2]
+                                && quad.rect[1] <= y
+                                && y < quad.rect[3]
+                        })
+                        .map(|quad| quad.alpha)
+                        .fold(0.0_f32, f32::max)
+                })
+                .collect();
+            assert!(
+                (profile[0] - SWITCH_KNOB_SHADOW_ALPHA).abs() < 0.01,
+                "the shadow is not at its full strength against the knob: {profile:?}"
+            );
+            assert!(
+                profile.windows(2).all(|pair| pair[1] < pair[0]),
+                "the shadow does not fall off with distance — it is a stroke round the knob \
+                 rather than a blur under it: {profile:?} (on = {})",
+                row.on
+            );
+            assert!(
+                profile[profile.len() - 1] <= SWITCH_KNOB_SHADOW_ALPHA / 8.0,
+                "the shadow has not run out by the end of its reach: {profile:?}"
+            );
+            // Offset down by its one logical pixel: it reaches further below the
+            // knob than above it.
+            let above = ink
+                .iter()
+                .map(|quad| quad.rect[1])
+                .fold(f32::INFINITY, f32::min);
+            let below = ink
+                .iter()
+                .map(|quad| quad.rect[3])
+                .fold(f32::NEG_INFINITY, f32::max);
+            let knob_top = lift[1] - px(1.0);
+            let knob_bottom = lift[3] - px(1.0);
+            assert!(
+                below - knob_bottom > knob_top - above,
+                "the shadow is a ring round the knob rather than a lift under it (on = {})",
+                row.on
+            );
+        }
+    }
+
+    /// PIN (v4 §2, user ruling 2026-09-06) — **440 logical, clamped to 92% of a
+    /// window narrower than that.**
+    ///
+    /// MUTATION: keep v3's 480 and the card is wider than the sentences it now
+    /// holds, which is the measurement the width was retuned from.
+    #[test]
+    fn the_card_is_four_hundred_and_forty_logical_or_the_window_s_own_share() {
+        // **The number, not the constant.** Asserting against
+        // `MAX_WIDTH_LOGICAL_PX` would be the constant agreeing with itself.
+        assert!(
+            (card_width(2000.0, 1.0) - 440.0).abs() < 0.51,
+            "the width v4's one-line rows were measured to is not the width the card takes"
         );
         assert!(
-            (card_width(2000.0, 2.0) - 960.0).abs() < 0.51,
+            (card_width(2000.0, 2.0) - 880.0).abs() < 0.51,
             "the cap is in logical pixels, so it doubles with the monitor's scale"
         );
         assert!(
             (card_width(400.0, 1.0) - 368.0).abs() < 0.51,
             "a window narrower than the card did not hand it 92%"
         );
+    }
+
+    /// PIN (user ruling 2026-09-06 — 「PowerShell 那一行要带上整合的名字」) —
+    /// **the PowerShell row names the integration, in both languages, before it
+    /// says what the reader gets.**
+    ///
+    /// Every other row on this card says only a result, and this one may not:
+    /// the reader who later goes to Settings to change it has to know what the
+    /// thing is called, and the card is the only place they will ever be told.
+    ///
+    /// MUTATIONS:
+    /// ① drop the name and the row is one of six anonymous results, and the
+    ///    Settings row it belongs to is unfindable;
+    /// ② put the name after the benefit and the line reads as a result with a
+    ///    footnote rather than as a feature with a reason.
+    #[test]
+    fn the_powershell_row_carries_the_integration_s_name_in_both_languages() {
+        for (lang, name) in [
+            (crate::i18n::Lang::English, "PowerShell integration"),
+            (crate::i18n::Lang::Chinese, "PowerShell 整合"),
+        ] {
+            let line = Text::FirstRunRowPowerShell.in_lang(lang);
+            assert!(
+                line.contains(name),
+                "the PowerShell row does not carry {name:?}: {line:?}"
+            );
+            assert!(
+                line.starts_with(name),
+                "the name is not the first thing the line says: {line:?}"
+            );
+            assert!(
+                line.len() > name.len(),
+                "the line is the name and nothing else, so it says what the switch is and not \
+                 what it gets you: {line:?}"
+            );
+        }
     }
 }

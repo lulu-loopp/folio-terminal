@@ -1131,6 +1131,18 @@ struct MathDraw {
     first_vertex: u32,
 }
 
+/// One preview pane's picture, as the pass has to issue it: the viewport its
+/// tiles were laid out in, the box it may be seen through, and those tiles.
+///
+/// A stage rather than a flat list because the *viewport* is per picture — a
+/// tile's vertices are in its own pane's coordinates — so two pictures cannot
+/// share one `set_viewport`. See [`WindowRenderer::prepare_preview_draws`].
+struct PreviewImageStage {
+    seat: SeatViewport,
+    clip: SeatViewport,
+    draws: Vec<MathDraw>,
+}
+
 /// One overlay layer's GPU resources for this frame: its rectangles, its marks
 /// and whether its text made it into the atlas. Held apart per layer so the pass
 /// can draw all three channels of one layer before starting the next.
@@ -1237,12 +1249,28 @@ pub struct PeekImageOverlay {
     pub pointer_y: f32,
 }
 
-/// Persistent image content for the preview seat. Pixels are already resampled by the shared
+/// Persistent image content for one preview pane. Pixels are already resampled by the shared
 /// decoration worker to the exact fit returned by [`preview_image_extent`]. The seat is expressed
 /// in whole-surface physical pixels; drawing switches the pass to that viewport rather than
 /// teaching terminal-frame geometry about neighbouring seats.
+///
+/// **One per picture on the glass, and the renderer is handed the whole list**
+/// ([`WindowRenderer::set_preview_images`]) — the shape [`PreviewBody`] and
+/// [`VideoLayer`] already take, and now for the same reason: a tab holds as many
+/// preview panes as its pins say it does, and each of them may be showing a
+/// picture.
 #[derive(Clone)]
 pub struct PreviewImage {
+    /// **Which picture this is, across frames.** Opaque here and the caller's to
+    /// mint: one value per pane showing a picture, stable while that pane is
+    /// showing it.
+    ///
+    /// [`Self::key`] cannot serve — it is the *content's* identity, so two panes
+    /// opened on the same file at the same size share one, and moving "the
+    /// picture with this key" would move whichever of them the list happened to
+    /// hold first. This is what [`WindowRenderer::place_preview_image`] addresses
+    /// on every frame of a pane FLIP.
+    pub owner: u64,
     pub seat: SeatViewport,
     /// The box the picture may appear in — the scissor to [`Self::seat`]'s
     /// viewport, and equal to it at rest.
@@ -3598,7 +3626,9 @@ pub struct WindowRenderer {
     window_focused: bool,
     cursor_blink_visible: bool,
     peek_overlay: Option<PeekImageOverlay>,
-    preview_image: Option<PreviewImage>,
+    /// This frame's pictures, one per preview pane showing one. See
+    /// [`WindowRenderer::set_preview_images`].
+    preview_images: Vec<PreviewImage>,
     /// This frame's playing videos. See [`WindowRenderer::set_video_layers`].
     video_layers: Vec<VideoLayer>,
     preview_bodies: Vec<PreviewBody>,
@@ -6002,7 +6032,7 @@ impl WindowRenderer {
             window_focused: true,
             cursor_blink_visible: true,
             peek_overlay: None,
-            preview_image: None,
+            preview_images: Vec::new(),
             video_layers: Vec::new(),
             preview_bodies: Vec::new(),
             preview_text_frame: PreviewTextFrame::default(),
@@ -6158,23 +6188,46 @@ impl WindowRenderer {
         changed
     }
 
-    /// Replace the persistent preview-seat raster. Like peek, this is presentation state beside a
-    /// terminal frame; unlike peek it owns a solver-provided neighbouring seat viewport.
-    pub fn set_preview_image(&mut self, image: Option<PreviewImage>) -> bool {
-        let changed = match (&self.preview_image, &image) {
-            (None, None) => false,
-            (Some(current), Some(next)) => {
-                current.seat != next.seat
-                    || current.clip != next.clip
-                    || current.key != next.key
-                    || current.width_px != next.width_px
-                    || current.height_px != next.height_px
-                    || current.display_width_px != next.display_width_px
-                    || current.display_height_px != next.display_height_px
-            }
-            _ => true,
+    /// Replace **every** preview pane's raster this frame. Like peek, this is presentation state
+    /// beside a terminal frame; unlike peek each entry owns a solver-provided neighbouring seat
+    /// viewport.
+    ///
+    /// # A list, since the picture channel caught up with the document one
+    ///
+    /// This was one `Option`, because a window had one preview seat, and it
+    /// stayed one for a whole slice after [`Self::set_preview_bodies`] became a
+    /// list. The cost of the lag is a user report (2026-09-06): a picture pane
+    /// and a recording pane side by side are two panes each holding a picture,
+    /// one slot elected one of them, and the pane that lost the election kept
+    /// its head, its foot and its meta line and showed nothing at all.
+    ///
+    /// The whole list every frame, for [`Self::set_preview_bodies`]' reason: the
+    /// caller recomputes these rectangles out of the layout anyway, so there is
+    /// no cheaper half to move. Each entry carries its own viewport and its own
+    /// scissor, so nothing here has to know which pane a picture came from — but
+    /// each also carries a [`PreviewImage::owner`], which is how the per-frame
+    /// [`Self::place_preview_image`] reaches one of several.
+    ///
+    /// The answer is whether anything a frame would *draw* differently changed —
+    /// the pixels themselves are addressed by key and are the same pixels.
+    pub fn set_preview_images(&mut self, images: Vec<PreviewImage>) -> bool {
+        let drawn_the_same = |current: &PreviewImage, next: &PreviewImage| {
+            current.owner == next.owner
+                && current.seat == next.seat
+                && current.clip == next.clip
+                && current.key == next.key
+                && current.width_px == next.width_px
+                && current.height_px == next.height_px
+                && current.display_width_px == next.display_width_px
+                && current.display_height_px == next.display_height_px
         };
-        self.preview_image = image;
+        let changed = self.preview_images.len() != images.len()
+            || self
+                .preview_images
+                .iter()
+                .zip(images.iter())
+                .any(|(current, next)| !drawn_the_same(current, next));
+        self.preview_images = images;
         changed
     }
 
@@ -6468,19 +6521,31 @@ impl WindowRenderer {
     /// **U8 — move the preview seat's picture to where its pane is drawn this
     /// frame.** Returns whether the pair changed.
     ///
-    /// A second door beside [`Self::set_preview_image`] because it answers a
+    /// A second door beside [`Self::set_preview_images`] because it answers a
     /// different question at a different rate. The *content* — the raster, its
     /// key, the extent it was fitted to — changes when the layout commits or the
     /// scale worker delivers, which is a handful of times per preview; the pair
     /// of rectangles changes on every frame of a 200ms flight. Routing the flight
-    /// through `set_preview_image` would have the caller rebuild a whole
+    /// through `set_preview_images` would have the caller rebuild a whole list of
     /// `PreviewImage` sixty times a second, `Arc` clone and key string included,
     /// in order to move two integers.
     ///
-    /// Nothing at all when there is no picture: a placement is a fact about an
-    /// image, and there is no empty image to hold one.
-    pub fn place_preview_image(&mut self, seat: SeatViewport, clip: SeatViewport) -> bool {
-        let Some(image) = self.preview_image.as_mut() else {
+    /// **One picture, named by its [`PreviewImage::owner`]**: several panes fly
+    /// at once and each is somewhere else on every frame of the flight.
+    ///
+    /// Nothing at all when no picture answers to that owner: a placement is a
+    /// fact about an image, and there is no empty image to hold one.
+    pub fn place_preview_image(
+        &mut self,
+        owner: u64,
+        seat: SeatViewport,
+        clip: SeatViewport,
+    ) -> bool {
+        let Some(image) = self
+            .preview_images
+            .iter_mut()
+            .find(|image| image.owner == owner)
+        else {
             return false;
         };
         let changed = image.seat != seat || image.clip != clip;
@@ -7262,7 +7327,7 @@ impl WindowRenderer {
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
-        let (preview_seat, preview_draws, preview_vertices) = self.prepare_preview_draws(gpu);
+        let (preview_stages, preview_vertices) = self.prepare_preview_draws(gpu);
         let preview_vertex_buffer = (!preview_vertices.is_empty()).then(|| {
             gpu.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -8016,32 +8081,40 @@ impl WindowRenderer {
             }
             // Preview content is above that seat's body chrome, but its viewport excludes the title
             // bar, so the filename and existing close affordance remain visible.
-            if let (Some((seat, clip)), Some(vertex_buffer)) =
-                (preview_seat, preview_vertex_buffer.as_ref())
-            {
-                // U8 — the viewport is where the picture was laid out and the
-                // scissor is the box it may appear in, exactly as a terminal
-                // seat's pair is. The two are the same rectangle at rest, so a
-                // preview that is not in flight issues the calls it always did.
-                pass.set_viewport(
-                    seat.x as f32,
-                    seat.y as f32,
-                    seat.width as f32,
-                    seat.height as f32,
-                    0.0,
-                    1.0,
-                );
-                // The scissor through [`set_scissor`], and the draws behind it:
-                // a preview whose box has no pixels on this surface paints none.
-                if set_scissor(&mut pass, clip, (self.config.width, self.config.height)) {
-                    pass.set_pipeline(&gpu.math_pipeline);
-                    pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                    for draw in &preview_draws {
-                        if let Some(texture) = gpu.math_textures.get(&draw.key)
-                            && let Some(tile) = texture.tiles.get(draw.tile_index)
-                        {
-                            pass.set_bind_group(0, &tile.bind_group, &[]);
-                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+            if let Some(vertex_buffer) = preview_vertex_buffer.as_ref() {
+                // **One stage per picture**, because each was laid out in its own
+                // pane's coordinates: a tab with a picture pane beside a
+                // recording pane hands two of these down, and a single viewport
+                // for both would draw one of them in the other's box.
+                for stage in &preview_stages {
+                    // U8 — the viewport is where the picture was laid out and the
+                    // scissor is the box it may appear in, exactly as a terminal
+                    // seat's pair is. The two are the same rectangle at rest, so a
+                    // preview that is not in flight issues the calls it always did.
+                    pass.set_viewport(
+                        stage.seat.x as f32,
+                        stage.seat.y as f32,
+                        stage.seat.width as f32,
+                        stage.seat.height as f32,
+                        0.0,
+                        1.0,
+                    );
+                    // The scissor through [`set_scissor`], and the draws behind it:
+                    // a preview whose box has no pixels on this surface paints none.
+                    if set_scissor(
+                        &mut pass,
+                        stage.clip,
+                        (self.config.width, self.config.height),
+                    ) {
+                        pass.set_pipeline(&gpu.math_pipeline);
+                        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                        for draw in &stage.draws {
+                            if let Some(texture) = gpu.math_textures.get(&draw.key)
+                                && let Some(tile) = texture.tiles.get(draw.tile_index)
+                            {
+                                pass.set_bind_group(0, &tile.bind_group, &[]);
+                                pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                            }
                         }
                     }
                 }
@@ -8712,82 +8785,97 @@ impl WindowRenderer {
         (draws, vertices)
     }
 
-    /// The preview seat's picture: its viewport, the box it may appear in, and
-    /// the tiles.
+    /// Every preview pane's picture: each one's viewport, the box it may appear
+    /// in, and its tiles.
     ///
     /// The pair travels together for the reason [`SeatFrame`] carries both — they
     /// are computed from one sample of one clock by the caller, and a renderer
     /// holding only the viewport would have to invent the crop.
+    ///
+    /// **One stage per picture, because the viewport is per picture.** A tile's
+    /// vertices are in its own pane's coordinates, so the pass switches viewport
+    /// and scissor between stages; the vertices themselves all go into one
+    /// buffer, which is why `first_vertex` runs on across the whole walk.
     fn prepare_preview_draws(
         &mut self,
         gpu: &mut GpuContext,
-    ) -> (
-        Option<(SeatViewport, SeatViewport)>,
-        Vec<MathDraw>,
-        Vec<MathVertex>,
-    ) {
-        let Some(image) = self.preview_image.clone() else {
-            return (None, Vec::new(), Vec::new());
-        };
-        if gpu.math_textures.get(&image.key).is_none()
-            && let Some(texture) =
-                gpu.upload_rgba_tiles(&image.rgba, image.width_px, image.height_px)
-        {
-            let (admitted, evictions) =
-                gpu.math_textures
-                    .insert(image.key.clone(), texture, image.rgba.len());
-            gpu.math_texture_evictions = gpu.math_texture_evictions.saturating_add(evictions);
-            if !admitted {
-                self.note_math_texture_refusal(&image.key, image.rgba.len());
+    ) -> (Vec<PreviewImageStage>, Vec<MathVertex>) {
+        let images = self.preview_images.clone();
+        let mut stages: Vec<PreviewImageStage> = Vec::with_capacity(images.len());
+        let mut vertices: Vec<MathVertex> = Vec::new();
+        for image in images {
+            if gpu.math_textures.get(&image.key).is_none()
+                && let Some(texture) =
+                    gpu.upload_rgba_tiles(&image.rgba, image.width_px, image.height_px)
+            {
+                let (admitted, evictions) =
+                    gpu.math_textures
+                        .insert(image.key.clone(), texture, image.rgba.len());
+                gpu.math_texture_evictions = gpu.math_texture_evictions.saturating_add(evictions);
+                if !admitted {
+                    self.note_math_texture_refusal(&image.key, image.rgba.len());
+                }
             }
-        }
-        let Some(tile_geometry) = gpu.math_textures.get(&image.key).map(|texture| {
-            texture
-                .tiles
-                .iter()
-                .map(|tile| (tile.x_px, tile.y_px, tile.width_px, tile.height_px))
-                .collect::<Vec<_>>()
-        }) else {
-            return (Some((image.seat, image.clip)), Vec::new(), Vec::new());
-        };
-        // Signed, because a zoomed picture is wider than the box it is seen through and its left
-        // edge is then off the left of the seat; the saturating unsigned subtraction this replaced
-        // would have pinned it to zero and drawn the *left* of the picture whatever the pan said.
-        // Floored so that the resting, unzoomed case is the integer division it has always been.
-        let left_inset = ((image.seat.width as f32 - image.display_width_px as f32) / 2.0).floor()
-            + image.pan_px[0];
-        let top_inset = ((image.seat.height as f32 - image.display_height_px as f32) / 2.0).floor()
-            + image.pan_px[1];
-        let scale_x = image.display_width_px as f32 / image.width_px as f32;
-        let scale_y = image.display_height_px as f32 / image.height_px as f32;
-        let mut draws = Vec::new();
-        let mut vertices = Vec::new();
-        for (tile_index, (tile_x, tile_y, tile_width, tile_height)) in
-            tile_geometry.into_iter().enumerate()
-        {
-            let left = left_inset + tile_x as f32 * scale_x;
-            let top = top_inset + tile_y as f32 * scale_y;
-            let first_vertex = vertices.len() as u32;
-            vertices.extend(math_quad_vertices(
-                left,
-                top,
-                left + tile_width as f32 * scale_x,
-                top + tile_height as f32 * scale_y,
-                0.0,
-                0.0,
-                1.0,
-                1.0,
-                image.seat.width,
-                image.seat.height,
-                1.0,
-            ));
-            draws.push(MathDraw {
-                key: image.key.clone(),
-                tile_index,
-                first_vertex,
+            let Some(tile_geometry) = gpu.math_textures.get(&image.key).map(|texture| {
+                texture
+                    .tiles
+                    .iter()
+                    .map(|tile| (tile.x_px, tile.y_px, tile.width_px, tile.height_px))
+                    .collect::<Vec<_>>()
+            }) else {
+                stages.push(PreviewImageStage {
+                    seat: image.seat,
+                    clip: image.clip,
+                    draws: Vec::new(),
+                });
+                continue;
+            };
+            // Signed, because a zoomed picture is wider than the box it is seen through and its
+            // left edge is then off the left of the seat; the saturating unsigned subtraction this
+            // replaced would have pinned it to zero and drawn the *left* of the picture whatever
+            // the pan said. Floored so that the resting, unzoomed case is the integer division it
+            // has always been.
+            let left_inset = ((image.seat.width as f32 - image.display_width_px as f32) / 2.0)
+                .floor()
+                + image.pan_px[0];
+            let top_inset = ((image.seat.height as f32 - image.display_height_px as f32) / 2.0)
+                .floor()
+                + image.pan_px[1];
+            let scale_x = image.display_width_px as f32 / image.width_px as f32;
+            let scale_y = image.display_height_px as f32 / image.height_px as f32;
+            let mut draws = Vec::new();
+            for (tile_index, (tile_x, tile_y, tile_width, tile_height)) in
+                tile_geometry.into_iter().enumerate()
+            {
+                let left = left_inset + tile_x as f32 * scale_x;
+                let top = top_inset + tile_y as f32 * scale_y;
+                let first_vertex = vertices.len() as u32;
+                vertices.extend(math_quad_vertices(
+                    left,
+                    top,
+                    left + tile_width as f32 * scale_x,
+                    top + tile_height as f32 * scale_y,
+                    0.0,
+                    0.0,
+                    1.0,
+                    1.0,
+                    image.seat.width,
+                    image.seat.height,
+                    1.0,
+                ));
+                draws.push(MathDraw {
+                    key: image.key.clone(),
+                    tile_index,
+                    first_vertex,
+                });
+            }
+            stages.push(PreviewImageStage {
+                seat: image.seat,
+                clip: image.clip,
+                draws,
             });
         }
-        (Some((image.seat, image.clip)), draws, vertices)
+        (stages, vertices)
     }
 
     /// **This frame's playing videos, as quads** — and the release of every
@@ -19740,7 +19828,8 @@ mod tests {
             },
         ];
         for clip in escapes {
-            window.set_preview_image(Some(PreviewImage {
+            window.set_preview_images(vec![PreviewImage {
+                owner: 0,
                 seat: SeatViewport::whole(WIDTH, HEIGHT),
                 clip,
                 key: format!("escape-{}-{}", clip.x, clip.y),
@@ -19750,7 +19839,7 @@ mod tests {
                 display_width_px: 8,
                 display_height_px: 8,
                 pan_px: [0.0, 0.0],
-            }));
+            }]);
             window
                 .present_frame(
                     &mut gpu,
@@ -22241,6 +22330,155 @@ mod tests {
         }
     }
 
+    /// §7.1.6k⁷ — the picture channel is a list, and a list draws all of it.
+    mod two_pictures {
+        use super::*;
+
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+
+        /// An `n`×`n` square of one opaque colour, as the decode lane hands one
+        /// over: RGBA, row-major, premultiplied by nothing.
+        fn a_square_of(colour: [u8; 3]) -> Arc<[u8]> {
+            Arc::from(
+                std::iter::repeat_n([colour[0], colour[1], colour[2], 255_u8], 64)
+                    .flatten()
+                    .collect::<Vec<u8>>()
+                    .into_boxed_slice(),
+            )
+        }
+
+        /// How many pixels of the readback are that colour, within the slop a
+        /// sampler and an sRGB target leave. `[b, g, r, a]` on the way back.
+        fn pixels_of(pixels: &[[u8; 4]], colour: [u8; 3]) -> usize {
+            pixels
+                .iter()
+                .filter(|pixel| {
+                    let seen = [
+                        i32::from(pixel[2]),
+                        i32::from(pixel[1]),
+                        i32::from(pixel[0]),
+                    ];
+                    seen.iter()
+                        .zip(colour.iter())
+                        .all(|(got, want)| (got - i32::from(*want)).abs() <= 8)
+                })
+                .count()
+        }
+
+        /// RED GATE — **two preview panes showing two pictures put two pictures
+        /// on the glass** (user report 2026-09-06, `next38` acceptance).
+        ///
+        /// The reader had `figure.png` open on a pane and dragged `clip.mp4`
+        /// out of the file column to the right of it. Both panes hold a picture
+        /// — a recording's still goes down this very channel until the play verb
+        /// is pressed — and this slot held one, so the arrival took the pixels
+        /// off the pane that had them: a head, a foot and
+        /// "1870 × 1122 · PNG · 381 KB · Fit" over nothing at all.
+        ///
+        /// A real adapter, for the reason every test in this file's neighbours
+        /// gives: what is under test is what the render path hands the
+        /// pipelines, and the only honest way to ask that is to ask a window
+        /// renderer and read its pixels back.
+        ///
+        /// MUTATION: take all but the first entry in
+        /// [`WindowRenderer::prepare_preview_draws`] (the one-slot channel this
+        /// replaced) and the green half goes to zero — which is the photograph.
+        #[test]
+        fn every_picture_handed_over_is_drawn_in_its_own_pane() {
+            const WIDTH: u32 = 200;
+            const HEIGHT: u32 = 120;
+            const LEFT: [u8; 3] = [220, 0, 0];
+            const RIGHT: [u8; 3] = [0, 200, 0];
+
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let mut window = WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT)
+                .expect("a window on this machine's adapter");
+            let left = SeatViewport {
+                x: 0,
+                y: 0,
+                width: WIDTH / 2,
+                height: HEIGHT,
+            };
+            let right = SeatViewport {
+                x: WIDTH / 2,
+                y: 0,
+                width: WIDTH / 2,
+                height: HEIGHT,
+            };
+            let picture =
+                |owner: u64, seat: SeatViewport, key: &str, colour: [u8; 3]| PreviewImage {
+                    owner,
+                    seat,
+                    clip: seat,
+                    key: key.to_owned(),
+                    rgba: a_square_of(colour),
+                    width_px: 8,
+                    height_px: 8,
+                    display_width_px: 40,
+                    display_height_px: 40,
+                    pan_px: [0.0, 0.0],
+                };
+            window.set_preview_images(vec![
+                picture(1, left, "the figure", LEFT),
+                picture(2, right, "the recording's still", RIGHT),
+            ]);
+
+            let frame = single_cell_cursor_frame(window.metrics());
+            let seat = SeatViewport::whole(WIDTH, HEIGHT);
+            window
+                .present_frame(
+                    &mut gpu,
+                    &[SeatFrame {
+                        seat,
+                        clip: seat,
+                        frame: &frame,
+                        focused: true,
+                    }],
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+                .expect("the frame that draws them both");
+            let pixels = window.read_back(&gpu).expect("it reads back");
+
+            let drawn_left = pixels_of(&pixels, LEFT);
+            let drawn_right = pixels_of(&pixels, RIGHT);
+            assert!(
+                drawn_left > 0,
+                "the picture that was already open is still on the glass"
+            );
+            assert!(
+                drawn_right > 0,
+                "and so is the one that arrived beside it — zero here is the \
+                 user's blank pane"
+            );
+            assert_eq!(
+                drawn_left, drawn_right,
+                "each fitted into its own pane and neither cropped by the \
+                 other's scissor"
+            );
+
+            // And the per-frame door reaches one of several by name, which is
+            // the whole reason `owner` exists: moving the right-hand picture
+            // must not move the left-hand one.
+            let moved = SeatViewport {
+                x: WIDTH / 2,
+                y: HEIGHT / 4,
+                width: WIDTH / 2,
+                height: HEIGHT / 2,
+            };
+            assert!(
+                window.place_preview_image(2, moved, moved),
+                "the picture answering to that owner moved"
+            );
+            assert!(
+                !window.place_preview_image(9, moved, moved),
+                "and an owner no picture answers to moves nothing"
+            );
+        }
+    }
+
     /// §7.1.6c-4f's second half: **a background is a background wherever it was
     /// declared**, and Folio's own state fills are not backgrounds.
     ///
@@ -23869,7 +24107,8 @@ mod tests {
             let mut window =
                 WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
-            window.set_preview_image(Some(PreviewImage {
+            window.set_preview_images(vec![PreviewImage {
+                owner: 0,
                 seat,
                 clip: seat,
                 key: "the picture that outlives its device".to_owned(),
@@ -23879,7 +24118,7 @@ mod tests {
                 display_width_px: 80,
                 display_height_px: 80,
                 pan_px: [0.0, 0.0],
-            }));
+            }]);
             let frame = single_cell_cursor_frame(window.metrics());
 
             one_frame(&mut window, &mut gpu, &frame).expect("the frame that uploads it");

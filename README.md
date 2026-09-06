@@ -99,7 +99,8 @@ application.
   `Ctrl`+click hands it to the browser.
 - A window holds as many pages as it has preview panes. A second page opens on a
   pane of its own instead of navigating the first, so a page can be locked and
-  another opened beside it.
+  another opened beside it, and a page dropped on a pane opens on the pane you
+  dropped it on.
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
@@ -138,10 +139,10 @@ be seen at once.
 - `Alt+Shift+-` splits a pane across, `Alt+Shift+=` splits it down. A tab or a
   single pane can be dragged out into a window of its own, and the panes it did
   not touch keep their widths.
-- A pane dropped on the join between two tabs becomes a tab *between* them, with
-  a line drawn across the join to say where it will land; dropped on a tab
-  itself it joins that tab's layout. The horizontal strip, the vertical rail and
-  the card column all read the join the same way.
+- A pane dropped on the join between two tabs becomes a tab *between* them: the
+  list opens a slot and the pane stands in it, which is where letting go puts
+  it. Dropped on a tab itself it joins that tab's layout. The horizontal strip,
+  the vertical rail and the card column all read the join the same way.
 - `Ctrl+Shift+Z` turns the tab strip into a column of cards, one per tab, each
   drawing that tab's own panes in the layout they have.
 - `Ctrl+Shift+G` turns the files column into a Git panel: branch, working tree,
@@ -291,34 +292,41 @@ publisher named there is **Weiyi Shi** and the app is `folio.exe`, and click
 
 ## First run
 
-A machine that has never run Folio gets one card, once, called **First things**.
-It asks every question whose answer writes something outside `%APPDATA%\Folio`,
-and it asks them together: whether to check for a new version once a day, whether
-to put **Open in Folio** in Explorer's right-click menu, whether to install the
-PowerShell integration, and one row for each of Claude Code, Codex and Copilot CLI
-that this machine actually has. Nothing about theme, font, size, language or
-layout — those are one click away and cost nothing while they are wrong.
+A machine that has never run Folio gets one card, once. It says **Welcome to
+Folio** and asks the six questions whose answers write something outside
+`%APPDATA%\Folio`, one line each: be told when a new version is out, which is
+the only row that arrives on; open any folder in Folio from its right-click
+menu; the PowerShell integration; and a tab that lights up for each of Claude
+Code, Codex and Copilot CLI this machine actually has. Nothing about theme,
+font, size, language or layout — those are one click away and cost nothing while
+they are wrong.
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/first-run-dark.png">
   <img src="docs/screenshots/first-run-light.png" width="100%"
-       alt="The First things card in the middle of a window that has just
-       started. Check for a new version once a day is on; Open any folder in
-       Folio from Explorer and Install the PowerShell integration are off, each
-       with a sentence under it saying what it does. Under a heading reading
-       AGENTS FOUND ON THIS MACHINE there is a row for Claude Code and a row for
-       Codex, both off, each naming the file its switch writes into. At the foot,
-       a line saying every row here is also a row in Settings, then Open
-       settings, Not now and Done. Behind the card, one tab and a prompt.">
+       alt="The card over a window that has just started: Folio's mark beside
+       Welcome to Folio, then six rows of one line each with a switch at the
+       right of every one. Get told when a new version of Folio is out is on;
+       Open any folder in Folio from its right-click menu and PowerShell
+       integration lets you jump between commands are off; below a hairline,
+       Its tab lights up when Claude Code is waiting, when a Codex turn ends,
+       and when Copilot CLI is waiting, all three off. At the foot, a faint line
+       reading Every row here is also a row in Settings, then Not now and Done.
+       Behind the card, one tab and a prompt.">
 </picture>
 
-**Every row on that card is also a row in Settings**, so nothing on it is a last
-chance. **Done** applies the rows that are on; **Not now** and `Esc` close it with
-the shipped values — the update check on, the rest off — and change nothing.
-Either way the card does not come back, and the shell behind it has been running
-the whole time. If you were already using Folio before this version, you never see
-it: your `settings.json` says so.
+**Rest the pointer on a row and it says how** — including which of your own
+files the switch writes, and that the file is copied to a dated backup first.
+Nothing else on the card explains itself, because nothing else on it writes
+anywhere you have not been told about.
+
+**Every row on the card is also a row in Settings**, so nothing on it is a last
+chance. **Done** applies the rows that are on; **Not now** and `Esc` close the
+card with the shipped values — the update check on, the rest off — and change
+nothing. Either way it does not come back, and the shell behind it has been
+running the whole time. If you were already using Folio before this version, you
+never see it: your `settings.json` says so.
 
 The first tab opens the first shell your machine actually has. The five shipped
 profiles are looked for in order — PowerShell 7, Windows PowerShell, WSL, Git

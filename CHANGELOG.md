@@ -6,36 +6,38 @@ All notable changes to Folio are recorded here. The format follows
 
 ## 0.2.2-preview (unreleased)
 
-Fixes and polish for 0.2.1-preview, and one card. A machine that has never run
-Folio is asked its boundary questions once, together, on a card that presses the
-Settings rows rather than doing anything of its own. Everything else here is
-something that was already meant to work: a pane dropped between two tabs, a menu
-that lists only the shells this machine can start, a second page that opens on a
-pane of its own, a formula on the screen of a program that repaints itself, and a
-picture that stays in the pane it was opened in.
+Fixes and polish for 0.2.1-preview, and one card: a machine that has never run
+Folio is welcomed once and asked its boundary questions together, on a card that
+presses the Settings rows rather than doing anything of its own. Everything else
+here is something that was already meant to work — a pane dropped between two
+tabs, a menu that lists only the shells this machine can start, a page that opens
+on the pane it was dropped on, two pictures side by side in two preview panes,
+and the formulas on the screen of a program that repaints itself, folds a line
+too long for the pane, or has pushed the top of a block off the window.
 
 ### Added
 
-- **First things: one card, once, on a machine that has never run Folio.** It
-  asks every question whose answer writes something outside `%APPDATA%\Folio`,
-  and it asks them together, because they are one decision about how much of this
-  machine Folio may touch. Four kinds of row: check for a new version once a day,
-  which is the only one that arrives on; open any folder in Folio from Explorer,
-  which on Windows 11 puts the entry both on the page that opens first and under
-  `Show more options`; install the PowerShell integration; and one row for each
-  of Claude Code, Codex and Copilot CLI that this machine actually has, so that
-  their tabs carry a mark when they are waiting for you. **Done** applies the
-  rows that are on. **Not now** and `Esc` close the card with the shipped values
-  and change nothing. The shell behind it has been running the whole time.
+- **Welcome to Folio: one card, once, on a machine that has never run Folio.**
+  It asks every question whose answer writes something outside
+  `%APPDATA%\Folio`, and it asks them together, because they are one decision
+  about how much of this machine Folio may touch. Six rows of one line each, and
+  the line is what you get: told when a new version is out, which is the only
+  one that arrives on; open any folder in Folio from its right-click menu; the
+  PowerShell integration; and a tab that lights up for each of Claude Code,
+  Codex and Copilot CLI that this machine actually has. Rest the pointer on a
+  row and it says how — including which of your own files it writes, and that
+  the file is copied to a dated backup first. **Done** applies the rows that are
+  on. **Not now** and `Esc` close the card with the shipped values and change
+  nothing. The shell behind it has been running the whole time.
   - **Every row on the card is a row in Settings**, and the card presses those
     rows rather than doing anything of its own — so nothing on it is a last
     chance, and the switch you find in Settings an hour later is the same switch
     in the same place on the same shape of row.
   - A row is only offered if it can be honoured. An agent that is not on this
     machine, or whose configuration already calls Folio, is not listed at all,
-    and when none of the three is there the heading goes with them. On Windows 11
-    unpacked without `folio.msix`, the Explorer row still offers the entry it
-    can offer, worded for it.
+    and when none of the three is there the rule above them goes with them. On
+    Windows 11 unpacked without `folio.msix`, the Explorer row still offers the
+    entry it can offer, worded for it.
   - The PowerShell row records an intent rather than acting: where your
     `$PROFILE` is comes from the shell, so the line is added by the next
     PowerShell that starts, and `Settings > Terminal` says so until it does. As
@@ -49,11 +51,11 @@ picture that stays in the pane it was opened in.
 - **Dropping a pane *between* two tabs is now a target you can hit.** The join
   between two entries in the tab list is a band eight logical pixels either
   side, and a pointer inside it makes the pane a new tab there rather than
-  handing it to the tab it happens to be over — with a line drawn across the
-  join to say where it will land. It takes four more pixels to leave the band
-  than to enter it, so the line and the tab highlight do not trade places under
-  a hand that is holding still. The horizontal tab strip, the vertical rail and
-  the card column all read the same rule.
+  handing it to the tab it happens to be over — the list opens a slot and the
+  pane stands in it, which is where releasing puts it. It takes four more pixels
+  to leave the band than to enter it, so the open slot and the tab highlight do
+  not trade places under a hand that is holding still. The horizontal tab strip,
+  the vertical rail and the card column all read the same rule.
 
 ### Changed
 
@@ -79,6 +81,21 @@ picture that stays in the pane it was opened in.
 
 ### Fixed
 
+- **A `$$` block under a formula whose top has gone off the screen is drawn
+  again.** A full-screen program owns its whole window and moves its transcript
+  up by redrawing it, not by scrolling, so the topmost formula's opening `$$`
+  can leave the window without a single row being removed and without anything
+  noticing. The first `$$` still on screen is then that formula's *closing* one,
+  and reading it as an opening shifted every `$$` below it by one place: each
+  pair then enclosed a heading instead of a formula and was refused as ordinary
+  text, and the last block on the screen — the one in the report — was never
+  even paired. It showed its own source with nothing recorded against it, not
+  even a failure. Folio already knew how to read a screen that begins in the
+  middle of a formula, but it could only say so when a line of scrollback stood
+  in front of that screen, which in a program of this kind never happens. That
+  question is now asked of any window, however it begins, so the formulas under
+  a half-visible one are typeset like all the others.
+
 - **A pane you drag over a web preview can now be dropped there.** The landing
   outline was drawn correctly over the page, but letting go did nothing: the
   press router handed every mouse button inside a page to the browser, releases
@@ -98,6 +115,21 @@ picture that stays in the pane it was opened in.
   cannot be reached or downloaded shows its card over its own pane rather than
   over the first page in the tab.
 
+- **A page dropped on a pane opens on that pane, and the preview beside it keeps
+  what it was showing.** Dragging an `.html` or a `.pdf` out of the file column
+  onto a pane of its own split the layout where you aimed, then opened the page
+  somewhere else: in the first preview pane of the tab, replacing the document
+  you were reading there, while the pane the drop had just made stood on its
+  empty placeholder. Two symptoms, one cause — where a page opens was decided
+  twice, and the second answer overrode the pane you had aimed at. A page now
+  opens where you put it, exactly as a picture or a text file already did, and
+  the rule that picks a pane for you is asked only when nothing else has. This
+  also covers dropping a page onto the middle of a locked preview pane, a page
+  carried out of a hover card into its own window, and renaming a file into a
+  page's name (`notes.md` → `notes.html`) on a pane that is locked. A page that
+  turns out not to be on the disk shows the reason on the pane it was aimed at,
+  too.
+
 - **A formula on the screen of a program that repaints itself now gets
   typeset.** A full-screen redraw writes every row, so every row arrives as a
   change even when not one byte of it moved, and a display block (`$$ ... $$`)
@@ -113,6 +145,21 @@ picture that stays in the pane it was opened in.
   drawn under image paths wait on the same stillness, so they come back on those
   screens too.
 
+- **A formula the pane was too narrow to hold on one row now gets typeset too.**
+  When a line is longer than the pane, the terminal folds it onto the next row,
+  and the fold can land on a space. Folio read each row on the screen with its
+  right-hand blanks removed — right for a row that ends a line, wrong for one
+  that carries on — so the two halves were welded together and the space between
+  them was lost. `\quad g_i(x)` folded at that space read back as `\quadg_i(x)`,
+  which is not a command, and the whole block stayed as its own source text at
+  that one pane width while typesetting at every other. One column of window
+  width was the whole difference, which is why the same answer from Claude Code
+  drew some of its formulas and not others, and why making the window smaller
+  could bring back a formula while taking away the one beside it. A line is now
+  read as the line the program printed, wherever the pane happened to fold it —
+  so a wider or narrower window changes where the fold falls and nothing else.
+  Markdown tables and the pictures drawn under image paths are read the same way.
+
 - **A picture stays in its own preview pane when a second preview pane is open.**
   Open an image, then open a page or a text file beside it, and the picture went
   somewhere else: drawn over the other pane's contents, or — where the other pane
@@ -122,6 +169,16 @@ picture that stays in the pane it was opened in.
   whichever preview pane came first in the window, which was the picture's own
   only while a tab had a single one of them. It now travels with the pane that is
   holding it, through splits, insertions, divider drags and tab switches alike.
+
+- **Two preview panes can show two pictures at once.** With an image open,
+  dragging a video in from the file column beside it left the image pane with
+  nothing but its size line, and doing it the other way round left the video
+  pane blank instead; closing the pane that arrived did not bring the first one
+  back. A window could hold one picture texture, so a tab elected one preview
+  pane to it and starved the rest, and a video pane counts as a picture until
+  you press play. Every preview pane holding a picture now draws it, so an
+  image, a recording and a third picture beside them are three pictures on the
+  screen.
 
 ### Known issues
 

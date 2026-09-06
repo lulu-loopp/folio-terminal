@@ -2070,11 +2070,7 @@ impl DualPlaneSession {
         let mut segments = Vec::<LiveImagePathSegment>::new();
         for row in 0..self.live_rows.len() as u32 {
             let captured = self.terminal.visible_row(row)?;
-            let (text, boundaries) = if captured.continues {
-                captured_row_text_and_boundaries_preserving_trailing_glyphs(&captured)
-            } else {
-                captured_row_text_and_boundaries(&captured)
-            };
+            let (text, boundaries) = captured_row_logical_text_and_boundaries(&captured);
             let byte_start = logical_text.len();
             logical_text.push_str(&text);
             segments.push(LiveImagePathSegment {
@@ -4532,7 +4528,7 @@ impl DualPlaneSession {
         let mut witness = String::new();
         for row in start.row..=end.row {
             let captured = self.terminal.visible_row(row)?;
-            let (text, boundaries) = captured_row_text_and_boundaries(&captured);
+            let (text, boundaries) = captured_row_logical_text_and_boundaries(&captured);
             let byte_start = if row == start.row {
                 byte_offset_at_column(&boundaries, start.column, text.len())
             } else {
@@ -4567,7 +4563,7 @@ impl DualPlaneSession {
             let Some(captured) = self.terminal.visible_row(row) else {
                 continue;
             };
-            let (text, boundaries) = captured_row_text_and_boundaries(&captured);
+            let (text, boundaries) = captured_row_logical_text_and_boundaries(&captured);
             let byte_start = logical_text.len();
             logical_text.push_str(&text);
             segments.push(LiveImagePathSegment {
@@ -4881,7 +4877,9 @@ impl DualPlaneSession {
         }
         let grid_inputs = (0..self.live_rows.len()).filter_map(|row| {
             self.terminal.visible_row(row as u32).map(|captured| {
-                let (text, cell_boundaries) = captured_row_text_and_boundaries(&captured);
+                // Detection reads these rows joined into logical lines, so each row contributes the
+                // text the logical line holds — a continuation keeps the space the wrap fell on.
+                let (text, cell_boundaries) = captured_row_logical_text_and_boundaries(&captured);
                 let row = row as u32;
                 // The row's own extent, from its first cell to one past its last. Asking about
                 // exactly the cells this input carries is what keeps the verdict per-row: a row is
@@ -8694,11 +8692,7 @@ impl DualPlaneSession {
             let Some(captured) = self.terminal.visible_row(row) else {
                 continue;
             };
-            let (text, boundaries) = if captured.continues {
-                captured_row_text_and_boundaries_preserving_trailing_glyphs(&captured)
-            } else {
-                captured_row_text_and_boundaries(&captured)
-            };
+            let (text, boundaries) = captured_row_logical_text_and_boundaries(&captured);
             let byte_start = logical_text.len();
             logical_text.push_str(&text);
             segments.push(LiveImagePathSegment {
@@ -9217,7 +9211,10 @@ impl DualPlaneSession {
                         .checked_sub(pending_shift)?;
                     let row = u32::try_from(target).ok()?;
                     let (staging, captured) = captured_rows.get(&row)?;
-                    let (text, cell_boundaries) = captured_row_text_and_boundaries(captured);
+                    // Same encoding as `live_detection_context`, or a proven row could never match
+                    // the grid row it was proven from.
+                    let (text, cell_boundaries) =
+                        captured_row_logical_text_and_boundaries(captured);
                     let captured = LiveDetectionInput {
                         source: LiveDetectionSource::Grid { row, revision: 0 },
                         text,
@@ -12198,12 +12195,25 @@ fn captured_row_text_and_boundaries(row: &CapturedRow) -> (String, Vec<(u32, u32
     captured_row_text_and_boundaries_with_trailing_glyphs(row, false)
 }
 
-/// The WRAPLINE variant keeps a real trailing whitespace glyph because it separates this row from
-/// the continuation. Glyphless cells remain right-edge padding and contribute nothing.
-fn captured_row_text_and_boundaries_preserving_trailing_glyphs(
-    row: &CapturedRow,
-) -> (String, Vec<(u32, u32)>) {
-    captured_row_text_and_boundaries_with_trailing_glyphs(row, true)
+/// One grid row as the **logical line** reads it — the single rule for every joiner that merges
+/// WRAPLINE-linked rows into one string (§4.6a). Glyphless cells are right-edge padding either way
+/// and contribute nothing.
+///
+/// A row that ends its logical line drops its right-edge padding: the blanks past the last glyph
+/// were never written and are not part of the line. A row that *continues* keeps its trailing
+/// whitespace, because a soft wrap can fall on a space — the wrap point is chosen by the terminal's
+/// width, not by the text — and that space is a character of the logical line, not padding. Trimming
+/// it welded the two halves together, so `\quad g_i(x)` broken across the seam read back as
+/// `\quadg_i(x)`: a command that does not exist, and a display block that failed to typeset at that
+/// one pane width while typesetting at every other. The logical line a detector reads must be the
+/// line the application printed, whatever width the grid happened to fold it at.
+///
+/// This is the same rule the transcript already applies when it freezes those rows
+/// (`bt_transcript`'s merge trims right-edge padding only for `!continues`, with a comment naming
+/// the identical failure: "find path" welded into "findpath"). The gap this closes is that the
+/// live detection context was reading the grid by a different rule than the transcript reads it.
+fn captured_row_logical_text_and_boundaries(row: &CapturedRow) -> (String, Vec<(u32, u32)>) {
+    captured_row_text_and_boundaries_with_trailing_glyphs(row, row.continues)
 }
 
 fn captured_row_text_and_boundaries_with_trailing_glyphs(
@@ -14968,11 +14978,14 @@ mod tests {
     /// block is a picture.
     #[test]
     fn a_byte_identical_reprint_does_not_restart_a_pending_blocks_stability_clock() {
-        // (columns, rows, body) — the third wraps at 24 columns into two physical rows.
+        // (columns, rows, body) — the third is 25 characters on a 24-column screen, so the grid
+        // really does fold it onto two physical rows, and it folds on the space before the final
+        // `t` (§4.6a: the logical line the scan reads has to be the one the program printed,
+        // wherever the width put the fold).
         let shapes = [
             (100_u32, 24_u32, "x + y"),
             (40, 6, "x + y"),
-            (24, 8, "x + y + z + w + v + u"),
+            (24, 8, "x + y + z + w + v + u + t"),
         ];
         for cadence_ms in [16_u64, 50, 100, 199] {
             for (columns, rows, body) in shapes {
@@ -14999,6 +15012,198 @@ mod tests {
                 assert_eq!(session.live_decorations.len(), 1);
             }
         }
+    }
+
+    /// The three `$$` blocks of the 2026-09-06 report, printed verbatim (Claude Code's own markdown
+    /// pass had already eaten `\;` → `;` and `\!` → `!`, and the report's blocks carry that).
+    fn reported_formula_blocks() -> [&'static [&'static str]; 3] {
+        [
+            &[
+                r"p(x) = \frac{1}{\sigma\sqrt{2\pi}}",
+                r"\exp!\left(-\frac{(x-\mu)^2}{2\sigma^2}\right)",
+            ],
+            &[r"P(A \mid B) = \frac{P(B \mid A),P(A)}{P(B)}"],
+            &[
+                r"\min_{\mathbf{x} \in \mathbb{R}^n} ; f(\mathbf{x})",
+                r"\quad \text{s.t.} \quad g_i(\mathbf{x}) \le 0,;",
+                r"h_j(\mathbf{x}) = 0",
+            ],
+        ]
+    }
+
+    /// Print those blocks onto a `columns`-wide grid, settle them, and rasterize with the real
+    /// engine — nothing about a fold can be proven off a synthetic raster, because the engine is
+    /// what refuses `\quadg`. Returns the session, whose `live_decorations` hold the verdicts.
+    fn typeset_reported_blocks(columns: u32) -> DualPlaneSession {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(columns), nz(30));
+        seat_inline_metrics(&mut session);
+        let mut feed = String::from("\x1b[2J\x1b[H");
+        for block in reported_formula_blocks() {
+            feed.push_str("prose\r\n$$\r\n");
+            for line in block {
+                feed.push_str(line);
+                feed.push_str("\r\n");
+            }
+            feed.push_str("$$\r\n");
+        }
+        session.feed_at(feed.as_bytes(), start).unwrap();
+        hide_cursor(&mut session, start);
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        complete_live_math_for_real(&mut session);
+        session
+    }
+
+    /// §4.6a. A soft wrap can fall on a space, and that space is a character of the line.
+    ///
+    /// The reported shape: at one pane width the constrained-optimisation block shows its own source
+    /// while the two blocks above it are pictures, and at another width the verdict swaps. The line
+    /// `\quad \text{s.t.} \quad g_i(\mathbf{x}) \le 0,;` is 24 columns up to and including the space
+    /// after the second `\quad`, so on a 24-column grid the terminal folds it exactly there. The
+    /// detector read each physical row with its right-edge padding trimmed — correct for a row that
+    /// ends a line, wrong for one that continues — and joined `\quad` straight onto `g_i`. MiTeX
+    /// answers `unknown command: \quadg` and the whole block falls to source, at that width only.
+    #[test]
+    fn a_block_soft_wrapped_on_a_space_keeps_the_space_and_typesets() {
+        let session = typeset_reported_blocks(24);
+        let optimisation = session
+            .live_decorations
+            .values()
+            .find(|record| record.span.render_source.contains(r"\min_"))
+            .expect("the constrained-optimisation block is detected at every width");
+        assert!(
+            optimisation.span.render_source.contains(r"\quad g_i"),
+            "the space the wrap fell on belongs to the logical line: {:?}",
+            optimisation.span.render_source
+        );
+        assert_eq!(
+            optimisation.failure_reason, None,
+            "a block folded across a space must not be handed to the engine as `\\quadg`"
+        );
+        assert!(
+            optimisation.artifact.is_some(),
+            "the block must typeset on a 24-column grid exactly as it does on a 100-column one"
+        );
+    }
+
+    /// The general statement of the same rule: how wide the pane is decides where the grid folds a
+    /// line, and nothing else. Every one of the reported blocks must therefore reach the engine
+    /// spelled identically at every width — including the Bayes block, which used to typeset while
+    /// silently losing the space in `P(B \mid A)` (a corruption a "did it render" assertion cannot
+    /// see, and the reason this test compares sources rather than counting pictures).
+    #[test]
+    fn a_wrapped_block_reads_the_same_source_at_every_pane_width() {
+        let reference = typeset_reported_blocks(100)
+            .live_decorations
+            .values()
+            .map(|record| record.span.render_source.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            reference.len(),
+            3,
+            "the fixture must prove all three blocks unwrapped: {reference:?}"
+        );
+        for columns in 20..=60 {
+            let session = typeset_reported_blocks(columns);
+            let sources = session
+                .live_decorations
+                .values()
+                .map(|record| record.span.render_source.clone())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                sources, reference,
+                "a {columns}-column grid folded the blocks into different text"
+            );
+            assert!(
+                session
+                    .live_decorations
+                    .values()
+                    .all(|record| record.artifact.is_some() && record.failure_reason.is_none()),
+                "every block must typeset at {columns} columns: {:?}",
+                session
+                    .live_decorations
+                    .values()
+                    .map(|record| record.failure_reason.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// The reported screen of 2026-09-06, rebuilt: Claude Code runs on the **alternate** screen and
+    /// redraws its whole window in place, so when its transcript moves up the rows that leave the
+    /// top are overwritten rather than removed. Nothing scrolls, nothing advances the alternate
+    /// context, and grid row 0 simply begins inside the body of the topmost block, whose opening
+    /// `$$` is no longer anywhere on the grid — the tail of a `\begin{aligned}` block, its
+    /// `\end{aligned}` and its closing `$$`, and then the rest of the answer beneath it.
+    ///
+    /// The block at the bottom is the one the user reported as source. Everything above it is
+    /// exactly the answer it arrived in, at the 52-column width the pane had, with Claude Code's own
+    /// two-space indent and the `\;` → `;` its markdown pass had already eaten.
+    fn alternate_screen_clipped_at_the_top() -> DualPlaneSession {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(52), nz(30));
+        seat_inline_metrics(&mut session);
+        let mut feed = String::from("\x1b[?1049h\x1b[2J\x1b[H");
+        let mut row = |text: &str| {
+            feed.push_str(text);
+            feed.push_str("\r\n");
+        };
+        // The tail of a block whose opener is above the window: two body rows and its closer.
+        row(r"  \nabla \times \mathbf{B} &= \mu_0\mathbf{J}");
+        row(r"  \end{aligned}");
+        row("  $$");
+        for block in reported_formula_blocks() {
+            row("");
+            row("  a heading before the block");
+            row("");
+            row("  $$");
+            for line in block {
+                row(&format!("  {line}"));
+            }
+            row("  $$");
+        }
+        session.feed_at(feed.as_bytes(), start).unwrap();
+        hide_cursor(&mut session, start);
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        complete_live_math_for_real(&mut session);
+        session
+    }
+
+    /// §4.6b. A block below a clipped-open block on the alternate screen is still a block.
+    ///
+    /// The clip resync exists for exactly this topology — grid row 0 inside a block whose opener is
+    /// gone, so the first `$$` on the grid is that block's CLOSER and reading it as an opener shifts
+    /// every `$$` below it by one. It was keyed to the frozen→live seam, which a grid-only window
+    /// does not have, so on the alternate screen it could never fire: the first `$$` opened a
+    /// spurious block that swallowed the heading beneath it, the pairing walked out of phase, and
+    /// the last block on the screen — the constrained-optimisation one the user reported — was never
+    /// paired at all. Not failed, not rejected: never seen.
+    #[test]
+    fn a_block_below_a_clipped_open_block_typesets_on_the_alternate_screen() {
+        let session = alternate_screen_clipped_at_the_top();
+        let sources = session
+            .live_decorations
+            .values()
+            .map(|record| record.span.render_source.clone())
+            .collect::<Vec<_>>();
+        for needle in [r"\min_", "p(x)", r"P(A \mid B)"] {
+            assert!(
+                sources.iter().any(|source| source.contains(needle)),
+                "the block containing {needle:?} is below a clipped-open block, not inside one: {sources:?}"
+            );
+        }
+        assert!(
+            session
+                .live_decorations
+                .values()
+                .all(|record| record.artifact.is_some() && record.failure_reason.is_none()),
+            "every block below the clip typesets: {:?}",
+            session
+                .live_decorations
+                .values()
+                .map(|record| record.failure_reason.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     /// The same rule with the one row that genuinely does change on every frame — a status line

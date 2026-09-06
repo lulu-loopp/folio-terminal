@@ -85,7 +85,7 @@ exactly the picture JPEG is worst at.
 | `quake-dark.png` | The same, dark. |
 | `palette-light.png` | The palette (`Ctrl+Shift+P`) open over a three-column window, with all five of its sections carrying rows: actions, panes and tabs, commands, files and settings. Five is the point of the picture, so a shot missing one of them is the wrong shot. |
 | `palette-dark.png` | The same, dark. |
-| `first-run-light.png` | The **First things** card standing over a window that has just started: one tab, one shell, a prompt and nothing run yet, which is what a first launch is. The card is photographed as it comes up and nothing on it is pressed — the update check on and every other row off, the agent heading over the agents this machine really has. |
+| `first-run-light.png` | The card a machine sees once and never again, on the first launch of a Folio that has never run there: the shipped mark and `Welcome to Folio`, then six rows of one line each — the update check, which is the only one that arrives on; the Explorer entry; the PowerShell integration; and one for each of Claude Code, Codex and Copilot CLI this machine has — over `Not now` and `Done`. The shell it is laid over has been running the whole time, which is the point of the scrim. |
 | `first-run-dark.png` | The same, dark. |
 | `context-menu.png` | The first page of the Windows 11 right-click menu on a folder, with `Open in Folio` on it, above `Show more options` and not under it. Explorer's window and nothing else — no desktop, no taskbar, no evaluation watermark. Taken on the verification VM; see the two notes above. |
 
@@ -115,11 +115,11 @@ can be told from one that was retaken on purpose.
 | `quake-dark.png` | 1920 x 1200 | 2026-09-05 | `9a1a2f4025da3797a919d387566fd91fe7bc7c37ad83ccb5ea99432e73053307` |
 | `palette-light.png` | 3200 x 2000 | 2026-09-05 | `a79617f8ec4bde9d5f1a4778c44be21f06a973f8015b13ac7aac23f94e9b98d0` |
 | `palette-dark.png` | 3200 x 2000 | 2026-09-05 | `61eafe6499d825d3ab46f125b6049b7482c42575dbe9c89c51d8c2aa5ed13e6a` |
-| `first-run-light.png` | 3200 x 2000 | 2026-09-06 | `496d18db0b1579165c35890cefc82beca4589bdf3164e914dc53ac0fd54a224d` |
-| `first-run-dark.png` | 3200 x 2000 | 2026-09-06 | `957736afb48431f44185e75fb99b8a95b22a701c9d75a67f8ce5ba503414116b` |
+| `first-run-light.png` | 3200 x 2000 | 2026-09-06 | `a2986c2b97e6e4f7550e29299995ba35302a290696fe0bae7e736d4ba6b320ce` |
+| `first-run-dark.png` | 3200 x 2000 | 2026-09-06 | `b89b400cee3e2d4556f0e2627763acd9db48eaf8b9d8513cbfc5204755346399` |
 | `context-menu.png` | 786 x 593 | 2026-09-05 | `e7e82a4ffe3a94dc1d52f8f38cabe48f61e1a39d9d2cc1c5dc17f5e5ed662faf` |
 
-The twenty the two READMEs point at come to 3.52 MiB after `oxipng`, and
+The twenty the two READMEs point at come to 3.43 MiB after `oxipng`, and
 `context-menu.png` adds 54 KiB to that; `docs/plans/release/large-files.md`
 carries the number beside everything else a clone has to fetch.
 
@@ -179,6 +179,40 @@ at cell height inside the cells its *source* occupies, so a short formula writte
 with long macros leaves the rest of that span blank, and that blank reads as a
 defect when punctuation lands on the far side of it.
 
+**`first-run-*` is the one pair that had to be staged, and every part of the
+staging is a thing a real first launch has.** The card appears once per machine,
+ever, so it is raised through the door `docs/BT-ENVIRONMENT.md` documents for
+exactly this — `BT_FIRST_RUN_CARD=1`, which overrides the gate and **nothing
+else**: which rows are offered, what `Done` would spend and what gets written
+are all identical to a true first launch. The rest of the rig is isolation. An
+`%APPDATA%`, `%LOCALAPPDATA%`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and
+`COPILOT_HOME` of their own, all empty, so the machine's real settings and the
+photographer's own agent configuration are neither read nor written — and so
+that all three agent rows are offered, since a row whose configuration already
+calls Folio is correctly not shown. Three one-line `.cmd` files on a `PATH` of
+their own are what `claude`, `codex` and `copilot` resolve to: the picker's
+lookup asks the path for those names, the copilot row additionally asks
+`copilot --version`, and **nothing is installed on this machine for a
+screenshot**. `folio.msix` is copied next to the staged `folio.exe` because that
+is how the archive ships and it is what decides the Explorer row's wording; the
+theme is written into the isolated `settings.json` between the two shots, which
+is the only difference between them. A `profiles.json` beside it overrides one
+field of the built-in PowerShell 7 row — `-NoProfile` — for the reason stated
+above about the other shots: a machine's own PowerShell profile prints a
+machine's own directories, and the first take of this pair had one on it.
+
+**The prompt in these two is fresh, and that is the scene rather than a missing
+one.** Every other shot here is asked for something in the terminal; this card
+appears about four seconds into a machine's first launch, before anybody has
+typed anything, so a command in the pane behind it would be a history the
+picture does not have.
+
+The window opens on the same throwaway `C:\Projects\aurora` the others use. It
+is placed with `SWP_NOACTIVATE`, so taking the picture never takes the desk's
+keyboard, and made topmost for the length of the shot because the panel it is
+framed on had somebody's own application filling it; it is put back to the
+ordinary z-order before the process is closed.
+
 **Two device pixels to the logical one, and no display is touched.** The window
 is parked at exactly 3200 × 2000 physical pixels with `SetWindowPos`, on the
 3840 × 2160 panel this machine already runs at 200%, and `GetDpiForWindow` is
@@ -188,29 +222,6 @@ second one to 100% for the length of the run and putting it back afterwards.
 Photographing the scale a display already has is both truer and one moving part
 fewer, and the file that comes out has a pixel per pixel to give on the screens
 a README is actually read on.
-
-**`first-run-*` is the pair taken from the packed archive rather than from
-`target\release\folio.exe`**, and the reason is on the card itself: the Explorer
-row is worded one way where `folio.msix` is standing beside the executable and
-another way where it is not, and the wording a reader gets is the first one. So
-the zip that was just built is unpacked and photographed, which is the same
-arrangement they will have. It carries the other two rules the rest carry — an
-`%APPDATA%` and `%LOCALAPPDATA%` of its own, and `-NoProfile` on the shell
-behind the card, because this machine's own PowerShell profile prints this
-machine's own directories.
-
-The card appears once per machine and never again, so it is raised with
-`BT_FIRST_RUN_CARD` — the gate `docs/BT-ENVIRONMENT.md` describes, which
-overrides the appearance test and nothing else. **Nothing on the card is
-pressed**: the window is closed rather than answered, so what is in the picture
-is the card as it arrives — the update check on, every other row off, and the
-agent heading standing over the agents this machine really has.
-
-The top two rows of a Folio window are its own alpha edge and show what is
-behind it, which is true of every shot here — theirs are the desktop. This one
-was taken with another window filling the panel, so it is parked over a band of
-that window which is one flat colour all the way across, and the two rows are
-that colour rather than a piece of somebody else's tab.
 
 ## Alt text
 

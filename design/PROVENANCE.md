@@ -61,7 +61,7 @@ producer string: they are clean rasters.
 | `assets/file-icons-r3/*.png` (11) | `ui-mockup.html`, screenshotted with the temporary `?icons=a\|b\|c` reader | The r3 round, three variants held side by side in column, window, git-page and preview-head contexts |
 | `assets/wordmark-r2/options.png` | `assets/wordmark-r2/options.html`, rendered in a browser | The wordmark comparison sheet |
 | `assets/wordmark-r2/detail-a.png` … `detail-d.png` | the same sheet, cropped (all four 906×192) | The four wordmark candidates |
-| `assets/app-icon/candidates-2026-08-28.png` | `assets/app-icon/candidates/{a..e}.svg`, rasterised by `assets/app-icon/make-candidates-board.py` | The application-icon round: five directions at 256/48/32/16, on a light and a dark taskbar |
+| `assets/app-icon/candidates-2026-08-28.png` | `assets/app-icon/candidates/{a..e}.svg`, rasterised by `assets/app-icon/make-candidates-board.py` | The application-icon round: five directions at 256/48/32/16, on a light and a dark taskbar. Closed 2026-09-06 with the shipped drawing kept. |
 
 `assets/file-icons-r2/options.html` and `assets/wordmark-r2/options.html` are
 **own**: hand-authored comparison sheets with the design commentary in them.
@@ -72,12 +72,12 @@ wordmark round.
 
 | File | | |
 |---|---|---|
-| `assets/app-icon/folio.ico` | **generated** | The placeholder in the binary, written by the script below out of geometry it holds itself. No input file, no traced artwork. |
-| `assets/app-icon/make-folio-ico.py` | **own** | Draws that placeholder. Standard library only. |
-| `assets/app-icon/candidates/{a..e}.svg` | **own** | Five directions for the real mark, hand-set in plain SVG. Nothing traced, no font outlines converted, no external resources — the `∫` in `b.svg` is stroked geometry and not a glyph. |
-| `assets/app-icon/candidates/{a..e}.ico` | **generated** | Each of those five at nine sizes, written by `make-ico.py` from the SVG beside it. |
+| `assets/app-icon/folio.ico` | **generated** | **The icon in the binary** (user ruling, 2026-09-06 — kept over the five candidates below), written by the script beside it out of geometry it holds itself. No input file, no traced artwork. `crates/bt-app/build.rs` links it into `folio.exe`, and `crates/bt-app/src/first_run.rs` embeds the same file for the first-run card's header. |
+| `assets/app-icon/make-folio-ico.py` | **own** | Draws it, and is the source of record for the mark. Standard library only. |
+| `assets/app-icon/candidates/{a..e}.svg` | **own** | **Retired 2026-09-06**, none chosen. Five directions for a replacement mark, hand-set in plain SVG. Nothing traced, no font outlines converted, no external resources — the `∫` in `b.svg` is stroked geometry and not a glyph. |
+| `assets/app-icon/candidates/{a..e}.ico` | **generated** | **Retired 2026-09-06.** Each of those five at nine sizes, written by `make-ico.py` from the SVG beside it. |
 | `assets/app-icon/make-ico.py`, `assets/app-icon/make-candidates-board.py` | **own** | The two build scripts: one SVG to one `.ico`, and the five SVGs to the contact sheet. Both need Pillow and a Chromium-family browser at run time; neither vendors anything. |
-| `assets/app-icon/README.md` | **own** | The written brief for the round and the instructions for swapping the icon in. |
+| `assets/app-icon/README.md` | **own** | The written brief for the round, the ruling that closed it, and the instructions for swapping the icon in. |
 
 ## Nothing here is undetermined
 
