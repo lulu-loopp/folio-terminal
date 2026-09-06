@@ -787,6 +787,26 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 **设置:`Rendered blocks` 页第三行 `Tables`,默认 On,与两行公式开关并列**,文案只陈述事实(「Draw markdown tables in output; off shows the pipe text」/「绘制输出里的 markdown 表格；关闭则显示管道符原文」),中英双语。热切与 Display formulas 逐字一致:`set_table_bands` 只在「已完成记录变成视口 artifact」的那两个点被读(冻结面与 live 面各一),关掉即下一帧回到竖线原文,打开即从内存重新武装,不重扫不重排。持久化 `settings.json` v11 → v12,单键 `tables`;迁移**把既有行为带过去**而不是选一个新默认——v11 的档案从未被问过这个问题,沉默的诚实读法是产品自己的答案 `true`。
 
 
+### 4.6 重画不是改动:一次不改一个字节的整屏重印,不该把一个还没排出来的块的钟拨回去(公式活性单,2026-09-06,已落地;`crates/bt-term/src/session.rs`)
+
+**由头是用户的两张截图:同一段 Claude Code 输出,在一块 pane 里四个 `$$` 块全排出来了(右上角还挂着 `1 rows above`),在另一块 pane 里一个都没排,`$$` 单独成行、源码原样。** 排查过的三条路都不是它:高度地板(§4.5 末段那条 `(live_rows - LIVE_MIN_VISIBLE_TEXT_ROWS) * cell_height`)**在 alt 屏上根本不生效**——`sync_live_math_artifacts` 的 alternate 分支是 expand-only,每一个证成的块都留着;`$$` 的成对识别也不看逗号,`\frac{P(B \mid A),P(A)}{P(B)}` 里那个逗号连被问都没被问过(`block_body_looks_like_prose` 对**任何含反斜杠的行**直接放行);pane 变窄同样无关,活屏是按逻辑行(WRAPLINE `continues`)扫的。
+
+**真因是一处不对称,而不是一个阈值。** `observe_live_damage` 里那句「同内容的重印不算改动」——用行指纹比,不改就 `continue`——**只问已经被装饰盖住的行**(`needs_fingerprint`)。于是同一次整屏重印对两种行是两种价钱:**已经排出来的块,它的行有装饰、有指纹,重印免费**;**还没排出来的块,它的行没有装饰、因而没有指纹,每一帧无所谓改没改都把 `revision` 加一、把 `settled_revision` 清掉、把 `last_damage_at` 拨到现在**。而 live 公式的唯一武装条件是「这一行 200ms(`LIVE_MATH_STABLE_INTERVAL`)没被动过」,所以**任何重印快过 200ms 的程序,都能让一个待排的块永远排不出来**——它就在屏幕上、字节一个没变、检测器认得它,只是那 200ms 永远攒不满。两个块并排站着,一个是图一个是自己的源码,**差别只是它们各自是在哪一秒被证成的**。
+
+**Claude Code 正好落在这个区间里,这不是推测,是量出来的。** `corpus/claude-code-session.btcr`(真机录的 Claude Code 2.1.210,100×28,BTCR 带微秒时间戳)进 alt 屏之后的 116 个输出块:相邻间隔中位数 **105.8ms**,**115 个间隔里 81 个(70%)小于 200ms**,最小 0.0ms,连续小于 200ms 的最长一串 18 块跨 0.29s;只数「整屏重画边界」的块(`contains_clear_home_snapshot_boundary` 那三种形状)也一样,中位数 171.5ms、76 个间隔里 43 个不到 200ms。**中位数在门槛之下**,所以一个块能不能排出来,就是它到屏幕上那一刻跟重画节奏掷的一次硬币——这正是「同一段输出,一次排一次不排」。
+
+**裁决:重画不是改动。行指纹对每一个报了 damage 的行都问,不再只问装饰盖着的行。** 一行被重写成它本来就有的那些字节,它就没有动过,**不管现在是谁在看它**;而真的动了(哪怕只换了个颜色)照旧把这一行的钟拨到现在。这不是给公式开的例外,是把已经在用的那条规矩补齐——指纹本来就是 `TerminalAdapter::visible_row` 那张捕获缓存的钥匙(`captured_row_fingerprint`,不分配、按会话随机加盐、覆盖字符/零宽/flags/前景背景/超链接 uri/宽字符占位/WRAPLINE),它的文档注释自己写着服务的是「TUI repaint path」。代价是每个报了 damage 的行每帧多算一次这个哈希,而这正是同一帧里 `visible_row` 本来就要算的那一次。
+
+**没有动阈值,这是刻意的。** 200ms 那个数不是这条 bug 的成因,把它调小只是把硬币换一枚——重印快过新阈值时同样的事会重新发生,而调大会让所有正常输出更晚成块。**该修的是「同一次重印对两种行两种价钱」这件事本身。**
+
+**真机 A/B(同一台机器、同一段内容、隔离 `APPDATA`、`BT_DECOR_TRACE` 逐帧记录)。** 一个模仿 Claude Code 画法的脚本:进 alt 屏,`ESC[?2026h` + 逐行绝对定位 + `ESC[K` 重写四个 `$$` 块和一条会跳数的状态行,50ms 一帧。
+- **修前、重画进行中**:857 帧 `DECOR_TRACE` 里**一条 `LIVE` 记录都没有**,块全是源码。
+- **修前、同一个进程、重画一停**:另一次跑到 624 帧的记录里,前 621 帧同样一条没有,重画停掉后第 **622** 帧起三个块在 ~300ms 内依次排出来——**同一屏字节,只差重画在不在跑**。
+- **修后、同样的 50ms 重画进行中**:881 帧里 2592 条 `LIVE ... state=rendered`,**第 16 帧**就排出来了,与「重画停掉」那一屏逐格相同。
+
+**钉子(`crates/bt-term/src/session.rs`)**:`a_byte_identical_reprint_does_not_restart_a_pending_blocks_stability_clock`(16/50/100/199ms 四种节奏各排出一个块)、`a_ticking_status_row_does_not_starve_the_block_above_it`(唯一真变的那一行只拨自己的钟)、`a_block_arriving_during_a_repaint_storm_typesets_beside_one_proven_before_it`(截图里那个形状:先证成的与后到的必须都是图)、`a_reprint_that_changes_a_row_restarts_exactly_that_rows_clock`(反面:改字、改色都算改动)。**变异红证**:把指纹改回只问装饰盖着的行 → 四条全红;改成「凡是有过指纹的行一律不再拨钟」→ 后两条红(后到的那个块永远到不了 worker);把颜色从指纹里拿掉 → 只有「改色也算改动」那一条红。
+
+
 ## 5. 数学渲染管线（M-1 spike）
 
 同 v3（三路径、300+ 样本含恶意输入、进程隔离开销验证、缓存键含 detection_rev + LayoutKey）。
