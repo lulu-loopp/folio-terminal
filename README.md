@@ -284,19 +284,38 @@ publisher named there is **Weiyi Shi** and the app is `folio.exe`, and click
 
 ## First run
 
+A machine that has never run Folio gets one card, once, called **First things**.
+It asks every question whose answer writes something outside `%APPDATA%\Folio`,
+and it asks them together: whether to check for a new version once a day, whether
+to put **Open in Folio** in Explorer's right-click menu, whether to install the
+PowerShell integration, and one row for each of Claude Code, Codex and Copilot CLI
+that this machine actually has. Nothing about theme, font, size, language or
+layout — those are one click away and cost nothing while they are wrong.
+
+**Every row on that card is also a row in Settings**, so nothing on it is a last
+chance. **Done** applies the rows that are on; **Not now** and `Esc` close it with
+the shipped values — the update check on, the rest off — and change nothing.
+Either way the card does not come back, and the shell behind it has been running
+the whole time. If you were already using Folio before this version, you never see
+it: your `settings.json` says so.
+
 The first tab opens the first shell your machine actually has. The five shipped
 profiles are looked for in order — PowerShell 7, Windows PowerShell, WSL, Git
 Bash, Command Prompt — and one whose program is not installed is greyed out in the
 picker rather than hidden. The seven agent profiles are found the same way, on the
-Windows path.
+Windows path, and that is the same lookup the card's agent rows use.
 
-The first time a PowerShell pane prints something, a strip says the PowerShell
-integration is not installed. **Add to `$PROFILE`** appends one line —
-`. "$env:APPDATA\Folio\shell-integration\folio.ps1"` — after copying the file as
-it stood to a dated backup beside itself; delete that line to undo it. **Don't
-show again** ends the asking, and closing the strip decides nothing, so the next
-PowerShell asks once more. Command marks and inline `$…$` formulas run on that
-integration. Git Bash and WSL need none of it and leave nothing on disk.
+The PowerShell integration adds one line —
+`. "$env:APPDATA\Folio\shell-integration\folio.ps1"` — to the `$PROFILE` a
+PowerShell names for itself, after copying the file as it stood to a dated backup
+beside it; delete that line to undo it. Where that file is comes from the shell,
+so a row left on when the card is answered joins the next PowerShell that starts,
+and Settings > Terminal says so until it does. If you were not asked on the card,
+a strip offers the same thing the first time a PowerShell pane prints something:
+**Add to `$PROFILE`** does it, **Don't show again** ends the asking, and closing
+the strip decides nothing, so the next PowerShell asks once more. Command marks
+and inline `$…$` formulas run on that integration. Git Bash and WSL need none of
+it and leave nothing on disk.
 
 The three rows on the Agent page **install nothing by default**, and they are not
 defaults that happen to be off: each reads the tool's own configuration file and

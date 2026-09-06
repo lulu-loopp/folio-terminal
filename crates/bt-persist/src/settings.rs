@@ -243,7 +243,25 @@ use serde::{Deserialize, Serialize};
 /// One bump for five changes, on v27's own argument: they arrive together as one ruling, and
 /// `SETTINGS_MIGRATIONS` is the map of the road from an old file to this one — five version numbers
 /// for one release would name four documents nobody ever wrote.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 31;
+///
+/// **v32 carries the first-run card's two keys** (user ruling, 2026-09-06, `docs/DESIGN.md` §7.56):
+/// [`SettingsV1::first_run_card`] and [`SettingsV1::powershell_install_pending`].
+///
+/// **The step lands neither the v13-v16 way nor the v28 way, and it is the first on this ladder
+/// that carries a *rule* rather than a value.** `first_run_card` is written `Shown` into every file
+/// this step walks, and that single line **is** the "an upgrading reader never sees the card"
+/// rule — there is no second "did this file exist before" probe to keep in step with it, and no way
+/// for the two to disagree. A reader who has been running this program for months is a reader who
+/// has already answered these four questions, one row at a time, in the places the card is a
+/// shortcut to; putting the card in front of them would be asking again about switches they can
+/// see the state of.
+///
+/// `powershell_install_pending` lands the v13-v16 way: `false`, because an intent is something a
+/// reader records by leaving a row on, and nobody who never saw the card ever recorded one.
+///
+/// One bump for two keys, on v27's own argument: they arrive together as one ruling, and one of
+/// them exists only because the other does.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 32;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -1092,6 +1110,31 @@ pub struct SettingsV1 {
     /// three of them.
     #[serde(default = "default_quake_restore")]
     pub quake_restore: QuakeRestoreV1,
+    /// **Whether the first-run card has been put up on this machine** (v32,
+    /// `docs/DESIGN.md` §7.56) — see [`FirstRunCardV1`].
+    ///
+    /// `#[serde(default)]` and not a named function, because
+    /// [`FirstRunCardV1::NotShown`] is the honest answer to a missing key: a file
+    /// without it is a file the migration has not walked, and the migration is
+    /// the only thing that can tell an upgrading reader from a new one. The card
+    /// asks a second question of its own before it appears — whether there was a
+    /// `settings.json` at all — so a hand-written file that omits the key does
+    /// not raise it.
+    #[serde(default)]
+    pub first_run_card: FirstRunCardV1,
+    /// **The first-run card's PowerShell row was left on, and no PowerShell has
+    /// yet said where its own `$PROFILE` is** (v32, `docs/DESIGN.md` §7.56).
+    ///
+    /// An intent and not an answer. Where that file lives comes from the shell
+    /// and is never computed here, so on the launch the card appears on there is
+    /// nothing to write to yet; the first PowerShell that names its own profile
+    /// performs the write and clears this. A machine that never starts a
+    /// PowerShell never gets the line, which is correct.
+    ///
+    /// `#[serde(default)]` because `false` is the honest missing-key answer:
+    /// nobody who never saw the card ever recorded an intent.
+    #[serde(default)]
+    pub powershell_install_pending: bool,
 }
 
 /// How much of a summoned terminal a new run puts back — `docs/DESIGN.md` §7.54e.
@@ -1318,6 +1361,12 @@ impl Default for SettingsV1 {
             quake_startup_command: String::new(),
             quake_top_gap: DEFAULT_QUAKE_TOP_GAP,
             quake_restore: DEFAULT_QUAKE_RESTORE,
+            // A file being written for the first time is a machine that has not
+            // been asked yet. The migration is what makes this untrue for
+            // everybody who was already here.
+            first_run_card: FirstRunCardV1::NotShown,
+            // Nobody has recorded an intent about a file nobody has named.
+            powershell_install_pending: false,
         }
     }
 }
@@ -1368,6 +1417,33 @@ pub enum PsReadLineInviteV1 {
     /// Refused twice, or refused after the second showing. Nothing asks again,
     /// ever, on this machine — the Terminal page's row remains the only way in.
     Dismissed,
+}
+
+/// Whether the first-run card has been put up on this machine —
+/// `docs/DESIGN.md` §7.56.
+///
+/// **Two values and not a `bool`, for [`PsReadLineInviteV1`]'s reason**: the
+/// default has to be the one a migrated file cannot land on by accident. A
+/// `bool` named `first_run_card_shown` would read `false` out of every document
+/// that predates the key, and `false` there would mean "put the card up" to
+/// every reader who has been using this program for months.
+///
+/// **Written when the card goes up, not when it is answered.** A crash, an
+/// `Alt+F4`, or a process killed while the card is on screen must not bring it
+/// back: the reader saw it, and a card that reappears after being closed is a
+/// card that will be closed faster the second time.
+///
+/// **None of the card's four answers is stored here.** Three of them are read
+/// off the registry and off the agents' own files, `update_check` has its own
+/// field, and the PowerShell row stores an intent
+/// ([`SettingsV1::powershell_install_pending`]) rather than an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FirstRunCardV1 {
+    /// Never shown. The only state from which the card appears.
+    #[default]
+    NotShown,
+    /// Put up once. Nothing shows it again, whatever the answer was.
+    Shown,
 }
 
 /// Which language the interface is written in — `docs/DESIGN.md` §7.1.6c-3.

@@ -7136,3 +7136,99 @@ BT_DPI stage=resized ... rect=-13,-13,2893,1813     swapchain_size=2880x1800 inn
 - **和弦按下时快捷键表读的是活焦点,面板列表读的是快照。** 两者在同一帧里可能不同(面板一开,`terminal_primary` 就掉了)。这是有意的(见 ③),但意味着面板列出的一条终端作用域的动作,是「刚才那只手能按的」而不是「此刻按下去会生效的」——它执行时面板已经先关了,所以焦点已经回来,今天这两件事对得上。窗层焦点若在面板开着的时候被别的东西改掉,这条对不上;那需要一条「重新拍照」的账,现在没有。
 - **忘只在有答案落地的那一刻发生。** `retain_file_indexes` 挂在 `apply_file_index_results` 上,所以一个「开过面板、随后关掉文件列、再也没开过面板」的根,它那份索引会一直留到下一份索引落地为止。留着的量是有界的(一个根至多三万条),而且它本来就是在那一列开着的时候付过的;要做得更干净,得给「谁还想要这个根」找一个不依赖答案到达的时刻。记明账。
 - **面板不带自己的进出动画的第二段。** 它按 `Travel::Down` 进,`arrival::Passages` 照常给它一次退场;但它不是从任何控件里长出来的,所以那个方向是一句约定而不是一次推导。
+
+### 7.56 一张只出现一次的卡:把「这台机器允许 Folio 碰多少」四个问题合成一次问,答案仍旧走设置页那一扇门(0.2.2 初次设置卡,用户裁决 2026-09-06,已落地;`crates/bt-app/src/first_run.rs`(新)、`crates/bt-app/src/{main,settings,i18n,persist,attention_copilot}.rs`、`crates/bt-persist/src/{settings,migrate,lib}.rs`)
+
+`profiles.rs` 里那句话在这一节之前一直是真的:仓里没有 `first_run`、没有 `onboarding`、没有 `seen_once`,整个教学面就是提示条、菜单行、贴士卡和设置页里的五句话——**一个没有行的动词只能靠意外被学会**。这一节把其中会在 `%APPDATA%\Folio` **之外**留下痕迹的那几个,合成一张窗内模态卡,在一台从没跑过 Folio 的机器上出现一次。
+
+#### ① 它问的是一个决定,不是四个
+
+主题、字体、字号、语言、布局、默认 profile 都不在卡上。那些是偏好:错了一步可撤,错着的时候什么代价都没有。卡上这四行不是偏好,因为每一行都会在读者没打开过的文件或注册表上留下一笔——更新检查(**唯一一条出生即开**)、资源管理器右键菜单、PowerShell 集成、本机检测到的 agent 各一行。它们被放在一起问,因为它们本来就是一个问题:**这台机器允许 Folio 碰多少**。产品此前把这个问题摊在三处:几分钟后才出现的一条提示条、三行没人去的设置行、一行大多数读者永远学不到存在的 Windows 11 行。
+
+行序是定的。唯一那条已经开着的行开头,读者于是先被告知 Folio **做**什么、再被问它**可以**做什么;而在一个会滚的身体里,唯一开着的那行按构造在折叠线之上。然后是两条 Windows 写入,最后是 agent。
+
+#### ② 出现的条件是两件事,而且两件都要
+
+`bt_persist::ReadReport::NotFound`(`%APPDATA%\Folio` 里没有 `settings.json`),**并且** `settings.json` 里的 `first_run_card` 还是 `NotShown`。只看后者,会在一份存在但读不出来的 `settings.json` 上弹卡——那份文件退回默认值,而默认的 `NotShown` 在那里不是一台新机器;只看前者,会在一次「卡还在屏上就被杀掉」的运行之后再弹一次。`SettingsStore::open` 因此把 `NotFound` 记下来(`was_missing`),这是 `loaded()` 事后说不出的那一件事。
+
+**`Shown` 写在卡升起的那一刻,不是答完的那一刻。** 崩溃、`Alt+F4`、进程被杀都不许把它带回来:读者看过了,而一张关掉之后还会回来的卡,第二次会被更快地关掉。
+
+**老用户从不遇到它,而这句话只写一遍**:`settings.json` 走到 **v32**,`migrate_settings_v31_to_v32` 把 `first_run_card` 写成 `Shown`。那一行**就是**这条规则——没有第二个「这份文件以前存在吗」的探测要跟它保持一致,也就没有两者失和的可能。这是这道梯子上第一级承载**规则**而不是承载**值**的台阶:写进去的不是出厂默认(`NotShown` 才是),因为出厂默认是给新机器的答案,而这一级只会被不新的机器走过。
+
+#### ③ 每一行只在能被兑现时才出现
+
+一行 Folio 只能拒绝的行,根本不列。拒绝的解释句设置页上已经有了(`DescExplorerFirstPageNoPackage`、`DescCopilotHooksTooOld`、`DescCopilotHooksDisabled`),而那一页正是这种形状的句子该待的地方。**卡上任何一句话都不描述一件不存在的事**。
+
+- **资源管理器**:一个开关。Windows 11 且 `folio.msix` 就在 `folio.exe` 旁边时,它同时是首页项和 `Show more options` 里的老菜单项;否则只是老菜单项,句子换成 Windows 10 那一句。**没有包时这一行仍然出现**——开关于是意味着它能意味的那一半,而不是把一台解包时漏了 `.msix` 的 Windows 11 连老菜单一起剥夺。
+- **agent**:只列在这台机器上找得到、且它自己的配置文件里还没有 Folio 的。「找得到」用的是 picker 给行置灰用的同一次查找(`ProfilePrograms::is_available`),不是第二次;写第二次查找的代价是卡可以为一个 picker 说没装的程序开一行。三个都没有时,组标题连同它的行一起消失,卡短四行,而不是空四行。
+- **copilot 那一行等探测**。`1.0.26` 以下的 copilot 会被 `attention_copilot::apply` 拒绝,而**在按下之前就知道的拒绝从来不是一次失败**(见 ⑤)——所以卡在 `copilot` 在 PATH 上时先起 `begin_probe()`,等 `probe_settled()` 才升起。`probe()` 把「还没回来」和「回来了但什么都没有」折成同一个 `None`(对 `readiness_from` 是对的:两者都不是拒绝),只有这一个调用者要把它们分开,所以 `probe_settled` 是为它加的。
+
+#### ④ PowerShell 那一行记的是意图,不是答案
+
+`shell_integration.rs` 从第一天起就说得很清楚:`$PROFILE` **在哪里由 shell 说**,Folio 从不推算。第一次启动时还没有人问过。所以这一行按下「完成」时留下的是一个意图 —— `powershell_install_pending`,`settings.json` 的第二个新键 —— 由**本进程里第一个报出自己 `$PROFILE` 的 PowerShell** 兑现:走 `shell_integration::install_into_profile`,也就是提示条上「加进 `$PROFILE`」按的同一个调用,同一份带日期的副本先拷。一台从不启动 PowerShell 的机器永远不会拿到那一行,这是对的。
+
+已经 dot-source 了 `folio.ps1` 的 `$PROFILE`,意图被**清掉而不写**:那是读者已经拥有他要的东西。写失败也清掉、且不重试——提示条原地留着同一个动词,那正是「一次写不进 `$PROFILE`」今天已经走的那条路,也是卡上这一行按构造不会失败的原因。
+
+**在此期间设置页说的是哪一件事。** 终端页那一行既不是「已安装」也不是「关」,它说的是**在等**:`Text::ShellIntegrationPending`(「下次启动 PowerShell 时生效」)。判据是纯函数 `first_run::pending_row_line`,`SettingsRow::description` 调它——一句读作 `Off` 却盖在一次正在路上的写入之上的行,是这扇窗在一份文件上自相矛盾。
+
+**卡问过了,提示条就不问。** 行开着按完成 → `powershell_integration_offer` 留 `true`(线正在装,装上以后提示条自己的闸门就假了);行关着按完成 → 写成 `false`,卡问过并且拿到了答案;按「暂不」→ 保持 `true`,提示条照常出现,因为**「暂不」的意思是什么都没被问**。
+
+#### ⑤ 两个动词,和失败
+
+**「完成」把每一条开着的行兑现,然后关。** 关着的行什么也不花——除了两个不是例外的例外:更新检查出生即开,所以把它关掉**本身就是**一个答案;PowerShell 的那一问是唯一有第二个表面的问题,所以行关着必须把那个表面也关掉(见 ④)。
+
+**「暂不」、`Esc`、「打开设置」与卡还在时关掉这扇窗，什么都不花。** 不是「按当前开关兑现」:卡带着出厂值关闭,而出厂值就是这台机器已经有的东西。两个动词走同一扇门(`apply_first_run`),差别整个在 `first_run` 返回什么——把「暂不」写成「不要调用兑现器」,会把这条规则同时写在那个模块和这里的一个分支上,而两者可以失和。
+
+**成功是安静的**(`Announce::OnlyFailures`)。读者半秒钟前刚要过这几件事,设置行现在读作 On;一次新安装上叠四张成功卡是噪音,而 `ExplorerFirstPageAddedToast` 那一族是为设置页存在的——在那里,一次没有近旁请求的开关翻转确实需要被确认。**失败照旧各自举起自己那张现成的卡**,一个字没改:一张关掉之后装作没事的卡,正是 `add_to_profile` 自己的文档拒绝成为的东西。**一次部分完成仍然关闭**:三条成了一条没成,就是三条成了。
+
+`Announce` 是一个参数而不是第二个分发器,因为两个调用者只在一个问题上不同,而那个问题不是「这次按下做什么」。
+
+#### ⑥ 完成按的是设置页的那一扇门
+
+这是这张卡与程序其余部分的全部契约:**它自己什么也不装,它按行**。六个答案里的五个以 `settings::SettingsTarget` 的形式离开 `first_run`(`settings_target`),交给 `apply_settings_choice_announcing` —— 同一个漏斗、同一批 `*_requested` 读取器、同一个 `apply_*` 方法。所以卡长不出第二条安装路径,而设置页上一行搬了家,这里跟着搬,不需要谁记得过来看一眼。第六个答案(那个意图)没有行可按,`settings_target` 因此答 `None` 并把理由说出来。
+
+红门是逐行断言的,而且是拿 `crate::settings` **自己的**行读取器断言的:一个指错行、或把 `FORMULA_OPTIONS`(`[true, false]`,所以答案就是它自己的下标)索引反了的目标,会以 `None` 或以 `false` 回来。
+
+#### ⑦ 几何:`restore.rs` 的手艺,设置页的行形
+
+同一张 `push_float_window` 的面、同一对 `.btn`、同一个 `restore::wrap`。行形是**设置页的**——句子在左、控件在右——因为一个刚被交了六行这种形状的读者,下次打开设置去改其中一行时该遇到同一种形状;它也把整张卡的宽度交给句子,而不是让每一行都缩进过一个控件列。控件是 `.aswitch`,到像素:30 × 18、圆角 9,轨道关时 `--active`、开时 `--accent`,滑块 14 × 14 内缩 2、`--menu` 面、`0 1px 3px rgba(0,0,0,.25)`;右边缘落在卡自己的 padding 上,**竖直居中于该行标题的第一行**,所以一行三句的句子不会把它的控件拖下去。
+
+这里唯一新的东西是**一个会滚的身体**。头(标题)与脚(细线、脚注、两个动词)钉住,中间滚:卡永不超过 `surface_height − 2 · 34` 逻辑像素,3px 的条画在右侧 padding 里(所以它出现时没有一行字会移动),被裁到的那一行在 20 逻辑像素上**淡进卡自己的地**,于是读者永远不会被展示半个字形。**钉住的脚正是滚动之所以安全的原因**:「完成」「暂不」和那句「这里的每一项也出现在设置中」永远不是滚走的那个东西。一个被裁到视口外的开关也**不再回答按下**——裁剪线是它停止被画的地方,也就是它停止回答的地方。
+
+**那道淡入与那根条是自己一层,而这不是整洁。** 一层的填充在它的字之前就收了口(`OverlayLayer` 自己的注记:「一层的三个通道在下一层的通道打开之前就完成」),所以推进同一层的淡入会铺在它本该带走的那句话**下面**。第二层于是把它放到字的上面,条又在淡入的上面——它们站的就是这个顺序。两端都淡:规格画的是脚,因为一张静止的卡裁的是那一端;身体一滞,头以完全相同的方式在裁,而半个字形不因为在哪一端被切而不是半个字形。
+
+宽 480 逻辑像素(`min(480 · scale, surface_width · 0.92)`),不是 `.restore` 的 400:开关列从句子列里拿走 42 逻辑像素,而 v1 量的 15+10 复选框列只拿走 25,480 把「搬到设置行形」花掉的那 20 像素句子原样还回来。
+
+#### ⑧ 键盘
+
+焦点开在**第一个开关**上,不是「完成」:这是一张表单,落在主按钮上会让一次盲目的 `Enter` 答完一张没人读过的卡(`restore.rs` 的 `FOCUSED_ANSWER` 把焦点放在动词上,因为那个对话框是一个问题而不是一张表单)。环开着的时候不画——一张出生就带环的卡,是在宣称一个没人用过的键盘。
+
+`Tab`/`Shift+Tab` 按视觉序走每个开关 → 「打开设置」→「暂不」→「完成」→ 回绕;卡是模态的,焦点永不离开它。`↑`/`↓` 只在开关之间走,列表就是列表;从按钮进入列表,从它来的那一端进。`空格` 翻焦点上的开关,或按下焦点上的按钮/链接。`←`/`→` 是该开关的关/开,平台惯例。`Enter` 从任何一个开关按下「完成」——这是它与旁边那张 PSReadLine 邀请卡分道的唯一一处:那张卡拒绝 `Enter`,因为它的肯定项会写文件而它可能在人打字打到一半时出现;这一张出现在一台机器的第一次启动上,焦点在一行没人碰过的行上、每一行会写东西的开关都关着——所以它可能意外收到的那个 `Enter` 做的是「暂不」做的事。`Esc` 正好是「暂不」,一次按下。`Alt+F4` 走 winit 自己那条关窗路不经过这里,而它按构造算「暂不」:`Shown` 在卡升起时就写了,而在按下「完成」之前什么也没被兑现,所以不存在一条能留下半个决定的路。本产品没有 `Ctrl+W`——`Ctrl+Shift+W` 关的是 pane——所以那一条无处可落。焦点走到折叠线以下的行会把它滚进来:一个读者看不见的环不是焦点。
+
+「打开设置」**是带了一个去处的「暂不」**:按它的读者在说他宁愿到设置里去做,于是卡花掉「暂不」花掉的那些东西——什么也不花——然后打开脚注点名的那一页。把卡留在那一页上面站着是另一种读法,而它不可用:这张卡是模态的,盖在它下面的设置对话框是一个没人能按的对话框。
+
+#### ⑧′ 一扇拍照用的门
+
+这张卡每台机器只出现一次,永远。没有一扇门的话,它就无法被第二种语言拍下来(卡的语言是窗的语言,而窗的语言来自 `settings.json` —— 而卡出现的前提正是那份文件不存在),也无法在改完一行之后再看一眼。`BT_FIRST_RUN_CARD` 是那扇门,它是 `BT_PSREADLINE_PROBE` 的同家——那一条在 `docs/BT-ENVIRONMENT.md` 里的理由逐字写着「所以那张邀装卡能被拍下来」。
+
+**它只覆盖闸门,不覆盖别的任何东西**:哪几行被提供、「完成」花什么、什么被写下来,全部与一次真正的首启一模一样——这正是一张从它里拍出来的图还值钱的原因。判据也因此不在 `first_run::due` 里面而在它的调用处:那个纯函数是红门盯的东西,把一个环境变量读进去会让它同时回答两个问题。
+
+#### ⑨ 层序
+
+在 gate 与退出卡**之下**、其余一切**之上**。那两张挡在一件已经在发生的事前面、谁也不能盖;而在一次首启上它们按构造不可能开着,所以在读者那里,这张卡在它站着的时候就是 Escape 梯子的顶端。
+
+#### ⑩ 文案
+
+中文全部由 DeepSeek 从英文事实简报写出,提示里没有本仓任何一句现成中文(不是 `i18n.rs` 的、不是 `README.zh-CN.md` 的),十轮,每一轮反馈都用英文并且只点名一个事实、一个长度或一处含糊。规则一句:**一句话说读者得到什么;然后,仅在这个开关会写一份属于读者的文件时,一句短话说写在哪里**。因此在卡上的有 `$PROFILE` 和它的日期副本、`~/.claude/settings.json`、`~/.codex/config.toml`、`~/.copilot/hooks/folio.json`;不在卡上的有「每天一次请求」「注册 `folio.msix`」「为本账户」「`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `COPILOT_HOME`」「`folio.ps1`」——前两类是我们的方法和我们的文件,第三类是我们那次写入的范围,第四类是一个设过它的读者本来就知道、没设过的读者根本没有的变量。
+
+**全站一个词:「暂不」**。PSReadLine 邀请卡的中文原来是另一句,现在不是了——两个请读者推迟的表面不该在这件事上花两个词。英文 `Not now` 一个字没动。
+
+#### ⑪ 门
+
+`the_card_is_due_only_when_there_was_no_settings_file_and_it_has_never_been_up`、`only_the_rows_this_machine_can_honour_are_offered`、`the_update_check_is_the_only_row_that_arrives_on_and_it_arrives_first`、`the_explorer_row_says_only_what_its_switch_can_mean`、`every_answer_leaves_this_card_as_the_press_the_settings_page_sends`(逐行、拿 `crate::settings` 自己的读取器断言)、`done_spends_the_rows_that_are_on_and_the_two_answers_that_are_answers`、`declining_writes_nothing_outside_the_card_s_own_state`、`the_recorded_intent_is_spent_by_the_first_shell_that_names_its_profile`、`the_settings_row_says_the_write_is_waiting_for_a_shell`、`the_focus_walks_the_card_in_a_ring_and_the_arrows_stay_in_the_list`、`the_card_opens_on_its_first_switch_with_the_ring_put_away`、`a_switch_changes_the_card_and_nothing_else_until_done`、`the_body_scrolls_and_the_two_verbs_never_do`、`walking_onto_a_row_below_the_fold_brings_it_into_view`、`a_press_outside_the_body_is_not_a_press_on_a_row`、`the_switch_is_settings_own_control_in_settings_own_row_shape`、`the_card_is_four_hundred_and_eighty_logical_or_the_window_s_own_share`(以上 `first_run.rs`);`real_settings_v31_to_v32_migration_tells_an_existing_reader_the_card_has_been_shown` 与 `a_settings_file_written_from_nothing_has_never_shown_the_card`(`bt-persist/src/migrate.rs`)。
+
+#### ⑫ 挂账
+
+- **PSReadLine 补丁不进这张卡**(用户裁决)。它是这个产品里最深入的一件事,而它**已经有自己的窗内模态**,并且那张模态的聪明之处正在于它到得晚:它欠读者的那一次额外出现,就在改字号之后——bug 可见的那一刻。于是一台新的 Windows PowerShell 机器会先见到这张卡,再在第一次缩放或改字号时见到第二张。两张模态,但第二张在它的症状到达的那一刻到达,这正是它当初被那样设计的原因。
+- **卡不带自己的进出动画。** 它按 `ModalBand::Fixed` 走,和 gate、退出卡、邀请卡一样。
+- **一次部分完成之后,卡上那些行的最终状态只在设置页可见。** 这是有意的(⑤),但意味着一个四行全开、其中一行失败的读者,拿到的是一张失败卡加三行静默;哪三行成了要去设置页数。给成功也发卡会把这件事说全,代价是新装第一分钟里的四张卡。

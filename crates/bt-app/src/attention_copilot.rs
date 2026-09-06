@@ -601,6 +601,18 @@ pub(crate) fn probe() -> Option<Version> {
     PROBE.get().copied().flatten()
 }
 
+/// Whether the probe has come back at all, **whatever it came back with**.
+///
+/// [`probe`] folds "still out" and "came back with nothing" together on purpose, because
+/// [`readiness_from`] treats them the same: neither is a refusal. One caller has to tell them
+/// apart. The first-run card offers a row only if it can be honoured, and it cannot know that a
+/// copilot is new enough until the version question has been *asked and answered* — so it waits
+/// for this rather than listing a row whose install would then be refused.
+#[must_use]
+pub(crate) fn probe_settled() -> bool {
+    PROBE.get().is_some()
+}
+
 /// **Through `cmd.exe`, and that is not a shortcut.**
 ///
 /// npm installs this program as `copilot.cmd`; `CreateProcess` appends `.exe` and does not consult
