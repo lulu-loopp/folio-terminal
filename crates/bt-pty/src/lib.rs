@@ -1257,6 +1257,33 @@ impl PtySession {
             .map_err(backend)
     }
 
+    /// Tell the console host to clear **its own** buffer, keeping the row the cursor is on.
+    ///
+    /// A terminal on Windows does not own the screen its child is drawing: conhost keeps the
+    /// buffer and ConPTY sends this window only the difference against *its* model of what we
+    /// show. A clear performed on our side alone therefore desynchronises the two — the host has
+    /// no reason to redraw a prompt it believes is already on the screen, so the pane stays blank
+    /// until something else forces a repaint. This is the call that keeps the two in step, and it
+    /// is what Windows Terminal's own `clearBuffer` spends
+    /// (`ConptyClearPseudoConsole(hPC, keepCursorRow)`; the parameter is `conpty.h`'s own).
+    ///
+    /// `Ok(false)` means the ConPTY this process loaded has no clear call — the operating
+    /// system's inbox implementation exports none — and the caller must fall back to clearing only
+    /// what it can see. It is not an error and must not be reported as one.
+    pub fn clear_host_buffer(&self, keep_cursor_row: bool) -> Result<bool, PtyError> {
+        #[cfg(windows)]
+        {
+            let master = self.master.as_ref().ok_or(PtyError::RingClosed)?;
+            portable_pty::win::conpty::clear_host_buffer(master.as_ref(), keep_cursor_row)
+                .map_err(backend)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = keep_cursor_row;
+            Ok(false)
+        }
+    }
+
     pub fn size(&self) -> Result<PtySize, PtyError> {
         PtySize::from_backend(
             self.master

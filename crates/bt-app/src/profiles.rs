@@ -7835,10 +7835,12 @@ pub enum TermMenuRow {
     /// the keys all landed, and the *discoverable* door did not, because this
     /// menu did not exist to hang it on. `Ctrl+F` was the only way in.
     Find,
-    /// **ED2 and the cursor home, executed here** — nothing is written to the
-    /// PTY, the transcript and staging are not touched, and the rows that leave
-    /// the viewport scroll out into history the ordinary way, so they can still
-    /// be scrolled back to and searched (§7.1.6).
+    /// **The screen scrolls away and the row you are typing on stays**, executed
+    /// here — nothing is written to the PTY as input, the transcript and staging
+    /// are not deleted, and the rows above the cursor scroll out into history the
+    /// ordinary way, so they can still be scrolled back to and searched
+    /// (§7.1.6, §7.1.6l). The console host is asked to keep the same row, which
+    /// is what makes the prompt still be there afterwards.
     ClearScreen,
     /// **The whole of §3.1's ED3 deletion** — history, staging, blocks, indexes,
     /// caches, anchor degradation, tombstones — which is what makes it the one

@@ -2615,6 +2615,43 @@ impl DualPlaneSession {
         result
     }
 
+    /// `Clear screen` (§7.1.6): **the rows above the cursor scroll out into the transcript, the
+    /// row the cursor is on stays and becomes the top row, and everything below it is erased.**
+    ///
+    /// A screen operation rather than bytes fed to this session's own parser, and the difference
+    /// is not stylistic. ED2 clears the *whole* screen — including the row the shell is drawing
+    /// its prompt on — and nothing is going to draw that prompt again: the shell was never told,
+    /// and on Windows it could not act on it if it had been, because the console host owns the
+    /// buffer this window mirrors and sends only the difference against what it believes is shown.
+    /// Keeping the cursor's row is what every terminal's clear-screen row does, and it is the half
+    /// of the operation that this window performs; `PtySession::clear_host_buffer` is the other
+    /// half, and the two agree on where the kept row ends up (the top).
+    ///
+    /// Not expressible as an escape sequence, which is why it is not one: no sequence says "scroll
+    /// away exactly the rows above the cursor, through the ordinary output path, whatever scroll
+    /// region is set". `ESC [ M` says something close and is classified as a local delete that
+    /// never enters canonical history (§3.1); linefeeds at the bottom of the screen say it only
+    /// while no program has narrowed the scroll region.
+    pub fn clear_screen_keeping_cursor_row(&mut self) -> Result<(), SessionError> {
+        self.clear_screen_keeping_cursor_row_at(Instant::now())
+    }
+
+    /// [`Self::clear_screen_keeping_cursor_row`] with the clock supplied — `feed_at` to `feed`.
+    pub fn clear_screen_keeping_cursor_row_at(
+        &mut self,
+        observed_at: Instant,
+    ) -> Result<(), SessionError> {
+        self.screen_revision = self.screen_revision.wrapping_add(1);
+        self.cursor_logical_line_memory = None;
+        let events = self.terminal.clear_screen_keeping_cursor_row();
+        let damage = self.terminal.take_damage();
+        self.apply_events(events, observed_at)?;
+        self.observe_live_damage(damage, observed_at);
+        self.sync_staging_tail();
+        self.remember_visible_cursor_logical_line();
+        Ok(())
+    }
+
     fn selection_touches_mutable_source(&self) -> bool {
         self.view_selection().is_some_and(|selection| {
             !matches!(selection.start, ContentAnchor::History { .. })
@@ -18171,14 +18208,200 @@ mod tests {
         );
     }
 
+    /// PIN (clear-screen ruling 2026-09-05) — **ED2 is a repaint boundary, and never grows the
+    /// transcript.**
+    ///
+    /// It was tempting to make it one: the vendored grid's own scrollback is pinned to zero
+    /// (`SCROLLBACK_LINES`) because this session owns history, so `Grid::clear_viewport` rotates
+    /// the occupied rows into nothing, and it looks for all the world like a scroll whose report
+    /// went missing. It is not, and the reason is that `ESC[H` `ESC[2J` is **also** how a
+    /// full-screen program repaints. Claude Code and Codex clear and reprint their transcript on
+    /// every frame; a window that read each of those as "the screen scrolled away" would put a
+    /// copy of the same screen into history sixty times a second, and `feed_at`'s whole
+    /// repaint-preservation window (`contains_clear_home_snapshot_boundary`) exists because the
+    /// two are byte-for-byte the same request. Nothing in the bytes tells them apart, so ED2 is
+    /// read as the more common one.
+    ///
+    /// What the menu row promises instead is delivered by the menu row:
+    /// [`DualPlaneSession::clear_screen_keeping_cursor_row`] reports its own rows, because there
+    /// it is this window clearing the screen and not a program redrawing one.
+    ///
+    /// MUTATION: report ED2's rows to the transcript hook and this goes red on the fourth copy —
+    /// and `primary_resize_keeps_formula_rendered_through_the_post_quiescence_repaint` goes red
+    /// with it, on the frame where the preserved formula drops back to source.
+    #[test]
+    fn ed2_is_a_repaint_boundary_and_never_grows_the_transcript() {
+        let mut session = DualPlaneSession::new(nz(16), nz(4));
+        session.feed(b"one\r\ntwo\r\nthree").unwrap();
+        let before = session.scrollback_line_count();
+
+        for _ in 0..3 {
+            session.feed(b"\x1b[H\x1b[2Jone\r\ntwo\r\nthree").unwrap();
+        }
+
+        assert_eq!(
+            session.scrollback_line_count(),
+            before,
+            "three repaints of one screen are one screen, not four"
+        );
+        assert_eq!(
+            session
+                .terminal()
+                .visible_text()
+                .iter()
+                .filter(|row| !row.trim_end().is_empty())
+                .count(),
+            3,
+            "and the screen still holds exactly what was printed on it"
+        );
+    }
+
+    /// PIN (clear-screen ruling 2026-09-05) — **the three spellings a shell's own clear arrives
+    /// in, and the one difference between them.**
+    ///
+    /// `Clear-Host` under Windows PowerShell, `clear` under a PowerShell 7 (the same cmdlet under
+    /// another name), and `clear` under a bash reading its terminfo do not send the same bytes:
+    /// the home comes before the erase or after it, and they may add ED3. Only the ED3 is a
+    /// *deletion*, and this holds that line for all of them at once — because the difference
+    /// between "the screen was redrawn" and "the history is gone" is the whole of what a reader
+    /// loses, and a shell that spells its clear differently must not change it.
+    ///
+    /// Measured through a real ConPTY (`crates/bt-pty/tests/clear_screen.rs`): Windows
+    /// PowerShell's `Clear-Host` arrives as the third of these, so a `cls` at a prompt really is a
+    /// deletion the shell asked for.
+    ///
+    /// MUTATION: make ED2 fire `ClearHistory` as well and the first two arms go red on a
+    /// transcript emptied by a request that never asked for a deletion.
+    #[test]
+    fn only_the_ed3_in_a_shells_clear_deletes_anything() {
+        for sequence in [
+            b"\x1b[2J\x1b[H".as_slice(), // erase, then home
+            b"\x1b[H\x1b[2J",            // home, then erase
+        ] {
+            let mut session = DualPlaneSession::new(nz(16), nz(2));
+            session.feed(b"one\r\ntwo\r\nthree\r\nfour").unwrap();
+            let before = session.scrollback_line_count();
+            assert!(before > 0, "the fixture froze nothing to be at risk");
+            session.feed(sequence).unwrap();
+            assert_eq!(
+                session.scrollback_line_count(),
+                before,
+                "{sequence:?} redrew the screen and deleted nothing"
+            );
+        }
+
+        // The third spelling — what Windows PowerShell and a terminfo-driven `clear` both send —
+        // carries ED3 behind the erase, and ED3 is a deletion.
+        let mut session = DualPlaneSession::new(nz(16), nz(2));
+        session.feed(b"one\r\ntwo\r\nthree\r\nfour").unwrap();
+        assert!(session.scrollback_line_count() > 0);
+        session.feed(b"\x1b[H\x1b[2J\x1b[3J").unwrap();
+        assert_eq!(
+            session.scrollback_line_count(),
+            0,
+            "the ED3 that follows is what empties the transcript, and it is the only thing that does"
+        );
+    }
+
+    /// PIN (clear-screen ruling 2026-09-05) — **`Clear screen` keeps the row you are typing on.**
+    ///
+    /// The menu row's own verb, and the difference from ED2 is the whole of it: ED2 is what a
+    /// *shell* asks for and the shell draws its next prompt afterwards, while nobody is going to
+    /// draw a prompt for a menu — least of all on Windows, where the console host owns the buffer
+    /// this window mirrors and sends only the difference against what it believes is displayed. A
+    /// clear that took the prompt row with it left a pane with nothing on it and no way to get
+    /// anything back (measured through a real ConPTY in `crates/bt-pty/tests/clear_screen.rs`).
+    ///
+    /// MUTATION: point the menu row back at `feed(b"\x1b[2J\x1b[H")` and the kept row is gone —
+    /// the first assertion here is the user-visible defect, stated once.
+    #[test]
+    fn clear_screen_keeps_the_cursors_row_and_scrolls_everything_above_it_out() {
+        let mut session = DualPlaneSession::new(nz(16), nz(4));
+        session.feed(b"one\r\ntwo\r\nthree\r\nPS> ").unwrap();
+        let cursor = session.terminal().cursor();
+        assert_eq!(
+            (cursor.row, cursor.column),
+            (3, 4),
+            "the fixture's prompt is on the last row, four columns in"
+        );
+
+        session.clear_screen_keeping_cursor_row().unwrap();
+
+        let rows = session.terminal().visible_text();
+        assert_eq!(
+            rows[0].trim_end(),
+            "PS>",
+            "the row the cursor was on is still on the screen, and it is the top row now"
+        );
+        assert!(
+            rows[1..].iter().all(|row| row.trim_end().is_empty()),
+            "everything below it is gone: {rows:?}"
+        );
+        let cursor = session.terminal().cursor();
+        assert_eq!(
+            (cursor.row, cursor.column),
+            (0, 4),
+            "the cursor came with its row and kept its column — where the host also puts it"
+        );
+        assert_eq!(
+            session.scrollback_line_count(),
+            3,
+            "the three rows above it scrolled out; they are still there to be found"
+        );
+    }
+
+    /// PIN (clear-screen ruling 2026-09-05) — **after a clear, `Clear scrollback` has something to
+    /// delete, and the ticks go with it.**
+    ///
+    /// The second half of the same report: `Clear scrollback…` appeared to do nothing at all. It
+    /// did exactly what it was asked — an ED3 over a transcript that was empty, because the clear
+    /// before it had destroyed the rows instead of scrolling them out, and over a ledger whose
+    /// marks were still anchored `Live` in a grid that no longer held them. Both halves are the
+    /// one defect above; this pins the consequence so it cannot come back on its own.
+    ///
+    /// MUTATION: drop the `ScrollOut` report from ED2 and the middle assertion goes red first —
+    /// there is nothing in the transcript for ED3 to take, and the ticks outlive their rows.
+    #[test]
+    fn clearing_the_scrollback_after_a_screen_clear_takes_the_ticks_with_it() {
+        let mut session = DualPlaneSession::new(nz(16), nz(8));
+        session
+            .feed(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07echo hi\x1b]133;C\x07\r\nhi\r\n\x1b]133;D;0\x07",
+            )
+            .unwrap();
+        assert_eq!(
+            session.scrollback_line_count(),
+            0,
+            "nothing has scrolled off an eight-row screen"
+        );
+        assert!(
+            !session.command_marks().is_empty(),
+            "the fixture recorded no command mark"
+        );
+
+        session.clear_screen_keeping_cursor_row().unwrap();
+        assert!(
+            session.scrollback_line_count() > 0,
+            "the cleared rows are in the transcript, so there is something to lose"
+        );
+
+        session.feed(b"\x1b[3J").unwrap();
+        assert_eq!(session.scrollback_line_count(), 0);
+        assert!(
+            session.command_marks().is_empty(),
+            "a tick anchored in a row ED3 deleted goes through the ledger with it"
+        );
+    }
+
     /// PIN (ticket #62) — **`Clear scrollback` empties the transcript and takes the command marks
     /// with it, and `Clear screen` does neither.**
     ///
     /// The two rows of §7.1.6 that a reader is most likely to confuse, asserted against each other
     /// in one test because the whole of what the design says about them is a *difference*: ED2
-    /// scrolls the viewport's rows out into history (so the count goes **up**), while ED3 runs the
-    /// §3.1 deletion pipeline over history and staging alike (so the count goes to zero, and the
-    /// marks go through the ledger with the lines they were anchored to).
+    /// leaves the transcript exactly as it found it (it is also how a program repaints — see
+    /// `ed2_is_a_repaint_boundary_and_never_grows_the_transcript`), while ED3 runs the §3.1
+    /// deletion pipeline over history and staging alike (so the count goes to zero, and the marks
+    /// go through the ledger with the lines they were anchored to).
     ///
     /// Red gate: send ED2 for the scrollback row and the transcript survives; delete the lines
     /// without going through `delete_history` and the marks outlive their own output.
@@ -18200,11 +18423,13 @@ mod tests {
             "the fixture recorded no command mark"
         );
 
-        // ED2 and the cursor home — the terminal's own `Clear screen`.
+        // ED2 and the cursor home — what a shell's own `cls` sends, and what a program repainting
+        // its screen sends. It is not a deletion either way.
         session.feed(b"\x1b[2J\x1b[H").unwrap();
-        assert!(
-            session.scrollback_line_count() >= before,
-            "clearing the screen scrolls its rows out; it never deletes any"
+        assert_eq!(
+            session.scrollback_line_count(),
+            before,
+            "clearing the screen deletes nothing from the transcript"
         );
         assert!(
             !session.command_marks().is_empty(),

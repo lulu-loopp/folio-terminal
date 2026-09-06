@@ -81,6 +81,32 @@ pub struct ConPtySlavePty {
     inner: Arc<Mutex<Inner>>,
 }
 
+/// Clear the console host's buffer behind `master`, or report `false` when there is no host to
+/// tell — a master that is not a ConPTY, or a ConPTY implementation without the call.
+///
+/// A free function rather than a `MasterPty` method: the trait describes what every platform's
+/// pty can do, and no other platform has a host-side buffer to clear. The downcast lives here
+/// because `MasterPty`'s `Downcast` bound is this crate's, and a caller outside it would have to
+/// take a dependency on `downcast-rs` to spell the same three lines.
+pub fn clear_host_buffer(master: &dyn MasterPty, keep_cursor_row: bool) -> anyhow::Result<bool> {
+    match master.downcast_ref::<ConPtyMasterPty>() {
+        Some(conpty) => conpty.clear(keep_cursor_row),
+        None => Ok(false),
+    }
+}
+
+impl ConPtyMasterPty {
+    /// Ask the console host to clear its own buffer, keeping the cursor's row when asked to.
+    ///
+    /// An inherent method rather than a `MasterPty` addition: every other platform's pty has no
+    /// buffer of its own to clear, so a trait method would be a question only one implementation
+    /// can answer. `Ok(false)` says the selected ConPTY exports no clear call.
+    pub fn clear(&self, keep_cursor_row: bool) -> anyhow::Result<bool> {
+        let inner = self.inner.lock().unwrap();
+        inner.con.clear(keep_cursor_row)
+    }
+}
+
 impl MasterPty for ConPtyMasterPty {
     fn resize(&self, size: PtySize) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().unwrap();

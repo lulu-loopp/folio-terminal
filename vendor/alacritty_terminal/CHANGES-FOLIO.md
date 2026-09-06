@@ -98,6 +98,18 @@ file produces the vendored file byte for byte. Upstream formats with its own
 - **Private mode 2031.** The dark/light theme-change notification subscription
   that kitty, foot, contour and WezTerm all speak is accepted and reported
   rather than falling into the unknown-mode branch.
+- **A clear-screen that keeps the cursor's row.**
+  `Term::clear_screen_keeping_cursor_row` is the terminal-side verb behind
+  Folio's own `Clear screen` menu row: the rows above the cursor scroll away
+  through the same `TranscriptEvent::ScrollOut` report an ordinary output
+  scroll uses, the row the cursor is on becomes the top row, and everything
+  below it is erased. It exists because no escape sequence says that — ED2
+  takes the whole screen including the prompt, and `ESC [ M` is a local
+  delete that never enters canonical history — and because on Windows the
+  console host is asked for exactly this through ConPTY's `keepCursorRow`.
+  ED2 itself is deliberately unchanged: a full-screen program repainting
+  spells its repaint the same way, and reading that as a scroll would put a
+  copy of the screen into history on every frame.
 - **Input-write tracking.** `take_input_writes` drains the set of rows that
   received printable input since the last drain — distinct from render damage,
   which is about what must be repainted.

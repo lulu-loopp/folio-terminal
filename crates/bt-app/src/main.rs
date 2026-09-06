@@ -64917,28 +64917,59 @@ impl Runtime<'_> {
         self.repaint_pane_change(seat)
     }
 
-    /// `Clear screen` — **ED2 and the cursor home, executed by the terminal**
-    /// (§7.1.6).
+    /// `Clear screen` — **the screen scrolls away and the row you are typing on
+    /// stays**, performed by the terminal on both sides of the pty (§7.1.6,
+    /// clear-screen ruling 2026-09-05).
     ///
-    /// Nothing is written to the PTY, which is the whole of the ruling's first
-    /// half: `cls` typed at a prompt is a *command*, and a menu row that typed
-    /// one for you would land in the middle of whatever half-finished line was
-    /// already there, would be refused outright by a program that is not a shell,
-    /// and would enter that shell's history. Feeding the escape into this
-    /// session's own parser is the terminal doing what the escape says, on the
-    /// screen the escape is about.
+    /// Nothing is written to the PTY as *input*, which is the whole of the
+    /// ruling's first half: `cls` typed at a prompt is a *command*, and a menu
+    /// row that typed one for you would land in the middle of whatever
+    /// half-finished line was already there, would be refused outright by a
+    /// program that is not a shell, and would enter that shell's history.
     ///
-    /// The rows that leave the viewport **scroll out into history the ordinary
-    /// way** — `clear_viewport` pushes the occupied lines up rather than erasing
-    /// them — so everything cleared is still there to be scrolled back to and
-    /// still there to be searched. That is exactly what the row below it is not.
+    /// **Why the cursor's row is kept, and why the host is told.** The first
+    /// draft of this row fed `ESC [ 2 J` `ESC [ H` into this session's own parser
+    /// and stopped there. Measured on a real ConPTY (`crates/bt-pty`'s
+    /// `clear_screen_keeps_the_prompt_and_the_host_agrees`), that leaves a pane
+    /// with no prompt on it and no way to get one: the child's screen lives in
+    /// the console host's buffer, ConPTY sends this window only the difference
+    /// against what *it* believes is displayed, and a clear it never heard about
+    /// gives it no reason to redraw anything. The recorded evidence is that the
+    /// child says nothing at all afterwards, and that the next keystroke arrives
+    /// as an absolute `CUP` to the row and column the prompt used to end at — a
+    /// lone character floating on a blank pane, which is precisely the defect
+    /// this rewrite answers.
+    ///
+    /// So: this window keeps the cursor's row and moves it to the top
+    /// (`DualPlaneSession::clear_screen_keeping_cursor_row`), and the host is
+    /// asked to do the same to its own buffer
+    /// (`PtySession::clear_host_buffer`, `keepCursorRow`). The two then agree —
+    /// measured: after the signal the host addresses the kept row as row 1 — so
+    /// the prompt is on the screen the moment the menu closes and stays where
+    /// both sides think it is.
+    ///
+    /// The rows above it **scroll out into history the ordinary way**, so
+    /// everything cleared is still there to be scrolled back to and still there
+    /// to be searched. That is exactly what the row below it is not.
     fn clear_pane_screen(&mut self, seat: SeatId) -> Result<()> {
         let Some(leaf) = self.sessions.get_mut(&seat) else {
             return Ok(());
         };
+        let alternate = leaf.session.terminal_modes().alternate_screen;
         leaf.session
-            .feed(b"\x1b[2J\x1b[H")
+            .clear_screen_keeping_cursor_row()
             .context("clear one pane's screen locally")?;
+        // **Not on the alternate screen**: that buffer belongs to the program
+        // drawing it, which repaints it itself and has no prompt row to keep.
+        if !alternate
+            && let Some(pty) = leaf.pty.as_ref()
+            && let Err(error) = pty.clear_host_buffer(true)
+        {
+            // The host refusing is not a reason to leave the window uncleared:
+            // this window's own screen is already right, and the only thing lost
+            // is the host's agreement about the rows above. Say so and go on.
+            eprintln!("BT_CLEAR host buffer not cleared: {error}");
+        }
         // The live selection goes with the screen it was drawn on (§7.1.6). Not
         // because the anchors would dangle — they name rows that are now in
         // history — but because a highlight left standing over cleared cells is

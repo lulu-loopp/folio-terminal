@@ -720,6 +720,75 @@ impl<T> Term<T> {
         }
     }
 
+    /// **MODIFIED BY THE FOLIO CONTRIBUTORS — `Clear screen` as a verb the terminal performs,
+    /// keeping the row the cursor is on.**
+    ///
+    /// ED2 scrolls the *whole* occupied screen away, which is right when the child asked for it
+    /// (`cls` is a command the shell runs, and the shell draws its next prompt afterwards) and
+    /// wrong when the reader asked a menu for it: nobody is going to draw that prompt again, and
+    /// on Windows nobody can — the console host holds the buffer this window is a mirror of, and
+    /// it has no reason to repaint a prompt it believes is still on the screen. What every
+    /// terminal's own clear-screen row does instead, and what `ConptyClearPseudoConsole`'s
+    /// `keepCursorRow` names on the host's side of the same operation, is this: the rows above the
+    /// cursor scroll away, the row the cursor is on stays and becomes the top row, everything
+    /// below it is erased.
+    ///
+    /// The rows that scroll away are reported to the transcript hook exactly as ED2's are and as
+    /// an ordinary output scroll's are — same cause, same scope — because it is the same movement.
+    ///
+    /// **The whole screen, not the scroll region.** A clear-screen is about the screen; ED2 is
+    /// about the screen; a region a program set for its own scrolling does not narrow either of
+    /// them.
+    pub fn clear_screen_keeping_cursor_row(&mut self)
+    where
+        T: EventListener,
+    {
+        if self.mode.contains(TermMode::ALT_SCREEN) {
+            // The alternate screen is the program's own canvas and has no transcript behind it
+            // (§3.2's separate namespace); there is no prompt row there to keep.
+            self.clear_screen(ansi::ClearMode::All);
+            return;
+        }
+
+        let screen_lines = self.screen_lines();
+        let kept = self.grid.cursor.point.line.0.max(0) as usize;
+        if kept > 0 {
+            let columns = self.columns();
+            if let Some(hook) = &self.transcript_hook {
+                let rows = (0..kept)
+                    .map(|line| RemovedRow {
+                        live_row: line,
+                        cells: (0..columns)
+                            .map(|column| self.grid[Line(line as i32)][Column(column)].clone())
+                            .collect(),
+                    })
+                    .collect();
+                hook(TranscriptEvent::ScrollOut {
+                    cause: ScrollOutCause::Normal {
+                        screen: TranscriptScreen::Primary,
+                        scope: ScrollRegionScope::FullScreen,
+                    },
+                    rows,
+                });
+            }
+            self.grid
+                .scroll_up(&(Line(0)..Line(screen_lines as i32)), kept);
+            self.grid.cursor.point.line -= kept;
+        }
+
+        if screen_lines > 1 {
+            self.grid.reset_region(Line(1)..);
+        }
+
+        self.vi_mode_cursor.point.line = self
+            .vi_mode_cursor
+            .point
+            .line
+            .grid_clamp(self, Boundary::Grid);
+        self.selection = None;
+        self.mark_fully_damaged();
+    }
+
     pub fn new<D: Dimensions>(config: Config, dimensions: &D, event_proxy: T) -> Term<T> {
         let num_cols = dimensions.columns();
         let num_lines = dimensions.screen_lines();

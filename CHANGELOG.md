@@ -85,6 +85,15 @@ and the first release that carries a signature.
 
 ### Fixed
 
+- **`Clear screen` leaves the prompt where you can see it.** The row you are
+  typing on now stays and moves to the top, and the rows above it go into the
+  scrollback, where they can still be found and searched. Before this, the whole
+  screen went — including the prompt, which nothing was ever going to draw
+  again, so the pane stayed blank and the next characters typed appeared on
+  their own where the prompt used to end. The rows it cleared were being thrown
+  away rather than kept, which is also why `Clear scrollback…` on the same pane
+  appeared to do nothing at all and why the marks beside it went on pointing at
+  lines that were no longer anywhere.
 - **The summon key no longer types itself.** ``Win+` `` used to leave a
   `` ` `` sitting at the prompt of the terminal it had just called up, because
   the window reports every key that is physically down at the moment it takes
