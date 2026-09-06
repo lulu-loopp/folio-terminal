@@ -3653,6 +3653,28 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
   - 红测 `a_page_carried_into_a_float_is_what_typing_goes_into`(源读,理由与 `a_refused_address_is_a_field_that_can_still_be_left` 同款:一张页持有键盘是浏览器 + 合成器 + Win32 焦点,本进程立不起来)。**这一片的 `fn_body` 每个 needle 都用 `concat!` 拆成两截**,因为这个测试模块在被读的那些方法**下面**,一整条字面量会先命中测试自己那行调用——测试就会对着自己断言。
 - **挂账。** ⓐ **`Ctrl+L` 在浮窗里的页上被 claim 了却没有门**:地址编辑框画在 pane 头上,浮窗的头目前只是把 URL 印出来、不可编辑,所以 `open_web_address` 对浮窗页返回 `Ok(())`。给浮窗头一条地址编辑路是自己一片,本单不夹带。ⓑ §7.14b 的 ⓐ / ⓓ / ⓔ 原样挂着。
 
+#### 7.14d 一张页的地板只在它自己在玻璃上的时候站着(用户实机报 next35,2026-09-05,已落地;`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/webhost.rs`)
+
+**用户截图:预览窗格里的 `paper.pdf` 只画在左侧一条竖带里,右边整片是窗格底色。** 单子当时的假设是矩形过期——`WebSeat::place` 收 `bounds: Option<WebBounds>`,传 `None` 时不更新 `wanted_bounds`。**这条假设当场被证伪,而且是结构性地不成立**:`sync_web_page` 里 `rect` 与 `presence` 是同一个 `body` 算出来的两个答案,所以 `bounds` 为 `None` 与 `presence` 为 `Hidden` 是同一件事——**一张在玻璃上的页,它的 `wanted_bounds` 永远是本帧的矩形**。实机复核(release,隔离 profile,加了本片新立的 `bounds` 取证站)把它钉死:拆分、files 列开关、Git 页、zoom pane、Cards、换 tab、模态下改窗、跨屏改 DPI、单跳改窗、拖分隔条、最小化还原——十几条路,窗口要的矩形与引擎被告知的矩形**一次都没有分开过**,连「模态盖着时改两次矩形再撤掉模态」这条也照样对。
+
+**真因是地板,不是矩形。** 一张页的地板是**窗口底色的一个纹素被拉伸到这张页的矩形上**,而且是不透明的(§7.14a 立它就是为了不让洞底下露出桌面)。每一张页的地板都用 `VisualLayer::Bottom` 加在窗口子列表的**开头**,它自己的页再紧贴着插在它上面——于是一扇装着两张页的窗子,栈自下而上是 `[ground₂, web₂, ground₁, web₁, gpu]`:**先开的那张页的地板,压在后开的每一张页的上面**。§7.14a 的钉子 `the_compositor_adds_the_web_visual_directly_above_its_own_ground` 的注记当年就把这句话写出来了(「两页各自要开头就会与对方的地板交错」),只是当时把它当成了那条钉子挡住的东西,而它挡住的只是**一对之内**的次序。
+
+两张页都在玻璃上时这不要紧:两块 pane 不重叠。**一张页离开玻璃的那一刻它就要命**——`stand_on_the_floor` 的 `Hidden` 臂**什么也不做**,理由写着「藏起来的页没有矩形可以站东西」;可它上一次被显示时摆下去的那块地板还在原地站着,不透明,压在现在这张页上面。于是读者看到的是:两块矩形嵌套就整片空白,两块矩形部分重叠就是**一条竖带**。
+
+**实机取证(release,隔离 `APPDATA`/`LOCALAPPDATA`/WebView2 profile,副屏,两张 tab 各开同一份 `.pdf`)。** ① 后开的那张页在前台、矩形 `x 2428..3400`,先开的那张已换到后台、地板停在它最后一次显示时的 `x 2680..3400`:截图里 972 物理像素宽的 pane 只在左边 252 像素里画着 PDF,右边全是底色——**与用户那张截图逐条同形**。② 把先开那张的 pane 拖宽到覆盖后开那张的整块矩形,后开那张**从头到尾一个像素都不画**,换 tab、改窗、等三十秒都不回来——因为它从来就不是「还没画完」,是被盖住了。
+
+**修法是一句话:地板站着的时间,正好是它那张页在玻璃上的时间。** 这与洞早就在守的是同一句话(`hole_for` 只对 `Shown` 且 `floored` 给洞)。
+
+- `Compositor::hide_web_visual(page)` 是 `place_web_visual` 的对门:把**这一对的两半**(地板的 holder 与页自己的 visual)裁到空矩形。**裁而不是从树里摘**——一张页下一次换 tab 就回来,而重新插入会把它对其他每一张页的次序重排,那正是 `attach_web_visual` 当初写成「按名字插在自己地板上面」要杜绝的事。**它不铸任何东西**:一张从没被摆过的页没有地板可撤,在这里铸一块就是给一张不显示的页造 visual。
+- `WebSeat::placed` 从「上次给合成器的**矩形**」改成「上次告诉合成器的**在场**」(`Option<WebPresence>`),与 `presence`(告诉引擎的那一份)同形同理。旧类型说得出「站在这块矩形上」和「从没摆过」,**说不出「不在玻璃上」**——那正是这个缺陷的形状。判据收成纯函数 `placement_owed(wanted, told)`,与 `rasterization_owed` 同款:变了才说,说成了才记,两条臂都要说。
+- `stand_on_the_floor` 因此两条臂都走一次合成器,返回值仍旧是「地板站住了没有」,`hole_for` 一个字未动。
+
+**红门。** `placement_owed` 四扇(bt-app 纯值):`a_page_that_has_left_the_glass_owes_the_compositor_its_absence`(变异:让 `Hidden` 恒答 `None`,就是出事的那个 build,当场红)、`a_page_that_has_come_back_is_owed_its_rectangle_again`(裁空之后必须能被裁回来,否则解药比病更糟)、`a_placement_that_has_not_moved_is_never_made_twice`(**两条臂都要有缓存**:后台 tab 的页不许每秒重裁六十次)、`a_pair_that_moved_is_owed_where_it_moved_to`。bt-platform 一扇源钉 `a_pages_floor_comes_off_the_glass_with_the_page`(理由同本模块所有源钉:DirectComposition 事后问不出树里有什么):门在、**两半都裁**、且**不铸地板**;删掉任一半 `place_clip` 当场红。
+
+**取证站补一枚,`BT_WEB_TRACE` 第六站。** `bounds tab=<n> seat=<n> x= y= w= h= was=<rect|none> shown=<0|1>` —— **引擎被告知的矩形**,写在 `apply_presence` 真的调用 `set_bounds` 的那一句上,按变化写行。第五站 `place` 说的是窗口**想**把这块 pane 放在哪,这一站说的是那张页**被告知**自己有多大;这次的单子从头到尾问的就是这两个会不会分开,而在此之前没有任何仪器能分开它们。它一条行为都不改。
+
+**挂账。** ⓐ **两张都在玻璃上的页,矩形在一次 FLIP 中途交叠**,仍然是上面那张的地板盖住下面那张的页,大约两百毫秒。本片不替它立次序:两张活着的页谁该压谁,没有一个诚实的答案可以由合成器单方面给出,而它们在静止时永远不重叠(两块 pane 不重叠)。ⓑ §7.14b 的 ⓐ / ⓓ / ⓔ 与 §7.14c 的 ⓐ 原样挂着。
+
 同 v3 表格，关键修订：**alacritty_terminal 稳态配置 scrollback=0**。vendor seam 包含既有上滚事件钩子，以及窄事务操作：打开 primary native history、查询行数、在 coalesced final viewport 上用 vendor row/WRAPLINE/cursor 重新评估高度、一次性 `take_history(oldest→newest)`、清空并恢复 limit=0，以及只针对唯一未闭合 staging candidate 的 `restore_history(oldest→newest)`；没有可独立呈现的 transcript snapshot/backing 镜像，也不复制 reflow 算法。事务期 vendor grid 是 mutable tail 唯一权威；收割后转录层拥有 staging ID/配额/定稿权，vendor 只保留该候选的原生 row escrow 供下一事务无损交还。升级必须 diff `grid/resize.rs`/history 语义，跑 vendor 181 项与完整生命周期矩阵。
 
 ### 7.17 七件交互裁决，一批落地（2026-08-25 用户裁决 B1/B4/B5/B7/B9/B10 + Cards 改名；`crates/bt-app/src/{main,seats,profiles,restore,shortcuts,i18n,webhost}.rs`、`crates/bt-layout/src/tree.rs`）

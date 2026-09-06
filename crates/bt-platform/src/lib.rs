@@ -941,6 +941,76 @@ mod visual_layer_tests {
         );
     }
 
+    /// **A floor stands only while its page is on the glass** (§7.14d; user
+    /// report 2026-09-05).
+    ///
+    /// The stacking this module pins above is per *pair*: a page is inserted
+    /// directly above the floor minted for it, and every floor asks for the
+    /// beginning of the child list. Two pages therefore stack
+    /// `[ground₂, web₂, ground₁, web₁, gpu]` — which is the interleaving
+    /// [`the_compositor_adds_the_web_visual_directly_above_its_own_ground`]
+    /// names in so many words, seen from the other side: **the floor of the page
+    /// opened first is above every page opened after it.** Harmless while both
+    /// are on the glass, because two panes do not overlap; ruinous the moment
+    /// one goes off it, because the floor was placed by the last frame that
+    /// showed that page and nothing took it down.
+    ///
+    /// Photographed on the machine (release, isolated profile, two tabs each
+    /// holding the same `.pdf`): the page in front stood at `x 2428..3400` and
+    /// the page behind had left its floor at `x 2680..3400`, and the reader saw
+    /// the document in a 252 px band down the left of a 972 px pane with the
+    /// window's ground colour over the rest.
+    ///
+    /// A source pin, for this module's standing reason: DirectComposition cannot
+    /// be asked what is in a tree. What a machine can hold is that the door
+    /// exists, that it crops **both** halves of the pair, and that it mints
+    /// nothing — a floor built here would be a visual made for a page that is
+    /// not being shown.
+    ///
+    /// Red gate: delete either `place_clip` call from `hide_web_visual` and the
+    /// half that is left standing is the shipped defect — the floor's half is
+    /// the band that was photographed, the page's half is a page drawn where
+    /// Folio has stopped cutting a hole for it. Give the body an
+    /// `ensure_page_ground` and the last assertion goes red.
+    #[test]
+    fn a_pages_floor_comes_off_the_glass_with_the_page() {
+        let source: String = include_str!("lib.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let door = source
+            .find(concat!("pubfnhide_web", "_visual(&self,page:PageVisual)"))
+            .expect("the door that takes a page's pair off the glass");
+        let next_door = source[door..]
+            .find(concat!("fnplace_", "clip("))
+            .expect("the helper that follows it");
+        let body = &source[door..door + next_door];
+        for owed in [
+            concat!("self.place_clip(&ground.holder,NO_CLIP", "_AT_ALL,"),
+            concat!("self.place_clip(web,NO_CLIP", "_AT_ALL,"),
+        ] {
+            assert!(
+                body.contains(owed),
+                "both halves of the pair come off the glass together, and this \
+                 half is missing: {owed}"
+            );
+        }
+        assert!(
+            !body.contains(concat!("ensure_page", "_ground")),
+            "taking a page off the glass must not build it a floor: {body}"
+        );
+        assert_eq!(
+            source
+                .matches(concat!(
+                    "constNO_CLIP",
+                    "_AT_ALL:(f32,f32,f32,f32)=(0.0,0.0,0.0,0.0);"
+                ))
+                .count(),
+            1,
+            "the crop that shows nothing is spelled once, as an empty rectangle"
+        );
+    }
+
     /// **A page's floor is minted by the pane's clock, not the browser's**
     /// (§7.14 amended; user ruling 2026-08-25).
     ///
@@ -2042,6 +2112,11 @@ mod windows_impl {
     /// Until somebody does, "the theme is the application's" is what makes one handle here correct
     /// rather than a simplification, and this static stays where it is.
     static WINDOW_CLASS_BACKGROUND: OnceLock<Mutex<Option<isize>>> = OnceLock::new();
+    /// The crop a visual that is **not on the glass** wears — see
+    /// [`Compositor::hide_web_visual`]. An empty rectangle rather than an
+    /// offscreen one, so that nothing about where the page last stood survives
+    /// in the tree.
+    const NO_CLIP_AT_ALL: (f32, f32, f32, f32) = (0.0, 0.0, 0.0, 0.0);
     const CF_UNICODETEXT: u32 = 13;
     const CLIPBOARD_OPEN_RETRY_DELAYS: [std::time::Duration; 4] = [
         std::time::Duration::from_millis(5),
@@ -3007,6 +3082,54 @@ mod windows_impl {
                 compositor_failure("IDCompositionVisual::SetOffsetY(web)", &error)
             })?;
             self.place_clip(web, clip, "web")
+        }
+
+        /// **Take this page's pair off the glass** — the symmetric door to
+        /// [`Self::place_web_visual`], and the whole of what a page that is not
+        /// on the glass leaves behind: nothing.
+        ///
+        /// # The defect this exists for (user report 2026-09-05, `next35`)
+        ///
+        /// A floor is one texel of the window's own ground **stretched over the
+        /// page's rectangle** and it is opaque. Every page's floor is added at
+        /// [`VisualLayer::Bottom`] — the beginning of the window's child list —
+        /// and its own page is inserted directly above it, so a window holding
+        /// two pages stacks them `[ground₂, web₂, ground₁, web₁, gpu]`: **the
+        /// floor of the page opened first stands above every page opened after
+        /// it.** While both pages are on the glass that costs nothing, because
+        /// two panes do not overlap. It costs everything the moment one of them
+        /// goes off the glass — another tab in front, a modal, focus mode —
+        /// because that page's floor was placed by the *last* frame
+        /// that showed it and there was no call that took it down again. Left
+        /// standing at that rectangle it is a slab of `--termbg` over whatever
+        /// page is now underneath.
+        ///
+        /// Photographed on the machine (release, isolated profile, two tabs,
+        /// one `.pdf` in each): the tab in front had its page at `x 2428..3400`
+        /// and the tab behind had left its floor at `x 2680..3400`; the reader
+        /// saw the PDF in a 252 px band down the left of a 972 px pane and the
+        /// window's ground colour over the rest — and with the two rectangles
+        /// nested the other way, a pane that was blank from edge to edge.
+        ///
+        /// **So a floor stands exactly while its page is on the glass**, which
+        /// is the same sentence the hole already obeys (`bt_app::hole_for`).
+        /// Both halves of the pair are cropped to nothing rather than removed
+        /// from the tree: a page comes back onto the glass on the next tab
+        /// switch, and re-inserting a visual would re-order it against every
+        /// other page in the window — the one thing `attach_web_visual` was
+        /// written to make impossible.
+        ///
+        /// **It mints nothing.** A page nothing has ever placed has no floor to
+        /// take down, and creating one here would be this type building a visual
+        /// for a page that is not being shown.
+        pub fn hide_web_visual(&self, page: PageVisual) -> Result<(), String> {
+            if let Some(ground) = self.web_ground.borrow().get(&page) {
+                self.place_clip(&ground.holder, NO_CLIP_AT_ALL, "web ground")?;
+            }
+            if let Some(web) = self.web.borrow().get(&page) {
+                self.place_clip(web, NO_CLIP_AT_ALL, "web")?;
+            }
+            Ok(())
         }
 
         /// Crop one visual to `clip`, in that visual's own coordinates.

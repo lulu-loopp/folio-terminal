@@ -50,6 +50,23 @@
 //!   could not see was that the hole was punched under the very window it
 //!   belonged to.
 //!
+//! # The sixth station is the other end of that rectangle (§7.14d, 2026-09-05)
+//!
+//! * `bounds tab=<n> seat=<n> x=<n> y=<n> w=<n> h=<n> was=<rect|none>
+//!   shown=<0|1>` — **the rectangle the engine was given**, written where
+//!   [`crate::webhost::WebSeat`] actually calls `set_bounds` and gated on that
+//!   method's own cache, so a page that has not moved is silent here too.
+//!
+//!   The fifth station says where the window put the *pane*; this one says what
+//!   the *page inside it* was told it had, and nothing before it could tell those
+//!   two apart. What it was built for was a pane drawn in a narrow band with the
+//!   window's own colour beside it, and the first question that report asked was
+//!   whether the engine had been left holding an old rectangle. It had not: over
+//!   a dozen paths — splits, the files column, Cards, a zoomed pane, a tab
+//!   switch, a resize under a modal, a display change, a divider drag — the two
+//!   lines never once disagreed, and that is what moved the hunt off the
+//!   rectangle and onto the floor under the page.
+//!
 //! **Written on a change and never otherwise**, which is
 //! [`crate::attention_trace`]'s rule for its reason exactly: a page standing
 //! still is sixty identical frames a second, and a file that wrote all of them

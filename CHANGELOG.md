@@ -37,6 +37,16 @@ here changes a setting, a file on disk or a key: a `settings.json` and a
 
 ### Fixed
 
+- **A page keeps the whole pane it is in, whatever else the window has open.**
+  With more than one page open in a window — a `.pdf` in one tab and a page in
+  another, say — the one you were looking at could come up drawn in a narrow
+  strip down the left of its pane, with the rest of the pane in the window's own
+  colour, or blank from edge to edge. Under every hosted page there is a plate of
+  the window's colour that keeps the desktop from showing through while the page
+  is still arriving, and a page that went out of view left its plate lying where
+  it last stood, over the top of any page opened after it. A plate is now down
+  only while the page it belongs to is on screen.
+
 - **A hover card over a PDF from LaTeX now says how many pages it has, and its
   pages turn.** A document written by `pdflatex` — most of them — packs its
   catalogue, its page tree and every page object into compressed streams, and

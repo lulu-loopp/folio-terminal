@@ -51,6 +51,16 @@ Fixes and polish for 0.2.0-preview, and the one thing 0.2.0 said was coming:
 - The printed string is still asked about first, so a file that really carries
   one still wins; where no such file exists, the name without it does.
 
+## A page keeps the whole pane it is in
+
+- With more than one page open in a window — a PDF in one tab and a web page in
+  another, say — the one you were looking at could come up drawn in a narrow
+  strip down the left of its pane, or blank from edge to edge, and stay that
+  way. Under every hosted page there is a plate of the window's colour that
+  keeps the desktop from showing through while the page is still arriving, and
+  a page that went out of view left its plate lying over any page opened after
+  it. A plate is now down only while its own page is on screen.
+
 ## A PDF from LaTeX has a page count, and its pages turn
 
 - A document written by `pdflatex` packs its page tree into compressed streams,
@@ -135,6 +145,10 @@ The full list is in `CHANGELOG.md` in the repository.
 
 - 以 `see docs/notes.md.` 结尾的一行此前打开的是 `notes.md.`——磁盘上没有这个名字，预览也无从处理。现在名字末尾的 ASCII 句点、逗号、分号、冒号与引号被读作句子的标点。
 - 打印出来的字符串仍然先问一遍磁盘，因此真带这个字符的文件依旧胜出；只有在没有这样的文件时，去掉标点的名字才作数。
+
+## 页面占满它所在的整个窗格
+
+- 一扇窗里开着不止一个页面时——比如一个标签里是 PDF、另一个里是网页——你正在看的那个可能只画在窗格左侧一条窄带里，或者整片空白，而且一直不恢复。每个页面下面都垫着一块窗口底色的板子，用来在页面加载时挡住桌面；一个已经切走的页面把它的板子留在了原地，压在后来打开的页面上面。现在板子只在它自己的页面显示时才铺着。
 
 ## LaTeX 生成的 PDF 有页数了，也能翻页
 
