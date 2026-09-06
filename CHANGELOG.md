@@ -81,6 +81,21 @@ All notable changes to Folio are recorded here. The format follows
   cannot be reached or downloaded shows its card over its own pane rather than
   over the first page in the tab.
 
+- **A page dropped on a pane opens on that pane, and the preview beside it keeps
+  what it was showing.** Dragging an `.html` or a `.pdf` out of the file column
+  onto a pane of its own split the layout where you aimed, then opened the page
+  somewhere else: in the first preview pane of the tab, replacing the document
+  you were reading there, while the pane the drop had just made stood on its
+  empty placeholder. Two symptoms, one cause — where a page opens was decided
+  twice, and the second answer overrode the pane you had aimed at. A page now
+  opens where you put it, exactly as a picture or a text file already did, and
+  the rule that picks a pane for you is asked only when nothing else has. This
+  also covers dropping a page onto the middle of a locked preview pane, a page
+  carried out of a hover card into its own window, and renaming a file into a
+  page's name (`notes.md` → `notes.html`) on a pane that is locked. A page that
+  turns out not to be on the disk shows the reason on the pane it was aimed at,
+  too.
+
 - **A formula on the screen of a program that repaints itself now gets
   typeset.** A full-screen redraw writes every row, so every row arrives as a
   change even when not one byte of it moved, and a display block (`$$ ... $$`)

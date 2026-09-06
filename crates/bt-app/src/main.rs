@@ -44777,9 +44777,17 @@ impl Runtime<'_> {
         // window has no reader for, which is exactly the contradiction this
         // ruling exists to end. The reverse cannot happen: a page has no file
         // path, so this door refuses it above.
+        //
+        // **On this surface, and this is §7.14f's rule rather than a second
+        // one.** The pane whose head you just typed a name into is the pane the
+        // renamed file is on; a door that already knows which one that is has no
+        // business asking where a *newly opened* file would go. While the page
+        // lane picked its own pane, renaming a locked pane's `notes.md` to
+        // `notes.html` opened the page somewhere else and left that pane
+        // pointing at a name the disk no longer has.
         if let Some(path) = source_opens_as_a_page(&preview::PreviewSource::file(&new)) {
             self.mark_session_dirty(Instant::now());
-            return self.open_preview_web_file(path);
+            return self.open_preview_web_file_on(surface, path);
         }
         // **The session holds the path, so the session has moved too.** A window
         // killed after a rename and restored from a file still naming the old
@@ -48735,34 +48743,78 @@ impl Runtime<'_> {
         }
     }
 
-    /// **The controlled file entry** (Web 预览块 W2 片⑤; `plan.md` section 3
-    /// 「受控 file 入口」) — a local page, on this tab's web seat.
+    /// **The controlled file entry, for a caller that has no pane in mind** (Web
+    /// 预览块 W2 片⑤; `plan.md` section 3「受控 file 入口」) — a local page,
+    /// wherever a newly opened file goes.
     ///
-    /// Four steps and the order is the whole rule:
+    /// The entry's own four steps live one call further in, on
+    /// [`Self::open_preview_web_file_on`], which is where they always belonged:
+    /// they are what a `file:` target costs, and they do not depend on which pane
+    /// is going to show it. **This door owns the pane and nothing else.**
+    ///
+    /// **The seat is the landing rule's, and this door is the one that asks it**
+    /// (§7.14f, 2026-09-06). The first unlocked preview pane, or a freshly split
+    /// one when this tab has none — [`Self::preview_landing_surface`], the same
+    /// answer every other kind of preview gets. A caller that already knows the
+    /// pane it means goes through [`Self::open_preview_web_file_on`] instead and
+    /// never reaches this line.
+    ///
+    /// **And the pane it chose takes the keyboard**, which is the pair
+    /// [`Self::open_web_page_with`] has always been: a door that picks the pane
+    /// is a door that put a browser somewhere you were not looking, so it moves
+    /// you there. A refusal card is not a page and moves nothing.
+    fn open_preview_web_file(&mut self, path: PathBuf) -> Result<()> {
+        self.mouse_trace(|| format!("open_preview_web_file enter path={}", path.display()));
+        let Some(surface) = self.preview_landing_surface() else {
+            // The silent door (`BT_MOUSE_TRACE`): from the outside this `Ok(())`
+            // and a click that never happened are the same event.
+            self.mouse_trace(|| "open_preview_web_file leave=no-landing-surface".to_owned());
+            return Ok(());
+        };
+        self.open_preview_web_file_on(surface, path)?;
+        match surface {
+            PreviewSurface::Seat(leaf) if self.seat_holds_a_page(leaf.seat) => {
+                self.focus_seat(leaf.seat)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// **The controlled file entry, on a surface the caller has already named**
+    /// (§7.14f — the defect this split repairs).
+    ///
+    /// [`Self::open_preview_image_on`]'s argument, word for word, now made true
+    /// of the third lane as well: *the pane you aimed at is the pane that takes
+    /// the file, whether or not it is the one an ordinary open would have
+    /// chosen.* The page lane used to drop its caller's surface on the floor and
+    /// re-ask the landing rule, so a `.html` dropped on a seat of its own opened
+    /// in whichever preview pane happened to be first in tree order — the pane
+    /// the reader was reading — and the seat the drop had just minted stayed the
+    /// empty placeholder.
+    ///
+    /// The four steps of the entry are all here and their order is the whole
+    /// rule:
     ///
     /// 1. **The disk says what the path is.** `canonicalize` resolves the
     ///    junctions, the `..`s, the short names and the case, and what comes back
     ///    is the only spelling anything downstream sees. A path that is not there
-    ///    is not a page: it goes down the document lane, whose "the disk was
-    ///    asked and said no" card is the answer this window already has for it.
+    ///    is not a page: it earns the disk's own sentence, on **this** surface.
     /// 2. **The host mints.** `webnav::Mint::file` turns that `PathBuf` into the
-    ///    one `file:` URL this seat may load - percent-encoding the four
+    ///    one `file:` URL this seat may load — percent-encoding the four
     ///    characters that would re-open the parse, and refusing a network path
     ///    outright. **No string from anywhere is trusted**: the URL is built from
     ///    the canonicalised path, never from an address, a row or a session file.
-    /// 3. **The host asks its own gate** (`webnav::Origin::HostMinted`), before
-    ///    a seat is even chosen. Slice ② wrote that arm so that "every navigation
-    ///    this product starts has been through a door" would have no exception in
-    ///    it; this is its first real caller.
+    /// 3. **The host asks its own gate** (`webnav::Origin::HostMinted`), which is
+    ///    [`Self::open_minted_page_on`]'s first line.
     /// 4. **The mint travels with the request** to `WebSeat`, which installs it
-    ///    before it calls `Navigate` - because `NavigationStarting` can fire
+    ///    before it calls `Navigate` — because `NavigationStarting` can fire
     ///    before `Navigate` returns, and a gate asked about a target the pane has
     ///    not yet admitted to minting would cancel the pane's own navigation.
     ///
-    /// The seat is the singleton rule's ([`Self::open_web_page`]): this tab's
-    /// page if it has one, and a landing preview seat if it has not.
-    fn open_preview_web_file(&mut self, path: PathBuf) -> Result<()> {
-        self.mouse_trace(|| format!("open_preview_web_file enter path={}", path.display()));
+    /// Both refusals are landed on the caller's surface for the reason §7.39
+    /// gave for the float's: the card belongs where the reader is looking, which
+    /// is where they aimed.
+    fn open_preview_web_file_on(&mut self, surface: PreviewSurface, path: PathBuf) -> Result<()> {
         let canonical = match std::fs::canonicalize(&path) {
             Ok(canonical) => canonical,
             Err(error) => {
@@ -48770,7 +48822,8 @@ impl Runtime<'_> {
                 // "一个不在那里的路径不是一张网页" (§7.10 ①), and the card it
                 // earns is the disk's own sentence — which this door is holding
                 // and the document lane is not (user ruling 2026-08-23).
-                return self.land_page_refusal(
+                return self.land_page_refusal_on(
+                    surface,
                     path,
                     preview::PreviewRefusal::Fault(preview::PreviewFault::from_io(&error)),
                 );
@@ -48785,21 +48838,35 @@ impl Runtime<'_> {
                 // not only at [`preview_open_lane`]. `NetworkPath` is section
                 // 7.1.3's own refusal and the one this window has always shown.
                 self.mouse_trace(|| format!("open_preview_web_file leave=refused {refusal:?}"));
-                return self.land_page_refusal(path, preview::PreviewRefusal::NetworkPath);
+                return self.land_page_refusal_on(
+                    surface,
+                    path,
+                    preview::PreviewRefusal::NetworkPath,
+                );
             }
         };
-        self.open_minted_page(mint)
+        match surface {
+            PreviewSurface::Seat(leaf) => self.open_minted_page_on(leaf, mint),
+            PreviewSurface::Float(id) => self.open_minted_page_on_float(id, mint),
+            // **A glance card has no engine and never will** (§7.14a: a card's
+            // life is a few hundred milliseconds and a browser process is not).
+            // It never arrives here — the card fills its own buffer and does not
+            // come through the pool's landing door — and the honest answer for a
+            // surface that cannot host a browser is to open none, said once
+            // rather than guarded at every caller.
+            PreviewSurface::Peek => {
+                self.mouse_trace(|| "open_preview_web_file leave=peek-hosts-no-engine".to_owned());
+                Ok(())
+            }
+        }
     }
 
-    /// **The controlled file entry, onto a float's own engine** (§7.39) — the
-    /// door a page card takes when its head is carried out into a window.
+    /// **A minted page onto a float's own engine** (§7.39) — the door a page card
+    /// takes when its head is carried out into a window.
     ///
-    /// [`Self::open_preview_web_file`]'s two opening steps — the disk names the
-    /// path, the host mints the one `file:` URL it may load — and then the one
-    /// thing a float does that a tab's singleton seat does not: it keeps a page
-    /// of its own. A tab has one browser and a drop does not buy a second; a
-    /// float *is* a browser, carried by a leaf that is in no layout tree, which
-    /// is exactly the shape `pop_out_preview` leaves a popped-out page in
+    /// The one thing a float does that a pane does not: it keeps a page of its
+    /// own. A float *is* a browser, carried by a leaf that is in no layout tree,
+    /// which is exactly the shape `pop_out_preview` leaves a popped-out page in
     /// (§7.14a). So a detached leaf is minted on this float's tab, the float is
     /// told to carry it, and the engine is opened on it through the same gate
     /// every navigation passes ([`Self::open_minted_page_on`]).
@@ -48808,27 +48875,7 @@ impl Runtime<'_> {
     /// ([`seats::Seats::mint_detached_seat`]) and never reused, so it cannot come
     /// to name another pane's page — the guarantee [`float::FloatPreview::page`]
     /// is written against.
-    fn open_preview_web_file_on_float(&mut self, id: float::FloatId, path: PathBuf) -> Result<()> {
-        let canonical = match std::fs::canonicalize(&path) {
-            Ok(canonical) => canonical,
-            Err(error) => {
-                return self.land_page_refusal_on(
-                    PreviewSurface::Float(id),
-                    path,
-                    preview::PreviewRefusal::Fault(preview::PreviewFault::from_io(&error)),
-                );
-            }
-        };
-        let mint = match webnav::Mint::file(&canonical) {
-            Ok(mint) => mint,
-            Err(_) => {
-                return self.land_page_refusal_on(
-                    PreviewSurface::Float(id),
-                    path,
-                    preview::PreviewRefusal::NetworkPath,
-                );
-            }
-        };
+    fn open_minted_page_on_float(&mut self, id: float::FloatId, mint: webnav::Mint) -> Result<()> {
         // A detached leaf on this float's tab for the float's own engine — the
         // seat a popped-out page keeps, minted fresh because this page was never
         // in a pane to leave one behind.
@@ -48855,7 +48902,8 @@ impl Runtime<'_> {
     }
 
     /// **The page lane asked the disk and the disk said no** — the file on the
-    /// seat, with the reason on it (user ruling 2026-08-23).
+    /// surface it was aimed at, with the reason on it (user ruling 2026-08-23;
+    /// §7.39; §7.14f).
     ///
     /// It used to be `open_preview_file`, and that was right while `.html` was
     /// text: the document lane would read the file, fail, and print the fault
@@ -48867,22 +48915,14 @@ impl Runtime<'_> {
     /// So the reason travels the one hop from where it was learned to the buffer
     /// that has to say it. `PreviewBuffer::accept` is the same door a head read's
     /// refusal comes through; there is no second way for a buffer to be refused.
-    fn land_page_refusal(&mut self, path: PathBuf, refusal: preview::PreviewRefusal) -> Result<()> {
-        let Some(surface) = self.preview_landing_surface() else {
-            self.mouse_trace(|| "land_page_refusal leave=no-landing-surface".to_owned());
-            return Ok(());
-        };
-        self.land_page_refusal_on(surface, path, refusal)
-    }
-
-    /// The same, onto a surface the caller has already named (§7.39).
     ///
-    /// A page promoted onto a float that turns out not to be on the disk owes
-    /// its refusal to **that float** and not to a landing preview seat: the card
-    /// became a window, and the disk's sentence belongs in the window the reader
-    /// is now looking at. Every other caller reaches the refusal through
-    /// [`Self::land_page_refusal`], which picks the landing seat exactly as
-    /// before.
+    /// **There is no second spelling that picks the surface itself.** A promoted
+    /// page that turns out not to be on the disk owes its refusal to *the float*
+    /// (§7.39), and since §7.14f a dropped one owes it to the seat it was dropped
+    /// on, for the same reason: the card belongs where the reader is looking,
+    /// which is where they aimed. The one door that has no surface of its own
+    /// ([`Self::open_preview_web_file`]) resolves the landing rule before it gets
+    /// here, so the caller always has one to name.
     fn land_page_refusal_on(
         &mut self,
         surface: PreviewSurface,
@@ -49084,23 +49124,18 @@ impl Runtime<'_> {
         // is what makes "从任何入口进来都开成渲染页" true by construction
         // instead of by six call sites remembering.
         //
-        // The seat is the singleton rule's rather than the one the caller
-        // chose, exactly as it is for a double click (`open_preview_at`): a tab
-        // has one page, and a drop aimed at a second pane does not buy a second
-        // browser.
-        //
-        // **Except a float, which is its own page** (§7.39). The singleton rule
-        // is a *tab's* — one browser for one tab — and a float carries an engine
-        // of its own, addressed by a detached leaf, exactly as `pop_out_preview`
-        // gives it one. A page promoted onto a float that fell back to the tab's
-        // seat would open a browser on the pane behind the window and leave the
-        // float empty, which is the very thing §7.29 ⑥′'s refusal used to
-        // prevent by refusing the promotion outright.
+        // **And it opens on the surface it was landed on** (§7.14f, user report
+        // 2026-09-06). This used to read "the seat is the singleton rule's
+        // rather than the one the caller chose", which was the last living piece
+        // of the per-tab singleton §7.14e ② retired: the arm threw the caller's
+        // surface away and re-asked the landing rule, so a page dropped on a
+        // seat of its own opened in the *reader's* preview pane — clearing what
+        // was in it — while the seat the drop had minted stayed empty. A page is
+        // a preview buffer (§7.9), so where it lands is not the page lane's
+        // question at all; every door above already answered it, and a float
+        // (§7.39) is only the second arm of the same sentence.
         if let Some(path) = source_opens_as_a_page(&source) {
-            return match surface {
-                PreviewSurface::Float(id) => self.open_preview_web_file_on_float(id, path),
-                _ => self.open_preview_web_file(path),
-            };
+            return self.open_preview_web_file_on(surface, path);
         }
         self.land_preview_source_on(surface, source, name)
     }
@@ -61713,7 +61748,7 @@ impl Runtime<'_> {
     /// down the engine's lane, and the note here read *"a page needs a seat, and
     /// a float is not one"*. That was the whole of it, and §7.29 ⑥′ said what
     /// would end it: *"when a float can be given an engine of its own, this arm
-    /// goes"*. It can now — [`Self::open_preview_web_file_on_float`] mints the
+    /// goes"*. It can now — [`Self::open_minted_page_on_float`] mints the
     /// float a detached leaf and opens the engine on it, which is the very
     /// engine `pop_out_preview` hands a float when it carries a page out of a
     /// pane (§7.14b). So a `.pdf` card torn out is a window with a page on it,
@@ -89667,18 +89702,19 @@ mod files_locate_door_tests {
         );
 
         // ② The page lane sends a float surface to the float's own engine door,
-        //    not to the tab's singleton seat.
-        let fork = body("    fn open_preview_source_on(");
+        //    not to a pane of the tab behind it. The arm moved to
+        //    `open_preview_web_file_on` with §7.14f — the fork above it now
+        //    passes the surface through whole instead of matching on it — so the
+        //    claim is read where the match now lives.
+        let fork = body("    fn open_preview_web_file_on(");
         assert!(
-            fork.contains(
-                "PreviewSurface::Float(id) => self.open_preview_web_file_on_float(id, path)"
-            ),
-            "a page promoted onto a float falls back to the tab's page seat, and the float opens empty"
+            fork.contains("PreviewSurface::Float(id) => self.open_minted_page_on_float(id, mint)"),
+            "a page promoted onto a float falls back to a pane of the tab behind it, and the float opens empty"
         );
 
         // ③ The float's opener carries the page and opens the engine on it — the
         //    same tenant shape pop_out_preview produces.
-        let opener = body("    fn open_preview_web_file_on_float(");
+        let opener = body("    fn open_minted_page_on_float(");
         assert!(
             opener.contains("preview.page = Some(leaf)"),
             "the float is never told to carry the page, so page_carried_by finds none and the window is a placeholder"
@@ -90848,6 +90884,179 @@ mod pages_are_plural_tests {
                 && press.contains("websheet::covers(layout, x, y)"),
             "a press is not matched against the card it landed in:\n{press}"
         );
+    }
+}
+
+/// **A page opens on the pane it was landed on** (user report on
+/// `dist\folio-next38.exe`, 2026-09-06: 「第二个网页 pane 的落点和我想要的位置不
+/// 一样，另一个是原来在的预览就不见了」; §7.14f).
+///
+/// **Two defects and one cause.** A `.html` dropped on a seat of its own reached
+/// the pool's door carrying that seat, and the page arm threw the seat away and
+/// re-asked the landing rule. So the page opened in whichever preview pane came
+/// first in tree order — clearing the document the reader had been reading, which
+/// is the second half of the report — while the seat the drop had just minted
+/// stayed the empty placeholder, which is the first.
+///
+/// Measured on the machine before the repair (`BT_MOUSE_TRACE`, `page.html`
+/// dragged from a files column onto the bottom edge of a terminal pane, a
+/// README preview standing at the far left):
+///
+/// ```text
+/// open_preview_web_file enter path=D:\Demo\page.html
+/// preview_landing_surface seat=SeatId(4) reused=1
+/// ```
+///
+/// `reused=1` is the whole defect in one field: the reader's pane answering for
+/// a drop that had named another.
+///
+/// Read as text for [`pages_are_plural_tests`]' reason, which is this repair's
+/// reason word for word — what changed is *which door asks which question*, and
+/// a `WindowRuntime` is a compositor and a browser, so "the page landed on the
+/// seat the drop minted" is not a sentence this process can say without a screen.
+#[cfg(test)]
+mod a_page_lands_where_it_was_aimed_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, **from its signature to its own closing brace** —
+    /// the first `}` in column four.
+    ///
+    /// Deliberately not the neighbouring modules' "run to the next `fn`": that
+    /// slice swallows the *next* function's doc comment, and every claim below
+    /// is about what a body does **not** say. A door that had been repaired and
+    /// whose neighbour's prose still named the old question would read as
+    /// unrepaired.
+    fn body(signature: &str) -> &'static str {
+        const CLOSE: &str = "\n    }\n";
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find(CLOSE).map_or(rest.len(), |at| at + CLOSE.len());
+        &rest[..end]
+    }
+
+    /// **Every door that was *told* which surface to work on**, in the order a
+    /// drop walks them: the row's opener, the two lanes it forks into, the page
+    /// lane's own two halves, the engine door under them, and the two landings
+    /// that write a buffer.
+    const NAMED_DOORS: &[&str] = &[
+        "    fn open_preview_onto(",
+        "    fn open_preview_file_on(",
+        "    fn open_preview_source_on(",
+        "    fn open_preview_web_file_on(",
+        "    fn open_minted_page_on_float(",
+        "    fn open_minted_page_on(",
+        "    fn open_web_page_on(",
+        "    fn open_preview_image_on(",
+        "    fn land_preview_source_on(",
+        "    fn land_page_refusal_on(",
+        // The door that changes a name without landing a source. It carries a
+        // surface for the toast it may have to raise, and since the day a name
+        // can say *page* it carries one for the page too.
+        "    fn rename_preview_file(",
+    ];
+    /// **The spellings that choose a surface for themselves.** Each is the door
+    /// a caller reaches when it has no surface of its own; reaching one from a
+    /// door that *has* one is the defect, whether the landing rule is asked here
+    /// or one call deeper.
+    const CHOOSERS: &[&str] = &[
+        "preview_landing_surface",
+        "self.open_preview_web_file(",
+        "self.open_preview_file(",
+        "self.open_preview_image(",
+        "self.open_minted_page(",
+        "self.open_web_page(",
+        "self.open_web_page_with(",
+    ];
+
+    /// **A door that was told a surface never chooses another** — the general
+    /// rule the two defects broke, stated once over every door that carries one.
+    ///
+    /// RED GATE: this is the defect. Put `_ => self.open_preview_web_file(path)`
+    /// back into `open_preview_source_on` and this names that door and that
+    /// spelling; the drop then opens its page on the reader's pane and leaves
+    /// the minted seat empty.
+    #[test]
+    fn a_door_that_was_told_a_surface_never_chooses_another() {
+        for signature in NAMED_DOORS {
+            let text = body(signature);
+            for chooser in CHOOSERS {
+                assert!(
+                    !text.contains(chooser),
+                    "{signature} was handed a surface and still reaches `{chooser}` — \
+                     the pane the caller aimed at is not the pane the file lands on:\n{text}"
+                );
+            }
+        }
+    }
+
+    /// **The pool's own fork hands the page lane the surface, whole.**
+    ///
+    /// RED GATE: the arm that used to stand here matched on the surface and kept
+    /// only the float; every other surface fell through to the door that picks
+    /// one. Restore either half of that — the match, or the surface-less call —
+    /// and this fails.
+    #[test]
+    fn the_page_lane_opens_on_the_surface_it_was_handed() {
+        let fork = body("    fn open_preview_source_on(");
+        assert!(
+            fork.contains("source_opens_as_a_page(&source)")
+                && fork.contains("return self.open_preview_web_file_on(surface, path);"),
+            "the pool's door still decides for itself where a page-named source \
+             opens:\n{fork}"
+        );
+    }
+
+    /// **The named page door answers for every surface that can hold an engine,
+    /// and lands its refusals on the one it was given.**
+    ///
+    /// RED GATE: drop the `Seat` arm and a dropped page has nowhere to go; drop
+    /// the `Float` arm and §7.39's promoted card opens a browser on the pane
+    /// behind the window (the very defect that ruling's refusal used to prevent);
+    /// send either refusal through a spelling that picks the landing seat and the
+    /// disk's sentence appears in a pane the reader never aimed at.
+    #[test]
+    fn the_named_page_door_opens_on_the_surface_and_refuses_on_it_too() {
+        let door = body("    fn open_preview_web_file_on(");
+        assert!(
+            door.contains("PreviewSurface::Seat(leaf) => self.open_minted_page_on(leaf, mint)"),
+            "a page named onto a pane does not reach that pane's engine:\n{door}"
+        );
+        assert!(
+            door.contains("PreviewSurface::Float(id) => self.open_minted_page_on_float(id, mint)"),
+            "a page named onto a float does not reach the float's own engine:\n{door}"
+        );
+        assert_eq!(
+            door.matches("self.land_page_refusal_on(").count(),
+            2,
+            "both of the page lane's refusals — the disk's and the network \
+             path's — are owed to the surface the caller named:\n{door}"
+        );
+    }
+
+    /// **The landing rule did not go away; it moved to the doors that have no
+    /// surface of their own**, which is the half of this repair a subtraction
+    /// alone would get wrong.
+    ///
+    /// RED GATE: delete the landing call from `open_preview_web_file` and a
+    /// double-clicked `.html` reaches a `match` on a surface nobody chose.
+    #[test]
+    fn the_doors_with_no_surface_are_the_ones_that_ask_the_landing_rule() {
+        for signature in [
+            "    fn open_preview_file(",
+            "    fn open_preview_image(",
+            "    fn open_preview_web_file(",
+            "    fn open_web_page_with(",
+        ] {
+            let text = body(signature);
+            assert!(
+                text.contains("self.preview_landing_surface()"),
+                "{signature} has no surface of its own and no longer asks the \
+                 landing rule for one:\n{text}"
+            );
+        }
     }
 }
 
@@ -136308,7 +136517,7 @@ mod tests {
         let door = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
         assert!(
             door.contains("source_opens_as_a_page(&source)")
-                && door.contains("self.open_preview_web_file(path)"),
+                && door.contains("self.open_preview_web_file_on(surface, path)"),
             "the pool's own door does not turn a page-named source back onto the \
              engine's lane, so a `.html` can still land as a document:\n{door}"
         );
@@ -136326,7 +136535,7 @@ mod tests {
         let rename = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
         assert!(
             rename.contains("source_opens_as_a_page(&preview::PreviewSource::file(&new))")
-                && rename.contains("self.open_preview_web_file(path)"),
+                && rename.contains("self.open_preview_web_file_on(surface, path)"),
             "a rename into a page's name leaves the file on the document lane:\n{rename}"
         );
     }
