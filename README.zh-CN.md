@@ -177,7 +177,7 @@ Folio 不能作为 VS Code 内嵌的终端面板。该面板运行的是一个�
 
 ## 第一次运行
 
-第一个标签页打开系统中排在最前的 shell。五条内置 shell 配置按 PowerShell 7、Windows PowerShell、WSL、Git Bash、命令提示符的顺序查找；未安装对应程序的配置在选择器中显示为灰色而非隐藏。七条 agent 配置以同样方式在 Windows PATH 中查找。
+第一个标签页打开系统中排在最前的 shell。五条内置 shell 配置按 PowerShell 7、Windows PowerShell、WSL、Git Bash、命令提示符的顺序查找；未安装对应程序的配置不会出现在用于启动 shell 的菜单中，而是保留在设置的配置文件页，在那里显示为灰色，并写明所查找的程序名称。七条 agent 配置以同样方式在 Windows PATH 中查找。
 
 第一个 PowerShell 窗格输出内容后，显示提示条，说明 PowerShell 整合尚未安装。**加进 `$PROFILE`** 在 PowerShell 配置文件末尾追加一行 `. "$env:APPDATA\Folio\shell-integration\folio.ps1"`，追加前先将原文件按日期另存为备份；删除该行可撤销。**不再提示** 终止询问；直接关闭提示条不构成决定，下一个 PowerShell 窗格会再次询问。命令标记与行内 `$…$` 公式依赖该整合。Git Bash 与 WSL 无需安装任何内容，亦不在磁盘上留下痕迹。
 

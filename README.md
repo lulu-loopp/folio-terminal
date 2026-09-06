@@ -286,9 +286,10 @@ publisher named there is **Weiyi Shi** and the app is `folio.exe`, and click
 
 The first tab opens the first shell your machine actually has. The five shipped
 profiles are looked for in order — PowerShell 7, Windows PowerShell, WSL, Git
-Bash, Command Prompt — and one whose program is not installed is greyed out in the
-picker rather than hidden. The seven agent profiles are found the same way, on the
-Windows path.
+Bash, Command Prompt — and one whose program is not installed does not appear in
+the menus that start a shell; it stays on the Profiles page in Settings, greyed
+out and naming the program that was looked for. The seven agent profiles are
+found the same way, on the Windows path.
 
 The first time a PowerShell pane prints something, a strip says the PowerShell
 integration is not installed. **Add to `$PROFILE`** appends one line —

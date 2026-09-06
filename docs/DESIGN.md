@@ -5569,6 +5569,27 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 
 **日期:2026-08-29,⑤⑥⑦ 三条,外加 08-29 晚的第五条。**
 
+**⑦′ 裁决 1 于 2026-09-06 被用户整条推翻:凡是「现在就要起一个 shell」的名单,起不动的一条都不列——灰显整条挪到设置 → 配置文件页(用户截图报缺陷 + 当日裁决;`crates/bt-app/src/{profiles,main}.rs`)。**
+
+由头是一张 pane 头 `⌄` 菜单的截图:`Split with ▸` 子菜单十二行,**下半屏五行灰的**(Copilot CLI、Kimi Code、pi、Hermes、OpenCode)。用户一句话:「这里的灰色选项是不是要去掉呢」。
+
+⑦ 的裁决 1 只裁了**新建标签选择器**,而且只裁了 agent。两个缺口都在这张截图里:一个是它没走到的面(`Split with ▸` 与终端右键菜单里那一份从来读的是 `offered()`,连 agent 都没筛),一个是它当时留下的那半句——「五条 shell 维持 §7.27 的灰显不隐藏」。第二个缺口是本次改判的正题。
+
+**裁决:一张「按下去就起一个 shell」的名单只列它起得动的行,内置行不分 shell 与 agent;读者自建的行一条都不筛。** ⑦ 当时把 §7.27 记成「有名字的例外」,而这一次把它**改成一条位置规矩**:§7.27 的论证从来没有错——「一行灰着的 Git Bash 是产品在说*这是 Folio 能开的东西*」——错的是它被说在哪儿。**那句话是给人读的,不是给人按的。** 一份动作菜单里的每一行都是一枚按钮,一枚亮起来又什么都做不了的按钮,教会读者的方式是「按一下才知道」;而「装上它就会出现」这件事,只有一个地方能真的说清楚,那就是设置 → 配置文件页——它收着全部十二条、写着这扇窗替每一条找的是哪个程序、还替 agent 写了「装在 WSL 里怎么办」。所以灰显不是被撤销,是**只留在那一页**。
+
+- **三张面**:`Split with ▸`(pane 头 `⌄` 与终端右键菜单各一份,同一个 `pane_submenu_layout`)、以及新建标签的 `⌄` 下拉。
+- **`⌄` 下拉里的 Recent 段维持灰显**,而这不是漏改,是同一条裁决里的同一处分界:一条 profile 行是**这个 build 写的**名单,写下来又起不动的行是读者从没要过的行;一条 Recent 行是**读者去过的地方**,它和自建 profile 一样是他自己的东西,悄悄忘掉他昨天在哪儿干活不是把菜单收拾干净,是藏他的历史。所以那一档灰墨与它带的那句 tip 都还在,只是从此只落在两种行上:自建 profile,和起不动的 Recent。
+- 一处推导:`ProfileTable::offered_to_start` 的筛子从「起不动的内置 **agent**」放宽成「起不动的内置行」(`profile.origin != Origin::Builtin || programs.is_available(index)`)。`pane_menu_layout` 与 `term_menu_layout` 因此各多收一个 `&ProfilePrograms`,和 `windows` 并肩:两者都决定子菜单**有几行**而不只是有多宽。`pane_submenu_layout` 收的是**已经开好的名单**而不是机器——它没有机器可问,而名单在测量的那一帧和点下去的那一刻之间不许变,这正是 `ProfilePrograms` 当初写成一个值的理由。
+- **自建行永远不筛**,判据从 `agent_command`(一份写下来的 id 名单)换成 `Origin::Builtin`,而理由一字未改:一条 Folio 自己发明、又起不动的行,是读者从没要过的行;一条他自己建、起不动的行是他能修的行,被悄悄拿掉的那条却得他自己回去找。**动作菜单里那一档灰墨因此没有死**,它现在只画在自建行上(以及上一条说的 Recent 行)。
+- **一台机器上什么时候会出现**:名单读的是 `ProfilePrograms` 那一次探测的结果,而探测发生在开窗第一帧、以及 `Runtime::adopt_profile_table` 每一次(配置表被这扇窗改动、或 `profiles.json` 被外面改动之后)。所以刚装好一个 agent,**开一扇新窗、或在配置文件页动一下表**,它就在菜单里了;什么都不做的那扇旧窗要等到下一次探测——这与 08-29 那版的口径完全一样,只是从「多七行灰的」变成「少七行」。
+- **不留空段**:子菜单没有分节也没有分隔线,所以「全部 agent 都没装」在几何上就是少几行,框高 = 上下留白 + 行数 × 行高。终端右键菜单那一份补上了 pane 头早在 2026-08-25 就有的那道闸(`.filter(|child| !child.items.is_empty())`)——在这条裁决之前它不可能空,现在可以了(读者把表里每一行都隐藏)。
+- **设置 → 配置文件页一个像素没动**:十二行照旧、缺席行照旧灰、shell 行照旧写「在这台机器上没找到 <程序>」、agent 行照旧写「在 Windows 中未找到 X」加组末那一句出路。没有新文案,所以没有新的 `Text::` 条目、`Text::ALL` 不变。
+- **设置 → 通用的「默认配置」与快捷终端的「使用的 profile」两个下拉不在这一片里**,而这是一处**明写的留白**而不是遗漏:那两行不是「现在起一个 shell」,是一条**存下来的选择**,而下拉里的序号就是存进 `settings.json` 的那个值(`SettingsRow::option_count` / `option_label` 都不收 `SettingsValues`,机器的答案是逐帧注进 `SettingsValues::profile_available` 的)。要在那里筛,得让「第几项」和「哪一行」分家,并且先裁一件这条裁决没有裁过的事:一台机器上存着的那条 profile 已经卸载了,那一行按钮上该显示什么。**留着等一次单独的裁决。**
+
+**红门。** `an_action_menu_offers_what_this_machine_can_start_and_the_readers_own_rows`(⑦ 那道门改写:裸 Windows 只 offer `winps`、装了 claude+codex 就是三条且各在原位、自建行怎么都在;红证:把可用性判据从筛子里抽掉,裸机 offer 十二条其中十一条是死的;把 `Origin::Builtin` 抽掉,自建那一行跟着内置行一起消失)、`an_action_menu_lists_only_what_this_machine_can_start`(子菜单的 `rows` = `offered_to_start`、每一行都起得动、画出来**一枚灰精灵都没有**;红证:把 `offered()` 放回 `pane_submenu_layout`,裸机画十一行、十行灰)、`a_machine_with_no_agents_leaves_the_shells_and_no_gap`(五条 shell、行与行之间没有缝、框高 = 留白 + 五行;红证:为 agent 组留一条带,末行掉出框外)、`a_program_installed_since_the_last_probe_joins_the_menu_on_the_next_one`(同一台机器加一个文件再探一次,Git Bash 那一行到场)、`the_profiles_page_keeps_every_row_and_names_what_is_missing`(页上十二行一行不少、缺席行都带理由、`capability` 为 `None`);`a_row_is_tipped_with_what_its_caption_left_out_and_nothing_else` 改写成断言裸机的选择器**没有一行可以被 tip**——那一档 tip 与它解释的灰墨都还在,只是从此只会落在自建 profile 行与起不动的 Recent 行上。
+
+**日期:2026-09-06,用户截图报缺陷,当日裁决,当日落地。**
+
 **⑧ 七条 agent 共用一枚标形,各穿自己的配置色;Claude Code 不再特殊(用户裁 2026-08-30,实机 #197/#198;`crates/bt-app/src/{marks,profiles,settings}.rs`)。**
 
 **看到的是什么。** 新建标签选择器和配置文件页里,Claude Code 一枚橙色星芒,Codex / Copilot CLI / Kimi Code / pi / Hermes / OpenCode 六枚 shell 的提示符面板。一张回答「我要开哪个 agent」的单子,却对其中六条说「这是一种控制台」——**它们不是**。同一屏上还有五条真的 shell 穿着同一块面板,于是这张单子唯一一处真正的分野(agent 还是 shell)恰好是它没画出来的那一处。

@@ -6,6 +6,19 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- **A menu that starts a shell now lists only the profiles this machine can
+  start.** `Split with`, on a pane head and in the terminal menu alike, drew
+  every profile it knew and greyed the ones whose program is not installed —
+  on an ordinary machine five of the seven agent rows, filling half the
+  submenu with lines a press could not spend. Those rows are simply not on
+  those lists now, and neither are shells this machine has not got. All twelve
+  profiles are still on the Profiles page in Settings, greyed there and naming
+  the program each one looked for, which is where installing one and having its
+  row come back can be read about. A profile you made yourself is never left off
+  a menu, whatever its program resolves to.
+
 ### Fixed
 
 - **A pane you drag over a web preview can now be dropped there.** The landing

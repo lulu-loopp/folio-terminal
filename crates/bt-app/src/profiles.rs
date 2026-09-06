@@ -1474,38 +1474,43 @@ impl ProfileTable {
             .collect()
     }
 
-    /// The rows the **new-tab picker** offers: [`Self::offered`], less the
-    /// built-in agents this machine has nowhere to start (user ruling
-    /// 2026-08-29).
+    /// The rows an **action menu** offers: [`Self::offered`], less every
+    /// built-in row this machine has nowhere to start (user ruling 2026-09-06,
+    /// widening the agents-only rule of 2026-08-29).
     ///
-    /// **§7.27 is unchanged and this is not a second reading of it.** A shell
-    /// this machine cannot start is still drawn greyed rather than hidden, for
-    /// the reason [`ProfilePrograms::is_available`] gives: the row is the
-    /// product saying "this is a thing Folio opens", and dropping it conflates
-    /// "you have not installed Git" with "we never thought of Git". Five rows
-    /// say that, and a reader who has not got PowerShell 7 can act on it.
+    /// **A menu that starts a shell lists what can start.** Four surfaces are
+    /// that kind of list — the `˅` picker's profiles, the pane head's
+    /// `Split with ▸`, the terminal menu's copy of it, and the recent seeds
+    /// those two hang beside — and every row on one of them is a button. A
+    /// button that lights under the pointer and then cannot do the thing it
+    /// names is worse than an absent row, because the reader learns what is
+    /// missing by pressing rather than by reading.
     ///
-    /// The agents are seven, and on the machine most readers open this menu on
-    /// they are seven rows of 「没找到」 — five of them filling the first screen
-    /// of a list whose whole job is to be pressed. The sentence the greying
-    /// makes is worth saying **once**, somewhere it can be read rather than
-    /// pressed, and that place exists: the Profiles page keeps all seven, says
-    /// where this window looked, and tells the reader what to do about a `codex`
-    /// that lives inside WSL. A picker is not that page — it is a list of what
-    /// can start now — so here the absent ones are simply not on it.
+    /// **§7.27's greying is not retired, it is placed.** The sentence a greyed
+    /// row makes — "this is a thing Folio opens, and not on this machine" — is
+    /// worth saying, and dropping the row would otherwise conflate "you have not
+    /// installed Git" with "we never thought of Git". So it is said **once**,
+    /// somewhere it can be read rather than pressed: Settings > Profiles keeps
+    /// every row this build ships, greys the ones this window could not find,
+    /// says which program it looked for, and tells the reader what to do about a
+    /// `codex` that lives inside WSL. That page is where "install it and it will
+    /// appear" is learnable; a menu is not, and until this ruling the two shared
+    /// the job and the menu did it badly — the report that closed it
+    /// photographed five greyed agents filling half of `Split with ▸`.
     ///
-    /// A profile of the reader's own is never dropped whatever it resolves to.
-    /// [`agent_command`] answers for the built-in agents alone, and the rule
-    /// above is about a list *this build* wrote: a row somebody made and cannot
-    /// start is a row they can fix, and one this window quietly removed is a
-    /// row they would have to go looking for.
+    /// **A profile of the reader's own is never dropped whatever it resolves
+    /// to.** The rule above is about a list *this build* wrote: a row Folio
+    /// invented and cannot start is a row the reader never asked for, and a row
+    /// somebody made themselves and cannot start is a row they can fix — one
+    /// this window quietly removed is a row they would have to go looking for.
+    /// [`Origin::Builtin`] is the whole of that distinction.
     #[must_use]
     pub fn offered_to_start(&self, programs: &ProfilePrograms) -> Vec<usize> {
         self.offered()
             .into_iter()
             .filter(|index| {
                 self.profiles.get(*index).is_none_or(|profile| {
-                    agent_command(profile).is_none() || programs.is_available(*index)
+                    profile.origin != Origin::Builtin || programs.is_available(*index)
                 })
             })
             .collect()
@@ -4058,17 +4063,19 @@ impl ProfilePrograms {
 
     /// Whether this profile can do what its row says it does.
     ///
-    /// The picker draws a profile it cannot start greyed rather than hiding it
-    /// (user ruling 2026-08-10): the row is the product saying "this is a thing
-    /// Folio opens", and the grey is it saying "not on this machine".
-    /// Dropping the row conflates "you have not installed Git" with "we never
-    /// thought of Git", and only one of those is something the user can act on.
+    /// **Settings > Profiles draws a profile it cannot start greyed rather than
+    /// hiding it** (user ruling 2026-08-10, placed by the ruling of
+    /// 2026-09-06): the row is the product saying "this is a thing Folio
+    /// opens", and the grey is it saying "not on this machine". Dropping the
+    /// row conflates "you have not installed Git" with "we never thought of
+    /// Git", and only one of those is something the user can act on.
     ///
-    /// **The built-in agents are the one exception and they are not a second
-    /// reading of that rule** (user ruling 2026-08-29): the picker leaves an
-    /// agent it cannot start off the list entirely, because seven of them say
-    /// the sentence at once and the Profiles page says it better. See
-    /// [`ProfileTable::offered_to_start`], which is the whole of that exception.
+    /// **A menu that starts a shell leaves it off instead** (user ruling
+    /// 2026-09-06): every row of one of those is a button, and the page above
+    /// has already said the sentence somewhere it can be read. See
+    /// [`ProfileTable::offered_to_start`], which is where that list is drawn up,
+    /// and note that this answer is still what those menus grey a row of the
+    /// reader's *own* with — the rule drops built-in rows only.
     #[must_use]
     pub fn is_available(&self, profile: usize) -> bool {
         self.program(profile).is_some()
@@ -4642,11 +4649,18 @@ pub fn hit(
 
 /// Whether the shell a Recent row would revive can be started on this machine.
 ///
-/// Asked of Recent rows and not only of profile rows, because the row above and
-/// the row below are the same offer: `~/repo · 3m ago` under a Git mark is
-/// "start Git Bash here", and if the profile row that says `Git Bash` is greyed
-/// then this one has to be too. Greying one and not the other would put, in one
-/// menu, both answers to the same question.
+/// Asked of Recent rows and not only of profile rows, because `~/repo · 3m ago`
+/// under a Git mark is "start Git Bash here" and a row that cannot do what it
+/// says has to say so.
+///
+/// **It goes on being greyed rather than dropped, which the profile rows above
+/// it stopped doing on 2026-09-06** — and the distinction is the one that ruling
+/// already draws. A profile row is a list *this build* wrote, so a row it wrote
+/// and cannot start is a row nobody asked for. A Recent row is a place the
+/// reader has been: it is their own, like a profile of their own, and a window
+/// that quietly forgot where they were working would be hiding their history
+/// rather than tidying a menu. So this one keeps the grey, and it keeps the tip
+/// that says which program is missing.
 ///
 /// A files locus has no shell, so nothing about it can be missing, and neither
 /// has a file (§7.1.6h).
@@ -8433,6 +8447,12 @@ const TERM_MENU_MIN_WIDTH_LOGICAL_PX: f32 = 172.0;
 /// frame — the segment falls under the seven, the child hangs off one of its
 /// rows and flips when this frame is near the window's edge — so a second entry
 /// point would be a second opinion about where the parent is.
+///
+/// `programs` is the machine, and it is here because since 2026-09-06 it decides
+/// **which rows the `Split with ▸` child has** and not merely how they are inked
+/// — [`ProfileTable::offered_to_start`]. It is the probe's frozen answer and not
+/// a fresh one, which is what keeps that safe: the list may not change between
+/// the frame a row was read on and the click aimed at it.
 #[must_use]
 pub fn term_menu_layout(
     point: [f32; 2],
@@ -8440,6 +8460,7 @@ pub fn term_menu_layout(
     scale: f32,
     look: &TermMenuLook,
     shortcuts: &crate::shortcuts::Shortcuts,
+    programs: &ProfilePrograms,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> TermMenuLayout {
     let px = |value: f32| value * scale;
@@ -8564,25 +8585,34 @@ pub fn term_menu_layout(
     // head's, so the seam it meets its parent on, the side it flips to and the
     // rows it holds are one derivation. Only the parent it is measured against
     // differs, which is the argument that function already takes.
-    let submenu = heading.filter(|_| look.submenu_open).map(|heading| {
-        // **The terminal menu carries one submenu, and it is the profile list**
-        // (B9). Its lone-pane segment is a hand-picked four rows and
-        // `Move to window` is not among them, so the kind is stated rather than
-        // derived — and the empty window list beside it is the honest way of
-        // saying this menu has no such row to draw one for.
-        pane_submenu_layout(
-            frame,
-            heading,
-            PaneMenuRow::SplitWith,
-            &[],
-            surface,
-            scale,
-            border,
-            padding,
-            item_height,
-            measure,
-        )
-    });
+    let submenu = heading
+        .filter(|_| look.submenu_open)
+        .map(|heading| {
+            // **The terminal menu carries one submenu, and it is the profile list**
+            // (B9). Its lone-pane segment is a hand-picked four rows and
+            // `Move to window` is not among them, so the kind is stated rather than
+            // derived — and the empty window list beside it is the honest way of
+            // saying this menu has no such row to draw one for.
+            pane_submenu_layout(
+                frame,
+                heading,
+                PaneMenuRow::SplitWith,
+                &[],
+                &table().offered_to_start(programs),
+                surface,
+                scale,
+                border,
+                padding,
+                item_height,
+                measure,
+            )
+        })
+        // A list with nothing in it is not a list: a reader who has hidden every
+        // row of the table has nothing to split with, and a child frame drawn
+        // around no rows is an empty box the pointer can get lost in. The pane
+        // head's own child has said this since 2026-08-25; this one had never been
+        // able to be empty until the 2026-09-06 ruling let a row leave the list.
+        .filter(|child| !child.items.is_empty());
     debug_assert_eq!(accels.len(), items.len());
     TermMenuLayout {
         scale,
@@ -9872,11 +9902,18 @@ impl PaneMenuLayout {
 /// `windows` decides **how many rows there are** as well as how wide the child
 /// is (user ruling 2026-08-25): with nowhere to go, `Move to window ▸` is not
 /// drawn at all. See [`PaneMenuRow::rows`].
-// Eight, and the eighth is the shortcut table (系统性发现 ②). The seven before
-// it were already this list, and the honest fix for the count is the `look`
-// struct `term_menu_layout` and `git_menu_layout` carry — a refactor of every
-// caller for no change on the glass, which is not what this slice is. The allow
-// is the same one `push_caps` and `push_button` carry two screens up.
+///
+/// `programs` does the same for the other child: since 2026-09-06 the machine
+/// decides which rows `Split with ▸` has and not merely how they are inked
+/// ([`ProfileTable::offered_to_start`]). It is the probe's frozen answer and not
+/// a fresh one, for [`layout`]'s own reason — the list may not change between
+/// the frame a row was read on and the click aimed at it.
+// Nine, and the ninth is the machine (user ruling 2026-09-06); the eighth is the
+// shortcut table (系统性发现 ②). The seven before them were already this list,
+// and the honest fix for the count is the `look` struct `term_menu_layout` and
+// `git_menu_layout` carry — a refactor of every caller for no change on the
+// glass, which is not what this slice is. The allow is the same one `push_caps`
+// and `push_button` carry two screens up.
 #[allow(clippy::too_many_arguments)]
 pub fn pane_menu_layout(
     point: [f32; 2],
@@ -9886,6 +9923,7 @@ pub fn pane_menu_layout(
     zoomed: bool,
     windows: &[String],
     shortcuts: &crate::shortcuts::Shortcuts,
+    programs: &ProfilePrograms,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> PaneMenuLayout {
     let px = |value: f32| value * scale;
@@ -10073,6 +10111,7 @@ pub fn pane_menu_layout(
                 heading,
                 kind,
                 windows,
+                &table().offered_to_start(programs),
                 surface,
                 scale,
                 border,
@@ -10164,6 +10203,7 @@ fn pane_submenu_layout(
     heading: [f32; 4],
     kind: PaneMenuRow,
     windows: &[String],
+    startable: &[usize],
     surface: (f32, f32),
     scale: f32,
     border: f32,
@@ -10179,9 +10219,16 @@ fn pane_submenu_layout(
     // two kinds of destination to tell apart with a glyph. The profile list has
     // both, which is why the two widths are measured apart rather than one being
     // made to fit the other's furniture.
+    //
+    // **The profile list arrives already drawn up** — it is
+    // [`ProfileTable::offered_to_start`]'s answer and not this function's
+    // (user ruling 2026-09-06), because it depends on what this machine has and
+    // this function has no machine to ask. Handed down rather than probed here
+    // for [`layout`]'s own reason: the list may not change between the frame a
+    // row was measured on and the click aimed at it.
     let offered: Vec<usize> = match kind {
         PaneMenuRow::MoveToWindow => (0..windows.len()).collect(),
-        _ => table().offered(),
+        _ => startable.to_vec(),
     };
     let content = offered
         .iter()
@@ -11190,6 +11237,9 @@ pub fn tab_menu_layout(
                 heading,
                 PaneMenuRow::MoveToWindow,
                 windows,
+                // A tab's child is the window list and nothing else, so there is
+                // no profile list for it to be drawn from.
+                &[],
                 surface,
                 scale,
                 border,
@@ -14115,27 +14165,30 @@ mod tests {
         }
     }
 
-    /// PIN (user ruling 2026-08-29) — **the picker offers the agents it can
-    /// start, and goes on offering every shell whether it can start it or not.**
+    /// PIN (user ruling 2026-09-06, widening the agents-only rule of
+    /// 2026-08-29) — **an action menu offers every row this machine can start,
+    /// and every row the reader wrote whether it can start it or not.**
     ///
-    /// Two rules that look like one and are not. §7.27 is untouched: a shell
-    /// this machine has not got is drawn greyed, because five rows saying so is
-    /// a product telling a reader what it opens and what they have not
-    /// installed. Seven agent rows saying it is half a screen of a menu whose
-    /// whole job is to be pressed — so an agent this window cannot start is left
-    /// off the list, and the Profiles page is where all seven are read.
+    /// Two rules that look like one and are not. A menu that starts a shell is a
+    /// list of buttons, so a row it cannot spend is a row that teaches by being
+    /// pressed; §7.27's greying is not retired but *placed* — Settings >
+    /// Profiles keeps all twelve rows, says which program each one looked for,
+    /// and is where "install it and it will appear" is learnable. The report
+    /// that closed this photographed `Split with ▸` with five greyed agents
+    /// filling half of it, and the ⌄ picker on the same machine showed four
+    /// greyed shells for the same reason.
     ///
-    /// The third claim is the one that keeps the exception honest: it is about
-    /// the rows *this build wrote*. A profile of the reader's own is offered
-    /// whatever it resolves to, because a row somebody made and cannot start is
-    /// a row they can fix, and one this window quietly removed is a row they
-    /// have to go looking for.
+    /// The second claim is what keeps the rule honest: it is about the rows
+    /// *this build wrote*. A profile of the reader's own is offered whatever it
+    /// resolves to, because a row somebody made and cannot start is a row they
+    /// can fix, and one this window quietly removed is a row they have to go
+    /// looking for.
     ///
-    /// Red gate: drop the `agent_command` test from the filter and the bare
-    /// machine offers twelve rows, seven of them dead; extend the filter to
-    /// every row and the bare machine offers one.
+    /// Red gate: drop the availability test from the filter and the bare machine
+    /// offers twelve rows, eleven of them dead; drop the `Origin::Builtin` test
+    /// and the row the reader wrote goes with them.
     #[test]
-    fn the_picker_offers_the_agents_it_can_start_and_every_shell_regardless() {
+    fn an_action_menu_offers_what_this_machine_can_start_and_the_readers_own_rows() {
         let offered = |programs: &ProfilePrograms| -> Vec<String> {
             table()
                 .offered_to_start(programs)
@@ -14145,12 +14198,12 @@ mod tests {
         };
         assert_eq!(
             offered(&bare()),
-            ["pwsh", "winps", "wsl", "gitbash", "cmd"],
-            "a machine with none of them offers the five shells and no agent"
+            ["winps"],
+            "a bare Windows box can start one row, so one row is what it is offered"
         );
         assert!(
-            !bare().is_available(index_of_id("gitbash")),
-            "and four of those five are greyed rather than gone — §7.27 stands"
+            page_lines(&bare(), fallback_profile(), true).len() > 1,
+            "and the eleven it dropped are still on the page that explains them"
         );
         assert_eq!(
             offered(&equipped()),
@@ -14162,17 +14215,15 @@ mod tests {
         );
 
         // Two agents installed the way they really install, and they appear in
-        // their own places rather than at the end of the list.
+        // their own places rather than at the end of the list — beside the one
+        // shell this machine has and not beside the four it has not.
         let two = ProfilePrograms::probe(
             &FakeMachine::bare_windows()
                 .with_var("PATH", r"C:\Users\dev\AppData\Roaming\npm")
                 .with_file(r"C:\Users\dev\AppData\Roaming\npm\claude.cmd")
                 .with_file(r"C:\Users\dev\AppData\Roaming\npm\codex.cmd"),
         );
-        assert_eq!(
-            offered(&two),
-            ["pwsh", "winps", "wsl", "gitbash", "cmd", "claude", "codex"],
-        );
+        assert_eq!(offered(&two), ["winps", "claude", "codex"]);
 
         // And a row of the reader's own that resolves to nothing is still on the
         // list, beside the shells and where their file put it.
@@ -14188,8 +14239,8 @@ mod tests {
                 .into_iter()
                 .map(|index| table.profiles()[index].id.as_str())
                 .collect::<Vec<_>>(),
-            ["mine", "pwsh", "winps", "wsl", "gitbash", "cmd"],
-            "the exception is this build's own agent rows and nothing else"
+            ["mine"],
+            "the carve-out is the reader's own rows and nothing else"
         );
     }
 
@@ -14562,12 +14613,20 @@ mod tests {
     /// is captioned `not installed`, which is a state without its reason — and an
     /// *available* profile row is showing everything it knows, so it says nothing
     /// rather than restating the label under the pointer.
+    ///
+    /// **Since 2026-09-06 the greyed case has no built-in row to happen on.**
+    /// The picker is one of the menus that lists only what this machine can
+    /// start, so a shipped row it cannot start is not on the list to be tipped;
+    /// the tip and the greying it explains survive for the rows the rule carves
+    /// out — the reader's own — which is why neither is deleted here. The claim
+    /// this pins on a bare box is therefore the *other* half of the sentence: a
+    /// picker with nothing greyed in it has nothing to say about a program.
     #[test]
     fn a_row_is_tipped_with_what_its_caption_left_out_and_nothing_else() {
         let scale = 1.0;
         let vault = [term(r"D:\Developer\folio-terminal\crates", None, 30)];
         // **Laid out on the machine it is tipped on**, which since 2026-08-29 is
-        // not a formality: the list a bare box gets is the five shells, so a
+        // not a formality: the list a bare box gets is what it can start, so a
         // menu laid out as `equipped` and tipped as `bare` would be a fixture
         // asking about rows that are not on the screen.
         let layout = layout(
@@ -14594,33 +14653,16 @@ mod tests {
             .collect();
         assert_eq!(
             profiles_tipped,
-            vec![
-                // PowerShell 7 is an install and this box has none of it; the
-                // 5.1 row beside it is part of Windows and says nothing.
-                (
-                    index_of_id("pwsh"),
-                    format!("{} — not found on this machine", powershell_seven())
-                ),
-                (
-                    index_of_id("wsl"),
-                    "WSL — not found on this machine".to_owned()
-                ),
-                (
-                    index_of_id("gitbash"),
-                    "Git Bash — not found on this machine".to_owned()
-                ),
-                (
-                    index_of_id("cmd"),
-                    "Command Prompt — not found on this machine".to_owned()
-                ),
-                // **And no agent row, on the machine that has none of them**
-                // (user ruling 2026-08-29). Seven of these sentences is what the
-                // ruling removed: an agent this window cannot start is not on
-                // this list at all, so it has no row to be tipped over. The
-                // Profiles page is where the seven are read.
-            ],
-            "every greyed row says why, in its own name, and the startable one \
-             says nothing"
+            Vec::new(),
+            "a bare box is offered only what it can start, and a startable row \
+             is showing everything it knows"
+        );
+        assert!(
+            layout
+                .profiles
+                .iter()
+                .all(|index| bare().is_available(*index)),
+            "which is the same sentence read off the list rather than the tips"
         );
 
         // The rectangles are the laid-out rows themselves — a tip registered
@@ -17361,6 +17403,7 @@ mod tests {
             false,
             &other_windows(),
             &rebound,
+            &equipped(),
             &mut fake_measure,
         );
         assert_eq!(
@@ -17398,6 +17441,7 @@ mod tests {
                 false,
                 &other_windows(),
                 &table,
+                &equipped(),
                 &mut fake_measure,
             )
         };
@@ -17433,6 +17477,13 @@ mod tests {
     }
 
     fn pane_menu(submenu_open: bool) -> PaneMenuLayout {
+        pane_menu_on(submenu_open, &equipped())
+    }
+
+    /// The same menu on a machine that is handed in, for the pins that are about
+    /// **which rows the child has** rather than about its shape (user ruling
+    /// 2026-09-06).
+    fn pane_menu_on(submenu_open: bool, programs: &ProfilePrograms) -> PaneMenuLayout {
         pane_menu_layout(
             [300.0, 120.0],
             (960.0, 600.0),
@@ -17445,6 +17496,7 @@ mod tests {
             false,
             &other_windows(),
             &chord_table(),
+            programs,
             &mut fake_measure,
         )
     }
@@ -17479,6 +17531,7 @@ mod tests {
             false,
             &other_windows(),
             &chord_table(),
+            &equipped(),
             &mut fake_measure,
         );
         assert_eq!(
@@ -17502,6 +17555,7 @@ mod tests {
             false,
             &other_windows(),
             &chord_table(),
+            &equipped(),
             &mut fake_measure,
         );
         assert_eq!(cornered.submenu_travel(), Some(Travel::Left));
@@ -17675,6 +17729,7 @@ mod tests {
             false,
             &windows,
             &chord_table(),
+            &equipped(),
             &mut fake_measure,
         );
         assert_eq!(layout.submenu_kind(), Some(PaneMenuRow::MoveToWindow));
@@ -17708,6 +17763,7 @@ mod tests {
             false,
             &[],
             &chord_table(),
+            &equipped(),
             &mut fake_measure,
         );
         assert!(
@@ -17760,6 +17816,7 @@ mod tests {
                 false,
                 windows,
                 &chord_table(),
+                &equipped(),
                 &mut fake_measure,
             )
         };
@@ -17895,6 +17952,7 @@ mod tests {
                 zoomed,
                 &[],
                 &chord_table(),
+                &equipped(),
                 &mut fake_measure,
             );
             let layer = one_layer(pane_menu_build(
@@ -18185,6 +18243,7 @@ mod tests {
             false,
             &[],
             &chord_table(),
+            &equipped(),
             &mut fake_measure,
         );
         assert!(
@@ -18355,6 +18414,7 @@ mod tests {
             false,
             &[],
             &chord_table(),
+            &equipped(),
             &mut fake_measure,
         );
         let parent = roomy.frame;
@@ -18384,6 +18444,7 @@ mod tests {
             false,
             &[],
             &chord_table(),
+            &equipped(),
             &mut fake_measure,
         );
         let parent = cramped.frame;
@@ -18424,6 +18485,7 @@ mod tests {
                 false,
                 &[],
                 &chord_table(),
+                &equipped(),
                 &mut fake_measure,
             );
             let parent = layout.frame;
@@ -18479,6 +18541,7 @@ mod tests {
             false,
             &[],
             &chord_table(),
+            &equipped(),
             &mut fake_measure,
         );
         let child = layout.submenu_frame().expect("an open submenu has a frame");
@@ -18524,6 +18587,7 @@ mod tests {
             false,
             &[],
             &chord_table(),
+            &equipped(),
             &mut fake_measure,
         );
         assert!(!alone.on_submenu(child[0] + 4.0, inside_y));
@@ -18553,6 +18617,7 @@ mod tests {
             false,
             &[],
             &chord_table(),
+            &equipped(),
             &mut fake_measure,
         );
         let parent = layout.frame;
@@ -18657,12 +18722,43 @@ mod tests {
         }
     }
 
-    /// PIN — a machine with no Git Bash greys that row rather than hiding it,
-    /// and the mark greys with the word.
+    /// PIN (user ruling 2026-09-06, from a photograph of `Split with ▸` with
+    /// five greyed agents in it) — **an action menu lists what this machine can
+    /// start and nothing else.**
+    ///
+    /// The two halves are one claim about the child being a list of buttons:
+    /// every row it draws is a row a press can spend, so there is no greyed ink
+    /// left in it at all. Drawn from the same machine the layout was measured
+    /// against, which is the other thing this pins — a child laid out for one
+    /// machine and painted from another would have rows nobody measured.
+    ///
+    /// MUTATION: put `offered()` back in `pane_submenu_layout` and a bare
+    /// Windows box draws eleven rows it cannot start, ten of them grey.
     #[test]
-    fn a_submenu_row_this_machine_cannot_start_is_drawn_and_not_offered() {
-        let layout = pane_menu(true);
-        let layers = pane_menu_build(&layout, None, Some(0), &bare(), &[], &mut fake_measure);
+    fn an_action_menu_lists_only_what_this_machine_can_start() {
+        let machine = bare();
+        let layout = pane_menu_on(true, &machine);
+        let child_rows = layout
+            .submenu
+            .as_ref()
+            .expect("the child is up")
+            .rows
+            .clone();
+        assert_eq!(
+            child_rows,
+            table().offered_to_start(&machine),
+            "the child is the startable list and not the whole table"
+        );
+        assert!(
+            child_rows.len() < count(),
+            "a bare Windows box cannot start every row this build ships"
+        );
+        assert!(
+            child_rows.iter().all(|index| machine.is_available(*index)),
+            "and every row it does draw is one a press can spend"
+        );
+
+        let layers = pane_menu_build(&layout, None, Some(0), &machine, &[], &mut fake_measure);
         let child = layers.last().expect("the child layer");
         assert_eq!(
             child
@@ -18670,12 +18766,119 @@ mod tests {
                 .iter()
                 .filter(|l| l.text != current_profile_hint_text())
                 .count(),
-            count(),
-            "no row is dropped — a missing row looks like a row nobody designed"
+            child_rows.len(),
+            "one word per row it offers"
         );
         assert!(
-            child.sprites.iter().any(|sprite| sprite.grayscale),
-            "and the ones this machine cannot start are greyed"
+            !child.sprites.iter().any(|sprite| sprite.grayscale),
+            "and no grey ink is left in a list whose whole job is to be pressed"
+        );
+    }
+
+    /// PIN (user ruling 2026-09-06) — **Settings > Profiles keeps every row and
+    /// says why each absent one is absent**, which is the one place the sentence
+    /// the menus stopped saying is still said.
+    ///
+    /// MUTATION: filter `page_lines` by availability and the reader loses the
+    /// only surface that could tell them installing `codex` would bring a row
+    /// back.
+    #[test]
+    fn the_profiles_page_keeps_every_row_and_names_what_is_missing() {
+        let machine = bare();
+        let lines = page_lines(&machine, 0, true);
+        assert_eq!(lines.len(), count(), "no row is dropped from the page");
+        let absent: Vec<&ProfileLine> = lines.iter().filter(|line| !line.available).collect();
+        assert!(
+            absent.len() >= AGENT_IDS.len(),
+            "a bare box is missing at least the seven agents"
+        );
+        for line in absent {
+            assert!(
+                line.command.contains(line.title) || line.is_agent,
+                "a shell row this window could not find names the shell it looked for"
+            );
+            assert!(
+                !line.command.is_empty(),
+                "and no absent row is left with nothing to read"
+            );
+            assert!(
+                line.capability.is_none(),
+                "an absent row spends its second line on the reason instead"
+            );
+        }
+    }
+
+    /// PIN (user ruling 2026-09-06) — **a machine with no agents leaves the
+    /// shells and no hole where the agents were.**
+    ///
+    /// The child has no sections and no rules, so "no empty段" is a claim about
+    /// arithmetic: the frame is its chrome plus one item height per row, and the
+    /// boxes run flush from the first to the last.
+    ///
+    /// MUTATION: reserve a band for the agent group and the last row hangs a row
+    /// height below the frame.
+    #[test]
+    fn a_machine_with_no_agents_leaves_the_shells_and_no_gap() {
+        let shells_only = ProfilePrograms::probe(
+            &FakeMachine::bare_windows()
+                .with_var("ProgramFiles", r"C:\Program Files")
+                .with_file(r"C:\Program Files\PowerShell\7\pwsh.exe")
+                .with_file(r"C:\WINDOWS\System32\wsl.exe")
+                .with_file(r"C:\WINDOWS\System32\cmd.exe")
+                .with_file(r"C:\Program Files\Git\bin\bash.exe"),
+        );
+        let layout = pane_menu_on(true, &shells_only);
+        let child = layout.submenu.as_ref().expect("the child is up");
+        assert_eq!(child.rows.len(), 5, "the five shells and not one agent");
+        assert!(
+            child
+                .rows
+                .iter()
+                .all(|index| agent_command(&table().profiles()[*index]).is_none()),
+            "and every row it kept is a shell"
+        );
+        let item_height = child.items[0][3] - child.items[0][1];
+        for pair in child.items.windows(2) {
+            assert!(
+                (pair[1][1] - pair[0][3]).abs() < 0.5,
+                "the rows run flush — a gap is a section nobody drew"
+            );
+        }
+        let chrome = child.items[0][1] - child.frame[1];
+        assert!(
+            ((child.frame[3] - child.frame[1]) - (2.0 * chrome + 5.0 * item_height)).abs() < 0.5,
+            "and the frame is its chrome plus five rows, with no band left over"
+        );
+    }
+
+    /// PIN (user ruling 2026-09-06) — **a program installed after the window
+    /// opened joins the menu on the next probe**, which is what makes hiding a
+    /// row honest rather than final.
+    ///
+    /// Written against the probe rather than against a window because that is
+    /// where the answer lives: `Runtime::adopt_profile_table` re-probes whenever
+    /// the table moves, and a fresh window probes on its first frame. The claim
+    /// here is the one both of those rest on — the same machine, asked twice
+    /// with a file added in between, gives a longer list the second time.
+    ///
+    /// MUTATION: cache the probe behind the table's revision and the second
+    /// answer is the first one, so an install never shows up.
+    #[test]
+    fn a_program_installed_since_the_last_probe_joins_the_menu_on_the_next_one() {
+        let gitbash = index_of_id("gitbash");
+        let before = ProfilePrograms::probe(&FakeMachine::bare_windows());
+        assert!(
+            !table().offered_to_start(&before).contains(&gitbash),
+            "no Git, no row"
+        );
+        let after = ProfilePrograms::probe(
+            &FakeMachine::bare_windows()
+                .with_var("ProgramFiles", r"C:\Program Files")
+                .with_file(r"C:\Program Files\Git\bin\bash.exe"),
+        );
+        assert!(
+            table().offered_to_start(&after).contains(&gitbash),
+            "and the row arrives with the install, on the next probe"
         );
     }
 
@@ -20284,6 +20487,7 @@ mod tests {
             1.0,
             &look,
             &chord_table(),
+            &equipped(),
             &mut fake_measure,
         );
         let frame = layout.frame;
@@ -20326,6 +20530,7 @@ mod tests {
             1.0,
             &look,
             &chord_table(),
+            &equipped(),
             &mut fake_measure,
         );
         let row = |wanted: TermMenuRow| {
@@ -20429,6 +20634,7 @@ mod tests {
             1.0,
             &look(true),
             &shortcuts,
+            &equipped(),
             &mut measure,
         );
         assert_eq!(layout.items.len(), 2);
@@ -20455,6 +20661,7 @@ mod tests {
             1.0,
             &look(false),
             &shortcuts,
+            &equipped(),
             &mut measure,
         );
         assert_eq!(
@@ -20561,6 +20768,7 @@ mod tests {
             1.0,
             &look,
             &chord_table(),
+            &equipped(),
             &mut fake_measure,
         );
         let entry = |wanted: TermMenuEntry| {
