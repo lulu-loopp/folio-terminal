@@ -906,6 +906,28 @@ impl SessionStatus {
     }
 }
 
+/// What the console host behind a session was told when this window cleared its screen.
+///
+/// A terminal on Windows does not own the screen its child is drawing on: the console host keeps
+/// the buffer and the pseudoconsole sends this window only the difference against what *it*
+/// believes is displayed. So a clear has two halves, and which of them happened decides how much
+/// this window is allowed to move — see
+/// [`DualPlaneSession::clear_screen_keeping_cursor_row_sequence`].
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum HostScreen {
+    /// The host cleared its own buffer the same way — or there is no host at all, which a pane
+    /// with no child and every session outside Windows is. Rows may move.
+    #[default]
+    Cleared,
+    /// There is a host and it could not be told. `ConptyClearPseudoConsole` is the packaged
+    /// pseudoconsole's call and the operating system's inbox one exports no clear at all, so a
+    /// window running against the inbox implementation has nobody to tell. The host's buffer still
+    /// holds the old screen and it addresses rows by their old numbers, so **nothing here may
+    /// move**: a row that moved is a row the next thing the host draws will land beside, which is
+    /// the 2026-09-05 report exactly.
+    Untold,
+}
+
 /// Per-session actor core. It is the serialized owner required by DESIGN.md §1.3 and composes
 /// terminal facts with lifecycle, transcript, detection, scheduling, and viewport policy.
 pub struct DualPlaneSession {
@@ -2643,19 +2665,40 @@ impl DualPlaneSession {
         result
     }
 
-    /// `Clear screen` (§7.1.6, §7.1.6l): **the rows above the cursor scroll out into the
-    /// transcript, the row the cursor is on stays and becomes the top row, and everything below it
-    /// is erased.**
+    /// `Clear screen` (§7.1.6, §7.1.6l): **the rows above the cursor go, the row the cursor is on
+    /// stays, and what this window is allowed to *move* depends on whether the console host was
+    /// told the same thing.**
     ///
     /// ED2 is not this. It clears the *whole* screen — including the row the shell is drawing its
     /// prompt on — and nothing is going to draw that prompt again: the shell was never told, and
     /// on Windows it could not act on it if it had been, because the console host owns the buffer
     /// this window mirrors and sends only the difference against what it believes is shown.
-    /// Keeping the cursor's row is what every terminal's clear-screen row does, and it is the half
-    /// of the operation this window performs; `PtySession::clear_host_buffer` is the other half,
-    /// and the two agree on where the kept row ends up (the top).
     ///
-    /// **Spelled in escapes, and each one is load-bearing.**
+    /// So the host is asked first, and its answer picks the shape (see [`HostScreen`]).
+    pub fn clear_screen_keeping_cursor_row(
+        &mut self,
+        host: HostScreen,
+    ) -> Result<(), SessionError> {
+        self.clear_screen_keeping_cursor_row_at(host, Instant::now())
+    }
+
+    /// [`Self::clear_screen_keeping_cursor_row`] with the clock supplied — `feed_at` to `feed`.
+    pub fn clear_screen_keeping_cursor_row_at(
+        &mut self,
+        host: HostScreen,
+        observed_at: Instant,
+    ) -> Result<(), SessionError> {
+        self.feed_at(
+            &self.clear_screen_keeping_cursor_row_sequence(host),
+            observed_at,
+        )
+    }
+
+    /// The escapes [`Self::clear_screen_keeping_cursor_row`] feeds, as a value, so a test can read
+    /// what this window says to itself rather than infer it from what changed.
+    ///
+    /// **[`HostScreen::Cleared`] — the rows above the cursor scroll away.** Each part is
+    /// load-bearing:
     ///
     /// * `ESC [ r` — the scroll region back to the whole screen. The only route that puts rows
     ///   into the transcript is an ordinary output scroll (`ScrollOutCause::Normal` with
@@ -2672,6 +2715,14 @@ impl DualPlaneSession {
     /// * `ESC [ 2 ; 1 H` `ESC [ J` — everything below the kept row, which is now the top row.
     /// * `ESC [ 1 ; <column> H` — the cursor back where it was, on the row it kept.
     ///
+    /// **[`HostScreen::Untold`] — nothing moves.** The host still believes the screen is laid out
+    /// the way it was and addresses its rows by their old numbers, so a row that moved here is a
+    /// row the next thing it draws will land beside. The screen is therefore cleared *around* the
+    /// cursor's row, in place: `ESC [ 1 J` from the end of the row above takes everything above,
+    /// `ESC [ J` from the row below takes everything under it, and the cursor ends where it
+    /// started. Nothing scrolls, so nothing reaches the transcript either — that is the price of
+    /// the row not moving, and it is paid only where there is no clear call to spend.
+    ///
     /// What is deliberately **not** here is a change to ED2 itself. `ESC [ H` `ESC [ 2 J` is also
     /// how a full-screen program repaints, byte for byte, and reading each repaint as a scroll
     /// would put another copy of the screen into history on every frame
@@ -2679,43 +2730,50 @@ impl DualPlaneSession {
     /// the two apart; what tells them apart is who asked, and only this window knows that.
     ///
     /// On the alternate screen there is no transcript behind the grid (§3.2's separate namespace)
-    /// and no prompt row to keep, so the plain clear is the honest answer there.
-    pub fn clear_screen_keeping_cursor_row(&mut self) -> Result<(), SessionError> {
-        self.clear_screen_keeping_cursor_row_at(Instant::now())
-    }
-
-    /// [`Self::clear_screen_keeping_cursor_row`] with the clock supplied — `feed_at` to `feed`.
-    pub fn clear_screen_keeping_cursor_row_at(
-        &mut self,
-        observed_at: Instant,
-    ) -> Result<(), SessionError> {
-        self.feed_at(
-            &self.clear_screen_keeping_cursor_row_sequence(),
-            observed_at,
-        )
-    }
-
-    /// The escapes [`Self::clear_screen_keeping_cursor_row`] feeds, as a value, so a test can read
-    /// what this window says to itself rather than infer it from what changed.
+    /// and no prompt row to keep, so the plain clear is the honest answer there, whichever the
+    /// host's answer was: a full-screen program repaints its own canvas with absolute addresses.
     #[must_use]
-    pub fn clear_screen_keeping_cursor_row_sequence(&self) -> Vec<u8> {
+    pub fn clear_screen_keeping_cursor_row_sequence(&self, host: HostScreen) -> Vec<u8> {
         let cursor = self.terminal.cursor();
         if self.terminal.modes().alternate_screen {
             return b"\x1b[2J\x1b[H".to_vec();
         }
-        let rows = self.terminal.dimensions().1.get();
+        let (columns, rows) = self.terminal.dimensions();
+        let (columns, rows) = (columns.get(), rows.get());
         let mut bytes = Vec::new();
-        // The scroll region back to the whole screen: an ordinary output scroll is the only thing
-        // that reaches the transcript, and a narrowed region has no such thing in it.
-        bytes.extend_from_slice(b"\x1b[r");
-        if cursor.row > 0 {
-            bytes.extend_from_slice(format!("\x1b[{rows};1H").as_bytes());
-            bytes.extend(std::iter::repeat_n(b'\n', cursor.row as usize));
+        match host {
+            HostScreen::Cleared => {
+                bytes.extend_from_slice(b"\x1b[r");
+                if cursor.row > 0 {
+                    bytes.extend_from_slice(format!("\x1b[{rows};1H").as_bytes());
+                    bytes.extend(std::iter::repeat_n(b'\n', cursor.row as usize));
+                }
+                if rows > 1 {
+                    bytes.extend_from_slice(b"\x1b[2;1H\x1b[J");
+                }
+                bytes.extend_from_slice(
+                    format!("\x1b[1;{}H", cursor.column.saturating_add(1)).as_bytes(),
+                );
+            }
+            HostScreen::Untold => {
+                if cursor.row > 0 {
+                    bytes.extend_from_slice(
+                        format!("\x1b[{};{columns}H\x1b[1J", cursor.row).as_bytes(),
+                    );
+                }
+                if cursor.row + 1 < rows {
+                    bytes.extend_from_slice(format!("\x1b[{};1H\x1b[J", cursor.row + 2).as_bytes());
+                }
+                bytes.extend_from_slice(
+                    format!(
+                        "\x1b[{};{}H",
+                        cursor.row.saturating_add(1),
+                        cursor.column.saturating_add(1)
+                    )
+                    .as_bytes(),
+                );
+            }
         }
-        if rows > 1 {
-            bytes.extend_from_slice(b"\x1b[2;1H\x1b[J");
-        }
-        bytes.extend_from_slice(format!("\x1b[1;{}H", cursor.column.saturating_add(1)).as_bytes());
         bytes
     }
 
@@ -18370,6 +18428,107 @@ mod tests {
         );
     }
 
+    /// PIN (2026-09-06, CI red on `windows-2025`) — **with no host to tell, a clear moves
+    /// nothing.**
+    ///
+    /// The other half of the operation is `ConptyClearPseudoConsole`, and it is the *packaged*
+    /// pseudoconsole's call: `kernel32` exports no clear at all. A window running against the
+    /// operating system's inbox implementation therefore has a second buffer out there, still laid
+    /// out the way it was, addressing its rows by their old numbers — and the moment this window
+    /// moves a row, the next thing that host draws lands beside it. That is the 2026-09-05 report
+    /// verbatim, and it is what came back from the GitHub runner as
+    /// `["BTCLR> half-written", "", "", "", "       half-written!", …]`: the kept row at the top
+    /// here, the keystroke five rows down, where the host still thought the prompt was.
+    ///
+    /// So the untold shape clears *around* the cursor's row and leaves every coordinate alone.
+    /// Nothing scrolls, so nothing reaches the transcript — that is the price of the row not
+    /// moving, and it is paid only where there is no clear call to spend.
+    ///
+    /// MUTATION: give `HostScreen::Untold` the told shape and the cursor moves to the top row
+    /// here, which is the desynchronisation this arm exists to refuse.
+    #[test]
+    fn with_no_host_to_tell_a_clear_screen_moves_no_row_and_no_coordinate() {
+        let mut session = DualPlaneSession::new(nz(16), nz(4));
+        session.feed(b"one\r\ntwo\r\nthree\r\nPS> ").unwrap();
+        let before = session.scrollback_line_count();
+
+        assert_eq!(
+            session.clear_screen_keeping_cursor_row_sequence(HostScreen::Untold),
+            b"\x1b[3;16H\x1b[1J\x1b[4;5H".to_vec(),
+            "everything above the kept row, and then the cursor exactly where it was"
+        );
+
+        session
+            .clear_screen_keeping_cursor_row(HostScreen::Untold)
+            .unwrap();
+
+        let rows = session.terminal().visible_text();
+        assert_eq!(
+            rows[3].trim_end(),
+            "PS>",
+            "the row the cursor is on has not moved: {rows:?}"
+        );
+        assert!(
+            rows[..3].iter().all(|row| row.trim_end().is_empty()),
+            "and everything above it is gone: {rows:?}"
+        );
+        let cursor = session.terminal().cursor();
+        assert_eq!(
+            (cursor.row, cursor.column),
+            (3, 4),
+            "the coordinates the host still believes in are the ones this window keeps"
+        );
+        assert_eq!(
+            session.scrollback_line_count(),
+            before,
+            "nothing scrolled, so nothing entered the transcript — the price of not moving"
+        );
+    }
+
+    /// PIN (2026-09-06) — **the untold shape also takes what is under the cursor's row.**
+    ///
+    /// A prompt is usually the last written row, so the rows below it are blank and the erase
+    /// below is invisible; a clear asked for while a program has drawn under the cursor must still
+    /// clear. Asserted separately because the sequence skips that part when the kept row is the
+    /// last one, and a shape that only ever ran on the common fixture would never show it.
+    #[test]
+    fn the_untold_shape_clears_under_the_kept_row_as_well() {
+        let mut session = DualPlaneSession::new(nz(16), nz(4));
+        session
+            .feed(b"one\r\ntwo\r\nthree\r\nfour\x1b[2;1H")
+            .unwrap();
+        let cursor = session.terminal().cursor();
+        assert_eq!((cursor.row, cursor.column), (1, 0));
+
+        session
+            .clear_screen_keeping_cursor_row(HostScreen::Untold)
+            .unwrap();
+
+        let rows = session.terminal().visible_text();
+        assert_eq!(rows[1].trim_end(), "two", "the kept row, where it was");
+        assert!(
+            rows[0].trim_end().is_empty() && rows[2..].iter().all(|row| row.trim_end().is_empty()),
+            "above and below both went: {rows:?}"
+        );
+        assert_eq!(
+            (
+                session.terminal().cursor().row,
+                session.terminal().cursor().column
+            ),
+            (1, 0)
+        );
+
+        // A kept row that is the last row has nothing under it, and says so.
+        let mut session = DualPlaneSession::new(nz(16), nz(4));
+        session.feed(b"one\r\ntwo\r\nthree\r\nPS> ").unwrap();
+        let sequence = session.clear_screen_keeping_cursor_row_sequence(HostScreen::Untold);
+        assert!(
+            !String::from_utf8_lossy(&sequence).contains("[5;1H"),
+            "there is no row past the last one to address: {:?}",
+            String::from_utf8_lossy(&sequence)
+        );
+    }
+
     /// PIN (clear-screen ruling 2026-09-05) — **`CSI S` moves the screen and tells the transcript
     /// nothing, so it cannot be what `Clear screen` scrolls with.**
     ///
@@ -18437,7 +18596,7 @@ mod tests {
         let mut session = DualPlaneSession::new(nz(16), nz(4));
         session.feed(b"one\r\ntwo\r\nthree\r\nPS> ").unwrap();
         assert_eq!(
-            session.clear_screen_keeping_cursor_row_sequence(),
+            session.clear_screen_keeping_cursor_row_sequence(HostScreen::Cleared),
             b"\x1b[r\x1b[4;1H\n\n\n\x1b[2;1H\x1b[J\x1b[1;5H".to_vec(),
             "region, park, one linefeed per row above the cursor, erase below, cursor back"
         );
@@ -18446,7 +18605,7 @@ mod tests {
         let mut session = DualPlaneSession::new(nz(16), nz(4));
         session.feed(b"PS> ").unwrap();
         assert_eq!(
-            session.clear_screen_keeping_cursor_row_sequence(),
+            session.clear_screen_keeping_cursor_row_sequence(HostScreen::Cleared),
             b"\x1b[r\x1b[2;1H\x1b[J\x1b[1;5H".to_vec()
         );
 
@@ -18454,7 +18613,7 @@ mod tests {
         let mut session = DualPlaneSession::new(nz(16), nz(4));
         session.feed(b"\x1b[?1049hdrawing").unwrap();
         assert_eq!(
-            session.clear_screen_keeping_cursor_row_sequence(),
+            session.clear_screen_keeping_cursor_row_sequence(HostScreen::Cleared),
             b"\x1b[2J\x1b[H".to_vec()
         );
     }
@@ -18481,7 +18640,9 @@ mod tests {
         let cursor = session.terminal().cursor();
         assert_eq!((cursor.row, cursor.column), (4, 4));
 
-        session.clear_screen_keeping_cursor_row().unwrap();
+        session
+            .clear_screen_keeping_cursor_row(HostScreen::Cleared)
+            .unwrap();
 
         let rows = session.terminal().visible_text();
         assert_eq!(
@@ -18522,7 +18683,9 @@ mod tests {
             "the fixture's prompt is on the last row, four columns in"
         );
 
-        session.clear_screen_keeping_cursor_row().unwrap();
+        session
+            .clear_screen_keeping_cursor_row(HostScreen::Cleared)
+            .unwrap();
 
         let rows = session.terminal().visible_text();
         assert_eq!(
@@ -18576,7 +18739,9 @@ mod tests {
             "the fixture recorded no command mark"
         );
 
-        session.clear_screen_keeping_cursor_row().unwrap();
+        session
+            .clear_screen_keeping_cursor_row(HostScreen::Cleared)
+            .unwrap();
         assert!(
             session.scrollback_line_count() > 0,
             "the cleared rows are in the transcript, so there is something to lose"
