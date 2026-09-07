@@ -4,7 +4,29 @@ All notable changes to Folio are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.2.2-preview (unreleased)
+## Unreleased
+
+### Changed
+
+- **The four picture-in-picture slots are four rows on the Shortcuts page, and
+  each one has a Record button.** They were one row saying `Not set` with
+  nothing on it to press, standing between `Summon the terminal`, which has a
+  Record button, and two greyed rows that are keys this window deliberately
+  leaves to readline — so there was no way to tell which of the two it was. It
+  was neither: those chords were always yours to choose, and the row had no way
+  to say so. `Summon picture in picture 1` to `4` are now a row each, with their
+  own chord, their own Record button and their own `↺`, and recording one works
+  the way it works on every other row: a chord another row already answers to is
+  refused, with the offer to take it, and `Restore all defaults` empties all
+  four again. The window a slot summons is still to come, which the row says on
+  the line under its name once there is a chord on it — in a short sentence
+  rather than the long one that stood there, because that line shares its row
+  with the caps, the button and the `↺`, and the long one was being cut off at
+  exactly the word that carried the fact. The nine tab ordinals keep their
+  single line, and `keybindings.json` is untouched — it named all four slots
+  before this change and names them now.
+
+## 0.2.2-preview — 2026-09-06
 
 Fixes and polish for 0.2.1-preview, and one card: a machine that has never run
 Folio is welcomed once and asked its boundary questions together, on a card that
@@ -58,24 +80,6 @@ too long for the pane, or has pushed the top of a block off the window.
   the vertical rail and the card column all read the same rule.
 
 ### Changed
-
-- **The four picture-in-picture slots are four rows on the Shortcuts page, and
-  each one has a Record button.** They were one row saying `Not set` with
-  nothing on it to press, standing between `Summon the terminal`, which has a
-  Record button, and two greyed rows that are keys this window deliberately
-  leaves to readline — so there was no way to tell which of the two it was. It
-  was neither: those chords were always yours to choose, and the row had no way
-  to say so. `Summon picture in picture 1` to `4` are now a row each, with their
-  own chord, their own Record button and their own `↺`, and recording one works
-  the way it works on every other row: a chord another row already answers to is
-  refused, with the offer to take it, and `Restore all defaults` empties all
-  four again. The window a slot summons is still to come, which the row says on
-  the line under its name once there is a chord on it — in a short sentence
-  rather than the long one that stood there, because that line shares its row
-  with the caps, the button and the `↺`, and the long one was being cut off at
-  exactly the word that carried the fact. The nine tab ordinals keep their
-  single line, and `keybindings.json` is untouched — it named all four slots
-  before this change and names them now.
 
 - **A menu that starts a shell now lists only the profiles this machine can
   start.** `Split with`, on a pane head and in the terminal menu alike, drew
