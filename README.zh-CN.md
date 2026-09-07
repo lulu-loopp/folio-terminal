@@ -2,232 +2,233 @@
   <source media="(prefers-color-scheme: dark)"
           srcset="assets/readme/hero-dark.svg">
   <img src="assets/readme/hero-light.svg" width="100%"
-       alt="Folio——可将数学公式排版的 Windows 终端，同时指示哪个 agent 正在等待。名称旁边有一个终端窗格：一条命令将文件内容打印至输出，其中独立成行的公式——e 的负 x 平方在全实轴上的积分等于根号 π——在输出中按其原位置排版，位于下一个提示符上方。">
+       alt="Folio — 一个能排版公式、标出哪个 agent 在等你的 Windows 终端。名称旁边的终端窗格运行了一条打印文件的命令，文件中的展示公式——e 的负 x 平方在整条实数轴上的积分等于根号 π——排版在输出中，位于下一行提示符的上方。">
 </picture>
 
-Folio 是一款 Windows 终端：命令输出的公式在其打印位置排版，命令提及的文件在提示符旁预览，等待用户响应的 agent 有明确标示。
+Folio 是一个 Windows 终端：命令输出的公式直接排版在原处，文件在提示符旁边预览，agent 在等你时会标在标签页上。
 
-[English](README.md) · [快捷键](docs/shortcuts.md) · [安全](SECURITY.md) · [更新记录](CHANGELOG.md)
+[English](README.md) · [快捷键](docs/shortcuts.md) ·
+[安全](SECURITY.md) · [更新记录](CHANGELOG.md)
 
-> **预览版。** 0.2.2 为预览版本，已由 Weiyi Shi 签名，详见下方 [下载](#下载)。
+> **预览版。** 0.2.2 是预览版本，由 Weiyi Shi 签名，详见下方[下载](#下载)。
 
 ---
 
 ## 下载
 
-从 [releases 页面](https://github.com/lulu-loopp/folio-terminal/releases) 下载 [`folio-0.2.2-windows-x64.zip`](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.2.2-preview/folio-0.2.2-windows-x64.zip)，解压到存放程序的目录，然后运行 `folio.exe`。无安装程序；运行之前，解压目录之外不会写入任何内容。`SHA256SUMS.txt` 为所下载文件的哈希值。需 **Windows 10 1809 或更高版本，或 Windows 11，64 位**。
+从[发布页](https://github.com/lulu-loopp/folio-terminal/releases)下载 [`folio-0.2.2-windows-x64.zip`](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.2.2-preview/folio-0.2.2-windows-x64.zip)，解压到你放程序的地方，运行 `folio.exe`。没有安装程序，运行前不会在解压目录外写任何文件。`SHA256SUMS.txt` 是下载文件的校验和。需要 **Windows 10 1809 或更新版本，或 Windows 11，64 位**。
 
-`folio.exe` 和 `folio.msix` 带有数字签名，签名者为 **Weiyi Shi**，证书来自 Microsoft 的 Artifact Signing 服务。首次运行 `folio.exe` 时，如果 Windows 显示「Windows 已保护你的电脑」对话框，点击「更多信息」，然后点击「仍要运行」；对话框中显示的发布者为 **Weiyi Shi**。
+`folio.exe` 和 `folio.msix` 由 **Weiyi Shi** 签名，证书来自 Microsoft Artifact Signing 服务。首次运行时 Windows 可能弹出**「Windows 已保护你的电脑」**：点击**「更多信息」**，再点**「仍要运行」**，显示的发布者是 **Weiyi Shi**。
 
-压缩包内为同一目录下的九个文件，它们须放在一起：`folio.exe`，以及缺之则无法启动 shell 的 `conpty.dll` 与 `OpenConsole.exe`；`folio.msix`——资源管理器菜单行的第一页选项所登记的那个几 KB 的包，它指向自身被解压到的目录；供 VS Code 使用的 `folio-here.cmd`；再加上两份许可、第三方声明与商标说明。
+压缩包内是一个文件夹，共九个文件，缺一不可：`folio.exe`；`conpty.dll` 和 `OpenConsole.exe`，缺少它们 shell 无法启动；`folio.msix`，几 KB 大小的包，用于在右键菜单第一页注册入口，包中记录了解压目录的路径；`folio-here.cmd`，供 VS Code 使用；以及两份许可证、第三方声明和商标说明。
 
-网页预览需 **WebView2 运行时**。Windows 11 自带该运行时；Windows 10 通常亦已安装，若未安装，可从此处获取 [Evergreen 运行时](https://developer.microsoft.com/microsoft-edge/webview2/)。缺少该运行时，除网页预览外的所有功能均正常，预览窗格会说明缺失项。
+网页预览需要 **WebView2 Runtime**。Windows 11 自带；Windows 10 通常也有，如果没有，可以从[这里](https://developer.microsoft.com/microsoft-edge/webview2/)安装 Evergreen Runtime。缺少它时，除网页预览外一切正常，预览窗格会提示缺少什么。
 
 ## 第一次运行
 
-从未运行过 Folio 的机器只会收到一张卡，仅此一次。卡标题为**欢迎使用 Folio**，并询问六个问题，答案会分别写入 `%APPDATA%\Folio` 之外的文件，一行一项：是否在有新版本时提醒（这是唯一一项默认打开的）；是否在右键菜单中用 Folio 打开文件夹；是否启用 PowerShell 整合；以及本机实际装有的 Claude Code、Codex、Copilot CLI 各一行，开着的话，它们等待（Codex 是一回合结束）时其所在标签页会高亮。主题、字体、字号、语言或布局均不涉及——这些设置只需一次点击即可更改，且在设置得不对的那段时间里也不产生任何代价。
+一台从未运行过 Folio 的机器会看到一张卡片，仅此一次。卡片标题是**欢迎使用 Folio**，列出六个问题，每个问题一行，回答它们会在 `%APPDATA%\Folio` 之外写文件：收到新版本通知（唯一默认开启的一行）；在右键菜单中添加「在 Folio 中打开」；PowerShell 整合；以及为本机实际安装了的 Claude Code、Codex、Copilot CLI 各亮一个标签页提示。主题、字体、窗口大小、语言、布局都不在卡片上——它们随时可以改，改之前也没有代价。
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/first-run-dark.png">
   <img src="docs/screenshots/first-run-light.png" width="100%"
-       alt="卡位于一个刚启动的窗口之上：Folio 标志旁为欢迎使用 Folio，下方六行各一项，每行右侧各有一个开关。有 Folio 新版本时提醒为开启；在右键菜单中用 Folio 打开文件夹与 PowerShell 整合让你在已运行命令间跳转为关闭；细分隔线下方依次为 Claude Code 等待时标签页高亮、Codex 回合结束时标签页高亮、Copilot CLI 等待时标签页高亮，三项均为关闭。底部有一行浅色文字：所有选项都可在设置中更改，其后为暂不与完成。卡后方为一个标签页与一个提示符。">
+       alt="刚启动的窗口上方覆盖着一张卡片：Folio 图标旁写着「欢迎使用 Folio」，下面是六行，每行右侧有一个开关。「有新版本时通知你」默认开启；「在右键菜单中添加打开方式」和「PowerShell 整合」默认关闭；分隔线下方是三行 agent 提醒——Claude Code、Codex、Copilot CLI——全部关闭。底部有一行浅色文字「卡片上的每一行也是设置中的一行」，然后是「暂不」和「完成」两个按钮。卡片后面是一个标签页和一个提示符。">
 </picture>
 
-**将指针悬停在某一项上，会显示该项的说明**——包括该开关会写入用户的哪个文件，以及写入前会先将原文件复制为带日期的备份。卡上别的东西不必自我解释，因为它们不会往任何没预先说明的位置写入。
+**把指针停在某一行上会看到具体说明**——包括这个开关会写你的哪个文件，以及写之前会先把原文件备份为带日期的副本。卡片上没有其他说明文字，因为其他行不会写你未被告知的地方。
 
-**卡上的所有选项都可在设置中更改**，因此卡上的任何决定都不是最后一次机会。**完成**应用当前开启的选项；**暂不**与 `Esc` 关闭卡并保留出厂值——更新检查开启，其余关闭——且不更改任何设置。无论选哪种方式，卡都不会再次出现，而其后的 shell 一直在运行。如果用户在此版本之前已使用过 Folio，则不会看到此卡：用户的 `settings.json` 已表明这一点。
+**卡片上的每一行在设置中都有对应的行**，所以卡片上没有「错过就没有了」的选项。**完成**应用已开启的行；**暂不**和 `Esc` 以出厂值关闭卡片——更新检查开启，其余关闭——不改变任何东西。无论哪种方式，卡片都不会再出现，卡片后面的 shell 一直在运行。如果你在此版本之前就在用 Folio，不会看到这张卡片：你的 `settings.json` 已经记录了设置。
 
-第一个标签页会打开机器上实际存在的第一个 shell。五条内置配置按顺序查找——PowerShell 7、Windows PowerShell、WSL、Git Bash、命令提示符——未安装相应程序的配置不会出现在启动 shell 的菜单中；该配置仍保留在设置中的配置文件页，呈灰色并标明所查找的程序名称。七条 agent 配置以同样方式在 Windows PATH 中查找，卡上 agent 相关选项使用的也是同一查找逻辑。
+第一个标签页打开的是本机实际存在的第一个 shell。出厂带五个配置：PowerShell 7、Windows PowerShell、WSL、Git Bash、命令提示符，按此顺序查找。未安装的不会出现在启动 shell 的菜单里；它留在设置的配置页中，显示为灰色，并注明查找的程序路径。七个 agent 配置同样按 Windows PATH 查找，和卡片上 agent 行的查找方式相同。
 
-PowerShell 整合会向 PowerShell 自行命名的 `$PROFILE` 文件添加一行——`. "$env:APPDATA\Folio\shell-integration\folio.ps1"`——添加前先将原文件复制为同目录下带日期的备份；删除该行即可撤销。该文件的位置由 shell 决定，因此若在回答卡问题时该选项处于开启状态，则下次启动的 PowerShell 会加载该行，设置 > 终端会一直显示此状态直到加载完成。若卡上未询问此选项，则首次有 PowerShell 窗格输出内容时，提示条会提供相同选项：**加进 `$PROFILE`** 执行添加，**不再提示**结束询问，关闭提示条则不做出任何决定，下次启动 PowerShell 时会再次询问。命令标记与行内 `$…$` 公式依赖该整合运行。Git Bash 与 WSL 均无需此整合，也不会在磁盘上留下任何内容。
+PowerShell 整合会在 `$PROFILE` 中添加一行——`. "$env:APPDATA\Folio\shell-integration\folio.ps1"`——添加前会将 `$PROFILE` 原文件备份为带日期的副本；删除这一行即可还原。`$PROFILE` 的位置由 PowerShell 自身决定，所以卡片上留着开启的行会在下一次启动 PowerShell 时生效，在此之前设置 > 终端会提示尚未生效。如果你没有在卡片上被问到，第一次在 PowerShell 窗格中输出内容时会出现一条提示条：**添加到 `$PROFILE`** 执行操作，**不再提示**关闭询问，直接关掉提示条不做任何决定，下次打开 PowerShell 时会再问一次。命令标记和行内 `$…$` 公式依赖这个整合。Git Bash 和 WSL 不需要它，也不会在磁盘上留下任何文件。
 
-设置的 Agent 页上的三行**默认不安装任何内容**，它们并非恰好关闭的默认项：每行都会读取对应工具自身的配置文件并报告其中内容。在新机器上这三个文件均不存在，因此三行均显示为关闭。
+设置中 Agent 页的三行**默认不安装任何东西**，也不是「碰巧关了的默认值」：每一行读取对应工具自身的配置文件，显示其中的内容。新机器上三个文件都不存在，所以三行都显示关闭。
 
 ---
 
 ## 主要功能
 
-### 命令输出中的 LaTeX 排版
+### 终端中的 LaTeX 排版
 
-命令输出的 LaTeX 在其打印位置完成排版。
+命令输出的 LaTeX 直接排版在打印的位置。
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/terminal-math-dark.png">
   <img src="docs/screenshots/terminal-math-light.png" width="100%"
-       alt="一个终端窗格，其中一条命令的输出在其打印位置完成排版：若干段文字内嵌有短行内公式，上、中、下位置各有一条独立成行的公式——高斯归一化积分、傅里叶变换对，以及指数函数的级数。">
+       alt="一个终端窗格，显示一条命令的排版输出：几段带有行内公式的文字，以及三个独占一行的展示公式——高斯归一化积分、傅里叶变换对和指数函数的级数展开。">
 </picture>
 
-- 命令输出中的 `$…$` 与 `$$…$$` 在对应打印行内完成排版。
-- 预览窗格除上述两种写法外，还支持 `\(…\)`、`\[…\]` 及不带包裹的 amsmath 环境。
-- 两处共用同一排版引擎：LaTeX 经 MiTeX 转换至 Typst；无法排版的内容按其打印原样显示。
-- 行内 `$…$` 依赖 PowerShell 整合与 shell 变量进行区分；未安装整合时，行内公式保持源码原样，`$$…$$` 块仍照常排版。
+- 命令输出中的 `$…$` 和 `$$…$$` 就地排版在命令打印它们的那一行。
+- 预览窗格除了这两种，还支持 `\(…\)`、`\[…\]` 和裸 `amsmath` 环境。
+- 两个场景共用一个排版引擎——LaTeX 经 MiTeX 送入 Typst。无法排版的内容按原样显示。
+- 行内 `$…$` 需要下面的 PowerShell 整合来区分公式和 shell 变量。没有整合时，行内公式保留为源码，`$$…$$` 块仍然排版。
 
-### agent 的提醒与配置
+### 为 agent 而设计
 
-等待响应的 agent 在其标签页上标记，无需逐个查看标签页。
+等你回复的 agent 会标在它的标签页上，不需要切过去查看。
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/settings-agents-dark.png">
   <img src="docs/screenshots/settings-agents-light.png" width="100%"
-       alt="设置的 Agent 页：Claude Code、Codex 与 GitHub Copilot CLI 各一行，每行以一句话说明其开关向哪个文件写入通知 hook，三行均处于关闭状态；第四行为回合结束提醒。">
+       alt="设置中的 Agent 页面：Claude Code、Codex 和 GitHub Copilot CLI 各一行，每行说明其开关会在哪个文件中写入通知钩子，三个都是关闭状态；末尾还有一行关于回合结束通知的设置。">
 </picture>
 
-- 等待响应的 agent 在其标签页显示一个圆点；焦点位于其他程序时，任务栏闪烁；窗口最小化或位于其他桌面时，发出 Windows 通知。
-- 一次请求最多中断一次；圆点仅在用户于对应窗格内回复或该程序撤回请求后清除。`Ctrl+Shift+A` 可跳转至等待时间最长的一项。
-- 设置的 Agent 页中，Claude Code、Codex 与 GitHub Copilot CLI 各有一行开关：开启时向对应工具自身的配置文件写入一个通知 hook，关闭时将其撤回。默认不安装任何内容。
-- 七条配置可直接启动 agent：Claude Code、Codex、Copilot CLI、Kimi Code、pi、Hermes、OpenCode，均在 Windows PATH 中查找；安装于 WSL 内的 agent 从 WSL 配置启动。任何向终端写入 `OSC 1337;RequestAttention=yes` 的程序，无需安装任何内容，Folio 也能收到。
+- 等待中的 agent 在标签页上亮一个点；如果另一个程序在前台，任务栏会闪烁；如果窗口最小化或在其他桌面上，会弹出 Windows 通知。
+- 一次请求最多打断你一次。你在那个窗格中回复或程序撤回请求后，提示点消失。`Ctrl+Shift+A` 跳到等待最久的 agent。
+- Claude Code、Codex 和 GitHub Copilot CLI 各有一个开关，位于设置的 Agent 页。开关写入的是对应工具自身配置文件中的一个通知钩子，关闭时移除。默认不安装任何东西。
+- 七个配置可以启动 agent——Claude Code、Codex、Copilot CLI、Kimi Code、pi、Hermes、OpenCode——通过 Windows PATH 查找；装在 WSL 里的从 WSL 配置启动。任何写 `OSC 1337;RequestAttention=yes` 的程序无需安装任何钩子即可被识别。
 
-### 文件、PDF、视频与网页的预览
+### 提示符旁边的预览：文件、PDF、视频、网页
 
-文件内容可在提示符旁直接阅读，无需打开其他应用程序。
+文件的内容可以在提示符旁边直接查看，不需要打开其他应用。
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/preview-pdf-dark.png">
   <img src="docs/screenshots/preview-pdf-light.png" width="100%"
-       alt="指针悬停于文件列中的一个文件名上，下方弹出卡片，显示该 PDF 的第一页，并标注页数与大小；滚轮可在卡片内逐页翻阅。">
+       alt="指针停在文件列中的一个文件名上，下方弹出一张卡片，显示 PDF 的第一页，以及页数和文件大小。滚轮可以翻页。">
 </picture>
 
-- 指针悬停于文件列中的文件名上时，弹出卡片：PDF 可逐页翻看，视频可播放，文本显示开头数行，图片显示图片本身。
-- 文件在提示符旁的预览窗格中打开：markdown 完成排版，PDF 逐页显示，视频可播放，网页带有地址栏与后退功能。
-- 终端输出的路径可单击打开至预览窗格；按住 `Ctrl` 并单击交由系统默认程序处理。未作标记的裸路径在确认文件存在后亦可识别。
-- 网页地址遵循相同规则：单击在预览窗格中打开，`Ctrl`+单击交予浏览器处理。
-- 窗口中同时可容纳的页面数与预览窗格数相同。第二个页面会在新窗格中打开，而不会让第一个窗格跳转到新地址，因此可将一个页面锁定，再在旁侧打开另一个页面；拖放到某个窗格上的页面会在该窗格中打开。
+- 指针停在文件列中的文件名上会弹出一张卡片：PDF 逐页显示，视频直接播放，文本显示前几行，图片直接显示。
+- 预览窗格在提示符旁边打开文件——Markdown 排版显示，PDF 逐页浏览，视频播放，网页带地址栏和返回按钮。
+- 终端输出的路径点击后在预览窗格中打开，`Ctrl`+点击交给系统默认应用。没有标记的裸路径也能识别，只要文件确认存在。
+- 网址同理：点击在预览窗格中打开，`Ctrl`+点击交给浏览器。
+- 一个窗口可以打开和预览窗格一样多的页面。第二个页面会在新的窗格中打开，而不是替换第一个，所以可以锁住一个页面同时在旁边打开另一个；把页面拖到某个窗格上，它就在那个窗格中打开。
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="assets/readme/surfaces-dark.png">
   <img src="assets/readme/surfaces-light.png" width="100%"
-       alt="另外三种界面形态：以卡片排布的窗口、在预览窗格中完成排版的 markdown 文档，以及带面包屑式地址栏的网页预览窗格。">
+       alt="另外三个界面：以卡片形式排列的窗口、预览窗格中排版的 Markdown 文档、预览窗格中的网页（上方有面包屑地址栏）。">
 </picture>
 
-### 标签页、窗格与窗口的排布
+### 窗格、标签页和窗口的移动
 
-布局可随时调整，会话不中断，所有会话均可同时查看。
+布局可以随时调整，里面的会话继续运行，所有内容可以同时看到。
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/tab-into-pane-dark.gif">
   <img src="docs/screenshots/tab-into-pane-light.gif" width="100%"
-       alt="按住标签并向下拖出标签条，窗口右半出现落点预览；松手后该标签的 shell 成为右侧窗格，会话保持运行。随后按住新窗格的标题条拖向下缘，左右布局变为上下两条全宽窗格。">
+       alt="一个标签页被按住并从标签栏向下拖出；在窗口右半部分出现落点预览，松开后标签页的 shell 变成右侧窗格，继续运行。然后把新窗格的标题拖到底边，并排布局变成上下两栏。">
 </picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/cards-dark.png">
   <img src="docs/screenshots/cards-light.png" width="100%"
-       alt="标签条已变为一列卡片。该卡片代表一个包含八个窗格的标签页，八个窗格均按原布局缩绘于卡片内；按住 Alt 并滚动滚轮，可逐行滚动卡片内的画面。">
+       alt="标签栏变成了一列卡片。这张卡片代表一个包含八个窗格的标签页，以缩略图形式画出了全部八个；按住 Alt 滚动鼠标滚轮可以逐行滚动卡片内的画面。">
 </picture>
 
-- `Alt+Shift+-` 横向分屏，`Alt+Shift+=` 纵向分屏。标签页或单个窗格可拖出并独立成窗，未触及的窗格宽度保持不变。
-- 拖放到两个标签页接缝处的窗格会成为*介于两者之间*的标签页：标签页列表让出一个空位，窗格以占位形式站入其中，松手后即落在该位置。直接拖放到某个标签页上则会并入该标签页的布局。横排标签条、竖排标签栏与卡片列均以相同方式识别接缝。
-- `Ctrl+Shift+Z` 将标签条切换为一列卡片，一张卡片对应一个标签页，卡片内按该标签页自身的布局绘出全部窗格。
-- `Ctrl+Shift+G` 将文件列切换为 git 面板：显示分支、工作区、暂存与未暂存文件、提交图；选中文件后，其差异显示于预览窗格。
-- `Ctrl+Shift+↑` 与 `Ctrl+Shift+↓` 可在历史输出的命令之间跳转，执行失败的命令标记为失败。
-- 文件列上方的文件夹按钮列出各 shell 所在的目录，其后是最近指向过的五个文件夹，每个标记 `recent`。
+- `Alt+Shift+-` 横向分割窗格，`Alt+Shift+=` 纵向分割。标签页或单个窗格可以拖出成为独立窗口，未动的窗格保持原有宽度。
+- 窗格拖到两个标签页之间的接缝处会变成一个新标签页，插在它们中间：列表打开一个空位，窗格站在那里，松手时就在那里。拖到标签页本身则加入该标签页的布局。横向标签栏、纵向标签栏和卡片列都以相同方式识别接缝。
+- `Ctrl+Shift+Z` 把标签栏切换为卡片列，每个标签页一张卡片，卡片上按实际布局绘制该标签页的窗格。
+- `Ctrl+Shift+G` 把文件列切换为 Git 面板：分支、工作区、已暂存和未暂存的文件、提交图，以及选中文件的 diff 显示在预览窗格中。
+- `Ctrl+Shift+↑` 和 `Ctrl+Shift+↓` 在滚动历史中按命令跳转，执行失败的命令会有失败标记。
+- 文件列上方的文件夹按钮列出各 shell 当前所在的目录，然后是最近五个曾打开过的目录，各标注 `recent`。
 
-### 快捷键呼出的终端
+### 快捷终端
 
-一个快捷键将终端呼出至当前画面之上，再按一次将其收起。
+一个按键把终端拉到屏幕顶部，同一个按键把它收回去。
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/quake-dark.png">
   <img src="docs/screenshots/quake-light.png" width="100%"
-       alt="终端窗口自屏幕顶部下拉、略低于上沿并居中，覆盖在一扇显示某个小项目文件的资源管理器窗口之上。该终端只有一个标签页、一个齿轮与一个关闭按钮，其 shell 已打印四条提交记录与一份目录列表，下方是空提示符。">
+       alt="一个终端窗口悬挂在屏幕顶部，略低于屏幕边缘，居中，覆盖在资源管理器窗口上方。终端有一个标签页、一个齿轮和一个关闭按钮，shell 已打印了四条 commit 和一个目录列表，下方是空的提示符。">
 </picture>
 
-- ``Win+` `` 将终端下拉至指针所在显示器的顶部，覆盖其下原有的画面；再按一次收起窗口，键盘交还给它覆盖前的程序。
-- 它就是同一个 Folio：标签页、窗格、文件列、预览与全部快捷键均在，两次呼出之间 shell 与历史输出保持不变。
-- 用户手动移动或调整后的矩形按显示器分别记录，下次在该显示器上呼出时落在上次的位置。
-- 它与 Folio 同生同死：没有独立图标，键后也不留驻留进程；关闭最后一扇可见窗口即结束本次运行。
-- **设置 > 快捷终端** 中可设置呼出键、新标签页使用的配置、窗口高度与宽度、距屏幕上沿的间距、失去键盘焦点时是否收起，以及每次运行首次呼出时执行的命令。
-- 下次启动时，钉住的标签页可将上次运行的命令填回提示符——只填入，不执行。
+- ``Win+` `` 在指针所在屏幕的顶部拉出一个终端，覆盖在当前内容上方。再按一次收起窗口，键盘焦点回到被覆盖的程序。
+- 它就是完整的 Folio——标签页、窗格、文件列、预览、所有快捷键——并且在两次召唤之间保留 shell 和滚动历史。
+- 手动移动或调整大小后，位置会按显示器记住，下次在该屏幕上召唤时出现在上次放置的位置。
+- 它与 Folio 共存亡：没有独立的图标，按键背后没有后台进程。关掉最后一个可见窗口就结束整个程序。
+- **设置 > 快捷终端**可以调整按键、新标签页的配置、高度、宽度、距屏幕顶部的间距、失去焦点时是否自动隐藏，以及每次启动首次召唤时执行的命令。
+- 下次启动时，固定标签页的上一条命令可以恢复到提示符处——只是填入，不会执行。
 
-### 一处搜索全部内容
+### 搜索面板
 
-一个面板同时回答五个问题，回车直达目标。
+一个输入框同时回答五个问题，`Enter` 直达目标。
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/palette-dark.png">
   <img src="docs/screenshots/palette-light.png" width="100%"
-       alt="面板浮于窗口上方，输入框中已键入查询词，结果分列于互不混排的五个标题之下：一个动作、一个窗格、本窗运行过的一条命令、一个文件、一个设置项。首行处于选中状态，各行中匹配到的字母均有标记。">
+       alt="窗口顶部浮着一个搜索框，输入了一个查询词，下方的结果分为五个互不混合的类别：一个操作、一个窗格、一条已运行的命令、一个文件和一项设置。第一行高亮，每行中匹配的字母有标记。">
 </picture>
 
-- `Ctrl+Shift+P` 在窗口上方弹出面板，分五段且互不混排：Folio 可执行的动作、本窗已打开的窗格与标签页、本窗运行过的命令、文件列所在目录下的文件，以及设置项。
-- 输入内容同时收窄五段，方向键在其中移动。回车落在窗格上即切至该窗格，落在文件上即在预览窗格中打开，落在设置项上即打开设置并定位到该行，落在动作上即执行该动作。
-- 命令仍在运行时，Folio 在其所在窗格周围画出一圈提示，而非滚动到一条已经翻过去的行。
-- 文件一段取自文件列所在目录的索引，该索引在窗口线程之外建立，目录层级较深时面板不必等待。
+- `Ctrl+Shift+P` 在窗口顶部弹出搜索面板，分五个区域且互不混合：Folio 的操作、当前窗口的窗格和标签页、运行过的命令、文件列所在目录下的文件、设置项。
+- 输入时五个区域同时筛选，方向键在结果间移动。`Enter` 选中窗格时跳到该窗格，选中文件时在预览窗格中打开，选中设置时打开设置并定位到该行，选中操作时执行该操作。
+- 正在运行的命令用窗格外框的圆环指示其所在位置，而不是滚动到一个可能已经滚过去的行。
+- 文件列表来自对文件列所在目录的索引，索引在窗口线程之外构建，深目录树不会让搜索框卡住。
 
-### 与 Windows 的集成
+### Windows 集成
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/main-window-dark.png">
   <img src="docs/screenshots/main-window-light.png" width="100%"
-       alt="窗口默认外观：左侧为文件列，中间两个终端窗格并排，右侧预览窗格中打开一份 markdown 文档，均采用默认字体与默认配色。">
+       alt="默认字体和配色方案下的窗口：左侧是文件列，中间是两个并排的终端窗格，右侧的预览窗格中打开了一篇 Markdown 文档。">
 </picture>
 
-- **设置 > General > 资源管理器菜单** 决定 Folio 在资源管理器右键菜单中的位置，有三个答案。「显示更多选项」写入 `HKEY_CURRENT_USER\Software\Classes` 下的两个注册表项，菜单项写作「在 Folio 中打开」，在 Windows 11 上位于「显示更多选项」之后，在 Windows 10 上位于唯一的那个菜单中。「第一页」保留该菜单项，并同时将压缩包内与 `folio.exe` 同目录的 `folio.msix` 注册到当前账户，从而使菜单项出现在 Windows 11 首先打开的第一页上：无需管理员权限，不写入账户外任何内容，将行移回上一档即可撤销。在 Windows 10 或 `folio.msix` 不在 `folio.exe` 旁时，该选项变灰并在行下显示原因。
-- Windows PowerShell 5.1 自带 PSReadLine 2.0.0，该版本在窗口改变大小后会错放输入行。Folio 内置一份已修补的 2.4.6 版本，用户可按需将其安装至模块目录。当机器的执行策略仍为出厂默认的 `Restricted` 时，开关会说明原因，并提供 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` 命令。
+- **设置 > 通用 > 资源管理器右键菜单**决定 Folio 在资源管理器右键菜单中的位置，有三个选项。*显示更多选项下*在 `HKEY_CURRENT_USER\Software\Classes` 下写入两个注册表项；菜单项显示「Open Folio here」，这也是 Windows 10 唯一的入口。*第一页*保留该入口，同时在 Windows 11 右键直接打开的第一页上添加「Open in Folio」，不需要点「显示更多选项」。第一页只接受已签名的包，所以这个选项会为当前账户注册 `folio.msix`——压缩包里 `folio.exe` 旁边的那个文件——不需要提权，不在账户外写任何东西，切回去就移除。在 Windows 10 上和 `folio.msix` 不在 `folio.exe` 旁边时，这个选项显示为灰色，原因写在行下方。
+- Windows PowerShell 5.1 自带的 PSReadLine 2.0.0 在窗口调整大小后输入行会错位。Folio 附带修正版 2.4.6，按需安装到你的模块路径。如果执行策略还是出厂的 `Restricted`，开关会提示你，并给出解除限制的 `Set-ExecutionPolicy` 命令。
 
-### 与 Visual Studio Code 的配合
+### Visual Studio Code
 
-压缩包内 `folio.exe` 旁附带 `folio-here.cmd`，内容为一行：
+压缩包里 `folio.exe` 旁边有一个 `folio-here.cmd`，只有一行：
 
 ```bat
 @"%~dp0folio.exe" --cwd "%CD%"
 ```
 
-在 VS Code 的设置界面或 `settings.json` 中将外部终端指向该文件：
+把 VS Code 的外部终端指向它——在设置中修改，或写入 `settings.json`：
 
 ```json
 "terminal.external.windowsExec": "C:\\Tools\\folio\\folio-here.cmd"
 ```
 
-此后 **终端 > 在外部终端中打开**（`Ctrl+Shift+C`）即在编辑器当前所在目录打开 Folio。之所以需要这个 `.cmd`，是因为该设置执行命令时不附带参数，而 Folio 由 `--cwd` 得知起始目录。
+**Terminal > Open in External Terminal**（`Ctrl+Shift+C`）会在编辑器当前目录下打开 Folio。这个 `.cmd` 文件存在的原因是该设置不传参数，而 `--cwd` 是告诉 Folio 启动位置的方式。
 
 ---
 
 ## 隐私
 
-Folio 不向任何位置发送与用户有关的数据：无遥测、无统计、无崩溃上报。Folio 内不含模型或 API key，其服务对象为用户已运行的 agent。联网行为共两项：用户在网页预览中打开的页面，以及更新检查。
+Folio 不向任何地方发送关于你的信息：没有遥测，没有分析，没有崩溃报告。程序中没有模型，没有 API key；它为你已经在运行的 agent 服务。两件事会访问网络：你在网页预览中打开的页面，以及更新检查。
 
-更新检查为对 `https://api.github.com/repos/lulu-loopp/folio-terminal/releases` 的一次 `GET`，本机所有窗口合计每天至多一次，只携带 `User-Agent: Folio`，不含版本号、标识符与 query。对返回结果，Folio 只做两件事：在设置齿轮上画一个标记，在设置中显示一行；不下载任何内容，也不替换任何文件。关闭方式为设置 > General > **检查新版**，或在 `settings.json` 中写 `"update_check": false`。
+更新检查是对 `https://api.github.com/repos/lulu-loopp/folio-terminal/releases` 的一次 `GET` 请求，所有窗口合计每天最多一次，`User-Agent` 为 `Folio`，不携带版本号、标识符或查询参数。它能做的只是在设置齿轮上画一个点、在设置中显示一行文字；不下载任何东西，不替换任何东西。在设置 > 通用 > **更新检查**中关闭，或在 `settings.json` 中设置 `"update_check": false`。
 
-其保存的数据位于两个目录：`%APPDATA%\Folio` 存放设置、配置文件、配色与会话，`%LOCALAPPDATA%\Folio\WebView2` 存放网页预览的 cookie 与缓存。删除前者后，Folio 恢复至首次启动状态。
+程序的数据保存在两个目录中：`%APPDATA%\Folio` 存放设置、配置、配色方案和会话，`%LOCALAPPDATA%\Folio\WebView2` 存放网页预览的 cookie 和缓存。删除前者，Folio 恢复到全新状态。
 
 ```powershell
 Remove-Item -Recurse -Force "$env:APPDATA\Folio"
 Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Folio\WebView2"
 ```
 
-各文件所存内容及 `session.json` 中完整地址的形成原因，详见 [`docs/PRIVACY.md`](docs/PRIVACY.md)。
+每个文件的具体内容，以及为什么完整地址会出现在 `session.json` 中，见 [`docs/PRIVACY.md`](docs/PRIVACY.md)。
 
 ## 已知问题
 
-- **曾有窗口移至第二显示器后上半部分显示为黑色的报告，未能复现。** 如遇此问题，请附上 `%APPDATA%\Folio\diagnostics.log`。
-- **`.webm` 需要 Microsoft Store 的 VP9 或 AV1 视频扩展。** 出厂 Windows 两者均未安装；缺少扩展时，首帧与播放均不可用。
+- **曾有一次报告窗口移到第二块屏幕后上半部分全黑**，未能复现。如果遇到，请附上 `%APPDATA%\Folio\diagnostics.log`。
+- **`.webm` 需要从 Microsoft Store 安装 VP9 或 AV1 Video Extension**。出厂的 Windows 两者都没有，缺少时没有预览画面也无法播放。
 - 其余问题见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 许可
 
-MIT 或 Apache-2.0，任选其一。各依赖项的许可及其要求的声明，均列于 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。
+MIT 或 Apache-2.0，任选其一。每个依赖的许可证及其要求的声明在 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 中。
 
-两份许可仅授予版权与专利许可，不包含其他内容。Folio 名称及标识不在许可范围内，[`TRADEMARK.md`](TRADEMARK.md) 说明了这对修改后分发的影响。
+两份许可证授予的是著作权和专利许可，不涉及其他。Folio 名称和标识不在许可范围内——[`TRADEMARK.md`](TRADEMARK.md) 说明了这对修改后的分发意味着什么。
 
 ## 构建与参与
 
-从源码构建见 [`docs/BUILDING.md`](docs/BUILDING.md)；变更流程见 [`CONTRIBUTING.md`](CONTRIBUTING.md)；安全报告请通过 [`SECURITY.md`](SECURITY.md) 中的私密渠道提交，勿以公开 issue 形式提出。
+从源码构建见 [`docs/BUILDING.md`](docs/BUILDING.md)；[`CONTRIBUTING.md`](CONTRIBUTING.md) 说明如何提交修改；安全问题通过 [`SECURITY.md`](SECURITY.md) 中的私密渠道报告，不要开 issue。
 
 ## 后续方向
 
-- 预览窗格中的 markdown 编辑
-- macOS 与 Linux
-- 在手机上远程使用终端
+- 预览窗格中的 Markdown 编辑。
+- macOS 和 Linux。
+- 从手机上使用终端。
 
-以上为方向，非时间承诺。
+这些是方向，不是时间表。
