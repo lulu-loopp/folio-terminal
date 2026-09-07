@@ -8,6 +8,20 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
+- **A Command Prompt pane has a command rail.** `cmd.exe` has no startup file
+  to hand a script to, so until now its rail was empty however many commands had
+  been run: nothing to click, and `Ctrl+Shift+↑`/`↓` with nowhere to go. Its one
+  way in is the `PROMPT` variable, and what fits there is what describes the one
+  moment `cmd` expands it at — just before it reads a line, which is the end of
+  the last command and the start of this prompt at once. So a `cmd` pane now
+  reports both, and every prompt gets a tick that lands on its own prompt row.
+  Whatever `PROMPT` you had set is kept and reported in front of, never replaced,
+  and a `cmd` started from a `cmd` does not report twice. Two things `cmd` cannot
+  say, it does not: a tick carries no exit code, because `PROMPT` has no way to
+  read one, and nothing marks where a typed line ends, so an inline `$…$` in a
+  `cmd` pane is still read as text. Display formulas and image previews in its
+  output are exactly where they were.
+
 - **A wide table in a Markdown preview scrolls sideways, and a tilt wheel is
   enough to do it.** A table whose columns need more room than the page can give
   has always had a bar along its own foot that a hand could drag, and a

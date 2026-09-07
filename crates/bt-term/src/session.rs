@@ -1113,6 +1113,26 @@ pub struct DualPlaneSession {
     live_screen: ScreenId,
     cursor_logical_line_memory: Option<CursorLogicalLineMemory>,
     shell_phases: BTreeMap<ScreenId, ShellIntegrationPhase>,
+    /// The screens whose shell has claimed the authority to **replace** the cursor-line heuristic —
+    /// which is a narrower claim than "has emitted OSC 133", and the difference is the whole of
+    /// this field.
+    ///
+    /// What that heuristic protects is the line the reader is still typing: it must not be
+    /// decorated while it is being written. What retires it is the *semantic region*, and only
+    /// `B` and `C` build one. A shell that reports its prompt boundaries and nothing else — `A` and
+    /// `D`, which is all a `cmd.exe` `PROMPT` can carry (`bt_app::profiles::Integration::CmdPrompt`)
+    /// — has said something true and useful about where its commands begin, and has said nothing
+    /// whatever about where the typed line ends. Reading its `A` as a claim of authority would
+    /// switch the protection off and put nothing in its place.
+    ///
+    /// So authority is recorded by the markers that build the regions that replace the heuristic,
+    /// and by no others. `B` **or** `C` rather than `B` alone: a screen that sends `C` builds an
+    /// output region, and the queries that read one are gated by this same predicate.
+    ///
+    /// `shell_integration_seen` deliberately does *not* read this: "is the integration installed in
+    /// this pane" is answered by any marker at all, which is what an offer to install it retracts
+    /// itself on.
+    shell_region_screens: BTreeSet<ScreenId>,
     /// The last working directory the shell reported over OSC 7, and the *only* authority relative
     /// image path text is ever resolved against (user ruling 2026-08-03). `None` — never reported,
     /// or reported as something unresolvable — means relative text yields no candidates at all;
@@ -1552,6 +1572,7 @@ impl DualPlaneSession {
             live_screen: ScreenId::Primary,
             cursor_logical_line_memory: None,
             shell_phases: BTreeMap::new(),
+            shell_region_screens: BTreeSet::new(),
             working_directory: None,
             window_title: None,
             progress: None,
@@ -3621,19 +3642,29 @@ impl DualPlaneSession {
         })
     }
 
+    /// Has this screen's shell built the machine that replaces the cursor-line heuristic?
+    ///
+    /// See [`Self::shell_region_screens`]: this is "a region-building marker has been seen here",
+    /// not "a marker has been seen here", and every caller wants the first. Three of them ask it
+    /// as a cheap guard before a region lookup that would answer `false` anyway; the other three
+    /// are the heuristic itself, and those are the ones the distinction is for.
     fn shell_integration_is_authoritative(&self, screen: ScreenId) -> bool {
-        self.shell_phases.contains_key(&screen)
+        self.shell_region_screens.contains(&screen)
     }
 
     /// Has this session ever reported an OSC 133 marker on its **primary**
     /// screen?
     ///
-    /// The public reading of the private predicate above, and the honest answer
-    /// to "is the shell integration installed in this pane" — the only answer
-    /// there is, because nothing else about a running shell says so. The app
-    /// asks it for one thing: an offer to install the integration retracts
-    /// itself the moment the integration speaks, whoever installed it and
-    /// however (`bt_app::shell_integration::Offer::showing`).
+    /// The honest answer to "is the shell integration installed in this pane" —
+    /// the only answer there is, because nothing else about a running shell says
+    /// so. The app asks it for one thing: an offer to install the integration
+    /// retracts itself the moment the integration speaks, whoever installed it
+    /// and however (`bt_app::shell_integration::Offer::showing`).
+    ///
+    /// **Any marker, and deliberately not the narrower question the predicate
+    /// above asks.** A shell that reports its prompt boundaries and nothing else
+    /// has still spoken, and an offer to install a script that is plainly
+    /// already talking would be the terminal failing to hear its own pane.
     ///
     /// **Primary and not the live screen**, which is `retire_program_input_modes`'
     /// own argument two hundred lines down said about a different consequence of
@@ -3642,7 +3673,7 @@ impl DualPlaneSession {
     /// shell underneath.
     #[must_use]
     pub fn shell_integration_seen(&self) -> bool {
-        self.shell_integration_is_authoritative(ScreenId::Primary)
+        self.shell_phases.contains_key(&ScreenId::Primary)
     }
 
     /// Is the live screen sitting inside the open OSC 133 input region begun by `B`?
@@ -3878,6 +3909,9 @@ impl DualPlaneSession {
                     let anchor = self.semantic_input_regions[region].start;
                     self.command_marks.open_command(anchor);
                 }
+                // A region now exists on this screen, so the cursor-line heuristic has a successor
+                // and may retire — see `shell_region_screens`.
+                self.shell_region_screens.insert(screen);
                 self.shell_phases
                     .insert(screen, ShellIntegrationPhase::Input(region));
             }
@@ -3905,6 +3939,9 @@ impl DualPlaneSession {
                 // grow past the command it belongs to.
                 self.close_open_semantic_output_region(screen, point);
                 let region = self.open_semantic_output_region(screen, point);
+                // `C` builds a region too, and a screen that sent one without a `B` before it is
+                // still a screen whose regions can be asked about.
+                self.shell_region_screens.insert(screen);
                 self.shell_phases
                     .insert(screen, ShellIntegrationPhase::Output(region));
             }
@@ -26818,70 +26855,63 @@ mod tests {
         );
     }
 
-    /// PIN — **why `cmd.exe` sends no OSC 133 at all**, checked rather than argued.
+    /// PIN — **what a shell that can only report its prompts gets, and what it must not be given
+    /// on top of it** (2026-09-07). The measurement, not the argument.
     ///
-    /// The Q5 ruling (2026-08-11) allowed the Command Prompt profile `133;A` and `133;B` and let
-    /// `C`/`D` fall to the documented degradation, on the reading that A and B are two more facts
-    /// and the degradation costs only the two that are missing. This is the measurement that
-    /// overturns the premise: **A and B are not facts, they are a claim of authority**, and both
-    /// halves of that claim are paid for by a `C` that `cmd.exe` has no moment to send — `PROMPT`
-    /// is a format string expanded once, just before a line is read, and there is no
-    /// pre-execution or post-execution hook anywhere in the shell.
+    /// This replaces `a_prompt_that_can_never_send_c_must_not_send_a_or_b_either`, whose own
+    /// closing sentence named the two edits that would expire it: teach the machine to close an
+    /// abandoned region, *or* keep the cursor heuristic while authority is only partial. The
+    /// second is what happened. Authority to retire that heuristic is now claimed by the markers
+    /// that build the region which replaces it — `B` and `C` — so a shell with only `A` and `D`
+    /// keeps the protection it always had, and may have the ticks it was refused.
     ///
-    /// Each half below is a regression against the *no-integration* baseline, which is the whole
-    /// point: sending these makes the pane worse than sending nothing, and sending nothing is a
-    /// documented, tested position rather than a gap.
+    /// Three halves, each a regression against a different baseline:
     ///
-    /// The profile-side pin is
-    /// `bt_app::shell_integration::command_prompt_reports_its_directory_and_claims_no_shell_integration`;
-    /// this is the fact underneath it, and it lives here because it is this crate's machine that
-    /// makes it true. If this test ever goes red — if a later ticket teaches the machine to close
-    /// an abandoned region, or to keep the cursor heuristic while authority is only partial — then
-    /// the reason `cmd` withholds these markers has expired and that decision should be revisited
-    /// rather than inherited.
+    /// 1. `A`/`D` alone fills the ledger the rail stands on. Red gate: the ledger used to open a
+    ///    record at `B`, so this shell ran commands forever and the rail drew nothing.
+    /// 2. `A` alone does **not** retire the cursor-line heuristic. Red gate: reading any marker as
+    ///    authority switches the protection off with no region to replace it, and the `$$` on the
+    ///    line being typed is typeset while it is being typed.
+    /// 3. `B` still does retire it, unchanged, and still builds the region — so the shells that
+    ///    send the full set are byte for byte where they were.
     #[test]
-    fn a_prompt_that_can_never_send_c_must_not_send_a_or_b_either() {
+    fn a_prompt_only_shell_gets_its_ticks_and_keeps_the_cursor_heuristic() {
         let started = Instant::now();
 
-        // Half one — `B` opens a region only `C` (or the *next* `A`) can close, so the command's
-        // own output is read as an unsent buffer for as long as it runs.
+        // Half one — the ledger. This is `cmd.exe`'s own byte stream: `D` for the command that
+        // ended, `A` for the prompt about to be printed, and no `B` and no `C` ever.
         let mut session = DualPlaneSession::new(nz(80), nz(8));
-        session
-            .feed_at(b"\x1b]133;A\x1b\\D:\\src>\x1b]133;B\x1b\\", started)
-            .unwrap();
-        assert!(
-            !session.typed_shell_input_live(),
-            "an idle prompt holds nothing, whoever sent it"
+        let prompt: &[u8] = b"\x1b]133;D\x1b\\\x1b]133;A\x1b\\D:\\src>";
+        session.feed_at(prompt, started).unwrap();
+        assert_eq!(
+            session.command_marks().len(),
+            1,
+            "the first prompt is one command's worth of record, waiting to be run"
         );
-        session.feed_at(b"dir", started).unwrap();
-        assert!(session.typed_shell_input_live(), "a typed buffer holds it");
-        // Enter, and the command runs and prints. A shell with a full integration would have sent
-        // `C` between these two writes; this one has nowhere to send it from.
         session
-            .feed_at(
-                b"\r\n Volume in drive D is Data\r\n 12 File(s)\r\n",
-                started,
-            )
+            .feed_at(b"dir\r\n Volume in drive D\r\n", started)
             .unwrap();
-        assert!(
-            session.typed_shell_input_live(),
-            "with no C, the gate cannot tell a command's output from the line that launched it — \
-             so every resize is deferred for as long as anything is printing"
+        session.feed_at(prompt, started).unwrap();
+        let marks = session.command_marks();
+        assert_eq!(
+            marks.len(),
+            2,
+            "one record per prompt, and not one per byte of output"
         );
         assert!(
-            session.shell_input_region_open(),
-            "and every resize that does land owes an InvokePrompt chord to a shell that has no \
-             such binding"
+            marks[0].finished.is_some(),
+            "the `D` of the second prompt ended the first prompt's command"
         );
-        // It releases only at the next prompt, which is the whole of the damage: one command's
-        // run is one interval of a window that cannot be resized.
-        session
-            .feed_at(b"\x1b]133;A\x1b\\D:\\src>", started)
-            .unwrap();
-        assert!(!session.typed_shell_input_live());
+        assert_eq!(
+            marks[0].exit_code, None,
+            "`PROMPT` cannot read ERRORLEVEL, so the rail is told nothing rather than told zero"
+        );
+        assert!(
+            marks[0].prompt.is_some(),
+            "and the tick has a prompt row to jump to, which is the whole of what it is for"
+        );
 
-        // Half two — `A` alone sends no region at all, and that is worse rather than safer: its
-        // one effect is to retire the cursor-line heuristic, whose replacement is the region.
+        // Half two — the protection. One `A` is not the claim of authority it used to be read as.
         let mut bare = DualPlaneSession::new(nz(80), nz(8));
         assert!(
             !bare.shell_integration_is_authoritative(ScreenId::Primary),
@@ -26889,22 +26919,32 @@ mod tests {
         );
         bare.feed_at(b"\x1b]133;A\x1b\\D:\\src>", started).unwrap();
         assert!(
-            bare.shell_integration_is_authoritative(ScreenId::Primary),
-            "one A is the whole of the claim — authority is per screen, not per marker set"
+            !bare.shell_integration_is_authoritative(ScreenId::Primary),
+            "a shell that reports prompts has not said where the typed line ends, so the heuristic \
+             that guesses it stays"
+        );
+        assert!(
+            bare.shell_integration_seen(),
+            "…while `is the integration installed here` is still answered by any marker at all"
         );
         assert_eq!(
             bare.shell_phases.get(&ScreenId::Primary),
-            Some(&ShellIntegrationPhase::Prompt),
-            "and it never becomes a region, because only B builds one"
+            Some(&ShellIntegrationPhase::Prompt)
         );
+
+        // Half three — a shell that does send `B` is exactly where it was.
+        let mut full = DualPlaneSession::new(nz(80), nz(8));
+        full.feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07", started)
+            .unwrap();
         assert!(
-            !bare.semantic_input_overlaps_live(
-                ScreenId::Primary,
-                GridPoint { row: 0, column: 0 },
-                GridPoint { row: 0, column: 40 },
-            ),
-            "so the line being typed is covered by nothing: the heuristic is gone and the region \
-             that was supposed to replace it was never built"
+            full.shell_integration_is_authoritative(ScreenId::Primary),
+            "`B` builds the region, and the region is what the claim was ever made of"
+        );
+        assert!(full.shell_input_region_open());
+        assert_eq!(
+            full.command_marks().len(),
+            1,
+            "and `A` then `B` is one command, not two — the `B` claims the record `A` opened"
         );
     }
 

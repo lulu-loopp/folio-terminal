@@ -48,7 +48,7 @@
 # coordinate read off a `ui-probe capture` is a coordinate this script can press.
 param(
   [Parameter(Position = 0, Mandatory = $true)]
-  [ValidateSet("list", "place", "left", "right", "menu")]
+  [ValidateSet("list", "place", "left", "right", "menu", "type", "key", "shot", "wheel", "chord")]
   [string]$Cmd,
   [Parameter(Mandatory = $true)][int]$ProcId,
   [int]$Window = 0,
@@ -65,7 +65,17 @@ param(
   [int]$X0 = 40,
   [int]$Y0 = 60,
   [int]$Gap = 20,
-  [string]$Out = ""
+  [string]$Out = "",
+  # type: the characters to post. key: one of the names in $POSTED_KEYS.
+  [string]$Text = "",
+  [string]$Name = "",
+  # chord: modifiers as any of c(trl) s(hift) a(lt); -Name is the base key, either
+  # one of $POSTED_KEYS or the single character printed on it.
+  [string]$Mods = "",
+  # wheel: how many notches, and the WHEEL_DELTA each one carries (negative
+  # scrolls down, which is Win32's own sign).
+  [int]$Steps = 3,
+  [int]$Delta = -120
 )
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
@@ -117,6 +127,54 @@ public class PostProbe {
     PostMessage(h, right ? 0x0204u : 0x0201u, right ? (IntPtr)2 : (IntPtr)1, LP(x,y));
     PostMessage(h, right ? 0x0205u : 0x0202u, (IntPtr)0, LP(x,y));
   }
+  [DllImport("user32.dll")] public static extern short VkKeyScanW(char c);
+  [DllImport("user32.dll")] public static extern uint MapVirtualKeyW(uint code, uint type);
+  /* WM_KEYDOWN, then the WM_CHAR winit peeks for while it is handling that
+     keydown, then WM_KEYUP. The WM_CHAR is what carries the *character*: a
+     posted key cannot move the real keyboard state, so the ToUnicode path
+     would answer for a Shift nobody is holding and every capital would arrive
+     lowered. The pair is therefore not a belt-and-braces — the second half is
+     the half that is read. */
+  static IntPtr Down(ushort vk) { return (IntPtr)(1 | (int)(MapVirtualKeyW(vk, 0) << 16)); }
+  static IntPtr Up(ushort vk) { return (IntPtr)(unchecked((int)0xC0000001) | (int)(MapVirtualKeyW(vk, 0) << 16)); }
+  public static void Type(IntPtr h, string text) {
+    foreach (char c in text) {
+      short scan = VkKeyScanW(c);
+      ushort vk = (ushort)(scan & 0xFF);
+      if (scan == -1) vk = 0;
+      PostMessage(h, 0x0100, (IntPtr)vk, Down(vk));
+      PostMessage(h, 0x0102, (IntPtr)c,  Down(vk));
+      PostMessage(h, 0x0101, (IntPtr)vk, Up(vk));
+    }
+  }
+  /* WM_MOUSEWHEEL carries SCREEN coordinates in its lParam, unlike every
+     button message above — so the caller's client point is offset by the
+     window's own rectangle here rather than at the call site. */
+  public static void Wheel(IntPtr h, int x, int y, int delta) {
+    PPRECT r; GetWindowRect(h, out r);
+    Move(h, x, y);
+    PostMessage(h, 0x020A, (IntPtr)(delta << 16), LP(r.L + x, r.T + y));
+  }
+  public static void Tap(IntPtr h, ushort vk) {
+    PostMessage(h, 0x0100, (IntPtr)vk, Down(vk));
+    PostMessage(h, 0x0101, (IntPtr)vk, Up(vk));
+  }
+  /* A chord, held the way a hand holds one: the modifiers go down first and come
+     up last, because winit builds its `ModifiersState` from the key events it is
+     handed and a base key posted between two of them is the only thing that
+     carries the chord. WM_SYSKEYDOWN for the Alt-held pair, which is the message
+     Windows itself would send. */
+  public static void Chord(IntPtr h, bool ctrl, bool shift, bool alt, ushort vk) {
+    uint down = alt ? 0x0104u : 0x0100u, up = alt ? 0x0105u : 0x0101u;
+    if (ctrl)  PostMessage(h, 0x0100, (IntPtr)0x11, Down(0x11));
+    if (shift) PostMessage(h, 0x0100, (IntPtr)0x10, Down(0x10));
+    if (alt)   PostMessage(h, 0x0104, (IntPtr)0x12, Down(0x12));
+    PostMessage(h, down, (IntPtr)vk, Down(vk));
+    PostMessage(h, up,   (IntPtr)vk, Up(vk));
+    if (alt)   PostMessage(h, 0x0105, (IntPtr)0x12, Up(0x12));
+    if (shift) PostMessage(h, 0x0101, (IntPtr)0x10, Up(0x10));
+    if (ctrl)  PostMessage(h, 0x0101, (IntPtr)0x11, Up(0x11));
+  }
 }
 '@
 [void][PostProbe]::SetProcessDpiAwarenessContext([IntPtr](-4))
@@ -159,8 +217,42 @@ function Save-WindowShot([IntPtr]$hwnd, [string]$path) {
   "shot ${wide}x${high} -> $path"
 }
 
+$POSTED_KEYS = @{
+  enter = 0x0D; tab = 0x09; esc = 0x1B; back = 0x08; space = 0x20
+  up = 0x26; down = 0x28; left = 0x25; right = 0x27
+  home = 0x24; end = 0x23; pageup = 0x21; pagedown = 0x22
+  f1 = 0x70; f2 = 0x71; f3 = 0x72; f4 = 0x73; f5 = 0x74; f6 = 0x75
+  f7 = 0x76; f8 = 0x77; f9 = 0x78; f10 = 0x79; f11 = 0x7A; f12 = 0x7B
+}
+
 switch ($Cmd) {
   "list" { Show-Windows }
+  # Typing by posted message, for the desktop this file exists for — and for a
+  # run beside somebody who is using their keyboard, where `ui-probe type` would
+  # take the foreground and swallow what they are typing. Same narrowing as the
+  # presses above: a posted key cannot reach another process's window, and it
+  # says "the app answered these keys", not "a hand could type them".
+  "type" { [PostProbe]::Type((Get-Target), $Text); "posted $($Text.Length) chars to window $Window" }
+  "key" {
+    $vk = $POSTED_KEYS[$Name]
+    if (-not $vk) { throw "unknown key: $Name (known: $(($POSTED_KEYS.Keys | Sort-Object) -join ', '))" }
+    [PostProbe]::Tap((Get-Target), [uint16]$vk)
+    "posted $Name to window $Window"
+  }
+  "wheel" {
+    $hwnd = Get-Target
+    for ($i = 0; $i -lt $Steps; $i++) { [PostProbe]::Wheel($hwnd, $X, $Y, $Delta); Start-Sleep -Milliseconds 40 }
+    "posted $Steps notches of $Delta at ($X,$Y) to window $Window"
+  }
+  "chord" {
+    $base = if ($POSTED_KEYS.ContainsKey($Name)) { $POSTED_KEYS[$Name] } else { [PostProbe]::VkKeyScanW($Name[0]) -band 0xFF }
+    [PostProbe]::Chord((Get-Target), ($Mods -match "c"), ($Mods -match "s"), ($Mods -match "a"), [uint16]$base)
+    "posted $Mods+$Name to window $Window"
+  }
+  "shot" {
+    if ($Out -eq "") { throw "shot needs -Out" }
+    Save-WindowShot (Get-Target) $Out
+  }
   "place" {
     $i = 0
     foreach ($hwnd in $ws) {

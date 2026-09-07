@@ -606,10 +606,11 @@ pub enum ProgramCandidate {
 /// shipped, and each of those five has a way in; what differs is how far it
 /// reaches, and the variants say so — a distinction a blanket `None` would have
 /// flattened, by spelling "we found no door" and "the door is only wide enough
-/// for one marker" the same way. A profile of the user's own running an
-/// arbitrary executable is the case that reopens it, and it reopens it honestly
-/// rather than by widening one of the other three: handing `--init-file` to a
-/// program that is not a bash makes it a filename to open.
+/// for the markers that describe the moment it opens at" the same way. A profile
+/// of the user's own running an arbitrary executable is the case that reopens
+/// it, and it reopens it honestly rather than by widening one of the other
+/// three: handing `--init-file` to a program that is not a bash makes it a
+/// filename to open.
 ///
 /// The profile with no script is not degraded by a special case: a shell that
 /// never emits OSC 133 keeps the cursor/WRAPLINE heuristics, and one that never
@@ -638,47 +639,63 @@ pub enum Integration {
     /// puts back — see `scripts/shell-integration/folio.bash`.
     BashInitFile,
     /// No script at all — the whole integration is the `PROMPT` variable
-    /// `cmd.exe` prints its prompt from, and what fits in there is **one**
-    /// marker: `OSC 7`.
+    /// `cmd.exe` prints its prompt from, and what fits in there is what
+    /// describes the one moment it is expanded at: `OSC 7`, `OSC 133;D` and
+    /// `OSC 133;A`.
     ///
     /// `PROMPT` is not a hook, it is a format string, and `cmd.exe` expands it
-    /// at exactly one moment: just before it reads a line. There is no
-    /// pre-execution and no post-execution moment to be called at, so
-    /// `OSC 133;C` (a command was submitted) and `OSC 133;D;<code>` (it ended,
-    /// with this status) have nowhere to be emitted from. That much was known
-    /// (ruling 2026-08-11, Q5).
+    /// at exactly one moment: just before it reads a line. That moment is the
+    /// end of the last command and the start of this prompt at once, so `D` and
+    /// `A` are exactly the two markers it can carry. There is no
+    /// pre-execution moment, so `OSC 133;C` (this line was submitted, output
+    /// starts here) has nowhere to be emitted from — and `D` carries no status,
+    /// because `PROMPT` has no substitution that reads `ERRORLEVEL` and a
+    /// terminal that guessed one would be colouring the reader's ticks from
+    /// nothing. All of that was known (ruling 2026-08-11, Q5).
     ///
-    /// **What that ruling assumed and this build disproves is that `A` and `B`
-    /// are free.** They are not two more facts, they are a claim of *authority*,
-    /// and the machine they claim it from is built on `C` closing what `B`
-    /// opened:
+    /// **What has changed (2026-09-07) is `B`, and the reason it was refused.**
+    /// The 2026-08-16 measurement found that `A` and `B` are not two more facts
+    /// but a claim of *authority*, and that the machine charged for that claim
+    /// in a `C` this shell cannot send. Both halves of the charge were real:
     ///
-    /// * `133;A` alone turns `shell_integration_is_authoritative` on, and that
+    /// * `133;B` opens an input region whose only closers are `C` and the
+    ///   *next* `A`. Without `C` it stays open across the command's entire run,
+    ///   so every row the command printed would sit inside the region that
+    ///   means "this is what the reader is typing" — undecorated, and holding
+    ///   the post-resize `InvokePrompt` chord over a shell with no such
+    ///   binding. **This half has not expired**, and it is why `B` is still not
+    ///   sent. `cmd` panes keep the display mathematics and the local-image
+    ///   previews they have always had in their output.
+    /// * `133;A` alone turned `shell_integration_is_authoritative` on, and that
     ///   flag's job is to **retire the cursor-line heuristic** — the rule that
-    ///   the line under the cursor is probably still being typed and must not be
-    ///   decorated yet. Its replacement is the semantic input region, which only
-    ///   `B` and `C` can build. A shell that sends `A` and stops has therefore
-    ///   switched the protection off and put nothing in its place, and a path
-    ///   typed at a `cmd` prompt would light up as a link mid-word.
-    /// * `133;B` opens an input region whose only closers are `C` and the *next*
-    ///   `A`. Without `C` it stays open across the command's entire run, so
-    ///   `typed_shell_input_live` reads the command's own output as an unsent
-    ///   buffer: the ConPTY resize gate holds for as long as anything is
-    ///   printing, and every resize commit owes an `InvokePrompt` chord to a
-    ///   shell with no such binding.
+    ///   the line under the cursor is probably still being typed and must not
+    ///   be decorated yet. Its replacement is the semantic region, which only
+    ///   `B` and `C` build, so a shell that sent `A` and stopped switched the
+    ///   protection off and put nothing in its place. **This half has expired**,
+    ///   by exactly the route the old measurement named as its own exit: the
+    ///   flag now asks whether a *region-building* marker has been seen rather
+    ///   than whether any marker has, so a screen with only `A` and `D` keeps
+    ///   the heuristic it always had. `bt_term::…::shell_region_screens`.
     ///
-    /// A third cost is `M2-restart-shell-contract.md` §1.6's: it defines idle as
-    /// "已见 OSC 133 A/B、停在提示符", so a `cmd` pane sending A/B would be
-    /// classified **idle** and a future `Restart shell` would skip its
-    /// confirmation — precisely where we cannot know whether it is busy.
+    /// What that buys is the one capability this profile's reader has no other
+    /// way to get. Every other profile can be given a script; `cmd` cannot, so
+    /// before this its command rail was empty however many commands had been
+    /// run — no tick to count, none to click, and `Ctrl+Shift+↑`/`↓` with
+    /// nowhere to go. `A` is a prompt row, which is what a tick points at, and
+    /// `D` is where the command before it ended. The ledger opens its record at
+    /// `A` for exactly this reason (`bt_term::command_marks`).
     ///
-    /// All three are strictly worse than sending nothing, and sending nothing is
-    /// a documented, tested position rather than a gap: a screen that never emits
-    /// OSC 133 keeps the cursor/WRAPLINE heuristics byte for byte
-    /// (`docs/shell-integration.md`, "Authority and fallback"). So `cmd` stays
-    /// there, whole, and spends its one available slot on the marker that has no
-    /// bracket to leave dangling. Pinned at
-    /// `bt_term::…::a_prompt_that_can_never_send_c_must_not_send_a_or_b_either`.
+    /// The third old cost, `M2-restart-shell-contract.md` §1.6's definition of
+    /// idle as "已见 OSC 133 A/B、停在提示符", is not paid either: `Restart
+    /// shell` is not built, and the definition it will be built against now has
+    /// a `cmd` pane to describe rather than a silence to guess at.
+    ///
+    /// Clink would supply `C` and `D`-with-status both, and is still **not**
+    /// required (Q5's surviving half); detecting it and upgrading the row is
+    /// booked, not done. Pinned at
+    /// `bt_term::…::a_prompt_only_shell_gets_its_ticks_and_keeps_the_cursor_heuristic`
+    /// and at `bt_term`'s `shell_integration_cmd` round trip, which runs a real
+    /// `cmd.exe`.
     CmdPrompt,
     /// No door at all — nothing is dot-sourced, no argument is added and no
     /// `PROMPT` is written.

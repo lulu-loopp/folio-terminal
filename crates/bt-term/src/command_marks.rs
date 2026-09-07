@@ -14,11 +14,16 @@
 //! alive across reflow, migration and eviction.
 //!
 //! **Honesty, restated as a property of this file.** Nothing here infers. A shell that emits no
-//! OSC 133 — `cmd.exe`, or a PowerShell whose profile never installed the integration — produces an
-//! empty ledger, and the rail then draws nothing and reports no error (inventory C13). There is no
-//! prompt-shaped-line heuristic, no "the last line before output was probably the command", no
-//! exit-code guess from the text. A terminal that guesses which of your commands failed is worse
-//! than one that admits it was never told.
+//! OSC 133 — a PowerShell whose profile never installed the integration, a WSL distribution that
+//! logs into zsh — produces an empty ledger, and the rail then draws nothing and reports no error
+//! (inventory C13). There is no prompt-shaped-line heuristic, no "the last line before output was
+//! probably the command", no exit-code guess from the text. A terminal that guesses which of your
+//! commands failed is worse than one that admits it was never told.
+//!
+//! A shell that emits *some* of them is served to exactly the depth it spoke to, and that is the
+//! same rule rather than an exception to it: `cmd.exe` reports its prompt boundaries and nothing
+//! else, so its records carry a prompt and an end and no exit code, no command text and no
+//! duration — see [`CommandMarkLedger::note_prompt`].
 
 use std::{
     collections::BTreeSet,
@@ -172,12 +177,26 @@ impl CommandMarkLedger {
         self.revision
     }
 
-    /// `A`. Remember where the prompt started; the next `B` claims it.
+    /// `A`. Open a mark at the prompt — and remember the anchor, so that the `B` which may follow
+    /// claims this record rather than opening a second one.
     ///
-    /// No revision bump: nothing observable through [`Self::marks`] has changed yet. A prompt with
-    /// no command after it is not a command.
+    /// **A prompt is a place worth going back to even from a shell that never says where its input
+    /// starts** (2026-09-07). `A` and `B` used to be one thing here — the record began at `B`,
+    /// because every shell this terminal served sent both — and a shell with only `A` therefore
+    /// left a ledger that was empty however many commands it had run. `cmd.exe` is that shell:
+    /// `PROMPT` is expanded once, just before a line is read, so `A` and `D` are the two markers it
+    /// can carry and `B` and `C` are the two it cannot
+    /// (`bt_app::profiles::Integration::CmdPrompt`). The rail's tick answers "which command", and
+    /// the prompt row *is* the answer to that; what `B` adds is a finer coordinate, not the fact.
+    ///
+    /// So the record starts here, with the prompt's own anchor standing in for
+    /// [`CommandMark::start`], and a `B` that arrives afterwards finds a blank draft and takes it
+    /// over — the same reclaim a redrawn prompt already relied on, reached by the same route. For
+    /// a shell that sends both, the ledger is byte for byte what it was: one record per command,
+    /// `start` at `B`, `prompt` at `A`.
     pub fn note_prompt(&mut self, prompt: AnchorId) {
         self.pending_prompt = Some(prompt);
+        self.open_command(prompt);
     }
 
     /// Is there a command in flight? Callers use this to avoid registering an anchor for a marker
