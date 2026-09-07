@@ -211,14 +211,16 @@ hyperlink declaration has been overridden away, "Prompt marks and directory; no
 exit codes, no hyperlinks"). It is derived from the same `Integration` value the
 spawn path uses, so it cannot drift from what the pane gets.
 
-**For the Chinese writer.** Two strings changed English today and carry the
-English in both slots with a `// zh: opus46` comment in
-`crates/bt-app/src/i18n.rs`:
+**Both halves of the Command Prompt row were rewritten**, English and Chinese,
+because two shipped gates forbid an untranslated string
+(`no_entry_ships_the_english_word_as_its_own_translation` and
+`every_chinese_entry_carries_at_least_one_han_character`), so leaving the English
+standing in the Chinese column was not an option this table has:
 
-| id | English |
-|---|---|
-| `Text::CapCmd` | Prompt marks, directory and hyperlinks; no exit codes |
-| `Text::CapCmdNoLinks` | Prompt marks and directory; no exit codes, no hyperlinks |
+| id | English | 中文 |
+|---|---|---|
+| `Text::CapCmd` | Prompt marks, directory and hyperlinks; no exit codes | 命令标记、当前目录、链接；没有退出码 |
+| `Text::CapCmdNoLinks` | Prompt marks and directory; no exit codes, no hyperlinks | 命令标记、当前目录；没有退出码、没有链接 |
 
 ---
 

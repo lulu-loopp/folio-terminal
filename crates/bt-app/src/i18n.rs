@@ -2986,14 +2986,12 @@ impl Text {
                 "Prompt marks, directory, exit codes and hyperlinks, on a bash login only",
                 "命令标记、当前目录、退出码、链接；只在登录 shell 是 bash 时生效",
             ),
-            // zh: opus46 — the English moved on 2026-09-07 (cmd gained prompt
-            // marks) and the Chinese half is the English until the Chinese
-            // writer has been round. Listed in
-            // `docs/plans/shell-matrix-2026-09-07.md`.
+            // Both halves moved on 2026-09-07, when `cmd` gained its prompt
+            // marks; the Chinese is the Chinese writer's own.
             Self::CapCmd => pick(
                 lang,
                 "Prompt marks, directory and hyperlinks; no exit codes",
-                "Prompt marks, directory and hyperlinks; no exit codes",
+                "命令标记、当前目录、链接；没有退出码",
             ),
             // 「整合」 and not 「集成」 for `shell integration` throughout (user
             // ruling 2026-08-29): the notice strip above the pane already said
@@ -3141,11 +3139,11 @@ impl Text {
                 "Prompt marks, directory and exit codes on a bash login only; no hyperlinks",
                 "只在登录 shell 是 bash 时有命令标记、当前目录、退出码；没有链接",
             ),
-            // zh: opus46 — same edit, same day, same list.
+            // Same edit, same day.
             Self::CapCmdNoLinks => pick(
                 lang,
                 "Prompt marks and directory; no exit codes, no hyperlinks",
-                "Prompt marks and directory; no exit codes, no hyperlinks",
+                "命令标记、当前目录；没有退出码、没有链接",
             ),
             // The mock-up's own wording for this row (`.pf-view[data-view=edit]`,
             // the `Shell integration` line), which says what is lost and then
