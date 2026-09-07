@@ -30,30 +30,30 @@ Folio 是一个 Windows 终端。公式在命令输出中原位排版，文件�
 
 ## 初次启动
 
-首次运行 Folio 的机器会看到一张初次设置卡（**欢迎使用 Folio**），仅出现一次。卡片有六行，每行一个开关：有新版本时通知（唯一默认开启的选项）、在右键菜单中添加 Folio、PowerShell 整合，以及为本机已安装的 Claude Code、Codex 和 Copilot CLI 各设一行标签页提醒。
+首次运行 Folio 的机器会看到一张初次设置卡（**欢迎使用 Folio**），仅出现一次。卡片为本机能做的每件事列一行，行尾是开关：有新版本时通知（唯一默认开启的选项）、在右键菜单中添加 Folio、PowerShell 整合，以及为本机已安装的 Claude Code、Codex 和 Copilot CLI 各设一行标签页提醒。三个 agent 行只在对应工具装在本机时出现，所以卡片少则两行，多则六行。不涉及主题、字体、大小、语言或布局——这些在设置中随时能改，选错了也没什么。
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/first-run-dark.png">
   <img src="docs/screenshots/first-run-light.png" width="100%"
        alt="刚启动的窗口上方显示初次设置卡：Folio 图标旁标题为「欢迎使用
-       Folio」，下方六行每行右侧各有开关。「有新版本时通知」已开启；
+       Folio」，下方各行右侧各有开关。「有新版本时通知」已开启；
        「在右键菜单中打开 Folio」和「PowerShell 整合，支持命令间跳转」
-       已关闭；分隔线下方，Claude Code 等待时、Codex 回合结束时、
+       已关闭；空开一段间距后，Claude Code 等待时、Codex 回合结束时、
        Copilot CLI 等待时点亮标签页三项均关闭。底部小字写着「以上选项
        均可在设置中更改」，然后是「暂不」和「完成」。卡片背后是一个
        标签页和等待输入的命令行。">
 </picture>
 
-**悬停在某行上可查看具体说明**——包括该选项写入哪个文件，以及写入前会备份原文件。
+**悬停在某行上可查看具体说明**——包括该选项写入哪个文件，以及写入前将原文件带日期备份。
 
-**卡片上的每一行也是设置中的一行**，随时可以更改。**完成**应用当前开启的选项；**暂不**或 `Esc` 保留默认值——检查更新开启，其余关闭。卡片只出现一次，背后的 shell 始终在运行。已有 `settings.json` 的用户不会看到它。
+**卡片上的每一行也是设置中的一行**，随时可以更改。**完成**应用当前开启的选项；**暂不**或 `Esc` 保留默认值——检查更新开启，其余关闭。卡片只出现一次。已用过 Folio 的机器不会再看到它。
 
-首个标签页打开本机第一个可用的 shell。内置五个配置，按以下顺序查找：PowerShell 7、Windows PowerShell、WSL、Git Bash、命令提示符。未安装的 shell 不出现在新建菜单中，但保留在设置的配置页，标灰并注明所查找的程序。
+首个标签页打开本机第一个可用的 shell。内置五个配置，按以下顺序查找：PowerShell 7、Windows PowerShell、WSL、Git Bash、命令提示符。未安装的 shell 不出现在新建菜单中，但保留在设置的配置页，标灰并注明所查找的程序。七个 agent 配置按同样方式在 Windows PATH 中查找，初次设置卡的 agent 行用的也是同一个查找结果。
 
-PowerShell 整合在 `$PROFILE` 中添加一行 `. "$env:APPDATA\Folio\shell-integration\folio.ps1"`，添加前自动备份原文件。删除该行即可还原。更改在下一个 PowerShell 窗口生效，设置 > 终端会在生效前提示。
+PowerShell 整合在 `$PROFILE` 中添加一行 `. "$env:APPDATA\Folio\shell-integration\folio.ps1"`，添加前将原文件带日期备份在旁。删除该行即可还原。更改在下一个 PowerShell 窗口生效，设置 > 终端会在生效前提示。
 
-如果初次设置卡未询问此项，Folio 会在 PowerShell 窗格首次输出时弹出提示条。**添加到 `$PROFILE`** 立即写入，**不再提示**关闭后续询问，直接关闭提示条不做决定——下次 PowerShell 启动时再问一次。命令标记和行内 `$…$` 公式排版依赖此整合。
+如果初次设置卡未询问此项，Folio 会在 PowerShell 窗格首次输出时弹出提示条。**添加到 `$PROFILE`** 立即写入，**不再提示**关闭后续询问，直接关闭提示条不做决定——下次 PowerShell 启动时再问一次。命令标记和行内 `$…$` 公式排版依赖此整合。Git Bash 和 WSL 无需此整合。
 
 Agent 页的三个开关**默认关闭**，各自读取对应工具的配置文件并显示当前状态。新机器上配置文件不存在，三项均显示关闭。
 
