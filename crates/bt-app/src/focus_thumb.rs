@@ -77,12 +77,14 @@
 //! re-project even though nothing behind it moved.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     time::{Duration, Instant},
 };
 
 use bt_layout::{SeatId, SeatKind};
 use bt_term::DualPlaneSession;
+use bt_transcript::CapturedRow;
 
 use crate::{
     TabId,
@@ -836,15 +838,46 @@ pub fn mini_columns(rect: [f32; 4], advance: f32, scale: f32) -> usize {
     (width / advance) as usize + 1
 }
 
-/// The last `rows` rows of a session's screen, oldest first, each cut to
-/// `columns` **columns**.
+/// The last `rows` lines of the **pane** a session is drawn in, oldest first,
+/// each cut to `columns` **columns**.
+///
+/// # Where the lines come from
+///
+/// **All three places a pane's text lives, and not only the third** (user
+/// report, 2026-09-07). A terminal's text is in frozen history, in the rows
+/// staged on their way into it, and on the live screen; the pane's own frame is
+/// built from exactly those three ([`DualPlaneSession::viewport_frame`]). This
+/// walked the third alone, so a card could only ever show what had not scrolled
+/// off the screen yet — and the moment a pane held more lines than its screen
+/// did, the card stopped at the screen's top edge and left the rest of itself
+/// blank while the pane under it went on showing the lines above.
+///
+/// A pane made taller is the plainest way to see it, and it is what the report
+/// was: this window owns its history, so the vendored grid keeps no scrollback
+/// of its own ([`bt_term::SCROLLBACK_LINES`] is zero) and a grow adds blank rows
+/// at the bottom rather than pulling the departed lines back. The screen then
+/// holds nine lines under a blank floor, the fifteen above it are in the two
+/// planes behind it, and the pane draws all twenty-four — while the card drew
+/// nine and left two thirds of itself empty. It is not about which shell is
+/// running: any pane that has scrolled and then been grown, or cleared, is in
+/// the same position, and a card whose cell holds more rows than the screen does
+/// was in it from the first frame.
+///
+/// So the walk climbs the screen, and then goes on past its top edge into the
+/// staging plane and then history, newest first, until it has as many lines as
+/// the card holds or the pane has no more to give.
+///
+/// **Except on the alternate screen**, where the pane shows no history either:
+/// §3.2 gives a full-screen program its own namespace and the transcript behind
+/// it is not reachable from there. A card that reached into the primary's
+/// history while `vim` was up would be a picture of two sessions at once.
 ///
 /// # What is kept, and what is skipped
 ///
 /// **A blank row inside the tail is kept, and keeps its place.** A real terminal
 /// prints blank lines on purpose — the gap between paragraphs, the empty line
 /// above a prompt — and a projection that closed those gaps would be a picture
-/// that does not line up with the screen it is a picture of. The bottom-up walk
+/// that does not line up with the pane it is a picture of. The bottom-up walk
 /// pushes every row it sees once it has seen a non-blank one, so those gaps
 /// arrive as empty strings and the painter spends a row's height on each.
 ///
@@ -857,10 +890,19 @@ pub fn mini_columns(rect: [f32; 4], advance: f32, scale: f32) -> usize {
 /// the tail begins at the last thing the shell said, and everything from there
 /// up is carried whole.
 ///
-/// The walk is bounded by the grid and is only ever reached when the generation
-/// moved, so a session with nothing happening in it does not walk at all — and a
-/// session busy enough to walk far is, by the time it is, a session whose screen
-/// has filled and whose walk is one row long.
+/// **The floor is the screen's alone.** A line that scrolled off was on the
+/// screen when it did, blank or not, and the pane draws it where it went — so
+/// the two planes behind the screen are carried whole from their first row,
+/// with no floor to climb past.
+///
+/// The walk is bounded by the card and not by the pane: the screen half stops at
+/// `wanted`, and the two planes behind it are read from their newest end
+/// (`staged_rows_newest_first`, and `entries` reversed — both are cheap walks
+/// backwards over ordered collections), so a pane holding a hundred thousand
+/// lines is walked exactly as far as a card can show. It is only ever reached
+/// when the generation moved, and nothing behind the screen can move without
+/// moving it: history grows when the screen scrolls or is reflowed, which are
+/// the two doors [`DualPlaneSession::screen_revision`] counts.
 fn transcript_tail(
     session: &DualPlaneSession,
     columns: usize,
@@ -877,16 +919,7 @@ fn transcript_tail(
         let Some(captured) = session.live_row(row) else {
             continue;
         };
-        let text: String = captured
-            .cells
-            .iter()
-            // A wide character's spacer has no text of its own; taking its empty
-            // string would drop a column out of the middle of the line and pull
-            // everything after it one place left, which on a table is the whole
-            // table coming apart.
-            .filter(|cell| !cell.wide_spacer)
-            .flat_map(|cell| cell.text.chars())
-            .collect();
+        let text = row_text(&captured);
         let text = text.trim_end();
         // Still climbing past the blank floor: nothing has been kept yet, so an
         // empty row is not a blank line inside the tail, it is the floor.
@@ -898,17 +931,56 @@ fn transcript_tail(
             break;
         }
     }
+    // **And on past the top of the screen, into the two planes the pane draws
+    // above it** — the staged rows first, because they left the screen after
+    // every frozen line did. Nothing here asks anybody anything: both are this
+    // session's own memory, and the walk stops the moment the card is full.
+    if climb.len() < wanted && !session.terminal_modes().alternate_screen {
+        let staged = session
+            .transcript()
+            .staged_rows_newest_first()
+            .map(|staged| Cow::Owned(row_text(&staged.row)));
+        let frozen = session
+            .document()
+            .entries()
+            .values()
+            .rev()
+            .map(|entry| Cow::Borrowed(entry.line.text.as_str()));
+        for text in staged.chain(frozen) {
+            climb.push(cut_to(text.trim_end(), columns));
+            if climb.len() == wanted {
+                break;
+            }
+        }
+    }
     // **Clamped to what is there**, which is the whole of "a window driven past
     // the top stops at the top". A seat holding fewer rows than the reader asked
     // to skip would otherwise hand back an empty picture, and an empty card is
     // the one answer a reader turning a wheel cannot tell from a broken one.
     // Note that this is also what keeps the two rulings of 2026-08-21 from
-    // meeting: a screen with less on it than the seat holds clamps `skip` to
+    // meeting: a pane with less on it than the seat holds clamps `skip` to
     // zero, so the top-aligned short tail is exactly the `skip == 0` case and
     // nothing here can produce a short list with rows hidden under it.
     let aimed = skip.min(climb.len().saturating_sub(rows));
     let window: Vec<String> = climb.into_iter().skip(aimed).take(rows).rev().collect();
     (window, aimed > 0)
+}
+
+/// One captured row's text.
+///
+/// A wide character's spacer has no text of its own; taking its empty string
+/// would drop a column out of the middle of the line and pull everything after
+/// it one place left, which on a table is the whole table coming apart.
+///
+/// One function because the same row shape arrives from two places now — the
+/// live screen, and the staging plane behind it — and two spellings of "what
+/// this row says" is how a card ends up drawing the same line two ways.
+fn row_text(row: &CapturedRow) -> String {
+    row.cells
+        .iter()
+        .filter(|cell| !cell.wide_spacer)
+        .flat_map(|cell| cell.text.chars())
+        .collect()
 }
 
 /// `text`, cut to `columns` **drawn columns** — leading whitespace and all.
@@ -1813,6 +1885,149 @@ mod tests {
         assert_eq!(
             transcript_tail(&shell, 40, 6, 0).0,
             vec!["one".to_owned(), String::new(), "two".to_owned()]
+        );
+    }
+
+    /// **A card shows the lines its pane shows, and a pane shows what has
+    /// scrolled off its screen as well as what is still on it** (user report,
+    /// 2026-09-07 — a Git Bash card nine rows tall beside a pane showing
+    /// twenty-four, with two thirds of the card empty).
+    ///
+    /// Twenty lines onto a ten-row screen: nine of them are still on it and
+    /// eleven are behind it, and the pane draws all twenty. A cell with room for
+    /// fifteen must therefore hold fifteen.
+    ///
+    /// Red gate: take the walk past the screen's top edge out of
+    /// `transcript_tail` and this comes back with the nine the grid still has.
+    #[test]
+    fn the_tail_climbs_past_the_top_of_the_screen_into_what_scrolled_off() {
+        let mut shell = session();
+        for line in 1..=20 {
+            shell
+                .feed(format!("line {line}\r\n").as_bytes())
+                .expect("a shell takes its own output");
+        }
+        assert_eq!(
+            transcript_tail(&shell, 40, 15, 0).0,
+            (6..=20)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>(),
+            "fifteen rows of room is fifteen of the pane's lines"
+        );
+    }
+
+    /// **The shape the report arrived in**: a pane that has scrolled, and is then
+    /// made taller.
+    ///
+    /// This window owns its history, so the vendored grid keeps no scrollback of
+    /// its own and growing a pane adds blank rows at the bottom rather than
+    /// pulling the departed lines back onto the screen. The pane goes on drawing
+    /// all twenty lines — the eleven behind the screen above the nine still on
+    /// it — and the card must draw the same twenty rather than nine at the top
+    /// of a cell with room for twenty-five.
+    ///
+    /// It is not about which shell is running. The report put Git Bash beside
+    /// PowerShell 7 and only Git Bash looked wrong; what separated them was that
+    /// the one had gone on printing after the grow until its screen filled again
+    /// and the other had not.
+    ///
+    /// Red gate: the same one, and this is the arithmetic the report photographed.
+    #[test]
+    fn a_pane_grown_over_its_own_history_still_fills_its_card() {
+        let mut shell = session();
+        for line in 1..=20 {
+            shell
+                .feed(format!("line {line}\r\n").as_bytes())
+                .expect("a shell takes its own output");
+        }
+        shell
+            .resize(
+                NonZeroU32::new(40).expect("40 is not zero"),
+                NonZeroU32::new(30).expect("30 is not zero"),
+            )
+            .expect("a pane can be made taller");
+        let (tail, more_below) = transcript_tail(&shell, 40, 25, 0);
+        assert_eq!(
+            tail.first().map(String::as_str),
+            Some("line 1"),
+            "the card begins where the pane begins"
+        );
+        assert_eq!(
+            tail.last().map(String::as_str),
+            Some("line 20"),
+            "and ends on the last thing the shell said"
+        );
+        assert_eq!(tail.len(), 20, "twenty lines is twenty rows");
+        assert!(
+            !more_below,
+            "nothing is hidden under a window resting on the tail"
+        );
+    }
+
+    /// **The plane between the screen and history is drawn too.** A line that is
+    /// still being printed cannot be frozen, so the rows of it that have already
+    /// scrolled off wait in the transcript's staging plane — which the pane's own
+    /// frame is handed beside history and the screen. A card that read the other
+    /// two and not this one would leave a hole in the middle of what it drew.
+    ///
+    /// Red gate: drop the staged half of the walk and the row that left the
+    /// screen goes missing, leaving four rows of a line the pane draws five of.
+    #[test]
+    fn the_tail_carries_the_rows_staged_between_the_screen_and_history() {
+        let mut shell = DualPlaneSession::new(
+            NonZeroU32::new(20).expect("20 is not zero"),
+            NonZeroU32::new(4).expect("4 is not zero"),
+        );
+        // One line, a hundred columns of it, onto a twenty-column screen four
+        // rows tall: five rows of one logical line, so one row has left the
+        // screen — and none of it can be frozen while it is still open.
+        shell
+            .feed("x".repeat(100).as_bytes())
+            .expect("a shell takes its own output");
+        assert!(
+            shell.transcript().staged_rows().count() >= 1,
+            "an unfinished line's departed rows wait in staging"
+        );
+        let tail = transcript_tail(&shell, 20, 10, 0).0;
+        assert_eq!(
+            tail.len(),
+            5,
+            "five rows of it, and the pane draws all five"
+        );
+        assert!(
+            tail.iter().all(|row| row.len() == 20),
+            "each of them full: {tail:?}"
+        );
+    }
+
+    /// **A card of the alternate screen stops where its pane stops.** §3.2 gives
+    /// a full-screen program its own namespace with no transcript behind it, so
+    /// the pane draws that grid and nothing above it; a card that reached into
+    /// the primary's history while `vim` was up would be a picture of two
+    /// sessions at once.
+    ///
+    /// Red gate: drop the alternate-screen test from `transcript_tail` and the
+    /// twenty lines the shell printed before the program started show up above
+    /// the program's own two.
+    #[test]
+    fn a_card_of_an_alternate_screen_stops_where_its_pane_does() {
+        let mut shell = session();
+        for line in 1..=20 {
+            shell
+                .feed(format!("line {line}\r\n").as_bytes())
+                .expect("a shell takes its own output");
+        }
+        // Home and clear before printing, which is how a full-screen program
+        // starts: without it the two lines land where the shell's cursor was and
+        // the blank rows above them are part of the picture, which is true but
+        // says nothing about where the walk stops.
+        shell
+            .feed(b"\x1b[?1049h\x1b[H\x1b[2Jalt one\r\nalt two")
+            .expect("a program takes the alternate screen");
+        assert_eq!(
+            transcript_tail(&shell, 40, 15, 0).0,
+            vec!["alt one".to_owned(), "alt two".to_owned()],
+            "the program's own screen, and nothing from behind the one it replaced"
         );
     }
 
