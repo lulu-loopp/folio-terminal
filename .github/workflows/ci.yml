@@ -416,9 +416,11 @@ jobs:
           -p bt-render -p bt-term -p bt-pty -p bt-corpus
           -p alacritty_terminal
 
-      # The nine suites the spike measured green here, plus the two this branch
-      # made green — `bt-transcript` and `bt-viewport`, whose seven failures were
-      # all one cause: a path grammar that only knew Windows.
+      # The eight suites the spike's own table records as green here, plus the
+      # two this branch made green — `bt-transcript` and `bt-viewport`, whose
+      # seven failures were all one cause: a path grammar that only knew Windows.
+      # Ten of the fourteen checked above; the other four are the two that want
+      # hardware and the two nobody has measured yet.
       - name: test the portable crates
         run: >
           cargo test --locked

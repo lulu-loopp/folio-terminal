@@ -8,6 +8,13 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- **The core builds on macOS, and CI keeps it that way.** Everything below the
+  application layer — the terminal grid, the renderer, the transcript, the
+  document model, the detectors, the layout, the maths — now compiles on a Mac,
+  and a job on every push compiles it there so that it goes on doing so.
+  Nothing about Folio on Windows changes: this is groundwork, not a port, and
+  there is no Mac build to download. What it buys is that the next feature
+  cannot quietly assume Windows without somebody being told the same day.
 
 - **The welcome card draws no line between its rows.** The Settings page — whose
   row shape this card borrows, and where every one of its six rows also lives —
