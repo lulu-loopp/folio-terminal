@@ -118,6 +118,19 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A card keeps up with its pane whatever shell is running in it.** The cards
+  in the tab column were refreshed by the same clock that breathes a tab's mark
+  while a command runs, and that clock is started by a shell reporting its own
+  prompt. So a PowerShell or Git Bash card followed every row, while a Command
+  Prompt card caught up at the next prompt and a WSL pane that reports nothing
+  at all caught up whenever something else happened to repaint the window — most
+  visibly at the end of a burst, where the last rows a pane printed could sit
+  unreproduced on its card until you moved the pointer over it. A card now
+  refreshes because the pane it is a picture of changed, which is the same thing
+  for every shell. It costs no more than it did: the refresh rides the frame the
+  window was already drawing at, a card still redraws at most ten times a
+  second, and a card you cannot see — column collapsed, tab scrolled out of the
+  list, mode off — costs a comparison and no frame at all.
 - **The first WSL tab of a Folio window is integrated like every other one.** A
   WSL pane gets its command marks, its working directory and its clickable
   paths from a small script handed to the shell the distribution logs you into

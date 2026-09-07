@@ -9583,6 +9583,21 @@ struct WindowRuntime {
     /// [`STRIP_ANIMATION_FRAME`] can be the rate it claims to be rather than a
     /// floor nothing stands on. `None` until the first tick.
     strip_animation_ticked_at: Option<Instant>,
+    /// **Whether a card on screen is behind the pane it is a picture of**
+    /// (§7.1.6b′; ticket T-5).
+    ///
+    /// The card column's own frame debt, kept beside the tick that spends it and
+    /// on the same terms as every other debt this window settles in
+    /// [`Runtime::advance_strip_animation`]: written where the fact is known
+    /// ([`Runtime::drain_pty`], which is where a pane is heard), read where the
+    /// next frame is decided ([`Runtime::strip_animation_deadline`]), and paid off
+    /// where the cards are actually rebuilt
+    /// ([`Runtime::refresh_focus_thumbnails`]).
+    ///
+    /// See [`focus_thumb::CardClock`] for what it replaced — a refresh clock that
+    /// was the shell's `OSC 133` breath, so a card tracked its pane only for as
+    /// long as the shell inside it was one that reported.
+    cards: focus_thumb::CardClock,
     preedit: Option<Preedit>,
     ime_active: bool,
     ime_cursor_throttle: ImeCursorThrottle,
@@ -31283,6 +31298,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         wheel_burst: None,
         last_present_at: None,
         strip_animation_ticked_at: None,
+        cards: focus_thumb::CardClock::default(),
         preedit: None,
         ime_active: false,
         ime_cursor_throttle: ImeCursorThrottle::default(),
@@ -72897,6 +72913,14 @@ impl Runtime<'_> {
         // stamps the panes a program spoke in (`attention` plan §11.10.4), and two tabs of one turn
         // sampled at two times would be two turns as far as that stamp is concerned.
         let now = Instant::now();
+        // **Which tabs spoke, for the card column's clock** (§7.1.6b′, T-5). Kept
+        // as indices because the question they are asked — is there a card of this
+        // tab on screen? — is one only [`Self::focus_rail_geometry_now`] can
+        // answer, and that cannot be reached from inside a loop holding the tabs.
+        // `Vec::new` allocates nothing, and nothing is pushed at all unless the
+        // column is up and its debt is not already standing.
+        let mut spoke: Vec<usize> = Vec::new();
+        let collect_speakers = self.window.focus_mode && !self.window.cards.owes_frame();
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             let outcome =
                 drain_tab_pty(tab, window_focused, index == active_tab, owner_is_a_shell)?;
@@ -72929,6 +72953,33 @@ impl Runtime<'_> {
             }
             chrome_changed |= outcome.renamed;
             moved |= outcome.moved;
+            if collect_speakers && outcome.arrived {
+                spoke.push(index);
+            }
+        }
+        // **§7.1.6b′ T-5 — a card moves because its pane did, whatever shell is
+        // inside it.**
+        //
+        // `arrived` is bytes that reached a screen, which is the same condition
+        // `DualPlaneSession::feed_at` bumps `screen_revision` on — the very number
+        // [`focus_thumb::FocusThumbnails`]'s damage gate keys a terminal seat to.
+        // So this is the card's own damage key heard at the one place every leaf
+        // of every tab passes through, and it is the whole of what schedules a
+        // card's refresh from output. What used to carry a card past
+        // [`Self::advance_strip_animation`]'s own gate was the shell: the tab-mark
+        // breath, which only `OSC 133;C` starts, and the rename a prompt's
+        // `OSC 0`/`OSC 7` causes — see [`focus_thumb::CardClock`] for the gate and
+        // for what a shell that reports neither was left showing.
+        //
+        // **The damage key is checked, not the projection**, and it is checked
+        // against the cards that are actually on screen: a collapsed column, a
+        // window not in the mode, or a tab scrolled out of the rail leaves this at
+        // one rectangle comparison per speaking tab and no frame asked for.
+        if !spoke.is_empty()
+            && let Some(geometry) = self.focus_rail_geometry_now(now)
+            && spoke.iter().any(|index| geometry.card_is_in_view(*index))
+        {
+            self.window.cards.pane_spoke();
         }
         // **A ring that still holds bytes is a turn this window owes itself.**
         //
@@ -73400,7 +73451,29 @@ impl Runtime<'_> {
         // survive the chrome's question below, which is why it is not folded
         // into `owes_frame` and forgotten — see [`tick_owes_a_present`].
         let pictures_owe = frames_arrived || boxes_moved;
-        let owes_frame = owes_frame || pictures_owe;
+        // **§7.1.6b′ T-5 — and the card column's debt is a fourth, kept beside
+        // them for the same reason.**
+        //
+        // This gate is where a card's refresh clock actually was. Everything
+        // above it asks whether some *animation* moved, and a card is not an
+        // animation: it is a picture of a pane, and the pane moves when the child
+        // writes. So on a tick where nothing was easing, this line returned
+        // before [`Self::refresh_chrome`] — which is the only door
+        // `refresh_focus_thumbnails` is behind — and the column stood still.
+        //
+        // What made that survivable, and what made it look like a shell defect,
+        // is the tab-mark breath: `tab_owes_frame(tab.last_drawn_mark, …)` a few
+        // dozen lines up sets `owes_frame` on every frame of a mark that is
+        // breathing, and only `OSC 133;C` starts one. So a PowerShell or Git Bash
+        // card was carried through this gate by its own shell's marker for the
+        // whole of every command, and a Command Prompt or WSL card was carried
+        // through only by whatever else happened to be moving.
+        //
+        // The debt is **not** folded into the present's question below: whether
+        // this tick owes the glass a picture is still `chrome_moved`'s to answer,
+        // and a re-projection that drew the same rows draws nothing.
+        let cards_owe = self.window.cards.owes_frame();
+        let owes_frame = owes_frame || pictures_owe || cards_owe;
         if !owes_frame && !panes_owe {
             return Ok(());
         }
@@ -73598,6 +73671,33 @@ impl Runtime<'_> {
         // out its dwell, or fading is a reason to wake even when the decoder has
         // nothing new — and no reason at all once it has settled.
         let bar_moving = self.window.video.bar_deadline(now, motion);
+        // **§7.1.6b′ T-5 — the card column's own, and the one line here that is
+        // not about an animation at all.**
+        //
+        // Every reading above asks whether a tween is still moving. This asks
+        // whether a picture is still behind the thing it is a picture of: a pane
+        // spoke, and either this tick has not come round yet or the projection it
+        // came round for was refused by the throttle. Both are states nothing else
+        // in this window would wake the loop out of — the pointer has stopped, the
+        // pane's own frame has already been published, and before this line the
+        // only thing that came back for the card was a shell that happened to be
+        // sending `OSC 133`.
+        //
+        // **Half of a pair, and the other half is in
+        // [`Self::advance_strip_animation`]'s `owes_frame` fold.** This wakes the
+        // loop; that lets the woken tick past the early return and on to
+        // `refresh_chrome`. Either alone is inert, and the one without the other
+        // was measured: a deadline with no fold woke the window every 16 ms to
+        // take an early return, so the card stood still *and* the window span.
+        //
+        // **Not gated on reduced motion**, and for the video's reason rather than
+        // its own: a card is not this window's decoration, it is a live picture of
+        // a pane, and a reader who asked for stillness asked for tweens to stop
+        // rather than for a terminal to stop being drawn. The frame it asks for is
+        // the breath's own [`STRIP_ANIMATION_FRAME`], so a card costs no more than
+        // an integrated shell's tab mark always has, and the debt is cleared by
+        // the very pass that draws it.
+        let cards_behind = self.window.cards.owes_frame();
         [
             (tabs_moving
                 || chevron_turning
@@ -73611,7 +73711,8 @@ impl Runtime<'_> {
                 || fading
                 || saying
                 || disclosing
-                || playing)
+                || playing
+                || cards_behind)
                 .then(|| now + STRIP_ANIMATION_FRAME),
             bar_moving,
             self.window.pane_motion.deadline(now, motion),
@@ -81862,8 +81963,15 @@ impl Runtime<'_> {
             .and_then(|broker| broker.guest_mini);
         if geometry.is_none() && !(in_hand.is_some() && guest_mini.is_some()) {
             self.window.focus_thumbs.clear();
+            // Nothing on the glass can be behind anything, so the clock stops
+            // here rather than carrying a debt out of the mode — gate 1's own
+            // sentence, said about the frame schedule.
+            self.window.cards.nothing_to_draw();
             return;
         }
+        // The counters as they stood before this pass, so that what the pass did
+        // can be read off the gates themselves — see [`focus_thumb::CardClock`].
+        let gates_before = self.window.focus_thumbs.stats();
         // **Which cards are projected this frame, and into what box.** One list
         // rather than two walks, because a window with no column of its own
         // still owes a picture of the pane it is carrying, and a second walk to
@@ -81871,14 +81979,11 @@ impl Runtime<'_> {
         // unread documents, the pages asked for.
         let mut boxes: Vec<(usize, [f32; 4])> = Vec::new();
         if let Some(geometry) = geometry.as_ref() {
-            let [list_top, list_bottom] = geometry.viewport;
             for (index, card) in geometry.cards.iter().enumerate() {
                 let Some(tab) = self.window.tabs.get(index) else {
                     continue;
                 };
-                if in_hand == Some(tab.id)
-                    || (card.body[3] > list_top && card.body[1] < list_bottom)
-                {
+                if in_hand == Some(tab.id) || geometry.card_is_in_view(index) {
                     boxes.push((index, card.mini));
                 }
             }
@@ -82008,6 +82113,15 @@ impl Runtime<'_> {
             );
         }
         self.window.focus_thumbs.retain_visible(&visible);
+        // **The card column's frame debt, settled where the cards were actually
+        // drawn** (§7.1.6b′, T-5). A pass that got every seat level owes nothing;
+        // a pass gate 4 refused a seat on does, because that gate is a *skip* and
+        // not a deferral — the seat keeps its old picture with nothing queued to
+        // come back for it, and until this line the only thing that ever came back
+        // was an integrated shell's 16 ms breath. See [`focus_thumb::CardClock`].
+        self.window
+            .cards
+            .settled(gates_before, self.window.focus_thumbs.stats());
         self.photograph_pages(wanted_pictures, now);
         dump_focus_thumb_frame(
             visible.len(),
@@ -92383,6 +92497,129 @@ mod pty_drain_budget_tests {
         assert!(
             all.pending,
             "and a quiet pane drained after it does not cancel it"
+        );
+    }
+
+    /// RED (ticket T-5, user report 2026-09-07) — **the card column is put on the
+    /// clock by the pane's output, and by a card that is actually on screen.**
+    ///
+    /// The drain is the one place every leaf of every tab passes through on every
+    /// turn, which is why the fact is taken here and not on the frame path: a pane
+    /// nobody is typing in is exactly the pane whose card was standing still. What
+    /// is consulted is `arrived` — bytes that reached a screen, the same condition
+    /// `DualPlaneSession::feed_at` bumps `screen_revision` on — and
+    /// `card_is_in_view`, and nothing about the shell inside the pane.
+    ///
+    /// Mutation: tell the clock without asking `card_is_in_view` and a window with
+    /// its column collapsed pays for a frame per burst; drop the call and a
+    /// Command Prompt card is back to catching up at its next prompt.
+    #[test]
+    fn a_pane_that_spoke_puts_its_own_card_on_the_clock() {
+        let drain = method_body("drain_pty");
+        let gathered = drain
+            .find("spoke.push(index)")
+            .expect("`drain_pty` notes which tabs spoke");
+        let asked = drain
+            .find("card_is_in_view")
+            .expect("`drain_pty` asks whether any of them has a card on screen");
+        let told = drain
+            .find("cards.pane_spoke()")
+            .expect("`drain_pty` puts the card column on the clock");
+        assert!(
+            gathered < asked && asked < told,
+            "the speakers are gathered, then filtered by what is on screen, and \
+             only then is a frame owed"
+        );
+        assert!(
+            drain.contains("outcome.arrived {"),
+            "and the fact it is keyed to is bytes reaching a screen, which is what \
+             moves the damage key the card is drawn against"
+        );
+        assert!(
+            drain.contains("self.window.focus_mode && !self.window.cards.owes_frame()"),
+            "a window outside the mode, and one already owed a frame, gather \
+             nothing at all"
+        );
+    }
+
+    /// RED (T-5) — **the tick that draws the cards is reached when a card is
+    /// behind its pane, and not only when something is easing.**
+    ///
+    /// `advance_strip_animation` leaves early — before `refresh_chrome`, which is
+    /// the one door `refresh_focus_thumbnails` stands behind — unless some debt
+    /// says otherwise, and every other debt in that fold is an *animation*. That
+    /// is where a card's refresh clock actually was, and why it looked like a
+    /// property of the shell: the tab-mark breath sets `owes_frame` on every
+    /// frame of a mark that is breathing, and only `OSC 133;C` starts one. So the
+    /// card column's own debt has to be in that fold, or a pane whose shell says
+    /// nothing about itself has no way to reach the pass that draws its card.
+    ///
+    /// Measured on the release build before this line existed: with the debt in
+    /// the *deadline* but not in this fold, the loop woke every 16 ms, took the
+    /// early return, never settled the debt and never redrew the card — a spin
+    /// and a frozen card at once.
+    ///
+    /// Mutation: drop `cards_owe` from the fold and the card stops tracking any
+    /// shell that does not report; drop `cards_behind` from the deadline and
+    /// nothing wakes the loop to spend it.
+    #[test]
+    fn the_tick_that_draws_the_cards_is_reached_when_a_card_is_behind() {
+        let advance = method_body("advance_strip_animation");
+        let read = advance
+            .find("let cards_owe = self.window.cards.owes_frame();")
+            .expect("the tick asks whether a card is behind its pane");
+        let folded = advance
+            .find("let owes_frame = owes_frame || pictures_owe || cards_owe;")
+            .expect("and folds it in beside the animations' own debts");
+        let gate = advance
+            .find("if !owes_frame && !panes_owe {")
+            .expect("which is the gate that decides whether this tick does anything");
+        let door = advance
+            .find("self.refresh_chrome()")
+            .expect("and `refresh_chrome` is what is behind it");
+        assert!(
+            read < folded && folded < gate && gate < door,
+            "the card's debt is read, folded, and only then does the gate stand \
+             between the tick and the pass that draws the cards"
+        );
+    }
+
+    /// RED (T-5) — **the loop is woken for a card that is behind its pane, and the
+    /// debt is settled where the cards are drawn.**
+    ///
+    /// Both halves, on `the_frame_schedule_knows_about_the_register`'s terms: the
+    /// deadline schedules the frame and the projection pass is what pays for it.
+    /// Without the first, a pane that stopped talking inside a frame leaves a card
+    /// showing a screen that has moved on until some unrelated event repaints;
+    /// without the second, the window would ask for a frame every 16 ms forever.
+    ///
+    /// Mutation: drop `cards_behind` from the fold, or settle the clock on "a pass
+    /// ran" rather than on the gates, and one of these goes red.
+    #[test]
+    fn the_frame_schedule_knows_about_the_card_column() {
+        let deadline = method_body("strip_animation_deadline");
+        assert!(
+            deadline.contains("self.window.cards.owes_frame()"),
+            "nothing wakes the loop for a card that is behind its pane"
+        );
+        assert!(
+            deadline.contains("|| cards_behind"),
+            "the reading is taken and then dropped: the fold never asks for the frame"
+        );
+        let pass = method_body("refresh_focus_thumbnails");
+        let before = pass
+            .find("let gates_before = self.window.focus_thumbs.stats()")
+            .expect("the pass reads the gates before it spends them");
+        let settled = pass
+            .find(".settled(gates_before, self.window.focus_thumbs.stats())")
+            .expect("the pass settles the clock against the gates");
+        assert!(
+            before < settled,
+            "the debt is settled against what this pass did, not against a total"
+        );
+        assert!(
+            pass.contains("cards.nothing_to_draw()"),
+            "and a window with no column on screen carries no debt out of the mode"
         );
     }
 
