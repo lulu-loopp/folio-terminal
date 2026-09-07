@@ -98,6 +98,8 @@
 
 `RowPsReadLine` / `PsReadLineRowGone` / `psreadline_row_installed_in` / `psreadline_row_update_in` / `RowScrollback` / `RowLineWrapping` / `RowNotifications` / `PsReadLineRemovedToast` 原样合格。
 
+> **`RowPowerShellOffer` 那一行的「术语统一(整合→集成)」于 2026-08-29 被用户裁决推翻,已作废。** 这件东西全产品只叫「PowerShell 整合」——提示条、设置行、`CapNone`、初次设置卡都是同一个名字,理由写在 `crates/bt-app/src/i18n.rs` 的 `CapNone` 上方。本页是那天那一遍的账,上面那一格照原样留着;要照做的是这条注,不是那一格。
+
 ---
 
 ## 4. Agents（三个安装行同句式）

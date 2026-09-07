@@ -338,10 +338,10 @@ out of the directory the signed files are in.
 
 ```powershell
 $assets = @(Get-ChildItem target/release-package -File | ForEach-Object { $_.FullName })
-$arguments = @('release', 'create', 'v0.2.1-preview') + $assets + @(
+$arguments = @('release', 'create', 'v0.2.2-preview') + $assets + @(
     '--draft', '--prerelease',
-    '--title', 'Folio 0.2.1',
-    '--notes-file', 'docs/plans/release/release-note-v0.2.1-preview.md')
+    '--title', 'Folio 0.2.2',
+    '--notes-file', 'docs/plans/release/release-note-v0.2.2-preview.md')
 & gh @arguments
 ```
 

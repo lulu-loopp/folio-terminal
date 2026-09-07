@@ -119,18 +119,16 @@ can be told from one that was retaken on purpose.
 | `first-run-dark.png` | 3200 x 2000 | 2026-09-06 | `b89b400cee3e2d4556f0e2627763acd9db48eaf8b9d8513cbfc5204755346399` |
 | `context-menu.png` | 786 x 593 | 2026-09-05 | `e7e82a4ffe3a94dc1d52f8f38cabe48f61e1a39d9d2cc1c5dc17f5e5ed662faf` |
 
-The eighteen the two READMEs point at come to 3.26 MiB after `oxipng`;
-`context-menu.png` adds 54 KiB to that, and the `first-run-*` pair adds 174 KiB
-— that pair is not linked from either README and is here as the record of what
-the card looked like. `docs/plans/release/large-files.md` carries the number
-beside everything else a clone has to fetch.
+The twenty the two READMEs point at come to 3.43 MiB after `oxipng`, and
+`context-menu.png` adds 54 KiB to that; `docs/plans/release/large-files.md`
+carries the number beside everything else a clone has to fetch.
 
 ## What was in front of the camera
 
-The eighteen the two READMEs point at were taken from `target\release\folio.exe`
-against a throwaway project — `C:\Projects\aurora`, a small library with a
-five-commit history, a README with a table and a display formula in it, a PDF
-and a page —
+Eighteen of the twenty the two READMEs point at were taken from
+`target\release\folio.exe` against a throwaway project — `C:\Projects\aurora`, a
+small library with a five-commit history, a README with a table and a display
+formula in it, a PDF and a page —
 and through an `%APPDATA%` and `%LOCALAPPDATA%` of their own, so the machine's
 real settings, session and profiles were neither read nor written. Each pane is
 a shell profile whose command line runs one command and then leaves an ordinary

@@ -4,7 +4,16 @@ All notable changes to Folio are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.2.2-preview (unreleased)
+
+Fixes and polish for 0.2.1-preview, and one card: a machine that has never run
+Folio is welcomed once and asked its boundary questions together, on a card that
+presses the Settings rows rather than doing anything of its own. Everything else
+here is something that was already meant to work — a pane dropped between two
+tabs, a menu that lists only the shells this machine can start, a page that opens
+on the pane it was dropped on, two pictures side by side in two preview panes,
+and the formulas on the screen of a program that repaints itself, folds a line
+too long for the pane, or has pushed the top of a block off the window.
 
 ### Added
 
@@ -60,6 +69,15 @@ All notable changes to Folio are recorded here. The format follows
   the program each one looked for, which is where installing one and having its
   row come back can be read about. A profile you made yourself is never left off
   a menu, whatever its program resolves to.
+
+- **`settings.json` is read and written forward.** The card's two keys are new,
+  and a file written by 0.2.1 is brought up to date the first time 0.2.2 reads
+  it: automatically, with nothing to do, nothing to delete and nothing to
+  re-enter. That step is also what records that the card has been shown, so a
+  machine that was already running Folio never meets it. `session.json`,
+  `profiles.json`, `keybindings.json` and `pins.json` are read and written
+  exactly as 0.2.1 left them, and no shortcut, default or file location has
+  moved.
 
 ### Fixed
 
@@ -162,7 +180,34 @@ All notable changes to Folio are recorded here. The format follows
   image, a recording and a third picture beside them are three pictures on the
   screen.
 
-## 0.2.1-preview (unreleased)
+### Known issues
+
+- **A new signature has no reputation yet.** SmartScreen can still raise "Windows
+  protected your PC" on the first run of a freshly signed build. **More info**
+  names Weiyi Shi as the publisher and `folio.exe` as the application; **Run
+  anyway** is the way through, and switching SmartScreen off is not.
+- **Folio cannot be a panel inside Visual Studio Code.** That panel takes a
+  process speaking a protocol, not a terminal; `folio-here.cmd` in the archive
+  makes Folio the external terminal VS Code opens instead.
+- **A window saved on a monitor that enumerates late** comes back on the primary
+  display. The displays are counted once, before the window is made, and a second
+  monitor can take a few seconds to appear after a cold start.
+- **Two pages whose panes cross while the layout is rearranging can overlap for
+  about 200 ms.** Under every hosted page is a plate of the window's colour, and
+  the plate belonging to the page opened first sits above the page opened after
+  it. Standing still that costs nothing, because two panes never overlap; while
+  the panes are gliding to new places — a split, a close, a pane dropped, torn
+  out or merged, all of which take 200 ms — the two rectangles can cross, and for
+  that long one page is covered by the other's plate. Both are whole again as
+  soon as the panes land, and a divider drag does not do it at all.
+- **A window was once reported drawing its top half black** after a move to a
+  second monitor, unreproduced. Attach `%APPDATA%\Folio\diagnostics.log` if you
+  hit it.
+- **`.webm` needs the VP9 or AV1 Video Extension** from the Microsoft Store. A
+  stock Windows has neither, and without one there is no still and no playback.
+  The other six containers play on a stock Windows.
+
+## 0.2.1-preview — 2026-09-06
 
 Fixes and polish for 0.2.0-preview. The one thing that is new is the one 0.2.0
 said was coming: `Open in Folio` on the page Windows 11 opens first. Nothing

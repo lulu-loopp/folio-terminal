@@ -4137,6 +4137,8 @@ impl Text {
                 "Open any folder in Folio under Show more options",
                 "在 Show more options 中用 Folio 打开文件夹",
             ),
+            // 「整合」 and not 「集成」, on `CapNone`'s ruling above and for its
+            // reason: one object may only have one name.
             Self::FirstRunRowPowerShell => pick(
                 lang,
                 "PowerShell integration lets you jump between commands",
