@@ -902,8 +902,10 @@ pub enum Text {
     /// WSL. The same everything, and the same honest condition — a `zsh` or
     /// `fish` login never reads the init file the launcher was handed.
     CapWslBash,
-    /// `cmd`, whose whole integration is the one marker that fits in `PROMPT`.
-    /// It is the only shipped row that has to say what it has not got.
+    /// `cmd`, whose whole integration is what fits in `PROMPT`: the prompt
+    /// boundaries and the directory, and no exit code, because the format
+    /// string has no substitution that reads one. It is the only shipped row
+    /// that has to say what it has not got.
     CapCmd,
     /// A profile served by no script at all.
     CapNone,
@@ -2984,10 +2986,14 @@ impl Text {
                 "Prompt marks, directory, exit codes and hyperlinks, on a bash login only",
                 "命令标记、当前目录、退出码、链接；只在登录 shell 是 bash 时生效",
             ),
+            // zh: opus46 — the English moved on 2026-09-07 (cmd gained prompt
+            // marks) and the Chinese half is the English until the Chinese
+            // writer has been round. Listed in
+            // `docs/plans/shell-matrix-2026-09-07.md`.
             Self::CapCmd => pick(
                 lang,
-                "Directory and hyperlinks; no prompt marks, no exit codes",
-                "当前目录、链接；没有命令标记和退出码",
+                "Prompt marks, directory and hyperlinks; no exit codes",
+                "Prompt marks, directory and hyperlinks; no exit codes",
             ),
             // 「整合」 and not 「集成」 for `shell integration` throughout (user
             // ruling 2026-08-29): the notice strip above the pane already said
@@ -3135,10 +3141,11 @@ impl Text {
                 "Prompt marks, directory and exit codes on a bash login only; no hyperlinks",
                 "只在登录 shell 是 bash 时有命令标记、当前目录、退出码；没有链接",
             ),
+            // zh: opus46 — same edit, same day, same list.
             Self::CapCmdNoLinks => pick(
                 lang,
-                "Directory; no prompt marks, no exit codes, no hyperlinks",
-                "当前目录；没有命令标记、没有退出码、没有链接",
+                "Prompt marks and directory; no exit codes, no hyperlinks",
+                "Prompt marks and directory; no exit codes, no hyperlinks",
             ),
             // The mock-up's own wording for this row (`.pf-view[data-view=edit]`,
             // the `Shell integration` line), which says what is lost and then

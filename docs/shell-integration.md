@@ -230,15 +230,25 @@ replacing it.
 
 **Which shell, and which distribution.** `wsl.exe --list --verbose` names the installed
 distributions and marks the default with `*`; that distribution is then asked for its own name and
-its user's login shell (`getent passwd`). The init file is offered **only** when that shell is a
+its user's login shell (`getent passwd`).
+
+**The login-shell answer is not in hand when the first WSL pane of a process spawns**, and the row
+above is what that pane gets rather than what the table promises. The question is asked from the
+spawn itself and never waited for — it boots a virtual machine, and §7.40 ② refuses to make a frame
+wait for one — so the first WSL pane of every run is started as a bare `wsl.exe --cd <dir>` with no
+`--init-file` and therefore no markers and no report at all, and every WSL pane after it in the same
+process is served in full. Measured 2026-09-07 and booked as a ticket in
+`docs/plans/shell-matrix-2026-09-07.md`; the row above describes the served case. The init file is offered **only** when that shell is a
 bash — a distribution logging into zsh or fish keeps its shell and goes without markers, which is
 the fallback path below rather than a broken shell. When more than one distribution is installed,
 the profile is titled `WSL · <default>` so the row says which one it starts; a machine with one
 needs no qualifier and keeps the bare `WSL`.
 
 **Command Prompt has no script and no hook — its whole integration is `PROMPT`.** Folio
-reads whatever `PROMPT` this process inherited, puts the `OSC 7` report in front of it, and hands
-the result to `cmd.exe`. Prefixed and never replaced: a `PROMPT` in the environment is a prompt
+reads whatever `PROMPT` this process inherited, puts the two command-boundary markers and the
+`OSC 7` report in front of it, and hands the result to `cmd.exe`. The report sits immediately
+before `133;A`, which is `folio.bash`'s own order, so the two doors report at the same point of the
+cycle. Prefixed and never replaced: a `PROMPT` in the environment is a prompt
 somebody wrote with `setx`, and a terminal that overwrote it would have taken their prompt away in
 exchange for a directory they cannot see. An unset `PROMPT` gets `cmd`'s own documented default,
 `$P$G`, spelled out — the moment we set the variable at all we owe the whole of it. And because a
@@ -258,7 +268,7 @@ fallback path described under **Authority and fallback** rather than on a guess.
 | **Git Bash** | yes | yes | yes | yes | yes | none, deliberately | yes | bash's own |
 | **WSL** (bash login shell) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | bash's own |
 | **WSL** (zsh/fish login shell) | no | no | no | no | no | — | set, but not forwarded | that shell's own |
-| **Command Prompt** | **no** | **no** | no | no | **yes** | refused — see below | yes | not promised |
+| **Command Prompt** | **yes** | **no** | no | **yes, no code** | **yes** | refused — see below | yes | not promised |
 | **a profile of the reader's own**, no door | no | no | no | no | no | — | yes | not promised |
 
 Six rows need their reasons stated, because each looks like an omission and is not.
@@ -287,28 +297,41 @@ executable **path** (v1–v5) are split by that path — `pwsh.exe` → `pwsh`, 
 `winps` — because the path is the surviving record of which of the two actually ran, and folding
 both onto one slug would spend it.
 
-**Command Prompt sends no OSC 133 at all**, and this overturns the ruling of 2026-08-11 (Q5) that
-allowed it `A` and `B`. That ruling assumed `A` and `B` are two more facts and that missing `C`/`D`
-costs only what `C`/`D` would have bought. They are not facts — they are a claim of *authority*,
-and this implementation charges for it in `C`:
+**Command Prompt marks its prompts and not its input** (2026-09-07). `PROMPT` is not a hook, it is
+a format string, and `cmd.exe` expands it at exactly one moment: just before it reads a line. That
+moment is the end of the last command and the start of this prompt at once, so `133;D` and `133;A`
+are precisely the two markers it can carry, and Folio sets
 
-* `133;A` alone turns `shell_integration_is_authoritative` on for the screen, and that flag's job
-  is to **retire the cursor-line heuristic** — the rule that the line under the cursor is probably
-  still being typed and must not be decorated yet. Its replacement is the semantic input region,
-  which only `B` and `C` build. A shell that sends `A` and stops has switched the protection off
-  and put nothing in its place: a path typed at a `cmd` prompt would light up as a link mid-word.
-* `133;B` opens an input region whose only closers are `C` and the *next* `A`. Without `C` it stays
-  open across the command's entire run, so the resize gate reads the command's own output as an
-  unsent buffer: the window cannot be resized for as long as anything is printing, and every resize
-  that does land owes an `InvokePrompt` chord to a shell that has no such binding.
+```
+PROMPT=$e]133;D$e\$e]7;file:///$P$e\$e]133;A$e\<the prompt you already had>
+```
 
-Both are strictly worse than sending nothing, and sending nothing is a documented, tested position.
-The measurement is pinned at `a_prompt_that_can_never_send_c_must_not_send_a_or_b_either` — if that
-test ever goes red the reason has expired and the decision should be revisited rather than
-inherited. What `cmd.exe` cannot do at all is the `C`/`D` pair itself: `PROMPT` is expanded once,
-just before a line is read, and the shell has no pre- or post-execution moment to be called at.
-Clink would supply both and is **not** required (Q5's surviving half); detecting it and upgrading
-the row is booked, not done.
+`D` carries no status: `PROMPT` has no substitution that reads `ERRORLEVEL`, and a tick coloured
+from a number nobody reported would be worse than a tick with no colour. `133;C` has nowhere at all
+to be emitted from — there is no pre-execution moment in this shell.
+
+**`133;B` is still refused, and for the half of the 2026-08-16 measurement that has not expired.**
+That measurement found `A` and `B` to be a claim of *authority* rather than two more facts, charged
+for in a `C` this shell cannot send, and it was right about `B`: the marker opens an input region
+whose only closers are `C` and the *next* `A`, so without `C` every row a `cmd` command printed
+would sit inside the region that means "this is what the reader is typing" — no display mathematics,
+no image previews, and the post-resize `InvokePrompt` chord owed to a shell with no such binding. So
+`cmd` panes go on decorating their output exactly as they always have.
+
+What has expired is the other half — that `A` alone was worse than silence, because it retired the
+cursor-line heuristic without building the region that replaces it. That is now false of the
+implementation rather than argued around: authority to retire the heuristic is claimed by the
+markers that build the region (`B`, `C`) and by no others, so a screen carrying only `A` and `D`
+keeps the heuristic it always had. The old measurement named this as its own exit — "if that test
+ever goes red the reason has expired" — and the new one is
+`a_prompt_only_shell_gets_its_ticks_and_keeps_the_cursor_heuristic`, beside a round trip through a
+real `cmd.exe` in `crates/bt-term/tests/shell_integration_cmd.rs`.
+
+What it buys is the capability this profile's reader has no other way to get. Every other profile
+can be handed a script; `cmd` cannot, and until now its command rail was empty however many commands
+had been run — nothing to click, and `Ctrl+Shift+↑`/`↓` with nowhere to go. Clink would supply `C`
+and a real exit code both, and is still **not** required (Q5's surviving half); detecting it and
+upgrading the row is booked, not done.
 
 **Command Prompt's `OSC 0` is refused rather than absent.** `cmd.exe` calls `SetConsoleTitle` with
 its own image path on the way up, and ConPTY forwards it as `ESC ]0;C:\WINDOWS\System32\cmd.exe`.
@@ -478,8 +501,12 @@ and the documented
 
 ## Authority and fallback
 
-Authority is scoped per screen. Once a primary or alternate screen emits any recognized OSC 133
-marker, region markers replace the cursor/CUP/sticky-line heuristics on that screen. Malformed or
+Authority is scoped per screen, and it is claimed by the markers that build a region rather than by
+any marker at all. Once a primary or alternate screen emits `133;B` or `133;C`, region markers
+replace the cursor/CUP/sticky-line heuristics on that screen. A screen that has emitted only `133;A`
+and `133;D` — which is every Command Prompt pane — has said where its commands begin and end and
+nothing about where a typed line stops, so it keeps those heuristics: the claim and the machine that
+honours it arrive together or not at all. Malformed or
 out-of-order markers recover conservatively: duplicate B does not move an open command start; A, C,
 or D closes an unterminated command at that marker; C/D without B changes phase but invents no input
 region. Both BEL and ST terminators and arbitrary PTY chunk boundaries are supported.

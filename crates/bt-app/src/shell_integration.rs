@@ -10,7 +10,7 @@
 //! | PowerShell | none — the user dot-sources it into `$PROFILE` themselves |
 //! | Git Bash | `bash --init-file <script> -i`, replacing `--login -i` |
 //! | WSL | `wsl.exe … -- <login shell> --init-file <script> -i` |
-//! | Command Prompt | the `PROMPT` variable, carrying `OSC 7` and nothing else |
+//! | Command Prompt | the `PROMPT` variable, carrying `OSC 7` and `OSC 133;D`/`;A` |
 //!
 //! PowerShell's absence from that list is not an omission. `pwsh` has one
 //! startup file at one well-known path and no argument that would source a
@@ -22,7 +22,9 @@
 //!
 //! `cmd.exe` has no startup file to name and no hook to install, so its whole
 //! integration is a *format string* — see [`profiles::Integration::CmdPrompt`]
-//! for why that string carries `OSC 7` alone and no OSC 133 marker at all.
+//! for why that string carries the two markers that describe the moment it is
+//! expanded at, and neither of the two that would open a region it could never
+//! close.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -103,6 +105,22 @@ const CMD_DEFAULT_PROMPT: &str = "$P$G";
 /// so that tightening the URI parser cannot silently blank every `cmd` pane's
 /// directory — the failure would be invisible from inside that crate.
 const CMD_OSC7: &str = r"$e]7;file:///$P$e\";
+
+/// The two OSC 133 markers a format string can carry, and the whole of what
+/// `cmd.exe` can say about a command boundary.
+///
+/// `D` ends the command the previous prompt started — bare, because `PROMPT`
+/// has no substitution for `ERRORLEVEL` and a status this shell cannot read is
+/// one it must not claim — and `A` opens the prompt about to be printed. Both
+/// describe *this* moment, which is the one moment `PROMPT` is expanded at, and
+/// that is why these two fit where `B` and `C` cannot: `B` would open an input
+/// region whose only closer is a `C` this shell has no moment to send, and the
+/// pane would spend every command's run with its output inside the region that
+/// says "this is what the reader is typing". See
+/// [`profiles::Integration::CmdPrompt`] for the whole of that reasoning and for
+/// what the terminal had to learn before these two could be sent at all.
+const CMD_MARKS_BEFORE_REPORT: &str = r"$e]133;D$e\";
+const CMD_MARKS_AFTER_REPORT: &str = r"$e]133;A$e\";
 
 /// The variables a WSL shell is given, listed for `WSLENV` so that they cross
 /// the Win32/Linux boundary.
@@ -501,8 +519,13 @@ pub fn declared_environment(integration: Integration) -> Vec<(&'static str, &'st
     declared
 }
 
-/// `existing` — whatever `PROMPT` this process inherited — with the working
-/// directory report in front of it.
+/// `existing` — whatever `PROMPT` this process inherited — with the command
+/// boundary markers and the working directory report in front of it.
+///
+/// The order is `133;D`, then `OSC 7`, then `133;A`, then the prompt somebody
+/// wrote. It is `folio.bash`'s own order — the report is emitted immediately
+/// before the prompt marker there too — so the two doors report in one order
+/// and the page that documents them needs one sentence rather than two.
 ///
 /// **Prefixed, never replaced.** A `PROMPT` in the environment is a prompt
 /// somebody wrote: `setx PROMPT` is how a person keeps `$T$G` or a coloured
@@ -526,7 +549,9 @@ fn cmd_prompt(existing: Option<OsString>) -> OsString {
     {
         return existing.unwrap_or_default();
     }
-    let mut prompt = OsString::from(CMD_OSC7);
+    let mut prompt = OsString::from(CMD_MARKS_BEFORE_REPORT);
+    prompt.push(CMD_OSC7);
+    prompt.push(CMD_MARKS_AFTER_REPORT);
     prompt.push(existing.unwrap_or_else(|| OsString::from(CMD_DEFAULT_PROMPT)));
     prompt
 }
@@ -1317,21 +1342,27 @@ mod tests {
         }
     }
 
-    /// PIN — Command Prompt reports where it is standing, and claims nothing
-    /// else.
+    /// PIN — Command Prompt marks where each of its commands begins and ends,
+    /// reports where it is standing, and claims **neither** of the two markers
+    /// that would open a region it can never close.
     ///
-    /// Red gate, and it is the *absence* that is load-bearing: adding
-    /// `$e]133;A$e\` to this string is a one-token edit that looks like more
-    /// capability and is less. `133;A` turns
-    /// `DualPlaneSession::shell_integration_is_authoritative` on, whose whole
-    /// job is to retire the cursor-line heuristic in favour of the semantic
-    /// input region — a region only `133;B`/`133;C` can build, and `cmd.exe`
-    /// can emit neither, because `PROMPT` is expanded once before a line is
-    /// read and there is no second moment to be called at. The pane would come
-    /// out of that trade with its typed line decorated as it is typed. See
-    /// [`profiles::Integration::CmdPrompt`] for the `133;B` half.
+    /// Both halves are red gates, in opposite directions.
+    ///
+    /// * Dropping `133;D`/`133;A` is the state this profile shipped in until
+    ///   2026-09-07: every other capability works and the command rail is
+    ///   simply empty forever, in the one profile whose reader has no other way
+    ///   to find the top of a command's output.
+    /// * Adding `$e]133;B$e\` at the end of this string is the one-token edit
+    ///   that looks like more capability and is less. `B` opens an input region
+    ///   whose only closers are `C` and the *next* `A`, `PROMPT` is expanded
+    ///   once — just before a line is read — so `C` has nowhere to be sent
+    ///   from, and every command's own output would then spend its whole run
+    ///   inside the region that means "this is what the reader is typing":
+    ///   undecorated, and holding the resize path's `InvokePrompt` chord over a
+    ///   shell with no such binding. See
+    ///   [`profiles::Integration::CmdPrompt`].
     #[test]
-    fn command_prompt_reports_its_directory_and_claims_no_shell_integration() {
+    fn command_prompt_marks_its_command_boundaries_and_reports_its_directory() {
         let command = shell_command(
             &row("cmd"),
             &[],
@@ -1345,12 +1376,20 @@ mod tests {
         );
         let prompt = prompt_of(&command);
         assert_eq!(
-            prompt, r"$e]7;file:///$P$e\$P$G",
-            "the report, then the prompt cmd would have printed on its own"
+            prompt, r"$e]133;D$e\$e]7;file:///$P$e\$e]133;A$e\$P$G",
+            "the previous command's end, the report, this prompt's start, then the prompt cmd \
+             would have printed on its own"
         );
+        for absent in ["133;B", "133;C"] {
+            assert!(
+                !prompt.contains(absent),
+                "a shell that cannot close a region must not open one: {prompt}"
+            );
+        }
         assert!(
-            !prompt.contains("133"),
-            "a shell that cannot close a region must not open one: {prompt}"
+            !prompt.contains("133;D;"),
+            "`PROMPT` cannot read ERRORLEVEL, so `D` carries no status rather than a wrong one: \
+             {prompt}"
         );
     }
 
@@ -1431,18 +1470,24 @@ mod tests {
             &bash_wsl(),
             &Env(vec![("PROMPT", "$T$S$P$G")]),
         );
-        assert_eq!(prompt_of(&theirs), r"$e]7;file:///$P$e\$T$S$P$G");
+        assert_eq!(
+            prompt_of(&theirs),
+            r"$e]133;D$e\$e]7;file:///$P$e\$e]133;A$e\$T$S$P$G"
+        );
 
         let again = shell_command(
             &row("cmd"),
             &[],
             None,
             &bash_wsl(),
-            &Env(vec![("PROMPT", r"$e]7;file:///$P$e\$T$S$P$G")]),
+            &Env(vec![(
+                "PROMPT",
+                r"$e]133;D$e\$e]7;file:///$P$e\$e]133;A$e\$T$S$P$G",
+            )]),
         );
         assert_eq!(
             prompt_of(&again),
-            r"$e]7;file:///$P$e\$T$S$P$G",
+            r"$e]133;D$e\$e]7;file:///$P$e\$e]133;A$e\$T$S$P$G",
             "an inherited prompt that already reports is left alone"
         );
 
@@ -1455,7 +1500,10 @@ mod tests {
             &bash_wsl(),
             &Env(vec![("PROMPT", "")]),
         );
-        assert_eq!(prompt_of(&empty), r"$e]7;file:///$P$e\$P$G");
+        assert_eq!(
+            prompt_of(&empty),
+            r"$e]133;D$e\$e]7;file:///$P$e\$e]133;A$e\$P$G"
+        );
     }
 
     // -- the profile's own environment (7.1.6c-6c) ---------------------------
