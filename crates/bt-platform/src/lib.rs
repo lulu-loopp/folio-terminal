@@ -8882,6 +8882,112 @@ pub use windows_impl::{
     virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_to_console,
 };
 
+/// The three thread-band calls, off Windows.
+///
+/// **The band is a Win32 notion, and the honest answer off Win32 is that nobody
+/// took it.** [`windows_impl::set_current_thread_priority`] already returns
+/// whether the kernel accepted the request, and already has one caller
+/// (`bt_term::inline_image`'s resample pool) that goes on running at whatever
+/// the machine allows when the answer is `false` — so a portable arm that says
+/// `false` is not a stub standing in for a decision, it is the same contract
+/// answered by a platform that has not been asked yet.
+///
+/// It is deliberately **not** `nice`, and not `pthread_setschedparam`. Every
+/// POSIX spelling of this is a different bargain from Win32's three bands:
+/// `setpriority` is per-process on some unixes and per-thread on Linux, and
+/// macOS's own answer is a QoS class — `pthread_set_qos_class_self_np`, which
+/// is a statement about *what kind of work this is* rather than about a number,
+/// and which the scheduler reads together with the thermal and power state. It
+/// would also be this crate's first dependency off Windows: `bt-platform`'s
+/// manifest has `[target.'cfg(windows)'.dependencies]` and nothing else, which
+/// is why its library already compiles on a Mac. Choosing between those
+/// spellings is a macOS backend's decision (`docs/plans/port/macos-spike-2026-09-07.md`
+/// class C), and making it here on the way past would be answering it by
+/// accident.
+///
+/// [`spawn_at_priority`] still exists, still names its thread, and still runs
+/// the body — the band is the only thing it drops. A caller that spawns a
+/// worker gets a worker; what it does not get is a promise that the worker is
+/// out of the frame's way.
+#[cfg(not(windows))]
+mod portable_priority {
+    use super::ThreadPriority;
+
+    /// Whether the kernel took the band. Off Windows it was never asked, so
+    /// `false` — see the module note.
+    pub fn set_current_thread_priority(priority: ThreadPriority) -> bool {
+        let _ = priority;
+        false
+    }
+
+    /// Which band the calling thread is in. Off Windows there are no bands, so
+    /// `None` — the same answer Win32 gives for a thread in none of the three.
+    #[must_use]
+    pub fn current_thread_priority() -> Option<ThreadPriority> {
+        None
+    }
+
+    /// A named thread, started. The band is requested from inside it exactly as
+    /// the Windows arm requests it, and refused exactly as
+    /// [`set_current_thread_priority`] refuses it, so the shape a caller reads
+    /// is the same on both.
+    pub fn spawn_at_priority<T: Send + 'static>(
+        name: &str,
+        priority: ThreadPriority,
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> std::io::Result<std::thread::JoinHandle<T>> {
+        std::thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(move || {
+                set_current_thread_priority(priority);
+                body()
+            })
+    }
+}
+
+#[cfg(not(windows))]
+pub use portable_priority::{
+    current_thread_priority, set_current_thread_priority, spawn_at_priority,
+};
+
+/// The band contract, asked where there are no bands.
+///
+/// It is the whole of what [`portable_priority`] promises, and it is worth a
+/// test rather than a comment for one reason: the caller in `bt-term` reads the
+/// `bool`, and a future arm that starts taking the band has to change this file
+/// **and** this claim together.
+#[cfg(all(test, not(windows)))]
+mod portable_priority_tests {
+    use super::{ThreadPriority, current_thread_priority, set_current_thread_priority};
+
+    #[test]
+    fn the_band_is_refused_and_says_so() {
+        assert!(!set_current_thread_priority(ThreadPriority::BelowNormal));
+        assert_eq!(current_thread_priority(), None);
+    }
+
+    #[test]
+    fn a_worker_still_starts_and_still_carries_its_name() {
+        let thread = super::spawn_at_priority(
+            "bt-portable-band-probe",
+            ThreadPriority::BelowNormal,
+            || {
+                std::thread::current()
+                    .name()
+                    .map(str::to_owned)
+                    .zip(current_thread_priority().or(Some(ThreadPriority::Normal)))
+            },
+        )
+        .expect("a named thread");
+        let seen = thread.join().expect("the worker ran");
+        assert_eq!(
+            seen,
+            Some(("bt-portable-band-probe".to_owned(), ThreadPriority::Normal)),
+            "the thread is named and runs; the band it asked for was simply not taken"
+        );
+    }
+}
+
 /// **The one decision in the system-preference watch.**
 ///
 /// Everything else about [`SystemSettingsWatch`] is `SetWindowSubclass` and a
