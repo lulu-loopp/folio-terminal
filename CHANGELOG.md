@@ -81,6 +81,20 @@ too long for the pane, or has pushed the top of a block off the window.
 
 ### Fixed
 
+- **An inline `$…$` formula that the line wraps through is typeset like any
+  other.** Where a line folds is decided by how wide the pane happens to be, and
+  it was deciding something else as well: a formula whose closing `$` had been
+  pushed onto the next row stayed as source text, while every other formula in
+  the same output — including the same formula one column of pane width wider —
+  was drawn. Nothing was recorded against it either, so a diagnostic trace of
+  that screen showed no failure and no formula: it simply was not there. Folio
+  reads a wrapped line as the one line it is when it looks for formulas, and now
+  reads the same line when it draws one. The picture goes where the formula
+  begins, over the formula's own characters wherever the fold has put them, and
+  it may be as wide as the characters it replaces on the row it is drawn on —
+  which is the same rule as before on a line that does not wrap. A formula whose
+  picture cannot fit there keeps its source, as it always has.
+
 - **A `$$` block under a formula whose top has gone off the screen is drawn
   again.** A full-screen program owns its whole window and moves its transcript
   up by redrawing it, not by scrolling, so the topmost formula's opening `$$`

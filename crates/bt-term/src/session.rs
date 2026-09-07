@@ -7920,15 +7920,10 @@ impl DualPlaneSession {
             ) else {
                 continue;
             };
-            let Some(text) =
-                live_grid_input(&record.inputs, record.start.row).map(|input| input.text.as_str())
-            else {
-                continue;
-            };
             let rendered_runs = artifact.inline_runs.clone();
             let Some((row, left_column, cells)) =
                 inline_placement_geometry(&record.span, &rendered_runs, |run| {
-                    live_inline_run_cells(frame, record.start.row, text, run)
+                    live_inline_run_cells(frame, &record.inputs, record.start.row, run)
                 })
             else {
                 continue;
@@ -10210,9 +10205,12 @@ pub fn render_detection_task(
         engine,
         &task.span,
         line,
-        task.cell_width_subpixels,
-        task.cell_height_subpixels,
-        task.ascii_baseline_subpixels,
+        InlineGridGeometry {
+            pane_columns: task.versions.layout.width_cells.get(),
+            cell_width_subpixels: task.cell_width_subpixels,
+            cell_height_subpixels: task.cell_height_subpixels,
+            ascii_baseline_subpixels: task.ascii_baseline_subpixels,
+        },
         MathRenderKey {
             dpi_milli: task.versions.layout.dpi_milli,
             font_milli_pt: NonZeroU32::new(12_000).expect("12 pt is non-zero"),
@@ -10245,15 +10243,20 @@ pub fn render_live_detection_task(
         task.band_start_row = task.start.row;
         task.band_end_row = task.end.row;
     }
-    let line =
-        live_grid_input(&task.inputs, task.start.row).map_or("", |input| input.text.as_str());
+    // The **logical** line, not the row the run starts on: a run's byte offsets are offsets into
+    // the string the detector proved it on, and the fold is free to have put the rest of it — or
+    // all of it — on a later row (§4.6c).
+    let line = live_snapshot_logical_line_text(&task.inputs, task.start.row);
     render_task_math(
         engine,
         &task.span,
-        line,
-        task.cell_width_subpixels,
-        task.cell_height_subpixels,
-        task.ascii_baseline_subpixels,
+        &line,
+        InlineGridGeometry {
+            pane_columns: task.layout.width_cells.get(),
+            cell_width_subpixels: task.cell_width_subpixels,
+            cell_height_subpixels: task.cell_height_subpixels,
+            ascii_baseline_subpixels: task.ascii_baseline_subpixels,
+        },
         MathRenderKey {
             dpi_milli: task.layout.dpi_milli,
             font_milli_pt: NonZeroU32::new(12_000).expect("12 pt is non-zero"),
@@ -10290,15 +10293,31 @@ fn unrendered_table_raster() -> MathRaster {
     }
 }
 
+/// The grid a run is being typeset into: the width its line folds at, and the box one cell is.
+///
+/// One value because they are one fact and are always read together — an inline picture sits on
+/// the text baseline of a cell of this size, on a row this many columns wide.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InlineGridGeometry {
+    pane_columns: u32,
+    cell_width_subpixels: i64,
+    cell_height_subpixels: i64,
+    ascii_baseline_subpixels: i64,
+}
+
 fn render_task_math(
     engine: &MathEngine,
     span: &MathSpan,
     line: &str,
-    cell_width_subpixels: i64,
-    cell_height_subpixels: i64,
-    ascii_baseline_subpixels: i64,
+    grid: InlineGridGeometry,
     key: MathRenderKey,
 ) -> Result<MathRaster, MathRenderError> {
+    let InlineGridGeometry {
+        pane_columns,
+        cell_width_subpixels,
+        cell_height_subpixels,
+        ascii_baseline_subpixels,
+    } = grid;
     if span.mode == MathMode::Display {
         return engine.render(&span.render_source, key);
     }
@@ -10334,15 +10353,23 @@ fn render_task_math(
     let mut rendered = Vec::with_capacity(span.inline_runs.len());
     let mut baseline_px = 0_u32;
     let mut render_time = Duration::ZERO;
+    let pane_columns = pane_columns.max(1) as usize;
     for (index, run) in span.inline_runs.iter().enumerate() {
         let start = usize::try_from(run.byte_start).map_err(|_| MathRenderError::InlineGeometry)?;
         let end = usize::try_from(run.byte_end).map_err(|_| MathRenderError::InlineGeometry)?;
         let (Some(before), Some(delimited)) = (line.get(..start), line.get(start..end)) else {
             return Err(MathRenderError::InlineGeometry);
         };
-        let column = UnicodeWidthStr::width(before).saturating_sub(base_column);
-        let available_px =
-            (UnicodeWidthStr::width(delimited) as f32 * cell_width_px).floor() as u32;
+        let column_in_line = UnicodeWidthStr::width(before);
+        let column = column_in_line.saturating_sub(base_column);
+        // **The cells its own source occupies, on the row the picture is drawn on.** A logical
+        // line is folded at the pane width, and a run the fold split owns cells on two rows while
+        // its picture is one box drawn where the run begins — so the box it has to fit in ends at
+        // that row's edge. Unfolded, the whole run is on one row and this is the source width
+        // exactly, which is what it has always been.
+        let available_cells = UnicodeWidthStr::width(delimited)
+            .min(pane_columns.saturating_sub(column_in_line % pane_columns));
+        let available_px = (available_cells as f32 * cell_width_px).floor() as u32;
         let fitted = render_inline_run_fitted(
             engine,
             &run.source,
@@ -12457,8 +12484,7 @@ fn frozen_inline_run_cells(
     )
     .ok()?;
     let end = u32::try_from(line.grapheme_boundaries.binary_search(&run.byte_end).ok()?).ok()?;
-    let mut row = None;
-    let mut left = u32::MAX;
+    let mut origin = None;
     let mut cells = Vec::new();
     for (index, anchors) in frame
         .cell_anchors
@@ -12477,16 +12503,63 @@ fn frozen_inline_run_cells(
         if *anchor_id != id || offset.0 < start || offset.0 >= end {
             continue;
         }
-        let cell_row = u32::try_from(index / columns).ok()?;
-        let cell_column = u32::try_from(index % columns).ok()?;
-        if row.is_some_and(|current| current != cell_row) {
-            return None;
+        // The frame is laid out row-major, so the first cell this matches is the one the run
+        // begins on. Its row and column are the composite's origin however many rows the fold
+        // has spread the rest of the run over — the picture is drawn where its source starts.
+        if origin.is_none() {
+            origin = Some((
+                u32::try_from(index / columns).ok()?,
+                u32::try_from(index % columns).ok()?,
+            ));
         }
-        row = Some(cell_row);
-        left = left.min(cell_column);
         cells.push(index);
     }
-    Some((row?, left, cells))
+    let (row, left) = origin?;
+    Some((row, left, cells))
+}
+
+/// The physical rows of the logical line a live grid row belongs to, joined out of one detection
+/// snapshot, with the byte offset at which each row begins inside that logical line.
+///
+/// A run's byte offsets are offsets into the **logical** line, because that is the string the
+/// detector proved the run on. Everything downstream has to read the same string: where a line
+/// folds is the window's business and not the text's (§4.6a, §4.6c), so a fold landing inside a run —
+/// or before it, on a run that starts on the second row of a wrapped line — must not change what
+/// the run is or whether it is drawn.
+fn live_logical_line_rows(inputs: &[LiveDetectionInput], row: u32) -> Vec<(u32, usize)> {
+    let mut first = row;
+    while let Some(previous) = first.checked_sub(1) {
+        if live_grid_input(inputs, previous).is_some_and(|input| input.continues) {
+            first = previous;
+        } else {
+            break;
+        }
+    }
+    let mut rows = Vec::new();
+    let mut offset = 0usize;
+    let mut cursor = first;
+    while let Some(input) = live_grid_input(inputs, cursor) {
+        rows.push((cursor, offset));
+        offset = offset.saturating_add(input.text.len());
+        if !input.continues {
+            break;
+        }
+        cursor = cursor.saturating_add(1);
+    }
+    rows
+}
+
+/// The same logical line as one string, for the renderer, which measures columns across it.
+///
+/// The snapshot's own rows and not the terminal's: a worker holds the grid as it stood when the
+/// task was built, which is the grid the run's offsets were measured against.
+/// [`DualPlaneSession::live_logical_line_text`] answers the same question of the live terminal.
+fn live_snapshot_logical_line_text(inputs: &[LiveDetectionInput], row: u32) -> String {
+    live_logical_line_rows(inputs, row)
+        .into_iter()
+        .filter_map(|(grid_row, _)| live_grid_input(inputs, grid_row))
+        .map(|input| input.text.as_str())
+        .collect()
 }
 
 /// Frame cells one live-grid `$…$` run occupies, as `(row, left column, cell indices)`.
@@ -12495,31 +12568,54 @@ fn frozen_inline_run_cells(
 /// character count — because that is what the grid drew and what `render_task_math` measured the
 /// run's available box with. The two must agree or a CJK line places its formula in the wrong
 /// cells.
+///
+/// The run is looked up across every physical row of its logical line, and the row and column
+/// returned are the ones its **first** cell sits on: a run the fold split still owns all of its
+/// own cells, and its picture is drawn where its source begins.
 fn live_inline_run_cells(
     frame: &ViewportFrame,
+    inputs: &[LiveDetectionInput],
     live_row: u32,
-    text: &str,
     run: &InlineMathRun,
 ) -> Option<(u32, u32, Vec<usize>)> {
-    let frame_row = frame
-        .row_map
-        .iter()
-        .position(|mapped| mapped.live_grid_row == Some(live_row))?;
     let columns = frame.columns.get() as usize;
-    let start = usize::try_from(run.byte_start).ok()?;
-    let end = usize::try_from(run.byte_end).ok()?;
-    let start_column = UnicodeWidthStr::width(text.get(..start)?);
-    let end_column = start_column.saturating_add(UnicodeWidthStr::width(text.get(start..end)?));
-    if start_column >= end_column || end_column > columns {
+    let run_start = usize::try_from(run.byte_start).ok()?;
+    let run_end = usize::try_from(run.byte_end).ok()?;
+    if run_start >= run_end {
         return None;
     }
-    Some((
-        u32::try_from(frame_row).ok()?,
-        u32::try_from(start_column).ok()?,
-        (start_column..end_column)
-            .map(|column| frame_row * columns + column)
-            .collect(),
-    ))
+    let rows = live_logical_line_rows(inputs, live_row);
+    let mut origin = None;
+    let mut cells = Vec::new();
+    for (grid_row, byte_start) in rows {
+        let text = live_grid_input(inputs, grid_row)?.text.as_str();
+        let byte_end = byte_start.saturating_add(text.len());
+        let from = run_start.max(byte_start);
+        let to = run_end.min(byte_end);
+        if from >= to {
+            continue;
+        }
+        let frame_row = frame
+            .row_map
+            .iter()
+            .position(|mapped| mapped.live_grid_row == Some(grid_row))?;
+        let start_column = UnicodeWidthStr::width(text.get(..from - byte_start)?);
+        let end_column = start_column.saturating_add(UnicodeWidthStr::width(
+            text.get(from - byte_start..to - byte_start)?,
+        ));
+        if start_column >= end_column || end_column > columns {
+            return None;
+        }
+        if origin.is_none() {
+            origin = Some((
+                u32::try_from(frame_row).ok()?,
+                u32::try_from(start_column).ok()?,
+            ));
+        }
+        cells.extend((start_column..end_column).map(|column| frame_row * columns + column));
+    }
+    let (row, left) = origin?;
+    Some((row, left, cells))
 }
 
 /// Assemble one inline occurrence's presentation geometry from its per-run cell lookup.
@@ -25700,6 +25796,232 @@ mod tests {
             text.matches('$').count(),
             2,
             "the run that rendered has its own source cells cleared, and only those: {text:?}"
+        );
+    }
+
+    /// The user's own first sentence, printed by a command, at one pane width per column.
+    ///
+    /// `$e^{i\theta}=\cos\theta+i\sin\theta$` starts at column 39 and is 36 cells long, so the
+    /// pane width alone decides whether the fold falls inside it. It must not decide whether the
+    /// formula is a picture: the detector proved the run on the logical line, and where that line
+    /// folds is the window's business, not the text's (§4.6c).
+    fn wrapped_inline_sentence_stream() -> Vec<u8> {
+        let mut stream =
+            String::from("\x1b]133;A\x07PS demo> \x1b]133;B\x07runner\r\n\x1b]133;C\x07");
+        stream.push_str(
+            r"Rotation and growth are one operation: $e^{i\theta}=\cos\theta+i\sin\theta$ puts the",
+        );
+        stream.push_str("\r\nexponential on the circle.\r\n");
+        stream.push_str("\x1b]133;D;0\x07\x1b]133;A\x07PS demo> \x1b]133;B\x07");
+        stream.into_bytes()
+    }
+
+    fn wrapped_inline_session(columns: u32) -> DualPlaneSession {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(columns), nz(20));
+        seat_inline_metrics(&mut session);
+        let layout = session.layout_key();
+        session.set_layout_key(LayoutKey {
+            width_cells: nz(columns),
+            ..layout
+        });
+        session
+            .feed_at(&wrapped_inline_sentence_stream(), started)
+            .unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        complete_live_math_for_real(&mut session);
+        session
+    }
+
+    /// PIN (§4.6c): a run the fold splits is typeset where its source begins.
+    ///
+    /// At 74 columns the closing `$` is the first character of the next physical row. Before this
+    /// fix the renderer read only the row the run starts on, `line.get(start..end)` was `None`,
+    /// and the whole occurrence died as `InlineGeometry` — a failure with no stage, so the record
+    /// was dropped with no artifact, no failure reason and not one line in `BT_DECOR_TRACE`. One
+    /// column wider it typeset. Same bytes, same session, same command: only the fold moved.
+    #[test]
+    fn an_inline_run_the_fold_splits_is_typeset_where_its_source_begins() {
+        let session = wrapped_inline_session(74);
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let blocks = rendered_inline_blocks(&frame);
+        assert_eq!(
+            blocks.len(),
+            1,
+            "the split run must still be one rendered picture: {:?}",
+            frame
+                .math_blocks
+                .iter()
+                .map(|block| (block.artifact.mode, block.display))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            blocks[0].source, r"e^{i\theta}=\cos\theta+i\sin\theta",
+            "the picture is of the source the detector proved"
+        );
+        let head = frame_row_text(&frame, 1);
+        let tail = frame_row_text(&frame, 2);
+        assert!(
+            head.starts_with("Rotation and growth are one operation:"),
+            "the prose before the run stays: {head:?}"
+        );
+        assert!(
+            !head.contains('$') && !tail.contains('$'),
+            "the run owns its own cells on both rows the fold spread them over: {head:?} {tail:?}"
+        );
+        assert!(
+            tail.contains("puts the"),
+            "the prose after the run stays on the row the fold put it on: {tail:?}"
+        );
+    }
+
+    /// PIN (§4.6c): the same sentence reads the same at every pane width.
+    ///
+    /// The band starts at 54 because that is where the picture stops fitting in the cells its own
+    /// source occupies on the row it is drawn on — the width rule doing its job, with the source
+    /// left standing. Above it there is no width at which this sentence is anything but a picture.
+    #[test]
+    fn a_wrapped_inline_run_is_a_picture_at_every_pane_width_that_can_hold_it() {
+        for columns in 54..=95u32 {
+            let session = wrapped_inline_session(columns);
+            let mut projection = session.new_projection(session.layout_key());
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            let sources = rendered_inline_blocks(&frame)
+                .iter()
+                .map(|block| block.source.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                sources,
+                vec![r"e^{i\theta}=\cos\theta+i\sin\theta".to_owned()],
+                "one picture, same source, at {columns} columns"
+            );
+            assert_eq!(
+                frame.cells.iter().filter(|cell| cell.text == "$").count(),
+                0,
+                "no delimiter is left on the grid at {columns} columns"
+            );
+        }
+    }
+
+    /// PIN (§4.6c): a run that the fold puts wholly on a later row of its own logical line.
+    ///
+    /// The other half of the same defect, and the one no width sweep of the sentence above can
+    /// reach: here the fold falls *before* the run, so the row the run starts on is not the row
+    /// the logical line starts on, and every byte offset the detector produced points past the end
+    /// of that row's text.
+    #[test]
+    fn an_inline_run_the_fold_puts_on_a_later_row_is_typeset_there() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(12));
+        seat_inline_metrics(&mut session);
+        let layout = session.layout_key();
+        session.set_layout_key(LayoutKey {
+            width_cells: nz(60),
+            ..layout
+        });
+        let mut stream =
+            String::from("\x1b]133;A\x07PS demo> \x1b]133;B\x07runner\r\n\x1b]133;C\x07");
+        stream.push_str(
+            "one two three four five six seven eight nine ten eleven twelve thirteen and $x^2$ ends",
+        );
+        stream.push_str("\r\n\x1b]133;D;0\x07\x1b]133;A\x07PS demo> \x1b]133;B\x07");
+        session.feed_at(stream.as_bytes(), started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        complete_live_math_for_real(&mut session);
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let blocks = rendered_inline_blocks(&frame);
+        assert_eq!(
+            blocks.len(),
+            1,
+            "a run on the second row of a wrapped line is still a run: {:?}",
+            frame
+                .math_blocks
+                .iter()
+                .map(|block| (block.artifact.mode, block.display))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(blocks[0].source, "x^2");
+        assert_eq!(
+            frame.cells.iter().filter(|cell| cell.text == "$").count(),
+            0,
+            "the run's delimiters are cleared on the row the fold put them on"
+        );
+    }
+
+    /// PIN (§4.6c): the fold cannot lend a picture room the pane has not got.
+    ///
+    /// At 50 columns the run begins at column 39 with eleven cells left on that row, and the
+    /// picture is wider than that. Reading the whole source's width as the budget — which is right
+    /// when nothing is folded and wrong the moment something is — would draw it over the pane's
+    /// right edge. The source stays instead, whole, which is the answer the width rule has always
+    /// given.
+    #[test]
+    fn a_split_run_whose_picture_outgrows_its_own_row_keeps_its_source() {
+        let session = wrapped_inline_session(50);
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            rendered_inline_blocks(&frame).is_empty(),
+            "a picture that does not fit the row it would be drawn on is not drawn"
+        );
+        assert_eq!(
+            frame.cells.iter().filter(|cell| cell.text == "$").count(),
+            2,
+            "and its source is left standing, both delimiters included"
+        );
+    }
+
+    /// PIN (§4.6c), frozen plane: a folded run keeps its picture once the line is scrollback.
+    ///
+    /// A transcript line is one logical line whatever the pane does to it, so the projection lays
+    /// it over as many visual rows as the width needs. The placer used to refuse any run whose
+    /// cells landed on two of them, which is the same sentence the live side was saying and the
+    /// same defect: a formula that was a picture on the grid became source the moment it scrolled.
+    #[test]
+    fn a_frozen_inline_run_the_fold_splits_keeps_its_picture() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(74), nz(6));
+        seat_inline_metrics(&mut session);
+        let layout = session.layout_key();
+        session.set_layout_key(LayoutKey {
+            width_cells: nz(74),
+            ..layout
+        });
+        session
+            .feed_at(&wrapped_inline_sentence_stream(), started)
+            .unwrap();
+        session
+            .feed_at(
+                b"pad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\n",
+                started,
+            )
+            .unwrap();
+        assert!(
+            session.document.entries().values().any(|entry| entry
+                .line
+                .text
+                .contains(r"$e^{i\theta}=\cos\theta+i\sin\theta$")),
+            "the fixture must actually freeze the formula line into history"
+        );
+        assert!(complete_frozen_math_for_real(&mut session) >= 1);
+        let mut projection = session.new_projection(session.layout_key());
+        session.refresh_projection(&mut projection);
+        // A frozen line stands above the live grid, and the live grid is exactly one screenful, so
+        // the only way to photograph scrollback is to scroll to it. The first frame is what
+        // measures the document; the scroll is honoured by the second.
+        let _ = session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let sources = rendered_inline_blocks(&frame)
+            .iter()
+            .map(|block| block.source.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sources,
+            vec![r"e^{i\theta}=\cos\theta+i\sin\theta".to_owned()],
+            "the frozen line's split run is still a picture"
         );
     }
 
