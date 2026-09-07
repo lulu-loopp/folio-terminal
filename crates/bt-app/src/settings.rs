@@ -23406,6 +23406,71 @@ mod tests {
         );
     }
 
+    /// RED (user ruling 2026-09-07) — **each of the four picture-in-picture
+    /// slots is drawn with a `Record` button the pointer can press and the
+    /// keyboard can reach.**
+    ///
+    /// The page had one line for the four, and a folded line offers no `Record`
+    /// — so what stood between `Summon the terminal`, which has one, and the two
+    /// greyed `Alt`+arrow rows, which are refusals, was a row saying `Not set`
+    /// with nothing on it at all. A reader has three things to go on there and
+    /// all three say the same wrong thing: no button, no key, and a neighbour
+    /// that looks like it for a reason this row does not share.
+    ///
+    /// Stated on this surface as well as on the table's own
+    /// (`shortcuts::tests::every_picture_in_picture_slot_is_its_own_recordable_line`)
+    /// because the complaint was about the page: the row model can call a line
+    /// recordable and the fix is only real when the button is drawn, hit-tested
+    /// and in the Tab order.
+    ///
+    /// MUTATION: fold the four back into a family — every lookup below fails to
+    /// find its line, which is the page losing four buttons at once.
+    #[test]
+    fn every_picture_in_picture_slot_is_drawn_with_a_record_button() {
+        let table = crate::shortcuts::Shortcuts::defaults();
+        let lines = table.editor_rows();
+        let rows = visible_rows(TabLayoutMode::Horizontal);
+        let page = |scroll: f32| {
+            layout_for_menu(
+                SURFACE.0,
+                SURFACE.1,
+                1.0,
+                None,
+                None,
+                content(&rows, &lines),
+                SettingsCategory::Shortcuts,
+                scroll,
+                MENU_UNSCROLLED,
+                &mut flat(0.0),
+            )
+            .expect("this window hosts the dialog")
+        };
+        let at_rest = page(UNSCROLLED);
+        let order = page_order(content(&rows, &lines), SettingsCategory::Shortcuts);
+        for slot in 1..=4u8 {
+            let id = format!("summon-pip-{slot}");
+            let index = lines
+                .iter()
+                .position(|line| line.ids == vec![id.as_str()])
+                .unwrap_or_else(|| panic!("{id} is a line of its own on the page"));
+            let placed = page(scroll_showing(&at_rest, at_rest.shortcuts[index].band));
+            let drawn = &placed.shortcuts[index];
+            let record = drawn.record.unwrap_or_else(|| {
+                panic!("{id} is drawn with a Record button");
+            });
+            let (x, y) = centre(record);
+            assert_eq!(
+                hit(&placed, &values(), x, y),
+                SettingsTarget::Record(index),
+                "{id}: the button answers where it is drawn"
+            );
+            assert!(
+                order.contains(&SettingsTarget::Record(index)),
+                "{id}: and the keyboard reaches it"
+            );
+        }
+    }
+
     /// Visual PIN — **a chord is drawn as key caps, right to left from the
     /// button that changes it, and an unbound row says so in words.**
     ///
