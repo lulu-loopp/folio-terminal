@@ -131,6 +131,11 @@ place.
 - **A `$$` block whose opening `$$` has been pushed off the top of a full-screen
   program is drawn again.** Every block below it was reading the wrong
   delimiter, and the last one on the screen was never paired at all.
+- **An inline `$…$` formula that the line wraps through is typeset too.**
+  When the pane was narrow enough that a fold fell inside an inline formula,
+  the formula stayed as source and nothing was recorded, while every other
+  formula on the screen was drawn. It is now typeset where it begins, at every
+  pane width that can hold it.
 - **Two preview panes can show two pictures at once.** An image and a video
   side by side left one of the two panes with nothing but its size line,
   whichever arrived second.
@@ -248,6 +253,7 @@ The full list is in `CHANGELOG.md` in the repository.
 - **拖到窗格上的页面在该窗格打开。**把 `.html` 或 `.pdf` 从文件列拖出来、让它单独占一个窗格时，布局确实在用户瞄准的位置分开了，但页面却在别处打开，盖住第一个预览窗格当时显示的内容。
 - **窗格宽度不足以单行容纳的公式也被排版。**终端折叠某一行时把折行处那个空格也丢掉，所以 `\quad g_i(x)` 读成 `\quadg_i(x)`，在那一个宽度下该块就一直以源代码形式显示。
 - **全屏程序中，开头的 `$$` 已被推出屏幕顶部的 `$$` 块重新绘制。**它下面的每个块此前都在读错误的定界符，而屏幕上最后一个块根本没有配对。
+- **折行经过的行内公式也会被排版。**以前当窗格窄到折行落在某个行内公式内部时，那个公式会一直保持源代码而不被记录，其他公式则正常绘制。现在公式从其源代码起始位置开始排版，只要窗格宽度能容纳它。
 - **两个预览窗格可以同时显示两幅图片。**图片和视频并排时，两个窗格中总有一个只剩下尺寸行——后到达的那个是谁都一样。
 - **卡上开关的旋钮现在带阴影而不是圆环**，阴影的衰减方式与窗口中其他所有凸起元素一致。
 
