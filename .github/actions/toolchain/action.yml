@@ -24,10 +24,29 @@ runs:
     # out of it and named explicitly rather than left for rustup to find: the
     # runner's bare `rustup toolchain install` rejects a channel that carries a
     # host triple, and this project's channel carries one on purpose.
+    #
+    # **Off Windows the triple is the one thing that cannot travel.** The pin is
+    # `<version>-x86_64-pc-windows-msvc`, and rustup on a Mac refuses it as a
+    # channel name — not because the version is wrong but because it cannot host
+    # that triple. The *version* is what this file pins; the triple only settles
+    # which of the two Windows hosts (MSVC or GNU) a Windows machine picks, and
+    # there is exactly one host to pick from anywhere else. So a non-Windows
+    # runner installs the same version against its own default host, and
+    # `RUSTUP_TOOLCHAIN` is exported for the rest of the job — without it every
+    # later `cargo` reads `rust-toolchain.toml` again and asks for the Windows
+    # channel a second time.
     - shell: pwsh
       run: |
-        $c = (Select-String -Path rust-toolchain.toml -Pattern 'channel = "(.+)"').Matches[0].Groups[1].Value
-        rustup toolchain install $c --component rustfmt --component clippy --no-self-update
+        $channel = (Select-String -Path rust-toolchain.toml -Pattern 'channel = "(.+)"').Matches[0].Groups[1].Value
+        if (-not $IsWindows) {
+          $version = ($channel -split '-', 2)[0]
+          $line = rustup show | Select-String -Pattern '^Default host:\s*(\S+)$'
+          if (-not $line) { throw "rustup did not report a default host, so there is no triple to install $version for" }
+          $channel = "$version-$($line.Matches[0].Groups[1].Value)"
+          "RUSTUP_TOOLCHAIN=$channel" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        }
+        Write-Host "installing $channel"
+        rustup toolchain install $channel --component rustfmt --component clippy --no-self-update
 
     # Third-party, so pinned to a commit rather than to a tag its owner can
     # repoint. This action itself is referenced by path, which is this
