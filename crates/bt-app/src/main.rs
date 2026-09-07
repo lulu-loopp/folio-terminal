@@ -29075,21 +29075,17 @@ fn create_leaf_session(
     if chosen_id == profiles::WINDOWS_POWERSHELL_ID {
         psreadline::begin_probe();
     }
-    // **The other one trigger** (§7.40 ③). Which shell the default distribution
-    // logs into is a question only the distribution can answer, and answering it
-    // means booting a virtual machine — so it is asked here, where somebody is
-    // actually opening a WSL shell, and on no other machine in the world. It
-    // used to be asked at launch, on every machine that merely had `wsl.exe`.
+    // There used to be a second trigger here (§7.40 ③): a `wsl.exe` started
+    // beside this spawn to ask the default distribution which shell it logs
+    // into. It is gone as of 2026-09-07, because nothing waited for it and so
+    // the *first* WSL pane of every run composed its command line before the
+    // answer existed and went out with no init file, no `OSC 133` and no
+    // `OSC 7` — `docs/plans/shell-matrix-2026-09-07.md` T-2. A question about a
+    // Linux user account is now put by the pane that needs the answer, inside
+    // the distribution it is about, in the same command line as the shell it
+    // decides (`shell_integration::WSL_LOGIN_SHELL`). No process here, nothing
+    // in flight, and every WSL pane composed the same way.
     //
-    // Keyed off the namespace rather than off the shipped `wsl` id, because that
-    // is what `shell_integration::shell_command_for` branches on: the day the
-    // profile editor lets somebody make a second WSL profile, that profile's
-    // panes need this answer too and would not carry that id.
-    //
-    // Idempotent, and nothing waits for it — see `wsl::begin_login_shell_probe`.
-    if profiles::row(seed.profile).is_some_and(|row| row.paths == profiles::PathNamespace::Wsl) {
-        wsl::begin_login_shell_probe();
-    }
     // **Where it opens, decided once for both paths.** A leaf with a directory
     // of its own — inherited from the pane it was split off, revived from disk,
     // translated across from the tab you were looking at — uses it; a leaf
@@ -29160,7 +29156,6 @@ fn create_leaf_session(
             &row,
             &place.arguments,
             shell_integration::script_path(),
-            &wsl::facts(),
             &bt_pty::SystemShellEnvironment,
         );
         // **The two variables that make an agent in this pane able to say something.**

@@ -118,6 +118,22 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **The first WSL tab of a Folio window is integrated like every other one.** A
+  WSL pane gets its command marks, its working directory and its clickable
+  paths from a small script handed to the shell the distribution logs you into
+  — and which shell that is, is a question only the distribution can answer.
+  Folio used to ask it by starting a second `wsl.exe` beside the pane and
+  never waiting for the reply, so the *first* WSL pane of every run went out
+  before the answer existed and was started without the script: no ticks on
+  the rail, no folder in the tab or the files column, no `Ctrl+Shift+↑`/`↓`,
+  and a card in `Cards` that never refreshed while a command ran. The second
+  WSL tab you opened worked, and every one after it — which on a machine whose
+  default profile is WSL is no consolation, because the first pane is the only
+  one there is. The question now travels *in* the pane's own command line and
+  the distribution answers it about itself, so there is nothing left to wait
+  for and every WSL pane is composed the same way. A distribution that logs you
+  into zsh or fish still keeps its shell, untouched, exactly as before.
+
 - **Folio now tells Windows when it changes the folder right-click menu.** Every
   program that registers a menu entry has to announce it, and Folio never did.
   A running File Explorer reads the association and context-menu tables once and
