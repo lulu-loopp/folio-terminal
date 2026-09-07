@@ -3,7 +3,8 @@
 # Folio 0.2.2-preview
 
 Fixes and polish for 0.2.1-preview, and one card: a machine that has never run
-Folio is asked its boundary questions once, together, in one place.
+Folio is welcomed once and asked its boundary questions together, in one
+place.
 
 ## Welcome to Folio, once, on a machine that has never run it
 
@@ -31,13 +32,13 @@ Folio is asked its boundary questions once, together, in one place.
   place, on the same shape of row.
 - **Done** applies the rows that are on. **Not now** and `Esc` close the card
   with the shipped values — the update check on, the rest off — and change
-  nothing. Either way it does not come back, and the shell behind it
-  has been running the whole time.
+  nothing. Either way it does not come back, and the shell behind it has been
+  running the whole time.
 - A row is only offered if it can be honoured. An agent that is not on this
   machine, or whose configuration already calls Folio, is not listed, and when
-  none of the three is there the rule above them goes with them. On Windows 11 unpacked
-  without `folio.msix`, the Explorer row still offers the entry it can offer,
-  worded for it.
+  none of the three is there the rule above them goes with them. On Windows 11
+  unpacked without `folio.msix`, the Explorer row still offers the entry it can
+  offer, worded for it.
 - The PowerShell row records an intent rather than acting: where your `$PROFILE`
   is comes from the shell, so the line is added by the next PowerShell that
   starts, and **Settings > Terminal** says so until it does. The file as it stood
