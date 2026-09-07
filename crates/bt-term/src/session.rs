@@ -343,6 +343,150 @@ struct LiveImagePathSegment {
     boundaries: Vec<(u32, u32)>,
 }
 
+/// What one registered anchor named, taken just before a resize hands the grid to the vendor to
+/// reflow. See [`DualPlaneSession::reflow_witnesses`].
+#[derive(Clone, Debug)]
+struct ReflowWitness {
+    id: AnchorId,
+    bias: Bias,
+    /// Where it stood in the tail before the reflow, kept only to sort the witnesses into content
+    /// order — which line, and how far into it.
+    order: (usize, usize),
+    /// The whole soft-wrapped logical line it sat in, as that tail read it.
+    line: String,
+    /// Its position inside that line, in bytes.
+    within: usize,
+}
+
+/// Which cell of the tail an anchor is asking about, in the terms its own plane speaks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReflowQuery {
+    Live(GridPoint),
+    Staged(StagingId, GraphemeOffset),
+}
+
+/// What a resize wrote down about the grid it is about to hand over.
+#[derive(Clone, Debug, Default)]
+struct ReflowSnapshot {
+    witnesses: Vec<ReflowWitness>,
+    /// How many soft-wrapped logical lines that grid held, which is how far back into the reflowed
+    /// tail an answer can possibly be: a reflow re-cuts lines into other rows and neither reorders
+    /// them nor invents them, so the plane's lines are the last this-many of `staging ++ grid`.
+    lines: usize,
+}
+
+/// Which plane a reflowed physical row ended up on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReflowPlane {
+    /// A row the reflow pushed off the top; `stage_resize_history` has handed it to the transcript.
+    Staged(StagingId),
+    /// A row that still fits on the grid.
+    Live(u32),
+}
+
+/// One physical row of the reflowed tail, and the bytes it contributes to its logical line.
+#[derive(Clone, Debug)]
+struct ReflowRow {
+    plane: ReflowPlane,
+    byte_start: usize,
+    byte_end: usize,
+    /// Byte inside this row's own text → the column that byte begins at.
+    boundaries: Vec<(u32, u32)>,
+    /// Column → grapheme offset inside this row, the same table a capture migration uses.
+    grapheme_offsets: Vec<GraphemeOffset>,
+}
+
+/// One soft-wrapped logical line of the reflowed tail.
+#[derive(Clone, Debug, Default)]
+struct ReflowLine {
+    text: String,
+    rows: Vec<ReflowRow>,
+}
+
+impl ReflowLine {
+    /// Where in this line a coordinate stands, in bytes, or `None` when it is not in this line.
+    ///
+    /// The inverse of [`Self::seat`], and the two are a pair on purpose: the same table answers
+    /// "which byte is this cell" before the reflow and "which cell is this byte" after it, so a
+    /// round trip through the pair cannot drift by a column.
+    fn locate(&self, query: ReflowQuery) -> Option<usize> {
+        let (row, column) = match query {
+            ReflowQuery::Live(point) => (
+                self.rows
+                    .iter()
+                    .find(|row| row.plane == ReflowPlane::Live(point.row))?,
+                point.column,
+            ),
+            ReflowQuery::Staged(id, offset) => {
+                let row = self
+                    .rows
+                    .iter()
+                    .find(|row| row.plane == ReflowPlane::Staged(id))?;
+                // The last column that begins at or before this grapheme, which is the reading
+                // `capture_rows_transaction` wrote the offset with.
+                let column = row
+                    .grapheme_offsets
+                    .iter()
+                    .rposition(|at| *at <= offset)
+                    .unwrap_or(0);
+                (row, u32::try_from(column).ok()?)
+            }
+        };
+        let local = row
+            .boundaries
+            .iter()
+            .rev()
+            .find(|(_, at)| *at <= column)
+            .map(|(boundary, _)| *boundary)
+            .unwrap_or(0);
+        Some(row.byte_start.saturating_add(local as usize))
+    }
+
+    /// The coordinate `within` bytes into this line, on whichever plane now carries that byte.
+    ///
+    /// A line may straddle the seam: its first rows left for staging and its last are still on the
+    /// grid. Answering per byte rather than per line is what lets a mark whose prompt row was cut
+    /// in half by the reflow still name the half it was in.
+    fn seat(
+        &self,
+        within: usize,
+        bias: Bias,
+        source_generation: SourceGeneration,
+        grid_generation: GridGeneration,
+    ) -> Option<ContentAnchor> {
+        let row = self
+            .rows
+            .iter()
+            .find(|row| row.byte_start <= within && within < row.byte_end)
+            .or_else(|| self.rows.last().filter(|row| within == row.byte_end))?;
+        let local = u32::try_from(within - row.byte_start).ok()?;
+        let column = row
+            .boundaries
+            .iter()
+            .rev()
+            .find(|(boundary, _)| *boundary <= local)
+            .map(|(_, column)| *column)?;
+        Some(match row.plane {
+            ReflowPlane::Staged(id) => ContentAnchor::Staging {
+                id,
+                offset: row
+                    .grapheme_offsets
+                    .get(column as usize)
+                    .copied()
+                    .unwrap_or(GraphemeOffset(column)),
+                bias,
+                generation: source_generation,
+            },
+            ReflowPlane::Live(row) => ContentAnchor::Live {
+                screen: ScreenId::Primary,
+                point: GridPoint { row, column },
+                bias,
+                generation: grid_generation,
+            },
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct LiveRowStability {
     revision: u64,
@@ -2793,6 +2937,15 @@ impl DualPlaneSession {
     ) -> Result<(), SessionError> {
         self.refresh_semantic_region_witnesses();
         let plan = plan_resize(self.terminal.dimensions(), (columns, rows));
+        // Before a single cell moves: what each registered live anchor names. A reflow is about to
+        // make every live coordinate a guess, and this — ahead of the generation bump below, while
+        // the anchors still carry the generation of the grid they were taken on — is the only
+        // moment the answer is still on the grid to be read (§3.2, [`Self::reflow_witnesses`]).
+        let reflow = if plan.begin_transaction {
+            self.reflow_witnesses()
+        } else {
+            ReflowSnapshot::default()
+        };
         if plan.begin_transaction {
             self.cursor_logical_line_memory = None;
             if self.resize_epoch.is_active() {
@@ -2870,9 +3023,6 @@ impl DualPlaneSession {
                 },
             );
         }
-        // A grow or width-only resize can change the generation without removing rows.
-        self.document
-            .capture_rows_transaction(&[], self.grid_generation);
         self.reanchor_semantic_input_regions_after_resize();
         self.reanchor_semantic_output_regions_after_resize();
         let next_layout = LayoutKey {
@@ -2893,6 +3043,16 @@ impl DualPlaneSession {
         self.remember_visible_cursor_logical_line();
         if plan.begin_transaction {
             self.stage_resize_history();
+            // **After staging, because staging is half the answer.** The rows the reflow pushed
+            // off the top are in the transcript's resize staging by this line and nowhere else,
+            // and an anchor that was on one of them belongs there rather than on the grid cell it
+            // used to occupy. Anything the reflow left in place is re-seated here too, so there is
+            // one rule for both halves instead of a rebase for one and a rematch for the other.
+            let taken = !reflow.witnesses.is_empty();
+            self.reseat_anchors_after_reflow(reflow);
+            if taken {
+                self.retire_marks_with_stale_anchors();
+            }
         }
         Ok(())
     }
@@ -3946,6 +4106,45 @@ impl DualPlaneSession {
         self.command_marks.retire(&doomed);
     }
 
+    /// Drop the marks a reflow could not put back on their own line.
+    ///
+    /// [`Self::reseat_anchors_after_reflow`] declines rather than guesses, so an anchor it could
+    /// not place is left holding the generation of a grid that no longer exists. That is the
+    /// honest state for one frame and a trap for every frame after it: the next capture
+    /// transaction re-dates any live anchor whose generation has moved
+    /// (`HistoryDocument::capture_rows_transaction`), which would hand the stale coordinate back
+    /// its authority the moment the shell prints a line — and the mark would be pointing at
+    /// somebody else's row again, this time with nothing left to say so.
+    ///
+    /// A mark whose line is gone therefore leaves, exactly as it does when the line is deleted
+    /// (`retire_command_marks`) or evicted. The rail shows one tick fewer, which is true, instead
+    /// of a tick that jumps somewhere the command never was.
+    fn retire_marks_with_stale_anchors(&mut self) {
+        let generation = self.grid_generation;
+        debug_assert_eq!(
+            self.live_screen,
+            ScreenId::Primary,
+            "only a reflow of the primary grid can have left a primary anchor behind"
+        );
+        let doomed = self
+            .command_marks
+            .marks()
+            .iter()
+            .filter(|mark| {
+                matches!(
+                    self.document.anchor(mark.start).ok(),
+                    Some(ContentAnchor::Live {
+                        screen: ScreenId::Primary,
+                        generation: at,
+                        ..
+                    }) if *at != generation
+                )
+            })
+            .map(|mark| mark.id)
+            .collect::<BTreeSet<_>>();
+        self.command_marks.retire(&doomed);
+    }
+
     fn close_semantic_input_region(
         &mut self,
         region_index: usize,
@@ -4577,6 +4776,263 @@ impl DualPlaneSession {
             }
         }
         (logical_text, segments)
+    }
+
+    /// **What every anchor the reflow can disturb names, written down before the vendor reflows.**
+    ///
+    /// A `ContentAnchor::Live` is a cell, and a reflow is precisely the event after which a cell
+    /// no longer holds what it held: the vendor rebuilds the grid at the new width, the rows that
+    /// no longer fit leave for its own escrow, and row 7 column 19 is now some other line's
+    /// middle. Until this existed the resize path answered that by re-dating every live anchor
+    /// into the new grid generation with its old coordinates
+    /// (`capture_rows_transaction(&[], …)`), which is not a migration — it is a promise that the
+    /// coordinate still means something, made without looking. A command mark taken on the row a
+    /// prompt was drawn on then jumped into the middle of its own output (user report 2026-09-07,
+    /// DESIGN §3.2).
+    ///
+    /// What is written down is the **soft-wrapped logical line** the anchor sat in and its byte
+    /// offset inside it, because that pair is exactly what a reflow preserves: a reflow re-cuts
+    /// logical lines into different physical rows and changes nothing else. It is the same
+    /// evidence `semantic_witness_rematch` uses for a region's text, taken for every anchor
+    /// rather than for the two families that happened to carry a witness.
+    ///
+    /// **Two planes are disturbed, not one.** The grid is the obvious one; the other is the batch
+    /// of rows the vendor has already pushed off during this resize epoch, which is holding
+    /// `StagingId`s that `resume_resize_staging` hands back before the next native operation. An
+    /// anchor on one of those is exactly as temporary as one on a cell, so both are written down
+    /// here and both are put back by [`Self::reseat_anchors_after_reflow`].
+    fn reflow_witnesses(&self) -> ReflowSnapshot {
+        // **Primary only, and the guard is the live screen rather than the anchor's.** A full-screen
+        // program's grid is a different document (§3.2's isolated namespace): the primary plane's
+        // rows are parked, not reflowed, so a primary anchor read against the alternate screen's
+        // text would be matched against a canvas it has nothing to do with.
+        if self.live_screen != ScreenId::Primary {
+            return ReflowSnapshot::default();
+        }
+        // **Asked before the tail is read, not after.** A pane with nothing registered on it — no
+        // command mark, no image, no open region — is the overwhelmingly common one, and reading
+        // its rows into strings once per frame of a window drag is a cost with no question behind
+        // it. The anchors are cheap to look at; the rows are not.
+        let staged = self
+            .transcript
+            .resize_staged_rows()
+            .iter()
+            .map(|row| row.id)
+            .collect::<BTreeSet<_>>();
+        let disturbed = self
+            .document
+            .anchors()
+            .filter_map(|(id, anchor)| match anchor {
+                // A live cell of the grid the vendor is about to rebuild. Anchors from a generation
+                // that has already gone are skipped: some earlier reflow could not place them, they
+                // name nothing, and nothing is what they should go on naming.
+                ContentAnchor::Live {
+                    screen: ScreenId::Primary,
+                    point,
+                    bias,
+                    generation,
+                } if *generation == self.grid_generation => {
+                    Some((id, ReflowQuery::Live(*point), *bias))
+                }
+                // **And the escrow beside it.** A row the vendor pushed off during this resize
+                // epoch is holding a `StagingId` that `resume_resize_staging` hands back before the
+                // next native operation (§3.2's resize-transaction staging), so an anchor left on
+                // one of those ids is as transient as a grid cell is. Staging ids belonging to
+                // lines already on their way to history are not in this set and are not touched:
+                // the document's own finalize migration answers for those.
+                ContentAnchor::Staging {
+                    id: staging,
+                    offset,
+                    bias,
+                    ..
+                } if staged.contains(staging) => {
+                    Some((id, ReflowQuery::Staged(*staging, *offset), *bias))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if disturbed.is_empty() {
+            return ReflowSnapshot::default();
+        }
+        // The whole tail, because an anchor may be anywhere in it. The bound belongs on the *other*
+        // side of the reflow, where it is this count.
+        let before = self.reflow_corpus(usize::MAX);
+        let mut witnesses = disturbed
+            .into_iter()
+            .filter_map(|(id, query, bias)| {
+                let (index, within) = before
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, line)| Some((index, line.locate(query)?)))?;
+                Some(ReflowWitness {
+                    id,
+                    bias,
+                    order: (index, within),
+                    line: before[index].text.clone(),
+                    within,
+                })
+            })
+            .collect::<Vec<_>>();
+        // Document order, which is the order the reflow preserves and therefore the order the
+        // placement matches in. The registry is keyed by `AnchorId`, i.e. by the order the anchors
+        // were *registered*, which is not the order their content stands in.
+        witnesses.sort_by_key(|witness| witness.order);
+        ReflowSnapshot {
+            witnesses,
+            // How far back the placement has to look. Every line these anchors sat in was a line of
+            // *this* tail, and a reflow neither reorders lines nor invents them, so afterwards they
+            // are the last this-many logical lines of `staging ++ grid`.
+            lines: before.len(),
+        }
+    }
+
+    /// **Put each of those anchors back on the line it named** (DESIGN §3.2).
+    ///
+    /// The corpus is the whole reflowed tail — the rows this resize handed to the transcript's
+    /// resize staging, then the rows still on the grid — because those two planes are the only
+    /// places a live row can be after a reflow: it either still fits, or it left the top for the
+    /// vendor's escrow, which `stage_resize_history` has just moved into staging. That is why
+    /// this runs after that call and not beside the region re-matches, which can only see the
+    /// grid and therefore decline exactly the case the user reported.
+    ///
+    /// **Matched from the newest end backwards.** Two runs of the same command draw the same
+    /// prompt line twice, so line text alone does not say which is which; the order of the lines
+    /// does, and a reflow preserves it. Walking both sides from the tail assigns the nth-from-last
+    /// line a reader is looking at to the nth-from-last line the reflow produced, and an anchor
+    /// whose line is not there at all is simply not placed — it keeps the generation it had, which
+    /// makes it stale, which is the honest reading of "the content this named is gone".
+    fn reseat_anchors_after_reflow(&mut self, snapshot: ReflowSnapshot) {
+        let ReflowSnapshot { witnesses, lines } = snapshot;
+        if witnesses.is_empty() {
+            return;
+        }
+        let source_generation = self.transcript.source_generation();
+        let grid_generation = self.grid_generation;
+        // **Only what the reflow left behind, and the anchor says so itself.** The region re-matches
+        // above have already put back every anchor they could prove, and a proof lands on a
+        // coordinate this resize produced: the new grid generation, or one of the staging ids
+        // `stage_resize_history` has just handed out. Anything still naming the grid that was
+        // replaced, or a staging id that was handed back with it, is what nobody has spoken for —
+        // and a second opinion on an anchor that already has an owner is how two mechanisms start
+        // disagreeing.
+        let seated = self
+            .transcript
+            .resize_staged_rows()
+            .iter()
+            .map(|row| row.id)
+            .collect::<BTreeSet<_>>();
+        let witnesses = witnesses
+            .into_iter()
+            .filter(|witness| match self.document.anchor(witness.id).ok() {
+                Some(ContentAnchor::Live { generation, .. }) => *generation != grid_generation,
+                Some(ContentAnchor::Staging { id, .. }) => !seated.contains(id),
+                _ => false,
+            })
+            .collect::<Vec<_>>();
+        if witnesses.is_empty() {
+            return;
+        }
+        let corpus = self.reflow_corpus(lines);
+        // One entry per distinct line, newest first, so several anchors on one row are one claim.
+        let mut wanted: Vec<(&str, Vec<usize>)> = Vec::new();
+        for (index, witness) in witnesses.iter().enumerate().rev() {
+            match wanted.last_mut() {
+                Some((line, holders)) if *line == witness.line.as_str() => holders.push(index),
+                _ => wanted.push((witness.line.as_str(), vec![index])),
+            }
+        }
+        let mut placements = Vec::new();
+        let mut ceiling = corpus.len();
+        for (line, holders) in wanted {
+            let Some(found) = corpus[..ceiling]
+                .iter()
+                .rposition(|candidate| candidate.text == line)
+            else {
+                continue;
+            };
+            ceiling = found;
+            for holder in holders {
+                let witness = &witnesses[holder];
+                let Some(anchor) = corpus[found].seat(
+                    witness.within,
+                    witness.bias,
+                    source_generation,
+                    grid_generation,
+                ) else {
+                    continue;
+                };
+                placements.push((witness.id, anchor));
+            }
+        }
+        // Under the same switch `semantic_witness_rematch` traces through, because the two answer
+        // the same question about the same event and a reader chasing one wants both.
+        if switched_on("BT_SEMANTIC_TRACE") {
+            eprintln!(
+                "REFLOW_RESEAT placed={} of {} over {} lines",
+                placements.len(),
+                witnesses.len(),
+                corpus.len()
+            );
+        }
+        for (id, anchor) in placements {
+            let _ = self.document.replace_anchor(id, anchor);
+        }
+    }
+
+    /// The **last `wanted` logical lines** of the reflowed tail: resize staging, then the grid.
+    ///
+    /// Bounded rather than whole, and the bound is the pre-reflow plane's own line count — see
+    /// [`ReflowSnapshot::lines`] for why nothing older can be an answer. Without it every drag of a
+    /// window edge would re-read the vendor's entire escrow, which is thousands of rows on a pane
+    /// that has been printing all day, once per resize event.
+    fn reflow_corpus(&self, wanted: usize) -> Vec<ReflowLine> {
+        let staged = self.transcript.resize_staged_rows();
+        let live = self.live_rows.len();
+        let rows = staged.len().saturating_add(live);
+        // Walk back from the newest row, keeping what it reads, until one more line than asked for
+        // has closed. A row closes a logical line when it does not say it continues, so counting
+        // those from the tail counts lines; the one extra is because the row this stops on may be
+        // the middle of a line, and a line read from its middle matches nothing.
+        let mut tail: Vec<(ReflowPlane, CapturedRow)> = Vec::new();
+        let mut closed = 0;
+        let mut index = rows;
+        while index > 0 && closed <= wanted {
+            index -= 1;
+            let entry = if let Some(staged) = staged.get(index) {
+                (ReflowPlane::Staged(staged.id), staged.row.clone())
+            } else {
+                let row = u32::try_from(index - staged.len()).unwrap_or(u32::MAX);
+                match self.terminal.visible_row(row) {
+                    Some(captured) => (ReflowPlane::Live(row), captured),
+                    None => continue,
+                }
+            };
+            if !entry.1.continues {
+                closed += 1;
+            }
+            tail.push(entry);
+        }
+        tail.reverse();
+        let mut lines: Vec<ReflowLine> = Vec::new();
+        let mut open = false;
+        for (plane, row) in tail {
+            let (text, boundaries) = captured_row_logical_text_and_boundaries(&row);
+            if !open {
+                lines.push(ReflowLine::default());
+            }
+            let line = lines.last_mut().expect("a line was just opened");
+            let byte_start = line.text.len();
+            line.text.push_str(&text);
+            line.rows.push(ReflowRow {
+                plane,
+                byte_start,
+                byte_end: line.text.len(),
+                boundaries,
+                grapheme_offsets: captured_grapheme_offsets(&row),
+            });
+            open = row.continues;
+        }
+        lines
     }
 
     fn reanchor_semantic_input_regions_after_resize(&mut self) {
@@ -27052,6 +27508,31 @@ mod tests {
             .map(|entry| entry.line.text.clone())
     }
 
+    /// The text of whatever line a mark's `B` anchor names right now, on any of the three planes.
+    ///
+    /// `mark_history_text` above answers only for a mark that has reached frozen history, which is
+    /// exactly the population that was never in doubt; a reflow moves a live anchor onto staging,
+    /// so a test about a reflow has to be able to read that plane too.
+    fn mark_named_text(session: &DualPlaneSession, mark: &CommandMark) -> Option<String> {
+        match session.command_mark_anchor(mark.start)? {
+            ContentAnchor::History { id, .. } => session
+                .document
+                .entries()
+                .get(id)
+                .map(|entry| entry.line.text.clone()),
+            ContentAnchor::Staging { id, .. } => session
+                .transcript
+                .resize_staged_rows()
+                .iter()
+                .find(|staged| staged.id == *id)
+                .map(|staged| captured_row_text(&staged.row)),
+            ContentAnchor::Live { point, .. } => session
+                .terminal
+                .visible_row(point.row)
+                .map(|row| captured_row_text(&row)),
+        }
+    }
+
     fn command_texts(session: &DualPlaneSession) -> Vec<String> {
         session
             .command_marks()
@@ -27544,6 +28025,86 @@ mod tests {
         assert_eq!(
             after, before,
             "narrower then wider must leave every mark on the same logical line"
+        );
+    }
+
+    /// **The other half of that promise, and the half that was missing** (user report 2026-09-07).
+    ///
+    /// The test above resizes a session whose every mark has already reached frozen history, where
+    /// the document's own migration answers for them. The mark a reader actually presses is the
+    /// newest one, and the newest one's prompt row is still a **live coordinate** — a row and a
+    /// column on a grid the vendor is about to rebuild at a different width. Splitting a pane in
+    /// two narrows it enough that every output line takes three rows instead of one, so the prompt
+    /// row leaves the top for the vendor's escrow and comes back as transcript staging; the
+    /// anchor used to stay behind on the cell that row had occupied, and the tick jumped into the
+    /// middle of the command's own output.
+    ///
+    /// **And a second resize, because one is not the shape a reader makes.** Dragging a divider or
+    /// a window edge is a run of resizes inside one transaction, and each of them hands the rows it
+    /// pushed off back to the vendor before reflowing again (`resume_resize_staging`), which
+    /// retires the `StagingId` the previous one seated this mark on. A pass that only looked at
+    /// live cells would place the mark once and then leave it on a dead id, where the viewport
+    /// cannot find it and the tick does nothing at all.
+    ///
+    /// MUTATIONS:
+    /// ① take out the `reseat_anchors_after_reflow` call (or put the old
+    ///    `capture_rows_transaction(&[], self.grid_generation)` back beside it) — the anchor stays
+    ///    `Live { row: 0, column: 4 }` and the text it names is a run of the output's own `z`s,
+    ///    which is the user's screenshot;
+    /// ② let [`DualPlaneSession::reflow_corpus`] walk only the live grid and not the rows staging
+    ///    just took — the prompt line is nowhere in the corpus, the anchor is left stale and
+    ///    [`DualPlaneSession::retire_marks_with_stale_anchors`] drops the mark, so the ledger is
+    ///    empty and the first assertion has nothing to read;
+    /// ③ drop the `ContentAnchor::Staging` arm from [`DualPlaneSession::reflow_witnesses`] — the
+    ///    first resize still places the mark, and the second one, which has taken that staging id
+    ///    back, leaves it on an id nothing carries any more.
+    #[test]
+    fn a_reflow_that_pushes_a_marks_prompt_row_off_the_grid_keeps_the_mark_on_that_line() {
+        let mut session = DualPlaneSession::new(nz(60), nz(12));
+        let output = (0..5)
+            .map(|index| format!("out{index} {}", "z".repeat(48)))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        run_command(&mut session, "echo one", &output, "0");
+
+        let mark = session.command_marks()[0].clone();
+        assert!(
+            matches!(
+                session.command_mark_anchor(mark.start),
+                Some(ContentAnchor::Live { .. })
+            ),
+            "the fixture is only about the newest mark, whose row is still on the grid"
+        );
+        assert_eq!(
+            mark_named_text(&session, &mark).as_deref(),
+            Some("PS> echo one")
+        );
+
+        session.resize(nz(20), nz(12)).unwrap();
+
+        assert_eq!(
+            session.command_marks().len(),
+            1,
+            "the mark is still in the ledger"
+        );
+        assert_eq!(
+            mark_named_text(&session, &session.command_marks()[0].clone()).as_deref(),
+            Some("PS> echo one"),
+            "a reflow moves the row, so the anchor moves with it — it does not stay on the cell"
+        );
+
+        session.resize(nz(16), nz(12)).unwrap();
+
+        assert_eq!(
+            session.command_marks().len(),
+            1,
+            "and a second resize in the same drag does not take it either"
+        );
+        assert_eq!(
+            mark_named_text(&session, &session.command_marks()[0].clone()).as_deref(),
+            Some("PS> echo one"),
+            "the row the first reflow put into staging is handed back and restaged by the second, \
+             so the mark has to move with it there too"
         );
     }
 

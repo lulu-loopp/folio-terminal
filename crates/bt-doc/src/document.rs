@@ -64,6 +64,19 @@ impl HistoryDocument {
         self.anchors.get(&id).ok_or(AnchorError::UnknownAnchor)
     }
 
+    /// Every registered anchor, so a caller that is about to move the content under them can say
+    /// what each one names before it moves.
+    ///
+    /// **The registry does not decide which of them are in danger**, and that is deliberate: what
+    /// a reflow disturbs is the live grid and the escrow the vendor is holding beside it, and only
+    /// the session knows which staging ids are that escrow's and which belong to lines already on
+    /// their way to history. Handing over the whole list keeps that judgment in one place —
+    /// `DualPlaneSession::reflow_witnesses` — instead of splitting it across a filter here and a
+    /// second filter there.
+    pub fn anchors(&self) -> impl Iterator<Item = (AnchorId, &ContentAnchor)> {
+        self.anchors.iter().map(|(id, anchor)| (*id, anchor))
+    }
+
     /// Re-seat one registered persistent anchor as part of a caller-owned reconciliation
     /// transaction. Selection anchors use `replace_selection`; decoration identities use this
     /// narrower single-anchor operation.

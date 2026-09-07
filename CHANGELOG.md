@@ -58,6 +58,26 @@ All notable changes to Folio are recorded here. The format follows
   the registry and off the deployment database, so removing the package from
   `Settings > Apps > Installed apps` still moves the row.
 
+### Fixed
+
+- **A tick on the command strip lands on the command's own prompt row again,
+  after a pane has been split or resized.** Pressing the newest tick used to drop
+  the reader into the middle of that command's own output, with the highlight on
+  the wrong row and the prompt line above the top of the pane. A command mark is
+  taken on the screen cell its prompt was drawn on, and a resize that changes the
+  width re-wraps every line on the screen at the new width, so the rows that no
+  longer fit leave the top and that cell now holds somebody else's text. The
+  resize used to re-date every such mark onto the new screen without looking at
+  what was under it. It now writes down the whole wrapped line each mark sits in
+  before the screen is re-wrapped — the one thing a re-wrap keeps — and puts each
+  mark back on that line afterwards, whether the line is still on the screen or
+  has scrolled out of it. Two runs of the same command draw the same prompt line
+  twice, so which is which is settled by their order, which a re-wrap also keeps.
+  Dragging an edge is a run of re-wraps rather than one, and each of them moves
+  the rows the last one pushed off, so a mark is carried through every step of
+  the drag and not only the first. A mark whose line the re-wrap genuinely lost
+  leaves the strip instead of pointing somewhere the command never was.
+
 ## 0.2.2-preview — 2026-09-06
 
 Fixes and polish for 0.2.1-preview, and one card: a machine that has never run
