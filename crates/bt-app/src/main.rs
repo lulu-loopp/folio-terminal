@@ -3019,131 +3019,162 @@ pub(crate) fn markdown_runs(
 ) -> Vec<bt_render::PreviewRun> {
     spans
         .iter()
-        .map(|span| match span.style {
-            // `.md-h { font-weight: 600; color: var(--ink) }` (mock-up 1201).
-            preview::SpanStyle::Plain if heading => bt_render::PreviewRun {
-                text: span.text.clone(),
+        .map(|span| {
+            let run = markdown_run(span, heading, math, em_px, palette);
+            // **A run that answers a click is drawn in the accent, whatever face
+            // it is set in.** A link's label is inline content (see
+            // [`preview::Span::linked`]), so the accent cannot be a property of
+            // one style any more: `[`folio.zip`](url)` is a code span that is
+            // also a link, and GitHub draws exactly that — the code face, in the
+            // link's colour. The face stays the style's; only the ink is the
+            // link's. A picture is the exception it is everywhere else in this
+            // window: it carries a target and is not a link (see
+            // [`note_link_sites`]), so it keeps the body's own ink.
+            let answers = span.target.is_some() && span.style != preview::SpanStyle::Image;
+            if answers {
+                bt_render::PreviewRun {
+                    color: palette.accent,
+                    ..run
+                }
+            } else {
+                run
+            }
+        })
+        .collect()
+}
+
+/// One markdown run, set in the face its style asks for.
+fn markdown_run(
+    span: &preview::Span,
+    heading: bool,
+    math: &DocumentMath,
+    em_px: f32,
+    palette: &bt_render::ChromePalette,
+) -> bt_render::PreviewRun {
+    match span.style {
+        // `.md-h { font-weight: 600; color: var(--ink) }` (mock-up 1201).
+        preview::SpanStyle::Plain if heading => bt_render::PreviewRun {
+            text: span.text.clone(),
+            color: palette.preview_body_text,
+            mono: false,
+            bold: true,
+            italic: false,
+            font_scale: 1.0,
+            inline_box_px: None,
+        },
+        // **A picture set inside a line is its own alt text** — for now.
+        //
+        // Every picture a paragraph carries is cut out into a block of its
+        // own ([`preview::MarkdownBlock::Image`]), so the only runs that
+        // reach here are the ones in the four places a paragraph cannot be
+        // cut: a heading, a table cell, a list item, a quote line. What they
+        // are owed is the box-on-the-baseline an inline formula already gets
+        // (`bt_render::PreviewRun::inline_box_px`); until that is built they
+        // say what the document says they say, which is what alt text is
+        // for. Written down as owed in §7.1.3k rather than left to be
+        // discovered.
+        preview::SpanStyle::Plain | preview::SpanStyle::Image => bt_render::PreviewRun {
+            text: span.text.clone(),
+            color: palette.files_row_text,
+            mono: false,
+            bold: false,
+            italic: false,
+            font_scale: 1.0,
+            inline_box_px: None,
+        },
+        preview::SpanStyle::Bold => bt_render::PreviewRun {
+            text: span.text.clone(),
+            color: palette.preview_body_text,
+            mono: false,
+            bold: true,
+            italic: false,
+            font_scale: 1.0,
+            inline_box_px: None,
+        },
+        // `*a*` / `_a_`: emphasis, set in the italic face (a synthesised
+        // oblique where the sans has no drawn italic). A heading is bold
+        // throughout, so emphasis inside one is bold-italic — the weight is
+        // the heading's, the slant is the emphasis's.
+        preview::SpanStyle::Italic => bt_render::PreviewRun {
+            text: span.text.clone(),
+            color: palette.preview_body_text,
+            mono: false,
+            bold: heading,
+            italic: true,
+            font_scale: 1.0,
+            inline_box_px: None,
+        },
+        // `***a***`: strong emphasis and emphasis at once — bold and italic.
+        preview::SpanStyle::BoldItalic => bt_render::PreviewRun {
+            text: span.text.clone(),
+            color: palette.preview_body_text,
+            mono: false,
+            bold: true,
+            italic: true,
+            font_scale: 1.0,
+            inline_box_px: None,
+        },
+        // github.css `code { font-size: 85% }` — the one run in a markdown
+        // document that is not set at its paragraph's own size. See
+        // [`preview::PREVIEW_MD_CODE_FONT_RATIO`] for why a monospace face
+        // beside a sans one has to be asked to be smaller.
+        preview::SpanStyle::Code => bt_render::PreviewRun {
+            text: span.text.clone(),
+            color: palette.preview_code_text,
+            mono: true,
+            bold: heading,
+            italic: false,
+            font_scale: preview::PREVIEW_MD_CODE_FONT_RATIO,
+            inline_box_px: None,
+        },
+        // The accent, and no underline: the accent alone is what every
+        // reader already reads as a link, and an underline under text that
+        // does not answer a click is a promise this build does not keep.
+        preview::SpanStyle::Link => bt_render::PreviewRun {
+            text: span.text.clone(),
+            color: palette.accent,
+            mono: false,
+            bold: heading,
+            italic: false,
+            font_scale: 1.0,
+            inline_box_px: None,
+        },
+        // **A formula with no picture yet is the author's literal text**, set
+        // in the page's own voice — not in the code face, because it is not
+        // code and dressing it as code would be this renderer telling the
+        // reader something about the document that the document did not say.
+        // The delimiters are part of the run (see [`preview::SpanStyle::Math`]),
+        // so what stands here while the engine works, and what stands here
+        // for good if the engine refuses, is exactly the bytes that were
+        // written.
+        // A formula whose picture has arrived stops being text and becomes a
+        // box the width of that picture: the words either side of it flow
+        // around a gap, and the picture is laid into the gap once the shaper
+        // has said where the gap ended up.
+        preview::SpanStyle::Math => match span
+            .math_source()
+            .and_then(|source| math.picture(source, MathMode::Inline, em_px))
+        {
+            Some(picture) => bt_render::PreviewRun {
+                text: String::new(),
                 color: palette.preview_body_text,
-                mono: false,
-                bold: true,
-                italic: false,
-                font_scale: 1.0,
-                inline_box_px: None,
-            },
-            // **A picture set inside a line is its own alt text** — for now.
-            //
-            // Every picture a paragraph carries is cut out into a block of its
-            // own ([`preview::MarkdownBlock::Image`]), so the only runs that
-            // reach here are the ones in the four places a paragraph cannot be
-            // cut: a heading, a table cell, a list item, a quote line. What they
-            // are owed is the box-on-the-baseline an inline formula already gets
-            // (`bt_render::PreviewRun::inline_box_px`); until that is built they
-            // say what the document says they say, which is what alt text is
-            // for. Written down as owed in §7.1.3k rather than left to be
-            // discovered.
-            preview::SpanStyle::Plain | preview::SpanStyle::Image => bt_render::PreviewRun {
-                text: span.text.clone(),
-                color: palette.files_row_text,
                 mono: false,
                 bold: false,
                 italic: false,
                 font_scale: 1.0,
-                inline_box_px: None,
+                inline_box_px: Some(picture.width_px as f32),
             },
-            preview::SpanStyle::Bold => bt_render::PreviewRun {
+            None => bt_render::PreviewRun {
                 text: span.text.clone(),
-                color: palette.preview_body_text,
-                mono: false,
-                bold: true,
-                italic: false,
-                font_scale: 1.0,
-                inline_box_px: None,
-            },
-            // `*a*` / `_a_`: emphasis, set in the italic face (a synthesised
-            // oblique where the sans has no drawn italic). A heading is bold
-            // throughout, so emphasis inside one is bold-italic — the weight is
-            // the heading's, the slant is the emphasis's.
-            preview::SpanStyle::Italic => bt_render::PreviewRun {
-                text: span.text.clone(),
-                color: palette.preview_body_text,
-                mono: false,
-                bold: heading,
-                italic: true,
-                font_scale: 1.0,
-                inline_box_px: None,
-            },
-            // `***a***`: strong emphasis and emphasis at once — bold and italic.
-            preview::SpanStyle::BoldItalic => bt_render::PreviewRun {
-                text: span.text.clone(),
-                color: palette.preview_body_text,
-                mono: false,
-                bold: true,
-                italic: true,
-                font_scale: 1.0,
-                inline_box_px: None,
-            },
-            // github.css `code { font-size: 85% }` — the one run in a markdown
-            // document that is not set at its paragraph's own size. See
-            // [`preview::PREVIEW_MD_CODE_FONT_RATIO`] for why a monospace face
-            // beside a sans one has to be asked to be smaller.
-            preview::SpanStyle::Code => bt_render::PreviewRun {
-                text: span.text.clone(),
-                color: palette.preview_code_text,
-                mono: true,
-                bold: heading,
-                italic: false,
-                font_scale: preview::PREVIEW_MD_CODE_FONT_RATIO,
-                inline_box_px: None,
-            },
-            // The accent, and no underline: the accent alone is what every
-            // reader already reads as a link, and an underline under text that
-            // does not answer a click is a promise this build does not keep.
-            preview::SpanStyle::Link => bt_render::PreviewRun {
-                text: span.text.clone(),
-                color: palette.accent,
+                color: palette.files_row_text,
                 mono: false,
                 bold: heading,
                 italic: false,
                 font_scale: 1.0,
                 inline_box_px: None,
             },
-            // **A formula with no picture yet is the author's literal text**, set
-            // in the page's own voice — not in the code face, because it is not
-            // code and dressing it as code would be this renderer telling the
-            // reader something about the document that the document did not say.
-            // The delimiters are part of the run (see [`preview::SpanStyle::Math`]),
-            // so what stands here while the engine works, and what stands here
-            // for good if the engine refuses, is exactly the bytes that were
-            // written.
-            // A formula whose picture has arrived stops being text and becomes a
-            // box the width of that picture: the words either side of it flow
-            // around a gap, and the picture is laid into the gap once the shaper
-            // has said where the gap ended up.
-            preview::SpanStyle::Math => match span
-                .math_source()
-                .and_then(|source| math.picture(source, MathMode::Inline, em_px))
-            {
-                Some(picture) => bt_render::PreviewRun {
-                    text: String::new(),
-                    color: palette.preview_body_text,
-                    mono: false,
-                    bold: false,
-                    italic: false,
-                    font_scale: 1.0,
-                    inline_box_px: Some(picture.width_px as f32),
-                },
-                None => bt_render::PreviewRun {
-                    text: span.text.clone(),
-                    color: palette.files_row_text,
-                    mono: false,
-                    bold: heading,
-                    italic: false,
-                    font_scale: 1.0,
-                    inline_box_px: None,
-                },
-            },
-        })
-        .collect()
+        },
+    }
 }
 
 /// One list row's marker, in the muted ink both kinds share.
