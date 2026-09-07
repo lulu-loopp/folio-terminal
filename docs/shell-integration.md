@@ -202,9 +202,26 @@ and the asymmetry is the shells':
 * `bash --init-file <file>` names the startup file for one interactive shell and touches nothing on
   disk.
 
-So a Git Bash profile is started as `bash --init-file <script> -i` and a WSL profile as
-`wsl.exe [--cd <dir>] -- <login shell> --init-file <script> -i`, with `BT_SHELL_INTEGRATION=1` in
-the environment. The script is written out to `%APPDATA%\Folio\shell-integration\` from a
+So a Git Bash profile is started as `bash --init-file <script> -i`, with `BT_SHELL_INTEGRATION=1` in
+the environment. A WSL profile is started as
+
+```
+wsl.exe [--cd <dir>] -e sh -c '<the login-shell question>' folio /mnt/c/…/folio.bash
+```
+
+where the question is the script `bt_app::shell_integration::WSL_LOGIN_SHELL` holds: read the login
+shell out of `getent passwd`, `exec` it with `--init-file` and `BT_SHELL_INTEGRATION=1` when it is a
+bash, and `exec` it with `-l` when it is anything else. The init file travels as `$1` rather than
+spliced into the text, so a reader whose Windows account name has a space in it gets a filename the
+shell reads verbatim.
+
+`-e` rather than `--`, and it is load-bearing: `wsl.exe --` joins everything after it into one
+command line and gives *that* to the login shell, which re-parses it — a question full of spaces,
+quotes, `$`, `|` and `;` comes apart on the way in. `wsl.exe -e` executes the program directly,
+argv for argv, which is also what makes handing the init file over as an argument work. Measured on
+Ubuntu-24.04, 2026-09-07.
+
+The script is written out to `%APPDATA%\Folio\shell-integration\` from a
 copy compiled into the binary, so the two halves of the OSC 133 agreement always ship together.
 
 **What `--init-file` costs, and how it is paid back.** It replaces `~/.bashrc`, and because bash
@@ -223,26 +240,35 @@ re-wrapped on every prompt, because a theme that regenerates `PS1` in its own `P
 No `OSC 0`/`OSC 2` title is emitted: a title set by the shell outranks the working directory in the
 name stack, so a pane that announced itself once would stop following `cd`.
 
-**WSL and `WSLENV`.** `wsl.exe` forwards no environment variable it was not told to, so
-`BT_SHELL_INTEGRATION` and the `TERM_PROGRAM`/`TERM_PROGRAM_VERSION`/`COLORTERM` declarations every
-other child already receives are listed in `WSLENV` — appended to whatever is already there, never
-replacing it.
+**WSL and `WSLENV`.** `wsl.exe` forwards no environment variable it was not told to, so the
+`TERM_PROGRAM`/`TERM_PROGRAM_VERSION`/`COLORTERM`/`FORCE_HYPERLINK` declarations every other child
+already receives are listed in `WSLENV` — appended to whatever is already there, never replacing it.
+`BT_SHELL_INTEGRATION` is **not** among them: it is set inside the distribution, by the one branch of
+the question that reads the init file, because it is the only one of these whose meaning depends on
+which shell was started. A zsh session carrying it for its whole life would tell every nested `bash`
+that somebody had already run its startup files.
 
-**Which shell, and which distribution.** `wsl.exe --list --verbose` names the installed
-distributions and marks the default with `*`; that distribution is then asked for its own name and
-its user's login shell (`getent passwd`).
+**Which shell, and which distribution — two questions, answered in two places.** Which
+distributions are installed and which one `wsl.exe` starts is a fact about *Windows*: it is read out
+of `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss`, synchronously, and costs microseconds
+(`DESIGN.md` §7.40 ②). Which shell that distribution logs the user into is a fact about a *Linux
+user account*, held only by the distribution's own password database — so it is asked by the pane
+that needs the answer, inside the distribution, in the same command line as the shell it decides.
 
-**The login-shell answer is not in hand when the first WSL pane of a process spawns**, and the row
-above is what that pane gets rather than what the table promises. The question is asked from the
-spawn itself and never waited for — it boots a virtual machine, and §7.40 ② refuses to make a frame
-wait for one — so the first WSL pane of every run is started as a bare `wsl.exe --cd <dir>` with no
-`--init-file` and therefore no markers and no report at all, and every WSL pane after it in the same
-process is served in full. Measured 2026-09-07 and booked as a ticket in
-`docs/plans/shell-matrix-2026-09-07.md`; the row above describes the served case. The init file is offered **only** when that shell is a
-bash — a distribution logging into zsh or fish keeps its shell and goes without markers, which is
-the fallback path below rather than a broken shell. When more than one distribution is installed,
-the profile is titled `WSL · <default>` so the row says which one it starts; a machine with one
-needs no qualifier and keeps the bare `WSL`.
+**Every WSL pane is integrated, the first one of a process included** (2026-09-07). It was not
+always: the login-shell question used to be put by a second `wsl.exe` armed from the pane spawn and
+never waited for, so the first WSL pane of every run composed its command line before the answer
+existed, was started as a bare `wsl.exe --cd <dir>`, and reported neither `OSC 133` nor `OSC 7` —
+while every WSL pane after it in the same process was served in full. On a machine whose default
+profile is WSL that first pane is the only one there is. Measured in
+`docs/plans/shell-matrix-2026-09-07.md` T-2 and fixed by moving the question into the pane, which
+leaves nothing in flight for a spawn to race. The init file is still offered **only** to a bash — a
+distribution logging into zsh or fish keeps its shell and goes without markers, which is the
+fallback path below rather than a broken shell — but that is now decided where the answer is,
+rather than from an answer that may not have arrived.
+
+When more than one distribution is installed, the profile is titled `WSL · <default>` so the row
+says which one it starts; a machine with one needs no qualifier and keeps the bare `WSL`.
 
 **Command Prompt has no script and no hook — its whole integration is `PROMPT`.** Folio
 reads whatever `PROMPT` this process inherited, puts the two command-boundary markers and the
@@ -267,7 +293,7 @@ fallback path described under **Authority and fallback** rather than on a guess.
 | **either PowerShell** (script not installed) | no | no | no | no | no | — | no | PSReadLine |
 | **Git Bash** | yes | yes | yes | yes | yes | none, deliberately | yes | bash's own |
 | **WSL** (bash login shell) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | bash's own |
-| **WSL** (zsh/fish login shell) | no | no | no | no | no | — | set, but not forwarded | that shell's own |
+| **WSL** (zsh/fish login shell) | no | no | no | no | no | — | yes, via `WSLENV` | that shell's own |
 | **Command Prompt** | **yes** | **no** | no | **yes, no code** | **yes** | refused — see below | yes | not promised |
 | **a profile of the reader's own**, no door | no | no | no | no | no | — | yes | not promised |
 
@@ -355,9 +381,12 @@ this to, so **R-d is settled**. PowerShell alone still gets it from its script, 
 twice would be two places to change and one silently redundant. Any inherited value is left alone,
 `0` included: this is a declaration, not an override, and someone who set it has already answered.
 Across the WSL boundary the name is listed in `WSLENV` whether or not this process set it, so the
-user's own answer travels too — but only on the path that has an init file, so a distribution
-logging into zsh gets the variable on the Win32 side and nothing in the distribution, which is the
-same boundary `TERM_PROGRAM` already stops at.
+user's own answer travels too — and since 2026-09-07 it travels whichever shell the distribution
+logs into. It used to be listed only where this side had established the shell was a bash, which
+made a fact about what this *terminal* renders a property of the reader's choice of shell: a zsh
+pane drew the same hyperlinks as any other and told the programs in it that it did not. Which shell
+answers is the pane's own business now, so the listing asks the question it was always really
+asking — is this pane crossing into WSL.
 
 **A profile's own environment is the last word, and it can change this table.** The three layers
 are: what this window inherited, then what this terminal declares (`TERM_PROGRAM`,
@@ -396,9 +425,9 @@ every check except the only one that matters. The names are listed `/u` — Win3
 carried verbatim — because that is what they are: values, and this terminal has no way to know that
 one of them holds a path wanting translation. A reader who wants something else writes their own
 `WSLENV` row, and the layering above lets it win. This is the reader's instruction and crosses
-whatever the login shell turns out to be, which is why the zsh row above still says "set, but not
-forwarded" about *this terminal's* five: those are listed by the install path alone and that has
-not changed.
+whatever the login shell turns out to be — as, since 2026-09-07, do this terminal's own four. The
+one WSL pane that lists nothing is the one handed no script at all, which is the pane that was never
+injected into.
 
 **"↑ history" is not ours to promise.** The `DESIGN.md` §7.1.4 wording is limited to a profile
 where PSReadLine is detected with persistent history enabled. `cmd`'s recall is `doskey`'s and dies

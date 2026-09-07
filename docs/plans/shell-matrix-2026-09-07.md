@@ -321,6 +321,21 @@ title, and that half already works from the registry.
 **Size.** Changes the WSL spawn contract and the two pinned tests around it. Not
 a one-file fix.
 
+**Fixed, 2026-09-07, on the user's ruling** (`fix/wsl-first-pane-integration`).
+The recommended shape, with one correction the measurement above did not reach:
+the launcher is handed the question with **`-e`, not `--`**. `wsl.exe --` joins
+everything after it into a single command line and gives that to the login shell,
+which re-parses it — a question full of spaces, quotes, `$`, `|` and `;` arrives
+in pieces and `$1` is empty. `wsl.exe -e` executes argv for argv. The probe is
+gone rather than deferred: `wsl::begin_login_shell_probe` and `ask_login_shell`
+are deleted, `crates/bt-app/src/wsl.rs` reads the registry and starts no process
+at all, and `BT_SHELL_INTEGRATION` moved out of `WSLENV` into the one branch of
+the question that reads the init file. Verified in the real window with a fresh
+isolated `APPDATA`: `folio --profile wsl`, one WSL pane and no other, and its
+`BT_PTY_DUMP` carries `ESC]7;file:///home/…` and `133;A`/`B`/`C`/`D;<code>` from
+the first prompt on, with the rail carrying one tick per command coloured by its
+exit code.
+
 ### T-3 — an MSYS or WSL path is never a link
 
 **Evidence.** `gitbash-03.png` and `wsl-01.png`: `D:\Demo\figure.png` and
@@ -427,3 +442,8 @@ cause. One documentation fix did land, because the page was making a promise thi
 machine measurably does not keep: `docs/shell-integration.md`'s WSL section now
 says that the first WSL pane of a process is started without the init file, and
 points at T-2.
+
+*(T-2 was ruled on and fixed the same day, on the branch
+`fix/wsl-first-pane-integration` — see the note under that ticket. That
+documentation fix has been replaced by the description of what the pane now
+does.)*

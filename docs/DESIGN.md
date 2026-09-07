@@ -2106,7 +2106,7 @@ else                           { Flash }    // 被压住了,但任务栏还在,�
 - **`paths` 从此对每一行都推导,内置也不例外。** 原先是「用户档案推导、五行陈述」——一个事实两条规则,并且让一个被改了程序的内置继续用它已经不再启动的那个 shell 的拼法翻译目录。推导与五行的陈述值逐个相同(`the_namespace_every_shipped_profile_states_is_the_one_it_derives`),所以换掉的是一份副本而不是一个决定。
 - **能力句现在是三维的,J85 就此收口**(`docs/shell-integration.md` 的矩阵仍是唯一权威,多了「读者自己的档案 · 无门」一行)。句子由**门 × 命名空间 × 环境**推出:`FORCE_HYPERLINK=0` 直接拿走超链接那一格;而在 PowerShell 上,一条 `TERM_PROGRAM` 覆盖同样拿走它——`folio.ps1` 只为它认得出的 `TERM_PROGRAM` 声明链接,所以覆盖掉这个名字的档案是**自己关掉了**自己的链接,句子必须照说,而不是重复一个这个 build 不会兑现的承诺。四句因此各有一个「没有超链接」的孪生句,而不是在句尾接一个从句:每一句本来就同时说自己**有**什么和**没有**什么,一句在两半里都提到超链接会读起来像在更正自己。`No shell integration` 多一个**长式**给编辑页(`CapNoneLong`,小样自己的字面),因为列表第三行与动作条共享一行、只装得下约五十八字符,而编辑页那一行有整页宽,站在 picker 前的读者该被告知代价而不是类别。
 - **幽灵行由推导得出,并且可以被领养**(计划 §1.7 的下一步,5b 记的账)。三条常量本来就已经在一处说错了:PowerShell 是这个模块**唯一不**替它声明 `FORCE_HYPERLINK` 的门(它自己的脚本才是说这句话的那一半),所以那一页上画第三条幽灵就是这一页存在的意义所反对的那种假装。现在幽灵 = `shell_integration::declared_environment(门)` 减去**读者已经有同名行**的那些:一个名字读者答过了,终端就不再有资格说它——这也正是「领养是搬家而不是复制」的原因,两条同名行是一个事实的两张图。整条幽灵行是**一个**目标(`EnvGhost`)而不是三个格子:幽灵里没有东西可编辑,编辑从它变成读者自己的那一刻开始,而那一刻插入符落在值框里——名字本来就是对的,不然按的就是 `Add`。它因此也成了 Tab 停靠点:一件读者看得见又能做的事,键盘必须够得到。
-- **WSL 的诚实答案是「能过去,但要点名」。** 一个设在 `wsl.exe` 上的变量设在一个 **Win32** 进程上,它背后的发行版看不见任何没有在 `WSLENV` 里点过名的东西——这正是终端自己那五条一直被列在那里的原因。所以档案自己的名字也被列上,`/u`(Win32→WSL、原值照搬),因为它们就是值,而这个终端无从知道其中哪一个装着一条想被翻译的路径;想要别的规矩的人写自己的 `WSLENV` 行,上面那条层叠规则让它赢。**没有为此变灰任何东西**:这不是机器做不到的事,而是一件要点名才成立的事。终端自己那五条的转发条件**一个字没改**——它们仍只在 init file 那条路上被列,所以矩阵里「WSL 登录到 zsh:设了但没转发」那一行仍然为真;读者自己的行则不论登录 shell 是什么都过去,因为那是读者的指令而不是这个终端的猜测。
+- **WSL 的诚实答案是「能过去,但要点名」。** 一个设在 `wsl.exe` 上的变量设在一个 **Win32** 进程上,它背后的发行版看不见任何没有在 `WSLENV` 里点过名的东西——这正是终端自己那五条一直被列在那里的原因。所以档案自己的名字也被列上,`/u`(Win32→WSL、原值照搬),因为它们就是值,而这个终端无从知道其中哪一个装着一条想被翻译的路径;想要别的规矩的人写自己的 `WSLENV` 行,上面那条层叠规则让它赢。**没有为此变灰任何东西**:这不是机器做不到的事,而是一件要点名才成立的事。终端自己那五条的转发条件**一个字没改**——它们仍只在 init file 那条路上被列,所以矩阵里「WSL 登录到 zsh:设了但没转发」那一行仍然为真;读者自己的行则不论登录 shell 是什么都过去,因为那是读者的指令而不是这个终端的猜测。**2026-09-07 就地记注:最后这半句已经作废,而作废它的是 §7.40 ③ 的结账。** 登录 shell 那一问搬进了 pane 自己那条命令行,Windows 这一侧从此不知道也不需要知道起的是哪把 shell,于是终端自己那几条**不论登录 shell 是什么都过去**——「WSL 登录到 zsh:设了但没转发」那一行随之改成「经 `WSLENV` 过去」。理由不是顺手:那几条说的是这个终端画什么,把它做成读者选了哪把 shell 的函数本来就是当初那条分支的副作用。同时 `BT_SHELL_INTEGRATION` 从名单里撤出,改由那一问在发行版里面导出,因为它是其中唯一一个含义取决于起的是哪把 shell 的。
 - **`shell_command` 现在收一整行档案而不是一个下标**,于是它成了一个纯粹由参数决定的函数——一件测试可以把任意档案摆在它面前的事。原先它拿着一个下标向 `profiles` 问四个问题,而进程的那张表是全局的,`cargo test` 又并行跑,所以「一个带 env 的档案 spawn 出什么」在旧形状下根本无法测。
 - **两处清理,都是 5b 搬动动词时留下的空门**:`SettingsControl::Sentence`(本片让那一行长出 picker,这个形态就没有人穿了)与 `SettingsTarget::ProfileDuplicate` / `ProfileAction::Duplicate`(复制早已从行内动作条搬进 `⋯`,这条通道自那以后没有任何东西构造过)。第二个不是洁癖:它是本片 item B 的**病灶**,见下。
 - **item A —— 编辑页的 Advanced 组不再自带 `Reset to defaults`**(用户裁决 2026-08-18)。别的每一页都有它;这一页的页脚已经有 `Restore all defaults`,而后者把**整个档案**放回出厂表——Advanced 那几行也在内。两个动词隔一行、说着几乎相同的话、而作用域只有其中一个说得出口,读者只能掷硬币。让路的是**页作用域**那一个,因为**档案作用域**那一个是完整的。
@@ -5660,6 +5660,75 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 - **让那次 spawn 等**:答案要几秒(虚拟机冷启动),而 spawn 在 UI 线程上,等于用户点开 WSL 的那一刻窗口冻住几秒;更糟的是默认 profile 就是 WSL 的机器——首个 tab 的 spawn 在 `show_new_window` **之前**,那样等就把 ④ 又废掉了。
 - **首帧之后统一预热**:等于给每台装了 WSL 却不用的机器每次启动都启一台虚拟机,正是本节要治的病。
 - **不等**(选中):代价有界、可见、只落在一次运行的第一块 pane 上。
+
+**2026-09-07 结账:那笔挂账已还,而还法是把这一问从这里搬走。**(用户裁决;
+`docs/plans/shell-matrix-2026-09-07.md` T-2;`crates/bt-app/src/{wsl,shell_integration,main}.rs`、
+`crates/bt-term/tests/shell_integration_wsl.rs`)
+
+**报上来的病。** 五扇 shell 的实测矩阵里,WSL 那一行的「命令标记」「当前目录」「行内公式」全是 ✗ ——
+**但只在一个进程的第一块 WSL pane 上**,第二块起全是 ✓。两条命令行从 `Win32_Process` 里读出来,
+一字之差就是整件事:
+
+```
+wsl.exe --cd /mnt/d/Developer/bt-wt-shell-matrix
+wsl.exe --cd /mnt/c/Users/… -- /bin/bash --init-file /mnt/c/…/folio.bash -i
+```
+
+第一块的 `BT_PTY_DUMP` 里一个 `OSC 133`、一个 `OSC 7` 都没有。**而默认 profile 是 WSL 的机器上,
+第一块就是唯一的一块。**
+
+**上面那三条路的第三条是选对了,选错的是问题的位置。** 「不等」本身没有错——一个 frame 不许停下来等
+一台虚拟机开机,这条不复审。错的是**把一句关于发行版的话,拿到发行版外面去问**:问出去、不等答案、
+然后用还没回来的答案去组命令行,这不是一个可以调快的探针,是一场**赛跑**,而第一块 pane 每一次都输。
+让它「等一下下」是把 ② 又废掉;预热是把整节要治的病请回来。所以第四条路:**取消这场赛跑**——一句关于
+Linux 用户账号的话,由**需要这个答案的那块 pane**,在**它自己那台发行版里面**,和它要决定的那把 shell
+**同一条命令行**上问:
+
+```
+wsl.exe [--cd <dir>] -e sh -c '<那一问>' folio /mnt/c/…/folio.bash
+```
+
+**`-e` 而不是 `--`,而这一字是承重的**(本机 Ubuntu-24.04 实测 2026-09-07)。`wsl.exe --` 把它后面的东西
+**拼成一条命令行**交给登录 shell 重新解析：那一问是一个塞满了空格、引号、`$`、`|`、`;` 的参数,
+进去就碎了——实测下 `$1` 是空的,而脚本正文被当成几条分句各自跑了一遍。`wsl.exe -e` 直接 exec,
+argv 对 argv：`$0` 是 `folio`、`$1` 是带空格的 init file 原样。旧拼法是 `--`,它能活到今天只是因为
+`/bin/bash --init-file <path> -i` 里没有一个空格。
+
+`shell_integration::WSL_LOGIN_SHELL` 就是那一问:`getent passwd` 读登录 shell,是 bash 就
+`exec` 它并带上 `--init-file` 与 `BT_SHELL_INTEGRATION=1`,不是就 `exec "$shell" -l`——探针有过的两条
+分支一条不少,而**分支现在长在答案所在的那一侧**。init file 走 `$1` 而不是拼进脚本正文,所以 Windows
+账号名里有空格的读者拿到的是一个这把 shell 原样读的文件名。三条附带的收获:
+
+- **`wsl::begin_login_shell_probe` 整个退役**,连同 `ask_login_shell`、`LOGIN_SHELL` 与那根 worker
+  线程。`crates/bt-app/src/wsl.rs` 现在只读注册表、**一个进程都不起**,这是 ② 的更强形式:装了 WSL 的
+  机器不为 Folio 开虚拟机,**开 WSL pane 的机器也不多开一台**。
+- **`BT_SHELL_INTEGRATION` 从 `WSLENV` 的名单里撤出**,改由那一问在发行版**里面**导出。它是这几个变量
+  里唯一一个**含义取决于起的是哪把 shell** 的:一个 zsh 会话终身带着它,等于对它里面每一个嵌套 `bash`
+  说「你的启动文件已经有人跑过了」,而把 `folio.bash` 手动挂在自己 `~/.bashrc` 里的读者会因此把登录链
+  跑两遍。
+- **终端自己那四条(`TERM_PROGRAM`/`TERM_PROGRAM_VERSION`/`COLORTERM`/`FORCE_HYPERLINK`)从此不论登录
+  shell 是什么都过去**,§7.1.6c-6c 里「WSL 登录到 zsh:设了但没转发」那一行随之作废(该节已就地记注)。
+  这不是顺手扩大范围:那四条说的是**这个终端**画什么,把它做成「读者选了哪把 shell」的函数,本来就是
+  当初那条分支的副作用——一块 zsh pane 和别的 pane 画一样的超链接,却告诉里面的程序它不画。
+
+**红门(变异实测)。**
+
+- `shell_integration::tests::the_first_wsl_pane_is_told_the_place_the_question_and_the_script_in_wsls_own_spelling`:
+  连着组两次命令行,断言两次一模一样、都点了 init file。**变异**:把 `wsl.integrated_login_shell()`
+  那道闸放回去 → 第一次是 `["--cd", "/mnt/d/Developer"]`,两个参数、没有脚本。
+- `shell_integration::tests::the_question_hands_bash_the_init_file_and_leaves_every_other_shell_alone`:
+  两条分支都还在,且那一问自己不含任何路径(路径走 `$1`)。
+- `bt_term` 的 `shell_integration_wsl::bash_is_handed_the_init_file_and_every_other_login_shell_is_left_alone`:
+  **真 POSIX `sh` 的往返**——`getent`、登录 shell、init file 全是测试自己写在临时 `PATH` 上的桩,于是
+  产品那条脚本对着一份**自己写的密码库**跑遍每条分支,不需要这台机器装 WSL。`bash` 分支断言
+  `argv=--init-file <path> -i` 且 `BT_SHELL_INTEGRATION=1`;`zsh`/`fish` 分支断言 `argv=-l`、没有
+  `--init-file`、且**没有**继承那个标记。**变异**:去掉 `export` → `BT_SHELL_INTEGRATION=<unset>`;把
+  `${shell##*/}` 写回 `$shell` → `/usr/bin/bash` 掉进默认分支,也就是每一台把 bash 放在 `/bin` 之外的
+  发行版。
+- `wsl::tests::nothing_in_this_module_boots_a_distribution`:源码门,`wsl.rs` 里不许再有起子进程的词。
+  **变异**:把 `ask_login_shell` 写回去 → 红在那个词上。
+- `wsl::tests::the_first_frame_and_the_first_pane_do_not_wait_for_a_distribution`:④ 那道门加上了第三处
+  读——**WSL profile 的整条命令行**,和首帧那两处一起在另一根线程上跑、答案走 channel 回来。
 
 #### ④ 首帧不等任何探针
 
