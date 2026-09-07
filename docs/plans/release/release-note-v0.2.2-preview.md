@@ -12,7 +12,7 @@ place.
   <source media="(prefers-color-scheme: dark)"
           srcset="https://raw.githubusercontent.com/lulu-loopp/folio-terminal/v0.2.2-preview/docs/screenshots/first-run-dark.png">
   <img src="https://raw.githubusercontent.com/lulu-loopp/folio-terminal/v0.2.2-preview/docs/screenshots/first-run-light.png" width="100%"
-       alt="The card over a window that has just started: Folio's mark beside Welcome to Folio, then six rows of one line each with a switch at the right of every one. Get told when a new version of Folio is out is on; Open any folder in Folio from its right-click menu and PowerShell integration lets you jump between commands are off; below a hairline, Its tab lights up when Claude Code is waiting, when a Codex turn ends, and when Copilot CLI is waiting, all three off. At the foot, a faint line reading Every row here is also a row in Settings, then Not now and Done.">
+       alt="The card over a window that has just started: Folio's mark beside Welcome to Folio, then six rows of one line each with a switch at the right of every one. Get told when a new version of Folio is out is on; Open any folder in Folio from its right-click menu and PowerShell integration lets you jump between commands are off; below a hairline, Its tab lights up when Claude Code is waiting, when a Codex turn ends, and when Copilot CLI is waiting, all three off. At the foot, a faint line reading You can change these options in Settings, then Not now and Done.">
 </picture>
 
 - The card asks every question whose answer writes something **outside**

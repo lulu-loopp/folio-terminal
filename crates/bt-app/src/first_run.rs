@@ -39,7 +39,7 @@ use crate::{
     explorer_menu::ExplorerPlace,
     i18n::Text,
     marks::OverlayLayer,
-    settings::{self, SettingsRow, SettingsTarget, push_float_window},
+    settings::{SettingsRow, SettingsTarget, push_float_window},
     shell_integration,
 };
 
@@ -84,7 +84,7 @@ pub enum RowKind {
 /// sentence is the Windows 10 one. The switch then means what it can mean, and
 /// the sentence explaining why the other half is unavailable stays where a
 /// sentence of that shape belongs — on the Settings page
-/// (`Text::DescExplorerFirstPageNoPackage`).
+/// (`Text::DescExplorerMenuNoPackage`).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ExplorerShape {
     /// The first page **and** the classic entry, both from one switch.
@@ -112,16 +112,17 @@ impl ExplorerShape {
     /// **The highest place this machine can honour**, which is what the card's
     /// one switch has always meant (user ruling 2026-09-07).
     ///
-    /// The card asks one question and the Settings row now answers it with three
-    /// values, so this is where the card's `on` becomes one of them. It never
-    /// answers [`ExplorerPlace::Off`]: a row left off spends nothing at all, and
-    /// `applications` is what says so.
+    /// **Not its own answer** — [`crate::explorer_menu::place_when_on`] is, and
+    /// the Settings row's switch calls the same function. The two surfaces ask
+    /// one question, so one function answers it and "the card and the row mean
+    /// the same thing" is a fact about the code rather than two tables somebody
+    /// has to keep in step.
+    ///
+    /// It never answers [`ExplorerPlace::Off`]: a row left off spends nothing at
+    /// all, and `applications` is what says so.
     #[must_use]
     pub fn place(self) -> ExplorerPlace {
-        match self {
-            Self::FirstPageAndClassic => ExplorerPlace::FirstPage,
-            Self::ClassicOnly => ExplorerPlace::ShowMoreOptions,
-        }
+        crate::explorer_menu::place_when_on(self == Self::FirstPageAndClassic)
     }
 }
 
@@ -316,14 +317,13 @@ pub fn settings_target(application: Application) -> Option<SettingsTarget> {
     let choice = |row, on: bool| Some(SettingsTarget::Choice(row, usize::from(!on)));
     match application {
         Application::UpdateCheck(on) => choice(SettingsRow::UpdateCheck, on),
-        // **Not `choice`**, because this row's picker is not `[true, false]`: it
-        // is the three places, and the index of an answer is where that answer
-        // stands in `EXPLORER_PLACE_OPTIONS`. Looked up rather than written down,
-        // so the card cannot drift from the list the dialog draws.
-        Application::Explorer(place) => settings::EXPLORER_PLACE_OPTIONS
-            .iter()
-            .position(|it| *it == place)
-            .map(|index| SettingsTarget::Choice(SettingsRow::ContextMenu, index)),
+        // **`choice` again since the switch** (user ruling 2026-09-07): the row
+        // is `[true, false]` like every other switch in the dialog, and what a
+        // press of `On` reaches is the machine's business rather than the
+        // index's. `Off` is spent by nobody here — `applications` never mints an
+        // `Explorer(Off)`, because a row left off asks for nothing — so the card
+        // presses `On` and the dialog reads back the place this machine can give.
+        Application::Explorer(place) => choice(SettingsRow::ContextMenu, place.on()),
         Application::PowerShellOffer(on) => choice(SettingsRow::PowerShellOffer, on),
         Application::ClaudeHooks => choice(SettingsRow::ClaudeHooks, true),
         Application::CodexNotify => choice(SettingsRow::CodexNotify, true),
@@ -1879,16 +1879,21 @@ mod tests {
     /// RED (user ruling 2026-09-07) — **the card's one switch asks for the
     /// highest place this machine can honour, and never for `Off`.**
     ///
-    /// The Settings row has three answers now, so the card's `on` has to become
-    /// one of them; what it has always meant is "as much of this as this machine
-    /// can do", which is [`ExplorerPlace::FirstPage`] where the first page is
-    /// reachable and the classic entry everywhere else. `Off` is not among the
-    /// answers a card can spend at all: a row left off spends nothing, because
-    /// off is the factory state and a card that pressed it would take away an
-    /// entry a previous install left behind.
+    /// What that switch has always meant is "as much of this as this machine can
+    /// do", which is [`ExplorerPlace::FirstPage`] where the first page is
+    /// reachable and the classic entry everywhere else. **Since the second
+    /// ruling of that day the Settings row's switch means exactly the same
+    /// thing, through the same function** — [`ExplorerShape::place`] is a call to
+    /// [`crate::explorer_menu::place_when_on`] and so is the row's `On`, which is
+    /// why the two surfaces cannot drift.
     ///
-    /// MUTATION: answer `FirstPage` for both shapes and a Windows 10 reader's
-    /// `Done` asks to register a package Windows there has no page for.
+    /// `Off` is not among the answers a card can spend at all: a row left off
+    /// spends nothing, because off is the factory state and a card that pressed
+    /// it would take away an entry a previous install left behind.
+    ///
+    /// MUTATION: answer `FirstPage` for both shapes — stop calling the shared
+    /// function — and a Windows 10 reader's `Done` asks to register a package
+    /// Windows there has no page for.
     #[test]
     fn the_cards_switch_asks_for_the_highest_place_this_machine_can_reach() {
         assert_eq!(
@@ -1947,22 +1952,24 @@ mod tests {
             settings::update_check_requested(target(Application::UpdateCheck(false))),
             Some(false)
         );
-        // **One press for Explorer since 2026-09-07**, and the place it carries
-        // is what comes back out. The index arithmetic is a lookup in
-        // `EXPLORER_PLACE_OPTIONS` rather than `usize::from(!on)`, so a card
-        // that spelled an index would land on the wrong answer of three.
-        assert_eq!(
-            settings::explorer_place_requested(target(Application::Explorer(
-                ExplorerPlace::FirstPage
-            ))),
-            Some(ExplorerPlace::FirstPage)
-        );
-        assert_eq!(
-            settings::explorer_place_requested(target(Application::Explorer(
-                ExplorerPlace::ShowMoreOptions
-            ))),
-            Some(ExplorerPlace::ShowMoreOptions)
-        );
+        // **One press for Explorer since 2026-09-07**, and since that day's
+        // second ruling it is `On` — the row is a switch and what `On` reaches is
+        // the machine's answer. So the card's shape and the dialog's `On` land on
+        // the same place by construction: the card presses `On`, the dialog reads
+        // the same machine fact, and neither spells a place of its own.
+        for (shape, offered) in [
+            (ExplorerShape::FirstPageAndClassic, true),
+            (ExplorerShape::ClassicOnly, false),
+        ] {
+            assert_eq!(
+                settings::explorer_place_requested(
+                    target(Application::Explorer(shape.place())),
+                    offered
+                ),
+                Some(shape.place()),
+                "{shape:?}: the card's switch and the row's switch are one switch"
+            );
+        }
         assert_eq!(
             settings::powershell_integration_offer_requested(target(Application::PowerShellOffer(
                 false

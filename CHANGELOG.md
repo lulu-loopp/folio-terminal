@@ -51,19 +51,23 @@ All notable changes to Folio are recorded here. The format follows
   single line, and `keybindings.json` is untouched — it named all four slots
   before this change and names them now.
 
-- **The two Explorer rows in Settings are one row with three answers.**
-  `Explorer context menu` and `First page of that menu` asked one question
-  twice, and the second was meaningless without the first. The one row now says
-  where Folio stands in Explorer's right-click menu: `Off`, `Under Show more
-  options`, or `On the first page`, which registers `folio.msix` and keeps the
-  classic entry beside it. The top answer is greyed, with the reason under the
-  row, on Windows 10 and where `folio.msix` is not beside `folio.exe`; the card
-  that used to say `folio.msix is not beside folio.exe` after a press is gone,
-  because that answer can no longer be pressed. The row is now on the General
-  page of every Windows rather than the pair being a Windows 11 shape, and
-  nothing about where the answers are stored changed: they are still read off
-  the registry and off the deployment database, so removing the package from
-  `Settings > Apps > Installed apps` still moves the row.
+- **The two Explorer rows in Settings are one switch.** `Explorer context menu`
+  and `First page of that menu` asked one question twice, and the second was
+  meaningless without the first. There is now one row, and it is on or off like
+  every other switch on the page. **On is everything this Windows can do**: on
+  Windows 11 with `folio.msix` beside `folio.exe` it puts "Open Folio here"
+  under `Show more options` and registers the package that puts "Open in Folio"
+  on the page Windows 11 opens first; anywhere else it writes the menu entry
+  alone. Off takes back whichever of the two is there. Because On means
+  different amounts on different machines, the line under the row says what it
+  does on yours — and on a Windows 10 that line names no page, because that
+  Windows has one menu. The row is now on the General page of every Windows
+  rather than the pair being a Windows 11 shape, the card that used to say
+  `folio.msix is not beside folio.exe` after a press is gone, and nothing about
+  where the answer is stored changed: it is still read off the registry and off
+  the deployment database, so removing the package from `Settings > Apps >
+  Installed apps` still moves the row. The welcome card's Explorer switch means
+  the same thing it always did, and now says so by calling the same function.
 
 ### Fixed
 
