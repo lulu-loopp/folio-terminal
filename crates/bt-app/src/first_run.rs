@@ -144,17 +144,20 @@ pub struct Machine {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Row {
     pub kind: RowKind,
-    /// **The hairline that stands above this row**, when the row opens the
+    /// **The wider gap that stands above this row**, when the row opens the
     /// agent group.
     ///
     /// v3 hung a caps heading here — `AGENTS FOUND ON THIS MACHINE` — and v4
-    /// deletes it rather than restyling it (user ruling 2026-09-06): a group of
-    /// three rows separated from the three above them by a rule does not need a
-    /// label to say it is a group, and the heading was the one string on the
-    /// card that described our own act of looking. Hung on the row and not on
-    /// the group, for the heading's own reason: a machine with no agents draws
-    /// no divider, because there is no row for it to stand above.
-    pub divider_above: bool,
+    /// deleted it rather than restyling it (user ruling 2026-09-06): a group of
+    /// three rows set apart from the three above them does not need a label to
+    /// say it is a group, and the heading was the one string on the card that
+    /// described our own act of looking. v4 put a hairline there instead, and
+    /// **that hairline is gone too** (user ruling 2026-09-07): the settings page
+    /// draws no line between its rows and this card is six rows of that same
+    /// shape, so the break is air and nothing else. Hung on the row and not on
+    /// the group, for the heading's own reason: a machine with no agents opens
+    /// no gap, because there is no row for it to stand above.
+    pub group_break_above: bool,
     /// The row's one line, and it is the result the reader gets.
     pub line: Text,
     /// What the pointer resting on the row says: the mechanism, and the address
@@ -173,20 +176,20 @@ pub struct Row {
 /// agents.
 ///
 /// **A row Folio would have to refuse is not listed at all.** If none of the
-/// three agents is found the divider and its rows are both absent, and the card
-/// never says that it looked and found nothing.
+/// three agents is found the group break and its rows are both absent, and the
+/// card never says that it looked and found nothing.
 #[must_use]
 pub fn rows(machine: &Machine) -> Vec<Row> {
     let mut rows = vec![Row {
         kind: RowKind::Update,
-        divider_above: false,
+        group_break_above: false,
         line: Text::FirstRunRowUpdate,
         tip: Text::FirstRunTipUpdate,
         on: true,
     }];
     rows.push(Row {
         kind: RowKind::Explorer,
-        divider_above: false,
+        group_break_above: false,
         line: explorer_shape(machine).line(),
         tip: Text::FirstRunTipExplorer,
         on: false,
@@ -194,7 +197,7 @@ pub fn rows(machine: &Machine) -> Vec<Row> {
     if !machine.powershell_integration_installed {
         rows.push(Row {
             kind: RowKind::PowerShell,
-            divider_above: false,
+            group_break_above: false,
             line: Text::FirstRunRowPowerShell,
             tip: Text::FirstRunTipPowerShell,
             on: false,
@@ -227,7 +230,7 @@ pub fn rows(machine: &Machine) -> Vec<Row> {
         }
         rows.push(Row {
             kind,
-            divider_above: !opened,
+            group_break_above: !opened,
             line,
             tip,
             on: false,
@@ -433,7 +436,12 @@ impl Card {
         };
     }
 
-    /// A key: the ring comes on, wherever it was.
+    /// A key the card **acts on**: the ring comes on, wherever it was.
+    ///
+    /// Not every key that arrives (user ruling 2026-09-07). A card that is up
+    /// swallows everything it does not act on, and a ring lit by a swallowed
+    /// key — a bare modifier, a letter — claims a keyboard nobody has used on
+    /// it, which is the same claim [`Self::open`] refuses to make.
     pub fn light_the_ring(&mut self) {
         self.focus_visible = true;
         if self.focus.is_none() && !self.rows.is_empty() {
@@ -628,13 +636,26 @@ const HEADER_MARGIN_BOTTOM_LOGICAL_PX: f32 = 18.0;
 /// is what "looser rhythm" buys once the second line is gone.
 const ROW_HEIGHT_LOGICAL_PX: f32 = 42.0;
 const ROW_FONT_LOGICAL_PX: f32 = 13.0;
-/// How far the row's `--hover` fill bleeds past the content column on each side,
-/// so that a hovered row reads as a band and not as a box drawn round the type.
-const ROW_HOVER_BLEED_LOGICAL_PX: f32 = 8.0;
-const ROW_HOVER_RADIUS_LOGICAL_PX: f32 = 5.0;
-/// The air above and below the one rule that separates Folio's own rows from the
-/// agent rows.
-const GROUP_DIVIDER_AIR_LOGICAL_PX: f32 = 9.0;
+/// How far the row's band runs past the content column on each side.
+///
+/// v4 drew this: eight pixels of `--hover` beyond the type, so that a row under
+/// the pointer read as a band rather than as a box round the words. Nothing is
+/// drawn there now (user ruling 2026-09-07), and the eight pixels stay because
+/// the band was never only a fill — it is what a press reaches and what the
+/// tooltip hangs off, and a target that stopped at the first glyph would be
+/// smaller than the row a reader is aiming at.
+const ROW_BAND_BLEED_LOGICAL_PX: f32 = 8.0;
+/// **The whole of what separates Folio's own rows from the agent rows** (user
+/// ruling 2026-09-07): air, and nothing drawn in it.
+///
+/// v4 spent 9 + hairline + 9 here and a `--border-soft` hairline between every
+/// other pair of rows. The settings page — the page this card borrows its row
+/// shape from, and the page every one of these six rows also lives on — draws no
+/// line between rows at all, and the reader asked for the same here. So rows of
+/// one group now abut, and the group break is this gap: wider than the air a row
+/// already carries around its own line, so it reads as a break, and not a mark,
+/// so there is nothing on the card to be consistent with.
+const GROUP_GAP_LOGICAL_PX: f32 = 16.0;
 
 /// `.aswitch`, to the pixel.
 const SWITCH_WIDTH_LOGICAL_PX: f32 = 30.0;
@@ -647,9 +668,9 @@ const SWITCH_KNOB_SHADOW_ALPHA: f32 = 0.25;
 /// The gap between the line's column and the switch.
 const SWITCH_GAP_LOGICAL_PX: f32 = 12.0;
 
-/// **16, and no hairline** (v4 §2): the rows already carry hairlines of their
-/// own, and a seventh one under the last of them would read as a row boundary
-/// with nothing under it.
+/// **16, and no hairline** (v4 §2, and now the card's own rule as well): there
+/// is no line anywhere on this card, so a line under the last row would be the
+/// only one and would read as a row boundary with nothing under it.
 const FOOT_GAP_LOGICAL_PX: f32 = 16.0;
 const SETTINGS_LINE_FONT_LOGICAL_PX: f32 = 11.0;
 const SETTINGS_LINE_LINE_LOGICAL_PX: f32 = 15.0;
@@ -688,12 +709,14 @@ pub enum Target {
     Panel,
     /// **The whole row, switch included** (v4 §2, §8).
     ///
-    /// Not the switch alone, which is what v3 hit-tested. A hovered row is
-    /// filled with `--hover` end to end and carries a tooltip about itself, and
-    /// this window has a standing rule about exactly that shape: a mark that
-    /// answers a hover and not a click is the window lying about what it drew
-    /// (§7.1.5f, quoted again in §7.1.5g). So the band that lights is the band
-    /// that answers, and what it answers is the switch drawn in it.
+    /// Not the switch alone, which is what v3 hit-tested. A row carries a
+    /// tooltip about itself end to end, and this window has a standing rule
+    /// about exactly that shape: something that answers a hover and not a click
+    /// is the window lying about what it drew (§7.1.5f, quoted again in
+    /// §7.1.5g). So the band that speaks is the band that answers, and what it
+    /// answers is the switch drawn in it. **The band is no longer filled**
+    /// (user ruling 2026-09-07) — the settings page paints nothing under the
+    /// pointer either — and that changes what is drawn, not what is reached.
     Row(usize),
     Later,
     Done,
@@ -714,9 +737,9 @@ pub fn card_width(surface_width: f32, scale: f32) -> f32 {
 /// can grow a second line under somebody's font.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RowContent {
-    /// The hairline that separates Folio's rows from the agent rows stands
-    /// above this one.
-    pub divider_above: bool,
+    /// The gap that separates Folio's rows from the agent rows stands above
+    /// this one.
+    pub group_break_above: bool,
     pub line: String,
     /// What the pointer resting on this row says.
     pub tip: String,
@@ -738,15 +761,12 @@ pub struct Content {
 
 #[derive(Clone, Debug, PartialEq)]
 struct RowRects {
-    /// The whole band — the content column plus the eight pixels the `--hover`
-    /// fill bleeds past it on each side. **What lights under the pointer, what
-    /// answers a press, and what the tooltip hangs off, and it is one rectangle
-    /// for all three** because it is one rectangle to the reader.
+    /// The whole band — the content column plus the eight pixels it runs past
+    /// that column on each side. **What answers a press and what the tooltip
+    /// hangs off, and it is one rectangle for both** because it is one
+    /// rectangle to the reader. Nothing is painted in it (user ruling
+    /// 2026-09-07).
     band: [f32; 4],
-    /// The hairline above this row — `--border` where it opens the agent group,
-    /// `--border-soft` between two rows of the same group, and `None` for the
-    /// first row of all.
-    rule: Option<([f32; 4], bool)>,
     line: (String, [f32; 4]),
     tip: String,
     switch: [f32; 4],
@@ -870,7 +890,7 @@ pub fn layout(
         + button_height
         + px(PADDING_BOTTOM_LOGICAL_PX);
 
-    let body_height = body_extent(content, scale, border);
+    let body_height = body_extent(content, scale);
     let room = (surface_height - 2.0 * px(SURFACE_MARGIN_LOGICAL_PX) - 2.0 * border - head - foot)
         .max(px(ROW_HEIGHT_LOGICAL_PX));
     let viewport_height = body_height.min(room);
@@ -911,22 +931,17 @@ pub fn layout(
     ];
     let mut rows = Vec::with_capacity(content.rows.len());
     let mut walk = viewport[1] - scroll;
-    for (index, row) in content.rows.iter().enumerate() {
-        let rule = (index > 0).then(|| {
-            if row.divider_above {
-                walk += px(GROUP_DIVIDER_AIR_LOGICAL_PX);
-            }
-            let rect = [content_left, walk, content_right, walk + border];
-            walk = rect[3];
-            if row.divider_above {
-                walk += px(GROUP_DIVIDER_AIR_LOGICAL_PX);
-            }
-            (rect, row.divider_above)
-        });
+    for row in &content.rows {
+        // **Rows of one group abut; the group break is air** (user ruling
+        // 2026-09-07). Nothing is drawn between two rows, so there is nothing
+        // here to measure a rectangle for — only a walk.
+        if row.group_break_above {
+            walk += px(GROUP_GAP_LOGICAL_PX);
+        }
         let band = [
-            content_left - px(ROW_HOVER_BLEED_LOGICAL_PX),
+            content_left - px(ROW_BAND_BLEED_LOGICAL_PX),
             walk,
-            content_right + px(ROW_HOVER_BLEED_LOGICAL_PX),
+            content_right + px(ROW_BAND_BLEED_LOGICAL_PX),
             walk + px(ROW_HEIGHT_LOGICAL_PX),
         ];
         let switch_top = (band[1] + band[3] - px(SWITCH_HEIGHT_LOGICAL_PX)) / 2.0;
@@ -939,7 +954,6 @@ pub fn layout(
         walk = band[3];
         rows.push(RowRects {
             band,
-            rule,
             // **Every row's line starts on the same x** (user ruling
             // 2026-09-06): the three agent rows carried a coloured silhouette
             // in v4's first drawing and no longer do, so there is one text
@@ -1044,15 +1058,12 @@ pub fn layout(
 }
 
 /// How tall the body is in full, before any of it is hidden.
-fn body_extent(content: &Content, scale: f32, border: f32) -> f32 {
+fn body_extent(content: &Content, scale: f32) -> f32 {
     let px = |value: f32| value * scale;
     let mut height = 0.0;
-    for (index, row) in content.rows.iter().enumerate() {
-        if index > 0 {
-            height += border;
-            if row.divider_above {
-                height += 2.0 * px(GROUP_DIVIDER_AIR_LOGICAL_PX);
-            }
+    for row in &content.rows {
+        if row.group_break_above {
+            height += px(GROUP_GAP_LOGICAL_PX);
         }
         height += px(ROW_HEIGHT_LOGICAL_PX);
     }
@@ -1260,40 +1271,14 @@ pub fn build(
     });
 
     let viewport = layout.viewport;
+    // **A row under the pointer is not painted** (user ruling 2026-09-07). v4
+    // filled the whole band with `--hover`; the settings page, whose row shape
+    // this card borrows, paints nothing when the pointer crosses a row — only
+    // the control at its right end answers a hover — and the reader asked for
+    // the same here. What the pointer still earns is the row's tooltip, and
+    // what a press still reaches is the whole band: the rectangle did not
+    // change, only what is drawn in it.
     for (index, row) in layout.rows.iter().enumerate() {
-        if let Some((rect, group)) = row.rule
-            && let Some(shown) = clipped(rect, viewport)
-        {
-            quads.push(OverlayQuad {
-                rect: shown,
-                color: palette.menu_border,
-                alpha: if group {
-                    alpha(palette.menu_border_alpha)
-                } else {
-                    // `--border-soft`: the same ink at rather less than
-                    // `--border`, which is what separates two rows of one group
-                    // from the one rule that separates the groups.
-                    alpha(palette.menu_border_alpha) * ROW_RULE_SOFTNESS
-                },
-            });
-        }
-        if hover == Some(Target::Row(index)) {
-            let lit = row.band;
-            // **Clipped by the body's top and bottom, not by the text column.**
-            // The fill's whole shape is that it runs eight pixels wider than
-            // the column on each side; clipping it to the viewport would cut
-            // exactly the part that makes it a band. What it may not cross is
-            // the card's own edge, and what it may not escape is the scroller.
-            quads.extend(clip_quads(
-                rounded_overlay_fill(
-                    lit,
-                    px(ROW_HOVER_RADIUS_LOGICAL_PX),
-                    palette.dialog_hover,
-                    1.0,
-                ),
-                layout.body_clip,
-            ));
-        }
         if let Some(shown) = clipped(row.line.1, viewport) {
             labels.push(ChromeLabel {
                 mono: false,
@@ -1312,6 +1297,15 @@ pub fn build(
         if clipped(row.switch, viewport).is_some() {
             push_switch(&mut quads, row.switch, row.on, scale, palette, viewport);
             if focus == Some(Focus::Switch(index)) {
+                // **Cut to the card's own edge, not to the text column** (user
+                // ruling 2026-09-07: the ring on the first switch came up with
+                // its right-hand side sliced off). The switch's right edge is
+                // the content column's right edge, and the ring stands one
+                // pixel outside the control and is two more wide — so a ring
+                // cut to the column loses exactly the three logical pixels that
+                // are on the far side of it. What it may not cross is the
+                // card's own edge, and what it may not escape is the scroller,
+                // and `body_clip` is both of those facts.
                 quads.extend(clip_quads(
                     focus_ring(
                         row.switch,
@@ -1319,7 +1313,7 @@ pub fn build(
                         FOCUS_RING_TIGHT_OFFSET_LOGICAL_PX,
                         palette.accent,
                     ),
-                    viewport,
+                    layout.body_clip,
                 ));
             }
         }
@@ -1425,12 +1419,6 @@ pub fn build(
         },
     ]
 }
-
-/// `--border-soft` as a fraction of `--border`: `.055` of ink where the border
-/// is `.088` in the light theme, `.06` of white where it is `.094` in the dark.
-/// One ratio, because the mock-up's two pairs are the same ratio to within a
-/// hundredth and a second constant would be a number nobody could check.
-const ROW_RULE_SOFTNESS: f32 = 0.63;
 
 /// The tile's corner radius as a fraction of its side — `GROUND_RADIUS` in
 /// `design/assets/app-icon/make-folio-ico.py`, which is the file that draws
@@ -1782,8 +1770,8 @@ mod tests {
             [RowKind::Update, RowKind::Explorer, RowKind::PowerShell]
         );
         assert!(
-            offered.iter().all(|row| !row.divider_above),
-            "the card is drawing the rule that opens a group with nothing in it"
+            offered.iter().all(|row| !row.group_break_above),
+            "the card is opening a group gap with nothing in the group"
         );
         let configured = Machine {
             claude_installable: false,
@@ -1801,12 +1789,14 @@ mod tests {
             "a row is being offered for a configuration that already calls Folio"
         );
         assert!(
-            rows(&configured)[3].divider_above,
-            "the rule moved off the first agent row that is actually shown"
+            rows(&configured)[3].group_break_above,
+            "the gap moved off the first agent row that is actually shown"
         );
         assert!(
-            rows(&configured)[..3].iter().all(|row| !row.divider_above),
-            "a rule is being drawn inside Folio's own three rows"
+            rows(&configured)[..3]
+                .iter()
+                .all(|row| !row.group_break_above),
+            "a group gap is being opened inside Folio's own three rows"
         );
     }
 
@@ -2211,7 +2201,7 @@ mod tests {
             rows: rows
                 .iter()
                 .map(|row| RowContent {
-                    divider_above: row.divider_above,
+                    group_break_above: row.group_break_above,
                     line: row.line.text().to_owned(),
                     tip: row.tip.text().to_owned(),
                     on: row.on,
@@ -2412,7 +2402,7 @@ mod tests {
     /// v4's first drawing put a 16px coloured silhouette at the head of each of
     /// the three agent rows, which indented those three lines by 26 pixels and
     /// made the card two text columns instead of one. The marks are struck: the
-    /// row names its agent in words, the rule above the group already says the
+    /// row names its agent in words, the break above the group already says the
     /// three belong together, and one repeated silhouette in three colours gave
     /// a colour-blind reader nothing at all.
     ///
@@ -2458,6 +2448,194 @@ mod tests {
             images[0].rect, placed.mark,
             "the one picture on the card is not the mark in the header"
         );
+    }
+
+    /// PIN (§7.56 ⑦, user ruling 2026-09-07) — **a row under the pointer is
+    /// not painted.**
+    ///
+    /// v4 filled the whole band with `--hover`. The settings page — whose row
+    /// shape this card borrows — paints nothing when the pointer crosses a row;
+    /// only the control at the row's right end answers a hover. What the
+    /// pointer still earns here is the row's tooltip, and what a press still
+    /// reaches is the whole band, so the executable form of the ruling is that
+    /// a hovered card and an unhovered one draw **the same picture**.
+    ///
+    /// MUTATION: push the `--hover` fill back and the two pictures differ by
+    /// the band's own quads, which is the report.
+    #[test]
+    fn a_row_under_the_pointer_is_not_painted() {
+        let placed = layout(
+            &measured(&rows(&every_row())),
+            SURFACE.0,
+            SURFACE.1,
+            SCALE,
+            0.0,
+        );
+        let cold = build(&placed, SURFACE, None, None);
+        for index in 0..placed.rows.len() {
+            let hovered = build(&placed, SURFACE, Some(Target::Row(index)), None);
+            assert_eq!(
+                quads_of(&hovered),
+                quads_of(&cold),
+                "the pointer on row {index} changed what the card draws"
+            );
+        }
+    }
+
+    /// PIN (§7.56 ⑧, user ruling 2026-09-07) — **the ring waits for the
+    /// keyboard, and when it comes it is not sliced off at the text column.**
+    ///
+    /// Two halves of one report. The card opens with the focus on its first
+    /// switch and the ring put away, because a ring drawn before anybody has
+    /// used a keyboard claims one; and the ring `Tab` then lights stands one
+    /// pixel outside a switch whose right edge **is** the content column's, so
+    /// a ring cut to that column loses its whole right-hand side.
+    ///
+    /// MUTATIONS:
+    /// ① light the ring on the way into the key handler — on a bare `Shift`, or
+    ///    on any key the card swallows — and `focus_ring` answers before a
+    ///    keyboard has moved anything;
+    /// ② cut the ring to the viewport instead of to the card and its outermost
+    ///    quad stops exactly on the switch's own right edge, which is the
+    ///    photograph.
+    #[test]
+    fn the_ring_waits_for_the_keyboard_and_is_not_cut_when_it_comes() {
+        let placed = layout(
+            &measured(&rows(&every_row())),
+            SURFACE.0,
+            SURFACE.1,
+            SCALE,
+            0.0,
+        );
+        let mut card = Card::default();
+        card.open(rows(&every_row()), ExplorerShape::ClassicOnly);
+        assert_eq!(
+            card.focus(),
+            Some(Focus::Switch(0)),
+            "the card does not open on its first switch"
+        );
+        assert!(
+            card.focus_ring().is_none(),
+            "the card opened with a ring on a control nobody has walked to"
+        );
+        let dark = build(&placed, SURFACE, None, card.focus_ring());
+
+        // What `Tab` does, and nothing else.
+        let stepped_to = stepped(card.focus().expect("a focus"), card.rows().len(), true);
+        card.move_focus(stepped_to);
+        let Some(Focus::Switch(index)) = card.focus_ring() else {
+            panic!("Tab left the ring away");
+        };
+        let lit = build(&placed, SURFACE, None, card.focus_ring());
+
+        let ring = added(&lit, &dark);
+        assert!(!ring.is_empty(), "Tab drew no ring at all");
+        let clip = placed.body_clip;
+        for quad in &ring {
+            assert!(
+                quad.rect[0] >= clip[0] - 0.01
+                    && quad.rect[1] >= clip[1] - 0.01
+                    && quad.rect[2] <= clip[2] + 0.01
+                    && quad.rect[3] <= clip[3] + 0.01,
+                "a ring quad at {:?} is outside the clip {clip:?} it was cut with",
+                quad.rect
+            );
+        }
+        // The ring stands `offset + width` outside the control on every side,
+        // and the switch's right edge is the content column's — so this is the
+        // assertion the old clip failed.
+        let switch = placed.rows[index].switch;
+        let reach = (FOCUS_RING_TIGHT_OFFSET_LOGICAL_PX + FOCUS_RING_WIDTH_LOGICAL_PX) * SCALE;
+        let right = ring
+            .iter()
+            .fold(f32::MIN, |far, quad| far.max(quad.rect[2]));
+        assert!(
+            (right - (switch[2] + reach)).abs() < 0.51,
+            "the ring reaches {right} where the control's own edge is {} and the ring should \
+             stand {reach} beyond it",
+            switch[2]
+        );
+    }
+
+    /// Every quad the card draws, in the order it draws them.
+    fn quads_of(layers: &[OverlayLayer]) -> Vec<OverlayQuad> {
+        layers
+            .iter()
+            .flat_map(|layer| layer.quads.iter().copied())
+            .collect()
+    }
+
+    /// The quads `lit` draws that `dark` does not — a multiset difference, so a
+    /// quad drawn twice in both is not reported as new.
+    fn added(lit: &[OverlayLayer], dark: &[OverlayLayer]) -> Vec<OverlayQuad> {
+        let mut rest = quads_of(dark);
+        let mut extra = Vec::new();
+        for quad in quads_of(lit) {
+            if let Some(at) = rest.iter().position(|other| *other == quad) {
+                rest.remove(at);
+            } else {
+                extra.push(quad);
+            }
+        }
+        extra
+    }
+
+    /// PIN (§7.56 ⑦, user ruling 2026-09-07 — 「要不要这里也不分隔保持一致」) —
+    /// **nothing is drawn between two rows, and the group break is air.**
+    ///
+    /// v4 drew a `--border-soft` hairline between every pair of rows and a
+    /// `--border` one above the agent group. The settings page — whose row shape
+    /// this card borrows, and where every one of these six rows also lives —
+    /// draws no line between its rows at all, and the reader asked for the same
+    /// here. So rows of one group abut, and what separates the two groups is
+    /// `GROUP_GAP_LOGICAL_PX` of nothing.
+    ///
+    /// **How "no separator" is stated so a machine can check it.** The card's
+    /// face and its scrim both cross the body, but neither is *inside* it: they
+    /// run from above the first row to below the last. A hairline between two
+    /// rows is the other shape — it fits inside the body and it crosses the
+    /// column the six lines are written in. The switches do not: they live out
+    /// at the card's right-hand padding, past where any line ends.
+    ///
+    /// MUTATIONS:
+    /// ① push the group's `--border` rule back and the one quad inside the body
+    ///    that crosses the text column is exactly it;
+    /// ② push the `--border-soft` ones back between rows of one group and the
+    ///    same assertion catches four more;
+    /// ③ give the group break its v4 spacing — air, hairline, air — and the gap
+    ///    assertion reports 19 logical pixels where 16 were asked for.
+    #[test]
+    fn no_line_is_drawn_between_two_rows_and_the_group_break_is_air() {
+        let px = |value: f32| value * SCALE;
+        let content = measured(&rows(&every_row()));
+        let placed = layout(&content, SURFACE.0, SURFACE.1, SCALE, 0.0);
+        let (text_left, text_right) = (placed.rows[0].line.1[0], placed.rows[0].line.1[2]);
+        for layer in build(&placed, SURFACE, None, None) {
+            for quad in layer.quads {
+                let inside_body = quad.rect[1] >= placed.viewport[1] - 0.01
+                    && quad.rect[3] <= placed.viewport[3] + 0.01;
+                let crosses_the_column = quad.rect[0] < text_right && quad.rect[2] > text_left;
+                assert!(
+                    !(inside_body && crosses_the_column),
+                    "a quad at {:?} lies inside the body and crosses the column the rows are \
+                     written in — the card has grown a separator",
+                    quad.rect
+                );
+            }
+        }
+        for (index, pair) in placed.rows.windows(2).enumerate() {
+            let gap = pair[1].band[1] - pair[0].band[3];
+            let want = if content.rows[index + 1].group_break_above {
+                px(GROUP_GAP_LOGICAL_PX)
+            } else {
+                0.0
+            };
+            assert!(
+                (gap - want).abs() < 0.01,
+                "the gap above row {} is {gap} and should be {want}",
+                index + 1
+            );
+        }
     }
 
     /// PIN (v4 §1, user ruling 2026-09-06) — **the header is the shipped icon

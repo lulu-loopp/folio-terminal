@@ -4,6 +4,20 @@ All notable changes to Folio are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- **The welcome card draws no line between its rows.** The Settings page — whose
+  row shape this card borrows, and where every one of its six rows also lives —
+  draws none either. The rows keep their 42-pixel rhythm and abut; what separates
+  Folio's own rows from the agents found on this machine is 16 pixels of air. A
+  row under the pointer is no longer filled: it still carries its tooltip and a
+  press anywhere along it still flips that row's switch, which is what the
+  Settings page does too. The ring on a switch waits for a key that moves
+  something rather than for any key at all, and it is no longer clipped at its
+  right-hand side when it comes.
+
 ## 0.2.2-preview (unreleased)
 
 Fixes and polish for 0.2.1-preview, and one card: a machine that has never run

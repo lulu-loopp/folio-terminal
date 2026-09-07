@@ -46450,7 +46450,7 @@ impl Runtime<'_> {
         let row_contents = rows
             .iter()
             .map(|row| first_run::RowContent {
-                divider_above: row.divider_above,
+                group_break_above: row.group_break_above,
                 line: row.line.text().to_owned(),
                 tip: row.tip.text().to_owned(),
                 on: row.on,
@@ -46576,9 +46576,16 @@ impl Runtime<'_> {
     ///
     /// Every other key is swallowed rather than typed into a shell behind a
     /// scrim.
+    /// **The ring is lit by a key that does something, not by a key that
+    /// arrives** (user ruling 2026-09-07: the ring was on the first switch
+    /// before anybody had walked to it). This card swallows every key it does
+    /// not act on, and a bare `Shift` is one of them — so lighting the ring on
+    /// the way in put an accent ring round a control the reader had not
+    /// touched, on the first surface a machine ever shows. Each arm below that
+    /// moves, flips or scrolls lights it; `Tab` and the arrows light it by
+    /// moving the focus, which is the same statement said once.
     fn press_first_run_key(&mut self, key: &Key, shift: bool) -> Result<()> {
         let switches = self.window.first_run.rows().len();
-        self.window.first_run.light_the_ring();
         let focus = self.window.first_run.focus();
         match key {
             Key::Named(NamedKey::Escape) => {
@@ -46599,6 +46606,7 @@ impl Runtime<'_> {
             // moot and they go the ordinary way.
             Key::Named(NamedKey::Space) => {
                 if let Some(first_run::Focus::Switch(index)) = focus {
+                    self.window.first_run.light_the_ring();
                     self.window.first_run.flip(index);
                 } else {
                     return self.answer_first_run(match focus {
@@ -46630,6 +46638,7 @@ impl Runtime<'_> {
             }
             Key::Named(NamedKey::PageDown | NamedKey::PageUp | NamedKey::Home | NamedKey::End) => {
                 if let Some(layout) = self.first_run_layout() {
+                    self.window.first_run.light_the_ring();
                     let to = match key {
                         Key::Named(NamedKey::PageDown) => layout.scrolled_by(layout.page()),
                         Key::Named(NamedKey::PageUp) => layout.scrolled_by(-layout.page()),
