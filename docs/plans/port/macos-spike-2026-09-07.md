@@ -7,6 +7,15 @@ Mac (macOS 26.6.2, arm64) under Rust 1.94.1 `aarch64-apple-darwin`, `-j 4`.
 answers one question — how much of Folio already is a macOS program, and what
 the rest would cost — and leaves every decision it raises open.
 
+> **Class B is done — 2026-09-07, `feature/portable-core-check`.** The user's
+> ruling on this document was: take the class-B days now, ship 0.4 on Windows,
+> and make the port its own milestone after it. The class-B work landed the same
+> day, and a `core-macos` job now compiles the portable core on every push, so
+> the measurements below are held rather than remembered. **Every table in this
+> document still records what was measured on `05bf018`** — a done note says
+> what changed and does not rewrite the reading. Nothing from class C or D was
+> touched, and `bt-app` still fails on macOS exactly as §1 says it does.
+
 ---
 
 ## 1. The short answer
@@ -23,6 +32,16 @@ build of everything below `bt-app`:
 |---|---|---|---|
 | 1 | `bt-render` | `E0599` no variant `CompositionVisual` on `wgpu::SurfaceTargetUnsafe` | `crates/bt-render/src/lib.rs:3422` |
 | 2 | `bt-term` | `E0425` `bt_platform::set_current_thread_priority` not found | `crates/bt-term/src/inline_image.rs:203` |
+
+**Done (2026-09-07).** ① `WindowTarget::CompositionVisual` is `#[cfg(windows)]`
+and the `Hwnd` arm is documented as the portable door; `WindowTargetKind` keeps
+both names on every platform, because everything above that layer speaks in the
+kind. ② `set_current_thread_priority`, `current_thread_priority` and
+`spawn_at_priority` have a portable arm in `bt-platform` that answers `false` —
+the band was never asked for — deliberately not `nice` and not a QoS class,
+because choosing between those is the macOS backend's decision and would be that
+crate's first dependency off Windows. `bt-render`, `bt-term`, `bt-corpus` and
+`bt-pty`'s library all check clean on the Mac with no shim.
 
 With those two lines stubbed on the Mac (a throwaway shim, reverted; see
 Appendix C), `bt-render`, `bt-term`, `bt-corpus` and `bt-pty` all compile
@@ -60,8 +79,18 @@ that check. Raw logs in Appendix A.
 | `bt-platform` | **lib ok**, test target fails — 2 | — | a `cfg(test)` module not gated `windows` |
 | `bt-corpus` | fail (via `bt-render`) | — | dependency only; clean with the shim |
 | `bt-pty` | fail (via `bt-term`) | — | lib clean with the shim; **5 windows-only test errors** |
-| `portable-pty` | lib ok, `--all-targets` fails | — | 4 example files were not vendored |
+| `portable-pty` | lib ok, `--all-targets` fails | — | 4 example files were not vendored *(done: the four `[[example]]` rows are gone — see `vendor/conpty/README.md`)* |
 | `bt-app` | fail (via `bt-render`) | — | **321 errors / 79 missing platform items** |
+
+**Done (2026-09-07).** Every row of that table except `bt-app` is now green on
+the Mac, and `.github/workflows/ci.yml`'s `core-macos` job is what keeps it so:
+`cargo check --locked --all-targets` for the thirteen first-party crates plus
+vendored alacritty, and `cargo test --locked` for the eleven whose suites pass
+there. `bt-render` and `bt-pty` are checked and not tested for the reason the
+`gpu` and `conpty` jobs already give — one wants a real adapter, the other real
+child processes through a ConPTY that does not exist there. `bt-term` and
+`bt-corpus` are checked and not tested because nobody has measured their suites
+on that platform yet; they join the test line the day somebody does.
 
 Three things worth pulling out of that table.
 
@@ -77,6 +106,17 @@ is gated whole. Only its own test target fails, because four test modules
 (`web_security_tests` and its neighbours) are `#[cfg(test)]` rather than
 `#[cfg(all(test, windows))]` — a two-word fix, and the sort of thing the port
 should tidy on the way past rather than plan around.
+
+**Done (2026-09-07).** It was one module, not four: `web_security_tests` reads
+`WEB_SETTINGS` and `webview.rs`'s own source, both behind `#[cfg(windows)] mod
+webview`, and the `E0282` beneath it was inference downstream of the two
+unresolved imports. `bt-pty`'s five are gated per item rather than per module —
+the `FILE_ATTRIBUTE_REPARSE_POINT` constant, the two helpers that read it, the
+two tests that call them, the two sidecar tests and the probe that asks this
+machine about `%SystemRoot%` — because the crate is otherwise already a unix
+crate and gating the module would have taken thirty portable tests with it. The
+ignored A/B record keeps its name and therefore its row on
+`ci/check-ignored-tests.ps1`'s allowlist.
 
 **`bt-pty` is already a unix crate.** It calls `native_pty_system()`, and its
 ConPTY-specific entry points (`conpty_source`, `clear_host_buffer`) already
@@ -172,6 +212,9 @@ Class A is **90 %** of the workspace. Class C is **8.7 %**.
 
 Small, and worth doing whether or not the port is ever built.
 
+> **Done (2026-09-07), all five items.** Each note below sits under the
+> paragraph it answers.
+
 **wgpu.** The workspace pins
 `wgpu = { default-features = false, features = ["std", "dx12", "wgsl"] }`.
 On macOS that compiles and enumerates **no adapter at all**. Adding `metal` is
@@ -181,6 +224,15 @@ product actually presents through, because the web panes are DirectComposition
 visuals composed over the terminal's own picture. On macOS the same shape exists
 (a `CAMetalLayer` as a sublayer of the window's content layer) but it is a
 different call, so `WindowTarget` grows a third variant rather than losing one.
+
+**Done.** `metal` is enabled for `cfg(target_os = "macos")` only, in
+`crates/bt-render/Cargo.toml`; cargo unions the two rows so Windows compiles the
+same wgpu it did, and `Cargo.lock` and `THIRD-PARTY-NOTICES.md` grow the eleven
+Apple-target packages that come with it. The **third variant was not added** —
+that is the compositor, which is class C and belongs with the `bt-platform`
+backend that would own the layer. What landed is the second variant being gated
+to the platform it names, so the enum has one arm off Windows and that arm is
+the plain window surface.
 
 **Fonts.** `bt-render` already has a `#[cfg(not(target_os = "windows"))]`
 `terminal_font_system()` — it builds an empty `FontSystem` carrying the embedded
@@ -194,6 +246,20 @@ both platforms and it is portable. **DirectWrite is used in exactly one place**:
 `monospace_font_families()`, which fills the settings font picker.
 `CTFontCollection` answers the same question.
 
+**Done, except the picker.** `terminal_font_system` has a `cfg(target_os = "macos")`
+arm carrying the policy this paragraph asks for: PingFang SC/TC/HK, Hiragino
+Sans, Apple SD Gothic Neo and Hiragino Sans GB for the CJK chain; SF Mono then
+Menlo then Monaco for the grid; San Francisco under both of its spellings then
+Helvetica for the chrome. One rule changed sides and it is worth recording why.
+The Windows arm names seven files and never enumerates, because a bounded
+startup is what that loader is for; macOS keeps PingFang inside
+`/System/Library/AssetsV2/com_apple_MobileAsset_Font*/<content hash>/`, and the
+hash moves with the OS update. So the macOS arm asks `fontdb`'s system loader
+for the **inventory** and keeps every word of the **policy** here — and checks
+each family name against the database before setting it, which is the one thing
+a file list gave for free. `monospace_font_families()` is untouched: it lives in
+`bt-platform` behind `#[cfg(windows)]`, which is class C.
+
 **Bare paths.** `bt-transcript/src/paths.rs` (994 lines) recognises a printed
 file path in terminal output. Its grammar is Windows: `is_windows_drive_absolute`,
 `is_drive_prefix_at`, backslash separators, and the indent-chain rejoin that
@@ -204,6 +270,38 @@ is perhaps 250 lines and a second fixture set. The cross-platform version is
 *stricter* than either, and that is the interesting part: on POSIX a bare
 `/usr/lib` is a plausible path far more often than a Windows `C:\` is a false
 positive.
+
+**Done, and that last sentence turned out to be the whole of it.** Nine
+functions grew a `cfg(not(windows))` arm — the root shape gate, the opening test
+the rooted scan uses, the five relative refusals, the anchor, the lexical join,
+the interior empty component, the device namespace, the `file:` decoder's
+assembly, and the spelling of a path as a URI — and two of them had to decide
+something the drive prefix never needed:
+
+* A root of **one character** is not evidence the way three were. The POSIX arm
+  refuses `//` (the only things that print two are a scheme's authority and a
+  `file://` URI, both other scans' business) and refuses a `/` behind a
+  **binding colon**, which is `bare_candidate_opens_at`'s own rule applied one
+  scan over. Quoting beats both, because quoting declares the opening as much as
+  the close.
+* The **entry separator of a declared search path** was a bug rather than a gap.
+  Read with `;`, a POSIX `PATH=` value is not merely unsplit — it is one name,
+  and every character of it clears the rooted shape gate, so the line came back
+  offering `/usr/bin:/bin` as a file somebody could open. It is now the
+  platform's character. The *fields* stay shared: `PATH` is `PATH` everywhere and
+  `PSMODULEPATH` is PowerShell's rather than Windows'.
+
+A backslash stays a path *character* on both platforms and stops being a
+*separator* on one — `a\ b.txt` is a name a POSIX filesystem holds. A leading
+`~` is refused there exactly as it is here, and for the same stated reason: the
+expansion belongs to the process that printed it.
+
+The Windows tests are untouched and their module is `cfg(all(test, windows))`
+because of its **fixtures**, not its claims. `posix_tests` beside it asks the
+same questions in the other spelling, and **lifts the six disk-backed cases
+verbatim** — those were never Windows tests, they built their fixture out of
+`std::env::temp_dir()` and failed only because the grammar could not see what
+they built.
 
 ---
 
@@ -292,7 +390,10 @@ Nothing below exists in the tree in any form.
   paths far less. The glyph atlas and the procedural shapes are already
   scale-parametric; what is untested is the *transition* — a window dragged
   between a 2.0 built-in display and a 1.0 external one.
-- **A macOS CI lane.** `ci.yml` is `windows-2025` throughout.
+- **A macOS CI lane.** `ci.yml` is `windows-2025` throughout. **Half done
+  (2026-09-07):** the `core-macos` job compiles and tests the portable core on
+  `macos-latest`. What is still class D is a lane that *produces* something — a
+  bundle, a signature, an archive somebody downloads.
 - **UI acceptance has no macOS equivalent.** `scripts/dev/ui-probe.ps1` is
   `SendInput` and Win32 window enumeration. The autonomous screenshot-and-keys
   acceptance loop this project depends on would have to be rebuilt against the
@@ -311,7 +412,7 @@ lands first; an Apple Developer membership exists before class D starts; and
 
 | Class | Work | Agent-days |
 |---|---|---|
-| **B** | two compile fixes · wgpu `metal` + a third `WindowTarget` · macOS font policy · POSIX path grammar and fixtures · gate the windows-only test modules | **4** |
+| **B** | two compile fixes · wgpu `metal` + a third `WindowTarget` · macOS font policy · POSIX path grammar and fixtures · gate the windows-only test modules | **4** — **done 2026-09-07**, less the third `WindowTarget` (that is the compositor, class C) and `monospace_font_families` (that is `bt-platform`, class C) |
 | **C** | `bt-platform` macOS backend — window, screen, DPI, clipboard, dark mode, pickers, dir watch, process, console (the 3,449-line core) | 10–14 |
 | **C** | compositor: a `CALayer` tree with a `CAMetalLayer` surface | 3–4 |
 | **C** | the `WKWebView` host, and `bt-app`'s 2,427 lines of conversation with it | 8–10 |
@@ -339,7 +440,8 @@ Two waypoints inside that:
   honest first milestone and it is worth reaching before any of the rest is
   scheduled, because it converts every estimate above from a reading of the code
   into a measurement.
-- **The class-B work alone — 4 days — is worth doing regardless.** It removes
+- **The class-B work alone — 4 days — is worth doing regardless.** *(Taken,
+  2026-09-07.)* It removes
   the only two hard compile errors, gives the tree a POSIX path grammar it
   arguably should have had anyway, and means every future change is checked
   against a second target instead of drifting further into Win32 by default.

@@ -339,7 +339,21 @@ fn math_overflow_fade_slabs(
 /// against this constant now asks the database instead — see
 /// [`primary_font_family`] — because a comparison against a constant would
 /// answer "no" for the face actually on screen.
+///
+/// One per platform, because the constant is a statement about a *file list*
+/// and each platform has its own. Menlo is macOS's Consolas here: it has
+/// shipped in `/System/Library/Fonts` since 10.6, it is what Terminal.app
+/// itself opens with, and it is not removable. SF Mono is the better-looking
+/// answer and is deliberately not this constant — it is offered first by
+/// [`terminal_font_system`]'s preference list, which asks the database whether
+/// a family is really there, because SF Mono's family name and its file have
+/// both moved between releases and a constant cannot check itself.
+#[cfg(target_os = "windows")]
 const DEFAULT_PRIMARY_FONT_FAMILY: &str = "Consolas";
+#[cfg(target_os = "macos")]
+const DEFAULT_PRIMARY_FONT_FAMILY: &str = "Menlo";
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const DEFAULT_PRIMARY_FONT_FAMILY: &str = "monospace";
 
 /// The family `Family::Monospace` resolves to right now.
 ///
@@ -3292,6 +3306,13 @@ pub enum WindowTarget {
     /// The window itself — on Windows, its `HWND`. wgpu builds the swapchain
     /// with `CreateSwapChainForHwnd` and the desktop compositor owns the
     /// presentation entirely.
+    ///
+    /// **This is also the portable door.** Off Windows there is no second one:
+    /// a `SurfaceTarget` is built from whatever raw window handle winit hands
+    /// out — an `NSView`'s on macOS — and wgpu's own backend decides what to
+    /// attach to it. Composition is the arm that does not travel, and it is
+    /// gated below rather than stubbed, so a platform that has no visual tree
+    /// cannot name one by accident.
     Hwnd(wgpu::SurfaceTarget<'static>),
     /// An `IDCompositionVisual` the caller owns, as a raw COM pointer.
     ///
@@ -3299,6 +3320,13 @@ pub enum WindowTarget {
     /// whole life, so the pointer only has to be a live visual **at the moment
     /// the surface is created**. What the caller keeps owing afterwards is the
     /// commit: see `bt_platform::Compositor::commit`.
+    ///
+    /// Windows only, because `wgpu::SurfaceTargetUnsafe::CompositionVisual` is
+    /// itself Windows only. macOS composes the same picture through a
+    /// `CAMetalLayer` under the window's content layer, which is a different
+    /// call and a different owner, and belongs with the platform backend that
+    /// would own that layer rather than here.
+    #[cfg(windows)]
     CompositionVisual(*mut std::ffi::c_void),
 }
 
@@ -3315,6 +3343,7 @@ impl WindowTarget {
     fn kind(&self) -> WindowTargetKind {
         match self {
             Self::Hwnd(_) => WindowTargetKind::Hwnd,
+            #[cfg(windows)]
             Self::CompositionVisual(_) => WindowTargetKind::CompositionVisual,
         }
     }
@@ -3418,6 +3447,7 @@ fn create_surface(
 ) -> Result<wgpu::Surface<'static>, RenderError> {
     match target {
         WindowTarget::Hwnd(target) => instance.create_surface(target),
+        #[cfg(windows)]
         WindowTarget::CompositionVisual(visual) => unsafe {
             instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CompositionVisual(visual))
         },
@@ -11736,7 +11766,189 @@ fn load_chrome_sans_family(db: &mut glyphon::fontdb::Database, fonts: &std::path
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+/// The macOS answer to [`CJK_FALLBACK_FAMILIES`], and it is a shorter list for a
+/// reason: macOS ships one CJK family per language and they are all present on
+/// every machine, so there is no compatibility tail to write down.
+///
+/// 1. `PingFang SC` — Simplified Chinese, the system's own, and the product's
+///    Chinese. It is the face macOS itself sets Chinese UI in.
+/// 2. `PingFang TC` / `PingFang HK` — Traditional. Not the product's Chinese,
+///    and every glyph they do have is a correct Han glyph, which is the whole
+///    question at this point in the list.
+/// 3. `Hiragino Sans` — Japanese. Han unification means it carries the
+///    ideographs with Japanese regional forms; visibly a little off to a
+///    Chinese reader, and legible, which beats a box.
+/// 4. `Apple SD Gothic Neo` — Korean, same argument one step further out.
+/// 5. `Hiragino Sans GB` — the Simplified Chinese face macOS carried before
+///    PingFang, still installed. Last for `SimSun`'s reason: it is the one that
+///    is always there, in `/System/Library/Fonts` rather than behind an asset.
+///
+/// Deliberately **no symbol or emoji face on this list**, exactly as on
+/// Windows: an ideograph that reached one would be a mistake, and the shaper's
+/// `.notdef` box is a better report of that mistake than a plausible-looking
+/// wrong glyph.
+#[cfg(target_os = "macos")]
+const MACOS_CJK_FALLBACK_FAMILIES: [&str; 6] = [
+    "PingFang SC",
+    "PingFang TC",
+    "PingFang HK",
+    "Hiragino Sans",
+    "Apple SD Gothic Neo",
+    "Hiragino Sans GB",
+];
+
+/// The grid's face, most wanted first. Asked of the database rather than
+/// asserted, because only one of these is guaranteed.
+///
+/// `SF Mono` is the face a macOS terminal should be drawn in and the one Apple
+/// draws its own tools in. It is also the one that cannot be named with
+/// confidence: it has lived at `SFMono.ttf`, at `SFNSMono.ttf`, and inside
+/// Terminal.app's own bundle across releases. So it is asked for and not
+/// assumed. `Menlo` behind it is [`DEFAULT_PRIMARY_FONT_FAMILY`] and is always
+/// there; `Monaco` behind that is the pre-10.6 face, kept because it costs one
+/// line and answers a machine whose font book somebody has been editing.
+#[cfg(target_os = "macos")]
+const MACOS_MONOSPACE_FAMILIES: [&str; 3] = ["SF Mono", "Menlo", "Monaco"];
+
+/// The window chrome's UI face, most wanted first — the macOS reading of
+/// [`CHROME_SANS_FONT_FILES`], written as families rather than as files for the
+/// reason stated on [`terminal_font_system`].
+///
+/// `.AppleSystemUIFont` is on it, and it is not a typo: San Francisco is
+/// installed under a dot-prefixed family name so that a font picker will not
+/// offer it, and asking for `SF Pro` on a machine that spells it that way finds
+/// nothing. Both spellings are tried and the first that is really there wins,
+/// which is what the whole list is for.
+#[cfg(target_os = "macos")]
+const MACOS_CHROME_SANS_FAMILIES: [&str; 5] = [
+    "SF Pro Text",
+    "SF Pro",
+    ".AppleSystemUIFont",
+    "Helvetica Neue",
+    "Helvetica",
+];
+
+/// This product's fallback table on macOS — [`FolioFallback`]'s sibling, with
+/// the same shape and the same reason.
+///
+/// The locale argument is ignored for the CJK scripts here for exactly the
+/// reason it is ignored on Windows: this `FontSystem` is built with `"en-US"`
+/// and always will be, because the locale steers language-sensitive shaping
+/// across the whole terminal grid, and switching it because the *chrome* is in
+/// Chinese would change how a shell's output is shaped to fix how a menu looks.
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct FolioMacFallback;
+
+#[cfg(target_os = "macos")]
+impl Fallback for FolioMacFallback {
+    fn common_fallback(&self) -> &[&'static str] {
+        // The list reached after the script-specific one, in the platform's own
+        // order: the UI face, then the two faces that answer everything else a
+        // terminal prints — emoji and the symbol block.
+        &[
+            ".AppleSystemUIFont",
+            "Helvetica Neue",
+            "Apple Color Emoji",
+            "Apple Symbols",
+        ]
+    }
+
+    fn forbidden_fallback(&self) -> &[&'static str] {
+        &[]
+    }
+
+    fn script_fallback(&self, script: unicode_script::Script, locale: &str) -> &[&'static str] {
+        use unicode_script::Script;
+        match script {
+            // One chain for all four, for Windows' reason: they share the
+            // ideographs, and a mixed line must not change face halfway through
+            // for a character both faces have.
+            Script::Han | Script::Hiragana | Script::Katakana | Script::Hangul => {
+                &MACOS_CJK_FALLBACK_FAMILIES
+            }
+            other => glyphon::cosmic_text::PlatformFallback.script_fallback(other, locale),
+        }
+    }
+}
+
+/// Whether a family name is one the database can actually answer.
+///
+/// The macOS half of the discipline [`CHROME_SANS_FONT_FILES`] states on
+/// Windows: **a family name is a claim about what is installed, and the only
+/// way to check it is to try it.** Without this a preference list is a wish
+/// list — `set_monospace_family("SF Mono")` succeeds on a machine that has no
+/// SF Mono, and the grid silently draws in whatever `fontdb` reaches next.
+#[cfg(target_os = "macos")]
+fn database_has_family(db: &glyphon::fontdb::Database, family: &str) -> bool {
+    db.faces()
+        .any(|face| face.families.iter().any(|(name, _)| name == family))
+}
+
+/// The first family on `wanted` that this machine really has.
+#[cfg(target_os = "macos")]
+fn first_installed_family<'a>(
+    db: &glyphon::fontdb::Database,
+    wanted: &[&'a str],
+) -> Option<&'a str> {
+    wanted
+        .iter()
+        .copied()
+        .find(|family| database_has_family(db, family))
+}
+
+/// The Windows loader's policy, written against macOS's faces.
+///
+/// # Why this arm enumerates and the Windows one refuses to
+///
+/// The Windows arm names seven files under `%WINDIR%\Fonts` and never asks the
+/// directory, because a bounded startup is the whole point of that loader. The
+/// trick does not survive the crossing. macOS keeps `PingFang` — the face that
+/// answers Simplified Chinese, which is half of what the fallback table exists
+/// for — inside `/System/Library/AssetsV2/com_apple_MobileAsset_Font*/`, under
+/// a directory named by a content hash that is different after the next OS
+/// update; Hiragino's files are named in Japanese and have been renamed within
+/// a release. A fixed file list on macOS is therefore not a cheaper way of
+/// asking the same question, it is a claim that goes stale silently and leaves
+/// a machine drawing boxes where a Chinese file name should be.
+///
+/// So this arm asks `fontdb`'s own system loader, which walks
+/// `/System/Library/Fonts`, `/Library/Fonts`, the `AssetsV2` font assets and
+/// `~/Library/Fonts`, memory-mapping each face rather than reading it — a face
+/// nothing ever shapes costs address space and no pages, which is the bargain
+/// [`CJK_FALLBACK_FONT_FILES`] already takes on Windows.
+///
+/// What is **not** asked of the operating system is the policy. Which family
+/// the grid opens in, which one the chrome is set in, and which chain a Han
+/// codepoint walks are decided here, by name, exactly as they are on Windows —
+/// and each name is checked against the database rather than assumed, which is
+/// the one thing a file list gave for free and a family list does not.
+///
+/// Noto Color Emoji is still compiled in and still loaded first, so a headless
+/// test on a machine with no system fonts at all composes the same emoji it
+/// composes everywhere else.
+#[cfg(target_os = "macos")]
+fn terminal_font_system() -> FontSystem {
+    let mut db = glyphon::fontdb::Database::new();
+    db.load_font_source(glyphon::fontdb::Source::Binary(Arc::new(
+        NOTO_COLOR_EMOJI_BYTES,
+    )));
+    db.load_system_fonts();
+    db.set_monospace_family(
+        first_installed_family(&db, &MACOS_MONOSPACE_FAMILIES)
+            .unwrap_or(DEFAULT_PRIMARY_FONT_FAMILY),
+    );
+    // Without this the chrome's `Family::SansSerif` lands wherever the
+    // database's first entry happens to be, which for this one is the embedded
+    // emoji face — the failure `load_chrome_sans_family` exists to prevent on
+    // Windows, reached by a different road.
+    if let Some(sans) = first_installed_family(&db, &MACOS_CHROME_SANS_FAMILIES) {
+        db.set_sans_serif_family(sans);
+    }
+    FontSystem::new_with_locale_and_db_and_fallback("en-US".to_owned(), db, FolioMacFallback)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn terminal_font_system() -> FontSystem {
     let mut font_system = FontSystem::new();
     font_system
@@ -22292,6 +22504,11 @@ mod tests {
         /// `SurfaceTarget` conversion that no longer accepts what the app holds
         /// — and none of that can be caught by a running window on the machine
         /// that already works.
+        ///
+        /// Windows, because the composition door is: see
+        /// [`WindowTarget::CompositionVisual`]. Its sibling below asks the half
+        /// of this that every platform owes.
+        #[cfg(windows)]
         #[test]
         fn both_window_targets_can_be_named_and_told_apart() {
             // Never handed to wgpu: what is under test is the discriminant, and
@@ -22310,6 +22527,26 @@ mod tests {
                 required_alpha_mode(WindowTargetKind::Hwnd),
                 wgpu::CompositeAlphaMode::Opaque
             );
+        }
+
+        /// The window door, and the alpha mode it must be configured with, on a
+        /// platform that has no composition visual to offer.
+        ///
+        /// It is the same claim the Windows sibling makes about its `Hwnd` arm,
+        /// asked where that arm is the only one — which is what makes it a
+        /// gate rather than a repetition: if the portable door were ever gated
+        /// away with the visual it was cut from, nothing else in this crate
+        /// would notice, because everything above here speaks in
+        /// [`WindowTargetKind`] and that enum keeps both names on every
+        /// platform.
+        #[cfg(not(windows))]
+        #[test]
+        fn the_window_door_is_the_one_every_platform_has() {
+            assert_eq!(
+                required_alpha_mode(WindowTargetKind::Hwnd),
+                wgpu::CompositeAlphaMode::Opaque
+            );
+            assert_ne!(WindowTargetKind::Hwnd, WindowTargetKind::CompositionVisual);
         }
 
         /// An offscreen window has no alpha mode to report, and says so rather

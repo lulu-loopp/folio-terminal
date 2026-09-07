@@ -7511,3 +7511,73 @@ v3 那张卡按本节其余各段的样子落地进了未发布的 0.2.2,读者�
 - **`.aswitch` 目前只有这一张卡在用,所以关着的滑块那条暗色规则也只写在这里**(v4 ⑦)。设置页用的是下拉行,不是开关;哪天第二个表面长出开关,`knob_face` 是要跟着搬走的那一段,而不是要抄第二遍的那一段。
 - **卡上第七行会让它重新开始滚。** 参照窗上 v4 是 273 在 308 里,一行 42;再加一行就是 315 在 308。地方是有的(548 高的窗里卡才 445),但只剩一行深。今天什么都不用定,记在这里是为了下一行是有意加的。
 - **一次部分完成之后,卡上那些行的最终状态只在设置页可见。** 这是有意的(⑤),但意味着一个四行全开、其中一行失败的读者,拿到的是一张失败卡加三行静默;哪三行成了要去设置页数。给成功也发卡会把这件事说全,代价是新装第一分钟里的四张卡。
+
+## 13. 可移植性
+
+2026-09-07。这一节记的**不是一次移植**,是为了让移植将来还可能而下的几条裁决。背景数据在 `docs/plans/port/macos-spike-2026-09-07.md`(英文;`main` 的 `05bf018`,Apple Silicon、macOS 26.6.2、Rust 1.94.1 `aarch64-apple-darwin`,`-j 4`)。
+
+### 13.1 规矩只有一句,而且它不是新立的
+
+**平台相关的代码住在 `bt-platform` 的接口后面;`bt-app` 以下的任何 crate 都不直接调 Win32。**
+
+这句话不是为了移植才写下来的。根 `Cargo.toml` 的 `unsafe_code = "deny"` 只给 `bt-platform` 一个破例(§7.42 ③),而每一次 Win32 调用都是 `unsafe`——所以产品里的每一次 Win32 调用当初就已经被推到那扇前门后面去了。移植只是让这个安排的第二个后果显形:**那扇前门本身就是移植的全部。**
+
+spike 量出来的数字说的正是这件事。`bt-app` 在 macOS 上停在 **321 条错误,点名 79 个 `bt_platform` 里没有的东西**。321 不是 321 处散落的麻烦,是一个有 79 个入口的接口,而这 79 个每一个都已经有名字、有文档、只从一个地方被调。
+
+### 13.2 可移植核:一个 crate 一个 crate 点名
+
+| | |
+|---|---|
+| 承诺能在第二个平台上编过 | `bt-unicode`、`bt-doc`、`bt-detect`、`bt-layout`、`bt-persist`、`bt-winres`、`bt-math`、`bt-transcript`、`bt-viewport`、`bt-render`、`bt-term`、`bt-pty`、`bt-corpus`,加 vendored 的 `alacritty_terminal` |
+| Win32 该待的地方 | `bt-platform` |
+| 不在名单上,今天在 macOS 上就是编不过 | `bt-app` |
+
+写成**名单**而不是写成「除 `bt-app` 之外的全部」,差别就是整个主张:`bt-platform` 是 Win32 该待的地方、`bt-app` 是还没移的那一半,这两件都是有人拍下来的事实,不是一个脚本能从目录形状里推出来的东西。一个新 crate 加进这个 workspace,要么是**有意**加进这张名单,要么它不在这份承诺里。
+
+`bt-app` 编不过是预期之内的:那 321 条就是移植本身,而**移植是它自己的一个里程碑,排在 0.4 之后**。这一节不是它。
+
+### 13.3 两道守卫,而它们是两种东西
+
+| 守卫 | 它问的问题 |
+|---|---|
+| `.github/workflows/ci.yml` 的 `core-macos`(`macos-latest`) | 上面那十四个 `cargo check --locked --all-targets`;其中十个 `cargo test --locked`(`bt-unicode`、`bt-doc`、`bt-detect`、`bt-layout`、`bt-persist`、`bt-winres`、`bt-math`、`bt-transcript`、`bt-viewport`、`alacritty_terminal`) |
+| `scripts/check-portable-core.ps1` | 那些 crate 的源码里有没有 `windows::`、`windows_sys::`、`winapi`、`webview2`、`std::os::windows`,而所在的项不在 `#[cfg(windows)]` / `#[cfg(target_os = "windows")]` 之下 |
+
+**为什么 check 十四个而只 test 十个。** `bt-render` 与 `bt-pty` 只 check 不 test,理由和 `gpu`、`conpty` 两个 job 说的是同一条:一个要真的 adapter,另一个要真的 ConPTY 子进程,而跑器两样都没有。`bt-term` 与 `bt-corpus` 只 check 不 test,理由是**还没有人在那边量过它们的测试**——这是一句关于本仓知道什么的陈述,不是关于那两个 crate 的判断。这个 job 和 `ci.yml` 里其余每一个 job 一样是必过的:那里没有任何一处 `continue-on-error`。
+
+**门为什么是词法的。** 它走一遍文件、跟着花括号深度记「哪一层开着一个 windows gate」,不做语法分析。代价是它读不懂某些写法,换来的是**它能在一棵编不过的树上五秒钟跑完**——而一棵编不过的树恰恰是最需要有人告诉你哪条规矩被破了的时候。谓词里的 `not(...)` 在提问之前先被剥掉:一个被 gate 到**另一个**平台上去的项还在点名 Win32,正是这道门要抓的错。门自己也照本仓的规矩证明自己会红:`gates-can-fail` 里种一个违规、要求它红、再把文件放回去。(脚本扫的是 `crates/` 下那十三个;vendored 的 `alacritty_terminal` 由 `core-macos` 编译来管,别人的字节不归这条规矩裁。)
+
+**为什么两道都要。** 编译失败点的是一个符号和一行;门点的是一条规矩。而且一个**写对了的** `#[cfg(windows)]` 仍然藏着某个人做过的一个决定,那是审 diff 的人应该看见的东西。
+
+### 13.4 90% 有半衰期
+
+spike 量到的是「这个 workspace 今天已经有约 90% 能在 macOS 上编过」。**这个测量会过期。** 每一个在只有 Windows 跑器的 CI 上落地的功能,都可能往一个可移植 crate 里加一次 Win32 调用而**没有任何东西会说一声**;再过一阵,那 90% 描述的就是九月里的某一天,而不是这个仓库。
+
+门存在的理由只有这一条,没有别的。
+
+### 13.5 `rust-toolchain.toml`:钉的是版本,不是主机
+
+那个文件钉的是 `1.94.1-x86_64-pc-windows-msvc`。在 Windows 之外,rustup 不认这个 channel 名。
+
+裁决:**这个钉子钉的是版本。** 后面那截 host triple 只解决一件事——一台 Windows 机器在 MSVC 与 GNU 两个 Windows 宿主里挑哪一个;而在别的任何地方,可挑的宿主**恰好只有一个**。所以 `.github/actions/toolchain` 在非 Windows 上装同一个版本、配跑器自己的默认宿主,并导出 `RUSTUP_TOOLCHAIN`,**那个 toml 文件一个字不动**。改文件会让 Windows 那边多出一个待答的问题,而那个问题现在有确定答案。
+
+### 13.6 2026-09-07 落地的 B 类改动
+
+- **`bt-render` 的 `WindowTarget::CompositionVisual` 加 `#[cfg(windows)]`,`Hwnd` 那一支是可移植的那扇门。** 但 `WindowTargetKind` 有意在**每个平台上都留着两个名字**:这一层以上的所有代码都用 kind 说话,把 kind 也 gate 掉,等于让那些类型开始陈述自己跑在哪台机器上,而它们本来陈述的是「有哪些门」。
+- **wgpu 只对 `cfg(target_os = "macos")` 开 `metal` feature。** 不开,wgpu 在 Mac 上照样编得过,然后**一个 adapter 都枚举不出来**——全部构建成功,第一次要设备的调用失败。这是一个可移植性缺口能取的最坏形状。
+- **`bt_platform::set_current_thread_priority` 和它的两个邻居长出一个可移植支,答 `false`**,意思是这条优先级带子没人要到。刻意**不是** `nice`、也**不是** `pthread_setschedparam`:macOS 自己的答案是 QoS class,在这几种写法之间挑一个是 macOS 后端的裁决,不是这次的。它还会是这个 crate 在 Windows 之外的第一个依赖——**一个都没有,正是它的库今天就能在那边编过的原因**。
+- **`bt-render` 长出一套 macOS 字体政策。** CJK 链是 PingFang SC/TC/HK、Hiragino Sans、Apple SD Gothic Neo、Hiragino Sans GB;网格是 SF Mono 再 Menlo 再 Monaco;chrome 是 San Francisco 的两种写法再退 Helvetica。有一条规矩在这里换了边:Windows 那一支**点文件名、从不枚举**,而 macOS 把 PingFang 放在一条**随系统更新而变的内容寻址资源路径**后面,所以 macOS 这一支去问 fontdb 的系统加载器要**清单**,而把**政策的每一个字**留在这里——并且拿每个族名回数据库里核一次,那是一份文件名单本来白送的唯一一件事。
+- **`bt-transcript/src/paths.rs` 长出 POSIX 支**:根是 `/`、没有盘符、`\` 是名字里的一个字符而不是分隔符、一条声明出来的搜索路径的各条目之间是 `:`。两件盘符前缀从来不需要决定的事:**一个字符的根不像三个字符那样是证据**——所以 `//` 和一个**向左结合的冒号**(`https://host/x` 里的 `//`、`scheme:/opaque` 里那个冒号:跟在它后面的东西属于它前面那个已经被它弄成绝对或带 scheme 的东西)都把一个已经开着的根收掉;以及**搜索路径分隔符读错是 bug 不是缺口**——按 `;` 读,一个 POSIX 的 `PATH=` 值会变成**一个名字**,而那个名字过得了形状门,于是这一行把 `/usr/bin:/bin` 当成一个文件递了出去。
+- **测试的 gate 补齐。** `bt-platform` 的 `web_security_tests` 与 `bt-pty` 的 sidecar / Store 别名那几条改成 `#[cfg(all(test, windows))]` 与逐项 `#[cfg(windows)]`;`bt-transcript` 的边界表模块归 Windows,理由是它的 **fixture** 而不是它的断言,所以旁边配了一份 `posix_tests` 镜像;`bt-viewport` 的 fixture 走一次**保宽**的翻译(`D:\` → `/D/`),因为那个模块有一半的断言问的就是宽度。
+- **vendored 的 `portable-pty` 不再声明四个从来没被 vendor 进来的 example 文件。**
+
+### 13.7 挂账:macOS 会问,而这里不替它答
+
+以下每一条都是一个决定,不是一件活。spike 的 §4 列了十二条,这里点其中最硬的六条,详情看那份文件。
+
+- **quake 全局热键要 Accessibility 权限**,由用户在系统设置里手动给,并且每次重新签名都会被撤销;换成 `NSEvent` 全局监视器则吞不掉那个键。一个开机第一次就要 Accessibility 的 quake 终端,还是不是同一个功能。
+- **右键菜单没有 sparse-MSIX 的对应物。** Finder Sync 扩展和 `NSServices` 都不是第一页。
+- **WebView2 有三件事不明显能过**:合成宿主、页面**上方**的拖放、以及 `forget_web_environment` 之所以存在的那个环境 / 用户数据目录模型。
+- **首启卡六行里有四行点名 Windows 设施。** 卡变成按平台分支,还是 macOS 拿一张自己的卡。
+- **设置放哪。** `~/Library/Application Support/Folio` 是 macOS 的惯例,`~/.config/folio` 是终端用户的惯例。一个函数,两套惯例,外加一个「改了之后怎么迁」的问题。
+- **`unsafe_code = "deny"` 意味着每一次 objc2 消息发送都得住在 `bt-platform` 里**,和每一次 Win32 调用一样。这一条在第一行代码写出来之前就决定了 macOS 后端的形状。

@@ -129,6 +129,25 @@ falls back to clearing only what it can see. Measured 2026-09-05 against the pin
 call emits no bytes of its own, and after it the host addresses the kept row as row 1.
 `BT_CONPTY_FORCE_SYSTEM=1` is reserved for the ignored upstream-regression oracle.
 
+### What was not vendored, and the manifest row that said otherwise
+
+`portable-pty/` is a **partial** vendor: `src/` and the manifest, without
+upstream's `examples/`. The manifest went on declaring all four of them —
+`[[example]] path = "examples/bash.rs"` and its three neighbours — so
+`cargo check -p portable-pty --all-targets` failed with four missing files on
+any machine that asked. It has never been asked on Windows, where nothing runs
+`--all-targets` against this package; the macOS portability spike
+(`docs/plans/port/macos-spike-2026-09-07.md`, appendix A) is what asked.
+
+The four rows are removed rather than the four files added. The examples are
+upstream's demonstrations of an API this fork does not change — a bash session,
+a narrow pty, `whoami` in both flavours — and vendoring them would be carrying
+four programs, two dev-dependencies' worth of async runtime and a second thing
+to keep in step with upstream, in order to build code no part of this product
+calls. `autoexamples = false` was already set, so nothing is discovered in their
+place, and `[dev-dependencies]` is left exactly as upstream wrote it: what is
+gone is the *claim* that four files are here, not a dependency of the library.
+
 The workspace uses an exact `portable-pty = "=0.9.0"` requirement plus `[patch.crates-io]`. This
 keeps every existing consumer on one API-compatible implementation while avoiding a fork of PTY
 I/O and lifecycle ownership; the exact requirement prevents a later registry 0.9.x from silently

@@ -4804,11 +4804,28 @@ fn file_uri_printed_form(uri: &str) -> Option<String> {
         // An authority and no path names a machine, not a file on it, and so has no path spelling.
         return None;
     }
-    let path = percent_decoded(path)?.replace('/', "\\");
-    let printed = if authority.is_empty() || authority.eq_ignore_ascii_case("localhost") {
-        path
-    } else {
-        format!("\\\\{}\\{path}", percent_decoded(authority)?)
+    // **The two ways a printed path differs from its URI that are the operating system's.** A
+    // URI's separator is `/` on every platform; a Windows path's is `\`, and a POSIX path's is the
+    // one it already has, so off Windows this substitution is the identity and writing it anyway
+    // would spell every label backwards. The remote share is the other one: `\\server\share` is a
+    // Windows spelling with no POSIX counterpart — a mounted share is reached through an ordinary
+    // path with nothing in it that says so — and inventing `/server/share` would be claiming that
+    // a machine's name is a directory at this filesystem's root.
+    #[cfg(windows)]
+    let printed = {
+        let path = percent_decoded(path)?.replace('/', "\\");
+        if authority.is_empty() || authority.eq_ignore_ascii_case("localhost") {
+            path
+        } else {
+            format!("\\\\{}\\{path}", percent_decoded(authority)?)
+        }
+    };
+    #[cfg(not(windows))]
+    let printed = {
+        if !(authority.is_empty() || authority.eq_ignore_ascii_case("localhost")) {
+            return None;
+        }
+        format!("/{}", percent_decoded(path)?)
     };
     Some(printed_path_folded(&printed))
 }
@@ -5401,6 +5418,96 @@ fn compare_visible_anchors(
 
 #[cfg(test)]
 mod tests {
+    /// **A fixture path in this platform's spelling** — the one place the printed-path fixtures
+    /// below are translated, and the reason they are not written twice.
+    ///
+    /// Every path fixture in this module is *written* in the Windows grammar, because that is the
+    /// grammar the boundary table (`bt_transcript::paths`, §7.1.5k) was settled in, and rewriting
+    /// sixty literals would be rewriting the claims rather than the spelling. On Windows this is
+    /// the identity. Off it, `D:\` becomes `/D/` and the remaining `\` become `/`.
+    ///
+    /// **The translation preserves width, and that is what makes it safe here.** Half the
+    /// assertions below are about *cells* — which column a reference ends on, whether it reaches
+    /// the row's last one, how wide the grid it was captured on was — and `PATH.len()` is written
+    /// into several of them. `D:\src\a.md` and `/D/src/a.md` are eleven ASCII characters each, so
+    /// every one of those numbers still counts the same thing after the crossing.
+    #[cfg(windows)]
+    fn native(fixture: &str) -> String {
+        fixture.to_owned()
+    }
+
+    #[cfg(not(windows))]
+    fn native(fixture: &str) -> String {
+        let mut out = String::with_capacity(fixture.len());
+        let bytes = fixture.as_bytes();
+        let mut index = 0usize;
+        while index < bytes.len() {
+            // `X:\` and `X:/` are three characters and `/X/` is three characters.
+            //
+            // **The letter has to open a token**, and that clause is the whole of what keeps
+            // this off an address: `https://a.test` carries `s:/` at its fifth byte, and
+            // rewriting it would turn every URL fixture in this module into `http/s/a.test`.
+            // A byte in front that is alphanumeric, `/`, `:` or `\` means the letter is inside
+            // something — a scheme, or the `file:///D:/…` of a URI, whose POSIX spelling is
+            // written out in full at the one place a fixture needs it.
+            let opens_a_token = index == 0
+                || (!matches!(bytes[index - 1], b'/' | b':' | b'\\')
+                    && !bytes[index - 1].is_ascii_alphanumeric());
+            if opens_a_token
+                && bytes[index].is_ascii_alphabetic()
+                && bytes.get(index + 1) == Some(&b':')
+                && matches!(bytes.get(index + 2), Some(b'\\') | Some(b'/'))
+            {
+                out.push('/');
+                out.push(char::from(bytes[index]));
+                out.push('/');
+                index += 3;
+                continue;
+            }
+            out.push(if bytes[index] == b'\\' {
+                '/'
+            } else {
+                fixture[index..]
+                    .chars()
+                    .next()
+                    .expect("a character boundary")
+            });
+            index += if bytes[index] < 0x80 {
+                1
+            } else {
+                fixture[index..]
+                    .chars()
+                    .next()
+                    .expect("a character boundary")
+                    .len_utf8()
+            };
+        }
+        out
+    }
+
+    /// The same translation for a `file:` URI, which is the other half of every fixture: a target
+    /// is spelled by `bt_transcript::paths::local_path_to_file_uri`, and what that produces for
+    /// `/D/src/a.md` is `file:///D/src/a.md` — the drive's colon is simply not there.
+    #[cfg(windows)]
+    fn native_uri(uri: &str) -> String {
+        uri.to_owned()
+    }
+
+    #[cfg(not(windows))]
+    fn native_uri(uri: &str) -> String {
+        uri.replace("/D:/", "/D/").replace("/C:/", "/C/")
+    }
+
+    /// One captured row of fixture text, in this platform's spelling.
+    fn fixture_row(text: &str, continues: bool) -> CapturedRow {
+        CapturedRow::plain(&native(text), continues)
+    }
+
+    /// The same, on a grid of a stated width.
+    fn fixture_row_on_grid(text: &str, continues: bool, captured_columns: u32) -> CapturedRow {
+        CapturedRow::plain_on_grid(&native(text), continues, captured_columns)
+    }
+
     use super::*;
     use bt_doc::{Bias, GridGeneration, GridPoint, ScreenId};
     use bt_transcript::{CapturedRow, GraphemeOffset, StagingId, TranscriptStore};
@@ -5417,7 +5524,7 @@ mod tests {
     fn history() -> HistoryDocument {
         let mut store = TranscriptStore::new(NonZeroUsize::new(8).unwrap());
         let line = store
-            .capture(CapturedRow::plain("abcdefgh", false))
+            .capture(fixture_row("abcdefgh", false))
             .finalized
             .remove(0);
         let mut document = HistoryDocument::default();
@@ -5453,10 +5560,7 @@ mod tests {
     fn a_frozen_offset_resolves_to_the_column_its_own_physical_row_shows_it_at() {
         let mut store = TranscriptStore::new(NonZeroUsize::new(8).unwrap());
         let mut capture = |text: &str, continues: bool| {
-            store
-                .capture(CapturedRow::plain(text, continues))
-                .finalized
-                .pop()
+            store.capture(fixture_row(text, continues)).finalized.pop()
         };
         capture("0123456789", true);
         let line = capture("abcXdef", false).unwrap().line;
@@ -5486,7 +5590,7 @@ mod tests {
 
         let mut store = TranscriptStore::new(NonZeroUsize::new(8).unwrap());
         let wide = store
-            .capture(CapturedRow::plain("中中 x.png", false))
+            .capture(fixture_row("中中 x.png", false))
             .finalized
             .pop()
             .unwrap()
@@ -5588,7 +5692,7 @@ mod tests {
             .continuous_frame(
                 &HistoryDocument::default(),
                 &[],
-                vec![CapturedRow::plain("    ", false); 3],
+                vec![fixture_row("    ", false); 3],
                 GridCursor {
                     row: 2,
                     column: 0,
@@ -5630,10 +5734,7 @@ mod tests {
         let frame = projection
             .live_frame(
                 nz32(2),
-                vec![
-                    CapturedRow::plain("ab", false),
-                    CapturedRow::plain("cd", false),
-                ],
+                vec![fixture_row("ab", false), fixture_row("cd", false)],
                 GridCursor {
                     row: 1,
                     column: 1,
@@ -5658,7 +5759,7 @@ mod tests {
         assert_eq!(
             projection.live_frame(
                 nz32(2),
-                vec![CapturedRow::plain("ab", false)],
+                vec![fixture_row("ab", false)],
                 GridCursor {
                     row: 0,
                     column: 0,
@@ -5685,10 +5786,7 @@ mod tests {
         let frame = projection
             .live_frame(
                 nz32(2),
-                vec![
-                    CapturedRow::plain("ab", false),
-                    CapturedRow::plain("cd", false),
-                ],
+                vec![fixture_row("ab", false), fixture_row("cd", false)],
                 GridCursor {
                     row: 1,
                     column: 1,
@@ -5755,8 +5853,8 @@ mod tests {
                 .live_frame(
                     nz32(10),
                     vec![
-                        CapturedRow::plain("x/a.png   ", false),
-                        CapturedRow::plain("before    ", false),
+                        fixture_row("x/a.png   ", false),
+                        fixture_row("before    ", false),
                     ],
                     GridCursor {
                         row: 1,
@@ -5825,10 +5923,7 @@ mod tests {
         let mut frame = projection
             .live_frame(
                 nz32(2),
-                vec![
-                    CapturedRow::plain("ab", false),
-                    CapturedRow::plain("cd", false),
-                ],
+                vec![fixture_row("ab", false), fixture_row("cd", false)],
                 GridCursor {
                     row: 0,
                     column: 0,
@@ -5868,10 +5963,7 @@ mod tests {
                 .continuous_frame(
                     &HistoryDocument::default(),
                     &[],
-                    vec![
-                        CapturedRow::plain("ab", false),
-                        CapturedRow::plain("cd", false),
-                    ],
+                    vec![fixture_row("ab", false), fixture_row("cd", false)],
                     GridCursor {
                         row: 0,
                         column: 0,
@@ -5889,7 +5981,7 @@ mod tests {
 
     #[test]
     fn implicit_links_fill_only_cells_not_owned_by_osc_8() {
-        let mut row = CapturedRow::plain("https://shown.example https://plain.example).", false);
+        let mut row = fixture_row("https://shown.example https://plain.example).", false);
         for cell in &mut row.cells[..21] {
             cell.hyperlink = Some(CellHyperlink::implicit("file:///real-target"));
         }
@@ -5984,7 +6076,7 @@ mod tests {
 
     #[test]
     fn hyperlink_hit_exposes_real_target_and_underlines_the_complete_span() {
-        let mut cells = CapturedRow::plain("trusted label", false).cells;
+        let mut cells = fixture_row("trusted label", false).cells;
         for cell in &mut cells {
             cell.hyperlink = Some(CellHyperlink::implicit("https://actual.example/login"));
         }
@@ -6041,13 +6133,13 @@ mod tests {
         // must upgrade both to solid, and the gap cells must stay untouched.
         let link = CellHyperlink {
             id: Some("42_alacritty".to_owned()),
-            uri: "file:///C:/pictures/a.png".to_owned(),
+            uri: native_uri("file:///C:/pictures/a.png"),
         };
-        let mut first_row = CapturedRow::plain("path-head", true).cells;
+        let mut first_row = fixture_row("path-head", true).cells;
         for cell in &mut first_row[2..] {
             cell.hyperlink = Some(link.clone());
         }
-        let mut second_row = CapturedRow::plain("  tail   ", false).cells;
+        let mut second_row = fixture_row("  tail   ", false).cells;
         for cell in &mut second_row[2..6] {
             cell.hyperlink = Some(link.clone());
         }
@@ -6086,7 +6178,7 @@ mod tests {
 
         // Hitting the second segment reports the whole link, first segment start to last end.
         let hit = frame.hyperlink_at(1, 3).unwrap();
-        assert_eq!(hit.uri, "file:///C:/pictures/a.png");
+        assert_eq!(hit.uri, native_uri("file:///C:/pictures/a.png"));
         assert_eq!(hit.id.as_deref(), Some("42_alacritty"));
         assert_eq!(hit, frame.hyperlink_at(0, 5).unwrap());
         assert!(frame.underline_hyperlink(&hit));
@@ -6137,10 +6229,10 @@ mod tests {
     fn two_runs_sharing_an_id_light_one_at_a_time() {
         let link = CellHyperlink {
             id: Some("7_alacritty".to_owned()),
-            uri: "file:///C:/notes.md".to_owned(),
+            uri: native_uri("file:///C:/notes.md"),
         };
         let row_with_link = || {
-            let mut cells = CapturedRow::plain("  notes.md  ", false).cells;
+            let mut cells = fixture_row("  notes.md  ", false).cells;
             for cell in &mut cells[2..11] {
                 cell.hyperlink = Some(link.clone());
             }
@@ -6227,13 +6319,13 @@ mod tests {
     fn a_wrapped_line_naming_one_url_twice_keeps_its_two_runs_apart() {
         let link = CellHyperlink {
             id: Some("9_alacritty".to_owned()),
-            uri: "file:///C:/a.png".to_owned(),
+            uri: native_uri("file:///C:/a.png"),
         };
-        let mut first_row = CapturedRow::plain("a.png and", true).cells;
+        let mut first_row = fixture_row("a.png and", true).cells;
         for cell in &mut first_row[..5] {
             cell.hyperlink = Some(link.clone());
         }
-        let mut second_row = CapturedRow::plain("so a.png ", false).cells;
+        let mut second_row = fixture_row("so a.png ", false).cells;
         for cell in &mut second_row[3..8] {
             cell.hyperlink = Some(link.clone());
         }
@@ -6363,21 +6455,18 @@ mod tests {
     /// A ledger holding exactly the files named, measured from `D:\src`.
     fn verified(paths: &[&str]) -> PrintedPathLinks {
         PrintedPathLinks::new(
-            Some(PathBuf::from("D:\\src")),
+            Some(PathBuf::from(native("D:\\src"))),
             paths
                 .iter()
-                .map(|path| (PathBuf::from(path), true))
+                .map(|path| (PathBuf::from(native(path)), true))
                 .collect(),
         )
     }
 
     /// One live row of `text`, padded to `columns`, plus enough blank rows to make a grid.
     fn live_rows_of(text: &str, columns: usize, rows: usize) -> Vec<CapturedRow> {
-        let mut grid = vec![CapturedRow::plain(&format!("{text:<columns$}"), false)];
-        grid.extend(vec![
-            CapturedRow::plain(&" ".repeat(columns), false);
-            rows - 1
-        ]);
+        let mut grid = vec![fixture_row(&format!("{text:<columns$}"), false)];
+        grid.extend(vec![fixture_row(&" ".repeat(columns), false); rows - 1]);
         grid
     }
 
@@ -6391,6 +6480,11 @@ mod tests {
     /// The same line, captured on a grid of a stated width — the one fact the truncation gate
     /// reads, and the reason it no longer moves when the pane does.
     fn frozen_line_captured_on(text: &str, captured_columns: u32) -> FrozenLine {
+        // The fixture's text in this platform's spelling, before anything is measured off it: the
+        // grapheme table, the fragment's byte range and the captured width are all read from the
+        // string below, so translating it afterwards would leave three numbers describing the
+        // string it used to be. See `native`.
+        let text = &native(text);
         FrozenLine {
             id: TranscriptId(7),
             source_generation: SourceGeneration(3),
@@ -6423,11 +6517,7 @@ mod tests {
         for (text, continues) in rows {
             finalized.extend(
                 store
-                    .capture(CapturedRow::plain_on_grid(
-                        text,
-                        *continues,
-                        captured_columns,
-                    ))
+                    .capture(fixture_row_on_grid(text, *continues, captured_columns))
                     .finalized,
             );
         }
@@ -6485,12 +6575,10 @@ mod tests {
     fn a_printed_reference_that_fills_its_row_is_pressed_down_on_both_planes() {
         const PATH: &str = "D:\\src\\a.md";
         let ledger = verified(&["D:\\src\\a.md"]);
-        let uri = "file:///D:/src/a.md".to_owned();
+        let uri = native_uri("file:///D:/src/a.md");
         // Live plane: the row is exactly as wide as the reference.
-        let (frame, probes) = live_frame_of_paths(
-            vec![CapturedRow::plain(PATH, false)],
-            verified(&["D:\\src\\a.md"]),
-        );
+        let (frame, probes) =
+            live_frame_of_paths(vec![fixture_row(PATH, false)], verified(&["D:\\src\\a.md"]));
         assert!(
             frame.hyperlink_at(0, 0).is_none(),
             "scenario 53: a reference on the row's last cell is edge-suspect"
@@ -6501,19 +6589,19 @@ mod tests {
         );
         // One blank column past it and the same text is an ordinary link (scenario 54).
         let (frame, _) = live_frame_of_paths(
-            vec![CapturedRow::plain(&format!("{PATH} "), false)],
+            vec![fixture_row(&format!("{PATH} "), false)],
             verified(&["D:\\src\\a.md"]),
         );
         assert_eq!(frame.hyperlink_at(0, 0).expect("a link").uri, uri);
         // Scenarios 55 and 70: the last cell is prose, so the candidate stopped short of it.
         let (frame, _) = live_frame_of_paths(
-            vec![CapturedRow::plain(&format!("({PATH})"), false)],
+            vec![fixture_row(&format!("({PATH})"), false)],
             verified(&["D:\\src\\a.md"]),
         );
         assert_eq!(frame.hyperlink_at(0, 1).expect("a link").uri, uri);
         // Scenario 71: a full-width stop is prose too, and it is two columns wide.
         let (frame, _) = live_frame_of_paths(
-            vec![CapturedRow::plain(&format!("{PATH}。"), false)],
+            vec![fixture_row(&format!("{PATH}。"), false)],
             verified(&["D:\\src\\a.md"]),
         );
         assert_eq!(frame.hyperlink_at(0, 0).expect("a link").uri, uri);
@@ -6554,11 +6642,11 @@ mod tests {
     #[test]
     fn a_wide_glyph_on_the_last_two_columns_is_still_the_rows_end() {
         let ledger = verified(&["D:\\src\\文"]);
-        let uri = "file:///D:/src/%E6%96%87".to_owned();
+        let uri = native_uri("file:///D:/src/%E6%96%87");
         // `文` is the reference's own last cell and it fills the last **two** columns of the row:
         // the glyph and the spacer the grid puts beside it, which carries no text of its own.
         let wide_tail = || {
-            let mut row = CapturedRow::plain("D:\\src\\文", false);
+            let mut row = fixture_row("D:\\src\\文", false);
             row.cells.push(CapturedCell {
                 wide_spacer: true,
                 ..CapturedCell::default()
@@ -6599,13 +6687,16 @@ mod tests {
     fn two_physical_rows_carry_one_rejoined_reference_and_case_a_stays_blank() {
         let (frame, _) = live_frame_of_paths(
             vec![
-                CapturedRow::plain("D:\\src\\very\\long\\pa", false),
-                CapturedRow::plain("th\\file.rs:12:3    ", false),
+                fixture_row("D:\\src\\very\\long\\pa", false),
+                fixture_row("th\\file.rs:12:3    ", false),
             ],
             verified(&["D:\\src\\very\\long\\path\\file.rs"]),
         );
         let upper = frame.hyperlink_at(0, 0).expect("the upper half is a link");
-        assert_eq!(upper.uri, "file:///D:/src/very/long/path/file.rs#L12C3");
+        assert_eq!(
+            upper.uri,
+            native_uri("file:///D:/src/very/long/path/file.rs#L12C3")
+        );
         assert_eq!(
             frame.hyperlink_at(1, 0).map(|hit| hit.uri),
             Some(upper.uri.clone()),
@@ -6619,8 +6710,8 @@ mod tests {
         // Scenario 56: both halves are on the disk and the answer is still a blank.
         let (frame, probes) = live_frame_of_paths(
             vec![
-                CapturedRow::plain("D:\\WINDOWS\\system", false),
-                CapturedRow::plain("32\\Modules       ", false),
+                fixture_row("D:\\WINDOWS\\system", false),
+                fixture_row("32\\Modules       ", false),
             ],
             verified(&["D:\\WINDOWS\\system", "D:\\WINDOWS\\system32\\Modules"]),
         );
@@ -6633,7 +6724,7 @@ mod tests {
             "and the halves are not joined"
         );
         assert!(
-            !probes.contains(&PathBuf::from("D:\\WINDOWS\\system32\\Modules")),
+            !probes.contains(&PathBuf::from(native("D:\\WINDOWS\\system32\\Modules"))),
             "gate ⑤ answers before the disk is asked anything: {probes:?}"
         );
     }
@@ -6670,7 +6761,7 @@ mod tests {
         ];
         let (mut frame, _) = live_frame_of_paths(
             rows.iter()
-                .map(|(text, continues, _)| CapturedRow::plain(text, *continues))
+                .map(|(text, continues, _)| fixture_row(text, *continues))
                 .collect(),
             verified(&["D:\\src\\crates\\bt-app\\src\\main-window-and-a-very-long-name.rs"]),
         );
@@ -6679,7 +6770,9 @@ mod tests {
         let hit = frame.hyperlink_at(1, 4).expect("the middle row is a link");
         assert_eq!(
             hit.uri,
-            "file:///D:/src/crates/bt-app/src/main-window-and-a-very-long-name.rs#L16810C5",
+            native_uri(
+                "file:///D:/src/crates/bt-app/src/main-window-and-a-very-long-name.rs#L16810C5"
+            ),
             "the target is the file the two halves spell between them, and the line inside it"
         );
         for (row, column) in [(0u32, 12u32), (2, 3)] {
@@ -6724,7 +6817,7 @@ mod tests {
         ];
         let (mut frame, _) = live_frame_of_paths(
             rows.iter()
-                .map(|(text, continues, _)| CapturedRow::plain(text, *continues))
+                .map(|(text, continues, _)| fixture_row(text, *continues))
                 .collect(),
             verified(&["D:\\src\\deep\\name-abcdefg.rs"]),
         );
@@ -6732,7 +6825,7 @@ mod tests {
         let hit = frame
             .hyperlink_at(1, 2)
             .expect("the continuation at the hanging indent is a link");
-        assert_eq!(hit.uri, "file:///D:/src/deep/name-abcdefg.rs");
+        assert_eq!(hit.uri, native_uri("file:///D:/src/deep/name-abcdefg.rs"));
         assert_eq!(
             frame.hyperlink_at(0, 6).unwrap(),
             hit,
@@ -6785,19 +6878,23 @@ mod tests {
         assert!(rows.iter().all(|row| row.chars().count() == COLUMNS));
 
         let ledger = PrintedPathLinks::new(
-            Some(PathBuf::from("D:\\src")),
+            Some(PathBuf::from(native("D:\\src"))),
             [
-                (PathBuf::from(format!("D:\\src\\deep\\{a}{b}")), false),
-                (PathBuf::from(format!("D:\\src\\deep\\{a}{b}{c}")), false),
-                (PathBuf::from(&target), true),
+                (
+                    PathBuf::from(native(&format!("D:\\src\\deep\\{a}{b}"))),
+                    false,
+                ),
+                (
+                    PathBuf::from(native(&format!("D:\\src\\deep\\{a}{b}{c}"))),
+                    false,
+                ),
+                (PathBuf::from(native(&target)), true),
             ]
             .into_iter()
             .collect(),
         );
         let (mut frame, _) = live_frame_of_paths(
-            rows.iter()
-                .map(|text| CapturedRow::plain(text, false))
-                .collect(),
+            rows.iter().map(|text| fixture_row(text, false)).collect(),
             ledger,
         );
 
@@ -6806,7 +6903,7 @@ mod tests {
             .expect("the third row of four is a link");
         assert_eq!(
             hit.uri,
-            format!("file:///D:/src/deep/{a}{b}{c}ddd.rs"),
+            native_uri(&format!("file:///D:/src/deep/{a}{b}{c}ddd.rs")),
             "the target is the file all four rows spell between them"
         );
         for row in [0u32, 1, 3] {
@@ -6841,12 +6938,12 @@ mod tests {
     #[test]
     fn a_soft_wrapped_reference_is_judged_whole_and_is_never_edge_suspect() {
         let ledger = verified(&["D:\\src\\deep\\file.rs"]);
-        let uri = "file:///D:/src/deep/file.rs".to_owned();
+        let uri = native_uri("file:///D:/src/deep/file.rs");
         let (frame, _) = live_frame_of_paths(
             vec![
-                CapturedRow::plain("D:\\src\\de", true),
-                CapturedRow::plain("ep\\file.r", true),
-                CapturedRow::plain("s        ", false),
+                fixture_row("D:\\src\\de", true),
+                fixture_row("ep\\file.r", true),
+                fixture_row("s        ", false),
             ],
             ledger.clone(),
         );
@@ -6891,7 +6988,7 @@ mod tests {
     fn a_frozen_lines_edge_verdict_is_its_captures_and_never_the_panes() {
         const PATH: &str = "D:\\src\\a.md";
         let ledger = verified(&["D:\\src\\a.md"]);
-        let uri = "file:///D:/src/a.md".to_owned();
+        let uri = native_uri("file:///D:/src/a.md");
         let filled = frozen_line_from_rows(&[(PATH, false)], PATH.len() as u32);
         let spare = frozen_line_from_rows(&[(PATH, false)], PATH.len() as u32 + 1);
 
@@ -6928,7 +7025,7 @@ mod tests {
             Vec::<String>::new(),
             "the gate declines to promise"
         );
-        assert_eq!(line.text, PATH, "and the row is here in full");
+        assert_eq!(line.text, native(PATH), "and the row is here in full");
         let fragment = line.fragments.last().expect("one fragment");
         assert_eq!(
             (fragment.byte_start as usize, fragment.byte_end as usize),
@@ -6950,16 +7047,12 @@ mod tests {
     #[test]
     fn fragments_captured_at_two_widths_are_each_judged_by_their_own() {
         let ledger = verified(&["D:\\src\\deep\\nested\\dir\\a.md"]);
-        let uri = "file:///D:/src/deep/nested/dir/a.md".to_owned();
+        let uri = native_uri("file:///D:/src/deep/nested/dir/a.md");
         let line = {
             let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
-            store.capture(CapturedRow::plain_on_grid(
-                "D:\\src\\deep\\nested\\",
-                true,
-                20,
-            ));
+            store.capture(fixture_row_on_grid("D:\\src\\deep\\nested\\", true, 20));
             store
-                .capture(CapturedRow::plain_on_grid("dir\\a.md", false, 9))
+                .capture(fixture_row_on_grid("dir\\a.md", false, 9))
                 .finalized
                 .pop()
                 .expect("the second row ends the line")
@@ -6977,13 +7070,9 @@ mod tests {
         // The same two rows with the tail exactly filling its own grid, and the gate fires.
         let filled = {
             let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
-            store.capture(CapturedRow::plain_on_grid(
-                "D:\\src\\deep\\nested\\",
-                true,
-                20,
-            ));
+            store.capture(fixture_row_on_grid("D:\\src\\deep\\nested\\", true, 20));
             store
-                .capture(CapturedRow::plain_on_grid("dir\\a.md", false, 8))
+                .capture(fixture_row_on_grid("dir\\a.md", false, 8))
                 .finalized
                 .pop()
                 .expect("the second row ends the line")
@@ -7011,14 +7100,31 @@ mod tests {
     /// fires.
     #[test]
     fn a_verified_printed_path_is_a_file_link_indistinguishable_from_osc_8() {
-        for (printed, path) in [
+        // **A fixture table per platform**, because this is the one case whose subject *is* the
+        // set of spellings — `native` translates a path and cannot translate a claim about how
+        // many ways there are to write one. Windows has six: two separators for the rooted form,
+        // the URI, the anchor, and two separators for the bare relative form. A POSIX filesystem
+        // has four, and the two that are missing are missing for one reason each: there is no
+        // second separator, so `D:/…` and `docs\\b.md` are not other spellings of anything — the
+        // first is a filename with a colon in it and the second is a filename with a backslash in
+        // it (`bt_transcript::paths::is_relative_reference`).
+        #[cfg(windows)]
+        const SPELLINGS: [(&str, &str); 6] = [
             ("D:\\src\\a.md", "D:\\src\\a.md"),
             ("D:/src/a.md", "D:\\src\\a.md"),
             ("file:///D:/src/a.md", "D:\\src\\a.md"),
             ("./a.md", "D:\\src\\a.md"),
             ("docs/b.md", "D:\\src\\docs\\b.md"),
             ("docs\\b.md", "D:\\src\\docs\\b.md"),
-        ] {
+        ];
+        #[cfg(not(windows))]
+        const SPELLINGS: [(&str, &str); 4] = [
+            ("/D/src/a.md", "/D/src/a.md"),
+            ("file:///D/src/a.md", "/D/src/a.md"),
+            ("./a.md", "/D/src/a.md"),
+            ("docs/b.md", "/D/src/docs/b.md"),
+        ];
+        for (printed, path) in SPELLINGS {
             let (mut frame, probes) =
                 live_frame_of_paths(live_rows_of(printed, 40, 3), verified(&[path]));
             assert!(
@@ -7071,8 +7177,8 @@ mod tests {
         assert_eq!(
             probes,
             [
-                PathBuf::from("D:\\src\\docs\\b.md"),
-                PathBuf::from("D:\\src\\gone.md")
+                PathBuf::from(native("D:\\src\\docs\\b.md")),
+                PathBuf::from(native("D:\\src\\gone.md"))
             ],
             "the two shapes that name a file are asked about; the bare word `README` is prose"
         );
@@ -7091,13 +7197,13 @@ mod tests {
         // there is no padding standing between the two halves of the name.
         const COLUMNS: usize = 15;
         let mut rows = vec![
-            CapturedRow::plain("D:\\src\\wrapped\\", true),
-            CapturedRow::plain(&format!("{:<COLUMNS$}", "deep\\a.md"), false),
+            fixture_row("D:\\src\\wrapped\\", true),
+            fixture_row(&format!("{:<COLUMNS$}", "deep\\a.md"), false),
         ];
-        rows.push(CapturedRow::plain(&" ".repeat(COLUMNS), false));
+        rows.push(fixture_row(&" ".repeat(COLUMNS), false));
         let (mut frame, _) = live_frame_of_paths(rows, verified(&["D:\\src\\wrapped\\deep\\a.md"]));
         let head = frame.hyperlink_at(0, 0).expect("the first row is a link");
-        assert_eq!(head.uri, "file:///D:/src/wrapped/deep/a.md");
+        assert_eq!(head.uri, native_uri("file:///D:/src/wrapped/deep/a.md"));
         assert_eq!(
             frame.hyperlink_at(1, 2).expect("the second row too"),
             head,
@@ -7153,10 +7259,10 @@ mod tests {
         ] {
             let columns = head.chars().count();
             let mut rows = vec![
-                CapturedRow::plain(head, true),
-                CapturedRow::plain(&format!("{tail:<columns$}"), false),
+                fixture_row(head, true),
+                fixture_row(&format!("{tail:<columns$}"), false),
             ];
-            rows.push(CapturedRow::plain(&" ".repeat(columns), false));
+            rows.push(fixture_row(&" ".repeat(columns), false));
             let (mut frame, _) = live_frame_of_paths(rows, verified(&[file]));
             let opens = columns - (printed.chars().count() - tail.chars().count());
             let hit = frame
@@ -7164,7 +7270,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("{printed} opens a link on the first row"));
             assert_eq!(
                 hit.uri.split('#').next(),
-                Some(bt_transcript::paths::local_path_to_file_uri(Path::new(file)).as_str()),
+                Some(
+                    bt_transcript::paths::local_path_to_file_uri(Path::new(&native(file))).as_str()
+                ),
                 "{printed} targets the file it names across the break"
             );
             assert_eq!(
@@ -7239,7 +7347,7 @@ mod tests {
             .expect("the alternate grid's first row is on screen") as u32;
         assert_eq!(
             frame.hyperlink_at(row, 0).expect("a link").uri,
-            "file:///D:/src/a.md"
+            native_uri("file:///D:/src/a.md")
         );
     }
 
@@ -7252,10 +7360,10 @@ mod tests {
     #[test]
     fn a_relative_reference_resolves_against_the_panes_directory_on_either_screen() {
         let links = PrintedPathLinks::new(
-            Some(PathBuf::from("D:\\src")),
+            Some(PathBuf::from(native("D:\\src"))),
             BTreeMap::from([
-                (PathBuf::from("D:\\src\\dist\\folio.exe"), true),
-                (PathBuf::from("D:\\src\\docs\\a.md"), true),
+                (PathBuf::from(native("D:\\src\\dist\\folio.exe")), true),
+                (PathBuf::from(native("D:\\src\\docs\\a.md")), true),
             ]),
         );
         for reference in ["dist\\folio.exe", "docs/a.md"] {
@@ -7322,13 +7430,13 @@ mod tests {
         let (frame, _) = live_frame_of_paths(
             live_rows_of("github.com/a/b", 40, 3),
             PrintedPathLinks::new(
-                Some(PathBuf::from("D:\\src")),
-                BTreeMap::from([(PathBuf::from("D:\\src\\github.com\\a\\b"), true)]),
+                Some(PathBuf::from(native("D:\\src"))),
+                BTreeMap::from([(PathBuf::from(native("D:\\src\\github.com\\a\\b")), true)]),
             ),
         );
         assert_eq!(
             frame.hyperlink_at(0, 0).expect("a link").uri,
-            "file:///D:/src/github.com/a/b",
+            native_uri("file:///D:/src/github.com/a/b"),
             "a verified path outranks a bare-domain guess"
         );
 
@@ -7337,8 +7445,8 @@ mod tests {
         let (frame, _) = live_frame_of_paths(
             live_rows_of("github.com/a/b", 40, 3),
             PrintedPathLinks::new(
-                Some(PathBuf::from("D:\\src")),
-                BTreeMap::from([(PathBuf::from("D:\\src\\github.com\\a\\b"), false)]),
+                Some(PathBuf::from(native("D:\\src"))),
+                BTreeMap::from([(PathBuf::from(native("D:\\src\\github.com\\a\\b")), false)]),
             ),
         );
         assert_eq!(
@@ -7353,8 +7461,11 @@ mod tests {
     /// the same cell answer two ways depending on which pass ran last.
     #[test]
     fn a_printed_path_never_takes_an_osc_8_spans_cells() {
+        #[cfg(windows)]
         const DECLARED: &str = "file:///D:/src/declared.md";
-        let mut row = CapturedRow::plain(&format!("{:<40}", "D:\\src\\a.md"), false);
+        #[cfg(not(windows))]
+        const DECLARED: &str = "file:///D/src/declared.md";
+        let mut row = fixture_row(&format!("{:<40}", "D:\\src\\a.md"), false);
         for cell in &mut row.cells[.."D:\\src\\a.md".len()] {
             cell.hyperlink = Some(CellHyperlink {
                 id: Some("7".to_owned()),
@@ -7362,7 +7473,7 @@ mod tests {
             });
         }
         let mut rows = vec![row];
-        rows.extend(vec![CapturedRow::plain(&" ".repeat(40), false); 2]);
+        rows.extend(vec![fixture_row(&" ".repeat(40), false); 2]);
         let (frame, _) = live_frame_of_paths(rows, verified(&["D:\\src\\a.md"]));
         assert_eq!(
             frame.hyperlink_at(0, 0).expect("the declared link").uri,
@@ -7380,7 +7491,7 @@ mod tests {
             live_rows_of("./a.md docs/b.md", 40, 3),
             PrintedPathLinks::new(
                 None,
-                BTreeMap::from([(PathBuf::from("D:\\src\\a.md"), true)]),
+                BTreeMap::from([(PathBuf::from(native("D:\\src\\a.md")), true)]),
             ),
         );
         assert!(
@@ -7411,8 +7522,8 @@ mod tests {
         let head = "> https://support.claude";
         let tail = ".com/en/a";
         let mut frame = live_frame_of(vec![
-            CapturedRow::plain(head, true),
-            CapturedRow::plain(&format!("{tail:<24}"), false),
+            fixture_row(head, true),
+            fixture_row(&format!("{tail:<24}"), false),
         ]);
 
         let hit = frame.hyperlink_at(0, 5).expect("the address is a link");
@@ -7473,11 +7584,11 @@ mod tests {
             id: Some(id.to_owned()),
             uri: URI.to_owned(),
         };
-        let mut first = CapturedRow::plain(head, false);
+        let mut first = fixture_row(head, false);
         for cell in &mut first.cells[6..] {
             cell.hyperlink = Some(emission("17_alacritty"));
         }
-        let mut second = CapturedRow::plain(&format!("{tail:<40}"), false);
+        let mut second = fixture_row(&format!("{tail:<40}"), false);
         for cell in &mut second.cells[..tail.len()] {
             cell.hyperlink = Some(emission("18_alacritty"));
         }
@@ -7530,7 +7641,7 @@ mod tests {
         };
         for explicit in [true, false] {
             let row = || {
-                let mut row = CapturedRow::plain(&format!("{URI} "), false);
+                let mut row = fixture_row(&format!("{URI} "), false);
                 if explicit {
                     for cell in &mut row.cells {
                         cell.hyperlink = Some(osc_8.clone());
@@ -7577,7 +7688,10 @@ mod tests {
     /// the three rows resting.
     #[test]
     fn a_file_link_wrapped_by_the_application_between_table_columns_is_one_link() {
+        #[cfg(windows)]
         const URI: &str = "file:///D:/shots/ca-2026-08-20-rest.png";
+        #[cfg(not(windows))]
+        const URI: &str = "file:///D/shots/ca-2026-08-20-rest.png";
         const COLUMNS: usize = 20;
         // The printed path `D:\shots\ca-2026-08-20-rest.png` in the three fragments the
         // application's own wrap makes of it, each followed by the size column's ink.
@@ -7630,7 +7744,12 @@ mod tests {
     /// fragment's own printed text.
     #[test]
     fn a_file_link_wrapped_mid_path_is_one_link_carrying_the_whole_target() {
+        #[cfg(windows)]
         const URI: &str = "file:///C:/Users/Alice/AppData/Local/Temp/claude/\
+            D--Developer-BetterTerminal/cafff1bf-5221-42c8-997c-a57c9d1ae041/scratchpad/\
+            attention-status.md";
+        #[cfg(not(windows))]
+        const URI: &str = "file:///C/Users/Alice/AppData/Local/Temp/claude/\
             D--Developer-BetterTerminal/cafff1bf-5221-42c8-997c-a57c9d1ae041/scratchpad/\
             attention-status.md";
         const COLUMNS: usize = 71;
@@ -7693,7 +7812,12 @@ mod tests {
     /// something the target is not and the whole thing comes apart into three.
     #[test]
     fn a_wrapped_file_link_behind_the_applications_own_gutter_is_still_one_link() {
+        #[cfg(windows)]
         const URI: &str = "file:///C:/Users/Alice/AppData/Local/Temp/claude/\
+            D--Developer-BetterTerminal/ccea9546-63d0-4a20-ba77-75caa4e8533c/scratchpad/\
+            folio-pdf-test.pdf";
+        #[cfg(not(windows))]
+        const URI: &str = "file:///C/Users/Alice/AppData/Local/Temp/claude/\
             D--Developer-BetterTerminal/ccea9546-63d0-4a20-ba77-75caa4e8533c/scratchpad/\
             folio-pdf-test.pdf";
         const COLUMNS: usize = 71;
@@ -7716,7 +7840,7 @@ mod tests {
             .enumerate()
             .map(|(index, (gutter, label, tail))| {
                 let text = format!("{gutter}{label}{tail}");
-                let mut row = CapturedRow::plain(&format!("{text:<COLUMNS$}"), false);
+                let mut row = fixture_row(&format!("{text:<COLUMNS$}"), false);
                 for cell in &mut row.cells[gutter.len()..gutter.len() + label.len()] {
                     row_link(cell, index, URI);
                 }
@@ -7776,7 +7900,7 @@ mod tests {
             .enumerate()
             .map(|(index, (label, tail))| {
                 let text = format!("{label}{tail}");
-                let mut row = CapturedRow::plain(&format!("{text:<columns$}"), false);
+                let mut row = fixture_row(&format!("{text:<columns$}"), false);
                 for cell in &mut row.cells[..label.len()] {
                     row_link(cell, index, uri);
                 }
@@ -7794,7 +7918,10 @@ mod tests {
     /// them spell it twice, and twice is not once.
     #[test]
     fn two_mentions_of_one_file_target_on_neighbouring_lines_stay_two_links() {
+        #[cfg(windows)]
         const URI: &str = "file:///D:/shots/a.png";
+        #[cfg(not(windows))]
+        const URI: &str = "file:///D/shots/a.png";
         const PRINTED: &str = "D:\\shots\\a.png";
         let osc_8 = CellHyperlink {
             // The one id the vendor reuses for one target: geometry and id both say join.
@@ -7802,7 +7929,7 @@ mod tests {
             uri: URI.to_owned(),
         };
         let row = || {
-            let mut row = CapturedRow::plain(&format!("{PRINTED} (2.1KB)"), false);
+            let mut row = fixture_row(&format!("{PRINTED} (2.1KB)"), false);
             for cell in &mut row.cells[..PRINTED.len()] {
                 cell.hyperlink = Some(osc_8.clone());
             }
@@ -7827,33 +7954,54 @@ mod tests {
     /// The second spelling a `file:` target has: the local path an application prints for it.
     #[test]
     fn file_uri_printed_form_spells_the_path_an_application_prints() {
-        for (uri, printed) in [
+        // **A table per platform, because the subject is a spelling.** Every row on the Windows
+        // side asks what `D:\shots\a.png` looks like as a URI and back; there is no drive to ask
+        // about off Windows, and the two rows that have no counterpart at all are the UNC share
+        // (a machine's name is not a directory at this filesystem's root) and the drive-letter
+        // fold. Everything the rule is really about — the scheme's case, the authority-less form,
+        // `localhost`, percent decoding in both flavours, and the four shapes that have no printed
+        // form — is asked on both.
+        #[cfg(windows)]
+        const FORMS: [(&str, Option<&str>); 12] = [
             ("file:///D:/shots/a.png", Some("D:\\shots\\a.png")),
-            // Percent encoding, both the ASCII kind and a multi-byte UTF-8 name.
             ("file:///D:/a%20b/c%20d.png", Some("D:\\a b\\c d.png")),
             ("file:///D:/%E4%B8%AD%E6%96%87.png", Some("D:\\中文.png")),
-            // A UNC share keeps its authority as the server.
             (
                 "file://server/share/x.png",
                 Some("\\\\server\\share\\x.png"),
             ),
-            // `localhost` is the same as no host at all (RFC 8089).
             ("file://localhost/D:/a.png", Some("D:\\a.png")),
             ("file://LocalHost/D:/a.png", Some("D:\\a.png")),
-            // The drive letter is folded so two spellings of one drive compare equal; nothing else
-            // in the path is.
             ("file:///c:/Shots/A.png", Some("C:\\Shots\\A.png")),
-            // The scheme is case-insensitive, and an authority-less `file:` URI is legal.
             ("FILE:///D:/a.png", Some("D:\\a.png")),
             ("file:/D:/a.png", Some("D:\\a.png")),
-            // No second spelling for anything that is not a file, for bytes that do not spell
-            // text, or for a URI that names a machine rather than a file on it.
             ("https://example.test/a", None),
             ("mailto:someone@example.test", None),
             ("file:///D:/%FF.png", None),
+        ];
+        #[cfg(not(windows))]
+        const FORMS: [(&str, Option<&str>); 12] = [
+            ("file:///shots/a.png", Some("/shots/a.png")),
+            ("file:///a%20b/c%20d.png", Some("/a b/c d.png")),
+            ("file:///%E4%B8%AD%E6%96%87.png", Some("/中文.png")),
+            // A remote share has no local spelling here, so there is no second spelling to
+            // compare a label against.
+            ("file://server/share/x.png", None),
+            ("file://localhost/a.png", Some("/a.png")),
+            ("file://LocalHost/a.png", Some("/a.png")),
+            ("file:///Shots/A.png", Some("/Shots/A.png")),
+            ("FILE:///a.png", Some("/a.png")),
+            ("file:/a.png", Some("/a.png")),
+            ("https://example.test/a", None),
+            ("mailto:someone@example.test", None),
+            ("file:///%FF.png", None),
+        ];
+        for (uri, printed) in FORMS.into_iter().chain([
+            // A URI that names a machine rather than a file on it, and a scheme with nothing
+            // behind it: no printed form on either platform.
             ("file://server", None),
             ("file:", None),
-        ] {
+        ]) {
             assert_eq!(
                 file_uri_printed_form(uri).as_deref(),
                 printed,
@@ -7879,10 +8027,10 @@ mod tests {
         };
         let mut first = Vec::new();
         first.extend(wide("见"));
-        first.extend(CapturedRow::plain(" https://a.te", true).cells);
-        let mut second = CapturedRow::plain("st/x ", false).cells;
+        first.extend(fixture_row(" https://a.te", true).cells);
+        let mut second = fixture_row("st/x ", false).cells;
         second.extend(wide("界"));
-        second.extend(CapturedRow::plain(&" ".repeat(8), false).cells);
+        second.extend(fixture_row(&" ".repeat(8), false).cells);
         assert_eq!((first.len(), second.len()), (15, 15));
         let mut frame = live_frame_of(vec![
             CapturedRow {
@@ -7948,7 +8096,7 @@ mod tests {
             };
             [lead, spacer]
         };
-        let mut cells = CapturedRow::plain(URI, false).cells;
+        let mut cells = fixture_row(URI, false).cells;
         for word in ["（", "带", "图", "片"] {
             cells.extend(wide(word));
         }
@@ -7997,16 +8145,13 @@ mod tests {
         let width = 32;
         let staged = [StagedRow {
             id: StagingId(77),
-            row: CapturedRow::plain("the docs: https://support.claude", true),
+            row: fixture_row("the docs: https://support.claude", true),
         }];
-        let mut live_rows = vec![CapturedRow::plain(
+        let mut live_rows = vec![fixture_row(
             &format!("{:<width$}", ".com/en/a", width = width as usize),
             false,
         )];
-        live_rows.extend(vec![
-            CapturedRow::plain(&" ".repeat(width as usize), false);
-            11
-        ]);
+        live_rows.extend(vec![fixture_row(&" ".repeat(width as usize), false); 11]);
         let document = HistoryDocument::default();
         let mut projection = ViewportProjection::new(
             key(width),
@@ -8103,7 +8248,7 @@ mod tests {
                 .continuous_frame(
                     &HistoryDocument::default(),
                     &[],
-                    vec![CapturedRow::plain("        ", false); 12],
+                    vec![fixture_row("        ", false); 12],
                     GridCursor {
                         row: 11,
                         column: 0,
@@ -8251,7 +8396,7 @@ mod tests {
             .continuous_frame(
                 &HistoryDocument::default(),
                 &[],
-                vec![CapturedRow::plain("        ", false); live_rows as usize],
+                vec![fixture_row("        ", false); live_rows as usize],
                 GridCursor {
                     row: live_rows - 1,
                     column: 0,
@@ -8386,7 +8531,7 @@ mod tests {
             }],
         );
 
-        let mut live = vec![CapturedRow::plain(&" ".repeat(width), false); rows as usize];
+        let mut live = vec![fixture_row(&" ".repeat(width), false); rows as usize];
         for row in &mut live[1..=4] {
             for cell in &mut row.cells {
                 cell.style.flags.insert(CellFlags::UNDERLINE);
@@ -8562,10 +8707,7 @@ mod tests {
     fn boundary_split_block_renders_as_one_bridge_across_frozen_and_live() {
         let width = 32;
         let mut store = TranscriptStore::new(NonZeroUsize::new(64).unwrap());
-        let opener = store
-            .capture(CapturedRow::plain("$$", false))
-            .finalized
-            .remove(0);
+        let opener = store.capture(fixture_row("$$", false)).finalized.remove(0);
         let mut document = HistoryDocument::default();
         document.finalize_transaction(opener);
         let frozen_prefix = document.entries().keys().copied().collect::<Vec<_>>();
@@ -8574,7 +8716,7 @@ mod tests {
         let staged_body = format!("{:<width$}", "A=", width = width as usize);
         let staged = [StagedRow {
             id: staging_id,
-            row: CapturedRow::plain(&staged_body, true),
+            row: fixture_row(&staged_body, true),
         }];
 
         let mut projection = ViewportProjection::new(
@@ -8625,8 +8767,8 @@ mod tests {
 
         let closer = format!("{:<width$}", "$$", width = width as usize);
         let blank = " ".repeat(width as usize);
-        let mut live_rows = vec![CapturedRow::plain(&closer, false)];
-        live_rows.extend(vec![CapturedRow::plain(&blank, false); 11]);
+        let mut live_rows = vec![fixture_row(&closer, false)];
+        live_rows.extend(vec![fixture_row(&blank, false); 11]);
         let frame = projection
             .continuous_frame(
                 &document,
@@ -8700,16 +8842,16 @@ mod tests {
 
         let wrong_staged = [StagedRow {
             id: StagingId(78),
-            row: CapturedRow::plain(&staged_body, true),
+            row: fixture_row(&staged_body, true),
         }];
         projection.scroll_to_top();
         let unproven = projection
             .continuous_frame(
                 &document,
                 &wrong_staged,
-                vec![CapturedRow::plain(&closer, false)]
+                vec![fixture_row(&closer, false)]
                     .into_iter()
-                    .chain(vec![CapturedRow::plain(&blank, false); 11])
+                    .chain(vec![fixture_row(&blank, false); 11])
                     .collect(),
                 GridCursor {
                     row: 0,
@@ -8861,7 +9003,7 @@ mod tests {
             ],
         );
 
-        let live = || vec![CapturedRow::plain("        ", false); 6];
+        let live = || vec![fixture_row("        ", false); 6];
         let cursor = GridCursor {
             row: 5,
             column: 0,
@@ -8957,10 +9099,7 @@ mod tests {
             .continuous_frame(
                 document,
                 &[],
-                vec![
-                    CapturedRow::plain("xy", false),
-                    CapturedRow::plain("zw", false),
-                ],
+                vec![fixture_row("xy", false), fixture_row("zw", false)],
                 GridCursor {
                     row: 0,
                     column: 0,
@@ -9087,10 +9226,7 @@ mod tests {
             .continuous_frame(
                 &HistoryDocument::default(),
                 &[],
-                vec![
-                    CapturedRow::plain("aaaa", false),
-                    CapturedRow::plain("bbbb", false),
-                ],
+                vec![fixture_row("aaaa", false), fixture_row("bbbb", false)],
                 GridCursor {
                     row: 1,
                     column: 0,
@@ -9147,17 +9283,14 @@ mod tests {
         );
         let staged = [StagedRow {
             id: bt_transcript::StagingId(1),
-            row: CapturedRow::plain("xx", false),
+            row: fixture_row("xx", false),
         }];
         projection.scroll_offset_subpixels = cell_height().get();
         let error = projection
             .continuous_frame(
                 &HistoryDocument::default(),
                 &staged,
-                vec![
-                    CapturedRow::plain("live", false),
-                    CapturedRow::plain("grid", false),
-                ],
+                vec![fixture_row("live", false), fixture_row("grid", false)],
                 GridCursor {
                     row: 0,
                     column: 0,
@@ -9190,10 +9323,7 @@ mod tests {
         let mut frame = projection
             .live_frame(
                 nz32(2),
-                vec![
-                    CapturedRow::plain("ab", false),
-                    CapturedRow::plain("cd", false),
-                ],
+                vec![fixture_row("ab", false), fixture_row("cd", false)],
                 GridCursor {
                     row: 0,
                     column: 0,
@@ -9234,10 +9364,7 @@ mod tests {
         let mut frame = projection
             .live_frame(
                 nz32(2),
-                vec![
-                    CapturedRow::plain("ab", false),
-                    CapturedRow::plain("cd", false),
-                ],
+                vec![fixture_row("ab", false), fixture_row("cd", false)],
                 GridCursor {
                     row: 0,
                     column: 0,
@@ -9361,10 +9488,7 @@ mod tests {
         let mut store = TranscriptStore::new(NonZeroUsize::new(64).unwrap());
         let mut document = HistoryDocument::default();
         let append = |store: &mut TranscriptStore, document: &mut HistoryDocument, text: &str| {
-            let line = store
-                .capture(CapturedRow::plain(text, false))
-                .finalized
-                .remove(0);
+            let line = store.capture(fixture_row(text, false)).finalized.remove(0);
             let id = line.line.id;
             document.finalize_transaction(line);
             id
@@ -9434,10 +9558,7 @@ mod tests {
         let mut document = HistoryDocument::default();
         let mut ids = Vec::new();
         for text in ["$$", "x^2 + y^2", "$$"] {
-            let finalized = store
-                .capture(CapturedRow::plain(text, false))
-                .finalized
-                .remove(0);
+            let finalized = store.capture(fixture_row(text, false)).finalized.remove(0);
             ids.push(finalized.line.id);
             document.finalize_transaction(finalized);
         }
@@ -9484,7 +9605,7 @@ mod tests {
         assert_eq!(narrow.anchor_y(&document, &middle_anchor), Ok(0));
         assert_eq!(wide.anchor_y(&document, &middle_anchor), Ok(0));
 
-        let live = || vec![CapturedRow::plain("    ", false); 4];
+        let live = || vec![fixture_row("    ", false); 4];
         narrow
             .continuous_frame(
                 &document,
@@ -9637,12 +9758,8 @@ mod tests {
         let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
         let mut document = HistoryDocument::default();
         for text in ["one", "two"] {
-            document.finalize_transaction(
-                store
-                    .capture(CapturedRow::plain(text, false))
-                    .finalized
-                    .remove(0),
-            );
+            document
+                .finalize_transaction(store.capture(fixture_row(text, false)).finalized.remove(0));
         }
         let mut projection = ViewportProjection::new(
             key(4),
@@ -9653,12 +9770,7 @@ mod tests {
             GridGeneration(1),
         );
         projection.project(&document);
-        let live = || {
-            vec![
-                CapturedRow::plain("aaaa", false),
-                CapturedRow::plain("bbbb", false),
-            ]
-        };
+        let live = || vec![fixture_row("aaaa", false), fixture_row("bbbb", false)];
         projection
             .continuous_frame(
                 &document,
@@ -9691,12 +9803,7 @@ mod tests {
             .unwrap();
         assert_eq!(frame.status_text.as_deref(), Some("1 lines below"));
 
-        document.finalize_transaction(
-            store
-                .capture(CapturedRow::plain("tri", false))
-                .finalized
-                .remove(0),
-        );
+        document.finalize_transaction(store.capture(fixture_row("tri", false)).finalized.remove(0));
         projection.project(&document);
         let frame = projection
             .continuous_frame(
@@ -9726,7 +9833,7 @@ mod tests {
         let mut ids = Vec::new();
         for index in 0..50 {
             let finalized = store
-                .capture(CapturedRow::plain(&format!("line-{index:02}"), false))
+                .capture(fixture_row(&format!("line-{index:02}"), false))
                 .finalized
                 .remove(0);
             ids.push(finalized.line.id);
@@ -9763,7 +9870,7 @@ mod tests {
         }));
         projection.project(&document);
 
-        let live = || vec![CapturedRow::plain("        ", false); 12];
+        let live = || vec![fixture_row("        ", false); 12];
         let cursor = GridCursor {
             row: 11,
             column: 0,
@@ -9836,16 +9943,16 @@ mod tests {
             "history-3 ",
             "history-4 ",
         ] {
-            let finalized = store.capture(CapturedRow::plain(row, false)).finalized;
+            let finalized = store.capture(fixture_row(row, false)).finalized;
             document.finalize_transaction(finalized.into_iter().next().unwrap());
         }
         let live = || {
             vec![
-                CapturedRow::plain("prompt>   ", false),
-                CapturedRow::plain("          ", false),
-                CapturedRow::plain("          ", false),
-                CapturedRow::plain("          ", false),
-                CapturedRow::plain("          ", false),
+                fixture_row("prompt>   ", false),
+                fixture_row("          ", false),
+                fixture_row("          ", false),
+                fixture_row("          ", false),
+                fixture_row("          ", false),
             ]
         };
 
@@ -9889,12 +9996,8 @@ mod tests {
         let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
         let mut document = HistoryDocument::default();
         for text in ["frozen-a", "frozen-b"] {
-            document.finalize_transaction(
-                store
-                    .capture(CapturedRow::plain(text, false))
-                    .finalized
-                    .remove(0),
-            );
+            document
+                .finalize_transaction(store.capture(fixture_row(text, false)).finalized.remove(0));
         }
         let mut projection = ViewportProjection::new(
             key(10),
@@ -9907,10 +10010,10 @@ mod tests {
         projection.project(&document);
         let live = || {
             vec![
-                CapturedRow::plain("live      ", false),
-                CapturedRow::plain("tail      ", false),
-                CapturedRow::plain("          ", false),
-                CapturedRow::plain("          ", false),
+                fixture_row("live      ", false),
+                fixture_row("tail      ", false),
+                fixture_row("          ", false),
+                fixture_row("          ", false),
             ]
         };
         projection
@@ -9954,12 +10057,8 @@ mod tests {
         let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
         let mut document = HistoryDocument::default();
         for text in ["frozen-a", "frozen-b", "frozen-c", "frozen-d"] {
-            document.finalize_transaction(
-                store
-                    .capture(CapturedRow::plain(text, false))
-                    .finalized
-                    .remove(0),
-            );
+            document
+                .finalize_transaction(store.capture(fixture_row(text, false)).finalized.remove(0));
         }
         let mut projection = ViewportProjection::new(
             key(10),
@@ -9972,11 +10071,11 @@ mod tests {
         projection.project(&document);
         let live = || {
             vec![
-                CapturedRow::plain("live-a    ", false),
-                CapturedRow::plain("          ", false),
-                CapturedRow::plain("live-b    ", false),
-                CapturedRow::plain("          ", false),
-                CapturedRow::plain("          ", false),
+                fixture_row("live-a    ", false),
+                fixture_row("          ", false),
+                fixture_row("live-b    ", false),
+                fixture_row("          ", false),
+                fixture_row("          ", false),
             ]
         };
         projection
@@ -10021,7 +10120,7 @@ mod tests {
         let mut document = HistoryDocument::default();
         document.finalize_transaction(
             store
-                .capture(CapturedRow::plain("abcdefgh", false))
+                .capture(fixture_row("abcdefgh", false))
                 .finalized
                 .remove(0),
         );
@@ -10036,8 +10135,8 @@ mod tests {
         projection.project(&document);
         let wide_live = || {
             vec![
-                CapturedRow::plain("live    ", false),
-                CapturedRow::plain("tail    ", false),
+                fixture_row("live    ", false),
+                fixture_row("tail    ", false),
             ]
         };
         projection
@@ -10057,10 +10156,7 @@ mod tests {
         assert_eq!(projection.scroll_offset_rows(), 1);
 
         projection.relayout(key(2), &document);
-        let narrow_live = vec![
-            CapturedRow::plain("li", false),
-            CapturedRow::plain("ta", false),
-        ];
+        let narrow_live = vec![fixture_row("li", false), fixture_row("ta", false)];
         projection
             .continuous_frame(
                 &document,
@@ -10087,7 +10183,7 @@ mod tests {
         for index in 0..count {
             document.finalize_transaction(
                 store
-                    .capture(CapturedRow::plain(&format!("line-{index:03}"), false))
+                    .capture(fixture_row(&format!("line-{index:03}"), false))
                     .finalized
                     .remove(0),
             );
@@ -10096,7 +10192,7 @@ mod tests {
     }
 
     fn six_blank_live() -> Vec<CapturedRow> {
-        vec![CapturedRow::plain("         ", false); 6]
+        vec![fixture_row("         ", false); 6]
     }
 
     fn reviewing_projection(store: &mut TranscriptStore) -> (ViewportProjection, HistoryDocument) {
@@ -10227,7 +10323,7 @@ mod tests {
         let mut document = HistoryDocument::default();
         document.finalize_transaction(
             store
-                .capture(CapturedRow::plain("abcdefghijkl", false))
+                .capture(fixture_row("abcdefghijkl", false))
                 .finalized
                 .remove(0),
         );
@@ -10240,10 +10336,7 @@ mod tests {
             GridGeneration(1),
         );
         projection.project(&document);
-        let wide_live = vec![
-            CapturedRow::plain("live  ", false),
-            CapturedRow::plain("tail  ", false),
-        ];
+        let wide_live = vec![fixture_row("live  ", false), fixture_row("tail  ", false)];
         projection
             .continuous_frame(
                 &document,
@@ -10262,10 +10355,7 @@ mod tests {
             .continuous_frame(
                 &document,
                 &[],
-                vec![
-                    CapturedRow::plain("live  ", false),
-                    CapturedRow::plain("tail  ", false),
-                ],
+                vec![fixture_row("live  ", false), fixture_row("tail  ", false)],
                 GridCursor {
                     row: 1,
                     column: 0,
@@ -10297,10 +10387,7 @@ mod tests {
             .continuous_frame(
                 &document,
                 &[],
-                vec![
-                    CapturedRow::plain("live", false),
-                    CapturedRow::plain("tail", false),
-                ],
+                vec![fixture_row("live", false), fixture_row("tail", false)],
                 GridCursor {
                     row: 1,
                     column: 0,
@@ -10324,7 +10411,7 @@ mod tests {
     #[test]
     fn staging_scroll_anchor_uses_the_g3_mapping_when_the_row_freezes() {
         let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
-        store.capture(CapturedRow::plain("head", true));
+        store.capture(fixture_row("head", true));
         let staged = store.staged_rows().cloned().collect::<Vec<_>>();
         let mut document = HistoryDocument::default();
         let mut projection = ViewportProjection::new(
@@ -10336,7 +10423,7 @@ mod tests {
             GridGeneration(1),
         );
         projection.project(&document);
-        let live = || vec![CapturedRow::plain("tail", false)];
+        let live = || vec![fixture_row("tail", false)];
         projection
             .continuous_frame(
                 &document,
@@ -10425,7 +10512,7 @@ mod tests {
         let mut ids = Vec::new();
         for index in 0..12 {
             let finalized = store
-                .capture(CapturedRow::plain(&format!("line-{index:02}"), false))
+                .capture(fixture_row(&format!("line-{index:02}"), false))
                 .finalized
                 .remove(0);
             ids.push(finalized.line.id);
@@ -10464,7 +10551,7 @@ mod tests {
             ids[7]
         };
         projection.project(&document);
-        let live = || vec![CapturedRow::plain("        ", false); 4];
+        let live = || vec![fixture_row("        ", false); 4];
         let cursor = GridCursor {
             row: 3,
             column: 0,
@@ -10559,7 +10646,7 @@ mod tests {
             SourceGeneration(1),
             GridGeneration(1),
         );
-        let live = || vec![CapturedRow::plain("        ", false); 12];
+        let live = || vec![fixture_row("        ", false); 12];
         let cursor = GridCursor {
             row: 11,
             column: 0,
@@ -10600,7 +10687,7 @@ mod tests {
         let mut ids = Vec::new();
         for index in 0..8 {
             let finalized = store
-                .capture(CapturedRow::plain(&format!("line-{index:02}"), false))
+                .capture(fixture_row(&format!("line-{index:02}"), false))
                 .finalized
                 .remove(0);
             ids.push(finalized.line.id);
@@ -10614,7 +10701,7 @@ mod tests {
             store.source_generation(),
             GridGeneration(1),
         );
-        let live = || vec![CapturedRow::plain("        ", false); 4];
+        let live = || vec![fixture_row("        ", false); 4];
         let cursor = GridCursor {
             row: 3,
             column: 0,
@@ -10667,7 +10754,7 @@ mod tests {
         let mut ids = Vec::new();
         for index in 0..16 {
             let finalized = store
-                .capture(CapturedRow::plain(&format!("line-{index:02}"), false))
+                .capture(fixture_row(&format!("line-{index:02}"), false))
                 .finalized
                 .remove(0);
             ids.push(finalized.line.id);
@@ -10682,7 +10769,7 @@ mod tests {
             GridGeneration(1),
         );
         projection.project(&document);
-        let live = || vec![CapturedRow::plain("        ", false); 4];
+        let live = || vec![fixture_row("        ", false); 4];
         let cursor = GridCursor {
             row: 3,
             column: 0,
@@ -10702,7 +10789,7 @@ mod tests {
 
         document.finalize_transaction(
             store
-                .capture(CapturedRow::plain("appended", false))
+                .capture(fixture_row("appended", false))
                 .finalized
                 .remove(0),
         );
@@ -10818,7 +10905,7 @@ mod tests {
         artifact.band_end_row = 2;
         artifact.artifact.height_subpixels = cell + cell / 3;
         projection.sync_live_math_artifacts(ScreenId::Alternate, [artifact]);
-        let live = || vec![CapturedRow::plain("        ", false); 6];
+        let live = || vec![fixture_row("        ", false); 6];
         let cursor = GridCursor {
             row: 5,
             column: 0,
@@ -10850,10 +10937,7 @@ mod tests {
         let mut document = HistoryDocument::default();
         let mut ids = Vec::new();
         for text in ["h0", "h1", "h2", "h3"] {
-            let finalized = store
-                .capture(CapturedRow::plain(text, false))
-                .finalized
-                .remove(0);
+            let finalized = store.capture(fixture_row(text, false)).finalized.remove(0);
             ids.push(finalized.line.id);
             document.finalize_transaction(finalized);
         }
@@ -10866,12 +10950,7 @@ mod tests {
             GridGeneration(1),
         );
         projection.project(&document);
-        let live = || {
-            vec![
-                CapturedRow::plain("l0", false),
-                CapturedRow::plain("l1", false),
-            ]
-        };
+        let live = || vec![fixture_row("l0", false), fixture_row("l1", false)];
         let cursor = GridCursor {
             row: 0,
             column: 1,
@@ -11076,7 +11155,7 @@ mod tests {
         let mut store = TranscriptStore::new(NonZeroUsize::new(64).unwrap());
         let mut document = HistoryDocument::default();
         for text in lines {
-            for finalized in store.capture(CapturedRow::plain(text, false)).finalized {
+            for finalized in store.capture(fixture_row(text, false)).finalized {
                 document.finalize_transaction(finalized);
             }
         }
@@ -11326,9 +11405,7 @@ mod tests {
         let (mut projection, document) =
             axis_pane(flattened_key(COLUMNS), 2, &["0123456789abcdefghij"]);
         let mut store = TranscriptStore::new(NonZeroUsize::new(8).unwrap());
-        let staged_id = store
-            .capture(CapturedRow::plain("STAGEDRW", false))
-            .staging_id;
+        let staged_id = store.capture(fixture_row("STAGEDRW", false)).staging_id;
         let staged = [StagedRow {
             id: staged_id,
             row: grid_row("STAGEDRW", COLUMNS as usize),
@@ -11541,7 +11618,7 @@ mod tests {
             GridGeneration(1),
         );
         let admit = |store: &mut TranscriptStore, document: &mut HistoryDocument, text: &str| {
-            for finalized in store.capture(CapturedRow::plain(text, false)).finalized {
+            for finalized in store.capture(fixture_row(text, false)).finalized {
                 document.finalize_transaction(finalized);
             }
             let evicted = store.take_evictions();
@@ -11617,7 +11694,7 @@ mod tests {
         for fragment in ["01234567", "89abcdef"] {
             assert!(
                 store
-                    .capture(CapturedRow::plain(fragment, true))
+                    .capture(fixture_row(fragment, true))
                     .finalized
                     .is_empty(),
                 "a line that continues is not finished, so nothing is sealed yet"
@@ -11668,7 +11745,7 @@ mod tests {
         );
 
         // The line ends. The seal takes all three fragments in one act.
-        for finalized in store.capture(CapturedRow::plain("ghij", false)).finalized {
+        for finalized in store.capture(fixture_row("ghij", false)).finalized {
             document.finalize_transaction(finalized);
         }
         assert_eq!(

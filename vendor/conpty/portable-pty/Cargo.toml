@@ -31,22 +31,6 @@ resolver = "2"
 name = "portable_pty"
 path = "src/lib.rs"
 
-[[example]]
-name = "bash"
-path = "examples/bash.rs"
-
-[[example]]
-name = "narrow"
-path = "examples/narrow.rs"
-
-[[example]]
-name = "whoami"
-path = "examples/whoami.rs"
-
-[[example]]
-name = "whoami_async"
-path = "examples/whoami_async.rs"
-
 [dependencies.anyhow]
 version = "1.0"
 

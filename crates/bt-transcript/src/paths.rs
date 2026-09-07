@@ -191,11 +191,37 @@ impl PrintedPathCandidate {
 /// over OSC 7 is a directory and has no extension to allow, while an image must additionally clear
 /// an extension list. Keeping the two halves apart is what lets one URI decoder serve both without
 /// either shape inheriting the other's privileges.
+#[cfg(windows)]
 pub fn is_local_absolute_path(path: &Path) -> bool {
     let text = path.as_os_str().to_string_lossy();
     is_windows_drive_absolute(&text) && !text.contains('\0')
 }
 
+/// The same gate where a filesystem has one root instead of one per volume.
+///
+/// # `~` is not a root here either
+///
+/// A POSIX shell prints `~/docs/a.md` before it expands it, and the expansion
+/// belongs to the process that printed it — the ruling
+/// [`is_relative_reference`] states for `~\docs\a.md` and `$HOME/docs/a.md`,
+/// which was never a Windows ruling. So `~` is deliberately absent from this
+/// function: a `~`-opening reference is not rooted, it falls to the relative
+/// scan, and that scan refuses a leading `~` on every platform for the reason
+/// written there. What this window promises is a place somebody named, and
+/// `~` names a place only after somebody else has said where home is.
+///
+/// A `//`-opening path is absent for a different reason and it is enforced at
+/// the scan rather than here: POSIX leaves two leading slashes
+/// implementation-defined, and the shapes that actually print them into a
+/// terminal are a scheme's authority (`https://host/x`) and a `file://` URI,
+/// both of which are other scans' business. See [`is_posix_root_prefix_at`].
+#[cfg(not(windows))]
+pub fn is_local_absolute_path(path: &Path) -> bool {
+    let text = path.as_os_str().to_string_lossy();
+    text.starts_with('/') && !text.contains('\0')
+}
+
+#[cfg(windows)]
 fn is_windows_drive_absolute(text: &str) -> bool {
     let bytes = text.as_bytes();
     bytes.len() >= 3
@@ -225,8 +251,7 @@ pub fn detect_absolute_path_candidates(text: &str) -> Vec<PrintedPathCandidate> 
         } else {
             cursor
         };
-        if !is_drive_prefix_at(bytes, start) || (!quoted && !candidate_start_boundary(text, start))
-        {
+        if !absolute_candidate_opens_at(text, bytes, start, quoted) {
             cursor += 1;
             continue;
         }
@@ -479,11 +504,34 @@ pub fn detect_relative_path_candidates(
 ///
 /// Absolute paths are untouched: `C:\x\~\y.txt` is drive-rooted, so nothing about it was ever
 /// waiting to be expanded, and a directory somebody really called `~` is a real place.
+#[cfg(windows)]
 pub fn is_relative_reference(candidate: &str) -> bool {
     !candidate.starts_with(['/', '\\'])
         && !candidate.starts_with('~')
         && !candidate.ends_with(['/', '\\'])
         && candidate.contains(['/', '\\'])
+        && !candidate.contains(':')
+}
+
+/// The same five refusals where `\` is not a separator.
+///
+/// Every word of the ruling above still holds; one character leaves the class
+/// it is tested against. A backslash is a **legal character in a POSIX
+/// filename** — `a\ b.txt` is what a shell prints for a name with a space in
+/// it — so reading it as a separator here would do the two wrong things at
+/// once: it would admit `docs\a.md` as a two-segment reference on a system
+/// where that is one file nobody has, and it would refuse `weird\name` as a
+/// trailing separator when it is a name.
+///
+/// It stays on [`is_path_tail_char`] for exactly that reason: what a name may
+/// be *spelled with* and what divides a name into segments are two questions,
+/// and only the second one is answered differently here.
+#[cfg(not(windows))]
+pub fn is_relative_reference(candidate: &str) -> bool {
+    !candidate.starts_with('/')
+        && !candidate.starts_with('~')
+        && !candidate.ends_with('/')
+        && candidate.contains('/')
         && !candidate.contains(':')
 }
 
@@ -540,9 +588,15 @@ fn is_relative_prefix_at(bytes: &[u8], start: usize) -> bool {
     } else {
         start + 1
     };
-    bytes
+    #[cfg(windows)]
+    let separator = bytes
         .get(after_dots)
-        .is_some_and(|byte| matches!(*byte, b'/' | b'\\'))
+        .is_some_and(|byte| matches!(*byte, b'/' | b'\\'));
+    // `./a.md` and nothing else: `.\a.md` is a filename beginning with a dot on
+    // a POSIX filesystem, and an anchor is a mark this window may act on.
+    #[cfg(not(windows))]
+    let separator = bytes.get(after_dots) == Some(&b'/');
+    separator
 }
 
 /// Join a relative candidate onto an authoritative working directory and normalize it lexically.
@@ -554,6 +608,7 @@ fn is_relative_prefix_at(bytes: &[u8], start: usize) -> bool {
 /// `..` that would climb past the drive root names nothing a filesystem can hold, and a join that
 /// lands on the bare drive root names a directory rather than a file; both are simply not
 /// candidates.
+#[cfg(windows)]
 pub fn resolve_relative_reference(working_directory: &Path, relative: &str) -> Option<PathBuf> {
     if !is_local_absolute_path(working_directory) {
         return None;
@@ -582,12 +637,99 @@ pub fn resolve_relative_reference(working_directory: &Path, relative: &str) -> O
     is_local_absolute_path(&path).then_some(path)
 }
 
+/// The same join against a single-rooted filesystem: no drive to carry through,
+/// and `/` for the separator on the way out as well as on the way in.
+///
+/// The two refusals are the same two and they land on the same shapes. A `..`
+/// that would climb past the root pops an empty stack and names nothing a
+/// filesystem can hold; a join that leaves nothing behind is the bare root,
+/// which is a directory rather than a file. Neither is a candidate.
+#[cfg(not(windows))]
+pub fn resolve_relative_reference(working_directory: &Path, relative: &str) -> Option<PathBuf> {
+    if !is_local_absolute_path(working_directory) {
+        return None;
+    }
+    let base = working_directory.as_os_str().to_str()?;
+    let mut components = Vec::new();
+    for component in base.split('/').chain(relative.split('/')) {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop()?;
+            }
+            named => components.push(named),
+        }
+    }
+    if components.is_empty() {
+        return None;
+    }
+    let mut native = String::new();
+    for component in components {
+        native.push('/');
+        native.push_str(component);
+    }
+    let path = PathBuf::from(native);
+    is_local_absolute_path(&path).then_some(path)
+}
+
+#[cfg(windows)]
 fn is_drive_prefix_at(bytes: &[u8], start: usize) -> bool {
     bytes.get(start).is_some_and(u8::is_ascii_alphabetic)
         && bytes.get(start + 1) == Some(&b':')
         && bytes
             .get(start + 2)
             .is_some_and(|byte| matches!(*byte, b'\\' | b'/'))
+}
+
+/// Where a rooted path may open, and the one boundary rule that goes with it.
+///
+/// **The two platforms differ in what the mark is, not in what it does for the
+/// scan.** A drive prefix is three characters and is vanishingly rare in prose,
+/// so on Windows the mark alone carries the whole opening test and
+/// [`candidate_start_boundary`] only has to say the token did not start
+/// earlier. A POSIX root is a single `/`, which is not rare at all — it is the
+/// commonest character in a URL — so the mark alone is not evidence and the
+/// arm below asks for two things more.
+///
+/// It is written as one function with two arms rather than as two conditions at
+/// the call site because the call site is inside
+/// [`detect_absolute_path_candidates`]'s loop, where the `quoted` case has to
+/// keep skipping the boundary test on both platforms: quoting is a declaration
+/// of extent and it declares the opening as much as the close, so
+/// `path:"/a b/c.md"` is one reference and not nothing.
+#[cfg(windows)]
+fn absolute_candidate_opens_at(text: &str, bytes: &[u8], start: usize, quoted: bool) -> bool {
+    is_drive_prefix_at(bytes, start) && (quoted || candidate_start_boundary(text, start))
+}
+
+#[cfg(not(windows))]
+fn absolute_candidate_opens_at(text: &str, bytes: &[u8], start: usize, quoted: bool) -> bool {
+    is_posix_root_prefix_at(bytes, start)
+        && (quoted
+            || (candidate_start_boundary(text, start)
+                && !a_binding_colon_stands_before(text, start)))
+}
+
+/// A `/` that opens a path rather than continuing a URL.
+///
+/// Two refusals, and both are about the same shape. `//` is refused because the
+/// only things that print two leading slashes into a terminal are an authority
+/// (`https://host/x`, whose `//` is preceded by the scheme's colon, so
+/// [`candidate_start_boundary`] lets it through) and a `file://` URI, which
+/// [`detect_file_uri_candidates`] decodes properly and must never be half-read
+/// here. POSIX itself leaves `//x` implementation-defined, so nothing is lost:
+/// a path a person means is spelled with one.
+///
+/// The second refusal is the **binding colon**, and it is
+/// [`bare_candidate_opens_at`]'s rule applied one scan over. On Windows the
+/// absolute scan never needed it — a drive prefix cannot follow a colon and
+/// still be a drive prefix — but `scheme:/opaque` and the `:`-separated
+/// `PATH` a POSIX shell prints both put a rooted-looking run behind a colon,
+/// and a colon binds leftward: what follows it belongs to whatever the colon
+/// already made absolute or schemed.
+#[cfg(not(windows))]
+fn is_posix_root_prefix_at(bytes: &[u8], start: usize) -> bool {
+    bytes.get(start) == Some(&b'/') && bytes.get(start + 1) != Some(&b'/')
 }
 
 /// Characters that could legitimately be the tail of a longer token, so a drive prefix that follows
@@ -1136,6 +1278,7 @@ fn matching_quote(opening: char) -> Option<char> {
 
 /// Whether a path carries an empty component somewhere other than at its very end — `D:\\a\\b`,
 /// `docs//a.md`. A single trailing separator is a directory's own and is not one of these.
+#[cfg(windows)]
 fn has_interior_empty_component(path: &str) -> bool {
     let rest = if is_windows_drive_absolute(path) {
         &path[3..]
@@ -1147,8 +1290,23 @@ fn has_interior_empty_component(path: &str) -> bool {
     segments.iter().any(|segment| segment.is_empty())
 }
 
+/// The same question where the root is one character and the separator is one
+/// character: `/a//b`, `docs//a.md`.
+///
+/// The root's own slash is taken off first for the drive prefix's reason — it
+/// is what makes the path rooted, not an empty segment — and a single trailing
+/// separator is still a directory's own.
+#[cfg(not(windows))]
+fn has_interior_empty_component(path: &str) -> bool {
+    let rest = path.strip_prefix('/').unwrap_or(path);
+    let mut segments = rest.split('/').collect::<Vec<_>>();
+    segments.pop();
+    segments.iter().any(|segment| segment.is_empty())
+}
+
 /// Whether a path's last component is one of the names Windows reserves for devices, with or
 /// without an extension: `D:\case\CON`, `D:\case\NUL.txt`.
+#[cfg(windows)]
 fn names_a_dos_device(path: &str) -> bool {
     const DEVICES: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "COM", "LPT"];
     let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
@@ -1170,6 +1328,21 @@ fn names_a_dos_device(path: &str) -> bool {
     })
 }
 
+/// There is no reserved-name namespace to be caught by off Windows.
+///
+/// `CON`, `NUL` and `COM1` are ordinary filenames on a POSIX filesystem, and
+/// the device nodes that do exist (`/dev/null`, `/dev/tty`) are named by an
+/// ordinary path with no shape that tells them apart from a file. The Windows
+/// refusal exists because metadata *succeeds* on a reserved name while whatever
+/// opens it afterwards reaches a different kind of object; that trap is not
+/// here, and inventing a `/dev/` refusal in its place would be refusing a
+/// directory somebody may perfectly well be pointing at.
+#[cfg(not(windows))]
+fn names_a_dos_device(path: &str) -> bool {
+    let _ = path;
+    false
+}
+
 /// The fields whose value this window will read as a Windows **search path** rather than as one
 /// name — §7.1.5k ③.
 ///
@@ -1179,6 +1352,24 @@ fn names_a_dos_device(path: &str) -> bool {
 /// `D:\case\real` — turning "this is not here" into a promise about somewhere the writer never
 /// named. Only a field that has *said* the value is a list is evidence that it is one.
 const PATH_LIST_FIELDS: [&str; 2] = ["PATH", "PSMODULEPATH"];
+
+/// What divides one entry of that value from the next.
+///
+/// The one character in §7.1.5k ③ that is an operating system's and not a
+/// habit's. A Windows list is `;`-separated because `:` is the drive's; a POSIX
+/// list is `:`-separated because there is no drive to spend it on. Reading a
+/// POSIX `PATH` with the Windows separator does not merely miss the split — it
+/// makes the **whole value one name**, and since every character of it clears
+/// the rooted-path shape gate, the line comes back offering `/usr/bin:/bin` as
+/// a file somebody could open.
+///
+/// The fields are deliberately not per-platform beside it: `PATH` is `PATH`
+/// everywhere, and `PSMODULEPATH` belongs to PowerShell rather than to Windows
+/// — pwsh sets it on a Mac too.
+#[cfg(windows)]
+const PATH_LIST_SEPARATOR: u8 = b';';
+#[cfg(not(windows))]
+const PATH_LIST_SEPARATOR: u8 = b':';
 
 /// The `NAME=` field a path list is declared by, if this line declares one: the byte range of its
 /// value, which runs to the end of the logical line.
@@ -1245,7 +1436,7 @@ fn detect_path_list_candidates(text: &str) -> Vec<PrintedPathCandidate> {
     let mut segment = span.start;
     let bytes = text.as_bytes();
     while cursor <= span.end {
-        let ends = cursor == span.end || (bytes[cursor] == b';' && !quoted);
+        let ends = cursor == span.end || (bytes[cursor] == PATH_LIST_SEPARATOR && !quoted);
         if !ends {
             if bytes[cursor] == b'"' {
                 quoted = !quoted;
@@ -1352,11 +1543,7 @@ pub fn decode_file_uri(
         }
         decoded_segments.push(decoded);
     }
-    let mut native = decoded_segments.join("\\");
-    // `file:///D:/` names the drive root: the separator that makes it a root belongs to the path.
-    if native.len() == 2 && native.ends_with(':') {
-        native.push('\\');
-    }
+    let native = native_path_from_uri_segments(&decoded_segments);
     if is_local_absolute_path(Path::new(&native)) {
         return Some(PathBuf::from(native));
     }
@@ -1369,6 +1556,34 @@ pub fn decode_file_uri(
     }
     let posix = format!("/{}", decoded_segments.join("/"));
     (!posix.contains('\0')).then(|| PathBuf::from(posix))
+}
+
+/// The native spelling of a `file:` URI's already-decoded segments.
+///
+/// Split out of [`decode_file_uri`] because it is the one line of that function
+/// that is about an operating system rather than about RFC 3986: everything
+/// above it — the authority, the query and fragment, the per-segment decode,
+/// the trailing-slash rule — is the same sentence on every platform, and only
+/// the assembly is not.
+#[cfg(windows)]
+fn native_path_from_uri_segments(segments: &[String]) -> String {
+    let mut native = segments.join("\\");
+    // `file:///D:/` names the drive root: the separator that makes it a root belongs to the path.
+    if native.len() == 2 && native.ends_with(':') {
+        native.push('\\');
+    }
+    native
+}
+
+/// The same segments, where the leading empty one **is** the root.
+///
+/// A `file:` URI's path always opens with `/`, so the segments are exactly the
+/// components below the root and the spelling is the root's slash in front of
+/// each of them. `file:///` decodes to no segments at all and never reaches
+/// here — an empty segment is refused above as an empty name.
+#[cfg(not(windows))]
+fn native_path_from_uri_segments(segments: &[String]) -> String {
+    format!("/{}", segments.join("/"))
 }
 
 /// Percent-decode one URI segment. `None` when an escape is malformed, the result is not UTF-8, or
@@ -1405,12 +1620,44 @@ fn percent_decode(segment: &str) -> Option<String> {
 /// Percent-encoding covers every byte outside RFC 3986's unreserved set, apart from the two
 /// structural characters this shape needs literally (`/` and the drive's `:`). A space becomes
 /// `%20`, and a name in any script becomes its UTF-8 bytes escaped one at a time.
+#[cfg(windows)]
 pub fn local_path_to_file_uri(path: &Path) -> String {
     const UNRESERVED_EXTRA: &[u8] = b"-._~";
     let mut uri = String::from("file:///");
     for byte in path.as_os_str().to_string_lossy().bytes() {
         match byte {
             b'\\' | b'/' => uri.push('/'),
+            b':' => uri.push(':'),
+            byte if byte.is_ascii_alphanumeric() || UNRESERVED_EXTRA.contains(&byte) => {
+                uri.push(byte as char);
+            }
+            byte => uri.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    uri
+}
+
+/// The same spelling where the path already carries the third slash.
+///
+/// `file://` and not `file:///`, because a POSIX path opens with the separator
+/// that the Windows arm has to supply — `/home/a/x.md` becomes
+/// `file:///home/a/x.md` and not `file:////home/a/x.md`, which is a URI with an
+/// empty authority followed by an implementation-defined root and decodes back
+/// to something else.
+///
+/// A backslash is percent-encoded here rather than turned into a separator, for
+/// [`is_relative_reference`]'s reason: on this filesystem it is a character in
+/// a name, and a link target that quietly turned one into a `/` would open a
+/// different file. The colon stays literal, exactly as it does on Windows —
+/// RFC 3986 allows it in a path segment, and a name with a colon in it is a
+/// name a POSIX filesystem holds.
+#[cfg(not(windows))]
+pub fn local_path_to_file_uri(path: &Path) -> String {
+    const UNRESERVED_EXTRA: &[u8] = b"-._~";
+    let mut uri = String::from("file://");
+    for byte in path.as_os_str().to_string_lossy().bytes() {
+        match byte {
+            b'/' => uri.push('/'),
             b':' => uri.push(':'),
             byte if byte.is_ascii_alphanumeric() || UNRESERVED_EXTRA.contains(&byte) => {
                 uri.push(byte as char);
@@ -1924,7 +2171,16 @@ impl PrintedPathLinks {
     }
 }
 
-#[cfg(test)]
+/// **The boundary table, asked on Windows.**
+///
+/// Windows and not `cfg(test)` because of the *fixtures*, not the claims. Every
+/// row of the boundary table is written as a drive-rooted path, and a drive
+/// letter is exactly what the POSIX arm of this module's grammar does not
+/// recognise — `D:\\x\\a.md` on a Mac is one filename with two colons and a
+/// backslash in it, and every span assertion below would be reporting the
+/// fixture rather than the rule. `posix_tests` after it asks the same questions
+/// in the spelling that platform reads.
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
@@ -5102,5 +5358,967 @@ mod tests {
                 "ranges come back in reading order and disjoint"
             );
         }
+    }
+}
+
+/// **The boundary table, asked where `/` is the root and `\` is a letter.**
+///
+/// The mirror of `tests` above, and deliberately not a translation of it: what
+/// is asked here is the set of decisions the POSIX arm of this module's grammar
+/// actually makes differently, each in the shape that platform prints. The rows
+/// that are the same sentence on both — the location syntax, the prose seams,
+/// the truncation gate, `$HOME`, the quoting rules — are asked once here on a
+/// POSIX fixture rather than twice, because their claim is about the lexer and
+/// the lexer is shared.
+///
+/// The disk-backed cases at the end are the six this module used to fail on a
+/// Mac (`docs/plans/port/macos-spike-2026-09-07.md`, appendix A). They are not
+/// mirrors of anything: they are the same tests, written against a real
+/// temporary directory, which is what makes them a measurement of the grammar
+/// rather than of a fixture table.
+#[cfg(all(test, not(windows)))]
+mod posix_tests {
+    use super::*;
+
+    /// The empty answer, typed. `assert_eq!(spans(..), [])` cannot infer the element type of an
+    /// array with nothing in it, and naming it here says what the empty answer is *of*.
+    const NO_SPANS: [&str; 0] = [];
+
+    /// Every candidate one line offers, as `(text, spelling)` pairs in reading order.
+    fn candidates(text: &str) -> Vec<(&str, PrintedPathSpelling)> {
+        let mut found = detect_absolute_path_candidates(text);
+        found.extend(detect_relative_path_candidates(text, &|_| true));
+        found.extend(detect_file_uri_candidates(text));
+        found.sort_by_key(|candidate| candidate.byte_start);
+        found
+            .into_iter()
+            .map(|candidate| (candidate.reference_text(text), candidate.spelling))
+            .collect()
+    }
+
+    fn spans(text: &str) -> Vec<&str> {
+        candidates(text)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect::<Vec<_>>()
+    }
+
+    /// Every candidate as `(path text, location)` — the two halves a located reference splits into.
+    fn located(text: &str) -> Vec<(&str, Option<PrintedPathLocation>)> {
+        let mut found = detect_absolute_path_candidates(text);
+        found.extend(detect_relative_path_candidates(text, &|_| true));
+        found.extend(detect_file_uri_candidates(text));
+        found.sort_by_key(|candidate| candidate.byte_start);
+        found
+            .into_iter()
+            .map(|candidate| (candidate.path_text(text), candidate.location))
+            .collect()
+    }
+
+    /// The last visual cell of `text`, as the truncation gate reads it when the whole line is one
+    /// row and the reference ends the row.
+    fn last_cell_of(text: &str) -> Option<LineEndCell> {
+        let last = text.char_indices().next_back()?;
+        Some(LineEndCell {
+            byte_start: last.0,
+            byte_end: text.len(),
+        })
+    }
+
+    /// Every link one line offers as `(printed span, target)`.
+    fn linked<'line>(
+        links: &PrintedPathLinks,
+        line: &'line str,
+        edge: Option<LineEndCell>,
+    ) -> Vec<(&'line str, String)> {
+        let mut unknown = BTreeSet::new();
+        links
+            .links_in(line, edge, &mut unknown)
+            .into_iter()
+            .map(|(range, uri)| (&line[range.byte_start..range.byte_end], uri))
+            .collect()
+    }
+
+    fn ledger(working_directory: &str, verdicts: &[(&str, bool)]) -> PrintedPathLinks {
+        PrintedPathLinks::new(
+            Some(PathBuf::from(working_directory)),
+            verdicts
+                .iter()
+                .map(|(path, answer)| (PathBuf::from(path), *answer))
+                .collect(),
+        )
+    }
+
+    /// A disk that says yes to every name it is asked about, so that a row which comes back empty
+    /// came back empty on the strength of the lexer and not of a fixture.
+    fn linked_on_a_full_disk<'line>(
+        working_directory: Option<&str>,
+        line: &'line str,
+    ) -> Vec<(&'line str, String)> {
+        let base = working_directory.map(PathBuf::from);
+        let mut unknown = BTreeSet::new();
+        PrintedPathLinks::new(base.clone(), BTreeMap::new()).links_in(line, None, &mut unknown);
+        let links =
+            PrintedPathLinks::new(base, unknown.into_iter().map(|path| (path, true)).collect());
+        linked(&links, line, None)
+    }
+
+    // ── the root ────────────────────────────────────────────────────────────
+
+    /// The POSIX reading of boundary table rows 1 and 2: there is one spelling of a rooted path,
+    /// and it is read whole.
+    #[test]
+    fn a_rooted_path_is_read_whole() {
+        assert_eq!(
+            spans("/Users/alice/folio-terminal/README.md"),
+            ["/Users/alice/folio-terminal/README.md"]
+        );
+    }
+
+    /// The drive letter is **not** a root here, and this is the one row that has to say so: on a
+    /// filesystem with one root, `D:\folio\README.md` is a single filename carrying two colons and
+    /// a backslash, and nothing in it is a separator.
+    #[test]
+    fn a_drive_letter_is_a_filename_and_not_a_root() {
+        assert_eq!(spans("D:\\Developer\\folio-terminal\\README.md"), NO_SPANS);
+        // The forward-slash spelling is not rooted either — it is a relative reference whose first
+        // segment happens to contain a colon, which `is_relative_reference` refuses for the reason
+        // it always refused it: a colon is what makes text absolute or schemed somewhere else.
+        assert_eq!(spans("D:/Developer/folio-terminal/README.md"), NO_SPANS);
+    }
+
+    /// Boundary table rows 3 and 4. A space ends an unquoted token, and quoting is the one
+    /// declaration of extent that lets a path carry one.
+    #[test]
+    fn a_space_belongs_to_a_path_only_inside_quotes() {
+        assert_eq!(spans("\"/tmp/a b/c.md\""), ["/tmp/a b/c.md"]);
+        assert_eq!(spans("/tmp/a b/c.md"), ["/tmp/a", "b/c.md"]);
+    }
+
+    /// Boundary table rows 5 and 6: a closing delimiter ends the token, in either width.
+    #[test]
+    fn a_closing_delimiter_ends_an_unquoted_path() {
+        assert_eq!(spans("(/x/a.md)"), ["/x/a.md"]);
+        assert_eq!(spans("（/x/a.md）"), ["/x/a.md"]);
+    }
+
+    /// A rooted path is no less rooted for standing in CJK prose, and the full-width colon in
+    /// front of it is punctuation rather than a binding colon.
+    #[test]
+    fn a_rooted_path_opens_after_prose_in_any_script() {
+        assert_eq!(spans("路径：/x/a.md"), ["/x/a.md"]);
+        assert_eq!(spans("见 /x/a.md。"), ["/x/a.md"]);
+    }
+
+    /// A rooted opening glued to the tail of a longer token is that token's, not a path of its
+    /// own — [`is_path_tail_char`] read as a boundary, which is what keeps `sub/a` from offering
+    /// a second candidate at its slash.
+    #[test]
+    fn a_slash_inside_a_token_opens_nothing() {
+        assert_eq!(
+            candidates("docs/plans/a.md"),
+            [("docs/plans/a.md", PrintedPathSpelling::Relative)],
+            "one relative reference, and no rooted candidate at either interior slash"
+        );
+    }
+
+    // ── the two refusals the POSIX root needs and the drive prefix did not ───
+
+    /// `//` never opens a path. The only shapes that print two leading slashes are a scheme's
+    /// authority and a `file://` URI, and both are other scans' business.
+    #[test]
+    fn two_leading_slashes_open_nothing() {
+        assert_eq!(
+            candidates("https://host.invalid/img/x.png")
+                .into_iter()
+                .filter(|(_, spelling)| *spelling == PrintedPathSpelling::Absolute)
+                .collect::<Vec<_>>(),
+            Vec::new(),
+            "the authority's // is not a rooted path and neither is anything inside the address"
+        );
+        assert_eq!(spans("//server/share/a.md"), NO_SPANS);
+    }
+
+    /// The binding colon, one scan over from where it already lived. A colon binds leftward, so
+    /// what follows it belongs to whatever the colon already made absolute or schemed.
+    #[test]
+    fn a_binding_colon_closes_a_rooted_opening() {
+        assert_eq!(spans("webpack:/app/src/main.ts"), NO_SPANS);
+        // A colon with another script in front of it has made nothing schemed — a scheme is
+        // spelled in ASCII — so the name behind it opens like any other.
+        assert_eq!(spans("路径:/x/a.md"), ["/x/a.md"]);
+    }
+
+    /// Quoting declares the opening as much as the close, so a quoted rooted path survives a
+    /// binding colon that would have refused it bare.
+    #[test]
+    fn quoting_beats_the_binding_colon() {
+        assert_eq!(spans("path:\"/a b/c.md\""), ["/a b/c.md"]);
+    }
+
+    // ── the relative grammar ────────────────────────────────────────────────
+
+    /// The five refusals, in the shape this platform prints them. The fourth — a trailing
+    /// separator — and the fifth — a leading `~` — are the two that carry a ruling of their own.
+    #[test]
+    fn the_five_refusals_hold() {
+        // no separator at all
+        assert_eq!(spans("README"), NO_SPANS);
+        // opens with a separator: that is the rooted scan's, not this one's
+        assert_eq!(
+            candidates("/usr/share/x.png"),
+            [("/usr/share/x.png", PrintedPathSpelling::Absolute)]
+        );
+        // a trailing separator is a directory prefix, and a reading must end on a character that
+        // is part of a name
+        assert_eq!(spans("src/"), NO_SPANS);
+        // a colon is what makes text absolute or schemed, and both are other scans' business
+        assert_eq!(spans("node:internal/modules/cjs/loader"), NO_SPANS);
+        // a leading `~` is somebody else's expansion — the same ruling, unchanged by the platform
+        assert_eq!(spans("~/docs/a.md"), NO_SPANS);
+        // `$HOME/docs/a.md` is refused one layer further out and it is worth showing where: `$` is
+        // not a path character, so the lexer opens a candidate one byte later and offers the whole
+        // of what follows it. §7.1.5k ④ is what reads the `$` standing in front of that candidate
+        // and refuses to promise a place the printing process had not expanded yet.
+        assert_eq!(spans("$HOME/docs/a.md"), ["HOME/docs/a.md"]);
+        assert_eq!(linked_on_a_full_disk(Some("/case"), "$HOME/docs/a.md"), []);
+    }
+
+    /// `~` inside a name is a name. The ruling refuses the mark at the **front** of a reference,
+    /// never the one inside it.
+    #[test]
+    fn a_tilde_inside_a_name_is_a_name() {
+        assert_eq!(spans("build/main.rs~"), ["build/main.rs~"]);
+    }
+
+    /// A backslash is a character in a POSIX filename, not a separator: it neither makes a
+    /// single-segment name into a reference nor ends one.
+    #[test]
+    fn a_backslash_is_a_letter_and_not_a_separator() {
+        assert_eq!(
+            spans("docs\\a.md"),
+            NO_SPANS,
+            "one segment carrying a backslash is a bare name, and a bare name is prose"
+        );
+        assert_eq!(
+            spans("docs/weird\\name.md"),
+            ["docs/weird\\name.md"],
+            "and a backslash inside a real reference is part of the name it is in"
+        );
+    }
+
+    /// The two anchors, and the one that is only an anchor on Windows.
+    #[test]
+    fn an_anchor_is_a_dot_and_a_forward_slash() {
+        assert_eq!(spans("./test.md"), ["./test.md"]);
+        assert_eq!(spans("../test.md"), ["../test.md"]);
+        assert_eq!(
+            spans(".\\test.md"),
+            NO_SPANS,
+            ".\\test.md is a filename that opens with a dot, not an anchored reference"
+        );
+    }
+
+    /// The location syntax a compiler, a linter and `grep -n` all print, on a rooted path and on
+    /// a relative one. The root's own slash can never be read as a line number because the run
+    /// this searches is digits and colons and it stops at the first character that is neither.
+    #[test]
+    fn a_location_is_split_off_the_name() {
+        assert_eq!(
+            located("/x/a.md:12:3"),
+            [(
+                "/x/a.md",
+                Some(PrintedPathLocation {
+                    line: 12,
+                    column: Some(3)
+                })
+            )]
+        );
+        assert_eq!(
+            located("docs/a.md:13"),
+            [(
+                "docs/a.md",
+                Some(PrintedPathLocation {
+                    line: 13,
+                    column: None
+                })
+            )]
+        );
+        assert_eq!(
+            located("docs/a.md:abc"),
+            Vec::new(),
+            "`abc` is not a position, so the colon is just a colon — and a relative reference \
+             carrying one is not a relative reference"
+        );
+    }
+
+    // ── the file: URI, both ways ────────────────────────────────────────────
+
+    /// A rooted path spells itself with three slashes and reads back as itself. The Windows arm
+    /// supplies the third slash because a drive-rooted path has none of its own; here the path
+    /// already carries it, and `file:////…` would be a different URI.
+    #[test]
+    fn a_local_path_round_trips_through_its_file_uri() {
+        let path = Path::new("/Users/alice/docs/a b.md");
+        let uri = local_path_to_file_uri(path);
+        assert_eq!(uri, "file:///Users/alice/docs/a%20b.md");
+        assert_eq!(file_uri_to_local_reference(&uri).as_deref(), Some(path));
+    }
+
+    /// A backslash in a name is escaped rather than turned into a separator, because turning one
+    /// into a `/` would open a different file.
+    #[test]
+    fn a_backslash_in_a_name_is_escaped_and_not_promoted() {
+        assert_eq!(
+            local_path_to_file_uri(Path::new("/tmp/weird\\name.md")),
+            "file:///tmp/weird%5Cname.md"
+        );
+        assert_eq!(
+            file_uri_to_local_reference("file:///tmp/weird%5Cname.md").as_deref(),
+            Some(Path::new("/tmp/weird\\name.md"))
+        );
+    }
+
+    /// The authority rules are the platform's business and unchanged: `localhost` is this
+    /// machine, a named server is not, and an interior empty segment is not a name.
+    #[test]
+    fn the_authority_and_the_empty_segment_are_read_as_they_always_were() {
+        assert_eq!(
+            file_uri_to_local_reference("file://localhost/x/a.md").as_deref(),
+            Some(Path::new("/x/a.md"))
+        );
+        assert_eq!(
+            file_uri_to_local_reference("file://server/share/a.md"),
+            None
+        );
+        assert_eq!(
+            file_uri_to_local_reference("file:///x//a.md"),
+            None,
+            "an interior empty segment is an empty name, and the decoder has refused one since it \
+             was written"
+        );
+        assert!(has_interior_empty_component("/x//a.md"));
+        assert!(!has_interior_empty_component("/x/a.md"));
+        assert!(!has_interior_empty_component("/x/"));
+    }
+
+    /// A printed `file://` URI is one candidate spanning the URI text, and its target is what the
+    /// decoder read rather than what was printed.
+    #[test]
+    fn a_printed_file_uri_is_one_candidate() {
+        assert_eq!(
+            candidates("file:///x/a.md"),
+            [("file:///x/a.md", PrintedPathSpelling::Uri)]
+        );
+    }
+
+    // ── the join ────────────────────────────────────────────────────────────
+
+    /// The join, and its two refusals: a `..` past the root names nothing a filesystem can hold,
+    /// and a join that lands on the bare root names a directory rather than a file.
+    #[test]
+    fn a_relative_reference_is_joined_lexically() {
+        let cwd = Path::new("/Users/alice/case");
+        assert_eq!(
+            resolve_relative_reference(cwd, "docs/a.md").as_deref(),
+            Some(Path::new("/Users/alice/case/docs/a.md"))
+        );
+        assert_eq!(
+            resolve_relative_reference(cwd, "../other/a.md").as_deref(),
+            Some(Path::new("/Users/alice/other/a.md"))
+        );
+        assert_eq!(
+            resolve_relative_reference(cwd, "./a.md").as_deref(),
+            Some(Path::new("/Users/alice/case/a.md"))
+        );
+        assert_eq!(
+            resolve_relative_reference(cwd, "../../../../a.md"),
+            None,
+            "climbing past the root names nothing"
+        );
+        assert_eq!(
+            resolve_relative_reference(Path::new("/one"), ".."),
+            None,
+            "and a join that lands on the bare root names a directory"
+        );
+        assert_eq!(
+            resolve_relative_reference(Path::new("relative/base"), "a.md"),
+            None,
+            "an unrooted working directory is not an authoritative one"
+        );
+    }
+
+    /// A reserved-device name is an ordinary filename here, and refusing one would be refusing a
+    /// file somebody may perfectly well be pointing at.
+    #[test]
+    fn there_is_no_device_namespace_to_be_caught_by() {
+        assert_eq!(
+            linked_on_a_full_disk(Some("/case"), "/case/NUL.txt"),
+            [("/case/NUL.txt", "file:///case/NUL.txt".to_owned())]
+        );
+        assert_eq!(
+            linked_on_a_full_disk(Some("/case"), "/case/COM1"),
+            [("/case/COM1", "file:///case/COM1".to_owned())]
+        );
+    }
+
+    // ── the gates on top of the lexical reading ─────────────────────────────
+
+    /// §7.1.5k ①: a reference whose last cell is the row's last cell may be the front half of one
+    /// the application cut in two, and is pressed down. It is one ruling over three shapes, so it
+    /// is asked of a rooted path, a relative one and an address.
+    #[test]
+    fn a_reference_that_reaches_the_rows_end_is_pressed_down() {
+        let links = ledger(
+            "/case",
+            &[
+                ("/case/docs/a.md", true),
+                ("/x/a.md", true),
+                ("/case/test.md", true),
+            ],
+        );
+        for line in ["/x/a.md", "docs/a.md", "./test.md"] {
+            assert_eq!(
+                linked(&links, line, None).len(),
+                1,
+                "{line} is one link inside the row"
+            );
+            assert_eq!(
+                linked(&links, line, last_cell_of(line)),
+                [],
+                "{line} is pressed down when its own last cell is the row's"
+            );
+        }
+        // A candidate that stopped at a delimiter the prose owns never reached the row's end, so
+        // both placements answer alike.
+        for line in ["(/x/a.md)", "见 /x/a.md。"] {
+            assert_eq!(
+                linked(&links, line, None),
+                linked(&links, line, last_cell_of(line)),
+                "{line} answers alike at both placements"
+            );
+            assert_eq!(linked(&links, line, last_cell_of(line)).len(), 1);
+        }
+        let address = "https://host.invalid:8080/img/x.png";
+        assert_eq!(inferred_url_ranges(address, None).len(), 1);
+        assert_eq!(inferred_url_ranges(address, last_cell_of(address)), []);
+    }
+
+    /// §7.1.5k ④: git's diff namespace is not this working tree's, on a disk that says yes to
+    /// everything.
+    #[test]
+    fn gits_synthesized_names_are_still_refused() {
+        for line in ["--- a/src/main.rs", "+++ b/src/main.rs"] {
+            assert_eq!(
+                linked_on_a_full_disk(Some("/case"), line),
+                [],
+                "{line} is a synthesized name and not this working tree's"
+            );
+        }
+    }
+
+    /// **Where a one-character root is more permissive than a drive prefix, stated rather than
+    /// papered over.**
+    ///
+    /// git's rename compression prints `src/{old => new}/main.rs`. The brace closes the token, and
+    /// the `/` behind it opens a rooted candidate — `/main.rs` — which no drive prefix could ever
+    /// have done, because three characters cannot appear by accident where one can. On Windows the
+    /// same line offers nothing at all.
+    ///
+    /// It is left as it is, and the reason is the one this whole module is built on: **existence is
+    /// the licence to draw a reference.** `/main.rs` is offered to the disk and the disk is what
+    /// refuses it; the fixture below is the deliberately adversarial one that says yes to
+    /// everything, which is the only way the difference can be seen at all. Inventing a rule that
+    /// refused a rooted path behind a closing brace would be refusing `(/etc/hosts)` for the same
+    /// reason, and that is a real reference somebody really printed.
+    #[test]
+    fn a_root_behind_a_closing_brace_is_offered_to_the_disk_and_only_the_disk_refuses_it() {
+        let line = "src/{old => new}/main.rs";
+        assert_eq!(
+            linked_on_a_full_disk(Some("/case"), line),
+            [("/main.rs", "file:///main.rs".to_owned())],
+            "a disk that holds everything holds this too"
+        );
+        assert_eq!(
+            linked(&ledger("/case", &[("/main.rs", false)]), line, None),
+            [],
+            "and an ordinary disk does not, which is the answer a machine actually gives"
+        );
+    }
+
+    /// §7.1.5k ③: a declared search path owns its whole value, and the value is **entries** —
+    /// asked with the `:` a POSIX shell separates them with rather than the `;` a Windows one does.
+    ///
+    /// RED before the separator was made the platform's: the ordinary reading of the value is one
+    /// unquoted token, every character of which clears the rooted shape gate, so the line came back
+    /// offering `/usr/local/bin:/usr/bin:/bin` as a file somebody could open.
+    #[test]
+    fn a_declared_path_list_is_read_as_its_entries_and_never_as_one_name() {
+        assert_eq!(
+            linked_on_a_full_disk(Some("/case"), "PATH=/usr/local/bin:/usr/bin:/bin"),
+            [
+                ("/usr/local/bin", "file:///usr/local/bin".to_owned()),
+                ("/usr/bin", "file:///usr/bin".to_owned()),
+                ("/bin", "file:///bin".to_owned()),
+            ],
+            "three entries, each its own name, and the separators belong to none of them"
+        );
+        // A relative entry is measured from a directory nobody reported, and an empty one is not a
+        // name at all — the two unknowns the first version of §7.1.5k ③ refuses to promise for.
+        assert_eq!(
+            linked_on_a_full_disk(Some("/case"), "PATH=/bin::rel/bin"),
+            [("/bin", "file:///bin".to_owned())]
+        );
+    }
+
+    // ── the disk-backed cases: the six that failed on a Mac ──────────────────
+    //
+    // Lifted from the Windows module **verbatim**, and that is the point. Every
+    // one of them already built its fixture out of `std::env::temp_dir()` and
+    // `std::path::MAIN_SEPARATOR`, so none of them was ever a Windows test:
+    // they failed on a Mac because the grammar above could not see a real,
+    // existing POSIX path, and nothing about the tests needed changing to say
+    // so (`docs/plans/port/macos-spike-2026-09-07.md`, appendix A). Copying
+    // rather than paraphrasing is what keeps them the same claim — a rewritten
+    // version of a test that used to fail is a different test.
+
+    /// The rejoin of two physical lines, as the five gates answer it.
+    fn rejoin<'a>(
+        links: &PrintedPathLinks,
+        upper: &'a str,
+        lower: &'a str,
+    ) -> Option<(&'a str, &'a str, String)> {
+        let (spans, uri) = rejoin_rows(links, &[upper, lower])?;
+        let [upper, lower] = spans[..] else {
+            panic!("a two-row rejoin stands on two rows, not {}", spans.len())
+        };
+        Some((upper, lower, uri))
+    }
+
+    /// The rejoin of a chain of physical rows, as the five gates answer it.
+    fn rejoin_rows<'a>(
+        links: &PrintedPathLinks,
+        rows: &[&'a str],
+    ) -> Option<(Vec<&'a str>, String)> {
+        let mut unknown = BTreeSet::new();
+        rejoined_rows(links, rows, &mut unknown)
+    }
+
+    /// [`rejoin_rows`] with the questions it asked kept, for the cases that assert about them.
+    fn rejoined_rows<'a>(
+        links: &PrintedPathLinks,
+        rows: &[&'a str],
+        unknown: &mut BTreeSet<PathBuf>,
+    ) -> Option<(Vec<&'a str>, String)> {
+        let (upper, lowers) = rows.split_first()?;
+        let continuations = lowers
+            .iter()
+            .copied()
+            .map(|text| ContinuationRow {
+                text,
+                edge: last_cell_of(text),
+            })
+            .collect::<Vec<_>>();
+        links
+            .rejoin_across_newline(upper, last_cell_of(upper)?, &continuations, unknown)
+            .map(|joined| {
+                (
+                    joined
+                        .rows
+                        .iter()
+                        .zip(rows)
+                        .map(|(span, row)| &row[span.byte_start..span.byte_end])
+                        .collect(),
+                    joined.uri,
+                )
+            })
+    }
+
+    /// A scratch directory of this test's own, removed when the test that made it ends.
+    ///
+    /// `std::env::temp_dir` and the process id rather than a crate: this workspace has no tempfile
+    /// dependency, and the one thing the hanging-indent cases want from a real disk is that the
+    /// name the two halves spell between them is a file somebody could actually open.
+    ///
+    /// **The caller's word comes first** so that the directory's own 8.3 short name is this test's
+    /// and not the next one's: Windows mints that name from the first six characters, and every
+    /// scratch in this module would otherwise be `FOLIO-~n` for some `n` nobody can predict
+    /// (`eight_dot_three_form_of`).
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn named(name: &str) -> Self {
+            let directory = std::env::temp_dir()
+                .join(format!("{name}-folio-rejoin-indent-{}", std::process::id()));
+            std::fs::create_dir_all(&directory).expect("a scratch directory");
+            Self(directory)
+        }
+
+        fn holding(&self, name: &str) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, b"<!doctype html>").expect("a scratch file");
+            path
+        }
+
+        /// A file under a directory tree of its own, so that the name is long enough for an
+        /// application to cut it into several rows.
+        fn holding_deep(&self, route: &str) -> PathBuf {
+            let path = self.0.join(route);
+            std::fs::create_dir_all(path.parent().expect("a route with a parent"))
+                .expect("a scratch tree");
+            std::fs::write(&path, b"MZ").expect("a scratch file");
+            path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The ledger a worker comes back with after asking **this machine's disk** about every name
+    /// the lexer offered it — the ordinary fixture, told the truth rather than a table.
+    fn disk_ledger(working_directory: &Path, asked: &[&str]) -> PrintedPathLinks {
+        PrintedPathLinks::new(
+            Some(working_directory.to_path_buf()),
+            asked
+                .iter()
+                .map(|name| (PathBuf::from(name), Path::new(name).exists()))
+                .collect(),
+        )
+    }
+
+    /// The two halves of the user's 2026-09-04 line, as an agent's bullet paragraph prints them.
+    fn bullet_wrap(head: &str, tail: &str, indent: &str) -> (String, String) {
+        (
+            format!("● 城池占领 v2 交了(提交 a9352d3,{head}"),
+            format!("{indent}{tail},浏览器直接打开)。截图里看:…"),
+        )
+    }
+
+    /// PIN (user report 2026-09-04, Claude Code running inside Folio) — **a hanging indent is not
+    /// a shared indent**, and §7.1.5k ② gate ② now says so.
+    ///
+    /// The picture: a bullet paragraph whose first row opens with `●` at visual column 0 and whose
+    /// continuation rows align under the bullet's text at column 2. The application cut
+    /// `…\prototypes\conquest.html` inside the name, the file exists, and every other gate passes —
+    /// yet the whole reference went undrawn because gate ② demanded column 0 of the lower half.
+    ///
+    /// The distinction the gate is actually about is untouched: peer lines (stack frames,
+    /// diagnostics, directory entries) share **the same** indent, while a continuation opens
+    /// **strictly deeper** than the line it continues. The `●` is ink and not blank, so this
+    /// paragraph's upper indent is 0 and 2 is deeper.
+    ///
+    /// §7.30 rides along on the shifted opening: the continuation's token is
+    /// `t.html,浏览器直接打开`, its seam sits at the comma before `浏`, and the readings are tried
+    /// longest first — so the whole form is asked about (and denied by the disk) before `t.html`
+    /// wins. RED before this slice: `None`.
+    #[test]
+    fn a_bullet_paragraphs_hanging_indent_is_a_wrap_and_not_a_peer_row() {
+        let scratch = Scratch::named("bullet");
+        let target = scratch.holding("conquest.html");
+        let printed = target.to_string_lossy().into_owned();
+        let split = printed.len() - "t.html".len();
+        let (head, tail) = printed.split_at(split);
+        let long_form = format!("{printed},浏览器直接打开");
+        let links = disk_ledger(&scratch.0, &[&printed, &long_form]);
+
+        let (upper, lower) = bullet_wrap(head, tail, "  ");
+        assert_eq!(
+            rejoin(&links, &upper, &lower),
+            Some((head, "t.html", local_path_to_file_uri(&target))),
+            "the continuation opens strictly deeper than the bullet row's own indent, which is \
+             what a wrap looks like"
+        );
+    }
+
+    /// The other side of the 2026-09-04 ruling, on the same disk fixture: **equal is still a peer
+    /// row, and shallower is still not a continuation.**
+    ///
+    /// Scenario 58's synthetic pair already pinned the equal case; this one pins it on the shape
+    /// that motivated the relaxation, so the relaxation cannot quietly grow into "any indent at
+    /// all". The joined name exists, so gate ② is the only gate that can be answering.
+    ///
+    /// **Untouched by the 2026-09-05 reversal**, and it is the case that says where that reversal
+    /// stops: the bullet paragraph's first row carries `● 城池占领 v2 交了…` in front of the path,
+    /// so the row is not nothing but the candidate and the shared indent stays what it always was —
+    /// the look of two peer lines.
+    #[test]
+    fn a_shared_or_shallower_indent_still_refuses_the_rejoin() {
+        let scratch = Scratch::named("peers");
+        let target = scratch.holding("conquest.html");
+        let printed = target.to_string_lossy().into_owned();
+        let split = printed.len() - "t.html".len();
+        let (head, tail) = printed.split_at(split);
+        let long_form = format!("{printed},浏览器直接打开");
+        let links = disk_ledger(&scratch.0, &[&printed, &long_form]);
+
+        let (upper, lower) = bullet_wrap(head, tail, "    ");
+        let shared = (format!("    {upper}"), lower);
+        assert_eq!(
+            rejoin(&links, &shared.0, &shared.1),
+            None,
+            "four spaces under four spaces is what two peer lines look like"
+        );
+
+        let (upper, lower) = bullet_wrap(head, tail, "   ");
+        let outdented = (format!("      {upper}"), lower);
+        assert_eq!(
+            rejoin(&links, &outdented.0, &outdented.1),
+            None,
+            "a lower half that opens shallower than the line above it is not that line's \
+             continuation either"
+        );
+    }
+
+    /// One printed path as an application hard-wraps it into an indented block: exactly `rows`
+    /// rows, each one indented two spaces, each filled to its own end.
+    ///
+    /// This is the user's 2026-09-05 picture reproduced rather than transcribed — the path is this
+    /// machine's own scratch file, so the disk really does hold what the rows spell between them.
+    ///
+    /// **The cut is made by row count, and the width follows from it** (CI red 2026-09-06). It used
+    /// to divide by a width the path's own length implied and then check how many rows fell out,
+    /// which made the number of rows — the one thing these cases are about — a property of whatever
+    /// length this machine's temp directory happens to have. Widths differ by at most one
+    /// character, which is what an application wrapping at a fixed width produces anyway.
+    fn block_rows(printed: &str, rows: usize) -> Vec<String> {
+        let characters = printed.chars().collect::<Vec<_>>();
+        assert!(
+            characters.len() >= rows * 4,
+            "{rows} rows want a longer name than {printed}"
+        );
+        let (width, wider) = (characters.len() / rows, characters.len() % rows);
+        let mut wrapped = Vec::with_capacity(rows);
+        let mut cut = 0;
+        for row in 0..rows {
+            let end = cut + width + usize::from(row < wider);
+            wrapped.push(format!(
+                "  {}",
+                characters[cut..end].iter().collect::<String>()
+            ));
+            cut = end;
+        }
+        wrapped
+    }
+
+    /// A scratch file whose printed path an application would hard-wrap into exactly `rows` rows,
+    /// and those rows — built **from the rows outwards**.
+    ///
+    /// The head row carries this machine's own scratch directory, whatever length that is, and every
+    /// row under it is a slice of one long name this test owns, cut where this function says and
+    /// nowhere else. So no cut can land on a name the machine already has, which is what a case that
+    /// asserts a **refusal** needs: [`block_rows`]' even division is honest about what a wrap looks
+    /// like, but where its cuts fall is this machine's business, and a cut that happens to land on a
+    /// real directory would put a name on the disk that the refusal was claiming is not there.
+    fn wrapped_file(scratch: &Scratch, rows: usize) -> (PathBuf, Vec<String>) {
+        const SEGMENT: usize = 16;
+        let segments = (0..rows - 1)
+            .map(|index| {
+                let letter = char::from(b'a' + u8::try_from(index).expect("a short chain"));
+                let mut segment = letter.to_string().repeat(SEGMENT);
+                if index == rows - 2 {
+                    segment.push_str(".exe");
+                }
+                segment
+            })
+            .collect::<Vec<_>>();
+        let target = scratch.holding(&segments.concat());
+
+        let mut wrapped = vec![format!(
+            "  {}{}",
+            scratch.0.to_string_lossy(),
+            std::path::MAIN_SEPARATOR
+        )];
+        wrapped.extend(segments.iter().map(|segment| format!("  {segment}")));
+        assert_eq!(
+            wrapped.iter().map(|row| &row[2..]).collect::<String>(),
+            target.to_string_lossy(),
+            "the rows are the name, cut"
+        );
+        (target, wrapped)
+    }
+
+    /// Nothing shorter than the whole name is on this disk — the precondition every refusal case
+    /// stands on, asserted rather than assumed.
+    fn assert_only_the_whole_name_exists(rows: &[String]) {
+        let mut join = rows[0].trim_start().to_owned();
+        for row in &rows[1..rows.len() - 1] {
+            join.push_str(row.trim_start());
+            assert!(
+                !Path::new(&join).exists(),
+                "a cut landed on a name this machine already has, so the refusal would not be the \
+                 one this case is about: {join}"
+            );
+        }
+    }
+
+    /// The ledger the worker comes back with once the chain walk has asked its way down: the name
+    /// **every chain length spells**, answered by this machine's disk.
+    ///
+    /// The walk asks one length per frame — a name nobody has looked at ends the search — and it
+    /// asks the **longest** first, so on these fixtures it is answered on the first question. The
+    /// shorter joins are in the ledger as the "no" the disk really gives them, which is what makes a
+    /// green run mean "the long one won" rather than "the short one was never asked".
+    ///
+    /// **A single row's own name is not in here, and that is the fixture telling the truth** (CI red
+    /// 2026-09-06). A hard-wrapped row reaches its row's last cell by construction, and §7.1.5k ①
+    /// stands in front of the question as well as in front of the link: `links_in` neither draws
+    /// such a candidate nor records it as an unknown, so no frame ever learns a verdict for it and
+    /// no worker ever brings one back. Putting one in was inventing a fact — and on the CI runner,
+    /// whose `%TEMP%` sits under an 8.3 short name, the fact it invented was that
+    /// `C:\Users\<short>` — seventeen characters, exactly where an eight-way cut of that machine's
+    /// path fell — is a verified reference, which gate ⑤ then quite correctly refused a chain over.
+    fn block_ledger(working_directory: &Path, rows: &[String]) -> PrintedPathLinks {
+        let mut join = rows[0].trim_start().to_owned();
+        let asked = rows[1..]
+            .iter()
+            .map(|row| {
+                join.push_str(row.trim_start());
+                join.clone()
+            })
+            .collect::<Vec<_>>();
+        disk_ledger(
+            working_directory,
+            &asked.iter().map(String::as_str).collect::<Vec<_>>(),
+        )
+    }
+
+    /// PIN (user report 2026-09-05, Claude Code running inside Folio) — **a path an application cut
+    /// into four rows of an indented block is one reference.**
+    ///
+    /// The picture: an agent renders a fenced block as two-space-indented text, the block holds one
+    /// path and nothing else, and the path is wider than the pane, so it arrives as four rows that
+    /// each fill their own row but the last. The file exists and nothing was drawn.
+    ///
+    /// RED before this slice, twice over: gate ② read the shared two-space indent as a column of
+    /// peers, and the rejoin had only ever been asked about **two** rows, so even with gate ②
+    /// relaxed the four fragments had no length at which they could be put together.
+    ///
+    /// MUTATIONS, both run: cap [`MAX_REJOIN_ROWS`] at 2 and this is `None` again — the chain is
+    /// what puts four fragments together, and nothing else in the module does; take the equal-indent
+    /// head back out of gate ② (`column == 0 || column > upper_indent`) and it is `None` again as
+    /// well, which is the state the user photographed.
+    #[test]
+    fn a_path_cut_into_four_indented_rows_is_one_reference() {
+        let scratch = Scratch::named("block");
+        let target = scratch.holding_deep(
+            "D--Developer-BetterTerminal/ccea9546-63d0-4a20-ba77-75caa4e8533c/scratchpad/signed/\
+             folio-next31.exe",
+        );
+        let printed = target.to_string_lossy().into_owned();
+        let rows = block_rows(&printed, 4);
+        let links = block_ledger(&scratch.0, &rows);
+
+        let borrowed = rows.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(
+            rejoin_rows(&links, &borrowed),
+            Some((
+                rows.iter().map(|row| &row[2..]).collect(),
+                local_path_to_file_uri(&target)
+            )),
+            "the promise covers all four rows and neither of the two indents in front of them"
+        );
+    }
+
+    /// The same block in three rows: the chain is a chain at every length, not a special case
+    /// written for the length of one photograph.
+    #[test]
+    fn a_path_cut_into_three_indented_rows_is_one_reference() {
+        let scratch = Scratch::named("block3");
+        let target =
+            scratch.holding_deep("ccea9546-63d0-4a20-ba77-75caa4e8533c/scratchpad/next31.exe");
+        let printed = target.to_string_lossy().into_owned();
+        let rows = block_rows(&printed, 3);
+        let links = block_ledger(&scratch.0, &rows);
+
+        let borrowed = rows.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(
+            rejoin_rows(&links, &borrowed),
+            Some((
+                rows.iter().map(|row| &row[2..]).collect(),
+                local_path_to_file_uri(&target)
+            ))
+        );
+    }
+
+    /// PIN (user ruling 2026-09-05) — **the chain is asked of the disk longest first**, because a
+    /// path's own parent directory is a real name a hard wrap can land a row's end exactly on.
+    ///
+    /// The picture is the one that closes the window the first version of this slice left open: the
+    /// application cut the path at the end of `…\scratchpad\signed`, which **is** a directory on
+    /// this machine, and the row under it carries the file's own name. Both are on the disk, both
+    /// are spelled by a chain the gates admit, and only the order decides which one the reader is
+    /// promised. The longer one is the one they are looking at; the shorter one is a place nobody
+    /// named, with the name they can see left dark underneath it.
+    ///
+    /// MUTATION, run: walk `admitted` forwards instead of `.rev()` — shortest chain first — and
+    /// this comes back as two rows pointing at the directory.
+    #[test]
+    fn a_chain_that_could_stop_at_a_real_directory_is_asked_about_the_file_first() {
+        let scratch = Scratch::named("parent");
+        let target = scratch.holding_deep("scratchpad/signed/folio-next31.exe");
+        let directory = target.parent().expect("the file's own directory");
+        let printed_directory = directory.to_string_lossy().into_owned();
+        let printed = target.to_string_lossy().into_owned();
+        let name = &printed[printed_directory.len()..];
+
+        // The application's cut falls exactly on the directory's last character.
+        let characters = printed_directory.chars().collect::<Vec<_>>();
+        let cut = characters.len() / 2;
+        let head = characters[..cut].iter().collect::<String>();
+        let tail = characters[cut..].iter().collect::<String>();
+        let rows = [
+            format!("  {head}"),
+            format!("  {tail}"),
+            format!("  {name}"),
+        ];
+        let links = disk_ledger(&scratch.0, &[&printed_directory, &printed]);
+
+        let borrowed = rows.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(
+            rejoin_rows(&links, &borrowed),
+            Some((
+                vec![head.as_str(), tail.as_str(), name],
+                local_path_to_file_uri(&target)
+            )),
+            "the disk holds the directory too, and the reference is still the file"
+        );
+    }
+
+    /// §7.1.5k ② (2026-09-05): the chain is **bounded at [`MAX_REJOIN_ROWS`]**, and the bound is a
+    /// refusal rather than a slower search.
+    ///
+    /// Both halves of the case are cut from a name of their own by row count, so the only thing
+    /// that differs is how many rows the application cut it into: eight rejoin, nine do not. The
+    /// ledger holds the name every chain length spells **and the whole name**, so the nine-row
+    /// refusal cannot be a question nobody answered — which is what the empty `unknown` asserts.
+    #[test]
+    fn a_chain_is_refused_past_eight_rows() {
+        let scratch = Scratch::named("cap");
+
+        let (_, eight) = wrapped_file(&scratch, MAX_REJOIN_ROWS);
+        let links = block_ledger(&scratch.0, &eight);
+        let borrowed = eight.iter().map(String::as_str).collect::<Vec<_>>();
+        assert!(
+            rejoin_rows(&links, &borrowed).is_some(),
+            "eight rows is the longest chain there is, and it is a chain"
+        );
+
+        let (_, nine) = wrapped_file(&scratch, MAX_REJOIN_ROWS + 1);
+        assert_only_the_whole_name_exists(&nine);
+        let links = block_ledger(&scratch.0, &nine);
+        let borrowed = nine.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut unknown = BTreeSet::new();
+        assert_eq!(
+            rejoined_rows(&links, &borrowed, &mut unknown),
+            None,
+            "the ninth row is past the ceiling, and the ceiling refuses rather than reaching"
+        );
+        assert!(
+            unknown.is_empty(),
+            "and it refused without asking anything new: {unknown:?}"
+        );
     }
 }

@@ -222,13 +222,16 @@ impl ShellEnvironment for FakeShellEnvironment {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsStr, os::windows::fs::MetadataExt};
+    use std::ffi::OsStr;
+    #[cfg(windows)]
+    use std::os::windows::fs::MetadataExt;
 
     use super::*;
 
     /// `FILE_ATTRIBUTE_REPARSE_POINT`, named here rather than pulled in: this crate has no Win32
     /// bindings and needs none for a bit that `std::os::windows::fs::MetadataExt` already hands
     /// over as a `u32`.
+    #[cfg(windows)]
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
     /// The Store's app execution alias for PowerShell 7 — but only when this machine really has
@@ -239,6 +242,7 @@ mod tests {
     /// file sitting at that path stops them passing *vacuously* on a machine where something else
     /// put an ordinary `pwsh.exe` in `WindowsApps`, which would prove nothing about the case they
     /// exist for.
+    #[cfg(windows)]
     fn store_pwsh_alias() -> Option<PathBuf> {
         let candidate = Path::new(&env::var_os("LocalAppData")?)
             .join("Microsoft")
@@ -250,6 +254,7 @@ mod tests {
 
     /// Skip-with-a-line, in the shape `tests/shell_integration_osc133.rs` already uses: a gate
     /// that quietly passes when its subject is missing is not a gate, so it says so on stderr.
+    #[cfg(windows)]
     fn skipped_for_want_of_a_store_install(test: &str) {
         eprintln!(
             "BT_SHELL_PROBE skipped={test} reason=no-store-appexeclink \
@@ -291,6 +296,7 @@ mod tests {
     /// **Red gate**: spell `SystemShellEnvironment::is_file` as the direct open its doc comment
     /// used to claim it was — `File::open(path).is_ok_and(…)` — and this fails on any machine with
     /// a Store install, taking `a_store_only_install_of_powershell_seven_still_resolves` with it.
+    #[cfg(windows)]
     #[test]
     fn an_app_exec_link_is_probed_as_a_startable_program() {
         let Some(alias) = store_pwsh_alias() else {
@@ -314,6 +320,7 @@ mod tests {
     /// persistent `PATH` that `folio.exe` inherits from Explorer names the `WindowsApps` alias
     /// directory and nothing else, so the package directory holding the real `pwsh.exe` is
     /// reachable only through the alias.
+    #[cfg(windows)]
     #[test]
     fn a_store_only_install_of_powershell_seven_still_resolves() {
         let Some(alias) = store_pwsh_alias() else {
@@ -338,6 +345,10 @@ mod tests {
 
     /// The other side of the same contract, and the part that needs no Store install: the probe is
     /// permissive about *how* a program is reached, not about whether it is there.
+    /// Windows: it asks the real machine about `%SystemRoot%` and about the
+    /// Windows PowerShell 5.1 under it, which is the floor every fallback in
+    /// this module is written against. There is no floor to point at elsewhere.
+    #[cfg(windows)]
     #[test]
     fn the_real_probe_still_refuses_a_directory_and_a_path_with_nothing_at_it() {
         let system_root = env::var_os("SystemRoot").expect("Windows always sets %SystemRoot%");

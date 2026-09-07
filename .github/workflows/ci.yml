@@ -77,6 +77,31 @@ jobs:
           }
           exit 0
 
+      # The portable core is thirteen crates that must go on compiling on a
+      # platform this workflow has exactly one job on. `scripts/check-portable-core.ps1`
+      # is the cheap half of that guard and `core-macos` is the compiling half;
+      # this proves the cheap half is not decoration.
+      - name: the portable-core gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "crates/bt-doc/src/lib.rs"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "`nuse windows::Win32::Foundation::HANDLE as _PortableCoreProbe;`n")
+            $failed = $false
+            try {
+              & ./scripts/check-portable-core.ps1 *> $null
+            } catch {
+              $failed = $true
+            }
+            if (-not $failed) {
+              throw "the portable-core check accepted a planted windows:: import"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          exit 0
+
       - name: the lint gate can actually fail
         shell: pwsh
         run: |
@@ -136,6 +161,12 @@ jobs:
       - name: adapter modules do not import policy crates
         shell: pwsh
         run: ./scripts/check-adapter-boundary.ps1
+
+      # The other boundary, and the other platform. See the script's own header
+      # and `docs/DESIGN.md` §Portability.
+      - name: the portable core calls no Win32 outside a cfg(windows) gate
+        shell: pwsh
+        run: ./scripts/check-portable-core.ps1
 
       # vendor/alacritty_terminal must stay a workspace member: its own upstream
       # suite is our regression line against our patches breaking VT semantics,
@@ -332,3 +363,67 @@ jobs:
           name: smoke
           path: target/smoke
           if-no-files-found: warn
+
+  # ── the second platform, kept from drifting away by compiling it ──────────
+  #
+  # `docs/plans/port/macos-spike-2026-09-07.md` measured that about 90 % of this
+  # workspace already builds on macOS, and that what stands between it and the
+  # rest is one crate — `bt-platform` — plus the modules of `bt-app` that consume
+  # it. A macOS port is its own milestone and it is not scheduled. **This job is
+  # not that port.** It exists because the measurement has a half-life: every
+  # feature landed on a Windows-only CI can add a Win32 call to a portable crate
+  # and nothing will say so, and the 90 % is then a number about a day in
+  # September rather than about this repository.
+  #
+  # So the crates are named one at a time, exactly as `scripts/check-portable-core.ps1`
+  # names them, and for the same reason: "everything except bt-app" is a shape a
+  # script can infer, while "these are the crates we promise compile on a second
+  # platform" is a decision. A crate that joins the workspace joins this list on
+  # purpose, or the promise does not cover it.
+  #
+  # It is required in the same sense every other job here is: nothing in this
+  # file is `continue-on-error`, and `gates-can-fail` differs from its neighbours
+  # by *proving itself* rather than by being optional. A red here is a red run.
+  #
+  # `bt-app` is deliberately absent and is expected to fail: 321 errors naming 79
+  # items missing from `bt_platform`, which is the port and not this job's
+  # business. `bt-pty` and `bt-render` are checked but not tested — one starts
+  # real child processes through a ConPTY that does not exist off Windows and the
+  # other asks for a real adapter, exactly as the `conpty` and `gpu` jobs above
+  # say. `bt-term` and `bt-corpus` are checked but not tested because the spike
+  # never got far enough to measure their suites there; they join the test line
+  # the day somebody does.
+  core-macos:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # The same composite action every other job comes through. It reads the
+      # channel out of rust-toolchain.toml and, off Windows, installs that
+      # version against this runner's own host triple — the pin is the version,
+      # and the triple in that file settles which of the two Windows hosts a
+      # Windows machine picks.
+      - uses: ./.github/actions/toolchain
+
+      # `--all-targets`, because the test code is where a platform assumption
+      # hides most cheaply: five of the seven errors this branch fixed were in
+      # `#[cfg(test)]` modules that had never been compiled anywhere else.
+      - name: check the portable crates
+        run: >
+          cargo check --locked --all-targets
+          -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
+          -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
+          -p bt-render -p bt-term -p bt-pty -p bt-corpus
+          -p alacritty_terminal
+
+      # The eight suites the spike's own table records as green here, plus the
+      # two this branch made green — `bt-transcript` and `bt-viewport`, whose
+      # seven failures were all one cause: a path grammar that only knew Windows.
+      # Ten of the fourteen checked above; the other four are the two that want
+      # hardware and the two nobody has measured yet.
+      - name: test the portable crates
+        run: >
+          cargo test --locked
+          -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
+          -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
+          -p alacritty_terminal
