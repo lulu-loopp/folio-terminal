@@ -157,6 +157,47 @@ pub struct Machine {
     pub powershell_integration_installed: bool,
 }
 
+/// What the pointer resting on a row earns.
+///
+/// **The three agent rows name a file the environment can move**, so those
+/// three carry a tag here rather than a finished sentence: `CLAUDE_CONFIG_DIR`,
+/// `CODEX_HOME` and `COPILOT_HOME` each move the file their installer writes,
+/// and the tip is this card's consent disclosure. The path is read at the
+/// moment the sentence is drawn, which keeps [`rows`] a pure function of
+/// [`Machine`] and keeps the tip in the language the window is speaking now —
+/// `line`'s own arrangement, for `line`'s own reason.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Tip {
+    /// A sentence that names no file of the reader's, or names one nothing can
+    /// move.
+    Fixed(Text),
+    /// Claude Code's user-level settings file.
+    ClaudeSettings,
+    /// codex's user-level configuration file.
+    CodexConfig,
+    /// Copilot CLI's hook file.
+    CopilotHooks,
+}
+
+impl Tip {
+    /// The sentence, with the file this machine will actually write.
+    #[must_use]
+    pub fn text(self) -> String {
+        match self {
+            Self::Fixed(text) => text.text().to_owned(),
+            Self::ClaudeSettings => {
+                crate::i18n::first_run_tip_claude(&crate::attention_hooks::settings_path_shown())
+            }
+            Self::CodexConfig => {
+                crate::i18n::first_run_tip_codex(&crate::attention_codex::config_path_shown())
+            }
+            Self::CopilotHooks => {
+                crate::i18n::first_run_tip_copilot(&crate::attention_copilot::hooks_path_shown())
+            }
+        }
+    }
+}
+
 /// One row of the card, as offered.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Row {
@@ -179,7 +220,7 @@ pub struct Row {
     pub line: Text,
     /// What the pointer resting on the row says: the mechanism, and the address
     /// of the reader's own file where there is one.
-    pub tip: Text,
+    pub tip: Tip,
     /// Whether the switch is on. The card is the only thing that changes this.
     pub on: bool,
 }
@@ -201,14 +242,14 @@ pub fn rows(machine: &Machine) -> Vec<Row> {
         kind: RowKind::Update,
         group_break_above: false,
         line: Text::FirstRunRowUpdate,
-        tip: Text::FirstRunTipUpdate,
+        tip: Tip::Fixed(Text::FirstRunTipUpdate),
         on: true,
     }];
     rows.push(Row {
         kind: RowKind::Explorer,
         group_break_above: false,
         line: explorer_shape(machine).line(),
-        tip: Text::FirstRunTipExplorer,
+        tip: Tip::Fixed(Text::FirstRunTipExplorer),
         on: false,
     });
     if !machine.powershell_integration_installed {
@@ -216,7 +257,7 @@ pub fn rows(machine: &Machine) -> Vec<Row> {
             kind: RowKind::PowerShell,
             group_break_above: false,
             line: Text::FirstRunRowPowerShell,
-            tip: Text::FirstRunTipPowerShell,
+            tip: Tip::Fixed(Text::FirstRunTipPowerShell),
             on: false,
         });
     }
@@ -225,19 +266,19 @@ pub fn rows(machine: &Machine) -> Vec<Row> {
             RowKind::Claude,
             machine.claude_found && machine.claude_installable,
             Text::FirstRunRowClaude,
-            Text::FirstRunTipClaude,
+            Tip::ClaudeSettings,
         ),
         (
             RowKind::Codex,
             machine.codex_found && machine.codex_installable,
             Text::FirstRunRowCodex,
-            Text::FirstRunTipCodex,
+            Tip::CodexConfig,
         ),
         (
             RowKind::Copilot,
             machine.copilot_found && machine.copilot_installable,
             Text::FirstRunRowCopilot,
-            Text::FirstRunTipCopilot,
+            Tip::CopilotHooks,
         ),
     ];
     let mut opened = false;
@@ -1723,6 +1764,36 @@ mod tests {
         rows.iter().map(|row| row.kind).collect()
     }
 
+    /// PIN (§7.56 ⓪″) — **the three agent rows disclose a file the environment
+    /// can move, so their tips are not fixed sentences.**
+    ///
+    /// A `Tip::Fixed` on one of these three is the bug this was: a literal
+    /// naming `~/.claude/settings.json` on a machine whose `CLAUDE_CONFIG_DIR`
+    /// points somewhere else, which is a consent disclosure for a write that
+    /// never happens. The three other rows name no file of the reader's that a
+    /// variable can move, so they stay fixed.
+    ///
+    /// MUTATION: put a `Text::…` tip back on an agent row and this goes red.
+    #[test]
+    fn an_agent_row_asks_the_machine_where_its_file_is() {
+        for row in rows(&every_row()) {
+            let expected = match row.kind {
+                RowKind::Claude => Tip::ClaudeSettings,
+                RowKind::Codex => Tip::CodexConfig,
+                RowKind::Copilot => Tip::CopilotHooks,
+                _ => {
+                    assert!(
+                        matches!(row.tip, Tip::Fixed(_)),
+                        "{:?} names no file a variable can move",
+                        row.kind
+                    );
+                    continue;
+                }
+            };
+            assert_eq!(row.tip, expected, "{:?}", row.kind);
+        }
+    }
+
     /// PIN (§7.56 §2, user ruling 2026-09-06) — **the card appears on a machine
     /// with no `settings.json`, and on no other.**
     ///
@@ -2282,7 +2353,7 @@ mod tests {
                 .map(|row| RowContent {
                     group_break_above: row.group_break_above,
                     line: row.line.text().to_owned(),
-                    tip: row.tip.text().to_owned(),
+                    tip: row.tip.text(),
                     on: row.on,
                 })
                 .collect(),

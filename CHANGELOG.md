@@ -88,6 +88,22 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A tab mark hook writes the file it says it writes.** The first-run card's
+  three agent rows name the file each switch will copy and then write, and they
+  spelled `~/.claude/settings.json`, `~/.codex/config.toml` and
+  `~/.copilot/hooks/folio.json` whatever the machine was set to. Claude Code
+  reads `CLAUDE_CONFIG_DIR`, codex reads `CODEX_HOME` and Copilot CLI reads
+  `COPILOT_HOME` before any of them looks beside your profile, and so does
+  Folio's installer — so on a machine that sets one of those, the consent
+  disclosure named a file that was never touched. Each row now names the file
+  its own machine will actually write. Nothing moved on a machine that sets
+  none of the three: the spelling there is the one it always was.
+
+- **An agent installer that refuses says why in one sentence.** "Copilot CLI's
+  hooks were not changed: copilot 1.0.26 or newer is needed for this" — the
+  reason the installer gave now follows a colon rather than a dash, and a reason
+  long enough to need a second line gets one instead of being cut.
+
 - **The README, the changelog and the design note no longer say the welcome card
   asks six questions.** It offers as few as two: an agent that is not on the
   machine is not listed at all. They also said every row on it writes outside

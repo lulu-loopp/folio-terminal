@@ -2326,13 +2326,18 @@ pub enum Text {
     FirstRunRowCodex,
     /// The Copilot CLI row.
     FirstRunRowCopilot,
-    // ── the six tooltips ───────────────────────────────────────────────────
+    // ── the row tooltips that name no file a variable can move ─────────────
     //
     // Where v3's explanations went (v4 §3). Each names the mechanism, and where
     // the switch writes a file the reader owns it names that file and says the
     // copy is dated — v3 §10.1's rule, moved rather than dropped. The Settings
     // page keeps its own long-form descriptions untouched; these were never
     // those strings.
+    //
+    // **The three agent tooltips are not here** (§7.56 ⓪″): the file each of
+    // them discloses is moved by `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or
+    // `COPILOT_HOME`, so the path is a parameter and the sentence lives in
+    // `first_run_tip_claude` and its two neighbours below.
     /// The update row's tooltip.
     FirstRunTipUpdate,
     /// The Explorer row's tooltip. One sentence for both shapes of that switch:
@@ -2342,12 +2347,6 @@ pub enum Text {
     /// The PowerShell row's tooltip: the reader's own `$PROFILE`, and the dated
     /// copy taken beside it first.
     FirstRunTipPowerShell,
-    /// The Claude Code row's tooltip.
-    FirstRunTipClaude,
-    /// The Codex row's tooltip.
-    FirstRunTipCodex,
-    /// The Copilot CLI row's tooltip.
-    FirstRunTipCopilot,
     /// **What the Terminal page's PowerShell row says while an intent is
     /// outstanding** (§7.56). The row is neither installed nor off; it says
     /// which. Where `$PROFILE` is comes from the shell and is never computed
@@ -4206,24 +4205,9 @@ impl Text {
                 "Takes a dated copy of your $PROFILE, then appends one line to it.",
                 "先做带日期的副本，再追加一行到 $PROFILE",
             ),
-            Self::FirstRunTipClaude => pick(
-                lang,
-                "Takes a dated copy of ~/.claude/settings.json, then writes the hook.",
-                "先做带日期的副本，再写入 ~/.claude/settings.json",
-            ),
-            Self::FirstRunTipCodex => pick(
-                lang,
-                "Takes a dated copy of ~/.codex/config.toml, then writes the notify program.",
-                "先做带日期的副本，再写入 ~/.codex/config.toml",
-            ),
-            Self::FirstRunTipCopilot => pick(
-                lang,
-                "Takes a dated copy of ~/.copilot/hooks/folio.json, then writes the hook.",
-                "先做带日期的副本，再写入 ~/.copilot/hooks/folio.json",
-            ),
             Self::ShellIntegrationPending => pick(
                 lang,
-                "Joins the next PowerShell that starts",
+                "Takes effect in the next PowerShell session",
                 "下次启动 PowerShell 时生效",
             ),
         }
@@ -4241,7 +4225,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 591] = [
+    pub const ALL: [Self; 588] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4829,9 +4813,6 @@ impl Text {
         Self::FirstRunTipUpdate,
         Self::FirstRunTipExplorer,
         Self::FirstRunTipPowerShell,
-        Self::FirstRunTipClaude,
-        Self::FirstRunTipCodex,
-        Self::FirstRunTipCopilot,
         Self::ShellIntegrationPending,
     ];
 
@@ -5306,6 +5287,63 @@ pub fn explorer_first_page_failed(message: &str) -> String {
     match current() {
         Lang::English => format!("Windows would not register the package: {message}"),
         Lang::Chinese => format!("Windows 拒绝登记这个包：{message}"),
+    }
+}
+
+// ── the three agent rows, over a file the environment can move ──────────────
+//
+// **The path is a parameter and not a word in the sentence.** Claude Code reads
+// `CLAUDE_CONFIG_DIR`, codex reads `CODEX_HOME` and Copilot CLI reads
+// `COPILOT_HOME` before any of them looks beside the user's profile, and the
+// installers in this build read them too. A tip that spelled
+// `~/.claude/settings.json` on a machine that has moved the directory would be
+// naming a file this build is not going to write — and the tip is the card's
+// consent disclosure, which is the one sentence on it that has to be true. The
+// spelling on a machine that has moved nothing is unchanged, because
+// `settings_path_shown` and its two neighbours answer with the default spelling
+// there.
+
+/// The Claude Code row's tooltip, naming the file this machine will write.
+#[must_use]
+pub fn first_run_tip_claude(path: &str) -> String {
+    match current() {
+        Lang::English => format!("Takes a dated copy of {path}, then writes the hook."),
+        Lang::Chinese => format!("先做带日期的副本，再写入 {path}"),
+    }
+}
+
+/// The Codex row's tooltip, naming the file this machine will write.
+#[must_use]
+pub fn first_run_tip_codex(path: &str) -> String {
+    match current() {
+        Lang::English => format!("Takes a dated copy of {path}, then writes the notify program."),
+        Lang::Chinese => format!("先做带日期的副本，再写入 {path}"),
+    }
+}
+
+/// The Copilot CLI row's tooltip, naming the file this machine will write.
+#[must_use]
+pub fn first_run_tip_copilot(path: &str) -> String {
+    match current() {
+        Lang::English => format!("Takes a dated copy of {path}, then writes the hook."),
+        Lang::Chinese => format!("先做带日期的副本，再写入 {path}"),
+    }
+}
+
+/// An agent installer's refusal, carrying the reason the installer gave.
+///
+/// **The reason is the point of the card.** "copilot 1.0.26 or newer is needed
+/// for this" and "a hook file of your own already stands under that name" are
+/// two different things to do next, and a toast that said only that nothing was
+/// changed would leave the reader with neither. The colon is the copy guide's
+/// join: one sentence, the head naming what did not happen and the tail naming
+/// why. A reason long enough to need a second line gets one — `toast::wrap_body`
+/// breaks the body at the card's own measure and only stops at six lines.
+#[must_use]
+pub fn agent_install_refused(said: &str, reason: &str) -> String {
+    match current() {
+        Lang::English => format!("{said}: {reason}"),
+        Lang::Chinese => format!("{said}：{reason}"),
     }
 }
 
@@ -6849,6 +6887,57 @@ fn move_refusal_notice_in(lang: Lang, said: &str, pane_is_now_a_tab: bool) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PIN — **an agent installer's refusal carries the installer's own reason,
+    /// after a colon.**
+    ///
+    /// The three `*FailedToast` heads say only that nothing was changed, which
+    /// is the shape the copy guide's principle 7 rejects on its own: a reader
+    /// told an install did not happen and not told why has been handed a
+    /// sentence they can do nothing with. The reason exists — it is what every
+    /// `Outcome::Refused` arm in the three installers carries — and this is the
+    /// join that puts it on the card.
+    ///
+    /// MUTATIONS: (1) drop the reason, and the first assertion goes red;
+    /// (2) join with a dash again, and the second does — the user's rule for UI
+    /// strings has no em-dash in it.
+    #[test]
+    fn an_installer_that_refuses_says_why() {
+        let said = Text::CopilotHooksFailedToast.text();
+        let reason = "copilot 1.0.26 or newer is needed for this";
+        let card = agent_install_refused(said, reason);
+        assert!(
+            card.ends_with(reason),
+            "the reason reaches the card: {card}"
+        );
+        assert!(card.starts_with(said), "and it follows the head: {card}");
+        assert!(!card.contains('—'), "no em-dash in a UI string: {card}");
+        assert_eq!(card, format!("{said}: {reason}"));
+    }
+
+    /// PIN — **the three agent tips name the file this machine will write.**
+    ///
+    /// The sentence is here and the path is a parameter, so a machine that has
+    /// set `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `COPILOT_HOME` is told the file
+    /// its own installer is about to copy and write. The default spelling is
+    /// what a machine that has set none of them still reads, byte for byte —
+    /// the three `*_path_shown_from` tests pin that half.
+    #[test]
+    fn an_agent_tip_names_the_path_it_is_given() {
+        for (built, default) in [
+            (
+                first_run_tip_claude as fn(&str) -> String,
+                "~/.claude/settings.json",
+            ),
+            (first_run_tip_codex, "~/.codex/config.toml"),
+            (first_run_tip_copilot, "~/.copilot/hooks/folio.json"),
+        ] {
+            assert!(built(default).contains(default));
+            let moved = r"D:\scratch\agent-home\settings.json";
+            assert!(built(moved).contains(moved));
+            assert!(!built(moved).contains(default));
+        }
+    }
 
     /// PIN — **a command that has not ended says so, in both languages, in the
     /// words the rail already uses** (DESIGN.md §7.55 ⑨).

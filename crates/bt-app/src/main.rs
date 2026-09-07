@@ -46176,7 +46176,7 @@ impl Runtime<'_> {
                     toast::ToastKind::Error,
                     toast::ToastAnchor::Window,
                     None,
-                    format!("{} — {reason}", i18n::Text::ClaudeHooksFailedToast.text()),
+                    i18n::agent_install_refused(i18n::Text::ClaudeHooksFailedToast.text(), reason),
                 )?;
                 Ok(false)
             }
@@ -46230,7 +46230,7 @@ impl Runtime<'_> {
                     toast::ToastKind::Error,
                     toast::ToastAnchor::Window,
                     None,
-                    format!("{} — {reason}", i18n::Text::CodexNotifyFailedToast.text()),
+                    i18n::agent_install_refused(i18n::Text::CodexNotifyFailedToast.text(), reason),
                 )?;
                 Ok(false)
             }
@@ -46289,7 +46289,7 @@ impl Runtime<'_> {
                     toast::ToastKind::Error,
                     toast::ToastAnchor::Window,
                     None,
-                    format!("{} — {reason}", i18n::Text::CopilotHooksFailedToast.text()),
+                    i18n::agent_install_refused(i18n::Text::CopilotHooksFailedToast.text(), reason),
                 )?;
                 Ok(false)
             }
@@ -46549,7 +46549,7 @@ impl Runtime<'_> {
             .map(|row| first_run::RowContent {
                 group_break_above: row.group_break_above,
                 line: row.line.text().to_owned(),
-                tip: row.tip.text().to_owned(),
+                tip: row.tip.text(),
                 on: row.on,
             })
             .collect();
