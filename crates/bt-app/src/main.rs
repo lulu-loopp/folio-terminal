@@ -46098,7 +46098,9 @@ impl Runtime<'_> {
                     toast::ToastKind::Ok,
                     toast::ToastAnchor::Window,
                     None,
-                    explorer_menu::place_toast(place).text().to_owned(),
+                    explorer_menu::place_toast(place, explorer_menu::shell_refresh_pending())
+                        .text()
+                        .to_owned(),
                 )?;
                 Ok(true)
             }
@@ -46174,9 +46176,12 @@ impl Runtime<'_> {
                 toast::ToastKind::Ok,
                 toast::ToastAnchor::Window,
                 None,
-                explorer_menu::place_toast(self.app.explorer_package_asked_place)
-                    .text()
-                    .to_owned(),
+                explorer_menu::place_toast(
+                    self.app.explorer_package_asked_place,
+                    explorer_menu::shell_refresh_pending(),
+                )
+                .text()
+                .to_owned(),
             ),
             Err(error) => self.toast(
                 toast::ToastKind::Error,

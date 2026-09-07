@@ -130,13 +130,36 @@ pub fn installed(state: ContextMenuState) -> bool {
 ///
 /// The switch's whole action, in one function, so that the two directions
 /// cannot disagree about which trees they are talking about.
+///
+/// **And it ends by telling the shell** — [`bt_platform::changing_explorer_menu`],
+/// the same wrapper the package's two deployment calls go through. Explorer
+/// reads the class store once and remembers what it found; a verb written into
+/// `HKCU\Software\Classes` while it is running is a verb nobody sees until
+/// something else happens to invalidate that cache, which for most people is the
+/// next time they sign in.
+///
+/// **The announcement is made here rather than one level down**, in
+/// [`bt_platform::install_context_menu`], for one reason: that function takes
+/// the class store as an argument because the suite calls it against an isolated
+/// subkey of its own, and a test run must not broadcast a shell-wide refresh on
+/// the reader's machine. This is the only caller that writes into the store
+/// Explorer actually reads.
+///
+/// **The one refusal that writes nothing is settled before the wrapper is
+/// entered**, so that "the shell is told after every attempt" stays literally
+/// true: a machine that will not say where its own executable is has no shape to
+/// write, and there is nothing for anybody to have noticed.
 pub fn apply(install: bool) -> Result<(), String> {
-    if install {
-        let shape = desired().ok_or_else(|| Text::ContextMenuNoExecutable.text().to_owned())?;
-        bt_platform::install_context_menu(CONTEXT_MENU_CLASSES, &shape)
-    } else {
-        bt_platform::remove_context_menu(CONTEXT_MENU_CLASSES)
-    }
+    let shape = install
+        .then(|| desired().ok_or_else(|| Text::ContextMenuNoExecutable.text().to_owned()))
+        .transpose()?;
+    bt_platform::changing_explorer_menu(
+        || match &shape {
+            Some(shape) => bt_platform::install_context_menu(CONTEXT_MENU_CLASSES, shape),
+            None => bt_platform::remove_context_menu(CONTEXT_MENU_CLASSES),
+        },
+        bt_platform::announce_explorer_menu_change,
+    )
 }
 
 /// The launch-time repair — see the module header.
@@ -216,5 +239,55 @@ mod tests {
             shape.icon
         );
         assert!(!shape.label.is_empty(), "and the menu has words in it");
+    }
+
+    /// RED (2026-09-07) — **the classic registration tells the shell too, and
+    /// [`apply`] is the one place it can.**
+    ///
+    /// [`apply`] cannot be called from a test: it writes into
+    /// `HKCU\Software\Classes`, which is the right-click menu of whoever is
+    /// running the suite. So what is held is the shape — that the whole of it
+    /// sits inside [`bt_platform::changing_explorer_menu`], which is the wrapper
+    /// the package's two deployment calls go through as well.
+    ///
+    /// `bt_platform`'s own suite proves the wrapper announces on both the
+    /// success and the refusal; this proves the classic half is behind it. The
+    /// two together are "every write to that menu is announced", which is the
+    /// whole of the finding: `SHChangeNotify` appeared nowhere in this
+    /// repository for two releases, and a shell that is never told goes on
+    /// drawing the menu it read when it started.
+    ///
+    /// **The suite's half of the file is cut off before the search**, or the
+    /// needle would find the line that names it here.
+    ///
+    /// MUTATION: call `install_context_menu` or `remove_context_menu` outside
+    /// the wrapper and this goes red.
+    #[test]
+    fn the_classic_registration_is_announced_to_the_shell_as_well() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("context_menu.rs"),
+        )
+        .expect("this module is a file in this crate");
+        let code = source
+            .split_once("#[cfg(test)]")
+            .expect("this module carries the suite this test is in")
+            .0;
+        assert_eq!(
+            code.matches("bt_platform::changing_explorer_menu(").count(),
+            1,
+            "one wrapper, around the one function that writes"
+        );
+        for call in [
+            "bt_platform::install_context_menu(",
+            "bt_platform::remove_context_menu(",
+        ] {
+            assert_eq!(
+                code.matches(call).count(),
+                1,
+                "{call} is written once, inside that wrapper"
+            );
+        }
     }
 }

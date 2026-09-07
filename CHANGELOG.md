@@ -118,6 +118,26 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Folio now tells Windows when it changes the folder right-click menu.** Every
+  program that registers a menu entry has to announce it, and Folio never did.
+  A running File Explorer reads the association and context-menu tables once and
+  goes on drawing what it read, so an entry written into a live session — the
+  classic "Open Folio here", and the packaged "Open in Folio" that Windows 11
+  puts on the page it opens first — could be registered correctly, verifiably
+  present on the machine, and still invisible until the next sign-in. Both
+  directions of both registrations now end with the announcement, on a refusal
+  as well as on a success, because a refused write can still have changed half
+  of what it was writing.
+
+  The first page is the one Windows does not promise to refresh on that
+  announcement: its list of entries belongs to the packaging system rather than
+  to the tables the announcement is about, and a File Explorer that has been
+  running since before the registration is reported to show a new entry late or
+  only after it restarts. So where Folio itself registered the package during
+  this run, the Explorer row and the card that follows the registration both say
+  so and give the one step that always works — sign out and back in. Folio does
+  not restart anybody's File Explorer.
+
 - **A tab's card draws everything its pane is showing, not only what is still on
   screen.** A card is a picture of the pane under it, and it was reading the
   terminal's live screen alone — so a pane that had scrolled and was then made
