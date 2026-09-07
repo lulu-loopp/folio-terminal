@@ -2815,6 +2815,24 @@ else                           { Flash }    // 被压住了,但任务栏还在,�
 
 **退役两条字符串，三张卡片一张不退。** `OptionExplorerShowMoreOptions` / `OptionExplorerFirstPage` 随选择器一起离开 i18n 表：没有人再挑地方，也就没有地方要当选项去念。卡片相反——一次按下仍然把动词落在三个地方之一，卡仍然点**地方**的名（`place_toast`）。两态的开关配三张卡不是矛盾：On 落在两个地方之一，而一张点开关名字的卡，会告诉 Windows 10 的读者动词在一页他没有的页上。
 
+**注册了，可是没人告诉 shell（2026-09-07，SHChangeNotify 缺失，已落地）。**
+
+**现象。** 这台机器上 `folio.msix` 已为当前账户注册好（`Get-AppxPackage WeiyiShi.Folio` 在、`SignatureKind Developer`、`PackageRootFolder` 指向 `folio.exe` 同一个文件夹、manifest 的 `Directory` 与 `Directory\Background` 两个 `ItemType` 都声明了），可是资源管理器右键菜单第一页上没有 Folio。`explorer.exe` 从 2026-09-04 起没重启过。
+
+**根因。** 整个仓库从来没有调用过 `SHChangeNotify`。Win32 文档在 `SHChangeNotify` 的 Remarks 一节写着："Applications that register new handlers of any type must call SHChangeNotify with the SHCNE_ASSOCCHANGED flag..."。正在运行的 `explorer.exe` 读一次关联表就把结果记住了，没有进程通知它就一直画旧的。
+
+**修法：一个 wrapper，四条路径。** 新增 `bt_platform::announce_explorer_menu_change()`——一句 `SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None)`，两个指针参数是 `None`，`SHCNF_IDLIST` 的文档写法就是「不点名具体项」。新增纯函数 `bt_platform::changing_explorer_menu(write, announce)`：先跑写入、**不管成功失败都** announce、再把写入的返回值原样透出。四条写路径全部走它——经典两棵树的 `bt_app::context_menu::apply`（装／卸两向），和 sparse 包的 `bt_platform::msix::register` / `bt_platform::msix::remove`。「不管成功失败都通知」的理由：`install_context_menu` 先写完第一棵树才发现第二棵写不进去，一次失败不等于什么都没变；多播一次没人察觉，漏播一次就是一个存在但看不见的菜单项。
+
+**announce 放在 `context_menu::apply` 而不是更下一层。** `bt_platform::install_context_menu` 的 class store 是参数，测试套件拿隔离子键调它——跑一次测试不该在跑测试的人机器上广播一次全 shell 刷新。同理，`apply` 里那一条什么也没写的拒绝（机器不肯说自己的可执行文件在哪里）在进 wrapper 之前就结了，好让「每一次尝试写入之后都告诉 shell」字面上成立。
+
+**诚实的第二层。** 文档保证 `SHCNE_ASSOCCHANGED` 会让 shell 作废图标／缩略图缓存并重新加载新注册的 handler。文档**没有**任何一处保证它会重新加载 Windows 11 第一页那份打包动词清单——那份清单来自 App Model 而不是 class store。Windows Terminal 仓库 issue #18401 描述的正是同一个 `windows.fileExplorerContextMenus` 扩展：一个正在跑的 `explorer.exe` 会晚一步、甚至一直到重启才显示刚注册的项。所以程序不替用户重启 explorer，而是：只要**本次进程**成功注册过包（`REGISTERED_HERE` 这个 `AtomicBool`），设置行的第二行切成 `DescExplorerFirstPageAwaitingShell`，注册成功的那张 toast 切成 `ExplorerFirstPageAddedRestartToast`，两处都告诉读者「已注册，如果条目尚未出现，注销并重新登录」。进程退出后标志复位，因为一句永远清不掉的话不该留在行上。成功移除包时标志同样复位——一个刚把开关关掉的读者不该被告诉 Folio 已注册到第一页。
+
+**分类只有两种。** 注册指向的文件夹（`Package::EffectiveExternalPath`——读 API 而不是读 `PackageRootFolder` 那个注册表键，API 是契约，那个键是部署服务自己的账本）是本 exe 的文件夹就是 `Current`，不是就是 `Elsewhere`。**`InstallLocation` 在 `C:\Program Files\WindowsApps` 下面不是任何证据**：sparse 包本来就是这么暂存的，那个目录里只有 manifest、block map、签名和图标，没有 `folio.exe` 是正常形状。曾经有过一个按这个误读立的第三态，已经撤掉。
+
+**红测四处。** ① wrapper 在成功与失败两条路上都 announce——把 announce 删掉或用 `if outcome.is_ok()` 包起来都会红（`a_change_to_explorers_menu_is_always_announced_to_the_shell`）。② 四条写路径确实都走 wrapper，两个模块各读自己的源文件作证（`every_deployment_this_module_makes_announces_itself_to_the_shell`、`the_classic_registration_is_announced_to_the_shell_as_well`）。③ 分类函数四例——同一文件夹的两种拼法、别的文件夹、没有外部位置（`a_registration_is_ours_when_the_folder_it_serves_is_this_one`）。④ 行的第二行与 toast 在「本次注册过」时改口，而够不着第一页时不改（`a_registration_made_here_says_explorer_may_not_have_caught_up`）。
+
+**待查的更深怀疑，本片不动、只记账。** manifest 声明的是 `com:ExeServer`（`folio.exe --explorer-command`）。查到的所有能跑起来的例子——包括 Windows Terminal 的 `Package.appxmanifest`、微软 "Support legacy context menus" 文档的写法——用的都是 `com:SurrogateServer` 加一个实现 `IExplorerCommand` 的 DLL，没有找到任何一个 `com:ExeServer` 在 `windows.fileExplorerContextMenus` 上跑通的先例。没有哪一句官方文档明文禁止，但也没有一个能用的例子。如果重启 explorer 之后第一页仍然没有条目，这条就是首要嫌疑。
+
 ### 7.5 files 列的「进去」与「钉住」（files 小单，2026-08-19，已落地）
 
 三件事一片：文件夹行的第二次按下是**进去**，root 菜单一行可以佩**两个徽标**，以及产品第一次有了一张**用户说要留着**的表（`pins.json`）。

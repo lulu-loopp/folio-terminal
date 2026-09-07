@@ -21479,12 +21479,14 @@ mod tests {
     ///
     /// [`no_settings_sentence_needs_a_fourth_line`] measures the sentence this
     /// row is showing **on the desk the test is running on**, and this row is the
-    /// one whose sentence depends on the machine: three of its four lines are
+    /// one whose sentence depends on the machine: four of its five lines are
     /// unmeasurable here, because a Windows 11 with `folio.msix` in the folder
-    /// never draws the Windows 10 line and never draws the missing-file one. So
-    /// the four are asked of [`crate::explorer_menu::description_for`] directly
-    /// and measured in the same column, which is the only way the copy for the
-    /// other two machines is held to the cap the ruling set for all of them.
+    /// never draws the Windows 10 line and never draws the missing-file one, and
+    /// the fifth is only ever drawn after this process has itself registered the
+    /// package (§7.4b). So all five are asked of
+    /// [`crate::explorer_menu::description_for`] directly and measured in the
+    /// same column, which is the only way the copy for the other machines is
+    /// held to the cap the ruling set for all of them.
     ///
     /// MUTATION: put the retired `folio.msix is not in this folder…` sentence
     /// back on the front of the missing-file line and it runs to four.
@@ -21504,15 +21506,18 @@ mod tests {
                 * font_size_px
                 * TEST_ADVANCE_PER_EM
         };
-        // Windows 10; Windows 11 with no package; the moved registration; and
-        // the machine that can do everything.
-        for (supported, package, elsewhere) in [
-            (false, true, false),
-            (true, false, false),
-            (true, true, true),
-            (true, true, false),
+        // Windows 10; Windows 11 with no package; the moved registration; the
+        // registration this session made and Explorer may not have read yet
+        // (§7.4b); and the machine that can do everything.
+        for (supported, package, elsewhere, pending) in [
+            (false, true, false, false),
+            (true, false, false, false),
+            (true, true, true, false),
+            (true, true, false, true),
+            (true, true, false, false),
         ] {
-            let entry = crate::explorer_menu::description_for(supported, package, elsewhere);
+            let entry =
+                crate::explorer_menu::description_for(supported, package, elsewhere, pending);
             for lang in [Lang::English, Lang::Chinese] {
                 let sentence = entry.in_lang(lang);
                 let lines = wrapped_description(

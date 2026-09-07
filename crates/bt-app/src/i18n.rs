@@ -421,6 +421,18 @@ pub enum Text {
     /// repairs this on its own; the sentence exists for the seconds before it
     /// has, and for the machine where the repair could not run.
     DescExplorerFirstPageElsewhere,
+    /// **And when this run of Folio has just registered the package** — the one
+    /// line of the five that is advice rather than a fact about the machine.
+    ///
+    /// Windows is told the moment either store changes
+    /// (`SHChangeNotify(SHCNE_ASSOCCHANGED, …)`), and for the classic entry that
+    /// is the whole of what is owed. The first page is drawn from the App
+    /// Model's list of packaged verbs rather than from the class store, and
+    /// nothing documents that broadcast as reloading it — a running
+    /// `explorer.exe` is reported to show a freshly registered item late or not
+    /// until it is restarted. So the row says what to do about that, and says
+    /// it only while this process is the one that made the change.
+    DescExplorerFirstPageAwaitingShell,
     /// The sentence the row wears while there is nothing newer — what the check
     /// does, and the bound on what it can do. The other sentence names a version
     /// and is composed by [`update_row_available_in`].
@@ -528,6 +540,16 @@ pub enum Text {
     /// the two answers wants to be told where the verb **is** rather than where
     /// it stopped being (user ruling 2026-09-07).
     ExplorerFirstPageAddedToast,
+    /// **The same card where the registration was made by this process**, which
+    /// since §7.4b is every card that follows a real deployment.
+    ///
+    /// Two cards and not one sentence with a clause on the end, because the
+    /// claim itself is different: the one above says where the verb *is*, and
+    /// this one says it is registered and that the shell may not have caught up.
+    /// A reader whose first page already carried the item — the press that
+    /// registers nothing, because it was registered before this window opened —
+    /// is owed the plain one.
+    ExplorerFirstPageAddedRestartToast,
     /// The refusal when `folio.msix` is not beside the executable.
     ///
     /// A statement about the folder rather than an instruction: the file ships in
@@ -2522,6 +2544,15 @@ impl Text {
                 "That entry points at another folder. Folio takes it back at the next launch.",
                 "那一页上的条目指向另一个文件夹。下次启动时 Folio 会改回来。",
             ),
+            // **Advice, and the only line here that is.** Explorer was told the
+            // moment the package was registered; what it does with that is not
+            // ours to promise, and the reader who is looking at a menu with no
+            // Folio in it needs the one thing that always works.
+            Self::DescExplorerFirstPageAwaitingShell => pick(
+                lang,
+                "Folio is registered for the first page. Explorer reads that list when it starts, so sign out and back in if the entry is not there yet.",
+                "Folio 已注册到右键菜单的第一页。资源管理器只在启动时读取这份列表，如果条目尚未出现，注销当前账户并重新登录。",
+            ),
             Self::DescTabLayout => pick(
                 lang,
                 "Whether tabs run along the top of the window or down its side.",
@@ -2723,6 +2754,11 @@ impl Text {
                 lang,
                 "Open in Folio is on the first page of Explorer's menu",
                 "「在 Folio 中打开」已在资源管理器菜单的第一页",
+            ),
+            Self::ExplorerFirstPageAddedRestartToast => pick(
+                lang,
+                "Open in Folio is registered. Explorer may need a restart to show it",
+                "「在 Folio 中打开」已注册，资源管理器可能需要重启才会显示",
             ),
             Self::ExplorerFirstPageNoPackage => pick(
                 lang,
@@ -4225,7 +4261,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 588] = [
+    pub const ALL: [Self; 590] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4284,6 +4320,7 @@ impl Text {
         Self::DescExplorerMenuNoFirstPage,
         Self::DescExplorerMenuNoPackage,
         Self::DescExplorerFirstPageElsewhere,
+        Self::DescExplorerFirstPageAwaitingShell,
         Self::DescTabLayout,
         Self::DescSidebar,
         Self::DescSplitDirection,
@@ -4318,6 +4355,7 @@ impl Text {
         Self::ContextMenuNoExecutable,
         Self::ExplorerCommandVerb,
         Self::ExplorerFirstPageAddedToast,
+        Self::ExplorerFirstPageAddedRestartToast,
         Self::ExplorerFirstPageNoPackage,
         Self::ProfileHintDefault,
         Self::ProfileHintUnavailable,

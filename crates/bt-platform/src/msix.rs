@@ -294,7 +294,19 @@ mod deployment {
     /// Registering over an existing registration is how a moved folder is
     /// repaired: the call replaces what is there rather than refusing, so there
     /// is no remove-then-add sequence that could leave a machine with neither.
+    ///
+    /// **It ends by telling the shell** — see
+    /// [`crate::changing_explorer_menu`], which is the wrapper both directions
+    /// of this deployment and both directions of the classic registration go
+    /// through. A registration nobody announced is a menu item nobody sees.
     pub fn register(msix: &Path, external: &Path) -> Result<(), String> {
+        crate::changing_explorer_menu(
+            || register_package(msix, external),
+            crate::announce_explorer_menu_change,
+        )
+    }
+
+    fn register_package(msix: &Path, external: &Path) -> Result<(), String> {
         let manager = PackageManager::new().map_err(|error| error.message())?;
         let options = AddPackageOptions::new().map_err(|error| error.message())?;
         options
@@ -328,7 +340,18 @@ mod deployment {
     }
 
     /// Take the registration back off this user's machine.
+    ///
+    /// [`register`]'s announcement, for the same reason read the other way: an
+    /// item Explorer still draws after the package behind it is gone is an item
+    /// whose click finds no class to create.
     pub fn remove(full_name: &str) -> Result<(), String> {
+        crate::changing_explorer_menu(
+            || remove_package(full_name),
+            crate::announce_explorer_menu_change,
+        )
+    }
+
+    fn remove_package(full_name: &str) -> Result<(), String> {
         let manager = PackageManager::new().map_err(|error| error.message())?;
         let operation = manager
             .RemovePackageAsync(&HSTRING::from(full_name))
@@ -510,6 +533,57 @@ mod tests {
             "the manifest carries a version of its own, which is a second place \
              this product's version is written"
         );
+    }
+
+    /// RED (2026-09-07) — **both directions of the deployment go through the
+    /// wrapper that tells the shell.**
+    ///
+    /// A deployment cannot be made in a test — it is a service call that would
+    /// change the right-click menu of whoever is running the suite — so what can
+    /// be held is the shape: [`register`] and [`remove`] are two lines each, and
+    /// the line that matters is
+    /// [`crate::changing_explorer_menu`]. The wrapper itself is tested where it
+    /// is defined; this is the pin that says the two calls that need it use it.
+    ///
+    /// It is the same kind of pin as
+    /// [`the_manifest_and_this_module_say_the_same_four_things`] below and for
+    /// the same reason: two things have to agree, nothing at build time would
+    /// notice them coming apart, and what it would cost is a package registered
+    /// on a machine that goes on drawing the menu it read an hour ago.
+    ///
+    /// **The suite's own half of the file is cut off before the search**, or
+    /// every needle below would find itself: the words this test is looking for
+    /// are words it is written in.
+    ///
+    /// MUTATION: call `register_package` or `remove_package` directly from the
+    /// public function and this goes red.
+    #[test]
+    fn every_deployment_this_module_makes_announces_itself_to_the_shell() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("msix.rs"),
+        )
+        .expect("this module is a file in this crate");
+        let code = source
+            .split_once("#[cfg(test)]")
+            .expect("this module carries the suite this test is in")
+            .0;
+        assert_eq!(
+            code.matches("crate::changing_explorer_menu(").count(),
+            2,
+            "the two deployment calls are the two that go through the wrapper"
+        );
+        for call in [
+            "register_package(msix, external)",
+            "remove_package(full_name)",
+        ] {
+            assert_eq!(
+                code.matches(call).count(),
+                1,
+                "{call} is reached from the wrapper and from nowhere else"
+            );
+        }
     }
 
     /// PIN — **Windows 11's first build is the edge, and 10 is below it.**
