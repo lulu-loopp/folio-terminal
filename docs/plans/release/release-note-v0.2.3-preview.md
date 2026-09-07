@@ -6,12 +6,51 @@
 
 **下载:**上方 zip 即为完整下载,其余为校验和、物料清单与源码。
 
-0.2.3 is about reading what a pane is showing: a wider Markdown column, a wide
-table that scrolls sideways under an ordinary wheel, links that are drawn as
-links, and a terminal scroll bar that is there only when there is something to
-scroll to. Settings loses a row that asked the same question twice and gains
-three that can each record a chord, and every string in the window has been read
-by a native writer in both languages.
+0.2.3 is about reading what a pane is showing, and about the panes that were
+left out. Command Prompt now has a command rail and reports the folder it is
+standing in, and the first WSL tab of a window is integrated like every one
+after it. A tab's card keeps up with its pane whatever shell is inside it, and
+draws everything that pane is showing. Markdown gets a wider column, a wide
+table that scrolls sideways under an ordinary wheel, and links that are drawn as
+links; a terminal scroll bar is there only when there is somewhere to scroll to,
+and a tick on the command strip lands on its own command after a split. Settings
+loses a row that asked the same question twice, a change to the Explorer menu
+now reaches a File Explorer that is already running, and every string in the
+window has been read by a native writer in both languages.
+
+## Command Prompt has a command rail, and knows which folder it is in
+
+- A `cmd.exe` pane used to have an empty rail however many commands you had run:
+  nothing to click, and `Ctrl+Shift+↑`/`↓` with nowhere to go. Every prompt now
+  gets a tick that lands on its own prompt row, so the strip walks a `cmd`
+  session the way it walks a `bash` one.
+- The pane reports the folder it is standing in, so the tab and the files column
+  follow a `cd`, and a path it prints is a link.
+- Whatever `PROMPT` you had set is kept. Folio reports in front of it, never in
+  place of it, so a prompt you wrote yourself looks exactly as it did, and a
+  `cmd` started from a `cmd` pane does not report twice.
+- **Two things `cmd` cannot say, and Folio does not pretend otherwise.** A tick
+  carries no exit code, because `PROMPT` has no way to read one. And nothing in
+  `cmd` marks where a typed line ends, so **an inline `$…$` in a Command Prompt
+  pane is still shown as text rather than typeset**. Display formulas and image
+  previews in its output are exactly where they were.
+- The Profiles page says so on the Command Prompt row, in both languages:
+  "Prompt marks, directory and hyperlinks; no exit codes".
+
+## The first WSL tab of a window is integrated like every one after it
+
+- A WSL pane gets its ticks, its working directory and its clickable paths from
+  a small script handed to the shell your distribution logs you into. The first
+  WSL pane of every run used to go out before Folio knew which shell that was,
+  and so was started without the script: no ticks on the rail, no folder in the
+  tab or the files column, no `Ctrl+Shift+↑`/`↓`, and a card that never moved
+  while a command ran. The second WSL tab you opened worked, which is no
+  consolation on a machine whose default profile is WSL, where the first pane is
+  the only one there is.
+- Every WSL pane is composed the same way now, the first one included, because
+  the pane asks its own distribution which shell it logs into instead of waiting
+  on an answer that arrived too late. A distribution that logs you into zsh or
+  fish keeps its shell, untouched, exactly as before.
 
 ## A Markdown document uses the width you gave the window
 
@@ -73,6 +112,29 @@ by a native writer in both languages.
   A mark whose line the re-wrap genuinely lost leaves the strip instead of
   pointing somewhere the command never was.
 
+## A tab's card keeps up with its pane, whatever shell is inside it
+
+- The cards in the tab column were refreshed by a clock that only an integrated
+  shell starts. A PowerShell or Git Bash card followed every row, while a
+  Command Prompt card caught up at the next prompt and a WSL card caught up
+  whenever something else happened to repaint the window: the last rows of a
+  burst could sit unreproduced on a card until you moved the pointer over it.
+- A card now refreshes because the pane it is a picture of changed, which is the
+  same thing for every shell. It costs no more than it did: a card still redraws
+  at most ten times a second, and a card you cannot see, in a collapsed column
+  or a tab scrolled out of the list, costs no frame at all.
+
+## A tab's card fills with the pane's own history
+
+- A pane that had scrolled and was then made taller goes on showing lines from
+  its own history above the ones still on the screen. Its card was reading the
+  live screen alone, so it drew nine rows at the top and left two thirds of
+  itself empty while the pane below it showed twenty-four.
+- A card now reads the same places the pane reads, so it fills from the top and
+  is a picture of what the pane is actually showing. It was reported against Git
+  Bash sitting beside PowerShell 7, and it was never about either shell: any
+  pane is in that position after the window is made taller.
+
 ## The two Explorer rows in Settings are one switch
 
 - `Explorer context menu` and `First page of that menu` asked one question twice,
@@ -89,17 +151,31 @@ by a native writer in both languages.
   changed: removing the package from `Settings > Apps > Installed apps` still
   moves the row.
 
-## Four picture-in-picture slots, four rows, four chords
+## A new Explorer menu entry shows up without a sign-in
 
-- They were one row saying `Not set` with nothing on it to press, standing
-  between a row that has a Record button and two greyed rows that are keys this
-  window leaves to readline — so there was no way to tell which of the two it
-  was. It was neither: those chords were always yours to choose.
-- `Summon picture in picture 1` to `4` are a row each now, with their own chord,
-  their own Record button and their own `↺`. A chord another row already answers
-  to is refused, with the offer to take it, and `Restore all defaults` empties
-  all four again. `keybindings.json` is untouched: it named all four slots before
-  this change and names them now.
+- File Explorer reads the right-click tables once and goes on drawing what it
+  read, and Folio never told it anything had changed. So turning the Explorer
+  row on could be registered correctly, be verifiably there on the machine, and
+  still be invisible until the next sign-in. Folio now announces every change it
+  makes to that menu, on a refusal as well as on a success, and a File Explorer
+  that is already running picks up "Open Folio here" straight away.
+- The page Windows 11 opens first is the one Windows does not promise to refresh
+  on that announcement. So where Folio registered the package during this run,
+  the Settings row and the message that follows the registration both say so,
+  and both give the one step that always works: sign out and back in. Folio does
+  not restart your File Explorer.
+
+## The picture-in-picture rows are off the Shortcuts page until that window exists
+
+- Those four rows offered a key for a window Folio cannot summon yet: a chord
+  could be recorded into one, pressing it did nothing, and the only place that
+  was said was a line under the row that appeared once the chord was already
+  there. A shortcut you can set and cannot use is not a setting, so the rows are
+  off the page and out of `docs/shortcuts.md`.
+- Nobody loses a chord they had already recorded. `keybindings.json` still names
+  all four slots, a chord written into one stays in the file exactly as it was,
+  and `Restore all defaults` still clears it. The rows come back, with their
+  names and their Record buttons, the day the window does.
 
 ## The interface reads the way a native writer would put it
 
@@ -189,6 +265,12 @@ who unpacks the archive.
   second monitor, unreproduced.
 - **`.webm` needs the VP9 or AV1 Video Extension** from the Microsoft Store. A
   stock Windows has neither, and without one there is no still and no playback.
+- **A tab is named after its shell rather than the folder it is standing in**, in
+  PowerShell, Git Bash and WSL panes. The pane head and the files column both
+  name the folder.
+- **A Unix-style path is not a link.** `D:\Demo\figure.png` printed in a Git Bash
+  or WSL pane is clickable; the same file written `/d/Demo/figure.png` or
+  `/mnt/d/Demo/figure.png` is not.
 
 The full list is in `CHANGELOG.md` in the repository.
 
@@ -280,3 +362,5 @@ The full list is in `CHANGELOG.md` in the repository.
 - **`.webm` 需要 Microsoft Store 中的 VP9 或 AV1 视频扩展**。出厂 Windows 两者皆无，缺少时既无静止画面也无播放。
 
 完整列表见仓库中的 `CHANGELOG.md`。
+
+<!-- zh: opus46 — mirror the new English sections: "Command Prompt has a command rail, and knows which folder it is in"; "The first WSL tab of a window is integrated like every one after it"; "A tab's card keeps up with its pane, whatever shell is inside it"; "A tab's card fills with the pane's own history"; "A new Explorer menu entry shows up without a sign-in"; "The picture-in-picture rows are off the Shortcuts page until that window exists", which replaces 四个画中画槽位各有一行，各有快捷键. Also mirror the rewritten opening paragraph and the two new Known issues lines (a tab named after its shell rather than its folder; a Unix-style path is not a link). -->
