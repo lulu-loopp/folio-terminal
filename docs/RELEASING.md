@@ -466,3 +466,141 @@ which is a description of the design rather than a fault in it. Microsoft's own
 instructions for granting identity with an external location pass it for this
 reason. The manifest's structure is still validated: a misspelled element or an
 undeclared namespace fails with the flag on.
+
+## winget
+
+`winget install WeiyiShi.Folio` is the same archive, fetched from the same
+release page and checked against the same hash. Nothing new is built for it and
+no new asset is published: what lives in this repository is three YAML files
+under `packaging/winget/manifests/w/WeiyiShi/Folio/<version>/`, laid out in the
+directory shape `microsoft/winget-pkgs` uses so that the folder can be copied
+into a fork of that repository unchanged.
+
+### The one field the whole thing rests on
+
+`InstallerType: zip` with `NestedInstallerType: portable` would, by default,
+extract the archive and put a **symlink** to `folio.exe` in
+`%LOCALAPPDATA%\Microsoft\WinGet\Links`. That is the one arrangement this
+product cannot survive: `folio.exe` looks for `conpty.dll` and
+`OpenConsole.exe` beside `current_exe()` and nowhere else, and `folio.msix`
+names the extracted folder as the program's external location. A link in a
+different directory is a `folio.exe` with no ConPTY and a package that
+registers against nothing.
+
+`ArchiveBinariesDependOnPath: true` is what turns that off. With it, winget
+extracts the whole archive into one real folder under
+`%LOCALAPPDATA%\Microsoft\WinGet\Packages\` and puts **that folder** on the
+user's `PATH`, so all nine files sit beside each other exactly as they do for
+somebody who unzipped the release by hand. It arrived in winget-cli 1.9 and is
+carried by manifest schema 1.9.0 onward; leaving it unset does not fail
+validation, it just quietly reintroduces the symlink. Do not remove it.
+
+`RelativeFilePath` names the folder **inside** the archive, which is
+`folio-<version>\folio.exe` — `package.ps1` zips the staging folder rather than
+its contents, and that folder is `folio-<version>`, while the archive itself is
+`folio-<version>-windows-x64.zip`. The two names differ by four words and a
+manifest that repeats the archive's name here points at a path that is not in
+the archive.
+
+### What to change for a release
+
+Four values, and three of them are the version:
+
+| field | file | where it comes from |
+| --- | --- | --- |
+| `PackageVersion` | all three | the workspace version, without the tag's `-preview` |
+| `RelativeFilePath` | installer | `folio-<version>\folio.exe` |
+| `InstallerUrl` | installer | the release page's zip asset |
+| `InstallerSha256` | installer | the `folio-<version>-windows-x64.zip` line of `SHA256SUMS.txt`, in upper case |
+| `ReleaseDate` | installer | the day the release page was published |
+| `PrivacyUrl`, `LicenseUrl`, `ReleaseNotesUrl` | locale | the same URLs at the new tag |
+
+**The hash is copied out of `SHA256SUMS.txt`, never typed and never recomputed
+from a second download.** That file is written by `package.ps1` over the signed
+bytes, so it is the hash of what was uploaded; a hash that disagrees with the
+asset is the most common reason a submission is refused, and it is the one
+failure mode that a copy-paste cannot produce and a retype can.
+
+The version number carries no channel. `-preview` lives in the tag and in the
+URLs the manifest points at, and the `PackageVersion` is `0.2.2`; winget's own
+precedent for a pre-release channel is a second `PackageIdentifier`
+(`Microsoft.VisualStudioCode.Insiders`), not a suffixed version. That the build
+is a preview is said in the locale manifest's `Description`, where a person
+reads it.
+
+### Validating before submitting
+
+```powershell
+winget validate --manifest packaging\winget\manifests\w\WeiyiShi\Folio\<version>
+```
+
+and then, on a machine that is **not** the one doing the work — the Windows 10
+virtual machine of `docs/plans/release/clean-vm.md`, or Windows Sandbox — the
+install itself, because `validate` only reads the YAML and the failure this
+manifest exists to avoid is a runtime one:
+
+```powershell
+winget settings --enable LocalManifestFiles              # once, elevated
+winget settings --enable LocalArchiveMalwareScanOverride # once, elevated
+winget install --manifest <the version folder> --ignore-local-archive-malware-scan
+```
+
+The second setting and the flag are not a way around anything a user meets.
+`winget install --manifest` runs a malware scan of the archive that installing
+from the winget source does not — winget's own help says the scan is "performed
+as part of installing an archive type package **from local manifest**" — and on
+the clean Windows 10 machine that scan refuses this archive while Windows
+Defender, asked directly about the same bytes on the same machine, finds nothing
+in it. Without the override the local test cannot be run at all; nobody
+installing the published package is asked the question.
+
+What that has to show, beyond exiting 0: `folio` resolves on `PATH` to the
+extracted folder under `WinGet\Packages` and **not** to anything in
+`WinGet\Links`; `folio --version` prints the version this release claims;
+`conpty.dll`, `OpenConsole.exe` and `folio.msix` are in the same directory as
+the `folio.exe` that `PATH` resolved to; and `winget uninstall WeiyiShi.Folio`
+takes the folder and the `PATH` entry away again.
+
+### Submitting
+
+The first submission is a pull request opened by hand, so that a new
+publisher's first refusal is read by a person rather than by a workflow:
+
+```powershell
+gh repo fork microsoft/winget-pkgs --clone --remote
+git -C winget-pkgs checkout -b WeiyiShi.Folio-<version>
+# copy packaging/winget/manifests/w/WeiyiShi/Folio/<version>/ to the same path
+git -C winget-pkgs add manifests/w/WeiyiShi/Folio/<version>
+git -C winget-pkgs commit -m "New package: WeiyiShi.Folio version <version>"
+git -C winget-pkgs push -u origin WeiyiShi.Folio-<version>
+gh pr create --repo microsoft/winget-pkgs --head <account>:WeiyiShi.Folio-<version>
+```
+
+The subsequent-version equivalent is `wingetcreate update WeiyiShi.Folio
+--version <version> --urls <the zip>|x64 --submit`, which downloads the asset to
+compute the hash itself and adds a folder rather than replacing one. Versions
+accumulate in `winget-pkgs` the same way they accumulate on the releases page.
+
+Before opening it, read the checklist in that repository's pull-request
+template, and expect these to be what is asked about:
+
+- the folder path matches the identifier, `manifests/w/WeiyiShi/Folio/<version>`,
+  and every file in it repeats the same `PackageIdentifier` and `PackageVersion`;
+- `InstallerSha256` matches the asset the URL serves;
+- the installer is not a script — a `zip` of a portable is fine, a `.ps1` or a
+  `.bat` is refused outright;
+- the install is silent, which a portable archive is by having no installer at all;
+- the manifests validate against the schema version they declare, and the
+  automated pipeline runs `winget validate` again on the pull request;
+- the binary passes an antivirus and security scan. This is the one that costs a
+  new independent publisher time and is not in our gift beyond what is already
+  true: `folio.exe` and `folio.msix` are Authenticode-signed by a real
+  certificate rather than a self-signed one. Budget a review cycle for it.
+
+Only after a submission has cleared moderation once is it worth automating the
+rest with `vedantmgoyal9/winget-releaser` on `release: types: [released]`, with
+an `installers-regex` narrow enough to match only the zip — the release page
+also carries `folio.msix`, the crate archive, the bill of materials and
+`SHA256SUMS.txt`, and none of those is an installer. The trigger is the release
+event and not a tag push, because a tag push here only builds an unsigned
+rehearsal and the release page is made by a person from the signed machine.

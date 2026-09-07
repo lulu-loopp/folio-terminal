@@ -76,15 +76,32 @@ same folder as its external content location (`docs/RELEASING.md` §"The
 sparse MSIX package"), so the Explorer-menu row a user turns on afterwards
 still resolves. **This is the one field that makes the whole plan work**, and
 it did not exist before winget-cli 1.9 — any manifest we write has to declare
-`ManifestVersion: 1.12.0` (or at least 1.9.0) and set it explicitly; leaving
-it unset reintroduces the symlink and a `folio.exe` that cannot start ConPTY.
+at least `ManifestVersion: 1.9.0` and set the field explicitly; leaving it unset
+reintroduces the symlink and a `folio.exe` that cannot start ConPTY.
+
+**Which schema version to declare is not "the highest one that exists".**
+`winget-pkgs` publishes schema folders up to 1.28.0 (`doc/manifest/schema/` on
+`master`; `https://aka.ms/winget-manifest.installer.1.28.0.schema.json` answers
+and 1.29.0 does not, checked 2026-09-07), but nothing in the repository is
+written against them: ten consecutive merges sampled on 2026-09-07 all declare
+**1.12.0**, and the pull-request template's own checklist asks whether the
+manifest "conforms to the 1.12 schema". 1.12.0 carries
+`ArchiveBinariesDependOnPath` — it has been there since 1.9.0 — so it is what
+the manifests in `packaging/winget/` declare. Declaring a version the community
+pipeline is not yet written against would buy nothing and risk a mechanical
+refusal.
 
 One more nuance the archive shape forces: `package.ps1` zips the *folder*, not
 its contents, so that extracting produces one directory rather than nine loose
 files (`ZipFile]::CreateFromDirectory(..., $true)`). `RelativeFilePath` inside
-the manifest therefore has to include that folder —
-`folio-<version>-windows-x64/folio.exe`, not `folio.exe` — or `NestedInstallerFiles`
-names a path that is not in the archive.
+the manifest therefore has to include that folder, and **the folder is not
+called what the archive is called**: `package.ps1` stages into
+`folio-<version>` and then names the zip `folio-<version>-windows-x64.zip`
+(`$folder = "folio-$Version"`, `"$folder-windows-x64.zip"`), so the path is
+`folio-<version>\folio.exe` and a manifest that repeats the archive's own name
+here points at a path that is not in the archive. Read out of the built zip on
+2026-09-07 rather than out of the script: the nine entries of
+`folio-0.2.2-windows-x64.zip` are all under `folio-0.2.2/`.
 
 ## 2. Identifier, manifest files, and the fields that carry real content
 
@@ -282,21 +299,26 @@ a real per-release step once one exists, and none exists yet.
 
 ## Checklist
 
-- [ ] **Decide open questions 1–3** below (identifier, wait-for-non-preview,
-      automate-or-not) — everything after this depends on them.
+- [x] **Decide open questions 1–5** below — answered 2026-09-07, see
+      "The rulings".
 - [ ] Fork `microsoft/winget-pkgs` under `lulu-loopp` (or wherever the
       identifier's publisher segment points).
-- [ ] Author the three manifest files for the chosen version, from the
-      skeleton below, filled from `SHA256SUMS.txt` and the release page for
-      that tag.
-- [ ] `winget validate --manifest <path>` locally.
-- [ ] `winget settings --enable LocalManifestFiles` (once), then
-      `winget install --manifest <path>` locally — confirm `folio` on `PATH`
-      starts a working shell (ConPTY, not the fallback path) from the
-      installed directory, not merely that the install step exits 0.
-- [ ] `Tools/SandboxTest.ps1` against the same manifest folder.
-- [ ] Submit via `wingetcreate submit` (first time, by hand) or
-      `wingetcreate update ... --submit` (subsequent versions).
+- [x] Author the three manifest files for the chosen version, filled from
+      `SHA256SUMS.txt` and the release page for that tag —
+      `packaging/winget/manifests/w/WeiyiShi/Folio/0.2.2/`.
+- [x] `winget validate --manifest <path>` locally.
+- [x] `winget settings --enable LocalManifestFiles` (once), then
+      `winget install --manifest <path>` — on the clean Windows 10 machine
+      rather than on the machine doing the work, confirming that `folio` on
+      `PATH` is the extracted folder and not a link, not merely that the
+      install step exits 0.
+- [ ] ~~`Tools/SandboxTest.ps1`~~ — Windows Sandbox is not enabled here and
+      turning it on needs an administrator and a restart. The clean Windows 10
+      machine above is the substitute, and it is the older of the two Windows
+      versions this product supports.
+- [ ] Submit by hand: fork, branch `WeiyiShi.Folio-0.2.2`, copy the folder in,
+      commit as `New package: WeiyiShi.Folio version 0.2.2`, open the PR
+      (`wingetcreate update ... --submit` for subsequent versions).
 - [ ] Watch the automated validation pipeline on the PR (hash check,
       AV/security scan, schema) and moderator review; budget for at least
       one round of feedback on a first submission from a new publisher.
@@ -304,120 +326,96 @@ a real per-release step once one exists, and none exists yet.
       `vedantmgoyal9/winget-releaser` on `release: types: [released]`, scoped
       to the zip asset only, with a classic PAT (`public_repo`) as a repo
       secret.
-- [ ] Add the short new section to `docs/RELEASING.md` documenting the
-      per-release manifest update.
+- [x] Add the new section to `docs/RELEASING.md` documenting the per-release
+      manifest update — `## winget`, at the end of that file.
 
-## Manifest skeleton
+## The manifests, as written
 
-Three files, `manifests/w/WeiyiShi/Folio/0.2.2/`, `ManifestVersion: 1.12.0`
-throughout (required — see §1, this is the version that carries
-`ArchiveBinariesDependOnPath`). Placeholders in `< >`; everything else is a
-value already established elsewhere in this repository, not invented here.
+The skeleton this section used to hold has been replaced by the files
+themselves, so that there is one copy of them and it is the one that was
+validated:
+`packaging/winget/manifests/w/WeiyiShi/Folio/0.2.2/` — `WeiyiShi.Folio.yaml`,
+`WeiyiShi.Folio.installer.yaml`, `WeiyiShi.Folio.locale.en-US.yaml`, all three
+at `ManifestVersion: 1.12.0` (§1). The directory shape is `winget-pkgs`' own,
+so the `0.2.2` folder is copied into a fork at the identical path rather than
+rearranged.
 
-`WeiyiShi.Folio.yaml` (version manifest):
+Four things in them are worth naming here because they are the ones a later
+version gets wrong:
 
-```yaml
-PackageIdentifier: WeiyiShi.Folio
-PackageVersion: 0.2.2
-DefaultLocale: en-US
-ManifestType: version
-ManifestVersion: 1.12.0
-```
+- `RelativeFilePath: folio-0.2.2\folio.exe` — the folder inside the archive, not
+  the archive's name (§1).
+- `ArchiveBinariesDependOnPath: true` — without it the install is a symlink in
+  `WinGet\Links` and `folio.exe` has no ConPTY beside it (§1).
+- `InstallerSha256` is the `folio-0.2.2-windows-x64.zip` line of the release's
+  `SHA256SUMS.txt`, upper-cased:
+  `5510BDE154972B927A6590D0A29DB111B69126F6604A854D43EF369C2AFB4F74`. Downloaded
+  and re-hashed on 2026-09-07; the release asset's own `digest` field agrees.
+- `MinimumOSVersion: 10.0.17763.0` — Windows 10 1809, which is what both READMEs
+  already say the archive needs.
 
-`WeiyiShi.Folio.locale.en-US.yaml` (default locale manifest):
+`SignatureSha256` is intentionally absent — that field applies to `msix`/`appx`
+installer types, and ours is `zip` (§2). There is no `locale.zh-CN` file; it is
+optional, and a Chinese `ShortDescription` is a separate piece of writing.
 
-```yaml
-PackageIdentifier: WeiyiShi.Folio
-PackageVersion: 0.2.2
-PackageLocale: en-US
-Publisher: Weiyi Shi
-PublisherUrl: https://github.com/lulu-loopp
-PublisherSupportUrl: https://github.com/lulu-loopp/folio-terminal/issues
-PrivacyUrl: https://github.com/lulu-loopp/folio-terminal/blob/main/docs/PRIVACY.md
-PackageName: Folio
-PackageUrl: https://github.com/lulu-loopp/folio-terminal
-License: MIT OR Apache-2.0
-LicenseUrl: <LICENSE-MIT or LICENSE-APACHE blob URL — open question 4>
-Copyright: Copyright (c) 2026 Weiyi Shi and Folio contributors
-ShortDescription: <one line, no marketing words>
-Tags:
-  - terminal
-  - console
-  - cli
-  - command-line
-  - conpty
-  - pty
-  - windows-terminal
-ReleaseNotesUrl: https://github.com/lulu-loopp/folio-terminal/releases/tag/v0.2.2-preview
-ReleaseDate: <YYYY-MM-DD, the date the release page was published>
-ManifestType: defaultLocale
-ManifestVersion: 1.12.0
-```
+`Author` is absent, and that is not an oversight. It is optional in the
+`defaultLocale` schema, and `scripts/check-machine-paths.ps1` refuses the
+author's name on any tracked line that is not a copyright notice, a sentence
+about who signed the release, or a package-identity string. `Publisher: Weiyi
+Shi` passes that rule (the word "Publisher" is one of the words it looks for);
+a bare `Author: Weiyi Shi` line does not, and it would say nothing that
+`Publisher` has not already said. Neither the gate nor the manifest was bent to
+fit the other.
 
-`WeiyiShi.Folio.installer.yaml` (installer manifest):
+## The rulings (2026-09-07)
 
-```yaml
-PackageIdentifier: WeiyiShi.Folio
-PackageVersion: 0.2.2
-Platform:
-  - Windows.Desktop
-InstallerType: zip
-NestedInstallerType: portable
-NestedInstallerFiles:
-  - RelativeFilePath: folio-0.2.2-windows-x64/folio.exe
-    PortableCommandAlias: folio
-ArchiveBinariesDependOnPath: true
-Installers:
-  - Architecture: x64
-    InstallerUrl: https://github.com/lulu-loopp/folio-terminal/releases/download/v0.2.2-preview/folio-0.2.2-windows-x64.zip
-    InstallerSha256: <sha256 of folio-0.2.2-windows-x64.zip, from SHA256SUMS.txt>
-ManifestType: installer
-ManifestVersion: 1.12.0
-```
+The five open questions this plan ended on are answered. What follows is the
+answer, not the argument for it.
 
-`SignatureSha256` is intentionally absent — that field applies to `msix`/
-`appx` installer types, and ours is `zip` (§2). No `LICENSE-CN`/`locale.zh-CN`
-file is included in the skeleton; it is optional and adds one field
-(`ShortDescription` in Chinese) if wanted later.
+1. **`PackageIdentifier: WeiyiShi.Folio`**, `Publisher: Weiyi Shi`,
+   `PackageName: Folio`, `Moniker: folio` — the MSIX identity string reused
+   verbatim, as recommended.
+2. **Submit now, at `PackageVersion: 0.2.2`.** The version is pure numeric; that
+   the build is a preview is stated in `Description` and on the release page the
+   `ReleaseNotesUrl` points at, and nowhere in the version string.
+3. **The first submission is a pull request opened by hand.** No
+   `winget-releaser` workflow is set up until that one has cleared moderation.
+4. **`LicenseUrl` points at `LICENSE-APACHE` at the tag**, as a raw URL;
+   `License` is `Apache-2.0 OR MIT`, and `Copyright` is `Copyright (c) Weiyi
+   Shi`.
+5. **`Tags` and `ShortDescription` are written**, in the locale manifest. The
+   short description is the first line of `README.md` said again; the tags are
+   fifteen of the sixteen the schema allows.
 
-## Automation choice, recommended
+## Validation, as run
 
-Do the **first** submission by hand (`wingetcreate submit`, or a manually
-authored PR from the skeleton above) — a new publisher's first PR is the one
-most likely to hit an AV false positive or a moderator request neither of us
-can predict from documentation alone, and there is no value in automating a
-flow that has not yet been proven once. Once that PR has merged, wire
-`vedantmgoyal9/winget-releaser` on `release: types: [released]` for every
-release after — it is the community-standard action, needs only a repo
-secret and an `installers-regex`, and matches this repository's existing
-posture of "no CI step publishes anything a human did not trigger": the
-release-event trigger still only fires after a person has run
-`gh release create` by hand from the signed machine.
+- `winget validate --manifest packaging\winget\manifests\w\WeiyiShi\Folio\0.2.2`
+  against winget-cli v1.29.290 — "Manifest validation succeeded", exit 0, no
+  warnings (2026-09-07).
+- `winget install --manifest` end to end on the **Windows 10 virtual machine of
+  `clean-vm.md`**, reverted to its `clean` snapshot: a real install from the
+  published URL, `folio` resolving on `PATH` to the extracted folder rather than
+  to `WinGet\Links`, `folio --version`, the sibling files, and
+  `winget uninstall`. The evidence is in `winget-install-test-2026-09-07.md`
+  beside this file.
 
-## Open questions for the user
-
-1. **`PackageIdentifier: WeiyiShi.Folio`** — reuse the MSIX identity string
-   verbatim (recommended above, matches the `Microsoft.WindowsTerminal` /
-   `Microsoft.WindowsTerminal_8wekyb3d8bbwe` precedent), or pick something
-   else? This is a one-time, effectively permanent choice — winget-pkgs
-   treats the identifier as the package's unique key.
-2. **Submit now, at `0.2.2`, with `-preview` confined to the tag/URLs and
-   never in `PackageVersion` — or wait for a non-preview tag?** Nothing
-   found in winget's schema or moderation docs blocks a preview build by
-   name; the VS Code Insiders precedent (§3) argues for keeping
-   `PackageVersion` clean regardless of channel, which this plan already
-   does. Whether to publish a still-preview product to winget at all before
-   `docs/plans/post-release-roadmap-2026-09-01.md`'s later milestones land
-   is a product-maturity call, not a technical one.
-3. **Automate on the first release, or only after the first manual PR
-   clears** (recommended: the latter, §"Automation choice")?
-4. **`LicenseUrl`** — point at `LICENSE-MIT` or `LICENSE-APACHE`? Winget
-   allows exactly one URL for a dual-licensed project; either file states
-   the same copyright line.
-5. Is `Tags` (§"Manifest skeleton") the right list, and is the one-line
-   `ShortDescription` placeholder something the user wants to write
-   themselves, or drafted here after question 2 settles the "preview or
-   not" framing it would need to reflect?
+  The Windows 11 machine could not be used: it is encrypted to carry its vTPM,
+  and `vmrun` refuses it without the encryption password, which §2.2 of
+  `clean-vm.md` deliberately keeps out of this repository. Windows Sandbox is
+  not enabled on the development machine and enabling it needs an administrator
+  and a restart. The Windows 10 machine is the lower bound this product claims
+  support for, so it is not a weaker test — but it did have to be given two
+  things it does not normally have: its network adapter, which the gate-5 build
+  turns off on purpose, and a current App Installer, since the clean image
+  carries `Microsoft.DesktopAppInstaller 1.0.30251.0` and no `winget` at all.
+  Both are undone by reverting to `clean`, which is what the run ends with.
+- Two things that run turned up and that a reader should not misread —
+  `winget install --manifest` refuses the archive on a malware scan that
+  Windows Defender, asked directly about the same bytes on the same machine,
+  does not; and `winget uninstall WeiyiShi.Folio` does not match a package
+  installed from a local manifest. Both are artefacts of the `--manifest` path
+  rather than of the archive or the manifest, and the evidence file works
+  through why.
 
 ## Sources
 
