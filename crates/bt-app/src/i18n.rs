@@ -2455,7 +2455,7 @@ impl Text {
             Self::DescCursor => pick(
                 lang,
                 "The shape the cursor takes in the pane you are typing in.",
-                "你正在输入的那个窗格里，光标是什么形状。",
+                "光标在当前输入窗格中的形状。",
             ),
             Self::DescFormulas => pick(
                 lang,
@@ -2475,12 +2475,12 @@ impl Text {
             Self::DescUpdateCheck => pick(
                 lang,
                 "Asks the releases page once a day whether a newer version is out. It downloads nothing.",
-                "每天问一次发布页有没有更新的版本。不下载任何内容。",
+                "每天查一次有没有新版本，有的话在设置中提示。",
             ),
             Self::DescGitPanel => pick(
                 lang,
                 "Adds a Git page to the files column. Off, Folio never reads a repository.",
-                "在文件列里加一页 Git。关闭时，Folio 不会读取任何仓库。",
+                "在文件列中加一页 Git。关闭时不读取仓库。",
             ),
             // **Two facts and no opinion about either.** What the entry says,
             // and what the top answer costs — the second because "registers a
@@ -2521,7 +2521,7 @@ impl Text {
             Self::DescExplorerFirstPageElsewhere => pick(
                 lang,
                 "The entry on that page points at another folder. Folio puts it back on the next launch that can.",
-                "那一页上的条目指向另一个文件夹。Folio 会在下一次能做到的启动里把它改回来。",
+                "那一页上的条目指向另一个文件夹。下次启动时 Folio 会改回来。",
             ),
             Self::DescTabLayout => pick(
                 lang,
@@ -2567,7 +2567,7 @@ impl Text {
             Self::DescFontSize => pick(
                 lang,
                 "How large terminal text is, before your display's scaling is applied.",
-                "终端文字有多大，尚未计入显示器的缩放。",
+                "终端文字的大小，不含显示器缩放。",
             ),
             Self::RowLightScheme => pick(lang, "Light scheme", "浅色配色"),
             Self::RowDarkScheme => pick(lang, "Dark scheme", "深色配色"),
@@ -2597,7 +2597,7 @@ impl Text {
             Self::DescBackgroundImage => pick(
                 lang,
                 "A picture drawn behind the whole window, under every pane.",
-                "在整扇窗口背后画一张图片，位于所有窗格之下。",
+                "在窗口背后画一张图片，位于所有窗格之下。",
             ),
             Self::DescImageFit => pick(
                 lang,
@@ -2622,7 +2622,7 @@ impl Text {
             Self::DescAlwaysOnTop => pick(
                 lang,
                 "This window stays above every other window.",
-                "这扇窗口保持在其他所有窗口之上。",
+                "窗口始终在其他窗口之上。",
             ),
             Self::DescAcrylicUnavailable => pick(
                 lang,
@@ -2632,7 +2632,7 @@ impl Text {
             Self::DescBackgroundOpacityUnavailable => pick(
                 lang,
                 "This window is drawn opaque and cannot let the desktop through.",
-                "这扇窗口以不透明方式绘制，无法让桌面透过来。",
+                "窗口以不透明方式绘制，桌面无法透过来。",
             ),
             Self::OptionImageNone => pick(lang, "None", "无"),
             Self::OptionImageChoose => pick(lang, "Choose…", "选择…"),
@@ -2896,17 +2896,17 @@ impl Text {
             Self::MathWorkerStopped => pick(
                 lang,
                 "Formula rendering stopped; terminal input and output remain available",
-                "公式渲染已停止；终端的输入输出仍然可用",
+                "公式渲染已停止，终端输入输出不受影响。",
             ),
             Self::FilesWorkerStopped => pick(
                 lang,
                 "Directory reading stopped; terminal input and output remain available",
-                "目录读取已停止；终端的输入输出仍然可用",
+                "目录读取已停止，终端输入输出不受影响。",
             ),
             Self::PreviewWorkerStopped => pick(
                 lang,
                 "File preview reading stopped; terminal input and output remain available",
-                "文件预览读取已停止；终端的输入输出仍然可用",
+                "文件预览已停止，终端输入输出不受影响。",
             ),
 
             // ── the hyperlink overlay ──────────────────────────────────────
@@ -3177,7 +3177,7 @@ impl Text {
                 "Jump to the longest waiting pane",
                 "跳到等待最久的窗格",
             ),
-            Self::ShortcutCommandPalette => pick(lang, "Command palette", "命令面板"),
+            Self::ShortcutCommandPalette => pick(lang, "Command palette", "搜索面板"),
             Self::PaletteFieldPlaceholder => pick(
                 lang,
                 "Type a pane, a command, a file or a setting…",
@@ -3198,7 +3198,7 @@ impl Text {
             Self::ShortcutSplitHorizontal => pick(lang, "Split horizontally", "横向拆分"),
             Self::ShortcutSplitVertical => pick(lang, "Split vertically", "竖向拆分"),
             Self::ShortcutDuplicatePaneSplit => {
-                pick(lang, "Duplicate pane into a split", "复制窗格到拆分里")
+                pick(lang, "Duplicate pane into a split", "复制窗格并拆分")
             }
             Self::ShortcutFilesPane => pick(lang, "Files column", "文件列"),
             Self::ShortcutGitPage => pick(lang, "Turn the files column to Git", "文件列切到 Git"),
@@ -3219,7 +3219,7 @@ impl Text {
             Self::ShortcutFamilyGotoTab => pick(lang, "Go to tab 1–9", "转到标签 1–9"),
             Self::ShortcutScopePreview => pick(lang, "In a preview", "在预览里"),
             Self::ShortcutScopeTerminalPrimary => {
-                pick(lang, "On a terminal's own scrollback", "在终端自己的回滚里")
+                pick(lang, "On a terminal's own scrollback", "在终端回滚区中")
             }
             Self::ShortcutScopeSearchOpen => pick(lang, "While the search is open", "查找打开时"),
             Self::ShortcutNotePending => {
@@ -3314,7 +3314,7 @@ impl Text {
             Self::GitWorkerStopped => pick(
                 lang,
                 "Git reading stopped; terminal input and output remain available",
-                "git 读取已停止；终端的输入输出仍然可用",
+                "git 读取已停止，终端输入输出不受影响。",
             ),
             Self::GitNotFound => pick(
                 lang,
@@ -3504,7 +3504,7 @@ impl Text {
             Self::MarkdownImageRemote => pick(
                 lang,
                 "Folio has no network client, so this image is not fetched",
-                "Folio 没有网络客户端，所以这张图片不会被取回",
+                "Folio 不抓取远程图片",
             ),
             // ── moving a pane out of this window (multiwindow slice F1c) ───
             Self::PaneMenuMoveToNewWindow => {
@@ -3513,17 +3513,17 @@ impl Text {
             Self::MoveRefusedGone => pick(
                 lang,
                 "That tab or that window closed before the move. Nothing moved.",
-                "那个 tab 或那扇窗在移动之前已经关了。什么都没有移动。",
+                "目标标签页或窗口已关闭，未移动。",
             ),
             Self::MoveRefusedAlreadyThere => pick(
                 lang,
                 "The tab is already in that window.",
-                "这个 tab 已经在那扇窗里了。",
+                "这个标签页已在该窗口中。",
             ),
             Self::MoveRefusedPaneIsNowATab => pick(
                 lang,
                 "The pane is a tab of this window.",
-                "这个窗格现在是本窗的一个 tab。",
+                "这个窗格已是本窗口中的一个标签页。",
             ),
 
             // The verb, because the verb is what separates this row from
@@ -3549,7 +3549,7 @@ impl Text {
             Self::DescKeyHints => pick(
                 lang,
                 "Hold a modifier for a moment and this window lists the shortcuts that start with it. The list never takes a keystroke.",
-                "按住修饰键片刻，窗口中列出以该键开头的快捷键。此列表不会截走任何按键。",
+                "按住修饰键片刻，窗口列出以该键开头的快捷键。列表不截走按键。",
             ),
             // ── the tree row's menu, completed (user ruling 2026-08-25) ────
             //
@@ -3651,7 +3651,7 @@ impl Text {
             Self::DescFocusMode => pick(
                 lang,
                 "The tab strip becomes a column of cards, one per tab, and the tab you pick fills the window whole. Ctrl+Shift+Z turns this same setting.",
-                "标签条变成一列卡片，一张卡一个标签；选中的那个标签占满整扇窗口。Ctrl+Shift+Z 拨的是同一个开关。",
+                "标签条变成一列卡片，一张卡一个标签；选中的标签占满整个窗口。Ctrl+Shift+Z 拨的是同一个开关。",
             ),
             // 「最小对比度」is the term of art both WCAG's Chinese translations
             // and VS Code's own Chinese locale use for this quantity, so the row
@@ -3684,7 +3684,7 @@ impl Text {
             Self::DescNotifications => pick(
                 lang,
                 "A program that asks for one can put a message on your desktop. Nothing appears while its pane is on screen in the focused window.",
-                "程序主动请求时，可以在你的桌面上放一条消息。它所在的窗格正显示在聚焦的窗口里时，什么都不弹。",
+                "程序请求时可在桌面弹出通知。窗格正显示在当前窗口中时不弹出。",
             ),
             // ── the turn-end lane ──────────────────────────────────────────
             // 「回合结束也提醒」and not 「回合结束」(user ruling 2026-08-29): the
@@ -3813,7 +3813,7 @@ impl Text {
             Self::DescClaudeHooks => pick(
                 lang,
                 "Adds hooks to your ~/.claude/settings.json, or CLAUDE_CONFIG_DIR, so Claude Code tells this window when it is waiting for you. Nothing is written into a project folder.",
-                "打开后，Folio 在 Claude Code 的用户级设置（~/.claude/settings.json）中写入 hook；等待你输入时对应标签显示提醒标记，不改动任何项目目录。",
+                "打开后，Folio 在 Claude Code 的用户级设置（~/.claude/settings.json）中写入 hook。等待你输入时标签页显示提醒标记。",
             ),
             Self::ClaudeHooksAddedToast => pick(
                 lang,
@@ -3887,7 +3887,7 @@ impl Text {
             // reading "On a terminal's own scrollback or on a page" is a
             // sentence, and every other tag in this family is a place.
             Self::ShortcutScopeSearchHost => {
-                pick(lang, "Where there is text to search", "有正文可查找的地方")
+                pick(lang, "Where there is text to search", "有内容可搜索的地方")
             }
             Self::PreviewWebBack => pick(lang, "Back", "后退"),
             Self::PreviewWebForward => pick(lang, "Forward", "前进"),
@@ -3912,7 +3912,7 @@ impl Text {
             Self::WebFailCrashSay => pick(
                 lang,
                 "This page stopped running. Its render process exited.",
-                "这个页面停止运行了。它的渲染进程已退出。",
+                "这个页面停止运行了。",
             ),
             Self::WebFailBlockedSay => pick(
                 lang,
@@ -3923,7 +3923,7 @@ impl Text {
             Self::WebFailDownloadSay => pick(
                 lang,
                 "This download cannot be handed to your browser. The request carried data a plain link cannot replay.",
-                "这次下载没法交给浏览器。请求里带着普通链接重放不出来的东西。",
+                "在浏览器中打开此页面即可下载。",
             ),
             Self::WebFailDownloadVerb => pick(
                 lang,
@@ -3961,7 +3961,7 @@ impl Text {
             Self::DescCodexNotify => pick(
                 lang,
                 "Adds a notify program to your ~/.codex/config.toml, or CODEX_HOME, so codex tells this window when a turn has ended. It does not report a codex waiting for you.",
-                "打开后，Folio 在 Codex 的用户级配置（~/.codex/config.toml）中写入 notify 程序。Codex 仅在回合结束时发出通知，不区分是否在等待输入。",
+                "打开后，Folio 在 Codex 的用户级配置（~/.codex/config.toml）中写入 notify 程序。Codex 回合结束时发出通知。",
             ),
             Self::CodexNotifyAddedToast => pick(
                 lang,
@@ -3985,7 +3985,7 @@ impl Text {
             Self::DescCopilotHooks => pick(
                 lang,
                 "Adds a hook file to your ~/.copilot/hooks/, or COPILOT_HOME, so Copilot CLI tells this window when it is waiting for you. Nothing is written into a project folder.",
-                "打开后，Folio 在 Copilot CLI 的用户级目录（~/.copilot/hooks/）中写入一个 hook 文件；等待你输入时对应标签显示提醒标记，不改动任何项目目录。",
+                "打开后，Folio 在 Copilot CLI 的用户级目录（~/.copilot/hooks/）中写入 hook 文件。等待你输入时标签页显示提醒标记。",
             ),
             Self::DescCopilotHooksTooOld => pick(
                 lang,
@@ -4058,7 +4058,7 @@ impl Text {
             Self::DescCopyOnSelect => pick(
                 lang,
                 "Letting go of a selection in a pane writes it to the clipboard. There is no other sign that it happened",
-                "在窗格里松开一段选区，它就被写进剪贴板。除此之外没有别的提示",
+                "松开选区即复制到剪贴板，不另作提示。",
             ),
             Self::ShortcutRecord => pick(lang, "Record", "录制"),
             // 「按键…」and not 「录制中…」: the ellipsis already says a clock is
@@ -4082,13 +4082,13 @@ impl Text {
             Self::DescQuakeHeight => pick(
                 lang,
                 "How much of the height of the screen the pointer is on the summoned terminal covers. It hangs from the top of that screen.",
-                "唤出的终端盖住鼠标所在那块屏幕高度的多少。它从那块屏幕的顶端挂下来。",
+                "唤出的终端占鼠标所在屏幕高度的多少，从屏幕顶端向下展开。",
             ),
             Self::RowQuakeWidth => pick(lang, "Summoned terminal width", "快捷终端宽度"),
             Self::DescQuakeWidth => pick(
                 lang,
                 "How much of the width of that screen it covers. It is centred in the rest.",
-                "它盖住那块屏幕宽度的多少。剩下的部分左右均分，它居中。",
+                "唤出的终端占该屏幕宽度的多少，居中显示。",
             ),
             Self::DescQuakeHotkeyTaken => pick(
                 lang,
@@ -4099,45 +4099,45 @@ impl Text {
             Self::DescQuakeHotkey => pick(
                 lang,
                 "The key that calls the terminal down. It is claimed from Windows, so it works while another program has the keyboard.",
-                "把终端叫下来的按键。它向 Windows 认领，所以在别的程序拿着键盘时也生效。",
+                "唤出终端的快捷键。向 Windows 注册为全局快捷键，其他程序拿着焦点时也生效。",
             ),
-            Self::RowQuakeProfile => pick(lang, "Profile", "使用的 profile"),
+            Self::RowQuakeProfile => pick(lang, "Profile", "新标签页的配置"),
             Self::DescQuakeProfile => pick(
                 lang,
                 "Which shell a new tab in the summoned terminal starts.",
-                "唤出的终端里新开的 tab 用哪个 shell 启动。",
+                "唤出的终端里新标签页用哪个 shell。",
             ),
-            Self::OptionQuakeProfileDefault => pick(lang, "Default profile", "默认 profile"),
+            Self::OptionQuakeProfileDefault => pick(lang, "Default profile", "默认配置"),
             Self::RowQuakeCommand => pick(lang, "Command on first summon", "首次唤出时运行"),
             Self::DescQuakeCommand => pick(
                 lang,
                 "This command is run once each time Folio starts, on the first summon. Nothing else the summoned terminal restores is run.",
-                "每次启动 Folio 后，第一次唤出时运行这条命令一次。唤出的终端恢复的其它内容都不会被运行。",
+                "每次 Folio 启动后首次唤出时运行一次。恢复的其他内容只填入输入行，不运行。",
             ),
             Self::RowQuakeTopGap => pick(lang, "Gap above it", "顶端留距"),
             Self::DescQuakeTopGap => pick(
                 lang,
                 "How far below the top of that screen it hangs, in pixels.",
-                "它从那块屏幕的顶端往下留多少像素。",
+                "终端顶部与屏幕顶端的间距，单位为像素。",
             ),
             Self::RowQuakeRestore => pick(lang, "What comes back", "恢复内容"),
             Self::DescQuakeRestore => pick(
                 lang,
                 "What a new run of Folio puts back into the summoned terminal. A restored command is typed at the prompt and not run, and only a shell that reports its commands has one to restore.",
-                "重新启动 Folio 后，唤出的终端里放回什么。恢复的命令只填在提示符后，不会运行；只有会上报命令的 shell 才有命令可恢复。",
+                "Folio 重新启动后唤出的终端恢复哪些内容。恢复的命令只填入输入行，不运行；只有支持 shell 整合的配置才有命令可恢复。",
             ),
             Self::OptionQuakeRestoreNothing => pick(lang, "Nothing", "不恢复"),
-            Self::OptionQuakeRestoreFolders => pick(lang, "Tabs and folders", "tab 与目录"),
+            Self::OptionQuakeRestoreFolders => pick(lang, "Tabs and folders", "标签页与目录"),
             Self::OptionQuakeRestoreFoldersAndCommands => pick(
                 lang,
                 "Tabs, folders, and a pinned tab's last command typed at its prompt",
-                "tab、目录，以及 pin 的 tab 上一条命令填在提示符后",
+                "标签页、目录，以及固定标签页的上一条命令填入输入行",
             ),
             Self::RowQuakeDismiss => pick(lang, "Hide it when it loses focus", "失去焦点时收起"),
             Self::DescQuakeDismiss => pick(
                 lang,
                 "The summoned terminal goes away when the keyboard moves to another window.",
-                "键盘转到其他窗口时，唤出的终端随即收起。",
+                "焦点转到其他窗口时自动收起。",
             ),
 
             // ── the first-run card (§7.56) ─────────────────────────────────
@@ -4174,7 +4174,7 @@ impl Text {
             Self::FirstRunRowPowerShell => pick(
                 lang,
                 "PowerShell integration lets you jump between commands",
-                "PowerShell 整合让你在已运行命令间跳转",
+                "PowerShell 整合，支持命令间跳转",
             ),
             Self::FirstRunRowClaude => pick(
                 lang,
@@ -5069,7 +5069,7 @@ pub fn update_row_available_in(lang: Lang, version: &str) -> String {
         Lang::English => {
             format!("{version} is available. Open releases page opens it in your browser.")
         }
-        Lang::Chinese => format!("{version} 已发布。打开发布页会在浏览器里打开它。"),
+        Lang::Chinese => format!("{version} 已发布。点击「打开发布页」可在浏览器中查看。"),
     }
 }
 
@@ -5482,7 +5482,7 @@ pub fn profile_deleted(profile_title: &str, panes: usize) -> String {
         }
         (Lang::Chinese, 0) => format!("{profile_title} 已删除"),
         (Lang::Chinese, panes) => {
-            format!("{profile_title} 已删除。有 {panes} 个 pane 仍在运行它，它们继续运行")
+            format!("{profile_title} 已删除。{panes} 个窗格仍在运行，不受影响")
         }
     }
 }

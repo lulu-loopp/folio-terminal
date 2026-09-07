@@ -69,6 +69,14 @@ All notable changes to Folio are recorded here. The format follows
   Installed apps` still moves the row. The welcome card's Explorer switch means
   the same thing it always did, and now says so by calling the same function.
 
+- **The Chinese interface reads more naturally.** A native-writing review of
+  every Chinese string a reader can see reworded 52 of them: settings
+  sentences that had been carrying a reassurance nobody asked for, lines that
+  explained an internal mechanism instead of what the switch does, and words
+  left in English — `tab`, `profile` — where the rest of the Chinese says
+  标签页 and 配置. No fact changed, no default moved, and the English is
+  untouched.
+
 ### Fixed
 
 - **A link whose text is set in code, or carries emphasis, is drawn as a link.**
