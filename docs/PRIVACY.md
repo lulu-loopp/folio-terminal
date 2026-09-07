@@ -105,13 +105,12 @@ profile. Do not put a secret in one.
 ### Elsewhere
 
 - `%TEMP%\bt-app-panic.log` — appended to if Folio panics.
-- The Explorer context-menu row, when you move it off "Off". "Under Show more
-  options" writes two keys under `HKEY_CURRENT_USER\Software\Classes` and
-  nothing else. "On the first page" writes those keys and also registers
-  `folio.msix` for your account — that is a Windows package registration, not a
-  file of ours, and it is what `Settings > Apps > Installed apps` then lists.
-  Both are per-user, need no elevation, and are undone by moving the row back
-  down.
+- The Explorer context-menu row, when you switch it on. It writes two keys under
+  `HKEY_CURRENT_USER\Software\Classes`, and on a Windows 11 that has
+  `folio.msix` beside `folio.exe` it also registers that package for your
+  account — that is a Windows package registration, not a file of ours, and it is
+  what `Settings > Apps > Installed apps` then lists. Both are per-user, need no
+  elevation, and are undone by switching the row off.
 - The three agent installers, when you switch them on, write one file each into
   Claude Code's, Codex's and Copilot CLI's own configuration directories. A dated
   copy of the file as it stood is kept beside it first. `SECURITY.md` has the
@@ -219,11 +218,10 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Folio\WebView2"
 ### 其它位置
 
 - `%TEMP%\bt-app-panic.log` —— Folio 崩溃时追加。
-- 资源管理器菜单行离开「关」时。「显示更多选项」只在
-  `HKEY_CURRENT_USER\Software\Classes` 下写两个键，不修改其他内容；「第一页」写入这些
-  键，并将 `folio.msix` 注册到当前账户——那是一次 Windows 包登记，不是我们的文件，也正是
-  此后「设置 > 应用 > 已安装的应用」中列出的那一条。两者都只作用于当前用户、无需提权，且
-  都由把该行移回上一档来撤销。
+- 打开资源管理器菜单行时，写入两个注册表键到 `HKEY_CURRENT_USER\Software\Classes`；若
+  Windows 11 的文件夹里有 `folio.msix`，则注册该包到当前账户（这是 Windows 包注册，不是
+  Folio 的文件；该注册会出现在「设置 > 应用 > 已安装的应用」中）。这些都只针对当前账户，
+  无需管理员，关闭时移除。
 - 三个 agent 安装行打开时，各写一个文件到 Claude Code、Codex、Copilot CLI 自己的配置
   目录里；写之前先在旁边留一份带日期的原件副本。细节见 `SECURITY.md`。
 - PowerShell 整合被要求时，在 PowerShell 自己报出的 `$PROFILE` 末尾追加一行，追加前先

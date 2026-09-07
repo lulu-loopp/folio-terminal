@@ -15,21 +15,37 @@
 //! no package registered has, and what somebody who never asks for the first
 //! page has.
 //!
-//! # One row, three answers (user ruling 2026-09-07)
+//! # One row, one switch (user ruling 2026-09-07)
 //!
-//! They were two switches until that ruling, and the reader's question was
-//! always one question: **where does Folio stand in Explorer's menu**. So the
-//! two rows are one picker with three answers — [`ExplorerPlace`] — and the
-//! machine still answers it. Nothing about the storage changed: `Off` and
-//! `Under Show more options` are read off the registry, `On the first page` off
-//! the deployment database, and `settings.json` holds no copy of either.
+//! They were two switches that morning and a picker of three places by the
+//! afternoon; the ruling that closed the day cut the picker too. The reader's
+//! question is not *where* — it is **whether Folio is in Explorer's menu**, and
+//! a machine that can put the verb in two places should put it in both, because
+//! a reader who wanted it in only one of them is a reader nobody has met.
 //!
-//! The third answer is **greyed with its reason on the row's line** where this
-//! machine cannot honour it — Windows 10, or `folio.msix` missing from this
-//! folder — which is `PsReadLine`'s and the profile picker's own machinery
-//! ([`crate::settings::SettingsRow::option_enabled`]). An answer nobody can
-//! choose needs no card explaining that it was refused, so the toast that used
-//! to say `folio.msix is not beside folio.exe` has no press left to fire on.
+//! So the row is a switch. **On is everything this machine can do**
+//! ([`place_when_on`]): Windows 11 with `folio.msix` in this folder means the
+//! package **and** the classic entry; anywhere else it means the classic entry
+//! alone. **Off is neither.** The middle place is still a place —
+//! [`ExplorerPlace::ShowMoreOptions`] is what On means on most machines — but it
+//! is no longer something to choose on a machine that can do better.
+//!
+//! The first-run card's one switch has always meant exactly this, and now says
+//! so through the same function: [`crate::first_run::ExplorerShape::place`]
+//! calls [`place_when_on`]. Two surfaces asking one question cannot drift when
+//! one function answers it.
+//!
+//! Nothing about the storage changed: the classic half is read off the registry,
+//! the package half off the deployment database, and `settings.json` holds no
+//! copy of either. The switch is **On when the verb is anywhere in that menu**,
+//! which is [`place`] read against `Off`.
+//!
+//! Because On means different things on different machines, the row's own line
+//! says which ([`description_for`]) — the greyed answer that used to carry that
+//! reason went with the picker, and the sentence stayed. An answer nobody can
+//! choose needs no card explaining that it was refused either, so the toast that
+//! used to say `folio.msix is not beside folio.exe` has no press left to fire
+//! on.
 //!
 //! # Three facts, none of them stored
 //!
@@ -120,53 +136,94 @@ impl PackageState {
     }
 }
 
-// ── the one row's three answers ─────────────────────────────────────────────
+// ── the one switch's two states, and the places they mean ───────────────────
 
 /// Where Folio's verb stands in Explorer's right-click menu (user ruling
 /// 2026-09-07).
 ///
-/// **Ordered as the row draws it**, and the order is the ladder rather than the
-/// house's `On`/`Off` habit: each answer is the one above it plus something, so
-/// a reader walking the picker walks from nothing to the most Windows will give.
+/// **Not a set of answers a reader picks from** since the switch replaced the
+/// picker: it is what the switch's two states *mean* on the machine in front of
+/// them. `Off` is the switch off; the two under it are the two shapes On can
+/// take, and which one it takes is [`place_when_on`]'s answer rather than
+/// anybody's choice.
+///
+/// Ordered as a ladder all the same — each is the one above it plus a
+/// registration — because that is the order [`place`] reads them back in.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ExplorerPlace {
-    /// Neither registration. The factory state, and what removing both leaves.
+    /// Neither registration. The factory state, and what the switch off leaves.
     #[default]
     Off,
     /// The classic entry alone — the two registry trees [`crate::context_menu`]
     /// writes. This is the whole menu on Windows 10 and the **Show more
-    /// options** page on Windows 11.
+    /// options** page on Windows 11, and it is what On means on every machine
+    /// that has no `folio.msix` to register.
     ShowMoreOptions,
     /// The package registered **and** the classic entry kept.
     ///
     /// Both, and not the package alone: Windows 10 has no first page, a machine
     /// that later loses the package still has the verb, and the two pages do not
     /// know about each other (DESIGN §7.4a). It is the pair the first-run card
-    /// has always spent together.
+    /// has always spent together, and since the switch it is what On means
+    /// wherever this machine can honour it.
     FirstPage,
 }
 
 impl ExplorerPlace {
-    /// Whether this answer wants the classic registry trees.
+    /// Whether this place wants the classic registry trees.
     #[must_use]
     pub fn classic(self) -> bool {
         matches!(self, Self::ShowMoreOptions | Self::FirstPage)
     }
 
-    /// Whether this answer wants the package registered.
+    /// Whether this place wants the package registered.
     #[must_use]
     pub fn package(self) -> bool {
         matches!(self, Self::FirstPage)
+    }
+
+    /// Whether the verb is in that menu at all — the switch's own state.
+    ///
+    /// One reading and not two, so that what a row draws and what a press means
+    /// cannot come apart: the switch is on exactly when this place is not
+    /// [`Self::Off`].
+    #[must_use]
+    pub fn on(self) -> bool {
+        self != Self::Off
+    }
+}
+
+/// **The highest place this machine can honour** — what On means (user ruling
+/// 2026-09-07).
+///
+/// The one function behind both switches. The first-run card has always spent
+/// the pair together where it could, and the Settings row now says the same
+/// thing; sharing the answer is what makes "the card and the row mean the same"
+/// a fact about the code rather than a promise in a comment.
+///
+/// Never [`ExplorerPlace::Off`]: On is a request for something, and the machine
+/// fact handed in only decides how much of it there is to give.
+#[must_use]
+pub fn place_when_on(first_page_offered: bool) -> ExplorerPlace {
+    if first_page_offered {
+        ExplorerPlace::FirstPage
+    } else {
+        ExplorerPlace::ShowMoreOptions
     }
 }
 
 /// The card a press on this row owes when it lands.
 ///
-/// **Named for where the verb ends up, never for what a registration did.** The
-/// three answers are three places, so the reader who has just chosen one is owed
-/// the place; `Taken off the first page` was a fourth sentence saying half of
-/// what `Under Show more options` says whole, and it retired with the second row
-/// (user ruling 2026-09-07).
+/// **Named for where the verb ends up, never for what a registration did.** A
+/// press moves the verb to a place, so the reader is owed the place; `Taken off
+/// the first page` was a fourth sentence saying half of what `Under Show more
+/// options` says whole, and it retired with the second row (user ruling
+/// 2026-09-07).
+///
+/// Three cards for a switch of two states is not a contradiction: On lands in
+/// one of two places, and a card that named the switch rather than the place
+/// would tell a reader on Windows 10 that the verb is on a page their Windows
+/// does not have.
 #[must_use]
 pub fn place_toast(place: ExplorerPlace) -> Text {
     match place {
@@ -176,7 +233,7 @@ pub fn place_toast(place: ExplorerPlace) -> Text {
     }
 }
 
-/// What the machine says the answer is right now.
+/// What the machine says the verb's place is right now.
 ///
 /// **The registration outranks the classic entry**, which is the same reading
 /// [`PackageState::registered`] already makes one level down: a package that is
@@ -184,7 +241,11 @@ pub fn place_toast(place: ExplorerPlace) -> Text {
 /// over it would name a place the verb is not. A machine holding the package and
 /// no classic tree is therefore `FirstPage` too — it is the state a build with
 /// two switches could be left in, and the honest name for it is the highest
-/// place the verb actually occupies.
+/// place the verb actually occupies. The switch over it reads `On` there, and
+/// the next `Off` takes both away.
+///
+/// What the switch shows is [`ExplorerPlace::on`] of this answer; the place
+/// itself is what the row's line is written from and what a press carries.
 #[must_use]
 pub fn place(classic: bool, package_registered: bool) -> ExplorerPlace {
     if package_registered {
@@ -196,7 +257,8 @@ pub fn place(classic: bool, package_registered: bool) -> ExplorerPlace {
     }
 }
 
-/// Whether [`ExplorerPlace::FirstPage`] is an answer this machine can honour.
+/// Whether [`ExplorerPlace::FirstPage`] is a place this machine can honour —
+/// what [`place_when_on`] is asking about.
 ///
 /// Both halves, because either one missing makes the same item undrawable: a
 /// Windows with no first page to reach, or a folder with no `folio.msix` to
@@ -530,17 +592,18 @@ pub fn take_outcome() -> Option<Result<bool, String>> {
         .take()
 }
 
-/// **The row's own sentence** — a fact about this machine, not about the picker.
+/// **What On does on this machine** — the row's own sentence (user ruling
+/// 2026-09-07).
 ///
 /// A function rather than a table entry, on `context_menu::row_description`'s
 /// footing: which of the four sentences is true depends on the world, and the
 /// module that owns the world is the one that should be asked.
 ///
-/// **A refused answer replaces the sentence**, which is this dialog's own idiom
-/// for a control that cannot fully act — `psreadline::row_description`'s line on
-/// its greyed row, and the line an unavailable profile carries. Where the first
-/// page is out of reach the reader's next question is why, and the line under
-/// the title is the one place to answer it.
+/// The switch has one label on every machine and means a different amount on
+/// each of them, so this line is where the difference is written. It is the
+/// same job the line did while the top answer could be greyed —
+/// `psreadline::row_description`'s idiom, a control's own line carrying what
+/// the control cannot say — asked now of a switch that is never refused.
 #[must_use]
 pub fn row_description() -> &'static str {
     description_for(
@@ -553,17 +616,22 @@ pub fn row_description() -> &'static str {
 
 /// The same answer from the three facts, so a test can ask for a machine it is
 /// not running on.
+///
+/// **Windows' absence is reported before the file's**, because on a Windows 10
+/// the file may well be sitting in the folder and naming it would answer a
+/// question that machine cannot ask.
 #[must_use]
 pub fn description_for(supported: bool, package_beside_exe: bool, elsewhere: bool) -> Text {
     if !supported {
-        // The one sentence the merged row added, and the row it replaced could
-        // not say it: that row was not drawn at all below Windows 11, so a
-        // reader there met no explanation and no absence either. Now the answer
-        // is on the page, greyed, and this says why.
+        // **This machine has one menu, and the sentence names no page at all.**
+        // Not the `Show more options` line with a caveat: that item is not on
+        // this Windows, so a line naming it would send the reader looking for a
+        // door that is not on their screen. What On does here is the whole of
+        // what On can do here, and there is nothing missing to explain.
         return Text::DescExplorerMenuNoFirstPage;
     }
     if !package_beside_exe {
-        return Text::DescExplorerFirstPageNoPackage;
+        return Text::DescExplorerMenuNoPackage;
     }
     if elsewhere {
         return Text::DescExplorerFirstPageElsewhere;
@@ -676,20 +744,30 @@ mod tests {
     ///
     /// The row that needs stating is the third: a package registered with no
     /// classic trees is a state an older build's two switches could be left in,
-    /// and it reads as the first page, because that is where the verb is.
+    /// and it reads as the first page, because that is where the verb is — and
+    /// the switch over it therefore reads `On`, with the `Off` beside it clearing
+    /// both.
     ///
     /// MUTATION: test `classic` before `package_registered` and the third row
     /// goes red — a machine with an item on the first page would say the verb is
     /// under `Show more options`, and pressing that answer would remove nothing.
+    /// Make [`ExplorerPlace::on`] answer `matches!(self, Self::FirstPage)` and the
+    /// switch block goes red on the most ordinary machine there is.
     #[test]
     fn every_state_two_switches_could_leave_reads_as_one_of_three_places() {
-        // classic, package  →  the answer the row ticks
+        // classic, package  →  the place the verb stands in
         assert_eq!(place(true, true), ExplorerPlace::FirstPage);
         assert_eq!(place(true, false), ExplorerPlace::ShowMoreOptions);
         assert_eq!(place(false, true), ExplorerPlace::FirstPage);
         assert_eq!(place(false, false), ExplorerPlace::Off);
-        // And the answer says what it wants of each store, so the press that
-        // follows puts the machine where the row says it is.
+        // And the switch over it is on wherever the verb is in that menu, which
+        // is either registration and not the classic one alone.
+        assert!(place(true, true).on());
+        assert!(place(true, false).on());
+        assert!(place(false, true).on());
+        assert!(!place(false, false).on());
+        // The place says what it wants of each store, so the press that follows
+        // puts the machine where the row says it is.
         for (classic, package) in [(true, true), (true, false), (false, false)] {
             let place = place(classic, package);
             assert_eq!(place.classic(), classic);
@@ -697,31 +775,48 @@ mod tests {
         }
     }
 
-    /// RED (user ruling 2026-09-07) — **the top answer needs both halves, and
-    /// the row says which one is missing.**
+    /// RED (user ruling 2026-09-07) — **the first page needs both halves, and
+    /// the row's own line says what On does without it.**
     ///
-    /// Two machine facts, either of which alone makes the same item undrawable:
+    /// Two machine facts, either of which alone makes the same item unregistrable:
     /// a Windows with no first page to reach, and a folder with no `folio.msix`
-    /// to register. They are separate sentences because they are separate
-    /// repairs — one of them has none.
+    /// to register. Together they are the whole of what
+    /// [`place_when_on`] asks — which is why they are one function and not two
+    /// conditions written out at each of its callers.
     ///
-    /// **And there is no card for the refusal.** The answer cannot be chosen, so
-    /// nothing can press it; a toast reading `folio.msix is not beside folio.exe`
-    /// would explain a press nobody made, in words the reader is already looking
-    /// at. That was the ruling's own reason for retiring it.
+    /// **And there is no card for a refusal, because nothing is refused.** The
+    /// switch turns on either way; a toast reading `folio.msix is not beside
+    /// folio.exe` would explain a press that succeeded. That was the earlier
+    /// ruling's reason for retiring it and the switch's reason for keeping it
+    /// retired.
     ///
     /// MUTATION: make `first_page_offered` answer `supported || package` and the
-    /// second assertion goes red, which is an offered answer on a machine with no
-    /// file to register.
+    /// second assertion goes red, which is `On` trying to register a file that is
+    /// not there. Make `place_when_on` answer `Off` for a machine with no package
+    /// and the fifth goes red, which is a switch that turns on and does nothing.
     #[test]
-    fn the_top_answer_needs_a_first_page_and_a_package_and_says_which_is_missing() {
+    fn the_first_page_needs_both_halves_and_on_gives_what_is_left() {
         assert!(first_page_offered(true, true));
         assert!(!first_page_offered(true, false));
         assert!(!first_page_offered(false, true));
         assert!(!first_page_offered(false, false));
-        // The sentence under the title is the reason, and Windows' absence is
-        // reported before the file's: on a Windows 10 the file may well be there
-        // and naming it would be answering a question nobody asked.
+        // What On means on each of them — never nothing.
+        assert_eq!(place_when_on(true), ExplorerPlace::FirstPage);
+        assert_eq!(place_when_on(false), ExplorerPlace::ShowMoreOptions);
+        assert!(place_when_on(true).on() && place_when_on(false).on());
+        // And the card's switch is the same switch, through the same function
+        // rather than through a second table saying the same thing.
+        assert_eq!(
+            crate::first_run::ExplorerShape::FirstPageAndClassic.place(),
+            place_when_on(true)
+        );
+        assert_eq!(
+            crate::first_run::ExplorerShape::ClassicOnly.place(),
+            place_when_on(false)
+        );
+        // The sentence under the title says what On does here, and Windows'
+        // absence is reported before the file's: on a Windows 10 the file may
+        // well be there and naming it would answer a question nobody asked.
         assert_eq!(
             description_for(false, false, false),
             Text::DescExplorerMenuNoFirstPage
@@ -732,7 +827,7 @@ mod tests {
         );
         assert_eq!(
             description_for(true, false, false),
-            Text::DescExplorerFirstPageNoPackage
+            Text::DescExplorerMenuNoPackage
         );
         assert_eq!(
             description_for(true, true, true),
@@ -766,6 +861,44 @@ mod tests {
             place_toast(ExplorerPlace::FirstPage),
             Text::ExplorerFirstPageAddedToast
         );
+    }
+
+    /// RED (user ruling 2026-09-07, the second of that day) — **the row's line
+    /// says what On does on this machine, one sentence per machine.**
+    ///
+    /// A switch has one word on every desk and buys a different amount on each,
+    /// so this line is where the difference is written. Three machines, three
+    /// sentences, and each of them a statement about what a press will do rather
+    /// than about what some answer would have cost.
+    ///
+    /// **The Windows 10 line names no page at all.** Not `Show more options`
+    /// with a footnote: that item is a Windows 11 item, and a line naming it on a
+    /// machine that has one menu would send the reader looking for a door that is
+    /// not drawn on their screen. The line that used to stand here said the
+    /// opposite thing — that this Windows has no first page — which was the
+    /// reason a rung was greyed, and there is no rung now.
+    ///
+    /// MUTATION: return `DescExplorerMenuNoPackage` for a machine with no first
+    /// page and the first assertion goes red, which is a Windows 10 reader told
+    /// to go and find a file for a page their Windows does not have.
+    #[test]
+    fn the_row_says_what_on_does_on_this_machine() {
+        use crate::i18n::Lang;
+        let ten = description_for(false, true, false).in_lang(Lang::English);
+        assert!(
+            !ten.contains("first page"),
+            "a machine with one menu is told about one menu: {ten:?}"
+        );
+        assert!(!ten.contains("Show more options"), "{ten:?}");
+        let no_package = description_for(true, false, false).in_lang(Lang::English);
+        assert!(no_package.contains("Show more options"), "{no_package:?}");
+        assert!(
+            no_package.contains("folio.msix is not in this folder"),
+            "{no_package:?}"
+        );
+        let both = description_for(true, true, false).in_lang(Lang::English);
+        assert!(both.contains("first page"), "{both:?}");
+        assert!(both.contains("Show more options"), "{both:?}");
     }
 
     /// PIN — **the icon is the executable's own first, and the words are the

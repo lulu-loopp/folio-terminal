@@ -392,27 +392,31 @@ pub enum Text {
     DescFormulas,
     DescInlineFormulas,
     DescGitPanel,
-    /// **What the row adds and what its third answer costs** — the merged row's
-    /// ordinary line (user ruling 2026-09-07).
+    /// **What On does on a machine that can do everything** — the switch's line
+    /// where Windows 11 and `folio.msix` are both there (user ruling
+    /// 2026-09-07).
     ///
-    /// Two facts and no opinion, which is what the two lines it replaces each
-    /// carried one of: the words that land in Explorer's menu, and the file the
+    /// Two facts and no opinion: the two places the verb lands, and the file the
     /// first page has to register. The package is named because it is a file the
     /// reader can see in the folder they extracted, and because "registers a
     /// package" is the part of this row that deleting a registry key does not
     /// undo.
     DescExplorerMenu,
-    /// The same row on a Windows with no first page — the reason its third
-    /// answer is greyed.
+    /// **What On does on a Windows with one menu.**
     ///
-    /// **The sentence that had nowhere to live until the rows merged**: the
-    /// first-page switch was not drawn at all below Windows 11, so a reader
-    /// there met neither the answer nor an explanation of its absence.
+    /// It names no page, because that machine has none to name — not `Show more
+    /// options`, which is a Windows 11 item, and not the first page. What On
+    /// does here is all On can do here, so there is nothing left over to
+    /// explain.
     DescExplorerMenuNoFirstPage,
-    /// The same row when `folio.msix` is not beside the executable — which is
-    /// the state of a machine where somebody moved `folio.exe` out of the folder
-    /// they extracted, and the reason the third answer is greyed.
-    DescExplorerFirstPageNoPackage,
+    /// **What On does on a Windows 11 with no `folio.msix` in the folder** —
+    /// which is the state of a machine where somebody moved `folio.exe` out of
+    /// the folder they extracted.
+    ///
+    /// The one line of the three that carries a fact about the folder as well as
+    /// about the menu, because it is the only one where the reader can see the
+    /// difference and do something about it.
+    DescExplorerMenuNoPackage,
     /// And when the registration names a folder that is not this one. The launch
     /// repairs this on its own; the sentence exists for the seconds before it
     /// has, and for the machine where the repair could not run.
@@ -441,22 +445,13 @@ pub enum Text {
     OptionVertical,
     OptionOn,
     OptionOff,
-    /// **The Explorer row's second answer** (user ruling 2026-09-07): the
-    /// classic entry, which Windows 11 files under its own `Show more options`.
-    ///
-    /// Named for where the reader will find the verb rather than for what gets
-    /// written, which is [`Self::RowContextMenu`]'s rule one level down. It
-    /// quotes Windows' own label, so it is the label Windows draws and not a
-    /// description of it. Windows 10 has no such page and takes this answer all
-    /// the same — there the classic menu **is** the menu, and a second wording
-    /// for one registration would teach two things where there is one.
-    OptionExplorerShowMoreOptions,
-    /// **The third answer**: the package registered, and the classic entry kept
-    /// beside it.
-    ///
-    /// Greyed where this machine cannot honour it, with the reason on the row's
-    /// own line — see [`Self::DescExplorerMenuNoFirstPage`].
-    OptionExplorerFirstPage,
+    // `Under Show more options` and `On the first page` stood here, between
+    // this table's `Off` and `Expanded`, for one afternoon (2026-09-07). They
+    // were the Explorer row's second and third answers while that row was a
+    // picker of places; the ruling that closed the day made it a switch, and
+    // the two words above are the only ones it needs. Where the verb lands is a
+    // fact about the machine now, and it is said in the row's own line —
+    // [`Self::DescExplorerMenu`] and the two beside it.
     OptionExpanded,
     /// The mode's name, not a sentence about it (user ruling 2026-08-10) — the
     /// translation must not put the explanation back.
@@ -2284,6 +2279,13 @@ pub enum Text {
     /// card's only promise and it is a fact: every row here has a row in
     /// Settings. **A statement and not an affordance** — the `Open settings`
     /// link went with v3 (v4 §5), so nothing on this line is pressable.
+    ///
+    /// **It says what the reader can do, not how the two surfaces line up**
+    /// (user ruling 2026-09-07). The English used to read `Every row here is
+    /// also a row in Settings.`, which is the same fact told from the card's
+    /// side — true, and of no use to somebody deciding whether a switch is
+    /// safe to leave off. The Chinese said the useful half from the start and
+    /// is untouched.
     FirstRunSettingsLine,
     /// The refusal. **`Not now` / 「暂不」 everywhere in this window** (user
     /// ruling 2026-09-06) — the PSReadLine invitation's own refusal was worded
@@ -2498,22 +2500,23 @@ impl Text {
             // holds again on the Chinese.
             Self::DescExplorerMenu => pick(
                 lang,
-                "Adds Open Folio here to Explorer's right-click menu. The first page registers folio.msix, the file beside folio.exe, for this account.",
-                "右键菜单加入「在 Folio 中打开」。第一页选项把与 folio.exe 同目录的 folio.msix 注册到当前账户。",
+                "Puts Folio in Explorer's right-click menu, on the first page and under Show more options. The first page registers folio.msix, beside folio.exe, for this account.",
+                "在资源管理器右键菜单的第一页和「显示更多选项」页都加入「在 Folio 中打开」。第一页需要注册 folio.msix（与 folio.exe 同文件夹）到当前账户。",
             ),
-            // The reason the top answer is greyed, and a plain statement of the
-            // machine: one menu, no page for a second entry to stand on. It says
-            // nothing about what the reader could do instead, because there is
-            // nothing they could do — this is the Windows they have.
+            // **One menu, and the sentence names no page.** Not `Show more
+            // options` with a footnote: that item is a Windows 11 item, and a
+            // line naming it here would send this reader looking for a door
+            // their Windows does not draw. What On does on this machine is the
+            // whole of what On can do on it, so nothing is left to explain.
             Self::DescExplorerMenuNoFirstPage => pick(
                 lang,
-                "This Windows has one right-click menu and no first page for an entry to stand on.",
-                "这台机器只有一个右键菜单，没有第一页可放置项目。",
+                "Puts Folio in Explorer's right-click menu.",
+                "在资源管理器右键菜单中加入「在 Folio 中打开」。",
             ),
-            Self::DescExplorerFirstPageNoPackage => pick(
+            Self::DescExplorerMenuNoPackage => pick(
                 lang,
-                "folio.msix is not in this folder. It ships in the archive beside folio.exe, and this page needs it.",
-                "这个文件夹里没有 folio.msix。它随压缩包发在 folio.exe 旁边，这一页需要它。",
+                "Puts Folio under Show more options in Explorer's menu. folio.msix is not in this folder. It ships in the archive beside folio.exe, and the first page needs it.",
+                "在资源管理器右键菜单的「显示更多选项」页加入「在 Folio 中打开」。本文件夹中缺少 folio.msix，该文件随压缩包放在 folio.exe 旁，第一页需要它。",
             ),
             Self::DescExplorerFirstPageElsewhere => pick(
                 lang,
@@ -2647,16 +2650,6 @@ impl Text {
             Self::OptionVertical => pick(lang, "Vertical", "竖向"),
             Self::OptionOn => pick(lang, "On", "开"),
             Self::OptionOff => pick(lang, "Off", "关"),
-            // **Windows' own label, quoted rather than described.** The reader
-            // will be looking for that exact item at the bottom of Windows 11's
-            // short menu, and a paraphrase would be this dialog naming a door by
-            // a name that is not written on it.
-            Self::OptionExplorerShowMoreOptions => {
-                pick(lang, "Under Show more options", "显示更多选项")
-            }
-            // Names the page. The picker is where the reader chooses a place, so
-            // the answers are places and the row's own line carries the cost.
-            Self::OptionExplorerFirstPage => pick(lang, "On the first page", "第一页"),
             Self::OptionExpanded => pick(lang, "Expanded", "展开"),
             Self::OptionIcons => pick(lang, "Icons", "图标"),
             Self::OptionSplitAuto => pick(lang, "Auto (longer edge)", "自动（沿长边）"),
@@ -4156,7 +4149,7 @@ impl Text {
             Self::FirstRunTitle => pick(lang, "Welcome to Folio", "欢迎使用 Folio"),
             Self::FirstRunSettingsLine => pick(
                 lang,
-                "Every row here is also a row in Settings.",
+                "You can change these options in Settings.",
                 "所有选项都可在设置中更改",
             ),
             Self::FirstRunLater => pick(lang, "Not now", "暂不"),
@@ -4248,7 +4241,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 593] = [
+    pub const ALL: [Self; 591] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4305,7 +4298,7 @@ impl Text {
         Self::DescUpdateCheck,
         Self::DescExplorerMenu,
         Self::DescExplorerMenuNoFirstPage,
-        Self::DescExplorerFirstPageNoPackage,
+        Self::DescExplorerMenuNoPackage,
         Self::DescExplorerFirstPageElsewhere,
         Self::DescTabLayout,
         Self::DescSidebar,
@@ -4324,8 +4317,6 @@ impl Text {
         Self::OptionVertical,
         Self::OptionOn,
         Self::OptionOff,
-        Self::OptionExplorerShowMoreOptions,
-        Self::OptionExplorerFirstPage,
         Self::OptionExpanded,
         Self::OptionIcons,
         Self::OptionSplitAuto,

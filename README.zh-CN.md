@@ -19,7 +19,7 @@ Folio 是一款 Windows 终端：命令输出的公式在其打印位置排版�
 
 `folio.exe` 和 `folio.msix` 带有数字签名，签名者为 **Weiyi Shi**，证书来自 Microsoft 的 Artifact Signing 服务。首次运行 `folio.exe` 时，如果 Windows 显示「Windows 已保护你的电脑」对话框，点击「更多信息」，然后点击「仍要运行」；对话框中显示的发布者为 **Weiyi Shi**。
 
-压缩包内为同一目录下的九个文件，它们须放在一起：`folio.exe`，以及缺之则无法启动 shell 的 `conpty.dll` 与 `OpenConsole.exe`；`folio.msix`——资源管理器菜单行的第一页选项所登记的那个几 KB 的包，它指向自身被解压到的目录；供 VS Code 使用的 `folio-here.cmd`；再加上两份许可、第三方声明与商标说明。
+压缩包内为同一目录下的九个文件，它们须放在一起：`folio.exe`，以及缺之则无法启动 shell 的 `conpty.dll` 与 `OpenConsole.exe`；`folio.msix`——资源管理器菜单第一页注册用的几 KB 包，它指向自身被解压到的目录；供 VS Code 使用的 `folio-here.cmd`；再加上两份许可、第三方声明与商标说明。
 
 网页预览需 **WebView2 运行时**。Windows 11 自带该运行时；Windows 10 通常亦已安装，若未安装，可从此处获取 [Evergreen 运行时](https://developer.microsoft.com/microsoft-edge/webview2/)。缺少该运行时，除网页预览外的所有功能均正常，预览窗格会说明缺失项。
 
@@ -172,7 +172,7 @@ PowerShell 整合会向 PowerShell 自行命名的 `$PROFILE` 文件添加一行
        alt="窗口默认外观：左侧为文件列，中间两个终端窗格并排，右侧预览窗格中打开一份 markdown 文档，均采用默认字体与默认配色。">
 </picture>
 
-- **设置 > General > 资源管理器菜单** 决定 Folio 在资源管理器右键菜单中的位置，有三个答案。「显示更多选项」写入 `HKEY_CURRENT_USER\Software\Classes` 下的两个注册表项，菜单项写作「在 Folio 中打开」，在 Windows 11 上位于「显示更多选项」之后，在 Windows 10 上位于唯一的那个菜单中。「第一页」保留该菜单项，并同时将压缩包内与 `folio.exe` 同目录的 `folio.msix` 注册到当前账户，从而使菜单项出现在 Windows 11 首先打开的第一页上：无需管理员权限，不写入账户外任何内容，将行移回上一档即可撤销。在 Windows 10 或 `folio.msix` 不在 `folio.exe` 旁时，该选项变灰并在行下显示原因。
+- **设置 > General > 资源管理器菜单**：打开时写入两个注册表键到 `HKEY_CURRENT_USER\Software\Classes`，加入「在 Folio 中打开」。在 Windows 11 上这项在「显示更多选项」页；在 Windows 10 上它在唯一的菜单中。如果 Windows 11 的文件夹里有 `folio.msix`，则同时注册该包到当前账户，使菜单项出现在第一页。无需管理员。关闭时移除已注册的项。
 - Windows PowerShell 5.1 自带 PSReadLine 2.0.0，该版本在窗口改变大小后会错放输入行。Folio 内置一份已修补的 2.4.6 版本，用户可按需将其安装至模块目录。当机器的执行策略仍为出厂默认的 `Restricted` 时，开关会说明原因，并提供 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` 命令。
 
 ### 与 Visual Studio Code 的配合

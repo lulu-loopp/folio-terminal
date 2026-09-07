@@ -36,8 +36,8 @@ publisher shown is **Weiyi Shi**.
 
 The archive holds nine files in one folder, and they belong together: `folio.exe`,
 `conpty.dll` and `OpenConsole.exe`, which it will not start a shell without;
-`folio.msix`, the few-kilobyte package the Explorer menu row registers for its
-first-page answer, which names the folder it was extracted into; `folio-here.cmd` for VS Code; and the two
+`folio.msix`, the few-kilobyte package the Explorer menu row registers to reach
+the first page, which names the folder it was extracted into; `folio-here.cmd` for VS Code; and the two
 licences, the third-party notices and the trademark note.
 
 The web preview needs the **WebView2 Runtime**. Windows 11 has it; Windows 10
@@ -67,7 +67,7 @@ they are wrong.
        integration lets you jump between commands are off; below a hairline,
        Its tab lights up when Claude Code is waiting, when a Codex turn ends,
        and when Copilot CLI is waiting, all three off. At the foot, a faint line
-       reading Every row here is also a row in Settings, then Not now and Done.
+       reading You can change these options in Settings, then Not now and Done.
        Behind the card, one tab and a prompt.">
 </picture>
 
@@ -312,17 +312,17 @@ One box answers five questions at once, and `Enter` goes straight there.
        a preview pane on the right.">
 </picture>
 
-- **Settings > General > Explorer context menu** decides where Folio stands in
-  Explorer's right-click menu, and it has three answers. *Under "Show more
-  options"* writes two keys under `HKEY_CURRENT_USER\Software\Classes`; the
-  entry reads "Open Folio here", and it is the only menu Windows 10 has. *On the
-  first page* keeps that entry and also puts "Open in Folio" on the page Windows
-  11 opens first, where a right-click gives it to you without "Show more
-  options". That page takes entries only from a signed package, so this answer
-  registers `folio.msix` — the file beside `folio.exe` in the archive — for your
-  account: no elevation, nothing written outside that account, and moving the row
-  back down takes it off again. It is greyed, with the reason under the row, on
-  Windows 10 and where `folio.msix` is not beside `folio.exe`.
+- **Settings > General > Explorer context menu** is a switch, and On is
+  everything your Windows can do. It writes two keys under
+  `HKEY_CURRENT_USER\Software\Classes`; the entry reads "Open Folio here", and
+  Windows 11 files it under "Show more options" while on Windows 10 it stands in
+  the only menu there is. On a Windows 11 that has `folio.msix` beside
+  `folio.exe`, On also registers that package for your account, which puts "Open
+  in Folio" on the page Windows 11 opens first — where a right-click gives it to
+  you without "Show more options". That page takes entries only from a signed
+  package, which is what `folio.msix` is for; it needs no elevation. Off takes
+  back whichever of the two is registered, and the line under the row says which
+  of them On reaches on the machine you are reading it on.
 - Windows PowerShell 5.1 ships PSReadLine 2.0.0, which misplaces the input line
   after the window is resized. Folio carries a patched 2.4.6 and installs it into
   your module path on request. On a machine whose execution policy is still the

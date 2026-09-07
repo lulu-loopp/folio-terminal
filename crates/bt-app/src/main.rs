@@ -41209,7 +41209,16 @@ impl Runtime<'_> {
         if let Some(enabled) = settings::powershell_integration_offer_requested(target) {
             self.apply_powershell_integration_offer(enabled)?;
         }
-        if let Some(place) = settings::explorer_place_requested(target) {
+        // The machine fact travels with the press: what the switch's `On` reaches
+        // is `explorer_menu::place_when_on`'s answer about this Windows and this
+        // folder, and the door that reads the press is not the place to ask.
+        if let Some(place) = settings::explorer_place_requested(
+            target,
+            explorer_menu::first_page_offered(
+                explorer_menu::supported(),
+                explorer_menu::package_file().is_some(),
+            ),
+        ) {
             self.apply_explorer_place(place, announce)?;
         }
         if let Some(install) = settings::claude_hooks_requested(target) {
@@ -46401,8 +46410,13 @@ impl Runtime<'_> {
         let machine = first_run::Machine {
             // Both halves of the first page: a Windows that shows one, and the
             // file that can be registered on it shipped beside the executable.
-            explorer_first_page_available: explorer_menu::supported()
-                && explorer_menu::package_file().is_some(),
+            // Through `first_page_offered` and not spelled again here, because
+            // the Settings row asks the same question through the same function
+            // and the card's switch has to mean what that row's switch means.
+            explorer_first_page_available: explorer_menu::first_page_offered(
+                explorer_menu::supported(),
+                explorer_menu::package_file().is_some(),
+            ),
             claude_found: self.agent_is_on_this_machine("claude"),
             claude_installable: attention_hooks::state() == attention_hooks::State::Absent,
             codex_found: self.agent_is_on_this_machine("codex"),
