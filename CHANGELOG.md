@@ -4,7 +4,20 @@ All notable changes to Folio are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.2.3-preview (unreleased)
+
+Most of this release is about reading what a pane is showing. A Markdown
+document is set in a column wide enough to use a maximised window, a wide table
+in it scrolls sideways under the tilt wheel most mice already have, and a link
+whose text carries code or emphasis is drawn as a link. In the terminal, a pane wears a scroll bar only when it has
+something to scroll to, its thumb rides the pane's own edge, and a tick on the
+command strip still lands on that command's prompt after the pane has been split
+or dragged. The two Explorer rows in Settings became one switch that does
+whatever this Windows can do; the four picture-in-picture slots became four rows
+that can each record a chord; and the interface reads better in both languages
+after an audit of every string a reader can see. Underneath, the core now
+compiles on macOS and a job on every push keeps it that way — groundwork, not a
+port.
 
 ### Added
 
