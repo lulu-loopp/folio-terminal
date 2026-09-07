@@ -9,7 +9,40 @@ Folio 是一款 Windows 终端：命令输出的公式在其打印位置排版�
 
 [English](README.md) · [快捷键](docs/shortcuts.md) · [安全](SECURITY.md) · [更新记录](CHANGELOG.md)
 
-> **预览版。** 0.2.2 为预览版本，已由 Weiyi Shi 签名，详见下方 [SmartScreen](#smartscreen)。
+> **预览版。** 0.2.2 为预览版本，已由 Weiyi Shi 签名，详见下方 [下载](#下载)。
+
+---
+
+## 下载
+
+从 [releases 页面](https://github.com/lulu-loopp/folio-terminal/releases) 下载 [`folio-0.2.2-windows-x64.zip`](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.2.2-preview/folio-0.2.2-windows-x64.zip)，解压到存放程序的目录，然后运行 `folio.exe`。无安装程序；运行之前，解压目录之外不会写入任何内容。`SHA256SUMS.txt` 为所下载文件的哈希值。需 **Windows 10 1809 或更高版本，或 Windows 11，64 位**。
+
+`folio.exe` 和 `folio.msix` 带有数字签名，签名者为 **Weiyi Shi**，证书来自 Microsoft 的 Artifact Signing 服务。首次运行 `folio.exe` 时，如果 Windows 显示「Windows 已保护你的电脑」对话框，点击「更多信息」，然后点击「仍要运行」；对话框中显示的发布者为 **Weiyi Shi**。
+
+压缩包内为同一目录下的九个文件，它们须放在一起：`folio.exe`，以及缺之则无法启动 shell 的 `conpty.dll` 与 `OpenConsole.exe`；`folio.msix`——一级菜单开关所登记的那个几 KB 的包，它指向自身被解压到的目录；供 VS Code 使用的 `folio-here.cmd`；再加上两份许可、第三方声明与商标说明。
+
+网页预览需 **WebView2 运行时**。Windows 11 自带该运行时；Windows 10 通常亦已安装，若未安装，可从此处获取 [Evergreen 运行时](https://developer.microsoft.com/microsoft-edge/webview2/)。缺少该运行时，除网页预览外的所有功能均正常，预览窗格会说明缺失项。
+
+## 第一次运行
+
+从未运行过 Folio 的机器只会收到一张卡，仅此一次。卡标题为**欢迎使用 Folio**，并询问六个问题，答案会分别写入 `%APPDATA%\Folio` 之外的文件，一行一项：是否在有新版本时提醒（这是唯一一项默认打开的）；是否在右键菜单中用 Folio 打开文件夹；是否启用 PowerShell 整合；以及本机实际装有的 Claude Code、Codex、Copilot CLI 各一行，开着的话，它们等待（Codex 是一回合结束）时其所在标签页会高亮。主题、字体、字号、语言或布局均不涉及——这些设置只需一次点击即可更改，且在设置得不对的那段时间里也不产生任何代价。
+
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="docs/screenshots/first-run-dark.png">
+  <img src="docs/screenshots/first-run-light.png" width="100%"
+       alt="卡位于一个刚启动的窗口之上：Folio 标志旁为欢迎使用 Folio，下方六行各一项，每行右侧各有一个开关。有 Folio 新版本时提醒为开启；在右键菜单中用 Folio 打开文件夹与 PowerShell 整合让你在已运行命令间跳转为关闭；细分隔线下方依次为 Claude Code 等待时标签页高亮、Codex 回合结束时标签页高亮、Copilot CLI 等待时标签页高亮，三项均为关闭。底部有一行浅色文字：所有选项都可在设置中更改，其后为暂不与完成。卡后方为一个标签页与一个提示符。">
+</picture>
+
+**将指针悬停在某一项上，会显示该项的说明**——包括该开关会写入用户的哪个文件，以及写入前会先将原文件复制为带日期的备份。卡上别的东西不必自我解释，因为它们不会往任何没预先说明的位置写入。
+
+**卡上的所有选项都可在设置中更改**，因此卡上的任何决定都不是最后一次机会。**完成**应用当前开启的选项；**暂不**与 `Esc` 关闭卡并保留出厂值——更新检查开启，其余关闭——且不更改任何设置。无论选哪种方式，卡都不会再次出现，而其后的 shell 一直在运行。如果用户在此版本之前已使用过 Folio，则不会看到此卡：用户的 `settings.json` 已表明这一点。
+
+第一个标签页会打开机器上实际存在的第一个 shell。五条内置配置按顺序查找——PowerShell 7、Windows PowerShell、WSL、Git Bash、命令提示符——未安装相应程序的配置不会出现在启动 shell 的菜单中；该配置仍保留在设置中的配置文件页，呈灰色并标明所查找的程序名称。七条 agent 配置以同样方式在 Windows PATH 中查找，卡上 agent 相关选项使用的也是同一查找逻辑。
+
+PowerShell 整合会向 PowerShell 自行命名的 `$PROFILE` 文件添加一行——`. "$env:APPDATA\Folio\shell-integration\folio.ps1"`——添加前先将原文件复制为同目录下带日期的备份；删除该行即可撤销。该文件的位置由 shell 决定，因此若在回答卡问题时该选项处于开启状态，则下次启动的 PowerShell 会加载该行，设置 > 终端会一直显示此状态直到加载完成。若卡上未询问此选项，则首次有 PowerShell 窗格输出内容时，提示条会提供相同选项：**加进 `$PROFILE`** 执行添加，**不再提示**结束询问，关闭提示条则不做出任何决定，下次启动 PowerShell 时会再次询问。命令标记与行内 `$…$` 公式依赖该整合运行。Git Bash 与 WSL 均无需此整合，也不会在磁盘上留下任何内容。
+
+设置的 Agent 页上的三行**默认不安装任何内容**，它们并非恰好关闭的默认项：每行都会读取对应工具自身的配置文件并报告其中内容。在新机器上这三个文件均不存在，因此三行均显示为关闭。
 
 ---
 
@@ -145,8 +178,6 @@ Folio 是一款 Windows 终端：命令输出的公式在其打印位置排版�
 
 ### 与 Visual Studio Code 的配合
 
-Folio 不能作为 VS Code 内嵌的终端面板。该面板运行的是一个使用 VS Code 自有协议的进程，终端画面由 VS Code 自己绘制；自行绘制窗口的终端无法向其交付内容。Folio 可以作为 VS Code 在旁边打开的外部终端。
-
 压缩包内 `folio.exe` 旁附带 `folio-here.cmd`，内容为一行：
 
 ```bat
@@ -160,43 +191,6 @@ Folio 不能作为 VS Code 内嵌的终端面板。该面板运行的是一个�
 ```
 
 此后 **终端 > 在外部终端中打开**（`Ctrl+Shift+C`）即在编辑器当前所在目录打开 Folio。之所以需要这个 `.cmd`，是因为该设置执行命令时不附带参数，而 Folio 由 `--cwd` 得知起始目录。
-
----
-
-## 下载
-
-从 releases 页面获取 `folio-0.2.2-windows-x64.zip`，解压至存放程序的目录，运行 `folio.exe`。无安装程序；运行之前，解压目录之外不会写入任何内容。`SHA256SUMS.txt` 为所下载文件的哈希值。需 **Windows 10 1809 或更高版本，或 Windows 11，64 位**。
-
-压缩包内为同一目录下的九个文件，它们须放在一起：`folio.exe`，以及缺之则无法启动 shell 的 `conpty.dll` 与 `OpenConsole.exe`；`folio.msix`——一级菜单开关所登记的那个几 KB 的包，它指向自身被解压到的目录；供 VS Code 使用的 `folio-here.cmd`；再加上两份许可、第三方声明与商标说明。
-
-网页预览需 **WebView2 运行时**。Windows 11 自带该运行时；Windows 10 通常亦已安装，若未安装，可从此处获取 [Evergreen 运行时](https://developer.microsoft.com/microsoft-edge/webview2/)。缺少该运行时，除网页预览外的所有功能均正常，预览窗格会说明缺失项。
-
-## SmartScreen
-
-自 0.2.0 起，`folio.exe` 由 **Weiyi Shi** 签名，证书来自微软 Artifact Signing 服务，并带有微软时间戳。
-
-签名不等于信誉，而 SmartScreen 依据的是信誉：在携带此签名的版本积累到足够的运行量之前，首次运行时仍可能出现「Windows 已保护你的电脑」提示。请点击「更多信息」——其中所列发布者为 **Weiyi Shi**，程序名为 `folio.exe`——再点击「仍要运行」。请勿为此关闭 SmartScreen。
-
-## 第一次运行
-
-从未运行过 Folio 的机器只会收到一张卡，仅此一次。卡标题为**欢迎使用 Folio**，并询问六个问题，答案会分别写入 `%APPDATA%\Folio` 之外的文件，一行一项：是否在有新版本时提醒（这是唯一一项默认打开的）；是否在右键菜单中用 Folio 打开文件夹；是否启用 PowerShell 整合；以及本机实际装有的 Claude Code、Codex、Copilot CLI 各一行，开着的话，它们等待（Codex 是一回合结束）时其所在标签页会高亮。主题、字体、字号、语言或布局均不涉及——这些设置只需一次点击即可更改，且在设置得不对的那段时间里也不产生任何代价。
-
-<picture>
-  <source media="(prefers-color-scheme: dark)"
-          srcset="docs/screenshots/first-run-dark.png">
-  <img src="docs/screenshots/first-run-light.png" width="100%"
-       alt="卡位于一个刚启动的窗口之上：Folio 标志旁为欢迎使用 Folio，下方六行各一项，每行右侧各有一个开关。有 Folio 新版本时提醒为开启；在右键菜单中用 Folio 打开文件夹与 PowerShell 整合让你在已运行命令间跳转为关闭；细分隔线下方依次为 Claude Code 等待时标签页高亮、Codex 回合结束时标签页高亮、Copilot CLI 等待时标签页高亮，三项均为关闭。底部有一行浅色文字：所有选项都可在设置中更改，其后为暂不与完成。卡后方为一个标签页与一个提示符。">
-</picture>
-
-**将指针悬停在某一项上，会显示该项的说明**——包括该开关会写入用户的哪个文件，以及写入前会先将原文件复制为带日期的备份。卡上别的东西不必自我解释，因为它们不会往任何没预先说明的位置写入。
-
-**卡上的所有选项都可在设置中更改**，因此卡上的任何决定都不是最后一次机会。**完成**应用当前开启的选项；**暂不**与 `Esc` 关闭卡并保留出厂值——更新检查开启，其余关闭——且不更改任何设置。无论选哪种方式，卡都不会再次出现，而其后的 shell 一直在运行。如果用户在此版本之前已使用过 Folio，则不会看到此卡：用户的 `settings.json` 已表明这一点。
-
-第一个标签页会打开机器上实际存在的第一个 shell。五条内置配置按顺序查找——PowerShell 7、Windows PowerShell、WSL、Git Bash、命令提示符——未安装相应程序的配置不会出现在启动 shell 的菜单中；该配置仍保留在设置中的配置文件页，呈灰色并标明所查找的程序名称。七条 agent 配置以同样方式在 Windows PATH 中查找，卡上 agent 相关选项使用的也是同一查找逻辑。
-
-PowerShell 整合会向 PowerShell 自行命名的 `$PROFILE` 文件添加一行——`. "$env:APPDATA\Folio\shell-integration\folio.ps1"`——添加前先将原文件复制为同目录下带日期的备份；删除该行即可撤销。该文件的位置由 shell 决定，因此若在回答卡问题时该选项处于开启状态，则下次启动的 PowerShell 会加载该行，设置 > 终端会一直显示此状态直到加载完成。若卡上未询问此选项，则首次有 PowerShell 窗格输出内容时，提示条会提供相同选项：**加进 `$PROFILE`** 执行添加，**不再提示**结束询问，关闭提示条则不做出任何决定，下次启动 PowerShell 时会再次询问。命令标记与行内 `$…$` 公式依赖该整合运行。Git Bash 与 WSL 均无需此整合，也不会在磁盘上留下任何内容。
-
-设置的 Agent 页上的三行**默认不安装任何内容**，它们并非恰好关闭的默认项：每行都会读取对应工具自身的配置文件并报告其中内容。在新机器上这三个文件均不存在，因此三行均显示为关闭。
 
 ---
 

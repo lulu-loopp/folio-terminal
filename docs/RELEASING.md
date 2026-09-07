@@ -14,6 +14,14 @@ has been tagged that way over a manifest with no suffix — `v0.1.0-preview` ove
 for, not what it is. The manifest does not carry it; nothing in the archive
 carries it; only the tag and the release page do.
 
+**Bump the versioned download link in both READMEs at release-prep time.**
+`README.md` and `README.zh-CN.md` each name `folio-<version>-windows-x64.zip` in
+the Download section and link it at
+`/releases/download/v<version>-preview/folio-<version>-windows-x64.zip`, which is
+the same claim as the tag and the manifest and goes stale the same way.
+`/releases/latest` is not a way out of bumping it: it answers 404 on a repository
+whose releases are all pre-releases.
+
 ## The workflow
 
 `.github/workflows/release.yml` has one job, `archive`, and two ways in.

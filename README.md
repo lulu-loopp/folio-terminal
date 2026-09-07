@@ -16,7 +16,97 @@ files preview beside the prompt, and an agent that is waiting for you says so.
 [Security](SECURITY.md) · [Changes](CHANGELOG.md)
 
 > **Preview.** 0.2.2 is a preview build, signed by Weiyi Shi — see
-> [SmartScreen](#smartscreen) below.
+> [Download](#download) below.
+
+---
+
+## Download
+
+Take [`folio-0.2.2-windows-x64.zip`](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.2.2-preview/folio-0.2.2-windows-x64.zip)
+from the [releases page](https://github.com/lulu-loopp/folio-terminal/releases),
+unpack it wherever you keep programs, and run `folio.exe`. There is no installer,
+and nothing is written outside that folder until you run it. `SHA256SUMS.txt` is
+the hash of what you downloaded. Needs **Windows 10 1809 or newer, or Windows 11,
+64-bit**.
+
+`folio.exe` and `folio.msix` are signed by **Weiyi Shi**, with a certificate from
+Microsoft's Artifact Signing service. On first run Windows may show **"Windows
+protected your PC"**: click **"More info"**, then **"Run anyway"**, where the
+publisher shown is **Weiyi Shi**.
+
+The archive holds nine files in one folder, and they belong together: `folio.exe`,
+`conpty.dll` and `OpenConsole.exe`, which it will not start a shell without;
+`folio.msix`, the few-kilobyte package the first-page menu row registers, which
+names the folder it was extracted into; `folio-here.cmd` for VS Code; and the two
+licences, the third-party notices and the trademark note.
+
+The web preview needs the **WebView2 Runtime**. Windows 11 has it; Windows 10
+usually does, and if it does not, the Evergreen Runtime is
+[here](https://developer.microsoft.com/microsoft-edge/webview2/). Without it
+everything except the web preview works, and the preview says what is missing.
+
+## First run
+
+A machine that has never run Folio gets one card, once. It says **Welcome to
+Folio** and asks the six questions whose answers write something outside
+`%APPDATA%\Folio`, one line each: be told when a new version is out, which is
+the only row that arrives on; open any folder in Folio from its right-click
+menu; the PowerShell integration; and a tab that lights up for each of Claude
+Code, Codex and Copilot CLI this machine actually has. Nothing about theme,
+font, size, language or layout — those are one click away and cost nothing while
+they are wrong.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="docs/screenshots/first-run-dark.png">
+  <img src="docs/screenshots/first-run-light.png" width="100%"
+       alt="The card over a window that has just started: Folio's mark beside
+       Welcome to Folio, then six rows of one line each with a switch at the
+       right of every one. Get told when a new version of Folio is out is on;
+       Open any folder in Folio from its right-click menu and PowerShell
+       integration lets you jump between commands are off; below a hairline,
+       Its tab lights up when Claude Code is waiting, when a Codex turn ends,
+       and when Copilot CLI is waiting, all three off. At the foot, a faint line
+       reading Every row here is also a row in Settings, then Not now and Done.
+       Behind the card, one tab and a prompt.">
+</picture>
+
+**Rest the pointer on a row and it says how** — including which of your own
+files the switch writes, and that the file is copied to a dated backup first.
+Nothing else on the card explains itself, because nothing else on it writes
+anywhere you have not been told about.
+
+**Every row on the card is also a row in Settings**, so nothing on it is a last
+chance. **Done** applies the rows that are on; **Not now** and `Esc` close the
+card with the shipped values — the update check on, the rest off — and change
+nothing. Either way it does not come back, and the shell behind it has been
+running the whole time. If you were already using Folio before this version, you
+never see it: your `settings.json` says so.
+
+The first tab opens the first shell your machine actually has. The five shipped
+profiles are looked for in order — PowerShell 7, Windows PowerShell, WSL, Git
+Bash, Command Prompt — and one whose program is not installed does not appear in
+the menus that start a shell; it stays on the Profiles page in Settings, greyed
+out and naming the program that was looked for. The seven agent profiles are
+found the same way, on the Windows path, and that is the same lookup the card's
+agent rows use.
+
+The PowerShell integration adds one line —
+`. "$env:APPDATA\Folio\shell-integration\folio.ps1"` — to the `$PROFILE` a
+PowerShell names for itself, after copying the file as it stood to a dated backup
+beside it; delete that line to undo it. Where that file is comes from the shell,
+so a row left on when the card is answered joins the next PowerShell that starts,
+and Settings > Terminal says so until it does. If you were not asked on the card,
+a strip offers the same thing the first time a PowerShell pane prints something:
+**Add to `$PROFILE`** does it, **Don't show again** ends the asking, and closing
+the strip decides nothing, so the next PowerShell asks once more. Command marks
+and inline `$…$` formulas run on that integration. Git Bash and WSL need none of
+it and leave nothing on disk.
+
+The three rows on the Agent page **install nothing by default**, and they are not
+defaults that happen to be off: each reads the tool's own configuration file and
+reports what is in it. On a new machine all three files are absent, so all three
+read Off.
 
 ---
 
@@ -238,11 +328,6 @@ One box answers five questions at once, and `Enter` goes straight there.
 
 ### Visual Studio Code
 
-Folio cannot be a panel inside VS Code. That panel runs a process speaking VS
-Code's own protocol and draws the terminal itself; a terminal that draws its own
-window has nothing to hand it. What Folio can be is the terminal VS Code opens
-beside itself.
-
 `folio-here.cmd` ships in the archive, beside `folio.exe`, and is one line:
 
 ```bat
@@ -258,100 +343,6 @@ Point VS Code's external terminal at it — Settings, or `settings.json`:
 **Terminal > Open in External Terminal** (`Ctrl+Shift+C`) then opens Folio on the
 folder the editor is standing in. The `.cmd` exists because that setting runs a
 command with no arguments, and `--cwd` is how Folio is told where to start.
-
----
-
-## Download
-
-Take `folio-0.2.2-windows-x64.zip` from the releases page, unpack it wherever you
-keep programs, and run `folio.exe`. There is no installer, and nothing is written
-outside that folder until you run it. `SHA256SUMS.txt` is the hash of what you
-downloaded. Needs **Windows 10 1809 or newer, or Windows 11, 64-bit**.
-
-The archive holds nine files in one folder, and they belong together: `folio.exe`,
-`conpty.dll` and `OpenConsole.exe`, which it will not start a shell without;
-`folio.msix`, the few-kilobyte package the first-page menu row registers, which
-names the folder it was extracted into; `folio-here.cmd` for VS Code; and the two
-licences, the third-party notices and the trademark note.
-
-The web preview needs the **WebView2 Runtime**. Windows 11 has it; Windows 10
-usually does, and if it does not, the Evergreen Runtime is
-[here](https://developer.microsoft.com/microsoft-edge/webview2/). Without it
-everything except the web preview works, and the preview says what is missing.
-
-## SmartScreen
-
-From 0.2.0, `folio.exe` is signed by **Weiyi Shi**, with a certificate from
-Microsoft's Artifact Signing service and a Microsoft time stamp.
-
-A signature is not a reputation, and SmartScreen goes on the second: until enough
-people have run a build carrying this one, the first run may still raise
-**"Windows protected your PC"**. Click **"More info"**, check that the
-publisher named there is **Weiyi Shi** and the app is `folio.exe`, and click
-**"Run anyway"**. Do not switch SmartScreen off for this.
-
-## First run
-
-A machine that has never run Folio gets one card, once. It says **Welcome to
-Folio** and asks the six questions whose answers write something outside
-`%APPDATA%\Folio`, one line each: be told when a new version is out, which is
-the only row that arrives on; open any folder in Folio from its right-click
-menu; the PowerShell integration; and a tab that lights up for each of Claude
-Code, Codex and Copilot CLI this machine actually has. Nothing about theme,
-font, size, language or layout — those are one click away and cost nothing while
-they are wrong.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)"
-          srcset="docs/screenshots/first-run-dark.png">
-  <img src="docs/screenshots/first-run-light.png" width="100%"
-       alt="The card over a window that has just started: Folio's mark beside
-       Welcome to Folio, then six rows of one line each with a switch at the
-       right of every one. Get told when a new version of Folio is out is on;
-       Open any folder in Folio from its right-click menu and PowerShell
-       integration lets you jump between commands are off; below a hairline,
-       Its tab lights up when Claude Code is waiting, when a Codex turn ends,
-       and when Copilot CLI is waiting, all three off. At the foot, a faint line
-       reading Every row here is also a row in Settings, then Not now and Done.
-       Behind the card, one tab and a prompt.">
-</picture>
-
-**Rest the pointer on a row and it says how** — including which of your own
-files the switch writes, and that the file is copied to a dated backup first.
-Nothing else on the card explains itself, because nothing else on it writes
-anywhere you have not been told about.
-
-**Every row on the card is also a row in Settings**, so nothing on it is a last
-chance. **Done** applies the rows that are on; **Not now** and `Esc` close the
-card with the shipped values — the update check on, the rest off — and change
-nothing. Either way it does not come back, and the shell behind it has been
-running the whole time. If you were already using Folio before this version, you
-never see it: your `settings.json` says so.
-
-The first tab opens the first shell your machine actually has. The five shipped
-profiles are looked for in order — PowerShell 7, Windows PowerShell, WSL, Git
-Bash, Command Prompt — and one whose program is not installed does not appear in
-the menus that start a shell; it stays on the Profiles page in Settings, greyed
-out and naming the program that was looked for. The seven agent profiles are
-found the same way, on the Windows path, and that is the same lookup the card's
-agent rows use.
-
-The PowerShell integration adds one line —
-`. "$env:APPDATA\Folio\shell-integration\folio.ps1"` — to the `$PROFILE` a
-PowerShell names for itself, after copying the file as it stood to a dated backup
-beside it; delete that line to undo it. Where that file is comes from the shell,
-so a row left on when the card is answered joins the next PowerShell that starts,
-and Settings > Terminal says so until it does. If you were not asked on the card,
-a strip offers the same thing the first time a PowerShell pane prints something:
-**Add to `$PROFILE`** does it, **Don't show again** ends the asking, and closing
-the strip decides nothing, so the next PowerShell asks once more. Command marks
-and inline `$…$` formulas run on that integration. Git Bash and WSL need none of
-it and leave nothing on disk.
-
-The three rows on the Agent page **install nothing by default**, and they are not
-defaults that happen to be off: each reads the tool's own configuration file and
-reports what is in it. On a new machine all three files are absent, so all three
-read Off.
 
 ---
 
