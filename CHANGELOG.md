@@ -71,6 +71,20 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A second copy of Folio no longer takes over your "Open Folio here" menu
+  entry.** The launch has always rewritten a right-click entry that names a
+  different folder than the one it is running from, so that moving `folio.exe`
+  and its files to another folder keeps the entry working. But "names another
+  folder" was also true of an entry belonging to a Folio still sitting there and
+  answering it perfectly well — a second copy run once out of a downloads folder
+  quietly became the one your menu ran, and if you then deleted that copy the
+  entry pointed at nothing. Now a launch rewrites the entry only when nothing is
+  at the path it names, or when that path is this very file. A copy started
+  beside an installation that is still there leaves the menu alone. Moving
+  `folio.exe` still works exactly as before, because after a move there is
+  nothing at the old path; and if you do want the copy to take the entry,
+  Settings > General > Explorer context menu writes it the moment you ask.
+
 - **A link whose text is set in code, or carries emphasis, is drawn as a link.**
   In the Markdown preview, a line reading ``[`folio-0.2.2-windows-x64.zip`](https://…)``
   printed its own Markdown source, brackets and address and all, while the
