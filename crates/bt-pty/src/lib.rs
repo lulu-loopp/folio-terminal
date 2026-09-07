@@ -2803,6 +2803,11 @@ mod tests {
         ));
     }
 
+    /// Windows: `CONPTY_SIDECAR_VERSION` and `ConPtySource::Sidecar` are
+    /// re-exported from `portable_pty::win`, which exists only there. The
+    /// crate's own unix arm answers `ConPtySource::NotWindows`, and there is
+    /// no sidecar to have a version.
+    #[cfg(windows)]
     #[test]
     fn sidecar_resize_keeps_history_navigation_on_a_clean_prompt_line() {
         let source = conpty_source();
@@ -2883,6 +2888,7 @@ mod tests {
     /// which is exactly the traffic `docs/M1.8-resize-visual-stability.md` records the sidecar as
     /// not producing. Anyone proposing to flip the default to the inbox implementation must re-run
     /// the M1.8 resize-stability corpus, not just this oracle.
+    #[cfg(windows)]
     #[test]
     #[ignore = "upstream A/B record: drives a real interactive PowerShell through the inbox ConPTY"]
     fn system_conpty_resize_cursor_outcome_matches_the_sidecar_contract() {

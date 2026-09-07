@@ -704,7 +704,14 @@ pub const INSERT_ABOVE_REFERENCE: bool = true;
 /// RED GATE: delete any of the four. `SetAreHostObjectsAllowed` was the one
 /// actually missing on 2026-08-22, which is what this test was written red
 /// against.
-#[cfg(test)]
+///
+/// `all(test, windows)` like every other Windows test module in this file, and
+/// it was the only one that was not. What it reads — `WEB_SETTINGS`, and
+/// `webview.rs`'s own source text — lives behind `#[cfg(windows)] mod webview`,
+/// so off Windows this module was two unresolved imports and the type-inference
+/// failure behind them: `bt-platform`'s **library** compiles on a Mac and only
+/// its test target did not (`docs/plans/port/macos-spike-2026-09-07.md` §2).
+#[cfg(all(test, windows))]
 mod web_security_tests {
     use super::{WEB_SETTINGS, WebSetting};
     /// `webview.rs` with its whitespace removed, so that rustfmt's line breaks
