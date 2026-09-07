@@ -64,13 +64,20 @@
     own `LegalCopyright`. Only read when `-ExpectSigned` is given.
 
 .PARAMETER Msix
-    The sparse package to check under `-ExpectSigned`. Defaults to `folio.msix`
-    beside `-Exe`, which is where it is once somebody extracts the archive —
-    both files are in it, and the package names the executable at the folder it
-    was extracted into. It is somewhere else in exactly one place: straight out
-    of `package.ps1`, which builds the executable's copy in `target/release` and
-    the package in `target/release-package`. Name it there rather than moving a
-    file so that the two paths can be checked without either being copied.
+    Where the sparse package to check under `-ExpectSigned` is. Defaults to
+    `folio.msix` beside `-Exe`, which is where it is once somebody extracts the
+    archive — both files are in it, and the package names the executable at the
+    folder it was extracted into.
+
+    **It can be named in the archive rather than as a file of its own**, and on
+    the release machine it has to be: `package.ps1` leaves the archive, the bill
+    of materials and `SHA256SUMS.txt` in `target/release-package` and no loose
+    `folio.msix` anywhere, because a package downloaded on its own names a
+    folder with no `folio.exe` in it. Given the archive, this takes the package
+    out of it into `-Artifacts` and checks that copy, which is byte for byte the
+    one a recipient registers. Which of the two a path is is settled by opening
+    it rather than by its name: an msix is a zip too, so the name could not
+    settle it.
 #>
 
 [CmdletBinding()]
@@ -113,10 +120,11 @@ $root = (Resolve-Path (Join-Path (Join-Path $here '..') '..')).Path
 # started in one checkout and pointed at another therefore has `Test-Path` find
 # a file that `[System.IO.Compression.ZipFile]::OpenRead` two hundred lines
 # later cannot, and the failure names a folder nobody typed. That is exactly how
-# `-Msix target\release-package\folio.msix` — the line `docs/RELEASING.md` tells
-# people to run — failed on the 0.2.1 packaging run, in a worktree, against the
-# main checkout's path. Resolving once, at the door, is the fix that holds for
-# every reader below rather than for the ones somebody remembered.
+# a `-Msix` naming something under `target\release-package` — the line
+# `docs/RELEASING.md` tells people to run — failed on the 0.2.1 packaging run,
+# in a worktree, against the main checkout's path. Resolving once, at the door,
+# is the fix that holds for every reader below rather than for the ones somebody
+# remembered.
 #
 # `GetUnresolvedProviderPathFromPSPath` is the resolution `$PWD` implies and it
 # answers for a path that does not exist yet — which `$Artifacts` does not, on
@@ -131,6 +139,52 @@ if (-not $Artifacts) { $Artifacts = Join-Path $root 'target\smoke' }
 $Exe = Resolve-GivenPath $Exe
 $Artifacts = Resolve-GivenPath $Artifacts
 if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) { throw "no folio.exe at $Exe" }
+
+[System.IO.Directory]::CreateDirectory($Artifacts) | Out-Null
+
+# **What a path names is settled by opening it, not by what it is called.** The
+# package ships inside the archive and nowhere else, so `-Msix` is given the
+# archive on the machine that packed it and the package itself on a machine
+# that has extracted one. An msix is a zip and so is the archive, and both are
+# called something ending in a name this script chose, so the only honest
+# question is which one holds an `AppxManifest.xml` at its root.
+#
+# What comes back is always a file on disk: `Get-AuthenticodeSignature` reads a
+# file, not an entry in an archive, so a package that arrived in one is written
+# out under `-Artifacts` first. Those are the same bytes — an entry is copied
+# out of the archive, not repacked — so the signature and the manifest read the
+# same as they will on the machine that extracts the release.
+function Resolve-PackageFile {
+    param([string] $Path, [string] $Into)
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    try { $archive = [System.IO.Compression.ZipFile]::OpenRead($Path) }
+    catch {
+        throw ("$Path is neither a sparse package nor an archive holding one: it does not open " +
+               'as a zip at all.')
+    }
+    try {
+        if ($archive.GetEntry('AppxManifest.xml')) { return $Path }
+
+        $inside = @($archive.Entries | Where-Object { $_.Name -eq 'folio.msix' })
+        if ($inside.Count -eq 0) {
+            throw ("$Path holds no AppxManifest.xml and no folio.msix, so it is neither the " +
+                   'package nor the archive the package ships in.')
+        }
+        if ($inside.Count -gt 1) {
+            throw "$Path holds $($inside.Count) files called folio.msix, and which one is meant is not a guess to make"
+        }
+
+        if (Test-Path -LiteralPath $Into) { Remove-Item -LiteralPath $Into -Recurse -Force }
+        [System.IO.Directory]::CreateDirectory($Into) | Out-Null
+        $extracted = Join-Path $Into 'folio.msix'
+        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($inside[0], $extracted, $true)
+        Write-Host "package: $($inside[0].FullName), out of $([IO.Path]::GetFileName($Path))"
+        return $extracted
+    }
+    finally { $archive.Dispose() }
+}
+
 if ($Msix) {
     # **A path somebody named has to be there, and is said so at the door.**
     # Naming `-Msix` is asking for that file; whether the checks that read it
@@ -141,15 +195,18 @@ if ($Msix) {
     if (-not (Test-Path -LiteralPath $Msix -PathType Leaf)) {
         throw "-Msix names $Msix, and there is no file there"
     }
+    # Read at the door, with everything else about the arguments, so that a path
+    # naming an archive with nothing usable in it is refused here rather than
+    # after a window has been opened.
+    $Msix = Resolve-PackageFile -Path $Msix -Into (Join-Path $Artifacts 'package')
 }
 else {
     # Beside the executable, resolved from the executable rather than from
     # `$root`: the arrangement being checked is the one a recipient has, which
-    # is one folder holding both files.
+    # is one folder holding both files. Nothing is asked of it here — an
+    # ordinary unsigned build has no package beside it and is not meant to.
     $Msix = Join-Path (Split-Path -Parent $Exe) 'folio.msix'
 }
-
-[System.IO.Directory]::CreateDirectory($Artifacts) | Out-Null
 
 Add-Type -Namespace Smoke -Name Win32 -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr p);
