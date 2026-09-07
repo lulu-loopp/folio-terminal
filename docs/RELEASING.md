@@ -385,16 +385,17 @@ reason the two files travel together: a package registered against a folder with
 no `folio.exe` in it names a path with nothing at it.
 
 Nothing happens when somebody extracts the archive. The package is inert until a
-user turns the row on in `Settings ▸ General ▸ First page of that menu`, and that
-registration is per-user and needs no elevation — no administrator, no installer,
+user sets `Settings ▸ General ▸ Explorer context menu` to `On the first page`,
+and that registration is per-user and needs no elevation — no administrator, no installer,
 no service. **Nothing in this repository registers a package on the machine that
 built it.** A build that registered its own output would be a build that changed
 the developer's Explorer menu and left it changed, and it would test the
 registration on the one machine where it cannot fail interestingly.
 
 The classic `HKCU\Software\Classes` verb — the one that reaches the "Show more
-options" page and Windows 10 — is not replaced by this and stays where it is.
-`docs/DESIGN.md` §7.4a is where that decision is written down.
+options" page and Windows 10 — is not replaced by this and stays where it is:
+the answer above writes both. `docs/DESIGN.md` §7.4a is where that decision is
+written down, and §7.4b is where the two rows became one.
 
 ### `Publisher` is the certificate subject, character for character
 

@@ -141,18 +141,12 @@ pub fn reassert() -> bool {
     installed(state)
 }
 
-/// The line under the row's title — **a fact about this Windows, not about the
-/// setting**.
-///
-/// It says where the entry will be found, because on Windows 11 that is the
-/// question the reader will otherwise ask by not finding it: the classic
-/// registration this product uses is not promoted to the short menu, and a user
-/// who switches this on and then right-clicks a folder sees no change at all
-/// until they press "Show more options".
-#[must_use]
-pub fn row_description() -> &'static str {
-    Text::DescContextMenu.text()
-}
+// **The row's sentence used to be written here** and moved to
+// `explorer_menu::row_description` on 2026-09-07, when the two Explorer rows
+// became one. It is one sentence about two stores now — what the entry says, and
+// what the first page has to register — and the module that can see both stores
+// is the one that composes it. Nothing about the words changed hands: they are
+// still a fact about this Windows rather than about the row.
 
 #[cfg(test)]
 mod tests {

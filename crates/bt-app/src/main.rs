@@ -8508,6 +8508,15 @@ struct App {
     /// closed simply raises no card: the row it would have reported to is not
     /// there any more.
     explorer_package_asked_by: Option<WindowId>,
+    /// **Which place that press asked for**, carried beside the address for the
+    /// address's own reason (user ruling 2026-09-07).
+    ///
+    /// The card the deployment owes names where the verb now stands, and that is
+    /// what the press said rather than what the deployment did: a removal made
+    /// on the way to `Under Show more options` and a removal made on the way to
+    /// `Off` are the same deployment and two different sentences. Read when the
+    /// answer lands, so it stays what it was set to until the next press sets it.
+    explorer_package_asked_place: explorer_menu::ExplorerPlace,
     /// **Whether that deployment's success is worth a card**, carried beside the
     /// address for the same reason the address is carried (§7.56).
     ///
@@ -32083,6 +32092,7 @@ impl Runtime<'_> {
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
             explorer_package_asked_by: None,
+            explorer_package_asked_place: explorer_menu::ExplorerPlace::default(),
             explorer_package_announce: Announce::Everything,
             // Read once, and *only* read: see the field for why this one is not repaired.
             claude_hooks_installed: attention_hooks::state() == attention_hooks::State::Installed,
@@ -38808,6 +38818,13 @@ impl Runtime<'_> {
             // could hold a stale version of. One `Mutex` read per frame the
             // dialog is up is not a cost worth a second store.
             explorer_first_page: explorer_menu::state().registered(),
+            // **What the machine could do, beside what it has done.** Both halves
+            // are cheap here — one `OnceLock` and one `is_file` — and neither can
+            // be answered by the row itself, which is why the answer is handed in.
+            explorer_first_page_offered: explorer_menu::first_page_offered(
+                explorer_menu::supported(),
+                explorer_menu::package_file().is_some(),
+            ),
             // The same, over a file instead of the registry.
             claude_hooks: self.app.claude_hooks_installed,
             // And the same again, over codex's own file.
@@ -41192,11 +41209,8 @@ impl Runtime<'_> {
         if let Some(enabled) = settings::powershell_integration_offer_requested(target) {
             self.apply_powershell_integration_offer(enabled)?;
         }
-        if let Some(install) = settings::context_menu_requested(target) {
-            self.apply_context_menu(install, announce)?;
-        }
-        if let Some(install) = settings::explorer_first_page_requested(target) {
-            self.apply_explorer_first_page(install, announce);
+        if let Some(place) = settings::explorer_place_requested(target) {
+            self.apply_explorer_place(place, announce)?;
         }
         if let Some(install) = settings::claude_hooks_requested(target) {
             self.apply_claude_hooks(install, announce)?;
@@ -41501,12 +41515,11 @@ impl Runtime<'_> {
             // this file at all, it is two keys in the user's own registry, and
             // `Reset to defaults` on a page is not a licence to change another
             // program's menu.
-            | Row::ContextMenu
             // And for a third store, on the same rule: what a reset would be
             // putting back is a package registered in this user's own deployment
             // database, which is not a line in this file and not this verb's to
-            // undo.
-            | Row::ExplorerFirstPage
+            // undo. One row asks about both since 2026-09-07.
+            | Row::ContextMenu
             | Row::QuakeHotkey
             | Row::QuakeProfile
             | Row::QuakeCommand
@@ -45932,32 +45945,58 @@ impl Runtime<'_> {
         }
     }
 
-    /// Put Folio's verb into Explorer's menu, or take it back out (§7.4).
+    /// Move Folio's verb to the place the row was set to (§7.4, §7.4a, user
+    /// ruling 2026-09-07).
     ///
-    /// **The row is redrawn from the registry either way**, not from what was
-    /// asked for: the cached answer is re-read after the write, so a refusal
-    /// leaves the switch standing where the machine actually is rather than
+    /// **One press, two stores, and the second one is only touched when it
+    /// disagrees.** The classic trees answer inside this call; the package takes
+    /// seconds and answers on `AppEvent::ExplorerPackageChanged`. A place that
+    /// leaves the deployment database where it already is starts no job at all —
+    /// otherwise choosing `Under Show more options` on a machine that never had
+    /// a package would spend a service call and raise a card about a removal
+    /// nobody asked for.
+    ///
+    /// **The row is redrawn from the machine either way**, not from what was
+    /// asked for: the cached answers are re-read after the write, so a refusal
+    /// leaves the picker standing where the machine actually is rather than
     /// where the press hoped it would be. That is the whole reason this row
     /// stores nothing in `settings.json` — there is no second copy of the truth
     /// to fall out of step.
     ///
-    /// A failure carries the operating system's own sentence, because on the
-    /// machine where it fires nobody else can see it.
-    fn apply_context_menu(&mut self, install: bool, announce: Announce) -> Result<bool> {
-        let outcome = context_menu::apply(install);
+    /// **One card, and it names the place.** Where a deployment was started the
+    /// card is owed by it and this call stays silent: two cards for one press
+    /// would report the halves of an answer the reader gave once. A failure
+    /// carries the operating system's own sentence, because on the machine where
+    /// it fires nobody else can see it.
+    fn apply_explorer_place(
+        &mut self,
+        place: explorer_menu::ExplorerPlace,
+        announce: Announce,
+    ) -> Result<bool> {
+        let package_job = match explorer_menu::state() {
+            // **`Unknown` is not "nothing registered"** (`explorer_menu`'s own
+            // rule for this state): the first probe of a launch has not landed,
+            // and skipping the job here would leave a package standing under a
+            // row that says it is gone. So the job runs and answers the question
+            // properly — `request` re-reads the deployment database on its own
+            // thread before it does anything, which is the whole reason it is
+            // allowed to ask.
+            explorer_menu::PackageState::Unknown => true,
+            state => place.package() != state.registered(),
+        };
+        if package_job {
+            self.request_explorer_package(place, announce);
+        }
+        let outcome = context_menu::apply(place.classic());
         self.app.context_menu_installed = context_menu::installed(context_menu::state());
         match outcome {
-            Ok(()) if announce == Announce::OnlyFailures => Ok(true),
+            Ok(()) if package_job || announce == Announce::OnlyFailures => Ok(true),
             Ok(()) => {
                 self.toast(
                     toast::ToastKind::Ok,
                     toast::ToastAnchor::Window,
                     None,
-                    if install {
-                        i18n::Text::ContextMenuAddedToast.text().to_owned()
-                    } else {
-                        i18n::Text::ContextMenuRemovedToast.text().to_owned()
-                    },
+                    explorer_menu::place_toast(place).text().to_owned(),
                 )?;
                 Ok(true)
             }
@@ -45980,31 +46019,46 @@ impl Runtime<'_> {
     /// A deployment is a service call of a second or three, and running it here
     /// would freeze every window in this process for that long — so what this
     /// does is start it. The row is redrawn from the machine when it lands, which
-    /// is `apply_context_menu`'s discipline over a store that is slower to ask
+    /// is `apply_explorer_place`'s discipline over a store that is slower to ask
     /// rather than a weaker version of it: there is still exactly one copy of
     /// this truth and it is still not in `settings.json`.
     ///
     /// Nothing is said here. A card raised now would be a card about what was
     /// asked for rather than about what happened, and the thing that happened
     /// arrives on `AppEvent::ExplorerPackageChanged`.
-    fn apply_explorer_first_page(&mut self, install: bool, announce: Announce) {
+    fn request_explorer_package(
+        &mut self,
+        place: explorer_menu::ExplorerPlace,
+        announce: Announce,
+    ) {
         self.app.explorer_package_asked_by = Some(self.window_id());
         // Carried with the request rather than read at the far end, because by
         // the time the answer lands the card that asked has closed and there
-        // would be nothing left to ask.
+        // would be nothing left to ask. The place travels for the same reason
+        // and buys the same thing: the card names where the verb ended up, and
+        // where it ended up is what this press said rather than what the
+        // deployment database happens to hold when the answer lands.
         self.app.explorer_package_announce = announce;
-        if !explorer_menu::request(install) {
+        self.app.explorer_package_asked_place = place;
+        if !explorer_menu::request(place.package()) {
             // A press while the last one is still running. The machine is
             // already going where this press wanted it, or it is going the other
             // way and will be asked again by whoever is watching.
-            eprintln!("BT_EXPLORER_PACKAGE busy; press ignored install={install}");
+            eprintln!("BT_EXPLORER_PACKAGE busy; press ignored place={place:?}");
         }
     }
 
     /// Put the finished registration's answer on the window in front of the
     /// person who asked for it.
     ///
-    /// A failure carries Windows' own sentence, `apply_context_menu`'s rule: on
+    /// **The card names the place the row was set to**, not the half this
+    /// deployment did: since the rows merged there is one press and one answer,
+    /// and a reader who moved from the first page down to the classic entry is
+    /// owed "the verb is under Show more options" rather than "the first page
+    /// lost something". The place is the one carried with the request — see
+    /// [`Self::request_explorer_package`].
+    ///
+    /// A failure carries Windows' own sentence, `apply_explorer_place`'s rule: on
     /// the machine where a deployment is refused nobody else can see it, and the
     /// refusal names a condition — a certificate the machine will not trust, a
     /// package already registered by another user — that no words of ours could
@@ -46012,17 +46066,15 @@ impl Runtime<'_> {
     fn report_explorer_package(&mut self, outcome: Result<bool, String>) -> Result<()> {
         match outcome {
             // The first-run card asked for this beside three others and the
-            // Settings row now reads On; a card for each is noise (§7.56 §8).
+            // Settings row now reads it; a card for each is noise (§7.56 §8).
             Ok(_) if self.app.explorer_package_announce == Announce::OnlyFailures => Ok(()),
-            Ok(registered) => self.toast(
+            Ok(_) => self.toast(
                 toast::ToastKind::Ok,
                 toast::ToastAnchor::Window,
                 None,
-                if registered {
-                    i18n::Text::ExplorerFirstPageAddedToast.text().to_owned()
-                } else {
-                    i18n::Text::ExplorerFirstPageRemovedToast.text().to_owned()
-                },
+                explorer_menu::place_toast(self.app.explorer_package_asked_place)
+                    .text()
+                    .to_owned(),
             ),
             Err(error) => self.toast(
                 toast::ToastKind::Error,

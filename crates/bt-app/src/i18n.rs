@@ -362,19 +362,14 @@ pub enum Text {
     RowFormulas,
     RowInlineFormulas,
     RowGitPanel,
-    /// **The Explorer verb's switch** (§7.4), on the General page.
+    /// **The Explorer verb's row** (§7.4, §7.4a), on the General page.
     ///
     /// Names the surface it changes — Explorer's menu — rather than the thing it
-    /// writes, which is a registry key nobody asked to hear about.
+    /// writes, which is a registry key nobody asked to hear about. It kept that
+    /// name when the first-page switch was folded into it (user ruling
+    /// 2026-09-07): the row's three answers are three places **in that menu**, so
+    /// the surface is still what the title names and the answers name the places.
     RowContextMenu,
-    /// **The same verb, on the page Windows 11 opens first** (§7.4a), directly
-    /// under [`Self::RowContextMenu`].
-    ///
-    /// Names the page rather than the mechanism: what a reader is choosing is
-    /// where the entry appears, and "sparse MSIX package" is a sentence about
-    /// how rather than about what. The row is not drawn at all below Windows 11,
-    /// where there is no such page.
-    RowExplorerFirstPage,
     /// **The one row in this dialog that governs a network request** (§7.51),
     /// last on the General page.
     RowUpdateCheck,
@@ -397,15 +392,26 @@ pub enum Text {
     DescFormulas,
     DescInlineFormulas,
     DescGitPanel,
-    /// Where the entry will be found, which on Windows 11 is the surprising
-    /// half — see [`Self::ContextMenuVerb`].
-    DescContextMenu,
-    /// What the first-page row adds, and the one thing about it a reader has to
-    /// know: it registers a package for this account.
-    DescExplorerFirstPage,
+    /// **What the row adds and what its third answer costs** — the merged row's
+    /// ordinary line (user ruling 2026-09-07).
+    ///
+    /// Two facts and no opinion, which is what the two lines it replaces each
+    /// carried one of: the words that land in Explorer's menu, and the file the
+    /// first page has to register. The package is named because it is a file the
+    /// reader can see in the folder they extracted, and because "registers a
+    /// package" is the part of this row that deleting a registry key does not
+    /// undo.
+    DescExplorerMenu,
+    /// The same row on a Windows with no first page — the reason its third
+    /// answer is greyed.
+    ///
+    /// **The sentence that had nowhere to live until the rows merged**: the
+    /// first-page switch was not drawn at all below Windows 11, so a reader
+    /// there met neither the answer nor an explanation of its absence.
+    DescExplorerMenuNoFirstPage,
     /// The same row when `folio.msix` is not beside the executable — which is
     /// the state of a machine where somebody moved `folio.exe` out of the folder
-    /// they extracted, and the reason the switch has nothing to press.
+    /// they extracted, and the reason the third answer is greyed.
     DescExplorerFirstPageNoPackage,
     /// And when the registration names a folder that is not this one. The launch
     /// repairs this on its own; the sentence exists for the seconds before it
@@ -435,6 +441,22 @@ pub enum Text {
     OptionVertical,
     OptionOn,
     OptionOff,
+    /// **The Explorer row's second answer** (user ruling 2026-09-07): the
+    /// classic entry, which Windows 11 files under its own `Show more options`.
+    ///
+    /// Named for where the reader will find the verb rather than for what gets
+    /// written, which is [`Self::RowContextMenu`]'s rule one level down. It
+    /// quotes Windows' own label, so it is the label Windows draws and not a
+    /// description of it. Windows 10 has no such page and takes this answer all
+    /// the same — there the classic menu **is** the menu, and a second wording
+    /// for one registration would teach two things where there is one.
+    OptionExplorerShowMoreOptions,
+    /// **The third answer**: the package registered, and the classic entry kept
+    /// beside it.
+    ///
+    /// Greyed where this machine cannot honour it, with the reason on the row's
+    /// own line — see [`Self::DescExplorerMenuNoFirstPage`].
+    OptionExplorerFirstPage,
     OptionExpanded,
     /// The mode's name, not a sentence about it (user ruling 2026-08-10) — the
     /// translation must not put the explanation back.
@@ -505,14 +527,21 @@ pub enum Text {
     /// one that fits both places.
     ExplorerCommandVerb,
     /// The card raised when the package is registered.
+    ///
+    /// There is no card for taking it back off: the answer under it — the
+    /// classic entry alone — has its own card, and the reader who moved between
+    /// the two answers wants to be told where the verb **is** rather than where
+    /// it stopped being (user ruling 2026-09-07).
     ExplorerFirstPageAddedToast,
-    /// And when it is taken back off.
-    ExplorerFirstPageRemovedToast,
     /// The refusal when `folio.msix` is not beside the executable.
     ///
     /// A statement about the folder rather than an instruction: the file ships in
     /// the archive, so its absence means an extraction that left it behind or a
     /// binary that was moved on its own.
+    ///
+    /// **No longer raised by a press**: the answer that needs the file is greyed
+    /// where the file is missing. It is the sentence for the file that goes away
+    /// between the frame that offered that answer and the thread that acts on it.
     ExplorerFirstPageNoPackage,
 
     // ── the `˅` profile menu ───────────────────────────────────────────────
@@ -2394,10 +2423,6 @@ impl Text {
             Self::RowInlineFormulas => pick(lang, "Inline formulas", "行内公式"),
             Self::RowGitPanel => pick(lang, "Git panel", "Git 面板"),
             Self::RowContextMenu => pick(lang, "Explorer context menu", "资源管理器菜单"),
-            // Names the page, which is the thing the row above it cannot reach.
-            // 「一级菜单」is what Windows 11's first page is called in Chinese
-            // writing about it, and there is no shorter true name.
-            Self::RowExplorerFirstPage => pick(lang, "First page of that menu", "一级菜单"),
             Self::RowTabLayout => pick(lang, "Tab layout", "标签布局"),
             Self::RowSidebar => pick(lang, "Sidebar", "侧栏"),
             Self::RowSplitDirection => pick(lang, "Split direction", "拆分方向"),
@@ -2443,33 +2468,34 @@ impl Text {
                 "在文件列里加一页 Git。关闭时，Folio 不会读取任何仓库。",
             ),
             // **Two facts and no opinion about either.** What the entry says,
-            // and where Windows 11 puts it — the second because it is the half a
-            // reader would otherwise discover by switching this on, right-clicking
-            // a folder, and seeing no change at all. See `context_menu`'s header
-            // for why the classic registration cannot reach the short menu.
+            // and what the top answer costs — the second because "registers a
+            // package" is the part of this row that deleting a registry key does
+            // not undo, and because `folio.msix` is a file the reader can see in
+            // the folder they extracted.
+            //
+            // **Where Windows 11 files the classic entry is no longer on this
+            // line** and does not need to be: it was here because a row reading
+            // `On`/`Off` could not say where the entry went, and the answers now
+            // say it themselves — `Under Show more options` is the place.
             //
             // **Length-sensitive, and measured rather than guessed.** A row's
-            // sentence is drawn in the text column and ellipsises: at the
-            // dialog's width there are about 54 characters of 12px English, and
-            // the first draft ("Adds Open Folio here; Windows 11 files it under
-            // Show more options", 64) came out cut at `Show m…` — losing exactly
-            // the half the line exists for. The verb `Adds` went rather than the
-            // place, because a row whose picker reads `On`/`Off` has already said
-            // that something is being added.
-            Self::DescContextMenu => pick(
+            // sentence is drawn in the text column and wraps to three lines
+            // before it ellipsises, which `no_settings_sentence_needs_a_fourth_line`
+            // holds in English and `a_chinese_settings_line_is_filled_before_it_breaks`
+            // holds again on the Chinese.
+            Self::DescExplorerMenu => pick(
                 lang,
-                "Adds Open Folio here to Explorer's right-click menu. Windows 11 files it under Show more options.",
-                "在资源管理器的右键菜单里加上「在 Folio 中打开」。Windows 11 把它收在「显示更多选项」下面。",
+                "Adds Open Folio here to Explorer's right-click menu. The first page registers folio.msix, the file beside folio.exe, for this account.",
+                "右键菜单加入「在 Folio 中打开」。第一页选项把与 folio.exe 同目录的 folio.msix 注册到当前账户。",
             ),
-            // Two facts and no opinion, `DescContextMenu`'s own discipline:
-            // what lands where, and what has to be registered for it to. The
-            // package is named because it is a file the reader can see in the
-            // folder they extracted, and because "registers a package" is the
-            // part of this switch that deleting a registry key does not undo.
-            Self::DescExplorerFirstPage => pick(
+            // The reason the top answer is greyed, and a plain statement of the
+            // machine: one menu, no page for a second entry to stand on. It says
+            // nothing about what the reader could do instead, because there is
+            // nothing they could do — this is the Windows they have.
+            Self::DescExplorerMenuNoFirstPage => pick(
                 lang,
-                "Puts Open in Folio on the page Windows 11 opens first. It registers folio.msix, the file beside folio.exe, for this account.",
-                "把「在 Folio 中打开」放到 Windows 11 先打开的那一页。它为这个账户登记 folio.msix，也就是 folio.exe 旁边的那个文件。",
+                "This Windows has one right-click menu and no first page for an entry to stand on.",
+                "这台机器只有一个右键菜单，没有第一页可放置项目。",
             ),
             Self::DescExplorerFirstPageNoPackage => pick(
                 lang,
@@ -2608,6 +2634,16 @@ impl Text {
             Self::OptionVertical => pick(lang, "Vertical", "竖向"),
             Self::OptionOn => pick(lang, "On", "开"),
             Self::OptionOff => pick(lang, "Off", "关"),
+            // **Windows' own label, quoted rather than described.** The reader
+            // will be looking for that exact item at the bottom of Windows 11's
+            // short menu, and a paraphrase would be this dialog naming a door by
+            // a name that is not written on it.
+            Self::OptionExplorerShowMoreOptions => {
+                pick(lang, "Under Show more options", "显示更多选项")
+            }
+            // Names the page. The picker is where the reader chooses a place, so
+            // the answers are places and the row's own line carries the cost.
+            Self::OptionExplorerFirstPage => pick(lang, "On the first page", "第一页"),
             Self::OptionExpanded => pick(lang, "Expanded", "展开"),
             Self::OptionIcons => pick(lang, "Icons", "图标"),
             Self::OptionSplitAuto => pick(lang, "Auto (longer edge)", "自动（沿长边）"),
@@ -2682,11 +2718,6 @@ impl Text {
                 lang,
                 "Open in Folio is on the first page of Explorer's menu",
                 "「在 Folio 中打开」已在资源管理器菜单的第一页",
-            ),
-            Self::ExplorerFirstPageRemovedToast => pick(
-                lang,
-                "Taken off the first page of Explorer's menu",
-                "已从资源管理器菜单的第一页移除",
             ),
             Self::ExplorerFirstPageNoPackage => pick(
                 lang,
@@ -4250,7 +4281,6 @@ impl Text {
         Self::RowGitPanel,
         Self::RowUpdateCheck,
         Self::RowContextMenu,
-        Self::RowExplorerFirstPage,
         Self::RowTabLayout,
         Self::RowSidebar,
         Self::RowSplitDirection,
@@ -4265,8 +4295,8 @@ impl Text {
         Self::DescInlineFormulas,
         Self::DescGitPanel,
         Self::DescUpdateCheck,
-        Self::DescContextMenu,
-        Self::DescExplorerFirstPage,
+        Self::DescExplorerMenu,
+        Self::DescExplorerMenuNoFirstPage,
         Self::DescExplorerFirstPageNoPackage,
         Self::DescExplorerFirstPageElsewhere,
         Self::DescTabLayout,
@@ -4286,6 +4316,8 @@ impl Text {
         Self::OptionVertical,
         Self::OptionOn,
         Self::OptionOff,
+        Self::OptionExplorerShowMoreOptions,
+        Self::OptionExplorerFirstPage,
         Self::OptionExpanded,
         Self::OptionIcons,
         Self::OptionSplitAuto,
@@ -4303,7 +4335,6 @@ impl Text {
         Self::ContextMenuNoExecutable,
         Self::ExplorerCommandVerb,
         Self::ExplorerFirstPageAddedToast,
-        Self::ExplorerFirstPageRemovedToast,
         Self::ExplorerFirstPageNoPackage,
         Self::ProfileHintDefault,
         Self::ProfileHintUnavailable,

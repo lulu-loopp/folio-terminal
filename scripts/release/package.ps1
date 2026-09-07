@@ -24,10 +24,10 @@
     extracted this archive into. That is why it ships beside `folio.exe` rather
     than being downloaded separately: the package and the executable it points at
     have to arrive in the same folder or the registration names a path with
-    nothing at it. It is inert until somebody turns the row on in
-    `Settings ▸ General ▸ First page of that menu`, which registers it for that user and
-    needs no elevation. Nothing here registers anything on the machine that built
-    it.
+    nothing at it. It is inert until somebody sets
+    `Settings ▸ General ▸ Explorer context menu` to `On the first page`, which
+    registers it for that user and needs no elevation. Nothing here registers
+    anything on the machine that built it.
 
     The copy it is packed as stays in the output directory as well as going into
     the zip. `SHA256SUMS.txt` covers it there, and it is the file
@@ -226,8 +226,8 @@ $manifest = @(
     # right-click menu. Packed further down out of `packaging/msix/` rather than
     # copied from a build directory, which is why it is marked `Packed` — it is
     # the one entry that does not exist yet when the list is checked. It is inert
-    # in the archive: nothing registers until a user switches the row on in
-    # `Settings ▸ General ▸ First page of that menu`.
+    # in the archive: nothing registers until a user sets
+    # `Settings ▸ General ▸ Explorer context menu` to `On the first page`.
     @{ Name = 'folio.msix';               From = $Output; Packed = $true },
     @{ Name = 'conpty.dll';               From = $Binaries },
     @{ Name = 'OpenConsole.exe';          From = $Binaries },
