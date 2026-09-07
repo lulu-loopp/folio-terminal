@@ -23631,27 +23631,29 @@ mod tests {
         );
     }
 
-    /// RED (user ruling 2026-09-07) — **each of the four picture-in-picture
-    /// slots is drawn with a `Record` button the pointer can press and the
-    /// keyboard can reach.**
+    /// RED (user ruling 2026-09-07) — **the Shortcuts page draws no row for a
+    /// verb this build does not have.**
     ///
-    /// The page had one line for the four, and a folded line offers no `Record`
-    /// — so what stood between `Summon the terminal`, which has one, and the two
-    /// greyed `Alt`+arrow rows, which are refusals, was a row saying `Not set`
-    /// with nothing on it at all. A reader has three things to go on there and
-    /// all three say the same wrong thing: no button, no key, and a neighbour
-    /// that looks like it for a reason this row does not share.
+    /// This morning's ruling gave the four picture-in-picture slots a line each
+    /// with a `Record` button each, because a row that could not be recorded read
+    /// as a refusal (§7.1.6c-2″). The button worked, the user pressed it, and
+    /// what he got back was `This feature is not built yet` under a row he had
+    /// just filled in. The evening's ruling reads the same screenshot one layer
+    /// down: **the row was never the problem, the row being on this page at all
+    /// was** — a shortcuts page is a list of keys that do things, and this one
+    /// does nothing (§7.1.6c-2‴).
     ///
     /// Stated on this surface as well as on the table's own
-    /// (`shortcuts::tests::every_picture_in_picture_slot_is_its_own_recordable_line`)
-    /// because the complaint was about the page: the row model can call a line
-    /// recordable and the fix is only real when the button is drawn, hit-tested
-    /// and in the Tab order.
+    /// (`shortcuts::tests::a_verb_that_is_not_built_is_not_offered_to_a_reader`)
+    /// because the complaint was about the page: the page draws one band per
+    /// line the table hands it, so what this holds down is that no band, no
+    /// `Record` and no Tab stop is spent on those four — and that the rest of the
+    /// page still lays out around their absence.
     ///
-    /// MUTATION: fold the four back into a family — every lookup below fails to
-    /// find its line, which is the page losing four buttons at once.
+    /// MUTATION: drop the `surfaced` filter from `editor_rows` and four bands
+    /// with four `Record` buttons come back, which every assertion below catches.
     #[test]
-    fn every_picture_in_picture_slot_is_drawn_with_a_record_button() {
+    fn no_row_for_a_verb_that_is_not_built_is_drawn_on_the_page() {
         let table = crate::shortcuts::Shortcuts::defaults();
         let lines = table.editor_rows();
         let rows = visible_rows(TabLayoutMode::Horizontal);
@@ -23674,26 +23676,44 @@ mod tests {
         let order = page_order(content(&rows, &lines), SettingsCategory::Shortcuts);
         for slot in 1..=4u8 {
             let id = format!("summon-pip-{slot}");
-            let index = lines
-                .iter()
-                .position(|line| line.ids == vec![id.as_str()])
-                .unwrap_or_else(|| panic!("{id} is a line of its own on the page"));
-            let placed = page(scroll_showing(&at_rest, at_rest.shortcuts[index].band));
-            let drawn = &placed.shortcuts[index];
-            let record = drawn.record.unwrap_or_else(|| {
-                panic!("{id} is drawn with a Record button");
-            });
-            let (x, y) = centre(record);
-            assert_eq!(
-                hit(&placed, &values(), x, y),
-                SettingsTarget::Record(index),
-                "{id}: the button answers where it is drawn"
-            );
             assert!(
-                order.contains(&SettingsTarget::Record(index)),
-                "{id}: and the keyboard reaches it"
+                !lines
+                    .iter()
+                    .any(|line| line.ids.iter().any(|other| *other == id)),
+                "{id} is not a line this page is given to draw"
+            );
+            let title = match slot {
+                1 => crate::i18n::Text::ShortcutSummonPip1,
+                2 => crate::i18n::Text::ShortcutSummonPip2,
+                3 => crate::i18n::Text::ShortcutSummonPip3,
+                _ => crate::i18n::Text::ShortcutSummonPip4,
+            }
+            .text();
+            assert!(
+                !lines.iter().any(|line| line.title == title),
+                "and its name is drawn on no other line"
             );
         }
+        // The page is exactly the lines it was handed — no band is drawn for a
+        // row that is not one of them, and every one of them can be reached.
+        assert_eq!(at_rest.shortcuts.len(), lines.len());
+        for (index, line) in lines.iter().enumerate() {
+            let placed = page(scroll_showing(&at_rest, at_rest.shortcuts[index].band));
+            assert_eq!(
+                placed.shortcuts[index].record.is_some(),
+                line.recordable,
+                "{}",
+                line.title
+            );
+        }
+        assert_eq!(
+            order
+                .iter()
+                .filter(|stop| matches!(stop, SettingsTarget::Record(_)))
+                .count(),
+            lines.iter().filter(|line| line.recordable).count(),
+            "and the keyboard reaches those buttons and no others"
+        );
     }
 
     /// Visual PIN — **a chord is drawn as key caps, right to left from the
