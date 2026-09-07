@@ -108,7 +108,7 @@ by a native writer in both languages.
   internal mechanism instead of what the switch does, and words left in English
   where the rest of the Chinese says 标签页 and 配置.
 - The English audit's 83 proposals are in, along with the passages it proposed in
-  `README.md`, `docs/PRIVACY.md` and `SECURITY.md`. No em-dash is left inside a
+  `README.md`, `docs/PRIVACY.md`, `SECURITY.md` and the 0.2.2 release page. No em-dash is left inside a
   string in the window, and a mechanism the reader cannot act on gives way to the
   result they get.
 - No fact changed and no default moved in either language.
