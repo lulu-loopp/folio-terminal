@@ -853,6 +853,38 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 **一句诚实的界限。** 用户那次的 `BT_PTY_DUMP` 只留下了第一块 pane 的字节:`BT_PTY_DUMP` 指的是**这一轮第一份录音**的文件名,后开的每一块 pane 各自取 `<path>.2`、`<path>.3`(`crates/bt-pty/src/lib.rs`),而 Claude Code 那块 pane 不是第一块。所以「Claude Code 当时到底往 PTY 里写了哪几个字节」这一层没有被证,被证的是:**这个拓扑本身会把备用屏上一整屏的 `$$` 块从「图」翻成「源码」,而且它就在用户那条 trace 的形状上。**
 
+### 4.6c 一行折在哪一列是窗宽的事,不是文本的事——画那张图的人也要照这条读(行内公式折行单,2026-09-06,已落地;`crates/bt-term/src/session.rs`)
+
+**由头是用户对 `dist\folio-next41.exe`(= `d3d8a3f`,next38 同样)的验收:在装了 PowerShell 整合的 pwsh 7 里跑 `D:\Demo\math.ps1`,第一句话里的 `$e^{i\theta}=\cos\theta+i\sin\theta$` 停在源码上,而同一段输出里的 `$$` 积分、换行句子里的 `$x=\frac{-b\pm\sqrt{b^2-4ac}}{2a}$`、`$\mathbf{E}$` 和后面两个 `$$` 块全排出来了。** 引擎在跑、行内那条路也在跑,所以要问的是「这一处跟别处差在哪」。
+
+**报告里列的五条猜想,四条被逐条量掉了。** 同一台机器上把整段输出喂进真会话,列宽从 60 扫到 90、每一档都跑一遍真引擎与真投影:
+- **不是「第一行输出」**。把同一句印成第二行输出(前面加一句无公式的散文),失败的列宽档**逐档相同**——60–74 源码、75–90 图。OSC 133 的 `C`、命令回显行的边界、提示行排除,全都与它无关。
+- **不是 `C` 在字节流里的先后**。`show\x1b]133;C\x07\r\n输出` 与 `show\r\n\x1b]133;C\x07输出` 两种顺序(后者才是 `folio.ps1` 真正写出来的顺序,`PSConsoleHostReadLine` 在 PSReadLine 回显完换行之后才写 `C`)排出来的结果一模一样,行的 site 都是 `CommandOutput`。
+- **不是 `$e` 像个变量、也不是 `}=` 撞了分隔符规则**。把 `$e` 换成 `$a`,失败档位一列不差;`detect_inline_math` 对这一句本来就答得干干净净(`byte_start: 39, byte_end: 75`)。
+- **不是静止时机**。同一份字节、同一个 `advance_live_stability`,只有列宽在变。
+- **对照组**:同一段输出在没有整合的会话里,**任何列宽都不排**——那是 scheme A 明写的价钱(`bt_detect::InlineMathSite::Ineligible`:「没有 shell 整合,主屏上就永远没有行内渲染」),不是缺陷。
+
+**真因是一处只读了半行的读法。** 这一句 84 个字符:前缀 39 格,公式 36 格(第 39–74 列),后面 ` puts the`。**pane 宽 75 及以上,整条 run 落在同一物理行;宽 74 及以下,收尾那个 `$` 被折到了下一行。** 而 live 那条渲染路的第一句就是
+
+```rust
+let line = live_grid_input(&task.inputs, task.start.row).map_or("", |input| input.text.as_str());
+```
+
+——**run 起始的那一个物理行**。可 run 的 `byte_start`/`byte_end` 是**逻辑行**上的偏移(检测器就是在逻辑行上证成它的),于是 `line.get(start..end)` 直接是 `None`,`render_task_math` 当场返回 `MathRenderError::InlineGeometry`。这个错**没有 failure stage**,所以 `failure_reason` 是 `None`、`artifact` 也是 `None`,`apply_live_worker_completion` 那一句 `if artifact.is_none() && failure_reason.is_none() { remove }` 把记录整条删掉——**屏幕上是源码,`BT_DECOR_TRACE` 里一条都没有,连 `state=failed` 都没有**。真机实测(隔离 `APPDATA`、`BT_DECOR_TRACE` 逐帧、192 DPI、release `d3d8a3f`):74 列那一屏的 trace 里其他五个块条条 `state=rendered`,这一个从头到尾不存在。
+
+**同一处缺口还有第二个落点,而且它连列宽扫描都够不到:折点落在 run 前面的时候。** 那时 run 整条在逻辑行的第二个物理行上,`record.start.row` 不是逻辑行的头一行,那些逻辑偏移同样指到那一行文本的外面去。摆放那一侧 `live_inline_run_cells` 也是同一句话的另一个写法:它拿 `record.start.row` 的文本切逻辑偏移,再要求 run 的所有格子落在**一个**物理行上。冻结那一侧 `frozen_inline_run_cells` 写的是同一条(`if row.is_some_and(|current| current != cell_row) { return None; }`)——所以一条在网格上是图的公式,滚进历史、按窗宽折过之后会变回源码。
+
+**裁决:§4.6a 那句话原样适用于画图的人。「一行折在哪一列是窗宽的事,不是文本的事」——检测器在逻辑行上证成的那条 run,排版与摆放必须读同一条逻辑行。** 三处落实:
+- **渲染读逻辑行**(`live_logical_line_rows`:顺着 `continues` 往上找到逻辑行的头一行,再往下拼到尾)。冻结那一侧本来就拿到整条转录行,不动。
+- **摆放跨行认格子**:一条 run 的格子就是它自己的源码占的那些格子,折点把它们摊到几行就是几行;图画在**它开头的那一行**,两行上的 `$` 一起清掉。冻结与 live 两个摆放器现在说同一句话。
+- **宽度判据跟着改口径**:一条 run 的图可以有多宽,是「**它的源码在它被画的那一行上占了几格**」。不折的时候这就是整条源码的宽度,与从前逐字节相同;折了的时候预算到那一行的右边缘为止——把整条源码的宽度当预算,会把图画到 pane 外面去。装不下照旧留源码,那是这条规矩一直以来的答案。
+
+**这不是给折行开的例外,是把已经在用的那条规矩补齐。** §4.6a 已经裁过一次同一句话:当时补的是四个「把物理行拼成逻辑行」的拼接器里漏掉的那两个;这一次补的是**读那条逻辑行的下游**——排版器与摆放器。同一条纪律,第三次落点。
+
+**钉子(`crates/bt-term/src/session.rs`)**:`an_inline_run_the_fold_splits_is_typeset_where_its_source_begins`(74 列、用户那一句原样、真引擎:必须有图,两行上都不许剩 `$`,后面的散文原样留在折过去的那一行上)、`a_wrapped_inline_run_is_a_picture_at_every_pane_width_that_can_hold_it`(54–95 每一档都是图、源码逐字相同、网格上零个 `$`)、`an_inline_run_the_fold_puts_on_a_later_row_is_typeset_there`(折点落在 run 前面的那一半)、`a_split_run_whose_picture_outgrows_its_own_row_keeps_its_source`(50 列:起点后只剩十一格,图装不下,源码连两个定界符一起留着)、`a_frozen_inline_run_the_fold_splits_keeps_its_picture`(同一句冻进历史、滚上去看:仍是图)。**变异红证**:渲染改回只读 `task.start.row` 那一行(修前的行为)→ 前三条红;冻结摆放器把「两行就拒绝」那一句放回去 → 冻结那条红;宽度预算改回整条源码的宽度 → 50 列那条红(图被画到 pane 外面)。
+
+**一句诚实的界限。** 用户截图里那块 pane 是 **79 列**(`put`/`s the` 的折点、`surfa`/`ce counts` 的折点、以及按等宽字距量出来的 18.0px 三处互相印证),而 79 列在本机 release `d3d8a3f` 上是**排得出来的**——真机逐列复现出的失败带是 **≤74 列**。所以被证的是:**这个缺陷会把这一句公式在「图」和「源码」之间按窗宽逐列翻面,症状与用户报的那一张逐条对上(只有第一条公式停在源码,同屏其余五条全排),而它就在用户那条路上**;没被证的是那张截图当时那块 pane 到底经历过哪几次宽度。这一条与 §4.6a 末尾那句界限是同一种诚实。
+
 ## 5. 数学渲染管线（M-1 spike）
 
 同 v3（三路径、300+ 样本含恶意输入、进程隔离开销验证、缓存键含 detection_rev + LayoutKey）。
