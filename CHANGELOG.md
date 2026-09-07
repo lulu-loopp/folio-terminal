@@ -8,6 +8,24 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+
+- **The welcome card draws no line between its rows.** The Settings page — whose
+  row shape this card borrows, and where every one of its six rows also lives —
+  draws none either. The rows keep their 42-pixel rhythm and abut; what separates
+  Folio's own rows from the agents found on this machine is 16 pixels of air. A
+  row under the pointer is no longer filled: it still carries its tooltip and a
+  press anywhere along it still flips that row's switch, which is what the
+  Settings page does too. The ring on a switch waits for a key that moves
+  something rather than for any key at all, and it is no longer clipped at its
+  right-hand side when it comes.
+
+- **A terminal pane's scroll mark rides the pane's own edge.** Every other bar
+  in the window — the glance card's, an open picker's, a preview pane's — puts
+  its thumb against the inner edge of the surface it belongs to, and this one
+  stood two logical pixels off its own. The bar along the foot moves with it,
+  because it is the same instrument turned. Nothing else about the edge changed:
+  the reserved lane is the same eight pixels, the command marks beside it have
+  not moved, and the thumb is grabbed and dragged exactly where it was.
 - **The four picture-in-picture slots are four rows on the Shortcuts page, and
   each one has a Record button.** They were one row saying `Not set` with
   nothing on it to press, standing between `Summon the terminal`, which has a

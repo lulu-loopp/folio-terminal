@@ -85,7 +85,7 @@ exactly the picture JPEG is worst at.
 | `quake-dark.png` | The same, dark. |
 | `palette-light.png` | The palette (`Ctrl+Shift+P`) open over a three-column window, with all five of its sections carrying rows: actions, panes and tabs, commands, files and settings. Five is the point of the picture, so a shot missing one of them is the wrong shot. |
 | `palette-dark.png` | The same, dark. |
-| `first-run-light.png` | The card a machine sees once and never again, on the first launch of a Folio that has never run there: the shipped mark and `Welcome to Folio`, then six rows of one line each — the update check, which is the only one that arrives on; the Explorer entry; the PowerShell integration; and one for each of Claude Code, Codex and Copilot CLI this machine has — over `Not now` and `Done`. The shell it is laid over has been running the whole time, which is the point of the scrim. |
+| `first-run-light.png` | The card a machine sees once and never again, on the first launch of a Folio that has never run there: the shipped mark and `Welcome to Folio`, then six rows of one line each, with nothing drawn between them — the update check, which is the only one that arrives on; the Explorer entry; the PowerShell integration; then a wider gap, and one row for each of Claude Code, Codex and Copilot CLI this machine has — over `Not now` and `Done`. The shell it is laid over has been running the whole time, which is the point of the scrim. |
 | `first-run-dark.png` | The same, dark. |
 | `context-menu.png` | The first page of the Windows 11 right-click menu on a folder, with `Open in Folio` on it, above `Show more options` and not under it. Explorer's window and nothing else — no desktop, no taskbar, no evaluation watermark. Taken on the verification VM; see the two notes above. |
 
@@ -115,8 +115,8 @@ can be told from one that was retaken on purpose.
 | `quake-dark.png` | 1920 x 1200 | 2026-09-05 | `9a1a2f4025da3797a919d387566fd91fe7bc7c37ad83ccb5ea99432e73053307` |
 | `palette-light.png` | 3200 x 2000 | 2026-09-05 | `a79617f8ec4bde9d5f1a4778c44be21f06a973f8015b13ac7aac23f94e9b98d0` |
 | `palette-dark.png` | 3200 x 2000 | 2026-09-05 | `61eafe6499d825d3ab46f125b6049b7482c42575dbe9c89c51d8c2aa5ed13e6a` |
-| `first-run-light.png` | 3200 x 2000 | 2026-09-06 | `a2986c2b97e6e4f7550e29299995ba35302a290696fe0bae7e736d4ba6b320ce` |
-| `first-run-dark.png` | 3200 x 2000 | 2026-09-06 | `b89b400cee3e2d4556f0e2627763acd9db48eaf8b9d8513cbfc5204755346399` |
+| `first-run-light.png` | 3200 x 2000 | 2026-09-07 | `bd3130880d1af2ddfd0bf6b6b2c3a45330cd2c8922efa0533cea474343d188f9` |
+| `first-run-dark.png` | 3200 x 2000 | 2026-09-07 | `16a36aa8e9248f945887f7f76551cbff71d721cf355b329ffe51facafa6c67b5` |
 | `context-menu.png` | 786 x 593 | 2026-09-05 | `e7e82a4ffe3a94dc1d52f8f38cabe48f61e1a39d9d2cc1c5dc17f5e5ed662faf` |
 
 The twenty the two READMEs point at come to 3.43 MiB after `oxipng`, and
