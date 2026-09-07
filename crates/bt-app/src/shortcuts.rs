@@ -43,11 +43,11 @@ use crate::i18n::{Lang, Text};
 
 /// Everything the window can be asked to do from the keyboard.
 ///
-/// `SummonPip` is the verb with no machine behind it yet: four rows, listed, unassigned, and
-/// dispatched to an explicit no-op rather than omitted, because the audit decided the *slots*
-/// belong to us even though none of their chords does. Four rows on the page as well as in this
-/// table since 2026-09-07 — a slot with no chord and no way to record one is a row that reads as a
-/// refusal.
+/// `SummonPip` is the verb with no machine behind it yet: four rows, unassigned, and dispatched to
+/// an explicit no-op rather than omitted, because the audit decided the *slots* belong to us even
+/// though none of their chords does. **Not shown to a reader since 2026-09-07** (§7.1.6c-2‴): the
+/// rows are in this table for `keybindings.json`'s sake and off the page until the machine arrives
+/// — see [`Binding::surfaced`].
 ///
 /// `JumpAttention` was a stub too until 2026-08-20, when the attention queue (P1-8) landed with
 /// §7.1.6b′ F3 and gave it [`crate::Runtime::jump_to_attention`]. What the stub bought is exactly
@@ -213,7 +213,7 @@ pub(crate) enum Action {
     /// panel could offer exactly one chord for, and the lesson was that one
     /// chord is not enough.
     ///
-    /// **All four ship with no chord at all** — see [`Binding::unassigned`] —
+    /// **All four ship with no chord at all** — see [`Binding::unbuilt`] —
     /// and the prototype's `F9` is deliberately not carried over. The mock-up
     /// calls `F9` "only the prototype's default", and this window is not that
     /// prototype: a bare function key here is exactly what the `F3` row two
@@ -231,6 +231,15 @@ pub(crate) enum Action {
     /// `Record` — so the four rows that exist in order to be filled were the one
     /// place on the page a chord could not be recorded. A panel to fill them in
     /// was half the delivery; the button is the other half.
+    ///
+    /// **And no lines in it at all since that evening** (§7.1.6c-2‴, user
+    /// ruling), which is the same day's second reading of the same screenshot.
+    /// The buttons were the honest half of a row that should not have been on
+    /// the page yet: what a reader can record, a reader will press, and pressing
+    /// this one does nothing at all. So the panel loses the four rows and
+    /// [`Binding::unbuilt`] holds them until the machine lands — the slots, the
+    /// ids and anything a user already recorded into them stay exactly where
+    /// they are.
     ///
     /// A stub row in the sense §7.1.5e means it: named, in the table, dispatched
     /// to an explicit no-op until the picture-in-picture machine arrives.
@@ -495,7 +504,7 @@ const WIN: ModifiersState = ModifiersState::SUPER;
 /// **`chord` is an `Option`, and the `None` is a real state rather than a
 /// missing value.** Two things spell themselves that way and they are the same
 /// thing seen from either end: a row that ships with no default at all (the
-/// four unassigned picture-in-picture slots — see [`Action::SummonPip`]) and a
+/// four unassigned picture-in-picture slots — see [`Binding::unbuilt`]) and a
 /// row a user has deliberately taken the chord away from (`"chord": null` in
 /// `keybindings.json`). Both mean "this verb has no key today", and a row that
 /// vanished from the table instead would be a verb the panel could not offer a
@@ -525,6 +534,21 @@ pub(crate) struct Binding {
     pub(crate) action: Action,
     pub(crate) chord: Option<Chord>,
     pub(crate) scope: Scope,
+    /// **Whether a reader is shown this row at all** — on the Shortcuts page
+    /// ([`Shortcuts::editor_rows`]) and in `docs/shortcuts.md`, which are the two
+    /// places this table is read out loud.
+    ///
+    /// Every row says `true` except the four picture-in-picture slots
+    /// (2026-09-07, §7.1.6c-2‴, user ruling): they are rows for a verb that does
+    /// not exist yet, and a row offering a key for nothing is a row a user
+    /// records a chord into and then presses to no effect.
+    ///
+    /// **It hides the row and nothing else.** The row keeps its id, its place in
+    /// [`BINDINGS`] and its line in `keybindings.json`, so a user who already
+    /// recorded a chord into one keeps it, `overrides()` still writes it and
+    /// `apply_overrides` still reads it back. Withdrawing the *row* would delete
+    /// their line the first time this build wrote that file.
+    pub(crate) surfaced: bool,
 }
 
 impl Binding {
@@ -537,6 +561,7 @@ impl Binding {
             action,
             chord: Some(chord),
             scope: Scope::Window,
+            surfaced: true,
         }
     }
 
@@ -560,18 +585,27 @@ impl Binding {
             action,
             chord: Some(chord),
             scope: Scope::Window,
+            surfaced: true,
         }
     }
 
-    /// A row that ships with no chord at all.
+    /// A row for a verb this build does not have yet: no chord, and **not shown
+    /// to a reader** (2026-09-07, §7.1.6c-2‴, user ruling).
     ///
-    /// **And not one of a folded family since 2026-09-07** (§7.1.6c-2″, user
-    /// ruling). The four picture-in-picture slots are this constructor's only
-    /// callers, and a folded line offers no `Record` button — see
-    /// [`Shortcuts::editor_rows`] for why one button cannot stand over four ids.
-    /// On rows that exist in order to be given a chord, that fold hid the only
-    /// thing they have.
-    const fn unassigned(id: &'static str, title: Text, action: Action) -> Self {
+    /// The four picture-in-picture slots are this constructor's only callers, and
+    /// the day before this one they were four listed rows with a `Record` button
+    /// each (§7.1.6c-2″). A user pressed one, recorded a chord, and read the line
+    /// that then appeared under it — `This feature is not built yet` — as the
+    /// page telling him he had just broken something. **A key that answers to
+    /// nothing is not a setting**, and the honest place for these four is out of
+    /// sight until [`Action::SummonPip`] has a machine behind it.
+    ///
+    /// **The whole un-hiding is the one word below.** `surfaced: false` becomes
+    /// `true` the day the verb lands and the four rows come back to the page and
+    /// to `docs/shortcuts.md` (regenerate it) with their ids, their file lines
+    /// and their `Record` buttons exactly as they were — nothing else in this
+    /// module knows they are hidden.
+    const fn unbuilt(id: &'static str, title: Text, action: Action) -> Self {
         Self {
             id,
             title,
@@ -579,6 +613,7 @@ impl Binding {
             action,
             chord: None,
             scope: Scope::Window,
+            surfaced: false,
         }
     }
 
@@ -591,6 +626,7 @@ impl Binding {
             action,
             chord: Some(chord),
             scope: Scope::Preview,
+            surfaced: true,
         }
     }
 
@@ -603,6 +639,7 @@ impl Binding {
             action,
             chord: Some(chord),
             scope: Scope::TerminalPrimary,
+            surfaced: true,
         }
     }
 
@@ -615,6 +652,7 @@ impl Binding {
             action,
             chord: Some(chord),
             scope: Scope::SearchOpen,
+            surfaced: true,
         }
     }
 
@@ -627,6 +665,7 @@ impl Binding {
             action,
             chord: Some(chord),
             scope: Scope::SearchHost,
+            surfaced: true,
         }
     }
 
@@ -639,6 +678,7 @@ impl Binding {
             action,
             chord: Some(chord),
             scope: Scope::WebPage,
+            surfaced: true,
         }
     }
 
@@ -1234,22 +1274,28 @@ pub(crate) const BINDINGS: &[Binding] = &[
     // into one line until a reader asked why that line could not be recorded,
     // and the honest answer was that it could — the fold was what took the
     // button away.
-    Binding::unassigned(
+    //
+    // **And off the page the same evening** (§7.1.6c-2‴, user ruling): the four
+    // buttons were real, the verb behind them still is not, and the first person
+    // to press one recorded a chord that does nothing. They stay in this table
+    // for the file's sake and come back when the machine does — see
+    // [`Binding::unbuilt`], which is where the one word that hides them is.
+    Binding::unbuilt(
         "summon-pip-1",
         Text::ShortcutSummonPip1,
         Action::SummonPip(1),
     ),
-    Binding::unassigned(
+    Binding::unbuilt(
         "summon-pip-2",
         Text::ShortcutSummonPip2,
         Action::SummonPip(2),
     ),
-    Binding::unassigned(
+    Binding::unbuilt(
         "summon-pip-3",
         Text::ShortcutSummonPip3,
         Action::SummonPip(3),
     ),
-    Binding::unassigned(
+    Binding::unbuilt(
         "summon-pip-4",
         Text::ShortcutSummonPip4,
         Action::SummonPip(4),
@@ -1752,12 +1798,22 @@ impl Shortcuts {
     /// headings the same way: a second list declaring which rows fold would be a
     /// second place to forget one, and the first forgotten fold is a verb that
     /// appears twice or not at all.
+    ///
+    /// **Of the rows a reader is shown** ([`Binding::surfaced`], 2026-09-07,
+    /// §7.1.6c-2‴): a row whose verb this program does not have yet is not a
+    /// setting anybody can hold an opinion about, and the page it is on is a
+    /// list of keys that do things. The walk drops those rows before it folds,
+    /// so a family half of whose members are hidden folds over the half that is
+    /// shown — the same answer the walk already gives a family the reader has
+    /// rebound out of its run, and for the same reason: this page describes the
+    /// keys it is offering.
     #[must_use]
     pub(crate) fn editor_rows(&self) -> Vec<ShortcutRow> {
+        let rows: Vec<&Binding> = self.rows.iter().filter(|row| row.surfaced).collect();
         let mut out: Vec<ShortcutRow> = Vec::new();
         let mut index = 0;
-        while index < self.rows.len() {
-            let head = &self.rows[index];
+        while index < rows.len() {
+            let head = rows[index];
             let Some(family) = head.family else {
                 out.push(ShortcutRow {
                     ids: vec![head.id],
@@ -1771,11 +1827,11 @@ impl Shortcuts {
                 index += 1;
                 continue;
             };
-            let end = self.rows[index..]
+            let end = rows[index..]
                 .iter()
                 .position(|row| row.family != Some(family))
-                .map_or(self.rows.len(), |offset| index + offset);
-            let members = &self.rows[index..end];
+                .map_or(rows.len(), |offset| index + offset);
+            let members = &rows[index..end];
             out.push(ShortcutRow {
                 ids: members.iter().map(|row| row.id).collect(),
                 title: family.text(),
@@ -1926,7 +1982,7 @@ fn folded_key_cap(members: &[&Binding]) -> Option<String> {
 }
 
 /// What a folded line says under its name.
-fn family_note(head: &Binding, members: &[Binding]) -> Option<Cow<'static, str>> {
+fn family_note(head: &Binding, members: &[&Binding]) -> Option<Cow<'static, str>> {
     let unassigned = members.iter().filter(|row| row.chord.is_none()).count();
     let counted = if unassigned == 0 {
         NOTE_ONE_PER_MEMBER
@@ -1950,7 +2006,7 @@ fn family_note(head: &Binding, members: &[Binding]) -> Option<Cow<'static, str>>
 /// run, or one where some have no chord at all — shows the first chord it
 /// actually has, because a range that skipped its gaps would be a line claiming
 /// keys nobody can press.
-fn fold_caps(members: &[Binding]) -> Vec<String> {
+fn fold_caps(members: &[&Binding]) -> Vec<String> {
     let mut bound = members.iter().filter_map(|row| row.chord.as_ref());
     let Some(first) = bound.next() else {
         return Vec::new();
@@ -4054,13 +4110,15 @@ mod tests {
     /// PIN (S1/S3/S67, 2026-08-17) — **the editor's list is the table, folded,
     /// with the rows the audit declined after it.**
     ///
-    /// Every row of `BINDINGS` is on the page exactly once — through a line of
-    /// its own or through the family line that folded it — so no verb is missing
-    /// and none appears twice. The nine tab ordinals are one line; the four
-    /// picture-in-picture slots were a second one until 2026-09-07 and are four
-    /// lines now (§7.1.6c-2″); and the two `Alt`+arrow families the audit listed
-    /// and never took are there as well, greyed and offering no Record button,
-    /// "so the table stays the whole ruling".
+    /// Every **surfaced** row of `BINDINGS` is on the page exactly once —
+    /// through a line of its own or through the family line that folded it — so
+    /// no verb is missing and none appears twice. The nine tab ordinals are one
+    /// line; the four picture-in-picture slots were a second one until
+    /// 2026-09-07 and are no line at all since that evening (§7.1.6c-2‴: the
+    /// verb behind them does not exist, so the page does not offer them); and
+    /// the two `Alt`+arrow families the audit listed and never took are there as
+    /// well, greyed and offering no Record button, "so the table stays the whole
+    /// ruling".
     ///
     /// MUTATIONS:
     /// (1) fold by walking a declared list of families instead of the `family`
@@ -4082,14 +4140,17 @@ mod tests {
                 seen.push(id);
             }
         }
-        for binding in BINDINGS {
+        for binding in BINDINGS.iter().filter(|binding| binding.surfaced) {
             assert!(
                 seen.contains(&binding.id),
                 "{} is in the table and not on the page",
                 binding.id
             );
         }
-        assert_eq!(seen.len(), BINDINGS.len());
+        assert_eq!(
+            seen.len(),
+            BINDINGS.iter().filter(|binding| binding.surfaced).count()
+        );
 
         let named = |title: &str| {
             lines
@@ -4106,25 +4167,12 @@ mod tests {
         );
         assert!(!tabs.recordable, "a family is edited a slot at a time");
 
-        // **And the four picture-in-picture slots are four lines** (§7.1.6c-2″,
-        // user ruling 2026-09-07): the fold that made them one is gone, and what
-        // it took with it was the Record button on the only rows that exist in
-        // order to be given a chord. `every_picture_in_picture_slot_is_its_own_recordable_line`
-        // is that ruling stated whole; here it is the count, in the walk that
-        // knows how many lines this page has.
-        for slot in 1..=4u8 {
-            let pip = named(pip_title(slot));
-            assert_eq!(pip.ids, vec![format!("summon-pip-{slot}").as_str()]);
-            assert!(
-                pip.caps.is_empty(),
-                "all four slots ship unassigned - see Action::SummonPip"
-            );
-            assert!(
-                pip.note.is_none(),
-                "a row with no chord claims nothing about one: {:?}",
-                pip.note
-            );
-        }
+        // **And the four picture-in-picture slots are on no line at all**
+        // (§7.1.6c-2‴, user ruling 2026-09-07): they are rows of the table whose
+        // verb does not exist, held off the page by [`Binding::surfaced`], which
+        // is why the count above is of the surfaced rows and not of the table.
+        // `a_verb_that_is_not_built_is_not_offered_to_a_reader` is that ruling
+        // stated whole, both surfaces and both directions of the flag.
 
         // **The alias is gone from the page** (user ruling 2026-08-18). One verb
         // is one line; the second chord is something a reader records.
@@ -4195,40 +4243,128 @@ mod tests {
 
     /// The name a picture-in-picture slot is called on the page.
     fn pip_title(slot: u8) -> &'static str {
+        pip_title_in(slot, crate::i18n::current())
+    }
+
+    /// The same name in a named language, for the two-column document.
+    fn pip_title_in(slot: u8, lang: Lang) -> &'static str {
         match slot {
-            1 => Text::ShortcutSummonPip1.text(),
-            2 => Text::ShortcutSummonPip2.text(),
-            3 => Text::ShortcutSummonPip3.text(),
-            _ => Text::ShortcutSummonPip4.text(),
+            1 => Text::ShortcutSummonPip1.in_lang(lang),
+            2 => Text::ShortcutSummonPip2.in_lang(lang),
+            3 => Text::ShortcutSummonPip3.in_lang(lang),
+            _ => Text::ShortcutSummonPip4.in_lang(lang),
         }
     }
 
-    /// RED (user ruling 2026-09-07) — **each picture-in-picture slot is a line
-    /// of its own, and each line offers a `Record` button.**
+    /// The table as it will read the day the picture-in-picture machine lands:
+    /// [`Binding::surfaced`] flipped on the four rows that hold it back, and
+    /// nothing else touched. The un-hiding is one word in
+    /// [`Binding::unbuilt`]; this is that word, said in a test.
+    fn as_if_the_verb_had_landed() -> Vec<Binding> {
+        BINDINGS
+            .iter()
+            .map(|row| Binding {
+                surfaced: true,
+                ..row.clone()
+            })
+            .collect()
+    }
+
+    /// RED (user ruling 2026-09-07) — **a verb this build does not have is not
+    /// offered to a reader**: not on the Shortcuts page, not in
+    /// `docs/shortcuts.md`.
     ///
-    /// The four slots folded into one line until today, and a folded line offers
-    /// no `Record` ([`Shortcuts::editor_rows`]): the recorder takes one chord and
-    /// a fold has four rows to put it on. What that left on the page was a line
-    /// reading `Not set` with nothing on it to press — sitting directly under a
-    /// row with a `Record` button and directly above two greyed rows the audit
-    /// really did decline, so the only reading left was that this row is another
-    /// key nobody is allowed to choose. The user's screenshot asked which of the
-    /// two it was; the answer is neither, and the row had no way to say so.
+    /// This morning's ruling gave the four picture-in-picture slots a line each
+    /// and a `Record` button each (§7.1.6c-2″), because a row that cannot be
+    /// recorded reads as a refusal. The button worked. The user pressed it,
+    /// recorded a chord, read `This feature is not built yet` under the row he
+    /// had just filled in, and asked what he had broken — which is the same
+    /// screenshot read one layer down: the row was never the problem, **the row
+    /// being on the page at all** was. A shortcuts page is a list of keys that
+    /// do things, and a key that does nothing is not a setting a person can hold
+    /// an opinion about.
     ///
-    /// **The tab ordinals keep their fold**, and the difference is not a
-    /// preference: nine lines of one verb would bury the fifteen other verbs
-    /// under them, and every one of the nine already has a key, so nothing on
-    /// that line is asking to be pressed. These four have no key and exist in
-    /// order to be given one — which is the whole of why they are in the table
-    /// (see [`Action::SummonPip`]) — so the affordance is the row's only point.
+    /// So the rows go, and only from the two surfaces a person reads. They stay
+    /// in [`BINDINGS`] with their ids and their defaults, which is what
+    /// `a_chord_recorded_on_one_slot_lands_on_that_slot_alone` holds down: a
+    /// user who already recorded one keeps their line in `keybindings.json`, and
+    /// this build neither honours it with a verb nor deletes it behind their
+    /// back.
     ///
-    /// MUTATIONS: give the four rows a `family` again and they fold back into
-    /// one line, so the per-slot count goes red; keep the fold and simply set
-    /// `recordable` on it and the `ids` assertion goes red, because one button
-    /// over four ids cannot say which slot it wrote.
+    /// MUTATION: drop the `surfaced` filter from [`Shortcuts::editor_rows`] or
+    /// from `shortcuts_document` and the matching half goes red — which is the
+    /// state this test was written in, four listed rows and four rows in the
+    /// document.
     #[test]
-    fn every_picture_in_picture_slot_is_its_own_recordable_line() {
+    fn a_verb_that_is_not_built_is_not_offered_to_a_reader() {
         let table = Shortcuts::defaults();
+        let lines = table.editor_rows();
+        let document = shortcuts_document(BINDINGS);
+        for slot in 1..=4u8 {
+            let id = format!("summon-pip-{slot}");
+            assert!(
+                !lines
+                    .iter()
+                    .any(|line| line.ids.iter().any(|other| *other == id)),
+                "{id} is not a line of the page while it answers to nothing"
+            );
+            assert!(
+                !lines.iter().any(|line| line.title == pip_title(slot)),
+                "and its name is on no other line either"
+            );
+            assert!(
+                !document.contains(&id),
+                "{id} is not a row of docs/shortcuts.md either"
+            );
+            for lang in Lang::ALL {
+                let title = pip_title_in(slot, lang);
+                assert!(
+                    !document.contains(title),
+                    "{title} is not in docs/shortcuts.md either"
+                );
+            }
+        }
+
+        // **And they are still rows of the table**, which is the half
+        // `keybindings.json` stands on: a row withdrawn from `BINDINGS` is a
+        // line this build would delete out of a user's own file the next time it
+        // wrote one.
+        for slot in 1..=4u8 {
+            let id = format!("summon-pip-{slot}");
+            let row = BINDINGS
+                .iter()
+                .find(|row| row.id == id)
+                .unwrap_or_else(|| panic!("{id} is still a row of the table"));
+            assert_eq!(row.action, Action::SummonPip(slot));
+            assert!(row.chord.is_none(), "and still ships with no chord");
+            assert!(
+                !row.surfaced,
+                "{id} is held off the page by its own flag and nothing else"
+            );
+        }
+    }
+
+    /// RED (user ruling 2026-09-07) — **and the flag is the whole of it**: flip
+    /// [`Binding::surfaced`] on those four rows and the page and the document
+    /// have them back, four lines, four `Record` buttons, no other edit.
+    ///
+    /// The other half of `a_verb_that_is_not_built_is_not_offered_to_a_reader`,
+    /// and the reason the hiding is a flag rather than four rows deleted or an
+    /// `if` in the page: the day [`Action::SummonPip`] gets its machine, the
+    /// delivery is one word in [`Binding::unbuilt`] and a regenerated
+    /// `docs/shortcuts.md`. This test is what says so out loud, and it carries
+    /// §7.1.6c-2″'s own assertions unchanged — a line of its own per slot, its
+    /// own name on it, a `Record` button, no chord and no note — because that
+    /// ruling was never overturned, only postponed.
+    ///
+    /// MUTATION: make the hiding anything the flag cannot undo — a filter on the
+    /// id prefix, an `if` in the page, the rows deleted from [`BINDINGS`] — and
+    /// this goes red while its neighbour stays green.
+    #[test]
+    fn flipping_surfaced_brings_the_hidden_rows_back_whole() {
+        let table = Shortcuts {
+            rows: as_if_the_verb_had_landed(),
+        };
         let lines = table.editor_rows();
         for slot in 1..=4u8 {
             let id = format!("summon-pip-{slot}");
@@ -4260,23 +4396,51 @@ mod tests {
             }),
             "the slots are four lines, not one"
         );
+
+        // The document the README sends a reader to is written from the same
+        // flag, so it comes back in the same one move.
+        let document = shortcuts_document(&as_if_the_verb_had_landed());
+        for slot in 1..=4u8 {
+            assert!(
+                document.contains(&format!("`summon-pip-{slot}`")),
+                "slot {slot} is a row of docs/shortcuts.md again"
+            );
+            for lang in Lang::ALL {
+                assert!(
+                    document.contains(pip_title_in(slot, lang)),
+                    "in both languages, as every other row is"
+                );
+            }
+        }
     }
 
-    /// RED (user ruling 2026-09-07) — **a chord recorded on one slot lands on
-    /// that slot alone, is refused exactly where any other row's would be, and
-    /// leaves with `Restore all defaults`.**
+    /// RED (user ruling 2026-09-07) — **a chord already recorded on one slot
+    /// survives this build whole**: it lands on that slot alone, is refused
+    /// exactly where any other row's would be, comes back out of
+    /// `keybindings.json` unchanged, and leaves with `Restore all defaults`.
     ///
-    /// The recorder is the one the rest of the page uses, so what this asserts is
-    /// that these rows are ordinary rows of the table and not a special case:
-    /// [`Shortcuts::verdict_for`] answers about them with the same three
-    /// refusals it answers about `new-tab` with, [`Shortcuts::set`] writes the
-    /// slot it was named and no other, and [`Shortcuts::restore_all`] — the
-    /// page's own closing verb — takes the chord away again.
+    /// These rows spent one morning on the page with a `Record` button each
+    /// (§7.1.6c-2″) and are off it again (§7.1.6c-2‴), which is exactly the
+    /// window in which a user could have filled one in — so the file is the part
+    /// of the ruling with a person behind it. **Hiding a row is not retiring
+    /// it**: the id stays in [`BINDINGS`], so `overrides()` writes the line back
+    /// and `apply_overrides` reads it home, and what a user recorded goes on
+    /// doing nothing rather than going quietly missing.
     ///
-    /// MUTATIONS: write the chord onto the family's first member instead of the
-    /// named row and the second slot's caps go red beside the first's; skip
-    /// these rows in `chord_verdict` and the conflict assertions go red, which is
-    /// a recorder handing out a chord `new-tab` is already answering to.
+    /// `Restore all defaults` still clears it, and that is the right answer
+    /// rather than an oversight worth an exception: the verb means "delete the
+    /// file" — its own doc says so — and a chord it left behind would be a line
+    /// in `keybindings.json` no page shows and no button can reach.
+    ///
+    /// The recorder half is unchanged: [`Shortcuts::verdict_for`] answers about
+    /// these rows with the same three refusals it answers about `new-tab` with,
+    /// and [`Shortcuts::set`] writes the slot it was named and no other.
+    ///
+    /// MUTATIONS: hide these rows by dropping them from [`BINDINGS`] instead of
+    /// by the flag and the round trip goes red — the user's line is discarded at
+    /// the file's door; skip them in `chord_verdict` and the conflict assertions
+    /// go red, which is a recorder handing out a chord `new-tab` is already
+    /// answering to.
     #[test]
     fn a_chord_recorded_on_one_slot_lands_on_that_slot_alone() {
         let mut table = Shortcuts::defaults();
@@ -4288,19 +4452,19 @@ mod tests {
         );
         table.set("summon-pip-2", Some(chord.clone()));
 
-        let caps = |lines: &[ShortcutRow], id: &str| {
-            lines
+        let chord_of = |table: &Shortcuts, id: &str| {
+            table
+                .rows()
                 .iter()
-                .find(|line| line.ids == vec![id])
-                .unwrap_or_else(|| panic!("{id} is a line of the page"))
-                .caps
+                .find(|row| row.id == id)
+                .unwrap_or_else(|| panic!("{id} is a row of the table"))
+                .chord
                 .clone()
         };
-        let lines = table.editor_rows();
-        assert_eq!(caps(&lines, "summon-pip-2"), vec!["Ctrl", "Shift", "0"]);
+        assert_eq!(chord_of(&table, "summon-pip-2"), Some(chord.clone()));
         for slot in [1u8, 3, 4] {
             assert!(
-                caps(&lines, &format!("summon-pip-{slot}")).is_empty(),
+                chord_of(&table, &format!("summon-pip-{slot}")).is_none(),
                 "slot {slot} was not the row that was recorded"
             );
         }
@@ -4355,15 +4519,39 @@ mod tests {
             "one recorded slot is one line in the file"
         );
 
+        // **And the line comes home.** This is the round trip a user who
+        // recorded a slot this morning actually takes: the file this build wrote
+        // for them, read by this build, laid over the defaults, and the chord
+        // still on the row it was recorded on — hidden, doing nothing, and
+        // theirs.
+        let mut relaunched = Shortcuts::defaults();
+        let faults = relaunched.apply_overrides(&table.overrides());
+        assert!(
+            faults.is_empty(),
+            "a hidden row is still a row this build knows: {faults:?}"
+        );
+        assert_eq!(relaunched, table, "the whole table came back");
+        assert_eq!(chord_of(&relaunched, "summon-pip-2"), Some(chord.clone()));
+        assert!(
+            !relaunched
+                .editor_rows()
+                .iter()
+                .any(|line| line.ids.iter().any(|id| id.starts_with("summon-pip-"))),
+            "and it is still not a row anybody is shown"
+        );
+
         table.restore_all();
         assert!(!table.is_overridden("summon-pip-2"));
-        let restored = table.editor_rows();
         for slot in 1..=4u8 {
             assert!(
-                caps(&restored, &format!("summon-pip-{slot}")).is_empty(),
+                chord_of(&table, &format!("summon-pip-{slot}")).is_none(),
                 "restoring the defaults empties slot {slot}"
             );
         }
+        assert!(
+            table.overrides().is_empty(),
+            "which is the file deleted, hidden rows and all"
+        );
         assert_eq!(
             table.lookup(
                 &Key::Character("0".into()),
@@ -5241,12 +5429,19 @@ mod tests {
             .expect("this crate sits two directories below the workspace root")
     }
 
-    /// `docs/shortcuts.md` as [`BINDINGS`] would have it, in both languages.
+    /// `docs/shortcuts.md` as a binding table would have it, in both languages.
     ///
     /// One renderer with two readers: the gate below compares it against the
     /// file in the tree, and `scripts/generate-shortcuts-table.ps1` writes the
     /// file from the copy every run leaves in `target/`.
-    fn shortcuts_document() -> String {
+    ///
+    /// **It writes the rows a reader is shown** ([`Binding::surfaced`]), which
+    /// is the same answer the Shortcuts page gives and for the same reason: this
+    /// document is that page in prose, and a key that answers to nothing does
+    /// not belong in either. The table itself is the parameter so a test can ask
+    /// what this document looks like with the flag flipped — see
+    /// `flipping_surfaced_brings_the_hidden_rows_back_whole`.
+    fn shortcuts_document(bindings: &[Binding]) -> String {
         let mut out = String::from(concat!(
             "# Shortcuts\n",
             "\n",
@@ -5277,7 +5472,7 @@ mod tests {
                 columns[0], columns[1], columns[2], columns[3]
             );
             let _ = writeln!(out, "| --- | --- | --- | --- |");
-            for binding in BINDINGS {
+            for binding in bindings.iter().filter(|binding| binding.surfaced) {
                 let key = binding.chord.as_ref().map_or_else(
                     || Text::ShortcutUnbound.in_lang(lang).to_owned(),
                     |chord| chord_caps(chord).join("+"),
@@ -5309,7 +5504,7 @@ mod tests {
     #[test]
     fn docs_shortcuts_md_is_the_bindings_table() {
         let root = repository_root();
-        let rendered = shortcuts_document();
+        let rendered = shortcuts_document(BINDINGS);
         let generated = root.join("target").join("shortcuts-table.md");
         if let Some(parent) = generated.parent() {
             std::fs::create_dir_all(parent).expect("the workspace has a target directory");

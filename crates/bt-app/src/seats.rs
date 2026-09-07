@@ -4821,6 +4821,29 @@ impl FocusRailGeometry {
     pub fn covers(&self, x: f64, y: f64) -> bool {
         contains(self.body, x as f32, y as f32)
     }
+
+    /// **Whether the card of the tab at `index` is on screen** — inside
+    /// [`Self::viewport`], which is the very rectangle `focus_rail_chrome` clips
+    /// its drawing to.
+    ///
+    /// One rule in one place, because two questions are asked of it and they must
+    /// never part company: `refresh_focus_thumbnails` spends the projection
+    /// budget on the cards this answers `true` for, and the PTY drain asks the
+    /// same thing before it puts a pane's output on the card column's clock
+    /// (§7.1.6b′, T-5). A window whose column is scrolled, collapsed or absent
+    /// answers `false` for every tab in it, and that is what makes a card nobody
+    /// can see cost nothing at all: the drain stops at this comparison rather
+    /// than at a projection.
+    ///
+    /// A tab with no card — an index past the end of a list solved before it was
+    /// opened — is not on screen either.
+    #[must_use]
+    pub fn card_is_in_view(&self, index: usize) -> bool {
+        let [list_top, list_bottom] = self.viewport;
+        self.cards
+            .get(index)
+            .is_some_and(|card| card.body[3] > list_top && card.body[1] < list_bottom)
+    }
 }
 
 /// How tall a card's **head** is, in physical pixels — its border plus
@@ -37682,6 +37705,44 @@ mod tests {",
         assert!(
             column.cards[1].body[3] <= column.viewport[1],
             "and the second card really is above it"
+        );
+    }
+
+    /// RED (§7.1.6b′, ticket T-5) — **which cards are on screen, asked once.**
+    ///
+    /// The projection budget spends itself on the cards this answers `true` for,
+    /// and the PTY drain asks the same question before it puts a pane's output on
+    /// the card column's frame clock. Two callers, one rule: a card scrolled out
+    /// of the list costs the drain a rectangle comparison and no frame at all.
+    ///
+    /// Mutation: widen the comparison to the column's whole body and a window
+    /// scrolled to the end of a long list starts asking for frames on behalf of
+    /// cards nobody can see.
+    #[test]
+    fn a_card_scrolled_out_of_the_list_is_not_on_screen() {
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let column = focus_rail_geometry(618.0, 1.0, 8, 0, 0.0, state)
+            .expect("focus mode puts a column on screen");
+        assert!(column.max_scroll > 0.0, "eight cards do not fit in 618px");
+        assert!(column.card_is_in_view(0), "the first card is at the top");
+        let last = column.cards.len() - 1;
+        assert!(
+            !column.card_is_in_view(last),
+            "and the last one is below the fold, so nothing is owed for it"
+        );
+        assert!(
+            !column.card_is_in_view(column.cards.len()),
+            "a tab with no card of its own is not on screen either"
+        );
+        let scrolled = focus_rail_geometry(618.0, 1.0, 8, 0, column.max_scroll, state)
+            .expect("focus mode puts a column on screen");
+        assert!(
+            scrolled.card_is_in_view(last),
+            "scrolled to the end, the last card is the one on screen"
+        );
+        assert!(
+            !scrolled.card_is_in_view(0),
+            "and the first has gone the other way"
         );
     }
 

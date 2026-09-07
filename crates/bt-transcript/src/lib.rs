@@ -1110,6 +1110,31 @@ impl TranscriptStore {
             .chain(self.resize_staging.iter())
     }
 
+    /// The same rows, newest first — [`Self::staged_rows`] walked from the other
+    /// end.
+    ///
+    /// It exists for a reader that wants the *end* of what has left the screen
+    /// rather than all of it: the focus column's thumbnails walk up from the
+    /// bottom of a pane until they have as many lines as a card holds
+    /// (`docs/DESIGN.md` §7.1.6b′ F2), and this is the plane they cross between
+    /// the live screen and history. Asking in capture order and reversing would
+    /// touch every staged row to keep a dozen of them, and a resize can leave a
+    /// whole vendor history in `resize_staging` — so the walk is published from
+    /// the end it is read from, exactly as `bt_term`'s `live_row` is published
+    /// beside `live_rows` for the same caller.
+    ///
+    /// The order is the reverse of [`Self::staged_rows`] and stays that way by
+    /// construction: both are written over the same two collections, and the
+    /// resize batch is the newer of the two in both directions.
+    pub fn staged_rows_newest_first(&self) -> impl Iterator<Item = &StagedRow> {
+        self.resize_staging.iter().rev().chain(
+            self.staging
+                .iter()
+                .rev()
+                .flat_map(|candidate| candidate.rows.iter().rev()),
+        )
+    }
+
     pub fn resize_staging_len(&self) -> usize {
         self.resize_staging.len()
     }

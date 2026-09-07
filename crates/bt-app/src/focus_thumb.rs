@@ -38,6 +38,13 @@
 //! clock is asked after, because its job is to bound the *rate* of real work, not
 //! to add a second reason to do none.
 //!
+//! # And what asks for the pass at all
+//!
+//! The four gates say what a pass costs; [`CardClock`] says when there is one.
+//! It is the pane's own output that moves a card and not the shell's opinion of
+//! itself — see that type for the clock the cards used to run on, and for why an
+//! unintegrated shell's card stood still.
+//!
 //! # What one projection is
 //!
 //! One seat's content, rebuilt: **as many rows of a terminal's tail as that
@@ -77,12 +84,14 @@
 //! re-project even though nothing behind it moved.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     time::{Duration, Instant},
 };
 
 use bt_layout::{SeatId, SeatKind};
 use bt_term::DualPlaneSession;
+use bt_transcript::CapturedRow;
 
 use crate::{
     TabId,
@@ -128,6 +137,100 @@ pub struct ThumbStats {
     /// Cards dropped because they scrolled out of the column — gate 2. Counted in
     /// cards and not in seats, because that is the unit the gate refuses in.
     pub dropped_offscreen: u64,
+}
+
+/// **The clock the card column runs on** (§7.1.6b′; ticket T-5, 2026-09-07).
+///
+/// The four gates above decide what a projection pass *does*. This decides
+/// whether there is a pass at all — and until this type existed the answer came
+/// from the shell rather than from the pane.
+///
+/// A card is re-projected in exactly one place: `refresh_focus_thumbnails`,
+/// inside `Runtime::refresh_chrome`. On the frame clock that door is behind one
+/// line of `Runtime::advance_strip_animation` —
+///
+/// ```text
+/// if !owes_frame && !panes_owe { return Ok(()); }
+/// ```
+///
+/// — and every debt in that fold is an **animation**: a mark breathing, a tween
+/// easing, a ring turning, a decoded picture arriving. A card is none of those.
+/// It is a picture of a pane, and what moves it is the child writing.
+///
+/// So the clock a card actually ran on was `tab_owes_frame(tab.last_drawn_mark,
+/// …)` — the tab-mark breath, which is set by `OSC 133;C`, cleared by `133;D`,
+/// and true for the whole of a command. A shell that reports its prompt carried
+/// its own card through that gate sixty times a second; a shell that does not
+/// reached the pass only when something unrelated happened to be moving, or when
+/// a rename (`OSC 0`/`OSC 7`) took the other road into `refresh_chrome`. That is
+/// the three tiers of `docs/plans/shell-matrix-2026-09-07.md` §1 row 7, and the
+/// reason they looked like a property of the shell.
+///
+/// Measured on this machine against the release build of `main` at e42c4f3:
+/// after a 400-row burst and two and a half seconds of silence, a Command Prompt
+/// pane with its markers taken away — the WSL worst case of that plan's §4 T-5 —
+/// had a card still showing an older screen in **7 of 8** runs, and a PowerShell 7
+/// pane, which the breath rescues *during* a command and not at the end of one,
+/// in **4 of 6**.
+///
+/// The second half of the same defect is gate 4: the throttle is a **skip and
+/// not a deferral**, so a seat whose damage arrived inside [`MIN_INTERVAL`] keeps
+/// its old picture with nothing queued to come back for it. An integrated shell's
+/// breath came back anyway. That is why the debt below survives a refusal.
+///
+/// A card is a picture of a pane, so the pane is what moves it. Two lines:
+///
+/// * **[`Self::pane_spoke`]** — a PTY batch changed the screen of a pane whose
+///   tab has a card *on screen* (`seats::FocusRailGeometry::card_is_in_view`).
+///   Nothing else about the shell inside it is consulted, and a card nobody can
+///   see costs the caller one rectangle comparison rather than a frame.
+/// * **[`Self::settled`]** — a projection pass has run. The debt is paid unless
+///   that pass was **refused by gate 4**, which is the half that cannot be left
+///   out: gate 4 is a skip and not a deferral, so a seat whose damage arrived
+///   inside the throttle keeps its old picture with nothing queued to come back
+///   for it. An integrated shell's breath came back anyway, sixty times a second;
+///   this is what comes back for every other shell.
+///
+/// The debt is spent by the window's existing 16 ms animation tick, in the two
+/// places that tick decides anything: `Runtime::strip_animation_deadline` asks
+/// for the frame, and `Runtime::advance_strip_animation`'s own fold lets the tick
+/// past the early return above and on to `refresh_chrome`. Both, because either
+/// alone is inert — a deadline that wakes a loop which then leaves early is a
+/// spin, and a fold nothing wakes is a card that moves only when something else
+/// does. The cadence is the breath's own, used as a ceiling rather than as a
+/// second timer: what a burst costs is one chrome rebuild per frame and, past
+/// gate 4, one projection per seat per [`MIN_INTERVAL`] — exactly what an
+/// integrated shell has always paid, now paid by all of them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CardClock {
+    owed: bool,
+}
+
+impl CardClock {
+    /// A pane with a card on screen has changed what its card is a picture of.
+    pub fn pane_spoke(&mut self) {
+        self.owed = true;
+    }
+
+    /// A projection pass ran between these two readings of the counters.
+    ///
+    /// The counters and not a boolean, so that "is a card still behind its pane?"
+    /// is answered by the gate that actually refused rather than by a call site's
+    /// account of what it thinks happened.
+    pub fn settled(&mut self, before: ThumbStats, after: ThumbStats) {
+        self.owed = after.skipped_throttled > before.skipped_throttled;
+    }
+
+    /// Nothing on screen owes anything — the column is gone, or empty.
+    pub fn nothing_to_draw(&mut self) {
+        self.owed = false;
+    }
+
+    /// Whether the window owes the card column a frame.
+    #[must_use]
+    pub fn owes_frame(self) -> bool {
+        self.owed
+    }
 }
 
 /// What a seat's content was last built from — the question "could this possibly
@@ -836,15 +939,46 @@ pub fn mini_columns(rect: [f32; 4], advance: f32, scale: f32) -> usize {
     (width / advance) as usize + 1
 }
 
-/// The last `rows` rows of a session's screen, oldest first, each cut to
-/// `columns` **columns**.
+/// The last `rows` lines of the **pane** a session is drawn in, oldest first,
+/// each cut to `columns` **columns**.
+///
+/// # Where the lines come from
+///
+/// **All three places a pane's text lives, and not only the third** (user
+/// report, 2026-09-07). A terminal's text is in frozen history, in the rows
+/// staged on their way into it, and on the live screen; the pane's own frame is
+/// built from exactly those three ([`DualPlaneSession::viewport_frame`]). This
+/// walked the third alone, so a card could only ever show what had not scrolled
+/// off the screen yet — and the moment a pane held more lines than its screen
+/// did, the card stopped at the screen's top edge and left the rest of itself
+/// blank while the pane under it went on showing the lines above.
+///
+/// A pane made taller is the plainest way to see it, and it is what the report
+/// was: this window owns its history, so the vendored grid keeps no scrollback
+/// of its own ([`bt_term::SCROLLBACK_LINES`] is zero) and a grow adds blank rows
+/// at the bottom rather than pulling the departed lines back. The screen then
+/// holds nine lines under a blank floor, the fifteen above it are in the two
+/// planes behind it, and the pane draws all twenty-four — while the card drew
+/// nine and left two thirds of itself empty. It is not about which shell is
+/// running: any pane that has scrolled and then been grown, or cleared, is in
+/// the same position, and a card whose cell holds more rows than the screen does
+/// was in it from the first frame.
+///
+/// So the walk climbs the screen, and then goes on past its top edge into the
+/// staging plane and then history, newest first, until it has as many lines as
+/// the card holds or the pane has no more to give.
+///
+/// **Except on the alternate screen**, where the pane shows no history either:
+/// §3.2 gives a full-screen program its own namespace and the transcript behind
+/// it is not reachable from there. A card that reached into the primary's
+/// history while `vim` was up would be a picture of two sessions at once.
 ///
 /// # What is kept, and what is skipped
 ///
 /// **A blank row inside the tail is kept, and keeps its place.** A real terminal
 /// prints blank lines on purpose — the gap between paragraphs, the empty line
 /// above a prompt — and a projection that closed those gaps would be a picture
-/// that does not line up with the screen it is a picture of. The bottom-up walk
+/// that does not line up with the pane it is a picture of. The bottom-up walk
 /// pushes every row it sees once it has seen a non-blank one, so those gaps
 /// arrive as empty strings and the painter spends a row's height on each.
 ///
@@ -857,10 +991,19 @@ pub fn mini_columns(rect: [f32; 4], advance: f32, scale: f32) -> usize {
 /// the tail begins at the last thing the shell said, and everything from there
 /// up is carried whole.
 ///
-/// The walk is bounded by the grid and is only ever reached when the generation
-/// moved, so a session with nothing happening in it does not walk at all — and a
-/// session busy enough to walk far is, by the time it is, a session whose screen
-/// has filled and whose walk is one row long.
+/// **The floor is the screen's alone.** A line that scrolled off was on the
+/// screen when it did, blank or not, and the pane draws it where it went — so
+/// the two planes behind the screen are carried whole from their first row,
+/// with no floor to climb past.
+///
+/// The walk is bounded by the card and not by the pane: the screen half stops at
+/// `wanted`, and the two planes behind it are read from their newest end
+/// (`staged_rows_newest_first`, and `entries` reversed — both are cheap walks
+/// backwards over ordered collections), so a pane holding a hundred thousand
+/// lines is walked exactly as far as a card can show. It is only ever reached
+/// when the generation moved, and nothing behind the screen can move without
+/// moving it: history grows when the screen scrolls or is reflowed, which are
+/// the two doors [`DualPlaneSession::screen_revision`] counts.
 fn transcript_tail(
     session: &DualPlaneSession,
     columns: usize,
@@ -877,16 +1020,7 @@ fn transcript_tail(
         let Some(captured) = session.live_row(row) else {
             continue;
         };
-        let text: String = captured
-            .cells
-            .iter()
-            // A wide character's spacer has no text of its own; taking its empty
-            // string would drop a column out of the middle of the line and pull
-            // everything after it one place left, which on a table is the whole
-            // table coming apart.
-            .filter(|cell| !cell.wide_spacer)
-            .flat_map(|cell| cell.text.chars())
-            .collect();
+        let text = row_text(&captured);
         let text = text.trim_end();
         // Still climbing past the blank floor: nothing has been kept yet, so an
         // empty row is not a blank line inside the tail, it is the floor.
@@ -898,17 +1032,56 @@ fn transcript_tail(
             break;
         }
     }
+    // **And on past the top of the screen, into the two planes the pane draws
+    // above it** — the staged rows first, because they left the screen after
+    // every frozen line did. Nothing here asks anybody anything: both are this
+    // session's own memory, and the walk stops the moment the card is full.
+    if climb.len() < wanted && !session.terminal_modes().alternate_screen {
+        let staged = session
+            .transcript()
+            .staged_rows_newest_first()
+            .map(|staged| Cow::Owned(row_text(&staged.row)));
+        let frozen = session
+            .document()
+            .entries()
+            .values()
+            .rev()
+            .map(|entry| Cow::Borrowed(entry.line.text.as_str()));
+        for text in staged.chain(frozen) {
+            climb.push(cut_to(text.trim_end(), columns));
+            if climb.len() == wanted {
+                break;
+            }
+        }
+    }
     // **Clamped to what is there**, which is the whole of "a window driven past
     // the top stops at the top". A seat holding fewer rows than the reader asked
     // to skip would otherwise hand back an empty picture, and an empty card is
     // the one answer a reader turning a wheel cannot tell from a broken one.
     // Note that this is also what keeps the two rulings of 2026-08-21 from
-    // meeting: a screen with less on it than the seat holds clamps `skip` to
+    // meeting: a pane with less on it than the seat holds clamps `skip` to
     // zero, so the top-aligned short tail is exactly the `skip == 0` case and
     // nothing here can produce a short list with rows hidden under it.
     let aimed = skip.min(climb.len().saturating_sub(rows));
     let window: Vec<String> = climb.into_iter().skip(aimed).take(rows).rev().collect();
     (window, aimed > 0)
+}
+
+/// One captured row's text.
+///
+/// A wide character's spacer has no text of its own; taking its empty string
+/// would drop a column out of the middle of the line and pull everything after
+/// it one place left, which on a table is the whole table coming apart.
+///
+/// One function because the same row shape arrives from two places now — the
+/// live screen, and the staging plane behind it — and two spellings of "what
+/// this row says" is how a card ends up drawing the same line two ways.
+fn row_text(row: &CapturedRow) -> String {
+    row.cells
+        .iter()
+        .filter(|cell| !cell.wide_spacer)
+        .flat_map(|cell| cell.text.chars())
+        .collect()
 }
 
 /// `text`, cut to `columns` **drawn columns** — leading whitespace and all.
@@ -1816,6 +1989,149 @@ mod tests {
         );
     }
 
+    /// **A card shows the lines its pane shows, and a pane shows what has
+    /// scrolled off its screen as well as what is still on it** (user report,
+    /// 2026-09-07 — a Git Bash card nine rows tall beside a pane showing
+    /// twenty-four, with two thirds of the card empty).
+    ///
+    /// Twenty lines onto a ten-row screen: nine of them are still on it and
+    /// eleven are behind it, and the pane draws all twenty. A cell with room for
+    /// fifteen must therefore hold fifteen.
+    ///
+    /// Red gate: take the walk past the screen's top edge out of
+    /// `transcript_tail` and this comes back with the nine the grid still has.
+    #[test]
+    fn the_tail_climbs_past_the_top_of_the_screen_into_what_scrolled_off() {
+        let mut shell = session();
+        for line in 1..=20 {
+            shell
+                .feed(format!("line {line}\r\n").as_bytes())
+                .expect("a shell takes its own output");
+        }
+        assert_eq!(
+            transcript_tail(&shell, 40, 15, 0).0,
+            (6..=20)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>(),
+            "fifteen rows of room is fifteen of the pane's lines"
+        );
+    }
+
+    /// **The shape the report arrived in**: a pane that has scrolled, and is then
+    /// made taller.
+    ///
+    /// This window owns its history, so the vendored grid keeps no scrollback of
+    /// its own and growing a pane adds blank rows at the bottom rather than
+    /// pulling the departed lines back onto the screen. The pane goes on drawing
+    /// all twenty lines — the eleven behind the screen above the nine still on
+    /// it — and the card must draw the same twenty rather than nine at the top
+    /// of a cell with room for twenty-five.
+    ///
+    /// It is not about which shell is running. The report put Git Bash beside
+    /// PowerShell 7 and only Git Bash looked wrong; what separated them was that
+    /// the one had gone on printing after the grow until its screen filled again
+    /// and the other had not.
+    ///
+    /// Red gate: the same one, and this is the arithmetic the report photographed.
+    #[test]
+    fn a_pane_grown_over_its_own_history_still_fills_its_card() {
+        let mut shell = session();
+        for line in 1..=20 {
+            shell
+                .feed(format!("line {line}\r\n").as_bytes())
+                .expect("a shell takes its own output");
+        }
+        shell
+            .resize(
+                NonZeroU32::new(40).expect("40 is not zero"),
+                NonZeroU32::new(30).expect("30 is not zero"),
+            )
+            .expect("a pane can be made taller");
+        let (tail, more_below) = transcript_tail(&shell, 40, 25, 0);
+        assert_eq!(
+            tail.first().map(String::as_str),
+            Some("line 1"),
+            "the card begins where the pane begins"
+        );
+        assert_eq!(
+            tail.last().map(String::as_str),
+            Some("line 20"),
+            "and ends on the last thing the shell said"
+        );
+        assert_eq!(tail.len(), 20, "twenty lines is twenty rows");
+        assert!(
+            !more_below,
+            "nothing is hidden under a window resting on the tail"
+        );
+    }
+
+    /// **The plane between the screen and history is drawn too.** A line that is
+    /// still being printed cannot be frozen, so the rows of it that have already
+    /// scrolled off wait in the transcript's staging plane — which the pane's own
+    /// frame is handed beside history and the screen. A card that read the other
+    /// two and not this one would leave a hole in the middle of what it drew.
+    ///
+    /// Red gate: drop the staged half of the walk and the row that left the
+    /// screen goes missing, leaving four rows of a line the pane draws five of.
+    #[test]
+    fn the_tail_carries_the_rows_staged_between_the_screen_and_history() {
+        let mut shell = DualPlaneSession::new(
+            NonZeroU32::new(20).expect("20 is not zero"),
+            NonZeroU32::new(4).expect("4 is not zero"),
+        );
+        // One line, a hundred columns of it, onto a twenty-column screen four
+        // rows tall: five rows of one logical line, so one row has left the
+        // screen — and none of it can be frozen while it is still open.
+        shell
+            .feed("x".repeat(100).as_bytes())
+            .expect("a shell takes its own output");
+        assert!(
+            shell.transcript().staged_rows().count() >= 1,
+            "an unfinished line's departed rows wait in staging"
+        );
+        let tail = transcript_tail(&shell, 20, 10, 0).0;
+        assert_eq!(
+            tail.len(),
+            5,
+            "five rows of it, and the pane draws all five"
+        );
+        assert!(
+            tail.iter().all(|row| row.len() == 20),
+            "each of them full: {tail:?}"
+        );
+    }
+
+    /// **A card of the alternate screen stops where its pane stops.** §3.2 gives
+    /// a full-screen program its own namespace with no transcript behind it, so
+    /// the pane draws that grid and nothing above it; a card that reached into
+    /// the primary's history while `vim` was up would be a picture of two
+    /// sessions at once.
+    ///
+    /// Red gate: drop the alternate-screen test from `transcript_tail` and the
+    /// twenty lines the shell printed before the program started show up above
+    /// the program's own two.
+    #[test]
+    fn a_card_of_an_alternate_screen_stops_where_its_pane_does() {
+        let mut shell = session();
+        for line in 1..=20 {
+            shell
+                .feed(format!("line {line}\r\n").as_bytes())
+                .expect("a shell takes its own output");
+        }
+        // Home and clear before printing, which is how a full-screen program
+        // starts: without it the two lines land where the shell's cursor was and
+        // the blank rows above them are part of the picture, which is true but
+        // says nothing about where the walk stops.
+        shell
+            .feed(b"\x1b[?1049h\x1b[H\x1b[2Jalt one\r\nalt two")
+            .expect("a program takes the alternate screen");
+        assert_eq!(
+            transcript_tail(&shell, 40, 15, 0).0,
+            vec!["alt one".to_owned(), "alt two".to_owned()],
+            "the program's own screen, and nothing from behind the one it replaced"
+        );
+    }
+
     /// **A taller seat projects more rows** (user ruling, 2026-08-20) — the
     /// count is the seat's own inner height over its own line height, floored,
     /// and never a constant.
@@ -2584,6 +2900,306 @@ mod tests {
             projected,
             (BUDGET_TABS * BUDGET_SEATS_PER_TAB) as u64,
             "and it paid for exactly one projection per seat, on the first frame"
+        );
+    }
+
+    /// **The window's loop, as far as a card is concerned** (T-5).
+    ///
+    /// Three things and no more, each of them the production rule rather than a
+    /// paraphrase of it:
+    ///
+    /// * the loop is woken by a chunk from the child, or by the deadline
+    ///   [`CardClock::owes_frame`] asks for and by nothing else — which is the
+    ///   whole of the question, because "nothing else" is exactly what a shell
+    ///   with no `OSC 133` and a pointer that is not moving leaves the window
+    ///   with;
+    /// * a woken turn runs the animation tick only if `STRIP_FRAME` has passed
+    ///   since the last one (`strip_animation_tick_is_due`);
+    /// * a tick that runs projects every visible card and settles the clock
+    ///   against the gates, which is `refresh_focus_thumbnails`.
+    ///
+    /// The shell inside the pane never appears, and that is the point: nothing
+    /// here can tell a Command Prompt from a `pwsh`.
+    struct CardLoop {
+        shell: DualPlaneSession,
+        thumbs: FocusThumbnails,
+        clock: CardClock,
+        now: Instant,
+        ticked_at: Option<Instant>,
+        /// Every instant at which a projection pass actually ran, for the perf
+        /// arm — one per frame at most is the claim.
+        passes: Vec<Instant>,
+    }
+
+    /// The window's own [`crate::STRIP_ANIMATION_FRAME`], spelled here because
+    /// this module cannot see the binary's constants.
+    const STRIP_FRAME: Duration = Duration::from_millis(16);
+
+    impl CardLoop {
+        fn new(start: Instant) -> Self {
+            Self {
+                shell: DualPlaneSession::new(
+                    NonZeroU32::new(80).expect("80 is not zero"),
+                    NonZeroU32::new(24).expect("24 is not zero"),
+                ),
+                thumbs: FocusThumbnails::default(),
+                clock: CardClock::default(),
+                now: start,
+                ticked_at: None,
+                passes: Vec::new(),
+            }
+        }
+
+        /// The child writes, the drain hears it, and the clock is told — the
+        /// three lines of `drain_pty` that matter here. **No prompt marker is
+        /// ever sent**: this pane is the worst case of the shell matrix, a shell
+        /// that reports nothing about itself at all.
+        fn print(&mut self, line: &str) {
+            self.shell
+                .feed(format!("{line}\r\n").as_bytes())
+                .expect("a shell takes its own output");
+            self.clock.pane_spoke();
+        }
+
+        /// One turn of the loop at the instant it was woken.
+        fn turn(&mut self) {
+            if self
+                .ticked_at
+                .is_some_and(|last| self.now.saturating_duration_since(last) < STRIP_FRAME)
+            {
+                return;
+            }
+            self.ticked_at = Some(self.now);
+            // `advance_strip_animation`'s own fold: a tick that owes nothing
+            // leaves before `refresh_chrome`, which is the door the pass below is
+            // behind. Nothing in this model is animating — that is the pane this
+            // ticket is about — so the card's own debt is the whole of the fold.
+            if !self.clock.owes_frame() {
+                return;
+            }
+            let before = self.thumbs.stats();
+            self.thumbs.project(
+                tab(1),
+                &[SeatDemand {
+                    id: seat(1),
+                    columns: 40,
+                    rows: 6,
+                    source: SeatSource::Terminal {
+                        session: &self.shell,
+                        skip: 0,
+                    },
+                }],
+                self.now,
+            );
+            self.clock.settled(before, self.thumbs.stats());
+            self.passes.push(self.now);
+        }
+
+        /// Let the loop run until `until`, waking only for the deadlines the
+        /// clock asks for. A window with nothing owed sleeps through the whole
+        /// span, which is what `ControlFlow::Wait` is.
+        fn sleep_until(&mut self, until: Instant) {
+            while self.clock.owes_frame() {
+                let next = self
+                    .ticked_at
+                    .map_or(self.now, |last| last + STRIP_FRAME)
+                    .max(self.now);
+                if next > until {
+                    break;
+                }
+                self.now = next;
+                self.turn();
+            }
+            self.now = self.now.max(until);
+        }
+
+        /// The same, reporting **when** the card first said `needle` — `None` if
+        /// the window went idle without ever drawing it, which is the failure this
+        /// ticket is about.
+        fn level_at(&mut self, needle: &str, until: Instant) -> Option<Instant> {
+            if self.card_shows(needle) {
+                return Some(self.now);
+            }
+            while self.clock.owes_frame() {
+                let next = self
+                    .ticked_at
+                    .map_or(self.now, |last| last + STRIP_FRAME)
+                    .max(self.now);
+                if next > until {
+                    break;
+                }
+                self.now = next;
+                self.turn();
+                if self.card_shows(needle) {
+                    return Some(self.now);
+                }
+            }
+            self.now = self.now.max(until);
+            None
+        }
+
+        /// What the card is showing.
+        fn card(&self) -> Vec<String> {
+            match self
+                .thumbs
+                .seats(tab(1))
+                .and_then(|seats| seats.get(&seat(1)))
+            {
+                Some(MiniSeatContent::Transcript { lines, .. }) => lines.clone(),
+                _ => Vec::new(),
+            }
+        }
+
+        fn card_shows(&self, needle: &str) -> bool {
+            self.card().iter().any(|line| line.contains(needle))
+        }
+    }
+
+    /// RED (ticket T-5, user report 2026-09-07) — **a pane that never says a word
+    /// about itself still moves its card, within one frame of the output.**
+    ///
+    /// The pane speaks twice inside one frame and then goes quiet, which is what
+    /// the end of every burst looks like and what a slow drip looks like whenever
+    /// a row happens to arrive just behind a tick. The first chunk is drawn by the
+    /// tick that follows it; the second is refused by the rate gate, and before
+    /// this ticket **nothing came back for it**: the window went to
+    /// `ControlFlow::Wait` with a card showing a screen that had moved on. What
+    /// used to come back was the tab-mark breath, and only a shell sending
+    /// `OSC 133;C` has one.
+    ///
+    /// Mutation: drop [`CardClock::pane_spoke`] from the drain, or the clock from
+    /// the frame deadline, and the second chunk never reaches the card.
+    #[test]
+    fn a_pane_that_reports_no_prompt_still_moves_its_card_within_a_frame() {
+        let start = Instant::now();
+        let mut window = CardLoop::new(start);
+        // A row on a quiet pane — the drip the report was written about. Nothing
+        // has been drawn for a second, so neither gate has an argument, and the
+        // card is level on the very turn the chunk woke.
+        window.now = start + Duration::from_secs(1);
+        window.print("first");
+        window.turn();
+        assert_eq!(
+            window.level_at("first", window.now + Duration::from_secs(2)),
+            Some(start + Duration::from_secs(1)),
+            "a row on a quiet pane is on its card within one frame of arriving"
+        );
+
+        // And the case that was losing rows: a second chunk five milliseconds
+        // later — inside the frame, so the rate gate refuses the turn — and then
+        // silence. Before this ticket **nothing came back for it**: the window
+        // went to `ControlFlow::Wait` with a card showing a screen that had moved
+        // on, and what used to come back was the tab-mark breath, which only a
+        // shell sending `OSC 133;C` has.
+        let spoke = window.now + Duration::from_millis(5);
+        window.now = spoke;
+        window.print("second");
+        window.turn();
+        assert!(
+            !window.card_shows("second"),
+            "the rate gate refuses this turn, exactly as it did before T-5"
+        );
+        assert!(
+            window.clock.owes_frame(),
+            "so the window owes the column a frame, and this is the debt that did \
+             not exist"
+        );
+        let level = window
+            .level_at("second", spoke + Duration::from_secs(2))
+            .expect("the card catches up without a prompt, a rename or a breath");
+        assert!(
+            level.saturating_duration_since(spoke) <= MIN_INTERVAL + STRIP_FRAME,
+            "and it caught up a whole {:?} later — the ceiling is the throttle's \
+             own interval and one frame, not the next prompt",
+            level.saturating_duration_since(spoke)
+        );
+    }
+
+    /// RED (T-5) — **the throttle's skip is not a dropped row.**
+    ///
+    /// Gate 4 is a skip and not a deferral: a seat whose damage arrived inside
+    /// [`MIN_INTERVAL`] keeps the picture it had, with nothing queued to come back
+    /// for it. That was survivable only because an integrated shell's breath came
+    /// back sixty times a second anyway. Here the pane prints twice in quick
+    /// succession and stops, and the second print is the one the throttle refuses.
+    ///
+    /// Mutation: settle the clock on "a pass ran" instead of on the gates, and the
+    /// last thing a pane said before going quiet is lost until it says another.
+    #[test]
+    fn a_seat_the_throttle_refused_is_drawn_when_the_clock_lets_it() {
+        let start = Instant::now();
+        let mut window = CardLoop::new(start);
+        window.print("first");
+        window.turn();
+        assert_eq!(window.thumbs.stats().projections, 1);
+
+        // A frame later: past the rate gate, inside the throttle.
+        window.now = start + STRIP_FRAME;
+        window.print("second");
+        window.turn();
+        assert_eq!(
+            window.thumbs.stats().skipped_throttled,
+            1,
+            "gate 4 refused it, as it is meant to"
+        );
+        assert!(!window.card_shows("second"));
+        assert!(
+            window.clock.owes_frame(),
+            "and the debt survives the refusal"
+        );
+
+        window.sleep_until(start + MIN_INTERVAL * 3);
+        assert!(
+            window.card_shows("second"),
+            "the clock comes back for what the throttle skipped"
+        );
+        assert!(
+            !window.clock.owes_frame(),
+            "and stops asking once the card is level"
+        );
+    }
+
+    /// PERF (T-5) — **a thousand rows are one projection pass per frame at most,
+    /// and one rebuilt seat per [`MIN_INTERVAL`] at most.**
+    ///
+    /// The ceiling the ruling names: a card on the output path costs no more than
+    /// the tab mark of an integrated shell has always cost. The rows arrive far
+    /// faster than either gate, which is the worst case — every wake-up finds new
+    /// damage, so nothing here is refused by gate 3.
+    ///
+    /// Mutation: refresh the chrome from the drain itself instead of settling a
+    /// debt the frame spends, and the pass count goes to the number of chunks.
+    #[test]
+    fn a_burst_of_a_thousand_rows_is_one_pass_a_frame_at_most() {
+        let start = Instant::now();
+        let mut window = CardLoop::new(start);
+        // A row every millisecond: a thousand chunks over a second, sixteen times
+        // faster than the frame and a hundred times faster than the throttle.
+        let chunk = Duration::from_millis(1);
+        for row in 0..1_000 {
+            window.now = start + chunk * row;
+            window.print(&format!("line {row}"));
+            window.turn();
+        }
+        let span = window.now.saturating_duration_since(start);
+        let frames = span.as_millis() / STRIP_FRAME.as_millis() + 1;
+        let passes = window.passes.len() as u128;
+        assert!(
+            passes <= frames,
+            "a thousand rows asked for {passes} projection passes over {frames} \
+             frames of window"
+        );
+        let intervals = span.as_millis() / MIN_INTERVAL.as_millis() + 1;
+        let projections = u128::from(window.thumbs.stats().projections);
+        assert!(
+            projections <= intervals,
+            "and rebuilt the seat {projections} times against the {intervals} \
+             the throttle allows"
+        );
+        window.sleep_until(start + Duration::from_secs(2));
+        assert!(
+            window.card_shows("line 999"),
+            "and the last row of the burst is on the card when it is over"
         );
     }
 

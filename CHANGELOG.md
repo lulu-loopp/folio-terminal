@@ -6,20 +6,39 @@ All notable changes to Folio are recorded here. The format follows
 
 ## 0.2.3-preview (unreleased)
 
-Most of this release is about reading what a pane is showing. A Markdown
-document is set in a column wide enough to use a maximised window, a wide table
-in it scrolls sideways under the tilt wheel most mice already have, and a link
-whose text carries code or emphasis is drawn as a link. In the terminal, a pane wears a scroll bar only when it has
-something to scroll to, its thumb rides the pane's own edge, and a tick on the
-command strip still lands on that command's prompt after the pane has been split
-or dragged. The two Explorer rows in Settings became one switch that does
-whatever this Windows can do; the four picture-in-picture slots became four rows
-that can each record a chord; and the interface reads better in both languages
-after an audit of every string a reader can see. Underneath, the core now
-compiles on macOS and a job on every push keeps it that way — groundwork, not a
-port.
+Most of this release is about reading what a pane is showing, and about the
+panes that were left out. Command Prompt carries command marks and its working
+directory in its own prompt, and the first WSL pane of a run is integrated like
+every one after it. A tab's card follows its pane whatever shell is in it, and
+draws everything that pane is showing. A Markdown document is set in a column
+wide enough to use a maximised window, a wide table in it scrolls sideways under
+the tilt wheel most mice already have, and a link whose text carries code or
+emphasis is drawn as a link. In the terminal, a pane wears a scroll bar only
+when it has something to scroll to, its thumb rides the pane's own edge, and a
+tick on the command strip still lands on that command's prompt after the pane
+has been split or dragged. The two Explorer rows in Settings became one switch
+that does whatever this Windows can do, and a change it makes is announced to a
+File Explorer that is already running; the four picture-in-picture rows left the
+Shortcuts page until the window they summon exists; and the interface reads
+better in both languages after an audit of every string a reader can see.
+Underneath, the core now compiles on macOS and a job on every push keeps it that
+way — groundwork, not a port.
 
 ### Added
+
+- **A Command Prompt pane has a command rail.** `cmd.exe` has no startup file
+  to hand a script to, so until now its rail was empty however many commands had
+  been run: nothing to click, and `Ctrl+Shift+↑`/`↓` with nowhere to go. Its one
+  way in is the `PROMPT` variable, and what fits there is what describes the one
+  moment `cmd` expands it at — just before it reads a line, which is the end of
+  the last command and the start of this prompt at once. So a `cmd` pane now
+  reports both, and every prompt gets a tick that lands on its own prompt row.
+  Whatever `PROMPT` you had set is kept and reported in front of, never replaced,
+  and a `cmd` started from a `cmd` does not report twice. Two things `cmd` cannot
+  say, it does not: a tick carries no exit code, because `PROMPT` has no way to
+  read one, and nothing marks where a typed line ends, so an inline `$…$` in a
+  `cmd` pane is still read as text. Display formulas and image previews in its
+  output are exactly where they were.
 
 - **A wide table in a Markdown preview scrolls sideways, and a tilt wheel is
   enough to do it.** A table whose columns need more room than the page can give
@@ -69,23 +88,16 @@ port.
   because it is the same instrument turned. Nothing else about the edge changed:
   the reserved lane is the same eight pixels, the command marks beside it have
   not moved, and the thumb is grabbed and dragged exactly where it was.
-- **The four picture-in-picture slots are four rows on the Shortcuts page, and
-  each one has a Record button.** They were one row saying `Not set` with
-  nothing on it to press, standing between `Summon the terminal`, which has a
-  Record button, and two greyed rows that are keys this window deliberately
-  leaves to readline — so there was no way to tell which of the two it was. It
-  was neither: those chords were always yours to choose, and the row had no way
-  to say so. `Summon picture in picture 1` to `4` are now a row each, with their
-  own chord, their own Record button and their own `↺`, and recording one works
-  the way it works on every other row: a chord another row already answers to is
-  refused, with the offer to take it, and `Restore all defaults` empties all
-  four again. The window a slot summons is still to come, which the row says on
-  the line under its name once there is a chord on it — in a short sentence
-  rather than the long one that stood there, because that line shares its row
-  with the caps, the button and the `↺`, and the long one was being cut off at
-  exactly the word that carried the fact. The nine tab ordinals keep their
-  single line, and `keybindings.json` is untouched — it named all four slots
-  before this change and names them now.
+- **The Shortcuts page no longer lists `Summon picture in picture`.** Those four
+  rows offered a key for a window Folio cannot summon yet: a chord could be
+  recorded into one, pressing it did nothing, and the only place that was said
+  was a line under the row that appeared once the chord was already there. A
+  shortcut you can set and cannot use is not a setting, so the four rows are off
+  the page and out of `docs/shortcuts.md` until the window they summon exists.
+  Nobody loses a chord they had already recorded: `keybindings.json` still names
+  all four slots, a chord written into one stays in the file exactly as it was,
+  and `Restore all defaults` still clears it. The rows come back, with their
+  names and their Record buttons, the day the window does.
 
 - **The two Explorer rows in Settings are one switch.** `Explorer context menu`
   and `First page of that menu` asked one question twice, and the second was
@@ -123,6 +135,71 @@ port.
   and the width each one was measured against.
 
 ### Fixed
+
+- **A card keeps up with its pane whatever shell is running in it.** The cards
+  in the tab column were refreshed by the same clock that breathes a tab's mark
+  while a command runs, and that clock is started by a shell reporting its own
+  prompt. So a PowerShell or Git Bash card followed every row, while a Command
+  Prompt card caught up at the next prompt and a WSL pane that reports nothing
+  at all caught up whenever something else happened to repaint the window — most
+  visibly at the end of a burst, where the last rows a pane printed could sit
+  unreproduced on its card until you moved the pointer over it. A card now
+  refreshes because the pane it is a picture of changed, which is the same thing
+  for every shell. It costs no more than it did: the refresh rides the frame the
+  window was already drawing at, a card still redraws at most ten times a
+  second, and a card you cannot see — column collapsed, tab scrolled out of the
+  list, mode off — costs a comparison and no frame at all.
+- **The first WSL tab of a Folio window is integrated like every other one.** A
+  WSL pane gets its command marks, its working directory and its clickable
+  paths from a small script handed to the shell the distribution logs you into
+  — and which shell that is, is a question only the distribution can answer.
+  Folio used to ask it by starting a second `wsl.exe` beside the pane and
+  never waiting for the reply, so the *first* WSL pane of every run went out
+  before the answer existed and was started without the script: no ticks on
+  the rail, no folder in the tab or the files column, no `Ctrl+Shift+↑`/`↓`,
+  and a card in `Cards` that never refreshed while a command ran. The second
+  WSL tab you opened worked, and every one after it — which on a machine whose
+  default profile is WSL is no consolation, because the first pane is the only
+  one there is. The question now travels *in* the pane's own command line and
+  the distribution answers it about itself, so there is nothing left to wait
+  for and every WSL pane is composed the same way. A distribution that logs you
+  into zsh or fish still keeps its shell, untouched, exactly as before.
+
+- **Folio now tells Windows when it changes the folder right-click menu.** Every
+  program that registers a menu entry has to announce it, and Folio never did.
+  A running File Explorer reads the association and context-menu tables once and
+  goes on drawing what it read, so an entry written into a live session — the
+  classic "Open Folio here", and the packaged "Open in Folio" that Windows 11
+  puts on the page it opens first — could be registered correctly, verifiably
+  present on the machine, and still invisible until the next sign-in. Both
+  directions of both registrations now end with the announcement, on a refusal
+  as well as on a success, because a refused write can still have changed half
+  of what it was writing.
+
+  The first page is the one Windows does not promise to refresh on that
+  announcement: its list of entries belongs to the packaging system rather than
+  to the tables the announcement is about, and a File Explorer that has been
+  running since before the registration is reported to show a new entry late or
+  only after it restarts. So where Folio itself registered the package during
+  this run, the Explorer row and the card that follows the registration both say
+  so and give the one step that always works — sign out and back in. Folio does
+  not restart anybody's File Explorer.
+
+- **A tab's card draws everything its pane is showing, not only what is still on
+  screen.** A card is a picture of the pane under it, and it was reading the
+  terminal's live screen alone — so a pane that had scrolled and was then made
+  taller, which leaves it showing lines from its own scrollback above the ones
+  still on screen, was pictured by a card holding nine rows at the top with two
+  thirds of itself empty while the pane showed twenty-four. It was reported
+  against Git Bash sitting beside PowerShell 7, and nothing about it belonged to
+  either shell: both are in the same position after the window is resized, and
+  what separated them was only that one had gone on printing until its screen
+  filled again. A card now reads the same three places its pane reads — the
+  lines that have been kept, the ones on their way there, and the ones on
+  screen — and stops when it is full or the pane has no more to give. Turning
+  the wheel over a card can now lift its window into lines that have scrolled
+  off, for the same reason. A full-screen program is the one exception: nothing
+  is kept behind its screen, so the card stops exactly where the pane does.
 
 - **A tab mark hook writes the file it says it writes.** The first-run card's
   three agent rows name the file each switch will copy and then write, and they

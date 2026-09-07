@@ -202,9 +202,26 @@ and the asymmetry is the shells':
 * `bash --init-file <file>` names the startup file for one interactive shell and touches nothing on
   disk.
 
-So a Git Bash profile is started as `bash --init-file <script> -i` and a WSL profile as
-`wsl.exe [--cd <dir>] -- <login shell> --init-file <script> -i`, with `BT_SHELL_INTEGRATION=1` in
-the environment. The script is written out to `%APPDATA%\Folio\shell-integration\` from a
+So a Git Bash profile is started as `bash --init-file <script> -i`, with `BT_SHELL_INTEGRATION=1` in
+the environment. A WSL profile is started as
+
+```
+wsl.exe [--cd <dir>] -e sh -c '<the login-shell question>' folio /mnt/c/…/folio.bash
+```
+
+where the question is the script `bt_app::shell_integration::WSL_LOGIN_SHELL` holds: read the login
+shell out of `getent passwd`, `exec` it with `--init-file` and `BT_SHELL_INTEGRATION=1` when it is a
+bash, and `exec` it with `-l` when it is anything else. The init file travels as `$1` rather than
+spliced into the text, so a reader whose Windows account name has a space in it gets a filename the
+shell reads verbatim.
+
+`-e` rather than `--`, and it is load-bearing: `wsl.exe --` joins everything after it into one
+command line and gives *that* to the login shell, which re-parses it — a question full of spaces,
+quotes, `$`, `|` and `;` comes apart on the way in. `wsl.exe -e` executes the program directly,
+argv for argv, which is also what makes handing the init file over as an argument work. Measured on
+Ubuntu-24.04, 2026-09-07.
+
+The script is written out to `%APPDATA%\Folio\shell-integration\` from a
 copy compiled into the binary, so the two halves of the OSC 133 agreement always ship together.
 
 **What `--init-file` costs, and how it is paid back.** It replaces `~/.bashrc`, and because bash
@@ -223,22 +240,41 @@ re-wrapped on every prompt, because a theme that regenerates `PS1` in its own `P
 No `OSC 0`/`OSC 2` title is emitted: a title set by the shell outranks the working directory in the
 name stack, so a pane that announced itself once would stop following `cd`.
 
-**WSL and `WSLENV`.** `wsl.exe` forwards no environment variable it was not told to, so
-`BT_SHELL_INTEGRATION` and the `TERM_PROGRAM`/`TERM_PROGRAM_VERSION`/`COLORTERM` declarations every
-other child already receives are listed in `WSLENV` — appended to whatever is already there, never
-replacing it.
+**WSL and `WSLENV`.** `wsl.exe` forwards no environment variable it was not told to, so the
+`TERM_PROGRAM`/`TERM_PROGRAM_VERSION`/`COLORTERM`/`FORCE_HYPERLINK` declarations every other child
+already receives are listed in `WSLENV` — appended to whatever is already there, never replacing it.
+`BT_SHELL_INTEGRATION` is **not** among them: it is set inside the distribution, by the one branch of
+the question that reads the init file, because it is the only one of these whose meaning depends on
+which shell was started. A zsh session carrying it for its whole life would tell every nested `bash`
+that somebody had already run its startup files.
 
-**Which shell, and which distribution.** `wsl.exe --list --verbose` names the installed
-distributions and marks the default with `*`; that distribution is then asked for its own name and
-its user's login shell (`getent passwd`). The init file is offered **only** when that shell is a
-bash — a distribution logging into zsh or fish keeps its shell and goes without markers, which is
-the fallback path below rather than a broken shell. When more than one distribution is installed,
-the profile is titled `WSL · <default>` so the row says which one it starts; a machine with one
-needs no qualifier and keeps the bare `WSL`.
+**Which shell, and which distribution — two questions, answered in two places.** Which
+distributions are installed and which one `wsl.exe` starts is a fact about *Windows*: it is read out
+of `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss`, synchronously, and costs microseconds
+(`DESIGN.md` §7.40 ②). Which shell that distribution logs the user into is a fact about a *Linux
+user account*, held only by the distribution's own password database — so it is asked by the pane
+that needs the answer, inside the distribution, in the same command line as the shell it decides.
+
+**Every WSL pane is integrated, the first one of a process included** (2026-09-07). It was not
+always: the login-shell question used to be put by a second `wsl.exe` armed from the pane spawn and
+never waited for, so the first WSL pane of every run composed its command line before the answer
+existed, was started as a bare `wsl.exe --cd <dir>`, and reported neither `OSC 133` nor `OSC 7` —
+while every WSL pane after it in the same process was served in full. On a machine whose default
+profile is WSL that first pane is the only one there is. Measured in
+`docs/plans/shell-matrix-2026-09-07.md` T-2 and fixed by moving the question into the pane, which
+leaves nothing in flight for a spawn to race. The init file is still offered **only** to a bash — a
+distribution logging into zsh or fish keeps its shell and goes without markers, which is the
+fallback path below rather than a broken shell — but that is now decided where the answer is,
+rather than from an answer that may not have arrived.
+
+When more than one distribution is installed, the profile is titled `WSL · <default>` so the row
+says which one it starts; a machine with one needs no qualifier and keeps the bare `WSL`.
 
 **Command Prompt has no script and no hook — its whole integration is `PROMPT`.** Folio
-reads whatever `PROMPT` this process inherited, puts the `OSC 7` report in front of it, and hands
-the result to `cmd.exe`. Prefixed and never replaced: a `PROMPT` in the environment is a prompt
+reads whatever `PROMPT` this process inherited, puts the two command-boundary markers and the
+`OSC 7` report in front of it, and hands the result to `cmd.exe`. The report sits immediately
+before `133;A`, which is `folio.bash`'s own order, so the two doors report at the same point of the
+cycle. Prefixed and never replaced: a `PROMPT` in the environment is a prompt
 somebody wrote with `setx`, and a terminal that overwrote it would have taken their prompt away in
 exchange for a directory they cannot see. An unset `PROMPT` gets `cmd`'s own documented default,
 `$P$G`, spelled out — the moment we set the variable at all we owe the whole of it. And because a
@@ -257,8 +293,8 @@ fallback path described under **Authority and fallback** rather than on a guess.
 | **either PowerShell** (script not installed) | no | no | no | no | no | — | no | PSReadLine |
 | **Git Bash** | yes | yes | yes | yes | yes | none, deliberately | yes | bash's own |
 | **WSL** (bash login shell) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | bash's own |
-| **WSL** (zsh/fish login shell) | no | no | no | no | no | — | set, but not forwarded | that shell's own |
-| **Command Prompt** | **no** | **no** | no | no | **yes** | refused — see below | yes | not promised |
+| **WSL** (zsh/fish login shell) | no | no | no | no | no | — | yes, via `WSLENV` | that shell's own |
+| **Command Prompt** | **yes** | **no** | no | **yes, no code** | **yes** | refused — see below | yes | not promised |
 | **a profile of the reader's own**, no door | no | no | no | no | no | — | yes | not promised |
 
 Six rows need their reasons stated, because each looks like an omission and is not.
@@ -287,28 +323,41 @@ executable **path** (v1–v5) are split by that path — `pwsh.exe` → `pwsh`, 
 `winps` — because the path is the surviving record of which of the two actually ran, and folding
 both onto one slug would spend it.
 
-**Command Prompt sends no OSC 133 at all**, and this overturns the ruling of 2026-08-11 (Q5) that
-allowed it `A` and `B`. That ruling assumed `A` and `B` are two more facts and that missing `C`/`D`
-costs only what `C`/`D` would have bought. They are not facts — they are a claim of *authority*,
-and this implementation charges for it in `C`:
+**Command Prompt marks its prompts and not its input** (2026-09-07). `PROMPT` is not a hook, it is
+a format string, and `cmd.exe` expands it at exactly one moment: just before it reads a line. That
+moment is the end of the last command and the start of this prompt at once, so `133;D` and `133;A`
+are precisely the two markers it can carry, and Folio sets
 
-* `133;A` alone turns `shell_integration_is_authoritative` on for the screen, and that flag's job
-  is to **retire the cursor-line heuristic** — the rule that the line under the cursor is probably
-  still being typed and must not be decorated yet. Its replacement is the semantic input region,
-  which only `B` and `C` build. A shell that sends `A` and stops has switched the protection off
-  and put nothing in its place: a path typed at a `cmd` prompt would light up as a link mid-word.
-* `133;B` opens an input region whose only closers are `C` and the *next* `A`. Without `C` it stays
-  open across the command's entire run, so the resize gate reads the command's own output as an
-  unsent buffer: the window cannot be resized for as long as anything is printing, and every resize
-  that does land owes an `InvokePrompt` chord to a shell that has no such binding.
+```
+PROMPT=$e]133;D$e\$e]7;file:///$P$e\$e]133;A$e\<the prompt you already had>
+```
 
-Both are strictly worse than sending nothing, and sending nothing is a documented, tested position.
-The measurement is pinned at `a_prompt_that_can_never_send_c_must_not_send_a_or_b_either` — if that
-test ever goes red the reason has expired and the decision should be revisited rather than
-inherited. What `cmd.exe` cannot do at all is the `C`/`D` pair itself: `PROMPT` is expanded once,
-just before a line is read, and the shell has no pre- or post-execution moment to be called at.
-Clink would supply both and is **not** required (Q5's surviving half); detecting it and upgrading
-the row is booked, not done.
+`D` carries no status: `PROMPT` has no substitution that reads `ERRORLEVEL`, and a tick coloured
+from a number nobody reported would be worse than a tick with no colour. `133;C` has nowhere at all
+to be emitted from — there is no pre-execution moment in this shell.
+
+**`133;B` is still refused, and for the half of the 2026-08-16 measurement that has not expired.**
+That measurement found `A` and `B` to be a claim of *authority* rather than two more facts, charged
+for in a `C` this shell cannot send, and it was right about `B`: the marker opens an input region
+whose only closers are `C` and the *next* `A`, so without `C` every row a `cmd` command printed
+would sit inside the region that means "this is what the reader is typing" — no display mathematics,
+no image previews, and the post-resize `InvokePrompt` chord owed to a shell with no such binding. So
+`cmd` panes go on decorating their output exactly as they always have.
+
+What has expired is the other half — that `A` alone was worse than silence, because it retired the
+cursor-line heuristic without building the region that replaces it. That is now false of the
+implementation rather than argued around: authority to retire the heuristic is claimed by the
+markers that build the region (`B`, `C`) and by no others, so a screen carrying only `A` and `D`
+keeps the heuristic it always had. The old measurement named this as its own exit — "if that test
+ever goes red the reason has expired" — and the new one is
+`a_prompt_only_shell_gets_its_ticks_and_keeps_the_cursor_heuristic`, beside a round trip through a
+real `cmd.exe` in `crates/bt-term/tests/shell_integration_cmd.rs`.
+
+What it buys is the capability this profile's reader has no other way to get. Every other profile
+can be handed a script; `cmd` cannot, and until now its command rail was empty however many commands
+had been run — nothing to click, and `Ctrl+Shift+↑`/`↓` with nowhere to go. Clink would supply `C`
+and a real exit code both, and is still **not** required (Q5's surviving half); detecting it and
+upgrading the row is booked, not done.
 
 **Command Prompt's `OSC 0` is refused rather than absent.** `cmd.exe` calls `SetConsoleTitle` with
 its own image path on the way up, and ConPTY forwards it as `ESC ]0;C:\WINDOWS\System32\cmd.exe`.
@@ -332,9 +381,12 @@ this to, so **R-d is settled**. PowerShell alone still gets it from its script, 
 twice would be two places to change and one silently redundant. Any inherited value is left alone,
 `0` included: this is a declaration, not an override, and someone who set it has already answered.
 Across the WSL boundary the name is listed in `WSLENV` whether or not this process set it, so the
-user's own answer travels too — but only on the path that has an init file, so a distribution
-logging into zsh gets the variable on the Win32 side and nothing in the distribution, which is the
-same boundary `TERM_PROGRAM` already stops at.
+user's own answer travels too — and since 2026-09-07 it travels whichever shell the distribution
+logs into. It used to be listed only where this side had established the shell was a bash, which
+made a fact about what this *terminal* renders a property of the reader's choice of shell: a zsh
+pane drew the same hyperlinks as any other and told the programs in it that it did not. Which shell
+answers is the pane's own business now, so the listing asks the question it was always really
+asking — is this pane crossing into WSL.
 
 **A profile's own environment is the last word, and it can change this table.** The three layers
 are: what this window inherited, then what this terminal declares (`TERM_PROGRAM`,
@@ -373,9 +425,9 @@ every check except the only one that matters. The names are listed `/u` — Win3
 carried verbatim — because that is what they are: values, and this terminal has no way to know that
 one of them holds a path wanting translation. A reader who wants something else writes their own
 `WSLENV` row, and the layering above lets it win. This is the reader's instruction and crosses
-whatever the login shell turns out to be, which is why the zsh row above still says "set, but not
-forwarded" about *this terminal's* five: those are listed by the install path alone and that has
-not changed.
+whatever the login shell turns out to be — as, since 2026-09-07, do this terminal's own four. The
+one WSL pane that lists nothing is the one handed no script at all, which is the pane that was never
+injected into.
 
 **"↑ history" is not ours to promise.** The `DESIGN.md` §7.1.4 wording is limited to a profile
 where PSReadLine is detected with persistent history enabled. `cmd`'s recall is `doskey`'s and dies
@@ -478,8 +530,12 @@ and the documented
 
 ## Authority and fallback
 
-Authority is scoped per screen. Once a primary or alternate screen emits any recognized OSC 133
-marker, region markers replace the cursor/CUP/sticky-line heuristics on that screen. Malformed or
+Authority is scoped per screen, and it is claimed by the markers that build a region rather than by
+any marker at all. Once a primary or alternate screen emits `133;B` or `133;C`, region markers
+replace the cursor/CUP/sticky-line heuristics on that screen. A screen that has emitted only `133;A`
+and `133;D` — which is every Command Prompt pane — has said where its commands begin and end and
+nothing about where a typed line stops, so it keeps those heuristics: the claim and the machine that
+honours it arrive together or not at all. Malformed or
 out-of-order markers recover conservatively: duplicate B does not move an open command start; A, C,
 or D closes an unterminated command at that marker; C/D without B changes phase but invents no input
 region. Both BEL and ST terminators and arbitrary PTY chunk boundaries are supported.

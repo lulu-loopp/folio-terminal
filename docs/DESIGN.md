@@ -1796,6 +1796,13 @@ else                           { Flash }    // 被压住了,但任务栏还在,�
 - **存根行那句话被砍成一句,因为第一次真有人把它读到时,省略号吃掉的正好是那个事实。** 录完键的实机截图上,那一行写的是「Bound, but the action behind it is…」——这一行同时还挂着三枚键帽、一颗 `Record` 和一枚 `↺`,留给文字的那一列就这么宽。这与 §7.1.6c-2′ 里冲突那句话撞的是同一堵墙,处理也照抄那次的裁决:**一句没有第二个从句的句子,没有第二个从句可丢**;而被丢掉的那半句「已绑定」,身旁的键帽本来就在说。英文改为 `This feature is not built yet`,中文由 DeepSeek 按纯英文事实单写(不给它看任何中文),取它自己排第一的那条:「这个功能还没做」。**这是本片唯一改动的字面量**,而它在此之前从来没有在玻璃上出现过——四行都没有键,而没有键的行不说这句话。
 - **行名不改,而这是「族名没有了」的直接后果**:「唤出画中画 2」必须自己把动词带上,而这个名字早在表里、早已双语。族名 `ShortcutFamilySummonPip` 随折叠一起退役——没有折叠行,它就是一句没有地方说的话。录进去之后那行说的仍是 `ShortcutNotePending`(「已绑定,但它背后的功能还没有做出来」),这是 §7.1.5e 存根行的老规矩:键是我们的,机器还没到——**而现在它至少记得下来**。
 
+**7.1.6c-2‴ 同一天的晚上,那四行从页上撤下来——一个还没做出来的功能不该在设置里占一行(用户实机报缺 + 裁决 2026-09-07,已落地;`crates/bt-app/src/{shortcuts,settings}.rs`、`docs/shortcuts.md`、`CHANGELOG.md`)。** 上一片给了那四行各自的 `Record`,而按钮是真的:用户按下去、录了一组键,行下面立刻冒出「这个功能还没做」——于是他问的是「我刚才是不是弄坏了什么」。**同一张截图往下读一层,真因就换了一层**:上一片以为要修的是「这一行长得像第三种保留行」,而真正的毛病是**这一行现在就在页上**。快捷键页是一张「按了会发生什么」的清单;一个按了什么都不发生的键不是一个人能有意见的设置,给它一颗按钮只是把「读起来像坏了」换成「按下去之后像坏了」。上一片的裁决没有被推翻,是被推迟:功能到的那天,四行、四颗按钮,一字不改地回来。
+
+- **裁决:这四行从快捷键页撤下,同时从 `docs/shortcuts.md` 撤下,等 `Action::SummonPip` 真有机器再回来。** 两处一起撤是因为它们是同一句话的两个说法——那份文档就是这一页的散文版(§7.1.6c-2′ 的老约:README 把读者送到那里),一页藏着、一份文档里列着,是两个互相拆台的答案。
+- **机制是 `Binding` 上的一个 `surfaced` 位,只有两处读它**:`Shortcuts::editor_rows`(页)与文档渲染器 `shortcuts_document`(文件)。**为什么是位而不是删行:`keybindings.json`。** 这四行今天上午在页上待过一阵,那正是有人能把键录进去的窗口;把行从 `BINDINGS` 里摘掉,`overrides()` 下一次写文件时就会把用户自己写下的那一行**悄悄吃掉**。留着位,则 id 留在表里、录过的和弦原样写回、原样读回来、原样什么都不做——**藏一行不等于退役一行**。`Action::SummonPip` 的 no-op 派发与 `ShortcutNotePending`(上一片刚砍短的那句)都原地留着:现在没有任何一行会说那句话,而功能回来那天它就在原处。
+- **`Restore all defaults` 照旧连隐藏行一起清空**,这是答案不是遗漏:那个动词的意思是「删掉那个文件」(见 `Shortcuts::restore_all` 自己的注释),留下一条页上看不见、按钮够不着、只能靠手改文件才能取消的键,才是真的把人锁在里面。
+- **解禁只有一处**:`Binding::unbuilt` 里的 `surfaced: false` 改成 `true`,再跑一遍 `scripts/generate-shortcuts-table.ps1`。两个方向都钉住了——`a_verb_that_is_not_built_is_not_offered_to_a_reader`(页与文档都没有它们,而 `BINDINGS` 里都还在)与 `flipping_surfaced_brings_the_hidden_rows_back_whole`(把位翻过来,四行、四颗按钮、两种语言的文档一次回齐,原封搬的正是上一片的断言),所以那一天不必重新想一遍今天想过的事。折叠机器与上一片摘掉的 `family` 一列一行没动。
+
 **7.1.6c-3 Settings 扩展块 slice 3a:Language 与中英字符串表(2026-08-17,已落地;`crates/bt-app/src/i18n.rs`、`settings.rs`、`bt-persist/src/settings.rs`、`bt-render/src/lib.rs`、`restore.rs`)。** 2026-08-10 的双语裁决在这一天兑现,兑现的方式是**一张 Rust 静态表**而不是资源文件——理由不是省事,是这个仓最贵的资产:每一条文案旁边都写着它为什么是这几个字(小样行号、被否决的措辞、量出来的长度预算),`.ftl`/`.json` 会把**文案和它的裁决理由物理分开**,让下一个想缩短句子的人不再站在解释它为何这么长的那段话旁边。表的形态是 `Text` 枚举 + `fn text(self) -> &'static str`,`match (self, lang)` 在两个字面量里挑一个,所以 `SettingsRow::title` / `seat_title` / `DirFault::notice` 这一族的 `&'static str` 签名**一处未改、零分配**(换 `Cow`/`String` 会波及几十处调用点,是纯粹的自伤)。**本片收 118 条**(i18n 清单 T001-T118 全表,Q9 = 一次收全),外加清单快照之后新生的**设置对话框行**(Git panel、Split direction、GENERAL 与四个导航词)——它们与被改写的那几个函数同体,半改比不改差。
 
 - **三态与落点**:`Language = System / 中文 / English`,与 Theme 同构的 combo,**存模式不存解析结果**(`ThemeModeV1` 的先例:选 `System` 的人说的是「问 Windows」,把当天的答案写进文件,会让日后改了 Windows 语言的用户找不到自己何时做过这个决定)。落 `settings.json` **v6 → v7**,新增 `language: LanguageV1`;迁移写 `System` 而不是 `English`——v6 的构建从不读任何东西就画英文,`English` 在跑迁移的那台机器上看起来一样、在下一台机器上就是替用户做了他没做过的决定(与 v3→v4 拒绝写 `"pwsh"` 同一条理由)。**v7 只带 language 一个字段**(Q10 = 一次 bump):字体与 PSReadLine 邀装的三态位都还没有读它们的界面,现在写进去正是 §2 自己骂的「只写字段 = 死规格」;它们在本 v7 提交之前落地就并入 v7,之后落地就是 v8。
@@ -2099,7 +2106,7 @@ else                           { Flash }    // 被压住了,但任务栏还在,�
 - **`paths` 从此对每一行都推导,内置也不例外。** 原先是「用户档案推导、五行陈述」——一个事实两条规则,并且让一个被改了程序的内置继续用它已经不再启动的那个 shell 的拼法翻译目录。推导与五行的陈述值逐个相同(`the_namespace_every_shipped_profile_states_is_the_one_it_derives`),所以换掉的是一份副本而不是一个决定。
 - **能力句现在是三维的,J85 就此收口**(`docs/shell-integration.md` 的矩阵仍是唯一权威,多了「读者自己的档案 · 无门」一行)。句子由**门 × 命名空间 × 环境**推出:`FORCE_HYPERLINK=0` 直接拿走超链接那一格;而在 PowerShell 上,一条 `TERM_PROGRAM` 覆盖同样拿走它——`folio.ps1` 只为它认得出的 `TERM_PROGRAM` 声明链接,所以覆盖掉这个名字的档案是**自己关掉了**自己的链接,句子必须照说,而不是重复一个这个 build 不会兑现的承诺。四句因此各有一个「没有超链接」的孪生句,而不是在句尾接一个从句:每一句本来就同时说自己**有**什么和**没有**什么,一句在两半里都提到超链接会读起来像在更正自己。`No shell integration` 多一个**长式**给编辑页(`CapNoneLong`,小样自己的字面),因为列表第三行与动作条共享一行、只装得下约五十八字符,而编辑页那一行有整页宽,站在 picker 前的读者该被告知代价而不是类别。
 - **幽灵行由推导得出,并且可以被领养**(计划 §1.7 的下一步,5b 记的账)。三条常量本来就已经在一处说错了:PowerShell 是这个模块**唯一不**替它声明 `FORCE_HYPERLINK` 的门(它自己的脚本才是说这句话的那一半),所以那一页上画第三条幽灵就是这一页存在的意义所反对的那种假装。现在幽灵 = `shell_integration::declared_environment(门)` 减去**读者已经有同名行**的那些:一个名字读者答过了,终端就不再有资格说它——这也正是「领养是搬家而不是复制」的原因,两条同名行是一个事实的两张图。整条幽灵行是**一个**目标(`EnvGhost`)而不是三个格子:幽灵里没有东西可编辑,编辑从它变成读者自己的那一刻开始,而那一刻插入符落在值框里——名字本来就是对的,不然按的就是 `Add`。它因此也成了 Tab 停靠点:一件读者看得见又能做的事,键盘必须够得到。
-- **WSL 的诚实答案是「能过去,但要点名」。** 一个设在 `wsl.exe` 上的变量设在一个 **Win32** 进程上,它背后的发行版看不见任何没有在 `WSLENV` 里点过名的东西——这正是终端自己那五条一直被列在那里的原因。所以档案自己的名字也被列上,`/u`(Win32→WSL、原值照搬),因为它们就是值,而这个终端无从知道其中哪一个装着一条想被翻译的路径;想要别的规矩的人写自己的 `WSLENV` 行,上面那条层叠规则让它赢。**没有为此变灰任何东西**:这不是机器做不到的事,而是一件要点名才成立的事。终端自己那五条的转发条件**一个字没改**——它们仍只在 init file 那条路上被列,所以矩阵里「WSL 登录到 zsh:设了但没转发」那一行仍然为真;读者自己的行则不论登录 shell 是什么都过去,因为那是读者的指令而不是这个终端的猜测。
+- **WSL 的诚实答案是「能过去,但要点名」。** 一个设在 `wsl.exe` 上的变量设在一个 **Win32** 进程上,它背后的发行版看不见任何没有在 `WSLENV` 里点过名的东西——这正是终端自己那五条一直被列在那里的原因。所以档案自己的名字也被列上,`/u`(Win32→WSL、原值照搬),因为它们就是值,而这个终端无从知道其中哪一个装着一条想被翻译的路径;想要别的规矩的人写自己的 `WSLENV` 行,上面那条层叠规则让它赢。**没有为此变灰任何东西**:这不是机器做不到的事,而是一件要点名才成立的事。终端自己那五条的转发条件**一个字没改**——它们仍只在 init file 那条路上被列,所以矩阵里「WSL 登录到 zsh:设了但没转发」那一行仍然为真;读者自己的行则不论登录 shell 是什么都过去,因为那是读者的指令而不是这个终端的猜测。**2026-09-07 就地记注:最后这半句已经作废,而作废它的是 §7.40 ③ 的结账。** 登录 shell 那一问搬进了 pane 自己那条命令行,Windows 这一侧从此不知道也不需要知道起的是哪把 shell,于是终端自己那几条**不论登录 shell 是什么都过去**——「WSL 登录到 zsh:设了但没转发」那一行随之改成「经 `WSLENV` 过去」。理由不是顺手:那几条说的是这个终端画什么,把它做成读者选了哪把 shell 的函数本来就是当初那条分支的副作用。同时 `BT_SHELL_INTEGRATION` 从名单里撤出,改由那一问在发行版里面导出,因为它是其中唯一一个含义取决于起的是哪把 shell 的。
 - **`shell_command` 现在收一整行档案而不是一个下标**,于是它成了一个纯粹由参数决定的函数——一件测试可以把任意档案摆在它面前的事。原先它拿着一个下标向 `profiles` 问四个问题,而进程的那张表是全局的,`cargo test` 又并行跑,所以「一个带 env 的档案 spawn 出什么」在旧形状下根本无法测。
 - **两处清理,都是 5b 搬动动词时留下的空门**:`SettingsControl::Sentence`(本片让那一行长出 picker,这个形态就没有人穿了)与 `SettingsTarget::ProfileDuplicate` / `ProfileAction::Duplicate`(复制早已从行内动作条搬进 `⋯`,这条通道自那以后没有任何东西构造过)。第二个不是洁癖:它是本片 item B 的**病灶**,见下。
 - **item A —— 编辑页的 Advanced 组不再自带 `Reset to defaults`**(用户裁决 2026-08-18)。别的每一页都有它;这一页的页脚已经有 `Restore all defaults`,而后者把**整个档案**放回出厂表——Advanced 那几行也在内。两个动词隔一行、说着几乎相同的话、而作用域只有其中一个说得出口,读者只能掷硬币。让路的是**页作用域**那一个,因为**档案作用域**那一个是完整的。
@@ -2524,6 +2531,10 @@ else                           { Flash }    // 被压住了,但任务栏还在,�
 **卡列宽度复议——220 → 280（Claude 采纳投影线的实机建议，2026-08-20；**用户可否决**）。** 上一段那三个旋钮里，「宽度是约束」这一句当时是真的，但**它选错了刻度**：220px 的卡列先扣掉 rail 自己的 8+8 内边距与那条算在宽里的 1px 边框，卡身只剩 203；卡身再扣两条卡边框、卡身自己 5px 的内嵌、迷你格之间 3px 的分界、以及格内 1px 边框加左右各 4px 内边距——每半张卡只剩 **84 逻辑像素**的字行，默认字面（Consolas 7.5px，一格 4.12px）下就是 **21 列**。21 列的 7.5px 等宽字，每一行都断在词中间，两张分屏卡一眼看过去长得一模一样，**卡片作为「这是哪个 tab」的凭据当场失效**。这是 F2 上机之后投影线报回来的实情，不是从小样量得出来的。**采纳的是 280**：同一条算术走下来卡身 263，单 pane 一格的字行从 181px 变成 **241px**（**44 → 59 列**），左右分屏每半从 84px 变成 **114px**（**21 → 28 列**）——28 列读得完 `Did not find path entry D:\A` 这样一句的开头，21 列读不完。**宽度定死的是那条 run（84 → 114 逻辑像素），不是列数**：列数由用户选的终端字面决定，上面这两组是默认字面在实机上量到的（见本段末实机证据）。当初「约 45 列」那个估计其实很准——单 pane 在 220 下的真值是 44。**这一条是 Claude 在实机证据上做的裁决，不是用户裁的；用户可以否决。** 记在这里而不是只留在代码注记里，是因为它改的是一个用户已经拍过板的数——卡列占位那句里的 220。**代价与边界**：舞台因此再让出 60 逻辑像素，走的仍是 `terminal_inset_logical_px` 那一个数，与 `Sidebar: Expanded` 让宽同一条路，不是新增的分支；**竖栏 Tab layout 的普通 rail 一动不动**——它是一列名字，名字没有变宽的理由——所以那两个宽度从这一天起是**两个常量**：`RAIL_WIDTH_LOGICAL_PX = 220`（rail 的宽、icon rail 开合的终点、以及它让出的那份宽）与 `FOCUS_COLUMN_WIDTH_LOGICAL_PX = 280`（只归聚焦卡列，用在 `RailState::width_logical_px` / `terminal_inset_logical_px` 的 `focus` 分支这两处）。**卡身宽、缩略图列数、缩排位置、命中框、进场 FLIP 的起止几何没有一处是新算的**：它们从 F1 落地起就是从面板宽度推下来的，改一个常量它们跟着走。红测两条各钉一半：`the_card_column_is_wider_than_the_rail_whose_panel_it_borrows`（两个面各读各自那一个常量，四种缩放下面板实解都等于常量乘缩放，rail 一个像素没动）与 `each_half_of_a_split_cards_body_holds_a_readable_run_of_columns`（那条从 280 一路扣到 114px 字行的算术**精确断言**，列数按默认字面断言 28，改回 220 就是 84px 与 21 列）。**另有一条旧钉被这次改动花掉并改写**：`the_card_column_is_in_the_flow_and_the_stage_begins_after_it` 原来断言「竖栏 Expanded 下进出聚焦舞台一动不动」——那是两个面共用一个常量的**后果**，不是裁决；现在改成断言「进模式让出的正是卡列比 rail 宽的那 60 逻辑像素，出模式原样还回」。**预算未被击穿**：基准的列数按同一条「拿单 pane 的最坏情况刷到两个座位上」的纪律从 44 提到 59（`focus_thumb::tests::BUDGET_COLUMNS`），同机同形、同一段空闲时间里前后各测三轮，满负荷 **0.0133 → 0.0131 ms/帧**（三轮 0.0133/0.0134/0.0129 对 0.0131/0.0129/0.0134），闲时 **0.0025–0.0028 → 0.0028 ms/帧**——**差值落在噪声里**，因为这一格的成本是四道门加一次字符搬运，而门的次数没变、搬运量只多了三成四。（同一组测量在四条 cargo 并发编译时会整体抬到 0.02–0.03，这也是预算类测试必须单跑的原因；上面这一组取自机器安静下来之后。）`FULL_BLAST_BUDGET_MS = 3.0` 与 10Hz 节流一个字没改，余量仍在两个数量级以上。（这一组数取自 test 档 `opt-level = 1`，与上一段那组 release 数不可直接相比；本机 release 档编译 `main.rs` 时 rustc 栈溢出——`STATUS_STACK_BUFFER_OVERRUN`，与本片改动无关——所以这次的前后对比统一在 test 档同一台机器上取。）**实机证据**（debug build，私有 `APPDATA`，192 DPI 即 scale 2，`BT_CHROME_DUMP` + `BT_FOCUS_THUMB_DUMP`）：卡列右缘那条 hairline 落在 `[558, 80, 560, 1200]`——**560 物理 = 280 逻辑 × 2**；卡身 `[16, 158, 542, 534]` 宽 526 = 263 × 2；单 pane 的迷你格 `[28, 224, 530, 522]` 宽 502 = 251 × 2，行框 `[38, …, 520, …]` 即 482 物理 = 241 逻辑的字行；`Alt+Shift+=` 劈成左右两半后两格各 `[28, 224, 276, 522]` 与 `[282, 224, 530, 522]`（各 248 物理 = 124 逻辑，中间 6 物理 = 3 逻辑的缝），行框各 228 物理 = 114 逻辑，**实际切在第 28 个字符**（`Did not find path entry D:\A`）——旧的 220 只切得到 21。这一条同时把 `focus_mini_advance` 的真值钉住了：228px 切 28 列意味着 15px 下一格在 (8.14, 8.44]，即 Consolas 的 0.5498em，而不是本片第一版红测里假设的 0.6em。
 **卡片高度成设置行、短尾巴顶对齐、每座位窗口可瞄准（用户裁决 2026-08-21，分支 `agent-a5abe2b1dc441bcbe`）。** 上面那三个旋钮的第一个——高度——2026-08-20 是一次性替所有人拧到 160 的，而那一拧发生在一台没有那个用例的机器上：一块 pane 跑着 agent，底部约十行状态栏、其下约三行输入框，160px 的卡按格高推出**十二行**（不是当时文档随口写的十三，见下），十二行正好被状态栏与输入框吃光，卡上永远是那身家具、从看不到对话。哪块 pane 是这种、哪块是普通 shell，本产品无从判断，所以高度从常数变成 **`Appearance ▸ Focus card height` 一行**（`settings.json` `focus_card_height`，本片 schema 升一版；迁移写的是「卡片本来就是的那个高度」160，因为这功能自 F2 起一直在屏上、只有一个高度，是把现状搬进文件而不是替谁改窗）。**三档 160 / 240 / 320 逻辑 px**，默认字面下单 pane 一格分别装 **12 / 20 / 27 行**（不是四舍五入的 13/20/26——那是估的，真值由几何算出、由 `seats::the_card_height_row_moves_every_box_that_hangs_off_the_body` 与 `a_taller_card_holds_more_rows_and_answers_over_all_of_itself` 钉住）；顶档 27 行正是这一裁决点名要的——agent 的最后几句话**与**它等着的那个输入框**同在一张卡上**。停在 320 是因为再高卡就不成其为卡：四张 320 塞不进一根高列，而行高是窗口三分之一的列没人扫得动，与「三档而不是滑杆」同一条理由。**几何只有一处知道这个数**：`FOCUS_MINI_HEIGHT_LOGICAL_PX` 从常量改名 `DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX`（只作默认与迁移用），活值走 `seats::RailState::focus_card_body_logical_px`——那是「这扇窗是什么形状」已经在的那处（`Runtime::rail_posture`），所以卡身、mini 格、进场 FLIP 起止、命中框、列滚动范围全从 `focus_rail_geometry` 交回的矩形推下来，没有第二处写死 160，改设置下一帧几何即变、不用重启。**预算按最大档重测并钉死**（`focus_thumb::BUDGET_ROWS` 从 13 改 **27**——单 pane 320 卡的行数，仍照「拿单 pane 最坏情况刷到两个座位、十 tab 二十座」的纪律加倍再加倍地打）：`FULL_BLAST_BUDGET_MS = 3.0` 与 10Hz 节流一字未改，`the_budget_holds_under_ten_tabs_of_full_blast_output` 在 27 行下仍绿，余量仍在两个数量级以上（门③把闲座答成整数比较这条没变）。**② 短尾巴改顶对齐（推翻 08-20 的隐含贴底）。** F2 的终端座位把尾巴从格底往上码（`.fc-tab-mini .fc-mini { justify-content: flex-end }`），让「最新一行」在每张卡同一处；本裁决推翻它，理由正是这条投影线立身的那句原话——「**左侧就是一个还在跑的终端，只是字小一点**」：一个只打了两行的 shell 把这两行显示在 pane **顶部**、下面留白，那么它的缩图把两行贴在底部就是**另一种排版**，不是同一个终端的小图；何况同一张卡里 files 行与 document 行自出生就是顶对齐，一张卡两种读法正是 §7.1.6b′ 反对的第二套词汇。**投影的仍是尾巴**（`focus_thumb::transcript_tail` 交回的仍是屏幕最后 N 行），所以尾巴填满格的卡逐像素不变，只有不足 N 行的卡从格顶铺起——铺到它所picture的那块 pane 把它铺到的地方；红测 `seats::a_tail_shorter_than_its_cell_starts_at_the_cells_top` 与 `a_tail_that_fills_its_cell_is_the_picture_it_always_was` 各钉一半。**③ 每个终端座位有一个「跳过底部 K 行」的窗口瞄准（滚轮 ±1，按座位持久化）。** ②解决的是「不满一屏」，这条解决的是「满一屏但底部是固定家具」：一块 pane 底部若压着 agent 状态块、`vim` 状态行、`lazygit` 页脚，它的新输出恒在离底 K 行处，一次瞄准就一直对准它。**它不认任何程序**——一个会认状态栏的 build 要为每个新程序重教、会认错没见过的、会不请自动地挪读者的卡；读者用滚轮设的数对任何在跑的东西都是对的。窗口是**尾巴上抬 K 行**：K=0 是尾巴（每张卡开机的样子），向上（滚轮上）抬、向下（滚轮下）降、**降到尾巴为止不回绕**，**升过屏顶就停在屏顶**（`transcript_tail` 把 K 夹到屏上实有行数——空卡是读者转轮时唯一分不清「对准了」还是「坏了」的答案；这条夹持也正是让②与③永不相遇的东西：屏上不足一格的 shell K 恒被夹成 0，短尾巴顶对齐就是 `skip==0`）。**一格一行、无修饰键**：`Shift`+滚轮在别处已是「另一根轴」（`scroll_preview_body`），mini 格没有第二根轴可转，给它一个量级会让一个键在两个面上说两件事；一甩滚轮本就并成一串 notch（`queue_wheel`），越过一屏状态栏是一甩而不是十几个手势。**K 住在 leaf 上**（`LeafSession::card_skip`，紧挨 `profile`），随撕出/并入整块迁走、`Move pane to new tab` 不必知道它存在；落 `session.json` 的 `term` leaf（`card_skip`，本片 session schema 升一版、一步迁移写 0）。**命中表一字未改**：`hit_focus_rail` 仍整卡答 `Tab(i)`、× 答 `TabClose(i)`，瞄准走 `Runtime::aim_focus_card_window` 不在命中路径上，mini 座位仍不是点击靶（「点卡即点那个 tab」是关于**按下**的，不是关于 notch 的）。**K>0 时格底一条 1px 点线**（`ChromePalette::focus_mini_seam` = 行墨在 `FOCUS_MINI_SEAM_ALPHA`=.45 下的一洗，站在格自己的发丝线上、走 `dash_runs` 同一台点线拟合器）：它说的是「这条边下面还有卡没画的行」，尾上的座位一条都不画，所以**记号在不在本身就是那句话**；红测 `seats::a_seat_aimed_above_the_tail_wears_a_seam_and_one_on_the_tail_does_not` 与 `focus_thumb::{an_aimed_window_is_the_tail_lifted_by_the_rows_it_was_given, a_window_driven_past_the_top_stops_at_the_top, aiming_a_screen_with_less_on_it_than_the_seat_holds_changes_nothing, aiming_a_seat_re_projects_it}` 分钉各半。小样同形（`--fcard-body` 变量、`Focus card height` 行、`.fc-cell.aimed::after` 点线、`termCardWindow` 与 rail 上的 `wheel` 委托）。
 
+**卡片投的是那块 pane，而不是那块 pane 的活网格（用户实机报，2026-09-07，分支 `fix/tab-card-projection-bash`）。** 报告是一张竖排卡列：一张 Git Bash 的卡只画出九行、齐齐码在卡顶，下面三分之二空着，而它画的那块 pane 屏上正显示着二十四行；紧挨着的 PowerShell 7 那张是满的。看上去像 bash 的毛病，不是。**根因是一个名词。** `focus_thumb::transcript_tail` **只**走活网格（`DualPlaneSession::live_row` 遍历 `live_dimensions`），而这块 pane 自己那一帧——`DualPlaneSession::viewport_frame`——是**三**层拼出来的：`document`（冻结的历史）、`transcript().staged_rows()`（还没冻结、正在下沉的行）、和活网格（`visible_row`）；于是这张卡永远只画得到三层里的第三层。`transcript_tail` 旧的 doc 注释写的是「一个 session 的**屏幕**的最后 N 行」——错的正是那个名词，而它读起来是对的，因为在别的终端里一块 pane 和它的屏幕本来就是同一样东西。**这里不是**：本窗自己管历史，vendored 网格自带的 scrollback 因此钉在零（`bt_term::SCROLLBACK_LINES = 0`），把 pane 拉高只是在网格底下补空行，**不会**把已经走掉的行拉回网格上。数值验过：十行的屏上打二十行，再把 pane 拉到三十行——网格上留着 `line 12`..`line 20` 九行、底下一层空地板，`line 1`..`line 11` 已经在 document 里，`transcript_tail` 要二十五行拿回九行，正是报告里那张图。**bash 与 PowerShell 的差别也就此散掉**：与 bash 的两行提示符、与它那个 `\n` 开头的 `PS1` 都没有关系——一次改窗之后两张 tab 处在同一个位置上，接着往下打、把屏重新填满的那张看着对，不再打的那张看着坏。实机复现走的是内置 Git Bash profile 与 PowerShell 7 并排、私有 `APPDATA`/`LOCALAPPDATA`、`ui-probe` 打真键：各跑六条会失败的命令，拉高窗口，`Ctrl+Shift+Z`——Git Bash 那张卡九行、下三分之一空着。**修法是让那趟遍历爬过网格的上沿**：照旧从活网格往上走，走到网格顶就接着进 staging 面、再进 document，由新到旧，直到凑够卡片装得下的行数、或者这块 pane 再也交不出行为止。新开的 `bt_transcript::TranscriptStore::staged_rows_newest_first` 是 `staged_rows` 的**尾巴形双生子**——与 `bt_term` 的 `live_row` 之于 `live_rows` 是同一种关系，也是为同一个调用方开的：一次改窗可以把整段 vendor 历史留在 `resize_staging` 里，让调用方自己去把它倒过来，是为了留十几行去摸每一行。**备用屏是唯一一处仍旧停在网格上沿的地方，因为那块 pane 自己也停在那里**（§3.2：全屏程序有自己的命名空间，它背后的转录取不到）——`vim` 开着时一张伸进主屏历史的卡，是把两个会话画在同一张图上。2026-08-21 的两条裁决一条没动，只是现在说在了对的名词上：短尾巴仍从格顶铺起，瞄准（`skip`）仍被夹住，只是夹的从**屏上**实有的行数改成**这块 pane** 的行数——于是在卡上转轮子的读者如今能把这幅图抬进已经滚出去的行里，一个开小了的终端本来就是这么答的。**代价**：常见情形一分没多花（网格自己行数就够的卡从不往它背后读），任何情形下也由卡片自己的行数封顶——网格背后那两层都是从新的一端读起。**damage 门不必为此加第二个数**：历史只在屏滚动或被重排时长，而这正是 `DualPlaneSession::screen_revision` 已经在数的那两扇门。红测钉四条：`focus_thumb::{the_tail_climbs_past_the_top_of_the_screen_into_what_scrolled_off, a_pane_grown_over_its_own_history_still_fills_its_card, the_tail_carries_the_rows_staged_between_the_screen_and_history, a_card_of_an_alternate_screen_stops_where_its_pane_does}`。
+
+**侧栏卡片的时钟跟的是「这块 pane 的屏变了」，而不是「里面是哪种 shell」（票 T-5 + 用户实机报，2026-09-07，分支 `fix/card-refresh-on-output`）。** 报告是 Command Prompt 与 WSL 的卡片刷新明显落后于 PowerShell 7 / Git Bash。T-5 自己的解释需要一处修正：它写 PTY 输出路径从不调 `refresh_chrome`——路径到的，`Runtime::turn` 在 `drain_pty` 之后调 `advance_strip_animation`，那条路一直走到 `refresh_chrome`；**挡住它的是那条路里面的一行闸**：`if !owes_frame && !panes_owe { return Ok(()); }`，站在动画 tick 与 `refresh_chrome` 之间，而 `refresh_chrome` 是 `refresh_focus_thumbnails`（重投每张卡的那趟遍历）的**唯一入口**。折进 `owes_frame` 的每一笔债都是**动画**——tab 记号在呼吸、tween 在缓动、圆环在转、解码视频到了一帧。**卡片不是动画**——它是一块 pane 的图，驱动它的是子进程在写。于是一张卡实际跑在的时钟是 `tab_owes_frame(tab.last_drawn_mark, …)`，tab 记号的呼吸，而呼吸仅由 `OSC 133;C` 起、`133;D` 止：一支报告自己提示符的 shell 在整条命令期间以 ~60 Hz 把自己那张卡带过闸；一支什么也不报的 shell 只有在碰巧有别的东西在动、或一次改名（`OSC 0`/`OSC 7`）走另一条路进了 `refresh_chrome` 时才带得过。这正是 shell 矩阵 §1 第 7 列的三级台阶，也是它看起来像 shell 的性质而不是窗口的性质的原因。同一个缺陷的第二半：`focus_thumb::MIN_INTERVAL`（100 ms）门④**是跳过而不是推迟**——damage 落在节流窗内的座位保持旧图、没有任何东西排队回来补它；呼吸替集成 shell 回来了。欠债因此必须是**站着的**，只有一趟拿到了每个座位的投影（`ThumbStats::skipped_throttled` 不变）才能结清。**修法落在两处，任一处单独落都不起效——这一条是在 release build 上量出来的。** `strip_animation_deadline` 必须请求那一帧（否则循环无人唤醒：没有动画时它答 `None`，循环挂进 `ControlFlow::Wait`），**并且** `owes_frame` 的 fold 必须带上这笔债（否则被唤醒的 tick 走进上面那行早返、永远到不了 `refresh_chrome`）。只把债折进 deadline 而不折进 `owes_frame`——第一次尝试，release build 加临时 trace 量到的——循环每 16 ms 醒一次、走早返、债永远不结、卡片永远不重画：**空转与冻图同时出现**。两行现在各有钉子。**实测**（本机 release，私有 `APPDATA`/`LOCALAPPDATA`，`focus_mode` 开，仅 posted 键——`scripts/dev/post-probe.ps1`，无真键注入）：在 pane 里打 400 行 burst、等 2.5 s 静默、散列卡片矩形，再向窗口 post 一下不碰任何命中的指针移动（它为别的原因请求了一次 chrome 重建），再散列——变了的卡就是陈旧的。修前（`main` at `e42c4f3`）：一块把标记全部摘掉的 Command Prompt pane（`prompt $P$G`，即 WSL 最坏情形——既不报 `133` 也不报 `OSC 7`）**8 次里陈旧 7 次**；PowerShell 7 pane **6 次里陈旧 4 次**——**不是 cmd 的毛病**，呼吸在命令执行期救了 PowerShell，结束后没人救。修后 cmd 8 次 0 次陈旧、PowerShell 7 6 次 0 次。修后追加的相机臂（cmd，无标记，400 行 burst，~100 ms 采样）：pane 的末次变化在 1172 ms，卡片的末次变化在 1272 ms——恰好一个节流间隔，且最终收敛。修后静息代价：十秒静默窗口自身 CPU 0.047 s，burst 后十秒 0.078 s——即窗口回到静息，债不是空转。修前另量过慢滴（六行、每行间隔 ~2 s）：~105 ms 拍照间隔下 cmd pane **零延迟**——卡与 pane 每次同帧变，说明 T-5 的「cmd 落后 1.5–2.5 秒、丢行」是同一个缺陷的 burst 尾巴形状，不是逐行延迟。**用户裁决：卡片刷新的理由是「这块 pane 的屏变了」，与里面是哪种 shell 无关；shell 集成那口钟留给它本来的用处（tab 记号的呼吸）；屏外的卡片一分不花——查的是 damage 键，不是投影。** **落地。** 新类型 `focus_thumb::CardClock`，一位，三条路：`pane_spoke`（一批 PTY 字节到达了一块 pane 的屏，且该 tab 有卡在屏上）、`settled(before, after)`（一趟投影跑过了；欠债恰在门④拒了某个座位时仍站着——读的是 `ThumbStats::skipped_throttled` 而不是调用点自己的记账）、`nothing_to_draw`（屏上没有卡列）。`Runtime::drain_pty` 收集 `DrainOutcome::arrived` 为真的 tab——字节到达屏的条件与 `DualPlaneSession::feed_at` 给 `screen_revision` 记一笔的条件相同，而 `screen_revision` 正是 `focus_thumb` 门③的键——且只在模式开着、欠债尚未立起时才收集（`self.window.focus_mode && !self.window.cards.owes_frame()`），再只在其中有一张卡在视野里时才告诉时钟。`seats::FocusRailGeometry::card_is_in_view` 是「这张卡在不在屏上」的**唯一规则**，`refresh_focus_thumbnails` 的门②与 drain 共用它——一条规则两个调用方，不可能分家。`strip_animation_deadline` 把这笔欠债折进去，请求呼吸自己的 `STRIP_ANIMATION_FRAME`：**上限沿用已有的 16 ms 节拍，不新开计时器**；这是那个 fold 里唯一一条不关于 tween 的，也（同视频那一条）不受 reduced motion 管辖——卡片是一块 pane 的活图，不是这扇窗的装饰。`advance_strip_animation` 的 `owes_frame` fold 同时带上这笔债——两处缺一不可，因为 deadline 只管唤醒循环，而 fold 才管放行闸。`refresh_focus_thumbnails` 在卡片确实重建的地方结清欠债。**代价**：屏外的卡 = 一次矩形比较、零帧；一段 burst = 每帧一次 chrome 重建加每座位每 `MIN_INTERVAL` 一次投影——与集成 shell 一直在付的一模一样，现在每种 shell 都付。**一笔挂账，未修。** `DualPlaneSession::finish_synchronized_update`（释放 DEC 2026 块）重写活网格而不碰 `screen_revision`，与两条 resize 路径不同（它们碰）；一块使用 synchronized updates 的 pane 的卡片仍可能落后一个块。不在本票范围（它不是 PTY 输出批次）；记为挂账。红测 `focus_thumb::{a_pane_that_reports_no_prompt_still_moves_its_card_within_a_frame, a_seat_the_throttle_refused_is_drawn_when_the_clock_lets_it, a_burst_of_a_thousand_rows_is_one_pass_a_frame_at_most}`、`seats::a_card_scrolled_out_of_the_list_is_not_on_screen`、`main::{a_pane_that_spoke_puts_its_own_card_on_the_clock, the_tick_that_draws_the_cards_is_reached_when_a_card_is_behind, the_frame_schedule_knows_about_the_card_column}`——前三条驱动一个窗口循环的模型（`CardLoop`），里面一个被唤醒的 turn 只在速率闸放行**且**时钟欠着债时才投影，这正是 `advance_strip_animation` 自己的 fold 里没有动画的那个形状。
+
 
 **一格滚不动一行:余量跨事件累积 + 手势绕过 10Hz(用户实机报 2026-08-21,同日晚,分支 `agent-a27a8352c053f8480`)。** 上一段 ③ 落地当天用户报回来一句:**「向上滚是有效的,但要滑好久才上移一行」**。两条因,都是把一条对某台设备成立的话当成了普遍真理。**① 一格是驱动加出来的一格,不是驱动某一次报出来的一格。** ③ 的原话「一格一行」在实现里被读成「把每个 wheel 事件四舍五入成整数格」,那句话对写它时手边那只鼠标成立(Win32 一个 detent 报 `WHEEL_DELTA`=120,winit 交回 `LineDelta(0, 1.0)`),对这张桌子上别的每一种指点设备都不成立:**高分辨率滚轮与精密触控板把一个 detent 拆成一串小报告**——一次 20 或 40,120 才是一格——每一份单独四舍五入都是零行,于是整整一格被六份一份一份地扔掉。转得不慢,是被丢了。**余量因此跨事件留着**(`main.rs` 的 `CardAim`,住在 `WindowRuntime::card_aim` 上),攒够一整格才走一行,走完剩下的仍留着。**它清零只有两条**,因为余量是「**一只手、一个方向、一个座位**」这句话的承诺,哪一半不再成立就丢:**换方向**——向上攒的半格是关于「上」的承诺,拿它去付向下的第一行,等于让一个读者看不见的旧手势提前拨动窗口;**换座位**(含换卡,键是 `LeafId` = tab + seat)——被瞄的窗口是某一个终端座位的事实,余量跟着指针走就会挪动一个谁也没在它上面转过轮子的窗口。**不设超时**:余量不会腐坏,一个轻推了三分之一格、过一会儿回来接着推的读者仍然是想往上,给它加个秒数就是加一个没有理由的常数。**余量存的是驱动自己的币种而不是格数**(复用 `WheelBurst` 那条「两种币种不可相加」的既有裁决,不写第二份):六次 20 像素是整数 20…120,`120 − 1×120` 恰好是零,换成格数就是 `0.1666…×6 − 1`,谁也担保不了它的符号。**`trunc` 不是 `round`**:半格是半行,半行不是一行——旧代码里的 `round` 一边让 60 像素的轻推白走一整行、一边让六次 20 像素一行不走,是同一个错的两张脸。**判定顺序随之改**:先找座位再量格数,因为一份不足一行的报告**仍然是这个座位的**,必须留下而不是漏给卡列自己的滚动(旧序先 `round`、为零就 `return false`,于是触控板在卡上滚时既攒不到瞄准、又去滚了那根列)。**② 手势不受内容通道的 10Hz 限流管辖。** `focus_thumb` 门④(`MIN_INTERVAL` = 100ms)那段论证逐字是写给**一个 shell** 的——「一秒写一万行的 shell 与一秒写十行的 shell 花一样多,因为 160px 的卡看不出区别」——**每个字都对,没有一个字是关于手的**。读者转轮子改了 `card_skip`,那张图就是这次手势的答复,压住十分之一秒不答复,手感上就是「这个面卡住了」,正是用户报的那句话。所以**不是把 `MIN_INTERVAL` 调小**(那会同时放开内容通道、掀掉 F2 立的预算),而是开一条**尽可能窄的手势通道**:`FocusThumbnails::unthrottle(tab, seat)` 给那**一个**座位记一笔「欠你一张图」,`project` 读到它就跳过门④。边界三条,每条各有钉子:**只跳门④**(门③原样问——一个把窗口推过屏顶、什么都没改的瞄准仍然一行都不重画,`a_gesture_that_left_the_seat_saying_the_same_thing_rebuilds_nothing`);**只给一个座位**(记在座位上不是记在这一趟上,所以在一张卡上狂转轮子拖不动另外十九个座位一起穿过时钟);**只算一次**(下一趟看到它的 `project` 当场取走,`the_gesture_credit_is_spent_by_the_pass_that_uses_it`,那个座位背后的 shell 立刻回到 10Hz)。它放开的速率是**一只手的**:一个 detent 一行(①保证一串不足格的报告是一行而不是六行),即胳膊极限下每秒几十次、且只是一个座位的——对着 `MIN_INTERVAL` 要挡的每秒几百次乘二十座。**内容通道一字未改**:`a_seat_changing_on_every_frame_rebuilds_at_the_ceiling_and_no_faster` 那句「one second of continuous change is ten projections at 10Hz」原样绿。红测:`main.rs` 的 `six_sixths_of_a_detent_add_up_to_one_row`(红证 `[0,0,0,0,0,0]`)、`turning_the_other_way_forgets_the_fraction_it_was_owed`、`the_fraction_belongs_to_the_seat_it_was_turned_at`,`focus_thumb` 的 `a_seat_the_hand_just_re_aimed_rebuilds_inside_the_clock`(红证 2 ≠ 11);`a_whole_detent_is_one_row_the_moment_it_lands` 钉住标准鼠标没被这次累积拖慢。**`wheel_zoom_notches` 本身一字未改**——它 doc 里那条「a detent is one step」是缩放线的裁决,累积是**调用方**的事,瞄准这一处攒余量不给缩放放行。
 
@@ -2805,6 +2816,24 @@ else                           { Flash }    // 被压住了,但任务栏还在,�
 **行的第二行改说「On 在这台机器上做什么」。** 一个开关在所有机器上只有一个词面，机器的差别就得写在它自己那一行上（`explorer_menu::description_for`，三件事实进、一句话出）——这正是置灰那一档原来在说的话，留下来掉个头：从「这一档为什么按不动」变成「你能按的这一下会做什么」。三种机器三句：Windows 11 且文件在，说落在第一页和「显示更多选项」，并说清是第一页那一半要为当前账户注册 `folio.msix`；Windows 11 而文件不在，说落在「显示更多选项」，外加那条留着的事实——`folio.msix` 不在本文件夹、它随压缩包放在 `folio.exe` 旁、第一页需要它；Windows 10 那句**不点名任何一页**：`Show more options` 是 Windows 11 的项，在一台只有一张菜单的机器上点它的名，等于让读者去找一扇他的 Windows 不画的门。`Elsewhere` 那句（条目指向另一个文件夹，下一次能做到的启动改回来）原样不动。
 
 **退役两条字符串，三张卡片一张不退。** `OptionExplorerShowMoreOptions` / `OptionExplorerFirstPage` 随选择器一起离开 i18n 表：没有人再挑地方，也就没有地方要当选项去念。卡片相反——一次按下仍然把动词落在三个地方之一，卡仍然点**地方**的名（`place_toast`）。两态的开关配三张卡不是矛盾：On 落在两个地方之一，而一张点开关名字的卡，会告诉 Windows 10 的读者动词在一页他没有的页上。
+
+**注册了，可是没人告诉 shell（2026-09-07，SHChangeNotify 缺失，已落地）。**
+
+**现象。** 这台机器上 `folio.msix` 已为当前账户注册好（`Get-AppxPackage WeiyiShi.Folio` 在、`SignatureKind Developer`、`PackageRootFolder` 指向 `folio.exe` 同一个文件夹、manifest 的 `Directory` 与 `Directory\Background` 两个 `ItemType` 都声明了），可是资源管理器右键菜单第一页上没有 Folio。`explorer.exe` 从 2026-09-04 起没重启过。
+
+**根因。** 整个仓库从来没有调用过 `SHChangeNotify`。Win32 文档在 `SHChangeNotify` 的 Remarks 一节写着："Applications that register new handlers of any type must call SHChangeNotify with the SHCNE_ASSOCCHANGED flag..."。正在运行的 `explorer.exe` 读一次关联表就把结果记住了，没有进程通知它就一直画旧的。
+
+**修法：一个 wrapper，四条路径。** 新增 `bt_platform::announce_explorer_menu_change()`——一句 `SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None)`，两个指针参数是 `None`，`SHCNF_IDLIST` 的文档写法就是「不点名具体项」。新增纯函数 `bt_platform::changing_explorer_menu(write, announce)`：先跑写入、**不管成功失败都** announce、再把写入的返回值原样透出。四条写路径全部走它——经典两棵树的 `bt_app::context_menu::apply`（装／卸两向），和 sparse 包的 `bt_platform::msix::register` / `bt_platform::msix::remove`。「不管成功失败都通知」的理由：`install_context_menu` 先写完第一棵树才发现第二棵写不进去，一次失败不等于什么都没变；多播一次没人察觉，漏播一次就是一个存在但看不见的菜单项。
+
+**announce 放在 `context_menu::apply` 而不是更下一层。** `bt_platform::install_context_menu` 的 class store 是参数，测试套件拿隔离子键调它——跑一次测试不该在跑测试的人机器上广播一次全 shell 刷新。同理，`apply` 里那一条什么也没写的拒绝（机器不肯说自己的可执行文件在哪里）在进 wrapper 之前就结了，好让「每一次尝试写入之后都告诉 shell」字面上成立。
+
+**诚实的第二层。** 文档保证 `SHCNE_ASSOCCHANGED` 会让 shell 作废图标／缩略图缓存并重新加载新注册的 handler。文档**没有**任何一处保证它会重新加载 Windows 11 第一页那份打包动词清单——那份清单来自 App Model 而不是 class store。Windows Terminal 仓库 issue #18401 描述的正是同一个 `windows.fileExplorerContextMenus` 扩展：一个正在跑的 `explorer.exe` 会晚一步、甚至一直到重启才显示刚注册的项。所以程序不替用户重启 explorer，而是：只要**本次进程**成功注册过包（`REGISTERED_HERE` 这个 `AtomicBool`），设置行的第二行切成 `DescExplorerFirstPageAwaitingShell`，注册成功的那张 toast 切成 `ExplorerFirstPageAddedRestartToast`，两处都告诉读者「已注册，如果条目尚未出现，注销并重新登录」。进程退出后标志复位，因为一句永远清不掉的话不该留在行上。成功移除包时标志同样复位——一个刚把开关关掉的读者不该被告诉 Folio 已注册到第一页。
+
+**分类只有两种。** 注册指向的文件夹（`Package::EffectiveExternalPath`——读 API 而不是读 `PackageRootFolder` 那个注册表键，API 是契约，那个键是部署服务自己的账本）是本 exe 的文件夹就是 `Current`，不是就是 `Elsewhere`。**`InstallLocation` 在 `C:\Program Files\WindowsApps` 下面不是任何证据**：sparse 包本来就是这么暂存的，那个目录里只有 manifest、block map、签名和图标，没有 `folio.exe` 是正常形状。曾经有过一个按这个误读立的第三态，已经撤掉。
+
+**红测四处。** ① wrapper 在成功与失败两条路上都 announce——把 announce 删掉或用 `if outcome.is_ok()` 包起来都会红（`a_change_to_explorers_menu_is_always_announced_to_the_shell`）。② 四条写路径确实都走 wrapper，两个模块各读自己的源文件作证（`every_deployment_this_module_makes_announces_itself_to_the_shell`、`the_classic_registration_is_announced_to_the_shell_as_well`）。③ 分类函数四例——同一文件夹的两种拼法、别的文件夹、没有外部位置（`a_registration_is_ours_when_the_folder_it_serves_is_this_one`）。④ 行的第二行与 toast 在「本次注册过」时改口，而够不着第一页时不改（`a_registration_made_here_says_explorer_may_not_have_caught_up`）。
+
+**待查的更深怀疑，本片不动、只记账。** manifest 声明的是 `com:ExeServer`（`folio.exe --explorer-command`）。查到的所有能跑起来的例子——包括 Windows Terminal 的 `Package.appxmanifest`、微软 "Support legacy context menus" 文档的写法——用的都是 `com:SurrogateServer` 加一个实现 `IExplorerCommand` 的 DLL，没有找到任何一个 `com:ExeServer` 在 `windows.fileExplorerContextMenus` 上跑通的先例。没有哪一句官方文档明文禁止，但也没有一个能用的例子。如果重启 explorer 之后第一页仍然没有条目，这条就是首要嫌疑。
 
 ### 7.5 files 列的「进去」与「钉住」（files 小单，2026-08-19，已落地）
 
@@ -5634,6 +5663,75 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 - **首帧之后统一预热**:等于给每台装了 WSL 却不用的机器每次启动都启一台虚拟机,正是本节要治的病。
 - **不等**(选中):代价有界、可见、只落在一次运行的第一块 pane 上。
 
+**2026-09-07 结账:那笔挂账已还,而还法是把这一问从这里搬走。**(用户裁决;
+`docs/plans/shell-matrix-2026-09-07.md` T-2;`crates/bt-app/src/{wsl,shell_integration,main}.rs`、
+`crates/bt-term/tests/shell_integration_wsl.rs`)
+
+**报上来的病。** 五扇 shell 的实测矩阵里,WSL 那一行的「命令标记」「当前目录」「行内公式」全是 ✗ ——
+**但只在一个进程的第一块 WSL pane 上**,第二块起全是 ✓。两条命令行从 `Win32_Process` 里读出来,
+一字之差就是整件事:
+
+```
+wsl.exe --cd /mnt/d/Developer/bt-wt-shell-matrix
+wsl.exe --cd /mnt/c/Users/… -- /bin/bash --init-file /mnt/c/…/folio.bash -i
+```
+
+第一块的 `BT_PTY_DUMP` 里一个 `OSC 133`、一个 `OSC 7` 都没有。**而默认 profile 是 WSL 的机器上,
+第一块就是唯一的一块。**
+
+**上面那三条路的第三条是选对了,选错的是问题的位置。** 「不等」本身没有错——一个 frame 不许停下来等
+一台虚拟机开机,这条不复审。错的是**把一句关于发行版的话,拿到发行版外面去问**:问出去、不等答案、
+然后用还没回来的答案去组命令行,这不是一个可以调快的探针,是一场**赛跑**,而第一块 pane 每一次都输。
+让它「等一下下」是把 ② 又废掉;预热是把整节要治的病请回来。所以第四条路:**取消这场赛跑**——一句关于
+Linux 用户账号的话,由**需要这个答案的那块 pane**,在**它自己那台发行版里面**,和它要决定的那把 shell
+**同一条命令行**上问:
+
+```
+wsl.exe [--cd <dir>] -e sh -c '<那一问>' folio /mnt/c/…/folio.bash
+```
+
+**`-e` 而不是 `--`,而这一字是承重的**(本机 Ubuntu-24.04 实测 2026-09-07)。`wsl.exe --` 把它后面的东西
+**拼成一条命令行**交给登录 shell 重新解析：那一问是一个塞满了空格、引号、`$`、`|`、`;` 的参数,
+进去就碎了——实测下 `$1` 是空的,而脚本正文被当成几条分句各自跑了一遍。`wsl.exe -e` 直接 exec,
+argv 对 argv：`$0` 是 `folio`、`$1` 是带空格的 init file 原样。旧拼法是 `--`,它能活到今天只是因为
+`/bin/bash --init-file <path> -i` 里没有一个空格。
+
+`shell_integration::WSL_LOGIN_SHELL` 就是那一问:`getent passwd` 读登录 shell,是 bash 就
+`exec` 它并带上 `--init-file` 与 `BT_SHELL_INTEGRATION=1`,不是就 `exec "$shell" -l`——探针有过的两条
+分支一条不少,而**分支现在长在答案所在的那一侧**。init file 走 `$1` 而不是拼进脚本正文,所以 Windows
+账号名里有空格的读者拿到的是一个这把 shell 原样读的文件名。三条附带的收获:
+
+- **`wsl::begin_login_shell_probe` 整个退役**,连同 `ask_login_shell`、`LOGIN_SHELL` 与那根 worker
+  线程。`crates/bt-app/src/wsl.rs` 现在只读注册表、**一个进程都不起**,这是 ② 的更强形式:装了 WSL 的
+  机器不为 Folio 开虚拟机,**开 WSL pane 的机器也不多开一台**。
+- **`BT_SHELL_INTEGRATION` 从 `WSLENV` 的名单里撤出**,改由那一问在发行版**里面**导出。它是这几个变量
+  里唯一一个**含义取决于起的是哪把 shell** 的:一个 zsh 会话终身带着它,等于对它里面每一个嵌套 `bash`
+  说「你的启动文件已经有人跑过了」,而把 `folio.bash` 手动挂在自己 `~/.bashrc` 里的读者会因此把登录链
+  跑两遍。
+- **终端自己那四条(`TERM_PROGRAM`/`TERM_PROGRAM_VERSION`/`COLORTERM`/`FORCE_HYPERLINK`)从此不论登录
+  shell 是什么都过去**,§7.1.6c-6c 里「WSL 登录到 zsh:设了但没转发」那一行随之作废(该节已就地记注)。
+  这不是顺手扩大范围:那四条说的是**这个终端**画什么,把它做成「读者选了哪把 shell」的函数,本来就是
+  当初那条分支的副作用——一块 zsh pane 和别的 pane 画一样的超链接,却告诉里面的程序它不画。
+
+**红门(变异实测)。**
+
+- `shell_integration::tests::the_first_wsl_pane_is_told_the_place_the_question_and_the_script_in_wsls_own_spelling`:
+  连着组两次命令行,断言两次一模一样、都点了 init file。**变异**:把 `wsl.integrated_login_shell()`
+  那道闸放回去 → 第一次是 `["--cd", "/mnt/d/Developer"]`,两个参数、没有脚本。
+- `shell_integration::tests::the_question_hands_bash_the_init_file_and_leaves_every_other_shell_alone`:
+  两条分支都还在,且那一问自己不含任何路径(路径走 `$1`)。
+- `bt_term` 的 `shell_integration_wsl::bash_is_handed_the_init_file_and_every_other_login_shell_is_left_alone`:
+  **真 POSIX `sh` 的往返**——`getent`、登录 shell、init file 全是测试自己写在临时 `PATH` 上的桩,于是
+  产品那条脚本对着一份**自己写的密码库**跑遍每条分支,不需要这台机器装 WSL。`bash` 分支断言
+  `argv=--init-file <path> -i` 且 `BT_SHELL_INTEGRATION=1`;`zsh`/`fish` 分支断言 `argv=-l`、没有
+  `--init-file`、且**没有**继承那个标记。**变异**:去掉 `export` → `BT_SHELL_INTEGRATION=<unset>`;把
+  `${shell##*/}` 写回 `$shell` → `/usr/bin/bash` 掉进默认分支,也就是每一台把 bash 放在 `/bin` 之外的
+  发行版。
+- `wsl::tests::nothing_in_this_module_boots_a_distribution`:源码门,`wsl.rs` 里不许再有起子进程的词。
+  **变异**:把 `ask_login_shell` 写回去 → 红在那个词上。
+- `wsl::tests::the_first_frame_and_the_first_pane_do_not_wait_for_a_distribution`:④ 那道门加上了第三处
+  读——**WSL profile 的整条命令行**,和首帧那两处一起在另一根线程上跑、答案走 channel 回来。
+
 #### ④ 首帧不等任何探针
 
 **病灶的最后一环在 `profiles::title`。** 首窗的标题由它组,它调 `wsl::facts()`,而旧的 `WslProbe::facts` 会 **join 探针线程**;`main` 又在 `create_window` **之前**组这个标题。于是「Folio 的窗过一会才出来」的那个「一会」,是一台 WSL 虚拟机的冷启动时间,原样加在首帧前面。
@@ -7555,6 +7653,50 @@ v3 那张卡按本节其余各段的样子落地进了未发布的 0.2.2,读者�
 - **`.aswitch` 目前只有这一张卡在用,所以关着的滑块那条暗色规则也只写在这里**(v4 ⑦)。设置页用的是下拉行,不是开关;哪天第二个表面长出开关,`knob_face` 是要跟着搬走的那一段,而不是要抄第二遍的那一段。
 - **卡上第七行会让它重新开始滚。** 参照窗上 v4 是 273 在 308 里,一行 42;再加一行就是 315 在 308。地方是有的(548 高的窗里卡才 445),但只剩一行深。今天什么都不用定,记在这里是为了下一行是有意加的。
 - **一次部分完成之后,卡上那些行的最终状态只在设置页可见。** 这是有意的(⑤),但意味着一个四行全开、其中一行失败的读者,拿到的是一张失败卡加三行静默;哪三行成了要去设置页数。给成功也发卡会把这件事说全,代价是新装第一分钟里的四张卡。
+
+### 7.57 `cmd.exe` 的命令轨终于有刻度了:一根没有钩子的壳靠格式串搬运 `A` 与 `D`,`B` 在没有 `C` 的地方仍然被拒(2026-09-07,已落地;`crates/bt-app/src/shell_integration.rs`、`crates/bt-app/src/profiles.rs`、`crates/bt-app/src/i18n.rs`、`crates/bt-term/src/{session,command_marks}.rs`、`crates/bt-term/tests/shell_integration_cmd.rs`(新)、`docs/shell-integration.md`)
+
+在今天之前,一个 Command Prompt(`cmd.exe`)窗格的命令轨是空的——跑了多少条命令都没有一格可以数、没有一格可以按,`Ctrl+Shift+↑`/`↓` 无处可去。每一个其它内置档案都能被交一份脚本;`cmd` 不能。
+
+#### ① `PROMPT` 不是钩子,它是一张格式串,而它恰好在对的时刻展开
+
+`cmd.exe` 展开 `PROMPT` 的时刻只有一个——刚好要读下一行之前。那个时刻**同时**是上一条命令的结束和这次提示的开始,所以 `OSC 133;D` 与 `OSC 133;A` 恰好是它能搬运的两枚标记,而且是按这个顺序。Folio 现在把 `PROMPT` 设成
+
+```
+$e]133;D$e\$e]7;file:///$P$e\$e]133;A$e\<读者自己的 PROMPT>
+```
+
+**前缀,从不替换**;继承来的值已经带着报告时原样放过——一个 `cmd` 窗格会把 `PROMPT` 导出给它的子进程,所以一个从 `cmd` 里启动的 `cmd`,要么已经有了这段前缀(放过),要么还没有(加上)。
+
+#### ② `D` 没有退出码
+
+`PROMPT` 没有任何一个替换符能读到 `ERRORLEVEL`。**一格从一个没人报过的数字涂出来的颜色,比一格没颜色的刻度更坏**——它不是在省略一件事,是在讲一件不存在的事。所以 `D` 不带退出码。
+
+#### ③ `C` 无处可发
+
+`133;C` 标记的是「执行前」——用户按下回车之后、命令开始写输出之前的那个时刻。`cmd.exe` 没有这个时刻:没有 `preexec` 钩子、没有 `PSConsoleHostReadLine`、没有任何可以在回车与输出之间插一句话的地方。
+
+#### ④ `B` 仍然被拒:2026-08-16 量测的这一半没过期
+
+**`B` 打开一个输入区域,它唯一的关闭者是 `C` 和下一个 `A`。** 没有 `C`,一条 `cmd` 命令打出来的**每一行**都会坐在那个意思是「读者正在打的字」的区域里——显示数学与图片预览在它自己的输出上丢失,而 post-resize 的 `InvokePrompt` 和弦欠着一根根本没有那个绑定的壳。这条和 2026-08-16 那次量测写下来的是同一句话,一个字没变。
+
+#### ⑤ 过期的是另一半:`A` 独存不再比沉默差
+
+那次量测的另一半主张:单独发一个 `A` 而不建区域,比什么都不发**更坏**——因为 `A` 退役了光标行启发,却没有建起替代它的区域。这一半**过期了**。修法就是退出那道旧钉子自己命名过的出口:**退役光标行启发的权力现在由建起区域的标记(`B`、`C`)主张,不由别人主张**,记在每屏新增的 `shell_region_screens` 字段里。一块只带 `A` 和 `D` 的屏幕保留它一直有的那条光标行启发,命令轨照样拿到刻度。
+
+`shell_integration_seen()`——安装提示在它为真时收回自己——仍然对任何一枚标记回答,现在是一次独立的读取:「这根壳在说 133」和「这根壳建起了区域」是两件事,前者给安装提示用,后者给启发退役用,两个问题不再混成一个谓词。
+
+#### ⑥ 账本:开记的位置从 `B` 移到 `A`
+
+`bt_term::command_marks` 从前在 `B` 开一笔记录。现在在 `A` 开——一笔空白草稿;紧随其后的 `B` 把那笔草稿认领回来,这和一次重画提示已经在做的认领是同一次。对一根两枚都发的壳,账本逐字节和从前一样:一条命令一笔记录,`start` 在 `B`,`prompt` 在 `A`。对 `cmd`,`start` 就是 `A` 那枚锚——`B` 从不来把它换掉;没有退出码、没有时长(`duration()` 要两头),命令轨上那一格是一个没有颜色的刻度,点下去跳到它的提示行。
+
+#### ⑦ 门
+
+旧钉 `a_prompt_that_can_never_send_c_must_not_send_a_or_b_either` 被 `a_prompt_only_shell_gets_its_ticks_and_keeps_the_cursor_heuristic` 替换,旁边是 `crates/bt-term/tests/shell_integration_cmd.rs` 里一趟通过真 `cmd.exe` 的往返。
+
+#### ⑧ 挂账
+
+Clink 会同时供上 `C` 和一个真的退出码,Folio 仍然不要求装它。
 
 ## 13. 可移植性
 

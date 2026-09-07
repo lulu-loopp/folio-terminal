@@ -310,7 +310,9 @@ One box answers five questions at once, and `Enter` goes straight there.
   only menu there is. On a Windows 11 with `folio.msix` beside `folio.exe`, On
   also puts "Open in Folio" on the page Windows 11 opens first. Off takes back
   whichever is registered, and the line under the row says which of them On
-  reaches on your machine. `docs/PRIVACY.md` lists what is written.
+  reaches on your machine. A running File Explorer reads its list of first-page
+  entries when it starts, so if "Open in Folio" is not there yet, sign out and
+  back in. `docs/PRIVACY.md` lists what is written.
 - Windows PowerShell 5.1 ships PSReadLine 2.0.0, which misplaces the input line
   after the window is resized. Folio carries a patched 2.4.6 and installs it into
   your module path on request. On a machine whose execution policy is still the

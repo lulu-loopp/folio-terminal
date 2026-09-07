@@ -224,11 +224,20 @@ pub fn place_when_on(first_page_offered: bool) -> ExplorerPlace {
 /// one of two places, and a card that named the switch rather than the place
 /// would tell a reader on Windows 10 that the verb is on a page their Windows
 /// does not have.
+///
+/// **The first page has two cards and the difference is who registered it**
+/// (§7.4b). Where the registration was made by this process the card says so
+/// and says that Explorer may not have caught up yet, because that is the case
+/// where it may not have; where the package was already registered before this
+/// window opened — the press that deploys nothing — the plain card is the true
+/// one. `refresh_pending` is [`shell_refresh_pending`], handed in on this
+/// module's rule for every fact about the world.
 #[must_use]
-pub fn place_toast(place: ExplorerPlace) -> Text {
+pub fn place_toast(place: ExplorerPlace, refresh_pending: bool) -> Text {
     match place {
         ExplorerPlace::Off => Text::ContextMenuRemovedToast,
         ExplorerPlace::ShowMoreOptions => Text::ContextMenuAddedToast,
+        ExplorerPlace::FirstPage if refresh_pending => Text::ExplorerFirstPageAddedRestartToast,
         ExplorerPlace::FirstPage => Text::ExplorerFirstPageAddedToast,
     }
 }
@@ -368,6 +377,37 @@ static BUSY: AtomicBool = AtomicBool::new(false);
 /// The outcome of the last press, waiting for the frame that will show it.
 static OUTCOME: Mutex<Option<Result<bool, String>>> = Mutex::new(None);
 
+/// **Whether this process has registered the package since it started, and
+/// therefore whether Explorer may not have noticed yet** (§7.4b).
+///
+/// `SHChangeNotify(SHCNE_ASSOCCHANGED, …)` goes out on every write
+/// ([`bt_platform::changing_explorer_menu`]) and it is what the documentation
+/// gives for a newly registered handler. What no documentation promises is that
+/// it reloads the **packaged** verb list a Windows 11 first page is drawn from:
+/// that list is the App Model's rather than the class store's, and the reports
+/// that exist — Windows Terminal's own, which ships this exact extension —
+/// describe a running `explorer.exe` that shows a freshly registered item late
+/// or not at all until it is restarted.
+///
+/// So the honest thing is neither to promise it worked nor to restart somebody
+/// else's shell for them: it is to say, on the one row that is about this and
+/// only while this process is the one that made the change, what to do if the
+/// item is not there. A flag that lived past the process would be a sentence
+/// nobody could ever clear.
+///
+/// **It goes down again on a removal that works**, so what it means is "this
+/// process registered the package and has not since taken it back". A flag that
+/// only ever went up would leave the row telling somebody who has just switched
+/// this off that Folio is registered for the first page.
+static REGISTERED_HERE: AtomicBool = AtomicBool::new(false);
+
+/// Whether a registration made in this session may still be waiting for
+/// Explorer to notice — see [`REGISTERED_HERE`].
+#[must_use]
+pub fn shell_refresh_pending() -> bool {
+    REGISTERED_HERE.load(Ordering::Acquire)
+}
+
 /// How a finished job asks for a frame — [`install_wake`].
 static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
@@ -453,20 +493,51 @@ fn read_state() -> PackageState {
     let here = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf));
-    match (registered.external_path, here) {
-        (Some(at), Some(here)) if !same_folder(&at, &here) => PackageState::Elsewhere {
-            full_name: registered.full_name,
-            at,
-        },
-        _ => PackageState::Current {
-            full_name: registered.full_name,
-        },
-    }
+    classify(
+        registered.full_name,
+        registered.external_path,
+        here.as_deref(),
+    )
 }
 
 #[cfg(not(windows))]
 fn read_state() -> PackageState {
     PackageState::Unsupported
+}
+
+/// **Which of ours a registration is, from the folder it serves** — the whole of
+/// the row's reading of the deployment database, as a function of its inputs so
+/// a test can ask about a machine it is not running on.
+///
+/// `external` is `Package::EffectiveExternalPath`
+/// ([`bt_platform::msix::registered`]). That is the **API** and not the
+/// deployment service's own bookkeeping: the same folder is written down as
+/// `PackageRootFolder` under
+/// `HKCU\…\AppModel\Repository\Packages\<full name>`, and reading it there
+/// would be reading a private store on a promise nobody made. Both were checked
+/// against each other on the machine this was written on and they agree.
+///
+/// **`InstallLocation` is not asked about at all.** A sparse package is staged
+/// under `C:\Program Files\WindowsApps\…` like every other one — that folder
+/// holds the manifest, the block map and the signature, and it holding no
+/// `folio.exe` is the *normal* shape of a package whose content is external
+/// rather than evidence that something went wrong. A reading that took it for
+/// evidence would call a perfectly good registration broken.
+///
+/// So there are two answers and not three. The registration serves a folder;
+/// it is ours when that folder is this one and somebody else's copy's when it
+/// is not. **A registration with no external location at all counts as ours**,
+/// which is the conservative direction: the only thing this state buys is the
+/// silent re-registration in [`begin_probe`], and re-registering over an answer
+/// Windows would not give is a three-second deployment at every launch.
+#[must_use]
+pub fn classify(full_name: String, external: Option<PathBuf>, here: Option<&Path>) -> PackageState {
+    match (external, here) {
+        (Some(at), Some(here)) if !same_folder(&at, here) => {
+            PackageState::Elsewhere { full_name, at }
+        }
+        _ => PackageState::Current { full_name },
+    }
 }
 
 /// Whether two paths name the same folder.
@@ -511,6 +582,7 @@ pub fn begin_probe() {
         {
             match msix::register(&package, here) {
                 Ok(()) => {
+                    REGISTERED_HERE.store(true, Ordering::Release);
                     remember(read_state());
                     wake();
                     return;
@@ -553,7 +625,14 @@ pub fn request(install: bool) -> bool {
                 // absent is the same answer, so they are fetched as one.
                 Some((package, package.parent()?))
             }) {
-                Some((package, here)) => msix::register(package, here).map(|()| true),
+                Some((package, here)) => msix::register(package, here).map(|()| {
+                    // The row's line says what to do if Explorer has not
+                    // noticed — see `REGISTERED_HERE`. Set on the way out of a
+                    // registration that worked and never on one that did not,
+                    // because a refusal leaves the menu exactly as it was.
+                    REGISTERED_HERE.store(true, Ordering::Release);
+                    true
+                }),
                 None => Err(Text::ExplorerFirstPageNoPackage.text().to_owned()),
             }
         } else {
@@ -564,7 +643,16 @@ pub fn request(install: bool) -> bool {
             // registered. This thread can afford the question; the one that took
             // the press could not.
             match read_state().full_name() {
-                Some(full_name) => msix::remove(full_name).map(|()| false),
+                Some(full_name) => msix::remove(full_name).map(|()| {
+                    // **And the sentence goes away with the registration it was
+                    // about.** `REGISTERED_HERE` means "this process registered
+                    // the package and has not since taken it back"; a flag that
+                    // only ever went up would leave the row telling a reader who
+                    // just switched this off that Folio is registered for the
+                    // first page.
+                    REGISTERED_HERE.store(false, Ordering::Release);
+                    false
+                }),
                 // Nothing registered and a press asking for that: the machine is
                 // already where the press wanted it.
                 None => Ok(false),
@@ -610,18 +698,31 @@ pub fn row_description() -> &'static str {
         supported(),
         package_file().is_some(),
         matches!(state(), PackageState::Elsewhere { .. }),
+        shell_refresh_pending(),
     )
     .text()
 }
 
-/// The same answer from the three facts, so a test can ask for a machine it is
+/// The same answer from the four facts, so a test can ask for a machine it is
 /// not running on.
 ///
 /// **Windows' absence is reported before the file's**, because on a Windows 10
 /// the file may well be sitting in the folder and naming it would answer a
 /// question that machine cannot ask.
+///
+/// **And a registration made in this session is reported last of all** — after
+/// the two that say the first page is out of reach, because on those machines
+/// nothing was registered, and after the moved folder, because that one names a
+/// condition the reader can still see. It is the only one of the four that is
+/// about *this run of Folio* rather than about the machine, and it is the only
+/// one that is advice rather than a fact: see [`shell_refresh_pending`].
 #[must_use]
-pub fn description_for(supported: bool, package_beside_exe: bool, elsewhere: bool) -> Text {
+pub fn description_for(
+    supported: bool,
+    package_beside_exe: bool,
+    elsewhere: bool,
+    refresh_pending: bool,
+) -> Text {
     if !supported {
         // **This machine has one menu, and the sentence names no page at all.**
         // Not the `Show more options` line with a caveat: that item is not on
@@ -635,6 +736,9 @@ pub fn description_for(supported: bool, package_beside_exe: bool, elsewhere: boo
     }
     if elsewhere {
         return Text::DescExplorerFirstPageElsewhere;
+    }
+    if refresh_pending {
+        return Text::DescExplorerFirstPageAwaitingShell;
     }
     Text::DescExplorerMenu
 }
@@ -818,22 +922,25 @@ mod tests {
         // absence is reported before the file's: on a Windows 10 the file may
         // well be there and naming it would answer a question nobody asked.
         assert_eq!(
-            description_for(false, false, false),
+            description_for(false, false, false, false),
             Text::DescExplorerMenuNoFirstPage
         );
         assert_eq!(
-            description_for(false, true, false),
+            description_for(false, true, false, false),
             Text::DescExplorerMenuNoFirstPage
         );
         assert_eq!(
-            description_for(true, false, false),
+            description_for(true, false, false, false),
             Text::DescExplorerMenuNoPackage
         );
         assert_eq!(
-            description_for(true, true, true),
+            description_for(true, true, true, false),
             Text::DescExplorerFirstPageElsewhere
         );
-        assert_eq!(description_for(true, true, false), Text::DescExplorerMenu);
+        assert_eq!(
+            description_for(true, true, false, false),
+            Text::DescExplorerMenu
+        );
     }
 
     /// RED (user ruling 2026-09-07) — **the card names the place, and there are
@@ -849,17 +956,143 @@ mod tests {
     /// page the press just took it off.
     #[test]
     fn one_press_raises_one_card_and_it_names_where_the_verb_ended_up() {
+        for pending in [false, true] {
+            assert_eq!(
+                place_toast(ExplorerPlace::Off, pending),
+                Text::ContextMenuRemovedToast
+            );
+            assert_eq!(
+                place_toast(ExplorerPlace::ShowMoreOptions, pending),
+                Text::ContextMenuAddedToast
+            );
+        }
         assert_eq!(
-            place_toast(ExplorerPlace::Off),
-            Text::ContextMenuRemovedToast
-        );
-        assert_eq!(
-            place_toast(ExplorerPlace::ShowMoreOptions),
-            Text::ContextMenuAddedToast
-        );
-        assert_eq!(
-            place_toast(ExplorerPlace::FirstPage),
+            place_toast(ExplorerPlace::FirstPage, false),
             Text::ExplorerFirstPageAddedToast
+        );
+    }
+
+    /// RED (2026-09-07, the shell-refresh finding) — **a registration made by
+    /// this process says so, on the row's line and on the card.**
+    ///
+    /// The bug this is the tail of: `folio.msix` was registered for this
+    /// account, the deployment database agreed, the package's root folder was
+    /// this executable's own folder — and Explorer's first page carried no
+    /// Folio. Nothing had told the shell anything had changed
+    /// (`SHChangeNotify` appears nowhere in the two releases before this one),
+    /// and a running `explorer.exe` had been up since before the registration.
+    ///
+    /// The call now goes out on every write
+    /// ([`bt_platform::changing_explorer_menu`]), and it is what the
+    /// documentation gives for a newly registered handler. What it is **not**
+    /// documented to do is reload the packaged verb list a Windows 11 first page
+    /// is drawn from, and the reports that exist — Windows Terminal's own, which
+    /// ships this same extension — are of an item that shows up late or not
+    /// until Explorer restarts. So the surfaces say the one thing that always
+    /// works, and they say it only while this process is the one that changed
+    /// the machine.
+    ///
+    /// **The plain card is still reachable**, which is the assertion above: a
+    /// press on a machine whose package was registered before this window opened
+    /// deploys nothing, so there is nothing for the shell to have missed.
+    ///
+    /// MUTATION: answer `ExplorerFirstPageAddedToast` for a pending refresh and
+    /// the first block goes red — the card claims the item is on the first page
+    /// on the machine where it most likely is not yet. Return
+    /// `DescExplorerMenu` from `description_for` for a pending refresh and the
+    /// second goes red, which is the row saying nothing at all to the one reader
+    /// who is staring at a menu with no Folio in it.
+    #[test]
+    fn a_registration_made_here_says_explorer_may_not_have_caught_up() {
+        use crate::i18n::Lang;
+        assert_eq!(
+            place_toast(ExplorerPlace::FirstPage, true),
+            Text::ExplorerFirstPageAddedRestartToast
+        );
+        assert_eq!(
+            description_for(true, true, false, true),
+            Text::DescExplorerFirstPageAwaitingShell
+        );
+        // And it is the last of the four to be reported: the two that say the
+        // first page is out of reach registered nothing, and the moved folder
+        // names a condition the reader can still act on.
+        assert_eq!(
+            description_for(false, true, false, true),
+            Text::DescExplorerMenuNoFirstPage
+        );
+        assert_eq!(
+            description_for(true, false, false, true),
+            Text::DescExplorerMenuNoPackage
+        );
+        assert_eq!(
+            description_for(true, true, true, true),
+            Text::DescExplorerFirstPageElsewhere
+        );
+        // Both sentences carry the action, which is the whole of what they are
+        // for. Neither says what Folio did about it, because a reader looking at
+        // a menu with nothing in it is not asking that.
+        let line = Text::DescExplorerFirstPageAwaitingShell.in_lang(Lang::English);
+        assert!(line.contains("sign out"), "{line:?}");
+        let card = Text::ExplorerFirstPageAddedRestartToast.in_lang(Lang::English);
+        assert!(card.contains("restart"), "{card:?}");
+    }
+
+    /// RED (2026-09-07) — **which folder a registration serves is the whole of
+    /// what the row reads, and it is the external location.**
+    ///
+    /// The state the diagnosis of this bug first reached for was a third one —
+    /// "App Installer put a full package on the machine" — read off an
+    /// `InstallLocation` under `C:\Program Files\WindowsApps`. That reading is
+    /// wrong and this test is where it is refused: a sparse package **is**
+    /// staged there, holding its manifest, its block map and its signature and
+    /// no `folio.exe`, and that is its normal shape rather than evidence of
+    /// anything. What says whether a registration is ours is the folder it
+    /// points its content at, and on the machine this was written on that folder
+    /// agreed with `PackageRootFolder` in the deployment service's own
+    /// repository key.
+    ///
+    /// MUTATION: read the absent external location as anything but ours and the
+    /// last assertion goes red, which is a launch that re-registers a package it
+    /// had no evidence was wrong — a three-second deployment at every start.
+    /// Compare the two folders with `==` and the second goes red.
+    #[test]
+    fn a_registration_is_ours_when_the_folder_it_serves_is_this_one() {
+        const NAME: &str = "WeiyiShi.Folio_0.2.2.0_x64__cffndppawf746";
+        let here = Path::new(r"E:\Programs\Folio\dist\next45");
+        assert_eq!(
+            classify(NAME.to_owned(), Some(here.to_path_buf()), Some(here)),
+            PackageState::Current {
+                full_name: NAME.to_owned()
+            }
+        );
+        assert_eq!(
+            classify(
+                NAME.to_owned(),
+                Some(PathBuf::from(r"e:\programs\folio\dist\next45\")),
+                Some(here)
+            ),
+            PackageState::Current {
+                full_name: NAME.to_owned()
+            }
+        );
+        assert_eq!(
+            classify(
+                NAME.to_owned(),
+                Some(PathBuf::from(r"C:\Tools\folio")),
+                Some(here)
+            ),
+            PackageState::Elsewhere {
+                full_name: NAME.to_owned(),
+                at: PathBuf::from(r"C:\Tools\folio"),
+            }
+        );
+        // A staging folder under `WindowsApps` is not an answer to this
+        // question, and neither is the operating system declining to give one.
+        assert_eq!(
+            classify(NAME.to_owned(), None, Some(here)),
+            PackageState::Current {
+                full_name: NAME.to_owned()
+            }
         );
     }
 
@@ -884,19 +1117,19 @@ mod tests {
     #[test]
     fn the_row_says_what_on_does_on_this_machine() {
         use crate::i18n::Lang;
-        let ten = description_for(false, true, false).in_lang(Lang::English);
+        let ten = description_for(false, true, false, false).in_lang(Lang::English);
         assert!(
             !ten.contains("first page"),
             "a machine with one menu is told about one menu: {ten:?}"
         );
         assert!(!ten.contains("Show more options"), "{ten:?}");
-        let no_package = description_for(true, false, false).in_lang(Lang::English);
+        let no_package = description_for(true, false, false, false).in_lang(Lang::English);
         assert!(no_package.contains("Show more options"), "{no_package:?}");
         assert!(
             no_package.contains("folio.msix is not in this folder"),
             "{no_package:?}"
         );
-        let both = description_for(true, true, false).in_lang(Lang::English);
+        let both = description_for(true, true, false, false).in_lang(Lang::English);
         assert!(both.contains("first page"), "{both:?}");
         assert!(both.contains("Show more options"), "{both:?}");
     }

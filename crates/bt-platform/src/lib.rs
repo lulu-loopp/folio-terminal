@@ -1576,6 +1576,38 @@ pub fn context_menu_shape(exe: &std::path::Path, label: &str) -> ContextMenuShap
     }
 }
 
+/// **Make a change to what Explorer's menu holds, and tell the shell about it**
+/// (`docs/DESIGN.md` §7.4b).
+///
+/// Every write this product makes to either of the two stores behind that menu
+/// goes through here: the classic trees ([`install_context_menu`],
+/// [`remove_context_menu`]) and the sparse package's registration
+/// ([`msix::register`], [`msix::remove`]). What `announce` does is
+/// `SHChangeNotify(SHCNE_ASSOCCHANGED, …)`
+/// ([`announce_explorer_menu_change`]), and the reason it is a *wrapper* rather
+/// than a line at each of the four call sites is that "the shell is always told"
+/// then has one place to be true and one test to hold it.
+///
+/// **The announcement is made whether the write worked or not.** A refusal is
+/// not proof that nothing changed: [`install_context_menu`] writes one tree
+/// before it discovers the second will not take, and a deployment that comes
+/// back with an error can still have staged and unstaged things. The cost of
+/// telling the shell about a change that did not happen is one refresh nobody
+/// notices; the cost of not telling it about one that did is a menu item that
+/// exists and cannot be seen until the machine is restarted — which is the whole
+/// of the bug this function was written for.
+///
+/// The write's own answer is passed straight through, so nothing above here has
+/// to know this step exists.
+pub fn changing_explorer_menu<T>(
+    write: impl FnOnce() -> Result<T, String>,
+    announce: impl FnOnce(),
+) -> Result<T, String> {
+    let outcome = write();
+    announce();
+    outcome
+}
+
 // ── Desktop notifications (Windows landing block, slice 3) ────────────────
 //
 // The identity Windows files a notification under, and the one document a toast
@@ -2156,10 +2188,10 @@ mod windows_impl {
                 FOF_WANTNUKEWARNING, FOLDERID_Documents, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
                 FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem,
                 ITaskbarList3, KF_FLAG_DONT_VERIFY, RemoveWindowSubclass, SHAppBarMessage,
-                SHCreateItemFromParsingName, SHFILEOPSTRUCTW, SHFileOperationW,
-                SHGetKnownFolderPath, SIGDN_FILESYSPATH, SetWindowSubclass, ShellExecuteW,
-                TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL, TBPF_PAUSED,
-                TaskbarList,
+                SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify, SHCreateItemFromParsingName,
+                SHFILEOPSTRUCTW, SHFileOperationW, SHGetKnownFolderPath, SIGDN_FILESYSPATH,
+                SetWindowSubclass, ShellExecuteW, TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS,
+                TBPF_NORMAL, TBPF_PAUSED, TaskbarList,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
@@ -7204,6 +7236,41 @@ mod windows_impl {
         Ok(())
     }
 
+    /// **Tell the shell that what its menus are built from has changed** —
+    /// `SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL)`.
+    ///
+    /// This is the call every other program on the machine makes after it
+    /// registers a file type or a verb, and the one this product did not make
+    /// for two releases. A running `explorer.exe` reads the association and
+    /// context-menu stores once and caches what it found; without this
+    /// broadcast a verb written five minutes ago is a verb nobody sees until
+    /// something else happens to invalidate that cache — which for most people
+    /// means the next time they sign in. `SHChangeNotify`'s own reference page
+    /// is not ambiguous about whose job this is — *applications that register
+    /// new handlers of any type must call `SHChangeNotify` with the
+    /// `SHCNE_ASSOCCHANGED` flag* — and it is the same call for both stores
+    /// Folio writes to: the classic `HKCU\Software\Classes` trees and the
+    /// sparse package's registration.
+    ///
+    /// **`SHCNF_IDLIST` with two nulls, which is what the documentation
+    /// requires** rather than a choice made here: `SHCNE_ASSOCCHANGED`'s entry
+    /// says the flag must be `SHCNF_IDLIST` and that the two item arguments are
+    /// unused and must be null. The event is about the association tables and
+    /// not about a file, so there is nothing to name.
+    ///
+    /// It is broadcast to every listener the shell has, so it is made once per
+    /// write, on no timer, and never on a path that did not attempt a write. See
+    /// [`super::changing_explorer_menu`], the one function that makes it.
+    pub fn announce_explorer_menu_change() {
+        // SAFETY: the two pointer arguments are `None`, which is what
+        // `SHCNF_IDLIST` means here — "the item this is about is not being
+        // named". The call keeps nothing and writes nowhere; its whole effect is
+        // a notification posted to other processes.
+        unsafe {
+            SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None);
+        }
+    }
+
     /// Write the verb into every tree of [`super::CONTEXT_MENU_TREES`].
     ///
     /// **Idempotent, and that is what makes it the repair as well as the
@@ -8952,21 +9019,22 @@ impl TaskbarProgress {
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirChange, DirWatch, FilePickKind, FolderPicker, ImagePicker,
     ImeSystemCaret, MathContextMenu, Notifier, PROGRAM_REFUSED, SystemSettingsWatch, Taskbar,
-    adopt_parent_console, client_area_animation_enabled, clipboard_text, cloaked_from_attribute,
-    current_thread_priority, current_user_registry_string, current_user_registry_subkeys,
-    detach_console, documents_directory, dpi_at, exposed_from_probe, exposure_probe_points,
-    file_product_version, flash_window, get_dpi_for_window, get_window_rect, get_work_area,
-    hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
-    install_window_class_background, is_window_cloaked, is_window_minimized, leave_process,
-    message_box, monitor_id_at, monospace_font_families, open_local_file, open_local_path,
-    open_system_fonts_page, os_ui_language, pointer_position, read_context_menu, recycle,
-    redirect_std_streams_to_file, remove_context_menu, request_window_close, reveal_in_explorer,
-    set_clipboard_text, set_current_thread_priority, set_system_backdrop, set_window_dark_mode,
-    set_window_outer_rect, set_window_topmost, shell_execute, silence_std_streams,
-    spawn_at_priority, stand_window_at, std_error_is_console, system_backdrop_available,
-    system_uses_light_apps, take_keyboard_focus, taskbar_auto_hidden_from_state,
-    taskbar_is_auto_hidden, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
-    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_to_console,
+    adopt_parent_console, announce_explorer_menu_change, client_area_animation_enabled,
+    clipboard_text, cloaked_from_attribute, current_thread_priority, current_user_registry_string,
+    current_user_registry_subkeys, detach_console, documents_directory, dpi_at, exposed_from_probe,
+    exposure_probe_points, file_product_version, flash_window, get_dpi_for_window, get_window_rect,
+    get_work_area, hide_every_window_of_this_process, install_console_ctrl_handler,
+    install_context_menu, install_window_class_background, is_window_cloaked, is_window_minimized,
+    leave_process, message_box, monitor_id_at, monospace_font_families, open_local_file,
+    open_local_path, open_system_fonts_page, os_ui_language, pointer_position, read_context_menu,
+    recycle, redirect_std_streams_to_file, remove_context_menu, request_window_close,
+    reveal_in_explorer, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
+    set_window_dark_mode, set_window_outer_rect, set_window_topmost, shell_execute,
+    silence_std_streams, spawn_at_priority, stand_window_at, std_error_is_console,
+    system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
+    taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
+    top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
+    window_is_exposed, work_area_at, write_to_console,
 };
 
 /// The three thread-band calls, off Windows.
@@ -10669,6 +10737,54 @@ mod context_menu_tests {
                 |_| false
             ),
             "and a machine that needs nothing is not written to"
+        );
+    }
+
+    /// RED (2026-09-07) — **every write to what Explorer's menu holds ends by
+    /// telling the shell, and a refusal does not excuse it.**
+    ///
+    /// The bug: `folio.msix` was registered for the account, the deployment
+    /// database agreed, the folder it named was this executable's own — and
+    /// Explorer's first page carried no Folio, on a shell that had been running
+    /// since before the registration. `SHChangeNotify` appeared nowhere in this
+    /// repository. A shell that is never told reads the association and
+    /// context-menu stores once and goes on believing what it read.
+    ///
+    /// The announcement is deliberately **not** conditional on the write having
+    /// worked: [`install_context_menu`] writes one of its two trees before it
+    /// can discover the second will not take, so a refusal is not proof that
+    /// nothing changed. One refresh nobody notices is the cost of being wrong
+    /// that way; a menu item that exists and cannot be seen is the cost of being
+    /// wrong the other.
+    ///
+    /// The announcement is a fake here rather than the real
+    /// `SHChangeNotify` — a test run must not broadcast a shell-wide refresh on
+    /// the machine it runs on, which is the same rule the isolated class store
+    /// below is written under.
+    ///
+    /// MUTATION: delete the `announce()` from [`changing_explorer_menu`] and
+    /// both halves go red. Guard it with `if outcome.is_ok()` and the second
+    /// goes red, which is the half-written registration nobody hears about.
+    #[test]
+    fn a_change_to_explorers_menu_is_always_announced_to_the_shell() {
+        let told = std::cell::Cell::new(0_u32);
+        assert_eq!(
+            changing_explorer_menu(|| Ok::<u8, String>(7), || told.set(told.get() + 1)),
+            Ok(7),
+            "the write's own answer is passed straight through"
+        );
+        assert_eq!(told.get(), 1);
+        assert_eq!(
+            changing_explorer_menu(
+                || Err::<u8, String>("the package is not signed".to_owned()),
+                || told.set(told.get() + 1)
+            ),
+            Err("the package is not signed".to_owned())
+        );
+        assert_eq!(
+            told.get(),
+            2,
+            "a refusal can still have changed half a store, and the shell is told"
         );
     }
 }
