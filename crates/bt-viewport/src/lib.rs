@@ -1692,6 +1692,11 @@ pub struct ViewportProjection {
     /// It is simultaneously the resting top cut, the local-review capacity, and the count behind the
     /// "N rows above" indicator — one number, so a review always ends exactly where rest begins.
     last_live_overflow_subpixels: i64,
+    /// How much band inflation the blank live tail gave back at rest, from the last projection
+    /// (`bottom_relief_subpixels` in `continuous_frame`). Held because the scroll ceiling is
+    /// `total - pane - relief` and every reader of that ceiling — the wheel's clamp, the bar, the
+    /// jump — has to be able to ask for it between frames.
+    last_bottom_relief_subpixels: i64,
     unread_rows: usize,
     last_total_rows: usize,
     last_total_height_subpixels: i64,
@@ -1849,6 +1854,7 @@ impl ViewportProjection {
             exact_source_reprint_hold: false,
             live_overflow_offset_subpixels: 0,
             last_live_overflow_subpixels: 0,
+            last_bottom_relief_subpixels: 0,
             unread_rows: 0,
             last_total_rows: 0,
             last_total_height_subpixels: 0,
@@ -2101,17 +2107,33 @@ impl ViewportProjection {
 
     /// **The furthest into history this view may be scrolled**, in subpixels:
     /// everything the last projection measured, less the one screenful that is
-    /// showing. Zero when the whole of the document fits, which is the same
-    /// thing as "there is no scrollback to look at".
+    /// showing, less the band inflation the blank live tail already gave back.
+    /// Zero when the whole of the document fits, which is the same thing as
+    /// "there is nothing here to scroll to".
     ///
     /// Public because a scroll bar is a *picture* of this number and of
     /// [`Self::scroll_offset_subpixels`], and a picture derived from anything
     /// else would be a second opinion about how far the view can go. It is the
     /// clamp [`Self::scroll_by_subpixels`] and [`Self::scroll_to_top`] were
     /// already computing inline, named once so the three cannot disagree.
+    ///
+    /// **The relief term is not a correction applied to this number, it is part
+    /// of what the number always meant** (user report 2026-09-07, §3.1). A
+    /// display band inflates the live plane past the pane it is drawn in, and
+    /// §3.1's bottom relief spends the blank rows under the prompt on that
+    /// inflation *at rest*: those pixels are already on the glass, so they are
+    /// not somewhere the view can travel to. `continuous_frame` has always
+    /// clamped the window by `total - pane - relief`; this function answered
+    /// `total - pane`, and everything that reads it — the wheel, the bar, the
+    /// "has any history" question the thumb's visibility turns on — believed in
+    /// a stretch of document that does not exist. A pane whose whole transcript
+    /// fits therefore wore a scroll bar, pinned to the bottom of its track,
+    /// with nowhere to go. The two are one expression now: `continuous_frame`
+    /// calls this rather than repeating it.
     pub fn scroll_extent_subpixels(&self) -> i64 {
         self.last_total_height_subpixels
             .saturating_sub(self.viewport_height_subpixels())
+            .saturating_sub(self.last_bottom_relief_subpixels)
             .max(0)
     }
 
@@ -2418,6 +2440,7 @@ impl ViewportProjection {
             .saturating_mul(self.cell_height_subpixels.get())
             .min(live_extra_height)
             .max(0);
+        self.last_bottom_relief_subpixels = bottom_relief_subpixels;
         // The relieved pixels are spent at rest, so they are no longer overflow: what remains is
         // both the height still cut off above the pane and the exact local-review capacity. One
         // number now drives the resting cut (`frame_top_subpixels`), the review indicator, and —
@@ -2455,11 +2478,13 @@ impl ViewportProjection {
             .saturating_add(staging_height)
             .saturating_add(live_height);
         self.last_total_height_subpixels = total_height;
+        // The window's own ceiling, asked of the function every other reader asks
+        // (`scroll_extent_subpixels`): the two numbers were the same arithmetic written twice, and
+        // one of the two copies was missing the relief term for as long as both existed.
+        // `viewport_height_subpixels()` is `rectangular_live_height` by construction.
         let pane_height = rectangular_live_height;
-        let bottom_top_subpixels = total_height
-            .saturating_sub(pane_height)
-            .saturating_sub(bottom_relief_subpixels)
-            .max(0);
+        debug_assert_eq!(self.viewport_height_subpixels(), pane_height);
+        let bottom_top_subpixels = self.scroll_extent_subpixels();
         if !primary {
             self.scroll_state = ViewportScrollState::Bottom;
             if let Some(requested) = self.pending_scroll_offset_subpixels.take() {

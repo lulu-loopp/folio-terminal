@@ -692,6 +692,13 @@ scroll → 收割 → 滚轮上翻 → frame/selection/renderer 边界”。
 | 配额淘汰 | 只由转录层执行，与 ED3 共用 tombstone/anchor 降级管线 |
 | 无换行的最后一行 | 稳态留 live；事务期随 vendor tail；不凭 resize 猜测定稿 |
 
+- **底部宽放让出去的像素不是可滚行程,滚动上限只有一个(用户实机报告 2026-09-07,已落地;`crates/bt-viewport/src/lib.rs`)。** 公式带把 live 面撑得比 pane 高时,2026-08-02 那条 bottom relief 让**提示符以下那截空白行**在静止态先把撑出来的高度还回去:`relief = min(空白尾行数 × 行高, 带撑高量)`,于是「一次 `math.ps1` 跑完、提示符回来、下面还空着一大片」的那种 pane 在静止态**一个像素都不缺**,窗口上限 `bottom_top = 总高 − pane 高 − relief` 因此是 **0**。用户拿两张截图来问:那样一枚**根本滚不动**的 pane 右缘却画着滑块,而且滑块从 pane 顶往下约三百物理像素起、一路贴到底;第二张是滚到最顶时滑块仍从顶往下二百多像素开始。
+  - **真因是同一个上限被写了两遍,而其中一遍漏了 relief 项。** `continuous_frame` 钳窗口用的是上面那个带 relief 的式子,而**其余每一个读者**——滚轮的钳位 `scroll_by_subpixels`、`scroll_to_top`、滑块的几何、连「这块 pane 有没有回滚」那个可见性判据——问的都是 `scroll_extent_subpixels()`,而它算的是 `总高 − pane 高`。两者相差正好一个 relief:滚不动的 pane 报出一段并不存在的行程(于是有滑块,且 offset=0 时滑块被画在轨道**底部**),能滚的 pane 在到顶时 `offset` 比 `extent` 少一个 relief(于是滑块到顶了却不在轨道顶,长度也比「视口占文档的份额」短)。
+  - **改法:上限只有一句话。** `scroll_extent_subpixels()` 减去上一帧记下的 `last_bottom_relief_subpixels`,而 `continuous_frame` 的 `bottom_top_subpixels` **改成调用它**——两处同一个算式写两遍,正是其中一遍能漏项的原因。relief 是内容推导出来的、每帧重算,所以这个数与 `last_total_height_subpixels` 是同一个新鲜度等级。
+  - **代价与边界诚实记账**:relief 只是**部分**时(空白尾行盖不住全部撑高量),pane 依旧能滚,上限就是没被盖住的那一截——这与修前一致,只是数目对了;「N rows above」那句提示本来就读的是 `last_live_overflow_subpixels`(已扣 relief),从来没有错过,本次只是把它钉进了红门。这一条**不解**另一桩同源几何的挂账:最新那几枚命令的提示行离文档尾不足一屏时只能「滚到底」而不能到顶(§3.2 2026-09-07 那条末尾记的那笔)——那是「文档到头了」这条普遍的界,不是本条修的漏项,两者只是都经过 `bottom_top`。
+  - **实机复验(隔离 `APPDATA`/`LOCALAPPDATA`,debug,2100×1750 物理 @scale 2,`D:\Demo\math.ps1`)。** 修前:一次跑完 `total=1909760 viewport=1667072 relief=242688` → 真上限 0,而 `extent` 报 242688,滑块 `[2092, 292.2, 2100, 1750]`——贴着底,画在一块滚不动的 pane 上;跑两次滚到顶 `relief=180224` → 真上限 305152,而 `extent` 报 485376,滑块顶在 `y=115`(轨道顶是 80)、长 1293 物理像素。修后同样两态:`extent=0` 且**没有滑块**;到顶时 `extent=offset=305152`,滑块 `[2092, 80.0, 2100, 1491.6]`——顶对顶,长 1411.6 = 1670 × 1667072 ÷ 1972224,正是视口占文档的份额,与同一枚 pane 停在底部时量到的长度**逐像素相同**。
+  - 红门四道:`termscroll::a_pane_whose_whole_transcript_fits_has_nothing_to_scroll_and_wears_no_bar`(把真投影拿来问 `bar()`:要一百万 subpixel 的历史而视口纹丝不动 → 无滑块、无 overlay)、`termscroll::a_view_at_the_top_of_its_document_puts_the_thumb_at_the_top_of_the_track`(到顶时滑块顶 = 轨道顶,长度 = 视口 ÷ 走一趟量出来的文档)、`session::a_fully_relieved_band_leaves_no_scroll_extent_for_anyone_to_read`、`session::a_view_at_the_top_of_a_partly_relieved_pane_has_spent_its_whole_extent`。变异红证原文:修前四道分别读到「a pane that cannot scroll draws no thumb」「the view is at the top and the thumb's top is 120 while the track's is 40」「left: 30720 / right: 0」「left: 30720 / right: 10240」。
+
 ### 3.2 统一坐标：ContentAnchor（v3.2 补全）
 
 ```rust
@@ -2202,6 +2209,8 @@ else                           { Flash }    // 被压住了,但任务栏还在,�
 **滑块贴 pane 自己的边(用户裁决 2026-09-07)。** 本片原本把 4px 的滑块**居中**在 8px 车道里,两侧各留 2px 终端。读者拿三张图来问:一瞥卡的条、下拉的条都紧贴着自己那个表面的内缘,只有 shell 这一条离自己的边有一段——「其他地方的滚动条都是贴边的,要不要把 shell 的这个改掉保持一致」。改掉:滑块右缘 = `body[2]`,车道那 8px 于是 4 给滑块、4 全留在**里侧**(滑块与正文之间),而不是两边各 2。**脚上那条同改**,理由是它本来就是同一件乐器转了个方向——一条贴底、一条悬空才是这次要消掉的那种不一致。**车道、取手范围、rail 的内缩量一个数都没动**:命中域仍旧是 `lane + gap` = 11px,`the_thumb_and_the_rail_stand_side_by_side_in_the_lane_that_was_reserved` 与 `the_ticks_sit_inboard_of_the_reserved_scroll_lane` 原样通过,命令 rail 一个像素没挪。红门 `the_mark_rides_the_panes_own_edge_and_is_still_the_only_thing_drawn` 钉三件事:两轴的滑块都落在 pane 自己的边上、宽度没变、以及**这一层推出去的每一块 quad 都在滑块矩形之内**——后者是「没有轨道」那条推论第一次被写成可执行的形式。
 
 **读者那张图上「滑块旁边那条通高的线」不是轨道。** 它是 pane 之间的 divider(截图里右邻是预览 pane),画在 `body[2]` 之外;本条从来没有画过轨道,而改完之后滑块正好抵着它,和一瞥卡的条抵着卡自己那道边是同一件事。最右侧的 pane 没有 divider,那里抵着的是窗自己的一道边线。
+
+**「无回滚 = 无条」问的那个数,以前答得比事实大(用户实机报告 2026-09-07,已落地;§3.1 同日那条)。** 状态机第一条压制读 `ViewportProjection::scroll_extent_subpixels() > 0`,滑块的几何也全从那个数派生——而在公式带把 live 面撑高、提示符下面又有空白行的 pane 上,它把 §3.1 的 bottom relief 已经花掉的那截也算成了行程。后果正是这条压制立起来防的那件事:**一块滚不动的 pane 戴上了条**,而且因为 `offset = 0` 而 `extent > 0`,它被画在轨道**底部**——一个撑不满全程、也指不动任何东西的家具。第二张截图是同一个漏项的另一面:能滚的 pane 滚到顶,`offset` 比 `extent` 少一个 relief,于是滑块到顶了却不在轨道顶,长度也比视口占文档的份额短。**本片一行未改**——`bar()` 的算式、贴边、车道、休息与淡出都原样成立:错的从来不是这幅画,是被画的那个数。修在 §3.1,滚动上限从此只有一句话,`continuous_frame` 与这条压制问的是同一个函数。
 
 **可见性状态机(本片的裁决面)。** 两条压制 + 三个理由 + 一次休息:① 无回滚 = 无条(一个撑满全程的条是冒充信息的家具);② alt-screen 无条——与搜索胶囊(`seat_can_search`,D-5)和 rail 同一条规矩,§3.2 两块屏幕锚点命名空间隔离,主屏的 extent 不是对 `vim` 画面的陈述;③ 手按住滑块、指针在车道内、视图不在 live 底部——三者任一为真则条常驻(前两者同时点亮 hover 色);④ 三者皆假时,从最后一个理由消失起保持 **900ms**,再用 **180ms** 淡出。`prefers-reduced-motion` 保留等待、去掉淡出——**等待不是过渡**。900/180 是本片新立的两个常数而非借用:窗内已有的时长全是 transition(rail `.18s`、pin 120ms、tip 90ms),已有的两个"等"(`PEEK_INTENT_MS`、float 的 180ms)问的是相反的问题(手要停多久才出现)。
 
