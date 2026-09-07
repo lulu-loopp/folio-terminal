@@ -825,6 +825,33 @@ impl Span {
         Self::styled(text, SpanStyle::Math)
     }
 
+    /// **This run, standing inside a link that points at `target`.**
+    ///
+    /// A link's label is inline content (CommonMark §6.3), so its runs keep the
+    /// faces they were written in and what the label gives them all is the
+    /// target: [`Span::target`] says "this run answers a click", and it is the
+    /// one field the window reads to make a run answer one
+    /// (`main::note_link_sites`). Plain words become [`SpanStyle::Link`], which
+    /// is the style that means "a link's plain text"; a code span stays code, a
+    /// bold word stays bold, a formula stays a formula.
+    ///
+    /// **A picture keeps its own target and is not made to answer**, because
+    /// [`SpanStyle::Image`]'s target is where its pixels are and there is only
+    /// one of those fields. `[![alt](img)](url)` is a badge, and a badge draws
+    /// its picture — a picture is not a link in this window (2026-08-28, the
+    /// ruling `main::note_link_sites` states), so what is lost is a click this
+    /// window would not have offered on it anyway.
+    fn linked(mut self, target: &str) -> Self {
+        if self.style == SpanStyle::Image {
+            return self;
+        }
+        if self.style == SpanStyle::Plain {
+            return Self::link(&self.text, target);
+        }
+        self.target = Some(target.to_owned());
+        self
+    }
+
     /// One picture: the alt text it says, and the source it names.
     pub fn image(alt: &str, src: &str) -> Self {
         Self {
@@ -1040,52 +1067,49 @@ pub struct ImageCandidate {
 
 /// Split one line into its inline runs.
 ///
-/// **Four scans and one ruling, and the order of the scans is itself a ruling.**
-/// Backticks first, which is the mock-up's order (4915-4917) and the one that
-/// makes `` `**not bold**` `` come out as literal code rather than as a bold run
-/// inside a code span; then mathematics, so that a formula's own `*`, `_` and `[`
-/// are the formula's and not this renderer's; then links, so a
-/// `**[bold link](url)**`'s brackets are gone before the asterisks are read; then
-/// the asterisks and underscores over whatever is still plain.
+/// **Two claiming scans, one walk, one ruling — and the order is itself a
+/// ruling.** Backticks are claimed first, which is the mock-up's order
+/// (4915-4917) and the one that makes `` `**not bold**` `` come out as literal
+/// code rather than as a bold run inside a code span; then mathematics inside
+/// what is left, so that a formula's own `*`, `_` and `[` are the formula's and
+/// not this renderer's. Those two produce [`ClaimedRun`]s — *byte ranges of the
+/// line*, not slices of it — and [`scan_line`] then walks the line once, from
+/// the first byte to the last, stepping over every claimed range and reading
+/// brackets and delimiter runs in between. [`resolve_emphasis`] rules on the
+/// delimiters at the end.
 ///
-/// **What the fourth scan produces is candidates, not runs.** Each of the first
-/// three works on a *slice* and hands its leftovers to the next, so a line comes
-/// out of them in pieces — and emphasis does not live in a piece. It lives in the
-/// line: `**a `b` c**` has its opener in the first piece and its closer in the
-/// third, and a pass that read one piece at a time saw no pair in either and
-/// printed both pairs of asterisks (user report, 2026-08-28). So the scans
-/// deposit [`Piece`]s into one list for the whole line, and
-/// [`resolve_emphasis`] — CommonMark's delimiter stack, §6.2 — runs over that
-/// list once, at the end, which is where the specification puts it too.
+/// **Every one of those passes reads the line and not a piece of it, and that is
+/// the whole of two reported bugs.** Emphasis was the first (2026-08-28):
+/// `**a `b` c**` has its opener before a code span and its closer after it, and
+/// a pass that read one leftover slice at a time saw no pair in either and
+/// printed both pairs of asterisks. Links were the second, and identical
+/// (2026-09-07): ``[`folio-0.2.2-windows-x64.zip`](https://…)`` has its `[`
+/// before a code span and its `](…)` after it, so a link scan working on
+/// leftovers saw a bracket with no partner and a partner with no bracket, and
+/// printed the markup. Neither emphasis nor a link is a property of a slice.
+/// Both are properties of the line, and the specification agrees: brackets are
+/// matched during one left-to-right scan against a stack of openers (§6.3) and
+/// the delimiter stack is processed after it (§6.2).
 ///
-/// **The backtick pass standing in front of the mathematics pass is the whole of
-/// "a dollar inside code is a dollar"** — and of "a `\begin{align}` inside code
-/// is a `\begin{align}`". There is no second rule and no list of things that look
-/// like shell or like LaTeX: a code span has already been claimed by the time the
-/// formulas are read, and a fenced block never reaches this function at all.
+/// **A claim standing in front of a bracket is CommonMark's own precedence.**
+/// "Code spans, autolinks and raw HTML tags bind more tightly than the brackets"
+/// (§6.3), so `` [foo`](/uri)` `` is a literal `[foo` beside a code span and not
+/// a link — which is exactly what a walk that steps *over* a claimed range does,
+/// without a rule of its own.
+///
+/// **The backtick claim standing in front of the mathematics claim is the whole
+/// of "a dollar inside code is a dollar"** — and of "a `\begin{align}` inside
+/// code is a `\begin{align}`". There is no second rule and no list of things
+/// that look like shell or like LaTeX: a code span has already been claimed by
+/// the time the formulas are read, and a fenced block never reaches this
+/// function at all.
 ///
 /// **One door for every block that has text in it.** A table cell, a list item,
 /// a quote line and a paragraph all come through here, which is the whole of why
 /// `` `code` `` inside a table cell works without a line of its own: there is no
 /// second inline parser to teach.
 pub fn parse_inline(line: &str) -> Vec<Span> {
-    let mut pieces = Vec::new();
-    let mut claimed = 0usize;
-    let mut rest = line;
-    while let Some(open) = rest.find('`') {
-        // A backtick with no partner is a backtick, not the start of anything.
-        let Some(close) = rest[open + 1..].find('`') else {
-            break;
-        };
-        push_math_runs(&rest[..open], claimed, line, &mut pieces);
-        pieces.push(Piece::Claimed(Span::code(
-            &rest[open + 1..open + 1 + close],
-        )));
-        let eaten = open + 1 + close + 1;
-        claimed += eaten;
-        rest = &rest[eaten..];
-    }
-    push_math_runs(rest, claimed, line, &mut pieces);
+    let mut pieces = scan_line(line);
     resolve_emphasis(&mut pieces);
     settle(pieces)
 }
@@ -1119,10 +1143,28 @@ enum Piece {
     /// show it. [`Span`] is a flat model with one style per run, so a code span
     /// inside a bold phrase is set in the code face and not in a bold code face.
     /// That is a floor of the model rather than of this pass, and it is the same
-    /// floor [`push_link_runs`] already stands on.
+    /// floor [`close_bracket`] already stands on.
     Claimed(Span),
     /// A run of `*` or `_`, and what the flanking rule said about it.
     Delimiter(Delimiter),
+    /// A `[` or a `![` that has not been shown to open anything.
+    ///
+    /// **Its own piece rather than a `[` inside a text piece, and the reason is
+    /// the cut.** A bracket that turns out to open a link is markup and does not
+    /// survive into the page, and everything the walk deposited after it is that
+    /// link's label — so [`close_bracket`] splits the piece list at this piece
+    /// and drops it. A `[` merged into the text around it could not be split off
+    /// again without cutting a string, which is what the byte arithmetic this
+    /// type replaces used to do.
+    ///
+    /// One that never closes anything is what the author typed, and it is set as
+    /// the text it is — inside whatever emphasis encloses it, which is why it
+    /// carries the same two flags a text piece does.
+    Bracket {
+        image: bool,
+        bold: bool,
+        italic: bool,
+    },
 }
 
 /// A run of `*` or `_`, weighed by CommonMark's flanking rule.
@@ -1213,7 +1255,213 @@ fn is_unicode_punctuation(character: char) -> bool {
     )
 }
 
-/// The second pass: mathematics inside whatever the backtick pass left plain.
+/// One run the code and mathematics scans claimed, **as a range of the line**.
+///
+/// A range and not a slice, because the walk that reads brackets and delimiters
+/// reads the line itself and has to know where to step over. Claiming by range
+/// is also what makes CommonMark's precedence (§6.3, "code spans … bind more
+/// tightly than the brackets") fall out of the walk instead of being a rule
+/// somebody has to remember: a `[` or a `]` inside a claimed range is never
+/// looked at, because the walk is never there.
+struct ClaimedRun {
+    /// Where the run begins in the line, its delimiters included.
+    start: usize,
+    /// One past its last byte.
+    end: usize,
+    /// The run itself, already built.
+    span: Span,
+}
+
+/// **Every code span and every formula in one line, in the order they stand.**
+///
+/// Backticks first over the whole line and mathematics only in the gaps between
+/// them — the order [`parse_inline`] documents, kept exactly, because it is the
+/// whole of "a dollar inside code is a dollar".
+fn claimed_runs(line: &str) -> Vec<ClaimedRun> {
+    let mut runs = Vec::new();
+    let mut at = 0usize;
+    while let Some(open) = line[at..].find('`').map(|found| at + found) {
+        // A backtick with no partner is a backtick, not the start of anything.
+        let Some(close) = line[open + 1..].find('`').map(|found| open + 1 + found) else {
+            break;
+        };
+        push_math_claims(line, at, open, &mut runs);
+        runs.push(ClaimedRun {
+            start: open,
+            end: close + 1,
+            span: Span::code(&line[open + 1..close]),
+        });
+        at = close + 1;
+    }
+    push_math_claims(line, at, line.len(), &mut runs);
+    runs
+}
+
+/// An unclosed `[` or `![`, and where its label began.
+struct OpenBracket {
+    /// The [`Piece::Bracket`] that stands for it, which is where its label's
+    /// pieces start and where the list is cut when it closes.
+    piece: usize,
+    /// Where its markup begins in the line — the `!` of a `![`, so that the
+    /// arithmetic that ends the label in front of it has one answer.
+    at: usize,
+    image: bool,
+    /// **Links may not contain links** (CommonMark §6.3): making one puts out
+    /// every `[` still standing in front of it. An `![` is not put out, because
+    /// a picture inside a link is a badge and is the ordinary case in a README.
+    active: bool,
+}
+
+/// Walk the line once and deposit every piece of it.
+///
+/// **One walk, one stack of brackets, and everything else is arithmetic.** At
+/// each byte the walk is either at the head of a [`ClaimedRun`] — which it
+/// deposits whole and steps over — or at a `[`, or at a `]`, or in prose. Prose
+/// is flushed to [`push_delimiter_runs`] the moment a bracket or a claim
+/// interrupts it, which is what keeps a delimiter run's neighbours the line's
+/// own and not a chunk boundary's.
+fn scan_line(line: &str) -> Vec<Piece> {
+    let claims = claimed_runs(line);
+    let bytes = line.as_bytes();
+    let mut pieces = Vec::new();
+    let mut brackets: Vec<OpenBracket> = Vec::new();
+    let mut claim = 0usize;
+    // Where the prose the walk has not deposited yet begins.
+    let mut plain = 0usize;
+    let mut at = 0usize;
+    while at < bytes.len() {
+        // A claim inside a link's destination is a claim the walk never reaches,
+        // because the destination was read off the line in one piece.
+        while claims.get(claim).is_some_and(|run| run.start < at) {
+            claim += 1;
+        }
+        if let Some(run) = claims.get(claim).filter(|run| run.start == at) {
+            push_delimiter_runs(&line[plain..at], plain, line, &mut pieces);
+            pieces.push(Piece::Claimed(run.span.clone()));
+            at = run.end;
+            plain = at;
+            claim += 1;
+            continue;
+        }
+        match bytes[at] {
+            b'[' => {
+                // **A `!` immediately in front of the bracket makes this a
+                // picture** — unless the author escaped it, in which case the
+                // `!` is a `!` and what follows it is an ordinary link. The
+                // parity is `bt_detect::delimiter_is_escaped`'s, which is the
+                // same count the dollar and the asterisk are read with: one
+                // definition, four callers. The `!` also has to be prose the
+                // walk is still holding: one at the tail of a code span is that
+                // span's own text and not this bracket's markup.
+                let image = at > plain
+                    && bytes[at - 1] == b'!'
+                    && !bt_detect::delimiter_is_escaped(line, at - 1);
+                let markup = if image { at - 1 } else { at };
+                push_delimiter_runs(&line[plain..markup], plain, line, &mut pieces);
+                brackets.push(OpenBracket {
+                    piece: pieces.len(),
+                    at: markup,
+                    image,
+                    active: true,
+                });
+                pieces.push(Piece::Bracket {
+                    image,
+                    bold: false,
+                    italic: false,
+                });
+                at += 1;
+                plain = at;
+            }
+            b']' => match close_bracket(line, at, plain, &mut brackets, &mut pieces) {
+                Some(resume) => {
+                    at = resume;
+                    plain = resume;
+                }
+                // The bracket closed nothing, so the `]` is the author's own
+                // and stays in the prose the walk is holding.
+                None => at += 1,
+            },
+            // Stepping by bytes reads the same positions stepping by characters
+            // would: `[`, `]` and `!` are ASCII, and a UTF-8 continuation byte
+            // is never one of them.
+            _ => at += 1,
+        }
+    }
+    push_delimiter_runs(&line[plain..], plain, line, &mut pieces);
+    pieces
+}
+
+/// Rule on the `]` at `at` — **CommonMark's "look for link or image"** (§6.3).
+///
+/// `Some(resume)` when it made one, and the byte the walk goes on from; `None`
+/// when the bracket was punctuation after all, which leaves the `]` in the prose
+/// where the walk found it. Either way the opener is off the stack: a `]` that
+/// failed to close it has spent it, and a later `]` may not try the same one
+/// again.
+///
+/// **The label is inline content and is parsed as such** — the whole of the
+/// 2026-09-07 report. Everything the walk deposited since the opener *is* the
+/// label, already read as code spans, formulas, brackets and delimiter runs, so
+/// what is left is what the specification does next: process the label's own
+/// emphasis, settle it into runs, and hang the target on every one of them. A
+/// code span in a label stays a code span and gains a target; a bold word stays
+/// bold and gains a target; plain words become [`SpanStyle::Link`]. There is no
+/// arm for "a label that is one code span" because there is no such case — a
+/// label is inline content, and one code span is what inline content sometimes
+/// happens to be.
+///
+/// **A picture is the one place the label collapses**, because
+/// [`SpanStyle::Image`] carries alt *text*: `![the `zip`](i.png)` says "the zip",
+/// which is CommonMark's own answer (the alt of an image is the plain text of
+/// its label). Emphasis is resolved before that text is taken, so a `**` that
+/// found its partner is markup and one that did not is a pair of asterisks the
+/// reader sees.
+fn close_bracket(
+    line: &str,
+    at: usize,
+    plain: usize,
+    brackets: &mut Vec<OpenBracket>,
+    pieces: &mut Vec<Piece>,
+) -> Option<usize> {
+    let opener = brackets.pop()?;
+    if !opener.active {
+        return None;
+    }
+    // The target has to follow the label immediately, which is what keeps
+    // `[a] (b)` and a bare `[TODO]` out of this branch.
+    let target = line[at + 1..].strip_prefix('(')?;
+    let close = at + 2 + target.find(')')?;
+    // `[]()` is punctuation, not an empty link. **`![](src)` is not**: an empty
+    // alt is what a document writes when the picture says nothing a reader needs
+    // told — a rule, a spacer, a badge whose meaning is its own face — and it is
+    // a picture like any other.
+    if at == opener.at + 1 && !opener.image {
+        return None;
+    }
+    let target = link_destination(&line[at + 2..close]);
+    push_delimiter_runs(&line[plain..at], plain, line, pieces);
+    let mut label = pieces.split_off(opener.piece);
+    // The bracket's own markup does not survive into the page.
+    label.remove(0);
+    resolve_emphasis(&mut label);
+    let spans = settle(label);
+    if opener.image {
+        let alt: String = spans.iter().map(|span| span.text.as_str()).collect();
+        pieces.push(Piece::Claimed(Span::image(&alt, &target)));
+    } else {
+        for bracket in brackets.iter_mut().filter(|bracket| !bracket.image) {
+            bracket.active = false;
+        }
+        pieces.extend(
+            spans
+                .into_iter()
+                .map(|span| Piece::Claimed(span.linked(&target))),
+        );
+    }
+    Some(close + 1)
+}
+
+/// The second claim: mathematics inside one gap the backtick scan left plain.
 ///
 /// **The rule for the dollar is Pandoc's `tex_math_dollars`**, which is the written-down
 /// standard for mathematics in a markdown document and is therefore something
@@ -1242,16 +1490,16 @@ fn is_unicode_punctuation(character: char) -> bool {
 /// renderer overruling the document about its own contents. What the two do
 /// share is the escape and the refusal to read `$$` as two delimiters, and those
 /// are shared by calling the same function rather than by writing it twice.
-fn push_math_runs(text: &str, at: usize, line: &str, pieces: &mut Vec<Piece>) {
-    let mut rest = text;
-    let mut at = at;
-    while let Some((open, end)) = next_inline_math(rest) {
-        push_link_runs(&rest[..open], at, line, pieces);
-        pieces.push(Piece::Claimed(Span::math(&rest[open..end])));
+fn push_math_claims(line: &str, from: usize, to: usize, runs: &mut Vec<ClaimedRun>) {
+    let mut at = from;
+    while let Some((open, end)) = next_inline_math(&line[at..to]) {
+        runs.push(ClaimedRun {
+            start: at + open,
+            end: at + end,
+            span: Span::math(&line[at + open..at + end]),
+        });
         at += end;
-        rest = &rest[end..];
     }
-    push_link_runs(rest, at, line, pieces);
 }
 
 /// The byte range of the next inline formula, **delimiters included**.
@@ -1485,82 +1733,6 @@ fn environment_close(text: &str, name: &str, open: usize) -> Option<usize> {
     }
 }
 
-/// The second pass: `[text](url)` and `![alt](src)` inside whatever the code
-/// pass left plain.
-///
-/// The label is emitted as one run and the target rides beside it, unresolved.
-/// A label carrying its own emphasis (`[**a**](b)`) keeps the asterisks visible
-/// rather than nesting two styles in one run — a deliberate floor, because the
-/// alternative is a span model with a stack in it and the case is vanishing.
-///
-/// **An image is read here and not in a pass of its own** (2026-08-28), because
-/// in CommonMark it is not a second construct: `![alt](src)` is the link
-/// grammar with a `!` in front of it, and a scanner that read images separately
-/// would have to agree with this one about where a label ends and what an
-/// escape is. What the `!` changes is the *verdict*, not the parse.
-fn push_link_runs(text: &str, at: usize, line: &str, pieces: &mut Vec<Piece>) {
-    let mut rest = text;
-    let mut at = at;
-    while let Some(open) = rest.find('[') {
-        let Some(label_end) = rest[open..].find(']').map(|found| open + found) else {
-            break;
-        };
-        // **A `!` immediately in front of the bracket makes this a picture** —
-        // unless the author escaped it, in which case the `!` is a `!` and what
-        // follows it is an ordinary link. The parity is
-        // `bt_detect::delimiter_is_escaped`'s, which is the same count the
-        // dollar and the asterisk are read with: one definition, four callers.
-        let image = open > 0
-            && rest.as_bytes()[open - 1] == b'!'
-            && !bt_detect::delimiter_is_escaped(line, at + open - 1);
-        // The target has to follow the label immediately, which is what keeps
-        // `[a] (b)` and a bare `[TODO]` out of this branch.
-        if !rest[label_end + 1..].starts_with('(') {
-            push_delimiter_runs(&rest[..label_end + 1], at, line, pieces);
-            at += label_end + 1;
-            rest = &rest[label_end + 1..];
-            continue;
-        }
-        let target_open = label_end + 1;
-        let Some(target_end) = rest[target_open..]
-            .find(')')
-            .map(|found| target_open + found)
-        else {
-            break;
-        };
-        // `[]()` is punctuation, not an empty link. **`![](src)` is not**: an
-        // empty alt is what a document writes when the picture says nothing a
-        // reader needs told — a rule, a spacer, a badge whose meaning is its
-        // own face — and it is a picture like any other.
-        if label_end == open + 1 && !image {
-            push_delimiter_runs(&rest[..target_end + 1], at, line, pieces);
-            at += target_end + 1;
-            rest = &rest[target_end + 1..];
-            continue;
-        }
-        if image {
-            // The `!` is markup and does not survive into the page, so the text
-            // in front of the picture stops one byte short of the bracket.
-            push_delimiter_runs(&rest[..open - 1], at, line, pieces);
-            pieces.push(Piece::Claimed(Span::image(
-                &rest[open + 1..label_end],
-                &link_destination(&rest[target_open + 1..target_end]),
-            )));
-            at += target_end + 1;
-            rest = &rest[target_end + 1..];
-            continue;
-        }
-        push_delimiter_runs(&rest[..open], at, line, pieces);
-        pieces.push(Piece::Claimed(Span::link(
-            &rest[open + 1..label_end],
-            &link_destination(&rest[target_open + 1..target_end]),
-        )));
-        at += target_end + 1;
-        rest = &rest[target_end + 1..];
-    }
-    push_delimiter_runs(rest, at, line, pieces);
-}
-
 /// **The address inside a `(…)`**, with the title CommonMark allows beside it
 /// taken off and an angle-bracketed address unwrapped.
 ///
@@ -1780,7 +1952,7 @@ fn close_emphasis(pieces: &mut [Piece], opener: usize, closer: usize) {
     };
     for piece in &mut pieces[opener + 1..closer] {
         match piece {
-            Piece::Text { bold, italic, .. } => {
+            Piece::Text { bold, italic, .. } | Piece::Bracket { bold, italic, .. } => {
                 *bold |= add_bold;
                 *italic |= add_italic;
             }
@@ -1819,6 +1991,12 @@ fn settle(pieces: Vec<Piece>) -> Vec<Span> {
         match piece {
             Piece::Text { text, bold, italic } => push_text(&text, bold, italic, &mut spans),
             Piece::Claimed(span) => spans.push(span),
+            // A bracket that closed nothing is the character the author typed.
+            Piece::Bracket {
+                image,
+                bold,
+                italic,
+            } => push_text(if image { "![" } else { "[" }, bold, italic, &mut spans),
             // Whatever a delimiter run did not spend is what the author typed.
             Piece::Delimiter(run) => push_text(
                 &(run.marker as char).to_string().repeat(run.unspent),
@@ -9672,6 +9850,144 @@ mod tests {
         // And the backtick pass still stands in front: a picture written inside
         // a code span is the text of that code span.
         assert_eq!(parse_inline("`![a](b)`"), vec![Span::code("![a](b)")]);
+    }
+
+    /// A run set in `style`, pointing at `target` — what a link's label leaves
+    /// behind on every run inside it.
+    fn targeted(text: &str, style: SpanStyle, target: &str) -> Span {
+        Span {
+            text: text.to_owned(),
+            style,
+            target: Some(target.to_owned()),
+        }
+    }
+
+    /// RED GATE (user report, 2026-09-07: in this window's own markdown preview
+    /// the download line of `README.zh-CN.md` printed
+    /// ``[`folio-0.2.2-windows-x64.zip`](https://…)`` as raw markdown, while the
+    /// plain-text link on the same line rendered) — **a link's label is inline
+    /// content, parsed by CommonMark's bracket rules, and never a string.**
+    ///
+    /// The cause was the one emphasis had on 2026-08-28, in a second
+    /// construct — `docs/DESIGN.md` §7.1.3i‴. The link pass ran on the
+    /// *leftovers* of the code and mathematics passes, so a `[` deposited in one
+    /// leftover and the `](…)` that answers it in another were two halves no
+    /// single leftover could see. Anything at all inside a label — a code span,
+    /// a formula, an inner picture — split the label in two and printed the
+    /// markup.
+    ///
+    /// Every row is checked before any of them is reported, because the matrix
+    /// is the evidence: a stop at the first row says which shape broke and not
+    /// which rule did.
+    ///
+    /// MUTATIONS: read brackets inside one pass's leftovers rather than along
+    /// the line (rows 1 to 6 and 8 to 10); hand the label to the renderer as one
+    /// string rather than as runs (rows 2, 3, 7 and 8); let a bracket inside a
+    /// claimed range open one (rows 4, 5 and 11); drop the target from every run
+    /// of a label but the first (rows 1 to 3); leave `![` alight when a link is
+    /// made (row 9).
+    #[test]
+    fn a_links_label_is_inline_content_and_not_a_string() {
+        let zip = "https://github.com/lulu-loopp/folio-terminal/releases/download/v0.2.2-preview/folio-0.2.2-windows-x64.zip";
+        let reported = format!("[`folio-0.2.2-windows-x64.zip`]({zip})");
+        let cases: [(&str, Vec<Span>); 11] = [
+            // 1. The reported shape: a label that is one code span.
+            (
+                reported.as_str(),
+                vec![targeted(
+                    "folio-0.2.2-windows-x64.zip",
+                    SpanStyle::Code,
+                    zip,
+                )],
+            ),
+            // 2. A label carrying emphasis, which was a floor and is now the rule.
+            (
+                "[**bold** text](u)",
+                vec![
+                    targeted("bold", SpanStyle::Bold, "u"),
+                    Span::link(" text", "u"),
+                ],
+            ),
+            // 3. And a label carrying both, in Chinese prose.
+            (
+                "从[发布页](p.md)下载 [`folio.zip` *现在*](z.zip)，解压",
+                vec![
+                    Span::plain("从"),
+                    Span::link("发布页", "p.md"),
+                    Span::plain("下载 "),
+                    targeted("folio.zip", SpanStyle::Code, "z.zip"),
+                    Span::link(" ", "z.zip"),
+                    targeted("现在", SpanStyle::Italic, "z.zip"),
+                    Span::plain("，解压"),
+                ],
+            ),
+            // 4. A code span in a label may hold the very characters the grammar
+            //    is written in: the claim was made before the walk read a bracket.
+            (
+                "[a `b]c` d](u)",
+                vec![
+                    Span::link("a ", "u"),
+                    targeted("b]c", SpanStyle::Code, "u"),
+                    Span::link(" d", "u"),
+                ],
+            ),
+            // 5. The same for a parenthesis.
+            ("[`f(x)`](u)", vec![targeted("f(x)", SpanStyle::Code, "u")]),
+            // 6. Brackets nest: an inner pair that opens no link is text in the
+            //    label of the outer one.
+            ("[see [1] here](u)", vec![Span::link("see [1] here", "u")]),
+            // 7. A picture's alt is the plain text of its label — CommonMark's
+            //    own answer, so a code span in it says what it says.
+            (
+                "![the `zip` file](i.png)",
+                vec![Span::image("the zip file", "i.png")],
+            ),
+            // 8. A formula in a label is still a formula, and it answers the click.
+            (
+                "[$x^2$ explained](m.md)",
+                vec![
+                    targeted("$x^2$", SpanStyle::Math, "m.md"),
+                    Span::link(" explained", "m.md"),
+                ],
+            ),
+            // 9. A badge: a picture inside a link keeps its own source, because
+            //    a picture is not a link in this window.
+            (
+                "[![build](b.svg)](ci.html)",
+                vec![Span::image("build", "b.svg")],
+            ),
+            // 10. Links may not contain links (CommonMark §6.3): the inner one
+            //     wins and the outer bracket is text.
+            (
+                "[a [b](c) d](e)",
+                vec![
+                    Span::plain("[a "),
+                    Span::link("b", "c"),
+                    Span::plain(" d](e)"),
+                ],
+            ),
+            // 11. PIN, CommonMark §6.3's own example: a code span binds more
+            //     tightly than the brackets, so this is not a link at all.
+            (
+                "[foo`](/uri)`",
+                vec![Span::plain("[foo"), Span::code("](/uri)")],
+            ),
+        ];
+        let mut wrong = Vec::new();
+        for (row, (source, want)) in cases.iter().enumerate() {
+            let got = parse_inline(source);
+            if got != *want {
+                wrong.push(format!(
+                    "row {}: {source}\n  want {want:?}\n  got  {got:?}",
+                    row + 1
+                ));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "a link's label is inline content:\n{}",
+            wrong.join("\n")
+        );
     }
 
     /// **A paragraph is cut at its pictures** — prose, picture, prose — which is

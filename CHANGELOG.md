@@ -60,6 +60,24 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A link whose text is set in code, or carries emphasis, is drawn as a link.**
+  In the Markdown preview, a line reading ``[`folio-0.2.2-windows-x64.zip`](https://…)``
+  printed its own Markdown source, brackets and address and all, while the
+  plain-text link beside it on the same line rendered. The reader of code spans
+  and formulas ran first and handed on what it had not claimed, and the reader of
+  links then looked for a pair inside each leftover: anything at all in a link's
+  text — a code span, a formula, a picture — left the opening bracket in one
+  leftover and the closing one in another, and neither could see a pair. Brackets
+  are now matched along the whole line, the way emphasis already was, and a
+  link's text is read as what CommonMark says it is: ordinary inline content. A
+  code span in it stays monospace and takes the link colour, the way it does on
+  GitHub; a bold word stays bold; a formula stays a formula; and every one of
+  them answers a click. `[**bold** text](url)` no longer shows its asterisks,
+  a picture wrapped in a link — a badge — draws its picture, and a picture whose
+  description contains code says what that code says. Where the specification
+  puts a code span ahead of the brackets it is still ahead of them: `` [foo`](/uri)` ``
+  is a literal bracket beside a code span, and not a link.
+
 - **A tick on the command strip lands on the command's own prompt row again,
   after a pane has been split or resized.** Pressing the newest tick used to drop
   the reader into the middle of that command's own output, with the highlight on
