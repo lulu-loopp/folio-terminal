@@ -196,25 +196,87 @@ The full list is in `CHANGELOG.md` in the repository.
 
 <!-- zh: opus46 -->
 
-**The Chinese half goes here, written separately.** It mirrors the English above,
-section for section, with the same headings in Chinese and the same facts:
+# Folio 0.2.3-preview
 
-1. `# Folio 0.2.3-preview` — the heading, unchanged.
-2. The opening paragraph: what this release is about.
-3. A Markdown document uses the width you gave the window.
-4. A wide table scrolls sideways, with the wheel most mice already have.
-5. A link whose text is set in code, or carries emphasis, is drawn as a link.
-6. A terminal pane's scroll bar says what the pane can do.
-7. A tick on the command strip lands on its own command after a split.
-8. The two Explorer rows in Settings are one switch.
-9. Four picture-in-picture slots, four rows, four chords.
-10. The interface reads the way a native writer would put it.
-11. The core compiles on macOS.
-12. Also fixed — the five entries above, in the same order.
-13. Upgrading from 0.2.2.
-14. Download and run — including that `folio.msix` is no longer an asset of its
-    own and why.
-15. Known issues — the six above, in the same order.
+0.2.3 围绕阅读体验：Markdown 排版列更宽，宽表格用滚轮即可横向滚动，带代码或强调的链接文字正常显示为链接，终端窗格只在可滚动时才显示滚动条。设置中两行资源管理器选项合为一行开关，四个画中画槽位各有自己的行和快捷键录制按钮，中英文界面经过逐条审读。
 
-The download line at the top of the page is already bilingual and is not
-repeated here.
+## Markdown 文档使用窗口给出的宽度
+
+- 排版列此前上限为 702 逻辑像素，最大化窗口时文档只占窗格中间一窄条。上限现在约为一千像素。
+- 排版列仍然居中，窗格比它窄时占满整个窗格，表格和代码块与正文在同一列内排版。
+
+## 宽表格用滚轮即可横向滚动
+
+- 宽度超出页面的表格一直有底部拖动条，也支持 `Shift`+滚轮。但倾斜滚轮和触控板双指横滑虽然一直被窗口接收，却在到达页面之前被丢弃了。
+- 现在两者都能到达，无需修饰键。指针下方的表格就是被滚动的表格，一页中有多个宽表格时各自独立滚动，和浏览器的行为一致。`Shift`+滚轮在原来生效的地方照旧生效。
+
+## 带代码或强调的链接文字正常显示为链接
+
+- 此前 ``[`folio-0.2.3-windows-x64.zip`](https://…)`` 会打印 Markdown 源码，而同行的纯文本链接能正常渲染。链接文字内含代码段、公式或图片时，两端方括号落在不同的片段里，两边都无法配对。
+- 链接文字现在按 CommonMark 规范解读为普通行内内容。代码段保持等宽并取链接颜色，粗体文字保持粗体，图片仍绘制图片，每一种都响应点击。
+
+## 终端窗格的滚动条反映窗格状态
+
+- **整个输出记录能放进窗格时不显示滚动条。** 此前在运行一段打印公式的脚本后，即使窗格不可滚动，右侧仍绘制了滑块。公式使行高超过标准行高，输入行下方的空行将多出的高度还了回去，而这些还回的像素仍被计入可滚动范围。
+- **滚动到顶部时滑块在轨道顶部**，滑块长度为窗格占整个输出记录的比例。
+- **滚动条贴合窗格自身的边缘。** 窗口中其他滚动条的滑块贴着所属区域的内边缘，终端的滑块此前偏了两个逻辑像素。底部的横条随之移动。预留的八像素宽道和拖动手感与此前相同。
+
+## 拆分或调整大小后，命令条上的标记仍落在对应命令上
+
+- 按下命令条最新的标记，此前会落到该命令输出的中间，输入行在窗格上沿之外，在窗格经过拆分或调整大小后才出现。
+- 标记现在记录它所在的整个折行——折行是重排时唯一保留的单位——重排后重新放到该行上，无论该行还在屏幕内还是已滚出。拖动边缘是一连串重排，每一步都带着标记。某条折行在重排中确实消失时，其标记从命令条中移除，而非指向命令从未所在的位置。
+
+## 设置中两行资源管理器选项合为一行开关
+
+- `Explorer context menu` 和 `First page of that menu` 实为同一个问题的两行，第二行离开第一行没有意义。
+- 现在只有一行，和页面上其他开关一样只分开和关。**开启的含义是这台 Windows 所能做到的全部**：在 Windows 11 上且 `folio.msix` 与 `folio.exe` 同目录时，将 "Open Folio here" 放入**显示更多选项**并注册将 "Open in Folio" 放到**第一页**的包；其他情况下只写入右键菜单项。关闭时撤回已有的条目。
+- 因为开启在不同机器上含义不同，行下方的说明文字会告知具体行为——在 Windows 10 上不提第一页，因为它只有一层菜单。存储位置不变：从 **设置 > 应用 > 已安装的应用** 中移除该包，开关随之变化。
+
+## 四个画中画槽位各有一行，各有快捷键
+
+- 此前四个槽位共用一行，显示 `Not set`，没有可按的按钮，夹在带录制按钮的行和两行灰色 readline 保留键之间——无从判断它属于哪一种。它哪种都不是：这些快捷键一直可以自定义。
+- `Summon picture in picture 1` 到 `4` 现在各占一行，各有快捷键、录制按钮和 `↺`。录制一个已被其他行占用的快捷键会被拒绝，并提供接管选项；`Restore all defaults` 清空全部四个。`keybindings.json` 不受影响：此变更前后它都列出四个槽位。
+
+## 界面文字经过母语写作者审读
+
+- 对窗口中所有中文字符串的审读修改了其中 52 条：删除了无人询问的安慰句，将解释内部机制的文字改为描述开关的实际作用，将残留的英文 `tab`、`profile` 等替换为标签页、配置。
+- 英文审读的 83 条建议已落地，同时涵盖 `README.md`、`docs/PRIVACY.md` 和 `SECURITY.md` 中审读建议的段落。窗口字符串中不再有破折号，读者无法操作的机制描述让位于可见的结果。
+- 两种语言均未更改任何事实，未移动任何默认值。
+
+## 核心层在 macOS 上通过编译
+
+- 应用层以下的所有模块——终端网格、渲染器、输出记录、文档模型、检测器、布局、数学库——在 Mac 上通过编译，每次推送的 CI 任务在 Mac 上编译它们以保持这一状态。
+- **Windows 上的 Folio 没有任何变化，没有 Mac 版本可供下载。** 这是基础工作，不是移植。它的作用是让下一个功能无法悄悄依赖 Windows 而不被当天发现。
+
+## 其他修复
+
+- **初次设置卡中每行标注实际写入的文件。** 三个 agent 行此前无论机器如何配置，都显示 `~/.claude/settings.json`、`~/.codex/config.toml` 和 `~/.copilot/hooks/folio.json`，而 Claude Code 读取 `CLAUDE_CONFIG_DIR`，Codex 读取 `CODEX_HOME`，Copilot CLI 读取 `COPILOT_HOME`——Folio 的安装器也是。三个环境变量都未设置的机器上显示的路径与此前相同。
+- **初次设置卡的行之间不再绘制分隔线**，指针悬停时不再填充行底色，焦点环等到有按键移动内容时才出现而非任意按键即出现，焦点环不再在右侧被裁切。设置页借用同一行样式，三者表现一致。
+- **第二份 Folio 不再接管你的 "Open Folio here" 右键菜单项。** 启动时只在原路径不存在文件、或原路径就是当前文件时才重写该条目，因此从下载文件夹随手运行一次的副本不会动已有的菜单。移动 `folio.exe` 后菜单仍照常工作。
+- **agent 安装失败时用一句话说明原因**，原因跟在冒号后面而非破折号后面，需要换行时能够换行而不被截断。
+- **README、更新日志和设计文档不再说初次设置卡提了六个问题。** 实际最少可以只有两个：本机没有的 agent 不会被列出。
+
+## 从 0.2.2 升级
+
+**无需额外操作。** 升级时保留原有设置。解压覆盖到旧文件夹或旁边，运行 `folio.exe`。压缩包内与 0.2.2 一样是**九个**文件，`folio.msix` 仍与 `folio.exe` 放在同一文件夹。
+
+## 下载与运行
+
+从此发布页获取 `folio-0.2.3-windows-x64.zip`，解压到存放程序的任意位置，运行 `folio.exe`。无需安装程序，解压后保持所有文件在同一文件夹内。`SHA256SUMS.txt` 是所下载文件的校验和，`folio-0.2.3.cdx.json` 是构建内容的物料清单。
+
+需要 **Windows 10 1809 或更高版本，或 Windows 11，64 位**。
+
+`folio.exe` 与 `folio.msix` 由 **Weiyi Shi** 签名，证书来自 Microsoft 的 Artifact Signing 服务并带有 Microsoft 时间戳，与 0.2.2 相同。
+
+**`folio.msix` 不再作为单独的发布资产。** 它在压缩包内——一直都在——压缩包是它唯一有效的位置：包内记录的是解压目录，单独下载的 `folio.msix` 指向一个没有 `folio.exe` 的文件夹。正常解压压缩包的用户不受影响。
+
+## 已知问题
+
+- **新签名尚无信誉。** SmartScreen 在首次运行时仍可能提示 **"Windows 已保护你的电脑"**。**更多信息**会标明发布者为 **Weiyi Shi**、应用程序为 `folio.exe`；**仍要运行**是通过的方式，关闭 SmartScreen 则不是。
+- **Folio 无法作为 Visual Studio Code 内部的面板。** 压缩包中的 `folio-here.cmd` 使其成为 VS Code 打开的外部终端。
+- **窗口上次所在的显示器出现得晚时，它会回到主显示器上。** 显示器只在窗口创建前计数一次。
+- **版面重排时，两张网页预览可能互相遮挡约 200 毫秒。** 静止的窗格不会重叠，拖动分隔条时也不会。
+- **曾有报告称窗口移到第二台显示器后上半部分绘制为黑色**，未能复现。
+- **`.webm` 需要 Microsoft Store 中的 VP9 或 AV1 视频扩展**。出厂 Windows 两者皆无，缺少时既无静止画面也无播放。
+
+完整列表见仓库中的 `CHANGELOG.md`。
