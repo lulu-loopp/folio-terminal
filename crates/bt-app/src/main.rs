@@ -113351,7 +113351,7 @@ mod tests {
         );
         assert_eq!(
             tooltip::tab_tip(&name, source, Some(&path), true),
-            format!("folio-terminal\nWorking folder · {path}\nPinned — restored next launch")
+            format!("folio-terminal\nWorking folder · {path}\nPinned. Restored next launch")
         );
         // The full path, not the leaf the first line already carries.
         assert!(path.ends_with(r"Developer\folio-terminal"));
@@ -134000,7 +134000,7 @@ mod tests {
         // its own and it is not a seat of this one — so its two verbs are read
         // off the payload and the flag says nothing here either way.
         assert_eq!(centre().caption(&file), "Open in this preview");
-        assert_eq!(centre().caption(&folder), "Root this tree here");
+        assert_eq!(centre().caption(&folder), "Root the files column here");
         for landing in [
             DropLanding::SeatEdge {
                 target: TARGET,

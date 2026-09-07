@@ -7,10 +7,9 @@ vulnerability privately.
 
 ## English
 
-Folio sends nothing about you anywhere. There is no telemetry, no analytics and
-no crash reporting. Two things reach the network: a page you open in the web
-preview, fetched by the WebView2 engine that Windows provides, and the update
-check below.
+Folio has no telemetry, no analytics and no crash reporting. Two things reach
+the network: a page you open in the web preview, fetched by the WebView2 engine
+that Windows provides, and the update check below.
 
 Everything Folio remembers is on your machine, in two directories.
 
@@ -25,7 +24,7 @@ Nothing is downloaded and nothing is replaced.
 | **Address** | `https://api.github.com/repos/lulu-loopp/folio-terminal/releases` |
 | **Method** | `GET`. No query string, no request body. |
 | **What is sent** | One header: `User-Agent: Folio`. No version, no build, no operating system, no identifier, no cookie. GitHub refuses a request with no user agent at all, which is why the header is not empty. |
-| **How often** | At most once every 24 hours, across every Folio window on the machine. A failure - no network, a proxy, a rate limit - counts as the attempt for that day and is not retried. |
+| **How often** | At most once every 24 hours, across every Folio window on the machine. A failure — no network, a proxy, a rate limit — counts as the attempt for that day and is not retried. |
 | **Where the answer goes** | `%APPDATA%\Folio\update-check.json`: when the page was last asked, the tag it named, and the tag you have already been shown. |
 | **How to switch it off** | Settings > General > **Update check**, or `"update_check": false` in `settings.json`. On a machine that has never run Folio it is also the first row of the first-run card, where it arrives on and can be switched off before it has ever run. Off, no thread is started, no request is made and `update-check.json` is never written. |
 
@@ -118,9 +117,10 @@ profile. Do not put a secret in one.
 - The PowerShell integration, when you ask for it, appends one line to the
   `$PROFILE` a PowerShell names for itself, after copying that file as it stood
   to a dated backup beside it. Delete the line to undo it.
-- **All five of those, and the update check, are what the first-run card asks
-  about.** It is shown once, on a machine that has never run Folio, and it writes
-  nothing on its own: pressing **Done** presses the same Settings rows listed
+- **Those, and the update check, are what the first-run card can ask about.** It
+  offers only the rows this machine can honour, so a machine with no agent
+  installed sees fewer. It is shown once, on a machine that has never run Folio,
+  and it writes nothing on its own: pressing **Done** presses the same Settings rows listed
   above, and **Not now** presses none of them. The only thing the card itself
   records is that it has been shown.
 - Several `BT_*` environment variables make Folio write terminal content to a

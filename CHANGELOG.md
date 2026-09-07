@@ -17,7 +17,7 @@ All notable changes to Folio are recorded here. The format follows
   cannot quietly assume Windows without somebody being told the same day.
 
 - **The welcome card draws no line between its rows.** The Settings page — whose
-  row shape this card borrows, and where every one of its six rows also lives —
+  row shape this card borrows, and where every one of its rows also lives —
   draws none either. The rows keep their 42-pixel rhythm and abut; what separates
   Folio's own rows from the agents found on this machine is 16 pixels of air. A
   row under the pointer is no longer filled: it still carries its tooltip and a
@@ -77,7 +77,22 @@ All notable changes to Folio are recorded here. The format follows
   标签页 and 配置. No fact changed, no default moved, and the English is
   untouched.
 
+- **The English interface reads the way an English writer would put it.** The
+  83 strings an audit proposed are in, along with the passages it proposed in
+  `README.md`, `docs/PRIVACY.md`, `SECURITY.md` and the 0.2.2 release page. No
+  em-dash is left inside a UI string, a sentence whose only job was to say what
+  Folio will not do is gone, and a mechanism the reader cannot act on gives way
+  to the result they get. No fact changed, no default moved, and the Chinese is
+  untouched. `docs/plans/copy/en-copy-audit-2026-09-07.md` has every proposal
+  and the width each one was measured against.
+
 ### Fixed
+
+- **The README, the changelog and the design note no longer say the welcome card
+  asks six questions.** It offers as few as two: an agent that is not on the
+  machine is not listed at all. They also said every row on it writes outside
+  `%APPDATA%\Folio`, which was never true of the update-check row — that one
+  writes Folio's own `settings.json`, inside that folder.
 
 - **A second copy of Folio no longer takes over your "Open Folio here" menu
   entry.** The launch has always rewritten a right-click entry that names a
@@ -157,14 +172,13 @@ too long for the pane, or has pushed the top of a block off the window.
 ### Added
 
 - **Welcome to Folio: one card, once, on a machine that has never run Folio.**
-  It asks every question whose answer writes something outside
-  `%APPDATA%\Folio`, and it asks them together, because they are one decision
-  about how much of this machine Folio may touch. Six rows of one line each, and
-  the line is what you get: told when a new version is out, which is the only
-  one that arrives on; open any folder in Folio from its right-click menu; the
-  PowerShell integration; and a tab that lights up for each of Claude Code,
-  Codex and Copilot CLI that this machine actually has. Rest the pointer on a
-  row and it says how — including which of your own files it writes, and that
+  It asks whether to check for updates, add Folio to the folder right-click
+  menu, enable the PowerShell integration, and mark the tab for each of Claude
+  Code, Codex and Copilot CLI this machine has, and it asks them together,
+  because they are one decision about how much of this machine Folio may touch.
+  Each row is one line, and the line is what you get. The update check arrives
+  on; the rest arrive off. A machine with no agent on it is asked fewer. Rest
+  the pointer on a row and it says how — including which of your own files it writes, and that
   the file is copied to a dated backup first. **Done** applies the rows that are
   on. **Not now** and `Esc` close the card with the shipped values and change
   nothing. The shell behind it has been running the whole time.

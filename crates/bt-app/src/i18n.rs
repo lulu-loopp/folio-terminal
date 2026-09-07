@@ -2386,7 +2386,7 @@ impl Text {
             // explain where the close button went (mock-up 4204).
             Self::Unpin => pick(
                 lang,
-                "Unpin — a pinned tab closes only after unpinning",
+                "Unpin. A pinned tab closes only after unpinning",
                 "取消固定 —— 固定的标签要先取消固定才能关闭",
             ),
 
@@ -2396,7 +2396,7 @@ impl Text {
             Self::NameSourceCwd => pick(lang, "Working folder", "工作目录"),
             Self::TabTipPinned => pick(
                 lang,
-                "\nPinned — restored next launch",
+                "\nPinned. Restored next launch",
                 "\n已固定 —— 下次启动会恢复",
             ),
 
@@ -2474,7 +2474,7 @@ impl Text {
             Self::RowUpdateCheck => pick(lang, "Update check", "检查新版"),
             Self::DescUpdateCheck => pick(
                 lang,
-                "Asks the releases page once a day whether a newer version is out. It downloads nothing.",
+                "Checks once a day for a new version and names it here.",
                 "每天查一次有没有新版本，有的话在设置中提示。",
             ),
             Self::DescGitPanel => pick(
@@ -2500,7 +2500,7 @@ impl Text {
             // holds again on the Chinese.
             Self::DescExplorerMenu => pick(
                 lang,
-                "Puts Folio in Explorer's right-click menu, on the first page and under Show more options. The first page registers folio.msix, beside folio.exe, for this account.",
+                "Puts Folio in Explorer's right-click menu, on the first page and under Show more options. The first page registers folio.msix for this account.",
                 "在资源管理器右键菜单的第一页和「显示更多选项」页都加入「在 Folio 中打开」。第一页需要注册 folio.msix（与 folio.exe 同文件夹）到当前账户。",
             ),
             // **One menu, and the sentence names no page.** Not `Show more
@@ -2520,7 +2520,7 @@ impl Text {
             ),
             Self::DescExplorerFirstPageElsewhere => pick(
                 lang,
-                "The entry on that page points at another folder. Folio puts it back on the next launch that can.",
+                "That entry points at another folder. Folio takes it back at the next launch.",
                 "那一页上的条目指向另一个文件夹。下次启动时 Folio 会改回来。",
             ),
             Self::DescTabLayout => pick(
@@ -2530,12 +2530,12 @@ impl Text {
             ),
             Self::DescSidebar => pick(
                 lang,
-                "Expanded keeps the vertical tab strip open beside the terminal. Icons parks it as a narrow strip that opens over the terminal.",
+                "Expanded keeps the vertical tab strip open beside the terminal. Icons narrows it to a strip that opens over the terminal.",
                 "「展开」让竖排标签栏一直开在终端旁边；「图标」把它收成一条窄条，需要时覆盖在终端上打开。",
             ),
             Self::DescSplitDirection => pick(
                 lang,
-                "Where a new pane lands when the split you asked for names no direction of its own.",
+                "Which way a pane splits when the action you used names no direction.",
                 "拆分时没有指明方向的话，新窗格落在哪一边。",
             ),
             Self::DescDefaultProfile => pick(
@@ -2709,7 +2709,7 @@ impl Text {
             ),
             Self::ContextMenuNoExecutable => pick(
                 lang,
-                "Windows did not say where folio.exe is",
+                "Folio could not work out where folio.exe is",
                 "Windows 没有说出 folio.exe 的位置",
             ),
 
@@ -2806,27 +2806,25 @@ impl Text {
             ),
             Self::PreviewRefusalBinary => pick(
                 lang,
-                "No preview — this looks like a binary file",
+                "No preview: this looks like a binary file",
                 "无法预览 —— 这看起来是二进制文件",
             ),
             Self::PreviewRefusalNetworkPath => pick(
                 lang,
-                "No preview — network paths are not read automatically",
+                "No preview: network paths are not read automatically",
                 "无法预览 —— 网络路径不会自动读取",
             ),
             Self::PreviewRefusalPermissionDenied => pick(
                 lang,
-                "No preview — permission denied",
+                "No preview: permission denied",
                 "无法预览 —— 没有权限",
             ),
-            Self::PreviewRefusalNotFound => pick(
-                lang,
-                "No preview — file not found",
-                "无法预览 —— 文件不存在",
-            ),
+            Self::PreviewRefusalNotFound => {
+                pick(lang, "No preview: file not found", "无法预览 —— 文件不存在")
+            }
             Self::PreviewRefusalUnreadable => pick(
                 lang,
-                "No preview — could not read this file",
+                "No preview: could not read this file",
                 "无法预览 —— 无法读取这个文件",
             ),
             Self::PreviewOpenExternally => pick(lang, "Open in default app", "用默认程序打开"),
@@ -2856,7 +2854,7 @@ impl Text {
             // above says about a picture that could not be read.
             Self::PreviewFailedImageWorker => pick(
                 lang,
-                "Preview failed: this picture could not be drawn",
+                "Preview failed: this image could not be drawn",
                 "预览失败：无法绘制这张图片",
             ),
             Self::PreviewFailedSeatTooSmall => pick(
@@ -2890,22 +2888,22 @@ impl Text {
             // ── the terminal's own status overlay ──────────────────────────
             Self::FilesProgramRefused => pick(
                 lang,
-                "The files tree does not run programs",
+                "The files column does not run programs",
                 "文件树不会运行程序",
             ),
             Self::MathWorkerStopped => pick(
                 lang,
-                "Formula rendering stopped; terminal input and output remain available",
+                "Formula rendering stopped. The terminal is unaffected",
                 "公式渲染已停止，终端输入输出不受影响。",
             ),
             Self::FilesWorkerStopped => pick(
                 lang,
-                "Directory reading stopped; terminal input and output remain available",
+                "Directory reading stopped. The terminal is unaffected",
                 "目录读取已停止，终端输入输出不受影响。",
             ),
             Self::PreviewWorkerStopped => pick(
                 lang,
-                "File preview reading stopped; terminal input and output remain available",
+                "File preview reading stopped. The terminal is unaffected",
                 "文件预览已停止，终端输入输出不受影响。",
             ),
 
@@ -2979,12 +2977,12 @@ impl Text {
             ),
             Self::CapPowerShell => pick(
                 lang,
-                "Prompt marks, directory, exit codes and hyperlinks — with folio.ps1 dot-sourced",
+                "Prompt marks, directory, exit codes and hyperlinks, with folio.ps1 dot-sourced",
                 "命令标记、当前目录、退出码、链接；点源 folio.ps1 之后才有",
             ),
             Self::CapWslBash => pick(
                 lang,
-                "Prompt marks, directory, exit codes and hyperlinks — on a bash login only",
+                "Prompt marks, directory, exit codes and hyperlinks, on a bash login only",
                 "命令标记、当前目录、退出码、链接；只在登录 shell 是 bash 时生效",
             ),
             Self::CapCmd => pick(
@@ -3073,7 +3071,7 @@ impl Text {
             Self::ProfilesRowArgs => pick(lang, "Arguments", "参数"),
             Self::ProfilesRowArgsDesc => pick(
                 lang,
-                "Passed to the program before it reads anything of its own. Spaces separate; double quotes group. e.g. -NoExit -File D:\\me\\start.ps1",
+                "Passed to the program when it starts. Spaces separate; double quotes group. e.g. -NoExit -File D:\\me\\start.ps1",
                 "在程序读取自己的任何内容之前传给它。空格分词，双引号成组。例：-NoExit -File D:\\me\\start.ps1",
             ),
             Self::ProfilesRowEnv => pick(lang, "Environment", "环境变量"),
@@ -3148,7 +3146,7 @@ impl Text {
             // says the one thing that is not.
             Self::CapNoneLong => pick(
                 lang,
-                "No prompt marks, no directory, no exit codes. Hyperlinks are declared anyway",
+                "No prompt marks, no directory, no exit codes. Hyperlinks still work",
                 "没有命令标记、没有当前目录、没有退出码。链接照常声明",
             ),
             Self::CapNoneLongNoLinks => pick(
@@ -3201,7 +3199,7 @@ impl Text {
                 pick(lang, "Duplicate pane into a split", "复制窗格并拆分")
             }
             Self::ShortcutFilesPane => pick(lang, "Files column", "文件列"),
-            Self::ShortcutGitPage => pick(lang, "Turn the files column to Git", "文件列切到 Git"),
+            Self::ShortcutGitPage => pick(lang, "Show Git in the files column", "文件列切到 Git"),
             Self::ShortcutSavePreview => pick(lang, "Save the open document", "保存打开的文档"),
             Self::ShortcutPrevCommandMark => pick(lang, "Previous command", "上一条命令"),
             Self::ShortcutNextCommandMark => pick(lang, "Next command", "下一条命令"),
@@ -3243,7 +3241,7 @@ impl Text {
             Self::ShortcutReservedResizePane => pick(lang, "Resize a pane", "调整窗格大小"),
             Self::ShortcutReservedAltArrow => pick(
                 lang,
-                "Reserved — readline reads Alt+arrow as word movement",
+                "Reserved: readline reads Alt+arrow as word movement",
                 "保留 —— readline 把 Alt+方向键读作按词移动",
             ),
             Self::ShortcutHintAltGrZone => pick(
@@ -3274,25 +3272,25 @@ impl Text {
             Self::GitGroupUntracked => pick(lang, "UNTRACKED", "未跟踪"),
             Self::GitGroupStagedTip => pick(
                 lang,
-                "Packed for the next commit — 'git commit' ships exactly these",
+                "What the next git commit will ship",
                 "已为下一次提交打包 —— 'git commit' 提交的正是这些",
             ),
-            Self::GitGroupChangesTip => pick(lang, "Edited but not packed yet", "已改，但还没打包"),
+            Self::GitGroupChangesTip => pick(lang, "Edited but not staged yet", "已改，但还没打包"),
             Self::GitGroupUntrackedTip => pick(
                 lang,
-                "Not in the repository yet — git is not watching these",
+                "Not in the repository yet. git does not track these",
                 "还不在仓库里 —— git 没有盯着这些",
             ),
             Self::GitBranchesHeading => pick(lang, "BRANCHES", "分支"),
             Self::GitRemotesHeading => pick(lang, "REMOTES", "远程"),
             Self::GitRemotesTipShut => pick(
                 lang,
-                "Branches on remotes — click to show them",
+                "Branches on remotes. Click to show them",
                 "远程上的分支 —— 点一下展开",
             ),
             Self::GitRemotesTipOpen => pick(
                 lang,
-                "Branches on remotes — click to fold them away",
+                "Branches on remotes. Click to hide them",
                 "远程上的分支 —— 点一下收起",
             ),
             Self::GitCommitsHeading => pick(lang, "COMMITS", "提交"),
@@ -3313,12 +3311,12 @@ impl Text {
             ),
             Self::GitWorkerStopped => pick(
                 lang,
-                "Git reading stopped; terminal input and output remain available",
+                "Git reading stopped. The terminal is unaffected",
                 "git 读取已停止，终端输入输出不受影响。",
             ),
             Self::GitNotFound => pick(
                 lang,
-                "git.exe was not found on this machine — install Git for Windows to use this page",
+                "git.exe was not found. Install Git for Windows to use this page",
                 "这台机器上找不到 git.exe —— 装上 Git for Windows 才能用这个页面",
             ),
 
@@ -3331,7 +3329,7 @@ impl Text {
             Self::GraphHeadingAuthor => pick(lang, "AUTHOR", "作者"),
             Self::GraphHeadingDate => pick(lang, "DATE", "日期"),
             Self::GraphHeadingCommit => pick(lang, "COMMIT", "提交"),
-            Self::GraphUncommitted => pick(lang, "Uncommitted Changes", "未提交的改动"),
+            Self::GraphUncommitted => pick(lang, "Uncommitted changes", "未提交的改动"),
             Self::GraphUncommittedTime => pick(lang, "now", "现在"),
             Self::GraphSearchPlaceholder => pick(lang, "Search commits", "搜索提交"),
             Self::GraphSearchNone => pick(lang, "no matches", "没有匹配"),
@@ -3349,12 +3347,12 @@ impl Text {
             Self::GraphToolSearchClearTip => pick(lang, "Clear the search", "清空搜索"),
             Self::GraphFileBinary => pick(
                 lang,
-                "Binary — git has no lines to count here",
+                "Binary. git counts no lines here",
                 "二进制 —— git 在这里没有行可数",
             ),
             Self::GraphMergeCommit => pick(
                 lang,
-                "Merge commit — another branch's history joins here",
+                "Merge commit. Another branch's history joins here",
                 "合并提交 —— 另一个分支的历史在这里并入",
             ),
             Self::GraphDoubleClickCheckout => pick(
@@ -3456,7 +3454,7 @@ impl Text {
             ),
             Self::PeekUnknown => pick(
                 lang,
-                "No preview — binary or unrecognized type.",
+                "No preview: binary or unrecognised type.",
                 "无法预览 —— 二进制或无法识别的类型。",
             ),
             Self::PeekFileGone => pick(lang, "The file is no longer there.", "文件已不存在。"),
@@ -3490,7 +3488,7 @@ impl Text {
             ),
             Self::PreviewUnlock => pick(
                 lang,
-                "Unlock — this pane becomes the reusable preview again",
+                "Unlock. This pane becomes the reusable preview again",
                 "解锁 —— 此窗格重新成为可复用的预览",
             ),
 
@@ -3503,7 +3501,7 @@ impl Text {
             }
             Self::MarkdownImageRemote => pick(
                 lang,
-                "Folio has no network client, so this image is not fetched",
+                "Images from the web are not fetched in a preview",
                 "Folio 不抓取远程图片",
             ),
             // ── moving a pane out of this window (multiwindow slice F1c) ───
@@ -3528,7 +3526,9 @@ impl Text {
 
             // The verb, because the verb is what separates this row from
             // `ShortcutWebAddress` two lines above it on the same page.
-            Self::ShortcutWindowAddress => pick(lang, "Open address", "打开地址"),
+            Self::ShortcutWindowAddress => {
+                pick(lang, "Open an address in a new preview", "打开地址")
+            }
 
             // ── single-pane zoom (§7.1.6l) ─────────────────────────────────
             //
@@ -3548,7 +3548,7 @@ impl Text {
             Self::RowKeyHints => pick(lang, "Shortcut hints", "快捷键提示"),
             Self::DescKeyHints => pick(
                 lang,
-                "Hold a modifier for a moment and this window lists the shortcuts that start with it. The list never takes a keystroke.",
+                "Hold a modifier for a moment and this window lists the shortcuts that start with it.",
                 "按住修饰键片刻，窗口列出以该键开头的快捷键。列表不截走按键。",
             ),
             // ── the tree row's menu, completed (user ruling 2026-08-25) ────
@@ -3566,7 +3566,9 @@ impl Text {
 
             // ── a drag's landing caption ───────────────────────────────────
             Self::DragOpenInPreview => pick(lang, "Open in this preview", "在这个预览里打开"),
-            Self::DragRootTreeHere => pick(lang, "Root this tree here", "把这棵树的根设到这里"),
+            Self::DragRootTreeHere => {
+                pick(lang, "Root the files column here", "把这棵树的根设到这里")
+            }
 
             // ── the Terminal page's Scrollback row ─────────────────────────
             //
@@ -3604,7 +3606,7 @@ impl Text {
             // It states the two ways and stops (copy ruling, 2026-08-17).
             Self::DescLineWrappingOff => pick(
                 lang,
-                "Lines longer than the pane run on, and the pane scrolls sideways with Shift+wheel or the bar along its foot.",
+                "Lines longer than the pane run on. Scroll sideways with Shift+wheel or the horizontal scrollbar.",
                 "比窗格宽的行一直延伸，窗格可以横向滚动：Shift+滚轮，或底边那条横条。",
             ),
             // 「窗口」and not 「窗」: the settings page already says 「窗口」in
@@ -3613,12 +3615,14 @@ impl Text {
             Self::ShortcutNewWindow => pick(lang, "New window", "新建窗口"),
 
             // ── standing somewhere else ────────────────────────────────────
-            Self::GateTitleGitDetach => pick(lang, "Stand on this commit?", "站到这个提交上？"),
-            Self::GateTitleGitDirtyCheckout => pick(lang, "Move the working tree?", "移动工作区？"),
+            Self::GateTitleGitDetach => pick(lang, "Check out this commit?", "站到这个提交上？"),
+            Self::GateTitleGitDirtyCheckout => {
+                pick(lang, "Check out with uncommitted changes?", "移动工作区？")
+            }
             Self::GateCheckout => pick(lang, "Checkout", "检出"),
             Self::GraphToolLeaveDetachedTip => pick(
                 lang,
-                "HEAD is on no branch — stand on one again",
+                "HEAD is on no branch. Check one out again",
                 "HEAD 不在任何分支上 —— 重新站到一条分支上",
             ),
             // The trailing space is part of it: the branch's own name is
@@ -3650,7 +3654,7 @@ impl Text {
             // that says less.
             Self::DescFocusMode => pick(
                 lang,
-                "The tab strip becomes a column of cards, one per tab, and the tab you pick fills the window whole. Ctrl+Shift+Z turns this same setting.",
+                "The tab strip becomes a column of cards, one per tab, and the tab you pick fills the window. Ctrl+Shift+Z does the same.",
                 "标签条变成一列卡片，一张卡一个标签；选中的标签占满整个窗口。Ctrl+Shift+Z 拨的是同一个开关。",
             ),
             // 「最小对比度」is the term of art both WCAG's Chinese translations
@@ -3669,7 +3673,7 @@ impl Text {
             // wearing.
             Self::DescMinimumContrast => pick(
                 lang,
-                "Lightens or darkens terminal text until it meets this ratio against the cell behind it. Backgrounds never change, and above Off this overrides the colours a program asked for.",
+                "Lightens or darkens terminal text until it meets this ratio against its background. Above Off, it overrides the colours a program asked for.",
                 "把终端文字提亮或压暗，直到与它背后的单元格达到这个对比度。背景一律不动；Off 以上的档位会覆盖程序指定的颜色。",
             ),
             // 「通知」and not 「桌面通知」: Windows itself calls the surface
@@ -3683,7 +3687,7 @@ impl Text {
             // question is no while the pane is in front of you.
             Self::DescNotifications => pick(
                 lang,
-                "A program that asks for one can put a message on your desktop. Nothing appears while its pane is on screen in the focused window.",
+                "Lets a program put a message on your desktop. Nothing appears while its pane is on screen in the focused window.",
                 "程序请求时可在桌面弹出通知。窗格正显示在当前窗口中时不弹出。",
             ),
             // ── the turn-end lane ──────────────────────────────────────────
@@ -3718,7 +3722,7 @@ impl Text {
             // lines and no fourth (`no_settings_sentence_needs_a_fourth_line`).
             Self::DescTurnEndNotifications => pick(
                 lang,
-                "When an agent finishes a turn and the window is out of sight, its taskbar button flashes, or a message goes to your desktop if it is minimised. Marks inside the window are unaffected.",
+                "Flashes the taskbar when an agent finishes a turn and the window is out of sight, or sends a desktop message if it is minimised.",
                 "回合结束时同样提醒，即使 agent 并非在等待输入：窗口不在你看得见的地方时闪烁任务栏按钮；窗口最小化或任务栏自动隐藏时发送系统通知。关闭后仅在等待输入时提醒。",
             ),
             Self::ToastTurnFinished => pick(lang, "Turn finished", "回合结束"),
@@ -3730,7 +3734,7 @@ impl Text {
             // a reader can press, and the platform's own sentence follows.
             Self::NotifyRefusedBody => pick(
                 lang,
-                "Windows would not take it. The marks inside this window are unaffected.",
+                "Windows would not take it. Tab marks still work.",
                 "Windows 没有接收这条通知。窗内的记号不受影响。",
             ),
             // ── the PowerShell integration notice ──────────────────────────
@@ -3787,7 +3791,7 @@ impl Text {
             // twice rather than two lists once.
             Self::DescPowerShellOffer => pick(
                 lang,
-                "A PowerShell pane whose $PROFILE does not load folio.ps1 offers to add it. Integration marks commands, follows the directory and typesets inline $…$ formulas.",
+                "A PowerShell pane that has no integration offers to add it. Integration marks commands, follows the directory and typesets inline $…$ formulas.",
                 "PowerShell 窗格的 $PROFILE 未加载 folio.ps1 时，提示将其加入。整合提供命令标记、当前目录跟随，以及输出中行内公式 $…$ 的渲染。关闭后不再提示。",
             ),
             // **The three installer rows are 「通知」 rows** (user ruling
@@ -3812,17 +3816,17 @@ impl Text {
             Self::RowClaudeHooks => pick(lang, "Claude Code hooks", "Claude Code 通知"),
             Self::DescClaudeHooks => pick(
                 lang,
-                "Adds hooks to your ~/.claude/settings.json, or CLAUDE_CONFIG_DIR, so Claude Code tells this window when it is waiting for you. Nothing is written into a project folder.",
+                "Marks the tab when Claude Code is waiting for you. Adds a hook to your ~/.claude/settings.json, or CLAUDE_CONFIG_DIR.",
                 "打开后，Folio 在 Claude Code 的用户级设置（~/.claude/settings.json）中写入 hook。等待你输入时标签页显示提醒标记。",
             ),
             Self::ClaudeHooksAddedToast => pick(
                 lang,
-                "Added to ~/.claude/settings.json. Takes effect in a new Claude Code session.",
+                "Hook added. Takes effect in a new Claude Code session.",
                 "已写入 ~/.claude/settings.json。新的 Claude Code 会话开始生效。",
             ),
             Self::ClaudeHooksRemovedToast => pick(
                 lang,
-                "Removed from ~/.claude/settings.json",
+                "Claude Code hook removed",
                 "已从 ~/.claude/settings.json 移除",
             ),
             Self::ClaudeHooksFailedToast => pick(
@@ -3864,7 +3868,7 @@ impl Text {
             // picture a row at a time — said in fewer words.
             Self::DescFocusCardHeight => pick(
                 lang,
-                "How tall the picture of a tab stands inside its card. Alt+wheel over one of its panes scrolls that picture a row at a time.",
+                "How tall the picture of a tab is inside its card. Alt+wheel over a pane scrolls it a row at a time.",
                 "每张卡片里那幅标签缩图有多高。在卡片中某个窗格上 Alt+滚轮，可以一行一行地滚动那幅图。",
             ),
             // The verb alone. The chord is drawn beside it — a cap and a wheel
@@ -3909,11 +3913,9 @@ impl Text {
                 pick(lang, "The web engine did not start.", "网页引擎没有启动。")
             }
             Self::WebFailEngineVerb => pick(lang, "Retry", "重试"),
-            Self::WebFailCrashSay => pick(
-                lang,
-                "This page stopped running. Its render process exited.",
-                "这个页面停止运行了。",
-            ),
+            Self::WebFailCrashSay => {
+                pick(lang, "This page stopped running.", "这个页面停止运行了。")
+            }
             Self::WebFailBlockedSay => pick(
                 lang,
                 "This address does not open in a preview.",
@@ -3922,7 +3924,7 @@ impl Text {
             Self::WebFailBlockedVerb => pick(lang, "Copy address", "复制地址"),
             Self::WebFailDownloadSay => pick(
                 lang,
-                "This download cannot be handed to your browser. The request carried data a plain link cannot replay.",
+                "Start this download in your browser instead.",
                 "在浏览器中打开此页面即可下载。",
             ),
             Self::WebFailDownloadVerb => pick(
@@ -3960,22 +3962,22 @@ impl Text {
             Self::RowCodexNotify => pick(lang, "Codex notify", "Codex 通知"),
             Self::DescCodexNotify => pick(
                 lang,
-                "Adds a notify program to your ~/.codex/config.toml, or CODEX_HOME, so codex tells this window when a turn has ended. It does not report a codex waiting for you.",
+                "Marks the tab when Codex finishes a turn. Adds a notify program to your ~/.codex/config.toml, or CODEX_HOME.",
                 "打开后，Folio 在 Codex 的用户级配置（~/.codex/config.toml）中写入 notify 程序。Codex 回合结束时发出通知。",
             ),
             Self::CodexNotifyAddedToast => pick(
                 lang,
-                "Added to ~/.codex/config.toml. Takes effect in a new codex session.",
+                "Notify program added. Takes effect in a new Codex session.",
                 "已写入 ~/.codex/config.toml。新的 codex 会话开始生效。",
             ),
             Self::CodexNotifyRemovedToast => pick(
                 lang,
-                "Removed from ~/.codex/config.toml",
+                "Codex notify program removed",
                 "已从 ~/.codex/config.toml 移除",
             ),
             Self::CodexNotifyFailedToast => pick(
                 lang,
-                "codex's configuration was not changed",
+                "Codex's configuration was not changed",
                 "codex 的配置未改动",
             ),
             // 「Copilot CLI」 stays in Latin on both sides, as 「Claude Code」 does
@@ -3984,7 +3986,7 @@ impl Text {
             Self::RowCopilotHooks => pick(lang, "Copilot CLI hooks", "Copilot CLI 通知"),
             Self::DescCopilotHooks => pick(
                 lang,
-                "Adds a hook file to your ~/.copilot/hooks/, or COPILOT_HOME, so Copilot CLI tells this window when it is waiting for you. Nothing is written into a project folder.",
+                "Marks the tab when Copilot CLI is waiting for you. Adds a hook file to your ~/.copilot/hooks/, or COPILOT_HOME.",
                 "打开后，Folio 在 Copilot CLI 的用户级目录（~/.copilot/hooks/）中写入 hook 文件。等待你输入时标签页显示提醒标记。",
             ),
             Self::DescCopilotHooksTooOld => pick(
@@ -3999,17 +4001,17 @@ impl Text {
             ),
             Self::CopilotHooksAddedToast => pick(
                 lang,
-                "Added to ~/.copilot/hooks/folio.json. Takes effect in a new copilot session.",
+                "Hook added. Takes effect in a new Copilot CLI session.",
                 "已写入 ~/.copilot/hooks/folio.json。新的 copilot 会话开始生效。",
             ),
             Self::CopilotHooksRemovedToast => pick(
                 lang,
-                "Removed ~/.copilot/hooks/folio.json",
+                "Copilot CLI hook removed",
                 "已删除 ~/.copilot/hooks/folio.json",
             ),
             Self::CopilotHooksFailedToast => pick(
                 lang,
-                "copilot's hooks were not changed",
+                "Copilot CLI's hooks were not changed",
                 "copilot 的 hooks 未改动",
             ),
 
@@ -4026,7 +4028,7 @@ impl Text {
             ),
             Self::ShortcutUndelivered => pick(
                 lang,
-                "Windows keeps some combinations for itself; one that never reaches the box cannot be recorded here",
+                "Windows keeps some combinations for itself. One that never reaches Folio cannot be recorded.",
                 "Windows 会自己截走一部分组合键；始终到不了框里的，这里录不到",
             ),
             Self::HyperlinkControlOpensExternally => pick(
@@ -4057,7 +4059,7 @@ impl Text {
             Self::TabMenuClose => pick(lang, "Close tab", "关闭标签"),
             Self::DescCopyOnSelect => pick(
                 lang,
-                "Letting go of a selection in a pane writes it to the clipboard. There is no other sign that it happened",
+                "Copy selected text to the clipboard when you release the mouse button.",
                 "松开选区即复制到剪贴板，不另作提示。",
             ),
             Self::ShortcutRecord => pick(lang, "Record", "录制"),
@@ -4072,7 +4074,7 @@ impl Text {
             // better — the three names are on the picker beside this line.
             Self::DescSearchEngine => pick(
                 lang,
-                "Where a web preview searches when what you type in its address bar is not an address.",
+                "Which search engine a web preview uses when what you type is not an address.",
                 "在网页预览的地址栏里输入的不是地址时，交给哪个搜索引擎去搜。",
             ),
             // Names what the key does and not what the window is called: a
@@ -4081,24 +4083,24 @@ impl Text {
             Self::RowQuakeHeight => pick(lang, "Summoned terminal height", "快捷终端高度"),
             Self::DescQuakeHeight => pick(
                 lang,
-                "How much of the height of the screen the pointer is on the summoned terminal covers. It hangs from the top of that screen.",
+                "How much of the screen's height the summoned terminal covers. It hangs from the top of the screen the pointer is on.",
                 "唤出的终端占鼠标所在屏幕高度的多少，从屏幕顶端向下展开。",
             ),
             Self::RowQuakeWidth => pick(lang, "Summoned terminal width", "快捷终端宽度"),
             Self::DescQuakeWidth => pick(
                 lang,
-                "How much of the width of that screen it covers. It is centred in the rest.",
+                "How much of the screen's width the summoned terminal covers. It stays centred.",
                 "唤出的终端占该屏幕宽度的多少，居中显示。",
             ),
             Self::DescQuakeHotkeyTaken => pick(
                 lang,
-                "Another program is already using the key that summons it.",
+                "Another program is already using this key.",
                 "唤出它的按键已被另一个程序占用。",
             ),
             Self::RowQuakeHotkey => pick(lang, "Summon key", "唤出按键"),
             Self::DescQuakeHotkey => pick(
                 lang,
-                "The key that calls the terminal down. It is claimed from Windows, so it works while another program has the keyboard.",
+                "Shows and hides the summoned terminal, from inside any other program.",
                 "唤出终端的快捷键。向 Windows 注册为全局快捷键，其他程序拿着焦点时也生效。",
             ),
             Self::RowQuakeProfile => pick(lang, "Profile", "新标签页的配置"),
@@ -4111,19 +4113,19 @@ impl Text {
             Self::RowQuakeCommand => pick(lang, "Command on first summon", "首次唤出时运行"),
             Self::DescQuakeCommand => pick(
                 lang,
-                "This command is run once each time Folio starts, on the first summon. Nothing else the summoned terminal restores is run.",
+                "Runs once, the first time you summon the terminal after starting Folio.",
                 "每次 Folio 启动后首次唤出时运行一次。恢复的其他内容只填入输入行，不运行。",
             ),
             Self::RowQuakeTopGap => pick(lang, "Gap above it", "顶端留距"),
             Self::DescQuakeTopGap => pick(
                 lang,
-                "How far below the top of that screen it hangs, in pixels.",
+                "How far below the top of the screen the summoned terminal hangs, in pixels.",
                 "终端顶部与屏幕顶端的间距，单位为像素。",
             ),
             Self::RowQuakeRestore => pick(lang, "What comes back", "恢复内容"),
             Self::DescQuakeRestore => pick(
                 lang,
-                "What a new run of Folio puts back into the summoned terminal. A restored command is typed at the prompt and not run, and only a shell that reports its commands has one to restore.",
+                "What a new run of Folio puts back into the summoned terminal. A restored command is typed at the prompt, not run, and needs shell integration.",
                 "Folio 重新启动后唤出的终端恢复哪些内容。恢复的命令只填入输入行，不运行；只有支持 shell 整合的配置才有命令可恢复。",
             ),
             Self::OptionQuakeRestoreNothing => pick(lang, "Nothing", "不恢复"),
@@ -4136,7 +4138,7 @@ impl Text {
             Self::RowQuakeDismiss => pick(lang, "Hide it when it loses focus", "失去焦点时收起"),
             Self::DescQuakeDismiss => pick(
                 lang,
-                "The summoned terminal goes away when the keyboard moves to another window.",
+                "Hides the summoned terminal when another window takes the focus.",
                 "焦点转到其他窗口时自动收起。",
             ),
 
@@ -4154,11 +4156,9 @@ impl Text {
             ),
             Self::FirstRunLater => pick(lang, "Not now", "暂不"),
             Self::FirstRunDone => pick(lang, "Done", "完成"),
-            Self::FirstRunRowUpdate => pick(
-                lang,
-                "Get told when a new version of Folio is out",
-                "有 Folio 新版本时提醒",
-            ),
+            Self::FirstRunRowUpdate => {
+                pick(lang, "Check for Folio updates", "有 Folio 新版本时提醒")
+            }
             Self::FirstRunRowExplorer11 => pick(
                 lang,
                 "Open any folder in Folio from its right-click menu",
@@ -4173,22 +4173,22 @@ impl Text {
             // reason: one object may only have one name.
             Self::FirstRunRowPowerShell => pick(
                 lang,
-                "PowerShell integration lets you jump between commands",
+                "Jump between commands in PowerShell",
                 "PowerShell 整合，支持命令间跳转",
             ),
             Self::FirstRunRowClaude => pick(
                 lang,
-                "Its tab lights up when Claude Code is waiting",
+                "Mark the tab when Claude Code is waiting",
                 "Claude Code 等待时标签页高亮",
             ),
             Self::FirstRunRowCodex => pick(
                 lang,
-                "Its tab lights up when a Codex turn ends",
+                "Mark the tab when a Codex turn ends",
                 "Codex 回合结束时标签页高亮",
             ),
             Self::FirstRunRowCopilot => pick(
                 lang,
-                "Its tab lights up when Copilot CLI is waiting",
+                "Mark the tab when Copilot CLI is waiting",
                 "Copilot CLI 等待时标签页高亮",
             ),
             Self::FirstRunTipUpdate => pick(
@@ -4198,7 +4198,7 @@ impl Text {
             ),
             Self::FirstRunTipExplorer => pick(
                 lang,
-                "Registers the menu entry for this Windows account.",
+                "Adds the entry for this Windows account only.",
                 "为当前 Windows 账户注册此菜单项",
             ),
             Self::FirstRunTipPowerShell => pick(

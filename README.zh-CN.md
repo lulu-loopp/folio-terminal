@@ -26,7 +26,7 @@ Folio 是一个 Windows 终端。公式在命令输出中原位排版，文件�
 
 压缩包共九个文件，需放在同一文件夹中。`folio.exe` 是主程序；`conpty.dll` 和 `OpenConsole.exe` 是启动 shell 的必需组件；`folio.msix` 是签名包，用于注册右键菜单第一页入口，指向解压目录；`folio-here.cmd` 供 VS Code 调用；其余是两份许可证、第三方声明和商标说明。
 
-网页预览需要 **WebView2 Runtime**。Windows 11 已内置；Windows 10 通常也有，若缺少可安装 [Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)。缺少时预览窗格会提示，其余功能不受影响。
+网页预览需要 **WebView2 Runtime**。Windows 11 已内置；Windows 10 通常也有，若缺少可安装 [Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)。缺少时预览窗格提示。
 
 ## 初次启动
 
@@ -49,11 +49,11 @@ Folio 是一个 Windows 终端。公式在命令输出中原位排版，文件�
 
 **卡片上的每一行也是设置中的一行**，随时可以更改。**完成**应用当前开启的选项；**暂不**或 `Esc` 保留默认值——检查更新开启，其余关闭。卡片只出现一次，背后的 shell 始终在运行。已有 `settings.json` 的用户不会看到它。
 
-首个标签页打开本机第一个可用的 shell。内置五个配置，按以下顺序查找：PowerShell 7、Windows PowerShell、WSL、Git Bash、命令提示符。未安装的 shell 不出现在新建菜单中，但保留在设置的配置页，标灰并注明所查找的程序。七个 agent 配置同样通过 Windows PATH 查找，初次设置卡的 agent 行使用相同的查找结果。
+首个标签页打开本机第一个可用的 shell。内置五个配置，按以下顺序查找：PowerShell 7、Windows PowerShell、WSL、Git Bash、命令提示符。未安装的 shell 不出现在新建菜单中，但保留在设置的配置页，标灰并注明所查找的程序。
 
 PowerShell 整合在 `$PROFILE` 中添加一行 `. "$env:APPDATA\Folio\shell-integration\folio.ps1"`，添加前自动备份原文件。删除该行即可还原。更改在下一个 PowerShell 窗口生效，设置 > 终端会在生效前提示。
 
-如果初次设置卡未询问此项，Folio 会在 PowerShell 窗格首次输出时弹出提示条。**添加到 `$PROFILE`** 立即写入，**不再提示**关闭后续询问，直接关闭提示条不做决定——下次 PowerShell 启动时再问一次。命令标记和行内 `$…$` 公式排版依赖此整合。Git Bash 和 WSL 无需整合，不写入任何文件。
+如果初次设置卡未询问此项，Folio 会在 PowerShell 窗格首次输出时弹出提示条。**添加到 `$PROFILE`** 立即写入，**不再提示**关闭后续询问，直接关闭提示条不做决定——下次 PowerShell 启动时再问一次。命令标记和行内 `$…$` 公式排版依赖此整合。
 
 Agent 页的三个开关**默认关闭**，各自读取对应工具的配置文件并显示当前状态。新机器上配置文件不存在，三项均显示关闭。
 
@@ -166,7 +166,7 @@ Agent 页的三个开关**默认关闭**，各自读取对应工具的配置文�
 - ``Win+` `` 在鼠标所在屏幕顶部拉下一个终端窗口，覆盖当前内容。再按一次收回窗口并将焦点还给之前的程序。
 - 这是完整的 Folio——标签页、窗格、文件列、预览、所有快捷键都可用。shell 和滚动历史在每次呼出之间保持。
 - 手动移动或调整过的窗口按显示器记忆，下次在该屏幕呼出时沿用。
-- 快捷终端随 Folio 启停，没有独立图标。关闭最后一个可见窗口即结束运行。
+- 快捷终端随 Folio 启停。关闭最后一个可见窗口即结束运行。
 - **设置 > 快捷终端**可配置快捷键、新标签页配置、高度、宽度、顶部间距、失焦自动隐藏，以及每次启动首次呼出时运行的命令。
 - 固定标签页在下次启动时可恢复上条命令到输入行——只填入，不运行。
 
@@ -239,7 +239,7 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Folio\WebView2"
 ## 已知问题
 
 - **曾有一例报告窗口上半部全黑**，发生在移至第二显示器后，尚未复现。如遇到请附上 `%APPDATA%\Folio\diagnostics.log`。
-- **`.webm` 需要从 Microsoft Store 安装 VP9 或 AV1 Video Extension**。Windows 默认未包含，缺少时无法显示静帧和播放。
+- **`.webm` 需要从 Microsoft Store 安装 VP9 或 AV1 Video Extension**。Windows 默认未包含，缺少时无法播放。
 - 其余已知问题见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 许可证

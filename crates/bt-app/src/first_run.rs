@@ -3256,16 +3256,23 @@ mod tests {
     /// the reader who later goes to Settings to change it has to know what the
     /// thing is called, and the card is the only place they will ever be told.
     ///
+    /// **The English column puts the benefit first from 2026-09-07** (copy
+    /// audit, user-approved the same day; §7.56 ⓪″). The ruling above is
+    /// untouched — the row still names the thing, so the Settings row it
+    /// belongs to is still findable — and only the order moved, which is that
+    /// audit's own "benefit before mechanism". The Chinese column did not
+    /// change and still opens with the name.
+    ///
     /// MUTATIONS:
-    /// ① drop the name and the row is one of six anonymous results, and the
-    ///    Settings row it belongs to is unfindable;
-    /// ② put the name after the benefit and the line reads as a result with a
-    ///    footnote rather than as a feature with a reason.
+    /// ① drop the name and the row is one anonymous result among several, and
+    ///    the Settings row it belongs to is unfindable;
+    /// ② put the Chinese benefit first and its half goes red, because that
+    ///    column was not part of the English audit.
     #[test]
     fn the_powershell_row_carries_the_integration_s_name_in_both_languages() {
-        for (lang, name) in [
-            (crate::i18n::Lang::English, "PowerShell integration"),
-            (crate::i18n::Lang::Chinese, "PowerShell 整合"),
+        for (lang, name, first) in [
+            (crate::i18n::Lang::English, "PowerShell", false),
+            (crate::i18n::Lang::Chinese, "PowerShell 整合", true),
         ] {
             let line = Text::FirstRunRowPowerShell.in_lang(lang);
             assert!(
@@ -3273,7 +3280,7 @@ mod tests {
                 "the PowerShell row does not carry {name:?}: {line:?}"
             );
             assert!(
-                line.starts_with(name),
+                !first || line.starts_with(name),
                 "the name is not the first thing the line says: {line:?}"
             );
             assert!(

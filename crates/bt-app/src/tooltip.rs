@@ -1647,7 +1647,7 @@ mod tests {
         let pinned = tab_tip("app", Some(NameSource::Cwd), Some("C:\\src"), true);
         assert_eq!(
             pinned,
-            "app\nWorking folder · C:\\src\nPinned — restored next launch"
+            "app\nWorking folder · C:\\src\nPinned. Restored next launch"
         );
         assert_eq!(pinned.lines().count(), 3);
         assert!(!tab_tip("app", Some(NameSource::Cwd), Some("C:\\src"), false).contains("Pinned"));
@@ -1660,7 +1660,7 @@ mod tests {
         assert_eq!(tab_tip("PowerShell", None, None, false), "PowerShell");
         assert_eq!(
             tab_tip("PowerShell", None, None, true),
-            "PowerShell\nPinned — restored next launch"
+            "PowerShell\nPinned. Restored next launch"
         );
         // A folder with no winning layer is still a place worth naming.
         assert_eq!(
