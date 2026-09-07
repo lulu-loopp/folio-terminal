@@ -2,15 +2,14 @@
   <source media="(prefers-color-scheme: dark)"
           srcset="assets/readme/hero-dark.svg">
   <img src="assets/readme/hero-light.svg" width="100%"
-       alt="Folio — the Windows terminal that renders math, and says which agent
-       is waiting for you. Beside the name, a terminal pane has run a command that
-       printed a file, and the display formula in that file — the integral of e to
-       the minus x squared over the whole real line, equal to the square root of pi
-       — stands typeset in the output, above the next prompt.">
+       alt="Folio, a Windows terminal that typesets LaTeX and marks the tab of an
+       agent waiting for you. Beside the name, a terminal pane shows a display
+       formula typeset in a command's output, above the next prompt.">
 </picture>
 
-Folio is a Windows terminal: formulas are typeset where a command prints them,
-files preview beside the prompt, and an agent that is waiting for you says so.
+Folio is an open-source Windows terminal. It typesets LaTeX where a command
+prints it, previews files beside the prompt, and marks the tab of an agent that
+is waiting for you.
 
 [中文说明](README.zh-CN.md) · [Shortcuts](docs/shortcuts.md) ·
 [Security](SECURITY.md) · [Changes](CHANGELOG.md)
@@ -24,21 +23,20 @@ files preview beside the prompt, and an agent that is waiting for you says so.
 
 Take [`folio-0.2.2-windows-x64.zip`](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.2.2-preview/folio-0.2.2-windows-x64.zip)
 from the [releases page](https://github.com/lulu-loopp/folio-terminal/releases),
-unpack it wherever you keep programs, and run `folio.exe`. There is no installer,
-and nothing is written outside that folder until you run it. `SHA256SUMS.txt` is
-the hash of what you downloaded. Needs **Windows 10 1809 or newer, or Windows 11,
-64-bit**.
+unpack it wherever you keep programs, and run `folio.exe`. There is no
+installer; keep the extracted files together in one folder. `SHA256SUMS.txt` is
+the hash of what you downloaded. Needs **Windows 10 1809 or newer, or Windows
+11, 64-bit**.
 
 `folio.exe` and `folio.msix` are signed by **Weiyi Shi**, with a certificate from
-Microsoft's Artifact Signing service. On first run Windows may show **"Windows
-protected your PC"**: click **"More info"**, then **"Run anyway"**, where the
-publisher shown is **Weiyi Shi**.
+Microsoft's Artifact Signing service. On first run Windows may show
+**"Windows protected your PC"**.
+**"More info"** names the publisher: check that it reads **Weiyi Shi** before
+running it.
 
-The archive holds nine files in one folder, and they belong together: `folio.exe`,
-`conpty.dll` and `OpenConsole.exe`, which it will not start a shell without;
-`folio.msix`, the few-kilobyte package the Explorer menu row registers to reach
-the first page, which names the folder it was extracted into; `folio-here.cmd` for VS Code; and the two
-licences, the third-party notices and the trademark note.
+The archive holds nine files that belong together: `folio.exe`, the two console
+libraries it needs to start a shell, `folio.msix` for the Explorer menu,
+`folio-here.cmd` for VS Code, and the licences and notices.
 
 The web preview needs the **WebView2 Runtime**. Windows 11 has it; Windows 10
 usually does, and if it does not, the Evergreen Runtime is
@@ -48,40 +46,34 @@ everything except the web preview works, and the preview says what is missing.
 ## First run
 
 A machine that has never run Folio gets one card, once. It says **Welcome to
-Folio** and asks the six questions whose answers write something outside
-`%APPDATA%\Folio`, one line each: be told when a new version is out, which is
-the only row that arrives on; open any folder in Folio from its right-click
-menu; the PowerShell integration; and a tab that lights up for each of Claude
-Code, Codex and Copilot CLI this machine actually has. Nothing about theme,
-font, size, language or layout — those are one click away and cost nothing while
-they are wrong.
+Folio** and asks whether to check for updates, add Folio to the folder
+right-click menu, enable the PowerShell integration, and mark the tab for each
+of Claude Code, Codex and Copilot CLI this machine has. Update checks arrive on;
+the rest arrive off. Nothing about theme, font, size, language or layout — those
+are one click away and cost nothing while they are wrong.
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
           srcset="docs/screenshots/first-run-dark.png">
   <img src="docs/screenshots/first-run-light.png" width="100%"
        alt="The card over a window that has just started: Folio's mark beside
-       Welcome to Folio, then six rows of one line each with a switch at the
-       right of every one. Get told when a new version of Folio is out is on;
-       Open any folder in Folio from its right-click menu and PowerShell
-       integration lets you jump between commands are off; below a hairline,
-       Its tab lights up when Claude Code is waiting, when a Codex turn ends,
-       and when Copilot CLI is waiting, all three off. At the foot, a faint line
-       reading You can change these options in Settings, then Not now and Done.
-       Behind the card, one tab and a prompt.">
+       Welcome to Folio, then the rows this machine was offered, one line each
+       with a switch at the right of every one. Check for Folio updates is on;
+       Open any folder in Folio from its right-click menu and Jump between
+       commands in PowerShell are off; after a wider gap, Mark the tab when
+       Claude Code is waiting, when a Codex turn ends, and when Copilot CLI is
+       waiting, all three off. At the foot, a faint line reading You can change
+       these options in Settings, then Not now and Done. Behind the card, one
+       tab and a prompt.">
 </picture>
 
 **Rest the pointer on a row and it says how** — including which of your own
 files the switch writes, and that the file is copied to a dated backup first.
-Nothing else on the card explains itself, because nothing else on it writes
-anywhere you have not been told about.
 
 **Every row on the card is also a row in Settings**, so nothing on it is a last
-chance. **Done** applies the rows that are on; **Not now** and `Esc` close the
-card with the shipped values — the update check on, the rest off — and change
-nothing. Either way it does not come back, and the shell behind it has been
-running the whole time. If you were already using Folio before this version, you
-never see it: your `settings.json` says so.
+chance. **Done** applies the rows that are on. **Not now** and `Esc` keep the
+shipped values: the update check on, the rest off. Either way the card does not
+come back, and if you were already using Folio you never see it.
 
 The first tab opens the first shell your machine actually has. The five shipped
 profiles are looked for in order — PowerShell 7, Windows PowerShell, WSL, Git
@@ -94,18 +86,20 @@ agent rows use.
 The PowerShell integration adds one line —
 `. "$env:APPDATA\Folio\shell-integration\folio.ps1"` — to the `$PROFILE` a
 PowerShell names for itself, after copying the file as it stood to a dated backup
-beside it; delete that line to undo it. Where that file is comes from the shell,
-so a row left on when the card is answered joins the next PowerShell that starts,
-and Settings > Terminal says so until it does. If you were not asked on the card,
-a strip offers the same thing the first time a PowerShell pane prints something:
-**Add to `$PROFILE`** does it, **Don't show again** ends the asking, and closing
-the strip decides nothing, so the next PowerShell asks once more. Command marks
-and inline `$…$` formulas run on that integration. Git Bash and WSL need none of
-it and leave nothing on disk.
+beside it; delete that line to undo it. Command marks and inline `$…$` formulas
+run on that integration. Git Bash and WSL need none of it.
 
-The three rows on the Agent page **install nothing by default**, and they are not
-defaults that happen to be off: each reads the tool's own configuration file and
-reports what is in it. On a new machine all three files are absent, so all three
+Where that file is comes from the shell, so a row left on when the card is
+answered takes effect in the next PowerShell session, and Settings > Terminal
+says so until it does.
+
+If you were not asked on the card, a strip offers the same thing the first time
+a PowerShell pane prints something: **Add to `$PROFILE`** does it, **Don't show
+again** ends the asking, and closing the strip decides nothing, so the next
+PowerShell asks once more.
+
+The three rows on the Agent page read the tool's own configuration file and
+report what is in it. On a new machine all three files are absent, so all three
 read Off.
 
 ---
@@ -130,8 +124,7 @@ The LaTeX a command prints is typeset where it was printed.
   them on.
 - The preview pane takes those, plus `\(…\)`, `\[…\]` and the bare `amsmath`
   environments.
-- One typesetter serves both — LaTeX through MiTeX into Typst. What it cannot set
-  is shown as it was printed.
+- Unsupported LaTeX remains visible as source text.
 - Inline `$…$` is told from a shell variable by the PowerShell integration below.
   Without it inline formulas stay as source, and `$$…$$` blocks still typeset.
 
@@ -160,8 +153,8 @@ The agent that is waiting for you is marked on its tab, so there is nothing to g
   file and takes it back out again. Nothing is installed by default.
 - Seven profiles start an agent — Claude Code, Codex, Copilot CLI, Kimi Code, pi,
   Hermes, OpenCode — found on the Windows path; one installed inside WSL is run
-  from the WSL profile. Any program that writes `OSC 1337;RequestAttention=yes` is
-  heard with nothing installed at all.
+  from the WSL profile. Any program that writes `OSC 1337;RequestAttention=yes`
+  raises the mark, with nothing installed at all.
 
 ### Preview beside the prompt: files, PDF, video, web
 
@@ -229,10 +222,10 @@ be seen at once.
 - `Alt+Shift+-` splits a pane across, `Alt+Shift+=` splits it down. A tab or a
   single pane can be dragged out into a window of its own, and the panes it did
   not touch keep their widths.
-- A pane dropped on the join between two tabs becomes a tab *between* them: the
-  list opens a slot and the pane stands in it, which is where letting go puts
-  it. Dropped on a tab itself it joins that tab's layout. The horizontal strip,
-  the vertical rail and the card column all read the join the same way.
+- A pane dropped on the join between two tabs becomes a tab *between* them: a
+  gap opens where it will land. Dropped on a tab itself it joins that tab's
+  layout. The horizontal strip, the vertical rail and the card column all read
+  the join the same way.
 - `Ctrl+Shift+Z` turns the tab strip into a column of cards, one per tab, each
   drawing that tab's own panes in the layout they have.
 - `Ctrl+Shift+G` turns the files column into a Git panel: branch, working tree,
@@ -266,8 +259,8 @@ takes it away again.
   shortcut — and it keeps its shells and its scrollback between summons.
 - A rectangle you move or resize by hand is remembered for the display it is on,
   so the summon comes down where you last put it on that screen.
-- It lives and dies with Folio: no icon of its own, and nothing left running
-  behind the key. Closing the last window you can see ends the run.
+- It has no icon of its own, and closing the last window you can see ends the
+  run.
 - **Settings > Summoned terminal** holds the key, which profile a new tab opens
   on, the height, width and the gap below the top of the screen, whether the
   window hides when the keyboard leaves it, and a command to run on the first
@@ -298,8 +291,7 @@ One box answers five questions at once, and `Enter` goes straight there.
   Settings at that row, and on an action does it.
 - A command still running is pointed at with a ring around the pane it is running
   in, rather than a scroll to a line that has gone past.
-- The files come from an index of the folder the column is standing in, built off
-  the window's own thread, so a deep tree does not make the box wait.
+- File search covers the folder the files column is showing.
 
 ### Windows integration
 
@@ -312,17 +304,13 @@ One box answers five questions at once, and `Enter` goes straight there.
        a preview pane on the right.">
 </picture>
 
-- **Settings > General > Explorer context menu** is a switch, and On is
-  everything your Windows can do. It writes two keys under
-  `HKEY_CURRENT_USER\Software\Classes`; the entry reads "Open Folio here", and
-  Windows 11 files it under "Show more options" while on Windows 10 it stands in
-  the only menu there is. On a Windows 11 that has `folio.msix` beside
-  `folio.exe`, On also registers that package for your account, which puts "Open
-  in Folio" on the page Windows 11 opens first — where a right-click gives it to
-  you without "Show more options". That page takes entries only from a signed
-  package, which is what `folio.msix` is for; it needs no elevation. Off takes
-  back whichever of the two is registered, and the line under the row says which
-  of them On reaches on the machine you are reading it on.
+- **Settings > General > Explorer context menu** puts Folio in the folder
+  right-click menu, and On is everything your Windows can do. Windows 11 files
+  "Open Folio here" under "Show more options"; on Windows 10 it stands in the
+  only menu there is. On a Windows 11 with `folio.msix` beside `folio.exe`, On
+  also puts "Open in Folio" on the page Windows 11 opens first. Off takes back
+  whichever is registered, and the line under the row says which of them On
+  reaches on your machine. `docs/PRIVACY.md` lists what is written.
 - Windows PowerShell 5.1 ships PSReadLine 2.0.0, which misplaces the input line
   after the window is resized. Folio carries a patched 2.4.6 and installs it into
   your module path on request. On a machine whose execution policy is still the
@@ -351,15 +339,14 @@ command with no arguments, and `--cwd` is how Folio is told where to start.
 
 ## Privacy
 
-Folio sends nothing about you anywhere: no telemetry, no analytics, no crash
-reporting. There is no model and no API key in it; it serves the agents you
-already run. Two things reach the network: a page you open in the web preview,
-and the update check.
+Folio has no telemetry, no analytics and no crash reporting. There is no model
+and no API key in it; it serves the agents you already run. Two things reach the
+network: a page you open in the web preview, and the update check.
 
 The update check is one `GET` of
 `https://api.github.com/repos/lulu-loopp/folio-terminal/releases`, at most
 once a day across every window, carrying a `User-Agent` of `Folio` and nothing
-else - no version, no identifier, no query string. What it can do with the answer
+else: no version, no identifier, no query string. What it can do with the answer
 is draw a mark on the settings gear and a line in Settings; it downloads nothing
 and replaces nothing. Switch it off at Settings > General > **Update check**, or
 with `"update_check": false` in `settings.json`.

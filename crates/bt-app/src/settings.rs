@@ -20430,8 +20430,8 @@ mod tests {
         );
         assert_eq!(
             SettingsRow::LineWrapping.description(&off),
-            "Lines longer than the pane run on, and the pane scrolls sideways \
-             with Shift+wheel or the bar along its foot."
+            "Lines longer than the pane run on. Scroll sideways with Shift+wheel \
+             or the horizontal scrollbar."
         );
         assert_ne!(
             SettingsRow::LineWrapping.description(&on),

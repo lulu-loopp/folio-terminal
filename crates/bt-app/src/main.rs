@@ -46238,7 +46238,7 @@ impl Runtime<'_> {
                     toast::ToastKind::Error,
                     toast::ToastAnchor::Window,
                     None,
-                    format!("{} — {reason}", i18n::Text::ClaudeHooksFailedToast.text()),
+                    i18n::agent_install_refused(i18n::Text::ClaudeHooksFailedToast.text(), reason),
                 )?;
                 Ok(false)
             }
@@ -46292,7 +46292,7 @@ impl Runtime<'_> {
                     toast::ToastKind::Error,
                     toast::ToastAnchor::Window,
                     None,
-                    format!("{} — {reason}", i18n::Text::CodexNotifyFailedToast.text()),
+                    i18n::agent_install_refused(i18n::Text::CodexNotifyFailedToast.text(), reason),
                 )?;
                 Ok(false)
             }
@@ -46351,7 +46351,7 @@ impl Runtime<'_> {
                     toast::ToastKind::Error,
                     toast::ToastAnchor::Window,
                     None,
-                    format!("{} — {reason}", i18n::Text::CopilotHooksFailedToast.text()),
+                    i18n::agent_install_refused(i18n::Text::CopilotHooksFailedToast.text(), reason),
                 )?;
                 Ok(false)
             }
@@ -46611,7 +46611,7 @@ impl Runtime<'_> {
             .map(|row| first_run::RowContent {
                 group_break_above: row.group_break_above,
                 line: row.line.text().to_owned(),
-                tip: row.tip.text().to_owned(),
+                tip: row.tip.text(),
                 on: row.on,
             })
             .collect();
@@ -113448,7 +113448,7 @@ mod tests {
         );
         assert_eq!(
             tooltip::tab_tip(&name, source, Some(&path), true),
-            format!("folio-terminal\nWorking folder · {path}\nPinned — restored next launch")
+            format!("folio-terminal\nWorking folder · {path}\nPinned. Restored next launch")
         );
         // The full path, not the leaf the first line already carries.
         assert!(path.ends_with(r"Developer\folio-terminal"));
@@ -134305,7 +134305,7 @@ mod tests {
         // its own and it is not a seat of this one — so its two verbs are read
         // off the payload and the flag says nothing here either way.
         assert_eq!(centre().caption(&file), "Open in this preview");
-        assert_eq!(centre().caption(&folder), "Root this tree here");
+        assert_eq!(centre().caption(&folder), "Root the files column here");
         for landing in [
             DropLanding::SeatEdge {
                 target: TARGET,

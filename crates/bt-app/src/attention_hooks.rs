@@ -102,6 +102,36 @@ pub(crate) fn settings_path() -> Option<PathBuf> {
     Some(config_dir()?.join(SETTINGS_FILE))
 }
 
+/// The same file, spelled for a reader who is being asked to consent to it.
+///
+/// **`~/.claude/settings.json` when nothing has moved the directory**, which is
+/// the spelling every other surface in this window uses and the truth on every
+/// machine that has not set `CLAUDE_CONFIG_DIR`. When the variable does name a
+/// directory the whole path is spelled out instead: a disclosure that named a
+/// file this build is not going to write is worse than no disclosure, and the
+/// reader who moved the directory is exactly the reader who will check.
+#[must_use]
+pub(crate) fn settings_path_shown() -> String {
+    settings_path_shown_from(
+        std::env::var_os(CONFIG_DIR_VARIABLE),
+        std::env::var_os("USERPROFILE"),
+    )
+}
+
+/// The same decision, with the environment handed in — [`config_dir_from`]'s
+/// reason, and it is what lets a test pin both halves without touching a
+/// process-wide variable.
+#[must_use]
+fn settings_path_shown_from(named: Option<OsString>, profile: Option<OsString>) -> String {
+    let default = || format!("~/{DEFAULT_DIRECTORY}/{SETTINGS_FILE}");
+    if named.as_ref().is_none_or(|named| named.is_empty()) {
+        return default();
+    }
+    config_dir_from(named, profile)
+        .map(|dir| dir.join(SETTINGS_FILE).display().to_string())
+        .unwrap_or_else(default)
+}
+
 /// What that file says today.
 #[must_use]
 pub(crate) fn state() -> State {
@@ -600,6 +630,40 @@ mod tests {
         assert!(
             config_dir_from(None, named(r"C:\Users\someone"))
                 .is_some_and(|path| path.is_absolute())
+        );
+    }
+
+    /// **The consent disclosure names the file this machine will write.**
+    ///
+    /// The first-run card's Claude Code row says which file it is about to copy and then write,
+    /// and that sentence is the one thing on the card that has to be true. Both halves are pinned
+    /// here: the default spelling on a machine that has moved nothing — byte for byte the string
+    /// the card has always drawn — and the real path on a machine that has set
+    /// `CLAUDE_CONFIG_DIR`, where the old literal named a file nothing was going to touch.
+    #[test]
+    fn the_tip_names_the_default_spelling_until_the_variable_moves_it() {
+        let named = |text: &str| Some(OsString::from(text));
+        assert_eq!(
+            settings_path_shown_from(None, named(r"C:\Users\someone")),
+            "~/.claude/settings.json"
+        );
+        // Set-but-empty is not set, `config_dir_from`'s rule, so the spelling does not move.
+        assert_eq!(
+            settings_path_shown_from(named(""), named(r"C:\Users\someone")),
+            "~/.claude/settings.json"
+        );
+        // …and with nothing to go on at all, the default spelling is still the honest answer:
+        // there is no path to offer instead.
+        assert_eq!(
+            settings_path_shown_from(None, None),
+            "~/.claude/settings.json"
+        );
+        assert_eq!(
+            settings_path_shown_from(named(r"D:\scratch\claude-home"), named(r"C:\Users\someone")),
+            PathBuf::from(r"D:\scratch\claude-home")
+                .join(SETTINGS_FILE)
+                .display()
+                .to_string()
         );
     }
 

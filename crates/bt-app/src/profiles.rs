@@ -22022,7 +22022,7 @@ mod tests {
             capability_of_parts(Integration::None, PathNamespace::Windows, true, true)
                 .in_lang(crate::i18n::Lang::English)
                 .to_lowercase()
-                .contains("hyperlinks are declared anyway"),
+                .contains("hyperlinks still work"),
             "the editor's own length says the one thing that is not lost"
         );
     }

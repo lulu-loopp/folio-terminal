@@ -34,7 +34,7 @@ Every key here can be changed on the Shortcuts page in Settings. Changing one wr
 | Ctrl+Shift+D | Duplicate pane into a split |  | `duplicate-pane-split` |
 | Ctrl+Shift+X | Zoom pane |  | `zoom-pane` |
 | Ctrl+Shift+B | Files column |  | `files-pane` |
-| Ctrl+Shift+G | Turn the files column to Git |  | `git-page` |
+| Ctrl+Shift+G | Show Git in the files column |  | `git-page` |
 | Ctrl+, | Settings |  | `open-settings` |
 | Ctrl+S | Save the open document | In a preview | `save-preview` |
 | Ctrl+Shift+↑ | Previous command | On a terminal's own scrollback | `prev-command-mark` |
@@ -44,7 +44,7 @@ Every key here can be changed on the Shortcuts page in Settings. Changing one wr
 | Shift+F3 | Previous match | While the search is open | `prev-match` |
 | Esc | Close search | While the search is open | `close-search` |
 | Ctrl+L | Address | On a page | `web-address` |
-| Ctrl+Shift+L | Open address |  | `window-address` |
+| Ctrl+Shift+L | Open an address in a new preview |  | `window-address` |
 | F12 | Developer tools | On a page | `web-devtools` |
 | Win+` | Summon the terminal |  | `summon-quake` |
 | Not set | Summon picture in picture 1 |  | `summon-pip-1` |

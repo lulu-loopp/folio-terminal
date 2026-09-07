@@ -2,9 +2,8 @@
 
 # Folio 0.2.2-preview
 
-Fixes and polish for 0.2.1-preview, and one card: a machine that has never run
-Folio is welcomed once and asked its boundary questions together, in one
-place.
+0.2.2 adds a first-run setup card and fixes pane dragging, web previews, image
+previews and formula rendering.
 
 ## Welcome to Folio, once, on a machine that has never run it
 
@@ -12,51 +11,37 @@ place.
   <source media="(prefers-color-scheme: dark)"
           srcset="https://raw.githubusercontent.com/lulu-loopp/folio-terminal/v0.2.2-preview/docs/screenshots/first-run-dark.png">
   <img src="https://raw.githubusercontent.com/lulu-loopp/folio-terminal/v0.2.2-preview/docs/screenshots/first-run-light.png" width="100%"
-       alt="The card over a window that has just started: Folio's mark beside Welcome to Folio, then six rows of one line each with a switch at the right of every one. Get told when a new version of Folio is out is on; Open any folder in Folio from its right-click menu and PowerShell integration lets you jump between commands are off; below a hairline, Its tab lights up when Claude Code is waiting, when a Codex turn ends, and when Copilot CLI is waiting, all three off. At the foot, a faint line reading You can change these options in Settings, then Not now and Done.">
+       alt="The card over a window that has just started: Folio's mark beside Welcome to Folio, then the rows this machine was offered, one line each with a switch at the right of every one. Check for Folio updates is on; Open any folder in Folio from its right-click menu and Jump between commands in PowerShell are off; after a wider gap, Mark the tab when Claude Code is waiting, when a Codex turn ends, and when Copilot CLI is waiting, all three off. At the foot, a faint line reading You can change these options in Settings, then Not now and Done.">
 </picture>
 
-- The card asks every question whose answer writes something **outside**
-  `%APPDATA%\Folio`, and it asks them together, because they are one decision
-  about how much of this machine Folio may touch. Six rows of one line each, and
-  the line is what you get: be told when a new version is out, which is the only
-  row that arrives on; open any folder in Folio from its right-click menu; the
-  PowerShell integration; and a tab that lights up for each of Claude Code,
-  Codex and Copilot CLI this machine actually has. Nothing about theme, font,
-  size, language or layout — those are one click away and cost nothing while
-  they are wrong.
+- On first launch the card asks whether to check for updates, add Folio to the
+  folder right-click menu, enable the PowerShell integration, and mark the tab
+  for each agent this machine has. Update checks arrive on; the rest arrive off.
+  Nothing about theme, font, size, language or layout.
 - **Rest the pointer on a row and it says how**, including which of your own
   files the switch writes and that the file is copied to a dated backup first.
-- **Every row on the card is a row in Settings**, and the card presses those rows
-  rather than doing anything of its own. Nothing on it is a last chance, and the
-  switch you find in Settings an hour later is the same switch, in the same
-  place, on the same shape of row.
+- **Every row on the card is also a row in Settings**, so nothing on it is a
+  last chance.
 - **Done** applies the rows that are on. **Not now** and `Esc` close the card
   with the shipped values — the update check on, the rest off — and change
   nothing. Either way it does not come back, and the shell behind it has been
   running the whole time.
-- A row is only offered if it can be honoured. An agent that is not on this
-  machine, or whose configuration already calls Folio, is not listed, and when
-  none of the three is there the rule above them goes with them. On Windows 11
+- A row is only offered if it can be honoured. An agent that is not installed,
+  or whose configuration already calls Folio, is not listed. On Windows 11
   unpacked without `folio.msix`, the Explorer row still offers the entry it can
   offer, worded for it.
-- The PowerShell row records an intent rather than acting: where your `$PROFILE`
-  is comes from the shell, so the line is added by the next PowerShell that
-  starts, and **Settings > Terminal** says so until it does. The file as it stood
-  is copied to a dated backup beside it first, as always.
-- **If you were already using Folio, you never see it.** The step that brings
-  your `settings.json` up to date is what records that.
+- The PowerShell line is added by the next PowerShell session, because that is
+  what names your `$PROFILE`. **Settings > Terminal** says so until it does. The
+  file as it stood is copied to a dated backup beside it first, as always.
+- **If you were already using Folio, you never see it.**
 
 ## A pane can be dropped *between* two tabs
 
-- The join between two entries in the tab list is a band eight logical pixels
-  either side, and a pointer inside it makes the pane a new tab there rather than
-  handing it to the tab it happens to be over. The list opens a slot and the pane
-  stands in it, which is where letting go puts it — the picture is the row
-  itself, and nothing is drawn across the join.
+- Drag a pane between two tabs to create a tab at that position. A gap shows
+  where it will appear. The horizontal strip, the vertical rail and the card
+  column all read the join the same way.
 - It takes four more pixels to leave the band than to enter it, so the open slot
   and the tab highlight do not trade places under a hand that is holding still.
-- The horizontal tab strip, the vertical rail and the card column all read the
-  same rule.
 
 ## A menu that starts a shell lists only what this machine can start
 
@@ -73,39 +58,22 @@ place.
 
 ## A pane dragged over a web preview can be dropped there
 
-- The landing outline was drawn correctly over the page, but letting go did
-  nothing: the press router handed every mouse button inside a page to the
-  browser, releases included, and every gesture that spends a release — the drop,
-  the divider, the video scrubber, the preview thumbs and pans, the terminal's
-  own selection — is answered below that line.
-- A hand that is already carrying something no longer counts as a hand hovering a
-  page, so the release reaches the gesture that started it. While you are
-  carrying something the page also stops lighting its own links under the pointer
-  and stops replacing the drag cursor with its own.
+- Fixed panes failing to drop over a web preview even when the drop outline was
+  visible. While you are carrying something, a page no longer lights its links
+  or replaces the drag cursor.
 
 ## A window holds as many pages as it has preview panes
 
-- Opening a second page in one tab used to navigate the first pane and leave the
-  new one standing on its empty placeholder. A page now lands where every other
-  preview lands — the first preview pane that is not locked, or a new one when
-  there is none — so locking a page and opening another puts them side by side,
-  each with its own engine, sharing the one browser profile they always shared.
+- Fixed web pages opening in the wrong preview pane. Lock a page before opening
+  another to view them side by side.
 - A page that cannot be reached or downloaded shows its card over its own pane
   rather than over the first page in the tab.
 
 ## A formula on the screen of a program that repaints itself gets typeset
 
-- A full-screen redraw writes every row, so every row arrives as a change even
-  when not one byte of it moved, and a display block (`$$ … $$`) is only typeset
-  once the rows it sits on have been still for a moment. A program that redraws
-  more often than that — Claude Code redraws at a median of 106 ms, and the wait
-  is 200 ms — kept restarting the wait, so a block that landed while the program
-  was busy stayed as its own source text for as long as it was there, beside
-  another block that had been drawn during a lull and was a picture.
-- Both are pictures now: a row rewritten with the bytes it already had counts as
-  unchanged, and a row that really does change — a character or a colour — still
-  restarts its wait exactly as before. Markdown tables and the pictures drawn
-  under image paths wait on the same stillness, so they come back on those
+- A display formula printed by a program that redraws constantly, such as Claude
+  Code, is typeset now. It used to stay as source text for as long as the program
+  was busy. Markdown tables and images under image paths come back on those
   screens too.
 
 ## A picture stays in its own preview pane
@@ -115,10 +83,8 @@ place.
   held a web page — hidden underneath it, leaving nothing but the size line where
   the picture should have been. The same thing happened when a preview pane was
   inserted between the picture and the terminal.
-- Every frame moved the picture to whichever preview pane came first in the
-  window, which was the picture's own only while a tab had a single one of them.
-  It now travels with the pane that is holding it, through splits, insertions,
-  divider drags and tab switches alike.
+- An image now stays in the pane that opened it, through splits, insertions,
+  divider drags and tab switches.
 
 ## Also fixed
 
@@ -144,24 +110,17 @@ place.
 
 ## Upgrading from 0.2.1
 
-**Nothing to do.** `settings.json` gains the card's two keys and is brought up to
-date **automatically**, the first time 0.2.2 reads it — nothing to delete,
-nothing to re-enter, and no answer you have already given is overwritten. That
-same step records that the card has been shown, which is why a machine that was
-already running Folio never meets it. `session.json`, `profiles.json`,
-`keybindings.json` and `pins.json` are read and written exactly as 0.2.1 left
-them, and no shortcut, default or file location has moved.
-
-Unpack over the old folder, or beside it, and run `folio.exe`. The archive holds
-the same **nine** files 0.2.1's did, and `folio.msix` still belongs in the same
-folder as `folio.exe`.
+**Nothing to do.** Your existing settings are preserved when you upgrade, and
+first-run setup appears only on a machine that has never run Folio. Unpack over
+the old folder, or beside it, and run `folio.exe`. The archive holds the same
+**nine** files 0.2.1's did, and `folio.msix` still belongs in the same folder as
+`folio.exe`.
 
 ## Download and run
 
 Take `folio-0.2.2-windows-x64.zip` from this release, unpack it wherever you keep
-programs, and run `folio.exe`. There is no installer, and nothing is written
-outside that folder until you run it. `SHA256SUMS.txt` is the hash of what you
-downloaded.
+programs, and run `folio.exe`. There is no installer; keep the extracted files
+together in one folder. `SHA256SUMS.txt` is the hash of what you downloaded.
 
 Needs **Windows 10 1809 or newer, or Windows 11, 64-bit**.
 
@@ -179,13 +138,9 @@ Microsoft's Artifact Signing service and a Microsoft time stamp, as they were in
   archive makes it the external terminal VS Code opens instead.
 - **A window saved on a monitor that enumerates late** comes back on the primary
   display. The displays are counted once, before the window is made.
-- **Two pages whose panes cross while the layout is rearranging can overlap for
-  about 200 ms.** Under every hosted page is a plate of the window's colour, and
-  the plate of the page opened first sits above the page opened after it. Two
-  panes standing still never overlap; while they glide to new places — a split, a
-  close, a pane dropped, torn out or merged — the rectangles can cross, and for
-  that long one page is covered by the other's plate. A divider drag does not do
-  it.
+- **Two web previews can overlap for about a fifth of a second while panes are
+  moving to new places.** Panes standing still never overlap, and a divider drag
+  does not do it.
 - **A window was once reported drawing its top half black** after a move to a
   second monitor, unreproduced.
 - **`.webm` needs the VP9 or AV1 Video Extension** from the Microsoft Store. A

@@ -115,8 +115,8 @@ can be told from one that was retaken on purpose.
 | `quake-dark.png` | 1920 x 1200 | 2026-09-05 | `9a1a2f4025da3797a919d387566fd91fe7bc7c37ad83ccb5ea99432e73053307` |
 | `palette-light.png` | 3200 x 2000 | 2026-09-05 | `a79617f8ec4bde9d5f1a4778c44be21f06a973f8015b13ac7aac23f94e9b98d0` |
 | `palette-dark.png` | 3200 x 2000 | 2026-09-05 | `61eafe6499d825d3ab46f125b6049b7482c42575dbe9c89c51d8c2aa5ed13e6a` |
-| `first-run-light.png` | 3200 x 2000 | 2026-09-07 | `bd3130880d1af2ddfd0bf6b6b2c3a45330cd2c8922efa0533cea474343d188f9` |
-| `first-run-dark.png` | 3200 x 2000 | 2026-09-07 | `16a36aa8e9248f945887f7f76551cbff71d721cf355b329ffe51facafa6c67b5` |
+| `first-run-light.png` | 3200 x 2000 | 2026-09-07 | `cf918dd19eb5a28059a1083c87ab792ac5bd45c8ce2171f9d9f5265873c4489c` |
+| `first-run-dark.png` | 3200 x 2000 | 2026-09-07 | `1062bfe3b565efbdf3d8ad9e3a7d4fedb8cac0efdbbd627ec15897ad2e207de6` |
 | `context-menu.png` | 786 x 593 | 2026-09-05 | `e7e82a4ffe3a94dc1d52f8f38cabe48f61e1a39d9d2cc1c5dc17f5e5ed662faf` |
 
 The twenty the two READMEs point at come to 3.43 MiB after `oxipng`, and

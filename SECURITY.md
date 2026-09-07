@@ -2,8 +2,8 @@
 
 Folio is a terminal emulator for Windows. It runs shells, hosts a web preview,
 writes into three other tools' configuration files when you ask it to, and listens
-on one named pipe. This file says what each of those is bounded by, and — more
-importantly — what it is **not** bounded by.
+on one named pipe. This file says what bounds each of those, and what does
+not.
 
 ## Reporting a vulnerability
 
@@ -12,7 +12,7 @@ private GitHub security advisory, visible only to you and the maintainers. Pleas
 do not open a public issue for something you believe is exploitable.
 
 If you are not sure whether what you found is in scope, report it privately
-anyway; deciding that is our job, not yours.
+anyway. Working out whether it is in scope is the maintainers' job.
 
 ## The threat model, in one paragraph
 

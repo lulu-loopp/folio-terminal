@@ -225,6 +225,33 @@ pub(crate) fn hooks_path() -> Option<PathBuf> {
     Some(config_dir()?.join(HOOKS_DIRECTORY).join(HOOKS_FILE))
 }
 
+/// The same file, spelled for a reader who is being asked to consent to it —
+/// [`crate::attention_hooks::settings_path_shown`]'s rule over `COPILOT_HOME`.
+#[must_use]
+pub(crate) fn hooks_path_shown() -> String {
+    hooks_path_shown_from(
+        std::env::var_os(HOME_VARIABLE),
+        std::env::var_os("USERPROFILE"),
+    )
+}
+
+/// The same decision, with the environment handed in.
+#[must_use]
+fn hooks_path_shown_from(named: Option<OsString>, profile: Option<OsString>) -> String {
+    let default = || format!("~/{DEFAULT_DIRECTORY}/{HOOKS_DIRECTORY}/{HOOKS_FILE}");
+    if named.as_ref().is_none_or(|named| named.is_empty()) {
+        return default();
+    }
+    config_dir_from(named, profile)
+        .map(|dir| {
+            dir.join(HOOKS_DIRECTORY)
+                .join(HOOKS_FILE)
+                .display()
+                .to_string()
+        })
+        .unwrap_or_else(default)
+}
+
 /// The user's own settings file, which this module **reads and never writes**.
 #[must_use]
 fn settings_path() -> Option<PathBuf> {
@@ -642,6 +669,36 @@ mod tests {
 
     fn exe() -> PathBuf {
         PathBuf::from(r"C:\Program Files\Folio\folio.exe")
+    }
+
+    /// **The consent disclosure names the file this machine will write** —
+    /// [`crate::attention_hooks`]'s pin over `COPILOT_HOME`, both halves.
+    #[test]
+    fn the_tip_names_the_default_spelling_until_the_variable_moves_it() {
+        let named = |text: &str| Some(OsString::from(text));
+        assert_eq!(
+            hooks_path_shown_from(None, named(r"C:\Users\someone")),
+            "~/.copilot/hooks/folio.json"
+        );
+        assert_eq!(
+            hooks_path_shown_from(named(""), named(r"C:\Users\someone")),
+            "~/.copilot/hooks/folio.json"
+        );
+        assert_eq!(
+            hooks_path_shown_from(None, None),
+            "~/.copilot/hooks/folio.json"
+        );
+        assert_eq!(
+            hooks_path_shown_from(
+                named(r"D:\scratch\copilot-home"),
+                named(r"C:\Users\someone")
+            ),
+            PathBuf::from(r"D:\scratch\copilot-home")
+                .join(HOOKS_DIRECTORY)
+                .join(HOOKS_FILE)
+                .display()
+                .to_string()
+        );
     }
 
     /// **Only the user's own file, and never a repository's.**

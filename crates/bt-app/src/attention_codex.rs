@@ -125,6 +125,28 @@ pub(crate) fn config_path() -> Option<PathBuf> {
     Some(config_dir()?.join(CONFIG_FILE))
 }
 
+/// The same file, spelled for a reader who is being asked to consent to it —
+/// [`crate::attention_hooks::settings_path_shown`]'s rule over `CODEX_HOME`.
+#[must_use]
+pub(crate) fn config_path_shown() -> String {
+    config_path_shown_from(
+        std::env::var_os(HOME_VARIABLE),
+        std::env::var_os("USERPROFILE"),
+    )
+}
+
+/// The same decision, with the environment handed in.
+#[must_use]
+fn config_path_shown_from(named: Option<OsString>, profile: Option<OsString>) -> String {
+    let default = || format!("~/{DEFAULT_DIRECTORY}/{CONFIG_FILE}");
+    if named.as_ref().is_none_or(|named| named.is_empty()) {
+        return default();
+    }
+    config_dir_from(named, profile)
+        .map(|dir| dir.join(CONFIG_FILE).display().to_string())
+        .unwrap_or_else(default)
+}
+
 /// What that file says today.
 #[must_use]
 pub(crate) fn state() -> State {
@@ -317,6 +339,29 @@ mod tests {
 
     fn exe() -> PathBuf {
         PathBuf::from(r"C:\Program Files\Folio\folio.exe")
+    }
+
+    /// **The consent disclosure names the file this machine will write** —
+    /// [`crate::attention_hooks`]'s pin over `CODEX_HOME`, both halves.
+    #[test]
+    fn the_tip_names_the_default_spelling_until_the_variable_moves_it() {
+        let named = |text: &str| Some(OsString::from(text));
+        assert_eq!(
+            config_path_shown_from(None, named(r"C:\Users\someone")),
+            "~/.codex/config.toml"
+        );
+        assert_eq!(
+            config_path_shown_from(named(""), named(r"C:\Users\someone")),
+            "~/.codex/config.toml"
+        );
+        assert_eq!(config_path_shown_from(None, None), "~/.codex/config.toml");
+        assert_eq!(
+            config_path_shown_from(named(r"D:\scratch\codex-home"), named(r"C:\Users\someone")),
+            PathBuf::from(r"D:\scratch\codex-home")
+                .join(CONFIG_FILE)
+                .display()
+                .to_string()
+        );
     }
 
     fn installed(text: &str) -> DocumentMut {
