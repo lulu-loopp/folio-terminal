@@ -43,6 +43,19 @@
 //! somebody deleted half of by hand, because all three are the same finding —
 //! see [`bt_platform::ContextMenuState::Stale`].
 //!
+//! # And why it does not always write
+//!
+//! "Not what this build would write" is also true of a registration another
+//! **live** copy of Folio put there, and rewriting that one is not a repair: it
+//! is this process taking a menu entry off a program that is answering it
+//! perfectly well. The rule is
+//! [`bt_platform::context_menu_reassert_wanted`]'s — rewrite unless a tree names
+//! a `folio.exe` that is still on the disk and is not this one — and the day it
+//! was written is the day a debug build, run once out of a scratch folder,
+//! pointed somebody's own right-click menu at a folder that was deleted an hour
+//! later. The explicit switch is not affected: a press asks for *this* Folio by
+//! name, and [`apply`] writes.
+//!
 //! # Windows 11's primary menu
 //!
 //! This verb lands under **"Show more options"**, not in the short menu that
@@ -133,12 +146,21 @@ pub fn apply(install: bool) -> Result<(), String> {
 /// window yet to report it on, the entry that is already there goes on being
 /// whatever it was, and the next launch will try again. What it must not do is
 /// stop the launch.
+///
+/// Whether it writes at all is [`bt_platform::context_menu_reassert_wanted`]'s
+/// answer, and the disk it is asked about is this one: `is_file` on the path the
+/// registered command line names. The read is done once and both answers — the
+/// write and the row's `On` — come off it, so the row cannot be drawn from a
+/// second reading of a registry this function has since changed.
 pub fn reassert() -> bool {
-    let state = state();
-    if state == ContextMenuState::Stale {
+    let Some(desired) = desired() else {
+        return false;
+    };
+    let found = bt_platform::read_context_menu(CONTEXT_MENU_CLASSES);
+    if bt_platform::context_menu_reassert_wanted(&found, &desired, |exe| exe.is_file()) {
         let _ = apply(true);
     }
-    installed(state)
+    installed(bt_platform::context_menu_verdict(&found, &desired))
 }
 
 // **The row's sentence used to be written here** and moved to

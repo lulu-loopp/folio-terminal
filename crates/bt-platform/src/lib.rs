@@ -1716,6 +1716,86 @@ pub fn context_menu_verdict(
     ContextMenuState::Stale
 }
 
+/// The executable a `command` value names, or `None` where the value is not one
+/// this product would have written.
+///
+/// The whole of the parse is the first quoted run: [`context_menu_shape`] writes
+/// `"<path>" --cwd "%V"` and nothing else, so an opening quote and the next
+/// quote after it bracket the path — including every path with a space in it,
+/// which is the case the quotes are there for in the first place.
+///
+/// **A value that does not start with a quote answers `None` rather than
+/// guessing.** Somebody's hand-written `command` is not this product's to read
+/// halfway; what the caller does with `None` is decide without it.
+#[must_use]
+pub fn context_menu_command_exe(command: &str) -> Option<&str> {
+    let rest = command.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    let exe = &rest[..end];
+    (!exe.is_empty()).then_some(exe)
+}
+
+/// Whether two `command` paths name the same file.
+///
+/// Both strings were written by a [`context_menu_shape`] over a `current_exe`,
+/// so they agree on spelling wherever they agree at all; what is folded is only
+/// what Windows itself folds — case, and a trailing separator a hand edit may
+/// have left. Canonicalisation is deliberately not asked for: this is a question
+/// about two strings and it must have the same answer on a path whose file is
+/// gone, which is exactly the case the rule below turns on.
+fn context_menu_same_exe(left: &str, right: &str) -> bool {
+    let fold = |path: &str| path.trim_end_matches(['\\', '/']).to_lowercase();
+    fold(left) == fold(right)
+}
+
+/// Whether the launch should write the verb again.
+///
+/// **The rule, in one sentence: a registration that is not what this build would
+/// write is rewritten, unless one of the trees names a `folio.exe` that is still
+/// on the disk and is not this one.**
+///
+/// The first half is [`ContextMenuState::Stale`]'s own repair and everything it
+/// has always carried — a moved binary, a label in a language the reader has
+/// left, a set of trees somebody deleted half of.
+///
+/// The second half is the sentence this function exists for. A `command` naming
+/// a file that is **still there** is a registration another live copy of Folio
+/// is answering: the reader right-clicks, a window opens, and nothing about
+/// their machine is broken. Rewriting it would be this copy taking a menu entry
+/// away from that one, which is a thing no launch has ever been asked to do —
+/// and on a developer's machine it is a build in a scratch folder quietly
+/// becoming the `folio.exe` the right-click menu runs. A `command` naming a file
+/// that is **gone** is the moved binary the repair was written for: nothing
+/// answers that entry, no installer will notice, and this process is a Folio
+/// that can.
+///
+/// What it cannot tell apart is a binary that moved from a second copy started
+/// while the first was deleted, because after the move the two are the same
+/// situation on the disk: one `folio.exe` here, and a path over there with
+/// nothing at it. Existence is the honest boundary, and the side it errs on is
+/// the one that leaves the reader with a menu entry that works.
+///
+/// `on_disk` is the only impure part and is handed in, so the rule can be read
+/// and tested without a file system under it. The explicit switch is not routed
+/// through here at all: a press on `Settings ▸ General ▸ Explorer context menu`
+/// is somebody asking for *this* Folio by hand, and it writes.
+#[must_use]
+pub fn context_menu_reassert_wanted(
+    found: &[Option<ContextMenuShape>],
+    desired: &ContextMenuShape,
+    on_disk: impl Fn(&std::path::Path) -> bool,
+) -> bool {
+    if context_menu_verdict(found, desired) != ContextMenuState::Stale {
+        return false;
+    }
+    let ours = context_menu_command_exe(&desired.command).unwrap_or_default();
+    !found
+        .iter()
+        .flatten()
+        .filter_map(|shape| context_menu_command_exe(&shape.command))
+        .any(|exe| !context_menu_same_exe(exe, ours) && on_disk(std::path::Path::new(exe)))
+}
+
 /// The extensions this product will decode a picture from, lower case.
 ///
 /// **One list, three readers.** It is the file chooser's filter
@@ -10458,6 +10538,139 @@ mod context_menu_tests {
             "fewer trees than this build writes is not a machine that is current"
         );
     }
+
+    /// PIN — **the path comes off the command line whole, quotes and all.**
+    ///
+    /// The rule below is decided on the file the registration names, and the
+    /// only place that file is written down is inside the quotes of a value the
+    /// shell parses. A path with a space in it is the ordinary case — `C:\Program
+    /// Files\Folio\folio.exe` is where an installer-less program most often ends
+    /// up being dropped — so a parse that stopped at the first space would read
+    /// `C:\Program` and answer that it is gone, on every machine of that shape.
+    ///
+    /// MUTATIONS:
+    /// ① split on whitespace and the first assertion goes red, which on a real
+    ///    machine hands the entry to whatever launched last;
+    /// ② return the rest of the line rather than stopping at the closing quote
+    ///    and the path carries ` --cwd "%V"` — no file has that name, so every
+    ///    registration reads as gone.
+    #[test]
+    fn the_registered_executable_is_read_out_of_the_quoted_command() {
+        assert_eq!(
+            context_menu_command_exe(&desired().command),
+            Some(r"C:\Program Files\Folio\folio.exe")
+        );
+        assert_eq!(
+            context_menu_command_exe(r#""D:\tools\folio.exe" --cwd "%V""#),
+            Some(r"D:\tools\folio.exe")
+        );
+        assert_eq!(
+            context_menu_command_exe(r"D:\tools\folio.exe --cwd %V"),
+            None,
+            "a value this product would not have written is not read halfway"
+        );
+        assert_eq!(context_menu_command_exe(r#""" --cwd "%V""#), None);
+        assert_eq!(context_menu_command_exe(""), None);
+    }
+
+    /// PIN — **a registration whose `folio.exe` is gone heals; one whose
+    /// `folio.exe` is still there is left alone.**
+    ///
+    /// The two halves of the launch-time repair, and they are opposite answers
+    /// to the same `Stale`. A `command` naming a file that no longer exists is
+    /// the moved binary the repair was written for: nobody else is answering it,
+    /// and a right-click on it does nothing at all. A `command` naming a file
+    /// that **is** there is another live copy of Folio doing its job, and taking
+    /// the entry off it is this process helping itself to somebody else's menu —
+    /// which on 2026-09-07 is exactly what happened, when a debug build run out
+    /// of a scratch folder pointed the reader's own entry at a folder that was
+    /// deleted an hour later.
+    ///
+    /// MUTATIONS:
+    /// ① answer `verdict == Stale` and ignore the disk — the second assertion
+    ///    goes red, and every stray copy takes the entry;
+    /// ② drop the same-file test and the third goes red, so a build repairing
+    ///    its own label would refuse because its own exe exists — and compare
+    ///    the two paths byte for byte instead of the way Windows compares them
+    ///    and the shouted spelling goes red for the same reason;
+    /// ③ ask whether *every* tree names a live stranger rather than whether
+    ///    *any* does, and the mixed pair goes red — a registration half of which
+    ///    still names a running install would be taken anyway.
+    #[test]
+    fn the_launch_repairs_a_dead_registration_and_leaves_a_live_one_standing() {
+        let desired = desired();
+        let gone = context_menu_shape(Path::new(r"D:\deleted\folio.exe"), "Open Folio here");
+        let live = context_menu_shape(Path::new(r"D:\installed\folio.exe"), "Open Folio here");
+        let exists = |path: &Path| path.starts_with(r"D:\installed");
+
+        assert!(
+            context_menu_reassert_wanted(
+                &[Some(gone.clone()), Some(gone.clone())],
+                &desired,
+                exists
+            ),
+            "the registered exe is not on the disk, so this one is the only Folio that answers"
+        );
+        assert!(
+            !context_menu_reassert_wanted(
+                &[Some(live.clone()), Some(live.clone())],
+                &desired,
+                exists
+            ),
+            "another live install owns the entry and a launch does not take it"
+        );
+
+        let relabelled = context_menu_shape(
+            Path::new(r"C:\Program Files\Folio\folio.exe"),
+            "\u{5728} Folio \u{4e2d}\u{6253}\u{5f00}",
+        );
+        assert!(
+            context_menu_reassert_wanted(
+                &[Some(relabelled.clone()), Some(relabelled)],
+                &desired,
+                |_| true
+            ),
+            "the registration names this very file, so nothing is being taken from anybody"
+        );
+        assert!(
+            context_menu_reassert_wanted(&[Some(desired.clone()), None], &desired, |_| true),
+            "and a half-deleted set of our own trees is still ours to finish"
+        );
+
+        let shouted = context_menu_shape(
+            Path::new(r"c:\PROGRAM FILES\folio\FOLIO.EXE\"),
+            "Open Folio here",
+        );
+        assert!(
+            context_menu_reassert_wanted(&[Some(shouted.clone()), Some(shouted)], &desired, |_| {
+                true
+            }),
+            "and a path Windows spells differently is still the same file, so a build \
+             repairing its own label is not refused by its own executable existing"
+        );
+
+        assert!(
+            !context_menu_reassert_wanted(&[Some(live.clone()), None], &desired, exists),
+            "half a registration naming a live install is that install's to finish"
+        );
+        assert!(
+            !context_menu_reassert_wanted(&[Some(live), Some(gone)], &desired, exists),
+            "and so is a registration only half of which still names a file — the \
+             install that is there repairs its own other half on its own next launch"
+        );
+        assert!(
+            !context_menu_reassert_wanted(&[None, None], &desired, |_| false),
+            "a machine that never asked for the verb is never given one"
+        );
+        assert!(
+            !context_menu_reassert_wanted(
+                &[Some(desired.clone()), Some(desired.clone())],
+                &desired,
+                |_| false
+            ),
+            "and a machine that needs nothing is not written to"
+        );
+    }
 }
 
 /// The registry half, against a class store of the suite's own.
@@ -10478,8 +10691,9 @@ mod context_menu_tests {
 mod context_menu_registry_tests {
     use super::windows_impl::{delete_registry_tree, registry_key_exists};
     use super::{
-        CONTEXT_MENU_TREES, CONTEXT_MENU_VERB_KEY, ContextMenuState, context_menu_shape,
-        context_menu_verdict, install_context_menu, read_context_menu, remove_context_menu,
+        CONTEXT_MENU_TREES, CONTEXT_MENU_VERB_KEY, ContextMenuState, context_menu_command_exe,
+        context_menu_reassert_wanted, context_menu_shape, context_menu_verdict,
+        install_context_menu, read_context_menu, remove_context_menu,
     };
     use std::path::Path;
 
@@ -10513,6 +10727,31 @@ mod context_menu_registry_tests {
     impl Drop for Isolated {
         fn drop(&mut self) {
             let _ = delete_registry_tree(&self.0);
+        }
+    }
+
+    /// A folder of this test's own, taken away however the test ends.
+    ///
+    /// [`Isolated`]'s discipline turned on the disk, and named the same way, so
+    /// two of these tests running at once cannot be looking at one folder.
+    struct ScratchFolder(std::path::PathBuf);
+
+    impl ScratchFolder {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "folio-context-menu-test-{}-{:?}-{name}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("a scratch folder to keep two installs in");
+            Self(path)
+        }
+    }
+
+    impl Drop for ScratchFolder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
@@ -10590,6 +10829,74 @@ mod context_menu_registry_tests {
 
         // Removing what is not there is what "make sure it is gone" means.
         remove_context_menu(&store.0).expect("a second removal is not a failure");
+    }
+
+    /// PIN — **the launch's whole decision, read back off a real registry.**
+    ///
+    /// The pure rule is pinned beside [`super::context_menu_reassert_wanted`];
+    /// what this adds is the two ends it has to survive on a machine: the value
+    /// really written by [`install_context_menu`], read back by
+    /// [`read_context_menu`], parsed out of its quotes again, and a real
+    /// `Path::is_file` as the disk. Both installs are named inside a folder with
+    /// a **space in its name**, which is where an installer-less program is most
+    /// often dropped and the case the quotes in the command line exist for; one
+    /// of the two files is really written, so what the rule turns on is a fact
+    /// about the disk rather than a stub.
+    ///
+    /// MUTATIONS:
+    /// ① go back to writing on any `Stale` and the second half goes red, which
+    ///    is a copy in a scratch folder taking over the reader's entry;
+    /// ② stop the exe parse at the first space and the second half goes red as
+    ///    well: the live install's path is truncated to a name nothing is at,
+    ///    so a launch reads it as gone and helps itself to the entry.
+    #[test]
+    fn a_dead_registration_is_rewritten_on_the_machine_and_a_live_one_is_not() {
+        let store = Isolated::new("reassert");
+        let folder = ScratchFolder::new("two folio installs");
+        let live = folder.0.join("live folio.exe");
+        std::fs::write(&live, b"as much of an executable as this test needs")
+            .expect("the install that is still on the disk");
+        let dead = folder.0.join("deleted folio.exe");
+        assert!(!dead.exists(), "and the one that is not");
+
+        let ours = context_menu_shape(&folder.0.join("this folio.exe"), "Open Folio here");
+        let on_disk = |path: &Path| path.is_file();
+
+        // The moved binary: what is registered names a file nobody can run.
+        install_context_menu(&store.0, &context_menu_shape(&dead, "Open Folio here"))
+            .expect("register the copy that is about to be deleted");
+        assert!(
+            context_menu_reassert_wanted(&read_context_menu(&store.0), &ours, on_disk),
+            "nothing answers that entry, so this launch may have it"
+        );
+        install_context_menu(&store.0, &ours).expect("the repair");
+        assert_eq!(
+            context_menu_verdict(&read_context_menu(&store.0), &ours),
+            ContextMenuState::Current,
+            "one idempotent write is the whole of the self-repair"
+        );
+        assert!(
+            !context_menu_reassert_wanted(&read_context_menu(&store.0), &ours, on_disk),
+            "and the next launch has nothing left to do"
+        );
+
+        // The second copy: what is registered names a Folio that is still there.
+        install_context_menu(&store.0, &context_menu_shape(&live, "Open Folio here"))
+            .expect("register the install that stays");
+        assert!(
+            !context_menu_reassert_wanted(&read_context_menu(&store.0), &ours, on_disk),
+            "another live install owns the entry"
+        );
+        assert_eq!(
+            context_menu_command_exe(
+                &read_context_menu(&store.0)[0]
+                    .as_ref()
+                    .expect("the tree still carries the verb")
+                    .command
+            ),
+            Some(live.display().to_string().as_str()),
+            "and it is still the one the menu runs"
+        );
     }
 }
 
