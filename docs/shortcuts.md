@@ -75,19 +75,19 @@ Every key here can be changed on the Shortcuts page in Settings. Changing one wr
 | Ctrl+Shift+9 | 转到标签 9 |  | `goto-tab-9` |
 | Ctrl+Shift+T | 重新打开最近关闭的标签 |  | `reopen-closed` |
 | Ctrl+Shift+A | 跳到等待最久的窗格 |  | `jump-attention` |
-| Ctrl+Shift+P | 命令面板 |  | `command-palette` |
+| Ctrl+Shift+P | 搜索面板 |  | `command-palette` |
 | Ctrl+Shift+Z | 卡片 |  | `focus-mode` |
 | Alt+Shift+- | 横向拆分 |  | `split-horizontal` |
 | Alt+Shift+= | 竖向拆分 |  | `split-vertical` |
-| Ctrl+Shift+D | 复制窗格到拆分里 |  | `duplicate-pane-split` |
+| Ctrl+Shift+D | 复制窗格并拆分 |  | `duplicate-pane-split` |
 | Ctrl+Shift+X | 放大窗格 |  | `zoom-pane` |
 | Ctrl+Shift+B | 文件列 |  | `files-pane` |
 | Ctrl+Shift+G | 文件列切到 Git |  | `git-page` |
 | Ctrl+, | 设置 |  | `open-settings` |
 | Ctrl+S | 保存打开的文档 | 在预览里 | `save-preview` |
-| Ctrl+Shift+↑ | 上一条命令 | 在终端自己的回滚里 | `prev-command-mark` |
-| Ctrl+Shift+↓ | 下一条命令 | 在终端自己的回滚里 | `next-command-mark` |
-| Ctrl+F | 在本窗格中查找 | 有正文可查找的地方 | `open-search` |
+| Ctrl+Shift+↑ | 上一条命令 | 在终端回滚区中 | `prev-command-mark` |
+| Ctrl+Shift+↓ | 下一条命令 | 在终端回滚区中 | `next-command-mark` |
+| Ctrl+F | 在本窗格中查找 | 有内容可搜索的地方 | `open-search` |
 | F3 | 下一处匹配 | 查找打开时 | `next-match` |
 | Shift+F3 | 上一处匹配 | 查找打开时 | `prev-match` |
 | Esc | 关闭搜索 | 查找打开时 | `close-search` |

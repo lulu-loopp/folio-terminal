@@ -4826,6 +4826,8 @@ v1 Q1-Q4、v3 各决策（alt=停放、一 session 一可输入视口、折叠�
 
 **⑥ 落地。** 80 条改动:74 条重写 + 3 条新入表 + 3 条实机复核后的中文再改(与前者有重叠,逐行账在 `docs/plans/ui-style/copy-rewrite-2026-08-26.md`,旧英/新英/旧中/新中/理由五列)。用户先前挂的三笔——`Card height`、`Minimum contrast`、`Codex notify` 的缩短版——按规范重写,随本片结清。
 
+**⑦ 中文再审一次,52 条改写(2026-09-07 用户裁「都认可」;逐条账在 `docs/plans/copy/zh-copy-audit-2026-09-07.md`)。** 一位母语写手按 `docs/plans/copy/zh-style-notes.md` 把每一条面向用户的中文重读一遍,改的是五类毛病——防御句(「不下载任何内容」)、机制暴露(「它向 Windows 认领」)、行话(「提示符」应作「输入行」)、翻译腔,以及术语漂移(`tab`/`profile` 在中文串里应作「标签页」/「配置」)。事实一条没动,只有说法换了;英文里同病的八条记在同一份文件末尾,留给英文那一遍。
+
 ### 7.25 探测不许比 spawn 严一格——一次被推翻的「真 bug」,和一句写反了的注释（发布前审计缺口 B「成因 B」复核，2026-08-27；`crates/bt-pty/src/shell.rs`）
 
 **① 报上来的病。** `docs/plans/release/readiness-gaps-2026-08-27.md` §B1「成因 B」与 §B-b 判定为**真 bug**:Store 版 PowerShell 7 的 `pwsh.exe` 是一个 **AppExecLink**(`%LocalAppData%\Microsoft\WindowsApps\pwsh.exe`,长度 0、属性 `Archive, ReparsePoint`),而 `find_pwsh` 的三级探测全部落在 `ShellEnvironment::is_file` 上,`is_file` 就是 `Path::is_file()`。推理链是:`Path::is_file` → `fs::metadata` → `File::open` → `CreateFileW`,而 `CreateFileW` 对 AppExecLink 答 `ERROR_CANT_ACCESS_FILE (1920)`;「Rust std 只在 `ERROR_SHARING_VIOLATION` 时回退 `FindFirstFile`,1920 直接返回 `Err`」⇒ `is_file() == false` ⇒ picker 里 pwsh 那行变灰、探测顺序落到 `winps`。
@@ -5802,7 +5804,7 @@ BT_WEB CreateCoreWebView2EnvironmentWithOptions failed: The system cannot find t
 - **一台机器上什么时候会出现**:名单读的是 `ProfilePrograms` 那一次探测的结果,而探测发生在开窗第一帧、以及 `Runtime::adopt_profile_table` 每一次(配置表被这扇窗改动、或 `profiles.json` 被外面改动之后)。所以刚装好一个 agent,**开一扇新窗、或在配置文件页动一下表**,它就在菜单里了;什么都不做的那扇旧窗要等到下一次探测——这与 08-29 那版的口径完全一样,只是从「多七行灰的」变成「少七行」。
 - **不留空段**:子菜单没有分节也没有分隔线,所以「全部 agent 都没装」在几何上就是少几行,框高 = 上下留白 + 行数 × 行高。终端右键菜单那一份补上了 pane 头早在 2026-08-25 就有的那道闸(`.filter(|child| !child.items.is_empty())`)——在这条裁决之前它不可能空,现在可以了(读者把表里每一行都隐藏)。
 - **设置 → 配置文件页一个像素没动**:十二行照旧、缺席行照旧灰、shell 行照旧写「在这台机器上没找到 <程序>」、agent 行照旧写「在 Windows 中未找到 X」加组末那一句出路。没有新文案,所以没有新的 `Text::` 条目、`Text::ALL` 不变。
-- **设置 → 通用的「默认配置」与快捷终端的「使用的 profile」两个下拉不在这一片里**,而这是一处**明写的留白**而不是遗漏:那两行不是「现在起一个 shell」,是一条**存下来的选择**,而下拉里的序号就是存进 `settings.json` 的那个值(`SettingsRow::option_count` / `option_label` 都不收 `SettingsValues`,机器的答案是逐帧注进 `SettingsValues::profile_available` 的)。要在那里筛,得让「第几项」和「哪一行」分家,并且先裁一件这条裁决没有裁过的事:一台机器上存着的那条 profile 已经卸载了,那一行按钮上该显示什么。**留着等一次单独的裁决。**
+- **设置 → 通用的「默认配置」与快捷终端的「新标签页的配置」两个下拉不在这一片里**,而这是一处**明写的留白**而不是遗漏:那两行不是「现在起一个 shell」,是一条**存下来的选择**,而下拉里的序号就是存进 `settings.json` 的那个值(`SettingsRow::option_count` / `option_label` 都不收 `SettingsValues`,机器的答案是逐帧注进 `SettingsValues::profile_available` 的)。要在那里筛,得让「第几项」和「哪一行」分家,并且先裁一件这条裁决没有裁过的事:一台机器上存着的那条 profile 已经卸载了,那一行按钮上该显示什么。**留着等一次单独的裁决。**
 
 **红门。** `an_action_menu_offers_what_this_machine_can_start_and_the_readers_own_rows`(⑦ 那道门改写:裸 Windows 只 offer `winps`、装了 claude+codex 就是三条且各在原位、自建行怎么都在;红证:把可用性判据从筛子里抽掉,裸机 offer 十二条其中十一条是死的;把 `Origin::Builtin` 抽掉,自建那一行跟着内置行一起消失)、`an_action_menu_lists_only_what_this_machine_can_start`(子菜单的 `rows` = `offered_to_start`、每一行都起得动、画出来**一枚灰精灵都没有**;红证:把 `offered()` 放回 `pane_submenu_layout`,裸机画十一行、十行灰)、`a_machine_with_no_agents_leaves_the_shells_and_no_gap`(五条 shell、行与行之间没有缝、框高 = 留白 + 五行;红证:为 agent 组留一条带,末行掉出框外)、`a_program_installed_since_the_last_probe_joins_the_menu_on_the_next_one`(同一台机器加一个文件再探一次,Git Bash 那一行到场)、`the_profiles_page_keeps_every_row_and_names_what_is_missing`(页上十二行一行不少、缺席行都带理由、`capability` 为 `None`);`a_row_is_tipped_with_what_its_caption_left_out_and_nothing_else` 改写成断言裸机的选择器**没有一行可以被 tip**——那一档 tip 与它解释的灰墨都还在,只是从此只会落在自建 profile 行与起不动的 Recent 行上。
 
@@ -7507,7 +7509,7 @@ v3 那张卡按本节其余各段的样子落地进了未发布的 0.2.2,读者�
 
 中文全部由 DeepSeek 从英文事实简报写出,提示里没有本仓任何一句现成中文(不是 `i18n.rs` 的、不是 `README.zh-CN.md` 的、也不是上一版自己的),每一轮反馈都用英文并且只点名一个事实、一个长度或一处含糊。规则一句:**一句话说读者得到什么;然后,仅在这个开关会写一份属于读者的文件时,一句短话说写在哪里**——**v4 把这两句拆到两个表面上**:前一句是行,后一句是那一行的 tooltip(⓪ 第 3 条)。因此在卡的行上一个文件路径都没有,而在 tooltip 里有 `$PROFILE` 和它的日期副本、`~/.claude/settings.json`、`~/.codex/config.toml`、`~/.copilot/hooks/folio.json`;两处都不在的有「每天一次请求」「注册 `folio.msix`」「`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `COPILOT_HOME`」「`folio.ps1`」——前两类是我们的方法和我们的文件,第三类是一个设过它的读者本来就知道、没设过的读者根本没有的变量。
 
-**PowerShell 那一行带着整合自己的名字**(用户裁决 2026-09-06)。卡上其余五行只说结果,这一行不许:一个日后要去设置里改它的读者必须知道这东西叫什么,而这张卡是他唯一会被告知的地方。所以名字在前、结果在后,同一条短行——英文 `PowerShell integration lets you jump between commands`,中文「PowerShell 整合让你在已运行命令间跳转」。四条好处里只放得下一条,放的是「在跑过的命令之间跳」;公式排版那一条留在设置页那句长的里。
+**PowerShell 那一行带着整合自己的名字**(用户裁决 2026-09-06)。卡上其余五行只说结果,这一行不许:一个日后要去设置里改它的读者必须知道这东西叫什么,而这张卡是他唯一会被告知的地方。所以名字在前、结果在后,同一条短行——英文 `PowerShell integration lets you jump between commands`,中文「PowerShell 整合，支持命令间跳转」。四条好处里只放得下一条,放的是「在跑过的命令之间跳」;公式排版那一条留在设置页那句长的里。
 
 **v4 的两句是第二次单独问出来的**(`scratchpad/firstrun/brief-v4b-en.md`、`ds_copy_v4b.py`、`ds_transcript_v4b.json`,三轮):PowerShell 那一行,以及更新那条 tooltip——它上一版把 `RELEASES_PAGE` 实际打开的那一页叫成「下载页」,而本仓其余地方一律叫**发布页**,一页两名是这两稿之间唯一一处实质分歧。其余每一句(标题、五条行句、脚上那句、其余五条 tooltip、暂不/完成)含义未变,原样从 `copy-zh-v4.json` 抄过来,**没有再送进提示**——把一句模型自己写过的中文再送回去让它改,正是这条规矩要防的事。
 
