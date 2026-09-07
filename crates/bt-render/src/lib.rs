@@ -3292,6 +3292,13 @@ pub enum WindowTarget {
     /// The window itself — on Windows, its `HWND`. wgpu builds the swapchain
     /// with `CreateSwapChainForHwnd` and the desktop compositor owns the
     /// presentation entirely.
+    ///
+    /// **This is also the portable door.** Off Windows there is no second one:
+    /// a `SurfaceTarget` is built from whatever raw window handle winit hands
+    /// out — an `NSView`'s on macOS — and wgpu's own backend decides what to
+    /// attach to it. Composition is the arm that does not travel, and it is
+    /// gated below rather than stubbed, so a platform that has no visual tree
+    /// cannot name one by accident.
     Hwnd(wgpu::SurfaceTarget<'static>),
     /// An `IDCompositionVisual` the caller owns, as a raw COM pointer.
     ///
@@ -3299,6 +3306,13 @@ pub enum WindowTarget {
     /// whole life, so the pointer only has to be a live visual **at the moment
     /// the surface is created**. What the caller keeps owing afterwards is the
     /// commit: see `bt_platform::Compositor::commit`.
+    ///
+    /// Windows only, because `wgpu::SurfaceTargetUnsafe::CompositionVisual` is
+    /// itself Windows only. macOS composes the same picture through a
+    /// `CAMetalLayer` under the window's content layer, which is a different
+    /// call and a different owner, and belongs with the platform backend that
+    /// would own that layer rather than here.
+    #[cfg(windows)]
     CompositionVisual(*mut std::ffi::c_void),
 }
 
@@ -3315,6 +3329,7 @@ impl WindowTarget {
     fn kind(&self) -> WindowTargetKind {
         match self {
             Self::Hwnd(_) => WindowTargetKind::Hwnd,
+            #[cfg(windows)]
             Self::CompositionVisual(_) => WindowTargetKind::CompositionVisual,
         }
     }
@@ -3418,6 +3433,7 @@ fn create_surface(
 ) -> Result<wgpu::Surface<'static>, RenderError> {
     match target {
         WindowTarget::Hwnd(target) => instance.create_surface(target),
+        #[cfg(windows)]
         WindowTarget::CompositionVisual(visual) => unsafe {
             instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CompositionVisual(visual))
         },
@@ -22292,6 +22308,11 @@ mod tests {
         /// `SurfaceTarget` conversion that no longer accepts what the app holds
         /// — and none of that can be caught by a running window on the machine
         /// that already works.
+        ///
+        /// Windows, because the composition door is: see
+        /// [`WindowTarget::CompositionVisual`]. Its sibling below asks the half
+        /// of this that every platform owes.
+        #[cfg(windows)]
         #[test]
         fn both_window_targets_can_be_named_and_told_apart() {
             // Never handed to wgpu: what is under test is the discriminant, and
@@ -22310,6 +22331,26 @@ mod tests {
                 required_alpha_mode(WindowTargetKind::Hwnd),
                 wgpu::CompositeAlphaMode::Opaque
             );
+        }
+
+        /// The window door, and the alpha mode it must be configured with, on a
+        /// platform that has no composition visual to offer.
+        ///
+        /// It is the same claim the Windows sibling makes about its `Hwnd` arm,
+        /// asked where that arm is the only one — which is what makes it a
+        /// gate rather than a repetition: if the portable door were ever gated
+        /// away with the visual it was cut from, nothing else in this crate
+        /// would notice, because everything above here speaks in
+        /// [`WindowTargetKind`] and that enum keeps both names on every
+        /// platform.
+        #[cfg(not(windows))]
+        #[test]
+        fn the_window_door_is_the_one_every_platform_has() {
+            assert_eq!(
+                required_alpha_mode(WindowTargetKind::Hwnd),
+                wgpu::CompositeAlphaMode::Opaque
+            );
+            assert_ne!(WindowTargetKind::Hwnd, WindowTargetKind::CompositionVisual);
         }
 
         /// An offscreen window has no alpha mode to report, and says so rather

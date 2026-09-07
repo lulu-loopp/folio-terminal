@@ -29,3 +29,13 @@ pollster.workspace = true
 
 [lints]
 workspace = true
+
+# **The backend a macOS adapter is enumerated through.** The workspace pin is
+# `default-features = false, features = ["std", "dx12", "wgsl"]`, which on an
+# Apple machine builds a wgpu that finds no adapter at all — every call in this
+# crate compiles and the first one that asks for a device fails, which is the
+# worst shape a portability gap can have. Cargo unions the feature sets of the
+# two rows, so Windows is untouched: `metal` is compiled for Apple targets only,
+# and this row does not exist off them.
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { workspace = true, features = ["metal"] }

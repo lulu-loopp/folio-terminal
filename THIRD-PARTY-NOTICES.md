@@ -3514,7 +3514,7 @@ of what has to be said about a modified copy.
 
 | Licence | Packages |
 |---|---:|
-| MIT License | 457 |
+| MIT License | 466 |
 | Apache License 2.0 | 36 |
 | Unicode License v3 | 26 |
 | BSD 2-Clause "Simplified" License | 6 |
@@ -9434,10 +9434,11 @@ SOFTWARE.
 
 ### MIT License
 
-Used by 8 package(s):
+Used by 9 package(s):
 
 - **naga-types 30.0.0** — <https://github.com/gfx-rs/wgpu>
 - **naga 30.0.0** — <https://github.com/gfx-rs/wgpu>
+- **wgpu-core-deps-apple 30.0.1** — <https://github.com/gfx-rs/wgpu>
 - **wgpu-core-deps-windows-linux-android 30.0.0** — <https://github.com/gfx-rs/wgpu>
 - **wgpu-core 30.0.0** — <https://github.com/gfx-rs/wgpu>
 - **wgpu-hal 30.0.0** — <https://github.com/gfx-rs/wgpu>
@@ -9472,9 +9473,10 @@ SOFTWARE.
 
 ### MIT License
 
-Used by 72 package(s):
+Used by 79 package(s):
 
 - **block2 0.5.1** — <https://github.com/madsmtm/objc2>
+- **block2 0.6.2** — <https://github.com/madsmtm/objc2>
 - **chrono 0.4.45** — <https://github.com/chronotope/chrono>
 - **comemo-macros 0.5.1** — <https://github.com/typst/comemo>
 - **dispatch 0.2.0** — <http://github.com/SSheldon/rust-dispatch>
@@ -9494,10 +9496,16 @@ Used by 72 package(s):
 - **ndk 0.9.0** — <https://github.com/rust-mobile/ndk>
 - **objc-sys 0.3.5** — <https://github.com/madsmtm/objc2>
 - **objc2-app-kit 0.2.2** — <https://github.com/madsmtm/objc2>
+- **objc2-core-foundation 0.3.2** — <https://github.com/madsmtm/objc2>
+- **objc2-core-graphics 0.3.2** — <https://github.com/madsmtm/objc2>
 - **objc2-encode 4.1.0** — <https://github.com/madsmtm/objc2>
 - **objc2-foundation 0.2.2** — <https://github.com/madsmtm/objc2>
+- **objc2-foundation 0.3.2** — <https://github.com/madsmtm/objc2>
+- **objc2-metal 0.3.2** — <https://github.com/madsmtm/objc2>
+- **objc2-quartz-core 0.3.2** — <https://github.com/madsmtm/objc2>
 - **objc2-ui-kit 0.2.2** — <https://github.com/madsmtm/objc2>
 - **objc2 0.5.2** — <https://github.com/madsmtm/objc2>
+- **objc2 0.6.4** — <https://github.com/madsmtm/objc2>
 - **profiling 1.0.18** — <https://github.com/aclysma/profiling>
 - **r-efi 5.3.0** — <https://github.com/r-efi/r-efi>
 - **r-efi 6.0.0** — <https://github.com/r-efi/r-efi>
@@ -10122,6 +10130,33 @@ NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
 LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+````````
+
+### MIT License
+
+Used by 1 package(s):
+
+- **raw-window-metal 1.1.0** — <https://github.com/rust-windowing/raw-window-metal>
+
+````````text
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ````````
 
@@ -11758,9 +11793,9 @@ the following restrictions:
 
 ## In the lock file, not in any resolved build
 
-`Cargo.lock` pins 552 packages from crates.io. 519 of them are in the
+`Cargo.lock` pins 563 packages from crates.io. 528 of them are in the
 dependency graph this workspace resolves, and are attributed above with their
-licence texts. The 33 below are optional or platform-specific entries
+licence texts. The 35 below are optional or platform-specific entries
 that no feature resolution here reaches: nothing links them, so nothing
 distributes them. They are listed with the terms they declare, so that the two
 counts a reader might compare are reconciled here rather than left as a gap.
@@ -11768,6 +11803,7 @@ counts a reader might compare are reconciled here rather than left as a gap.
 | Package | Declared licence |
 |---|---|
 | `bitvec 1.1.1` | MIT |
+| `dispatch2 0.3.1` | Zlib OR Apache-2.0 OR MIT |
 | `foldhash 0.1.5` | Zlib |
 | `funty 2.0.0` | MIT |
 | `glifo 0.1.1` | Apache-2.0 OR MIT |
@@ -11779,6 +11815,7 @@ counts a reader might compare are reconciled here rather than left as a gap.
 | `objc2-core-data 0.2.2` | MIT |
 | `objc2-core-image 0.2.2` | MIT |
 | `objc2-core-location 0.2.2` | MIT |
+| `objc2-io-surface 0.3.2` | Zlib OR Apache-2.0 OR MIT |
 | `objc2-link-presentation 0.2.2` | MIT |
 | `objc2-metal 0.2.2` | MIT |
 | `objc2-quartz-core 0.2.2` | MIT |
