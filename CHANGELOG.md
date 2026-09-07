@@ -60,6 +60,21 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A terminal pane whose whole transcript fits wears no scroll bar, and a pane
+  scrolled to the top shows its thumb at the top of the track.** After one run of
+  a script that prints display formulas, with the prompt back and empty space
+  below it, a thumb was drawn down the right edge of a pane that could not be
+  scrolled at all — starting a fifth of the way down and running flush to the
+  bottom. A display formula makes its row taller than a row, so the live screen
+  stands taller than the pane it is drawn in, and the blank rows under the prompt
+  give that height back where they can, which is why the pane looks complete
+  standing still. Those given-back pixels were still being counted as somewhere
+  the view could travel to. They are not, and the bar, the wheel and the question
+  of whether a pane has any history to look at now all read the same number the
+  frame itself is clamped by. On a pane that really does scroll, the thumb's top
+  is the track's top when the view is at the top, and its length is the pane's
+  share of the whole transcript.
+
 - **A tick on the command strip lands on the command's own prompt row again,
   after a pane has been split or resized.** Pressing the newest tick used to drop
   the reader into the middle of that command's own output, with the highlight on

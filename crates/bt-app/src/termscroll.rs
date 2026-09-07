@@ -669,6 +669,9 @@ pub fn column_layer(
 
 #[cfg(test)]
 mod tests {
+    use std::num::{NonZeroI64, NonZeroU32};
+    use std::sync::Arc;
+
     use super::*;
 
     const SCALE: f32 = 2.0;
@@ -678,6 +681,9 @@ mod tests {
     const ROW: i64 = 20 * bt_viewport::SUBPIXELS_PER_PX;
     /// One screenful: thirty of them.
     const PAGE: i64 = 30 * ROW;
+    /// The band-inflated fixture's grid: twelve rows of ten logical pixels.
+    const PANE_ROWS: u32 = 12;
+    const CELL: i64 = 10 * bt_viewport::SUBPIXELS_PER_PX;
 
     fn linear(x: f32) -> f32 {
         x
@@ -1264,6 +1270,204 @@ mod tests {
             !bar.thumb_holds([BODY[0] + 1.0, BODY[3] - 1.0]),
             "a press on the same band but beside the mark is the terminal's too — \
              there is no track to page from down here"
+        );
+    }
+
+    /// **A pane whose live plane is inflated by a display band, with a blank
+    /// tail under the prompt** — the shape of the 2026-09-07 report
+    /// (`math.ps1`, one run, the prompt back, empty space below).
+    ///
+    /// A real [`bt_viewport::ViewportProjection`] rather than three numbers
+    /// typed out here, because the numbers are the defect: the bar is a picture
+    /// of what the projection says the view may do, and only the projection can
+    /// say what §3.1's bottom relief already gave back. `cursor_row` is where
+    /// the prompt is left, so every row below it is the blank tail that yields.
+    fn band_inflated_pane(cursor_row: u32) -> bt_viewport::ViewportProjection {
+        use bt_doc::{DetectionRevision, GridGeneration, GridPoint, LayoutKey, MathMode, ScreenId};
+        use bt_transcript::{SourceGeneration, TranscriptId};
+
+        let mut projection = bt_viewport::ViewportProjection::new(
+            LayoutKey {
+                width_cells: NonZeroU32::new(20).unwrap(),
+                dpi_milli: NonZeroU32::new(1000).unwrap(),
+                font_rev: 1,
+                theme_rev: 1,
+                lang_rev: 0,
+                profile_rev: 0,
+                line_wrapping: true,
+            },
+            DetectionRevision(1),
+            NonZeroU32::new(PANE_ROWS).unwrap(),
+            NonZeroI64::new(CELL).unwrap(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        // One display band on grid row 0, four cells tall: that row grows from
+        // one cell to four, so the live plane stands three cells taller than the
+        // pane it is drawn in — which is the whole of the reader's complaint.
+        let height_subpixels = 4 * CELL;
+        let height_px = u32::try_from(height_subpixels / bt_viewport::SUBPIXELS_PER_PX).unwrap();
+        projection.sync_live_math_artifacts(
+            ScreenId::Primary,
+            [bt_viewport::ProjectedLiveMathArtifact {
+                occurrence_id: bt_viewport::LiveMathOccurrenceId(1),
+                screen: ScreenId::Primary,
+                start: GridPoint { row: 0, column: 0 },
+                end: GridPoint { row: 0, column: 4 },
+                band_start_row: 0,
+                band_end_row: 0,
+                clipped_top_rows: 0,
+                clipped_bottom_rows: 0,
+                occluded_source_rows: 0,
+                occluded_visible_rows: Vec::new(),
+                transition_stale: false,
+                frozen_prefix: Vec::new(),
+                staging_prefix: Vec::new(),
+                generation: GridGeneration(1),
+                artifact: bt_viewport::ProjectedMathArtifact {
+                    inline_runs: Vec::new(),
+                    key: "display-x".to_owned(),
+                    end: TranscriptId(0),
+                    rgba: Arc::from(vec![255; height_px as usize * 4]),
+                    width_px: 1,
+                    height_px,
+                    height_subpixels,
+                    baseline_subpixels: 0,
+                    mode: MathMode::Display,
+                    kind: bt_viewport::RgbaArtifactKind::Math,
+                    vertical_padding_subpixels: 0,
+                    render_scale_milli: 1000,
+                    source: "x".to_owned(),
+                },
+            }],
+        );
+        let _ = project(&mut projection, cursor_row);
+        projection
+    }
+
+    /// One frame out of the pane above, the prompt on `cursor_row`: row zero
+    /// carries the formula's source, the prompt carries its own ink, and every
+    /// row below the prompt is blank — which is what makes a tail to relieve
+    /// with.
+    fn project(
+        projection: &mut bt_viewport::ViewportProjection,
+        cursor_row: u32,
+    ) -> bt_viewport::ViewportFrame {
+        let rows = (0..PANE_ROWS)
+            .map(|row| {
+                let text = if row == 0 || row == cursor_row {
+                    "x                   "
+                } else {
+                    "                    "
+                };
+                bt_transcript::CapturedRow::plain(text, false)
+            })
+            .collect();
+        projection
+            .continuous_frame(
+                &bt_doc::HistoryDocument::default(),
+                &[],
+                rows,
+                bt_viewport::GridCursor {
+                    row: cursor_row,
+                    column: 0,
+                    visible: true,
+                },
+                bt_doc::ScreenId::Primary,
+            )
+            .expect("the fixture's planes are the shape the projection asked for")
+    }
+
+    /// The bar that pane would wear, asked exactly the way the window asks
+    /// (`Runtime::terminal_scroll_bar`): the extent the projection clamps the
+    /// wheel by, the page it measures that against, and where the view stands.
+    fn bar_for(projection: &bt_viewport::ViewportProjection) -> Option<TerminalScrollBar> {
+        bar(
+            BODY,
+            projection.scroll_extent_subpixels(),
+            projection.viewport_height_subpixels(),
+            projection.scroll_offset_subpixels(),
+            SCALE,
+        )
+    }
+
+    /// **A pane whose whole transcript fits wears no bar** (user report
+    /// 2026-09-07, first screenshot: one `math.ps1` run, the prompt back, empty
+    /// space below — and a thumb down the right edge all the same).
+    ///
+    /// That it fits is not an opinion here: the view is asked for a million
+    /// subpixels of history and comes back standing exactly where it was. A
+    /// pane that cannot move has nothing to say about where it is, and the
+    /// overlay says nothing either, because the blank tail gave every inflated
+    /// pixel back.
+    ///
+    /// MUTATION (this is the report): drop the bottom relief from
+    /// `ViewportProjection::scroll_extent_subpixels` and the extent becomes the
+    /// raw band inflation — a bar appears on a pane that cannot scroll and,
+    /// the offset being zero, it appears pinned to the *bottom* of the track,
+    /// which is the photograph.
+    #[test]
+    fn a_pane_whose_whole_transcript_fits_has_nothing_to_scroll_and_wears_no_bar() {
+        let mut projection = band_inflated_pane(8);
+        projection.scroll_by_subpixels(1_000_000);
+        let frame = project(&mut projection, 8);
+        assert_eq!(
+            projection.scroll_offset_subpixels(),
+            0,
+            "a screenful of history was asked for and the view did not move: it fits"
+        );
+        assert_eq!(
+            frame.status_text, None,
+            "nothing is above the pane, so no overlay may claim rows are"
+        );
+        assert!(
+            bar_for(&projection).is_none(),
+            "a pane that cannot scroll draws no thumb"
+        );
+    }
+
+    /// **At the top of the document the thumb's top is the track's top**, and
+    /// the mark is the viewport's share of the document it can actually reach
+    /// (user report 2026-09-07, second screenshot: scrolled to the very top,
+    /// the thumb starting a fifth of the way down the pane).
+    ///
+    /// The reachable document is read off the projection by going there: the
+    /// offset the view settles on when it is asked for more history than exists
+    /// is, by definition, everything there is above it.
+    ///
+    /// MUTATION (this is the report): drop the bottom relief from
+    /// `scroll_extent_subpixels` and the bar is drawn against a document two
+    /// cells taller than the one that exists — with the view at the top the
+    /// thumb starts a hundred physical pixels below the track's top, and it is
+    /// seventy-odd pixels shorter than the viewport's share.
+    #[test]
+    fn a_view_at_the_top_of_its_document_puts_the_thumb_at_the_top_of_the_track() {
+        let mut projection = band_inflated_pane(9);
+        projection.scroll_by_subpixels(1_000_000);
+        let frame = project(&mut projection, 9);
+        let reachable = projection.scroll_offset_subpixels();
+        assert!(reachable > 0, "this pane must have somewhere to go");
+        assert_eq!(
+            frame.row_map[0].top_subpixels, 0,
+            "and it must have gone all the way: the first row starts at the pane's own top"
+        );
+
+        let bar = bar_for(&projection).expect("a pane that can scroll wears a bar");
+        assert!(
+            (bar.thumb[1] - BODY[1]).abs() <= 1.0,
+            "the view is at the top and the thumb's top is {} while the track's is {}",
+            bar.thumb[1],
+            BODY[1]
+        );
+
+        let track = f64::from(BODY[3] - BODY[1]);
+        let page = projection.viewport_height_subpixels();
+        let document = page.saturating_add(reachable);
+        let share = track * page as f64 / document as f64;
+        assert!(
+            (f64::from(bar.thumb[3] - bar.thumb[1]) - share).abs() <= 1.0,
+            "the thumb is {} long where the viewport's share of the document is {share}",
+            bar.thumb[3] - bar.thumb[1]
         );
     }
 }

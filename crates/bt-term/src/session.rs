@@ -21169,6 +21169,82 @@ mod tests {
         assert_eq!(returned.status_text, frame.status_text);
     }
 
+    /// **The scroll extent the rest of the product reads is the one the frame
+    /// clamps by** — the third face of the bottom-relief ruling, and the defect
+    /// a reader photographed on 2026-09-07.
+    ///
+    /// With eight CR/LFs the cursor parks on row 8, so `blank_tail_rows =
+    /// 12 - 9 = 3` and `relief = min(3 * 10240, 30720) = 30720`: the blank tail
+    /// gives back every inflated pixel and `bottom_top_subpixels` is zero. The
+    /// pane cannot move, and it must say so with the one number every reader of
+    /// this projection asks — the wheel's clamp, the pane's scroll bar, and the
+    /// "N rows above" overlay all come off `scroll_extent_subpixels`.
+    ///
+    /// MUTATION: leave the relief out of `scroll_extent_subpixels` (the shape
+    /// this had until 2026-09-07) and it answers 30720 for a pane whose view
+    /// cannot travel one subpixel — which is a scroll bar drawn on a pane whose
+    /// whole transcript fits.
+    #[test]
+    fn a_fully_relieved_band_leaves_no_scroll_extent_for_anyone_to_read() {
+        let (session, _occurrence_id, mut projection) = bottom_relief_image_session(8);
+
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(projection.scroll_offset_subpixels(), 0);
+        assert_eq!(
+            frame.row_map[0].top_subpixels, 0,
+            "the blank tail relieved the whole inflation: nothing is cut off at the top"
+        );
+        assert_eq!(
+            frame.status_text, None,
+            "and nothing is above the pane for an overlay to count"
+        );
+        assert_eq!(
+            projection.scroll_extent_subpixels(),
+            0,
+            "a pane whose whole transcript fits has no extent to offer"
+        );
+
+        projection.scroll_by_subpixels(1_000_000);
+        let asked = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            projection.scroll_offset_subpixels(),
+            0,
+            "and asking for a screenful of history moves it nowhere"
+        );
+        assert_eq!(asked.row_map, frame.row_map);
+    }
+
+    /// **At the top of the document the offset is the whole extent** — the
+    /// second half of the same report (scrolled to the very top, and the bar
+    /// still drawn a fifth of the way down its track).
+    ///
+    /// The relief is partial here (`bottom_relief_image_session(9)`: two blank
+    /// rows against three cells of inflation), so this pane genuinely scrolls.
+    /// Its ceiling is 10240, and a view standing on that ceiling is standing at
+    /// the document's top: `offset == extent` is what "at the top" means to
+    /// every picture drawn from these two numbers.
+    ///
+    /// MUTATION: leave the relief out of `scroll_extent_subpixels` and it
+    /// answers 30720 against an offset of 10240, so a view that has reached the
+    /// top reads as two cells short of it, forever.
+    #[test]
+    fn a_view_at_the_top_of_a_partly_relieved_pane_has_spent_its_whole_extent() {
+        let (session, _occurrence_id, mut projection) = bottom_relief_image_session(9);
+
+        // One resting frame first: the wheel clamps by what the last projection measured, and a
+        // projection that has never run has measured nothing.
+        let _ = session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_by_subpixels(1_000_000);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(frame.row_map[0].top_subpixels, 0, "this view is at the top");
+        assert_eq!(projection.scroll_offset_subpixels(), 10240);
+        assert_eq!(
+            projection.scroll_extent_subpixels(),
+            10240,
+            "the extent is what the view could travel, and it has travelled all of it"
+        );
+    }
+
     /// Control for `inline_image_band_inflation_relieves_a_blank_live_tail_at_bottom`: the cursor
     /// parks on the very last grid row (11 CR/LF after the image), so
     /// `blank_tail_rows = 12 - (11+1) = 0` and `relief = min(0, live_extra_height) = 0`
