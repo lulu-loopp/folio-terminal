@@ -36,9 +36,10 @@ use bt_render::{
 };
 
 use crate::{
+    explorer_menu::ExplorerPlace,
     i18n::Text,
     marks::OverlayLayer,
-    settings::{SettingsRow, SettingsTarget, push_float_window},
+    settings::{self, SettingsRow, SettingsTarget, push_float_window},
     shell_integration,
 };
 
@@ -105,6 +106,21 @@ impl ExplorerShape {
         match self {
             Self::FirstPageAndClassic => Text::FirstRunRowExplorer11,
             Self::ClassicOnly => Text::FirstRunRowExplorer10,
+        }
+    }
+
+    /// **The highest place this machine can honour**, which is what the card's
+    /// one switch has always meant (user ruling 2026-09-07).
+    ///
+    /// The card asks one question and the Settings row now answers it with three
+    /// values, so this is where the card's `on` becomes one of them. It never
+    /// answers [`ExplorerPlace::Off`]: a row left off spends nothing at all, and
+    /// `applications` is what says so.
+    #[must_use]
+    pub fn place(self) -> ExplorerPlace {
+        match self {
+            Self::FirstPageAndClassic => ExplorerPlace::FirstPage,
+            Self::ClassicOnly => ExplorerPlace::ShowMoreOptions,
         }
     }
 }
@@ -259,11 +275,16 @@ pub enum Application {
     /// The one stored preference on the card, applied **both ways**: it arrives
     /// on, so a reader who turned it off has answered and the answer is `false`.
     UpdateCheck(bool),
-    /// The classic entry. Only ever `true`: a row left off asks for nothing, and
-    /// off is already the factory state.
-    ContextMenu,
-    /// The first page, beside it, on a machine whose switch means both.
-    ExplorerFirstPage,
+    /// **Where Folio's verb goes in Explorer's menu** — one press since the rows
+    /// merged (user ruling 2026-09-07), carrying the highest place this machine
+    /// can honour.
+    ///
+    /// It was two applications until then, and the pair is what the one place
+    /// still means: [`crate::explorer_menu::ExplorerPlace::FirstPage`] is the
+    /// package **and** the classic entry. Never
+    /// [`crate::explorer_menu::ExplorerPlace::Off`] — a row left off asks for
+    /// nothing, and off is already the factory state.
+    Explorer(ExplorerPlace),
     /// Whether a pane with no integration is still offered one, applied **both
     /// ways** — §7.56's table: the card asked, so the strip does not. A row left
     /// on leaves the offer standing, because the line is being installed and the
@@ -292,8 +313,14 @@ pub fn settings_target(application: Application) -> Option<SettingsTarget> {
     let choice = |row, on: bool| Some(SettingsTarget::Choice(row, usize::from(!on)));
     match application {
         Application::UpdateCheck(on) => choice(SettingsRow::UpdateCheck, on),
-        Application::ContextMenu => choice(SettingsRow::ContextMenu, true),
-        Application::ExplorerFirstPage => choice(SettingsRow::ExplorerFirstPage, true),
+        // **Not `choice`**, because this row's picker is not `[true, false]`: it
+        // is the three places, and the index of an answer is where that answer
+        // stands in `EXPLORER_PLACE_OPTIONS`. Looked up rather than written down,
+        // so the card cannot drift from the list the dialog draws.
+        Application::Explorer(place) => settings::EXPLORER_PLACE_OPTIONS
+            .iter()
+            .position(|it| *it == place)
+            .map(|index| SettingsTarget::Choice(SettingsRow::ContextMenu, index)),
         Application::PowerShellOffer(on) => choice(SettingsRow::PowerShellOffer, on),
         Application::ClaudeHooks => choice(SettingsRow::ClaudeHooks, true),
         Application::CodexNotify => choice(SettingsRow::CodexNotify, true),
@@ -315,12 +342,7 @@ pub fn applications(rows: &[Row], shape: ExplorerShape) -> Vec<Application> {
     for row in rows {
         match row.kind {
             RowKind::Update => spent.push(Application::UpdateCheck(row.on)),
-            RowKind::Explorer if row.on => {
-                spent.push(Application::ContextMenu);
-                if shape == ExplorerShape::FirstPageAndClassic {
-                    spent.push(Application::ExplorerFirstPage);
-                }
-            }
+            RowKind::Explorer if row.on => spent.push(Application::Explorer(shape.place())),
             RowKind::PowerShell => {
                 spent.push(Application::PowerShellOffer(row.on));
                 if row.on {
@@ -1864,6 +1886,48 @@ mod tests {
         );
     }
 
+    /// RED (user ruling 2026-09-07) — **the card's one switch asks for the
+    /// highest place this machine can honour, and never for `Off`.**
+    ///
+    /// The Settings row has three answers now, so the card's `on` has to become
+    /// one of them; what it has always meant is "as much of this as this machine
+    /// can do", which is [`ExplorerPlace::FirstPage`] where the first page is
+    /// reachable and the classic entry everywhere else. `Off` is not among the
+    /// answers a card can spend at all: a row left off spends nothing, because
+    /// off is the factory state and a card that pressed it would take away an
+    /// entry a previous install left behind.
+    ///
+    /// MUTATION: answer `FirstPage` for both shapes and a Windows 10 reader's
+    /// `Done` asks to register a package Windows there has no page for.
+    #[test]
+    fn the_cards_switch_asks_for_the_highest_place_this_machine_can_reach() {
+        assert_eq!(
+            ExplorerShape::FirstPageAndClassic.place(),
+            ExplorerPlace::FirstPage
+        );
+        assert_eq!(
+            ExplorerShape::ClassicOnly.place(),
+            ExplorerPlace::ShowMoreOptions
+        );
+        let mut all_on = rows(&every_row());
+        for row in &mut all_on {
+            row.on = true;
+        }
+        for shape in [
+            ExplorerShape::FirstPageAndClassic,
+            ExplorerShape::ClassicOnly,
+        ] {
+            assert!(
+                !applications(&all_on, shape).contains(&Application::Explorer(ExplorerPlace::Off)),
+                "{shape:?}: a card asked for the answer that removes things"
+            );
+            assert!(
+                applications(&all_on, shape).contains(&Application::Explorer(shape.place())),
+                "{shape:?}: the card spent a place its machine was not opened with"
+            );
+        }
+    }
+
     /// PIN (§7.56 §11, user ruling 2026-09-06 「完成按各行调用与设置页同一函数」)
     /// — **every row the card spends is spent as the press the Settings page
     /// sends.**
@@ -1893,13 +1957,21 @@ mod tests {
             settings::update_check_requested(target(Application::UpdateCheck(false))),
             Some(false)
         );
+        // **One press for Explorer since 2026-09-07**, and the place it carries
+        // is what comes back out. The index arithmetic is a lookup in
+        // `EXPLORER_PLACE_OPTIONS` rather than `usize::from(!on)`, so a card
+        // that spelled an index would land on the wrong answer of three.
         assert_eq!(
-            settings::context_menu_requested(target(Application::ContextMenu)),
-            Some(true)
+            settings::explorer_place_requested(target(Application::Explorer(
+                ExplorerPlace::FirstPage
+            ))),
+            Some(ExplorerPlace::FirstPage)
         );
         assert_eq!(
-            settings::explorer_first_page_requested(target(Application::ExplorerFirstPage)),
-            Some(true)
+            settings::explorer_place_requested(target(Application::Explorer(
+                ExplorerPlace::ShowMoreOptions
+            ))),
+            Some(ExplorerPlace::ShowMoreOptions)
         );
         assert_eq!(
             settings::powershell_integration_offer_requested(target(Application::PowerShellOffer(
@@ -1966,8 +2038,10 @@ mod tests {
             applications(&all_on, ExplorerShape::FirstPageAndClassic),
             [
                 Application::UpdateCheck(true),
-                Application::ContextMenu,
-                Application::ExplorerFirstPage,
+                // **One application since 2026-09-07**, carrying the place the
+                // Settings row now spells. The pair the two applications used to
+                // be is what `FirstPage` means.
+                Application::Explorer(ExplorerPlace::FirstPage),
                 Application::PowerShellOffer(true),
                 Application::PowerShellIntent,
                 Application::ClaudeHooks,
@@ -1975,12 +2049,9 @@ mod tests {
                 Application::CopilotHooks
             ]
         );
-        assert_eq!(
+        assert!(
             applications(&all_on, ExplorerShape::ClassicOnly)
-                .into_iter()
-                .filter(|spent| *spent == Application::ExplorerFirstPage)
-                .count(),
-            0,
+                .contains(&Application::Explorer(ExplorerPlace::ShowMoreOptions)),
             "a machine with no package is being asked to register one"
         );
         let mut update_off = rows(&every_row());
@@ -2143,10 +2214,11 @@ mod tests {
         );
         // The shape it was opened with is kept, and the only thing that can
         // show it is what `Done` would spend: this machine's switch means both
-        // registrations, so an Explorer row that is on spends two.
+        // registrations, so an Explorer row that is on asks for the top place.
         card.flip(1);
         assert!(
-            card.done().contains(&Application::ExplorerFirstPage),
+            card.done()
+                .contains(&Application::Explorer(ExplorerPlace::FirstPage)),
             "the card forgot which shape its Explorer switch was opened with"
         );
     }
@@ -2176,7 +2248,7 @@ mod tests {
             card.done(),
             [
                 Application::UpdateCheck(true),
-                Application::ContextMenu,
+                Application::Explorer(ExplorerPlace::ShowMoreOptions),
                 Application::PowerShellOffer(false)
             ]
         );

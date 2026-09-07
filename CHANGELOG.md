@@ -26,6 +26,20 @@ All notable changes to Folio are recorded here. The format follows
   single line, and `keybindings.json` is untouched — it named all four slots
   before this change and names them now.
 
+- **The two Explorer rows in Settings are one row with three answers.**
+  `Explorer context menu` and `First page of that menu` asked one question
+  twice, and the second was meaningless without the first. The one row now says
+  where Folio stands in Explorer's right-click menu: `Off`, `Under Show more
+  options`, or `On the first page`, which registers `folio.msix` and keeps the
+  classic entry beside it. The top answer is greyed, with the reason under the
+  row, on Windows 10 and where `folio.msix` is not beside `folio.exe`; the card
+  that used to say `folio.msix is not beside folio.exe` after a press is gone,
+  because that answer can no longer be pressed. The row is now on the General
+  page of every Windows rather than the pair being a Windows 11 shape, and
+  nothing about where the answers are stored changed: they are still read off
+  the registry and off the deployment database, so removing the package from
+  `Settings > Apps > Installed apps` still moves the row.
+
 ## 0.2.2-preview — 2026-09-06
 
 Fixes and polish for 0.2.1-preview, and one card: a machine that has never run
