@@ -1163,10 +1163,13 @@ pub enum Text {
     ShortcutSummonPip2,
     ShortcutSummonPip3,
     ShortcutSummonPip4,
-    /// The two folded rows' own names. The en dash is a range and survives
+    /// The folded row's own name. The en dash is a range and survives
     /// translation the way [`Self::RootBrowse`]'s ellipsis does.
+    ///
+    /// **One entry and not two since 2026-09-07**: the picture-in-picture slots
+    /// had a family name too, and it went with the fold — a name for a line the
+    /// page no longer draws is a sentence with nowhere to be said.
     ShortcutFamilyGotoTab,
-    ShortcutFamilySummonPip,
     /// Where a scoped row is in force — the first clause of the muted line under
     /// its name.
     ShortcutScopePreview,
@@ -1174,6 +1177,16 @@ pub enum Text {
     ShortcutScopeSearchOpen,
     /// And the second clause: the key is claimed, the verb behind it has not
     /// arrived (§7.1.5e).
+    ///
+    /// **One clause since 2026-09-07, and the reason is the column it is drawn
+    /// in** (§7.1.6c-2″). It said "Bound, but the action behind it is not built
+    /// yet" — and the first row ever to actually wear it, a picture-in-picture
+    /// slot with a chord just recorded on it, showed "Bound, but the action
+    /// behind it is…": the row also carries key caps, a `Record` and a `↺`, and
+    /// what the ellipsis ate was the whole of the fact. This is the conflict
+    /// sentence's lesson met a second time (§7.1.6c-2′): a sentence with no
+    /// second clause has no second clause to lose — and the dropped half was
+    /// already said by the caps standing beside it.
     ShortcutNotePending,
     /// What a folded row says about the chords it folded. **Three entries and
     /// not one with a clause bolted on**, because the join is a `; ` in English
@@ -3180,19 +3193,14 @@ impl Text {
             Self::ShortcutSummonPip3 => pick(lang, "Summon picture in picture 3", "唤出画中画 3"),
             Self::ShortcutSummonPip4 => pick(lang, "Summon picture in picture 4", "唤出画中画 4"),
             Self::ShortcutFamilyGotoTab => pick(lang, "Go to tab 1–9", "转到标签 1–9"),
-            Self::ShortcutFamilySummonPip => {
-                pick(lang, "Summon picture in picture 1–4", "唤出画中画 1–4")
-            }
             Self::ShortcutScopePreview => pick(lang, "In a preview", "在预览里"),
             Self::ShortcutScopeTerminalPrimary => {
                 pick(lang, "On a terminal's own scrollback", "在终端自己的回滚里")
             }
             Self::ShortcutScopeSearchOpen => pick(lang, "While the search is open", "查找打开时"),
-            Self::ShortcutNotePending => pick(
-                lang,
-                "Bound, but the action behind it is not built yet",
-                "已绑定，但它背后的功能还没有做出来",
-            ),
+            Self::ShortcutNotePending => {
+                pick(lang, "This feature is not built yet", "这个功能还没做")
+            }
             Self::ShortcutNoteOnePerMember => pick(lang, "One chord for each", "每一个各有一组键"),
             Self::ShortcutNoteNoneAssigned => pick(
                 lang,
@@ -4209,7 +4217,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 594] = [
+    pub const ALL: [Self; 593] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4517,7 +4525,6 @@ impl Text {
         Self::ShortcutSummonPip3,
         Self::ShortcutSummonPip4,
         Self::ShortcutFamilyGotoTab,
-        Self::ShortcutFamilySummonPip,
         Self::ShortcutScopePreview,
         Self::ShortcutScopeTerminalPrimary,
         Self::ShortcutScopeSearchOpen,

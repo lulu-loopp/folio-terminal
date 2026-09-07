@@ -43,9 +43,11 @@ use crate::i18n::{Lang, Text};
 
 /// Everything the window can be asked to do from the keyboard.
 ///
-/// `SummonPip` is the family with no machine behind it yet: four rows, listed, unassigned, and
+/// `SummonPip` is the verb with no machine behind it yet: four rows, listed, unassigned, and
 /// dispatched to an explicit no-op rather than omitted, because the audit decided the *slots*
-/// belong to us even though none of their chords does.
+/// belong to us even though none of their chords does. Four rows on the page as well as in this
+/// table since 2026-09-07 — a slot with no chord and no way to record one is a row that reads as a
+/// refusal.
 ///
 /// `JumpAttention` was a stub too until 2026-08-20, when the attention queue (P1-8) landed with
 /// §7.1.6b′ F3 and gave it [`crate::Runtime::jump_to_attention`]. What the stub bought is exactly
@@ -223,6 +225,12 @@ pub(crate) enum Action {
     /// So what ships is the ruling itself rather than a guess at it: four named
     /// slots, four lines in `keybindings.json`, and a panel to fill them in. The
     /// lesson of July was that one key chosen for the user was one key too many.
+    ///
+    /// **And four lines in that panel since 2026-09-07** (§7.1.6c-2″, user
+    /// ruling). They folded into one until then, and a folded line offers no
+    /// `Record` — so the four rows that exist in order to be filled were the one
+    /// place on the page a chord could not be recorded. A panel to fill them in
+    /// was half the delivery; the button is the other half.
     ///
     /// A stub row in the sense §7.1.5e means it: named, in the table, dispatched
     /// to an explicit no-op until the picture-in-picture machine arrives.
@@ -487,7 +495,7 @@ const WIN: ModifiersState = ModifiersState::SUPER;
 /// **`chord` is an `Option`, and the `None` is a real state rather than a
 /// missing value.** Two things spell themselves that way and they are the same
 /// thing seen from either end: a row that ships with no default at all (the
-/// three unassigned picture-in-picture slots — see [`Action::SummonPip`]) and a
+/// four unassigned picture-in-picture slots — see [`Action::SummonPip`]) and a
 /// row a user has deliberately taken the chord away from (`"chord": null` in
 /// `keybindings.json`). Both mean "this verb has no key today", and a row that
 /// vanished from the table instead would be a verb the panel could not offer a
@@ -555,12 +563,19 @@ impl Binding {
         }
     }
 
-    /// A member of a folded family that ships with no chord at all.
-    const fn unassigned(id: &'static str, title: Text, family: Text, action: Action) -> Self {
+    /// A row that ships with no chord at all.
+    ///
+    /// **And not one of a folded family since 2026-09-07** (§7.1.6c-2″, user
+    /// ruling). The four picture-in-picture slots are this constructor's only
+    /// callers, and a folded line offers no `Record` button — see
+    /// [`Shortcuts::editor_rows`] for why one button cannot stand over four ids.
+    /// On rows that exist in order to be given a chord, that fold hid the only
+    /// thing they have.
+    const fn unassigned(id: &'static str, title: Text, action: Action) -> Self {
         Self {
             id,
             title,
-            family: Some(family),
+            family: None,
             action,
             chord: None,
             scope: Scope::Window,
@@ -1214,28 +1229,29 @@ pub(crate) const BINDINGS: &[Binding] = &[
     // them. See [`Action::SummonPip`] for why the prototype's `F9` is not
     // carried over: a bare function key with no scope to hand it back is the one
     // shape this table has already refused once, four rows up.
+    //
+    // **Four rows and no `family` since 2026-09-07** (§7.1.6c-2″): they folded
+    // into one line until a reader asked why that line could not be recorded,
+    // and the honest answer was that it could — the fold was what took the
+    // button away.
     Binding::unassigned(
         "summon-pip-1",
         Text::ShortcutSummonPip1,
-        FAMILY_SUMMON_PIP,
         Action::SummonPip(1),
     ),
     Binding::unassigned(
         "summon-pip-2",
         Text::ShortcutSummonPip2,
-        FAMILY_SUMMON_PIP,
         Action::SummonPip(2),
     ),
     Binding::unassigned(
         "summon-pip-3",
         Text::ShortcutSummonPip3,
-        FAMILY_SUMMON_PIP,
         Action::SummonPip(3),
     ),
     Binding::unassigned(
         "summon-pip-4",
         Text::ShortcutSummonPip4,
-        FAMILY_SUMMON_PIP,
         Action::SummonPip(4),
     ),
 ];
@@ -1253,9 +1269,11 @@ const fn character(text: &'static str) -> ChordKey {
 // `match lang` can keep returning one of two literals without allocating.
 
 /// The name of the row the nine `Ctrl+Shift+digit` bindings fold into.
+///
+/// **The only fold left** (§7.1.6c-2″, user ruling 2026-09-07): the four
+/// picture-in-picture slots had one too, and gave it up for the `Record` button
+/// a folded line cannot offer.
 const FAMILY_GOTO_TAB: Text = Text::ShortcutFamilyGotoTab;
-/// The name of the row the four picture-in-picture summon slots fold into.
-const FAMILY_SUMMON_PIP: Text = Text::ShortcutFamilySummonPip;
 
 /// What a stub row says about itself (§7.1.5e: the key is claimed, the machine
 /// is not here yet).
@@ -1768,6 +1786,16 @@ impl Shortcuts {
                 // *which* slot, a folded line offers no Record button. The file
                 // still names every member, which is the door that stays open:
                 // `keybindings.json` can move `goto-tab-9` on its own today.
+                //
+                // **Which is why the picture-in-picture slots stopped being a
+                // family** (§7.1.6c-2″, user ruling 2026-09-07). The trade is a
+                // good one for the nine tab ordinals: nine lines of one verb
+                // would bury the fifteen other verbs under them, and every one
+                // of the nine already has a key, so nothing on that line is
+                // waiting to be pressed. On four rows whose whole purpose is to
+                // be given a chord it was the opposite trade — the button is all
+                // they have, and folding it away left a row that read as a key
+                // nobody was allowed to choose.
                 recordable: false,
                 reserved: false,
                 overridden: members.iter().any(|row| self.is_overridden(row.id)),
@@ -4028,10 +4056,11 @@ mod tests {
     ///
     /// Every row of `BINDINGS` is on the page exactly once — through a line of
     /// its own or through the family line that folded it — so no verb is missing
-    /// and none appears twice. The nine tab ordinals are one line, the four
-    /// picture-in-picture slots are another, and the two `Alt`+arrow families
-    /// the audit listed and never took are there as well, greyed and offering no
-    /// Record button, "so the table stays the whole ruling".
+    /// and none appears twice. The nine tab ordinals are one line; the four
+    /// picture-in-picture slots were a second one until 2026-09-07 and are four
+    /// lines now (§7.1.6c-2″); and the two `Alt`+arrow families the audit listed
+    /// and never took are there as well, greyed and offering no Record button,
+    /// "so the table stays the whole ruling".
     ///
     /// MUTATIONS:
     /// (1) fold by walking a declared list of families instead of the `family`
@@ -4077,26 +4106,25 @@ mod tests {
         );
         assert!(!tabs.recordable, "a family is edited a slot at a time");
 
-        let pip = named(FAMILY_SUMMON_PIP.text());
-        assert_eq!(pip.ids.len(), 4);
-        assert!(
-            pip.caps.is_empty(),
-            "all four slots ship unassigned - see Action::SummonPip"
-        );
-        assert!(
-            pip.note
-                .as_deref()
-                .is_some_and(|note| note.contains(NOTE_NONE_ASSIGNED.text())),
-            "and the line says so: {:?}",
-            pip.note
-        );
-        assert!(
-            pip.note
-                .as_deref()
-                .is_some_and(|note| !note.contains(NOTE_MACHINE_PENDING.text())),
-            "a row with no chord does not also claim to be bound: {:?}",
-            pip.note
-        );
+        // **And the four picture-in-picture slots are four lines** (§7.1.6c-2″,
+        // user ruling 2026-09-07): the fold that made them one is gone, and what
+        // it took with it was the Record button on the only rows that exist in
+        // order to be given a chord. `every_picture_in_picture_slot_is_its_own_recordable_line`
+        // is that ruling stated whole; here it is the count, in the walk that
+        // knows how many lines this page has.
+        for slot in 1..=4u8 {
+            let pip = named(pip_title(slot));
+            assert_eq!(pip.ids, vec![format!("summon-pip-{slot}").as_str()]);
+            assert!(
+                pip.caps.is_empty(),
+                "all four slots ship unassigned - see Action::SummonPip"
+            );
+            assert!(
+                pip.note.is_none(),
+                "a row with no chord claims nothing about one: {:?}",
+                pip.note
+            );
+        }
 
         // **The alias is gone from the page** (user ruling 2026-08-18). One verb
         // is one line; the second chord is something a reader records.
@@ -4162,6 +4190,189 @@ mod tests {
                 .iter()
                 .all(|line| line.reserved),
             "they stand after the rows this window actually claims"
+        );
+    }
+
+    /// The name a picture-in-picture slot is called on the page.
+    fn pip_title(slot: u8) -> &'static str {
+        match slot {
+            1 => Text::ShortcutSummonPip1.text(),
+            2 => Text::ShortcutSummonPip2.text(),
+            3 => Text::ShortcutSummonPip3.text(),
+            _ => Text::ShortcutSummonPip4.text(),
+        }
+    }
+
+    /// RED (user ruling 2026-09-07) — **each picture-in-picture slot is a line
+    /// of its own, and each line offers a `Record` button.**
+    ///
+    /// The four slots folded into one line until today, and a folded line offers
+    /// no `Record` ([`Shortcuts::editor_rows`]): the recorder takes one chord and
+    /// a fold has four rows to put it on. What that left on the page was a line
+    /// reading `Not set` with nothing on it to press — sitting directly under a
+    /// row with a `Record` button and directly above two greyed rows the audit
+    /// really did decline, so the only reading left was that this row is another
+    /// key nobody is allowed to choose. The user's screenshot asked which of the
+    /// two it was; the answer is neither, and the row had no way to say so.
+    ///
+    /// **The tab ordinals keep their fold**, and the difference is not a
+    /// preference: nine lines of one verb would bury the fifteen other verbs
+    /// under them, and every one of the nine already has a key, so nothing on
+    /// that line is asking to be pressed. These four have no key and exist in
+    /// order to be given one — which is the whole of why they are in the table
+    /// (see [`Action::SummonPip`]) — so the affordance is the row's only point.
+    ///
+    /// MUTATIONS: give the four rows a `family` again and they fold back into
+    /// one line, so the per-slot count goes red; keep the fold and simply set
+    /// `recordable` on it and the `ids` assertion goes red, because one button
+    /// over four ids cannot say which slot it wrote.
+    #[test]
+    fn every_picture_in_picture_slot_is_its_own_recordable_line() {
+        let table = Shortcuts::defaults();
+        let lines = table.editor_rows();
+        for slot in 1..=4u8 {
+            let id = format!("summon-pip-{slot}");
+            let holding: Vec<&ShortcutRow> = lines
+                .iter()
+                .filter(|line| line.ids.iter().any(|other| *other == id))
+                .collect();
+            assert_eq!(holding.len(), 1, "{id} is on the page exactly once");
+            let line = holding[0];
+            assert_eq!(line.ids, vec![id.as_str()], "one line, one slot");
+            assert_eq!(line.title, pip_title(slot), "and it wears its own name");
+            assert!(line.recordable, "{id} offers a Record button");
+            assert!(!line.reserved, "{id} is not a row the audit declined");
+            assert!(
+                line.caps.is_empty(),
+                "and it still ships with no chord at all - see Action::SummonPip"
+            );
+            assert!(
+                line.note.is_none(),
+                "a row with no chord claims nothing about one: {:?}",
+                line.note
+            );
+        }
+        // And nothing folded them behind the page's back: no line on this page
+        // stands for more than one slot.
+        assert!(
+            !lines.iter().any(|line| {
+                line.ids.len() > 1 && line.ids.iter().any(|id| id.starts_with("summon-pip-"))
+            }),
+            "the slots are four lines, not one"
+        );
+    }
+
+    /// RED (user ruling 2026-09-07) — **a chord recorded on one slot lands on
+    /// that slot alone, is refused exactly where any other row's would be, and
+    /// leaves with `Restore all defaults`.**
+    ///
+    /// The recorder is the one the rest of the page uses, so what this asserts is
+    /// that these rows are ordinary rows of the table and not a special case:
+    /// [`Shortcuts::verdict_for`] answers about them with the same three
+    /// refusals it answers about `new-tab` with, [`Shortcuts::set`] writes the
+    /// slot it was named and no other, and [`Shortcuts::restore_all`] — the
+    /// page's own closing verb — takes the chord away again.
+    ///
+    /// MUTATIONS: write the chord onto the family's first member instead of the
+    /// named row and the second slot's caps go red beside the first's; skip
+    /// these rows in `chord_verdict` and the conflict assertions go red, which is
+    /// a recorder handing out a chord `new-tab` is already answering to.
+    #[test]
+    fn a_chord_recorded_on_one_slot_lands_on_that_slot_alone() {
+        let mut table = Shortcuts::defaults();
+        let chord = Chord::new(CTRL_SHIFT, super::character("0"));
+        assert_eq!(
+            table.verdict_for("summon-pip-2", &chord),
+            ChordVerdict::Free,
+            "the digit the tab ordinals stop short of is nobody's"
+        );
+        table.set("summon-pip-2", Some(chord.clone()));
+
+        let caps = |lines: &[ShortcutRow], id: &str| {
+            lines
+                .iter()
+                .find(|line| line.ids == vec![id])
+                .unwrap_or_else(|| panic!("{id} is a line of the page"))
+                .caps
+                .clone()
+        };
+        let lines = table.editor_rows();
+        assert_eq!(caps(&lines, "summon-pip-2"), vec!["Ctrl", "Shift", "0"]);
+        for slot in [1u8, 3, 4] {
+            assert!(
+                caps(&lines, &format!("summon-pip-{slot}")).is_empty(),
+                "slot {slot} was not the row that was recorded"
+            );
+        }
+        // The press reaches that slot and no other.
+        assert_eq!(
+            table.lookup(
+                &Key::Character("0".into()),
+                &Key::Character("0".into()),
+                CTRL_SHIFT,
+                ON_A_TERMINAL,
+            ),
+            Some(Action::SummonPip(2))
+        );
+
+        // A chord another row is answering to is refused here the way it is
+        // refused everywhere, and the slot that has just been given one is a
+        // holder like any other.
+        assert!(
+            matches!(
+                table.verdict_for("summon-pip-3", &Chord::new(CTRL_SHIFT, super::character("n"))),
+                ChordVerdict::AlreadyUsed { holder, .. } if holder == "new-tab"
+            ),
+            "the conflict is the table's, not the row's"
+        );
+        assert!(
+            matches!(
+                table.verdict_for("summon-pip-3", &chord),
+                ChordVerdict::AlreadyUsed { holder, .. } if holder == "summon-pip-2"
+            ),
+            "and one slot cannot quietly take another's"
+        );
+        // And the two standing disciplines reach these rows too.
+        assert_eq!(
+            table.verdict_for(
+                "summon-pip-3",
+                &Chord::new(CTRL.union(ModifiersState::ALT), super::character("k")),
+            ),
+            ChordVerdict::AltGrZone
+        );
+        assert_eq!(
+            table.verdict_for("summon-pip-3", &Chord::new(CTRL, super::character("k"))),
+            ChordVerdict::ShellControlLetter
+        );
+
+        assert!(table.is_overridden("summon-pip-2"));
+        assert_eq!(
+            table.overrides(),
+            vec![Override {
+                id: "summon-pip-2".to_owned(),
+                chord: Some("Ctrl+Shift+0".to_owned()),
+            }],
+            "one recorded slot is one line in the file"
+        );
+
+        table.restore_all();
+        assert!(!table.is_overridden("summon-pip-2"));
+        let restored = table.editor_rows();
+        for slot in 1..=4u8 {
+            assert!(
+                caps(&restored, &format!("summon-pip-{slot}")).is_empty(),
+                "restoring the defaults empties slot {slot}"
+            );
+        }
+        assert_eq!(
+            table.lookup(
+                &Key::Character("0".into()),
+                &Key::Character("0".into()),
+                CTRL_SHIFT,
+                ON_A_TERMINAL,
+            ),
+            None,
+            "and the chord reaches nothing again"
         );
     }
 
