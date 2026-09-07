@@ -2780,19 +2780,35 @@ pub const PREVIEW_MD_LANG_TRACKING_EM: f32 = 0.08;
 
 /// How wide the prose column is allowed to get, in ems of the body.
 ///
-/// github.css: `#write { max-width: 860px }` on a 16px body — 53.75em, written
-/// as 54 because a measure is a reading decision and not a pixel count. It is
-/// the single number the user's report is really about: at 1600 physical pixels
-/// a paragraph of Chinese ran a hundred and forty characters to the line, and
-/// nobody's eye finds the start of the next line after that. Every typographic
-/// manual in print puts the comfortable measure between 45 and 75 characters
-/// and Typora's 860px lands in the middle of it.
+/// **77em — a thousand logical pixels of this window's 13px body** (user ruling,
+/// 2026-09-07), written as a round em because a measure is a reading decision
+/// and not a pixel count.
+///
+/// It was 54em, and 54 was faithful: github.css sets `#write { max-width: 860px
+/// }` on a 16px body, which is 53.75em, and 2026-08-16 ported Typora's *ratios*
+/// rather than its pixels for the reason [`PREVIEW_MD_FONT_LOGICAL_PX`] states.
+/// What the port could not carry across was that 860 pixels is a number chosen
+/// for a 16px page in a window, and 54em of a 13px body in a pane three levels
+/// deep is 702 pixels. The report is a screenshot of what that costs: a `.md`
+/// file open as a tab of its own, 1770 logical pixels of pane, and the document
+/// reading down a strip in the middle of it under 40% of the width — with a wide
+/// table clipped at the strip's edge and no way to reach the rest.
+///
+/// **The cap is the only thing the ruling changes.** The page's own padding, the
+/// centring and the narrow-pane rule are all as they were: see
+/// [`markdown_measure_box`], which is untouched. And a cap there still is,
+/// against "run to the pane" — prose whose line length is whatever the window
+/// happens to be is prose that has to be re-learned at every window size, and
+/// the eye that has to find the start of the next line pays for it every line.
+/// Still an em rather than a pixel count, so that a 4K monitor at 200% gets a
+/// column twice as wide and not a column of 1001 physical pixels with a mile of
+/// nothing beside it.
 ///
 /// The column is **centred** when the pane can hold it, which is `#write`'s own
 /// `margin: 0 auto`; a pane narrower than the measure wraps at the pane exactly
 /// as it did before, because a measure enforced on a 300px pane is a 300px pane
 /// with a hole down one side.
-pub const PREVIEW_PROSE_MEASURE_EM: f32 = 54.0;
+pub const PREVIEW_PROSE_MEASURE_EM: f32 = 77.0;
 /// github.css: `body { line-height: 1.6 }`.
 ///
 /// The old value was the window's own `CHROME_LINE_HEIGHT` of 1.4, which is a
@@ -9093,8 +9109,9 @@ mod tests {
         assert_eq!(metrics.line_height, 21.0);
         // p, blockquote, ul, ol, table, pre { margin: 0 0 16px } — 1em.
         assert_eq!(metrics.paragraph_gap, 13.0);
-        // #write { max-width: 860px } on a 16px body.
-        assert_eq!(metrics.measure, 702.0);
+        // 77em — github.css's `#write { max-width: 860px }` re-decided for this
+        // window's own body size (user ruling, 2026-09-07).
+        assert_eq!(metrics.measure, 1001.0);
 
         // h1 … h6 { font-size: 2 / 1.5 / 1.25 / 1 / .875 / .85 em }.
         assert_eq!(metrics.heading_font(1), 26.0);
@@ -9189,7 +9206,7 @@ mod tests {
         assert_eq!(right, 400.0 - metrics.padding_x);
         assert_eq!(right - left, 368.0);
 
-        let wide = [100.0, 0.0, 1300.0, 600.0];
+        let wide = [100.0, 0.0, 1301.0, 600.0];
         let (left, right) = markdown_measure_box(wide, metrics);
         assert_eq!(
             right - left,
@@ -9201,8 +9218,8 @@ mod tests {
             wide[2] - right,
             "and what is left over is split evenly — `margin: 0 auto`"
         );
-        assert_eq!(left, 349.0);
-        assert_eq!(right, 1051.0);
+        assert_eq!(left, 200.0);
+        assert_eq!(right, 1201.0);
 
         // The hinge is exactly the measure plus the two paddings; a pane one
         // pixel narrower than that is still a pane and gets the pane's rule.
@@ -9217,6 +9234,68 @@ mod tests {
             left,
             metrics.padding_x + 1.0,
             "one pixel over and it centres"
+        );
+    }
+
+    /// PIN — **the column's cap is about a thousand logical pixels, and a pane
+    /// under it still gets the pane** (user ruling, 2026-09-07).
+    ///
+    /// The report is a screenshot: a `.md` file open as a tab of its own, 1770
+    /// logical pixels of pane, and the document reading down a 730-pixel strip in
+    /// the middle of it with a wide table clipped at the strip's edge. 54em of a
+    /// 13px body is 702 pixels, and 702 was Typora's own `860px` carried across
+    /// to a smaller body — a faithful port of a number chosen for a 16px page.
+    /// The ruling raises the cap and nothing else: the margins, the centring and
+    /// the pane rule underneath are all as they were.
+    ///
+    /// Three widths, because a cap is a claim about all three: a pane too narrow
+    /// for even the old column, a pane between the old cap and the new one — which
+    /// used to be capped and now is not — and a pane wide enough to be capped.
+    ///
+    /// MUTATION: put `PREVIEW_PROSE_MEASURE_EM` back to 54 and the middle width
+    /// goes red with a column of 702 in a pane that can hold 868; the wide width
+    /// goes red on the cap itself.
+    #[test]
+    fn the_prose_column_is_capped_at_about_a_thousand_logical_pixels() {
+        let metrics = markdown_metrics(1.0);
+        assert_eq!(
+            metrics.measure, 1001.0,
+            "77em of a 13px body — a thousand logical pixels, near enough"
+        );
+
+        // ① Under the old cap: the pane, exactly as before.
+        let narrow = [0.0, 0.0, 500.0, 600.0];
+        let (left, right) = markdown_measure_box(narrow, metrics);
+        assert_eq!(
+            (left, right),
+            (metrics.padding_x, 500.0 - metrics.padding_x),
+            "a narrow pane is untouched by the ruling"
+        );
+
+        // ② Between the two caps: this pane used to be capped at 702 and now
+        // gets the whole of itself, which is the half of the ruling a single
+        // number cannot state.
+        let middle = [0.0, 0.0, 900.0, 600.0];
+        let (left, right) = markdown_measure_box(middle, metrics);
+        assert_eq!(
+            (left, right),
+            (metrics.padding_x, 900.0 - metrics.padding_x),
+            "a pane that used to be capped now holds the column whole"
+        );
+        assert!(
+            right - left > 702.0,
+            "and it is wider than the column this pane used to be given"
+        );
+
+        // ③ The user's own pane, near enough: the cap holds and the column is
+        // centred, which is what keeps this from being "run to the pane".
+        let wide = [0.0, 0.0, 1771.0, 900.0];
+        let (left, right) = markdown_measure_box(wide, metrics);
+        assert_eq!(right - left, 1001.0, "capped");
+        assert_eq!(left - wide[0], wide[2] - right, "and still centred");
+        assert!(
+            right - left < (wide[2] - wide[0]) * 0.6,
+            "a pane's worth of prose is the thing the cap exists to refuse"
         );
     }
 

@@ -6,7 +6,30 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **A wide table in a Markdown preview scrolls sideways, and a tilt wheel is
+  enough to do it.** A table whose columns need more room than the page can give
+  has always had a bar along its own foot that a hand could drag, and a
+  `Shift`+wheel that moved it. What it did not have was the wheel most mice
+  already carry: a tilt wheel, and a touchpad's second finger, were reported to
+  the window all along and dropped before they reached the page. They are not
+  dropped any more, they need no modifier, and the table under the pointer is
+  the one that moves — a page with several wide tables has several scrolling
+  regions, exactly as a browser does. `Shift`+wheel still does what it did,
+  everywhere it did it.
+
 ### Changed
+
+- **A Markdown document is set in a wider column.** The reading column was
+  capped at 702 logical pixels, which is Typora's own 860-pixel page carried
+  across to this window's smaller body type. On a maximised window that left a
+  document reading down a strip in the middle of the pane. The cap is now about
+  a thousand pixels. Everything else about the column is unchanged: it is still
+  centred, a pane too narrow for it still gets the whole pane, and prose still
+  stops there rather than running the width of the window. Tables and code
+  blocks are set in the same column as the prose, exactly as before; one wider
+  than the column scrolls inside itself.
 
 - **The core builds on macOS, and CI keeps it that way.** Everything below the
   application layer — the terminal grid, the renderer, the transcript, the

@@ -4214,10 +4214,12 @@ fn build_preview_markdown_body(
     // that the scrolling region is the block. It is what GitHub and Typora do.
     //
     // **And the column has a maximum width** (user report, 2026-08-16): the same
-    // `#write { max-width: 860px; margin: 0 auto }` Typora sets its own page in.
-    // A fence and a table are constrained to this box exactly as the prose is —
-    // they scroll inside it, which is what keeps a wide table from being the one
-    // block on the page that ignores the measure.
+    // `#write { max-width: 860px; margin: 0 auto }` Typora sets its own page in,
+    // re-decided for this window's own body size on 2026-09-07. **Every** block is
+    // constrained to it — a fence and a table alike — and a block that does not
+    // fit scrolls inside it. A table was let past it for one afternoon on
+    // 2026-09-07 and the ruling was withdrawn the same day on the picture: one
+    // block wider than every other one is a page whose blocks do not line up.
     let (left, right) = preview::markdown_measure_box(body, metrics);
     let origin = body[1] + metrics.padding_y - scroll[1];
     let mut quads = Vec::new();
@@ -5423,6 +5425,40 @@ fn preview_wide_blocks<'a>(
                 placed.width,
             ))
         })
+}
+
+/// Which wide block a notch lands in, and where that leaves the block's own
+/// offset.
+///
+/// A free function taking the same answers the painter takes, for
+/// [`preview_block_bar_at`]'s reason: a test can then ask it exactly what a hand
+/// asks it, with no window, no renderer and no platform behind it — and the
+/// wheel's clamp and the thumb's are visibly the same two numbers.
+///
+/// `None` when the pointer is outside the document's box or over no wide block
+/// at all: a sideways notch over prose is not this axis's, and the caller hands
+/// it on to the page. **The pointer decides which block** (user ruling,
+/// 2026-08-13) — a page may hold several wide tables, they are separate
+/// scrolling regions, and the one you are pointing at is the one you mean.
+fn preview_block_wheel(
+    body: [f32; 4],
+    metrics: seats::PreviewMarkdownMetrics,
+    scroll: [f32; 2],
+    block_scroll: &[f32],
+    document: (&[preview::MarkdownBlock], &[MarkdownBlockLayout]),
+    at: [f32; 2],
+    travel: f32,
+) -> Option<(usize, f32)> {
+    if at[0] < body[0] || at[0] > body[2] || at[1] < body[1] || at[1] > body[3] {
+        return None;
+    }
+    let (index, clip, width) = preview_wide_blocks(body, metrics, scroll, document)
+        .find(|(_, clip, _)| at[1] >= clip[1] && at[1] < clip[3])?;
+    let overflow = width - (clip[2] - clip[0]);
+    let current = block_scroll.get(index).copied().unwrap_or(0.0);
+    // Still the block's notch either way: a table at its own end does not hand
+    // the wheel back to a page that has nowhere to go either.
+    Some((index, (current - travel).clamp(0.0, overflow)))
 }
 
 /// The block whose scroll thumb the pointer is on, and that thumb's bar.
@@ -18118,6 +18154,32 @@ fn wheel_zoom_notches(delta: MouseScrollDelta) -> f32 {
         MouseScrollDelta::LineDelta(_, y) => y,
         MouseScrollDelta::PixelDelta(position) => position.y as f32 / WHEEL_PIXELS_PER_NOTCH,
     }
+}
+
+/// **Which axis the platform put this report on**, which is a fact about the
+/// report and not about whatever surface it lands on.
+///
+/// A tilt wheel and a touchpad's second finger arrive as a number on `x`. There
+/// is no modifier to read and no phase to read — the component has travelled
+/// this window's whole wheel path since the window was written and been dropped
+/// at the far end by every consumer that only ever looked at `y`.
+///
+/// **The larger component is the gesture and the smaller one is the hand not
+/// being straight.** That sentence was already written down inside
+/// [`Runtime::wheel_columns`], where it governed the pixel arm alone; a
+/// [`WheelBurst`] merges consecutive reports, so a run that is mostly down and a
+/// little sideways reaches a consumer as *one* `LineDelta` carrying both, and the
+/// line arm needs the same rule. Ties go to the vertical: it is the axis every
+/// surface in this window has, and a hand that is not tilting means it.
+///
+/// One function, so the terminal and the preview cannot come to different
+/// conclusions about the same report.
+fn wheel_points_sideways(delta: MouseScrollDelta) -> bool {
+    let (x, y) = match delta {
+        MouseScrollDelta::LineDelta(x, y) => (x, y),
+        MouseScrollDelta::PixelDelta(position) => (position.x as f32, position.y as f32),
+    };
+    x != 0.0 && x.abs() > y.abs()
 }
 
 /// **The travel a card aim has been handed and not yet spent** (user report
@@ -50769,17 +50831,29 @@ impl Runtime<'_> {
         delta: MouseScrollDelta,
     ) -> Result<()> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        // **Shift turns the wheel sideways**, which is the convention every
-        // horizontal scroller on this desktop already follows and the only one
-        // a mouse without a tilt wheel can reach. The notch is the same notch;
-        // only the axis it is spent on changes.
-        let sideways = self.window.modifiers.shift_key();
+        // **A report the platform already put on the x axis is sideways, and it
+        // needs no modifier to say so** (user ruling, 2026-09-07). A tilt wheel
+        // and a touchpad's second finger have been arriving here since this
+        // method was written and being spent on `y`, which for a report that is
+        // all `x` is zero: the notch reached the right surface and did nothing at
+        // all. `wheel_points_sideways` is the same reading the terminal's own
+        // axis takes, and `wheel_travel` then takes the component that goes with
+        // it.
+        //
+        // **Shift turns the wheel sideways** as well, which is the convention
+        // every horizontal scroller on this desktop follows and the only one a
+        // mouse without a second axis can reach. Nothing about it changes here or
+        // in the terminal: over a preview it already meant this axis, and what
+        // 2026-09-07 adds is a road to the same place that needs no hand on the
+        // keyboard. The notch is the same notch either way.
+        let tilted = wheel_points_sideways(delta);
+        let sideways = tilted || self.window.modifiers.shift_key();
         let extent = if sideways {
             body[2] - body[0]
         } else {
             body[3] - body[1]
         };
-        let travel = self.vertical_wheel_travel(delta, extent);
+        let travel = self.wheel_travel(delta, extent, tilted);
         // **Sideways over a wide block scrolls the block** (user ruling,
         // 2026-08-13). Asked first, because the page has no horizontal axis of
         // its own on this surface and a notch spent on nothing is a notch the
@@ -50824,21 +50898,19 @@ impl Runtime<'_> {
         let Some(pointer) = self.window.pointer_position else {
             return Ok(false);
         };
-        let (x, y) = (pointer.x as f32, pointer.y as f32);
-        if x < body[0] || x > body[2] || y < body[1] || y > body[3] {
-            return Ok(false);
-        }
         let metrics = seats::preview_markdown_metrics(scale);
-        let hit = preview_wide_blocks(body, metrics, pane.scroll, (blocks, layout))
-            .find(|(_, clip, _)| y >= clip[1] && y < clip[3]);
-        let Some((index, clip, width)) = hit else {
+        let Some((index, offset)) = preview_block_wheel(
+            body,
+            metrics,
+            pane.scroll,
+            &pane.md_block_scroll,
+            (blocks, layout),
+            [pointer.x as f32, pointer.y as f32],
+            travel,
+        ) else {
             return Ok(false);
         };
-        let overflow = width - (clip[2] - clip[0]);
-        let current = pane.md_block_scroll.get(index).copied().unwrap_or(0.0);
-        // Still the block's notch either way: a table at its own end does not
-        // hand the wheel back to a page that has nowhere to go either.
-        self.set_preview_block_scroll(surface, index, (current - travel).clamp(0.0, overflow))?;
+        self.set_preview_block_scroll(surface, index, offset)?;
         Ok(true)
     }
 
@@ -83651,19 +83723,46 @@ impl Runtime<'_> {
     }
 
     fn vertical_wheel_travel(&self, delta: MouseScrollDelta, page: f32) -> f32 {
+        self.wheel_travel(delta, page, false)
+    }
+
+    /// How far one report moves a chrome scroller, in pixels, along the axis it
+    /// is being spent on.
+    ///
+    /// **Positive travels back on both axes** — back up a document, back along a
+    /// line toward its start — and the two agree without anything here having to
+    /// arrange it. winit reports a wheel turned away from the hand as positive
+    /// `y`; its Windows backend negates `WM_MOUSEHWHEEL`, whose own sign is
+    /// positive for a tilt to the *right*, so a tilt left arrives as positive
+    /// `x`. Both components therefore already mean "back", every caller
+    /// subtracts whatever it is given from the offset it keeps, and the one place
+    /// a sign could have been introduced is this comment.
+    ///
+    /// **A notch travels the same distance whichever way it is turned**, which is
+    /// why the lines-per-notch multiplier is the same on both axes: a gesture
+    /// that changed length depending on the direction of the hand is a distance
+    /// the hand has to relearn. `page` is the screenful along *this* axis, so the
+    /// "one screen at a time" wheel setting means one screen either way.
+    fn wheel_travel(&self, delta: MouseScrollDelta, page: f32, sideways: bool) -> f32 {
         match delta {
-            MouseScrollDelta::LineDelta(_, y) => {
+            MouseScrollDelta::LineDelta(x, y) => {
                 let line = self.line_height_subpixels().get() as f32
                     / bt_viewport::SUBPIXELS_PER_PX as f32;
                 let amount =
                     match recoverable_wheel_scroll_amount(bt_platform::wheel_scroll_amount()) {
                         bt_platform::WheelScrollAmount::Lines(lines) => lines as f32 * line,
-                        // A page of a vertical scroller is a screenful of it.
+                        // A page of a scroller is a screenful of it.
                         bt_platform::WheelScrollAmount::Page => page,
                     };
-                y * amount
+                if sideways { x * amount } else { y * amount }
             }
-            MouseScrollDelta::PixelDelta(position) => position.y as f32,
+            MouseScrollDelta::PixelDelta(position) => {
+                if sideways {
+                    position.x as f32
+                } else {
+                    position.y as f32
+                }
+            }
         }
     }
 
@@ -84380,13 +84479,11 @@ impl Runtime<'_> {
     /// away a sixth at a time.
     fn wheel_columns(&mut self, seat: SeatId, delta: MouseScrollDelta) -> Option<i32> {
         let axis = self.leaf(seat).projection.horizontal();
-        // A report the platform put on the x axis says what it means. On a
-        // trackpad both arrive at once, so the larger one is the gesture and the
-        // smaller one is the hand not being straight.
-        let sideways = match delta {
-            MouseScrollDelta::LineDelta(x, _) => x != 0.0,
-            MouseScrollDelta::PixelDelta(position) => position.x.abs() > position.y.abs(),
-        };
+        // A report the platform put on the x axis says what it means, and
+        // [`wheel_points_sideways`] is where this window decides that — the
+        // sentence about a hand not being straight now governs both arms of the
+        // report rather than the pixel one alone.
+        let sideways = wheel_points_sideways(delta);
         if wheel_axis(
             self.window.modifiers.shift_key(),
             sideways,
@@ -122917,6 +123014,213 @@ mod tests {
         assert_eq!(prose_left(&[0.0, 0.0]), prose_left(&[0.0, overflow]));
     }
 
+    /// PIN — **a report the platform put on the x axis is sideways, and the
+    /// larger component is the gesture** (user ruling, 2026-09-07).
+    ///
+    /// A tilt wheel and a touchpad's second finger reach this window with no
+    /// modifier and no phase to tell them apart, and this is the whole of how
+    /// they are recognised. The tie-break matters because [`WheelBurst`] merges
+    /// consecutive reports: a run that is mostly down and a little sideways
+    /// arrives as one `LineDelta` carrying both, and a predicate of `x != 0.0`
+    /// would spend that run on the axis the hand did not mean.
+    ///
+    /// MUTATION: drop the magnitude comparison and the merged cases go red — an
+    /// ordinary downward scroll with a pixel of tilt in it stops scrolling down.
+    #[test]
+    fn a_wheel_report_is_sideways_when_the_platform_put_it_on_the_x_axis() {
+        let lines = |x: f32, y: f32| wheel_points_sideways(MouseScrollDelta::LineDelta(x, y));
+        let pixels = |x: f64, y: f64| {
+            wheel_points_sideways(MouseScrollDelta::PixelDelta(PhysicalPosition::new(x, y)))
+        };
+
+        // A tilt wheel, which is all this window ever sees of one.
+        assert!(lines(-1.0, 0.0));
+        assert!(lines(1.0, 0.0));
+        // An ordinary notch, which is what every mouse on the desk sends.
+        assert!(!lines(0.0, -3.0));
+        // A merged run: the larger component is the gesture and the smaller one
+        // is the hand not being straight.
+        assert!(!lines(0.5, -3.0));
+        assert!(lines(-3.0, 0.5));
+        // A tie goes to the axis every surface in this window has.
+        assert!(!lines(2.0, -2.0));
+        // Nothing at all is not sideways, which keeps a dead report off an axis
+        // it would then have to be clamped on.
+        assert!(!lines(0.0, 0.0));
+        // A trackpad speaks pixels, and the same reading answers it.
+        assert!(pixels(-40.0, 3.0));
+        assert!(!pixels(3.0, -40.0));
+    }
+
+    /// PIN — **a sideways notch scrolls the table under the pointer, clamped at
+    /// both of its own ends, and a notch over prose is nobody's** (user ruling,
+    /// 2026-09-07, tier 3).
+    ///
+    /// The report was that a tilt wheel did nothing at all: the axis was read off
+    /// `Shift` alone and the travel off `y` alone, so a report that was all `x`
+    /// came out zero at both ends of the arithmetic. This is the arithmetic that
+    /// answers it, with the pointer and the geometry handed in — the same numbers
+    /// [`preview_block_bar_at`] hands the thumb, so the wheel and the hand cannot
+    /// stop in different places.
+    ///
+    /// MUTATIONS: drop the `clamp` in [`preview_block_wheel`] and a table can be
+    /// pushed past either end; hit-test on `at[0]` instead of `at[1]` and the
+    /// prose case starts taking notches that belong to the page.
+    #[test]
+    fn a_sideways_notch_scrolls_the_table_under_the_pointer_and_clamps_at_both_ends() {
+        let metrics = seats::preview_markdown_metrics(1.0);
+        // Wide enough that the column is capped, so the table has more width than
+        // the column can hold and a scroll to do inside it.
+        let body = [0.0, 0.0, 1771.0, 900.0];
+        let blocks = preview::parse_markdown("Prose.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n");
+        assert_eq!(blocks.len(), 2, "a paragraph and a table");
+        assert!(matches!(blocks[1], preview::MarkdownBlock::Table { .. }));
+        let wide = 3000.0;
+        let table_top = metrics.line_height + metrics.paragraph_gap;
+        let layout = vec![
+            MarkdownBlockLayout::solid(metrics.line_height),
+            MarkdownBlockLayout {
+                width: wide,
+                top: table_top,
+                ..MarkdownBlockLayout::solid(metrics.line_height * 3.0)
+            },
+        ];
+        let (left, right) = preview::markdown_measure_box(body, metrics);
+        let overflow = wide - (right - left);
+        assert!(overflow > 0.0, "a table this wide has to scroll");
+        let origin = body[1] + metrics.padding_y;
+        let on_the_table = [(left + right) / 2.0, origin + table_top + 2.0];
+        let on_the_prose = [(left + right) / 2.0, origin + 1.0];
+        let wheel = |offsets: &[f32], at: [f32; 2], travel: f32| {
+            preview_block_wheel(
+                body,
+                metrics,
+                [0.0, 0.0],
+                offsets,
+                (&blocks, &layout),
+                at,
+                travel,
+            )
+        };
+
+        // A tilt to the right reaches this window as a negative `x`, and so as a
+        // negative travel — `Runtime::wheel_travel`'s "positive goes back" — and
+        // it moves the table forward.
+        assert_eq!(wheel(&[0.0, 0.0], on_the_table, -40.0), Some((1, 40.0)));
+        assert_eq!(
+            wheel(&[0.0, 40.0], on_the_table, 40.0),
+            Some((1, 0.0)),
+            "and a tilt the other way brings it back"
+        );
+
+        // Clamped at both ends, by the numbers the thumb clamps by.
+        assert_eq!(
+            wheel(&[0.0, 0.0], on_the_table, 40.0),
+            Some((1, 0.0)),
+            "it stops at its own start"
+        );
+        assert_eq!(
+            wheel(&[0.0, overflow], on_the_table, -400.0),
+            Some((1, overflow)),
+            "and at its own end, rather than handing the notch on to a page that \
+             has nowhere to go either"
+        );
+
+        // A notch over prose is not this axis's: it goes on to the page, and a
+        // markdown page has no horizontal axis, so nothing moves.
+        assert_eq!(wheel(&[0.0, 0.0], on_the_prose, -40.0), None);
+        // Nor is one outside the document's box at all.
+        assert_eq!(
+            wheel(&[0.0, 0.0], [body[2] + 10.0, on_the_table[1]], -40.0),
+            None
+        );
+    }
+
+    /// PIN — **a table is never wider than the prose column, at any pane width**
+    /// (user ruling, 2026-09-07, superseding the same day's earlier "a table may
+    /// bleed past it").
+    ///
+    /// The bleed was built and photographed first: a table that needed more room
+    /// than the column reached up to fifteen per cent of it past the edge on each
+    /// side, bounded by the page's own padding. Shown the picture, the user's
+    /// verdict was that it is ugly — one block wider than everything else on the
+    /// page puts the eye on a ragged edge instead of on the document, and a page
+    /// whose blocks do not line up is not a page. So every block is set in the
+    /// same column the prose is, and a table that does not fit scrolls inside
+    /// itself, which is the whole of what the thumb along its foot is for.
+    ///
+    /// Three widths, because "never wider" is a claim about all of them: a pane
+    /// narrower than the column has ever been, one between the old cap and the
+    /// new one, and one wide enough for the cap to bite.
+    ///
+    /// MUTATION: give a table a box of its own — anything other than
+    /// `preview::markdown_measure_box` — and every width goes red.
+    #[test]
+    fn a_wide_table_is_drawn_into_the_prose_column_and_wears_a_thumb_along_its_own_foot() {
+        const SCALE: f32 = 1.0;
+        let palette = bt_render::chrome_palette();
+        let metrics = seats::preview_markdown_metrics(SCALE);
+        let blocks = preview::parse_markdown("| a | b |\n|---|---|\n| 1 | 2 |\n");
+        assert_eq!(blocks.len(), 1, "a table and nothing else");
+        let wide = 3000.0;
+        let layout = vec![MarkdownBlockLayout {
+            width: wide,
+            ..MarkdownBlockLayout::solid(metrics.line_height * 3.0)
+        }];
+        let box_of = |body: [f32; 4]| {
+            let built = markdown_body(
+                body,
+                metrics,
+                [0.0, 0.0],
+                rested_bars(&[0.0]),
+                (&blocks, &layout),
+                &palette,
+            );
+            built
+                .blocks
+                .first()
+                .expect("a table wider than the column scrolls inside itself")
+                .clone()
+        };
+
+        // ① The box is the column's, at every width — not one pixel of it is
+        //    the table's own.
+        for body in [
+            [0.0, 0.0, 500.0, 600.0],
+            [0.0, 0.0, 900.0, 600.0],
+            [0.0, 0.0, 1771.0, 900.0],
+        ] {
+            let block = box_of(body);
+            assert_eq!(
+                (block.clip[0], block.clip[2]),
+                preview::markdown_measure_box(body, metrics),
+                "a table stands in the prose column, in a pane {} wide",
+                body[2] - body[0]
+            );
+        }
+
+        // ② The thumb: flush to the box's own foot, the family's thickness, and
+        //    as long as the share of the table the box is showing.
+        let body = [0.0, 0.0, 1771.0, 900.0];
+        let block = box_of(body);
+        let (left, right) = preview::markdown_measure_box(body, metrics);
+        let thumb = block.quads.last().expect("a bar has a thumb");
+        let thickness = (preview::BLOCK_SCROLL_THICKNESS_LOGICAL_PX * SCALE)
+            .round()
+            .max(1.0);
+        assert_eq!(
+            thumb.rect[3], block.clip[3],
+            "flush to the box's bottom edge"
+        );
+        assert_eq!(thumb.rect[3] - thumb.rect[1], thickness);
+        assert_eq!(thumb.rect[0], block.clip[0], "at rest it starts at the box");
+        let page = right - left;
+        assert!(
+            (thumb.rect[2] - thumb.rect[0] - page * (page / wide)).abs() < 0.01,
+            "a thumb is the visible share of the content, drawn in proportion"
+        );
+    }
+
     /// PIN (user report, 2026-08-12) — **what looks like a scrollbar is one**.
     ///
     /// The report is that the bar under a wide table could not be dragged. It
@@ -123251,7 +123555,7 @@ mod tests {
     /// defect #186: 「预览 pane 独占一个 tab 后很卡」).
     ///
     /// The document is `README.zh-CN.md` and the pictures are its own: five
-    /// 3200×2000 screenshots and one 3200×3240 plate, drawn into the 54em
+    /// 3200×2000 screenshots and one 3200×3240 plate, drawn into the 77em
     /// measure a 4K screen at 200% gives a full-window pane — 1404 physical
     /// pixels, which is what the report's geometry works out to and the number
     /// the sizes below are derived from rather than typed.
@@ -123280,7 +123584,7 @@ mod tests {
     /// and three of them do not fit anywhere.
     #[test]
     fn a_page_of_screenshots_costs_no_resample_and_no_reflow_the_second_time() {
-        // 54em of a 13px body at 200% — `preview::PREVIEW_PROSE_MEASURE_EM`
+        // 77em of a 13px body at 200% — `preview::PREVIEW_PROSE_MEASURE_EM`
         // through `preview::markdown_metrics`, which is where the number is
         // decided.
         let measure = seats::preview_markdown_metrics(2.0).measure;
@@ -125843,7 +126147,8 @@ mod tests {
     /// The geometry itself is `preview::markdown_measure_box`'s and is pinned
     /// beside it; what is asserted here is that the *painter* asks — a body that
     /// went on computing `body[0] + padding_x` for itself would draw the prose
-    /// across a maximised window while the layout pass wrapped it at 702, which
+    /// across a maximised window while the layout pass wrapped it at the
+    /// measure, which
     /// is a paragraph that reserves four rows and paints two.
     ///
     /// MUTATION: put `let left = body[0] + metrics.padding_x` back at the top of
@@ -125874,7 +126179,7 @@ mod tests {
             "a pane under the measure keeps the pane, exactly as before"
         );
 
-        let wide = [0.0, 0.0, 1600.0, 600.0];
+        let wide = [0.0, 0.0, 1601.0, 600.0];
         let (left, right) = column(wide);
         assert_eq!(right - left, metrics.measure, "the column stops growing");
         assert_eq!(

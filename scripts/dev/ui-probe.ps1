@@ -44,6 +44,13 @@
 #                                                                around the run, which is the only
 #                                                                way to reach a horizontal scroller
 #                                                                from a mouse with no tilt wheel
+#   .\ui-probe.ps1 wheel -Pid <pid> -X 900 -Y 400 -Delta 3 -Sideways
+#                                                              → the same run on the HORIZONTAL
+#                                                                axis (MOUSEEVENTF_HWHEEL, which
+#                                                                Windows turns into WM_MOUSEHWHEEL):
+#                                                                a tilt wheel, or a touchpad's second
+#                                                                finger. -Delta keeps Win32's sign,
+#                                                                so positive is a tilt to the RIGHT
 #   .\ui-probe.ps1 wheel -Pid <pid> -X 1400 -Y 600 -Delta 1 -Mods c -PreHoldMs 1100 -Out z.png
 #                                                              → rest with the modifiers down before
 #                                                                the first notch, photographing what
@@ -194,6 +201,13 @@ param(
   # a 180ms transition with frames either side of it.
   [int]$Frames = 8,
   [int]$EveryMs = 30,
+  # wheel: send the run on the HORIZONTAL axis — MOUSEEVENTF_HWHEEL, which is
+  # what a tilt wheel and a touchpad's second finger send and what Windows turns
+  # into WM_MOUSEHWHEEL. -Delta keeps Win32's own sign: positive is a tilt to the
+  # RIGHT. Without this the probe can only reach a horizontal scroller through
+  # -Mods s, and "my tilt wheel does nothing" is exactly the report Shift cannot
+  # test.
+  [switch]$Sideways,
   # burst: press at X/Y and start the run immediately. A separate `click`
   # invocation cannot be used to start an animation, because the burst's own
   # PowerShell start-up would land after the transition had finished.
@@ -495,6 +509,9 @@ public class Probe {
      an app that rounds each report on its own throws all of them away. Driving
      that shape is the only way to test it from outside. */
   public static void WheelWithMods(int notches, bool ctrl, bool shift, bool alt, int step) {
+    WheelWithMods(notches, ctrl, shift, alt, step, false);
+  }
+  public static void WheelWithMods(int notches, bool ctrl, bool shift, bool alt, int step, bool sideways) {
     var hold = new System.Collections.Generic.List<INPUT>();
     var drop = new System.Collections.Generic.List<INPUT>();
     if (ctrl)  { var d = new INPUT { type = 1 }; d.u.ki = new KEYBDINPUT { wVk = 0x11, wScan = 0x1D, dwFlags = 0 }; hold.Add(d);
@@ -507,7 +524,7 @@ public class Probe {
       SendInput((uint)hold.Count, hold.ToArray(), Marshal.SizeOf(typeof(INPUT)));
       System.Threading.Thread.Sleep(40);
     }
-    Notches(notches, step);
+    Notches(notches, step, sideways);
     if (drop.Count > 0) {
       System.Threading.Thread.Sleep(40);
       drop.Reverse();
@@ -522,10 +539,24 @@ public class Probe {
      modifiers that have been down 800ms, and the claim under test is what one
      notch does to it while they are STILL down. A run that released them first
      could never tell the notch's answer from the release's. */
-  public static void Notches(int notches, int step) {
+  public static void Notches(int notches, int step) { Notches(notches, step, false); }
+  /* `sideways` sends MOUSEEVENTF_HWHEEL (0x1000) instead of MOUSEEVENTF_WHEEL
+     (0x0800), which is what a tilt wheel and a precision touchpad's second
+     finger put on the wire and what Windows turns into WM_MOUSEHWHEEL. Without
+     it this probe could only ever reach a horizontal scroller through Shift,
+     and "the tilt wheel does nothing" is precisely the class of report Shift
+     cannot test.
+
+     Win32's own sign is positive-for-a-tilt-RIGHT, and it is left alone here:
+     the probe sends what the hardware sends. (winit's Windows backend negates
+     it on the way in, so the app sees a tilt right as a negative x. That is the
+     app's business, and a probe that pre-compensated for it would be testing
+     itself.) */
+  public static void Notches(int notches, int step, bool sideways) {
     int dir = notches < 0 ? -step : step;
+    uint flag = sideways ? 0x1000u : 0x0800u;
     for (int i = 0; i < System.Math.Abs(notches); i++) {
-      mouse_event(0x0800, 0, 0, dir, UIntPtr.Zero);
+      mouse_event(flag, 0, 0, dir, UIntPtr.Zero);
       System.Threading.Thread.Sleep(60);
     }
   }
@@ -859,8 +890,9 @@ switch ($Cmd) {
     # ctrl/shift/alt down around the run, which is how a horizontal scroller is
     # reached from a mouse that has no tilt wheel.
     if ($PreHoldMs -le 0) {
-      [Probe]::WheelWithMods($Delta, $ctrl, $shift, $alt, $Step)
-      "wheeled $Delta reports of $Step mods=$Mods at ($px, $py) on pid=$ProcId (foreground verified)"
+      [Probe]::WheelWithMods($Delta, $ctrl, $shift, $alt, $Step, $Sideways.IsPresent)
+      $axis = if ($Sideways) { "sideways (WM_MOUSEHWHEEL, + is a tilt right)" } else { "vertical" }
+      "wheeled $Delta $axis reports of $Step mods=$Mods at ($px, $py) on pid=$ProcId (foreground verified)"
     } else {
       # The three parts driven by hand, so that the rest and the notches can be
       # photographed with the modifiers still down. `hold`'s scriptblock, its
@@ -885,7 +917,7 @@ switch ($Cmd) {
         if ($sent -eq 0 -and $Mods) { throw "SendInput accepted 0 events — the hold was not sent" }
         Start-Sleep -Milliseconds $PreHoldMs
         $said += "held mods=$Mods for ${PreHoldMs}ms -> $(& $shot '00-held')"
-        [Probe]::Notches($Delta, $Step)
+        [Probe]::Notches($Delta, $Step, $Sideways.IsPresent)
         Start-Sleep -Milliseconds 250
         $said += "wheeled $Delta reports of $Step at ($px, $py), hold still down -> $(& $shot '01-notched')"
       } finally {
