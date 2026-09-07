@@ -104,6 +104,22 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A tab's card draws everything its pane is showing, not only what is still on
+  screen.** A card is a picture of the pane under it, and it was reading the
+  terminal's live screen alone — so a pane that had scrolled and was then made
+  taller, which leaves it showing lines from its own scrollback above the ones
+  still on screen, was pictured by a card holding nine rows at the top with two
+  thirds of itself empty while the pane showed twenty-four. It was reported
+  against Git Bash sitting beside PowerShell 7, and nothing about it belonged to
+  either shell: both are in the same position after the window is resized, and
+  what separated them was only that one had gone on printing until its screen
+  filled again. A card now reads the same three places its pane reads — the
+  lines that have been kept, the ones on their way there, and the ones on
+  screen — and stops when it is full or the pane has no more to give. Turning
+  the wheel over a card can now lift its window into lines that have scrolled
+  off, for the same reason. A full-screen program is the one exception: nothing
+  is kept behind its screen, so the card stops exactly where the pane does.
+
 - **A tab mark hook writes the file it says it writes.** The first-run card's
   three agent rows name the file each switch will copy and then write, and they
   spelled `~/.claude/settings.json`, `~/.codex/config.toml` and
