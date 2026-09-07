@@ -107,12 +107,9 @@ use crate::preview::{self, ScrollAxis, ScrollBar};
 /// band would be a rule down the pane's edge, which is a *border*, and the one
 /// adjective the design gives this thing is "a mark".
 ///
-/// Four with [`THUMB_LANE_MARGIN_LOGICAL_PX`] on either side is the lane's own
-/// eight, which is why neither number is free.
+/// Four in a lane of eight, with the other four inboard of it: the mark rides
+/// the pane's own edge and the terminal shows through between it and the text.
 pub const THUMB_WIDTH_LOGICAL_PX: f32 = 4.0;
-/// The lane either side of the mark — two pixels of terminal between the thumb
-/// and the pane's edge, and two more between the thumb and the text.
-pub const THUMB_LANE_MARGIN_LOGICAL_PX: f32 = 2.0;
 /// A four-pixel bar with a two-pixel radius is a stadium, which is what every
 /// engine's thin thumb is and what [`cmdrail::TICK_RADIUS_LOGICAL_PX`] makes of
 /// the tick beside it.
@@ -233,15 +230,18 @@ pub fn bar(
         scale,
     )?;
     let right = body[2];
-    let margin = THUMB_LANE_MARGIN_LOGICAL_PX * scale;
     let width = THUMB_WIDTH_LOGICAL_PX * scale;
     let reach = right - THUMB_REACH_LOGICAL_PX * scale;
-    let thumb = [
-        right - margin - width,
-        inner.thumb[1],
-        right - margin,
-        inner.thumb[3],
-    ];
+    // **Flush with the pane's own right edge** (user ruling 2026-09-07). Every
+    // other bar in this window — the glance card's, an open picker's, a preview
+    // pane's — puts its thumb against the inner edge of the surface it belongs
+    // to, and this one stood two logical pixels off its own, which is the
+    // difference a reader photographed. The lane is unchanged and so is
+    // everything the lane was reserved for: the mark strip is inboard of it,
+    // `reach` still stops exactly where the rail's box begins, and the four
+    // pixels the margin used to spend on the far side are now all on the near
+    // one, between the mark and the text.
+    let thumb = [right - width, inner.thumb[1], right, inner.thumb[3]];
     Some(TerminalScrollBar {
         bar: inner,
         thumb,
@@ -543,14 +543,11 @@ pub fn column_bar(
         scale,
     )?;
     let foot = body[3];
-    let margin = THUMB_LANE_MARGIN_LOGICAL_PX * scale;
     let thickness = THUMB_WIDTH_LOGICAL_PX * scale;
-    let thumb = [
-        inner.thumb[0],
-        foot - margin - thickness,
-        inner.thumb[2],
-        foot - margin,
-    ];
+    // The same edge, turned: this is one instrument on two axes, so a foot bar
+    // held two pixels above the pane while the right-hand one rode its edge
+    // would be the very inconsistency 2026-09-07 was about.
+    let thumb = [inner.thumb[0], foot - thickness, inner.thumb[2], foot];
     Some(TerminalColumnBar {
         bar: inner,
         thumb,
@@ -724,6 +721,75 @@ mod tests {
             "the thumb's reach ends exactly where the rail's box begins"
         );
         assert_eq!(bar.lane[0], bar.grab[0], "and the track's reach with it");
+    }
+
+    /// PIN (§7.1.6f, user ruling 2026-09-07 —
+    /// 「其他地方的滚动条都是贴边的,要不要把 shell 的这个改掉保持一致」) —
+    /// **the mark rides the pane's own edge, on both axes, and there is still
+    /// nothing drawn beside it.**
+    ///
+    /// Every other bar in this window puts its thumb against the inner edge of
+    /// the surface it belongs to: the glance card's, an open picker's, a
+    /// preview pane's. This one stood two logical pixels off its own, and a
+    /// reader photographed the difference. The lane is unchanged and so is
+    /// everything the lane was reserved for — the four pixels the margin used
+    /// to spend on the far side are all on the near one now, between the mark
+    /// and the text — so the assertion below this one still holds beside it.
+    ///
+    /// MUTATIONS:
+    /// ① put the two-pixel margin back and the thumb's right edge is two
+    ///    logical pixels short of the pane's, which is the report;
+    /// ② leave the foot bar behind and one instrument rides its edge on one
+    ///    axis and floats on the other;
+    /// ③ draw the lane as a rule the way the preview family draws its track and
+    ///    a quad appears that is taller than the thumb.
+    #[test]
+    fn the_mark_rides_the_panes_own_edge_and_is_still_the_only_thing_drawn() {
+        let bar = bar(BODY, 500 * ROW, PAGE, 0, SCALE).expect("five hundred rows of history");
+        assert!(
+            (bar.thumb[2] - BODY[2]).abs() < 0.01,
+            "the thumb's right edge is {} and the pane's is {} — the mark is not on the edge",
+            bar.thumb[2],
+            BODY[2]
+        );
+        assert!(
+            (bar.thumb[2] - bar.thumb[0] - THUMB_WIDTH_LOGICAL_PX * SCALE).abs() < 0.01,
+            "the mark riding the edge changed its width"
+        );
+
+        // **No track.** `scrollbar-color: var(--thumb) transparent` is drawn by
+        // drawing nothing, so every quad this layer pushes belongs to the thumb
+        // — a rule down the lane would be taller than the thumb is.
+        let palette = bt_render::chrome_palette();
+        let painted = layer(
+            &bar,
+            Thumb::Shown {
+                alpha: 1.0,
+                lit: false,
+            },
+            &palette,
+        )
+        .expect("a shown thumb draws something");
+        for quad in &painted.quads {
+            assert!(
+                quad.rect[0] >= bar.thumb[0] - 0.01
+                    && quad.rect[1] >= bar.thumb[1] - 0.01
+                    && quad.rect[2] <= bar.thumb[2] + 0.01
+                    && quad.rect[3] <= bar.thumb[3] + 0.01,
+                "a quad at {:?} lies outside the thumb {:?} — this bar has grown a track",
+                quad.rect,
+                bar.thumb
+            );
+        }
+
+        // The same edge, turned: one instrument on two axes.
+        let foot = column_bar(BODY, 400, 100, 20, SCALE).expect("a line wider than the pane");
+        assert!(
+            (foot.thumb[3] - BODY[3]).abs() < 0.01,
+            "the foot's mark is {} and the pane's foot is {}",
+            foot.thumb[3],
+            BODY[3]
+        );
     }
 
     /// The proportion is the viewport's share of the document, and the floor

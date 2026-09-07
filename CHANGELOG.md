@@ -17,6 +17,13 @@ All notable changes to Folio are recorded here. The format follows
   Settings page does too. The ring on a switch waits for a key that moves
   something rather than for any key at all, and it is no longer clipped at its
   right-hand side when it comes.
+- **A terminal pane's scroll mark rides the pane's own edge.** Every other bar
+  in the window — the glance card's, an open picker's, a preview pane's — puts
+  its thumb against the inner edge of the surface it belongs to, and this one
+  stood two logical pixels off its own. The bar along the foot moves with it,
+  because it is the same instrument turned. Nothing else about the edge changed:
+  the reserved lane is the same eight pixels, the command marks beside it have
+  not moved, and the thumb is grabbed and dragged exactly where it was.
 
 ## 0.2.2-preview (unreleased)
 
