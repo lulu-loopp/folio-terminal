@@ -144,7 +144,7 @@ R1-5, R1-11, R1-12, R1-16, R1-17, R1-23, R1-26, R3-1.
 
 Why together: every row is on the route where Folio stops rendering and gives something to the machine, by shell, by browser or by spawn. The design is one hand-off point that normalises the target the way Windows will, refuses the shapes a real target never has, names every program absolutely, and states in one place which cards and which modifiers may reach it.
 
-### T4 `fix/bytes-from-the-child-are-bounded` (terminal side merged, `becba80`; app side R1-7, R1-8, R1-20, R1-25, R1-28 in flight as `fix/decoders-and-caches-are-bounded`)
+### T4 `fix/bytes-from-the-child-are-bounded` (merged in two halves: terminal side `becba80`, app side `0ac921b` as `fix/decoders-and-caches-are-bounded`)
 
 R1-7, R1-8, R1-13, R1-14, R1-15, R1-20, R1-25, R1-27, R1-28, R3-2, R3-3, R3-4, R5-1.
 
@@ -156,7 +156,7 @@ R5-2, R5-3, R5-4, R5-5, R5-6, R5-7, R5-8.
 
 Why together: all seven are a fact that is window-wide or transcript-wide being computed on the focused leaf, the visible plane or the newest match. The design is to move each of these onto the road that already visits every leaf of every tab, and to key marks and search on the identity the other consumer uses rather than on a coordinate that looks close enough. R3-10 is the eighth row of this family and is filed under T6 with the rest of that slice.
 
-### T6 `fix/shell-integration-scripts`
+### T6 `fix/shell-integration-scripts` (in flight)
 
 R3-5, R3-6, R3-7, R3-8, R3-9, R3-10, R3-11, R3-12, R3-13, R3-14, R3-15, R3-16, R3-17, R3-18.
 
