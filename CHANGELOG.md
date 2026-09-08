@@ -35,6 +35,23 @@ All notable changes to Folio are recorded here. The format follows
   directory holds. Nothing about the program changed.
 ### Fixed
 
+- **Starting Folio no longer takes the right-click menu's first page off
+  another copy of Folio that is still installed.** On Windows 11 the entry on
+  the first page of the menu belongs to whichever folder Folio was last
+  registered from, and every launch used to claim it for the folder it was
+  started from. So running a second copy once — a build you were trying out, a
+  copy still sitting in `Downloads` — pointed that menu item at the second copy
+  for good, and the install you actually use went on standing where you left
+  it. A launch now looks at the folder the menu item names first: if `folio.exe`
+  is gone from it, the item is repaired to point here, which is what happens
+  when you move Folio and is the whole reason the repair exists; if the file
+  there is this very one under another spelling, the item is rewritten for the
+  same reason; and if another Folio is still standing there, nothing is touched
+  and the Explorer row in Settings says the menu item belongs to a copy in
+  another folder. Switching the row on by hand still names the Folio you
+  switched it in, exactly as before. The classic entry under *Show more
+  options* has behaved this way since the previous release; the two now decide
+  it with one piece of code.
 - **A card of a pane that repaints its screen in one piece is no longer a frame
   behind.** A full-screen program can ask the terminal to hold a whole frame
   back and put it up at once. Where the terminal was the one to put it up — the

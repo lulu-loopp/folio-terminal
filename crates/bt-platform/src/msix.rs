@@ -74,6 +74,17 @@ pub const EXPLORER_COMMAND_CLSID: &str = "E129F337-6C7E-4AC7-9C02-58FCB8940AF1";
 /// `folio.exe`.
 pub const PACKAGE_FILE_NAME: &str = "folio.msix";
 
+/// The program the manifest names — `Application/@Executable`, and the
+/// `com:ExeServer` that answers Explorer's class.
+///
+/// **The one file an external location has to hold.** A sparse package carries
+/// no program: the folder it is registered against is a folder Windows will look
+/// in for exactly this name, so "is there still a Folio over there" is a
+/// question with a spelling, and this is it. `bt_app::explorer_menu` asks it of
+/// a registration that names another folder, which is the only way to tell an
+/// install that moved from one that is still standing.
+pub const PACKAGE_EXECUTABLE: &str = "folio.exe";
+
 /// The first Windows build that has a first page to be promoted onto.
 ///
 /// 22000 is Windows 11's first. Below it the whole of this module is a thing
@@ -491,15 +502,17 @@ mod tests {
 
     /// PIN — **the manifest on disk is the manifest this code believes in.**
     ///
-    /// Four strings live in two places — the package's name, its publisher, the
-    /// CLSID Explorer creates and the CLSID the two item types point at — and
-    /// nothing at build time would notice them drifting apart. What a drift costs
-    /// is a menu item that is registered and never appears, or a class Explorer
-    /// asks for that this binary does not answer to.
+    /// Five strings live in two places — the package's name, its publisher, the
+    /// CLSID Explorer creates, the CLSID the two item types point at, and the
+    /// program an external location has to hold — and nothing at build time would
+    /// notice them drifting apart. What a drift costs is a menu item that is
+    /// registered and never appears, a class Explorer asks for that this binary
+    /// does not answer to, or a launch looking for the wrong file over there and
+    /// so re-registering the package on top of an install that is still standing.
     ///
-    /// MUTATION: change any one of the four in either file and this goes red.
+    /// MUTATION: change any one of the five in either file and this goes red.
     #[test]
-    fn the_manifest_and_this_module_say_the_same_four_things() {
+    fn the_manifest_and_this_module_say_the_same_five_things() {
         let manifest = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("..")
@@ -526,6 +539,14 @@ mod tests {
             3,
             "the class is declared once and pointed at by both item types"
         );
+        assert_eq!(
+            manifest
+                .matches(&format!("Executable=\"{PACKAGE_EXECUTABLE}\""))
+                .count(),
+            2,
+            "the application and its class server name the program this module \
+             looks for at an external location"
+        );
         // The version is a placeholder on purpose; `package.ps1` injects the
         // workspace's. A real one here would be a second version line.
         assert!(
@@ -546,7 +567,7 @@ mod tests {
     /// is defined; this is the pin that says the two calls that need it use it.
     ///
     /// It is the same kind of pin as
-    /// [`the_manifest_and_this_module_say_the_same_four_things`] below and for
+    /// [`the_manifest_and_this_module_say_the_same_five_things`] below and for
     /// the same reason: two things have to agree, nothing at build time would
     /// notice them coming apart, and what it would cost is a package registered
     /// on a machine that goes on drawing the menu it read an hour ago.
