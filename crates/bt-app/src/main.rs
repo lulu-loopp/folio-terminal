@@ -109500,7 +109500,13 @@ mod tests {
             "http://bank.test@203.0.113.9/",
         ] {
             assert_eq!(
-                hyperlink_activation(true, true, uri, &no_directories),
+                hyperlink_activation(
+                    true,
+                    true,
+                    uri,
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &no_directories,
+                ),
                 HyperlinkActivation::Blocked,
                 "{uri} is the shape the address field already refuses"
             );
@@ -109508,7 +109514,13 @@ mod tests {
             // same word about it — under the cells the address is printed in,
             // which is where a reader is looking.
             assert_eq!(
-                hyperlink_activation(false, true, uri, &no_directories),
+                hyperlink_activation(
+                    false,
+                    true,
+                    uri,
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &no_directories,
+                ),
                 HyperlinkActivation::Page(uri.to_owned()),
                 "{uri} goes to the seat, whose door refuses it there"
             );
@@ -109520,7 +109532,13 @@ mod tests {
         }
         // A bare `@` outside the authority is ordinary text and stays open.
         assert_eq!(
-            hyperlink_activation(true, true, "https://example.test/a@b", &no_directories),
+            hyperlink_activation(
+                true,
+                true,
+                "https://example.test/a@b",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories,
+            ),
             HyperlinkActivation::Browser
         );
     }

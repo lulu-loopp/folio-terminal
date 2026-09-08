@@ -2226,9 +2226,12 @@ fn percent_decode(segment: &str) -> Option<String> {
     }
     // The escape that would move a boundary, refused where it is read: the
     // segment shrank, so something was decoded, and what came out is a
-    // separator that the split above never saw.
-    let escaped_a_separator =
-        segment.len() != decoded.len() && segment.contains('%') && decoded.contains(['\\', '/']);
+    // separator that the split above never saw. Which characters separate is
+    // the platform's answer: `%5C` is a boundary on Windows and a plain
+    // character in a POSIX name, where a backslash is a legal byte of a name.
+    let escaped_a_separator = segment.len() != decoded.len()
+        && segment.contains('%')
+        && decoded.chars().any(std::path::is_separator);
     (!escaped_a_separator).then_some(decoded)
 }
 

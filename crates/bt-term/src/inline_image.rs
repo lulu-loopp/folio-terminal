@@ -1181,8 +1181,10 @@ pub fn file_uri_to_local_image_path(uri: &str) -> Option<PathBuf> {
 /// directory — a directory has no extension, so the image gate must not be wired into the decoder.
 ///
 /// Resolution is per URI segment: each is percent-decoded on its own and the results are joined
-/// with `\`. That is what RFC 3986 means — a `%2F` inside a segment decodes to a literal `/` in a
-/// filename, never to a separator — and it costs nothing, since such a name simply fails to exist.
+/// with `\`. An escape that decodes to a separator (`%2F`, `%5C`) is refused and the URI names no
+/// file: on Windows both characters are separators, so `D:/a%2Fb.png` would have named `b.png`
+/// inside `D:\a`, a different file from the one the URI spells, and a run of `%5C` at the front
+/// rebuilt `\\host\share` (review row R3-1, 2026-09-08). Raw backslashes in a URI are still read.
 /// A single **trailing** empty segment is a directory's trailing slash rather than an empty name
 /// (`file:///D:/src/` and `file:///D:/` both name directories); an interior one (`file:///D://a`)
 /// stays rejected.
