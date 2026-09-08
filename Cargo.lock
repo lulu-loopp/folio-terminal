@@ -399,6 +399,7 @@ dependencies = [
  "bt-math",
  "bt-platform",
  "bt-transcript",
+ "bt-unicode",
  "bt-viewport",
  "image",
  "proptest",

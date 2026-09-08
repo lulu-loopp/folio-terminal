@@ -1,6 +1,6 @@
 //! Canonical frozen transcript and mutable staging primitives.
 
-use std::{collections::VecDeque, num::NonZeroUsize};
+use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc};
 
 use bitflags::bitflags;
 use unicode_segmentation::UnicodeSegmentation;
@@ -25,15 +25,15 @@ pub const SPIKE_DEFAULT_FROZEN_QUOTA: NonZeroUsize = NonZeroUsize::new(100_000).
 /// **The number is the published ladder times a margin, not a taste.** §7.1.6g
 /// costed one 80-column frozen line and read the ladder off it — 25,000 through
 /// 200,000 lines is "about 14 MB to 112 MB a pane". This build measures that same
-/// line at 636 bytes (`the_shape_of_a_frozen_line_is_measured_not_remembered`), so
-/// 2,048 is **3.2x** the shape the ladder was costed on, and the whole ladder sits
+/// line at 620 bytes (`the_shape_of_a_frozen_line_is_measured_not_remembered`), so
+/// 2,048 is **3.3x** the shape the ladder was costed on, and the whole ladder sits
 /// under the ceiling it derives: what a pane may hold runs 48 MiB to 391 MiB while
-/// what §7.1.6g promises runs 15 MB to 126 MB.
+/// what §7.1.6g promises runs 15 MB to 124 MB.
 ///
 /// The margin is spent on the things a plain ASCII line has none of. Measured on
-/// this build: a coloured, hyperlinked 80-column line costs 1,260 bytes, and the
+/// this build: a coloured, hyperlinked 80-column line costs 1,244 bytes, and the
 /// heaviest 80-column shape there is — a new colour every fourth column, 20 style
-/// runs — costs 2,000. So an ordinary pane still gets every line its capacity
+/// runs — costs 1,684. So an ordinary pane still gets every line its capacity
 /// promised, and the ceiling only overtakes the reader's number when the *average*
 /// logical line passes ~363 columns of filled plain text. A history that averages
 /// that for 100,000 consecutive lines is a flood, not a session.
@@ -475,16 +475,22 @@ impl Default for CellStyle {
 /// hashing therefore cover the uri alone — content fingerprints, preservation's proven-source
 /// exact equality, and shaped-row caches all stay byte-stable across repaints, exactly as when
 /// only the uri was stored. Link grouping reads `.id` explicitly.
+///
+/// **Both fields are `Arc<str>` and that is load-bearing.** One `OSC 8` target covers every cell
+/// of the run it opens, and the vendor terminal already stores it once behind an `Arc` for
+/// exactly that reason. Owning a copy per cell turned one target into rows times columns copies
+/// of it — a two-hundred-column row under a long target paid for it on every capture, and the row
+/// cache captures on every repaint. Cloning one of these clones two pointers.
 #[derive(Clone, Debug)]
 pub struct CellHyperlink {
-    pub id: Option<String>,
-    pub uri: String,
+    pub id: Option<Arc<str>>,
+    pub uri: Arc<str>,
 }
 
 impl CellHyperlink {
     /// An implicitly detected link (bare URL in transcript text): no OSC 8 id exists, so the
     /// link's extent is defined by cell contiguity.
-    pub fn implicit(uri: impl Into<String>) -> Self {
+    pub fn implicit(uri: impl Into<Arc<str>>) -> Self {
         Self {
             id: None,
             uri: uri.into(),
@@ -917,9 +923,12 @@ impl FrozenLine {
     /// one rather than the 50x its text alone would suggest.
     #[must_use]
     pub fn resident_bytes(&self) -> usize {
+        // The two targets are shared — one allocation serves every cell of a run and every row
+        // the run crosses — so this counts what one line would need if it were the only holder.
+        // That is the conservative reading, and the one the ceiling wants.
         let hyperlink_bytes = |link: &Option<CellHyperlink>| {
             link.as_ref().map_or(0, |link| {
-                link.uri.capacity() + link.id.as_ref().map_or(0, String::capacity)
+                link.uri.len() + link.id.as_ref().map_or(0, |id| id.len())
             })
         };
         std::mem::size_of::<Self>()
@@ -1677,10 +1686,7 @@ mod tests {
         assert_eq!(line.text, "e\u{301}");
         assert_eq!(line.grapheme_boundaries, vec![0, 3]);
         assert_eq!(
-            line.styles[0]
-                .hyperlink
-                .as_ref()
-                .map(|link| link.uri.as_str()),
+            line.styles[0].hyperlink.as_ref().map(|link| &*link.uri),
             Some("https://example.test")
         );
         assert_eq!(line.shell_marks[0].1, "prompt");
@@ -1826,7 +1832,8 @@ mod tests {
     /// 112 MB a pane" — and then the measurement was left to drift: `CellHyperlink`
     /// grew its OSC 8 `id`, which widened every `StyleSpan` by eight bytes. A number
     /// a document quotes has to be a number something re-derives, so this is where
-    /// the ladder's arithmetic lives from now on.
+    /// the ladder's arithmetic lives from now on — in both directions, since the
+    /// day `CellHyperlink` began sharing those two strings the ladder got shorter.
     ///
     /// It also prints the shape the ladder never costed, which is the whole reason
     /// there is a byte ceiling at all.
@@ -1873,7 +1880,14 @@ mod tests {
         // Re-derived 2026-08-24 when `captured_columns` joined every fragment
         // (horizontal step one): four bytes a line, 2,000 → 2,004, and the
         // ceiling still clears it with 2.1% to spare — so the ceiling stands.
-        assert_eq!(rainbow_80, 2_004, "the heaviest 80-column line there is");
+        //
+        // Re-derived 2026-09-08 when `CellHyperlink` began sharing its two strings
+        // instead of owning a copy per cell: a `String` is twenty-four bytes and an
+        // `Arc<str>` is sixteen, so every `StyleSpan` lost sixteen and the heaviest
+        // line lost twenty of those. The rare direction — a line got cheaper — and
+        // the ceiling stays where it is, because what it bounds is the flood below
+        // and not this line.
+        assert_eq!(rainbow_80, 1_684, "the heaviest 80-column line there is");
         assert!(
             rainbow_80 < FROZEN_BYTES_PER_LINE,
             "the heaviest 80-column line costs {rainbow_80}, which the ceiling would take \
@@ -1881,8 +1895,8 @@ mod tests {
         );
 
         // The ladder §7.1.6g published, re-derived rather than remembered.
-        assert_eq!(plain_80, 636, "one 80-column frozen line");
-        for (lines, megabytes) in [(25_000, 15), (100_000, 63), (200_000, 127)] {
+        assert_eq!(plain_80, 620, "one 80-column frozen line");
+        for (lines, megabytes) in [(25_000, 15), (100_000, 62), (200_000, 124)] {
             assert_eq!((lines * plain_80) / 1_000_000, megabytes, "{lines} lines");
         }
 

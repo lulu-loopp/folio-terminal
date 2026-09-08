@@ -135,6 +135,30 @@ impl CommandMark {
         self.executed.is_none() && self.finished.is_none() && self.command_text.is_empty()
     }
 
+    /// Every anchor this mark holds, including the one it shares with its input region.
+    fn anchors(&self) -> BTreeSet<AnchorId> {
+        self.prompt
+            .into_iter()
+            .chain(std::iter::once(self.start))
+            .chain(self.executed)
+            .chain(self.finished)
+            .collect()
+    }
+
+    /// The anchors this mark asked the document for on its own account.
+    ///
+    /// [`Self::start`] is deliberately absent: `B` hands the mark the registration its input
+    /// region already made, so the region is what releases it. Everything else — the prompt `A`
+    /// reported, and the coordinates `C` and `D` named — was registered for this mark and nothing
+    /// else, and goes when the mark stops naming it.
+    fn own_anchors(&self) -> Vec<AnchorId> {
+        self.prompt
+            .into_iter()
+            .chain(self.executed)
+            .chain(self.finished)
+            .collect()
+    }
+
     /// How long this command ran: `C` to `D`.
     ///
     /// `None` for anything that did not have both ends — still running, never executed, or a shell
@@ -166,6 +190,18 @@ pub struct CommandMarkLedger {
     pending_prompt: Option<AnchorId>,
     next_id: u64,
     revision: u64,
+    /// Anchors this ledger asked for and no longer holds, waiting for the session to give them
+    /// back to the document.
+    ///
+    /// The ledger cannot release them itself — it holds ids, not the registry — and the registry
+    /// cannot release them on its own either, because a deleted line's anchors are degraded onto a
+    /// neighbour rather than removed and afterwards nothing in the registry can tell a live holder
+    /// from a departed one. So the ledger says what it dropped and
+    /// `DualPlaneSession::release_retired_mark_anchors` hands it over.
+    ///
+    /// [`CommandMark::start`] is never in here: that registration belongs to the command's input
+    /// region, which releases it when the region leaves.
+    orphaned: Vec<AnchorId>,
 }
 
 impl CommandMarkLedger {
@@ -173,6 +209,17 @@ impl CommandMarkLedger {
     /// carries order, not scroll geometry").
     pub fn marks(&self) -> &[CommandMark] {
         &self.marks
+    }
+
+    /// Take the anchors this ledger has stopped holding, for the session to release.
+    pub fn take_released_anchors(&mut self) -> Vec<AnchorId> {
+        std::mem::take(&mut self.orphaned)
+    }
+
+    /// Note that `held` are no longer held by any mark, minus the ones still standing.
+    fn orphan(&mut self, held: Vec<AnchorId>, kept: &BTreeSet<AnchorId>) {
+        self.orphaned
+            .extend(held.into_iter().filter(|anchor| !kept.contains(anchor)));
     }
 
     pub fn get(&self, id: CommandMarkId) -> Option<&CommandMark> {
@@ -244,9 +291,12 @@ impl CommandMarkLedger {
         if let Some(mark) = self.marks.last_mut().filter(|mark| mark.is_at_the_prompt()) {
             // A `B` with no `A` before it leaves the prompt this mark already had: the repaint
             // reported no new one, so the old one is still the best coordinate we were given.
+            let dropped = mark.own_anchors();
             mark.prompt = prompt.or(mark.prompt);
             mark.start = start;
+            let kept = mark.anchors();
             let id = mark.id;
+            self.orphan(dropped, &kept);
             self.open = Some(id);
             self.revision += 1;
             return id;
@@ -331,10 +381,22 @@ impl CommandMarkLedger {
             return;
         }
         let before = self.marks.len();
+        let dropped = self
+            .marks
+            .iter()
+            .filter(|mark| doomed.contains(&mark.id))
+            .flat_map(CommandMark::own_anchors)
+            .collect::<Vec<_>>();
         self.marks.retain(|mark| !doomed.contains(&mark.id));
         if self.marks.len() == before {
             return;
         }
+        let kept = self
+            .marks
+            .iter()
+            .flat_map(CommandMark::anchors)
+            .collect::<BTreeSet<_>>();
+        self.orphan(dropped, &kept);
         if self.open.is_some_and(|open| doomed.contains(&open)) {
             self.open = None;
         }

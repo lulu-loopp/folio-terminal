@@ -850,13 +850,20 @@ impl ViewportFrame {
         // same-target cells the pointer is standing on. See [`Self::link_span`].
         let (first, last) = self.link_span(index)?;
         Some(HyperlinkHit {
-            uri: link.uri.clone(),
+            uri: link.uri.to_string(),
             // The **segment's** id, read off its first cell rather than off whichever cell the
             // pointer happens to be on. A link the application broke across a line arrives as two
             // emissions with two synthesized ids, and one link must be one hit however it is
             // pointed at — the app compares whole hits to decide that the pointer is still on the
             // same thing.
-            id: self.cells.get(first)?.hyperlink.as_ref()?.id.clone(),
+            id: self
+                .cells
+                .get(first)?
+                .hyperlink
+                .as_ref()?
+                .id
+                .as_ref()
+                .map(|id| id.to_string()),
             start: self.cell_anchors.get(first)?.start.clone(),
             end: self.cell_anchors.get(last)?.end.clone(),
         })
@@ -4556,8 +4563,8 @@ fn implicit_hyperlinks(
             // it, rather than left for the frame to prove again off the printed text — see
             // [`rejoined_reference_mark`] and [`ViewportFrame::rejoined_by_record`].
             let link = CellHyperlink {
-                id: Some(rejoined_reference_mark(index)),
-                uri: joined.uri,
+                id: Some(rejoined_reference_mark(index).into()),
+                uri: joined.uri.into(),
             };
             for (offset, span) in joined.rows.iter().enumerate() {
                 claim_cells(
@@ -4684,7 +4691,7 @@ fn inferred_links_in(
     let mut links = inferred_url_ranges(text, edge)
         .into_iter()
         .map(|range| InferredLink {
-            uri: text[range.byte_start..range.byte_end].to_owned(),
+            uri: text[range.byte_start..range.byte_end].into(),
             range,
             resting_dotted: false,
         })
@@ -4788,7 +4795,9 @@ fn cell_in_link_group(cell: &CapturedCell, link: &CellHyperlink) -> bool {
 /// the two memberships: it holds across the fresh id a re-opened OSC 8 sequence is given, which is
 /// what a link broken by the application's own line break arrives as.
 fn cell_targets(cell: &CapturedCell, uri: &str) -> bool {
-    cell.hyperlink.as_ref().is_some_and(|link| link.uri == uri)
+    cell.hyperlink
+        .as_ref()
+        .is_some_and(|link| &*link.uri == uri)
 }
 
 /// The local path a `file:` target names, spelled the way an application prints it — `None` for
@@ -6015,14 +6024,16 @@ mod tests {
         mark_osc_8_dotted(&mut cells);
         apply_implicit_hyperlinks(&mut cells, &implicit[0]);
 
-        assert!(cells[..21].iter().all(
-            |cell| cell.hyperlink.as_ref().map(|link| link.uri.as_str())
-                == Some("file:///real-target")
-                && cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE)
-        ));
+        assert!(
+            cells[..21]
+                .iter()
+                .all(|cell| cell.hyperlink.as_ref().map(|link| &*link.uri)
+                    == Some("file:///real-target")
+                    && cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE))
+        );
         let implicit = "https://plain.example";
         assert!(cells[22..43].iter().all(|cell| {
-            cell.hyperlink.as_ref().map(|link| link.uri.as_str()) == Some(implicit)
+            cell.hyperlink.as_ref().map(|link| &*link.uri) == Some(implicit)
                 && !cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE)
         }));
         assert_eq!(cells[43].hyperlink, None, "trailing ')' is not linked");
@@ -6046,9 +6057,7 @@ mod tests {
         let linked_text = rows
             .iter()
             .flat_map(|row| row.cells.iter())
-            .filter(|cell| {
-                cell.hyperlink.as_ref().map(|link| link.uri.as_str()) == Some(text.as_str())
-            })
+            .filter(|cell| cell.hyperlink.as_ref().map(|link| &*link.uri) == Some(text.as_str()))
             .map(|cell| cell.text.as_str())
             .collect::<String>();
 
@@ -6082,14 +6091,14 @@ mod tests {
             .flat_map(|row| row.cells)
             .collect::<Vec<_>>();
         assert!(cells[..explicit.len()].iter().all(|cell| {
-            cell.hyperlink.as_ref().map(|link| link.uri.as_str()) == Some("file:///actual-target")
+            cell.hyperlink.as_ref().map(|link| &*link.uri) == Some("file:///actual-target")
                 && cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE)
         }));
         assert!(
             cells[explicit.len() + 1..explicit.len() + 1 + implicit.len()]
                 .iter()
                 .all(|cell| {
-                    cell.hyperlink.as_ref().map(|link| link.uri.as_str()) == Some(implicit)
+                    cell.hyperlink.as_ref().map(|link| &*link.uri) == Some(implicit)
                         && !cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE)
                 })
         );
@@ -6157,8 +6166,8 @@ mod tests {
         // synthesizes one when the app omits it) makes them one link: hovering either segment
         // must upgrade both to solid, and the gap cells must stay untouched.
         let link = CellHyperlink {
-            id: Some("42_alacritty".to_owned()),
-            uri: native_uri("file:///C:/pictures/a.png"),
+            id: Some("42_alacritty".into()),
+            uri: native_uri("file:///C:/pictures/a.png").into(),
         };
         let mut first_row = fixture_row("path-head", true).cells;
         for cell in &mut first_row[2..] {
@@ -6253,8 +6262,8 @@ mod tests {
     #[test]
     fn two_runs_sharing_an_id_light_one_at_a_time() {
         let link = CellHyperlink {
-            id: Some("7_alacritty".to_owned()),
-            uri: native_uri("file:///C:/notes.md"),
+            id: Some("7_alacritty".into()),
+            uri: native_uri("file:///C:/notes.md").into(),
         };
         let row_with_link = || {
             let mut cells = fixture_row("  notes.md  ", false).cells;
@@ -6343,8 +6352,8 @@ mod tests {
     #[test]
     fn a_wrapped_line_naming_one_url_twice_keeps_its_two_runs_apart() {
         let link = CellHyperlink {
-            id: Some("9_alacritty".to_owned()),
-            uri: native_uri("file:///C:/a.png"),
+            id: Some("9_alacritty".into()),
+            uri: native_uri("file:///C:/a.png").into(),
         };
         let mut first_row = fixture_row("a.png and", true).cells;
         for cell in &mut first_row[..5] {
@@ -6571,9 +6580,9 @@ mod tests {
         let mut targets: Vec<String> = Vec::new();
         for cell in rows.iter().flat_map(|row| row.cells.iter()) {
             if let Some(link) = &cell.hyperlink
-                && targets.last() != Some(&link.uri)
+                && targets.last().map(String::as_str) != Some(&*link.uri)
             {
-                targets.push(link.uri.clone());
+                targets.push(link.uri.to_string());
             }
         }
         targets
@@ -7493,8 +7502,8 @@ mod tests {
         let mut row = fixture_row(&format!("{:<40}", "D:\\src\\a.md"), false);
         for cell in &mut row.cells[.."D:\\src\\a.md".len()] {
             cell.hyperlink = Some(CellHyperlink {
-                id: Some("7".to_owned()),
-                uri: DECLARED.to_owned(),
+                id: Some("7".into()),
+                uri: DECLARED.into(),
             });
         }
         let mut rows = vec![row];
@@ -7606,8 +7615,8 @@ mod tests {
         let head = "more: https://support.claude.com/en/arti";
         let tail = "cles/15363606";
         let emission = |id: &str| CellHyperlink {
-            id: Some(id.to_owned()),
-            uri: URI.to_owned(),
+            id: Some(id.into()),
+            uri: URI.into(),
         };
         let mut first = fixture_row(head, false);
         for cell in &mut first.cells[6..] {
@@ -7661,8 +7670,8 @@ mod tests {
     fn two_mentions_of_one_address_on_neighbouring_lines_stay_two_links() {
         const URI: &str = "https://example.test/a-fairly-long-path";
         let osc_8 = CellHyperlink {
-            id: Some("4_alacritty".to_owned()),
-            uri: URI.to_owned(),
+            id: Some("4_alacritty".into()),
+            uri: URI.into(),
         };
         for explicit in [true, false] {
             let row = || {
@@ -7907,8 +7916,8 @@ mod tests {
     /// mints for it.
     fn row_link(cell: &mut CapturedCell, emission: usize, uri: &str) {
         cell.hyperlink = Some(CellHyperlink {
-            id: Some(format!("{}_alacritty", 40 + emission)),
-            uri: uri.to_owned(),
+            id: Some(format!("{}_alacritty", 40 + emission).into()),
+            uri: uri.into(),
         });
     }
 
@@ -7950,8 +7959,8 @@ mod tests {
         const PRINTED: &str = "D:\\shots\\a.png";
         let osc_8 = CellHyperlink {
             // The one id the vendor reuses for one target: geometry and id both say join.
-            id: Some("7_alacritty".to_owned()),
-            uri: URI.to_owned(),
+            id: Some("7_alacritty".into()),
+            uri: URI.into(),
         };
         let row = || {
             let mut row = fixture_row(&format!("{PRINTED} (2.1KB)"), false);
@@ -11610,7 +11619,7 @@ mod tests {
                     continue;
                 };
                 assert_eq!(
-                    link.uri, URI,
+                    &*link.uri, URI,
                     "origin {origin}, column {column}: a window read its own address"
                 );
             }

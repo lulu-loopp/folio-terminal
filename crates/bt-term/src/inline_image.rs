@@ -46,6 +46,26 @@ const MAX_OSC_7_URI_BYTES: usize = 4 * 1024;
 /// pair of integers.
 const MAX_OSC_NOTIFICATION_BYTES: usize = 1024;
 
+/// How many bytes of an OSC this scanner does **not** own it will hold before dropping the
+/// sequence.
+///
+/// Everything with a number this scanner recognises is already bounded a few lines above. Every
+/// other number — a window title, an `OSC 8` hyperlink target, an `OSC 52` clipboard store —
+/// belongs to the vendored parser behind this one, and that parser keeps its payload in a `Vec`
+/// with no ceiling of its own while the `std` feature is on. So the ceiling is applied here, at
+/// the one place every byte from the child passes through, and it covers the parser behind it as
+/// well as this one.
+///
+/// Sixty-four kibibytes is far past anything real: the longest hyperlink target anybody sends is
+/// a few hundred bytes and a window title is a line of text. A sequence that reaches this is not
+/// a title or a target, and it is dropped **whole** — the same rule the four sequences above
+/// follow, for the same reason, because half a URI names a different page. Whole is also the only
+/// choice available: there is no byte that takes a parser out of a string state *without*
+/// dispatching what it has already collected (`vte-0.15.0/src/lib.rs` `advance_osc_string`), so a
+/// sequence this scanner has begun passing on can no longer be recalled. It is held here until it
+/// terminates instead, which is what makes the ceiling a ceiling.
+pub(crate) const MAX_UNOWNED_OSC_BYTES: usize = 64 * 1024;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InlineImageTask {
     pub occurrence_id: u64,
@@ -1314,7 +1334,17 @@ enum StreamState {
     OscPrefix {
         held: Vec<u8>,
     },
-    OscPass,
+    /// An OSC with a number this scanner does not own, held whole until it terminates so the
+    /// ceiling in [`MAX_UNOWNED_OSC_BYTES`] can be a ceiling. `held` carries the introducer too.
+    OscPass {
+        held: Vec<u8>,
+    },
+    OscPassEscape {
+        held: Vec<u8>,
+    },
+    /// An unowned OSC past the ceiling: everything up to its terminator is dropped.
+    OscOverBudget,
+    OscOverBudgetEscape,
     Osc1337(Osc1337Capture),
     AfterInlineEscape,
     Text {
@@ -1572,25 +1602,71 @@ impl Osc1337Scanner {
                         held.pop();
                         ordinary.extend_from_slice(&held);
                         StreamState::Escape
-                    } else {
+                    } else if byte == 0x07 {
                         ordinary.extend_from_slice(&held);
-                        if byte == 0x07 {
-                            StreamState::Ground
-                        } else {
-                            StreamState::OscPass
-                        }
+                        StreamState::Ground
+                    } else {
+                        StreamState::OscPass { held }
                     }
                 }
-                StreamState::OscPass => {
-                    if byte == 0x1b {
+                StreamState::OscPass { mut held } => match byte {
+                    // BEL, CAN and SUB all end the string where the parser behind this one is
+                    // concerned, and it dispatches what it has for each of them. Pass the whole
+                    // sequence on so it makes exactly that decision.
+                    0x07 | 0x18 | 0x1a => {
+                        held.push(byte);
+                        ordinary.extend_from_slice(&held);
+                        StreamState::Ground
+                    }
+                    0x1b => StreamState::OscPassEscape { held },
+                    _ => {
+                        if held.len() < MAX_UNOWNED_OSC_BYTES {
+                            held.push(byte);
+                            StreamState::OscPass { held }
+                        } else {
+                            StreamState::OscOverBudget
+                        }
+                    }
+                },
+                StreamState::OscPassEscape { mut held } => {
+                    if byte == b'\\' {
+                        held.extend_from_slice(&[0x1b, b'\\']);
+                        ordinary.extend_from_slice(&held);
+                        StreamState::Ground
+                    } else if byte == b']' {
+                        // One ESC does two jobs there: it ends this string and introduces the
+                        // next one. Pass the payload on and let the fresh prefix carry the ESC.
+                        ordinary.extend_from_slice(&held);
+                        StreamState::OscPrefix {
+                            held: vec![0x1b, b']'],
+                        }
+                    } else if byte == 0x1b {
+                        ordinary.extend_from_slice(&held);
+                        ordinary.push(0x1b);
                         StreamState::Escape
                     } else {
-                        ordinary.push(byte);
-                        if byte == 0x07 {
-                            StreamState::Ground
-                        } else {
-                            StreamState::OscPass
+                        held.extend_from_slice(&[0x1b, byte]);
+                        ordinary.extend_from_slice(&held);
+                        StreamState::Ground
+                    }
+                }
+                StreamState::OscOverBudget => match byte {
+                    0x07 | 0x18 | 0x1a => StreamState::Ground,
+                    0x1b => StreamState::OscOverBudgetEscape,
+                    _ => StreamState::OscOverBudget,
+                },
+                StreamState::OscOverBudgetEscape => {
+                    if byte == b'\\' {
+                        StreamState::Ground
+                    } else if byte == b']' {
+                        StreamState::OscPrefix {
+                            held: vec![0x1b, b']'],
                         }
+                    } else if byte == 0x1b {
+                        StreamState::Escape
+                    } else {
+                        ordinary.extend_from_slice(&[0x1b, byte]);
+                        StreamState::Ground
                     }
                 }
                 StreamState::Osc1337(capture) => match byte {
@@ -1934,6 +2010,27 @@ fn content_hash_128(bytes: &[u8]) -> u128 {
 
 #[cfg(test)]
 mod tests {
+    /// R1-14. A sequence nobody terminates is not a title, and this scanner is the one place
+    /// every byte from the child passes through, so it is where the ceiling belongs.
+    #[test]
+    fn an_unterminated_osc_forwards_at_most_the_ceiling() {
+        let mut scanner = Osc1337Scanner::default();
+        let mut bytes = b"\x1b]0;".to_vec();
+        bytes.extend(std::iter::repeat_n(b'A', 4 * 1024 * 1024));
+        let forwarded = scanner
+            .scan(&bytes)
+            .iter()
+            .map(|action| match action {
+                InlineImageStreamAction::Bytes(bytes) => bytes.len(),
+                _ => 0,
+            })
+            .sum::<usize>();
+        assert!(
+            forwarded <= MAX_UNOWNED_OSC_BYTES + 16,
+            "the scanner passed on {forwarded} bytes of a sequence that never ended"
+        );
+    }
+
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -64,6 +64,19 @@ impl HistoryDocument {
         self.anchors.get(&id).ok_or(AnchorError::UnknownAnchor)
     }
 
+    /// Give back one registered anchor.
+    ///
+    /// **The registry never decides on its own that an id has stopped meaning something.** A
+    /// deletion *degrades* every anchor it touches onto a surviving neighbour rather than removing
+    /// it ([`Self::delete_transaction`]), exactly so that a holder is never left resolving a
+    /// dangling id — which is the right rule for reading and the wrong one for keeping, because
+    /// nothing in here can tell a degraded anchor somebody still holds from one whose holder is
+    /// long gone. So releasing is the holder's job: whoever asked for the id says when the thing
+    /// it named has left, and until somebody does, every scroll and every resize walks it.
+    pub fn release_anchor(&mut self, id: AnchorId) {
+        self.anchors.remove(&id);
+    }
+
     /// Every registered anchor, so a caller that is about to move the content under them can say
     /// what each one names before it moves.
     ///

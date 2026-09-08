@@ -2153,7 +2153,7 @@ fn g1_style_color_and_osc8_metadata_survive_the_real_capture_pipeline() {
     assert!(span.style.flags.contains(CellFlags::BOLD));
     assert_eq!(span.style.foreground, TerminalColor::Named(1));
     assert_eq!(
-        span.hyperlink.as_ref().map(|link| link.uri.as_str()),
+        span.hyperlink.as_ref().map(|link| &*link.uri),
         Some("https://example.test")
     );
 }

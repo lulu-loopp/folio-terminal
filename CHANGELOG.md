@@ -35,6 +35,48 @@ All notable changes to Folio are recorded here. The format follows
   directory holds. Nothing about the program changed.
 ### Fixed
 
+- **A program can no longer decide how much a pane remembers.** A program can
+  ask a terminal to hold its output back until the picture is complete, and
+  Folio kept every byte of that request so a window resize could replay it. The
+  parser underneath gives up on such a request once it has held two megabytes,
+  and Folio did not hear it give up: from then on every byte the program printed
+  was kept forever, and every drag of the window edge replayed all of them. A
+  request carrying more numbers than the parser accepts started the same
+  keeping, and nothing could end it. Folio now follows the parser it reads
+  through, and stops keeping bytes at the same point the parser does.
+
+- **A sequence that never ends no longer grows without a limit.** A program sets
+  the window title, a link target or a clipboard payload with a sequence that
+  runs until it says it is finished, and one that never says so was held whole,
+  in three places at once, for as long as the pane lived. Folio now holds at most
+  64 KB of a sequence it does not read itself and drops the rest of it, so a
+  title nobody ended costs a pane the same as a title.
+
+- **A row of links costs one link.** A program can put one address behind a
+  whole line of text, and Folio copied that address once per cell, on every
+  repaint. A 48 KB address across 200 columns cost nine megabytes a frame; it now
+  costs the address once, shared by every cell that wears it.
+
+- **A long session stops collecting the shells it has already forgotten.** Every
+  prompt a shell drew left behind a record of where its command started and
+  ended, and those records were never released, not even when the lines they
+  stood on had scrolled out of the transcript and been thrown away. A shell that
+  redraws its prompt on every window resize could leave thousands of them, and
+  each was walked again on the next scroll. Records now leave with the lines they
+  describe, and the search for the command that is running looks at the newest
+  one instead of reading all of them.
+
+- **A cell holds one character, however many marks are sent for it.** Accents and
+  other marks attach to the character before them, and a program sending ten
+  thousand of them for one cell made Folio re-measure and re-copy the whole
+  thing on every one, on the thread that draws the window. Folio now stops at 32,
+  which is past anything Unicode itself allows a real cluster to hold.
+
+- **A clipboard request Folio does not honour costs nothing.** A program can ask
+  a terminal to put text on the clipboard, and Folio does not do that. It was
+  still decoding the whole request first and then throwing the result away, so a
+  megabyte asked for a megabyte of work. It is now refused before it is read.
+
 - **An SVG can no longer make Folio open a file it names.** An SVG document can
   point an `<image>` at a path, and Folio's renderer used to follow it: a file
   anywhere on the machine, or on a network share, was read while the picture was

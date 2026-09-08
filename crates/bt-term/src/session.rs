@@ -1185,8 +1185,24 @@ pub struct DualPlaneSession {
     failure_exit_code: Option<i32>,
     working: bool,
     published_revision: u64,
-    semantic_input_regions: Vec<SemanticInputRegion>,
-    semantic_output_regions: Vec<SemanticOutputRegion>,
+    /// The `B..C` and `C..D` regions this session has been told about, by the identity the
+    /// [`ShellIntegrationPhase`] payloads carry.
+    ///
+    /// A map rather than a vector because **a region leaves when the line it stands on leaves**
+    /// (see `retire_semantic_regions`), and an index into a vector cannot survive its neighbours
+    /// being removed. The key is handed out by the counter below and never reused, so a phase
+    /// naming a region that has since gone finds nothing rather than somebody else's region.
+    semantic_input_regions: BTreeMap<usize, SemanticInputRegion>,
+    semantic_output_regions: BTreeMap<usize, SemanticOutputRegion>,
+    next_semantic_input_region: usize,
+    next_semantic_output_region: usize,
+    /// How many regions the last open-region lookup examined.
+    ///
+    /// Test-only instrumentation, because "the open region is found from the back" is a claim
+    /// about cost and not about the answer: a scan from either end returns the same region, so
+    /// counting what was examined is the only way to hold it.
+    #[cfg(test)]
+    open_region_lookup_visits: std::cell::Cell<usize>,
     /// One record per command the shell reported, in order (DESIGN §7.1.5c). Fed by exactly the
     /// same `A/B/C/D` stream the two region tables above are fed by, and kept separate from them
     /// because it answers a different question — "which commands ran and how did each end", not
@@ -1618,8 +1634,12 @@ impl DualPlaneSession {
             failure_exit_code: None,
             working: false,
             published_revision: 0,
-            semantic_input_regions: Vec::new(),
-            semantic_output_regions: Vec::new(),
+            semantic_input_regions: BTreeMap::new(),
+            semantic_output_regions: BTreeMap::new(),
+            next_semantic_input_region: 0,
+            next_semantic_output_region: 0,
+            #[cfg(test)]
+            open_region_lookup_visits: std::cell::Cell::new(0),
             command_marks: CommandMarkLedger::default(),
             alternate_detection_context: DetectionContext::default(),
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
@@ -2672,14 +2692,14 @@ impl DualPlaneSession {
                 index += 1;
                 continue;
             };
-            let uri = link.uri.as_str();
+            let uri = &*link.uri;
             let mut end = index + 1;
             while end < cells.len()
                 && frame
                     .cells
                     .get(cells[end].cell as usize)
                     .and_then(|cell| cell.hyperlink.as_ref())
-                    .is_some_and(|other| other.uri == uri)
+                    .is_some_and(|other| &*other.uri == uri)
             {
                 end += 1;
             }
@@ -3804,7 +3824,7 @@ impl DualPlaneSession {
     /// made *entirely* of spaces as empty. The region's own write history is the second witness that
     /// closes that gap — see `typed_writes_precede_the_cursor`.
     fn semantic_input_region_holds_content(&self, index: usize) -> bool {
-        let Some(region) = self.semantic_input_regions.get(index) else {
+        let Some(region) = self.semantic_input_regions.get(&index) else {
             return false;
         };
         if region.closed || region.screen != self.live_screen {
@@ -3962,18 +3982,22 @@ impl DualPlaneSession {
                     bias: Bias::Before,
                     generation: self.grid_generation,
                 });
-                let region = self.semantic_input_regions.len();
-                self.semantic_input_regions.push(SemanticInputRegion {
-                    screen,
-                    start,
-                    end,
-                    closed: false,
-                    written_rows: BTreeSet::new(),
-                    witness: String::new(),
-                });
+                let region = self.next_semantic_input_region;
+                self.next_semantic_input_region += 1;
+                self.semantic_input_regions.insert(
+                    region,
+                    SemanticInputRegion {
+                        screen,
+                        start,
+                        end,
+                        closed: false,
+                        written_rows: BTreeSet::new(),
+                        witness: String::new(),
+                    },
+                );
                 // The mark and the region share this one registration; see `CommandMark::start`.
                 if screen == ScreenId::Primary {
-                    let anchor = self.semantic_input_regions[region].start;
+                    let anchor = self.semantic_input_regions[&region].start;
                     self.command_marks.open_command(anchor);
                 }
                 // A region now exists on this screen, so the cursor-line heuristic has a successor
@@ -4055,6 +4079,7 @@ impl DualPlaneSession {
                     .insert(screen, ShellIntegrationPhase::Finished);
             }
         }
+        self.release_retired_mark_anchors();
         self.reconcile_decorations_against_semantic_input();
     }
 
@@ -4072,6 +4097,20 @@ impl DualPlaneSession {
             bias: Bias::Before,
             generation: self.grid_generation,
         })
+    }
+
+    /// Give the document back the anchors the ledger has stopped holding.
+    ///
+    /// The other half of `register_command_mark_anchor`, and it runs after every change to the
+    /// ledger rather than at the two obvious ones. A prompt drawn again is the case that matters:
+    /// a line editor repainting its input emits `A` and `B` on every resize, each `A` registers a
+    /// coordinate, and the mark keeps only the newest — so without this a reader dragging a window
+    /// edge for a few seconds leaves hundreds of registrations behind, and every later scroll and
+    /// resize walks all of them.
+    fn release_retired_mark_anchors(&mut self) {
+        for anchor in self.command_marks.take_released_anchors() {
+            self.document.release_anchor(anchor);
+        }
     }
 
     /// Copy the just-closed input region's content witness into the open mark as its command text.
@@ -4107,7 +4146,7 @@ impl DualPlaneSession {
         if screen != ScreenId::Primary {
             return;
         }
-        let Some(region) = self.semantic_input_regions.get(region_index) else {
+        let Some(region) = self.semantic_input_regions.get(&region_index) else {
             return;
         };
         let text = region.witness.trim().to_owned();
@@ -4208,6 +4247,87 @@ impl DualPlaneSession {
             .map(|mark| mark.id)
             .collect::<BTreeSet<_>>();
         self.command_marks.retire(&doomed);
+        self.release_retired_mark_anchors();
+    }
+
+    /// Drop the regions whose lines have gone.
+    ///
+    /// **A region stands on a line, and it leaves when that line does.** Nothing else can decide
+    /// it: a region names its extent with two registered anchors, and a deleted line's anchors are
+    /// degraded onto a surviving neighbour rather than removed, so after the deletion a region
+    /// whose command was evicted looks exactly like one whose command is still on screen. It would
+    /// keep answering "yes, that is inside a command" about somebody else's rows, and the list
+    /// would grow by two regions per command for the life of the pane while every overlap query
+    /// walked all of them.
+    ///
+    /// The rule is character for character the one [`Self::retire_command_marks`] applies beside
+    /// it, and it is the same rule for the same reason: a `History` anchor among the removed ids
+    /// goes, a `Staging` anchor goes when staging is being cleared, and a `Live` anchor stays,
+    /// because ED3 deletes scrollback and not the screen. So the transcript's own frozen quota is
+    /// what bounds this list, exactly as it bounds the ledger.
+    ///
+    /// Both of a region's anchors are released here, because both were registered for it: the
+    /// `end` is its alone, and the `start` is the one it lends its command's mark
+    /// (`CommandMark::start`), which is retired in the same breath by the same rule.
+    fn retire_semantic_regions(&mut self, removed: &BTreeSet<TranscriptId>, clear_staging: bool) {
+        let doomed = |document: &HistoryDocument, anchor| match document.anchor(anchor).ok() {
+            Some(ContentAnchor::History { id, .. }) => removed.contains(id),
+            Some(ContentAnchor::Staging { .. }) => clear_staging,
+            _ => false,
+        };
+        let input = self
+            .semantic_input_regions
+            .iter()
+            .filter(|(_, region)| doomed(&self.document, region.start))
+            .map(|(index, region)| (*index, region.start, region.end))
+            .collect::<Vec<_>>();
+        let output = self
+            .semantic_output_regions
+            .iter()
+            .filter(|(_, region)| doomed(&self.document, region.start))
+            .map(|(index, region)| (*index, region.start, region.end))
+            .collect::<Vec<_>>();
+        for (index, start, end) in input {
+            self.semantic_input_regions.remove(&index);
+            self.document.release_anchor(start);
+            self.document.release_anchor(end);
+        }
+        for (index, start, end) in output {
+            self.semantic_output_regions.remove(&index);
+            self.document.release_anchor(start);
+            self.document.release_anchor(end);
+        }
+    }
+
+    /// Drop the regions that described the alternate screen once that screen is gone.
+    ///
+    /// The alternate screen keeps no history, so an alternate region can never be retired by a
+    /// line leaving the transcript - there is no line. Leaving one behind means a full-screen
+    /// program that speaks OSC 133 adds regions to this session on every run of itself and none of
+    /// them ever go.
+    fn retire_alternate_semantic_regions(&mut self) {
+        let input = self
+            .semantic_input_regions
+            .iter()
+            .filter(|(_, region)| region.screen == ScreenId::Alternate)
+            .map(|(index, region)| (*index, region.start, region.end))
+            .collect::<Vec<_>>();
+        let output = self
+            .semantic_output_regions
+            .iter()
+            .filter(|(_, region)| region.screen == ScreenId::Alternate)
+            .map(|(index, region)| (*index, region.start, region.end))
+            .collect::<Vec<_>>();
+        for (index, start, end) in input {
+            self.semantic_input_regions.remove(&index);
+            self.document.release_anchor(start);
+            self.document.release_anchor(end);
+        }
+        for (index, start, end) in output {
+            self.semantic_output_regions.remove(&index);
+            self.document.release_anchor(start);
+            self.document.release_anchor(end);
+        }
     }
 
     /// Drop the marks a reflow could not put back on their own line.
@@ -4247,6 +4367,7 @@ impl DualPlaneSession {
             .map(|mark| mark.id)
             .collect::<BTreeSet<_>>();
         self.command_marks.retire(&doomed);
+        self.release_retired_mark_anchors();
     }
 
     fn close_semantic_input_region(
@@ -4255,7 +4376,7 @@ impl DualPlaneSession {
         screen: ScreenId,
         point: GridPoint,
     ) {
-        let Some(region) = self.semantic_input_regions.get(region_index) else {
+        let Some(region) = self.semantic_input_regions.get(&region_index) else {
             return;
         };
         let end = region.end;
@@ -4269,7 +4390,7 @@ impl DualPlaneSession {
                 generation: self.grid_generation,
             },
         );
-        if let Some(region) = self.semantic_input_regions.get_mut(region_index) {
+        if let Some(region) = self.semantic_input_regions.get_mut(&region_index) {
             region.closed = true;
         }
         self.refresh_semantic_input_witness(region_index, true);
@@ -4294,23 +4415,37 @@ impl DualPlaneSession {
         };
         let start = anchor(self);
         let end = anchor(self);
-        let region = self.semantic_output_regions.len();
-        self.semantic_output_regions.push(SemanticOutputRegion {
-            screen,
-            start,
-            end,
-            closed: false,
-            witness: String::new(),
-        });
+        let region = self.next_semantic_output_region;
+        self.next_semantic_output_region += 1;
+        self.semantic_output_regions.insert(
+            region,
+            SemanticOutputRegion {
+                screen,
+                start,
+                end,
+                closed: false,
+                witness: String::new(),
+            },
+        );
         region
     }
 
     /// The open output region on `screen`, of which there is at most one by construction: every
     /// path that opens one closes the previous first.
     fn open_semantic_output_region_index(&self, screen: ScreenId) -> Option<usize> {
+        // **From the back.** The open region is the newest one - every path that opens one
+        // closes the previous first - so a scan from the front reads the whole list to reach the
+        // one answer it will ever give, and it does that on the path of every marker.
         self.semantic_output_regions
             .iter()
-            .position(|region| region.screen == screen && !region.closed)
+            .rev()
+            .find(|(_, region)| {
+                #[cfg(test)]
+                self.open_region_lookup_visits
+                    .set(self.open_region_lookup_visits.get() + 1);
+                region.screen == screen && !region.closed
+            })
+            .map(|(index, _)| *index)
     }
 
     /// Seal the open output region on `screen` at `point`, if there is one.
@@ -4324,7 +4459,7 @@ impl DualPlaneSession {
         let Some(index) = self.open_semantic_output_region_index(screen) else {
             return;
         };
-        let end = self.semantic_output_regions[index].end;
+        let end = self.semantic_output_regions[&index].end;
         let _ = self.document.replace_anchor(
             end,
             ContentAnchor::Live {
@@ -4334,7 +4469,9 @@ impl DualPlaneSession {
                 generation: self.grid_generation,
             },
         );
-        self.semantic_output_regions[index].closed = true;
+        if let Some(region) = self.semantic_output_regions.get_mut(&index) {
+            region.closed = true;
+        }
         self.refresh_semantic_output_witness(index, true);
     }
 
@@ -4344,7 +4481,7 @@ impl DualPlaneSession {
         screen: ScreenId,
         close: GridPoint,
     ) -> GridPoint {
-        let Some(region) = self.semantic_input_regions.get(region_index) else {
+        let Some(region) = self.semantic_input_regions.get(&region_index) else {
             return close;
         };
         if close.column != 0
@@ -4437,7 +4574,7 @@ impl DualPlaneSession {
     /// were recorded under stops being current.
     fn retire_semantic_input_writes(&mut self) {
         let live_screen = self.live_screen;
-        for region in &mut self.semantic_input_regions {
+        for region in self.semantic_input_regions.values_mut() {
             if region.screen == live_screen && !region.closed {
                 region.written_rows.clear();
             }
@@ -4450,7 +4587,7 @@ impl DualPlaneSession {
         else {
             return;
         };
-        let Some(region) = self.semantic_input_regions.get_mut(region_index) else {
+        let Some(region) = self.semantic_input_regions.get_mut(&region_index) else {
             return;
         };
         region
@@ -4568,8 +4705,7 @@ impl DualPlaneSession {
     fn semantic_input_overlaps(&self, start: &ContentAnchor, end: &ContentAnchor) -> bool {
         self.semantic_input_regions
             .iter()
-            .enumerate()
-            .any(|(region_index, region)| {
+            .any(|(&region_index, region)| {
                 let Ok(region_start) = self.document.anchor(region.start) else {
                     return false;
                 };
@@ -4671,8 +4807,7 @@ impl DualPlaneSession {
     fn command_output_covers(&self, start: &ContentAnchor, end: &ContentAnchor) -> bool {
         self.semantic_output_regions
             .iter()
-            .enumerate()
-            .any(|(region_index, region)| {
+            .any(|(&region_index, region)| {
                 let Ok(region_start) = self.document.anchor(region.start) else {
                     return false;
                 };
@@ -4760,14 +4895,14 @@ impl DualPlaneSession {
     }
 
     fn refresh_semantic_input_witness(&mut self, region_index: usize, authoritative_close: bool) {
-        let Some(region) = self.semantic_input_regions.get(region_index) else {
+        let Some(region) = self.semantic_input_regions.get(&region_index) else {
             return;
         };
         let (screen, start, end, closed) = (region.screen, region.start, region.end, region.closed);
         let Some(witness) = self.semantic_region_witness(screen, start, end, closed) else {
             return;
         };
-        let Some(region) = self.semantic_input_regions.get_mut(region_index) else {
+        let Some(region) = self.semantic_input_regions.get_mut(&region_index) else {
             return;
         };
         // `C` is the one authoritative event that may initialize a closed command witness. After
@@ -4798,7 +4933,7 @@ impl DualPlaneSession {
     /// not a nudge toward a match, it is the same region stated in coordinates that survive a
     /// reflow.
     fn refresh_semantic_output_witness(&mut self, region_index: usize, authoritative_close: bool) {
-        let Some(region) = self.semantic_output_regions.get(region_index) else {
+        let Some(region) = self.semantic_output_regions.get(&region_index) else {
             return;
         };
         let (screen, start, end, closed) = (region.screen, region.start, region.end, region.closed);
@@ -4806,7 +4941,7 @@ impl DualPlaneSession {
             return;
         };
         let witness = witness.trim_matches('\n').to_owned();
-        let Some(region) = self.semantic_output_regions.get_mut(region_index) else {
+        let Some(region) = self.semantic_output_regions.get_mut(&region_index) else {
             return;
         };
         if closed && !authoritative_close && region.witness != witness {
@@ -4816,10 +4951,20 @@ impl DualPlaneSession {
     }
 
     fn refresh_semantic_region_witnesses(&mut self) {
-        for index in 0..self.semantic_input_regions.len() {
+        for index in self
+            .semantic_input_regions
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+        {
             self.refresh_semantic_input_witness(index, false);
         }
-        for index in 0..self.semantic_output_regions.len() {
+        for index in self
+            .semantic_output_regions
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+        {
             self.refresh_semantic_output_witness(index, false);
         }
     }
@@ -5142,7 +5287,7 @@ impl DualPlaneSession {
     fn reanchor_semantic_input_regions_after_resize(&mut self) {
         if !self
             .semantic_input_regions
-            .iter()
+            .values()
             .any(|region| region.screen == self.live_screen)
         {
             return;
@@ -5159,8 +5304,13 @@ impl DualPlaneSession {
             _ => None,
         };
         let mut regions_by_witness = BTreeMap::<String, Vec<usize>>::new();
-        for index in 0..self.semantic_input_regions.len() {
-            let region = &self.semantic_input_regions[index];
+        for index in self
+            .semantic_input_regions
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            let region = &self.semantic_input_regions[&index];
             if region.screen != self.live_screen {
                 continue;
             }
@@ -5211,7 +5361,7 @@ impl DualPlaneSession {
 
         let matches = semantic_witness_rematch(&logical_text, &segments, regions_by_witness);
         for (index, start, end) in matches {
-            let region = &self.semantic_input_regions[index];
+            let region = &self.semantic_input_regions[&index];
             let start_anchor = region.start;
             let end_anchor = region.end;
             let _ = self.document.replace_anchor(
@@ -5232,7 +5382,7 @@ impl DualPlaneSession {
                     generation: self.grid_generation,
                 },
             );
-            if let Some(region) = self.semantic_input_regions.get_mut(index)
+            if let Some(region) = self.semantic_input_regions.get_mut(&index)
                 && let Some(rows) = semantic_input_region_rows(start, end)
             {
                 region
@@ -5257,7 +5407,7 @@ impl DualPlaneSession {
     fn reanchor_semantic_output_regions_after_resize(&mut self) {
         if !self
             .semantic_output_regions
-            .iter()
+            .values()
             .any(|region| region.screen == self.live_screen)
         {
             return;
@@ -5270,8 +5420,13 @@ impl DualPlaneSession {
             column: cursor.column,
         };
         let mut regions_by_witness = BTreeMap::<String, Vec<usize>>::new();
-        for index in 0..self.semantic_output_regions.len() {
-            let region = &self.semantic_output_regions[index];
+        for index in self
+            .semantic_output_regions
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            let region = &self.semantic_output_regions[&index];
             if region.screen != self.live_screen {
                 continue;
             }
@@ -5327,7 +5482,7 @@ impl DualPlaneSession {
 
         let matches = semantic_witness_rematch(&logical_text, &segments, regions_by_witness);
         for (index, start, end) in matches {
-            let region = &self.semantic_output_regions[index];
+            let region = &self.semantic_output_regions[&index];
             let (start_anchor, end_anchor, screen) = (region.start, region.end, region.screen);
             for (anchor, point) in [(start_anchor, start), (end_anchor, end)] {
                 let _ = self.document.replace_anchor(
@@ -8864,6 +9019,7 @@ impl DualPlaneSession {
                         .collect::<BTreeSet<_>>();
                     self.retire_inline_images(&retired);
                     self.retire_command_marks(&BTreeSet::new(), true);
+                    self.retire_semantic_regions(&BTreeSet::new(), true);
                     self.document
                         .delete_transaction(&[], true, self.grid_generation);
                 }
@@ -8888,6 +9044,7 @@ impl DualPlaneSession {
                     self.pending_live_handoffs.clear();
                     self.live_tasks.clear();
                     self.live_screen = ScreenId::Primary;
+                    self.retire_alternate_semantic_regions();
                     for row in &mut self.live_rows {
                         *row = LiveRowStability::default();
                     }
@@ -10148,6 +10305,7 @@ impl DualPlaneSession {
             .collect::<BTreeSet<_>>();
         self.retire_inline_images(&retired_images);
         self.retire_command_marks(&removed_set, clear_staging);
+        self.retire_semantic_regions(&removed_set, clear_staging);
         self.document
             .delete_transaction(removed, clear_staging, self.grid_generation);
         if clear_staging {
@@ -13552,6 +13710,113 @@ mod tests {
 
     pub(super) fn nz(value: u32) -> NonZeroU32 {
         NonZeroU32::new(value).unwrap()
+    }
+
+    /// Drive one whole `A`/`B`/`C`/`D` round of shell integration through a session.
+    fn feed_one_command(session: &mut DualPlaneSession, at: Instant) {
+        session.feed_at(b"\x1b]133;A\x07", at).unwrap();
+        session.feed_at(b"$ ", at).unwrap();
+        session.feed_at(b"\x1b]133;B\x07", at).unwrap();
+        session.feed_at(b"echo hi", at).unwrap();
+        session.feed_at(b"\r\n\x1b]133;C\x07", at).unwrap();
+        session.feed_at(b"hi\r\n", at).unwrap();
+        session.feed_at(b"\x1b]133;D;0\x07", at).unwrap();
+    }
+
+    /// R3-3. A region stands on a line, and when the line goes the region goes with it. A shell
+    /// that runs thousands of commands past the transcript's own quota therefore leaves a list
+    /// the size of the transcript, not the size of the session.
+    #[test]
+    fn command_regions_leave_with_the_lines_they_stand_on() {
+        const QUOTA: usize = 64;
+        const ROUNDS: usize = 20_000;
+        let mut session = DualPlaneSession::with_quotas(
+            nz(40),
+            nz(4),
+            NonZeroUsize::new(QUOTA).unwrap(),
+            NonZeroUsize::new(QUOTA).unwrap(),
+        );
+        let mut at = Instant::now();
+        for _ in 0..ROUNDS {
+            feed_one_command(&mut session, at);
+            at += Duration::from_millis(1);
+        }
+
+        let bound = QUOTA * 4;
+        assert!(
+            session.semantic_input_regions.len() <= bound,
+            "{} B..C regions survive a transcript that holds {QUOTA} lines",
+            session.semantic_input_regions.len()
+        );
+        assert!(
+            session.semantic_output_regions.len() <= bound,
+            "{} C..D regions survive a transcript that holds {QUOTA} lines",
+            session.semantic_output_regions.len()
+        );
+    }
+
+    /// R3-3, the second half. At most one output region is open on a screen, and it is always the
+    /// newest, so the lookup that finds it should look at one region and stop.
+    ///
+    /// A cost claim and not a behaviour one — a front scan and a back scan return the same region
+    /// — so it is held by counting what the lookup examined.
+    #[test]
+    fn the_open_output_region_is_found_from_the_back() {
+        let mut session = DualPlaneSession::new(nz(40), nz(24));
+        let mut at = Instant::now();
+        for _ in 0..64 {
+            feed_one_command(&mut session, at);
+            at += Duration::from_millis(1);
+        }
+        session.feed_at(b"\x1b]133;A\x07", at).unwrap();
+        session.feed_at(b"\x1b]133;B\x07", at).unwrap();
+        session.feed_at(b"\r\n\x1b]133;C\x07", at).unwrap();
+        assert!(
+            session.semantic_output_regions.len() > 1,
+            "there are older closed regions to scan past"
+        );
+
+        session.open_region_lookup_visits.set(0);
+        assert!(
+            session
+                .open_semantic_output_region_index(ScreenId::Primary)
+                .is_some(),
+            "the round left one region open"
+        );
+        assert_eq!(
+            session.open_region_lookup_visits.get(),
+            1,
+            "the newest region is the open one, so exactly one is examined"
+        );
+    }
+
+    /// R5-1. Every anchor a mark or a region registered is released by whoever registered it, so
+    /// a shell repainting its prompt cannot grow the registry every pass walks.
+    #[test]
+    fn anchors_leave_with_the_marks_and_regions_that_registered_them() {
+        const QUOTA: usize = 64;
+        const ROUNDS: usize = 20_000;
+        let mut session = DualPlaneSession::with_quotas(
+            nz(40),
+            nz(4),
+            NonZeroUsize::new(QUOTA).unwrap(),
+            NonZeroUsize::new(QUOTA).unwrap(),
+        );
+        let mut at = Instant::now();
+        for _ in 0..ROUNDS {
+            // Two prompt repaints per command, which is what a line editor redrawing its input
+            // does on every resize.
+            session.feed_at(b"\x1b]133;A\x07", at).unwrap();
+            session.feed_at(b"\x1b]133;A\x07", at).unwrap();
+            feed_one_command(&mut session, at);
+            at += Duration::from_millis(1);
+        }
+
+        let registered = session.document.anchors().count();
+        assert!(
+            registered <= QUOTA * 16,
+            "{registered} anchors survive a transcript that holds {QUOTA} lines"
+        );
     }
 
     /// **The panic a released build took, reproduced.**
@@ -25647,18 +25912,18 @@ mod tests {
         assert!(
             session
                 .semantic_input_regions
-                .iter()
+                .values()
                 .all(|region| region.witness.trim_end_matches('\n') == OSC133_ACCEPT2_COMMAND),
             "every B..C region must retain the recorded logical command witness: {:?}",
             session
                 .semantic_input_regions
-                .iter()
+                .values()
                 .map(|region| &region.witness)
                 .collect::<Vec<_>>()
         );
         let starts = session
             .semantic_input_regions
-            .iter()
+            .values()
             .map(|region| format!("{:?}", session.document.anchor(region.start).unwrap()))
             .collect::<BTreeSet<_>>();
         assert_eq!(
@@ -25813,7 +26078,7 @@ mod tests {
 
         let region_end = session
             .document
-            .anchor(session.semantic_input_regions[0].end)
+            .anchor(session.semantic_input_regions[&0].end)
             .unwrap()
             .clone();
         assert!(
@@ -26259,7 +26524,7 @@ mod tests {
             session.feed_at(closer, started).unwrap();
 
             assert_eq!(session.semantic_input_regions.len(), 1);
-            let region = &session.semantic_input_regions[0];
+            let region = &session.semantic_input_regions[&0];
             let ContentAnchor::Live { point, bias, .. } =
                 session.document.anchor(region.end).unwrap()
             else {
@@ -26290,7 +26555,7 @@ mod tests {
             )
             .unwrap();
 
-        let region = &session.semantic_input_regions[0];
+        let region = &session.semantic_input_regions[&0];
         let ContentAnchor::Live { point, bias, .. } = session.document.anchor(region.end).unwrap()
         else {
             panic!("the compact fixture keeps its command region live")
@@ -26308,7 +26573,7 @@ mod tests {
             .unwrap();
         let start = session
             .document
-            .anchor(session.semantic_input_regions[0].start)
+            .anchor(session.semantic_input_regions[&0].start)
             .unwrap()
             .clone();
         session.feed_at(b"\x1b]133;B\x07", started).unwrap();
@@ -26317,7 +26582,7 @@ mod tests {
         assert_eq!(
             session
                 .document
-                .anchor(session.semantic_input_regions[0].start)
+                .anchor(session.semantic_input_regions[&0].start)
                 .unwrap(),
             &start
         );
@@ -26450,7 +26715,7 @@ mod tests {
         // shut forever, because the shell sits in `Output` with the text still on screen.
         let region = 0;
         session.feed_at(b"\r\n\x1b]133;C\x07", started).unwrap();
-        assert!(session.semantic_input_regions[region].closed);
+        assert!(session.semantic_input_regions[&region].closed);
         assert!(
             !session.typed_shell_input_live(),
             "the phase is no longer Input, so the region is not consulted"
@@ -26520,14 +26785,14 @@ mod tests {
             !matches!(
                 session
                     .document
-                    .anchor(session.semantic_input_regions[0].start),
+                    .anchor(session.semantic_input_regions[&0].start),
                 Ok(ContentAnchor::Live { .. })
             ),
             "the fixture must actually scroll the region's start row off the live grid, or this \
              pin proves nothing: {:?}",
             session
                 .document
-                .anchor(session.semantic_input_regions[0].start)
+                .anchor(session.semantic_input_regions[&0].start)
         );
         assert!(
             session.typed_shell_input_live(),
@@ -27801,7 +28066,7 @@ mod tests {
         output_start: GridPoint,
         output_end: GridPoint,
     ) {
-        let region = &session.semantic_input_regions[0];
+        let region = &session.semantic_input_regions[&0];
         for (anchor, point) in [(region.start, output_start), (region.end, output_end)] {
             session
                 .document
@@ -27837,7 +28102,7 @@ mod tests {
                 started,
             )
             .unwrap();
-        assert_eq!(session.semantic_input_regions[0].witness, COMMAND);
+        assert_eq!(session.semantic_input_regions[&0].witness, COMMAND);
 
         drift_closed_region_to_output(
             &mut session,
@@ -27858,12 +28123,12 @@ mod tests {
         }
 
         assert_eq!(
-            session.semantic_input_regions[0].witness, COMMAND,
+            session.semantic_input_regions[&0].witness, COMMAND,
             "a drifted live coordinate must not degrade the authoritative closed witness"
         );
         let ContentAnchor::Live { point, .. } = session
             .document
-            .anchor(session.semantic_input_regions[0].start)
+            .anchor(session.semantic_input_regions[&0].start)
             .unwrap()
         else {
             panic!("the compact fixture keeps the command region live")

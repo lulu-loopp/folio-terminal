@@ -1554,7 +1554,7 @@ mod tests {
                     continue;
                 };
                 assert_eq!(
-                    link.uri, URI,
+                    &*link.uri, URI,
                     "origin {origin}, column {column}: a window read its own address"
                 );
             }

@@ -1,6 +1,7 @@
 // MODIFIED BY THE FOLIO CONTRIBUTORS — not the upstream
 // alacritty_terminal 0.26.0 file of the same name.
-// Change: reformatted to this repository's rustfmt settings, and nothing else.
+// Change: reformatted to this repository's rustfmt settings, and a ceiling on the zerowidth marks
+// one cell holds (`push_zerowidth`).
 // Index: vendor/alacritty_terminal/CHANGES-FOLIO.md
 // Notice given under section 4(b) of the Apache License, Version 2.0.
 
@@ -8,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use bitflags::bitflags;
+use bt_unicode::MAX_GRAPHEME_CLUSTER_CHARS;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -171,8 +173,22 @@ impl Cell {
     }
 
     /// Write a new zerowidth character to this cell.
+    ///
+    /// **Change from upstream: the cell holds a bounded cluster.** One cell holds one grapheme
+    /// cluster and a cluster is short — see `bt_unicode::MAX_GRAPHEME_CLUSTER_CHARS` for where
+    /// Unicode itself puts the line. Past the ceiling the marks are dropped, because this cell is
+    /// cloned into every captured row of every frame and an unbounded one lets a child choose how
+    /// much this terminal copies per repaint. The base character counts toward the ceiling, so
+    /// what is stored here is one short of it.
     #[inline]
     pub fn push_zerowidth(&mut self, character: char) {
+        if self
+            .extra
+            .as_ref()
+            .is_some_and(|extra| extra.zerowidth.len() + 1 >= MAX_GRAPHEME_CLUSTER_CHARS)
+        {
+            return;
+        }
         let extra = self.extra.get_or_insert(Default::default());
         Arc::make_mut(extra).zerowidth.push(character);
     }
