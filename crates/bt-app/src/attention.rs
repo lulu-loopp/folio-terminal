@@ -62,7 +62,10 @@
 // is the running build's attention queue now, and the two things left unconstructed below carry
 // their own one-line reasons at the point where the gap is rather than over the whole file.
 
-use std::{fmt, time::Instant};
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 
 use bt_layout::SeatId;
 
@@ -903,13 +906,20 @@ pub(crate) struct AttentionLedger {
     /// Whether this **turn**'s ending has already been decided about. Belongs to no episode,
     /// because a turn ending mints none (`attention` plan §13.3).
     announced_turn_end: bool,
-    /// **The sentence the last accepted turn-end decision carried**, or `None` when it carried
-    /// none.
+    /// **This pane's own share of the endpoint's frames** (R2-9).
     ///
-    /// Lives and dies with [`Self::announced_turn_end`], and it is what keeps that bit from
-    /// swallowing something it was never about — see [`Self::announce_turn_end`] for the whole of
-    /// why a wordless second source is the same fact and a second *sentence* is not.
-    announced_words: Option<String>,
+    /// The bound that keeps one pane's runaway hook out of every other pane's way, and it is here
+    /// rather than in `bt_platform::attention_pipe` because *here* is the first place a frame has
+    /// a pane. The endpoint takes a line off the wire knowing nothing about the grammar inside it,
+    /// so the bucket it charges cannot tell one sender from another; the capability is what names
+    /// the sender, and the capability is checked one layer up from this field, in
+    /// `deliver_attention`, immediately before this is asked.
+    ///
+    /// The endpoint keeps a ceiling of its own an order of magnitude higher — see
+    /// `bt_platform::attention_pipe::MAX_FRAMES_PER_SECOND` — which bounds the listener thread on
+    /// a machine where dozens of panes are wrong at once. That one is the backstop. This is the
+    /// bound that has a name in it.
+    frames: FrameRate,
     /// **When a program last spoke in this pane**, or `None` when none ever has (`attention` plan
     /// §11.10.4, user ruling 乙, 2026-08-25).
     ///
@@ -941,7 +951,7 @@ impl Default for AttentionLedger {
             refused: false,
             lent: None,
             announced_turn_end: false,
-            announced_words: None,
+            frames: FrameRate::default(),
             spoke_at: None,
         }
     }
@@ -1578,7 +1588,7 @@ impl AttentionLedger {
     /// reached this window — a program's own `OSC 9` message answers to Terminal ▸ `Notifications`,
     /// and everything that is only a report that a turn ended answers to Agents ▸ `Turn finished`.
     ///
-    /// # What the bit is allowed to swallow, and what it is not
+    /// # One turn, one toast (R2-21)
     ///
     /// §13.3 sets the bit on the first *accepted decision* so that a second source cannot deliver
     /// a late flash about a turn that ended while you were watching. The sources it was written
@@ -1586,15 +1596,23 @@ impl AttentionLedger {
     /// — and two of those in one turn are **the same fact arriving twice**, which is precisely
     /// what deduplication is for.
     ///
-    /// **An arrival carrying the program's own sentence is not that.** `OSC 9;<text>`,
-    /// `OSC 777;notify` and `OSC 99` are messages: they have words, and §11.6 rule 2 already
-    /// establishes that a program's own words are the one thing this terminal must not throw away.
-    /// A bit that swallowed the second of two *different* sentences would be this terminal deciding
-    /// that a build finishing and a deploy finishing are one event because nobody pressed a key in
-    /// between — and it would silently take away a delivery this product has always made. So the
-    /// rule is stated on the decision rather than on the arrival: **a later arrival for the same
-    /// turn is silent unless it says something the last accepted decision did not.** A restatement
-    /// of the same sentence is still the same fact and is still swallowed.
+    /// This paragraph used to carry an exception, and the exception is withdrawn. It read: an
+    /// arrival carrying the program's own sentence is not a restatement, so **a later arrival for
+    /// the same turn is silent unless it says something the last accepted decision did not** —
+    /// argued from §11.6 rule 2, that a program's own words are the one thing this terminal must
+    /// not throw away.
+    ///
+    /// What that reasoning missed is *whose* the toast is. A desktop notification is not a line in
+    /// a pane: it carries Folio's name, it appears over whatever the reader is doing, and nothing
+    /// stands beside it to say where it came from. Latching on the sentence rather than on the turn
+    /// therefore gave any program in any pane an unbounded supply of Folio-branded interruptions —
+    /// print a different sentence each time and the bit never closes, however many arrive between
+    /// one turn and the next. The rule is now the one the attention dot already follows and has
+    /// always followed: **one toast per turn**, whoever raises it and whatever it says.
+    ///
+    /// The words themselves are not thrown away. The *first* accepted arrival's sentence is the
+    /// one the toast carries, which is what §11.6 rule 2 asks for, and every arrival of any kind
+    /// still writes its own line to the trace. What is refused is a second card.
     ///
     /// `words` is the program's own sentence, or `None` for the sources that have none.
     pub(crate) fn announce_turn_end(
@@ -1621,11 +1639,12 @@ impl AttentionLedger {
         if !switches.admits(via) {
             return out;
         }
-        if self.announced_turn_end && words.is_none_or(|new| Some(new) == self.announced_words()) {
+        // **The turn, and not the sentence** (R2-21). See this function's own note for the
+        // exception that used to stand here and why it is gone.
+        if self.announced_turn_end {
             return out;
         }
         self.announced_turn_end = true;
-        self.announced_words = words.map(str::to_owned);
         out.lines.push(format!(
             "toast {at} why=turn-end episode=- reach={reach} src={source} via={via}"
         ));
@@ -1645,18 +1664,67 @@ impl AttentionLedger {
         out
     }
 
-    fn announced_words(&self) -> Option<&str> {
-        self.announced_words.as_deref()
-    }
-
     /// **Your next turn has begun**, so the one before it may be announced again.
     ///
-    /// The two together and never one of them: a bit saying "already decided" beside the sentence
-    /// that decision carried is one fact in two fields, and clearing half of it would leave a
-    /// sentence from a finished turn able to silence an identical one in the next.
+    /// One bit, since R2-21 folded the sentence back into the turn: the latch is on the turn and
+    /// nothing else, so this is the whole of what re-arming means.
     fn rearm_turn_end(&mut self) {
         self.announced_turn_end = false;
-        self.announced_words = None;
+    }
+
+    /// **Whether this pane may spend one more frame this second** (R2-9).
+    ///
+    /// Asked once per arrival, by the one caller that has already decided which pane the frame is
+    /// for — `deliver_attention`, immediately after the capability matched a leaf's own. Charging
+    /// it there and not earlier is the whole of the fix: a bucket charged before the sender is
+    /// known is a bucket every sender shares, and a pane whose hook has gone into a loop was
+    /// spending every other pane's allowance out of it.
+    ///
+    /// A refusal is silent, for `MAX_FRAMES_PER_SECOND`'s reason: there is nobody on the other end
+    /// to tell, and a hook that is looping is not reading errors.
+    pub(crate) fn admits_a_frame(&mut self, now: Instant) -> bool {
+        self.frames.admit(now)
+    }
+}
+
+/// How many frames **one pane** may spend in a second before its own bucket is empty.
+///
+/// A hook fires a handful of times per turn — a permission request, its receipt, a prompt and a
+/// stop is four — so sixty-four is more than an order of magnitude of slack for a pane that is
+/// working, and it is the number the endpoint's single bucket used to hold for the whole process.
+/// The arithmetic that matters is against the endpoint's ceiling: a pane at this bound spends an
+/// eighth of it, so seven more panes can be flooding at once and an eighth pane's ordinary hook
+/// still gets through.
+pub(crate) const MAX_FRAMES_PER_PANE_PER_SECOND: u32 = 64;
+
+/// A token bucket over one second, per pane.
+///
+/// The same shape as the endpoint's, and deliberately not shared with it: that one is a bound on a
+/// thread and this one is a bound on a *principal*, they are charged at different moments for
+/// different reasons, and a type used by both would be one place to change one of them by
+/// accident.
+///
+/// The window opens on the first frame rather than at construction, so a pane that has been quiet
+/// for an hour gets a whole second's allowance the moment it speaks rather than whatever was left
+/// of a window that started when the pane did.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FrameRate {
+    window_started: Option<Instant>,
+    used: u32,
+}
+
+impl FrameRate {
+    fn admit(&mut self, now: Instant) -> bool {
+        let started = self.window_started.get_or_insert(now);
+        if now.duration_since(*started) >= Duration::from_secs(1) {
+            *started = now;
+            self.used = 0;
+        }
+        if self.used >= MAX_FRAMES_PER_PANE_PER_SECOND {
+            return false;
+        }
+        self.used += 1;
+        true
     }
 }
 

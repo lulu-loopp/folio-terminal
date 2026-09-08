@@ -46,9 +46,20 @@
 //!
 //! 1. **Was it due back?** Handing control to the platform, the thread records
 //!    its own parking: a deadline for `ControlFlow::WaitUntil`, "indefinitely"
-//!    for `ControlFlow::Wait`. Silence inside an indefinite park is never a
-//!    hang — nothing was owed. Silence past a deadline is a wake-up the platform
-//!    promised and did not deliver, which is.
+//!    for `ControlFlow::Wait`. Silence past a deadline is a wake-up the platform
+//!    promised and did not deliver.
+//!
+//!    Silence inside an **indefinite** park is not a hang by arithmetic — nothing
+//!    was owed — and until R2-28 that was the end of it: the arm answered
+//!    quiet and the question below was never put. What that missed is the state
+//!    an indefinite park most often ends in badly: a wake arrives, and the thread
+//!    wedges on the way out of the park before it writes a new pulse. The park
+//!    reason it left behind is then read for ever, and no report is written.
+//!    So the park reason now decides what the *arithmetic* means and no longer
+//!    decides whether to ask: past the threshold the thread is asked, whatever it
+//!    said on its way out, and an idle window answers and is excused. See
+//!    `HangWatch::asked_at_ms` for the cadence that keeps that from being a
+//!    message to an idle program every two seconds.
 //! 2. **Does it answer?** Suspicion is not a verdict. Before a report is
 //!    written the watchdog *asks* — one `WM_NULL` with a bounded wait, see
 //!    [`bt_platform::hang::ask_thread_to_answer`] — and a thread that replies is
@@ -930,6 +941,16 @@ pub struct HangWatch {
     /// the healing line measures from.
     stall_began_ms: Option<u64>,
     stall_station: Station,
+    /// When the window thread was last put a question (R2-28).
+    ///
+    /// It exists for one arm — an indefinite park, where the thread has said
+    /// nothing is owed to it and the silence never ends on its own. A window
+    /// nobody is using is in that state for hours, and asking it on every poll
+    /// would be a message sent to an idle program every two seconds for as long
+    /// as it is left alone. Once per threshold is the cadence instead: enough to
+    /// find a thread that has stopped answering inside one more threshold, and
+    /// far too little to be a cost.
+    asked_at_ms: Option<u64>,
 }
 
 impl HangWatch {
@@ -945,6 +966,7 @@ impl HangWatch {
             started: false,
             stall_began_ms: None,
             stall_station: Station::Starting,
+            asked_at_ms: None,
         }
     }
 
@@ -1001,9 +1023,36 @@ impl HangWatch {
         // **Parking is not silence.** The window thread said, before it let go,
         // whether anything was owed to it; this is where that is spent.
         let overdue_ms = match pulse.park {
-            // Nothing was owed. However long this lasts it is a window nobody
-            // is using, and the 200 reports that said otherwise were all here.
-            Park::Indefinite => return Verdict::Quiet,
+            // **Nothing was owed — and that is a reason not to *convict*, not a
+            // reason not to ask** (R2-28). This arm used to answer `Quiet` here,
+            // before the threshold and before the one question that can tell a
+            // window nobody is using from a window that has stopped working; the
+            // 200 reports that argument was written against were all filed on
+            // arithmetic alone, and `ask` is what replaced the arithmetic.
+            //
+            // The state it was blind to is the one an indefinite park is most
+            // likely to end in: a wake arrives — a shell speaks, a timer fires, a
+            // message is posted — and the thread wedges on the way back out
+            // before it writes a new pulse. Nothing about the pulse changes, so
+            // every later poll reads the same indefinite park, and the report
+            // that would name where it stopped is never written.
+            //
+            // A window that is genuinely idle answers the question and is
+            // `Excused`, silently, which is what an idle Folio is. What that
+            // costs is one message per threshold, and no more — see
+            // [`Self::asked_at_ms`].
+            Park::Indefinite => {
+                if silent_ms < threshold_ms {
+                    return Verdict::Quiet;
+                }
+                if self
+                    .asked_at_ms
+                    .is_some_and(|last| now_ms.saturating_sub(last) < threshold_ms)
+                {
+                    return Verdict::Quiet;
+                }
+                None
+            }
             // Control was never handed over, so the loop coming round is owed by
             // this process to itself and the ordinary threshold applies.
             Park::Running => None,
@@ -1027,6 +1076,7 @@ impl HangWatch {
         // what this process said about itself; this is the one question put to
         // the outside, and a thread that answers it is alive whatever its own
         // loop is doing.
+        self.asked_at_ms = Some(now_ms);
         let answer = ask();
         if answer == Answer::Answered {
             return Verdict::Excused {
@@ -1720,10 +1770,19 @@ mod tests {
     /// Red gate: judge on the turn counter alone — the whole of the first
     /// version — and the assertions below turn into `Hung` in an event-driven
     /// GUI that is working exactly as designed.
+    ///
+    /// **What R2-28 moved is *why* it is never a hang**, not whether. The park
+    /// reason used to answer the question on its own, before the threshold and
+    /// before anything was asked; now it decides what the arithmetic means and
+    /// the window is asked past the threshold like any other. An idle window
+    /// answers — it is sitting in `MsgWaitForMultipleObjectsEx`, which is where a
+    /// sent message is delivered from — so it is `Excused`, which says nothing
+    /// out loud and writes no file. The question is put once per threshold and
+    /// not once per poll, which is the whole of what the old arm was buying.
     #[test]
     fn a_window_parked_with_nothing_owed_is_never_a_hang() {
         let mut watch = HangWatch::new(Duration::from_secs(5), Duration::from_secs(30));
-        let question = Question::silent();
+        let question = Question::answering(Answer::Answered);
         let mut ask = question.ask();
         assert_eq!(
             watch.poll(1_000, pulse(900, 1, Station::Wait), &mut ask),
@@ -1731,18 +1790,84 @@ mod tests {
         );
         // The turn ends, the loop asks for `ControlFlow::Wait`, and nobody
         // types for a quarter of an hour.
-        for now in [3_000, 7_000, 60_000, 900_000] {
+        assert_eq!(
+            watch.poll(3_000, idle(900, 1), &mut ask),
+            Verdict::Quiet,
+            "2.1 seconds of silence is under the threshold, so nothing is asked"
+        );
+        for now in [7_000, 60_000, 900_000] {
             assert_eq!(
                 watch.poll(now, idle(900, 1), &mut ask),
-                Verdict::Quiet,
-                "{now}ms: silence inside an indefinite park is the program working"
+                Verdict::Excused {
+                    silent_ms: now - 900,
+                    station: Station::Parked,
+                },
+                "{now}ms: an idle window answers, and a window that answers is never convicted"
             );
         }
         drop(ask);
         assert_eq!(
             question.asked(),
-            0,
-            "and it costs nothing to know that: an idle window is never even asked"
+            3,
+            "once per threshold and not once per poll: three questions across \
+             fifteen minutes of an idle window"
+        );
+    }
+
+    /// RED (R2-28) — **a thread that wedges on the way out of an indefinite park
+    /// is reported.**
+    ///
+    /// The state the old arm could not see, and the one an indefinite park is
+    /// most likely to end in badly. The thread parks with nothing owed, which is
+    /// correct and ordinary; a wake arrives — a shell speaks, a message is
+    /// posted — and it wedges before it writes a new pulse. Nothing about the
+    /// pulse changes, so the park reason left behind on the way *in* is what
+    /// every later poll reads, and the arm answered `Quiet` to all of them. No
+    /// file, no station, no evidence at all for the one fault this facility
+    /// exists to report.
+    ///
+    /// MUTATION: put `Park::Indefinite => return Verdict::Quiet` back and every
+    /// assertion below reads `Quiet`, for ever.
+    #[test]
+    fn a_wedge_on_the_way_out_of_an_idle_park_is_still_reported() {
+        let mut watch = HangWatch::new(Duration::from_secs(5), Duration::from_secs(30));
+        let question = Question::silent();
+        let mut ask = question.ask();
+        assert_eq!(
+            watch.poll(1_000, pulse(900, 1, Station::Wait), &mut ask),
+            Verdict::Quiet
+        );
+        assert_eq!(
+            watch.poll(3_000, idle(900, 1), &mut ask),
+            Verdict::Quiet,
+            "under the threshold nothing is suspected and nothing is asked"
+        );
+        assert_eq!(
+            watch.poll(7_000, idle(900, 1), &mut ask),
+            Verdict::Hung {
+                silent_ms: 6_100,
+                threshold_ms: 5_000,
+                // Nothing was owed, so there is no deadline to be late for and
+                // no overdue figure to print. The silence is the whole account.
+                overdue_ms: None,
+                answer: Answer::Silent,
+                station: Station::Parked,
+                turn: 1,
+            },
+            "a park that stopped answering is a wedge whatever it said on the way in"
+        );
+        assert_eq!(
+            watch.poll(9_000, idle(900, 1), &mut ask),
+            Verdict::StillHung { silent_ms: 8_100 },
+            "and it is reported once"
+        );
+        // The wake path finishes, eventually.
+        assert_eq!(
+            watch.poll(11_000, idle(10_900, 2), &mut ask),
+            Verdict::Healed {
+                hung_ms: 10_000,
+                station: Station::Parked,
+            }
         );
     }
 

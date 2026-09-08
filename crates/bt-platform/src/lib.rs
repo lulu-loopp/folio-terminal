@@ -1710,28 +1710,65 @@ pub enum ContextMenuState {
     Stale,
 }
 
+/// **What one tree holds**, in the three states it can be in (R2-26).
+///
+/// Two of these used to be one. A verb key with no `command` under it read as
+/// `None` — the same answer as a tree with nothing in it at all — and the
+/// difference between them is the whole of the defect: an install that failed
+/// half way through leaves exactly that key, `context_menu_verdict` called the
+/// set `Absent`, and `Absent` is the one state the launch-time repair is
+/// forbidden to touch. So the broken install was invisible to the only thing
+/// that could have fixed it, for ever.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ContextMenuTree {
+    /// No key, or a key with nothing of ours in it.
+    Absent,
+    /// **The verb key is there and there is no command line under it.**
+    ///
+    /// Not a menu entry anybody can press — the shell needs the `command` child
+    /// to have anything to run — and not nothing, either: the key is ours, it
+    /// was written by a Folio, and nothing but a Folio is going to take it away.
+    Broken,
+    /// The verb is there and this is what it says.
+    Written(ContextMenuShape),
+}
+
+impl ContextMenuTree {
+    /// The shape, where there is one to read.
+    #[must_use]
+    pub const fn shape(&self) -> Option<&ContextMenuShape> {
+        match self {
+            Self::Written(shape) => Some(shape),
+            Self::Absent | Self::Broken => None,
+        }
+    }
+}
+
 /// Read the trees' answers as one verdict.
 ///
-/// `found` is parallel to [`CONTEXT_MENU_TREES`]: `None` where the tree carries
-/// no verb, `Some` with whatever was actually read where it does.
+/// `found` is parallel to [`CONTEXT_MENU_TREES`].
 ///
 /// **A partial set is `Stale` and not `Absent`.** The difference is what happens
 /// next: `Absent` means the switch reads `Off` and the launch leaves the
 /// registry alone, and a machine whose folder verb survived while its background
 /// verb was deleted would then have a switch reading `Off` over a menu entry
 /// that is still there.
+///
+/// **And a [`ContextMenuTree::Broken`] tree is `Stale` for the same reason**
+/// (R2-26): there is a key of ours on the machine, it does nothing, and the one
+/// answer that leads anywhere is the repair.
 #[must_use]
 pub fn context_menu_verdict(
-    found: &[Option<ContextMenuShape>],
+    found: &[ContextMenuTree],
     desired: &ContextMenuShape,
 ) -> ContextMenuState {
-    if found.iter().all(Option::is_none) {
+    if found.iter().all(|tree| *tree == ContextMenuTree::Absent) {
         return ContextMenuState::Absent;
     }
     if found.len() == CONTEXT_MENU_TREES.len()
         && found
             .iter()
-            .all(|shape| shape.as_ref().is_some_and(|shape| shape == desired))
+            .all(|tree| tree.shape().is_some_and(|shape| shape == desired))
     {
         return ContextMenuState::Current;
     }
@@ -1841,18 +1878,21 @@ pub fn explorer_reassert_wanted(named: impl IntoIterator<Item = RegisteredExe>) 
 /// asking for *this* Folio by hand, and it writes.
 #[must_use]
 pub fn context_menu_reassert_wanted(
-    found: &[Option<ContextMenuShape>],
+    found: &[ContextMenuTree],
     desired: &ContextMenuShape,
     on_disk: impl Fn(&std::path::Path) -> bool,
 ) -> bool {
     if context_menu_verdict(found, desired) != ContextMenuState::Stale {
         return false;
     }
+    // A [`ContextMenuTree::Broken`] tree names no executable, so it contributes
+    // nothing to the sequence below and the rule reads it exactly as it reads a
+    // registration of our own: nobody's to lose, and ours to repair (R2-26).
     let ours = context_menu_command_exe(&desired.command).unwrap_or_default();
     explorer_reassert_wanted(
         found
             .iter()
-            .flatten()
+            .filter_map(ContextMenuTree::shape)
             .filter_map(|shape| context_menu_command_exe(&shape.command))
             .map(|exe| RegisteredExe {
                 on_disk: on_disk(std::path::Path::new(exe)),
@@ -6894,11 +6934,11 @@ mod windows_impl {
     /// cannot answer, since a key that is there with no values and a key that is
     /// not there both read as `None`.
     ///
-    /// Behind `cfg(test)` because nothing the product does needs it: the removal
-    /// deletes unconditionally and the read-back reads values. `DirNews::is_armed`'s
-    /// own ruling — a question only the suite asks is a question the shipped
-    /// binary should not carry.
-    #[cfg(test)]
+    /// **It came out from behind `cfg(test)` for R2-26.** The note that stood
+    /// here said nothing the product does needs it, on `DirNews::is_armed`'s
+    /// ruling; what the product now needs it for is
+    /// [`super::ContextMenuTree::Broken`] — a verb key with no command under it
+    /// is precisely a key whose existence no value can report.
     pub(super) fn registry_key_exists(key: &str) -> bool {
         let key_units = wide_null(key);
         let mut opened = HKEY::default();
@@ -6988,15 +7028,40 @@ mod windows_impl {
     /// system's own code out. Half a menu is a state the caller has to be told
     /// about, and the verdict it reads afterwards says so on its own —
     /// [`super::context_menu_verdict`] calls a partial set `Stale`.
+    ///
+    /// **And what this call wrote comes back out** (R2-26). Three values go into
+    /// each tree and the second or the third of them can refuse — a hive that is
+    /// full, a key somebody has denied this user write access to — leaving a verb
+    /// key with a label and no command line: a menu entry the shell will not
+    /// draw, made of keys nothing but a Folio will ever remove. The state that is
+    /// worth leaving behind is one of the two the reader can act on, so this
+    /// leaves *neither half* rather than the half that does nothing.
+    ///
+    /// The rollback is the same delete the removal makes, over the trees this
+    /// call touched. It is best-effort by construction: a machine that refused a
+    /// write may refuse the delete too, and the answer carried out is still the
+    /// **write's** failure, which is the one the caller asked about. That case is
+    /// no longer permanent either — a command-less key now reads as
+    /// [`super::ContextMenuTree::Broken`] and the next launch repairs it.
     pub fn install_context_menu(
         classes: &str,
         shape: &super::ContextMenuShape,
     ) -> Result<(), String> {
+        let mut touched: Vec<String> = Vec::new();
         for tree in super::CONTEXT_MENU_TREES {
             let key = context_menu_key(classes, tree);
-            write_registry_string(&key, "", &shape.label)?;
-            write_registry_string(&key, "Icon", &shape.icon)?;
-            write_registry_string(&format!("{key}\\command"), "", &shape.command)?;
+            touched.push(key.clone());
+            let written = write_registry_string(&key, "", &shape.label)
+                .and_then(|()| write_registry_string(&key, "Icon", &shape.icon))
+                .and_then(|()| {
+                    write_registry_string(&format!("{key}\\command"), "", &shape.command)
+                });
+            if let Err(refusal) = written {
+                for key in &touched {
+                    let _ = delete_registry_tree(key);
+                }
+                return Err(refusal);
+            }
         }
         Ok(())
     }
@@ -7031,21 +7096,33 @@ mod windows_impl {
 
     /// What each tree actually holds, in [`super::CONTEXT_MENU_TREES`]'s order.
     ///
-    /// A tree with no `command` reads as `None` even if a label is somehow
-    /// sitting there: the command line is the whole of what the verb *does*, and
-    /// a key without one is not a menu entry anybody can press.
+    /// A tree with no `command` is [`super::ContextMenuTree::Broken`] and not
+    /// absent (R2-26). The command line is still the whole of what the verb
+    /// *does*, so such a key is not a menu entry anybody can press — but it is a
+    /// key, it is ours, and the difference between "there is nothing here" and
+    /// "there is a broken thing here" is the difference between a launch that
+    /// leaves the registry alone and one that repairs it. The state exists on
+    /// real machines because [`install_context_menu`] can be refused between its
+    /// second value and its third.
+    ///
+    /// **A key is ours by existing**, which is as far as this reading goes: the
+    /// key path is built from this build's own verb name under the class store
+    /// the caller named, so nothing else puts a key there.
     #[must_use]
-    pub fn read_context_menu(classes: &str) -> Vec<Option<super::ContextMenuShape>> {
+    pub fn read_context_menu(classes: &str) -> Vec<super::ContextMenuTree> {
         super::CONTEXT_MENU_TREES
             .iter()
             .map(|tree| {
                 let key = context_menu_key(classes, tree);
-                let command = read_registry_string(&format!("{key}\\command"), "")?;
-                Some(super::ContextMenuShape {
-                    label: read_registry_string(&key, "").unwrap_or_default(),
-                    icon: read_registry_string(&key, "Icon").unwrap_or_default(),
-                    command,
-                })
+                match read_registry_string(&format!("{key}\\command"), "") {
+                    Some(command) => super::ContextMenuTree::Written(super::ContextMenuShape {
+                        label: read_registry_string(&key, "").unwrap_or_default(),
+                        icon: read_registry_string(&key, "Icon").unwrap_or_default(),
+                        command,
+                    }),
+                    None if registry_key_exists(&key) => super::ContextMenuTree::Broken,
+                    None => super::ContextMenuTree::Absent,
+                }
             })
             .collect()
     }
@@ -10220,6 +10297,17 @@ mod file_uri_tests {
 
 #[cfg(test)]
 mod context_menu_tests {
+    use super::ContextMenuTree;
+
+    /// One tree carrying a shape, spelled short because these tables are read
+    /// as tables — see [`super::ContextMenuTree`] for the three states.
+    fn written(shape: ContextMenuShape) -> ContextMenuTree {
+        ContextMenuTree::Written(shape)
+    }
+
+    /// One tree with nothing of ours in it.
+    const ABSENT: ContextMenuTree = ContextMenuTree::Absent;
+
     use super::*;
     use std::path::Path;
 
@@ -10277,13 +10365,13 @@ mod context_menu_tests {
     #[test]
     fn a_verdict_tells_a_fresh_machine_from_one_that_needs_rewriting() {
         let desired = desired();
-        let absent = vec![None, None];
+        let absent = vec![ABSENT, ABSENT];
         assert_eq!(
             context_menu_verdict(&absent, &desired),
             ContextMenuState::Absent
         );
 
-        let current = vec![Some(desired.clone()), Some(desired.clone())];
+        let current = vec![written(desired.clone()), written(desired.clone())];
         assert_eq!(
             context_menu_verdict(&current, &desired),
             ContextMenuState::Current
@@ -10291,13 +10379,13 @@ mod context_menu_tests {
 
         let moved = context_menu_shape(Path::new(r"D:\tools\folio.exe"), "Open Folio here");
         assert_eq!(
-            context_menu_verdict(&[Some(moved.clone()), Some(moved)], &desired),
+            context_menu_verdict(&[written(moved.clone()), written(moved)], &desired),
             ContextMenuState::Stale,
             "an exe that has been moved leaves a menu entry that opens nothing"
         );
 
         assert_eq!(
-            context_menu_verdict(&[Some(desired.clone()), None], &desired),
+            context_menu_verdict(&[written(desired.clone()), ABSENT], &desired),
             ContextMenuState::Stale,
             "half a menu is not no menu"
         );
@@ -10307,12 +10395,12 @@ mod context_menu_tests {
             "\u{5728} Folio \u{4e2d}\u{6253}\u{5f00}",
         );
         assert_eq!(
-            context_menu_verdict(&[Some(renamed.clone()), Some(renamed)], &desired),
+            context_menu_verdict(&[written(renamed.clone()), written(renamed)], &desired),
             ContextMenuState::Stale,
             "the label is part of the shape, so a language change is a rewrite"
         );
 
-        let short = vec![Some(desired.clone())];
+        let short = vec![written(desired.clone())];
         assert_eq!(
             context_menu_verdict(&short, &desired),
             ContextMenuState::Stale,
@@ -10386,7 +10474,7 @@ mod context_menu_tests {
 
         assert!(
             context_menu_reassert_wanted(
-                &[Some(gone.clone()), Some(gone.clone())],
+                &[written(gone.clone()), written(gone.clone())],
                 &desired,
                 exists
             ),
@@ -10394,7 +10482,7 @@ mod context_menu_tests {
         );
         assert!(
             !context_menu_reassert_wanted(
-                &[Some(live.clone()), Some(live.clone())],
+                &[written(live.clone()), written(live.clone())],
                 &desired,
                 exists
             ),
@@ -10407,14 +10495,14 @@ mod context_menu_tests {
         );
         assert!(
             context_menu_reassert_wanted(
-                &[Some(relabelled.clone()), Some(relabelled)],
+                &[written(relabelled.clone()), written(relabelled)],
                 &desired,
                 |_| true
             ),
             "the registration names this very file, so nothing is being taken from anybody"
         );
         assert!(
-            context_menu_reassert_wanted(&[Some(desired.clone()), None], &desired, |_| true),
+            context_menu_reassert_wanted(&[written(desired.clone()), ABSENT], &desired, |_| true),
             "and a half-deleted set of our own trees is still ours to finish"
         );
 
@@ -10423,29 +10511,31 @@ mod context_menu_tests {
             "Open Folio here",
         );
         assert!(
-            context_menu_reassert_wanted(&[Some(shouted.clone()), Some(shouted)], &desired, |_| {
-                true
-            }),
+            context_menu_reassert_wanted(
+                &[written(shouted.clone()), written(shouted)],
+                &desired,
+                |_| { true }
+            ),
             "and a path Windows spells differently is still the same file, so a build \
              repairing its own label is not refused by its own executable existing"
         );
 
         assert!(
-            !context_menu_reassert_wanted(&[Some(live.clone()), None], &desired, exists),
+            !context_menu_reassert_wanted(&[written(live.clone()), ABSENT], &desired, exists),
             "half a registration naming a live install is that install's to finish"
         );
         assert!(
-            !context_menu_reassert_wanted(&[Some(live), Some(gone)], &desired, exists),
+            !context_menu_reassert_wanted(&[written(live), written(gone)], &desired, exists),
             "and so is a registration only half of which still names a file — the \
              install that is there repairs its own other half on its own next launch"
         );
         assert!(
-            !context_menu_reassert_wanted(&[None, None], &desired, |_| false),
+            !context_menu_reassert_wanted(&[ABSENT, ABSENT], &desired, |_| false),
             "a machine that never asked for the verb is never given one"
         );
         assert!(
             !context_menu_reassert_wanted(
-                &[Some(desired.clone()), Some(desired.clone())],
+                &[written(desired.clone()), written(desired.clone())],
                 &desired,
                 |_| false
             ),
@@ -10520,9 +10610,9 @@ mod context_menu_tests {
 mod context_menu_registry_tests {
     use super::windows_impl::{delete_registry_tree, registry_key_exists};
     use super::{
-        CONTEXT_MENU_TREES, CONTEXT_MENU_VERB_KEY, ContextMenuState, context_menu_command_exe,
-        context_menu_reassert_wanted, context_menu_shape, context_menu_verdict,
-        install_context_menu, read_context_menu, remove_context_menu,
+        CONTEXT_MENU_TREES, CONTEXT_MENU_VERB_KEY, ContextMenuState, ContextMenuTree,
+        context_menu_command_exe, context_menu_reassert_wanted, context_menu_shape,
+        context_menu_verdict, install_context_menu, read_context_menu, remove_context_menu,
     };
     use std::path::Path;
 
@@ -10641,7 +10731,9 @@ mod context_menu_registry_tests {
 
         remove_context_menu(&store.0).expect("take it back out");
         assert!(
-            read_context_menu(&store.0).iter().all(Option::is_none),
+            read_context_menu(&store.0)
+                .iter()
+                .all(|tree| *tree == ContextMenuTree::Absent),
             "the verb is gone from every tree"
         );
         for tree in CONTEXT_MENU_TREES {
@@ -10658,6 +10750,60 @@ mod context_menu_registry_tests {
 
         // Removing what is not there is what "make sure it is gone" means.
         remove_context_menu(&store.0).expect("a second removal is not a failure");
+    }
+
+    /// RED (R2-26) — **a verb key with no command line is broken, not absent,
+    /// and the launch repairs it.**
+    ///
+    /// `install_context_menu` writes three values into each tree and can be
+    /// refused between the second and the third — a hive that is full, a key
+    /// somebody has denied this user write access to. What that leaves is exactly
+    /// what this test makes by hand: the verb key, a label on it, and no
+    /// `command` child. The shell will not draw such an entry, and until this row
+    /// was fixed the state reader called it `Absent` — which is the one verdict
+    /// that tells the launch to leave the registry alone. The broken install was
+    /// therefore invisible to the only thing that could repair it, on every
+    /// launch, for ever.
+    ///
+    /// MUTATIONS:
+    /// ① read a command-less key as absent again and the first two assertions go
+    ///    red, and with them the repair;
+    /// ② count a `Broken` tree as naming an executable and the third goes red,
+    ///    which is a launch that refuses to repair its own wreckage because it
+    ///    mistook it for somebody else's install.
+    #[test]
+    fn a_verb_key_with_no_command_is_broken_and_the_launch_repairs_it() {
+        let store = Isolated::new("halfwritten");
+        let shape = context_menu_shape(Path::new(r"C:\tools\folio.exe"), "Open Folio here");
+        install_context_menu(&store.0, &shape).expect("write the verb into an isolated store");
+        // The refused third write, made after the fact: the key and its label
+        // stay, the command line goes.
+        delete_registry_tree(&format!("{}\\command", store.verb(CONTEXT_MENU_TREES[0])))
+            .expect("take the command line back off");
+
+        let found = read_context_menu(&store.0);
+        assert_eq!(
+            found[0],
+            ContextMenuTree::Broken,
+            "a key of ours with nothing to run is not the same thing as no key"
+        );
+        assert_eq!(
+            context_menu_verdict(&found, &shape),
+            ContextMenuState::Stale,
+            "a set with a broken tree in it is a set that wants repairing"
+        );
+        assert!(
+            context_menu_reassert_wanted(&found, &shape, |_| true),
+            "a broken tree names no executable, so it is nobody else's to lose — \
+             the same reading the rule gives a registration of our own"
+        );
+
+        install_context_menu(&store.0, &shape).expect("the repair");
+        assert_eq!(
+            context_menu_verdict(&read_context_menu(&store.0), &shape),
+            ContextMenuState::Current,
+            "one idempotent write puts the whole verb back"
+        );
     }
 
     /// PIN — **the launch's whole decision, read back off a real registry.**
@@ -10719,7 +10865,7 @@ mod context_menu_registry_tests {
         assert_eq!(
             context_menu_command_exe(
                 &read_context_menu(&store.0)[0]
-                    .as_ref()
+                    .shape()
                     .expect("the tree still carries the verb")
                     .command
             ),

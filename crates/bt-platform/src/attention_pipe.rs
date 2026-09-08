@@ -117,13 +117,22 @@ use windows::core::PCWSTR;
 /// be handed.
 pub const MAX_MESSAGE_BYTES: usize = 4096;
 
-/// How many frames one endpoint will take in a second before it starts refusing.
+/// **The backstop, and not the bound that protects one pane from another** (R2-9).
 ///
-/// A hook fires a handful of times per turn. Sixty-four is two orders of magnitude above that and
-/// still low enough that a runaway loop cannot spend the window's time in this thread. Refusal is
+/// This bucket is charged before a frame is parsed, because parsing is the caller's and this
+/// module knows nothing about the grammar — which means it cannot tell one pane's frames from
+/// another's, and a bucket that could not tell them apart was one pane's runaway hook spending
+/// every other pane's allowance. The bound that answers *that* is charged per pane, after the
+/// capability has been checked, by the layer that knows which pane a capability names:
+/// `bt_app::attention::AttentionLedger::admits_a_frame`.
+///
+/// What is left here is the bound on this **thread**: however many panes a window has and however
+/// wrong their hooks are, the listener will not spend more than this many frames' worth of a second
+/// delivering. It is an order of magnitude above the per-pane bound so that it is reached only by a
+/// machine with dozens of runaway panes at once, which is the case it exists for. Refusal is
 /// counted rather than reported: there is nobody on the other end to report it to, and a hook that
 /// is looping is not going to read an error.
-pub const MAX_FRAMES_PER_SECOND: u32 = 64;
+pub const MAX_FRAMES_PER_SECOND: u32 = 512;
 
 /// How long the endpoint will hold one connection open waiting for its one line.
 ///
@@ -337,6 +346,19 @@ use windows::Win32::Security::GetTokenInformation;
 /// hand-closed handle would leak on, and the paths that fail are the ones nobody exercises.
 struct OwnedHandle(HANDLE);
 
+impl OwnedHandle {
+    /// Give the handle up, so that something else can be the thing that closes it.
+    ///
+    /// The one legitimate way out of this type, and it exists so that ownership can be taken
+    /// *before* the first step that can fail and released only once somebody else is holding it —
+    /// which is the order R2-25 found missing at the endpoint's stop event.
+    fn into_raw(self) -> HANDLE {
+        let handle = self.0;
+        std::mem::forget(self);
+        handle
+    }
+}
+
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
         if !self.0.is_invalid() {
@@ -399,10 +421,16 @@ impl AttentionPipe {
         let descriptor = SecurityDescriptor::from_sddl(&sddl)?;
         // Manual-reset: the listener may be anywhere between two waits when `drop` fires, so once
         // this is set it has to stay set.
+        //
+        // **Owned from the moment it exists** (R2-25). `SendHandle` is a `Copy` integer with no
+        // `Drop`, and the spawn below can fail — a stop event held only as one of those would be a
+        // kernel object this process never closes, on the one path nobody exercises. The guard is
+        // released by hand once the thread that shares it is running.
         // SAFETY: a nameless, unowned event.
-        let stop =
-            unsafe { CreateEventW(None, true, false, PCWSTR::null()) }.map_err(win32_io_error)?;
-        let stop = SendHandle(stop);
+        let stop = OwnedHandle(
+            unsafe { CreateEventW(None, true, false, PCWSTR::null()) }.map_err(win32_io_error)?,
+        );
+        let stop_for_thread = SendHandle(stop.0);
         let counts = Arc::new(Mutex::new(PipeCounts::default()));
         let (armed, first_word) = mpsc::channel::<io::Result<()>>();
         let listener = {
@@ -410,8 +438,21 @@ impl AttentionPipe {
             let counts = Arc::clone(&counts);
             std::thread::Builder::new()
                 .name("folio-attention-endpoint".to_owned())
-                .spawn(move || listen(&name, descriptor, stop, &counts, &armed, &deliver))?
+                .spawn(move || {
+                    listen(
+                        &name,
+                        descriptor,
+                        stop_for_thread,
+                        &counts,
+                        &armed,
+                        &deliver,
+                    )
+                })?
         };
+        // The listener is running and shares the event, so the guard's job is over: from here the
+        // handle is closed by whichever of the three arms below is taken, and by `Drop` on the arm
+        // that hands the endpoint back.
+        let stop = SendHandle(stop.into_raw());
         // The thread's first word. A timeout rather than a bare `recv` because a listener that
         // never speaks is a bug in this file, and hanging the launch over it would turn a bug into
         // a product that does not start.
@@ -571,11 +612,27 @@ struct Instance {
     /// outstanding at once, and one shared buffer would be four kernel writes into the same bytes.
     buffer: Vec<u8>,
     phase: Phase,
+    /// **Whether the kernel still owns [`Self::overlapped`] and [`Self::buffer`]** (R2-1).
+    ///
+    /// Set the moment an operation is accepted as pending and cleared only when its completion has
+    /// actually been *observed*. `CancelIoEx` asks for a cancellation; it does not deliver one, and
+    /// until `GetOverlappedResult` says the operation is over, both the structure and the buffer are
+    /// addresses the kernel may still write to.
+    outstanding: bool,
+    /// How many outstanding operations this instance has watched to completion.
+    ///
+    /// Bookkeeping for [`Self::settle`], and the only thing a test can hold the contract by: the
+    /// wait itself is invisible from outside, and a count of the operations that were collected
+    /// before their storage was reused is not.
+    settled: u64,
 }
 
 impl Drop for Instance {
     fn drop(&mut self) {
         cancel(self.pipe.0);
+        // **Before the buffer and the structure are freed** (R2-1): a cancellation that has been
+        // asked for and not yet collected is an operation the kernel may still write through.
+        self.settle();
         // SAFETY: this instance owns the handle; disconnecting an unconnected pipe is a no-op.
         unsafe {
             let _ = DisconnectNamedPipe(self.pipe.0);
@@ -633,14 +690,20 @@ impl Instance {
         if pipe == INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error());
         }
+        // **Owned before the next thing that can fail** (R2-25). `Overlapped::new` creates a kernel
+        // object and can refuse; a handle still living in a local at that moment is a handle the
+        // `?` walks away from.
+        let pipe = OwnedHandle(pipe);
         let event = Overlapped::new()?;
         let overlapped = Box::new(event.overlapped());
         let mut instance = Self {
-            pipe: OwnedHandle(pipe),
+            pipe,
             event,
             overlapped,
             buffer: vec![0u8; MAX_MESSAGE_BYTES],
             phase: Phase::Connecting,
+            outstanding: false,
+            settled: 0,
         };
         let attached = instance.arm_connect()?;
         Ok((instance, attached))
@@ -682,7 +745,10 @@ impl Instance {
             {
                 Ok(true)
             }
-            Err(error) if code(&error) == ERROR_IO_PENDING.0 => Ok(false),
+            Err(error) if code(&error) == ERROR_IO_PENDING.0 => {
+                self.outstanding = true;
+                Ok(false)
+            }
             Err(error) => Err(win32_io_error(error)),
         }
     }
@@ -705,15 +771,28 @@ impl Instance {
         };
         match issued {
             // Synchronous completion still signals the event, because the `OVERLAPPED` names one —
-            // so both answers are the same answer here, and the loop picks it up uniformly.
-            Ok(()) => Posted::Pending,
-            Err(error) if win32_of(&error) == ERROR_IO_PENDING.0 => Posted::Pending,
+            // so both answers are the same answer here, and the loop picks it up uniformly. It is
+            // `outstanding` all the same: a completion that has not been collected with
+            // `GetOverlappedResult` is a completion nothing has observed.
+            Ok(()) => {
+                self.outstanding = true;
+                Posted::Pending
+            }
+            Err(error) if win32_of(&error) == ERROR_IO_PENDING.0 => {
+                self.outstanding = true;
+                Posted::Pending
+            }
             Err(error) if win32_of(&error) == ERROR_MORE_DATA.0 => Posted::Oversize,
             Err(_) => Posted::Failed,
         }
     }
 
     /// Collect a read the event has just reported.
+    ///
+    /// `bWait` is `true` and costs nothing: this runs because the operation's own event came back
+    /// signalled, so the wait is already satisfied. What it buys is that the answer is a
+    /// *collection* rather than a poll — the operation is over when this returns, on every path,
+    /// which is what lets [`Self::outstanding`] be cleared here rather than assumed.
     fn complete_read(&mut self) -> Frame {
         let mut read = 0u32;
         // SAFETY: the instance still owns the handle and the structure the operation was issued on.
@@ -722,9 +801,10 @@ impl Instance {
                 self.pipe.0,
                 &raw const *self.overlapped,
                 &raw mut read,
-                false,
+                true,
             )
         };
+        self.outstanding = false;
         match done {
             Ok(()) => {
                 let read = (read as usize).min(self.buffer.len());
@@ -749,6 +829,7 @@ impl Instance {
     /// starts being *listening*.
     fn recycle(&mut self) -> io::Result<bool> {
         cancel(self.pipe.0);
+        self.settle();
         // SAFETY: this instance owns the handle.
         unsafe {
             let _ = DisconnectNamedPipe(self.pipe.0);
@@ -756,8 +837,55 @@ impl Instance {
         self.arm_connect()
     }
 
+    /// **Wait for the operation the kernel still holds, if it holds one** (R2-1).
+    ///
+    /// `CancelIoEx` is a *request*. It returns as soon as the request is queued, and the operation
+    /// it names finishes some time afterwards — with `ERROR_OPERATION_ABORTED`, or with the bytes
+    /// that had already arrived. Until then the `OVERLAPPED` and the buffer belong to the kernel,
+    /// and this file has two places that would take them back: [`Self::reset`], which overwrites the
+    /// structure for the next operation, and `Drop`, which frees both.
+    ///
+    /// Every issue, cancel, reuse and free happens on the one listener thread, so in practice the
+    /// completion has landed by the time either of those runs. **That is a measurement and not a
+    /// contract**, and the contract is what this makes true: the operation is over when this
+    /// returns, because `GetOverlappedResult` was asked to wait for it and said so.
+    ///
+    /// `bWait` cannot block for long — the operation has already been cancelled by every caller —
+    /// and it cannot block at all where nothing is outstanding, which is what the flag is read for
+    /// first. A wait on an event no operation ever signalled would be the one way this could hang.
+    fn settle(&mut self) {
+        if !self.outstanding {
+            return;
+        }
+        let mut read = 0u32;
+        // SAFETY: the instance owns both the handle and the structure the operation was issued on,
+        // and both outlive this call.
+        let _ = unsafe {
+            windows::Win32::System::IO::GetOverlappedResult(
+                self.pipe.0,
+                &raw const *self.overlapped,
+                &raw mut read,
+                true,
+            )
+        };
+        self.outstanding = false;
+        self.settled += 1;
+    }
+
+    /// How many outstanding operations this instance has watched to completion — see
+    /// [`Self::settle`].
+    #[cfg(test)]
+    const fn settled(&self) -> u64 {
+        self.settled
+    }
+
     /// Clear the event and the structure before reusing them for the next operation.
+    ///
+    /// **After the kernel has given the structure back**, which is [`Self::settle`]'s whole job:
+    /// overwriting an `OVERLAPPED` a pending operation still names is the defect R2-1 reported, and
+    /// the order here is the fix.
     fn reset(&mut self) {
+        self.settle();
         // SAFETY: the event belongs to this instance.
         unsafe {
             let _ = ResetEvent(self.event.handle());
@@ -1018,23 +1146,116 @@ pub fn send_line(endpoint: &str, line: &str) -> io::Result<()> {
             "message longer than the endpoint's frame bound",
         ));
     }
+    // **The name is checked before it is opened** (R2-27). It arrives in this process's own
+    // environment, which anything that spawned this process wrote, and `CreateFileW` opens whatever
+    // it is handed — a device, a share, a pipe belonging to somebody else. What this refuses is not
+    // an impersonation of our endpoint, which a name cannot prevent; it is a *different kind of
+    // object* being written a capability line by a verb that thought it was ringing a doorbell.
+    if !names_an_endpoint(endpoint) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the endpoint variable does not name a Folio attention pipe",
+        ));
+    }
     let wide_name = wide(endpoint);
     let handle = open_client(&wide_name)?;
-    let mut written = 0u32;
-    // SAFETY: the buffer outlives the synchronous call.
-    unsafe {
-        WriteFile(
-            handle.0,
-            Some(line.as_bytes()),
-            Some(&raw mut written),
-            None,
-        )
+    write_bounded(handle.0, line.as_bytes())
+}
+
+/// **Whether a string is the name of one of this build's attention endpoints** — see
+/// [`endpoint_name`], which is the only thing that writes one.
+///
+/// The grammar and not merely the prefix: everything after `folio-attention-` is hexadecimal
+/// digits and the separators between the three segments, so a name that got here cannot carry a
+/// `\` or a `/` and cannot address anything outside the local pipe namespace whatever else is
+/// wrong with it.
+#[must_use]
+pub fn names_an_endpoint(name: &str) -> bool {
+    const PREFIX: &str = r"\\.\pipe\folio-attention-";
+    let Some(tail) = name.strip_prefix(PREFIX) else {
+        return false;
+    };
+    // Long enough that the three segments are all there, short enough that a name is a name.
+    if tail.is_empty() || name.len() > 256 {
+        return false;
     }
-    .map_err(win32_io_error)?;
-    Ok(())
+    tail.bytes()
+        .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+}
+
+/// How long the verb will spend putting one line on the wire.
+///
+/// A named pipe write blocks until the reader takes the bytes, and the reader is a window that may
+/// be painting, resizing or waiting on something of its own. Unbounded, that is a hook — the one
+/// that fires while an agent is holding an approval open — sitting in a syscall for as long as the
+/// window is busy. A quarter of a second is three orders of magnitude more than the endpoint takes
+/// on a machine that is answering at all, and the verb's contract is that it never blocks.
+const WRITE_DEADLINE_MS: u32 = 250;
+
+/// **One line onto the wire, under a deadline** (R2-27).
+///
+/// Overlapped, because that is the only shape in which a write to a pipe has a deadline at all:
+/// `WriteFile` on a synchronous handle returns when the reader has taken the bytes and there is no
+/// argument that says otherwise. A write that runs out of time is cancelled and then **collected**
+/// — the buffer is the caller's stack and the kernel has to be finished with it before this
+/// returns, which is `Instance::settle`'s rule at the other end of the same file.
+fn write_bounded(pipe: HANDLE, bytes: &[u8]) -> io::Result<()> {
+    let event = Overlapped::new()?;
+    let mut overlapped = Box::new(event.overlapped());
+    let mut written = 0u32;
+    // SAFETY: the buffer and the boxed structure both outlive this function, which does not return
+    // until the operation has been collected below.
+    let issued = unsafe {
+        WriteFile(
+            pipe,
+            Some(bytes),
+            Some(&raw mut written),
+            Some(&raw mut *overlapped),
+        )
+    };
+    match issued {
+        Ok(()) => return Ok(()),
+        Err(error) if win32_of(&error) == ERROR_IO_PENDING.0 => {}
+        Err(error) => return Err(win32_io_error(error)),
+    }
+    let handles = [event.handle()];
+    // SAFETY: the event belongs to this call and outlives the wait.
+    let answer = unsafe { WaitForMultipleObjects(&handles, false, WRITE_DEADLINE_MS) };
+    let timed_out = answer != WAIT_OBJECT_0;
+    if timed_out {
+        // SAFETY: cancelling this thread's own outstanding operation on a handle it owns.
+        unsafe {
+            let _ = CancelIoEx(pipe, Some(&raw const *overlapped));
+        }
+    }
+    // SAFETY: the handle and the structure are both still this call's, and `bWait` is what makes
+    // the buffer the caller's again on the way out.
+    let done = unsafe {
+        windows::Win32::System::IO::GetOverlappedResult(
+            pipe,
+            &raw const *overlapped,
+            &raw mut written,
+            true,
+        )
+    };
+    if timed_out {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "the endpoint did not take the line inside the verb's allowance",
+        ));
+    }
+    done.map_err(win32_io_error)
 }
 
 fn open_client(wide_name: &[u16]) -> io::Result<OwnedHandle> {
+    // **What the server may do with this client's token** (R2-27). Without `SECURITY_SQOS_PRESENT`
+    // the level is the driver's default, which for a named pipe is impersonation — a server that
+    // opened this handle could act as the caller against anything on the machine. `IDENTIFICATION`
+    // lets it read who we are, which is all the attention endpoint ever wants, and nothing else.
+    // `FILE_FLAG_OVERLAPPED` is what gives the write below a deadline.
+    let flags = windows::Win32::Storage::FileSystem::SECURITY_SQOS_PRESENT
+        | windows::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION
+        | FILE_FLAG_OVERLAPPED;
     for attempt in 0..2 {
         // SAFETY: `wide_name` is NUL-terminated and outlives the call.
         let handle = unsafe {
@@ -1044,7 +1265,7 @@ fn open_client(wide_name: &[u16]) -> io::Result<OwnedHandle> {
                 FILE_SHARE_MODE(0),
                 None,
                 OPEN_EXISTING,
-                windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0),
+                flags,
                 None,
             )
         };
@@ -1322,6 +1543,54 @@ mod tests {
         assert_eq!(counts.delivered, 12, "{counts:?}");
     }
 
+    /// RED (R2-1) — **a cancelled read is watched to completion before its storage is reused.**
+    ///
+    /// `CancelIoEx` queues a request; it does not deliver one. Until `GetOverlappedResult` says the
+    /// operation is over, the `OVERLAPPED` and the buffer are addresses the kernel may still write
+    /// through — and `recycle` overwrites the first and `Drop` frees both. Every issue, cancel and
+    /// reuse is on the one listener thread, so the completion has landed in practice on every run
+    /// anybody has watched; that is a measurement of this machine and not a promise Windows makes.
+    ///
+    /// MUTATION: take the `settle` out of `recycle` and this reads `0` — the instance armed a new
+    /// connect over a structure it had never taken back.
+    #[test]
+    fn a_cancelled_read_is_collected_before_its_storage_is_reused() {
+        let logon = logon_sid().expect("this test process has an interactive logon SID");
+        let descriptor =
+            SecurityDescriptor::from_sddl(&security_descriptor_sddl(&logon)).expect("a descriptor");
+        let attributes = descriptor.attributes();
+        let name = endpoint_name(&session_tag(&logon), process_id(), unguessable_bits());
+        let wide_name = wide(&name);
+        let (mut instance, attached) =
+            Instance::open(&wide_name, &attributes, true).expect("one instance of a fresh name");
+        assert!(!attached, "nobody has connected to a name just created");
+        // A client that attaches and then says nothing: the read this posts stays with the kernel
+        // for as long as the client holds the connection open, which is what makes the cancellation
+        // below a cancellation of something real.
+        let _client = open_client(&wide_name).expect("connect to our own endpoint");
+        let handles = [instance.event.handle()];
+        // SAFETY: the handle belongs to the instance this thread owns.
+        let answer = unsafe { WaitForMultipleObjects(&handles, false, 5_000) };
+        assert_eq!(answer, WAIT_OBJECT_0, "the connect never completed");
+        assert!(
+            matches!(instance.post_read(), Posted::Pending),
+            "a client that has said nothing leaves the read with the kernel"
+        );
+        assert!(instance.outstanding, "the kernel holds the structure");
+        // The connect this instance was opened with has already been collected by
+        // the read's own `reset`, so what is measured is the *step*: recycling an
+        // instance with a read outstanding collects exactly that read.
+        let before = instance.settled();
+        instance
+            .recycle()
+            .expect("hand the instance back to the pool");
+        assert_eq!(
+            instance.settled(),
+            before + 1,
+            "the cancelled read was never collected, so the structure was reused under it"
+        );
+    }
+
     /// A frame over the bound is refused whole rather than truncated and parsed.
     #[test]
     fn an_oversized_frame_is_dropped_and_counted() {
@@ -1344,6 +1613,47 @@ mod tests {
                 .expect("delivery"),
             "after",
             "an oversized frame must not wedge the endpoint for the next caller"
+        );
+    }
+
+    /// RED (R2-27) — **the verb writes only to a name this build could have written.**
+    ///
+    /// The endpoint's name arrives in `FOLIO_ATTENTION_PIPE`, which is to say in this process's
+    /// environment, which is to say from whatever spawned it. `CreateFileW` opens whatever it is
+    /// handed — another program's pipe, a device, a share — and the line that follows carries a
+    /// capability. What a name check cannot do is stop an impersonation of *our* endpoint; what it
+    /// does do is stop the verb writing that line into an object of an entirely different kind.
+    ///
+    /// MUTATION: take the check out and `send_line` opens `\\.\pipe\srvsvc` and writes to it.
+    #[test]
+    fn the_verb_writes_only_to_a_name_this_build_could_have_written() {
+        assert!(names_an_endpoint(&endpoint_name(
+            &session_tag("S-1-5-5-0-1"),
+            4242,
+            0xfeed_face
+        )));
+        for forged in [
+            r"\\.\pipe\srvsvc",
+            r"\\.\pipe\folio-attention-..\..\srvsvc",
+            r"\\.\pipe\folio-attention-",
+            r"\\server\pipe\folio-attention-0000",
+            r"\\.\PhysicalDrive0",
+            r"C:\Windows\System32\drivers\etc\hosts",
+            "folio-attention-0000",
+            "",
+        ] {
+            assert!(
+                !names_an_endpoint(forged),
+                "{forged:?} is not one of this build's endpoints"
+            );
+        }
+        let answer = send_line(r"\\.\pipe\srvsvc", "cap=0 event=Stop");
+        assert_eq!(
+            answer
+                .expect_err("a name that is not ours is refused")
+                .kind(),
+            io::ErrorKind::InvalidInput,
+            "the refusal happens before anything is opened"
         );
     }
 

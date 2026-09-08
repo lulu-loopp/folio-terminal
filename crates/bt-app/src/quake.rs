@@ -268,6 +268,44 @@ pub(crate) fn hotkey_for(chord: &Chord) -> Option<Hotkey> {
     })
 }
 
+/// **What a press of the summon chord asks for** (R2-23).
+///
+/// Two answers, and the whole of the correction is which fact decides between
+/// them. The rule used to be "on the screen or not": a press while the window
+/// was up put it away, whatever had the keyboard. That is right for the case it
+/// was written for — the reader is typing in the summoned terminal and presses
+/// the key to send it back — and wrong for the one nobody had thought about:
+/// the window is standing there, visible, while the reader is working in
+/// something else. Clicking away does not hide it (the dismiss-on-blur row is
+/// off by default), so this is an ordinary state to be in — and the chord, whose
+/// whole purpose is *bring me the terminal*, made it disappear, and then handed
+/// the keyboard to whatever `give_back` was holding: a third window the reader
+/// had not asked for and was not looking at.
+///
+/// So the question is not "is it on the screen", it is **"am I in it"**.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SummonMove {
+    /// Bring it up and take the keyboard — including when it is already up and
+    /// somebody else has the keyboard, which is the case R2-23 was about.
+    Raise,
+    /// It is up and the reader is in it, so the press means "away".
+    Dismiss,
+}
+
+/// The rule, with no window and no Win32 in it.
+///
+/// `focused` is the summoned window's own focus and not "some window of ours has
+/// the keyboard": a second Folio window in front of the summoned one is exactly
+/// as much *not this window* as somebody's editor is.
+#[must_use]
+pub(crate) const fn summon_move(showing: bool, focused: bool) -> SummonMove {
+    if showing && focused {
+        SummonMove::Dismiss
+    } else {
+        SummonMove::Raise
+    }
+}
+
 /// **Everything this process knows about the summoned terminal**, held on `App`
 /// because a chord is claimed once per *process* and the window it calls up is
 /// one of the windows in the map beside it.
@@ -606,7 +644,8 @@ impl Quake {
 #[cfg(test)]
 mod tests {
     use super::{
-        Quake, SummonScreen, hotkey_for, physical_rect, summoned_rect, typed_into_a_prompt,
+        Quake, SummonMove, SummonScreen, hotkey_for, physical_rect, summon_move, summoned_rect,
+        typed_into_a_prompt,
     };
     use bt_platform::WindowRect;
     use bt_platform::hotkey::HotkeyFault;
@@ -846,6 +885,43 @@ mod tests {
         }
         assert!(!quake.is_showing());
         assert_eq!(quake.hidden(), None, "and nothing is owed at the end of it");
+    }
+
+    /// RED (R2-23) — **the chord raises a window that is up and not focused, and
+    /// hides one that is up and focused.**
+    ///
+    /// The rule used to be "on the screen or not", and the case it was written
+    /// for is the one a person meets most: the reader is typing in the summoned
+    /// terminal, presses the key, and it goes away. The case nobody had thought
+    /// about is the ordinary state that follows clicking somewhere else —
+    /// `Dismiss on blur` is off by default, so the window stays standing while
+    /// the reader works in an editor. Pressing the chord there, meaning *bring me
+    /// the terminal*, made the terminal disappear, and then handed the keyboard
+    /// to whatever `give_back` was still holding: a third window nobody was
+    /// looking at.
+    ///
+    /// MUTATION: judge on `showing` alone and the second assertion answers
+    /// `Dismiss` — a summon that hides the thing it was pressed to reach.
+    #[test]
+    fn the_chord_raises_a_visible_unfocused_summon_and_hides_a_focused_one() {
+        assert_eq!(
+            summon_move(false, false),
+            SummonMove::Raise,
+            "nothing on the screen: the ordinary first press"
+        );
+        assert_eq!(
+            summon_move(true, false),
+            SummonMove::Raise,
+            "standing there while the reader works elsewhere: the press asks for it"
+        );
+        assert_eq!(
+            summon_move(true, true),
+            SummonMove::Dismiss,
+            "up, and the reader is in it: the press means away"
+        );
+        // A window that is hidden cannot hold the keyboard, so this pair says
+        // nothing new — it is asserted so that the rule has no unexamined corner.
+        assert_eq!(summon_move(false, true), SummonMove::Raise);
     }
 
     /// RED (§7.54) — **the settings page speaks only for the refusal a reader can

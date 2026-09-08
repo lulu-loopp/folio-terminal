@@ -20815,6 +20815,23 @@ fn deliver_attention(
             };
             let seat = *seat;
             let at = attention::Site { tab: index, seat };
+            // **The pane's own allowance, charged now that there is a pane** (R2-9). The endpoint
+            // took this line off the wire knowing nothing about who sent it, so the bucket it
+            // charged is one every pane shares and a pane whose hook is looping was spending
+            // everybody's. This is the first line at which the frame has a name — the capability
+            // matched a leaf's own on the line above — so it is where the bound that has a name in
+            // it belongs. `break` and not `continue`: the message named this pane and no other, so
+            // the walk over the remaining tabs has nothing left to find.
+            if !leaf.attention.admits_a_frame(now) {
+                emit_attention_lines(
+                    trace,
+                    vec![format!(
+                        "throttled {at} src={}",
+                        attention_map::PIPE_TRANSPORT
+                    )],
+                );
+                break;
+            }
             if let Some(event) = asks.ledger.clone() {
                 // The clock mirrors the arrival rather than the ledger's answer, and deliberately:
                 // an event the ledger treats as a restatement changes nothing, and re-arming its
@@ -95318,6 +95335,8 @@ impl FolioApp {
         app.quake.reconcile(wanted.as_ref());
         let pressed = app.quake.take_press();
         let blurred = app.quake.take_dismiss();
+        let showing = app.quake.is_showing();
+        let summoned_window = app.quake.window();
         if !pressed && !blurred {
             return Ok(());
         }
@@ -95325,11 +95344,23 @@ impl FolioApp {
         // read first: a reader who pressed the key while the window was up asked
         // for it to go, and the blur that follows is the same sentence arriving
         // twice.
-        if pressed && app.quake.is_showing() {
+        //
+        // **And "up" is not the question — "focused" is** ([`quake::summon_move`],
+        // R2-23). The focus is read off the window itself rather than off the
+        // press, because the press did not arrive at any window of ours: it is a
+        // thread message Windows posted while somebody else had the keyboard, and
+        // whether that somebody was the summoned terminal is exactly what has to
+        // be looked up.
+        let focused = summoned_window.is_some_and(|id| {
+            self.windows
+                .get_mut(id)
+                .is_some_and(|window| window.window_focused)
+        });
+        if pressed && quake::summon_move(showing, focused) == quake::SummonMove::Dismiss {
             return self.dismiss_quake();
         }
         if pressed {
-            if app.quake.window().is_none() {
+            if summoned_window.is_none() {
                 // Queued and spent on the next line, which is
                 // `settle_drag_handover`'s own shape: the press, the window it
                 // needs and the frame it appears in all land in one turn, and no
@@ -97737,7 +97768,7 @@ fn clean_title_capped(text: &str, maximum: usize) -> String {
 /// Hebrew is to draw it, and the bidi *algorithm* does its own work from the
 /// letters themselves — what is removed here is only the set of characters
 /// whose whole purpose is to override that.
-fn is_format_or_bidi_control(character: char) -> bool {
+pub(crate) fn is_format_or_bidi_control(character: char) -> bool {
     matches!(
         character,
         '\u{00ad}'
