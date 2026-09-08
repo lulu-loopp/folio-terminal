@@ -1780,26 +1780,42 @@ fn context_menu_same_exe(left: &str, right: &str) -> bool {
     fold(left) == fold(right)
 }
 
-/// Whether the launch should write the verb again.
+/// One `folio.exe` an existing registration names, read off the disk.
 ///
-/// **The rule, in one sentence: a registration that is not what this build would
-/// write is rewritten, unless one of the trees names a `folio.exe` that is still
-/// on the disk and is not this one.**
+/// The two facts [`explorer_reassert_wanted`] decides from, and neither is
+/// derived from the other: a path with nothing at it is a registration nobody
+/// answers, and a path with a file at it is either this process's own executable
+/// or another copy of Folio that is running perfectly well. Both readings are
+/// the caller's to make — one registration names the file in a `command` value,
+/// the other names the folder that file has to be in — so what crosses into the
+/// rule is the answers rather than the path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegisteredExe {
+    /// Whether that path has a file at it right now.
+    pub on_disk: bool,
+    /// Whether that file is this very executable, however it is spelled.
+    pub ours: bool,
+}
+
+/// **The rule both of Folio's Explorer registrations obey**, over the executables
+/// an existing registration names.
 ///
-/// The first half is [`ContextMenuState::Stale`]'s own repair and everything it
-/// has always carried — a moved binary, a label in a language the reader has
-/// left, a set of trees somebody deleted half of.
+/// One sentence, and it is the one `docs/DESIGN.md` §7.4 wrote for the classic
+/// entry and §7.4a carried onto the package: a registration this build would
+/// write differently is rewritten, **unless it names a `folio.exe` that is still
+/// on the disk and is not this one**.
 ///
-/// The second half is the sentence this function exists for. A `command` naming
-/// a file that is **still there** is a registration another live copy of Folio
-/// is answering: the reader right-clicks, a window opens, and nothing about
-/// their machine is broken. Rewriting it would be this copy taking a menu entry
-/// away from that one, which is a thing no launch has ever been asked to do —
-/// and on a developer's machine it is a build in a scratch folder quietly
-/// becoming the `folio.exe` the right-click menu runs. A `command` naming a file
-/// that is **gone** is the moved binary the repair was written for: nothing
+/// A registration naming a file that is **still there** is one another live copy
+/// of Folio is answering: the reader right-clicks, a window opens, and nothing
+/// about their machine is broken. Rewriting it would be this copy taking a menu
+/// entry away from that one, which is a thing no launch has ever been asked to
+/// do — and on a developer's machine it is a build in a scratch folder quietly
+/// becoming the `folio.exe` the right-click menu runs. A registration naming a
+/// file that is **gone** is the moved binary the repair was written for: nothing
 /// answers that entry, no installer will notice, and this process is a Folio
-/// that can.
+/// that can. A registration naming **this** file is not somebody else's at all —
+/// a label in a language the reader has left, a folder recorded under another
+/// spelling of the same file — and repairing it takes nothing from anybody.
 ///
 /// What it cannot tell apart is a binary that moved from a second copy started
 /// while the first was deleted, because after the move the two are the same
@@ -1807,10 +1823,32 @@ fn context_menu_same_exe(left: &str, right: &str) -> bool {
 /// nothing at it. Existence is the honest boundary, and the side it errs on is
 /// the one that leaves the reader with a menu entry that works.
 ///
+/// **The caller brings its own finding of staleness.** This answers only the
+/// half that is about somebody else's install, because the other half is a
+/// different question in each store — four registry values against what this
+/// build would write, or one folder against this one — and a rule that took both
+/// would have to know about both stores.
+///
+/// An empty sequence answers `true`: a stale registration that names no
+/// executable at all is nobody's to lose.
+#[must_use]
+pub fn explorer_reassert_wanted(named: impl IntoIterator<Item = RegisteredExe>) -> bool {
+    !named.into_iter().any(|exe| exe.on_disk && !exe.ours)
+}
+
+/// Whether the launch should write the verb again — [`explorer_reassert_wanted`]
+/// asked of the classic entry's two trees.
+///
+/// The staleness half is [`ContextMenuState::Stale`]'s own repair and everything
+/// it has always carried: a moved binary, a label in a language the reader has
+/// left, a set of trees somebody deleted half of.
+///
 /// `on_disk` is the only impure part and is handed in, so the rule can be read
-/// and tested without a file system under it. The explicit switch is not routed
-/// through here at all: a press on `Settings ▸ General ▸ Explorer context menu`
-/// is somebody asking for *this* Folio by hand, and it writes.
+/// and tested without a file system under it. Whether a `command` names this
+/// very file is a question about two strings, both of which this build wrote —
+/// see `context_menu_same_exe`. The explicit switch is not routed through here
+/// at all: a press on `Settings ▸ General ▸ Explorer context menu` is somebody
+/// asking for *this* Folio by hand, and it writes.
 #[must_use]
 pub fn context_menu_reassert_wanted(
     found: &[Option<ContextMenuShape>],
@@ -1821,11 +1859,16 @@ pub fn context_menu_reassert_wanted(
         return false;
     }
     let ours = context_menu_command_exe(&desired.command).unwrap_or_default();
-    !found
-        .iter()
-        .flatten()
-        .filter_map(|shape| context_menu_command_exe(&shape.command))
-        .any(|exe| !context_menu_same_exe(exe, ours) && on_disk(std::path::Path::new(exe)))
+    explorer_reassert_wanted(
+        found
+            .iter()
+            .flatten()
+            .filter_map(|shape| context_menu_command_exe(&shape.command))
+            .map(|exe| RegisteredExe {
+                on_disk: on_disk(std::path::Path::new(exe)),
+                ours: context_menu_same_exe(exe, ours),
+            }),
+    )
 }
 
 /// The extensions this product will decode a picture from, lower case.

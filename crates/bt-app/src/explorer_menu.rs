@@ -80,6 +80,19 @@
 //! that way through a hundred launches. The repair needs [`PACKAGE_FILE_NAME`]
 //! beside the executable; where the file did not come along with the move, the
 //! row says so and there is nothing to press.
+//!
+//! # And the folder nobody moved (user ruling 2026-09-07)
+//!
+//! "Points at another folder" is also true of a folder another **live** copy of
+//! Folio is running out of, and re-registering that one is not a repair: it is
+//! this process taking the first page's item off a program that is answering it.
+//! The rule is [`reassert_wanted`]'s, which is `context_menu::reassert`'s own —
+//! `bt_platform::explorer_reassert_wanted`, shared by the two — and it turns on
+//! the `folio.exe` the other folder holds: gone, or this very file, and the
+//! launch registers; a live stranger, and it does not, leaving the row to say
+//! where the item is instead ([`description_for`]). The explicit switch is not
+//! routed through it, for the reason the classic entry's is not: a press names
+//! *this* Folio by hand.
 
 use std::{
     path::{Path, PathBuf},
@@ -533,14 +546,14 @@ fn read_state() -> PackageState {
 #[must_use]
 pub fn classify(full_name: String, external: Option<PathBuf>, here: Option<&Path>) -> PackageState {
     match (external, here) {
-        (Some(at), Some(here)) if !same_folder(&at, here) => {
+        (Some(at), Some(here)) if !same_path(&at, here) => {
             PackageState::Elsewhere { full_name, at }
         }
         _ => PackageState::Current { full_name },
     }
 }
 
-/// Whether two paths name the same folder.
+/// Whether two paths name the same thing on the disk.
 ///
 /// **Compared after canonicalisation where the operating system will do it**, and
 /// case-insensitively as a fallback, because the two strings come from different
@@ -549,8 +562,14 @@ pub fn classify(full_name: String, external: Option<PathBuf>, here: Option<&Path
 /// `C:` against `c:`, and over an 8.3 short name in a path somebody registered
 /// from a console. Reading any of those as "the folder moved" would re-register
 /// the package on every launch.
+///
+/// Asked of a folder by [`classify`] and of a file by [`reassert_wanted`], and
+/// it is one function because it is one question: the operating system resolves
+/// a link and a short name for either kind, and where it will not answer — the
+/// path is gone — folding the spelling is all anybody can honestly do for either
+/// kind.
 #[must_use]
-pub fn same_folder(left: &Path, right: &Path) -> bool {
+pub fn same_path(left: &Path, right: &Path) -> bool {
     let canonical = |path: &Path| std::fs::canonicalize(path).ok();
     if let (Some(left), Some(right)) = (canonical(left), canonical(right)) {
         return left == right;
@@ -561,6 +580,71 @@ pub fn same_folder(left: &Path, right: &Path) -> bool {
             .to_lowercase()
     };
     trim(left) == trim(right)
+}
+
+/// The `folio.exe` a registration's external location has to hold.
+///
+/// The manifest names the program (`bt_platform::msix::PACKAGE_EXECUTABLE`) and
+/// the registration names the folder, so the file Windows would run for that
+/// menu item is the two of them joined — and whether it is still there is the
+/// whole of [`reassert_wanted`]'s question.
+#[must_use]
+pub fn package_exe_in(folder: &Path) -> PathBuf {
+    folder.join(msix::PACKAGE_EXECUTABLE)
+}
+
+/// Whether the launch should register the package for this folder — the classic
+/// entry's rule on this heavier mechanism (user ruling 2026-09-07).
+///
+/// The staleness half is [`PackageState::Elsewhere`] and nothing else: a
+/// registration that already serves this folder needs no repair, and a machine
+/// with **no** package registered is never given one by a launch (the module
+/// header's own rule, and the reason `Absent` is not a state this function acts
+/// on). `Unknown` and `Unsupported` are not findings at all.
+///
+/// The other half is `bt_platform::explorer_reassert_wanted`, shared word for
+/// word with `crate::context_menu`: the folder over there is re-registered away
+/// from only when it no longer holds a `folio.exe`, or when the `folio.exe` it
+/// holds is this very file. A folder that still has a live Folio in it is
+/// another install's registration, doing for its reader exactly what this one
+/// does for ours, and a launch does not take a first-page menu item off it. That
+/// reader would find the item still on the page, opening a window in a copy of
+/// Folio they did not start — which is worse here than in the classic entry,
+/// because the page Windows curates is the one they trust.
+///
+/// **The folder comparison of [`classify`] does not answer this.** They are two
+/// questions about two different paths: a folder that was deleted and made again
+/// is not the folder that was registered, while the `folio.exe` in it may be
+/// this very file reached through a link. So the file is asked about on its own,
+/// with the same [`same_path`] the folder was asked with.
+///
+/// Both impure answers are handed in, so the rule can be read and tested without
+/// a file system under it. The explicit switch is not routed through here: a
+/// press on the Explorer row is somebody asking for *this* Folio by hand, and
+/// [`request`] registers.
+#[must_use]
+pub fn reassert_wanted(
+    state: &PackageState,
+    on_disk: impl Fn(&Path) -> bool,
+    ours: impl Fn(&Path) -> bool,
+) -> bool {
+    let PackageState::Elsewhere { at, .. } = state else {
+        return false;
+    };
+    let there = package_exe_in(at);
+    bt_platform::explorer_reassert_wanted([bt_platform::RegisteredExe {
+        on_disk: on_disk(&there),
+        ours: ours(&there),
+    }])
+}
+
+/// Whether a path names the executable this process is running.
+///
+/// `current_exe` failing answers `false`, which is the side that leaves another
+/// install's registration alone: a process that cannot say which file it is has
+/// no business claiming to be the one over there.
+fn is_this_executable(exe: &Path) -> bool {
+    std::env::current_exe().is_ok_and(|ours| same_path(exe, &ours))
 }
 
 /// Ask the machine, and repair a registration that names another folder.
@@ -575,8 +659,9 @@ pub fn begin_probe() {
     std::thread::spawn(|| {
         let state = read_state();
         // The repair, and the only place this module writes without being
-        // pressed. `Absent` is left alone on purpose — see the module header.
-        if let PackageState::Elsewhere { .. } = &state
+        // pressed. Which registrations it may take over is [`reassert_wanted`];
+        // `Absent` is left alone on purpose — see the module header.
+        if reassert_wanted(&state, |exe| exe.is_file(), is_this_executable)
             && let Some(package) = package_file()
             && let Some(here) = package.parent()
         {
@@ -818,18 +903,112 @@ mod tests {
     /// red.
     #[test]
     fn the_same_folder_spelled_two_ways_is_one_folder() {
-        assert!(same_folder(
+        assert!(same_path(
             Path::new(r"C:\Tools\folio"),
             Path::new(r"c:\tools\folio\")
         ));
-        assert!(same_folder(
+        assert!(same_path(
             Path::new(r"D:\Developer\folio\"),
             Path::new(r"D:\Developer\folio")
         ));
-        assert!(!same_folder(
+        assert!(!same_path(
             Path::new(r"C:\Tools\folio"),
             Path::new(r"C:\Tools\folio2")
         ));
+    }
+
+    /// RED (user ruling 2026-09-07) — **a package registered for a folder that
+    /// still holds a live Folio is left alone; one whose Folio is gone, or whose
+    /// Folio is this very file, is registered here.**
+    ///
+    /// The classic entry's rule (`bt_platform::context_menu_reassert_wanted`,
+    /// DESIGN §7.4) asked of the package, which until this ruling re-registered
+    /// on any [`PackageState::Elsewhere`] at all. The state is the same shape as
+    /// the classic entry's `Stale` and the mistake would have been the same one:
+    /// a second copy of Folio — a build run once out of a scratch folder, a copy
+    /// somebody kept in `Downloads` — quietly becoming the program the first
+    /// page's item starts, for a reader who never asked it to and whose own
+    /// install is standing right where they left it. The first page is the worse
+    /// place to make that mistake, because it is the page Windows curates.
+    ///
+    /// The two folders are asked about as **files**: the manifest names
+    /// `folio.exe` at the external location, so "is another Folio still over
+    /// there" has a spelling. The one that is this very file spelled differently
+    /// is the moved install — the folder is not this folder, and the program in
+    /// it is this program, reached through a link or through a name the file
+    /// system resolves — and taking that registration is taking nothing from
+    /// anybody.
+    ///
+    /// MUTATIONS:
+    /// ① drop the disk check and answer on `Elsewhere` alone — the live stranger
+    ///    goes red, which is this process helping itself to another install's
+    ///    item on the first page;
+    /// ② drop the same-file test and the moved install goes red, so a Folio that
+    ///    was moved would be refused by its own executable existing;
+    /// ③ compare the two paths byte for byte rather than the way Windows
+    ///    compares them and the moved install goes red for the same reason;
+    /// ④ act on `Absent` as well and its assertion goes red, which is a launch
+    ///    registering a package on a machine that never asked for one.
+    #[test]
+    fn the_launch_takes_over_a_dead_registration_and_leaves_a_live_one_standing() {
+        let elsewhere = |at: &str| PackageState::Elsewhere {
+            full_name: "WeiyiShi.Folio_0.2.2.0_x64__abc".to_owned(),
+            at: PathBuf::from(at),
+        };
+        let here = PathBuf::from(r"C:\Tools\folio\folio.exe");
+        let ours = |exe: &Path| same_path(exe, &here);
+
+        assert!(
+            reassert_wanted(&elsewhere(r"D:\deleted\folio"), |_| false, ours),
+            "nothing stands at the folder that was registered, so this Folio is \
+             the only one that can answer the item"
+        );
+        assert!(
+            reassert_wanted(&elsewhere(r"c:\TOOLS\FOLIO\"), |_| true, ours),
+            "the folder over there holds this very file, spelled the way Windows \
+             also spells it, so the registration is this install's own"
+        );
+        assert!(
+            !reassert_wanted(&elsewhere(r"D:\installed\folio"), |_| true, ours),
+            "another live Folio is answering that item and a launch does not take \
+             it away"
+        );
+
+        assert!(
+            !reassert_wanted(
+                &PackageState::Current {
+                    full_name: "WeiyiShi.Folio_0.2.2.0_x64__abc".to_owned(),
+                },
+                |_| false,
+                ours
+            ),
+            "a registration that already serves this folder has nothing to repair"
+        );
+        assert!(
+            !reassert_wanted(&PackageState::Absent, |_| false, ours),
+            "and a machine that never asked for the package is never given one"
+        );
+        for state in [PackageState::Unknown, PackageState::Unsupported] {
+            assert!(
+                !reassert_wanted(&state, |_| false, ours),
+                "{state:?} is not a finding about any registration"
+            );
+        }
+    }
+
+    /// PIN — **the file the rule asks about is the one the manifest names.**
+    ///
+    /// A registration names a folder and Windows runs a program out of it; the
+    /// question `reassert_wanted` puts to the disk is about that program, so the
+    /// two names have to be the same name. `bt_platform::msix` pins it against
+    /// `AppxManifest.xml`; this pins that this module asks for it there.
+    #[test]
+    fn the_program_looked_for_over_there_is_the_one_the_package_declares() {
+        assert_eq!(
+            package_exe_in(Path::new(r"C:\Tools\folio")),
+            PathBuf::from(r"C:\Tools\folio").join(msix::PACKAGE_EXECUTABLE)
+        );
+        assert_eq!(msix::PACKAGE_EXECUTABLE, "folio.exe");
     }
 
     /// RED (user ruling 2026-09-07) — **the four states the two switches could
