@@ -578,10 +578,15 @@ band 退役之后,图片只剩 hover 一条通路——而 hover 的前提是**�
   所以它不长 band,只答 hover。
   - `file_uri_to_local_image_path(uri)`(`crates/bt-term/src/inline_image.rs`)是唯一裁决点:
     scheme 大小写无关;authority 必须为空或 `localhost`(`file://host/share/a.png` 这类远程共享
-    直接拒);query/fragment 不属于路径;**逐 segment** 百分号解码后以 `\` 连接(`%2F` 因此是某个
-    文件名里的字面斜杠而非分隔符,符合 RFC 3986,且这种名字自然不存在);随后过**与打印路径完全
-    相同**的准入门 `is_admissible_local_image_path`(盘符绝对 + 扩展名白名单),存在性/大小/解码
-    照旧只在 worker。没有任何形状因此获得别的形状没有的特权。
+    直接拒);query/fragment 不属于路径;**逐 segment** 百分号解码后以 `\` 连接;**解出分隔符的
+    转义一律拒**——`%2F`、`%5C` 落在哪个 segment 里,这条 URI 就不指任何文件(9f5c4d0 修订本条,
+    原文按 RFC 3986 把 `%2F` 读作某个文件名里的字面斜杠,并说这种名字自然不存在)。理由不在
+    文件系统而在 Windows 自己:两个字符都是分隔符,`file:///D:/a%2Fb.png` 于是落在 `D:\a` 里的
+    `b.png` 上,与这条 URI 写出来的那份是两份文件;路径开头连着几个 `%5C` 更会拼回
+    `\\host\share` 这条网络共享,而上面那道 authority 门只看 authority,放它过去。URI 里
+    **没转义**的反斜杠照收(`file:///D:\Demo\notes`,真实 shell 就这么打),被拒的只有转义
+    这一种写法。随后过**与打印路径完全相同**的准入门 `is_admissible_local_image_path`(盘符绝对
+    + 扩展名白名单),存在性/大小/解码照旧只在 worker。没有任何形状因此获得别的形状没有的特权。
   - 两个来源、一个接缝:行文本里的裸 URI 由 `detect_local_image_uri_candidates` 词法扫出
     (URI 按 RFC 3986 是 ASCII,故全角 `）` 天然收尾,尾随句读按 `bt_transcript::detect_http_urls`
     的同一条规则释放),与原生路径合流于 `detect_peek_image_candidates`,`local_image_path_probe_at`
