@@ -168,7 +168,7 @@ R2-1, R2-2, R2-3, R2-4, R2-5, R2-6, R2-7, R2-8, R2-9, R2-11, R2-14, R2-15, R2-17
 
 Why together: each row is a Win32 or COM contract the code half keeps, on ownership order, on waiting for what it cancelled, on bounding what it joins, on validating what the OS returned, or on deciding what another process may make it do. The design is to make each contract explicit at its one call site: release before uninitialise, close before drop, bound every wait, validate every length and pitch, and treat a message or a claim as authoritative only when Folio itself registered it. R2-14, R2-15, R2-21 and R2-27 are not in this ticket's original list and sit here as the nearest home.
 
-### T8 `fix/persisted-state` (in flight)
+### T8 `fix/persisted-state` (merged, `663a46c`; second instance = session-local named mutex on the data directory, the second process keeps its window and writes nothing; left open: R4-6's spoken half, `storage_dir()` as a process-wide OnceLock keeps several readers out of tests, the rejected-bytes copy is taken at startup only)
 
 R1-24, R4-1, R4-2, R4-3, R4-4, R4-5, R4-6, R4-7, R4-8, R4-9, R4-10, R4-11, R4-12, R4-13, R4-14.
 
