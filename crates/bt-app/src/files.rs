@@ -26,7 +26,7 @@
 //! to agree.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -1023,6 +1023,25 @@ pub fn compare_entries(a: &DirEntry, b: &DirEntry) -> Ordering {
         .then_with(|| a.name.cmp(&b.name))
 }
 
+/// **Display order is the entry's own order**, so that a heap can be kept in it.
+///
+/// [`compare_entries`] was already total and already the one answer to "which of
+/// these two rows comes first"; naming it as `Ord` is what lets
+/// [`read_directory`] keep the best [`DIR_ENTRY_CAP`] as it walks instead of
+/// collecting the whole directory and sorting it (review row R1-25, adversarial
+/// review 2026-09-08). There is no second order for a `DirEntry` to be in.
+impl Ord for DirEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        compare_entries(self, other)
+    }
+}
+
+impl PartialOrd for DirEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 fn fold_case(name: &str) -> String {
     name.to_lowercase()
 }
@@ -1055,7 +1074,17 @@ pub fn read_directory(path: &Path) -> DirOutcome {
         Ok(reader) => reader,
         Err(error) => return DirOutcome::Failed(DirFault::from_io(&error)),
     };
-    let mut entries = Vec::new();
+    // **The cap is a bound and not a trim** (review row R1-25, adversarial
+    // review 2026-09-08). What stood here collected every name in the directory
+    // into one vector, sorted all of them, and only then cut the list to the
+    // cap — so a folder of a hundred thousand names cost a hundred thousand
+    // `String`s and an `n log n` sort on the files worker to draw two thousand
+    // rows. A max-heap held at the cap keeps the best [`DIR_ENTRY_CAP`] in
+    // display order as the walk goes, so the peak allocation *is* the cap
+    // whatever the directory turns out to hold, and the answer is the same
+    // answer: the first `DIR_ENTRY_CAP` under [`compare_entries`].
+    let mut best: BinaryHeap<DirEntry> = BinaryHeap::with_capacity(DIR_ENTRY_CAP);
+    let mut seen = 0_usize;
     for entry in reader {
         // A name that vanishes between the directory being opened and being
         // walked is a name that is no longer in the directory, which is exactly
@@ -1091,15 +1120,25 @@ pub fn read_directory(path: &Path) -> DirOutcome {
         } else {
             file_type.is_dir()
         };
-        entries.push(DirEntry {
+        seen += 1;
+        let candidate = DirEntry {
             name,
             is_dir,
             is_symlink,
-        });
+        };
+        if best.len() < DIR_ENTRY_CAP {
+            best.push(candidate);
+        } else if let Some(mut last) = best.peek_mut()
+            && candidate < *last
+        {
+            // The heap's top is the row that would come *last* on screen, so a
+            // name that sorts before it takes its place and the heap never grows
+            // past the cap by even one entry.
+            *last = candidate;
+        }
     }
-    entries.sort_by(compare_entries);
-    let omitted = entries.len().saturating_sub(DIR_ENTRY_CAP);
-    entries.truncate(DIR_ENTRY_CAP);
+    let omitted = seen.saturating_sub(best.len());
+    let entries = best.into_sorted_vec();
     DirOutcome::Listed(DirListing {
         entries,
         omitted,
@@ -1700,6 +1739,62 @@ mod tests {
             names,
             vec![".dotfile", "visible.txt"],
             "the dotfile stays and the two the platform marked are gone"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED — **a huge directory costs the cap and not the directory** (review
+    /// row R1-25, adversarial review 2026-09-08).
+    ///
+    /// RED EVIDENCE (2026-09-08), before the bounded selection:
+    ///
+    /// ```text
+    /// the peak the reader allocates is the cap: it held room for 16000 entries
+    /// ```
+    ///
+    /// The cap was applied by `truncate` *after* every name in the directory had
+    /// been collected into one vector and that whole vector sorted — so a folder
+    /// of a hundred thousand names, which is what a package cache or a build
+    /// output directory is, cost a hundred thousand `String`s and an `n log n`
+    /// sort on the files worker to show two thousand rows. A cap that is only
+    /// applied at the end is not a bound on anything.
+    ///
+    /// The capacity is the assertion because it is the peak: a selection that
+    /// keeps the best [`DIR_ENTRY_CAP`] as it goes never holds room for more
+    /// than that, whatever the directory turns out to be.
+    ///
+    /// MUTATION: collect into a `Vec`, sort and truncate, and the capacity goes
+    /// back to the directory's own size.
+    #[test]
+    fn a_directory_far_past_the_cap_is_read_at_the_cap() {
+        let dir = std::env::temp_dir().join(format!("bt-files-many-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Ten thousand names, written so that sort order and creation order
+        // disagree: `9999` sorts before `1000`, so a reader that kept the first
+        // `DIR_ENTRY_CAP` it met rather than the first in order would be caught
+        // by the names below.
+        for index in 0..10_000_u32 {
+            std::fs::write(dir.join(format!("{index:05}.txt")), b"x").unwrap();
+        }
+        let DirOutcome::Listed(listing) = read_directory(&dir) else {
+            panic!("a directory that exists lists");
+        };
+        assert_eq!(listing.entries.len(), DIR_ENTRY_CAP);
+        assert_eq!(listing.omitted, 10_000 - DIR_ENTRY_CAP);
+        assert_eq!(
+            listing.entries.first().map(|entry| entry.name.as_str()),
+            Some("00000.txt"),
+            "and they are the first in sort order, not the first the disk handed over",
+        );
+        assert_eq!(
+            listing.entries.last().map(|entry| entry.name.as_str()),
+            Some(format!("{:05}.txt", DIR_ENTRY_CAP - 1).as_str()),
+        );
+        assert!(
+            listing.entries.capacity() <= DIR_ENTRY_CAP,
+            "the peak the reader allocates is the cap: it held room for {} entries",
+            listing.entries.capacity(),
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

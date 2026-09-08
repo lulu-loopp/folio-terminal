@@ -42,7 +42,7 @@
 //! every hundred milliseconds, is a build that plays every animation at the
 //! wrong speed and most of them at a speed that changes with the window's load.
 //!
-//! # And a bound, because a GIF may be enormous
+//! # And three bounds, because a GIF may be enormous
 //!
 //! Frames are held decoded, so the cost is `frames × width × height × 4` and a
 //! reader can hover something pathological — a thousand-frame screen capture at
@@ -50,13 +50,23 @@
 //! it the file is shown as its **first frame, still**, which is exactly what
 //! this window did for every animation until today and is a good deal better
 //! than a decode that takes the process with it.
+//!
+//! That ceiling counts what is *kept*, and on its own it was not enough (review
+//! row R1-7, adversarial review 2026-09-08): a file is read before it is
+//! decoded and a frame is allocated before it is counted, so a hover could
+//! spend both without ever reaching the total. The other two bounds stand in
+//! front of it. [`MAX_ANIMATION_FILE_BYTES`] is how much of the file is read at
+//! all, and [`MAX_ANIMATION_SIDE_PX`] goes onto the decoder as an `image`
+//! `Limits` before the first frame is pulled, so a header declaring a
+//! 65535-square logical screen is refused by the descriptor rather than by the
+//! seventeen gigabytes it asked for.
 
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use image::codecs::gif::GifDecoder;
-use image::{AnimationDecoder, ImageFormat, ImageReader};
+use image::{AnimationDecoder, ImageDecoder, ImageFormat, ImageReader, Limits};
 
 /// **How many bytes of decoded frames one animation may hold.**
 ///
@@ -72,6 +82,28 @@ use image::{AnimationDecoder, ImageFormat, ImageReader};
 /// capture somebody would rather scrub than watch in a hover card, and the
 /// second is every spinner ever made.
 pub const MAX_ANIMATION_RGBA_BYTES: u64 = 256 * 1024 * 1024;
+
+/// **How many bytes of a file this window will read looking for frames**
+/// (review row R1-7, adversarial review 2026-09-08).
+///
+/// `bt_term::MAX_INLINE_IMAGE_BYTES`, and it is that number rather than one of
+/// this module's own because the two lanes are looking at the same files: the
+/// picture lane has refused a local image past this cap since it was written, so
+/// a `.gif` over it cannot be *drawn* by this window at all. Reading it whole to
+/// find frames for a picture that will never appear was the plainest form of the
+/// defect — one hover, one `std::fs::read`, no ceiling.
+pub const MAX_ANIMATION_FILE_BYTES: u64 = bt_term::MAX_INLINE_IMAGE_BYTES as u64;
+
+/// **The largest side this window will decode an animation's frames at.**
+///
+/// Every frame goes to the GPU through [`bt_render::VideoLayer`]'s one texture,
+/// created at the frame's own size, and `wgpu::Limits::default()` puts the
+/// portability floor for `max_texture_dimension_2d` at 8192 — so a frame wider
+/// or taller than this is one no adapter this window is willing to require could
+/// draw. Refusing it at the decoder rather than at the upload is the difference
+/// between a picture that does not move and a gigabyte allocated to find that
+/// out.
+pub const MAX_ANIMATION_SIDE_PX: u32 = 8192;
 
 /// **The shortest delay a frame is honoured at.**
 ///
@@ -164,7 +196,27 @@ pub fn decode(path: &std::path::Path) -> Result<Animation, AnimationRefusal> {
     if !path_names_an_animation(path) {
         return Err(AnimationRefusal::NotAnAnimation);
     }
-    let bytes = std::fs::read(path).map_err(|_| AnimationRefusal::Undecodable)?;
+    // **The length is asked of the handle the bytes are then read through, and
+    // the read is bounded by the cap rather than by that length** — the
+    // discipline `pdf::read_capped` states in the same words, for the same
+    // reason: a file being appended to between the two calls is a file this
+    // window may not be handed unboundedly much of.
+    let mut file = std::fs::File::open(path).map_err(|_| AnimationRefusal::Undecodable)?;
+    let length = file
+        .metadata()
+        .map_err(|_| AnimationRefusal::Undecodable)?
+        .len();
+    if length > MAX_ANIMATION_FILE_BYTES {
+        return Err(AnimationRefusal::TooLarge);
+    }
+    let mut bytes = Vec::with_capacity(length as usize);
+    (&mut file)
+        .take(MAX_ANIMATION_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| AnimationRefusal::Undecodable)?;
+    if bytes.len() as u64 > MAX_ANIMATION_FILE_BYTES {
+        return Err(AnimationRefusal::TooLarge);
+    }
     decode_bytes(&bytes)
 }
 
@@ -180,7 +232,22 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<Animation, AnimationRefusal> {
     if format != Some(ImageFormat::Gif) {
         return Err(AnimationRefusal::NotAnAnimation);
     }
-    let decoder = GifDecoder::new(Cursor::new(bytes)).map_err(|_| AnimationRefusal::Undecodable)?;
+    let mut decoder =
+        GifDecoder::new(Cursor::new(bytes)).map_err(|_| AnimationRefusal::Undecodable)?;
+    // **The limits go on before a frame is pulled** (review row R1-7,
+    // adversarial review 2026-09-08). `GifDecoder::new` opens every file with
+    // `Limits::no_limits()`, and the frame iterator's first act is to allocate
+    // the whole *declared* logical screen — so the total counted below, which is
+    // the only ceiling this module used to have, was a refusal to keep pixels
+    // that had already been made. `set_limits` reads the logical screen
+    // descriptor and fails here, with no buffer anywhere.
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_ANIMATION_SIDE_PX);
+    limits.max_image_height = Some(MAX_ANIMATION_SIDE_PX);
+    limits.max_alloc = Some(MAX_ANIMATION_RGBA_BYTES);
+    decoder
+        .set_limits(limits)
+        .map_err(|_| AnimationRefusal::TooLarge)?;
     let mut frames = Vec::new();
     let mut width_px = 0_u32;
     let mut height_px = 0_u32;
@@ -231,6 +298,16 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<Animation, AnimationRefusal> {
 }
 
 impl Animation {
+    /// **How many bytes of decoded frames this animation is holding** — what the
+    /// window's own ceiling over every animation at once is counted against.
+    #[must_use]
+    pub fn bytes_held(&self) -> u64 {
+        self.frames
+            .iter()
+            .map(|frame| frame.bgra.len() as u64)
+            .sum()
+    }
+
     /// The pure constructor — what a test builds without a file.
     #[must_use]
     pub fn of(
@@ -318,6 +395,152 @@ mod tests {
                 .join("../../tests/assets/folio-anim-test.gif"),
         )
         .expect("the animation fixture is in tests/assets")
+    }
+
+    /// **A GIF that declares a logical screen of `width` × `height` and holds
+    /// one 1×1 frame** — nine bytes of picture behind a header that claims a
+    /// rectangle of any size at all.
+    ///
+    /// It is written out by hand rather than encoded, because the whole point of
+    /// it is a header that disagrees with its own contents, and no encoder will
+    /// write one.
+    fn a_gif_declaring(width: u16, height: u16) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GIF89a");
+        // Logical screen descriptor: the two numbers under test, then a packed
+        // byte saying "a global colour table of two entries follows".
+        bytes.extend_from_slice(&width.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes.extend_from_slice(&[0x80, 0x00, 0x00]);
+        bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF]);
+        // One image, 1×1, at the origin, with no local colour table.
+        bytes.push(0x2C);
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes.extend_from_slice(&[1, 0, 1, 0]);
+        bytes.push(0x00);
+        // LZW at two bits: clear (4), the single pixel (0), end of information
+        // (5), packed three bits at a time from the low end.
+        bytes.push(0x02);
+        bytes.extend_from_slice(&[0x02, 0x44, 0x01, 0x00]);
+        bytes.push(0x3B);
+        bytes
+    }
+
+    /// RED — **a header cannot ask this window for gigabytes** (review row
+    /// R1-7, adversarial review 2026-09-08).
+    ///
+    /// RED EVIDENCE (2026-09-08), before the limits — the test harness process
+    /// did not survive to print an assertion:
+    ///
+    /// ```text
+    /// test animation::tests::a_declared_screen_this_window_will_not_hold_is_refused_before_it_is_allocated
+    /// memory allocation of 17179344900 bytes failed
+    /// process didn't exit successfully: ... (exit code: 0xc0000409)
+    /// ```
+    ///
+    /// `GifDecoder::new` opens every GIF with `Limits::no_limits()`, and the
+    /// frame iterator's first act is to allocate the whole **declared** logical
+    /// screen and compose the file's frames into it. The refusal that existed —
+    /// the running total against [`MAX_ANIMATION_RGBA_BYTES`] — is counted after
+    /// that allocation, so it was a refusal to *keep* the pixels rather than a
+    /// refusal to make them: nine bytes of picture behind a 65535-square header
+    /// asked the allocator for seventeen gigabytes, on a hover, with no click
+    /// anywhere.
+    ///
+    /// **The structural half is the load-bearing one and it stands first**,
+    /// because the two readings agree about the verdict and differ only in what
+    /// they spend reaching it: both answer [`AnimationRefusal::TooLarge`], and
+    /// only one of them allocates seventeen gigabytes on the way. `set_limits`
+    /// is where the difference lives — it checks the logical screen descriptor
+    /// against [`MAX_ANIMATION_SIDE_PX`] and fails there, with the frame
+    /// iterator not yet built — so the call is what is asserted on, and it is
+    /// asserted on *before* the fixtures are decoded. That order is also the
+    /// safety: the tree that produced the evidence above went on to ask for the
+    /// seventeen gigabytes, and one that drops the call today is caught by the
+    /// first assertion instead.
+    ///
+    /// MUTATION: drop the `.set_limits(` call and the first assertion goes red;
+    /// move it after `into_frames()` and it goes red the same way.
+    #[test]
+    fn a_declared_screen_this_window_will_not_hold_is_refused_before_it_is_allocated() {
+        const SOURCE: &str = include_str!("animation.rs");
+        let at = SOURCE
+            .find("\npub fn decode_bytes(")
+            .expect("the container walk is a free function in this file");
+        let rest = &SOURCE[at..];
+        let walk = &rest[..rest.find("\n}\n").expect("and it ends") + 3];
+        let limits = walk
+            .find(".set_limits(")
+            .expect("the decoder is opened under limits, before a frame is pulled");
+        let frames = walk
+            .find("into_frames()")
+            .expect("and the frames are pulled from it");
+        assert!(
+            limits < frames,
+            "the limits are set before the first frame is asked for:\n{walk}",
+        );
+
+        // And the verdict, at the size the review named and at one a machine can
+        // survive being wrong about.
+        for side in [16_384_u16, 65_535] {
+            assert_eq!(
+                decode_bytes(&a_gif_declaring(side, side)).err(),
+                Some(AnimationRefusal::TooLarge),
+                "a {side}-square logical screen is over this window's ceiling",
+            );
+        }
+        // A screen this window can hold is untouched: the fixture is 64 square.
+        assert!(decode_bytes(&fixture()).is_ok());
+    }
+
+    /// RED — **a `.gif` past the encoded cap is not read whole** (the same row's
+    /// other half).
+    ///
+    /// RED EVIDENCE (2026-09-08), before the capped read:
+    ///
+    /// ```text
+    /// a file is read behind a cap and not whole:
+    /// pub fn decode(path: &std::path::Path) -> Result<Animation, AnimationRefusal> {
+    ///     ...
+    ///     let bytes = std::fs::read(path).map_err(|_| AnimationRefusal::Undecodable)?;
+    ///     decode_bytes(&bytes)
+    /// }
+    /// ```
+    ///
+    /// `decode` was a bare `std::fs::read`, so a hover over any file named
+    /// `.gif` pulled all of it into memory before anything looked at it — while
+    /// the still-picture lane next door has refused past
+    /// `bt_term::MAX_INLINE_IMAGE_BYTES` since it was written, which means a file
+    /// over that cap could not be *shown* by this window and was read whole
+    /// anyway. The animation lane now reads behind the same number.
+    ///
+    /// MUTATION: go back to `std::fs::read` and the verdict is whatever the
+    /// bytes happen to guess as, after all of them have been read.
+    #[test]
+    fn a_gif_past_the_encoded_cap_is_not_read_whole() {
+        const SOURCE: &str = include_str!("animation.rs");
+        let at = SOURCE
+            .find("\npub fn decode(")
+            .expect("the file reader is a free function in this file");
+        let rest = &SOURCE[at..];
+        let reader = &rest[..rest.find("\n}\n").expect("and it ends") + 3];
+        assert!(
+            !reader.contains("fs::read("),
+            "a file is read behind a cap and not whole:\n{reader}",
+        );
+
+        let path = std::env::temp_dir().join(format!("bt-anim-huge-{}.gif", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let file = std::fs::File::create(&path).expect("a file in the temp directory");
+        file.set_len(MAX_ANIMATION_FILE_BYTES + 1)
+            .expect("a file of a declared length");
+        drop(file);
+        assert_eq!(
+            decode(&path).err(),
+            Some(AnimationRefusal::TooLarge),
+            "a file past the cap is refused on its size",
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// RED — **an animation advances by the delays its own file declares**
@@ -447,17 +670,35 @@ mod tests {
         // nothing at all, which is `NotAnAnimation`. Answering the first with
         // "not an animation" would be this module telling a reader their `.gif`
         // is not a `.gif`, when what is true is that it is a broken one.
+        //
+        // The screen descriptor is written out — a 16-square screen with no
+        // global colour table — rather than left to whatever the prose after
+        // `GIF89a` happened to spell. It used to be the prose, and once the
+        // decoder was given limits (review row R1-7) the two bytes of `" b"`
+        // turned out to declare a screen 25120 pixels wide, so the refusal that
+        // came back was `TooLarge`: a true answer to a fixture that had never
+        // meant to ask that question.
         assert_eq!(
-            refusal(decode_bytes(b"GIF89a but not really")),
+            refusal(decode_bytes(
+                b"GIF89a\x10\x00\x10\x00\x00\x00\x00 but not really"
+            )),
             Some(AnimationRefusal::Undecodable)
         );
         assert_eq!(
             refusal(decode_bytes(&[])),
             Some(AnimationRefusal::NotAnAnimation)
         );
-        // The ceiling is a constant a reader can find and not a number buried in
+        // And a header whose screen this window could never draw is refused for
+        // that, before anything behind it is read.
+        assert_eq!(
+            refusal(decode_bytes(&a_gif_declaring(20_000, 4))),
+            Some(AnimationRefusal::TooLarge)
+        );
+        // The ceilings are constants a reader can find and not numbers buried in
         // a comparison.
         assert_eq!(MAX_ANIMATION_RGBA_BYTES, 256 * 1024 * 1024);
+        assert_eq!(MAX_ANIMATION_SIDE_PX, 8192);
+        assert_eq!(MAX_ANIMATION_FILE_BYTES, 8 * 1024 * 1024);
     }
 
     /// PIN — **a declared delay of nothing is a tenth of a second, and a very

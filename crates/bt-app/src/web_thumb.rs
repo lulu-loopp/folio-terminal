@@ -126,6 +126,17 @@ const MAX_PICTURE_PIXELS: u32 = 526 * 640;
 /// honest answer everywhere else too: a frame that is not there is not invented.
 const MAX_FRAME_PIXELS: u32 = 4096 * 2560;
 
+/// **The largest side a capture may declare** (review row R1-28, adversarial
+/// review 2026-09-08).
+///
+/// [`MAX_FRAME_PIXELS`] is an area and a decoder's dimension limit is not, so
+/// this is the second half of the same ceiling: the area refuses a picture that
+/// is large in total, and this refuses one that is absurd in one direction while
+/// staying under it. Twice the widest side the area allows, so no real pane —
+/// however wide the window, however short the page — is refused by this rather
+/// than by the area.
+const MAX_FRAME_SIDE_PX: u32 = 8192;
+
 /// Everything about one web seat that the capture decision is made of.
 ///
 /// Read off the seat in one go — see `webhost::WebSeat::capture_facts` — because
@@ -799,7 +810,21 @@ pub fn shrink(png: &[u8], target: Option<(u32, u32)>) -> Option<(Vec<u8>, u32, u
     {
         return None;
     }
-    let decoded = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?;
+    // **Under limits, and they go on before the decode** (review row R1-28,
+    // adversarial review 2026-09-08). [`MAX_FRAME_PIXELS`] was checked only on
+    // the branch that keeps a pane's own frame; the branch that shrinks a
+    // capture into a card decoded whatever it was handed under the `image`
+    // crate's default half-gigabyte allowance and only then resampled it. The
+    // ceiling is the same one either way, so it belongs on the reader that both
+    // branches go through.
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(png));
+    reader.set_format(image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_FRAME_SIDE_PX);
+    limits.max_image_height = Some(MAX_FRAME_SIDE_PX);
+    limits.max_alloc = Some(u64::from(MAX_FRAME_PIXELS) * 4);
+    reader.limits(limits);
+    let decoded = reader.decode().ok()?;
     // **A pane's frame is not resampled at all.** `CapturePreview` returns the
     // viewport, and the viewport is the pane — so the picture is already the
     // size it will be drawn at, and a resample to its own dimensions would be
@@ -1284,6 +1309,36 @@ mod tests {
         assert_eq!((width, height), (263, 320));
         assert_eq!(rgba.len(), 263 * 320 * 4);
         assert!(shrink(b"not a png at all", Some((263, 320))).is_none());
+    }
+
+    /// RED — **a capture larger than a pane could be is refused before it is
+    /// decoded** (review row R1-28, adversarial review 2026-09-08).
+    ///
+    /// RED EVIDENCE (2026-09-08), before the limits:
+    ///
+    /// ```text
+    /// a picture past the frame ceiling is not decoded to be thrown away
+    /// ```
+    ///
+    /// [`MAX_FRAME_PIXELS`] was checked only on the branch that keeps a pane's
+    /// own frame; the branch that shrinks a capture into a card decoded whatever
+    /// it was handed under `image`'s default half-gigabyte allowance and only
+    /// then resampled it into a 263-pixel box. The ceiling is now the decoder's
+    /// as well as the branch's, so bytes past it cost the container header and
+    /// nothing else.
+    ///
+    /// MUTATION: take the limits off the reader and a five-thousand-pixel
+    /// capture is decoded whole again.
+    #[test]
+    fn a_capture_past_the_frame_ceiling_is_never_decoded() {
+        assert!(
+            shrink(&a_real_png(5000, 3000), Some((263, 320))).is_none(),
+            "a picture past the frame ceiling is not decoded to be thrown away",
+        );
+        assert!(
+            shrink(&a_real_png(1146, 777), Some((263, 320))).is_some(),
+            "and a real capture is untouched",
+        );
     }
 
     /// Red gate: **a page that has not changed is photographed and then let go**

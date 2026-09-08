@@ -1770,6 +1770,102 @@ impl DocumentPictures {
     }
 }
 
+/// **How many pictures either side of the ones on screen a page asks for**
+/// (review row R1-8, adversarial review 2026-09-08).
+///
+/// Eight, and it is a count of pictures rather than a distance in pixels because
+/// what it is buying is a *read that has already finished* by the time the
+/// picture is scrolled to. A wheel notch moves a page by a line or two; eight
+/// screenshots either side is several notches of warning in a document whose
+/// pictures are a screen tall, and a whole screen of warning in one whose
+/// pictures are badges.
+///
+/// It is also what keeps the reach stable: the band only changes when a picture
+/// crosses the edge of the viewport, so a page is re-flowed once per picture
+/// scrolled past rather than once per pixel.
+const MARKDOWN_PICTURE_MARGIN: usize = 8;
+
+/// **Which of a page's pictures it will ask the disk for** — an inclusive range
+/// of image-block ordinals, counted in document order.
+///
+/// A document is not a thing this window reads all of: `resolve_document_pictures`
+/// used to walk every image block of a rendered page and ask for the file behind
+/// each one, so hovering a README with five hundred screenshots in it sent five
+/// hundred reads down the decoration worker and put five hundred decodes in the
+/// window's cache — for a card showing the first screenful.
+///
+/// Ordinals and not pixels, because the two passes cannot be in the same order:
+/// a picture's own size is what its block is *laid out* from, so the reach has
+/// to be answerable before the layout it will produce exists. Where a layout
+/// from the previous pass is standing, [`markdown_picture_reach`] reads the band
+/// off it; where none is — the first pass over a newly parsed document, which is
+/// a page at its top — the reach is the top of the document.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PictureReach {
+    first: usize,
+    last: usize,
+}
+
+impl PictureReach {
+    /// The reach of a page nothing has laid out yet: its beginning.
+    fn from_the_top() -> Self {
+        Self {
+            first: 0,
+            last: MARKDOWN_PICTURE_MARGIN,
+        }
+    }
+
+    /// Whether the image block standing at `ordinal` is one this page asks for.
+    fn holds(self, ordinal: usize) -> bool {
+        ordinal >= self.first && ordinal <= self.last
+    }
+}
+
+/// **The band of pictures a laid-out page is looking at**, widened by
+/// [`MARKDOWN_PICTURE_MARGIN`] either side.
+///
+/// A free function over the three things that decide it — the blocks, the boxes
+/// the last pass put them in, and where the reader is — so that it is answerable
+/// without a window.
+///
+/// With nothing of the page on screen the answer is still a band and not an
+/// empty one: the picture *about* to come into view is the one worth having, so
+/// the count of pictures entirely above the viewport names the middle of it.
+fn markdown_picture_reach(
+    blocks: &[preview::MarkdownBlock],
+    layout: &[MarkdownBlockLayout],
+    scroll_y: f32,
+    height: f32,
+) -> PictureReach {
+    let (top, bottom) = (scroll_y, scroll_y + height.max(0.0));
+    let mut ordinal = 0_usize;
+    let mut visible: Option<(usize, usize)> = None;
+    let mut above = 0_usize;
+    for (index, block) in blocks.iter().enumerate() {
+        if !matches!(block, preview::MarkdownBlock::Image(_)) {
+            continue;
+        }
+        let this = ordinal;
+        ordinal += 1;
+        let Some(box_) = layout.get(index) else {
+            continue;
+        };
+        if box_.top + box_.height <= top {
+            above = this + 1;
+        } else if box_.top < bottom {
+            visible = Some(match visible {
+                Some((first, _)) => (first, this),
+                None => (this, this),
+            });
+        }
+    }
+    let (first, last) = visible.unwrap_or((above, above));
+    PictureReach {
+        first: first.saturating_sub(MARKDOWN_PICTURE_MARGIN),
+        last: last.saturating_add(MARKDOWN_PICTURE_MARGIN),
+    }
+}
+
 /// **What one page's pictures are**, resolved against the document's own
 /// directory and the theme in force (user ruling 2026-08-28; §7.1.3k).
 ///
@@ -1788,8 +1884,25 @@ fn resolve_document_pictures(
     blocks: &[preview::MarkdownBlock],
     document: Option<&Path>,
     theme: bt_render::Theme,
+    reach: PictureReach,
     ask: &mut dyn FnMut(&Path, bool) -> MarkdownPicture,
 ) -> DocumentPictures {
+    // **Which sources are near enough to be worth a disk** (review row R1-8,
+    // adversarial review 2026-09-08). A source is asked for when *any* of the
+    // blocks carrying it is in reach, which is why this is a pass of its own: a
+    // page that shows one badge twice, once at the top and once at the bottom,
+    // has one entry in `by_source`, and the entry has to be the answer for the
+    // occurrence that is on screen.
+    let mut wanted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut ordinal = 0_usize;
+    for block in blocks {
+        if let preview::MarkdownBlock::Image(image) = block {
+            if reach.holds(ordinal) {
+                wanted.insert(image.source_for(theme));
+            }
+            ordinal += 1;
+        }
+    }
     let mut pictures = DocumentPictures::default();
     for block in blocks {
         let preview::MarkdownBlock::Image(image) = block else {
@@ -1815,11 +1928,17 @@ fn resolve_document_pictures(
             // fetched over SMB with no click anywhere. It draws what a picture this window cannot
             // read draws, because that is what it is: the file is not this window's to open.
             preview::LinkAction::Refused(_) => MarkdownPicture::Failed,
-            preview::LinkAction::Preview(path) => {
+            preview::LinkAction::Preview(path) if wanted.contains(source) => {
                 let picture = ask(&path, image.fill);
                 pictures.files.insert(path);
                 picture
             }
+            // **A picture the reader is nowhere near** — see [`PictureReach`].
+            // It draws what a picture that has not arrived draws, because that is
+            // what it is: nothing has been asked for it and nothing will be until
+            // the page is scrolled far enough that it is worth a read. Nor does
+            // the watch follow a file this page is not showing.
+            preview::LinkAction::Preview(_) => MarkdownPicture::Loading,
         };
         pictures.by_source.insert(source.to_owned(), picture);
     }
@@ -2022,6 +2141,15 @@ struct PageArtKey {
     /// only because of that coincidence would be a document that stopped
     /// re-flowing the day two schemes shared a body colour.
     theme: bt_render::Theme,
+    /// **Which of the page's pictures are near enough to be asked for** — see
+    /// [`PictureReach`].
+    ///
+    /// It is in the key because scrolling has to be able to change it: a page
+    /// asks only for the pictures around the viewport, so a reader who scrolls
+    /// past the eighth screenshot is owed the ninth, and nothing else about the
+    /// document has changed to say so. The band moves one picture at a time, so
+    /// this makes a re-flow per picture scrolled past and not one per pixel.
+    picture_reach: PictureReach,
 }
 
 /// **How large a picture is drawn on a markdown page, and the only place that
@@ -9494,7 +9622,7 @@ struct WindowRuntime {
     /// that is a single still frame is asked about once and drawn by the picture
     /// channel thereafter, rather than sending a decode down the worker on every
     /// pointer move.
-    animations: std::collections::HashMap<String, AnimationEntry>,
+    animations: AnimationCache,
     /// **The files this window's preview seats are showing, watched** (W2 slice
     /// 5, `preview_watch`).
     ///
@@ -9798,7 +9926,7 @@ struct WindowRuntime {
     /// repaint is therefore owed — which, with several panes, is a question about a pair.
     underlined_image_reference: Option<(SeatId, bt_term::FrameImageReference)>,
     peek_hover: PeekHover,
-    peek_cache: std::collections::HashMap<String, PeekCacheEntry>,
+    peek_cache: PeekCache,
     /// Every formula this window's markdown previews have asked the engine for.
     ///
     /// **The window's and not a tab's**, for the same reason `peek_cache` is:
@@ -17504,6 +17632,39 @@ enum PeekCacheEntry {
     },
 }
 
+impl bt_term::Weighed for PeekCacheEntry {
+    fn bytes_held(&self) -> u64 {
+        match self {
+            Self::Pending | Self::Failed => 0,
+            Self::Ready { rgba, .. } => rgba.len() as u64,
+        }
+    }
+}
+
+/// **What this window's decoded pictures live in** — see [`MAX_PEEK_CACHE_BYTES`].
+type PeekCache = bt_term::BoundedCache<String, PeekCacheEntry>;
+
+/// **How many bytes of decoded pictures one window may hold** (review row R1-8,
+/// adversarial review 2026-09-08).
+///
+/// 192 MiB. The cache used to be a `HashMap` with one door in and none out, so
+/// every distinct file a pointer had rested on since the window opened was still
+/// decoded in it — and `resolve_document_pictures` asked for *every* image block
+/// of a rendered document, so one README of screenshots filled it in one pass.
+///
+/// The number is read off the two things that fill it. A single entry is capped
+/// at `bt_term::MAX_INLINE_IMAGE_RGBA_BYTES` (64 MiB), so this is three of the
+/// largest picture the decoder will ever hand back; and a documentation page's
+/// screenshots are two to eight megabytes each, so it is a page's worth of them
+/// with room over. Past it the oldest goes, and the cost of having been wrong is
+/// one worker read of a file that is still on the disk.
+///
+/// It is per window and not per process because that is where the map is, and
+/// because the frame path reads it: a window drawing a page is asking this cache
+/// on every rebuild, and a shared one would put another window's hovering in the
+/// way of that.
+const MAX_PEEK_CACHE_BYTES: u64 = 192 * 1024 * 1024;
+
 /// One content at one display size: `(content key, display width, display height)`.
 type PeekThumbnailTarget = (String, u32, u32);
 
@@ -23175,6 +23336,34 @@ enum AnimationEntry {
     /// reason is printed once, where a reason belongs.
     Refused,
 }
+
+impl bt_term::Weighed for AnimationEntry {
+    fn bytes_held(&self) -> u64 {
+        match self {
+            Self::Pending | Self::Refused => 0,
+            Self::Ready(animation) => animation.bytes_held(),
+        }
+    }
+}
+
+/// **What this window's animations live in** — see [`MAX_ANIMATION_CACHE_BYTES`].
+type AnimationCache = bt_term::BoundedCache<String, AnimationEntry>;
+
+/// **How many bytes of decoded frames one window may hold, over every animation
+/// in it** (review row R1-8, adversarial review 2026-09-08).
+///
+/// It is [`animation::MAX_ANIMATION_RGBA_BYTES`], and stating the same number
+/// twice is the point: what *one* animation was allowed to hold is now what all
+/// of them together may hold. The per-animation ceiling stands — §7.44 ⑤ argued
+/// it against a real shape, a thousand-frame screen capture, and nothing about
+/// that argument has changed — but the map it went into had no ceiling at all,
+/// so a folder of spinners hovered one after another kept every one of them
+/// decoded until the window closed.
+///
+/// A playing animation is read on every frame it advances, so it is never the
+/// least recently used one: what this evicts is a `loading.gif` nobody has
+/// looked at since, and the cost of being wrong about that is one worker decode.
+const MAX_ANIMATION_CACHE_BYTES: u64 = animation::MAX_ANIMATION_RGBA_BYTES;
 
 /// **Where a playing video is drawn on one surface** — see
 /// [`Runtime::video_shape_of`].
@@ -31524,7 +31713,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         compositor,
         web: BTreeMap::new(),
         video: video_seat::VideoSeats::default(),
-        animations: std::collections::HashMap::new(),
+        animations: AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES),
         preview_watch: preview_watch::PreviewWatch::default(),
         files_watch: files_watch::FilesWatch::default(),
         web_cursor: None,
@@ -31589,7 +31778,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         hover_pane: None,
         underlined_image_reference: None,
         peek_hover: PeekHover::default(),
-        peek_cache: std::collections::HashMap::new(),
+        peek_cache: PeekCache::with_budget(MAX_PEEK_CACHE_BYTES),
         preview_math: PreviewMathCache::default(),
         markdown_pictures: MarkdownPictures::default(),
         peek_thumbnail: None,
@@ -31833,7 +32022,7 @@ fn files_a_tab_stands_on(tab: &TabState) -> BTreeSet<PathBuf> {
 /// Nothing here touches a disk. It ends the window's right to answer from
 /// memory; the asking belongs to the frame, down the lane it already has.
 fn forget_a_picture(
-    peek_cache: &mut std::collections::HashMap<String, PeekCacheEntry>,
+    peek_cache: &mut PeekCache,
     video_facts: &mut BTreeMap<String, preview::VideoFacts>,
     pictures: &mut MarkdownPictures,
     path: &Path,
@@ -54283,6 +54472,29 @@ impl Runtime<'_> {
         moved
     }
 
+    /// **The band of pictures this surface is looking at** — [`PictureReach`],
+    /// read off the layout the surface is already standing on.
+    ///
+    /// [`PictureReach::from_the_top`] when there is none to read: a surface that
+    /// is not showing a page, or one whose page has just been parsed and not yet
+    /// laid out. Both are a reader at the top of a document, which is what that
+    /// answer says.
+    ///
+    /// The layout may belong to the *previous* document on this surface, and
+    /// that is harmless rather than overlooked: a page arriving on a surface
+    /// arrives at the top of itself, so the band read off the old boxes is the
+    /// band at the old scroll, and the pass after this one — the first with a
+    /// layout of its own — corrects it through the key.
+    fn standing_picture_reach(&self, surface: PreviewSurface, body: [f32; 4]) -> PictureReach {
+        let Some(pane) = self.preview_pane(surface) else {
+            return PictureReach::from_the_top();
+        };
+        let PreviewDocument::Markdown { blocks, layout, .. } = &pane.doc else {
+            return PictureReach::from_the_top();
+        };
+        markdown_picture_reach(blocks, layout, pane.scroll[1], body[3] - body[1])
+    }
+
     /// Re-derive the parsed body if what it was parsed from has changed.
     ///
     /// The content is cloned once here rather than borrowed, which is what lets
@@ -54304,10 +54516,17 @@ impl Runtime<'_> {
         let document = self
             .preview_buffer_on(surface)
             .and_then(|buffer| buffer.source.file_path().map(Path::to_path_buf));
+        // **Where the reader is, in pictures** (review row R1-8). Read off the
+        // layout this surface is already standing on, because that is the only
+        // thing that knows where a block ended up — and it goes into the key, so
+        // that scrolling into the next band is a re-flow the same way a formula
+        // landing is.
+        let picture_reach = self.standing_picture_reach(surface, body);
         let art_key = PageArtKey {
             math_generation,
             body_ink,
             picture_generation,
+            picture_reach,
             theme,
         };
         let key = self.preview_buffer_on(surface).map(|buffer| {
@@ -54359,7 +54578,8 @@ impl Runtime<'_> {
             let width = (measure_right - measure_left).max(1.0);
             let _ = layout;
             let math = self.resolve_document_math(&blocks, metrics, &bt_render::chrome_palette());
-            let pictures = self.resolve_document_pictures(&blocks, document.as_deref(), width);
+            let pictures =
+                self.resolve_document_pictures(&blocks, document.as_deref(), width, picture_reach);
             let intrinsic = if math_changed {
                 self.measure_markdown_intrinsics(&blocks, metrics, &math)
             } else {
@@ -54478,7 +54698,12 @@ impl Runtime<'_> {
                 let width = (measure_right - measure_left).max(1.0);
                 let math =
                     self.resolve_document_math(&blocks, metrics, &bt_render::chrome_palette());
-                let pictures = self.resolve_document_pictures(&blocks, document.as_deref(), width);
+                let pictures = self.resolve_document_pictures(
+                    &blocks,
+                    document.as_deref(),
+                    width,
+                    picture_reach,
+                );
                 let intrinsic = self.measure_markdown_intrinsics(&blocks, metrics, &math);
                 let layout = self.lay_markdown_out(
                     &blocks,
@@ -54627,6 +54852,7 @@ impl Runtime<'_> {
         blocks: &[preview::MarkdownBlock],
         document: Option<&Path>,
         measure_px: f32,
+        reach: PictureReach,
     ) -> DocumentPictures {
         let theme = bt_render::current_theme();
         let now = Instant::now();
@@ -54709,7 +54935,7 @@ impl Runtime<'_> {
                 native,
             }
         };
-        resolve_document_pictures(blocks, document, theme, &mut ask)
+        resolve_document_pictures(blocks, document, theme, reach, &mut ask)
     }
 
     /// Send every exact-size pass the quiet has released.
@@ -100371,10 +100597,7 @@ fn tick_owes_a_present(chrome_changed: bool, panes_owe: bool, pictures_owe: bool
 /// The key is [`normalized_local_image_path_key`], which is the key the picture
 /// lane, the glance card and the animation clock all use — so a card, a pane and
 /// a hover over one file are one decode and one texture.
-fn card_picture_in<'a>(
-    cache: &'a std::collections::HashMap<String, PeekCacheEntry>,
-    path: &Path,
-) -> Option<focus_thumb::CardPicture<'a>> {
+fn card_picture_in<'a>(cache: &'a PeekCache, path: &Path) -> Option<focus_thumb::CardPicture<'a>> {
     match cache.get(&normalized_local_image_path_key(path))? {
         PeekCacheEntry::Ready {
             key,
@@ -112295,7 +112518,7 @@ mod tests {
         let path = Path::new(r"D:\shots\B1-rest.png");
         let key = normalized_local_image_path_key(path);
         let rgba: Arc<[u8]> = Arc::from(vec![0x11; 8 * 2 * 4]);
-        let mut cache = std::collections::HashMap::new();
+        let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
 
         assert!(
             card_picture_in(&cache, path).is_none(),
@@ -112341,6 +112564,121 @@ mod tests {
             "the card's picture lookup asks the worker or writes the cache, \
              which is a column of cards reading the disk as you scroll:\n{reader}"
         );
+    }
+
+    /// RED — **this window's decoded pictures have a ceiling** (review row R1-8,
+    /// adversarial review 2026-09-08).
+    ///
+    /// RED EVIDENCE (2026-09-08), before the budget:
+    ///
+    /// ```text
+    /// eight thirty-two megabyte pictures into a 201326592 byte cache: it is holding 268436480
+    /// ```
+    ///
+    /// `peek_cache` was a `HashMap` with one door in and one narrow door out —
+    /// [`forget_a_picture`], which is a *file watch* telling the window one named
+    /// file has changed. Nothing anywhere took an entry out because there were
+    /// too many of them, so every distinct picture a pointer had rested on since
+    /// the window opened was still decoded in it.
+    ///
+    /// The entries here are the real ones: `PeekCacheEntry::Ready` holding real
+    /// `Arc<[u8]>`s, through the real budget, so what is being asserted is what
+    /// this window will actually hold.
+    ///
+    /// MUTATION: build the cache with `u64::MAX` and the first assertion goes red
+    /// with everything ever inserted still in it.
+    #[test]
+    fn the_windows_decoded_pictures_are_bounded_and_the_oldest_goes_first() {
+        const PICTURE_BYTES: usize = 32 * 1024 * 1024;
+        let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+        for index in 0..8_u8 {
+            cache.insert(
+                format!(r"d:\shots\{index}.png"),
+                PeekCacheEntry::Ready {
+                    key: format!("image:{index}"),
+                    rgba: Arc::from(vec![index; PICTURE_BYTES]),
+                    width_px: 2048,
+                    height_px: 4096,
+                },
+            );
+        }
+        assert!(
+            cache.bytes_held() <= MAX_PEEK_CACHE_BYTES,
+            "eight thirty-two megabyte pictures into a {} byte cache: it is holding {}",
+            MAX_PEEK_CACHE_BYTES,
+            cache.bytes_held(),
+        );
+        assert!(
+            cache.get(r"d:\shots\7.png").is_some(),
+            "the picture asked for last is the one it kept",
+        );
+        assert!(
+            cache.get(r"d:\shots\0.png").is_none(),
+            "and the one nothing has looked at since the window opened is gone",
+        );
+    }
+
+    /// RED — **and so do this window's animations** (the same row, one map over).
+    ///
+    /// RED EVIDENCE (2026-09-08), before the budget:
+    ///
+    /// ```text
+    /// four animations into a two animation cache: it is holding 8389120
+    /// ```
+    ///
+    /// [`WindowRuntime::animations`] was inserted into at two doors and removed
+    /// from at none, so a folder of spinners hovered one after another kept every
+    /// one of them decoded until the window closed. The per-animation ceiling
+    /// [`animation::MAX_ANIMATION_RGBA_BYTES`] never applied to the map.
+    ///
+    /// A small budget rather than the window's own, because the rule is the
+    /// cache's and the window's number is 256 MiB of frames: what this pins is
+    /// that an `AnimationEntry` is weighed by the frames it holds, which is the
+    /// half that lives in this file.
+    ///
+    /// MUTATION: weigh `AnimationEntry::Ready` as zero and nothing is ever
+    /// evicted, because nothing is ever counted.
+    #[test]
+    fn the_windows_animations_are_bounded_by_the_frames_they_hold() {
+        const FRAME_BYTES: usize = 1024 * 1024;
+        let frames = || {
+            vec![
+                animation::AnimationFrame {
+                    bgra: Arc::from(vec![0x20; FRAME_BYTES]),
+                    delay: Duration::from_millis(100),
+                },
+                animation::AnimationFrame {
+                    bgra: Arc::from(vec![0x40; FRAME_BYTES]),
+                    delay: Duration::from_millis(100),
+                },
+            ]
+        };
+        let mut cache = AnimationCache::with_budget(2 * 2 * FRAME_BYTES as u64);
+        for index in 0..4_u8 {
+            cache.insert(
+                format!(r"d:\spinners\{index}.gif"),
+                AnimationEntry::Ready(Box::new(animation::Animation::of(
+                    frames(),
+                    512,
+                    512,
+                    Instant::now(),
+                ))),
+            );
+        }
+        assert!(
+            cache.bytes_held() <= cache.budget(),
+            "four animations into a two animation cache: it is holding {}",
+            cache.bytes_held(),
+        );
+        assert!(
+            cache.contains_key(r"d:\spinners\3.gif"),
+            "the animation asked for last is the one it kept",
+        );
+        assert!(!cache.contains_key(r"d:\spinners\0.gif"));
+        // A refusal weighs nothing but is still remembered, which is what stops a
+        // `.gif` this window will not animate being asked about on every frame.
+        cache.insert(r"d:\spinners\still.gif".to_owned(), AnimationEntry::Refused);
+        assert!(cache.contains_key(r"d:\spinners\still.gif"));
     }
 
     /// RED — **a recording follows the pane it is drawn in** (user report on
@@ -125223,6 +125561,7 @@ mod tests {
             &blocks,
             Some(Path::new(r"D:\proj\README.md")),
             bt_render::Theme::Dark,
+            PictureReach::from_the_top(),
             &mut |path, _| {
                 asked.push(path.to_path_buf());
                 MarkdownPicture::Loading
@@ -125273,6 +125612,7 @@ mod tests {
             &blocks,
             Some(Path::new(r"D:\proj\README.md")),
             bt_render::Theme::Dark,
+            PictureReach::from_the_top(),
             &mut |path, _| {
                 asked.push(path.to_path_buf());
                 MarkdownPicture::Loading
@@ -125363,6 +125703,91 @@ mod tests {
         );
     }
 
+    /// RED — **a page asks for the pictures the reader can see, and not for the
+    /// five hundred it cannot** (review row R1-8, adversarial review
+    /// 2026-09-08).
+    ///
+    /// RED EVIDENCE (2026-09-08), before the reach:
+    ///
+    /// ```text
+    /// a page asks for what is near the reader, not for the whole document
+    ///   asked 500, at most 18
+    /// ```
+    ///
+    /// The walk went over every image block of the document and asked for every
+    /// one, so hovering a README with five hundred screenshots in it sent five
+    /// hundred reads down the one decoration worker and put five hundred decodes
+    /// into this window's cache — for a card showing the first screenful. The
+    /// cache's own budget bounds what is *kept*; this bounds what is asked for,
+    /// and the two are different costs.
+    ///
+    /// Ten pictures on screen plus [`MARKDOWN_PICTURE_MARGIN`] either side is
+    /// eighteen: the nine before the first visible one do not exist, so the band
+    /// runs from the top to eight past the last.
+    ///
+    /// MUTATIONS: ask regardless of the reach and the count goes back to five
+    /// hundred; drop the margin and a reader who scrolls one notch is looking at
+    /// a picture nothing has begun to read.
+    #[test]
+    fn a_page_asks_only_for_the_pictures_near_its_viewport() {
+        let mut source = String::new();
+        for index in 0..500 {
+            source.push_str(&format!("![shot {index}](shots/{index}.png)\n\n"));
+        }
+        let blocks = preview::parse_markdown(&source);
+        // A hundred pixels a picture, and a viewport a thousand tall standing at
+        // the top: the first ten are on screen.
+        let layout: Vec<MarkdownBlockLayout> = blocks
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let mut box_ = MarkdownBlockLayout::solid(100.0);
+                box_.top = index as f32 * 100.0;
+                box_
+            })
+            .collect();
+        let reach = markdown_picture_reach(&blocks, &layout, 0.0, 1000.0);
+        assert_eq!(
+            (reach.first, reach.last),
+            (0, 9 + MARKDOWN_PICTURE_MARGIN),
+            "the ten on screen, and the margin past the last of them",
+        );
+
+        let mut asked: Vec<PathBuf> = Vec::new();
+        let pictures = resolve_document_pictures(
+            &blocks,
+            Some(Path::new(r"D:\proj\README.md")),
+            bt_render::Theme::Dark,
+            reach,
+            &mut |path, _| {
+                asked.push(path.to_path_buf());
+                MarkdownPicture::Loading
+            },
+        );
+        assert!(
+            asked.len() <= 10 + MARKDOWN_PICTURE_MARGIN,
+            "a page asks for what is near the reader, not for the whole document\n  \
+             asked {}, at most {}",
+            asked.len(),
+            10 + MARKDOWN_PICTURE_MARGIN,
+        );
+        assert_eq!(asked.first(), Some(&PathBuf::from(r"D:\proj\shots/0.png")));
+        assert_eq!(
+            pictures.files.len(),
+            asked.len(),
+            "and the watch follows exactly the files it asked for",
+        );
+
+        // And the reader scrolls: the band moves with them, and the pictures
+        // behind them are still in it.
+        let further = markdown_picture_reach(&blocks, &layout, 20_000.0, 1000.0);
+        assert_eq!(
+            (further.first, further.last),
+            (200 - MARKDOWN_PICTURE_MARGIN, 209 + MARKDOWN_PICTURE_MARGIN),
+        );
+        assert!(!further.holds(0), "and the top of the document has left it");
+    }
+
     /// RED GATE (same report; `README.md` and `PRIVACY.md`'s promise) — **a
     /// remote picture is never fetched.**
     ///
@@ -125383,6 +125808,7 @@ mod tests {
             &blocks,
             Some(Path::new(r"D:\proj\README.md")),
             bt_render::Theme::Dark,
+            PictureReach::from_the_top(),
             &mut |_, _| {
                 doors += 1;
                 MarkdownPicture::Failed
@@ -127705,6 +128131,7 @@ mod tests {
                 math_generation: 0,
                 body_ink: [0, 0, 0],
                 picture_generation: 0,
+                picture_reach: PictureReach::from_the_top(),
                 theme: bt_render::Theme::Dark,
             },
         )
@@ -130833,7 +131260,7 @@ mod tests {
         /// file's normalized path.
         fn open(
             decoder: &mut bt_term::InlineImageDecoder,
-            peek_cache: &mut std::collections::HashMap<String, PeekCacheEntry>,
+            peek_cache: &mut PeekCache,
             path: &Path,
         ) {
             let decoded = decoder
@@ -130853,10 +131280,7 @@ mod tests {
             );
         }
 
-        fn size_of(
-            peek_cache: &std::collections::HashMap<String, PeekCacheEntry>,
-            path: &Path,
-        ) -> Option<(u32, u32)> {
+        fn size_of(peek_cache: &PeekCache, path: &Path) -> Option<(u32, u32)> {
             match peek_cache.get(&normalized_local_image_path_key(path))? {
                 PeekCacheEntry::Ready {
                     width_px,
@@ -130882,7 +131306,7 @@ mod tests {
         std::fs::write(&neighbour, png_of(9, 9, [255, 255, 0, 255])).expect("its neighbour");
 
         let mut decoder = bt_term::InlineImageDecoder::default();
-        let mut peek_cache = std::collections::HashMap::new();
+        let mut peek_cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
         let mut video_facts = BTreeMap::new();
         let mut pictures = MarkdownPictures::default();
 
