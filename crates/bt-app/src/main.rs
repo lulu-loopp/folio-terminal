@@ -26022,7 +26022,9 @@ struct FilePeekSubject {
     /// binary, a file too large.
     refused: bool,
     dirty: bool,
-    row: [f32; 4],
+    /// **What the card is placed against** — the row, or the card that row is
+    /// inside (user ruling 2026-09-07; [`file_peek::PeekAnchor`]).
+    anchor: file_peek::PeekAnchor,
 }
 
 impl TabState {
@@ -28766,6 +28768,36 @@ impl HoverFloat {
     /// this panel's.
     fn free(self, up: impl Fn(Self) -> bool) -> bool {
         Self::holding(up).is_none_or(|held| held == self)
+    }
+}
+
+/// **Whether a glance may arm over a row, given who holds the glass and whether
+/// that row is drawn inside the flyout itself** (user ruling 2026-09-07,
+/// `docs/DESIGN.md` §7.58).
+///
+/// [`HoverFloat::free`] asked of a *row* instead of of the window, and the one
+/// exception the ruling adds to the list above. The list is about panels that
+/// half-cover each other, and it earns that by being a rule about **independent**
+/// clocks: two surfaces that know nothing of one another, arriving over the same
+/// pixels. A glance raised by a row of the flyout is not independent of it — it is
+/// placed against the flyout's own frame, it holds the flyout open while the hand
+/// is in it ([`Runtime::drive_float_hover`]), and it dies with it
+/// ([`Runtime::forget_dead_float_gestures`]). The pair is one region with two
+/// rectangles in it, which is exactly what [`file_peek::corridor`] already says
+/// about a card and its row.
+///
+/// **`Menu` still outranks both**, and that is not an oversight: a press outranks
+/// every hover on this list, and a flyout row under an open menu is a row under a
+/// menu. So the exception is spent on the one arm it is about and the other three
+/// answers are [`HoverFloat::free`]'s, unchanged.
+///
+/// A free function of the two facts for [`HoverFloat::holding`]'s reason: the
+/// thing that goes wrong here is a *policy*, and a policy that needs a live
+/// window, a pointer and a clock to exercise is a policy nobody exercises.
+fn glance_may_arm(held: Option<HoverFloat>, row_is_in_the_flyout: bool) -> bool {
+    match held {
+        Some(HoverFloat::Flyout) => row_is_in_the_flyout,
+        held => held.is_none_or(|who| who == HoverFloat::Glance),
     }
 }
 
@@ -41100,6 +41132,23 @@ impl Runtime<'_> {
         who.free(|other| self.hover_float_is_up(other))
     }
 
+    /// **The row under the pointer, if a glance may arm over it** — the one hover
+    /// intent whose exclusion is asked of the row rather than of the window (user
+    /// ruling 2026-09-07; see [`glance_may_arm`]).
+    ///
+    /// The hit test runs either way, because it is the hit test that says *which*
+    /// row, and which row is the whole of the question. `None` is what
+    /// [`Self::observe_file_peek`] is told when nothing may arm, which is how it
+    /// learns to let go of a card — a call skipped instead would leave one on the
+    /// glass over a row the hand left when the menu came up.
+    fn glancing_row_at(&mut self, position: PhysicalPosition<f64>) -> Option<(RowHost, usize)> {
+        let held = HoverFloat::holding(|who| self.hover_float_is_up(who));
+        let row = self.row_under(position)?;
+        let in_the_flyout =
+            matches!(row.0, RowHost::Float(id) if self.window.float.peek_id() == Some(id));
+        glance_may_arm(held, in_the_flyout).then_some(row)
+    }
+
     /// Take down every hover panel but `keep`, and report whether anything went.
     ///
     /// The intents go with the panels. A flyout dismissed while its own
@@ -41170,10 +41219,7 @@ impl Runtime<'_> {
             .then(|| self.float_trigger_at(position))
             .flatten();
         self.window.float.observe(trigger, now);
-        let row = self
-            .hover_float_free(HoverFloat::Glance)
-            .then(|| self.row_under(position))
-            .flatten();
+        let row = self.glancing_row_at(position);
         if self.observe_file_peek(row, now) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -60966,8 +61012,48 @@ impl Runtime<'_> {
             // does — the refusal is the preview's judgement, borrowed.
             refused: buffer.refusal().is_some(),
             dirty: buffer.dirty,
-            row: peek.rect,
+            anchor: self.peek_anchor(peek),
         })
+    }
+
+    /// **What the glance stands beside** — its row, or the floating card that
+    /// row is drawn inside (user ruling 2026-09-07, `docs/DESIGN.md` §7.58).
+    ///
+    /// Three of the four hosts are surfaces pinned to an edge of this window, and
+    /// their rows are their own anchors: a files column's row runs to the column's
+    /// edge, a Git page's row to the page's, and a terminal reference is a run of
+    /// cells on the glass. The fourth is a **window** — the folder card, and every
+    /// other floating tree — and a row inside a window is not a thing anything can
+    /// stand beside: the ten pixels would be measured from a line drawn inside the
+    /// card, and the glance would come to rest on that card's own border.
+    ///
+    /// So the float's frame is the anchor and the row is the height, which is
+    /// [`file_peek::PeekAnchor::row_in_a_card`]'s whole argument. It is asked of
+    /// the frame **as it is drawn now** — through the rise the window is making if
+    /// it is still arriving — for the reason [`Self::row_geometry`] reads the same
+    /// number the same way: a card placed against where a window used to be is a
+    /// card standing in a gap.
+    ///
+    /// A float that has gone falls back to the row, which is unreachable in
+    /// practice (the card goes with the window it was raised in,
+    /// [`Self::forget_dead_float_gestures`]) and is the honest answer if it ever
+    /// is not.
+    fn peek_anchor(&self, peek: &FilePeek) -> file_peek::PeekAnchor {
+        let card = match peek.host {
+            RowHost::Float(id) => {
+                let scale = self.window.renderer.metrics().scale_factor as f32;
+                let now = Instant::now();
+                self.window
+                    .float
+                    .live(id)
+                    .map(|win| risen_frame(win.frame, self.float_fade_of(win, now, scale)))
+            }
+            RowHost::Column(_) | RowHost::Git(_) | RowHost::Terminal(_) => None,
+        };
+        card.map_or_else(
+            || file_peek::PeekAnchor::row(peek.rect),
+            |card| file_peek::PeekAnchor::row_in_a_card(peek.rect, card),
+        )
     }
 
     /// **The card's picture**: what shape to reserve for it, and the pixels if
@@ -61542,7 +61628,7 @@ impl Runtime<'_> {
         );
         let layout = file_peek::layout(
             &content,
-            subject.row,
+            subject.anchor,
             (width as f32, height as f32),
             name_width,
             ftype_width,
@@ -68503,13 +68589,41 @@ impl Runtime<'_> {
                     | seats::ChromeTarget::PaneFiles(_)
                     | seats::ChromeTarget::FilesRoot(_)
             )
-        ) || self.pointer_is_on_the_peeks_reference(position);
+        ) || self.pointer_is_on_the_peeks_reference(position)
+            || self.pointer_is_in_the_peeks_own_glance(position);
         if reach.inside || on_trigger {
             self.window.float.hold();
         } else {
             self.window.float.release(reach.off_left, Instant::now());
         }
         Ok(())
+    }
+
+    /// **Whether the pointer is inside the glance one of the peek's own rows
+    /// raised** (user ruling 2026-09-07, `docs/DESIGN.md` §7.58).
+    ///
+    /// The third entry on "reaching for the thing that summoned it is not leaving
+    /// it", read the other way round: the trigger and the root menu are things the
+    /// peek came *from*, and this is a thing the peek gave *rise to*. Both are the
+    /// same sentence — the region the peek is alive in is larger than its own
+    /// rectangle — and the ruling states the consequence outright: the folder card
+    /// stays open while its child preview is showing. Without this, walking off the
+    /// folder card into the card it just opened starts the folder card's 220ms and
+    /// takes the preview's anchor down from under it.
+    ///
+    /// **Only the glance this peek raised**, never any other: a card standing over
+    /// a files column, over a Git page or over a terminal reference has nothing to
+    /// do with this window, and holding a window open under one would be a peek
+    /// that never closes while an unrelated card happens to be up.
+    fn pointer_is_in_the_peeks_own_glance(&self, position: PhysicalPosition<f64>) -> bool {
+        let Some(id) = self.window.float.peek_id() else {
+            return false;
+        };
+        self.window
+            .file_peek
+            .as_ref()
+            .is_some_and(|peek| peek.host == RowHost::Float(id))
+            && self.file_peek_holds([position.x as f32, position.y as f32])
     }
 
     /// Whether the pointer is on the run of cells that summoned the peek which
@@ -69651,6 +69765,18 @@ impl Runtime<'_> {
             && self.window.float.live(id).is_none()
         {
             self.window.float_hover = None;
+        }
+        // **And the glance one of its rows raised** (user ruling 2026-09-07,
+        // §7.58). It is a gesture on this window in exactly the sense the three
+        // above are: it was placed against the window's frame, it names a file the
+        // window's tree listed, and it is drawn over the top of it. A card left
+        // standing where its window used to be is a card about a place the reader
+        // can no longer see — and it would have no anchor to be re-placed against
+        // on the next frame that drew it.
+        if let Some(RowHost::Float(id)) = self.window.file_peek.as_ref().map(|peek| peek.host)
+            && self.window.float.live(id).is_none()
+        {
+            self.hide_file_peek();
         }
     }
 
@@ -76343,10 +76469,12 @@ impl Runtime<'_> {
         // say which row — if any — is under the pointer, and the answer has to
         // be this frame's. Every path that owns the pointer has returned above,
         // so a drag, a divider and a float carry cannot arm one.
-        let row = self
-            .hover_float_free(HoverFloat::Glance)
-            .then(|| self.row_under(position))
-            .flatten();
+        //
+        // **And the exclusion is asked of the row** (user ruling 2026-09-07),
+        // which is the one difference from the flyout's line above: a row of the
+        // folder card may raise a glance while that card is on the glass, because
+        // the two are one region rather than two panels — see [`glance_may_arm`].
+        let row = self.glancing_row_at(position);
         // The card is taken down **here**, on the move that left the row, and the
         // frame it owes is paid here too: the chrome hover above has already
         // presented by the time this runs, so a card retired without its own
@@ -122997,7 +123125,14 @@ mod tests {
                 meta: Some("3 KB".to_owned()),
                 body: file_peek::PeekBody::Document(height),
             };
-            let layout = file_peek::layout(&card, row, window, 60.0, 24.0, scale);
+            let layout = file_peek::layout(
+                &card,
+                file_peek::PeekAnchor::row(row),
+                window,
+                60.0,
+                24.0,
+                scale,
+            );
             let clamp = preview_document_max_scroll(
                 document,
                 layout.body,
@@ -133529,6 +133664,156 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// RED GATE (user ruling 2026-09-07, `docs/DESIGN.md` §7.58) — **a file row
+    /// inside the folder card raises a glance, and it is the only row on the
+    /// glass that may.**
+    ///
+    /// The report: a folder path printed in a pane opens the folder card, and a
+    /// hand resting on `report.md` inside it was answered by nothing at all —
+    /// while the same name in the files column, in a pinned window, or printed in
+    /// the output, answers with a preview. Nothing about the glance was wrong.
+    /// What refused was the rule above: the folder card is a
+    /// [`float::FloatMode::Peek`], so [`HoverFloat::Flyout`] was holding the
+    /// glass, and no glance may arm under a panel.
+    ///
+    /// **The exception is a rule about independence, not a hole in the list.**
+    /// [`HoverFloat`] exists because two hover surfaces that know nothing of one
+    /// another end up half-covering each other; a glance a flyout's own row
+    /// raised knows a great deal about it — it is placed against that flyout's
+    /// frame ([`file_peek::PeekAnchor::row_in_a_card`]), it holds it open while
+    /// the hand is in it ([`Runtime::pointer_is_in_the_peeks_own_glance`]), and
+    /// it dies with it ([`Runtime::forget_dead_float_gestures`]). Two rectangles,
+    /// one region — the same thing [`file_peek::corridor`] already says about a
+    /// card and its row.
+    ///
+    /// MUTATIONS that must turn this red:
+    ///
+    /// * [`glance_may_arm`] delegating to [`HoverFloat::free`] again — ② goes
+    ///   red, which is the defect exactly.
+    /// * the exception widened to any row — ① goes red: a files column under an
+    ///   open folder card starts arming cards behind it.
+    /// * the exception widened past `Flyout` to whoever holds the glass — ③ goes
+    ///   red and a press stops outranking a hover.
+    #[test]
+    fn a_row_inside_the_folder_card_may_raise_a_glance_while_that_card_holds_the_glass() {
+        // ① The standing exclusion, untouched: a row anywhere *else* arms
+        // nothing while a peek flyout is up.
+        assert!(
+            !glance_may_arm(Some(HoverFloat::Flyout), false),
+            "a files column row under an open folder card still arms nothing"
+        );
+        // ② The ruling.
+        assert!(
+            glance_may_arm(Some(HoverFloat::Flyout), true),
+            "but the folder card's own file row raises its glance"
+        );
+        // ③ A press outranks every hover, and the exception does not reach it.
+        for inside in [false, true] {
+            assert!(
+                !glance_may_arm(Some(HoverFloat::Menu), inside),
+                "a row under an open menu is a row under a menu ({inside})"
+            );
+        }
+        // ④ Everything else is [`HoverFloat::free`] verbatim, which is what
+        // makes this an exception rather than a second policy.
+        let mut glass: Vec<Option<HoverFloat>> = vec![None];
+        glass.extend(HoverFloat::ALL.map(Some));
+        for held in glass {
+            assert_eq!(
+                glance_may_arm(held, false),
+                HoverFloat::Glance.free(|who| held == Some(who)),
+                "off the flyout, the list decides on its own: {held:?}"
+            );
+        }
+        assert!(glance_may_arm(None, false), "a free hand on a free glass");
+        assert!(
+            glance_may_arm(Some(HoverFloat::Glance), true),
+            "and a glance never blocks itself, wherever the row is"
+        );
+        assert!(
+            !glance_may_arm(Some(HoverFloat::LayoutPeek), true),
+            "the flyout is the one panel this exception is about"
+        );
+    }
+
+    /// RED GATE (user ruling 2026-09-07, §7.58) — **the folder card stays open
+    /// while the glance it raised is showing, and that glance opens nothing
+    /// further.**
+    ///
+    /// Two halves of one sentence, and both are facts about *where a question is
+    /// asked* rather than about a value, which is why they are read as text —
+    /// [`the_rail_zone_is_asked_before_a_gesture_can_swallow_the_move`]'s reason
+    /// exactly: what goes wrong is an asker that never runs, and no state machine
+    /// can be driven into a state nobody puts it in.
+    ///
+    /// * **The pair stays up together.** The glance stands *outside* the folder
+    ///   card, so walking into it is walking off the card by
+    ///   [`float::peek_reach`]'s arithmetic, and the card's 220ms starts under a
+    ///   hand that is reading the very thing it opened. The glance's own frame
+    ///   has to count as part of the peek's region, beside the trigger and the
+    ///   root menu that are already on that list.
+    /// * **One level only.** A hand inside a glance is inside the glance,
+    ///   whatever rows are drawn under it — so
+    ///   [`Runtime::observe_file_peek`] answers [`file_peek::Life::Held`] before
+    ///   it ever looks at the row the pointer is over, and a glance can therefore
+    ///   never raise a second one.
+    ///
+    /// RED GATE: drop `pointer_is_in_the_peeks_own_glance` from
+    /// `drive_float_hover` and the first half fails by name; move the `Held` arm
+    /// below the dwell and the second does.
+    #[test]
+    fn the_folder_card_stays_up_under_the_glance_it_raised_and_that_glance_raises_nothing() {
+        const SOURCE: &str = include_str!("main.rs");
+        let body_of = |signature: &str| {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        };
+
+        let hover = body_of("    fn drive_float_hover(");
+        let asked = hover
+            .find("self.pointer_is_in_the_peeks_own_glance(position)")
+            .expect("the peek's region includes the glance its own row raised");
+        let released = hover
+            .find("self.window.float.release(")
+            .expect("and otherwise the pointer has left and the grace starts");
+        assert!(
+            asked < released,
+            "the glance is counted as part of the peek before the peek is let \
+             go — otherwise reaching into the card the folder card just opened \
+             starts the folder card's dismissal"
+        );
+
+        let observe = body_of("    fn observe_file_peek(");
+        let held = observe
+            .find("Some(file_peek::Life::Held) => return self.keep_file_peek(),")
+            .expect("a pointer inside the card is inside the card");
+        for later in [
+            "self.dwell_file_peek(host, now);",
+            "self.armed_file_peek(host, index, now)",
+        ] {
+            let at = observe
+                .find(later)
+                .unwrap_or_else(|| panic!("{later} is how a row takes a card"));
+            assert!(
+                held < at,
+                "the card's own face is answered before {later} — one level \
+                 only: a row drawn under a glance raises nothing"
+            );
+        }
+
+        // And the card goes when the window that raised it does: a glance left
+        // standing where its folder card used to be is about a place the reader
+        // can no longer see, and has no frame left to be placed against.
+        let forget = body_of("    fn forget_dead_float_gestures(");
+        assert!(
+            forget.contains("Some(RowHost::Float(id)) = self.window.file_peek.as_ref()"),
+            "a glance raised inside a float is one of that float's gestures"
+        );
     }
 
     /// PIN — **the `Split direction` setting decides every split that has no

@@ -7726,6 +7726,22 @@ $e]133;D$e\$e]7;file:///$P$e\$e]133;A$e\<读者自己的 PROMPT>
 
 Clink 会同时供上 `C` 和一个真的退出码,Folio 仍然不要求装它。
 
+### 7.58 文件夹卡里的一行文件悬停出预览卡:互斥名单拦的是互不相识的两层,而一张卡替自己的行举起来的一瞥认识它、靠着它、与它同死(用户裁决 2026-09-07,已落地;`crates/bt-app/src/{file_peek,main}.rs`)
+
+**缺口。** 终端里一条文件夹路径举起文件夹卡(一扇 `float::FloatMode::Peek` 的浮窗,带一棵文件树、一个 `DOCK` 按钮、一个 `×`)——§7.29 的第二张卡。指针停在那张卡**里面的一行文件**上,什么也不出;同一个文件名在这扇窗的任何别处——停靠的文件列、列的 Git 页、钉住的浮动树、终端输出——悬停都出预览卡。一瞥卡本身没有毛病。拒绝的是同一时刻只许一层悬停面的那条规矩(`HoverFloat`,2026-08-19):文件夹卡是一张 peek,`HoverFloat::Flyout` 占着玻璃,玻璃上不许再起第二层。
+
+**裁决(用户,2026-09-07)。** 文件夹卡里,指针停在一行文件上,在文件夹卡**旁边**——空间更宽的那一侧——打开该文件的预览卡,延迟 350ms,尺寸规则与内容与文件列的悬停预览完全相同。指针离开那一行,或者离开两张卡,预览关闭。**只一层**:这样打开的预览卡不再打开下一张卡;文件夹卡里的文件夹行不打开嵌套文件夹卡(点击仍然展开树)。无键盘。预览显示期间文件夹卡自身保持打开。
+
+**① 互斥名单管的是独立,而这一对不独立。** 新自由函数 `glance_may_arm(held: Option<HoverFloat>, row_is_in_the_flyout: bool) -> bool`,写在 `main.rs` 的 `HoverFloat` 旁边。`HoverFloat` 存在的理由是两层互不知情的悬停面各自盖住对方一半;而一层由 flyout 自己的行举起来的一瞥对那个 flyout 知情——它被贴着那扇窗的边框放置,它在手还在它里面时把那扇窗撑着,它随那扇窗一起死。两个矩形、一个区域——`file_peek::corridor` 对一张卡与它的行说的正是这句话。所以例外只花在一条臂上:`Some(HoverFloat::Flyout)` 对 `row_is_in_the_flyout` 放行,其余一律交回 `HoverFloat::free` 的原判。**`Menu` 仍然压过两者**——一次按下压过一切悬停,而一个打开的菜单底下的 flyout 行是一个菜单底下的行。新方法 `Runtime::glancing_row_at(position)` 先问命中测试再问互斥名单,因为这一行**是哪行**本身就是那道题;两个调用点(`pointer_moved`、`rearm_hover_intents`)各自丢掉了自己的 `hover_float_free(HoverFloat::Glance)` 过滤,改走这一处。红门 `a_row_inside_the_folder_card_may_raise_a_glance_while_that_card_holds_the_glass`;变异:改回委托给 `HoverFloat::free`,文件夹卡自己的行重新沉暗——正是那个缺口。
+
+**② 卡站在卡旁边,不是站在行旁边。** 新结构 `file_peek::PeekAnchor { rect, side }` 与 `PeekSide::{Right, Roomier}`,两个构造器:`PeekAnchor::row(rect)` 给自己就是锚的行用,`PeekAnchor::row_in_a_card(row, card)` 给画在一扇窗里面的行用。两条各自值得说的理由:(a) 一行画在窗里面,右端到窗的内边为止——原型图上那十个像素的间距如果从行的右端量起,一瞥落在文件夹卡的边框与阴影上。卡决定方向与距离;行只决定高度(`[card[0], row[1], card[2], row[3]]`)。(b) 「右边放不下才翻左」(6413–6420)对钉在窗边缘的面——文件列、Git 页、玻璃上的一串格子——是对的规矩,因为它每次都把卡放进中间那片空地。文件夹卡是浮动的:拖到刚好偏左一点仍然通过那道测试,读者拿到的是一张 300px 的卡挤在较窄的半边、较宽的半边空着。所以 `Roomier` 比较两侧**能容下卡及其间距**的空间,平手归右。`file_peek::layout` 的其余部分一字未动:同样的 10px 间距、同样的 8px 上探、同样的 8px 视口边距、同样的宽度、同样的 264px 上限。最后的视口钳位现在对两侧都跑一遍而不是只跑翻转后的那一侧——它在原来那条臂上本就是空操作,留着是给一扇窄到放不下 300px 卡的窗兜底。`Runtime::peek_anchor` 是四个宿主被区分的唯一一处:三个(文件列、Git 页、终端引用)钉在窗的边缘,它们的行就是自己的锚;第四个(`RowHost::Float`)是一扇窗,它的边框**按当前正在画的那一帧读**,读的是它正在升起的途中的位置,理由与 `Runtime::row_geometry` 这样读的理由相同。红门 `a_glance_raised_inside_a_card_stands_beside_the_card_on_the_roomier_side`——它的第四个 case 在同一个锚上把两条放置规矩拆开:右边放得下而左边更宽。
+
+**③ 文件夹卡在它打开的那张卡底下保持打开,而那张卡不再打开任何东西。** 一瞥站在文件夹卡**外面**,走进它就是以 `float::peek_reach` 的算术走出了文件夹卡,文件夹卡的 220ms 收回计时会在一只正在读它打开的东西的手底下启动。新谓词 `Runtime::pointer_is_in_the_peeks_own_glance` 加入触发区与根菜单的行列,成为「仍在与 peek 打交道」的第三个地方——已有的两项是 peek 的**来处**,这一项是 peek 的**产物**;两者是同一句话:一张 peek 活着的区域比它自己的矩形大。它只计入**这张** peek 举起来的那一瞥,不计入站在文件列或终端引用上方的一瞥。**只一层**不需要新代码,而这正是要点:`Runtime::observe_file_peek` 对一个指针落在卡内部的位置回答 `file_peek::Life::Held`,这发生在它去看行之前,所以一瞥永远举不起第二张;而一行树行不是 `float::FloatTrigger` 三种形状中的任何一种,所以文件夹卡里的文件夹行也举不起嵌套的文件夹卡。两条都由红门 `the_folder_card_stays_up_under_the_glance_it_raised_and_that_glance_raises_nothing` 以文本钉住,读法与 `the_rail_zone_is_asked_before_a_gesture_can_swallow_the_move` 给出的理由相同:出错的是一个根本没被调用的提问者,而一台状态机不会自行走进没有人把它推进去的状态。
+
+**④ 一瞥与举起它的那扇窗同死。** `Runtime::forget_dead_float_gestures`——那扇已经在放手拖动、头部按下与悬停的门——现在也放手一个 `file_peek`,如果它的宿主是一扇已经不再存活的浮窗。一张站在它的文件夹卡曾经所在的地方的卡,讲的是一个读者已经看不见的位置,而且下一帧画它时已经没有边框可以贴着放了。
+
+**⑤ 不做的。** 无键盘:`PreviewSurface::Peek` 仍然不在键盘可达的表面清单里,按 §7.29。无嵌套文件夹卡。**钉住的**浮动树的行为除了一处什么都没变:它的一瞥现在站在窗旁边而不是窗的边框宽度之内——同一个缺口,路上发现,一条规矩而不是两种写法。无新字符串,`i18n` 未动。
+
 ## 13. 可移植性
 
 2026-09-07。这一节记的**不是一次移植**,是为了让移植将来还可能而下的几条裁决。背景数据在 `docs/plans/port/macos-spike-2026-09-07.md`(英文;`main` 的 `05bf018`,Apple Silicon、macOS 26.6.2、Rust 1.94.1 `aarch64-apple-darwin`,`-j 4`)。
