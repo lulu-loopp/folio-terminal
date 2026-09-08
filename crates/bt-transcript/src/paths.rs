@@ -80,12 +80,32 @@ pub enum PrintedPathNamespace {
     /// working directory by; that function is this arm, read from the one place both callers can
     /// reach.
     ///
-    /// **A distribution-internal path stays plain text**, and so does `~`. `/home/alice` is a
-    /// directory inside the distribution's own filesystem; the only Windows spelling of it is the
-    /// `\\wsl.localhost\<distro>\home\alice` share, which is a `file:` authority this product's
-    /// decoder is obliged to refuse as remote (`decode_file_uri`). Admitting it is a ruling about
-    /// what "local" means and it is not this ticket's — see the note under §7.30.
-    Wsl,
+    /// **A distribution-internal path is this machine's too, and it is spelled through the
+    /// distribution's own share** (user ruling 2026-09-07, §7.30). `/etc/hosts` names a file in a
+    /// filesystem this machine is hosting, and Windows opens it at
+    /// `\\wsl.localhost\<distro>\etc\hosts` with no network anywhere in the path. That is a
+    /// **second translation step beside** [`drive_mount_to_local_path`]
+    /// ([`distro_path_to_local_path`]) and nothing wider: it runs only in this arm, it produces
+    /// only this one share, and every other UNC spelling — `\\server\share\…`, `//server/share`, a
+    /// `file:` URI naming a foreign authority — is refused exactly as it was, in this namespace as
+    /// in every other.
+    ///
+    /// `distro` is which distribution this pane's shell is in: the `wsl.exe -d <name>` argument the
+    /// pane's profile carries, or the machine's default distribution when the profile names none
+    /// (`bt_app::profiles::printed_path_namespace`). `None` is a machine that could name neither,
+    /// and then a distribution-internal path stays plain text because this window has no share to
+    /// point at.
+    ///
+    /// `home` is the distribution's own `$HOME`, spelled inside the distribution (`/home/alice`) —
+    /// what `~` means here. It is not knowable from this side of the launcher: `wsl.exe --cd ~` is
+    /// what the launcher was *told*, and only the shell can say what it expanded to. So it is
+    /// learned from the shell — a pane put down in its shell's own home reports that home over
+    /// `OSC 7` at its first prompt, and `bt_term::DualPlaneSession` folds the report in through
+    /// [`Self::with_shell_home`]. `None` is a pane nobody has told, and then `~` names nothing here.
+    Wsl {
+        distro: Option<String>,
+        home: Option<PathBuf>,
+    },
 }
 
 impl PrintedPathNamespace {
@@ -99,8 +119,16 @@ impl PrintedPathNamespace {
     /// What this machine calls the place `printed` names, or `None` when it has no name for it.
     ///
     /// The refusals are the honest half of the rule and each is a real case: an MSYS path outside
-    /// the drive mounts, a distribution-internal path, a `~` in a namespace whose home this window
-    /// has not been told, and a root with nothing below it (`/` names a filesystem, not a file).
+    /// the drive mounts, a distribution this window cannot name, a `~` in a namespace whose home
+    /// this window has not been told, and a root with nothing below it (`/` names a filesystem, not
+    /// a file).
+    ///
+    /// **The drive mounts are asked first in the WSL arm, and the order is the answer's.**
+    /// `/mnt/d/Demo` is `D:\Demo` — the same directory the pane's neighbours are standing in, and
+    /// the spelling every other pane in the window speaks — while `\\wsl.localhost\…\mnt\d\Demo`
+    /// would reach the same bytes through a share by way of a filesystem that is only forwarding
+    /// them. A mount that is not a drive (`/mnt/cdrom`) is an ordinary directory inside the
+    /// distribution and falls through to the share, which is what it is.
     #[cfg(windows)]
     #[must_use]
     pub fn to_local_path(&self, printed: &str) -> Option<PathBuf> {
@@ -110,8 +138,41 @@ impl PrintedPathNamespace {
                 Some(tail) => Some(join_below(home.as_deref()?, tail.strip_prefix('/')?)),
                 None => drive_mount_to_local_path(printed.strip_prefix('/')?),
             },
-            // `~` is deliberately absent: see the arm's own note.
-            Self::Wsl => drive_mount_to_local_path(printed.strip_prefix("/mnt/")?),
+            Self::Wsl { distro, home } => {
+                if let Some(mounted) = printed
+                    .strip_prefix("/mnt/")
+                    .and_then(drive_mount_to_local_path)
+                {
+                    return Some(mounted);
+                }
+                let inside = match printed.strip_prefix('~') {
+                    // `~` is the home the shell reported, and the report is a path inside the same
+                    // distribution — so the expansion happens here, in the distribution's own
+                    // spelling, and the one translation below reads the result.
+                    Some(tail) => {
+                        format!("{}{tail}", home.as_deref()?.to_str()?.trim_end_matches('/'))
+                    }
+                    None => printed.to_owned(),
+                };
+                distro_path_to_local_path(distro.as_deref()?, &inside)
+            }
+        }
+    }
+
+    /// The same namespace, told what the shell standing in this pane calls its own home.
+    ///
+    /// Only a [`Self::Wsl`] arm that has not been told one takes it, and that is the whole of the
+    /// rule: a distribution's `$HOME` is a fact only that distribution's shell can state, while an
+    /// MSYS pane's home was read off `%USERPROFILE%` by the layer that built the namespace and a
+    /// later report cannot improve on it.
+    #[must_use]
+    pub fn with_shell_home(&self, reported: Option<&Path>) -> Self {
+        match (self, reported) {
+            (Self::Wsl { distro, home: None }, Some(reported)) => Self::Wsl {
+                distro: distro.clone(),
+                home: Some(reported.to_path_buf()),
+            },
+            _ => self.clone(),
         }
     }
 
@@ -165,6 +226,97 @@ pub fn drive_mount_to_local_path(below_root: &str) -> Option<PathBuf> {
     let mut translated = format!("{}:\\", char::from(letter).to_ascii_uppercase());
     translated.push_str(&tail.replace('/', "\\"));
     Some(PathBuf::from(translated))
+}
+
+/// The authority Windows serves a WSL distribution's own filesystem under.
+///
+/// One constant and not a spelling per caller, because it is the *whole* of what this product
+/// treats as local-but-not-drive-rooted: the widening §7.30 took on 2026-09-07 is this host and no
+/// other. `\\wsl$\…`, the older alias for the same share, is deliberately absent — nothing in this
+/// window produces it, no scan can ever offer it (a printed `\\…` opens no candidate in any
+/// namespace), and a second spelling admitted here would be surface nobody reaches.
+pub const WSL_DISTRIBUTION_SHARE_HOST: &str = "wsl.localhost";
+
+/// `/etc/hosts` in an Ubuntu pane → `\\wsl.localhost\Ubuntu\etc\hosts` — the **second** translation
+/// step, beside [`drive_mount_to_local_path`] (user ruling 2026-09-07, §7.30).
+///
+/// It is scoped to [`PrintedPathNamespace::Wsl`] by being reachable only from that arm, and it is
+/// the only producer of a non-drive-rooted local path in this crate. That is what keeps the ruling
+/// a *translation* rather than a widening of what "local" means: `\\server\share\notes.md` printed
+/// into any pane opens no candidate at all (no scan admits a `\\` or a `//` opening), and a `file:`
+/// URI naming a foreign authority is still refused by [`decode_file_uri`]. The only way a UNC path
+/// exists in this window is that a namespace made this one.
+///
+/// `below_root` is the distribution's own absolute spelling, `/` and all. A root with nothing below
+/// it names a filesystem rather than a file and is refused, exactly as [`drive_mount_to_local_path`]
+/// refuses a bare `/mnt`.
+#[cfg(windows)]
+#[must_use]
+pub fn distro_path_to_local_path(distro: &str, below_root: &str) -> Option<PathBuf> {
+    let tail = below_root
+        .strip_prefix('/')
+        .filter(|tail| !tail.is_empty())?;
+    if !is_distribution_name(distro) {
+        return None;
+    }
+    Some(PathBuf::from(format!(
+        "\\\\{WSL_DISTRIBUTION_SHARE_HOST}\\{distro}\\{}",
+        tail.replace('/', "\\")
+    )))
+}
+
+/// Whether a name may stand as the share segment of [`WSL_DISTRIBUTION_SHARE_HOST`].
+///
+/// The distribution's name reaches this crate from a profile row a person may edit, so it is
+/// checked where it is *used to build a path* rather than trusted for having come from the
+/// registry: a name carrying a separator, a colon or a control character would compose a path
+/// naming somewhere else entirely, and `.`/`..` name the share's own parents. Everything WSL itself
+/// allows in a distribution name — letters, digits, `-`, `_`, `.` — passes.
+fn is_distribution_name(distro: &str) -> bool {
+    !distro.is_empty()
+        && distro != "."
+        && distro != ".."
+        && !distro
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\' | ':'))
+}
+
+/// Whether a path this window holds is a WSL distribution's own share — **this machine's
+/// filesystem, reached over a local transport, and not a network share**.
+///
+/// It exists because [`is_local_absolute_path`] and every reader of "is this remote?" have to agree
+/// about exactly one prefix, and agreeing means one function. A `\\server\share` is still a share
+/// and still refused everywhere it was.
+#[cfg(windows)]
+#[must_use]
+pub fn is_wsl_distribution_share(path: &Path) -> bool {
+    wsl_share_root_length(&path.as_os_str().to_string_lossy()).is_some()
+}
+
+/// The same question where this machine has no such share to hold.
+#[cfg(not(windows))]
+#[must_use]
+pub fn is_wsl_distribution_share(_path: &Path) -> bool {
+    false
+}
+
+/// How many bytes of `text` are `\\wsl.localhost\<distro>` — the share's root, which is what a drive
+/// letter's `D:` is to a drive-rooted path: everything below it is components.
+#[cfg(windows)]
+fn wsl_share_root_length(text: &str) -> Option<usize> {
+    let prefix_length = 2 + WSL_DISTRIBUTION_SHARE_HOST.len() + 1;
+    let head = text.get(..prefix_length)?;
+    if !head.starts_with("\\\\")
+        || !head[2..prefix_length - 1].eq_ignore_ascii_case(WSL_DISTRIBUTION_SHARE_HOST)
+        || !head.ends_with('\\')
+    {
+        return None;
+    }
+    let distro = text[prefix_length..]
+        .split('\\')
+        .next()
+        .filter(|distro| is_distribution_name(distro))?;
+    Some(prefix_length + distro.len())
 }
 
 /// `~/src/a.md` → `<home>\src\a.md`, with the tail's separators turned into this machine's.
@@ -338,10 +490,19 @@ impl PrintedPathCandidate {
 /// over OSC 7 is a directory and has no extension to allow, while an image must additionally clear
 /// an extension list. Keeping the two halves apart is what lets one URI decoder serve both without
 /// either shape inheriting the other's privileges.
+/// # The one root that is not a drive
+///
+/// A WSL distribution's share ([`is_wsl_distribution_share`]) is admitted here since 2026-09-07,
+/// and it is admitted **as a root**, not as a UNC path: `\\server\share\a.md` is as remote as it
+/// ever was, and so is every other authority. The distinction is not about the spelling but about
+/// where the bytes are — a distribution is a filesystem this machine is hosting, and reading it
+/// crosses no network — which is the same question `bt_app::preview::is_network_path` asks with the
+/// same function, so that one prefix has one answer.
 #[cfg(windows)]
 pub fn is_local_absolute_path(path: &Path) -> bool {
     let text = path.as_os_str().to_string_lossy();
-    is_windows_drive_absolute(&text) && !text.contains('\0')
+    (is_windows_drive_absolute(&text) || wsl_share_root_length(&text).is_some())
+        && !text.contains('\0')
 }
 
 /// The same gate where a filesystem has one root instead of one per volume.
@@ -777,10 +938,43 @@ fn bare_candidate_opens_at(text: &str, start: usize, candidate: &str) -> bool {
 /// and a bare reference is admitted on evidence throughout this scan (a separator it carries, an
 /// anchor it opens with) rather than on the lack of it.
 ///
+/// # A prompt's own colon binds nothing (user ruling 2026-09-07)
+///
+/// `alice@HOST:/mnt/d/Demo$` is what Ubuntu's default `PS1` writes, and the colon in it is a
+/// **separator between two fields of a prompt** — who and where — rather than a mark that made
+/// anything absolute. The witness is in the text and it is one character class again: what stands
+/// in front of the colon ends in `@` followed by a host name ([`is_hostname_char`]), and a scheme
+/// may not carry an `@` at all ([RFC 3986] `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`), so
+/// nothing this exception admits was ever a scheme's opaque tail. The same shape is what an `scp`
+/// address is written as, which is the other place a person copies a path out from behind a colon.
+///
+/// It costs the refusals nothing: `scheme:/opaque` and the `:`-separated `PATH` a shell prints
+/// carry no `@`, and `https://user@host:8080/img/x.png` — the one URL that does — is held out of
+/// this scan by its own scheme span ([`is_promisable`]) and by the `//` its authority opens with.
+///
 /// [RFC 3986]: https://www.rfc-editor.org/rfc/rfc3986#section-3.1
 fn a_binding_colon_stands_before(text: &str, start: usize) -> bool {
-    let mut behind = text[..start].chars().rev();
-    behind.next() == Some(':') && behind.next().is_none_or(|character| character.is_ascii())
+    let Some(head) = text[..start].strip_suffix(':') else {
+        return false;
+    };
+    head.chars()
+        .next_back()
+        .is_none_or(|character| character.is_ascii())
+        && !a_prompts_host_stands_before(head)
+}
+
+/// Whether the text in front of a colon ends in the `@<host>` half of a prompt or an `scp` address.
+///
+/// The host must be non-empty — `alice@:` names nobody — and the `@` must sit directly behind it,
+/// which is what makes this a *transition* rather than a search for an `@` anywhere on the line.
+fn a_prompts_host_stands_before(head: &str) -> bool {
+    let before_host = head.trim_end_matches(is_hostname_char);
+    before_host.len() < head.len() && before_host.ends_with('@')
+}
+
+/// The characters a host name is spelled with: letters, digits, `-` and the label separator `.`.
+fn is_hostname_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '-' | '.')
 }
 
 /// A `.` or `..` component followed by a separator, and nothing else.
@@ -813,13 +1007,19 @@ fn is_relative_prefix_at(bytes: &[u8], start: usize) -> bool {
 /// `..` that would climb past the drive root names nothing a filesystem can hold, and a join that
 /// lands on the bare drive root names a directory rather than a file; both are simply not
 /// candidates.
+/// **The root is whatever rooted the base**, which since 2026-09-07 is either a drive letter or a
+/// WSL distribution's share ([`wsl_share_root_length`]). A WSL pane standing in `/home/alice/src`
+/// reports that directory, the namespace spells it `\\wsl.localhost\Ubuntu\home\alice\src`, and the
+/// `docs/a.md` printed under it is measured from there exactly as `./a.md` in a `D:\` pane is —
+/// including the climb: a `..` that would pop past the share's root pops an empty stack and names
+/// nothing, which is the drive root's own refusal said about a different root.
 #[cfg(windows)]
 pub fn resolve_relative_reference(working_directory: &Path, relative: &str) -> Option<PathBuf> {
     if !is_local_absolute_path(working_directory) {
         return None;
     }
     let base = working_directory.as_os_str().to_str()?;
-    let (drive, rest) = base.split_at(2);
+    let (drive, rest) = base.split_at(wsl_share_root_length(base).unwrap_or(2));
     let mut components = Vec::new();
     for component in rest.split(['/', '\\']).chain(relative.split(['/', '\\'])) {
         match component {
@@ -1863,11 +2063,26 @@ fn percent_decode(segment: &str) -> Option<String> {
 /// Percent-encoding covers every byte outside RFC 3986's unreserved set, apart from the two
 /// structural characters this shape needs literally (`/` and the drive's `:`). A space becomes
 /// `%20`, and a name in any script becomes its UTF-8 bytes escaped one at a time.
+///
+/// # A UNC path's two slashes are its authority
+///
+/// `\\wsl.localhost\Ubuntu\etc\hosts` is written `file://wsl.localhost/Ubuntu/etc/hosts` — the host
+/// in the authority, which is what RFC 8089 §3 says a UNC path is and what
+/// `bt_platform::file_uri_to_path` reads it back as. Spelling it the drive way instead
+/// (`file://///wsl.localhost/…`) would produce a URI with four empty segments in front of the name,
+/// which every decoder in this product refuses and which no reader could recognise as the path it
+/// came from. This is a spelling rule and not an admission: which paths may become a target at all
+/// is [`is_local_absolute_path`]'s question, one function over, and [`decode_file_uri`] still
+/// refuses every authority but this host's own — a printed `file://wsl.localhost/…` is text.
 #[cfg(windows)]
 pub fn local_path_to_file_uri(path: &Path) -> String {
     const UNRESERVED_EXTRA: &[u8] = b"-._~";
-    let mut uri = String::from("file:///");
-    for byte in path.as_os_str().to_string_lossy().bytes() {
+    let text = path.as_os_str().to_string_lossy();
+    let (mut uri, body) = match text.strip_prefix("\\\\") {
+        Some(share) => (String::from("file://"), share),
+        None => (String::from("file:///"), text.as_ref()),
+    };
+    for byte in body.bytes() {
         match byte {
             b'\\' | b'/' => uri.push('/'),
             b':' => uri.push(':'),
@@ -2663,6 +2878,14 @@ mod tests {
         }
     }
 
+    /// A WSL pane that knows which distribution it is in and what its shell calls home.
+    fn wsl() -> PrintedPathNamespace {
+        PrintedPathNamespace::Wsl {
+            distro: Some("Ubuntu".to_owned()),
+            home: Some(PathBuf::from("/home/alice")),
+        }
+    }
+
     /// Every link one line offers **in one namespace**, as `(printed span, target)`.
     fn linked_in(
         namespace: &PrintedPathNamespace,
@@ -2728,37 +2951,37 @@ mod tests {
         );
     }
 
-    /// PIN (T-3): a WSL pane reads `/mnt/<drive>/…`, and the paths that live inside the
-    /// distribution stay plain text because this machine has no name for them.
+    /// PIN (T-3): a WSL pane reads `/mnt/<drive>/…` as the drive it is, and neither of the two
+    /// foreign namespaces reads the other's spelling.
+    ///
+    /// **The half this test used to hold has been overturned** (user ruling 2026-09-07): it asserted
+    /// that `/home/alice/notes.md`, `~/notes.md` and `/usr/local/bin/tool` name nothing in a WSL
+    /// pane, because this machine had no name for them. It has one —
+    /// `a_wsl_pane_opens_the_distributions_own_paths_through_its_share` is where those three lines
+    /// live now, and the reason the old claim went is written under §7.30 rather than only here.
     #[test]
-    fn a_wsl_pane_reads_its_drive_mounts_and_leaves_the_distribution_alone() {
+    fn a_wsl_pane_reads_its_drive_mounts_as_drives() {
         assert_eq!(
             linked_in(
-                &PrintedPathNamespace::Wsl,
+                &wsl(),
                 &[("D:\\Demo\\report.md", true)],
                 "ls /mnt/d/Demo/report.md",
             ),
             ["/mnt/d/Demo/report.md → file:///D:/Demo/report.md"]
         );
-        for inside in ["/home/alice/notes.md", "~/notes.md", "/usr/local/bin/tool"] {
-            assert!(
-                linked_in(
-                    &PrintedPathNamespace::Wsl,
-                    &[("D:\\Demo\\report.md", true)],
-                    inside,
-                )
-                .is_empty(),
-                "{inside} names a place inside the distribution, which Windows cannot open"
-            );
-        }
-        // The MSYS spelling is not the WSL one, and neither pane reads the other's.
-        assert!(
+        // The MSYS spelling is not the WSL one, and neither pane reads the other's. In a WSL pane
+        // `/d/Demo` is an ordinary directory called `d` inside the distribution — which is what it
+        // really is there — and never the drive an MSYS pane would have read.
+        assert_eq!(
             linked_in(
-                &PrintedPathNamespace::Wsl,
-                &[("D:\\Demo\\report.md", true)],
+                &wsl(),
+                &[
+                    ("D:\\Demo\\report.md", true),
+                    ("\\\\wsl.localhost\\Ubuntu\\d\\Demo\\report.md", true),
+                ],
                 "/d/Demo/report.md",
-            )
-            .is_empty()
+            ),
+            ["/d/Demo/report.md → file://wsl.localhost/Ubuntu/d/Demo/report.md"]
         );
         assert!(
             linked_in(
@@ -2768,6 +2991,249 @@ mod tests {
             )
             .is_empty(),
             "an MSYS shell has no /mnt, so this is a path inside the Git installation"
+        );
+    }
+
+    /// RED (user ruling 2026-09-07, §7.30) — **a distribution-internal path in a WSL pane opens
+    /// through that distribution's own share, and only there.**
+    ///
+    /// `/etc/hosts` in an Ubuntu pane is a file this machine is hosting; Windows opens it at
+    /// `\\wsl.localhost\Ubuntu\etc\hosts` with no network anywhere in the path. `~` is the home the
+    /// shell itself reported, and the drive mounts are untouched beside it.
+    #[test]
+    fn a_wsl_pane_opens_the_distributions_own_paths_through_its_share() {
+        assert_eq!(
+            linked_in(
+                &wsl(),
+                &[("\\\\wsl.localhost\\Ubuntu\\etc\\hosts", true)],
+                "cat /etc/hosts",
+            ),
+            ["/etc/hosts → file://wsl.localhost/Ubuntu/etc/hosts"]
+        );
+        assert_eq!(
+            linked_in(
+                &wsl(),
+                &[("\\\\wsl.localhost\\Ubuntu\\home\\alice\\notes.md", true)],
+                "wrote /home/alice/notes.md:12",
+            ),
+            ["/home/alice/notes.md:12 → file://wsl.localhost/Ubuntu/home/alice/notes.md#L12"]
+        );
+        assert_eq!(
+            linked_in(
+                &wsl(),
+                &[("\\\\wsl.localhost\\Ubuntu\\home\\alice\\notes.md", true)],
+                "see ~/notes.md",
+            ),
+            ["~/notes.md → file://wsl.localhost/Ubuntu/home/alice/notes.md"]
+        );
+        // The drive mounts are still read as the drive mounts they are, and they are asked about
+        // first: `/mnt/d/Demo` is `D:\Demo`, not a directory inside the distribution.
+        assert_eq!(
+            linked_in(
+                &wsl(),
+                &[("D:\\Demo\\report.md", true)],
+                "ls /mnt/d/Demo/report.md",
+            ),
+            ["/mnt/d/Demo/report.md → file:///D:/Demo/report.md"]
+        );
+    }
+
+    /// RED (user ruling 2026-09-07) — **the widening is one namespace-scoped translation and not a
+    /// change to what "local" means.**
+    ///
+    /// A share spelling printed as *text* names nothing in any pane, including a WSL one: the only
+    /// way a `\\wsl.localhost\…` path exists in this window is that the namespace made it out of a
+    /// distribution-internal spelling. And a foreign authority is still foreign in a WSL pane.
+    #[test]
+    fn a_distribution_share_is_a_path_only_where_the_namespace_made_one() {
+        let verdicts = &[
+            ("\\\\wsl.localhost\\Ubuntu\\etc\\hosts", true),
+            ("\\\\server\\share\\notes.md", true),
+        ];
+        for namespace in [PrintedPathNamespace::Windows, msys(), wsl()] {
+            for printed in [
+                "\\\\wsl.localhost\\Ubuntu\\etc\\hosts",
+                "//wsl.localhost/Ubuntu/etc/hosts",
+                "\\\\server\\share\\notes.md",
+                "//server/share/notes.md",
+                "file://wsl.localhost/Ubuntu/etc/hosts",
+                "file://server/share/notes.md",
+            ] {
+                assert!(
+                    linked_in(&namespace, verdicts, printed).is_empty(),
+                    "{printed} in a {namespace:?} pane names a machine, not a file this window may open"
+                );
+            }
+        }
+    }
+
+    /// RED (user ruling 2026-09-07) — a pane that cannot name its distribution has no share to
+    /// point at, so a distribution-internal path is plain text there exactly as it was.
+    #[test]
+    fn a_wsl_pane_that_cannot_name_its_distribution_leaves_the_distribution_alone() {
+        let unnamed = PrintedPathNamespace::Wsl {
+            distro: None,
+            home: Some(PathBuf::from("/home/alice")),
+        };
+        for printed in ["/etc/hosts", "/home/alice/notes.md", "~/notes.md"] {
+            assert!(
+                linked_in(
+                    &unnamed,
+                    &[
+                        ("\\\\wsl.localhost\\Ubuntu\\etc\\hosts", true),
+                        ("\\\\wsl.localhost\\Ubuntu\\home\\alice\\notes.md", true),
+                    ],
+                    printed,
+                )
+                .is_empty(),
+                "{printed} has no share to be spelled through"
+            );
+        }
+        // And a pane nobody told a home to has no `~`, while everything else it reads is unaffected.
+        let homeless = PrintedPathNamespace::Wsl {
+            distro: Some("Ubuntu".to_owned()),
+            home: None,
+        };
+        assert!(
+            linked_in(
+                &homeless,
+                &[("\\\\wsl.localhost\\Ubuntu\\home\\alice\\notes.md", true)],
+                "~/notes.md",
+            )
+            .is_empty(),
+            "`~` names a place only after the shell has said where home is"
+        );
+        assert_eq!(
+            linked_in(
+                &homeless,
+                &[("\\\\wsl.localhost\\Ubuntu\\etc\\hosts", true)],
+                "/etc/hosts",
+            ),
+            ["/etc/hosts → file://wsl.localhost/Ubuntu/etc/hosts"]
+        );
+    }
+
+    /// RED (user ruling 2026-09-07) — **the share is built out of a name, and a name is checked
+    /// where it is used to build a path.**
+    ///
+    /// A distribution's name reaches this crate from a profile row a person may edit, so a name
+    /// carrying a separator would compose a path naming somewhere else entirely — and `..` names
+    /// the share's own parents. Neither is a distribution, and neither becomes a path.
+    ///
+    /// MUTATION: trust the name and `/etc/hosts` in a pane whose row says `-d ..\..` asks the disk
+    /// about `\\wsl.localhost\..\..\etc\hosts`.
+    #[test]
+    fn a_distribution_name_is_checked_where_it_builds_a_path() {
+        for name in ["Ubuntu", "Ubuntu-24.04", "docker_desktop", "openSUSE.15"] {
+            assert_eq!(
+                distro_path_to_local_path(name, "/etc/hosts"),
+                Some(PathBuf::from(format!(
+                    "\\\\wsl.localhost\\{name}\\etc\\hosts"
+                ))),
+                "{name} is a name WSL itself allows"
+            );
+        }
+        for refused in ["", ".", "..", "a\\b", "a/b", "C:", "a\u{7}b"] {
+            assert_eq!(
+                distro_path_to_local_path(refused, "/etc/hosts"),
+                None,
+                "{refused:?} would compose a path naming somewhere else"
+            );
+        }
+        // A root names a filesystem rather than a file, exactly as a bare `/mnt` does.
+        assert_eq!(distro_path_to_local_path("Ubuntu", "/"), None);
+        assert_eq!(distro_path_to_local_path("Ubuntu", "etc/hosts"), None);
+
+        assert!(is_wsl_distribution_share(Path::new(
+            "\\\\wsl.localhost\\Ubuntu\\etc\\hosts"
+        )));
+        assert!(
+            is_wsl_distribution_share(Path::new("\\\\WSL.LOCALHOST\\Ubuntu")),
+            "a host name is not case-sensitive, and the share's root is a place"
+        );
+        for outside in [
+            "\\\\server\\share\\notes.md",
+            "\\\\wsl.localhost.example.test\\Ubuntu\\etc",
+            "\\\\wsl.localhost\\",
+            "D:\\Demo",
+        ] {
+            assert!(
+                !is_wsl_distribution_share(Path::new(outside)),
+                "{outside} is not a distribution's own share"
+            );
+        }
+    }
+
+    /// RED (user ruling 2026-09-07, §7.30) — **a colon that ends in `@<host>` is a prompt's
+    /// separator and not a binding colon.**
+    ///
+    /// Ubuntu's own prompt writes the shell's directory behind exactly that colon, and so does
+    /// every `scp`-shaped address a person copies out of one. What the colon still binds is
+    /// unchanged: a scheme, and the `:`-separated list a shell prints.
+    #[test]
+    fn a_prompts_own_host_colon_is_not_a_binding_colon() {
+        // The prompt's `$` is §7.30's sentence stop at the end of a token, so the disk is asked
+        // about `D:\Demo$` before `D:\Demo` — the ruling's own longest-first order, unchanged by
+        // which colon stands in front of the name.
+        assert_eq!(
+            linked_in(
+                &wsl(),
+                &[("D:\\Demo", true), ("D:\\Demo$", false)],
+                "alice@HOST:/mnt/d/Demo$ ls -la",
+            ),
+            ["/mnt/d/Demo → file:///D:/Demo"]
+        );
+        assert_eq!(
+            linked_in(
+                &wsl(),
+                &[("\\\\wsl.localhost\\Ubuntu\\home\\alice\\notes", true)],
+                "alice@box:~/notes",
+            ),
+            ["~/notes → file://wsl.localhost/Ubuntu/home/alice/notes"]
+        );
+        // The same sentence in the namespace that has always read a drive letter.
+        assert_eq!(
+            linked_in(
+                &PrintedPathNamespace::Windows,
+                &[("D:\\Demo\\docs\\a.md", true)],
+                "PS alice@host:D:\\Demo\\docs\\a.md",
+            ),
+            ["D:\\Demo\\docs\\a.md → file:///D:/Demo/docs/a.md"]
+        );
+        for refused in [
+            "http://host/mnt/d/Demo",
+            "scheme:/mnt/d/Demo",
+            "/a:/mnt/d/Demo:/c",
+            "alice@HOST:",
+            "alice@:/mnt/d/Demo",
+        ] {
+            assert!(
+                linked_in(&wsl(), &[("D:\\Demo", true), ("D:\\a", true)], refused).is_empty(),
+                "{refused} carries no prompt's host in front of its colon"
+            );
+        }
+    }
+
+    /// RED (user ruling 2026-09-07) — a WSL pane standing inside the distribution measures its
+    /// relative text from there, because the base it reports is now a place this machine can name.
+    #[test]
+    fn a_relative_reference_is_measured_from_a_distribution_directory_too() {
+        let links = PrintedPathLinks::in_namespace(
+            Some(PathBuf::from("/home/alice/src")),
+            [(
+                PathBuf::from("\\\\wsl.localhost\\Ubuntu\\home\\alice\\src\\docs\\a.md"),
+                true,
+            )]
+            .into_iter()
+            .collect(),
+            &wsl(),
+        );
+        assert_eq!(
+            linked(&links, "see docs/a.md", None),
+            [(
+                "docs/a.md",
+                "file://wsl.localhost/Ubuntu/home/alice/src/docs/a.md".to_owned()
+            )]
         );
     }
 
@@ -2799,37 +3265,55 @@ mod tests {
     }
 
     /// PIN (T-3): the refusals a foreign spelling keeps, so that a namespace does not become a
-    /// licence. A root with no drive under it, a mount that is not a drive, a `~` glued to a word,
-    /// a device name and a scheme's opaque tail are each read exactly as they are.
+    /// licence. A bare root, a `//` opening, a `~` glued to a word, a device name and a scheme's
+    /// opaque tail are each read exactly as they are — and every one of them is *proved* a refusal
+    /// rather than merely unanswered, because the ledger below holds a yes for the share spelling
+    /// each of them would have translated into.
+    ///
+    /// `/mnt/cdrom/disc/report.md` moved out of this list on 2026-09-07: it is a refusal in an MSYS
+    /// pane (there is no `/mnt` in the Git installation this window was told about) and it is an
+    /// ordinary directory inside the distribution in a WSL one, which the widened rule now spells.
     #[test]
     fn a_foreign_spelling_keeps_every_refusal_the_windows_one_has() {
+        let verdicts = &[
+            ("D:\\Demo\\report.md", true),
+            ("D:\\Demo\\NUL", true),
+            ("\\\\wsl.localhost\\Ubuntu\\d\\Demo\\NUL", true),
+            ("\\\\wsl.localhost\\Ubuntu\\d\\Demo\\report.md", true),
+            ("\\\\wsl.localhost\\Ubuntu\\notes\\a.md", true),
+        ];
         for printed in [
             "/",
             "//d/Demo/report.md",
-            "/mnt/cdrom/disc/report.md",
             "~notes/a.md",
             "/d/Demo/NUL",
             "scheme:/d/Demo/report.md",
         ] {
             assert!(
-                linked_in(
-                    &PrintedPathNamespace::Wsl,
-                    &[("D:\\Demo\\report.md", true), ("D:\\Demo\\NUL", true)],
-                    printed,
-                )
-                .is_empty(),
+                linked_in(&wsl(), verdicts, printed).is_empty(),
                 "{printed} in a WSL pane"
             );
             assert!(
-                linked_in(
-                    &msys(),
-                    &[("D:\\Demo\\report.md", true), ("D:\\Demo\\NUL", true)],
-                    printed,
-                )
-                .is_empty(),
+                linked_in(&msys(), verdicts, printed).is_empty(),
                 "{printed} in an MSYS pane"
             );
         }
+        assert!(
+            linked_in(&msys(), verdicts, "/mnt/cdrom/disc/report.md").is_empty(),
+            "an MSYS shell has no /mnt at all"
+        );
+        assert_eq!(
+            linked_in(
+                &wsl(),
+                &[(
+                    "\\\\wsl.localhost\\Ubuntu\\mnt\\cdrom\\disc\\report.md",
+                    true,
+                )],
+                "/mnt/cdrom/disc/report.md",
+            ),
+            ["/mnt/cdrom/disc/report.md → file://wsl.localhost/Ubuntu/mnt/cdrom/disc/report.md"],
+            "a mount that is not a drive is a directory inside the distribution, and is read as one"
+        );
     }
 
     /// PIN (T-3): a pane reports `OSC 7` in the namespace it stands in, so the base a relative
@@ -2841,7 +3325,7 @@ mod tests {
             [(PathBuf::from("D:\\Demo\\docs\\a.md"), true)]
                 .into_iter()
                 .collect(),
-            &PrintedPathNamespace::Wsl,
+            &wsl(),
         );
         assert_eq!(
             linked(&links, "see docs/a.md", None),

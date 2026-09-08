@@ -380,14 +380,26 @@ the shape above did not reach:
   **relative** references in a WSL pane were dead too. The base is translated
   once, in `PrintedPathLinks::in_namespace`.
 
-`\\wsl.localhost\<distro>\…` was **considered and not taken**, and it is the one
-piece of this ticket still open: a UNC target is a `file:` authority
-`decode_file_uri` is obliged to refuse as remote, so admitting it means widening
-`is_local_absolute_path`, `local_path_to_file_uri` and every `Rooting::DriveOnly`
-call site — a ruling about what "local" means, with a security-shaped edge
-(`\\server\share\…` printed in any pane becomes clickable with it), rather than a
-translation. Until it is taken, a distribution-internal path is the same empty
-cell `docs/shell-integration.md`'s own table has.
+`\\wsl.localhost\<distro>\…` was **considered and not taken** in the fix above,
+and it was the one piece of this ticket left open: a UNC target is a `file:`
+authority `decode_file_uri` is obliged to refuse as remote, so admitting it means
+widening `is_local_absolute_path`, `local_path_to_file_uri` and every
+`Rooting::DriveOnly` call site — a ruling about what "local" means, with a
+security-shaped edge (`\\server\share\…` printed in any pane becoming clickable
+with it), rather than a translation.
+
+**Taken the same day, on the user's ruling** (`fix/wsl-distro-paths-and-host-colon`).
+It is one namespace-scoped translation and not a change to what "local" means:
+`distro_path_to_local_path` sits beside `drive_mount_to_local_path`, is reached
+only from `PrintedPathNamespace::Wsl { distro, home }`, and produces only this one
+share. `is_local_absolute_path` admits that share as a **root**, `resolve_relative_reference`
+takes it as one, `local_path_to_file_uri` writes it as RFC 8089's `file://wsl.localhost/…`,
+and `preview::is_network_path` answers "no" for the same prefix through the same
+function — while `decode_file_uri` still refuses every foreign authority and no scan
+opens a candidate on a printed `\\` or `//`, so `\\server\share\…` is exactly as
+unrecognised as it was, in every pane. The distribution comes from the profile's
+own `-d` argument or the machine's default; `~` is the home the pane's shell
+reported at its first prompt. §7.30 carries the ruling.
 
 ### T-4 — a posted chord cannot drive this window
 

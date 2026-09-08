@@ -31,10 +31,28 @@ All notable changes to Folio are recorded here. The format follows
   pane reported. The file still has to be on the disk before anything is drawn,
   exactly as before. Which spelling a pane reads comes from the profile it was
   started from and not from the text, so `/d/Demo` typed into a PowerShell or
-  Command Prompt pane is still ordinary words. Two things a Windows path cannot
-  name are still left alone: a folder inside the distribution, such as
-  `/home/you` or `/usr/local/bin`, and `~` in a WSL pane, which is the same
-  folder said another way.
+  Command Prompt pane is still ordinary words.
+- **A file inside a WSL distribution opens too**, which the entry above had left
+  as the one thing a WSL pane still could not click. `/etc/hosts`,
+  `/home/you/notes.md` and `~/notes.md` printed in a WSL pane are now links, to
+  the same file Windows opens at `\\wsl.localhost\<distribution>\…` — a plain
+  click puts it in the preview beside the pane, `Ctrl`-click hands it to the
+  machine, and the folder it sits in points the files column at it. Which
+  distribution is the one that pane's profile starts: its own `-d` argument, or
+  the one `wsl.exe` starts by default. `~` is whatever the shell said its home
+  was when it opened. This is one translation in one kind of pane and nothing
+  wider: a share printed anywhere — `\\server\share\notes.md`, and a
+  `\\wsl.localhost\…` written out as text in any pane — names nothing, exactly
+  as before, and a network share still meets the card that says this window does
+  not read one unasked.
+- **A path right after a prompt's `user@host:` opens.** Ubuntu's own prompt
+  writes the folder you are standing in behind that colon, and the colon was
+  read as the kind that belongs to a scheme — so `alice@box:/mnt/d/Demo$` and
+  `alice@box:~/notes` were words. A colon with a host name in front of it is a
+  prompt's separator, and the path behind it is a path; the shape an `scp`
+  address is written in is the same one. Nothing else moved: `http://…`,
+  `scheme:/opaque` and the `:`-separated list a shell prints its `PATH` as are
+  refused exactly as they were.
 - **The tick on the prompt you are typing at no longer says a command is
   running.** Every prompt gets a tick the moment it is drawn, and hovering the
   newest one — the prompt with nothing typed into it yet — read `running ·

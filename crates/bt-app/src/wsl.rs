@@ -144,6 +144,20 @@ impl WslFacts {
         }
         self.default.as_ref().map(|default| default.name.as_str())
     }
+
+    /// The distribution `wsl.exe` starts when nothing names another — **whether or not there is a
+    /// choice to disambiguate**, which is the whole difference between this and
+    /// [`Self::title_qualifier`].
+    ///
+    /// A title says a name only when the name is load-bearing for a reader. A path needs the name
+    /// whenever it needs one at all: `/etc/hosts` in the one and only installed distribution is
+    /// `\\wsl.localhost\<that one>\etc\hosts`, and a window that declined to say which distribution
+    /// it meant would have no share to open (`profiles::printed_path_namespace`, §7.30
+    /// 2026-09-07).
+    #[must_use]
+    pub fn default_distribution(&self) -> Option<&str> {
+        self.default.as_ref().map(|default| default.name.as_str())
+    }
 }
 
 /// The installation, read out of the registry.

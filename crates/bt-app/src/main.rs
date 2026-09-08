@@ -29343,6 +29343,10 @@ fn create_leaf_session(
     // knows it (`profiles::spawn_place` has already folded HOME into it), so pushing it here is
     // what keeps relative text in this pane from being measured by a second copy of the ladder.
     session.set_spawn_directory(spawn_place.clone());
+    // And whether that rung is a *mark* rather than a place: a WSL leaf opening at its own `$HOME`
+    // was handed `--cd ~`, which only the shell can expand, so the session reads the expansion off
+    // the pane's first `OSC 7` report (§7.30, 2026-09-07).
+    session.set_spawn_at_shell_home(place.at_shell_home);
     // T-3, and it arrives beside the rung above for the same reason: which spelling of an absolute
     // path this pane's shell prints is a fact about the profile, and `seed.profile` is the last
     // place that holds it. A Git Bash prints `/d/Demo/report.md` and a WSL bash prints
@@ -109139,7 +109143,10 @@ mod tests {
     ///    and they are not the same mistake: ④ is a plain click starting a
     ///    *program*, which it must never do, and ⑥ is a plain click doing
     ///    nothing where this window has somewhere to go, which is the same
-    ///    half-lie ⑤ is about.
+    ///    half-lie ⑤ is about;
+    /// ⑦ make `preview::is_network_path` answer `true` for a WSL distribution's share again — drop
+    ///    its `is_wsl_distribution_share` clause — and the `wsl.localhost` cells go red: a file
+    ///    inside the distribution meets the network card, which is the refusal 2026-09-07 lifted.
     #[test]
     fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
         assert_eq!(
@@ -109221,6 +109228,24 @@ mod tests {
                 "a share meets the network card under either modifier, without a round trip"
             );
         }
+        // **The one share that is not one** (user ruling 2026-09-07, §7.30). A WSL distribution's
+        // filesystem is running on this machine and reaching it crosses no network, so the row it
+        // takes is the row every other local file takes — and the URI it takes it by is the one
+        // `local_path_to_file_uri` writes for exactly that path, which is what makes the printed
+        // `/etc/hosts` in a WSL pane and this table one road rather than two.
+        let hosts = PathBuf::from(r"\\wsl.localhost\Ubuntu\etc\hosts");
+        let hosts_uri = bt_transcript::paths::local_path_to_file_uri(&hosts);
+        assert_eq!(hosts_uri, "file://wsl.localhost/Ubuntu/etc/hosts");
+        assert_eq!(
+            hyperlink_activation(false, true, &hosts_uri, &no_directories),
+            HyperlinkActivation::Preview(hosts.clone(), None),
+            "a distribution-internal path opens in this window, through the share Windows serves it at"
+        );
+        assert_eq!(
+            hyperlink_activation(true, true, &hosts_uri, &no_directories),
+            HyperlinkActivation::External(hosts),
+            "and `Ctrl` hands it over exactly as it hands over a drive-rooted file"
+        );
         for uri in [
             "mailto:person@example.test",
             "javascript:alert(1)",

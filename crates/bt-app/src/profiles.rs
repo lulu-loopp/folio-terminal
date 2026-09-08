@@ -2846,12 +2846,52 @@ pub fn printed_path_namespace(
     environment: &dyn ShellEnvironment,
 ) -> PrintedPathNamespace {
     match (paths(index), integration(index)) {
-        (PathNamespace::Wsl, _) => PrintedPathNamespace::Wsl,
+        (PathNamespace::Wsl, _) => PrintedPathNamespace::Wsl {
+            distro: wsl_distribution(index),
+            // Not knowable here, and deliberately not guessed: `wsl.exe --cd ~` is what the
+            // launcher is *told*, and only the shell that read it can say what it expanded to. The
+            // session fills this in from the pane's own first `OSC 7` report
+            // (`PrintedPathNamespace::with_shell_home`).
+            home: None,
+        },
         (PathNamespace::Windows, Integration::BashInitFile) => PrintedPathNamespace::Msys {
             home: home_directory(environment),
         },
         (PathNamespace::Windows, _) => PrintedPathNamespace::Windows,
     }
+}
+
+/// Which distribution one WSL row's shell is standing in — the share a distribution-internal path
+/// printed in it is opened through (§7.30, user ruling 2026-09-07).
+///
+/// **The row's own argument first, and the machine's answer second.** `wsl.exe -d <name>` pins a
+/// launcher to one distribution, and a row carrying that flag names its distribution outright; a
+/// row without it starts whatever `wsl.exe` starts by default, which is a fact about the machine
+/// and is read from the registry beside every other fact about this installation
+/// ([`crate::wsl::facts`], three registry reads at startup and no process). `None` is a machine
+/// that could name neither, and then a distribution-internal path stays plain text.
+///
+/// Only the two spellings `wsl.exe` documents are read. A `--distribution=<name>` is not one of
+/// them, and inventing an argument form here would be this window claiming a launcher accepts
+/// something it may not.
+#[must_use]
+fn wsl_distribution(index: usize) -> Option<String> {
+    named_distribution(&args(index)).or_else(|| {
+        crate::wsl::facts()
+            .default_distribution()
+            .map(str::to_owned)
+    })
+}
+
+/// The `-d <name>` / `--distribution <name>` a row's arguments carry, if any.
+fn named_distribution(arguments: &[String]) -> Option<String> {
+    let mut rest = arguments.iter();
+    while let Some(argument) = rest.next() {
+        if argument == "-d" || argument == "--distribution" {
+            return rest.next().cloned();
+        }
+    }
+    None
 }
 
 /// One whole row, cloned — **what the spawn path is handed** (§7.1.6c-6c).
@@ -3801,6 +3841,17 @@ pub struct SpawnPlace {
     /// inside the two arms below, so a reader gets one answer instead of a
     /// second copy of the ladder.
     pub directory: Option<PathBuf>,
+    /// Whether [`Self::directory`] is the **shell's own `$HOME`, named to a launcher** rather than
+    /// a place this machine can spell — which is the one case where the directory above is a mark
+    /// (`~`) instead of a path.
+    ///
+    /// It exists for §7.30's `~` (2026-09-07). A WSL pane's home lives inside the distribution and
+    /// nothing on this side of `wsl.exe` can expand it; what this side knows is that it *asked* for
+    /// it, and the shell then says over `OSC 7` where it was put down. So this bit is what lets
+    /// `bt_term::DualPlaneSession` read the pane's first report as the answer to `~` — and refuse
+    /// to read any other pane's first report that way, because a pane that inherited a folder was
+    /// put down somewhere that is not its home.
+    pub at_shell_home: bool,
 }
 
 /// A directory a leaf of `profile` was saved standing in, if it is still a
@@ -3919,9 +3970,13 @@ fn place_for(
                 working_directory: directory.clone(),
                 arguments: Vec::new(),
                 directory,
+                // `%USERPROFILE%` is a home this machine can spell, so there is no mark here for
+                // anybody downstream to expand.
+                at_shell_home: false,
             }
         }
         StartingDir::LauncherFlag { flag, home } => {
+            let at_shell_home = place.is_none();
             let directory = place.unwrap_or_else(|| PathBuf::from(home.clone()));
             SpawnPlace {
                 working_directory: None,
@@ -3930,6 +3985,7 @@ fn place_for(
                     directory.clone().into_os_string(),
                 ],
                 directory: Some(directory),
+                at_shell_home,
             }
         }
     }
@@ -14885,6 +14941,7 @@ mod tests {
                     working_directory: Some(PathBuf::from(r"C:\Users\dev")),
                     arguments: Vec::new(),
                     directory: Some(PathBuf::from(r"C:\Users\dev")),
+                    at_shell_home: false,
                 },
                 "{profile} is a Windows process and takes a working directory"
             );
@@ -14898,6 +14955,9 @@ mod tests {
                 // carry it. `~` is where this shell stands, and it is what a leaf
                 // that never reported an OSC 7 has to answer with.
                 directory: Some(PathBuf::from("~")),
+                // And it is a **mark**: only the shell can expand it, which is why the
+                // session reads the expansion off this pane's first OSC 7 report (§7.30).
+                at_shell_home: true,
             },
             "WSL's home has no Windows spelling, so it is asked for rather than handed over"
         );
@@ -14942,6 +15002,7 @@ mod tests {
                 working_directory: Some(PathBuf::from(r"D:\Developer")),
                 arguments: Vec::new(),
                 directory: Some(PathBuf::from(r"D:\Developer")),
+                at_shell_home: false,
             },
             "a Windows process is simply started there"
         );
@@ -14955,6 +15016,8 @@ mod tests {
                 working_directory: None,
                 arguments: vec![OsString::from("--cd"), OsString::from("/mnt/d/Developer")],
                 directory: Some(PathBuf::from("/mnt/d/Developer")),
+                // A pane that inherited a folder was not put down at its shell's own home.
+                at_shell_home: false,
             },
             "the launcher is told the place, in the namespace the shell reads"
         );
@@ -14985,7 +15048,11 @@ mod tests {
         );
         assert_eq!(
             printed_path_namespace(index_of_id("wsl"), &machine),
-            PrintedPathNamespace::Wsl
+            PrintedPathNamespace::Wsl {
+                distro: None,
+                home: None
+            },
+            "no test process has read this machine's registry, so there is no distribution to name"
         );
         for windows_speaking in ["pwsh", "powershell", "cmd"] {
             assert_eq!(
@@ -14999,6 +15066,57 @@ mod tests {
             PrintedPathNamespace::Msys { home: None },
             "a machine that cannot name a home has no `~` to expand either"
         );
+    }
+
+    /// PIN (user ruling 2026-09-07, §7.30) — **which distribution a WSL row's paths are opened
+    /// through: the row's own `-d` argument, and the machine's default only when the row names
+    /// none.**
+    ///
+    /// A row pinned to one distribution states it outright, and pinning is what the profile editor
+    /// makes possible; a row that names none starts whatever `wsl.exe` starts, which is a fact
+    /// about the machine and is read where every other fact about this installation is read.
+    /// Reading the arguments matters because the two answers can differ — a `-d Debian` row inside
+    /// a machine whose default is Ubuntu would otherwise have its `/etc/hosts` opened out of the
+    /// wrong filesystem, silently, since both shares exist.
+    ///
+    /// MUTATIONS: stop reading the arguments and a `-d Debian` row's `/etc/hosts` is opened out of
+    /// whatever this machine's default distribution is, silently, because both shares exist; read
+    /// the machine's default *before* the row's own argument and the same thing happens on every
+    /// machine that has one. (The second is red only against a machine with a default installed —
+    /// no test process reads the registry, which is `wsl::facts`'s own discipline — so what pins it
+    /// here is the order written in [`wsl_distribution`] and asserted of `named_distribution`.)
+    #[test]
+    fn a_wsl_rows_own_argument_names_the_distribution_its_paths_are_opened_through() {
+        assert_eq!(
+            named_distribution(&["--cd".to_owned(), "~".to_owned()]),
+            None,
+            "the flag every WSL row carries names no distribution"
+        );
+        for spelling in ["-d", "--distribution"] {
+            assert_eq!(
+                named_distribution(&[
+                    spelling.to_owned(),
+                    "Debian".to_owned(),
+                    "--cd".to_owned(),
+                    "~".to_owned(),
+                ]),
+                Some("Debian".to_owned()),
+                "{spelling} is one of the two spellings `wsl.exe` documents"
+            );
+        }
+        assert_eq!(
+            named_distribution(&["--distribution=Debian".to_owned()]),
+            None,
+            "and an argument form the launcher does not document is not invented here"
+        );
+        assert_eq!(
+            named_distribution(&["-d".to_owned()]),
+            None,
+            "a flag with nothing behind it names nobody"
+        );
+        // No test process has read this machine's registry (`wsl::start` is `main`'s alone), so the
+        // fall-through is the honest empty answer rather than whatever is installed here.
+        assert_eq!(wsl_distribution(index_of_id("wsl")), None);
     }
 
     /// PIN — the drive map, in both directions, including every shape that has
