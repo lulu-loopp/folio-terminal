@@ -162,13 +162,13 @@ R3-5, R3-6, R3-7, R3-8, R3-9, R3-10, R3-11, R3-12, R3-13, R3-14, R3-15, R3-16, R
 
 Why together: the injected scripts and the sequences they emit assume one shell, one prompt shape and one spelling of a directory, and every row is a shell or a directory that does not match the assumption. The design is to ask the shell what it is rather than assume it, and to accept on the reading side the spellings the emitting side genuinely cannot encode.
 
-### T7 `fix/platform-boundary` (first half in flight as `fix/platform-boundary-summon-and-pipes`: R2-1, R2-3, R2-5, R2-9, R2-11, R2-14, R2-20, R2-21, R2-23, R2-25, R2-26, R2-27, R2-28; second half in flight as `fix/platform-boundary-pty-video-render`: R2-2, R2-4, R2-6, R2-7, R2-8, R2-15, R2-17, R2-18, R2-19, R2-22)
+### T7 `fix/platform-boundary` (first half merged, `85cb3d6`, as `fix/platform-boundary-summon-and-pipes`: R2-1, R2-3, R2-5, R2-9, R2-11, R2-14, R2-20, R2-21, R2-23, R2-25, R2-26, R2-27, R2-28, with the live manual checks for a hung foreground, a forged hotkey message and the raise-versus-hide chord documented and not yet run; second half in flight as `fix/platform-boundary-pty-video-render`: R2-2, R2-4, R2-6, R2-7, R2-8, R2-15, R2-17, R2-18, R2-19, R2-22)
 
 R2-1, R2-2, R2-3, R2-4, R2-5, R2-6, R2-7, R2-8, R2-9, R2-11, R2-14, R2-15, R2-17, R2-18, R2-19, R2-20, R2-21, R2-22, R2-23, R2-25, R2-26, R2-27, R2-28.
 
 Why together: each row is a Win32 or COM contract the code half keeps, on ownership order, on waiting for what it cancelled, on bounding what it joins, on validating what the OS returned, or on deciding what another process may make it do. The design is to make each contract explicit at its one call site: release before uninitialise, close before drop, bound every wait, validate every length and pitch, and treat a message or a claim as authoritative only when Folio itself registered it. R2-14, R2-15, R2-21 and R2-27 are not in this ticket's original list and sit here as the nearest home.
 
-### T8 `fix/persisted-state`
+### T8 `fix/persisted-state` (in flight)
 
 R1-24, R4-1, R4-2, R4-3, R4-4, R4-5, R4-6, R4-7, R4-8, R4-9, R4-10, R4-11, R4-12, R4-13, R4-14.
 
