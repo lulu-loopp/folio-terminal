@@ -35,6 +35,25 @@ All notable changes to Folio are recorded here. The format follows
   directory holds. Nothing about the program changed.
 ### Fixed
 
+- **Text a program prints can no longer send Folio to a file server, a named
+  pipe, or a stopped WSL distribution.** A link a program printed, a path it
+  printed, or a picture written into a Markdown file could name a place that is
+  not on this machine, and resting the pointer on it was enough: Folio opened
+  the card, went for the file, and Windows offered your account name and
+  password to whatever answered. A picture on a share was fetched even while the
+  card said it would not be shown; a video on one was opened by the media
+  decoder; a link written `file://./pipe/name` reached a blocking read with no
+  end, which stopped every later preview in that window; a folder shortcut
+  pointing at a share was followed while merely listing the folder it sits in,
+  and while painting a card. Folio now asks one question of every such path
+  before it touches it, in every one of those places: it reads without being
+  asked only a path on a drive of this machine, or the files of the WSL
+  distribution the pane itself is standing in, and it reads what a shortcut
+  points at before following it. A path that fails the question gets the card
+  that says so, a picture that fails it draws the same placeholder a picture
+  Folio cannot read draws, and a link that fails it is plain text. Opening a
+  file you name yourself is unchanged, and so is everything about ordinary
+  paths on this machine.
 - **Starting Folio no longer takes the right-click menu's first page off
   another copy of Folio that is still installed.** On Windows 11 the entry on
   the first page of the menu belongs to whichever folder Folio was last

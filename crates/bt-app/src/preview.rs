@@ -27,7 +27,7 @@
 //! worker's to answer.
 
 use std::io::Read;
-use std::path::{Component, Path, PathBuf, Prefix};
+use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
 use std::time::SystemTime;
 
@@ -3389,32 +3389,27 @@ pub fn video_fact_lines(extension: Option<&str>, facts: VideoFacts) -> [Option<S
     [first, facts.bytes.map(format_byte_size)]
 }
 
-/// Whether a path names a share on another machine.
+/// Whether a path is one this window declines to read off a resting pointer.
 ///
-/// §7.1.3, with §3.4's attachment discipline behind it: **a network path is not
-/// previewed automatically.** The cost of being wrong is not a slow frame, it is
-/// a hover that dials a disconnected share and blocks for the operating system's
-/// own timeout, and the read is not something the user asked for by name.
+/// DESIGN 7.1.3, with 3.4's attachment discipline behind it: **a network path is
+/// not previewed automatically.** The cost of being wrong is not a slow frame,
+/// it is a hover that dials a disconnected share and blocks for the operating
+/// system's own timeout, and the read is not something the user asked for by
+/// name.
 ///
-/// Decided from the path's *prefix* rather than by looking for two backslashes,
-/// because `\\?\C:\…` also starts with two and is as local as a path gets.
+/// **The rule itself lives one crate down**, in
+/// [`bt_transcript::paths::may_read_unasked`], and this is its name inside the
+/// preview: a share on another machine, a device path, a verbatim spelling and a
+/// distribution's share are one question with one answer, and this file used to
+/// hold a second reading of two thirds of it. The refusal it files is still
+/// [`PreviewRefusal::NetworkPath`], because a share is the shape a reader
+/// actually meets and the card has said so since 7.1.3.
 ///
-/// **A WSL distribution's own share is the second such prefix** (user ruling
-/// 2026-09-07, §7.30). `\\wsl.localhost\Ubuntu\etc\hosts` is spelled like a
-/// share and is not one: the filesystem behind it is running on this machine,
-/// the transport is local, and there is no disconnected server for a hover to
-/// dial. The question this function exists to ask — "could reading this block
-/// the window on a network?" — is answered *no* there, so the answer is no. The
-/// prefix is read through `bt_transcript::paths::is_wsl_distribution_share`,
-/// which is the same function the path detector translates into it with, so the
-/// two halves of the ruling cannot come to disagree about which share it is.
-pub fn is_network_path(path: &Path) -> bool {
-    !bt_transcript::paths::is_wsl_distribution_share(path)
-        && matches!(
-            path.components().next(),
-            Some(Component::Prefix(prefix))
-                if matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
-        )
+/// [`PathNamer::ThisWindow`]: a preview source is a path this window already
+/// holds — a row of a column, a file a person picked, a target the terminal's own
+/// routing table has already put the pane's question to.
+pub fn is_readable_unasked(path: &Path) -> bool {
+    bt_transcript::paths::may_read_unasked(path, bt_transcript::paths::PathNamer::ThisWindow)
 }
 
 /// The four ways a file declines to be previewed.
@@ -3905,7 +3900,7 @@ impl PreviewBuffer {
         };
         let load = match &source {
             PreviewSource::File(path) => {
-                if is_network_path(path) {
+                if !is_readable_unasked(path) {
                     PreviewLoad::Refused(PreviewRefusal::NetworkPath)
                 } else {
                     match ftype {
@@ -5269,6 +5264,19 @@ pub fn save_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
 /// two chances to disagree — the head is taken once, its length answers
 /// truncation, and its bytes answer whether this is text at all.
 pub fn read_head(path: &Path) -> HeadOutcome {
+    // **The read is behind this line, so the question is asked in front of it** (route B of the
+    // untrusted-path audit, 2026-09-08). `File::open` followed by `read_to_end` has no end when
+    // what was opened is a door somebody else is holding — `\\.\pipe\name` accepts and never
+    // writes — and this worker serves one request at a time, so one such open silences every
+    // preview after it. `PreviewBuffer::new` asks the same question before it ever files a read;
+    // this is the same predicate asked where the blocking call actually is, and it asks the disk's
+    // half of it as well, because a drive-rooted name can be a local spelling of a share.
+    if !bt_transcript::paths::may_read_unasked_through_links(
+        path,
+        bt_transcript::paths::PathNamer::ThisWindow,
+    ) {
+        return HeadOutcome::Refused(PreviewRefusal::NetworkPath);
+    }
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) => {
@@ -5554,6 +5562,20 @@ pub enum LinkAction {
     Preview(PathBuf),
     /// A web address. **Not a verb**: see the note above.
     Web(String),
+    /// **A file this window will not read off a hover** (route E of the untrusted-path audit,
+    /// 2026-09-08) — a share, a device path, a distribution nobody here is standing in.
+    ///
+    /// Apart from [`Self::Nowhere`] because the two readers of this table owe a reader two
+    /// different sentences about it. A *link* wearing it is not a link: pressing it does nothing,
+    /// exactly as pressing a `mailto:` does nothing, and the row says so by wearing no finger. An
+    /// *image source* wearing it is a picture this window will not fetch, which is the "not shown"
+    /// placeholder a markdown page already draws over a source it cannot read — and drawing
+    /// "resolves to nothing" over a source that resolves perfectly well would be the page saying
+    /// something untrue about a file that is there.
+    ///
+    /// The path travels because both of those sentences are about a file somebody named, and a
+    /// diagnostic that could not name it would be a diagnostic about nothing.
+    Refused(PathBuf),
     /// Nothing this window will act on.
     Nowhere,
 }
@@ -5628,13 +5650,31 @@ pub fn link_action(target: &str, document: &Path) -> LinkAction {
         return LinkAction::Nowhere;
     }
     if path.is_absolute() {
-        return LinkAction::Preview(normalized(&path));
+        return resolved_link(normalized(&path));
     }
     match document.parent() {
-        Some(directory) => LinkAction::Preview(normalized(&directory.join(path))),
+        Some(directory) => resolved_link(normalized(&directory.join(path))),
         // A document with no directory is one with no relative frame; there is
         // nowhere for the link to be relative *to*.
         None => LinkAction::Nowhere,
+    }
+}
+
+/// The resolved path, sorted into the arm this window may act on.
+///
+/// **A document is text somebody else wrote, and its targets are that person's**
+/// (route E of the untrusted-path audit, 2026-09-08). A markdown page rendered
+/// on a hover carries the link targets and image sources its author put in it,
+/// and a page that named `\\attacker\share\x.png` had its picture asked for
+/// during the render — an SMB probe with no click anywhere in it. The gate is
+/// [`is_readable_unasked`], which is the same one the buffer beside it is built
+/// through, so a target the pane would refuse to open is a target the page will
+/// not go looking at either.
+fn resolved_link(path: PathBuf) -> LinkAction {
+    if is_readable_unasked(&path) {
+        LinkAction::Preview(path)
+    } else {
+        LinkAction::Refused(path)
     }
 }
 
@@ -7251,26 +7291,34 @@ mod tests {
 
     /// ⑦ A network path is refused without a read.
     ///
-    /// Mutation: make [`is_network_path`] test `starts_with(r"\\")` on the
-    /// string, which drags `\\?\C:\…` in with it.
+    /// Mutation: make [`bt_transcript::paths::may_read_unasked`] answer from
+    /// `starts_with(r"\\")` on the string, which drags `\\?\C:\…` in with it.
     #[test]
     fn a_network_path_is_refused_without_a_read() {
-        assert!(is_network_path(Path::new(r"\\server\share\notes.txt")));
-        assert!(is_network_path(Path::new(
+        assert!(!is_readable_unasked(Path::new(r"\\server\share\notes.txt")));
+        assert!(!is_readable_unasked(Path::new(
             r"\\?\UNC\server\share\notes.txt"
         )));
-        assert!(!is_network_path(Path::new(r"C:\w\notes.txt")));
-        assert!(!is_network_path(Path::new(r"\\?\C:\w\notes.txt")));
+        assert!(is_readable_unasked(Path::new(r"C:\w\notes.txt")));
+        // **A verbatim path is refused here too, and so is a device one** (route B of the
+        // untrusted-path audit, 2026-09-08). `\\?\C:\…` used to be admitted on the strength of
+        // being local, which it is; what it is not is a spelling anything in this window produces,
+        // and a second spelling of one file is a second answer about it in every memo keyed by
+        // path. `\\.\pipe\…` was admitted on the same line and is not a file at all.
+        assert!(!is_readable_unasked(Path::new(r"\\?\C:\w\notes.txt")));
+        assert!(!is_readable_unasked(Path::new(r"\\.\pipe\folio-probe")));
         // **A WSL distribution's share is not a network path** (user ruling 2026-09-07, §7.30): the
         // filesystem behind it runs on this machine and a read of it dials nothing. It is the one
         // authority exempted, and the exemption is the share's own — a distribution named `server`
         // would still be reached through `wsl.localhost`, and `\\server\…` above is still refused.
-        assert!(!is_network_path(Path::new(
+        assert!(is_readable_unasked(Path::new(
             r"\\wsl.localhost\Ubuntu\etc\hosts"
         )));
-        assert!(!is_network_path(Path::new(r"\\WSL.LOCALHOST\Ubuntu\etc")));
+        assert!(is_readable_unasked(Path::new(
+            r"\\WSL.LOCALHOST\Ubuntu\etc"
+        )));
         assert!(
-            is_network_path(Path::new(r"\\wsl.localhost.example.test\Ubuntu\etc\hosts")),
+            !is_readable_unasked(Path::new(r"\\wsl.localhost.example.test\Ubuntu\etc\hosts")),
             "a host that merely begins with the share's name is somebody else's machine"
         );
 

@@ -94,6 +94,20 @@ pub fn path_exists(path: &Path) -> bool {
     if cfg!(windows) && win32_would_trim_the_name(path) {
         return false;
     }
+    // **A name this window may not read is not a name it goes looking for** (route C of the
+    // untrusted-path audit, 2026-09-08). `metadata` follows a link before it answers, so a
+    // drive-rooted name whose junction points at `\\server\share` was verified by dialling that
+    // server — from a worker, off text a child process printed, with no click anywhere. The
+    // question is asked of the link and never of what it points at, so this costs a local stat and
+    // reaches no network. `PathNamer::ThisWindow`: the spelling reaching here has already been
+    // translated out of the pane's own namespace by `PrintedPathLinks`, which is where the pane's
+    // half of the rule is asked.
+    if !bt_transcript::paths::may_read_unasked_through_links(
+        path,
+        bt_transcript::paths::PathNamer::ThisWindow,
+    ) {
+        return false;
+    }
     std::fs::metadata(path).is_ok()
 }
 
@@ -9005,6 +9019,20 @@ impl DualPlaneSession {
             self.path_namespace = namespace;
             self.rebuild_printed_path_links();
         }
+    }
+
+    /// Which spelling this pane's shell prints, as the ledger reads it — the profile's own answer
+    /// with the shell's reported `~` folded in.
+    ///
+    /// Composed exactly as [`Self::rebuild_printed_path_links`] composes it, and read from the
+    /// same place, because a second reading of "which namespace is this pane in" is a second
+    /// opinion about which roots the text in it may name — which is the question
+    /// `bt_transcript::paths::may_read_unasked` puts to a link target before this window touches
+    /// it (route D of the untrusted-path audit, 2026-09-08).
+    #[must_use]
+    pub fn printed_path_namespace(&self) -> bt_transcript::paths::PrintedPathNamespace {
+        self.path_namespace
+            .with_shell_home(self.shell_home.as_deref())
     }
 
     pub fn set_spawn_directory(&mut self, directory: Option<PathBuf>) {
@@ -21593,6 +21621,76 @@ mod tests {
         let path = directory.join("notes.md");
         std::fs::write(&path, b"# notes\n").unwrap();
         (directory, path)
+    }
+
+    /// RED — **a link is a spelling, and a link to a share is a share** (route C of the
+    /// untrusted-path audit, 2026-09-08).
+    ///
+    /// RED EVIDENCE (2026-09-08). `path_exists` was `std::fs::metadata`, which follows a link
+    /// before it answers; so a printed `C:\…\reachable` whose local junction points at
+    /// `\\server\share` was verified by dialling that server — from a worker, on a name a child
+    /// process printed, with no click anywhere. The lexical prefix test never saw a `\\`, because
+    /// the path this window held had a drive letter on it. Before the fix:
+    ///
+    /// ```text
+    /// a local name for a share is not a name this window verifies
+    ///   assertion failed: !path_exists(&link)
+    /// ```
+    ///
+    /// The target is deliberately a share that does not exist: what is being pinned is that
+    /// nothing goes *looking*, and a machine that answered would answer slowly.
+    ///
+    /// MUTATION: drop the `may_read_unasked_through_links` gate and `metadata` follows the link
+    /// again.
+    #[test]
+    fn a_link_to_a_share_is_not_a_path_this_window_verifies() {
+        let (directory, real) = temporary_ordinary_file();
+        let link = directory.join("reachable");
+        if !make_directory_link(&link, Path::new(r"\\folio-test-no-such-host\share")) {
+            eprintln!(
+                "SKIPPED: this account may not create a symbolic link (Developer Mode off, and \
+                 no SeCreateSymbolicLinkPrivilege), so there is no link for the rule to refuse"
+            );
+            std::fs::remove_file(&real).ok();
+            std::fs::remove_dir_all(&directory).ok();
+            return;
+        }
+        assert!(
+            path_exists(&real),
+            "the ordinary file beside it is verified exactly as it was"
+        );
+        // The rule itself, asked of the link: refused on the strength of the name written inside
+        // it, with nothing opened at the other end.
+        assert!(
+            !bt_transcript::paths::may_read_unasked_through_links(
+                &link,
+                bt_transcript::paths::PathNamer::ThisWindow,
+            ),
+            "the name written inside the link is a share, and that is the whole answer"
+        );
+        assert!(
+            !path_exists(&link),
+            "a local name for a share is not a name this window verifies"
+        );
+        std::fs::remove_dir(&link).ok();
+        std::fs::remove_file(&real).ok();
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// A directory symbolic link, or `false` on an account that may not make one.
+    ///
+    /// Windows gives this privilege to administrators and to machines with Developer Mode on, and
+    /// to nobody else; a runner without it is not a failing build, it is a machine where the shape
+    /// under test cannot be built.
+    #[cfg(windows)]
+    fn make_directory_link(link: &Path, target: &Path) -> bool {
+        std::os::windows::fs::symlink_dir(target, link).is_ok()
+    }
+
+    /// The same, where a symbolic link needs no privilege at all.
+    #[cfg(not(windows))]
+    fn make_directory_link(link: &Path, target: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).is_ok()
     }
 
     /// One frame of `session`, with the printed-path questions it raises answered against the real
