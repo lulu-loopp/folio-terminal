@@ -16,8 +16,8 @@
     shell started in one checkout and moved into another therefore has
     `Test-Path` find a file that `[System.IO.Compression.ZipFile]::OpenRead`
     later cannot, and the message names a folder nobody typed. That is what
-    `-Msix target\release-package\folio.msix` — the line `docs/RELEASING.md`
-    tells people to run — did on the 0.2.1 packaging run.
+    a `-Msix` naming something under `target\release-package` — the line
+    `docs/RELEASING.md` tells people to run — did on the 0.2.1 packaging run.
 
     So every case here reproduces that divergence rather than describing it: the
     child is started with the repository as its process directory and then
@@ -74,6 +74,51 @@ $scratch = Join-Path ([IO.Path]::GetTempPath()) ('folio-smoke-tests-' + [Guid]::
 $stubExe = Join-Path $scratch 'pkg\folio.exe'
 Copy-Item -LiteralPath ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) -Destination $stubExe
 [IO.File]::AppendAllText($stubExe, '.')
+
+# **Three zips, because `-Msix` is now given whichever of them the machine has.**
+# The package ships inside the release archive and `package.ps1` leaves no loose
+# copy of it, so the path handed to `-Msix` is the archive on the machine that
+# packed it and the package itself on a machine that extracted one. Which it is
+# has to be read out of the file, since an msix is a zip as well.
+#
+# None of the three is a real package: nothing here signs, and what is under
+# test is which file the script goes to and what it says when there is no answer
+# in it. Two of the three cases are stopped by the executable's signature just
+# after the door, which is how they say the package was found at all; the third
+# never gets past the door.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+function New-Zip {
+    param([string] $Path, [hashtable] $Files)
+
+    $staging = Join-Path $scratch ('zip-' + [Guid]::NewGuid().ToString('n'))
+    foreach ($name in $Files.Keys) {
+        $file = Join-Path $staging $name
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $file)) | Out-Null
+        [IO.File]::WriteAllText($file, $Files[$name])
+    }
+    [IO.Compression.ZipFile]::CreateFromDirectory($staging, $Path)
+    Remove-Item -LiteralPath $staging -Recurse -Force
+}
+
+# The release archive: one folder, and the package inside it under the name the
+# extraction will give it.
+$archiveEntry = 'folio-0.0.0/folio.msix'
+$archive = Join-Path $scratch 'folio-0.0.0-windows-x64.zip'
+New-Zip -Path $archive -Files @{
+    'folio-0.0.0\folio.msix' = 'the package, as far as these cases are concerned'
+    'folio-0.0.0\folio.exe'  = 'not started by any case here'
+}
+
+# A package: what makes it one is an `AppxManifest.xml` at its root, which is
+# where `MakeAppx` puts it and where `smoke.ps1` reads it from.
+$package = Join-Path $scratch 'folio.msix'
+New-Zip -Path $package -Files @{ 'AppxManifest.xml' = '<Package />' }
+
+# A zip that is neither, which is what a mistyped path most often turns out to
+# be — a source archive, a downloads folder's worth of something else.
+$strangerZip = Join-Path $scratch 'stranger.zip'
+New-Zip -Path $strangerZip -Files @{ 'notes.txt' = 'nothing in here is a package' }
 
 $failures = New-Object System.Collections.Generic.List[string]
 $ran = 0
@@ -183,6 +228,50 @@ Test-Case 'a -Msix that was named and is not there stops the run at the door' {
     # stops before a window is opened rather than after.
     $result = Invoke-Smoke -StandingIn $scratch -Parameters @{ Exe = $stubExe; Msix = 'nowhere\folio.msix' }
     if ($result.Flat -notmatch '-Msix names') { throw "the refusal was something else: $($result.Text)" }
+}
+
+Test-Case 'a -Msix naming the release archive is read out of the archive' {
+    # What the release machine has: no loose `folio.msix` anywhere, and the
+    # package inside the zip `package.ps1` just wrote. The case is stopped by
+    # the executable's signature, which is the check after the door — so
+    # reaching that message is the statement that the package was found.
+    $artifacts = Join-Path $scratch 'from-archive'
+    $result = Invoke-Smoke -StandingIn $scratch -Parameters @{
+        Exe = $stubExe; ExpectSigned = $true; Msix = $archive; Artifacts = $artifacts }
+    if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+    if ($result.Flat -notmatch [regex]::Escape($archiveEntry)) {
+        throw "it did not say which entry it took the package out of: $($result.Text)"
+    }
+    $taken = Join-Path $artifacts 'package\folio.msix'
+    if (-not (Test-Path -LiteralPath $taken -PathType Leaf)) {
+        throw "no package was written to $taken : $($result.Text)"
+    }
+    $inside = [IO.File]::ReadAllText($taken)
+    if ($inside -ne 'the package, as far as these cases are concerned') {
+        throw "what was taken out of the archive is not what went into it: $inside"
+    }
+}
+
+Test-Case 'a -Msix naming the package itself is used where it stands' {
+    $artifacts = Join-Path $scratch 'from-package'
+    $result = Invoke-Smoke -StandingIn $scratch -Parameters @{
+        Exe = $stubExe; ExpectSigned = $true; Msix = $package; Artifacts = $artifacts }
+    if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+    if (Test-Path -LiteralPath (Join-Path $artifacts 'package')) {
+        throw 'a package that is already a package was copied somewhere before being read'
+    }
+}
+
+Test-Case 'a -Msix naming a zip with no package in it is refused at the door' {
+    $result = Invoke-Smoke -StandingIn $scratch -Parameters @{
+        Exe = $stubExe; Msix = $strangerZip; Artifacts = (Join-Path $scratch 'from-stranger') }
+    if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+    if ($result.Flat -notmatch 'neither the package nor the archive') {
+        throw "the refusal was something else: $($result.Text)"
+    }
+    if ($result.Flat -notmatch [regex]::Escape($strangerZip)) {
+        throw "the refusal did not name $strangerZip : $($result.Text)"
+    }
 }
 
 Test-Case 'an absolute path is passed through as it was written' {

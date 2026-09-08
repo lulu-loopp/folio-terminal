@@ -269,11 +269,16 @@ That SHA-256 is the same value `Cargo.lock` records for the package, so the
 archive a recipient downloads is verifiably the one this binary was built from.
 No file of it was modified.
 
-**The archive travels with every release.** `option-ext-0.2.0.crate` is
-published as an asset of each GitHub release beside the `.zip`, and its hash is
-one of the lines in that release's `SHA256SUMS.txt`. A source offer that points
-only at somebody else's host is an offer that expires when they do; this one
-does not need crates.io to still be there.
+**This notice is the offer.** It names the exact version, the address the
+archive is served from, and the SHA-256 that `Cargo.lock` records for the bytes
+this binary was built from, so a recipient can fetch that one archive and check
+that it is the Source Code Form of what they were given rather than a later
+release of the same crate.
+
+Up to 0.2.2 the archive was also published as an asset of each GitHub release.
+It is not any more: what it added was a 7 KB file on a page of downloads for a
+terminal, and the hash above is what makes any copy of it verifiable, wherever
+it is fetched from.
 
 <!-- verbatim: licenses/option-ext-MPL-2.0.txt -->
 

@@ -217,9 +217,8 @@ standard is the third-party GitHub Action
 - `identifier: WeiyiShi.Folio` (or whatever open question 1 settles on) and
   an `installers-regex` narrow enough to match only
   `folio-<version>-windows-x64.zip` among this release's assets — the same
-  release also publishes `folio.msix`, `option-ext-<version>.crate`,
-  `folio-<version>.cdx.json` and `SHA256SUMS.txt`, none of which is an
-  installer winget should see.
+  release also publishes `folio-<version>.cdx.json` and `SHA256SUMS.txt`,
+  neither of which is an installer winget should see.
 
 The trigger has to be `release: types: [released]`, not a tag push:
 `docs/RELEASING.md` is explicit that the tag-push workflow only builds an

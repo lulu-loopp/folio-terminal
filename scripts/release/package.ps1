@@ -29,10 +29,15 @@
     registers it for that user and needs no elevation. Nothing here registers
     anything on the machine that built it.
 
-    The copy it is packed as stays in the output directory as well as going into
-    the zip. `SHA256SUMS.txt` covers it there, and it is the file
-    `smoke.ps1 -ExpectSigned` opens to read the package identity out of — which
-    it could not do to a copy that only exists inside an archive.
+    **It is packed in a working directory and leaves only inside the zip.** It
+    used to stay beside the archive as an asset of its own; a file called
+    `folio.msix` on a release page reads as an installer, and it was downloaded
+    on its own by people who then had a package naming a folder with no
+    `folio.exe` in it. The working directory is taken away once the archive has
+    been read back, so what the output directory holds is exactly what the
+    release page carries: the archive, the bill of materials and
+    `SHA256SUMS.txt`. `smoke.ps1 -ExpectSigned` reads the package identity out
+    of the copy in the archive, which is the copy a recipient registers.
 
     There is deliberately no `README.md` in it. Every relative link and every
     image in that file resolves against the repository, and inside a zip it
@@ -42,12 +47,12 @@
     the two licences, the third-party notices, and `TRADEMARK.md`, which says
     what the two licences do not grant.
 
-    One asset is written beside the archive rather than into it:
-    `option-ext-0.2.0.crate`. The MPL-2.0 asks that the Source Code Form be
-    available to recipients, not that it be handed to each of them, and a 7 KB
-    crate archive in the folder somebody extracts a terminal into is noise.
-    `SHA256SUMS.txt` covers it, so the offer in `THIRD-PARTY-NOTICES.md` is made
-    good by this release rather than by crates.io still being there.
+    **No crate archive is written.** `option-ext` is MPL-2.0 and section 3.2
+    asks that the Source Code Form be available to recipients and that they be
+    told how to get it, which `THIRD-PARTY-NOTICES.md` does by naming the exact
+    version, the crates.io address it is served from and the SHA-256 that
+    `Cargo.lock` records for it. A 7 KB file on the release page next to a
+    terminal was one more asset to explain and nobody fetched it.
 
     Everything here is a check on what was actually produced rather than a
     description of what was meant to be:
@@ -143,6 +148,16 @@ if (-not $Documents) { $Documents = $root }
 if (-not $Packaging) { $Packaging = Join-Path $root 'packaging' }
 if (-not $Output) { $Output = Join-Path $root 'target\release-package' }
 
+# **Where the package is built, and where it does not stay.** `$Output` is the
+# release page: every file in it is uploaded and every file in it is hashed into
+# `SHA256SUMS.txt`. `folio.msix` is not one of those files — it travels in the
+# archive — so it is packed one directory down and that directory is removed
+# once the archive has been read back. A subdirectory would be passed over by
+# the hashing below in any case, which reads files and not folders; it is taken
+# away so that what is left after a run is the three assets and nothing to
+# wonder about.
+$work = Join-Path $Output 'package-work'
+
 function Get-WorkspaceVersion {
     $manifest = Get-Content -LiteralPath (Join-Path $root 'Cargo.toml') -Raw
     if ($manifest -notmatch '(?ms)^\[workspace\.package\](.*?)^\[') {
@@ -228,7 +243,11 @@ $manifest = @(
     # the one entry that does not exist yet when the list is checked. It is inert
     # in the archive: nothing registers until a user sets
     # `Settings ▸ General ▸ Explorer context menu` to `On the first page`.
-    @{ Name = 'folio.msix';               From = $Output; Packed = $true },
+    #
+    # `$work` and not `$Output`: the package goes into the archive and nowhere
+    # else, and the working directory it is packed in is taken away once the
+    # archive has been read back.
+    @{ Name = 'folio.msix';               From = $work; Packed = $true },
     @{ Name = 'conpty.dll';               From = $Binaries },
     @{ Name = 'OpenConsole.exe';          From = $Binaries },
     @{ Name = 'folio-here.cmd';           From = $Packaging },
@@ -288,8 +307,8 @@ if ($info.ProductVersion.Trim() -ne $Version) {
 #     preference.
 
 $packaging = Join-Path $root 'packaging\msix'
-$layout = Join-Path $Output 'msix-layout'
-if (Test-Path -LiteralPath $layout) { Remove-Item -LiteralPath $layout -Recurse -Force }
+if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force }
+$layout = Join-Path $work 'msix-layout'
 [System.IO.Directory]::CreateDirectory((Join-Path $layout 'images')) | Out-Null
 
 # **The manifest is edited as a document and not as text.** The attribute that
@@ -346,7 +365,7 @@ foreach ($logo in @('Square44x44Logo.png', 'Square150x150Logo.png', 'StoreLogo.p
 }
 
 $makeappx = Find-MakeAppx
-$msix = Join-Path $Output 'folio.msix'
+$msix = Join-Path $work 'folio.msix'
 
 # **`/nv`, and it is not a shortcut.** makeappx's semantic validation checks that
 # every file a manifest names is in the package, and the whole point of a sparse
@@ -462,47 +481,12 @@ try {
 }
 finally { $zip.Dispose() }
 
-# **The MPL-2.0 source offer, made good by the release rather than by a URL.**
-# `option-ext` reaches this binary through `dirs` -> `dirs-sys`, and section 3.2
-# obliges whoever distributes the executable to make the Source Code Form of the
-# covered files available to recipients. `THIRD-PARTY-NOTICES.md` says where it
-# is and pins it by hash; this puts the archive itself among the release assets,
-# so the offer does not expire the day somebody else's host does.
-#
-# It is not put in the `.zip` — see the note at the top of this file.
-$crateName = 'option-ext'
-$crateVersion = '0.2.0'
-$crateFile = "$crateName-$crateVersion.crate"
-
-# The hash is read out of `Cargo.lock` rather than written here a second time.
-# That entry is cargo's own record of the bytes it downloaded and verified, and a
-# copy of it in this script is a copy that can go stale by itself.
-$lock = Get-Content -LiteralPath (Join-Path $root 'Cargo.lock') -Raw
-$entry = '(?ms)^\[\[package\]\]\r?\nname = "' + [regex]::Escape($crateName) +
-         '"\r?\nversion = "' + [regex]::Escape($crateVersion) + '".*?^checksum = "([0-9a-f]{64})"'
-if ($lock -notmatch $entry) {
-    throw "Cargo.lock records no checksum for $crateName $crateVersion"
-}
-$crateSum = $Matches[1]
-
-$cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME '.cargo' }
-$cache = Join-Path $cargoHome 'registry\cache'
-$copies = @(Get-ChildItem -Path $cache -Recurse -Filter $crateFile -File -ErrorAction SilentlyContinue)
-if ($copies.Count -eq 0) {
-    throw "$crateFile is not under $cache - run ``cargo fetch --locked`` first"
-}
-
-# A registry cache can hold the same name under more than one index. Take the one
-# whose bytes are the bytes `Cargo.lock` names, or none of them.
-$exact = @($copies | Where-Object {
-    (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -eq $crateSum
-})
-if ($exact.Count -eq 0) {
-    throw "no copy of $crateFile under $cargoHome hashes to the checksum Cargo.lock records ($crateSum)"
-}
-Copy-Item -LiteralPath $exact[0].FullName -Destination (Join-Path $Output $crateFile) -Force
-Write-Host ''
-Write-Host ('{0,12:N0}  {1}  (MPL-2.0 source, sha256 {2})' -f $exact[0].Length, $crateFile, $crateSum)
+# **The working directory goes away here**, after the archive has been read
+# back and before anything in `$Output` is hashed. `folio.msix` is in the
+# archive, which is the only place a recipient can use it from: a package
+# registers against the folder its `folio.exe` was extracted into, and a copy
+# downloaded on its own names a folder with nothing at it.
+Remove-Item -LiteralPath $work -Recurse -Force
 
 # Every asset this release publishes, in the format `sha256sum -c` reads.
 $sums = Join-Path $Output 'SHA256SUMS.txt'

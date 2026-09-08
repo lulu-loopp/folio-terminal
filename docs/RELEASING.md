@@ -69,7 +69,7 @@ run by hand exactly as it runs there:
 | script | what it produces |
 | --- | --- |
 | `scripts/release/sbom.ps1` | the bill of materials, written into the output directory |
-| `scripts/release/package.ps1` | `folio.msix`, `folio-<version>-windows-x64.zip` with the package and the executable both in it, the MPL-2.0 crate archive, and `SHA256SUMS.txt` over everything beside them |
+| `scripts/release/package.ps1` | `folio-<version>-windows-x64.zip`, with `folio.msix` and the executable both in it, and `SHA256SUMS.txt` over everything beside it |
 | `scripts/release/smoke.ps1` | starts the executable that was built and checks the seven things a green build can still be broken about |
 
 ## What gets published
@@ -91,27 +91,36 @@ then left where it is.
 | asset | what it is |
 | --- | --- |
 | `folio-<version>-windows-x64.zip` | the nine files, in one folder |
-| `folio.msix` | **an asset of its own as well as a file in the zip** |
-| `option-ext-<version>.crate` | the MPL-2.0 source offer, made good by this release |
+| `SHA256SUMS.txt` | one line for each of the other two, in the format `sha256sum -c` reads |
 | `folio-<version>.cdx.json` | the CycloneDX bill of materials `sbom.ps1` writes |
-| `SHA256SUMS.txt` | one line for each of the four above, in the format `sha256sum -c` reads |
 
-`folio.msix` being both is deliberate and is not a duplicate to tidy away. It
-has to be **in the zip**, because the package names the folder it was extracted
-into and a registration against a folder with no `folio.exe` in it names a path
-with nothing at it. It stays **beside the zip** because that copy is the one
-`smoke.ps1 -ExpectSigned` opens to read the package identity out of, and because
-`SHA256SUMS.txt` is written over the directory: a hash somebody can check
-against the file they were handed. Both copies are the same bytes — one file,
-packed once, signed once, then copied into the archive.
+**Three, and `folio.msix` is not one of them.** It was an asset of its own up to
+0.2.2, beside the copy of itself in the zip, and what that bought was people
+downloading it on its own: a file called `folio.msix` on a release page reads as
+an installer, and a package registered against the folder it was downloaded into
+names a path with no `folio.exe` at it. It is in the archive, where the
+executable it points at is, and `package.ps1` packs it in a working directory it
+takes away again rather than leaving a second copy behind.
+
+The MPL-2.0 crate archive is not an asset either. `option-ext` is reached
+through `dirs` → `dirs-sys`, and section 3.2 asks that the Source Code Form be
+available to recipients and that they be told how to get it, which
+`THIRD-PARTY-NOTICES.md` does by naming the exact version, the crates.io address
+it is served from, and the SHA-256 `Cargo.lock` records for those bytes.
+
+`SHA256SUMS.txt` cannot carry its own hash, so it is two lines over the other
+two files.
 
 `scripts/release/smoke-tests.ps1` is `smoke.ps1`'s own self-test, and it is
 about the one part of that script a green release does not exercise: the paths
 it is handed. It builds nothing, signs nothing and starts nothing — each case
 runs `smoke.ps1` in a child shell that was started in the repository and then
 walked into a scratch folder, which is the one arrangement under which a
-relative path has two answers, and reads the path the refusal names. Run it
-after changing how `smoke.ps1` reads its arguments.
+relative path has two answers, and reads the path the refusal names. Three of
+its cases are about the other question the door answers — whether the file
+`-Msix` names is the package or the archive the package ships in — and they
+build a zip of each shape rather than describing one. Run it after changing how
+`smoke.ps1` reads its arguments.
 
 Everything below is about the one step that is not in that workflow, because it
 needs a person: signing.
@@ -213,7 +222,7 @@ cargo build --release
 ./scripts/release/sbom.ps1
 ./scripts/release/package.ps1 -Sign
 ./scripts/release/smoke.ps1 -Exe target/release/folio.exe -ExpectSigned `
-    -Msix target/release-package/folio.msix
+    -Msix target/release-package/folio-0.2.3-windows-x64.zip
 ```
 
 `package.ps1 -Sign` signs `folio.exe` where the build left it and `folio.msix`
@@ -221,12 +230,14 @@ where it packed it, *before* the archive is built and before `SHA256SUMS.txt` is
 written, so the hash published beside the archive is the hash of the signed bytes
 and the executable `smoke.ps1` starts afterwards is the executable that ships.
 
-`-Msix` is needed on that last line and nowhere else. `smoke.ps1` looks for the
-package beside the executable, because that is where it is for everybody who
-receives one — the archive holds both files in one folder. Straight out of a
-build they are two directories apart, `target/release` and
-`target/release-package`, so the path is given rather than a file copied to make
-a default true.
+`-Msix` is needed on that last line and nowhere else, and on the release machine
+it names the **archive**. `smoke.ps1` looks for the package beside the
+executable, because that is where it is for everybody who receives one — the
+archive holds both files in one folder. On the machine that packed it there is
+no loose copy at all: the package is in the zip and nowhere else, so the zip is
+what is named, and `smoke.ps1` takes the package out of it into `-Artifacts` and
+checks those bytes. It settles which of the two it was handed by opening the
+file rather than by reading its name, because an msix is a zip as well.
 
 A relative path there is read from the directory the shell is standing in, and
 so are `-Exe` and `-Artifacts`: all three are made absolute before anything
@@ -346,10 +357,10 @@ out of the directory the signed files are in.
 
 ```powershell
 $assets = @(Get-ChildItem target/release-package -File | ForEach-Object { $_.FullName })
-$arguments = @('release', 'create', 'v0.2.2-preview') + $assets + @(
+$arguments = @('release', 'create', 'v0.2.3-preview') + $assets + @(
     '--draft', '--prerelease',
-    '--title', 'Folio 0.2.2',
-    '--notes-file', 'docs/plans/release/release-note-v0.2.2-preview.md')
+    '--title', 'Folio 0.2.3',
+    '--notes-file', 'docs/plans/release/release-note-v0.2.3-preview.md')
 & gh @arguments
 ```
 
@@ -504,6 +515,15 @@ the archive.
 
 ### What to change for a release
 
+**The version's folder is made at release time, out of the last one.** The
+manifests in this repository are `0.2.2`'s. A new version's three files are a
+copy of that folder under the new number, with the values below changed in the
+copy — and one of those values, `InstallerSha256`, does not exist until
+`package.ps1` has signed and hashed the archive, so a folder created at
+release-prep time is a folder with a hash from the previous release in it or a
+hash somebody will have to remember to come back for. Copy it after the release
+page is published, when all six values can be filled in at once.
+
 Four values, and three of them are the version:
 
 | field | file | where it comes from |
@@ -600,7 +620,7 @@ template, and expect these to be what is asked about:
 Only after a submission has cleared moderation once is it worth automating the
 rest with `vedantmgoyal9/winget-releaser` on `release: types: [released]`, with
 an `installers-regex` narrow enough to match only the zip — the release page
-also carries `folio.msix`, the crate archive, the bill of materials and
-`SHA256SUMS.txt`, and none of those is an installer. The trigger is the release
+also carries the bill of materials and `SHA256SUMS.txt`, and neither of those is
+an installer. The trigger is the release
 event and not a tag push, because a tag push here only builds an unsigned
 rehearsal and the release page is made by a person from the signed machine.
