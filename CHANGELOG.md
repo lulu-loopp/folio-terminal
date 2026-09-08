@@ -99,6 +99,59 @@ All notable changes to Folio are recorded here. The format follows
   there no longer leak a handle, and `folio attention` checks the endpoint name
   it was given, asks for the narrowest impersonation level, and writes under a
   deadline.
+- **A pane starts in the environment this window is standing in.** Every pane
+  rebuilt its environment from the machine's registry and wrote it over the one
+  Folio itself was launched with, so the `PATH` your shell exported was thrown
+  away: the program Folio found under a name and the program your pane found
+  under the same name could be two different files. A pane now inherits this
+  window's environment, with anything a profile row sets layered on top, and the
+  registry only fills in names this window does not have.
+
+- **Closing a pane closes what the pane started.** A build, a server or a watcher
+  started inside a pane went on running after the pane was gone, with nothing
+  left on screen to show it and no way to reach it but the task manager. What a
+  pane starts now ends with the pane.
+
+- **Closing a pane no longer waits on a program that will not stop.** The window
+  waited without limit for a killed shell to answer. It waits a couple of seconds
+  now, and what has not ended by then is ended with the pane.
+
+- **A profile whose program is a batch file runs the file you picked.** A `.cmd`
+  or `.bat` whose path holds an `&`, a `|`, a `<`, a `>` or a `^` was handed to
+  the command interpreter as two commands rather than one, so the pane ran
+  something else, or nothing. The whole line is now quoted the way the
+  interpreter reads it.
+
+- **A profile row that cannot name a variable changes nothing.** A row whose
+  name held an equals sign used to set a different variable than the one it
+  named, quietly overwriting it in every pane of that profile. Such a row, and
+  one whose name holds a null character, is now left out of the pane's
+  environment entirely, like the empty-name row beside it.
+
+- **A window that could not come back after a graphics device was lost is not
+  reported as recovered.** When a driver reset took the device away, Folio marked
+  itself recovered before every window had a device again, so a window that could
+  not be given one sat blank while everything else carried on. The recovery is
+  now over when the last window has come back, and a window that could not is
+  tried again.
+
+- **A video thumbnail refuses a frame it cannot measure.** A file whose stream
+  changed shape while it was being read could make the frame copy read past the
+  end of the decoded frame. Both ways in now check the frame's own stride and
+  length first and refuse it otherwise.
+
+- **Closing Folio while a video is still being read waits for the reader.** The
+  media platform was taken down as soon as the window loop ended, which could be
+  while a slow file was still inside the decoder.
+
+- **Five contracts with Windows that Folio was keeping only half of.** A registry
+  string is given the terminator the system reads it to before it is expanded; a
+  notification's connection to Windows is released before the apartment holding
+  it is; the video engine's device protection is asked of the object documented
+  to carry it and a machine that refuses is reported rather than run over; an
+  engine that fails to open is taken off the ledger it was put on; and closing a
+  video pane stops waiting for the engine's own thread after a couple of seconds.
+  Nothing about any of them is visible while they work.
 
 - **The last shell exiting closes its tab, and closing the last tab ends the
   program.** A tab holding one pane whose shell exited stayed open with a dead

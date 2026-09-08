@@ -200,6 +200,16 @@ pub const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// [`Option`] means.
 pub const OPEN_BUDGET: Duration = Duration::from_secs(5);
 
+/// **How long [`Engine::shutdown`] waits for the engine thread to say it has
+/// left** (review row R2-19).
+///
+/// The thread's ending is a `Shutdown` command it is already waiting on, the
+/// engine's own `Shutdown` call and an apartment being left — microseconds, on
+/// every ordinary close. Two seconds is therefore never reached except by a
+/// thread that is inside the platform and not coming back soon, and reaching it
+/// costs the window nothing: the thread is left to finish rather than waited on.
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);
+
 /// **Which Direct3D device the frames are decoded onto.**
 ///
 /// [`Adapter::Automatic`] is what the product uses: the hardware adapter, and
@@ -443,6 +453,9 @@ impl Engine {
                 .name("folio-video-engine".to_owned())
                 .spawn(move || {
                     run(&BSTR::from_wide(&url), adapter, &shared, &commands, &inbox);
+                    // Last of all, and read by `Engine::shutdown` to know
+                    // whether joining this thread will return — see there.
+                    shared.stopped.store(true, Ordering::Release);
                 })
                 // The one thing that can still fail here, and it fails without
                 // having started anything: a process out of thread handles.
@@ -610,11 +623,40 @@ impl Engine {
     /// The verb a pane calls when it closes or is handed a different file. It is
     /// idempotent and [`Drop`] calls it, so a caller that forgets is not a caller
     /// that leaks — see [`engines_shut_down`].
+    ///
+    /// # The join is bounded (review row R2-19)
+    ///
+    /// A pane closes on the window's own thread, and the thread it is closing is
+    /// inside somebody else's decoder: one `IMFMediaEngine` call on a broken
+    /// stream or a wedged driver is a wait with no ending, and an unbounded
+    /// `join` here would hand the window that wait. So the thread is asked to
+    /// stop, and this waits [`SHUTDOWN_BUDGET`] for it to say it has — the flag
+    /// it sets as its very last act, which is what makes the `join` after it a
+    /// formality that returns at once.
+    ///
+    /// A thread that has not said so by then is **let go rather than waited on**.
+    /// It is still inside the platform, so it is left to finish and unwind on
+    /// its own, exactly as the first-frame reader that overran its budget is
+    /// (`super::within_budget`); its engine is still on the ledger, which is the
+    /// truth — [`engines_outstanding`] is not zero, because an engine is still
+    /// standing.
     pub fn shutdown(&mut self) {
         let _ = self.commands.send(Command::Shutdown);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        let deadline = Instant::now() + SHUTDOWN_BUDGET;
+        while !self.shared.stopped.load(Ordering::Acquire) {
+            if Instant::now() >= deadline {
+                eprintln!(
+                    "video: an engine thread was still running {SHUTDOWN_BUDGET:?} \
+                     after it was told to stop; leaving it to finish"
+                );
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
         }
+        let _ = thread.join();
     }
 }
 
@@ -645,6 +687,10 @@ struct Shared {
     /// [`Engine::state`] reads it to decide whether [`OPEN_BUDGET`] has been
     /// missed — a question that only has an answer while this is `false`.
     built: AtomicBool,
+    /// **Whether the engine thread has left.** Set once, as the thread's last
+    /// act, and read by [`Engine::shutdown`] so that its join is a bounded wait
+    /// rather than an unbounded one — see there.
+    stopped: AtomicBool,
 }
 
 enum Command {
@@ -687,6 +733,64 @@ pub fn engines_outstanding() -> u64 {
 
 static ENGINES_STARTED: AtomicU64 = AtomicU64::new(0);
 static ENGINES_SHUT_DOWN: AtomicU64 = AtomicU64::new(0);
+
+/// **One engine's place on the process ledger, opened where the engine comes
+/// into being and closed by whoever ends up owning it** (review row R2-19).
+///
+/// The ledger's whole promise is that [`engines_outstanding`] is zero at every
+/// moment no engine is alive, and a bare `fetch_add` cannot keep it: everything
+/// between the `CreateInstance` that makes an engine and the `Machinery` that
+/// will one day stop it is fallible, and a failure there added a count nothing
+/// would ever take off. So the entry is a value. [`Self::kept`] hands it to the
+/// machinery — from there `Machinery::stop` closes it, as it always did — and
+/// dropping it any other way closes it here, including on an unwind.
+struct LedgerEntry {
+    kept: bool,
+}
+
+impl LedgerEntry {
+    /// An engine exists. Counted from here.
+    fn opened() -> Self {
+        ENGINES_STARTED.fetch_add(1, Ordering::Relaxed);
+        Self { kept: false }
+    }
+
+    /// The engine reached a [`Machinery`], which is what will shut it down.
+    fn kept(mut self) {
+        self.kept = true;
+    }
+}
+
+impl Drop for LedgerEntry {
+    fn drop(&mut self) {
+        if !self.kept {
+            ENGINES_SHUT_DOWN.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// **Turn on the immediate context's own critical section**, which is what makes
+/// it safe for Media Foundation's work queue and this thread to reach the same
+/// device (review row R2-15).
+///
+/// `ID3D11Multithread` is an interface of the **immediate context**: it is that
+/// object's lock, and `ID3D11Device` does not implement it. `false` means the
+/// query or the call was refused, which is a device this engine cannot share
+/// safely — reported by the caller rather than by a silent `if let`.
+fn protect_from_other_threads(context: &ID3D11DeviceContext) -> bool {
+    match context.cast::<ID3D11Multithread>() {
+        Ok(multithread) => {
+            // SAFETY: two COM methods on an interface of this thread's own
+            // context. `SetMultithreadProtected` answers the state it *was* in,
+            // so the state it is in now is asked for separately.
+            unsafe {
+                let _ = multithread.SetMultithreadProtected(true);
+                multithread.GetMultithreadProtected().as_bool()
+            }
+        }
+        Err(_) => false,
+    }
+}
 
 /// **The whole of the engine thread**: an apartment, a device, an engine, a
 /// loop, and the giving back of all four in the reverse order.
@@ -879,8 +983,20 @@ impl Machinery {
             // making one so — the alternative is `IMFDXGIDeviceManager::LockDevice`
             // around every call, which is the same lock with more places to
             // forget it.
-            if let Ok(multithread) = device.cast::<ID3D11Multithread>() {
-                let _ = multithread.SetMultithreadProtected(true);
+            //
+            // **Asked of the context, and answered rather than shrugged at**
+            // (review row R2-15). `ID3D11Multithread` is documented as an
+            // interface of the *immediate context* — it is that object's own
+            // critical section — and this used to query the `ID3D11Device`
+            // instead, inside an `if let` whose other arm did nothing at all.
+            // Measured on 2026-09-08 the device's query does succeed and shares
+            // the context's state, so the protection was in fact being applied;
+            // what was wrong was asking an object no page promises an answer
+            // from, and having no answer when it refuses. A machine that does
+            // refuse now fails the build of this engine rather than running a
+            // decoder and a copy over one unprotected context.
+            if !protect_from_other_threads(&context) {
+                return Err(EngineError::NoEngine);
             }
             let mut reset_token = 0_u32;
             let mut manager: Option<IMFDXGIDeviceManager> = None;
@@ -923,7 +1039,18 @@ impl Machinery {
             // Counted where the engine actually comes into being, so that every
             // path that makes one — a playback, a `can_play_types` probe — is on
             // the same ledger as the `Shutdown` that ends it.
-            ENGINES_STARTED.fetch_add(1, Ordering::Relaxed);
+            //
+            // **A guard rather than a bare increment** (review row R2-19). The
+            // count used to be added here and the ledger closed by
+            // `Machinery::stop`, with a fallible `SetSource` in between: a source
+            // the platform would not take left the count added and no machinery
+            // to ever take it off, so `engines_outstanding` never came back to
+            // zero, the debug assertion in `shutdown_media_session` fired on
+            // every debug run afterwards, and the engine object itself was
+            // dropped without the `Shutdown` it is owed. The entry now belongs
+            // to whichever of the two happens: `kept` hands it to the machinery,
+            // and anything else — an error, a panic — closes it here.
+            let ledger = LedgerEntry::opened();
             let _ = engine.SetPreload(MF_MEDIA_ENGINE_PRELOAD_AUTOMATIC);
             // **Not autoplay.** The reader presses play; an engine that started
             // on its own would make "the pane is showing a still" a state the
@@ -932,9 +1059,15 @@ impl Machinery {
             // **`None` is an engine with nothing to play**, which is what
             // [`can_play_types`] wants: a source would make it load a file in
             // order to answer a question about a type.
-            if let Some(url) = url {
-                engine.SetSource(url).map_err(|_| EngineError::NoEngine)?;
+            if let Some(url) = url
+                && engine.SetSource(url).is_err()
+            {
+                // The engine exists and nobody is going to pump it, so this is
+                // the one place its `Shutdown` can come from.
+                let _ = engine.Shutdown();
+                return Err(EngineError::NoEngine);
             }
+            ledger.kept();
             Ok(Self {
                 engine,
                 _notify: notify,
@@ -1333,6 +1466,103 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/assets")
             .join(name)
+    }
+
+    /// PIN — **the immediate context is protected before anything else
+    /// touches this device** (review row R2-15).
+    ///
+    /// Media Foundation's decoder reaches this device from its own work queue
+    /// while the engine thread reaches it to copy the frame out, and a D3D11
+    /// immediate context is not thread-safe without this.
+    ///
+    /// **What R2-15 reported is not what this machine does, and the row is
+    /// wrong about the consequence.** It said the query off `ID3D11Device`
+    /// answers `E_NOINTERFACE` and so the protection never ran. Measured here on
+    /// 2026-09-08, Windows 11 26200, hardware adapter: the device's
+    /// `QueryInterface` for `ID3D11Multithread` **succeeds**, hands back a
+    /// different COM identity from the context's, and the two share one state —
+    /// setting protection through the device is read back as on through the
+    /// context, and clearing it through the device clears it there too. The
+    /// protection was being applied all along.
+    ///
+    /// The call moved to the context anyway, because that is the source
+    /// Microsoft documents ("You can get a pointer to this interface by calling
+    /// `QueryInterface` on the `ID3D11DeviceContext` interface") and the device's
+    /// answer is a courtesy no page promises; and the `if let` that silently did
+    /// nothing became a function with an answer, so a machine where the query
+    /// really is refused says so instead of running unprotected.
+    ///
+    /// MUTATION: drop the `SetMultithreadProtected` call and the last assertion
+    /// fails — an unprotected context under a decoder on its own work queue.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_immediate_context_is_what_carries_multithread_protection() {
+        let Ok((_device, context, _)) = create_device(Adapter::Automatic) else {
+            return;
+        };
+        let multithread = context
+            .cast::<ID3D11Multithread>()
+            .expect("the immediate context implements it, which is the documented route");
+        // SAFETY: a COM method on an interface of this thread's own context.
+        assert!(
+            !unsafe { multithread.GetMultithreadProtected() }.as_bool(),
+            "a fresh device starts unprotected, or this test proves nothing"
+        );
+        assert!(
+            protect_from_other_threads(&context),
+            "the context takes the protection and says so"
+        );
+        // SAFETY: a COM method on an interface of this thread's own context.
+        assert!(
+            unsafe { multithread.GetMultithreadProtected() }.as_bool(),
+            "the protection is on afterwards, which is the whole point of the call"
+        );
+    }
+
+    /// PIN — **an engine that never reached its source leaves the ledger
+    /// balanced** (review row R2-19).
+    ///
+    /// The count used to be added the instant `CreateInstance` returned, with a
+    /// fallible `SetSource` still to come: a source the platform would not take
+    /// left a count nothing would ever take off, so `engines_outstanding` never
+    /// came back to zero, `shutdown_media_session`'s assertion fired on every
+    /// debug run afterwards, and the engine object went away without the
+    /// `Shutdown` it is owed.
+    ///
+    /// MUTATION: make [`LedgerEntry::drop`] do nothing and the first arm below
+    /// leaves the ledger one short for the life of the process.
+    #[test]
+    fn an_engine_that_never_reached_its_source_leaves_the_ledger_balanced() {
+        let _gate = ledger_gate();
+
+        let before = engines_outstanding();
+        {
+            // Everything `build` does between the engine existing and the
+            // machinery owning it, ending in a failure.
+            let _entry = LedgerEntry::opened();
+            assert_eq!(
+                engines_outstanding(),
+                before + 1,
+                "an engine that exists is on the ledger while it exists"
+            );
+        }
+        assert_eq!(
+            engines_outstanding(),
+            before,
+            "and it comes off again when the build gives it straight back"
+        );
+
+        let entry = LedgerEntry::opened();
+        entry.kept();
+        assert_eq!(
+            engines_outstanding(),
+            before + 1,
+            "an engine handed to a machinery stays on the ledger"
+        );
+        // What `Machinery::stop` does, and the only thing that may close this
+        // entry now.
+        ENGINES_SHUT_DOWN.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(engines_outstanding(), before);
     }
 
     /// **Hold the process still while an engine is counted.**

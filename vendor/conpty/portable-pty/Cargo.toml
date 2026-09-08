@@ -98,6 +98,10 @@ features = [
     "fileapi",
     "namedpipeapi",
     "synchapi",
+    "jobapi2",
+    "processthreadsapi",
+    "winbase",
+    "winnt",
 ]
 
 [target."cfg(windows)".dependencies.winreg]

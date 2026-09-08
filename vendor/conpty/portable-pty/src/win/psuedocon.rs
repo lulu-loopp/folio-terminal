@@ -1,4 +1,4 @@
-use super::WinChild;
+use super::{Job, WinChild};
 use crate::cmdbuilder::CommandBuilder;
 use crate::win::procthreadattr::ProcThreadAttributeList;
 use anyhow::{bail, ensure, Error};
@@ -17,7 +17,8 @@ use winapi::shared::winerror::{HRESULT, S_OK};
 use winapi::um::handleapi::*;
 use winapi::um::processthreadsapi::*;
 use winapi::um::winbase::{
-    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 use winapi::um::wincon::COORD;
 use winapi::um::winnt::HANDLE;
@@ -303,6 +304,12 @@ impl PsuedoCon {
 
         let cwd = cmd.current_directory();
 
+        // **The child is created suspended so that it is in the job before it
+        // can start anything of its own** (BetterTerminal, review row R2-6).
+        // `AssignProcessToJobObject` after a running `CreateProcessW` is a race
+        // the child wins whenever its first act is to spawn: the grandchild is
+        // then outside the job and outlives the pane exactly as before. The
+        // thread is resumed a few statements down, once the job is on.
         let res = unsafe {
             CreateProcessW(
                 exe.as_mut_slice().as_mut_ptr(),
@@ -310,7 +317,7 @@ impl PsuedoCon {
                 ptr::null_mut(),
                 ptr::null_mut(),
                 0,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
                 cmd.environment_block().as_mut_slice().as_mut_ptr() as *mut _,
                 cwd.as_ref()
                     .map(|c| c.as_slice().as_ptr())
@@ -340,11 +347,24 @@ impl PsuedoCon {
 
         // Make sure we close out the thread handle so we don't leak it;
         // we do this simply by making it owned
-        let _main_thread = unsafe { OwnedHandle::from_raw_handle(pi.hThread as _) };
+        let main_thread = unsafe { OwnedHandle::from_raw_handle(pi.hThread as _) };
         let proc = unsafe { OwnedHandle::from_raw_handle(pi.hProcess as _) };
+
+        let job = Job::holding(proc.as_raw_handle() as _);
+
+        // SAFETY: the thread this process created suspended a few statements
+        // ago, whose handle it owns and has not resumed.
+        let resumed = unsafe { ResumeThread(main_thread.as_raw_handle() as _) };
+        if resumed == u32::MAX {
+            let err = IoError::last_os_error();
+            // SAFETY: a process this function created and nobody else has seen.
+            unsafe { TerminateProcess(proc.as_raw_handle() as _, 1) };
+            bail!("could not start the suspended child: {}", err);
+        }
 
         Ok(WinChild {
             proc: Mutex::new(proc),
+            _job: job,
         })
     }
 }

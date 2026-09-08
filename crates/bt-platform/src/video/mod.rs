@@ -115,8 +115,8 @@
 pub mod engine;
 
 use std::path::Path;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Media::MediaFoundation::{
@@ -350,9 +350,90 @@ pub fn prewarm() {
     let _ = std::thread::Builder::new()
         .name("folio-video-prewarm".to_owned())
         .spawn(|| {
+            let _inside = READERS.enter();
             media_session();
         });
 }
+
+/// **How many threads are inside Media Foundation right now**, and the way to
+/// wait for that to be none (review row R2-18).
+///
+/// A count and not a set of join handles, and the reason is [`within_budget`]'s
+/// own rule: a decode that overran its budget is *abandoned*, on purpose,
+/// because there is no supported way to interrupt a synchronous `ReadSample`
+/// inside somebody else's demuxer. A shutdown that joined it would be waiting
+/// exactly as long as the budget exists to stop anyone waiting. What a shutdown
+/// can honestly do is wait a bounded while for the abandoned thread to come out
+/// on its own, and then say the platform is going down anyway.
+struct Readers {
+    inside: Mutex<usize>,
+    changed: Condvar,
+}
+
+impl Readers {
+    const fn new() -> Self {
+        Self {
+            inside: Mutex::new(0),
+            changed: Condvar::new(),
+        }
+    }
+
+    /// One thread entering the platform, counted until the guard is dropped —
+    /// including when it is dropped by an unwind.
+    fn enter(&self) -> Inside<'_> {
+        let mut inside = self.inside.lock().unwrap_or_else(|held| held.into_inner());
+        *inside += 1;
+        drop(inside);
+        Inside { readers: self }
+    }
+
+    /// **Wait until nobody is inside, and stop waiting after `budget`.** `true`
+    /// when the platform is quiet, `false` when the budget ran out with somebody
+    /// still in it.
+    fn quiet_within(&self, budget: Duration) -> bool {
+        let deadline = Instant::now() + budget;
+        let mut inside = self.inside.lock().unwrap_or_else(|held| held.into_inner());
+        while *inside > 0 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            inside = self
+                .changed
+                .wait_timeout(inside, left)
+                .unwrap_or_else(|held| held.into_inner())
+                .0;
+        }
+        true
+    }
+}
+
+/// One thread's place in [`Readers`], given back however the thread leaves.
+struct Inside<'a> {
+    readers: &'a Readers,
+}
+
+impl Drop for Inside<'_> {
+    fn drop(&mut self) {
+        let mut inside = self
+            .readers
+            .inside
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
+        *inside = inside.saturating_sub(1);
+        self.readers.changed.notify_all();
+    }
+}
+
+static READERS: Readers = Readers::new();
+
+/// How long [`shutdown_media_session`] waits for a reader that is still inside
+/// the platform.
+///
+/// [`FIRST_FRAME_BUDGET`] is what a *caller* waits for one answer; this is what
+/// the process waits for the thread that gave that up to finish unwinding, which
+/// is the tail of one `ReadSample` and not another whole decode.
+const MEDIA_QUIET_BUDGET: Duration = Duration::from_millis(1500);
 
 /// Whether this process's Media Foundation session is up, **starting it the
 /// first time anybody asks**.
@@ -432,6 +513,20 @@ pub fn shutdown_media_session() {
     if MEDIA_SESSION_STARTS.load(Ordering::Relaxed) == 0 {
         return;
     }
+    // **Nobody is inside the platform when it is taken down** (review row
+    // R2-18). `MFShutdown` used to run the moment the event loop returned, which
+    // is not the moment the last question was answered: a decode that overran
+    // [`FIRST_FRAME_BUDGET`] is deliberately left to finish, and it may still be
+    // inside a `ReadSample` in a demuxer whose platform this is about to remove.
+    // The wait is bounded because the alternative is a process that will not
+    // close, and its ending is honest: the line says the platform went down over
+    // somebody.
+    if !READERS.quiet_within(MEDIA_QUIET_BUDGET) {
+        eprintln!(
+            "video: shutting Media Foundation down with a reader still inside it \
+             after {MEDIA_QUIET_BUDGET:?}"
+        );
+    }
     // SAFETY: paired with the one `MFStartup` in `media_session`, on a process
     // that has stopped asking questions.
     unsafe {
@@ -450,6 +545,10 @@ fn in_the_process_apartment(
     cost: &mut FirstFrameCost,
     work: impl FnOnce(&mut FirstFrameCost) -> Option<VideoFrame>,
 ) -> Option<VideoFrame> {
+    // Counted from before the platform is touched until after this thread has
+    // left it, so that `shutdown_media_session` knows whether anybody is inside.
+    // See [`Readers`].
+    let _inside = READERS.enter();
     let started = Instant::now();
     if !media_session() {
         cost.session = started.elapsed();
@@ -722,9 +821,24 @@ unsafe fn copy_locked_frame(
             let mut scanline0: *mut u8 = std::ptr::null_mut();
             let mut pitch = 0_i32;
             if two_d.Lock2D(&mut scanline0, &mut pitch).is_ok() {
-                let rgba = (!scanline0.is_null())
-                    .then(|| swizzle(scanline0, pitch, row_bytes, rows))
-                    .flatten();
+                // **The buffer is measured before it is read** (review row
+                // R2-4). A pointer that is not null says nothing about how much
+                // is behind it: the width and height being copied are the ones
+                // the media type declared when the output was set, and a stream
+                // whose type changes mid-play — or a file built to make it —
+                // hands back a smaller frame under the same numbers. The pitch
+                // is the buffer's own and is checked with it, because a pitch
+                // narrower than a row is a row read into the next one.
+                let contiguous = two_d
+                    .GetContiguousLength()
+                    .ok()
+                    .map(|length| length as usize);
+                let rgba = contiguous
+                    .filter(|_| !scanline0.is_null())
+                    .filter(|contiguous| {
+                        frame_fits(pitch, row_bytes, rows, LockedAs::Rows, *contiguous)
+                    })
+                    .and_then(|_| swizzle(scanline0, pitch, row_bytes, rows));
                 let _ = two_d.Unlock2D();
                 return rgba;
             }
@@ -737,20 +851,69 @@ unsafe fn copy_locked_frame(
         // the first byte is the *bottom* row, and scanline zero is the last one.
         let pitch = declared_stride.unwrap_or(row_bytes as i32);
         let stride = pitch.unsigned_abs() as usize;
-        let needed = stride.checked_mul(rows)?;
-        let rgba = (!start.is_null() && length as usize >= needed && stride >= row_bytes)
-            .then(|| {
-                let scanline0 = if pitch < 0 {
-                    start.add(stride * (rows - 1))
-                } else {
-                    start
-                };
-                swizzle(scanline0, pitch, row_bytes, rows)
-            })
-            .flatten();
+        let rgba = (!start.is_null()
+            && frame_fits(pitch, row_bytes, rows, LockedAs::Flat, length as usize))
+        .then(|| {
+            let scanline0 = if pitch < 0 {
+                start.add(stride * (rows - 1))
+            } else {
+                start
+            };
+            swizzle(scanline0, pitch, row_bytes, rows)
+        })
+        .flatten();
         let _ = buffer.Unlock();
         rgba
     }
+}
+
+/// Which of a media buffer's two lengths a copy has to fit inside.
+///
+/// Media Foundation's own division, not this module's: `IMFMediaBuffer`'s
+/// `Lock`, `GetCurrentLength` and `GetMaxLength` describe the buffer as one flat
+/// run of bytes with the media type's stride in it, while `IMF2DBuffer`'s
+/// `Lock2D` describes it as rows at a pitch of the buffer's choosing and
+/// `GetContiguousLength` answers what those rows would be worth **packed**. So a
+/// flat lock is measured against the padded rows it will actually walk, and a
+/// 2-D lock against the frame's own packed size, which is the only length the
+/// platform will state about a buffer whose padding is its own business.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LockedAs {
+    /// One run of bytes, `|pitch|` apart per row.
+    Flat,
+    /// Rows at a pitch, measured by their contiguous worth.
+    Rows,
+}
+
+/// **Whether `rows` rows of `row_bytes`, `pitch` apart, fit in a buffer of
+/// `available` bytes** — and whether that shape is one a copy may walk at all
+/// (review row R2-4).
+///
+/// Three refusals, and each is a read that would otherwise go somewhere it was
+/// not given: a pitch narrower than a row walks each row into the next one; a
+/// frame whose byte count overflows a `usize` is not a frame; and a buffer
+/// smaller than the frame it is said to hold is the shape a media type changing
+/// mid-stream leaves behind.
+///
+/// A frame of no rows or no bytes per row is refused too. There is nothing to
+/// copy out of it, and letting it through would make `rows - 1` in the caller's
+/// bottom-up arithmetic an underflow.
+fn frame_fits(
+    pitch: i32,
+    row_bytes: usize,
+    rows: usize,
+    locked_as: LockedAs,
+    available: usize,
+) -> bool {
+    let stride = pitch.unsigned_abs() as usize;
+    if row_bytes == 0 || rows == 0 || stride < row_bytes {
+        return false;
+    }
+    let needed = match locked_as {
+        LockedAs::Flat => stride.checked_mul(rows),
+        LockedAs::Rows => row_bytes.checked_mul(rows),
+    };
+    needed.is_some_and(|needed| available >= needed)
 }
 
 /// BGRX rows at `pitch` apart, starting at scanline zero, out as opaque RGBA8.
@@ -816,6 +979,103 @@ fn contain(size: (u32, u32), fit: (u32, u32)) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PIN — **a frame is measured before it is copied, on both locks** (review
+    /// row R2-4).
+    ///
+    /// The 2-D branch used to check only that the pointer was not null, while
+    /// the flat branch beside it checked the pitch and the length. A pitch
+    /// narrower than a row reads each row into the next one, and a buffer
+    /// smaller than the frame its media type declares — which is what a stream
+    /// whose type changes mid-play, or a file built to do it, hands back — is
+    /// read past its end.
+    ///
+    /// MUTATIONS, all three: drop the `stride < row_bytes` refusal and a 4-byte
+    /// pitch on a 64-byte row walks sixteen rows into one; drop the length
+    /// comparison and a buffer holding one row is read for a hundred; drop the
+    /// `checked_mul` and a frame whose byte count wraps a `usize` is accepted as
+    /// though it fitted in nothing.
+    #[test]
+    fn a_locked_frame_is_measured_before_it_is_copied() {
+        // 64 rows of 320 bytes, packed and padded, both locks.
+        assert!(frame_fits(320, 320, 64, LockedAs::Flat, 320 * 64));
+        assert!(frame_fits(384, 320, 64, LockedAs::Flat, 384 * 64));
+        assert!(frame_fits(384, 320, 64, LockedAs::Rows, 320 * 64));
+        // Bottom-up is the same frame walked the other way.
+        assert!(frame_fits(-384, 320, 64, LockedAs::Flat, 384 * 64));
+        assert!(frame_fits(-384, 320, 64, LockedAs::Rows, 320 * 64));
+
+        // A pitch narrower than one row is a row read into the next one.
+        assert!(!frame_fits(4, 320, 64, LockedAs::Rows, 1 << 20));
+        assert!(!frame_fits(-4, 320, 64, LockedAs::Rows, 1 << 20));
+        assert!(!frame_fits(4, 320, 64, LockedAs::Flat, 1 << 20));
+
+        // A buffer smaller than the frame it is said to hold — one row short is
+        // enough, and it is what a media type changing mid-stream leaves.
+        assert!(!frame_fits(320, 320, 64, LockedAs::Rows, 320 * 63));
+        assert!(!frame_fits(384, 320, 64, LockedAs::Flat, 384 * 64 - 1));
+
+        // Nothing to copy, and `rows - 1` in the caller would underflow.
+        assert!(!frame_fits(320, 320, 0, LockedAs::Rows, 1 << 20));
+        assert!(!frame_fits(0, 0, 64, LockedAs::Rows, 1 << 20));
+
+        // A frame whose byte count is not a number.
+        assert!(!frame_fits(
+            i32::MAX,
+            usize::MAX / 2,
+            64,
+            LockedAs::Flat,
+            usize::MAX
+        ));
+        assert!(!frame_fits(
+            i32::MAX,
+            usize::MAX / 2,
+            64,
+            LockedAs::Rows,
+            usize::MAX
+        ));
+    }
+
+    /// PIN — **the platform is not shut down under a thread that is inside it**
+    /// (review row R2-18).
+    ///
+    /// The reader that overran [`FIRST_FRAME_BUDGET`] is abandoned on purpose,
+    /// so there is no handle to join; what a shutdown can do is wait a bounded
+    /// while for the count to come back to zero. This drives the counter with a
+    /// fake reader rather than a decode, because what is being pinned is the
+    /// wait and not the decoder.
+    ///
+    /// MUTATIONS: never decrement and the wait always runs out; wait without a
+    /// bound and the second half of this test never returns.
+    #[test]
+    fn a_shutdown_waits_for_the_readers_still_inside_the_platform() {
+        static QUIET: Readers = Readers::new();
+
+        assert!(
+            QUIET.quiet_within(Duration::from_millis(0)),
+            "nobody inside is quiet at once"
+        );
+
+        let inside = QUIET.enter();
+        let started = Instant::now();
+        assert!(
+            !QUIET.quiet_within(Duration::from_millis(60)),
+            "a reader still inside is reported as still inside"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "and the wait for it is bounded"
+        );
+
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(inside);
+        });
+        assert!(
+            QUIET.quiet_within(Duration::from_secs(30)),
+            "a reader that leaves releases the wait"
+        );
+    }
 
     /// PIN — **the two halves of `MF_MT_FRAME_SIZE` do not swap places.**
     ///

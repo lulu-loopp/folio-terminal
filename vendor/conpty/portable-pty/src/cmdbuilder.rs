@@ -112,18 +112,28 @@ fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
         fn reg_value_to_string(value: &RegValue) -> anyhow::Result<OsString> {
             match value.vtype {
                 RegType::REG_EXPAND_SZ => {
-                    let src = unsafe {
-                        std::slice::from_raw_parts(
-                            value.bytes.as_ptr() as *const u16,
-                            value.bytes.len() / 2,
-                        )
-                    };
+                    // **Terminated here and nowhere else** (review row R2-2).
+                    // `ExpandEnvironmentStringsW` reads its source until a NUL,
+                    // and what the registry crate hands back is the value's
+                    // bytes exactly as `RegEnumValueW` reported them — with no
+                    // terminator added and none guaranteed by the registry
+                    // itself, whose own documentation warns that a string value
+                    // "may not have been stored with the proper terminating null
+                    // characters". Handing that buffer straight to Win32 reads
+                    // past the allocation on every pane spawn.
+                    let src = wide_terminated(&value.bytes);
                     let size =
                         unsafe { ExpandEnvironmentStringsW(src.as_ptr(), std::ptr::null_mut(), 0) };
+                    if size == 0 {
+                        anyhow::bail!("ExpandEnvironmentStringsW could not size the value");
+                    }
                     let mut buf = vec![0u16; size as usize + 1];
-                    unsafe {
+                    let written = unsafe {
                         ExpandEnvironmentStringsW(src.as_ptr(), buf.as_mut_ptr(), buf.len() as u32)
                     };
+                    if written == 0 || written as usize > buf.len() {
+                        anyhow::bail!("ExpandEnvironmentStringsW could not expand the value");
+                    }
 
                     let mut buf = buf.as_slice();
                     while let Some(0) = buf.last() {
@@ -135,6 +145,8 @@ fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
             }
         }
 
+        let mut from_registry: BTreeMap<OsString, EnvEntry> = BTreeMap::new();
+
         if let Ok(sys_env) = RegKey::predef(HKEY_LOCAL_MACHINE)
             .open_subkey("System\\CurrentControlSet\\Control\\Session Manager\\Environment")
         {
@@ -145,7 +157,7 @@ fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
                     }
                     if let Ok(value) = reg_value_to_string(&value) {
                         log::trace!("adding SYS env: {:?} {:?}", name, value);
-                        env.insert(
+                        from_registry.insert(
                             EnvEntry::map_key(name.clone().into()),
                             EnvEntry {
                                 is_from_base_env: true,
@@ -164,7 +176,7 @@ fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
                     if let Ok(value) = reg_value_to_string(&value) {
                         // Merge the system and user paths together
                         let value = if name.to_ascii_lowercase() == "path" {
-                            match env.get(&EnvEntry::map_key(name.clone().into())) {
+                            match from_registry.get(&EnvEntry::map_key(name.clone().into())) {
                                 Some(entry) => {
                                     let mut result = OsString::new();
                                     result.push(&entry.value);
@@ -179,7 +191,7 @@ fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
                         };
 
                         log::trace!("adding USER env: {:?} {:?}", name, value);
-                        env.insert(
+                        from_registry.insert(
                             EnvEntry::map_key(name.clone().into()),
                             EnvEntry {
                                 is_from_base_env: true,
@@ -191,9 +203,63 @@ fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
                 }
             }
         }
+
+        fill_the_gaps(&mut env, from_registry);
     }
 
     env
+}
+
+/// The bytes of a registry string as a **NUL-terminated** wide buffer, which is
+/// the only shape a Win32 string argument may be handed (review row R2-2).
+///
+/// Three things the registry can hand back and this answers all of them: a
+/// trailing odd byte belongs to no `u16` and is dropped, an embedded NUL ends
+/// the string because that is what a NUL means to every reader of one, and a
+/// value that carried no terminator gets the one it needs. The result always
+/// ends in exactly one NUL, so an empty value is a lone terminator rather than
+/// an empty slice with nothing to stop on.
+///
+/// Public so that the terminal above this crate can pin the rule where its own
+/// tests run: this package is a vendored fork and not a workspace member, so
+/// nothing here is reached by `cargo test --workspace`.
+#[cfg(windows)]
+pub fn wide_terminated(bytes: &[u8]) -> Vec<u16> {
+    let mut wide: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    if let Some(end) = wide.iter().position(|unit| *unit == 0) {
+        wide.truncate(end);
+    }
+    wide.push(0);
+    wide
+}
+
+/// Lay the registry's account of the environment **under** the process's own,
+/// never over it (review row R2-22).
+///
+/// A pane is a child of this window, and the environment a child inherits is the
+/// one its parent is standing in: the `PATH` the launching shell exported, the
+/// variable a developer set for this session alone, the `NODE_OPTIONS` an
+/// outer tool put there on the way in. Reading the two `Environment` keys and
+/// writing them over that made every pane a child of the *machine* instead —
+/// the window's own `PATH` was discarded, so the program `bt-app` resolved off
+/// `PATH` and the program the child found under the same name could be two
+/// different files.
+///
+/// The registry is still read, and this is what it is still for: a variable
+/// added through System Properties after this window started exists nowhere in
+/// this process, and a pane opened afterwards is entitled to see it. So it fills
+/// the gaps and only the gaps.
+#[cfg(windows)]
+fn fill_the_gaps(
+    env: &mut BTreeMap<OsString, EnvEntry>,
+    from_registry: BTreeMap<OsString, EnvEntry>,
+) {
+    for (key, entry) in from_registry {
+        env.entry(key).or_insert(entry);
+    }
 }
 
 /// `CommandBuilder` is used to prepare a command to be spawned into a pty.
@@ -207,6 +273,11 @@ pub struct CommandBuilder {
     #[cfg(unix)]
     pub(crate) umask: Option<libc::mode_t>,
     controlling_tty: bool,
+    /// A command line for an interpreter that parses its own tail — see
+    /// [`CommandBuilder::set_interpreter_line`]. `None` for every ordinary
+    /// program, which is nearly all of them.
+    #[cfg(windows)]
+    interpreter_line: Option<OsString>,
 }
 
 impl CommandBuilder {
@@ -220,6 +291,8 @@ impl CommandBuilder {
             #[cfg(unix)]
             umask: None,
             controlling_tty: true,
+            #[cfg(windows)]
+            interpreter_line: None,
         }
     }
 
@@ -232,6 +305,8 @@ impl CommandBuilder {
             #[cfg(unix)]
             umask: None,
             controlling_tty: true,
+            #[cfg(windows)]
+            interpreter_line: None,
         }
     }
 
@@ -259,6 +334,8 @@ impl CommandBuilder {
             #[cfg(unix)]
             umask: None,
             controlling_tty: true,
+            #[cfg(windows)]
+            interpreter_line: None,
         }
     }
 
@@ -635,7 +712,7 @@ impl CommandBuilder {
     /// Uses the current process environment as the base and then
     /// adds/replaces the environment that was specified via the
     /// `env` methods.
-    pub(crate) fn environment_block(&self) -> Vec<u16> {
+    pub fn environment_block(&self) -> Vec<u16> {
         // encode the environment as wide characters
         let mut block = vec![];
 
@@ -645,6 +722,17 @@ impl CommandBuilder {
             value,
         } in self.envs.values()
         {
+            // **A name that cannot be spelled in a block is left out of it**
+            // (review row R2-22). The block is a run of `NAME=VALUE` strings
+            // separated by NULs, so the first `=` in an entry is where the name
+            // ends and a NUL is where the entry does: a name carrying either
+            // does not name a variable, it renames the one beside it or cuts
+            // the block short. Windows itself uses a leading `=` for the
+            // per-drive current directories (`=C:`), which is why the test is
+            // for an `=` anywhere in the name rather than only at the front.
+            if !a_block_can_carry(preferred_key, value) {
+                continue;
+            }
             block.extend(preferred_key.encode_wide());
             block.push(b'=' as u16);
             block.extend(value.encode_wide());
@@ -665,7 +753,29 @@ impl CommandBuilder {
             .unwrap_or_else(|_| "%CompSpec%".to_string())
     }
 
-    pub(crate) fn cmdline(&self) -> anyhow::Result<(Vec<u16>, Vec<u16>)> {
+    /// Hand the interpreter named by `argv[0]` a command line it will parse for
+    /// **itself**, written through exactly as given.
+    ///
+    /// `cmd.exe` after `/c` does not read argv: it reads the rest of the line
+    /// with its own quoting rules, where a backslash is not an escape and a
+    /// double quote is the only thing that makes `&`, `|`, `<`, `>` and `^`
+    /// ordinary characters. Argv quoting therefore cannot express what that
+    /// line has to say, and a caller who knows it is addressing an interpreter
+    /// writes the line and says so here. Everything before it — `argv[0]` and
+    /// the switches — is still quoted the ordinary way.
+    ///
+    /// A line carrying a NUL is refused by [`Self::cmdline`], the same as an
+    /// argument that carries one.
+    pub fn set_interpreter_line<S: AsRef<OsStr>>(&mut self, line: S) {
+        self.interpreter_line = Some(line.as_ref().to_os_string());
+    }
+
+    /// The line this builder hands its interpreter, if it was given one.
+    pub fn get_interpreter_line(&self) -> Option<&OsStr> {
+        self.interpreter_line.as_deref()
+    }
+
+    pub fn cmdline(&self) -> anyhow::Result<(Vec<u16>, Vec<u16>)> {
         let mut cmdline = Vec::<u16>::new();
 
         let exe: OsString = if self.is_default_prog() {
@@ -691,6 +801,18 @@ impl CommandBuilder {
                 arg
             );
             Self::append_quoted(arg, &mut cmdline);
+        }
+        // The interpreter's own line, written through as given: the caller
+        // quoted it by the interpreter's rules and this must not quote it again.
+        // See [`Self::set_interpreter_line`].
+        if let Some(line) = &self.interpreter_line {
+            anyhow::ensure!(
+                !line.encode_wide().any(|c| c == 0),
+                "invalid encoding for interpreter command line {:?}",
+                line
+            );
+            cmdline.push(' ' as u16);
+            cmdline.extend(line.encode_wide());
         }
         // Ensure that the command line is nul terminated too!
         cmdline.push(0);
@@ -743,6 +865,28 @@ impl CommandBuilder {
         }
         cmdline.push('"' as u16);
     }
+}
+
+/// Whether a `NAME=VALUE` pair can be spelled in an environment block at all
+/// (review row R2-22).
+///
+/// The block's own grammar is the whole rule: entries are separated by NULs and
+/// a name ends at the first `=`, so a name carrying either character does not
+/// name a variable — it renames the entry beside it, or ends the block early and
+/// takes every entry after it away. A value may carry an `=` (a great many do)
+/// but not a NUL, for the same reason.
+///
+/// An empty name is refused here too: `=NAME=VALUE` is how Windows spells the
+/// per-drive current directory, and a caller's empty name would be writing one.
+///
+/// Public for [`wide_terminated`]'s reason.
+#[cfg(windows)]
+pub fn a_block_can_carry(name: &OsStr, value: &OsStr) -> bool {
+    !name.is_empty()
+        && !name
+            .encode_wide()
+            .any(|unit| unit == 0 || unit == b'=' as u16)
+        && !value.encode_wide().any(|unit| unit == 0)
 }
 
 #[cfg(unix)]
