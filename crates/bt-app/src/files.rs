@@ -1076,8 +1076,18 @@ pub fn read_directory(path: &Path) -> DirOutcome {
         let is_symlink = file_type.is_symlink();
         // What is behind a link decides whether the row opens, so the link — and
         // only the link — is worth the extra call to look through.
+        //
+        // **And only when what is behind it is this window's to look at** (route C of the
+        // untrusted-path audit, 2026-09-08). `std::fs::metadata` follows the link, so a folder
+        // holding one junction into `\\server\share` made merely *listing* that folder a dial to
+        // that server — once per listing, on the files worker, with nobody having opened
+        // anything. The gate reads the name written inside the link and opens nothing, so a link
+        // to a share costs a local stat and the row simply does not claim to be a folder.
         let is_dir = if is_symlink {
-            std::fs::metadata(entry.path()).is_ok_and(|target| target.is_dir())
+            bt_transcript::paths::may_read_unasked_through_links(
+                &entry.path(),
+                bt_transcript::paths::PathNamer::ThisWindow,
+            ) && std::fs::metadata(entry.path()).is_ok_and(|target| target.is_dir())
         } else {
             file_type.is_dir()
         };

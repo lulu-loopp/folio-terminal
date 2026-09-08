@@ -496,8 +496,8 @@ impl PrintedPathCandidate {
 /// and it is admitted **as a root**, not as a UNC path: `\\server\share\a.md` is as remote as it
 /// ever was, and so is every other authority. The distinction is not about the spelling but about
 /// where the bytes are — a distribution is a filesystem this machine is hosting, and reading it
-/// crosses no network — which is the same question `bt_app::preview::is_network_path` asks with the
-/// same function, so that one prefix has one answer.
+/// crosses no network — which is the same question [`may_read_unasked`] asks with the same
+/// function, so that one prefix has one answer.
 #[cfg(windows)]
 pub fn is_local_absolute_path(path: &Path) -> bool {
     let text = path.as_os_str().to_string_lossy();
@@ -527,6 +527,151 @@ pub fn is_local_absolute_path(path: &Path) -> bool {
 pub fn is_local_absolute_path(path: &Path) -> bool {
     let text = path.as_os_str().to_string_lossy();
     text.starts_with('/') && !text.contains('\0')
+}
+
+/// Who named the path a locality question is being asked about.
+///
+/// The two arms are the two provenances a path in this window has, and they are kept apart because
+/// they deserve different answers about exactly one prefix. Everything else — a drive letter, a
+/// share on another machine, a device path — is answered the same way for both.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PathNamer<'namespace> {
+    /// **A child process did.** Text a program printed, or the target it declared over `OSC 8`:
+    /// attacker-controlled in the only sense that matters here, since the program on the other end
+    /// of the pipe chooses every byte of it. The pane it was printed into is what decides which
+    /// roots that text may name — see [`PrintedPathNamespace`].
+    Pane(&'namespace PrintedPathNamespace),
+    /// **This window did.** A row of the files column, a file the user picked out of a dialog, a
+    /// working directory a pane reported over `OSC 7`, a path this window already translated out
+    /// of a pane's own spelling. No untrusted text is left in it, so every root this machine holds
+    /// is one of its own and the namespace question has already been asked and answered.
+    ThisWindow,
+}
+
+/// **Whether this window may read `path` without being asked to** — the one answer to that
+/// question, and the reason there is only one function to ask it of.
+///
+/// A hover is not a request. A pointer resting on a word, a card rising under it, a picture
+/// decoded to fill that card and a head read to fill a preview pane are all work this window
+/// starts on its own, off text a child process chose; and the cost of doing it against a path that
+/// is not on this machine is not a slow frame. `\\server\share\probe.png` hands the operating
+/// system's SMB client the user's credentials to offer to a stranger. `\\.\pipe\name` opens a
+/// door somebody else is holding, and a server that accepts and never writes keeps the worker
+/// that opened it forever. Both are a *click* the user did not make.
+///
+/// So: **drive-rooted, and nothing else, unless the pane itself is standing in the distribution
+/// the path names.**
+///
+/// * `Prefix::Disk` with a root under it — `D:\src\a.md` — is this machine's own filesystem and is
+///   the whole of what this window reads unasked.
+/// * `Prefix::UNC` / `Prefix::VerbatimUNC` — `\\server\share\…` — is somebody else's machine.
+/// * `Prefix::DeviceNS` — `\\.\pipe\…`, `\\.\COM1` — is not a filesystem at all. Reading one is
+///   an act with a side effect, and its `read` has no end a timeout could be written against.
+/// * `Prefix::Verbatim` and `Prefix::VerbatimDisk` — `\\?\C:\…` — name the same files a drive
+///   letter does while skipping the normalizer every other reader in this window is written
+///   against. A second spelling of a path is a second answer about it, and nothing in this window
+///   produces one.
+/// * `\\wsl.localhost\<distro>\…` is the one root that is not a drive and is still this machine's
+///   ([`is_wsl_distribution_share`], §7.30). It stays admissible where the *pane* is standing in
+///   that distribution, which is the only way this window ever mints one: an `OSC 8` target naming
+///   a distribution nobody in this window is running is a stranger's spelling of a share, and
+///   reaching for a stopped distribution starts a virtual machine on a resting pointer.
+///
+/// Nothing here touches a disk, which is what lets the window thread ask it. The disk's half of
+/// the same question is [`may_read_unasked_through_links`].
+#[cfg(windows)]
+#[must_use]
+pub fn may_read_unasked(path: &Path, namer: PathNamer<'_>) -> bool {
+    let text = path.as_os_str().to_string_lossy();
+    if text.contains('\0') {
+        return false;
+    }
+    match wsl_share_root_length(&text) {
+        // The distribution's own share, and the one question it turns on.
+        Some(root) => {
+            let distro = &text[2 + WSL_DISTRIBUTION_SHARE_HOST.len() + 1..root];
+            match namer {
+                PathNamer::Pane(PrintedPathNamespace::Wsl {
+                    distro: Some(standing_in),
+                    ..
+                }) => standing_in.eq_ignore_ascii_case(distro),
+                PathNamer::Pane(_) => false,
+                PathNamer::ThisWindow => true,
+            }
+        }
+        // Everything else is a drive letter with a root under it, or it is not this window's to
+        // read. The prefix is read through `std::path::Prefix` rather than off the leading
+        // characters, because `\\?\C:\…`, `\\.\pipe\…` and `\\server\share\…` all open with two
+        // backslashes and no reading of those two says which of the three it is. The root is asked
+        // for separately: `C:notes.md` carries a drive and no root, and what it names depends on
+        // where the process happens to be standing.
+        None => {
+            let mut components = path.components();
+            let drive = matches!(
+                components.next(),
+                Some(std::path::Component::Prefix(prefix))
+                    if matches!(prefix.kind(), std::path::Prefix::Disk(_))
+            );
+            drive && matches!(components.next(), Some(std::path::Component::RootDir))
+        }
+    }
+}
+
+/// The same question where a filesystem has one root instead of one per volume, and no spelling of
+/// a path can name another machine.
+#[cfg(not(windows))]
+#[must_use]
+pub fn may_read_unasked(path: &Path, namer: PathNamer<'_>) -> bool {
+    let _ = namer;
+    is_local_absolute_path(path)
+}
+
+/// [`may_read_unasked`] asked again of what the last component is a **link to**.
+///
+/// The lexical answer is about a spelling and a symbolic link is a spelling that means another
+/// one: `C:\Users\alice\notes` may be a local name for `\\server\share`, and a reader that stopped
+/// at the lexical answer would dial the share while believing it had opened a file on `C:`.
+///
+/// One hop, and a link to a link is refused. Following further would be walking a chain somebody
+/// else wrote while holding the answer to "is this local?" open, and the shapes this window
+/// actually meets — a junction into a share, a link left by a build — are one hop.
+///
+/// **Every call it makes is against the link itself and never against its target**:
+/// `symlink_metadata` reports the link, `read_link` reads the name written inside it, and neither
+/// opens what that name points at. So a target on a disconnected share costs nothing, and this is
+/// safe on the window thread for the same reason the lexical half is.
+#[must_use]
+pub fn may_read_unasked_through_links(path: &Path, namer: PathNamer<'_>) -> bool {
+    if !may_read_unasked(path, namer) {
+        return false;
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        // Nothing is there to be a link, so there is nothing the lexical answer could be wrong
+        // about. Whatever asked is about to open it and be told the same thing.
+        return true;
+    };
+    if !metadata.file_type().is_symlink() {
+        return true;
+    }
+    let Ok(target) = std::fs::read_link(path) else {
+        return false;
+    };
+    // A link may be written relative to the directory it stands in, and what it names is then that
+    // directory's own answer — so the question is put to the name the reader would actually open.
+    let target = if target.is_absolute() {
+        target
+    } else {
+        match path.parent() {
+            Some(directory) => directory.join(target),
+            None => return false,
+        }
+    };
+    if !may_read_unasked(&target, namer) {
+        return false;
+    }
+    // One hop. A link whose target is a link is refused rather than followed: the chain belongs to
+    // whoever wrote it, and this window is answering a question about a resting pointer.
+    std::fs::symlink_metadata(&target).is_ok_and(|target| !target.file_type().is_symlink())
 }
 
 #[cfg(windows)]
@@ -7283,6 +7428,105 @@ mod posix_tests {
         assert!(
             unknown.is_empty(),
             "and it refused without asking anything new: {unknown:?}"
+        );
+    }
+}
+
+/// **What this window may read off a resting pointer** - [`may_read_unasked`] and its
+/// disk-reading sibling, one test per shape the answer turns on.
+#[cfg(all(test, windows))]
+mod locality_tests {
+    use super::*;
+
+    fn windows() -> PrintedPathNamespace {
+        PrintedPathNamespace::Windows
+    }
+
+    fn ubuntu() -> PrintedPathNamespace {
+        PrintedPathNamespace::Wsl {
+            distro: Some("Ubuntu".to_owned()),
+            home: None,
+        }
+    }
+
+    /// RED - **a device path is not a file, and a verbatim path is a second spelling of one**
+    /// (route B of the untrusted-path audit, 2026-09-08).
+    ///
+    /// RED EVIDENCE (2026-09-08). `is_network_path` decided locality from the prefix and counted
+    /// exactly two of them as remote, so `\\.\pipe\name` - which is not a filesystem at all -
+    /// came back local and went to the preview worker's blocking `File::open` + `read_to_end`. A
+    /// pipe server that accepts and never writes holds that worker for the rest of the session,
+    /// and the worker serves one request at a time. Before the fix:
+    ///
+    /// ```text
+    /// not a path this window reads unasked: \\.\pipe\folio-probe
+    ///   assertion failed: !may_read_unasked(...)
+    /// ```
+    ///
+    /// MUTATION: let `may_read_unasked` answer from `Prefix::UNC | Prefix::VerbatimUNC` alone and
+    /// the device namespace is local again.
+    #[test]
+    fn a_device_or_verbatim_path_is_not_one_this_window_reads_unasked() {
+        for namer in [PathNamer::Pane(&windows()), PathNamer::ThisWindow] {
+            for refused in [
+                r"\\.\pipe\folio-probe",
+                r"\\.\COM1",
+                r"\\?\C:\Users\alice\notes.md",
+                r"\\?\UNC\server\share\notes.md",
+                r"\\server\share\notes.md",
+                r"C:notes.md",
+            ] {
+                assert!(
+                    !may_read_unasked(Path::new(refused), namer),
+                    "not a path this window reads unasked: {refused}",
+                );
+            }
+            // The ordinary local path is untouched, which is the whole of what this window did
+            // before and still does.
+            assert!(may_read_unasked(
+                Path::new(r"C:\Users\alice\notes.md"),
+                namer
+            ));
+        }
+    }
+
+    /// RED - **a distribution's share is this machine's only in a pane standing in it** (route D
+    /// of the untrusted-path audit, 2026-09-08; the rule of DESIGN 7.30, asked where it was not
+    /// being asked).
+    ///
+    /// RED EVIDENCE (2026-09-08). 7.30 admitted `\\wsl.localhost\<distro>\...` as a root because a
+    /// distribution is a filesystem this machine hosts - true of a share this window *minted* out
+    /// of a WSL pane's own `/etc/hosts`, and not true of an `OSC 8` target a program printed into
+    /// a PowerShell pane. Reaching for a distribution nobody in this window is running starts a
+    /// virtual machine, on the window thread, off a resting pointer. Before the fix:
+    ///
+    /// ```text
+    /// a Windows pane's text does not name a distribution's share
+    ///   assertion failed: !may_read_unasked(...)
+    /// ```
+    ///
+    /// MUTATION: ignore the namer and every pane names every distribution again.
+    #[test]
+    fn a_distribution_share_is_readable_only_where_the_pane_stands_in_that_distribution() {
+        let hosts = Path::new(r"\\wsl.localhost\Ubuntu\etc\hosts");
+        assert!(
+            !may_read_unasked(hosts, PathNamer::Pane(&windows())),
+            "a Windows pane's text does not name a distribution's share",
+        );
+        assert!(
+            may_read_unasked(hosts, PathNamer::Pane(&ubuntu())),
+            "the pane standing in Ubuntu names Ubuntu's own files",
+        );
+        assert!(
+            !may_read_unasked(
+                Path::new(r"\\wsl.localhost\Debian\etc\hosts"),
+                PathNamer::Pane(&ubuntu())
+            ),
+            "and only that distribution, not its neighbour",
+        );
+        assert!(
+            may_read_unasked(hosts, PathNamer::ThisWindow),
+            "a share this window minted is one it may read back",
         );
     }
 }

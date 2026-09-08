@@ -9,7 +9,6 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use bt_transcript::paths::is_local_absolute_path;
 use image::{ImageFormat, ImageReader, Limits, codecs::png::PngDecoder};
 use rayon::prelude::*;
 
@@ -531,6 +530,17 @@ impl InlineImageDecoder {
         let payload = match &task.source {
             InlineImageSource::Osc1337(encoded) => decode_osc_payload(encoded)?,
             InlineImageSource::LocalPath(path) => {
+                // **The admissibility question comes before the stat** (route A of the
+                // untrusted-path audit, 2026-09-08). `LocalImageStamp::of` is a bare
+                // `std::fs::metadata`, and it used to stand here, one line above the memo and
+                // several above `read_and_decode_local_image`'s gate — so a path this decoder was
+                // about to refuse had already been stat-ed, which for `\\server\share\probe.png`
+                // is the SMB round trip the refusal exists to prevent. The gate is the same one,
+                // asked in the order the two questions actually stand in: may this be read, and
+                // only then, what does it look like now.
+                if !is_admissible_local_image_path(path) {
+                    return Err(InlineImageDecodeError::InvalidPath);
+                }
                 let cache_key = normalized_local_path_key(path);
                 let stamp = LocalImageStamp::of(path);
                 match self.local_path_cache.get(&cache_key) {
@@ -585,7 +595,15 @@ fn decode_osc_payload(encoded: &[u8]) -> Result<DecodedImagePayload, InlineImage
 }
 
 fn read_and_decode_local_image(path: &Path) -> Result<DecodedImagePayload, InlineImageDecodeError> {
-    if !is_admissible_local_image_path(path) {
+    // The lexical gate, and then the disk's half of it: a drive-rooted name may still be a local
+    // spelling of a share, and this is the line the bytes are about to be read behind. Both are
+    // the one predicate, and this call is the one that may touch a disk — which is why it is here,
+    // on the decoration worker, and not in the scan that finds these names.
+    if !bt_transcript::paths::may_read_unasked_through_links(
+        path,
+        bt_transcript::paths::PathNamer::ThisWindow,
+    ) || !has_admissible_image_extension(path)
+    {
         return Err(InlineImageDecodeError::InvalidPath);
     }
     let mut file =
@@ -939,8 +957,21 @@ pub fn decode_background_image(
     })
 }
 
+/// Whether a name may become a picture: somewhere this window may read without being asked
+/// ([`bt_transcript::paths::may_read_unasked`]), and spelled like a picture it can show.
+///
+/// The locality half used to be [`bt_transcript::paths::is_local_absolute_path`], which answers a
+/// neighbouring question — "is this a place on this machine" — and had grown a second reader here
+/// (route A of the untrusted-path audit, 2026-09-08). Nothing about which names are admitted
+/// changes: a drive-rooted path and a WSL distribution's share are the two this window reads, and
+/// they were the two that function admitted. What changes is that there is one function to change
+/// when that list does.
+///
+/// Nothing here touches a disk — this is the scan's gate as well as the decoder's, and the scan
+/// runs on the event thread. The disk's half is asked in [`read_and_decode_local_image`].
 fn is_admissible_local_image_path(path: &Path) -> bool {
-    is_local_absolute_path(path) && has_admissible_image_extension(path)
+    bt_transcript::paths::may_read_unasked(path, bt_transcript::paths::PathNamer::ThisWindow)
+        && has_admissible_image_extension(path)
 }
 
 /// Whether a name is spelled like a picture this build can show.

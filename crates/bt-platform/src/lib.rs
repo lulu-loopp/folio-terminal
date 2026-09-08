@@ -1446,7 +1446,31 @@ pub fn file_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
     // The same shape `validate_openable_path` asks of every path this crate will
     // hand to the shell, asked one step earlier so a URI can never become a
     // relative path in the first place.
-    let unc = text.starts_with(r"\\") && text.len() > 2;
+    //
+    // **A share, and not everything that opens with two backslashes** (route B
+    // of the untrusted-path audit, 2026-09-08). `\\.\pipe\name` opens with two
+    // as well and names no file: it is the device namespace, where an open is an
+    // act with a side effect and a read has no end. `\\?\C:\x` opens with two
+    // and is a *second spelling* of a path a drive letter already names, which
+    // is a second answer about one file for every reader downstream. So the
+    // authority is read rather than counted: a host is a share, `.` and `?` are
+    // not hosts, and a share is the only one of the three a `file:` URI names.
+    //
+    // A share is still admitted, deliberately: `\\server\share\a.md` is a real
+    // file on a real machine and the arm that answers a click on one is the
+    // refusal card §7.1.3 already draws. Whether a path may be *read* without a
+    // click is a different question with a different answer, asked one layer up
+    // by `bt_transcript::paths::may_read_unasked`.
+    //
+    // Read off the text rather than through `std::path::Prefix`, because this
+    // function answers about **Windows paths** whichever host it is compiled
+    // for: the prefix grammar exists only in the Windows implementation of
+    // `Path`, and a build for another platform would quietly stop recognizing
+    // shares at all.
+    let unc = text.strip_prefix(r"\\").is_some_and(|rest| {
+        let host = rest.split('\\').next().unwrap_or_default();
+        !host.is_empty() && host != "." && host != "?" && rest.len() > host.len()
+    });
     (drive_rooted || unc).then(|| std::path::PathBuf::from(text))
 }
 
@@ -10544,6 +10568,42 @@ mod file_uri_tests {
         assert_eq!(
             file_uri_to_path("file:///C:/docs/"),
             Some(PathBuf::from(r"C:\docs\"))
+        );
+    }
+
+    /// RED — **a `file:` URI names a file, and the device namespace holds none** (route B of the
+    /// untrusted-path audit, 2026-09-08).
+    ///
+    /// RED EVIDENCE (2026-09-08). The admission below this function's last line was "drive-rooted
+    /// **or** starts with two backslashes", and `\\.\pipe\name` starts with two: an `OSC 8` target
+    /// of `file://./pipe/name` came out of here as a path, was called local by every prefix test
+    /// downstream, and reached a blocking open on a door somebody else was holding. Before the
+    /// fix:
+    ///
+    /// ```text
+    /// a device path is not a file a URI can name
+    ///   left: Some("\\\\.\\pipe\\folio-probe")  right: None
+    /// ```
+    ///
+    /// A share stays admitted, and deliberately: `\\server\share\a.md` is a real file on a real
+    /// machine, and the arm that answers a click on one is the refusal card §7.1.3 already draws.
+    /// What this function decides is whether a URI names a path **at all**; whether that path may
+    /// be read without a click is `bt_transcript::paths::may_read_unasked`'s, one layer up.
+    ///
+    /// MUTATION: put `text.starts_with(r"\\")` back and the device namespace is a filename again.
+    #[test]
+    fn a_device_or_verbatim_uri_names_no_path() {
+        assert_eq!(
+            decoded("file://./pipe/folio-probe"),
+            None,
+            "a device path is not a file a URI can name",
+        );
+        assert_eq!(decoded("file://.//COM1"), None);
+        assert_eq!(decoded("file://%3F/C:/Users/alice/notes.md"), None);
+        assert_eq!(
+            decoded("file://server/share/notes.md").as_deref(),
+            Some(r"\\server\share\notes.md"),
+            "a share is still a path, and still refused one layer up",
         );
     }
 }
