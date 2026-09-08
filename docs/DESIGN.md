@@ -2103,7 +2103,7 @@ else                           { Flash }    // 被压住了,但任务栏还在,�
 - **三层,档案写在最后,因此赢**(计划 §1.7)。继承环境 → 终端自己的声明(`TERM_PROGRAM` / `TERM_PROGRAM_VERSION` / `COLORTERM` / `TERM`、`FORCE_HYPERLINK` 声明、cmd 的 `PROMPT`、bash 的 `BT_SHELL_INTEGRATION`)→ 档案自己的 `env`。**`TERM_PROGRAM` 也可以被压过**,这是裁决不是疏漏:档案的环境是任何人对它的会话说过的**最具体的一句话**,而 `hyperlink_declaration` 本来就写着「设过的人已经答过了」;`BT_SHELL` 作为调试后门被保留(Q4)说的是同一件事——这台机器是用户的。层叠**替换而不是追加**,一个名字一条记录:追加在远端也能赢(`PtyCommand::env` 大小写不敏感地覆盖,最后一次写入生效,`explicit_environment_overrides_default_terminal_and_color_declarations` 钉住),但会在每一份记录里留下两条互相矛盾的行,而**一条正确的行赢不过一份说谎的记录**。
 - **空值把变量拿走,空名字不是变量。** 这一条**实测过而不是推的**,而且实测把初稿推翻了:Windows 对一条值为空的环境块记录是**删掉这个名字**而不是把它绑到空串,所以一个带 `FOO=` 的档案是从它的会话里**拿走** `FOO`——连这扇窗自己继承来的那一个也一起拿走(证据 `21-empty-value.png`:窗口带着 `EMPTYVAL=inherited-from-the-window` 启动,该档案的子进程里 `Test-Path Env:EMPTYVAL` 为 `False`)。这件事**交给操作系统回答而不是在这里过滤**:过滤等于这个终端替别人的环境块发明一条规矩,而它给出的这个答案恰好就是一个把值框清空的人想说的那句话——于是存储也不需要第三种状态。**空名字**的行在边界处被丢掉(`layer_profile_environment`):它正是编辑器 `Add` 在有人打字之前产生的东西,会以 `""` 为键round-trip进 `profiles.json`,并且是子进程环境块唯一真的装不下的形状。丢在边界而不是更早,因为半打完的一行是编辑器的真实状态,在插入符底下把它删掉是对话框扔掉别人正在写的东西。
 - **`Force hyperlinks` 现在真的管事,而且仍然只有一处存储。** `Auto` 是这个档案什么都不说,于是终端自己的声明逐字节照旧;`On`/`Off` 是这张表里一条叫 `FORCE_HYPERLINK` 的行,而**那一行就是全部答案**——在它之上再推一条声明,即使远端仍会选对,也已经让记录说了谎。所以 `hyperlink_declaration` 现在也问档案自己的表,而不只是问继承环境。
-- **`Shell integration` 变成五项 combo,`Auto` 是规则不是答案**(计划 §1.6、§3.3)。`IntegrationChoice::{Auto, Named}` 两态而不是给 `Integration` 再加一个变体,因为它们回答的是两个问题,并且只有一个能在 `Program` 被改之后存活:`Auto` 是一条规则(不管这一行跑什么,按那个家族该有的方式伺候它),具名是一个**比它所描述的程序活得更久**的决定。**出厂五行全是 `Auto`**,而这是推导自证而不是五个常量并排站着——`derive_integration` 逐个复现这个 build 一直开着的那五扇门(`auto_derives_the_door_every_shipped_profile_has_always_had`)。推导读程序的**文件名主干**:`pwsh`/`powershell` → PowerShell 脚本,`bash`/`sh`/`zsh`/`wsl` → init file,`cmd` → `PROMPT`,**其余 → 无门**。没有一项变灰:四扇门都是这个终端真有的机制,而把 `--init-file` 递给一个不是 bash 的程序会怎样,是**那个程序**报的错,不是这张对话框知道的事。
+- **`Shell integration` 变成六项 combo,`Auto` 是规则不是答案**(计划 §1.6、§3.3)。`IntegrationChoice::{Auto, Named}` 两态而不是给 `Integration` 再加一个变体,因为它们回答的是两个问题,并且只有一个能在 `Program` 被改之后存活:`Auto` 是一条规则(不管这一行跑什么,按那个家族该有的方式伺候它),具名是一个**比它所描述的程序活得更久**的决定。**出厂五行全是 `Auto`**,而这是推导自证而不是五个常量并排站着——`derive_integration` 逐个复现这个 build 一直开着的那五扇门(`auto_derives_the_door_every_shipped_profile_has_always_had`)。推导读程序的**文件名主干**:`pwsh`/`powershell` → PowerShell 脚本,`bash`/`wsl` → init file,`zsh` → ZDOTDIR,`cmd` → `PROMPT`,`sh` 与**其余 → 无门**(`sh` 接受 `--init-file` 但静默忽略它,等于没有门也没有报错,所以不再假装有;review row R3-6)。没有一项变灰:五扇门都是这个终端真有的机制,而把某一扇门递给不认它的程序会怎样,是**那个程序**报的错,不是这张对话框知道的事。
 - **`paths` 从此对每一行都推导,内置也不例外。** 原先是「用户档案推导、五行陈述」——一个事实两条规则,并且让一个被改了程序的内置继续用它已经不再启动的那个 shell 的拼法翻译目录。推导与五行的陈述值逐个相同(`the_namespace_every_shipped_profile_states_is_the_one_it_derives`),所以换掉的是一份副本而不是一个决定。
 - **能力句现在是三维的,J85 就此收口**(`docs/shell-integration.md` 的矩阵仍是唯一权威,多了「读者自己的档案 · 无门」一行)。句子由**门 × 命名空间 × 环境**推出:`FORCE_HYPERLINK=0` 直接拿走超链接那一格;而在 PowerShell 上,一条 `TERM_PROGRAM` 覆盖同样拿走它——`folio.ps1` 只为它认得出的 `TERM_PROGRAM` 声明链接,所以覆盖掉这个名字的档案是**自己关掉了**自己的链接,句子必须照说,而不是重复一个这个 build 不会兑现的承诺。四句因此各有一个「没有超链接」的孪生句,而不是在句尾接一个从句:每一句本来就同时说自己**有**什么和**没有**什么,一句在两半里都提到超链接会读起来像在更正自己。`No shell integration` 多一个**长式**给编辑页(`CapNoneLong`,小样自己的字面),因为列表第三行与动作条共享一行、只装得下约五十八字符,而编辑页那一行有整页宽,站在 picker 前的读者该被告知代价而不是类别。
 - **幽灵行由推导得出,并且可以被领养**(计划 §1.7 的下一步,5b 记的账)。三条常量本来就已经在一处说错了:PowerShell 是这个模块**唯一不**替它声明 `FORCE_HYPERLINK` 的门(它自己的脚本才是说这句话的那一半),所以那一页上画第三条幽灵就是这一页存在的意义所反对的那种假装。现在幽灵 = `shell_integration::declared_environment(门)` 减去**读者已经有同名行**的那些:一个名字读者答过了,终端就不再有资格说它——这也正是「领养是搬家而不是复制」的原因,两条同名行是一个事实的两张图。整条幽灵行是**一个**目标(`EnvGhost`)而不是三个格子:幽灵里没有东西可编辑,编辑从它变成读者自己的那一刻开始,而那一刻插入符落在值框里——名字本来就是对的,不然按的就是 `Add`。它因此也成了 Tab 停靠点:一件读者看得见又能做的事,键盘必须够得到。
@@ -5718,10 +5718,7 @@ wsl.exe [--cd <dir>] -e sh -c '<那一问>' folio /mnt/c/…/folio.bash
 argv 对 argv：`$0` 是 `folio`、`$1` 是带空格的 init file 原样。旧拼法是 `--`,它能活到今天只是因为
 `/bin/bash --init-file <path> -i` 里没有一个空格。
 
-`shell_integration::WSL_LOGIN_SHELL` 就是那一问:`getent passwd` 读登录 shell,是 bash 就
-`exec` 它并带上 `--init-file` 与 `BT_SHELL_INTEGRATION=1`,不是就 `exec "$shell" -l`——探针有过的两条
-分支一条不少,而**分支现在长在答案所在的那一侧**。init file 走 `$1` 而不是拼进脚本正文,所以 Windows
-账号名里有空格的读者拿到的是一个这把 shell 原样读的文件名。三条附带的收获:
+`shell_integration::WSL_LOGIN_SHELL` 就是那一问:`getent passwd` 读登录 shell,三条分支各给各的门:bash 带上 `--init-file` 与 `BT_SHELL_INTEGRATION=login`;zsh 带上 `ZDOTDIR`(指向 Folio 自己的目录)与 `-l`,读者原来的 `ZDOTDIR` 存进 `BT_USER_ZDOTDIR`;其余 shell 只拿 `-l`,不碰启动文件。**分支现在长在答案所在的那一侧**。init file 与 ZDOTDIR 目录都走参数(`$1` 与 `$2`)而不是拼进脚本正文,所以 Windows 账号名里有空格的读者拿到的是 shell 原样读的路径。三条附带的收获:
 
 - **`wsl::begin_login_shell_probe` 整个退役**,连同 `ask_login_shell`、`LOGIN_SHELL` 与那根 worker
   线程。`crates/bt-app/src/wsl.rs` 现在只读注册表、**一个进程都不起**,这是 ② 的更强形式:装了 WSL 的
@@ -5745,8 +5742,7 @@ argv 对 argv：`$0` 是 `folio`、`$1` 是带空格的 init file 原样。旧�
 - `bt_term` 的 `shell_integration_wsl::bash_is_handed_the_init_file_and_every_other_login_shell_is_left_alone`:
   **真 POSIX `sh` 的往返**——`getent`、登录 shell、init file 全是测试自己写在临时 `PATH` 上的桩,于是
   产品那条脚本对着一份**自己写的密码库**跑遍每条分支,不需要这台机器装 WSL。`bash` 分支断言
-  `argv=--init-file <path> -i` 且 `BT_SHELL_INTEGRATION=1`;`zsh`/`fish` 分支断言 `argv=-l`、没有
-  `--init-file`、且**没有**继承那个标记。**变异**:去掉 `export` → `BT_SHELL_INTEGRATION=<unset>`;把
+  `argv=--init-file <path> -i` 且 `BT_SHELL_INTEGRATION=login`;`zsh` 分支断言 `ZDOTDIR` 指向脚本目录、`argv=-l`、没有 `--init-file`;`fish` 及其余分支断言 `argv=-l`、没有 `--init-file`、且**没有**继承 `BT_SHELL_INTEGRATION`。**变异**:去掉 `export` → `BT_SHELL_INTEGRATION=<unset>`;把
   `${shell##*/}` 写回 `$shell` → `/usr/bin/bash` 掉进默认分支,也就是每一台把 bash 放在 `/bin` 之外的
   发行版。
 - `wsl::tests::nothing_in_this_module_boots_a_distribution`:源码门,`wsl.rs` 里不许再有起子进程的词。
