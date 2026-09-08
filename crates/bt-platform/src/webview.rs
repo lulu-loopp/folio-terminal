@@ -53,8 +53,9 @@ use webview2_com::{
     LaunchingExternalUriSchemeEventHandler, MoveFocusRequestedEventHandler,
     NavigationCompletedEventHandler, NavigationStartingEventHandler,
     NewBrowserVersionAvailableEventHandler, NewWindowRequestedEventHandler,
-    PermissionRequestedEventHandler, ProcessFailedEventHandler, SourceChangedEventHandler,
-    StatusBarTextChangedEventHandler, take_pwstr,
+    PermissionRequestedEventHandler, ProcessFailedEventHandler, ScriptDialogOpeningEventHandler,
+    SourceChangedEventHandler, StatusBarTextChangedEventHandler, WebResourceRequestedEventHandler,
+    take_pwstr,
 };
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::core::{BOOL, HSTRING, IUnknown, Interface as _, PCWSTR, PWSTR};
@@ -283,7 +284,245 @@ pub enum WebEvent {
     PlayingAudioChanged {
         playing: bool,
     },
+    /// **A page asked for a modal dialog and did not get one** (R1-21).
+    ///
+    /// `kind` is `COREWEBVIEW2_SCRIPT_DIALOG_KIND`: 0 alert, 1 confirm, 2
+    /// prompt, 3 the one a page raises on its way out. The engine's own dialogs
+    /// are off, so this is the whole of what happens — the ask is answered as a
+    /// dismissal inside the callback, because `ICoreWebView2ScriptDialogOpeningEventArgs::Accept`
+    /// cannot be decided later, and what the seat does with the news is say so
+    /// on its foot.
+    ScriptDialogDismissed {
+        kind: i32,
+    },
+    /// **A frame or a subresource this seat would not fetch** (R1-10).
+    ///
+    /// Not a [`Self::NavigationStarting`] with `cancelled` set: that one is
+    /// about where the seat itself was going, and the caller answers it with a
+    /// card and a loading state. This is about something inside a document that
+    /// is already on the glass, and the answer to it is the request being
+    /// refused — which has already happened by the time this is queued. It
+    /// travels so that a page missing a picture is a line in the trace rather
+    /// than a mystery.
+    RequestRefused {
+        uri: String,
+    },
 }
+
+/// What the caller's policy says about one thing a document asked for that is
+/// not a navigation — a picture, a stylesheet, a script, a font or a frame.
+///
+/// Two answers and not three: a subresource cannot be sent somewhere else the
+/// way a navigation can, because the only thing that could act on a rewrite is
+/// the document that named it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebRequestVerdict {
+    /// Let the engine fetch it.
+    Allow,
+    /// Answer it here, with nothing.
+    Refuse,
+}
+
+/// **Which of the seat's guarantees this controller actually carries** (R2-16).
+///
+/// Every one of them is a handler or a switch that install either attached or
+/// could not, and a seat that cannot say which it has is a seat that has to
+/// assume it has them all. So they are counted rather than assumed, and the
+/// caller fails closed on what is missing: a local file is not opened on a
+/// controller that cannot gate what the document loads or cannot answer its
+/// dialogs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebGuards {
+    /// `AreDefaultScriptDialogsEnabled(false)` **and** `ScriptDialogOpening`.
+    /// Both, because either one alone is the wrong half: the switch without the
+    /// handler is a page whose `alert` never returns, and the handler without
+    /// the switch is the engine's own window opening anyway.
+    pub script_dialogs: bool,
+    /// `FrameNavigationStarting` — where a frame in the document is going.
+    pub frame_navigation: bool,
+    /// `WebResourceRequested`, with a filter over every context — everything
+    /// else the document names.
+    pub resource_requests: bool,
+}
+
+impl WebGuards {
+    /// Nothing attached yet, which is what a controller has before install
+    /// walks it.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            script_dialogs: false,
+            frame_navigation: false,
+            resource_requests: false,
+        }
+    }
+
+    /// Whether every one of them stands. The caller's whole question.
+    #[must_use]
+    pub const fn all_stand(self) -> bool {
+        self.script_dialogs && self.frame_navigation && self.resource_requests
+    }
+
+    /// The ones that do not, named as the engine names them, for the line of
+    /// fact under the card.
+    #[must_use]
+    pub fn missing(self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if !self.script_dialogs {
+            missing.push("ScriptDialogOpening");
+        }
+        if !self.frame_navigation {
+            missing.push("FrameNavigationStarting");
+        }
+        if !self.resource_requests {
+            missing.push("WebResourceRequested");
+        }
+        missing
+    }
+}
+
+/// What [`WebHost::install`] managed to establish.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebInstallReport {
+    pub guards: WebGuards,
+    /// The switches this build of the runtime would not take. Never a
+    /// [`WebSettingRule::Required`] one — that is an `Err` and the seat has no
+    /// engine.
+    pub unapplied: Vec<WebSetting>,
+}
+
+/// One step of taking a controller into service.
+///
+/// The same shape as [`RehostStep`] and for the same reason: what a failure
+/// owes is decided by how far the walk got, and a table is the only form of
+/// that fact a test can hold.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InstallStep {
+    /// Take the controller the callback left, and read its `CoreWebView2` and
+    /// its composition interface off it.
+    TakeController,
+    /// Walk [`WEB_SETTINGS`].
+    Configure,
+    /// Attach every handler that belongs to this controller, the three gates
+    /// among them.
+    AttachEvents,
+    /// Attach the two that belong to the process-wide environment.
+    AttachEnvironmentEvents,
+    /// Point the controller at this seat's visual.
+    PointAtVisual,
+}
+
+/// Install, in order. [`WebHost::install`] walks exactly this.
+pub const INSTALL_SEQUENCE: [InstallStep; 5] = [
+    InstallStep::TakeController,
+    InstallStep::Configure,
+    InstallStep::AttachEvents,
+    InstallStep::AttachEnvironmentEvents,
+    InstallStep::PointAtVisual,
+];
+
+/// What a half-finished install has to take back (R2-16).
+///
+/// Two booleans and not a list of steps, for [`RehostCompensation`]'s reason:
+/// the undo is not the walk run backwards. A controller that was configured and
+/// then failed to attach its events is closed, not un-configured, and the
+/// environment's own subscriptions are removed whether one of them or both got
+/// on.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct InstallRollback {
+    /// A controller exists and must be closed. Dropping it is not closing it:
+    /// the browser process tree goes on running with nobody pointing at it,
+    /// which is the leak the generation token exists to prevent.
+    pub controller: bool,
+    /// Handlers were put on the process-wide environment and must come off it,
+    /// or every failed install leaves one more of them alive for the life of
+    /// the process (R2-10).
+    pub environment_events: bool,
+}
+
+impl InstallStep {
+    /// What running this step leaves behind, and therefore what a **later**
+    /// step's failure owes.
+    fn leaves(self) -> InstallRollback {
+        let mut left = InstallRollback::default();
+        match self {
+            Self::TakeController => left.controller = true,
+            Self::AttachEnvironmentEvents => left.environment_events = true,
+            // Configuring changes a controller that is already owed, attaching
+            // this controller's own handlers dies with it, and pointing it at a
+            // visual is undone by closing it.
+            Self::Configure | Self::AttachEvents | Self::PointAtVisual => {}
+        }
+        left
+    }
+}
+
+/// What has to be taken back when install fails **at** `failed_at`.
+///
+/// Folded over the steps that already ran rather than written out, exactly as
+/// [`rehost_compensation`] is: a second copy of the sequence is the thing that
+/// goes stale when a step moves.
+#[must_use]
+pub fn install_rollback(failed_at: InstallStep) -> InstallRollback {
+    let mut owed = InstallRollback::default();
+    for step in INSTALL_SEQUENCE {
+        if step == failed_at {
+            break;
+        }
+        let left = step.leaves();
+        owed.controller |= left.controller;
+        owed.environment_events |= left.environment_events;
+    }
+    owed
+}
+
+/// **One thing closing a seat lets go of** (R2-10, R2-12, R2-13, R2-24).
+///
+/// A table for [`WEB_SETTINGS`]'s reason: what has to be right is the **set**,
+/// and the set is everything install created. Four of the six were missing from
+/// the run of statements this replaces, and each cost something different — a
+/// handler left on the process-wide environment for the life of the process, a
+/// cached environment that made the next rebuild adopt the very thing it was
+/// rebuilding away from, a controller callback still holding a slot nobody
+/// would ever come for, and a latch that made a rebuilt page stop counting its
+/// own search matches. None of them is visible in a run of statements; all of
+/// them are visible as a row that is not there.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CloseStep {
+    /// `ICoreWebView2Controller::Close`, and the controller with it.
+    Controller,
+    /// The composition controller this host held beside it.
+    Composition,
+    /// The `ICoreWebView2` read off the controller.
+    Webview,
+    /// `remove_BrowserProcessExited` and `remove_NewBrowserVersionAvailable` on
+    /// the environment they were added to (R2-10).
+    EnvironmentEvents,
+    /// The environment this host cached for itself (R2-12). The process-wide
+    /// one is not this host's to drop — [`forget_web_environment`] is the
+    /// caller's separate decision — but a host that kept its own copy would
+    /// hand it back to the rebuild that exists to abandon it.
+    CachedEnvironment,
+    /// The slot the controller callback writes into (R2-13). A close that left
+    /// it standing left the next generation's `install` free to adopt a
+    /// controller made for the generation before it.
+    PendingController,
+    /// The latch that says the find session's counters are subscribed (R2-24).
+    /// The session belongs to the controller, so a new controller has a new
+    /// session and the latch is a statement about a page that is gone.
+    FindLatch,
+}
+
+/// Everything closing lets go of. [`WebHost::close`] walks exactly this.
+pub const WEB_CLOSE_STEPS: [CloseStep; 7] = [
+    CloseStep::Controller,
+    CloseStep::Composition,
+    CloseStep::Webview,
+    CloseStep::EnvironmentEvents,
+    CloseStep::CachedEnvironment,
+    CloseStep::PendingController,
+    CloseStep::FindLatch,
+];
 
 /// What the caller's navigation policy says about a URI the engine is about to
 /// go to.
@@ -490,6 +729,32 @@ pub enum WebSetting {
     /// `ICoreWebView2Settings4::IsPasswordAutosaveEnabled` — passwords saved into
     /// the profile directory.
     PasswordAutosave,
+    /// `ICoreWebView2Settings::IsScriptEnabled` — whether the page runs its own
+    /// script at all.
+    Script,
+    /// `ICoreWebView2Settings::AreDefaultScriptDialogsEnabled` — the engine's
+    /// own modal `alert`, `confirm` and `prompt` windows.
+    DefaultScriptDialogs,
+}
+
+/// **What a switch that could not be set costs**, which is the only thing that
+/// decides what happens next (R2-16).
+///
+/// Written per row rather than "all or nothing", because the seven were not all
+/// the same kind of decision and a single cast in front of the loop said they
+/// were: a runtime too old to answer one of them applied none, so a preference
+/// nobody would miss took the page's way out to the host down with it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebSettingRule {
+    /// The seat has no engine without it. Installing fails and the seat wears
+    /// the card that says the engine did not start.
+    Required,
+    /// The seat may still browse, but it will not open a local file: a document
+    /// off somebody's own disk is the case this switch was the guard for.
+    Guard,
+    /// A decision this host makes and would rather have, worth saying out loud
+    /// when a build cannot take it and not worth refusing a page over.
+    Preference,
 }
 
 impl WebSetting {
@@ -505,6 +770,49 @@ impl WebSetting {
             Self::DefaultContextMenus => "SetAreDefaultContextMenusEnabled",
             Self::GeneralAutofill => "SetIsGeneralAutofillEnabled",
             Self::PasswordAutosave => "SetIsPasswordAutosaveEnabled",
+            Self::Script => "SetIsScriptEnabled",
+            Self::DefaultScriptDialogs => "SetAreDefaultScriptDialogsEnabled",
+        }
+    }
+
+    /// **The lowest interface that carries this switch** (R2-16).
+    ///
+    /// The one fact that decides which runtimes can be told this, and it used
+    /// to be nobody's: the loop was written inside a single
+    /// `ICoreWebView2Settings4` cast, so the two switches that genuinely need
+    /// that interface made the five that do not unreachable on any build
+    /// without it.
+    #[must_use]
+    pub const fn interface(self) -> &'static str {
+        match self {
+            Self::WebMessage
+            | Self::HostObjects
+            | Self::StatusBar
+            | Self::DevTools
+            | Self::DefaultContextMenus
+            | Self::Script
+            | Self::DefaultScriptDialogs => "ICoreWebView2Settings",
+            Self::GeneralAutofill | Self::PasswordAutosave => "ICoreWebView2Settings4",
+        }
+    }
+
+    /// What a build that cannot take this switch costs the reader.
+    #[must_use]
+    pub const fn rule(self) -> WebSettingRule {
+        match self {
+            // The page's way out to the host and the host's way in to the page.
+            // A seat that cannot shut both is not a seat this window offers.
+            Self::WebMessage | Self::HostObjects => WebSettingRule::Required,
+            // Both file what a person typed into a profile directory on disk
+            // that outlives the window. There is no page worth that.
+            Self::GeneralAutofill | Self::PasswordAutosave => WebSettingRule::Required,
+            // The guard the dialog handler stands behind: with the engine's own
+            // dialogs still on, a page answers for its own modality and can sit
+            // on the seat with them.
+            Self::DefaultScriptDialogs => WebSettingRule::Guard,
+            Self::StatusBar | Self::DevTools | Self::DefaultContextMenus | Self::Script => {
+                WebSettingRule::Preference
+            }
         }
     }
 }
@@ -521,7 +829,7 @@ impl WebSetting {
 /// purpose.
 ///
 /// The order is the order they are set in, and nothing depends on it.
-pub const WEB_SETTINGS: [(WebSetting, bool); 7] = [
+pub const WEB_SETTINGS: [(WebSetting, bool); 9] = [
     // Slice ① hosts a page and offers it nothing. The bridge, the status bar and
     // the developer tools are all slice ②'s and slice ④'s to decide about.
     (WebSetting::WebMessage, false),
@@ -559,6 +867,21 @@ pub const WEB_SETTINGS: [(WebSetting, bool); 7] = [
     // never end up in a directory this product creates behind a preview pane is
     // somebody's password.
     (WebSetting::PasswordAutosave, false),
+    // **On, and said rather than inherited** (R1-21). The seat is a browser as
+    // well as a viewer — a dev server's page is script from top to bottom — so
+    // this is not the switch that answers the dialog problem. It is here
+    // because it was the one switch in this family nobody had decided: the
+    // engine's default is on, this host wants it on, and a value that matches
+    // the default by accident is a value that moves when the default does.
+    (WebSetting::Script, true),
+    // **Off, and this is the one that answers it** (R1-21). WebView2's default
+    // is the browser's: `alert()` opens a modal window of the engine's own,
+    // and a page in a loop opens another the moment it is dismissed — which is
+    // a page holding a pane of this window shut. With this off the engine
+    // raises `ScriptDialogOpening` instead and the host answers, which it does
+    // without blocking anything: the dialog is dismissed and the seat's foot
+    // says a message was turned away. See `WebEvent::ScriptDialogDismissed`.
+    (WebSetting::DefaultScriptDialogs, false),
 ];
 
 /// The handoff, in order. [`WebHost::rehost`] walks exactly this.
@@ -737,6 +1060,16 @@ struct Shared {
     /// besides the URI — which target this pane minted for itself — is the
     /// caller's state, and the caller captures it. This crate never sees it.
     gate: Box<dyn Fn(&str) -> WebNavigationVerdict>,
+    /// **The same caller's policy, asked about everything a document names**
+    /// (R1-10) — a picture, a stylesheet, a script, a font, a frame.
+    ///
+    /// A second closure and not the first one reused, because the two questions
+    /// have different answers and only one of them can be redirected: a
+    /// navigation the policy rewrites is cancelled and started again, and a
+    /// subresource has nobody to restart it. Both run synchronously inside
+    /// their callback for `gate`'s reason — neither `SetCancel` nor
+    /// `SetResponse` can be decided later.
+    request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
     /// The target of the rewrite currently in flight, if any.
     ///
     /// A cancel-and-renavigate raises `NavigationStarting` again for the new
@@ -774,7 +1107,25 @@ pub struct WebHost {
     /// cannot store it on `self`, because it does not have `self`. So it stores
     /// it here, and the state machine decides — from the generation the event
     /// carried — whether it is wanted.
-    pending_controller: Option<Rc<RefCell<Option<ICoreWebView2CompositionController>>>>,
+    /// **The generation the slot was opened for, beside it** (R2-13).
+    ///
+    /// One slot and no generation was a slot that answered whoever asked. The
+    /// callback cannot be cancelled, so a seat that was closed and asked again
+    /// has two of them in flight, and an `install` for the second generation
+    /// would take the first one's controller — a live browser pointed at a
+    /// window that had already let go of it. The generation is asked for by
+    /// name now, and a slot that does not carry it is not adopted.
+    pending_controller: Option<(u64, Rc<RefCell<Option<ICoreWebView2CompositionController>>>)>,
+    /// **The environment these handlers were put on, and their two tokens**
+    /// (R2-10).
+    ///
+    /// Kept rather than discarded because the environment is process-wide and
+    /// the handlers are not: every controller ever installed added two more of
+    /// them, each holding an `Rc<Shared>` of a host that may be long closed, and
+    /// nothing ever took one off. So the environment is held beside the tokens,
+    /// because `remove_` is a call on the object the handler was added to and
+    /// the cached one may have moved on by the time this host closes.
+    environment_events: Option<(ICoreWebView2Environment, i64, i64)>,
     /// Whether the find session's two counter events have been attached.
     ///
     /// `ICoreWebView2::Find` hands back the same session object every time, so
@@ -782,6 +1133,12 @@ pub struct WebHost {
     /// report one count several times over. A `Cell` and not a plain `bool`
     /// because the attaching happens behind `&self`, as every other verb here
     /// does.
+    ///
+    /// **Cleared on close** ([`CloseStep::FindLatch`], R2-24). The session
+    /// belongs to the controller, so a rebuilt seat has a new one with nothing
+    /// subscribed to it — and a latch left standing said otherwise, which is a
+    /// search capsule whose match count stopped moving for the rest of the
+    /// session.
     find_attached: std::cell::Cell<bool>,
 }
 
@@ -789,15 +1146,23 @@ impl WebHost {
     /// A host that has not started anything yet.
     ///
     /// `gate` is asked, synchronously inside `NavigationStarting`, what to do
-    /// with a URI. `wake` is called after every event is queued and must get the
-    /// event loop to call [`WebHost::drain`] — a callback that arrives while the
-    /// window is idle would otherwise sit unread until somebody moved the mouse.
-    pub fn new(gate: Box<dyn Fn(&str) -> WebNavigationVerdict>, wake: Box<dyn Fn()>) -> Self {
+    /// with a URI, and `request_gate` is asked the same way inside
+    /// `FrameNavigationStarting` and `WebResourceRequested` about everything a
+    /// document names. `wake` is called after every event is queued and must get
+    /// the event loop to call [`WebHost::drain`] — a callback that arrives while
+    /// the window is idle would otherwise sit unread until somebody moved the
+    /// mouse.
+    pub fn new(
+        gate: Box<dyn Fn(&str) -> WebNavigationVerdict>,
+        request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
+        wake: Box<dyn Fn()>,
+    ) -> Self {
         Self {
             shared: Rc::new(Shared {
                 events: RefCell::new(VecDeque::new()),
                 chords: RefCell::new(Vec::new()),
                 gate,
+                request_gate,
                 rewriting_to: RefCell::new(None),
                 wake,
             }),
@@ -806,6 +1171,7 @@ impl WebHost {
             webview: None,
             environment: None,
             pending_controller: None,
+            environment_events: None,
             find_attached: std::cell::Cell::new(false),
         }
     }
@@ -956,7 +1322,13 @@ impl WebHost {
                 Ok(())
             },
         ));
-        self.pending_controller = Some(holder);
+        // **The generation the slot is opened for** (R2-13). A slot already
+        // standing here belongs to an attempt this one supersedes, and the
+        // controller it may yet receive is one nobody will come for — so it is
+        // closed rather than dropped, which is the same rule
+        // [`Self::close_pending_controller`] states for the caller's side of it.
+        self.close_pending_controller();
+        self.pending_controller = Some((generation, holder));
         let hwnd = HWND(hwnd.get() as *mut c_void);
         unsafe { environment3.CreateCoreWebView2CompositionController(hwnd, &handler) }
             .map_err(|error| failure("CreateCoreWebView2CompositionController", &error))
@@ -969,11 +1341,81 @@ impl WebHost {
     /// and policies are all installed before the first navigation, because a
     /// navigation started a moment earlier would run before `NavigationStarting`
     /// existed to check it.
-    pub fn install(&mut self, compositor: &Compositor, page: PageVisual) -> Result<(), String> {
-        let pending = self
+    /// `generation` is the one the caller's state machine is currently on, and
+    /// the slot is adopted only when it was opened for that one (R2-13).
+    ///
+    /// # Nothing half-installed survives (R2-16)
+    ///
+    /// Every step after the controller is taken can fail, and each of them used
+    /// to leave the controller and its page standing on this host: a browser
+    /// process with no gates on it, kept by the very object that failed to put
+    /// gates on it. So the walk is [`INSTALL_SEQUENCE`], the undo is
+    /// [`install_rollback`], and a failure closes what it made before it
+    /// answers.
+    pub fn install(
+        &mut self,
+        compositor: &Compositor,
+        page: PageVisual,
+        generation: u64,
+    ) -> Result<WebInstallReport, String> {
+        let mut guards = WebGuards::none();
+        let mut unapplied = Vec::new();
+        let mut failure_at = None;
+        for step in INSTALL_SEQUENCE {
+            let done = match step {
+                InstallStep::TakeController => self.take_the_controller(generation),
+                InstallStep::Configure => self.configure().map(|could_not| unapplied = could_not),
+                InstallStep::AttachEvents => self.attach_events(&mut guards),
+                InstallStep::AttachEnvironmentEvents => self.attach_environment_events(),
+                InstallStep::PointAtVisual => compositor
+                    .web_visual(page)
+                    .ok_or_else(|| String::from("this page has no web visual to render into"))
+                    .and_then(|visual| {
+                        unsafe { self.composition().SetRootVisualTarget(&visual) }
+                            .map_err(|error| failure("SetRootVisualTarget", &error))
+                    }),
+            };
+            if let Err(error) = done {
+                failure_at = Some((step, error));
+                break;
+            }
+        }
+        let Some((failed_at, error)) = failure_at else {
+            // **The handler is only half of that guard.** With the engine's own
+            // dialogs still on, the handler is raised and the window opens
+            // anyway, so a build that would not take the switch does not have
+            // this gate however well the subscription went.
+            guards.script_dialogs &= !unapplied.contains(&WebSetting::DefaultScriptDialogs);
+            return Ok(WebInstallReport { guards, unapplied });
+        };
+        let owed = install_rollback(failed_at);
+        if owed.environment_events {
+            self.take_the_environment_events_off();
+        }
+        if owed.controller {
+            self.close_the_controller();
+        }
+        Err(error)
+    }
+
+    /// Take the controller the callback left for `generation`, and read the two
+    /// interfaces this host works through off it.
+    fn take_the_controller(&mut self, generation: u64) -> Result<(), String> {
+        let (opened_for, pending) = self
             .pending_controller
             .take()
             .ok_or_else(|| String::from("no controller callback has been answered"))?;
+        if opened_for != generation {
+            // The slot belongs to an attempt this seat has moved on from. It is
+            // closed rather than adopted, for the reason it would have been
+            // closed had the caller's own machine caught it: a controller
+            // nobody points at is a browser process nobody points at.
+            self.pending_controller = Some((opened_for, pending));
+            self.close_pending_controller();
+            return Err(format!(
+                "the controller that answered was asked for by generation {opened_for}, not {generation}"
+            ));
+        }
         let composition: ICoreWebView2CompositionController = pending
             .borrow_mut()
             .take()
@@ -986,14 +1428,7 @@ impl WebHost {
         self.composition = Some(composition);
         self.controller = Some(controller);
         self.webview = Some(webview);
-        self.configure()?;
-        self.attach_events()?;
-        self.attach_environment_events()?;
-        let visual = compositor
-            .web_visual(page)
-            .ok_or_else(|| String::from("this page has no web visual to render into"))?;
-        unsafe { self.composition().SetRootVisualTarget(&visual) }
-            .map_err(|error| failure("SetRootVisualTarget", &error))
+        Ok(())
     }
 
     /// **Move this live page to another window** — the whole of F1a.
@@ -1214,29 +1649,32 @@ impl WebHost {
             .expect("a composition controller, checked by the caller's state machine")
     }
 
-    fn configure(&self) -> Result<(), String> {
+    /// Walk [`WEB_SETTINGS`], answering with the switches this build would not
+    /// take.
+    ///
+    /// **Each through the lowest interface that carries it** (R2-16). What
+    /// stood here was one `ICoreWebView2Settings4` cast in front of the whole
+    /// loop, so a runtime without that interface applied not one of the seven —
+    /// including the two that shut the page's channel to the host, which live
+    /// on the base interface every runtime has had since the first one. The
+    /// cast is per row now, and what a refusal costs is the row's own
+    /// [`WebSettingRule`]: `Required` is an error and this seat has no engine,
+    /// and anything else is recorded and said.
+    fn configure(&self) -> Result<Vec<WebSetting>, String> {
         let Some(webview) = self.webview.as_ref() else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let controller = self
             .controller
             .as_ref()
             .expect("a controller beside the webview");
+        let mut unapplied = Vec::new();
         unsafe {
             let settings = webview
                 .Settings()
                 .map_err(|error| failure("ICoreWebView2::Settings", &error))?;
-            // `_4` carries the two the profile would otherwise decide for us.
-            // Cast here rather than inside the loop, and failing rather than
-            // skipping, for the reason the `_15` and `_18` casts below are made
-            // where they are: a runtime too old to answer this must fail while
-            // the host is being configured — before the first navigation — and
-            // not quietly keep a form-filling profile nobody asked for.
-            let settings4: ICoreWebView2Settings4 = settings
-                .cast()
-                .map_err(|error| failure("ICoreWebView2Settings4", &error))?;
             for (setting, value) in WEB_SETTINGS {
-                match setting {
+                let applied = match setting {
                     WebSetting::WebMessage => settings.SetIsWebMessageEnabled(value),
                     WebSetting::HostObjects => settings.SetAreHostObjectsAllowed(value),
                     WebSetting::StatusBar => settings.SetIsStatusBarEnabled(value),
@@ -1244,10 +1682,29 @@ impl WebHost {
                     WebSetting::DefaultContextMenus => {
                         settings.SetAreDefaultContextMenusEnabled(value)
                     }
-                    WebSetting::GeneralAutofill => settings4.SetIsGeneralAutofillEnabled(value),
-                    WebSetting::PasswordAutosave => settings4.SetIsPasswordAutosaveEnabled(value),
+                    WebSetting::Script => settings.SetIsScriptEnabled(value),
+                    WebSetting::DefaultScriptDialogs => {
+                        settings.SetAreDefaultScriptDialogsEnabled(value)
+                    }
+                    WebSetting::GeneralAutofill | WebSetting::PasswordAutosave => settings
+                        .cast::<ICoreWebView2Settings4>()
+                        .and_then(|settings4| match setting {
+                            WebSetting::GeneralAutofill => {
+                                settings4.SetIsGeneralAutofillEnabled(value)
+                            }
+                            _ => settings4.SetIsPasswordAutosaveEnabled(value),
+                        }),
+                };
+                if let Err(error) = applied {
+                    match setting.rule() {
+                        WebSettingRule::Required => {
+                            return Err(failure(setting.api(), &error));
+                        }
+                        WebSettingRule::Guard | WebSettingRule::Preference => {
+                            unapplied.push(setting);
+                        }
+                    }
                 }
-                .map_err(|error| failure(setting.api(), &error))?;
             }
             let controller3: ICoreWebView2Controller3 = controller
                 .cast()
@@ -1270,11 +1727,11 @@ impl WebHost {
                 .SetShouldDetectMonitorScaleChanges(false)
                 .map_err(|error| failure("SetShouldDetectMonitorScaleChanges", &error))?;
         }
-        Ok(())
+        Ok(unapplied)
     }
 
     #[allow(clippy::too_many_lines)]
-    fn attach_events(&self) -> Result<(), String> {
+    fn attach_events(&self, guards: &mut WebGuards) -> Result<(), String> {
         let webview = self
             .webview
             .as_ref()
@@ -1328,6 +1785,135 @@ impl WebHost {
                     &mut token,
                 )
                 .map_err(|error| failure("add_NavigationStarting", &error))?;
+
+            // ── the two doors the main frame's was standing in for (R1-10) ──
+            //
+            // `NavigationStarting` is asked about the document and about
+            // nothing the document contains, so a previewed local page naming
+            // `<iframe src="file:///C:/…">` or `<img src="…">` outside its own
+            // folder was fetched without anybody being asked. A frame is a
+            // navigation of its own and everything else is a request, so there
+            // are two of them, and both run the caller's `request_gate` — the
+            // same rule, asked about the same seat, in the two shapes the
+            // engine offers.
+            let shared = Rc::clone(&self.shared);
+            webview
+                .add_FrameNavigationStarting(
+                    &NavigationStartingEventHandler::create(Box::new(move |_, args| {
+                        let Some(args) = args else { return Ok(()) };
+                        let uri = read_string(|out| args.Uri(out));
+                        if matches!((shared.request_gate)(&uri), WebRequestVerdict::Allow) {
+                            return Ok(());
+                        }
+                        // `SetCancel` cannot be decided later, exactly as it
+                        // cannot in the main frame's handler above.
+                        args.SetCancel(true)?;
+                        shared.push(WebEvent::RequestRefused { uri });
+                        Ok(())
+                    })),
+                    &mut token,
+                )
+                .map_err(|error| failure("add_FrameNavigationStarting", &error))?;
+            guards.frame_navigation = true;
+
+            // The environment is what a refusal is *made of*: blocking a
+            // request means answering it, and the answer is an empty 403 the
+            // environment mints. A clone rather than a borrow because the
+            // handler outlives this call, and it is let go when the handler is
+            // taken off — which is [`CloseStep::Controller`]'s doing, since the
+            // handler belongs to the controller being closed.
+            let environment = self
+                .environment
+                .clone()
+                .ok_or_else(|| String::from("no environment to answer a refused request with"))?;
+            let shared = Rc::clone(&self.shared);
+            webview
+                .add_WebResourceRequested(
+                    &WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
+                        let Some(args) = args else { return Ok(()) };
+                        let uri = match args.Request() {
+                            Ok(request) => read_string(|out| request.Uri(out)),
+                            // A request whose own address cannot be read is a
+                            // request nothing can be decided about, and the
+                            // empty string is refused by every arm of the rule.
+                            Err(_) => String::new(),
+                        };
+                        if matches!((shared.request_gate)(&uri), WebRequestVerdict::Allow) {
+                            return Ok(());
+                        }
+                        // **Answered, not merely dropped.** A handler that
+                        // returned without setting a response lets the engine
+                        // go and fetch it; the empty 403 is what makes the
+                        // refusal the whole of what happens, and it is the same
+                        // answer the document would get from a server that
+                        // refused it, which is a case every loader already
+                        // handles.
+                        let response = environment.CreateWebResourceResponse(
+                            None,
+                            403,
+                            &HSTRING::from("Blocked"),
+                            &HSTRING::from(""),
+                        )?;
+                        args.SetResponse(&response)?;
+                        shared.push(WebEvent::RequestRefused { uri });
+                        Ok(())
+                    })),
+                    &mut token,
+                )
+                .map_err(|error| failure("add_WebResourceRequested", &error))?;
+            // **Every address, in every context.** A filter narrower than this
+            // is a list of the request kinds somebody thought of, and the kinds
+            // nobody thought of are exactly the ones a document would be built
+            // out of to get past it.
+            webview
+                .AddWebResourceRequestedFilter(
+                    &HSTRING::from("*"),
+                    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+                )
+                .map_err(|error| failure("AddWebResourceRequestedFilter", &error))?;
+            // And, where the runtime carries it, the same filter over the
+            // sources that are not the document at all — a service worker or a
+            // shared worker fetching on the page's behalf. Best effort: a build
+            // without `_22` has no such sources to filter, so its absence is
+            // not a gate that failed.
+            if let Ok(sources) = webview.cast::<ICoreWebView2_22>() {
+                sources
+                    .AddWebResourceRequestedFilterWithRequestSourceKinds(
+                        &HSTRING::from("*"),
+                        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+                        COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_ALL,
+                    )
+                    .map_err(|error| {
+                        failure(
+                            "AddWebResourceRequestedFilterWithRequestSourceKinds",
+                            &error,
+                        )
+                    })?;
+            }
+            guards.resource_requests = true;
+
+            // **The page's own modal windows, answered rather than opened**
+            // (R1-21). `AreDefaultScriptDialogsEnabled` is off in
+            // [`WEB_SETTINGS`], so the engine raises this instead of putting a
+            // window on the screen, and this host answers it the only way a
+            // window with a message pump of its own can: immediately, without a
+            // deferral, by not accepting. A page in a loop gets its `alert`
+            // back on the spot every time and never holds the seat; what the
+            // reader gets is one line on the pane's foot saying a message was
+            // turned away, which is the seat's own band and costs no press.
+            let shared = Rc::clone(&self.shared);
+            webview
+                .add_ScriptDialogOpening(
+                    &ScriptDialogOpeningEventHandler::create(Box::new(move |_, args| {
+                        let Some(args) = args else { return Ok(()) };
+                        let kind = read::<COREWEBVIEW2_SCRIPT_DIALOG_KIND>(|out| args.Kind(out)).0;
+                        shared.push(WebEvent::ScriptDialogDismissed { kind });
+                        Ok(())
+                    })),
+                    &mut token,
+                )
+                .map_err(|error| failure("add_ScriptDialogOpening", &error))?;
+            guards.script_dialogs = true;
 
             let shared = Rc::clone(&self.shared);
             webview
@@ -1698,12 +2284,19 @@ impl WebHost {
 
     /// The two events that belong to the environment rather than to any one
     /// controller: the browser going away, and a newer one arriving.
-    fn attach_environment_events(&self) -> Result<(), String> {
+    fn attach_environment_events(&mut self) -> Result<(), String> {
         let environment = self
             .environment
-            .as_ref()
+            .clone()
             .ok_or_else(|| String::from("no environment to attach to"))?;
         let mut token = 0i64;
+        // **Both tokens are kept** (R2-10). The environment is the process's,
+        // not this host's, and a handler added to it outlives every controller
+        // — so a token that was written into a scratch variable and forgotten
+        // was a subscription nobody could ever take off, holding this host's
+        // whole event queue alive on a shared object for as long as the program
+        // ran.
+        let (browser_exited, new_version);
         unsafe {
             let environment5: ICoreWebView2Environment5 = environment
                 .cast()
@@ -1726,6 +2319,7 @@ impl WebHost {
                     &mut token,
                 )
                 .map_err(|error| failure("add_BrowserProcessExited", &error))?;
+            browser_exited = token;
 
             let shared = Rc::clone(&self.shared);
             environment
@@ -1737,8 +2331,29 @@ impl WebHost {
                     &mut token,
                 )
                 .map_err(|error| failure("add_NewBrowserVersionAvailable", &error))?;
+            new_version = token;
         }
+        self.environment_events = Some((environment, browser_exited, new_version));
         Ok(())
+    }
+
+    /// Take this host's two environment handlers off the environment they were
+    /// put on (R2-10).
+    ///
+    /// The environment they were added to and not the cached one: a rebuild
+    /// replaces the cache, and `remove_` on an object the handler was never
+    /// added to removes nothing.
+    fn take_the_environment_events_off(&mut self) {
+        let Some((environment, browser_exited, new_version)) = self.environment_events.take()
+        else {
+            return;
+        };
+        unsafe {
+            if let Ok(environment5) = environment.cast::<ICoreWebView2Environment5>() {
+                let _ = environment5.remove_BrowserProcessExited(browser_exited);
+            }
+            let _ = environment.remove_NewBrowserVersionAvailable(new_version);
+        }
     }
 
     /// **The seat's rectangle inside the parent window**, in physical pixels —
@@ -2209,7 +2824,7 @@ impl WebHost {
     /// pointing at it, which is the leak the generation token exists to prevent
     /// rather than to cause.
     pub fn close_pending_controller(&mut self) {
-        let Some(pending) = self.pending_controller.take() else {
+        let Some((_, pending)) = self.pending_controller.take() else {
             return;
         };
         let Some(orphan) = pending.borrow_mut().take() else {
@@ -2222,7 +2837,36 @@ impl WebHost {
 
     /// Close the controller. The browser process goes on living until it says
     /// otherwise — which is what the caller's state machine is waiting for.
+    ///
+    /// **And let go of everything else install created** ([`WEB_CLOSE_STEPS`]).
+    /// What stood here closed the controller and dropped two interfaces, which
+    /// is three of the seven things a live seat holds; the other four were each
+    /// a defect of their own, and each of them is a row of that table now
+    /// rather than a line somebody has to remember to write.
     pub fn close(&mut self) {
+        for step in WEB_CLOSE_STEPS {
+            match step {
+                CloseStep::Controller => self.close_the_controller(),
+                // Closing the controller already dropped these two; the rows
+                // exist because the *set* is what has to be right, and a
+                // controller that refused to close must not leave them behind.
+                CloseStep::Composition => self.composition = None,
+                CloseStep::Webview => self.webview = None,
+                CloseStep::EnvironmentEvents => self.take_the_environment_events_off(),
+                CloseStep::CachedEnvironment => self.environment = None,
+                CloseStep::PendingController => self.close_pending_controller(),
+                CloseStep::FindLatch => self.find_attached.set(false),
+            }
+        }
+    }
+
+    /// The controller alone, closed and let go of.
+    ///
+    /// Shared by [`Self::close`] and by install's own rollback, which owes the
+    /// controller and nothing else: a host whose install failed has no
+    /// environment subscriptions to take off except the ones
+    /// [`install_rollback`] names.
+    fn close_the_controller(&mut self) {
         if let Some(controller) = self.controller.take() {
             let _ = unsafe { controller.Close() };
         }
@@ -2375,8 +3019,83 @@ mod engine_settings_tests {
                 (WebSetting::DefaultContextMenus, false),
                 (WebSetting::GeneralAutofill, false),
                 (WebSetting::PasswordAutosave, false),
+                (WebSetting::Script, true),
+                (WebSetting::DefaultScriptDialogs, false),
             ]
         );
+    }
+
+    /// RED — **a page cannot hold the seat with its own dialogs** (R1-21).
+    ///
+    /// The table set neither the script switch nor the dialog one, so both were
+    /// whatever the engine on the machine happened to default to — and the
+    /// engine's default for dialogs is the browser's, which is a modal window
+    /// the page opens and can open again the moment it is dismissed. Script
+    /// stays on, because the seat is a browser as well as a viewer; the dialogs
+    /// go, and the host answers them instead.
+    ///
+    /// RED GATE: take either row out of [`WEB_SETTINGS`] and this fails, which
+    /// on the machine is `while (true) alert('')` in a previewed page.
+    #[test]
+    fn script_stays_on_and_the_engines_own_dialogs_do_not() {
+        assert!(
+            WEB_SETTINGS.contains(&(WebSetting::Script, true)),
+            "a seat that is also a browser runs the page's script"
+        );
+        assert!(
+            WEB_SETTINGS.contains(&(WebSetting::DefaultScriptDialogs, false)),
+            "and answers the page's dialogs itself rather than letting it open one"
+        );
+        // The switch alone is only half of it: with the engine's dialogs off and
+        // nobody answering `ScriptDialogOpening`, a page's `alert` never
+        // returns. So the guard names both.
+        assert_eq!(
+            WebSetting::DefaultScriptDialogs.rule(),
+            WebSettingRule::Guard,
+            "a build that will not take it opens no local file"
+        );
+    }
+
+    /// RED — **every switch is set through the lowest interface that carries
+    /// it** (R2-16).
+    ///
+    /// The loop stood inside one `ICoreWebView2Settings4` cast, and the cast
+    /// failing was the whole table failing: a runtime without that interface
+    /// applied not one of the seven, including the two that shut the page's
+    /// channel to the host and that have lived on the base interface since the
+    /// first runtime there was.
+    ///
+    /// RED GATE: answer `"ICoreWebView2Settings4"` for every row — which is
+    /// what the code did — and the first assertion fails for seven of the nine.
+    #[test]
+    fn every_switch_names_the_lowest_interface_that_carries_it() {
+        for (setting, _) in WEB_SETTINGS {
+            let expected = match setting {
+                WebSetting::GeneralAutofill | WebSetting::PasswordAutosave => {
+                    "ICoreWebView2Settings4"
+                }
+                _ => "ICoreWebView2Settings",
+            };
+            assert_eq!(setting.interface(), expected, "{}", setting.api());
+        }
+        // And what a refusal costs is a decision per row rather than one for the
+        // table: nothing that files what a person typed is ever a preference.
+        for (setting, _) in WEB_SETTINGS {
+            if matches!(
+                setting,
+                WebSetting::WebMessage
+                    | WebSetting::HostObjects
+                    | WebSetting::GeneralAutofill
+                    | WebSetting::PasswordAutosave
+            ) {
+                assert_eq!(
+                    setting.rule(),
+                    WebSettingRule::Required,
+                    "{} is not a switch a seat may go without",
+                    setting.api()
+                );
+            }
+        }
     }
 
     /// RED — **nothing that saves what a person typed is left to a default.**
@@ -2414,6 +3133,684 @@ mod engine_settings_tests {
         let count = named.len();
         named.dedup();
         assert_eq!(named.len(), count, "two switches share one method name");
+    }
+}
+
+/// **The one thing a rule about strings cannot say: that the engine asks it at
+/// all** (R1-10).
+///
+/// Every other test of the resource door is a function of two strings, which is
+/// the right shape for a rule and the wrong shape for the finding. What the
+/// review actually found was that `NavigationStarting` is raised for the
+/// document and for nothing the document contains — so the question this cannot
+/// be answered without a runtime is whether an `<img>` and an `<iframe>` in a
+/// local page reach a gate at all.
+///
+/// # It is a probe, and it is `#[ignore]`d for the reason the others are
+///
+/// It needs a WebView2 runtime, a window and a message pump, which is a
+/// question with a different right answer on every machine —
+/// `scripts/ci/ignored-tests.txt` states that policy and carries this name. Run
+/// it with `cargo test -p bt-platform -- --ignored --nocapture`.
+///
+/// # It measures the before and the after in one run
+///
+/// The first pass opens the page behind a gate that allows everything, which is
+/// exactly what a seat with no resource door had, and the page reports that the
+/// picture outside its folder **loaded**. The second opens the same page behind
+/// the folder rule and the same picture reports that it did **not**. Nothing
+/// here reaches a share: the stand-in for `\\attacker\share` is a second
+/// temporary folder on this disk, because a test that actually ran would be a
+/// machine reaching for somebody else's server.
+///
+/// # It takes nothing from the person running it
+///
+/// The window is `WS_POPUP` and is never shown, so the foreground is never
+/// taken; the profile is a temporary folder of this test's own, so nothing of
+/// the user's is read or written; and both windows are destroyed and both
+/// folders removed however the run ends.
+#[cfg(test)]
+mod webview2_runtime_probe {
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE,
+        PeekMessageW, RegisterClassW, TranslateMessage, WNDCLASSW, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_POPUP,
+    };
+    use windows::core::{HSTRING, PCWSTR};
+
+    use super::*;
+    use crate::{Compositor, PageVisual};
+
+    /// A one-pixel PNG, so that a picture inside the folder has something real
+    /// to load and `onload` is a fact rather than a hope.
+    const ONE_PIXEL_PNG: [u8; 67] = [
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    /// How long any one step of the probe is allowed to say nothing.
+    const STEP: Duration = Duration::from_secs(30);
+
+    /// A window that exists and is never shown.
+    ///
+    /// `WS_POPUP` with no `ShowWindow` never appears and never takes the
+    /// foreground, which is the whole of what a controller needs a parent for:
+    /// a place to hang its own popups off and a handle to be reparented under.
+    struct HiddenWindow(HWND);
+
+    impl HiddenWindow {
+        fn open() -> Self {
+            let class = HSTRING::from("FolioWebResourceProbe");
+            let wnd = WNDCLASSW {
+                lpfnWndProc: Some(procedure),
+                lpszClassName: PCWSTR(class.as_ptr()),
+                ..Default::default()
+            };
+            // A second registration of one class name answers zero and is not an
+            // error worth stopping for: the class from the first pass is still
+            // registered and is the one that will be used.
+            unsafe { RegisterClassW(&wnd) };
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                    PCWSTR(class.as_ptr()),
+                    PCWSTR(HSTRING::from("").as_ptr()),
+                    WS_POPUP,
+                    0,
+                    0,
+                    800,
+                    600,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .expect("a window for the probe to host a page in");
+            Self(hwnd)
+        }
+
+        fn key(&self) -> std::num::NonZeroIsize {
+            std::num::NonZeroIsize::new(self.0.0 as isize).expect("a real window handle")
+        }
+    }
+
+    impl Drop for HiddenWindow {
+        fn drop(&mut self) {
+            let _ = unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+        unsafe { DefWindowProcW(hwnd, message, w, l) }
+    }
+
+    /// A directory of this test's own, removed however the run ends.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn make(tag: &str) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("folio-web-probe-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).expect("a scratch directory");
+            Self(root)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The rule the second and third passes run: the folder the page was opened
+    /// in, and the engine's own parts. `folder` is a lower-cased `file:` URL
+    /// ending in a slash.
+    ///
+    /// Deliberately not `bt_app::webnav::resource_request` — that lives in the
+    /// crate above this one, and what this probe is measuring is not the rule
+    /// but whether the engine asks anybody at all.
+    fn inside_the_folder(candidate: &str, folder: &str) -> bool {
+        let candidate = candidate.to_lowercase();
+        if candidate.starts_with("file:") {
+            return candidate.starts_with(folder);
+        }
+        !candidate.starts_with("http:") && !candidate.starts_with("https:")
+    }
+
+    /// The `file:` URL of a path, spelled the one way this product spells one.
+    fn file_url(path: &Path) -> String {
+        format!("file:///{}", path.display().to_string().replace('\\', "/"))
+    }
+
+    /// Turn the pump until `done` answers or the step's budget runs out.
+    ///
+    /// The pump is the probe's, not winit's: WebView2 delivers every callback on
+    /// the thread that made the environment and delivers none of them to a
+    /// thread that is not pumping.
+    fn pump_until(host: &WebHost, seen: &mut Vec<WebEvent>, done: impl Fn(&[WebEvent]) -> bool) {
+        let deadline = Instant::now() + STEP;
+        loop {
+            turn_the_pump();
+            seen.extend(host.drain());
+            if done(seen) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the engine said nothing for {STEP:?}; what it had said was {seen:#?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Turn the pump for a fixed while, for the answers that arrive after the
+    /// one that was waited for — a picture's `onerror` lands after the
+    /// document's own navigation has completed.
+    fn pump_for(host: &WebHost, seen: &mut Vec<WebEvent>, span: Duration) {
+        let until = Instant::now() + span;
+        while Instant::now() < until {
+            turn_the_pump();
+            seen.extend(host.drain());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Dispatch whatever this thread has waiting and nothing else.
+    ///
+    /// Its own function because the teardown needs it with no host to drain:
+    /// a controller that has been closed goes on posting to this thread for a
+    /// moment, and a thread that stopped dispatching would tear its apartment
+    /// down underneath the engine.
+    fn turn_the_pump() {
+        let mut message = MSG::default();
+        while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+            let _ = unsafe { TranslateMessage(&message) };
+            unsafe { DispatchMessageW(&message) };
+        }
+    }
+
+    /// Give the engine a moment to finish what closing started.
+    fn settle() {
+        let until = Instant::now() + Duration::from_millis(600);
+        while Instant::now() < until {
+            turn_the_pump();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The last title the document gave itself, which is where the page writes
+    /// down what loaded and what did not.
+    fn title(seen: &[WebEvent]) -> String {
+        seen.iter()
+            .rev()
+            .find_map(|event| match event {
+                WebEvent::DocumentTitleChanged { title } => Some(title.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// What one pass of the probe measured.
+    struct Pass {
+        /// The last name the document gave itself, which is where the page
+        /// writes down what loaded and what did not.
+        title: String,
+        /// Whether the document itself committed.
+        loaded: bool,
+        /// Every address the gate was asked about, and what it answered.
+        asked: Vec<(String, bool)>,
+        guards: WebGuards,
+    }
+
+    /// One pass: open the page behind `allow` and answer with what the document
+    /// said about itself and what the gate was asked.
+    fn open_the_page(
+        profile: &Path,
+        page_url: &str,
+        allow: impl Fn(&str) -> bool + 'static,
+    ) -> Pass {
+        let window = HiddenWindow::open();
+        let asked: Rc<RefCell<Vec<(String, bool)>>> = Rc::new(RefCell::new(Vec::new()));
+        let log = Rc::clone(&asked);
+        let mut host = WebHost::new(
+            Box::new(|_| WebNavigationVerdict::Proceed),
+            Box::new(move |candidate| {
+                let allowed = allow(candidate);
+                log.borrow_mut().push((candidate.to_owned(), allowed));
+                if allowed {
+                    WebRequestVerdict::Allow
+                } else {
+                    WebRequestVerdict::Refuse
+                }
+            }),
+            Box::new(|| {}),
+        );
+        let mut seen = Vec::new();
+        host.request_environment(profile, 1)
+            .expect("the environment was asked for");
+        pump_until(&host, &mut seen, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, WebEvent::Environment { .. }))
+        });
+        host.request_controller(window.key(), 1)
+            .expect("the controller was asked for");
+        pump_until(&host, &mut seen, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, WebEvent::Controller { .. }))
+        });
+
+        let compositor = Compositor::new(window.key()).expect("a composition tree");
+        let page = PageVisual { tab: 1, seat: 1 };
+        compositor.attach_web_visual(page).expect("a web visual");
+        let report = host
+            .install(&compositor, page, 1)
+            .expect("the controller was taken into service");
+        host.set_bounds(0, 0, 800, 600).expect("bounds");
+        host.set_visible(true).expect("visible");
+        compositor.commit().expect("a commit");
+        host.navigate(page_url).expect("a navigation");
+        pump_until(&host, &mut seen, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, WebEvent::NavigationCompleted { .. }))
+        });
+        // The document's own verdicts on its pictures arrive after its
+        // navigation has completed, so the pump is turned for a while longer
+        // rather than for another event.
+        pump_for(&host, &mut seen, Duration::from_secs(2));
+        host.close();
+        // The controller goes on posting to this thread for a moment after it
+        // is closed, and a window destroyed under those messages is where a
+        // probe crashes instead of failing.
+        settle();
+        let asked = asked.borrow().clone();
+        Pass {
+            title: title(&seen),
+            loaded: seen.iter().any(
+                |event| matches!(event, WebEvent::NavigationCompleted { success, .. } if *success),
+            ),
+            asked,
+            guards: report.guards,
+        }
+    }
+
+    /// RED — **an `<img>` and an `<iframe>` in a previewed local page reach the
+    /// gate, and what they reach outside the page's folder does not load**
+    /// (R1-10).
+    ///
+    /// RED GATE: this test contains its own. The first pass *is* the code before
+    /// the ticket — a gate that answers `Allow` to everything is what a seat
+    /// with only `NavigationStarting` had — and it asserts that the picture
+    /// outside the folder loaded. The second asserts that the same picture, in
+    /// the same page, behind the folder rule, did not.
+    #[test]
+    #[ignore = "needs a WebView2 runtime, a window and a message pump: run it with --ignored"]
+    fn a_local_page_reaches_only_its_own_folder() {
+        webview2_runtime_version().expect("a WebView2 runtime on this machine");
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+            .ok()
+            .expect("an apartment for the engine's callbacks");
+
+        let scratch = Scratch::make("tree");
+        let profile = Scratch::make("profile");
+        let inside = scratch.0.join("page");
+        let outside = scratch.0.join("outside");
+        std::fs::create_dir_all(&inside).expect("the page's folder");
+        std::fs::create_dir_all(&outside).expect("a folder the page was not opened in");
+        std::fs::write(inside.join("beside.png"), ONE_PIXEL_PNG).expect("a picture beside it");
+        // The stand-in for a share: a real path on this disk, outside the tree.
+        std::fs::write(outside.join("secret.png"), ONE_PIXEL_PNG).expect("a picture outside");
+        std::fs::write(
+            outside.join("frame.html"),
+            b"<!doctype html><title>f</title>",
+        )
+        .expect("a document outside");
+
+        let document = format!(
+            "<!doctype html><meta charset=\"utf-8\"><title>start</title>\
+             <script>var seen=[];function mark(m){{if(seen.indexOf(m)<0){{seen.push(m);seen.sort();document.title=seen.join('|');}}}}</script>\
+             <img src=\"beside.png\" onload=\"mark('beside-loaded')\" onerror=\"mark('beside-blocked')\">\
+             <img src=\"{outside_png}\" onload=\"mark('outside-loaded')\" onerror=\"mark('outside-blocked')\">\
+             <iframe src=\"{outside_html}\"></iframe>",
+            outside_png = file_url(&outside.join("secret.png")),
+            outside_html = file_url(&outside.join("frame.html")),
+        );
+        let page_path = inside.join("report.html");
+        std::fs::write(&page_path, document).expect("the page");
+        let page_url = file_url(&page_path);
+        let folder = format!("{}/", file_url(&inside).to_lowercase());
+
+        // ── before: the seat as it stood, with nothing asked ──────────────
+        let before = open_the_page(&profile.0, &page_url, |_| true);
+        assert!(
+            before.guards.all_stand(),
+            "a current runtime carries every gate: {:?}",
+            before.guards.missing()
+        );
+        assert!(
+            before.title.contains("outside-loaded"),
+            "the page's own report was {:?}; before the gate, the picture outside its folder loaded",
+            before.title
+        );
+        assert!(
+            before
+                .asked
+                .iter()
+                .any(|(uri, _)| uri.to_lowercase().contains("secret.png")),
+            "the picture reached the gate at all, which is the finding: {:#?}",
+            before.asked
+        );
+        assert!(
+            before
+                .asked
+                .iter()
+                .any(|(uri, _)| uri.to_lowercase().contains("frame.html")),
+            "and so did the frame: {:#?}",
+            before.asked
+        );
+
+        // ── after: the same page, behind the folder rule ──────────────────
+        // The measurement, printed because that is what a probe is for: the
+        // same page, the same two folders, with and without the door.
+        eprintln!(
+            "probe: with no resource door the page reported {:?}",
+            before.title
+        );
+        let inside_only = folder.clone();
+        let after = open_the_page(&profile.0, &page_url, move |candidate| {
+            inside_the_folder(candidate, &inside_only)
+        });
+        assert!(
+            after.title.contains("outside-blocked"),
+            "the page's own report was {:?}; the picture outside its folder must not load",
+            after.title
+        );
+        assert!(
+            after.title.contains("beside-loaded"),
+            "the page's own report was {:?}; the picture beside it must still load",
+            after.title
+        );
+        eprintln!(
+            "probe: behind the folder rule it reported {:?}",
+            after.title
+        );
+        for (uri, allowed) in &after.asked {
+            let uri = uri.to_lowercase();
+            if uri.contains("secret.png") || uri.contains("frame.html") {
+                assert!(!allowed, "{uri} was allowed");
+            }
+        }
+
+        // ── and the engine's own furniture still stands ───────────────────
+        //
+        // A `.pdf` opened out of the files column is drawn by a page of the
+        // browser's own, served over `chrome-extension:`. A door that gated the
+        // document's own contents and forgot that would leave a reader a blank
+        // rectangle where their document was, so the case is measured rather
+        // than reasoned about.
+        let pdf = inside.join("folio-pdf-test.pdf");
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/assets/folio-pdf-test.pdf"),
+            &pdf,
+        )
+        .expect("the repository's own test document");
+        let viewer = open_the_page(&profile.0, &file_url(&pdf), move |candidate| {
+            inside_the_folder(candidate, &folder)
+        });
+        assert!(
+            viewer.loaded,
+            "a local PDF still opens behind the door: {:#?}",
+            viewer.asked
+        );
+        for (uri, allowed) in &viewer.asked {
+            assert!(
+                *allowed,
+                "the engine's own viewer was refused {uri}, which is a blank rectangle where a document was"
+            );
+        }
+        eprintln!(
+            "probe: the viewer asked for {} addresses and was refused none",
+            viewer.asked.len()
+        );
+
+        // **The environment is let go of before the apartment is.** It is
+        // cached on this thread, so a thread that ended with it still cached
+        // would release a COM object into an apartment that had already gone —
+        // which is a crash and not a failure, and says nothing about the rule
+        // this probe is here to measure.
+        forget_web_environment();
+        settle();
+    }
+}
+
+/// **What install creates and what closing lets go of, held without a browser.**
+///
+/// Both are sets rather than runs of statements, and a set is exactly the thing
+/// a run of statements cannot be asked about afterwards: the four defects this
+/// module's tests were written for are each one row that was not there.
+#[cfg(test)]
+mod install_and_close_contract_tests {
+    use super::*;
+
+    /// A host with no engine behind it. `WebHost::new` touches no COM at all —
+    /// it builds a queue, three closures and a wake — so the whole of this
+    /// module's state can be shot at on a machine with no runtime, which is the
+    /// same argument `bt_app::webhost::WebMachine` is a separate object for.
+    fn a_host() -> WebHost {
+        WebHost::new(
+            Box::new(|_| WebNavigationVerdict::Proceed),
+            Box::new(|_| WebRequestVerdict::Allow),
+            Box::new(|| {}),
+        )
+    }
+
+    /// RED — **closing lets go of everything install created** (R2-10, R2-12,
+    /// R2-13, R2-24).
+    ///
+    /// Four of these seven were missing, and not one of the four is visible in
+    /// a run of statements — each is a line somebody did not write. As rows
+    /// they are readable, and each names what its absence cost.
+    ///
+    /// RED GATE: drop any row from [`WEB_CLOSE_STEPS`] and this fails; drop the
+    /// arm that performs it from [`WebHost::close`] and the file will not
+    /// compile, because the walk is a match over this table and not a run of
+    /// statements beside it.
+    #[test]
+    fn closing_lets_go_of_every_one_of_these() {
+        // Compared as slices so that a row taken out of the table is a failing
+        // assertion naming the row, and not a type error naming an array
+        // length: the point of the test is which step is missing.
+        assert_eq!(
+            WEB_CLOSE_STEPS.as_slice(),
+            [
+                CloseStep::Controller,
+                CloseStep::Composition,
+                CloseStep::Webview,
+                // R2-10: two handlers on the process-wide environment, added by
+                // every install and removed by nothing.
+                CloseStep::EnvironmentEvents,
+                // R2-12: the cached environment, which a rebuild adopted — the
+                // very environment the rebuild exists to abandon.
+                CloseStep::CachedEnvironment,
+                // R2-13: the slot the controller callback writes into.
+                CloseStep::PendingController,
+                // R2-24: the latch that says the find counters are subscribed.
+                CloseStep::FindLatch,
+            ]
+            .as_slice()
+        );
+    }
+
+    /// RED — **a rebuilt page counts its own search matches again** (R2-24).
+    ///
+    /// `ICoreWebView2::Find` hands back one session per controller, so the latch
+    /// that keeps the counters from being subscribed twice is a statement about
+    /// *this* controller. Left standing across a close it was a statement about
+    /// a page that is gone, and the seat that came back after a crash or a
+    /// runtime update never subscribed at all: the capsule went on showing
+    /// whatever number it last heard.
+    ///
+    /// RED GATE: take [`CloseStep::FindLatch`] out of the walk and this fails.
+    #[test]
+    fn closing_takes_the_find_latch_off() {
+        let mut host = a_host();
+        host.find_attached.set(true);
+        host.close();
+        assert!(
+            !host.find_attached.get(),
+            "the next controller has a find session of its own and nothing subscribed to it"
+        );
+    }
+
+    /// RED — **a closed seat leaves no slot for a controller to arrive into**
+    /// (R2-13).
+    ///
+    /// The creation callback cannot be cancelled. A seat closed while one was in
+    /// flight kept the slot, so the controller arrived, sat in it, and the next
+    /// `install` — a different generation, a different attempt — took it: a live
+    /// browser pointed at a window that had already let go of it.
+    ///
+    /// RED GATE: take [`CloseStep::PendingController`] out of the walk and this
+    /// fails.
+    #[test]
+    fn closing_empties_the_slot_a_controller_would_arrive_into() {
+        let mut host = a_host();
+        host.pending_controller = Some((7, Rc::new(RefCell::new(None))));
+        host.close();
+        assert!(
+            host.pending_controller.is_none(),
+            "a controller that answers now has nowhere to be adopted from"
+        );
+    }
+
+    /// RED — **and a slot belongs to the generation it was opened for**
+    /// (R2-13).
+    ///
+    /// The other half of the same defect: one slot with no name on it answered
+    /// whoever asked. Two attempts can be in flight at once, because the
+    /// callback cannot be cancelled — so `install` names the generation it is
+    /// installing for, and a slot opened for another one is closed rather than
+    /// adopted.
+    #[test]
+    fn a_controller_asked_for_by_one_generation_is_not_adopted_by_another() {
+        let mut host = a_host();
+        host.pending_controller = Some((3, Rc::new(RefCell::new(None))));
+        let refused = host
+            .take_the_controller(4)
+            .expect_err("the slot was opened for generation 3");
+        assert!(refused.contains('3') && refused.contains('4'), "{refused}");
+        assert!(
+            host.pending_controller.is_none(),
+            "and the slot is emptied rather than left for a third attempt"
+        );
+        // The generation it *was* opened for still finds it, and fails on the
+        // controller having never been delivered rather than on the generation.
+        let mut host = a_host();
+        host.pending_controller = Some((3, Rc::new(RefCell::new(None))));
+        let refused = host
+            .take_the_controller(3)
+            .expect_err("the callback delivered nothing");
+        assert!(refused.contains("delivered no controller"), "{refused}");
+    }
+
+    /// RED — **a failed install keeps nothing** (R2-16).
+    ///
+    /// Every step after the controller is taken can fail, and each of them left
+    /// the controller and the page standing on this host: a browser process
+    /// with no gates on it, kept by the object that had just failed to put
+    /// gates on it, while the caller's state machine sat in `ControllerPending`
+    /// beside it.
+    ///
+    /// RED GATE: answer `InstallRollback::default()` for every step — which is
+    /// what keeping everything amounts to — and the four middle assertions
+    /// fail.
+    #[test]
+    fn an_install_that_fails_closes_what_it_had_already_made() {
+        // Nothing has been taken yet, so nothing is owed.
+        assert_eq!(
+            install_rollback(InstallStep::TakeController),
+            InstallRollback::default()
+        );
+        // From the moment the controller is in hand, every later failure closes
+        // it.
+        for step in [
+            InstallStep::Configure,
+            InstallStep::AttachEvents,
+            InstallStep::AttachEnvironmentEvents,
+            InstallStep::PointAtVisual,
+        ] {
+            assert!(
+                install_rollback(step).controller,
+                "{step:?} left a live browser nobody points at"
+            );
+        }
+        // And the environment's own handlers come off only once they are on:
+        // putting back what was never taken is the other half of a compensation
+        // being right.
+        assert!(
+            !install_rollback(InstallStep::AttachEnvironmentEvents).environment_events,
+            "they had not been added yet"
+        );
+        assert!(
+            install_rollback(InstallStep::PointAtVisual).environment_events,
+            "a failure after them leaves two more on the process's environment (R2-10)"
+        );
+    }
+
+    /// RED — **rollback only grows.** A step that created something can never be
+    /// dropped from a later step's undo, which is the property that makes
+    /// [`INSTALL_SEQUENCE`] safe to extend: a sixth step inherits everything the
+    /// five before it made.
+    #[test]
+    fn every_later_install_failure_takes_back_at_least_what_an_earlier_one_does() {
+        let mut previous = InstallRollback::default();
+        for step in INSTALL_SEQUENCE {
+            let owed = install_rollback(step);
+            assert!(
+                !previous.controller || owed.controller,
+                "{step:?} drops a controller an earlier step owed"
+            );
+            assert!(
+                !previous.environment_events || owed.environment_events,
+                "{step:?} drops the environment handlers an earlier step owed"
+            );
+            previous = owed;
+        }
+    }
+
+    /// The gates a controller carries are counted rather than assumed, and one
+    /// that has none says which — the line of fact under the card that refuses
+    /// to open a local file (R2-16).
+    #[test]
+    fn a_controller_says_which_of_its_gates_it_does_not_have() {
+        assert!(!WebGuards::none().all_stand());
+        assert_eq!(
+            WebGuards::none().missing(),
+            [
+                "ScriptDialogOpening",
+                "FrameNavigationStarting",
+                "WebResourceRequested"
+            ]
+        );
+        let all = WebGuards {
+            script_dialogs: true,
+            frame_navigation: true,
+            resource_requests: true,
+        };
+        assert!(all.all_stand());
+        assert!(all.missing().is_empty());
     }
 }
 

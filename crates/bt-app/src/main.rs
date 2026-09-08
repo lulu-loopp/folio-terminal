@@ -6909,23 +6909,45 @@ fn page_foot_lead(_page_url: &str, hover: &str) -> String {
 /// unzoomed is a detent (`webhost::zoom_step`), and a detent nobody confirms is
 /// the one rung a reader cannot tell they have reached.
 ///
-/// **The later gesture owns the strip**, because both of these are answers to
-/// something that was just done and the older one is answering a question the
-/// hand has already moved on from.
+/// **And a message the page was not allowed to put on the screen** (R1-21).
+/// The engine's own `alert`, `confirm` and `prompt` windows are off, so a page
+/// asking for one is answered on the spot and told nothing opened; this band is
+/// where the reader is told the same thing, because a message that vanished
+/// with no trace is a page that looks broken. It is a third thing on one clock
+/// and not a clock of its own, for the reason the zoom is on this one:
+/// 「一排按钮是程序把自己的判断交还给读者」 applies to bands too, and a strip
+/// with three rhythms on it is three strips.
+///
+/// **The later gesture owns the strip**, because each of these answers something
+/// that was just done and the older one is answering a question the hand has
+/// already moved on from.
 fn page_foot_flash(
     zoomed: Option<(f64, Instant)>,
     opened: Option<Instant>,
+    dismissed: Option<Instant>,
     now: Instant,
 ) -> Option<String> {
     let fresh = |at: Instant| now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK;
-    let zoomed = zoomed.filter(|(_, said)| fresh(*said));
-    let opened = opened.filter(|at| fresh(*at));
-    match (zoomed, opened) {
-        (Some((_, said)), Some(at)) if said < at => Some(preview_opened_label().to_owned()),
-        (Some((factor, _)), _) => Some(i18n::zoom_percent(factor)),
-        (None, Some(_)) => Some(preview_opened_label().to_owned()),
-        (None, None) => None,
+    // The later gesture owns the strip — each of these answers something that
+    // was just done, and the older one answers a question the hand has left.
+    // Written as a fold over the three rather than as a match over their
+    // combinations, because a fourth would otherwise be eight arms.
+    let mut said: Option<(Instant, String)> = None;
+    let mut latest = |at: Instant, text: String| {
+        if fresh(at) && said.as_ref().is_none_or(|(before, _)| *before <= at) {
+            said = Some((at, text));
+        }
+    };
+    if let Some((factor, at)) = zoomed {
+        latest(at, i18n::zoom_percent(factor));
     }
+    if let Some(at) = opened {
+        latest(at, preview_opened_label().to_owned());
+    }
+    if let Some(at) = dismissed {
+        latest(at, i18n::Text::WebDialogDismissed.text().to_owned());
+    }
+    said.map(|(_, text)| text)
 }
 
 fn files_row_activation(root: &str, key: &str) -> RowActivation {
@@ -50677,7 +50699,12 @@ impl Runtime<'_> {
             let wanted = if sourced {
                 None
             } else {
-                page_foot_flash(zoomed, opened, now)
+                page_foot_flash(
+                    zoomed,
+                    opened,
+                    self.web_on(seat).and_then(webhost::WebSeat::dialog_said),
+                    now,
+                )
             };
             let (flash, dissolved) =
                 self.foot_saying(FootSaying::PageTag(seat), wanted.as_deref(), now);
@@ -69125,15 +69152,15 @@ impl Runtime<'_> {
     /// [`Self::next_deadline`] a wake-up that is already in the past on every
     /// turn for the rest of the session — the `WaitUntil` pin's own definition
     /// of a loop that never sleeps.
-    fn advance_page_zoom_said(&mut self, now: Instant) -> Result<()> {
+    fn advance_page_foot_clocks(&mut self, now: Instant) -> Result<()> {
         let expired: Vec<LeafId> = self
             .window
             .web
             .iter()
             .filter(|(_, web)| {
-                web.zoom_said().is_some_and(|(_, at)| {
-                    now.saturating_duration_since(at) >= FOOT_REVEAL_FEEDBACK
-                })
+                let over = |at: Instant| now.saturating_duration_since(at) >= FOOT_REVEAL_FEEDBACK;
+                web.zoom_said().is_some_and(|(_, at)| over(at))
+                    || web.dialog_said().is_some_and(over)
             })
             .map(|(leaf, _)| *leaf)
             .collect();
@@ -69143,6 +69170,7 @@ impl Runtime<'_> {
         for leaf in expired {
             if let Some(web) = self.window.web.get_mut(&leaf) {
                 web.forget_the_zoom_it_said();
+                web.forget_the_dialog_it_said();
             }
         }
         if self.refresh_chrome() {
@@ -87501,6 +87529,15 @@ impl Runtime<'_> {
                     self.refresh_chrome();
                     self.present_chrome_change()?;
                 }
+                // **A page asked for a dialog and was answered** (R1-21). The
+                // moment is already on the seat and the foot reads it there;
+                // what travels is the repaint, for the sound's reason exactly —
+                // a page answered while nobody is moving the mouse would
+                // otherwise say nothing until something else redrew the band.
+                webhost::WebOutcome::DialogDismissed => {
+                    self.refresh_chrome();
+                    self.present_chrome_change()?;
+                }
                 // **The engine took the keyboard; whether it may keep it is this
                 // window's answer, not its own** (§7.7 W2 片④ ⑧, user report
                 // 2026-08-24). A controller focuses itself on its own account —
@@ -89671,7 +89708,7 @@ impl Runtime<'_> {
         self.advance_foot_reveal(now)?;
         // And a page's magnification, on the same clock and for the same reason
         // it is its own step: what has to be rebuilt is the pane the page is in.
-        self.advance_page_zoom_said(now)?;
+        self.advance_page_foot_clocks(now)?;
         // And the preview's own acknowledgement, on the same 1300ms clock.
         self.advance_preview_notice(now)?;
         // Service the PTY gate after every other due task that can mutate session state, then carry
@@ -89819,6 +89856,13 @@ impl Runtime<'_> {
                 .web
                 .values()
                 .filter_map(|web| web.zoom_said().map(|(_, at)| at + FOOT_REVEAL_FEEDBACK))
+                .min(),
+            // And a message the page was refused, on that same clock and owing
+            // the same single wake-up (R1-21).
+            self.window
+                .web
+                .values()
+                .filter_map(|web| web.dialog_said().map(|at| at + FOOT_REVEAL_FEEDBACK))
                 .min(),
             // The preview's "Saved", on the same clock and owing the same single
             // wake-up: the instant it is due to go away.
@@ -128872,35 +128916,35 @@ mod tests {
         let stale = now - FOOT_REVEAL_FEEDBACK - Duration::from_millis(1);
 
         assert_eq!(
-            page_foot_flash(Some((1.2, just_now)), None, now).as_deref(),
+            page_foot_flash(Some((1.2, just_now)), None, None, now).as_deref(),
             Some("120%"),
             "the picture's own words, from the picture's own function"
         );
         // The way back to unzoomed is a rung like any other, and a rung nobody
         // confirms is the one a reader cannot tell they have reached.
         assert_eq!(
-            page_foot_flash(Some((1.0, just_now)), None, now).as_deref(),
+            page_foot_flash(Some((1.0, just_now)), None, None, now).as_deref(),
             Some("100%")
         );
         // Whole percents: `0.67` is a rung of the ladder, not a number to read.
         assert_eq!(
-            page_foot_flash(Some((0.67, just_now)), None, now).as_deref(),
+            page_foot_flash(Some((0.67, just_now)), None, None, now).as_deref(),
             Some("67%")
         );
         // One clock, and it is the band's own. After it, the hover line again.
-        assert_eq!(page_foot_flash(Some((1.2, stale)), None, now), None);
+        assert_eq!(page_foot_flash(Some((1.2, stale)), None, None, now), None);
 
         // The later gesture owns the strip — both of these answer something that
         // was just done, and the older one answers a question the hand has left.
         assert_eq!(
-            page_foot_flash(Some((1.2, just_now)), Some(stale), now).as_deref(),
+            page_foot_flash(Some((1.2, just_now)), Some(stale), None, now).as_deref(),
             Some("120%")
         );
         assert_eq!(
-            page_foot_flash(Some((1.2, stale)), Some(just_now), now).as_deref(),
+            page_foot_flash(Some((1.2, stale)), Some(just_now), None, now).as_deref(),
             Some(preview_opened_label()),
         );
-        assert_eq!(page_foot_flash(None, None, now), None);
+        assert_eq!(page_foot_flash(None, None, None, now), None);
     }
 
     /// PIN (user ruling, 2026-08-15) — **when the path and the phrase meet, the

@@ -2181,10 +2181,11 @@ mod webview;
 
 #[cfg(windows)]
 pub use webview::{
-    REHOST_SEQUENCE, RehostCompensation, RehostOutcome, RehostSide, RehostStep, WEB_SETTINGS,
-    WebChord, WebDpiOwnership, WebEvent, WebHost, WebKey, WebMouseEvent, WebNavigationVerdict,
-    WebSetting, forget_web_environment, rehost_compensation, web_mouse_buttons,
-    webview2_runtime_version,
+    INSTALL_SEQUENCE, InstallRollback, InstallStep, REHOST_SEQUENCE, RehostCompensation,
+    RehostOutcome, RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord,
+    WebDpiOwnership, WebEvent, WebGuards, WebHost, WebInstallReport, WebKey, WebMouseEvent,
+    WebNavigationVerdict, WebRequestVerdict, WebSetting, WebSettingRule, forget_web_environment,
+    install_rollback, rehost_compensation, web_mouse_buttons, webview2_runtime_version,
 };
 
 #[cfg(windows)]

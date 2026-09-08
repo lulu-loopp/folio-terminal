@@ -35,6 +35,47 @@ All notable changes to Folio are recorded here. The format follows
   directory holds. Nothing about the program changed.
 ### Fixed
 
+- **A local page previewed in a pane reads only the folder it was opened in.**
+  A `.html` file opened from the file column could name a picture, a stylesheet,
+  a script or a frame anywhere else on the disk, or on a network share, and the
+  preview fetched it: only the address of the page itself was checked, and
+  nothing a page loads is that address. A previewed local file now reads its own
+  folder and the folders under it, and nothing else — not a folder beside it,
+  not another drive, not a share, and nothing from the network. Pages opened
+  from an address go on loading their own contents as before, and they now
+  cannot read the disk at all.
+
+- **A page cannot hold a preview pane shut with its own message boxes.** The
+  engine's default was to open a modal window for every `alert`, `confirm` and
+  `prompt` a page asked for, and a page that asked in a loop opened another the
+  moment you dismissed one. The pane now answers those itself and says so for a
+  moment on its bottom strip, so a page can ask as often as it likes and the
+  pane stays yours.
+
+- **Closing a preview pane lets go of everything opening it took.** Two
+  subscriptions on the shared engine, the engine handle the pane cached, the
+  slot a still-arriving page would have landed in, and the counter behind the
+  search box were all left standing: a search in a page rebuilt after a crash or
+  an engine update stopped showing how many matches it had found, and a pane
+  that was torn out and closed could not be torn out again for the rest of the
+  session.
+
+- **A preview whose engine never answers offers a Retry that works.** When the
+  engine was asked for and said nothing at all, the pane drew the card that says
+  so and the button on it did nothing when pressed. It now asks for the engine
+  again. A browser that exits under a page that is still open is no longer
+  silently ignored either: the page is rebuilt rather than left as an empty
+  rectangle.
+
+- **A preview that fails to start leaves nothing running behind it.** Any step
+  after the engine handed over a page kept that page and its browser alive on a
+  pane that had just failed to set it up. The pane now closes what it made
+  before it reports the failure, and each of its settings is applied through the
+  oldest interface that carries it, so an engine that cannot take one of them no
+  longer loses the other eight. An engine too old to be given the page rules at
+  all will show a page from an address and refuses to open a file from your
+  disk, saying which rule it could not be given.
+
 - **The key that summons the quick terminal raises it when it is on screen and
   you are working somewhere else.** The chord read only whether the window was
   visible, so pressing it while the terminal stood behind your editor sent the

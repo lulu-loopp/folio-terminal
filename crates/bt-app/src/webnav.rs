@@ -460,6 +460,222 @@ pub fn navigation_starting(candidate: &str, mint: &Mint) -> Decision {
     check(candidate, Origin::NavigationStarting(mint))
 }
 
+/// **The third door: everything a page asks for that is not a navigation**
+/// (R1-10).
+///
+/// [`navigation_starting`] answers for the address the seat goes to. It is
+/// asked once per top-level navigation, and a document is not one request — it
+/// is a request and then every picture, stylesheet, script, font and frame it
+/// names. Those never reached a door at all, so a previewed local report could
+/// name `<img src="…/another/folder/secret.png">` or
+/// `<iframe src="file:///C:/Users/…">` and the engine would fetch it, because
+/// the only rule in this file ran on the address bar's question.
+///
+/// # A seat is opened on one thing, and that is what it may read
+///
+/// The mint says which. A seat opened on a local file may read **that file's
+/// own folder and the folders under it**, and nothing else on the disk: not a
+/// sibling folder, not another drive, and not a share — the product's UNC
+/// refusal (DESIGN §7.1.3) reaches this door in the same words it reaches the
+/// others. It may not reach the network either: a local page is a document
+/// somebody opened out of the files column, and a stylesheet it pulls from a
+/// server is that document telling somebody it was opened. A browsing seat is
+/// the mirror image — the network is what it is for, and the disk is what it
+/// may not touch.
+///
+/// # The three schemes that are neither
+///
+/// `data:` and `blob:` name bytes the page already holds, and `about:blank`
+/// and `about:srcdoc` are the two empty documents a frame is made of. None of
+/// them is a fetch of anything outside the document, so all four pass on every
+/// seat. The navigation door goes on refusing `data:` and `about:` as
+/// *locations*, which is a different question and stays answered the way it
+/// was: what may be *loaded into* a document is not what a seat may be
+/// *pointed at*.
+///
+/// # The engine's own furniture
+///
+/// A `.pdf` opened out of the files column is drawn by the engine's built-in
+/// viewer, and that viewer is a page of the browser's own served over
+/// `chrome-extension:`. So the engine's internal schemes pass here. They are
+/// still refused at the navigation door, which is the door that decides where a
+/// reader can be taken; this one decides what a document already on the glass
+/// may be built out of, and the browser building its own viewer out of its own
+/// parts is not a document reaching anywhere.
+#[must_use]
+pub fn resource_request(candidate: &str, mint: &Mint) -> Decision {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() {
+        return Decision::Refuse(Refusal::Empty);
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Decision::Refuse(Refusal::ControlOrWhitespace);
+    }
+    let Some((scheme, _)) = split_scheme(trimmed) else {
+        // Everything the engine hands this door carries a scheme; it resolved
+        // the document's relative references before it asked anybody. A
+        // candidate with none is not a request this window can reason about.
+        return Decision::Refuse(Refusal::ExternalScheme);
+    };
+    match scheme.as_str() {
+        "data" | "blob" => Decision::Navigate(trimmed.to_owned()),
+        "about" => {
+            if is_an_empty_document(trimmed) {
+                Decision::Navigate(trimmed.to_owned())
+            } else {
+                Decision::Refuse(Refusal::BrowserInternalScheme)
+            }
+        }
+        // The engine's own parts, listed rather than pattern-matched: a scheme
+        // this door has not been told about is refused, and adding one is a
+        // line somebody types on purpose.
+        "chrome-extension" | "chrome-untrusted" | "devtools" => {
+            Decision::Navigate(trimmed.to_owned())
+        }
+        "file" => match mint {
+            Mint::File(minted) if file_url_is_inside_the_folder_of(minted, trimmed) => {
+                Decision::Navigate(trimmed.to_owned())
+            }
+            // A `file:` URL that names a host is a share, and it is refused
+            // under the name the rest of the product refuses shares by — even
+            // on a seat that has no local file at all, where the answer would
+            // otherwise be the blander `FileScheme`.
+            _ if names_a_file_host(trimmed) => Decision::Refuse(Refusal::NetworkPath),
+            _ => Decision::Refuse(Refusal::FileScheme),
+        },
+        "http" | "https" => match mint {
+            // Nothing minted is an ordinary browsing seat, and its page's own
+            // subresources are the whole of what it is for.
+            Mint::Nothing => Decision::Navigate(trimmed.to_owned()),
+            Mint::Blank | Mint::File(_) => Decision::Refuse(Refusal::NotMinted),
+        },
+        other => Decision::Refuse(match classify_scheme(other) {
+            Err(refusal) => refusal,
+            // A scheme the allow-list would have taken is still not a thing a
+            // document may be built out of unless one of the arms above named
+            // it. Nothing reaches here today; the arm exists so that a scheme
+            // added to `classify_scheme` cannot quietly become a subresource.
+            Ok(()) => Refusal::ExternalScheme,
+        }),
+    }
+}
+
+/// The two `about:` documents that are documents rather than destinations.
+fn is_an_empty_document(candidate: &str) -> bool {
+    candidate.eq_ignore_ascii_case(BLANK_PAGE) || candidate.eq_ignore_ascii_case("about:srcdoc")
+}
+
+/// Whether a `file:` URL carries an authority — `file://server/share/x`.
+///
+/// The one spelling this product's `file:` URLs have is `file:///` with the
+/// drive letter straight after it ([`Mint::file`]), so anything between the two
+/// slashes and the path is a host, and a host on a `file:` URL is a share.
+fn names_a_file_host(url: &str) -> bool {
+    let Some(rest) = url.get(5..) else {
+        return false;
+    };
+    if !url[..5].eq_ignore_ascii_case("file:") {
+        return false;
+    }
+    // `file://` then anything that is not immediately the third slash.
+    rest.starts_with("//") && !rest.starts_with("///")
+}
+
+/// **Whether a `file:` URL names something inside the folder the minted file
+/// sits in** — the whole of the local seat's reach.
+///
+/// The folder and the folders under it, because that is what a document is: a
+/// report and its `images/` directory are one thing a person opened, and a rule
+/// that admitted only the exact file would show them a report with no pictures
+/// in it. What it is not is a rule about prefixes of *text*: both sides are
+/// decoded to a path first, so `%2e%2e`, `%5c` and a percent-encoded drive
+/// letter are the same string here that they are on disk, and a path with a
+/// `..` in it is refused outright rather than folded — the engine resolves
+/// relative references before it asks, so a `..` arriving here is a candidate
+/// that did not come from resolving anything.
+fn file_url_is_inside_the_folder_of(minted: &str, candidate: &str) -> bool {
+    let (Some(minted), Some(candidate)) = (
+        decoded_file_path(minted),
+        decoded_file_path(strip_the_tail(candidate)),
+    ) else {
+        return false;
+    };
+    let Some(folder) = minted.rsplit_once('\\').map(|(head, _)| head) else {
+        return false;
+    };
+    // The folder itself is not a file, so the comparison is against the folder
+    // plus its separator: `D:\report` must not admit `D:\reportage\x.png`.
+    let folder = format!("{}\\", folder.to_lowercase());
+    candidate.to_lowercase().starts_with(&folder)
+}
+
+/// A URL's path, without the `?query` and `#fragment` the page owns.
+fn strip_the_tail(url: &str) -> &str {
+    match url.find(['?', '#']) {
+        Some(cut) => &url[..cut],
+        None => url,
+    }
+}
+
+/// **A `file:///` URL as a Windows path**, with every percent escape undone.
+///
+/// A second reader beside [`Mint::path_and_tail_of_file_url`] and deliberately
+/// so: that one is strict on purpose — it reads back only what
+/// [`Mint::file`] writes, because its job is to prove a stored string came out
+/// of this product's own door. This one reads what *the engine* wrote, which is
+/// a URL it built by resolving a reference inside a document and percent-encoded
+/// by its own rules: a Chinese file name arrives as UTF-8 in `%XX`, and a reader
+/// that only knew four escapes would answer `None` for a picture that is
+/// sitting in the folder it is allowed to read.
+///
+/// `None` for anything that is not one absolute drive path: no authority, no
+/// relative path, no `.` or `..` component, no interior NUL, and no escape that
+/// is not two hexadecimal digits.
+fn decoded_file_path(url: &str) -> Option<String> {
+    let rest = url
+        .get(..8)
+        .filter(|head| head.eq_ignore_ascii_case("file:///"))
+        .map(|_| &url[8..])?;
+    let mut bytes = Vec::with_capacity(rest.len());
+    let mut characters = rest.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '%' => {
+                let high = characters.next()?.to_digit(16)?;
+                let low = characters.next()?.to_digit(16)?;
+                bytes.push(u8::try_from(high * 16 + low).ok()?);
+            }
+            // A path is bytes to Windows and characters here; the encoder above
+            // is the only thing that ever wrote a multi-byte one, so the rest
+            // are pushed as they are.
+            other => {
+                let mut buffer = [0u8; 4];
+                bytes.extend_from_slice(other.encode_utf8(&mut buffer).as_bytes());
+            }
+        }
+    }
+    let path = String::from_utf8(bytes).ok()?.replace('/', "\\");
+    if path.chars().any(char::is_control) {
+        return None;
+    }
+    let mut parts = path.split('\\');
+    let drive = parts.next()?;
+    // `C:` and nothing else: two characters, a letter and a colon.
+    let mut letters = drive.chars();
+    if !letters.next()?.is_ascii_alphabetic() || letters.next()? != ':' || letters.next().is_some()
+    {
+        return None;
+    }
+    let mut components = 0usize;
+    for part in parts {
+        if part == ".." || part == "." || part.is_empty() {
+            return None;
+        }
+        components += 1;
+    }
+    (components > 0).then_some(path)
+}
+
 /// Split `input` into `(scheme, rest)` when it carries an explicit scheme.
 ///
 /// Deliberately stricter than "find a colon": `localhost:3000` and
@@ -739,6 +955,174 @@ pub fn site_key(url: &str) -> Option<String> {
         Some(port) => format!("{scheme}://{host}:{port}"),
         None => format!("{scheme}://{host}"),
     })
+}
+
+/// **The third door, held without a browser** (R1-10).
+///
+/// The rule is a function of two strings, so the whole of it can be shot at
+/// here and the engine-side registration has nothing left to decide.
+#[cfg(test)]
+mod resource_gate_tests {
+    use super::*;
+
+    /// The seat a reader opens out of the files column: one report, in one
+    /// folder, with a second folder beside it that has nothing to do with it.
+    fn a_report() -> Mint {
+        Mint::File(String::from("file:///D:/tmp/page/report.html"))
+    }
+
+    /// RED — **a picture in a previewed page cannot come from outside the page's
+    /// own folder** (R1-10, and the whole of why this door exists).
+    ///
+    /// The review's reproduction, as strings: a local `.html` under one
+    /// temporary folder naming an image under a second one. Before this door
+    /// existed the engine fetched it, because `NavigationStarting` is asked
+    /// about the document and about nothing the document contains.
+    ///
+    /// The share is spelled here and is **not** the stand-in the runtime probe
+    /// uses: a test that actually ran would be a machine reaching for somebody
+    /// else's server, so the reachable case a probe can run is the second
+    /// folder, and the share is held here where it is only ever text.
+    ///
+    /// RED GATE: answer `Decision::Navigate` for every `file:` candidate —
+    /// which is what a seat with no resource door does — and every assertion
+    /// below fails.
+    #[test]
+    fn a_previewed_page_may_not_pull_a_file_from_outside_its_own_folder() {
+        for outside in [
+            // The stand-in the runtime probe uses: a real path this machine has,
+            // in a folder the page was not opened in.
+            "file:///D:/tmp/other/secret.png",
+            // One directory up, which is the same sentence said with a shorter
+            // path.
+            "file:///D:/tmp/secret.png",
+            // Another drive.
+            "file:///C:/Windows/win.ini",
+            // The share, refused by the name every other door in this product
+            // refuses shares by.
+            "file://attacker/share/x.png",
+            // The same walk written with escapes, so that the rule is about
+            // paths and not about the text of a prefix.
+            "file:///D:/tmp/page/%2E%2E/other/secret.png",
+            // And the folder next door whose name begins with this one's.
+            "file:///D:/tmp/pageant/secret.png",
+        ] {
+            assert!(
+                matches!(
+                    resource_request(outside, &a_report()),
+                    Decision::Refuse(Refusal::FileScheme | Refusal::NetworkPath)
+                ),
+                "a page in D:\\tmp\\page reached {outside}"
+            );
+        }
+    }
+
+    /// RED — **and it may still read the folder it was opened in.**
+    ///
+    /// The other half of the same rule, because a door that refused everything
+    /// would pass the test above and show a report with no pictures in it.
+    #[test]
+    fn a_previewed_page_reads_its_own_folder_and_the_folders_under_it() {
+        for inside in [
+            "file:///D:/tmp/page/report.html",
+            "file:///D:/tmp/page/images/figure-1.png",
+            "file:///D:/tmp/page/style.css",
+            // A name with a space and a name with characters outside ASCII, both
+            // as the engine percent-encodes them.
+            "file:///D:/tmp/page/my%20notes.css",
+            "file:///D:/tmp/page/%E5%9B%BE.png",
+            // The document's own fragment and query ride along.
+            "file:///D:/tmp/page/report.html#ch3",
+        ] {
+            assert!(
+                matches!(resource_request(inside, &a_report()), Decision::Navigate(_)),
+                "the page could not read {inside}, which is beside it"
+            );
+        }
+    }
+
+    /// RED — **a local page reaches no server** (R1-10's second half).
+    ///
+    /// A stylesheet or a script pulled from a host is the previewed document
+    /// telling somebody it was opened, which is the one thing a file a person
+    /// chose out of their own disk must not be able to do.
+    #[test]
+    fn a_previewed_local_page_reaches_no_server() {
+        for outward in [
+            "https://cdn.example.com/style.css",
+            "http://127.0.0.1:9/beacon.gif",
+        ] {
+            assert_eq!(
+                resource_request(outward, &a_report()),
+                Decision::Refuse(Refusal::NotMinted),
+                "{outward}"
+            );
+        }
+    }
+
+    /// RED — **and a browsing seat reaches no disk.**
+    ///
+    /// The mirror image, and the reason the rule is one function: a page from a
+    /// server naming `file:///C:/Users/…` is the same defect read the other way
+    /// round.
+    #[test]
+    fn a_browsing_seat_reaches_no_file_at_all() {
+        assert_eq!(
+            resource_request("file:///C:/Windows/win.ini", &Mint::Nothing),
+            Decision::Refuse(Refusal::FileScheme),
+        );
+        assert_eq!(
+            resource_request("file://attacker/share/x.png", &Mint::Nothing),
+            Decision::Refuse(Refusal::NetworkPath),
+        );
+        assert!(matches!(
+            resource_request("https://example.com/app.js", &Mint::Nothing),
+            Decision::Navigate(_)
+        ));
+    }
+
+    /// The bytes a document is built out of rather than fetched from: inline
+    /// content, memory inside the page, the two empty documents a frame is made
+    /// of, and the parts the engine builds its own PDF viewer out of. All four
+    /// pass on a local seat, which is what keeps a previewed `.pdf` drawn and an
+    /// `<iframe srcdoc>` filled.
+    #[test]
+    fn what_a_document_already_holds_is_not_a_fetch() {
+        for held in [
+            "data:image/png;base64,iVBORw0KGgo=",
+            "blob:https://example.com/1234",
+            "about:blank",
+            "about:srcdoc",
+            "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html",
+        ] {
+            assert!(
+                matches!(resource_request(held, &a_report()), Decision::Navigate(_)),
+                "{held}"
+            );
+        }
+    }
+
+    /// Every other scheme keeps the refusal the address bar already gives it, so
+    /// this door adds no vocabulary and invents no verdict.
+    #[test]
+    fn every_other_scheme_keeps_the_refusal_it_already_had() {
+        for (candidate, refusal) in [
+            ("javascript:fetch('/x')", Refusal::ScriptOrInlineScheme),
+            ("mailto:someone@example.com", Refusal::ExternalScheme),
+            (
+                "view-source:https://example.com",
+                Refusal::BrowserInternalScheme,
+            ),
+            ("about:history", Refusal::BrowserInternalScheme),
+            ("", Refusal::Empty),
+        ] {
+            assert_eq!(
+                resource_request(candidate, &Mint::Nothing),
+                Decision::Refuse(refusal),
+                "{candidate}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

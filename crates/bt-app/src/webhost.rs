@@ -346,8 +346,24 @@ impl WebMachine {
     }
 
     /// `BrowserProcessExited` arrived — the door the plan named.
+    ///
+    /// **Two events wear this name and only one of them is the door** (R2-13).
+    /// Under a *closing* seat it is the end of the wait for the user data
+    /// folder, which is what the plan wrote it down for. Under a live one it is
+    /// the browser this seat's page is drawn by having gone, and that used to
+    /// end here as `Ignore`: no rebuild, no card, no state — a pane of ground
+    /// colour with a state machine that still believed it was `Ready`. It is
+    /// the same news as `ProcessFailed(browser)` and it gets the same answer.
     pub(crate) fn on_browser_process_exited(&mut self) -> WebEffect {
-        self.finish_cleanup()
+        if self.cleanup == Cleanup::Awaiting {
+            return self.finish_cleanup();
+        }
+        if self.state == WebState::Closing {
+            // Closing, and somebody already took the folder. A second door
+            // opening changes nothing — which is what `finish_cleanup` says.
+            return self.finish_cleanup();
+        }
+        self.on_browser_process_failed()
     }
 
     /// The wait ran out. The plan's literal wording has no such input, which is
@@ -381,6 +397,30 @@ impl WebMachine {
         self.on_new_browser_version_available()
     }
 
+    /// **The engine is not coming up, whichever of the three doors said so**
+    /// (R2-13, §7.36).
+    ///
+    /// The card for it has one verb and the verb is [`Self::restart`], which
+    /// answers `Ignore` from anywhere but `Failed`. Two of the three doors —
+    /// the environment callback and the controller callback arriving with an
+    /// error — went through `on_environment`/`on_controller` and reached that
+    /// state. The third, the start deadline passing with no callback at all,
+    /// only ever drew the card: the machine stayed in `EnvironmentPending` for
+    /// the rest of the session and the button on that card did nothing when it
+    /// was pressed. So the third door says it here, in the one place all three
+    /// can.
+    ///
+    /// **Not from `Closing`.** A seat on its way out is not a seat with a
+    /// failed engine, and a card raised over one would be a card about a pane
+    /// that is going.
+    pub(crate) fn the_engine_did_not_start(&mut self) {
+        if self.state == WebState::Closing {
+            return;
+        }
+        self.state = WebState::Failed;
+        self.events_installed = false;
+    }
+
     /// A newer runtime is installed and the running one is now the old one.
     pub(crate) fn on_new_browser_version_available(&mut self) -> WebEffect {
         if self.state == WebState::Closing {
@@ -410,6 +450,7 @@ fn is_blank(url: &str) -> bool {
 // admitted it by name, and §3’s loopback rule admits it now (DESIGN §7.8 ⑦).
 use crate::webnav::{
     BLANK_PAGE, Decision, Mint, Origin, Refusal, address_bar, check, navigation_starting,
+    resource_request,
 };
 
 // ── The development entry ──────────────────────────────────────────────────
@@ -818,6 +859,20 @@ pub(crate) enum WebFault {
     },
     /// The renderer under this page exited.
     RenderProcessGone,
+    /// **The engine on this machine could not be given the rules this window
+    /// puts on a page, so a local file was not opened** (R2-16).
+    ///
+    /// Its own card and not [`Self::EngineDidNotStart`]: the engine *did*
+    /// start, and a page from a server opens on it perfectly well. What it
+    /// cannot do is hold a document off somebody's own disk to the rule that a
+    /// document may read only its own folder, and the answer to that is to not
+    /// open the document — said out loud, with the gate that is missing on the
+    /// line under it, and with the one verb that could change the answer: a
+    /// newer runtime.
+    GuardsUnavailable {
+        /// The gates the engine would not take, in the SDK's own spelling.
+        detail: String,
+    },
     /// A URL this seat was **handed** does not open in a preview.
     ///
     /// Handed, not clicked: a link inside a page is inert and says so in the
@@ -880,6 +935,7 @@ impl WebFault {
             Self::EngineDidNotStart { .. } => crate::i18n::Text::WebFailEngineSay.text().to_owned(),
             Self::DidNotLoad { host, .. } => crate::i18n::web_fail_did_not_respond(host),
             Self::RenderProcessGone => crate::i18n::Text::WebFailCrashSay.text().to_owned(),
+            Self::GuardsUnavailable { .. } => crate::i18n::Text::WebFailGuardsSay.text().to_owned(),
             // The scheme comes from `webnav::scheme_of` and from nowhere else
             // (§7.8 ③: 「不另起第二种解析」). An address that carries none — a
             // bare host, an empty string — gets the sentence that names no
@@ -898,6 +954,7 @@ impl WebFault {
         match self {
             Self::RuntimeMissing { detail }
             | Self::EngineDidNotStart { detail }
+            | Self::GuardsUnavailable { detail }
             | Self::DidNotLoad { detail, .. } => (!detail.is_empty()).then_some(detail.as_str()),
             // The crash has none, and that is the mock-up's own answer: there is
             // no code a renderer's exit hands over that a reader could act on.
@@ -912,7 +969,13 @@ impl WebFault {
     /// The word on the button.
     pub(crate) fn verb_text(&self) -> crate::i18n::Text {
         match self {
-            Self::RuntimeMissing { .. } => crate::i18n::Text::WebFailRuntimeVerb,
+            // The same verb as the missing runtime's, because it is the same
+            // press for the same reason: what is wrong is the build of the
+            // engine on this machine, and Microsoft's page is where a newer one
+            // comes from.
+            Self::RuntimeMissing { .. } | Self::GuardsUnavailable { .. } => {
+                crate::i18n::Text::WebFailRuntimeVerb
+            }
             Self::EngineDidNotStart { .. } => crate::i18n::Text::WebFailEngineVerb,
             Self::DidNotLoad { .. } | Self::RenderProcessGone => {
                 crate::i18n::Text::PreviewWebReload
@@ -928,7 +991,9 @@ impl WebFault {
     /// What pressing it does.
     pub(crate) fn verb(&self) -> WebFaultVerb {
         match self {
-            Self::RuntimeMissing { .. } => WebFaultVerb::DownloadTheRuntime,
+            Self::RuntimeMissing { .. } | Self::GuardsUnavailable { .. } => {
+                WebFaultVerb::DownloadTheRuntime
+            }
             Self::EngineDidNotStart { .. } => WebFaultVerb::RestartTheEngine,
             Self::DidNotLoad { .. } | Self::RenderProcessGone => WebFaultVerb::Reload,
             Self::Blocked { url, .. } => WebFaultVerb::CopyAddress(url.clone()),
@@ -1383,6 +1448,14 @@ pub(crate) enum WebOutcome {
     /// is the *repaint* — the strip is redrawn on change and not polled — and a
     /// change is the only thing that has to travel.
     PlayingAudioChanged,
+    /// **A dialog this page asked for was turned away** (R1-21).
+    ///
+    /// It carries nothing, for [`Self::PlayingAudioChanged`]'s reason: the
+    /// moment is already on the seat ([`WebSeat::dialog_said`]) and the foot
+    /// reads it from there. What has to travel is the repaint — the band is
+    /// drawn from what the seat last heard, and a page that is answered while
+    /// nobody is moving the mouse would otherwise say nothing at all.
+    DialogDismissed,
     /// **A `CapturePreview` came back** (W2 slice ⑥) — the encoded PNG, or
     /// `None` if the engine refused, together with the viewport size it is a
     /// picture of.
@@ -1520,6 +1593,18 @@ pub(crate) struct WebSeat {
     mint: Rc<RefCell<Mint>>,
     /// The chords the window takes back, and what each one runs.
     claims: Vec<ClaimedChord>,
+    /// **Which of the seat's guarantees this controller carries** (R2-16).
+    ///
+    /// Written by every `install` and read by [`WebSeat::issue`], which is the
+    /// one place a local file is opened. `WebGuards::none` until an install has
+    /// answered, so a seat that has never had a controller refuses a file
+    /// rather than assuming one.
+    guards: bt_platform::WebGuards,
+    /// **When this page last had a dialog turned away** (R1-21), for the one
+    /// line the foot flashes about it. The same shape and the same clock as
+    /// [`WebSeat::zoom_said`], because it is the same band saying a different
+    /// thing.
+    dialog_said: Option<Instant>,
     /// What is waiting on a browser, and until when.
     waiting: Option<(BrowserWait, Instant)>,
     /// When the engine this seat has asked for stops being allowed to say
@@ -1720,6 +1805,7 @@ impl WebSeat {
         })?;
         let mint = Rc::new(RefCell::new(Mint::Nothing));
         let gate = Rc::clone(&mint);
+        let request_gate = Rc::clone(&mint);
         let refusal = Rc::new(RefCell::new(None));
         let refusal_sink = Rc::clone(&refusal);
         let host = WebHost::new(
@@ -1761,6 +1847,33 @@ impl WebSeat {
                     Decision::Search(_) => WebNavigationVerdict::Cancel,
                 }
             }),
+            // **The third door, on the same mint** (R1-10). A frame and a
+            // subresource are asked about by `webnav::resource_request`, which
+            // is the same seat's rule said about what a document is built out
+            // of rather than about where the seat goes. It travels out as a
+            // trace line and nothing else: the request has already been refused
+            // by the time anybody could act on it, and a card per missing
+            // picture would be this window shouting about a page's own
+            // contents.
+            Box::new(move |candidate| {
+                let decision = resource_request(candidate, &request_gate.borrow());
+                let allowed = matches!(decision, Decision::Navigate(_));
+                if !allowed {
+                    crate::web_trace::line(|| {
+                        format!(
+                            "request_refused {} uri={candidate} mint={} verdict={}",
+                            crate::web_trace::seat(page),
+                            crate::web_trace::mint(&request_gate.borrow()),
+                            crate::web_trace::verdict(&decision),
+                        )
+                    });
+                }
+                if allowed {
+                    bt_platform::WebRequestVerdict::Allow
+                } else {
+                    bt_platform::WebRequestVerdict::Refuse
+                }
+            }),
             wake,
         );
         let mut web = Self {
@@ -1770,6 +1883,8 @@ impl WebSeat {
             host,
             mint,
             claims: Vec::new(),
+            guards: bt_platform::WebGuards::none(),
+            dialog_said: None,
             waiting: None,
             engine_owes_an_answer: None,
             wanted: WebPresence::Hidden,
@@ -2119,6 +2234,37 @@ impl WebSeat {
                 }
                 WebEffect::Ignore
             }
+            // **A page asked for a modal window and did not get one** (R1-21).
+            // The engine has already answered it as a dismissal — that is what
+            // the handler does and it could not be decided later — so what is
+            // left here is telling the reader, on the one band this pane owns
+            // and for the same few moments a zoom is announced on it. Nothing
+            // is pressed and nothing is waited for, which is the whole point:
+            // a page in a loop opens a dialog, gets it back, and holds nothing.
+            WebEvent::ScriptDialogDismissed { kind } => {
+                crate::web_trace::line(|| {
+                    format!(
+                        "script_dialog_dismissed {} kind={kind}",
+                        crate::web_trace::seat(self.address.page),
+                    )
+                });
+                self.dialog_said = Some(Instant::now());
+                outcomes.push(WebOutcome::DialogDismissed);
+                WebEffect::Ignore
+            }
+            // **Something inside a document was refused** (R1-10). Already
+            // refused, by the gate inside the callback; the trace is where it
+            // is readable, and there is no card, because a page missing one of
+            // its own pictures is not a thing that happened *to* the reader.
+            WebEvent::RequestRefused { uri } => {
+                crate::web_trace::line(|| {
+                    format!(
+                        "request_refused_arrived {} uri={uri}",
+                        crate::web_trace::seat(self.address.page),
+                    )
+                });
+                WebEffect::Ignore
+            }
             // **The download is already cancelled** — the engine could not be
             // asked later. What is decided here is what happens instead, and
             // the rule is 方案 §0's: hand over a URL that can be replayed, and
@@ -2310,7 +2456,26 @@ impl WebSeat {
                 // The visual first: the controller is told where to render
                 // before it is told to do anything at all.
                 compositor.attach_web_visual(self.address.page)?;
-                self.host.install(compositor, self.address.page)?;
+                // **What this controller actually carries, recorded rather than
+                // assumed** (R2-16). A build that would not take one of the
+                // switches or one of the gates says so here, and the seat is
+                // the thing that then refuses a local file — see
+                // [`WebSeat::issue`].
+                let report =
+                    self.host
+                        .install(compositor, self.address.page, self.machine.generation())?;
+                self.guards = report.guards;
+                if !report.unapplied.is_empty() {
+                    let named = report
+                        .unapplied
+                        .iter()
+                        .map(|setting| setting.api())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    outcomes.push(WebOutcome::Fault(format!(
+                        "this WebView2 build would not take {named}"
+                    )));
+                }
                 // **A visual that has just joined the tree has not been placed**
                 // — whatever the floor under it was told. The cache speaks for
                 // the pair, so the pair changing is what clears it, and this is
@@ -2446,6 +2611,20 @@ impl WebSeat {
         minted: &Mint,
         outcomes: &mut Vec<WebOutcome>,
     ) -> Result<Option<String>, String> {
+        // **A local file is not opened on an engine that cannot police it**
+        // (R2-16). The gates are what make a previewed document a document
+        // rather than a program with the reader's disk under it, so a build
+        // that could not be given them opens no file at all — and says which
+        // one it could not be given, because "this did not work" and "your
+        // WebView2 is too old to do this safely" are two different things to
+        // the person looking at the empty pane.
+        if matches!(minted, Mint::File(_)) && !self.guards.all_stand() {
+            self.fault = Some(WebFault::GuardsUnavailable {
+                detail: self.guards.missing().join(", "),
+            });
+            outcomes.push(WebOutcome::Refused(url.to_owned()));
+            return Ok(None);
+        }
         let verdict = if *minted == Mint::Nothing {
             navigation_starting(url, &Mint::Nothing)
         } else {
@@ -2515,6 +2694,11 @@ impl WebSeat {
     /// the two mistakes.
     fn the_engine_did_not_start(&mut self, detail: String, outcomes: &mut Vec<WebOutcome>) {
         self.engine_owes_an_answer = None;
+        // **And the machine hears it too** (R2-13). The card this raises has
+        // one verb and the verb is `WebMachine::restart`, which does nothing
+        // from any state but `Failed` — so a card raised without this line was
+        // a button that could be pressed and could not fire.
+        self.machine.the_engine_did_not_start();
         self.fault = Some(if bt_platform::webview2_runtime_version().is_err() {
             WebFault::RuntimeMissing {
                 detail: detail.clone(),
@@ -3284,11 +3468,24 @@ impl WebSeat {
     /// The flash has stood its duration: the foot goes back to being the hover
     /// line, and the slot is emptied rather than left for the reader to ignore.
     ///
-    /// See `Runtime::advance_page_zoom_said` for why emptying it is the point: a
+    /// See `Runtime::advance_page_foot_clocks` for why emptying it is the point: a
     /// slot that stayed full would hand the event loop a wake-up already in the
     /// past, on every turn, forever.
     pub(crate) fn forget_the_zoom_it_said(&mut self) {
         self.zoom_said = None;
+    }
+
+    /// **When this page last had a dialog turned away** (R1-21), for the band
+    /// that says so. The zoom's two accessors said about the other thing on the
+    /// same clock.
+    pub(crate) fn dialog_said(&self) -> Option<Instant> {
+        self.dialog_said
+    }
+
+    /// And the slot emptied when its duration is up, for
+    /// `forget_the_zoom_it_said`'s reason exactly.
+    pub(crate) fn forget_the_dialog_it_said(&mut self) {
+        self.dialog_said = None;
     }
 
     /// Search this page for `term`. The counts come back as
@@ -4189,10 +4386,13 @@ mod rehost_address_tests {
             machine: WebMachine::new(),
             host: bt_platform::WebHost::new(
                 Box::new(|_| bt_platform::WebNavigationVerdict::Proceed),
+                Box::new(|_| bt_platform::WebRequestVerdict::Allow),
                 Box::new(|| {}),
             ),
             mint: Rc::new(RefCell::new(Mint::Nothing)),
             claims: Vec::new(),
+            guards: bt_platform::WebGuards::none(),
+            dialog_said: None,
             waiting: None,
             engine_owes_an_answer: None,
             wanted: WebPresence::Hidden,
@@ -4216,6 +4416,152 @@ mod rehost_address_tests {
             favicon_changed_again: false,
             zoom_said: None,
         }
+    }
+
+    /// RED — **an engine that never answered leaves a card whose button
+    /// works** (R2-13, §7.36).
+    ///
+    /// Three doors say the engine is not coming up, and two of them went
+    /// through the state machine on their way: the environment callback and the
+    /// controller callback arriving with an error each set `Failed`. The third
+    /// — the start deadline passing with no callback at all — only drew the
+    /// card. The card's one verb is `WebMachine::restart`, which answers
+    /// `Ignore` from anywhere but `Failed`, so the seat came up with a card, a
+    /// button, and nothing behind the button for the rest of the session. Gate
+    /// 5 photographed exactly this shape on a machine with no runtime.
+    ///
+    /// RED GATE: take `self.machine.the_engine_did_not_start()` out of
+    /// [`WebSeat::the_engine_did_not_start`] and the second assertion fails —
+    /// which on the machine is a `Retry` that does nothing when it is pressed.
+    #[test]
+    fn a_card_for_an_engine_that_said_nothing_has_a_button_that_can_fire() {
+        let mut seat = detached(SeatAddress {
+            page: page(1, 1),
+            hwnd: hwnd(1),
+        });
+        // The seat has asked for an engine and is waiting on the answer, which
+        // is the state the deadline exists for.
+        let _ = seat.machine.request("https://example.com/");
+        seat.engine_owes_an_answer = Some(Instant::now() - Duration::from_millis(1));
+        let outcomes = seat.engine_that_said_nothing(Instant::now());
+
+        assert!(
+            matches!(seat.fault, Some(WebFault::EngineDidNotStart { .. })),
+            "the card is raised: {:?}",
+            seat.fault
+        );
+        assert_eq!(
+            seat.machine.state(),
+            WebState::Failed,
+            "and the machine is where the card's verb can act"
+        );
+        assert_eq!(
+            seat.machine.restart(),
+            WebEffect::RebuildFromScratch,
+            "so the button on it actually asks for an engine again"
+        );
+        assert!(
+            !outcomes.is_empty(),
+            "and the reason is on its way to the log either way"
+        );
+    }
+
+    /// RED — **a seat is not left with nothing when its browser exits under it**
+    /// (R2-13).
+    ///
+    /// One event name over two entirely different events. Under a *closing*
+    /// seat `BrowserProcessExited` is the end of the wait for the user data
+    /// folder, which is the meaning the plan wrote down. Under a live one it is
+    /// the browser this page is drawn by having gone — and that ended in
+    /// `finish_cleanup`, which answers `Ignore` for a seat that is not closing.
+    /// The result was a pane of ground colour with a machine that still
+    /// believed it was `Ready`: no rebuild, no card, and no way back.
+    ///
+    /// RED GATE: put `finish_cleanup` back as the whole of
+    /// [`WebMachine::on_browser_process_exited`] and the first assertion fails.
+    #[test]
+    fn a_browser_that_exits_under_a_live_seat_is_rebuilt_and_not_ignored() {
+        let mut machine = WebMachine::new();
+        let _ = machine.request("https://example.com/");
+        assert_eq!(machine.on_environment(1, true), WebEffect::CreateController);
+        assert_eq!(machine.on_controller(1, true), WebEffect::InstallEvents);
+        let _ = machine.on_events_installed(1);
+        assert_eq!(machine.state(), WebState::Ready);
+
+        assert_eq!(
+            machine.on_browser_process_exited(),
+            WebEffect::RebuildFromScratch,
+            "the browser under this page is gone, which is news and not bookkeeping"
+        );
+
+        // And the meaning the plan named is untouched: under a closing seat the
+        // same event is still the folder being let go of, exactly once.
+        let mut closing = WebMachine::new();
+        let _ = closing.request("https://example.com/");
+        assert_eq!(closing.close(), WebEffect::AwaitBrowserExitBeforeCleanup);
+        assert_eq!(
+            closing.on_browser_process_exited(),
+            WebEffect::ReleaseUserDataFolder
+        );
+        assert_eq!(
+            closing.on_browser_process_exited(),
+            WebEffect::Ignore,
+            "a second door opening changes nothing"
+        );
+    }
+
+    /// RED — **a local file is not opened on an engine that cannot police it**
+    /// (R2-16).
+    ///
+    /// The gates are what make a previewed document a document rather than a
+    /// program with the reader's own disk under it. A build of the runtime that
+    /// would not take them was, until this ticket, a build that opened the file
+    /// anyway — with the one door the seat had left being the main frame's, and
+    /// the review's whole finding being that the main frame is not where a
+    /// document reaches.
+    ///
+    /// RED GATE: drop the `guards.all_stand()` check from [`WebSeat::issue`] and
+    /// the first assertion fails.
+    #[test]
+    fn a_seat_whose_gates_did_not_attach_opens_no_local_file() {
+        let mut seat = detached(SeatAddress {
+            page: page(1, 1),
+            hwnd: hwnd(1),
+        });
+        let minted = Mint::file(Path::new(r"D:\tmp\page\report.html")).expect("a local file");
+        let target = minted.target().expect("a minted URL").to_owned();
+        let mut outcomes = Vec::new();
+
+        assert_eq!(
+            seat.issue(&target, &minted, &mut outcomes),
+            Ok(None),
+            "a seat with no gates hands the engine nothing"
+        );
+        assert!(
+            matches!(seat.fault, Some(WebFault::GuardsUnavailable { .. })),
+            "and says so on a card of its own: {:?}",
+            seat.fault
+        );
+        assert_eq!(
+            seat.fault.as_ref().and_then(WebFault::detail),
+            Some("ScriptDialogOpening, FrameNavigationStarting, WebResourceRequested"),
+            "naming the gates, because that is the fact a reader can act on"
+        );
+
+        // With the gates standing the same file goes through, which is what
+        // keeps this a rule about the engine rather than a refusal of local
+        // files.
+        seat.guards = bt_platform::WebGuards {
+            script_dialogs: true,
+            frame_navigation: true,
+            resource_requests: true,
+        };
+        seat.fault = None;
+        assert_eq!(
+            seat.issue(&target, &minted, &mut outcomes),
+            Ok(Some(target.clone()))
+        );
+        assert!(seat.fault.is_none());
     }
 
     /// RED — **a closing seat is not audible** (user ruling 2026-08-27; route B
@@ -5606,11 +5952,20 @@ mod refusal_card_tests {
     use super::rehost_address_tests::{detached, hwnd, page};
     use super::*;
 
+    /// A seat whose controller carries every gate — which is what an install on
+    /// a current runtime answers, and what makes these tests about the *door*
+    /// rather than about the engine that could not be given one (R2-16).
     fn seat() -> WebSeat {
-        detached(SeatAddress {
+        let mut seat = detached(SeatAddress {
             page: page(1, 1),
             hwnd: hwnd(0x41),
-        })
+        });
+        seat.guards = bt_platform::WebGuards {
+            script_dialogs: true,
+            frame_navigation: true,
+            resource_requests: true,
+        };
+        seat
     }
 
     /// The three addresses gate 5 pointed `BT_WEB_DEV` at, and the scheme each
