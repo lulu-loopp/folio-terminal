@@ -855,6 +855,17 @@ impl TerminalAdapter {
         self.processor.sync_timeout().sync_timeout()
     }
 
+    /// How many bytes an open DEC 2026 block is holding back — the block's own
+    /// output, waiting for the ESU or the timeout that writes it to the grid.
+    ///
+    /// It is the block's answer to the question `feed` answers with
+    /// `!bytes.is_empty()`: these are the bytes that will reach the screen when
+    /// the block commits, and a block holding none of them cannot change a cell.
+    /// Zero while no block is open.
+    pub fn synchronized_update_pending_bytes(&self) -> usize {
+        self.processor.sync_bytes_count()
+    }
+
     /// Commit a synchronized update whose ESU terminator did not arrive before its deadline.
     pub fn finish_synchronized_update(&mut self) -> Vec<AdapterEvent> {
         if self.synchronized_update_deadline().is_none() {

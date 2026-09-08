@@ -1871,8 +1871,9 @@ impl DualPlaneSession {
     }
 
     /// **Monotonic count of the moments something could have changed what stands
-    /// on the live screen** — the child's own output, and the reflows a resize
-    /// performs.
+    /// on the live screen** — the child's own output, the release of output it
+    /// asked to have held back ([`Self::finish_synchronized_update`]), and the
+    /// reflows a resize performs.
     ///
     /// It exists for a reader that wants to *not* re-read the grid
     /// (`docs/DESIGN.md` §7.1.6b′ F2's damage gate): comparing one integer
@@ -1893,7 +1894,8 @@ impl DualPlaneSession {
     /// The opposite mistake is the one that matters: a screen that changed
     /// without this moving would be a card frozen on an old picture, and there is
     /// no path to that, because the grid cannot be written except through
-    /// [`Self::feed_at`] or a resize.
+    /// [`Self::feed_at`], the DEC 2026 block one of those feeds opened and
+    /// [`Self::finish_synchronized_update`] closes, or a resize.
     pub fn screen_revision(&self) -> u64 {
         self.screen_revision
     }
@@ -3119,8 +3121,28 @@ impl DualPlaneSession {
         }
         self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
         let primary_reprint_boundary = self.primary_repaint_in_progress;
+        // Releasing the block writes the live grid without a byte arriving, so
+        // the screen's damage counter has to move with it — see
+        // [`Self::screen_revision`], and the two resize paths, which move it for
+        // the same reason. The block's bytes moved it when they *arrived*, on a
+        // frame their cells were still withheld from; without this second move a
+        // reader that re-reads only when the number changes keeps the picture
+        // from before the block for as long as the pane stays quiet afterwards.
+        //
+        // The condition is the block's own held bytes, which is this path's way
+        // of saying what `feed_at` says with `!bytes.is_empty()`: they are what
+        // is about to be written, so a block holding none cannot change a cell.
+        // Conservative in the same direction, and for the same reason — held
+        // bytes that turn out to paint the same picture still move it. The
+        // damage `take_damage` reports below cannot answer this question: it is
+        // deliberately generous about the cursor, so an empty block reports a
+        // damaged row.
+        let held_bytes = self.terminal.synchronized_update_pending_bytes();
         let events = self.terminal.finish_synchronized_update();
         let damage = self.terminal.take_damage();
+        if held_bytes > 0 {
+            self.screen_revision = self.screen_revision.wrapping_add(1);
+        }
         if let Err(error) = self.apply_events(events, observed_at) {
             self.alternate_repaint_snapshot = None;
             self.alternate_repaint_in_progress = false;
@@ -19232,6 +19254,96 @@ mod tests {
         assert!(session.synchronized_update_deadline().is_none());
         assert_eq!(session.terminal().visible_text()[0], "new");
         assert!(!session.finish_synchronized_update(Instant::now()).unwrap());
+    }
+
+    /// A reader keyed to [`DualPlaneSession::screen_revision`], in the smallest
+    /// form that can be wrong the way a focus card can: it re-reads the grid
+    /// only when the number moves (`focus_thumb::Damage::Grid`), so a screen
+    /// rewritten without the number moving leaves it holding an old picture for
+    /// as long as the pane stays quiet.
+    struct RevisionKeyedReader {
+        revision: u64,
+        picture: Vec<String>,
+    }
+
+    impl RevisionKeyedReader {
+        fn new(session: &DualPlaneSession) -> Self {
+            Self {
+                revision: session.screen_revision(),
+                picture: session.terminal().visible_text(),
+            }
+        }
+
+        fn frame(&mut self, session: &DualPlaneSession) {
+            if session.screen_revision() != self.revision {
+                self.revision = session.screen_revision();
+                self.picture = session.terminal().visible_text();
+            }
+        }
+    }
+
+    #[test]
+    fn a_released_synchronized_update_moves_the_screen_revision_like_a_resize() {
+        let mut session = DualPlaneSession::new(nz(16), nz(2));
+        session.feed(b"old").unwrap();
+        session.feed(b"\x1b[?2026h\rnew").unwrap();
+        let held = session.screen_revision();
+        assert_eq!(session.terminal().visible_text()[0], "old");
+
+        assert!(session.finish_synchronized_update(Instant::now()).unwrap());
+
+        assert_eq!(session.terminal().visible_text()[0], "new");
+        assert!(
+            session.screen_revision() > held,
+            "releasing the block rewrote the live grid, so the screen's damage \
+             counter moves with it exactly as a resize's reflow moves it"
+        );
+    }
+
+    #[test]
+    fn a_card_keyed_to_the_screen_revision_sees_a_released_block_on_the_frame_it_lands() {
+        let mut session = DualPlaneSession::new(nz(16), nz(2));
+        session.feed(b"old").unwrap();
+        let mut card = RevisionKeyedReader::new(&session);
+        assert_eq!(card.picture[0], "old");
+
+        // The frame the block is fed on: its bytes have arrived — and moved the
+        // revision, like any other output — but its cells are still withheld, so
+        // the reader correctly re-reads the screen the block has not landed on.
+        session.feed(b"\x1b[?2026h\rnew").unwrap();
+        card.frame(&session);
+        assert_eq!(card.picture[0], "old");
+
+        // The frame the block lands on, with no byte arriving to announce it.
+        assert!(session.finish_synchronized_update(Instant::now()).unwrap());
+        card.frame(&session);
+        assert_eq!(
+            card.picture[0], "new",
+            "a card of a pane using synchronized updates shows the block on the \
+             frame it lands, not one block later"
+        );
+
+        // And a quiet pane afterwards costs the reader nothing.
+        let settled = session.screen_revision();
+        card.frame(&session);
+        assert_eq!(session.screen_revision(), settled);
+    }
+
+    #[test]
+    fn a_synchronized_update_that_commits_nothing_leaves_the_screen_revision_alone() {
+        let mut session = DualPlaneSession::new(nz(16), nz(2));
+        session.feed(b"old\x1b[?2026h").unwrap();
+        let held = session.screen_revision();
+
+        assert!(session.finish_synchronized_update(Instant::now()).unwrap());
+
+        assert_eq!(session.terminal().visible_text()[0], "old");
+        assert_eq!(
+            session.screen_revision(),
+            held,
+            "an empty block rewrites nothing, so there is nothing for a reader \
+             of the revision to come back for"
+        );
     }
 
     #[test]
