@@ -280,7 +280,20 @@ The full list is in `CHANGELOG.md` in the repository.
 
 # Folio 0.2.3-preview
 
-0.2.3 围绕阅读体验：Markdown 排版列更宽，宽表格用滚轮即可横向滚动，带代码或强调的链接文字正常显示为链接，终端窗格只在可滚动时才显示滚动条。设置中两行资源管理器选项合为一行开关，四个画中画槽位各有自己的行和快捷键录制按钮，中英文界面经过逐条审读。
+0.2.3 围绕读懂窗格正在显示的内容，以及此前被遗漏的窗格。Command Prompt 有了命令条，并报告所在目录；窗口的第一个 WSL 标签页与之后每一个一样完整。标签页卡片跟上窗格的变化，无论其中运行哪种 shell，绘制窗格正在显示的一切。Markdown 排版列更宽，宽表格用普通滚轮即可横向滚动，带格式的链接文字正常显示为链接；终端滚动条只在可滚动时才出现，拆分后命令条上的标记仍落在对应命令上。设置中两行资源管理器选项合为一行开关，右键菜单的变更到达已在运行的资源管理器，中英文界面经过母语写作者逐条审读。
+
+## Command Prompt 有了命令条，并报告所在目录
+
+- `cmd.exe` 窗格此前无论运行了多少条命令，命令条都是空的：没有可点击的标记，`Ctrl+Shift+↑`/`↓` 无处可去。现在每个输入行都获得标记，命令条对 `cmd` 会话的导航方式与 `bash` 相同。
+- 窗格报告当前所在目录，标签页和文件列跟随 `cd` 更新，输出中的路径是可点击的链接。
+- 已有的 `PROMPT` 设置不受影响。Folio 在它前面报告，不替换它，自定义的输入行外观不变，从 `cmd` 窗格启动的 `cmd` 不会重复报告。
+- **`cmd` 无法提供的两项信息，Folio 不假装提供。** 标记不带退出码，因为 `PROMPT` 无法读取退出码。`cmd` 也不标记输入行的结束位置，因此 **Command Prompt 窗格中的行内 `$…$` 仍显示为文本而非排版公式**。输出中的独立公式和图片预览照常显示。
+- 配置页在 Command Prompt 行上以中英文标明这一点："Prompt marks, directory and hyperlinks; no exit codes"。
+
+## 窗口的第一个 WSL 标签页与之后每一个一样完整
+
+- WSL 窗格的标记、工作目录和可点击路径来自交给登录 shell 的一段脚本。此前每次运行的第一个 WSL 窗格在 Folio 得知登录 shell 之前就已启动，因此没有脚本：命令条上没有标记，标签页和文件列中没有目录，`Ctrl+Shift+↑`/`↓` 无处可去，卡片在命令运行时不刷新。第二个 WSL 标签页正常工作——但默认配置是 WSL 的机器上，第一个窗格就是唯一的窗格。
+- 现在每个 WSL 窗格都以同样方式整合，包括第一个，因为窗格向自己的发行版询问登录 shell，不再等待来得太迟的答案。登录 shell 是 zsh 或 fish 的发行版照旧保持原样。
 
 ## Markdown 文档使用窗口给出的宽度
 
@@ -308,16 +321,31 @@ The full list is in `CHANGELOG.md` in the repository.
 - 按下命令条最新的标记，此前会落到该命令输出的中间，输入行在窗格上沿之外，在窗格经过拆分或调整大小后才出现。
 - 标记现在记录它所在的整个折行——折行是重排时唯一保留的单位——重排后重新放到该行上，无论该行还在屏幕内还是已滚出。拖动边缘是一连串重排，每一步都带着标记。某条折行在重排中确实消失时，其标记从命令条中移除，而非指向命令从未所在的位置。
 
+## 标签页卡片跟上窗格的变化，无论其中运行哪种 shell
+
+- 卡片列中的卡片此前在不同 shell 中的刷新频率不同。PowerShell 和 Git Bash 的卡片跟上每一行输出，Command Prompt 的卡片到下一次输入行才更新，WSL 的卡片在窗口碰巧重绘时才更新：一段输出的末尾几行可能一直停在卡片上，直到指针移过去才被复现。
+- 卡片现在因为窗格内容变化而刷新，对每种 shell 都一样。开销不变：卡片每秒最多重绘十次，看不到的卡片——标签列折叠或标签页滚出列表时——不消耗任何帧。
+
+## 标签页卡片绘制窗格的完整内容
+
+- 窗格滚动后被拉高时，屏幕上方会显示历史输出行。卡片此前只读取当前屏幕，因此顶部画了九行后其余部分留空，而窗格显示二十四行。
+- 卡片现在读取与窗格相同的内容，从顶部填充，是窗格实际显示内容的映射。该问题在 Git Bash 与 PowerShell 7 并排时被报告，但与 shell 无关：窗口拉高后任何窗格都处于同一状态。
+
 ## 设置中两行资源管理器选项合为一行开关
 
 - `Explorer context menu` 和 `First page of that menu` 实为同一个问题的两行，第二行离开第一行没有意义。
 - 现在只有一行，和页面上其他开关一样只分开和关。**开启的含义是这台 Windows 所能做到的全部**：在 Windows 11 上且 `folio.msix` 与 `folio.exe` 同目录时，将 "Open Folio here" 放入**显示更多选项**并注册将 "Open in Folio" 放到**第一页**的包；其他情况下只写入右键菜单项。关闭时撤回已有的条目。
 - 因为开启在不同机器上含义不同，行下方的说明文字会告知具体行为——在 Windows 10 上不提第一页，因为它只有一层菜单。存储位置不变：从 **设置 > 应用 > 已安装的应用** 中移除该包，开关随之变化。
 
-## 四个画中画槽位各有一行，各有快捷键
+## 新的资源管理器菜单项无需重新登录即可生效
 
-- 此前四个槽位共用一行，显示 `Not set`，没有可按的按钮，夹在带录制按钮的行和两行灰色 readline 保留键之间——无从判断它属于哪一种。它哪种都不是：这些快捷键一直可以自定义。
-- `Summon picture in picture 1` 到 `4` 现在各占一行，各有快捷键、录制按钮和 `↺`。录制一个已被其他行占用的快捷键会被拒绝，并提供接管选项；`Restore all defaults` 清空全部四个。`keybindings.json` 不受影响：此变更前后它都列出四个槽位。
+- 资源管理器启动时读取一次右键菜单注册表，此后使用缓存。Folio 此前从未通知系统有变更，因此开启资源管理器选项后，即使注册成功且可验证存在，仍可能在下一次登录前不可见。Folio 现在在每次变更后发送通知，无论成功或失败，已在运行的资源管理器立刻显示 "Open Folio here"。
+- Windows 11 第一页由打包系统管理，Windows 不保证对该通知作出刷新。因此当 Folio 在本次运行中注册了包，设置中的行和注册后的提示都会说明这一点，并给出一定有效的步骤：注销再登录。Folio 不会重启资源管理器。
+
+## 画中画行从快捷键页暂时移除，待该窗口实现后恢复
+
+- 四行画中画快捷键此前为一个 Folio 还无法呼出的窗口提供按键录制：可以录入快捷键，按下后无事发生，唯一的说明文字在录入完成后才出现。能设置却无法使用的快捷键不是设置，因此这些行从页面和 `docs/shortcuts.md` 中移除。
+- 已录入的快捷键不会丢失。`keybindings.json` 仍列出四个槽位，写入其中的快捷键原样保留，**Restore all defaults** 仍可清除。这些行会在该窗口实现之日带着名称和录制按钮回来。
 
 ## 界面文字经过母语写作者审读
 
@@ -360,7 +388,7 @@ The full list is in `CHANGELOG.md` in the repository.
 - **版面重排时，两张网页预览可能互相遮挡约 200 毫秒。** 静止的窗格不会重叠，拖动分隔条时也不会。
 - **曾有报告称窗口移到第二台显示器后上半部分绘制为黑色**，未能复现。
 - **`.webm` 需要 Microsoft Store 中的 VP9 或 AV1 视频扩展**。出厂 Windows 两者皆无，缺少时既无静止画面也无播放。
+- **标签页以 shell 而非所在目录命名**，在 PowerShell、Git Bash 和 WSL 窗格中。窗格头部和文件列都显示目录名。
+- **Unix 风格路径不是链接。** Git Bash 或 WSL 窗格中打印的 `D:\Demo\figure.png` 可点击；同一文件写作 `/d/Demo/figure.png` 或 `/mnt/d/Demo/figure.png` 则不可点击。
 
 完整列表见仓库中的 `CHANGELOG.md`。
-
-<!-- zh: opus46 — mirror the new English sections: "Command Prompt has a command rail, and knows which folder it is in"; "The first WSL tab of a window is integrated like every one after it"; "A tab's card keeps up with its pane, whatever shell is inside it"; "A tab's card fills with the pane's own history"; "A new Explorer menu entry shows up without a sign-in"; "The picture-in-picture rows are off the Shortcuts page until that window exists", which replaces 四个画中画槽位各有一行，各有快捷键. Also mirror the rewritten opening paragraph and the two new Known issues lines (a tab named after its shell rather than its folder; a Unix-style path is not a link). -->
