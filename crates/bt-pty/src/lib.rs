@@ -348,6 +348,41 @@ fn pty_dump_chunks_path(path: &Path) -> PathBuf {
     PathBuf::from(chunks)
 }
 
+/// How long a pane's shutdown waits for a child it has already killed.
+///
+/// A `TerminateProcess` a healthy process answers in microseconds; what this
+/// bounds is the one that is inside a driver call the kernel will not interrupt.
+/// Two seconds is long enough that no ordinary shutdown ever reaches the end of
+/// it and short enough that a window closing does not look wedged, and reaching
+/// the end costs nothing: the child is in a job object whose closing kills it
+/// and everything it started.
+const CHILD_EXIT_BUDGET: Duration = Duration::from_secs(2);
+
+/// How often the wait above asks.
+const CHILD_EXIT_POLL: Duration = Duration::from_millis(2);
+
+/// **Ask `reaped` until it answers, and stop asking after `budget`.**
+///
+/// The bounded shape of a wait on a child (review row R2-6), written as a
+/// function of a closure rather than of a `Child` so that the bound itself can
+/// be tested without a process: `None` is "it had not ended when the budget ran
+/// out", which is a fact the caller acts on rather than an error.
+fn reap_within(
+    budget: Duration,
+    mut reaped: impl FnMut() -> Option<ExitStatus>,
+) -> Option<ExitStatus> {
+    let deadline = Instant::now() + budget;
+    loop {
+        if let Some(status) = reaped() {
+            return Some(status);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(CHILD_EXIT_POLL);
+    }
+}
+
 fn read_pty_output(
     reader: &mut dyn Read,
     output: &OutputRing,
@@ -370,9 +405,29 @@ fn read_pty_output_without_dump(reader: &mut dyn Read, output: &OutputRing, wake
             Ok(count) => count,
         };
         if output.push(buffer[..count].to_vec()).is_err() {
+            drain_to_the_end(reader);
             break;
         }
         wake();
+    }
+}
+
+/// Read what is left on the pipe and **throw it away**, until the pipe ends.
+///
+/// Called the moment there is nowhere to put the bytes — the ring has been
+/// closed, which happens once, at shutdown — and it is not politeness (review
+/// row R2-6). A reader that simply stopped would leave the console host's flush
+/// with nobody to read it, and `ClosePseudoConsole` does not return until that
+/// flush has been consumed: the thread closing the pane would wait on a host
+/// waiting on a pipe waiting on this thread. So the pipe goes on being drained,
+/// into nothing, until the host closes its end — which is what the pseudoconsole
+/// being closed does — and then this returns.
+fn drain_to_the_end(reader: &mut dyn Read) {
+    let mut buffer = [0_u8; READER_CHUNK_BYTES];
+    while let Ok(count) = reader.read(&mut buffer) {
+        if count == 0 {
+            break;
+        }
     }
 }
 
@@ -401,6 +456,7 @@ fn read_pty_output_with_dump(
             return;
         }
         if output.push(buffer[..count].to_vec()).is_err() {
+            drain_to_the_end(reader);
             break;
         }
         wake();
@@ -458,6 +514,11 @@ pub struct PtyCommand {
     pub working_directory: Option<PathBuf>,
     pub environment: Vec<(OsString, OsString)>,
     declare_color_support: bool,
+    /// A command line the program parses for itself, written into the launcher's
+    /// command line verbatim — see [`PtyCommand::interpreter_line`]. `None` for
+    /// every program that reads argv, which is all of them but a command
+    /// interpreter.
+    interpreter_line: Option<OsString>,
 }
 
 impl PtyCommand {
@@ -468,11 +529,25 @@ impl PtyCommand {
             working_directory: None,
             environment: Vec::new(),
             declare_color_support: false,
+            interpreter_line: None,
         }
     }
 
     pub fn arg(mut self, argument: impl Into<OsString>) -> Self {
         self.arguments.push(argument.into());
+        self
+    }
+
+    /// Hand this program a command line it parses for **itself**, after the
+    /// arguments already given.
+    ///
+    /// The one caller is [`through_the_interpreter`], which quotes a batch
+    /// file's line by `cmd.exe`'s rules; the launcher writes it through as it
+    /// stands rather than quoting it a second time by argv's, which `cmd` does
+    /// not read. See that function for the rule and for what goes wrong without
+    /// it (review row R2-8).
+    pub fn interpreter_line(mut self, line: impl Into<OsString>) -> Self {
+        self.interpreter_line = Some(line.into());
         self
     }
 
@@ -984,10 +1059,40 @@ pub struct ShellFallback {
 /// `%ComSpec%` first, because that is the interpreter this machine says it has,
 /// and a plain `cmd.exe` after it — resolved by `CreateProcess` off `PATH` —
 /// for a machine whose environment has lost the variable.
+///
+/// # `/s /c` and a line quoted by cmd's rules, not by argv's (review row R2-8)
+///
+/// What follows `/c` is **not argv**. `cmd.exe` reads the rest of the command
+/// line itself, and its rules are its own: a backslash escapes nothing, and
+/// `&`, `|`, `<`, `>` and `^` are syntax everywhere except inside a pair of
+/// double quotes. The launcher's ordinary quoting adds quotes only around an
+/// argument holding a space, a tab or a quote, so a path with none of those and
+/// an `&` in it — `C:\tools\a&b.cmd` — arrived at `cmd` as two commands, the
+/// second of them whatever stood after the ampersand. The arguments are the
+/// reader's own profile rows rather than anybody else's input, which is what
+/// keeps this a correctness fault rather than an injection; it is the same
+/// class as the batch-file quoting flaw published in 2024.
+///
+/// So the line is built here, by cmd's rules, and handed through
+/// [`PtyCommand::interpreter_line`] so that nothing quotes it a second time:
+///
+/// * every token — the script and each of its arguments — is wrapped in a pair
+///   of double quotes, which is the whole of what makes a metacharacter
+///   ordinary to `cmd`. **Not caret escapes**: a `^` inside a quoted region is
+///   a literal caret, so caret-escaping what is already quoted would put the
+///   caret in the argument.
+/// * the whole payload is wrapped in one more pair, and `/s` is passed with
+///   `/c`. `cmd /?` documents `/s` as the switch under which the first and last
+///   quote characters are stripped and the rest of the line is used as it
+///   stands — without it the outcome depends on cmd's "exactly two quote
+///   characters and no special character between them" rule, which is a rule
+///   about the line a caller happens to have.
+/// * a double quote inside a token is doubled, which is how a quoted region
+///   spells one.
 fn through_the_interpreter(
     program: &OsStr,
     args: &[OsString],
-) -> Option<(OsString, Vec<OsString>)> {
+) -> Option<(OsString, Vec<OsString>, OsString)> {
     let script = Path::new(program).extension().is_some_and(|extension| {
         extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
     });
@@ -995,11 +1100,62 @@ fn through_the_interpreter(
         return None;
     }
     let interpreter = std::env::var_os("ComSpec").unwrap_or_else(|| OsString::from("cmd.exe"));
-    let mut wrapped = Vec::with_capacity(args.len() + 2);
-    wrapped.push(OsString::from("/c"));
-    wrapped.push(program.to_os_string());
-    wrapped.extend(args.iter().cloned());
-    Some((interpreter, wrapped))
+    let switches = vec![OsString::from("/s"), OsString::from("/c")];
+    Some((interpreter, switches, interpreter_line(program, args)))
+}
+
+/// The line `cmd.exe` is handed after `/s /c`, quoted by cmd's own rules.
+///
+/// See [`through_the_interpreter`] for why each of the three quoting steps is
+/// there. The result always begins and ends with the outer pair `/s` strips.
+fn interpreter_line(program: &OsStr, args: &[OsString]) -> OsString {
+    let mut line = OsString::from("\"");
+    quoted_for_cmd(program, &mut line);
+    for argument in args {
+        line.push(" ");
+        quoted_for_cmd(argument, &mut line);
+    }
+    line.push("\"");
+    line
+}
+
+/// One token inside a cmd command line: wrapped in quotes, with any quote of
+/// its own doubled.
+///
+/// Written over the units the operating system actually stores rather than over
+/// a `str`, so that a token with no Unicode spelling is quoted by the same rule
+/// as every other one instead of being passed through unexamined.
+#[cfg(windows)]
+fn quoted_for_cmd(token: &OsStr, line: &mut OsString) {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    const QUOTE: u16 = b'"' as u16;
+    let mut quoted = vec![QUOTE];
+    for unit in token.encode_wide() {
+        if unit == QUOTE {
+            quoted.push(QUOTE);
+        }
+        quoted.push(unit);
+    }
+    quoted.push(QUOTE);
+    line.push(OsString::from_wide(&quoted));
+}
+
+/// The same rule where there is no `cmd.exe` to quote for, so that this module
+/// goes on compiling off Windows.
+#[cfg(not(windows))]
+fn quoted_for_cmd(token: &OsStr, line: &mut OsString) {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let mut quoted = vec![b'"'];
+    for byte in token.as_bytes() {
+        if *byte == b'"' {
+            quoted.push(b'"');
+        }
+        quoted.push(*byte);
+    }
+    quoted.push(b'"');
+    line.push(OsString::from_vec(quoted));
 }
 
 impl PtySession {
@@ -1136,19 +1292,21 @@ impl PtySession {
         // **A batch file is a program the user can run and not a program
         // `CreateProcess` can start**, so the one that can is put in front of
         // it. See [`through_the_interpreter`].
-        let (started, args) = match through_the_interpreter(&program, args) {
-            Some(wrapped) => wrapped,
-            None => (program.clone(), args.to_vec()),
+        let (started, args, line) = match through_the_interpreter(&program, args) {
+            Some((interpreter, switches, line)) => (interpreter, switches, Some(line)),
+            None => (program.clone(), args.to_vec(), None),
+        };
+        let command = args.iter().fold(
+            PtyCommand::interactive_shell(started),
+            |command, argument| command.arg(argument),
+        );
+        let command = match line {
+            Some(line) => command.interpreter_line(line),
+            None => command,
         };
         let command = environment
             .iter()
-            .fold(
-                args.iter().fold(
-                    PtyCommand::interactive_shell(started),
-                    |command, argument| command.arg(argument),
-                ),
-                |command, (key, value)| command.env(key, value),
-            )
+            .fold(command, |command, (key, value)| command.env(key, value))
             .working_directory(working_directory.clone());
         match Self::spawn(command, size, wake.clone()) {
             Ok(session) => Ok(session),
@@ -1201,6 +1359,10 @@ impl PtySession {
         }
         for (key, value) in environment {
             builder.env(key, value);
+        }
+        #[cfg(windows)]
+        if let Some(line) = command.interpreter_line {
+            builder.set_interpreter_line(line);
         }
         let child = pair.slave.spawn_command(builder).map_err(backend)?;
         drop(pair.slave);
@@ -1332,6 +1494,11 @@ impl PtySession {
     /// The answer is **remembered** ([`Self::exited`]) rather than handed over: a child that has
     /// ended goes on having ended, so the first ask reaps and records, and every ask after it
     /// reads what was recorded.
+    ///
+    /// **The child object itself is kept**, and that is the job object's lifetime rather than a
+    /// missed tidy-up (review row R2-6): closing it kills whatever the pane started and has not
+    /// ended, and the moment a pane's *shell* exits is not the moment the pane is over. So the
+    /// handle is let go by [`Self::shutdown`], which is where the pane is.
     pub fn try_wait(&mut self) -> Result<Option<ExitStatus>, PtyError> {
         if let Some(status) = self.exited.as_ref() {
             return Ok(Some(status.clone()));
@@ -1341,7 +1508,6 @@ impl PtySession {
         };
         let status = child.try_wait()?;
         if status.is_some() {
-            self.child = None;
             self.exited = status.clone();
         }
         Ok(status)
@@ -1365,7 +1531,14 @@ impl PtySession {
                 Some(status)
             } else {
                 child.kill()?;
-                Some(child.wait()?)
+                // **Bounded** (review row R2-6). This used to be
+                // `WaitForSingleObject(…, INFINITE)` on the window's own thread,
+                // one call after a `TerminateProcess` that a child inside an
+                // uninterruptible kernel wait does not have to answer. A window
+                // closing a pane may not be made to wait for a driver, and the
+                // job object below is what makes the wait's ending safe: what
+                // has not exited by then is killed when the job handle closes.
+                reap_within(CHILD_EXIT_BUDGET, || child.try_wait().ok().flatten())
             }
         } else {
             // Nothing to reap because a `try_wait` already did, and it wrote down what it found:
@@ -1373,8 +1546,19 @@ impl PtySession {
             self.exited.clone()
         };
         self.exited = status.clone();
-        self.master.take();
+        // **The ring is closed before the pseudoconsole is** (review row R2-6).
+        // `ClosePseudoConsole` — which is what dropping the master ends up
+        // calling — does not return until the host has flushed its output and
+        // somebody has read it, and the only thread reading it is the reader
+        // below, which pushes into this ring and *blocks* when the ring is full.
+        // A pane closed while a child was flooding a full ring therefore had the
+        // window thread waiting on the host, the host waiting on the pipe, and
+        // the pipe waiting on a reader that was waiting on the window thread.
+        // Closing the ring first releases the reader, which goes on draining the
+        // pipe and discarding what it reads (see [`read_pty_output`]) until the
+        // pipe ends, so the flush the host is waiting for can finish.
         self.output.close();
+        self.master.take();
         if let Some(reader) = self.reader.take() {
             reader.join().map_err(|_| PtyError::ReaderPanicked)?;
         }
@@ -2759,18 +2943,19 @@ mod tests {
             r"C:\Users\dev\AppData\Roaming\npm\claude.cmd",
             r"D:\x\go.BAT",
         ] {
-            let (started, wrapped) = through_the_interpreter(OsStr::new(shim), &args)
+            let (started, switches, line) = through_the_interpreter(OsStr::new(shim), &args)
                 .unwrap_or_else(|| panic!("{shim} is a script and needs the interpreter"));
             assert_eq!(started, interpreter);
             assert_eq!(
-                wrapped,
-                vec![
-                    OsString::from("/c"),
-                    OsString::from(shim),
-                    OsString::from("--resume"),
-                ],
-                "the shim's own arguments follow it, and `/c` ends with the \
-                 program rather than leaving a prompt behind"
+                switches,
+                vec![OsString::from("/s"), OsString::from("/c")],
+                "`/c` ends with the program rather than leaving a prompt behind, \
+                 and `/s` says how the line after it is quoted"
+            );
+            assert_eq!(
+                line,
+                OsString::from(format!("\"\"{shim}\" \"--resume\"\"")),
+                "the shim's own arguments follow it, inside the pair `/s` strips"
             );
         }
 
@@ -2788,6 +2973,251 @@ mod tests {
                 "{program} is started as itself"
             );
         }
+    }
+
+    /// PIN — **a registry string handed to Win32 ends in a NUL** (review row
+    /// R2-2).
+    ///
+    /// `ExpandEnvironmentStringsW` reads its source until a NUL, and what the
+    /// registry crate hands the launcher is the value's bytes exactly as
+    /// `RegEnumValueW` reported them — with no terminator added and none
+    /// guaranteed by the registry, whose own documentation warns that a string
+    /// value "may not have been stored with the proper terminating null
+    /// characters". Two of those calls happen on every pane spawn.
+    ///
+    /// The rule lives in the vendored launcher and is pinned here because that
+    /// package is a fork rather than a workspace member: nothing inside it is
+    /// reached by `cargo test --workspace`.
+    ///
+    /// MUTATION: drop the terminator and the call reads past the end of the
+    /// allocation for every value the registry stored without one.
+    #[cfg(windows)]
+    #[test]
+    fn a_registry_string_is_terminated_before_win32_sees_it() {
+        use portable_pty::cmdbuilder::wide_terminated;
+
+        assert_eq!(
+            wide_terminated(&[b'A', 0, b'B', 0]),
+            vec!['A' as u16, 'B' as u16, 0],
+            "a value stored without a terminator gets the one Win32 reads to"
+        );
+        assert_eq!(
+            wide_terminated(&[b'A', 0, 0, 0]),
+            vec!['A' as u16, 0],
+            "a value that already ends in one is not given a second"
+        );
+        assert_eq!(
+            wide_terminated(&[b'A', 0, 0, 0, b'B', 0]),
+            vec!['A' as u16, 0],
+            "a NUL ends the string, whatever the registry stored after it"
+        );
+        assert_eq!(
+            wide_terminated(&[b'A', 0, b'B']),
+            vec!['A' as u16, 0],
+            "a trailing odd byte belongs to no unit"
+        );
+        assert_eq!(wide_terminated(&[]), vec![0], "an empty value still stops");
+    }
+
+    /// PIN — **a pane inherits the environment this window is standing in**
+    /// (review row R2-22).
+    ///
+    /// The launcher reads the machine's two `Environment` registry keys and used
+    /// to write them *over* the process's own environment, which made every pane
+    /// a child of the machine rather than of this window: the `PATH` the
+    /// launching shell exported was discarded, so the program the window
+    /// resolved off `PATH` (`crate::shell`, `bt_app::profiles`) and the program
+    /// the child found under the same name could be two different files. The
+    /// registry is still read — a variable added through System Properties after
+    /// this window started belongs in a pane opened afterwards — but it fills
+    /// gaps and only gaps.
+    ///
+    /// MUTATION: `insert` instead of `or_insert` in the launcher's fold and this
+    /// is the machine's `PATH` rather than this process's.
+    #[cfg(windows)]
+    #[test]
+    fn a_pane_inherits_the_path_this_process_is_standing_in() {
+        let mine = std::env::var_os("PATH").expect("this process has a PATH");
+        let base = CommandBuilder::new("dummy");
+        assert_eq!(
+            base.get_env("PATH").map(OsStr::to_os_string),
+            Some(mine),
+            "the environment a spawn starts from is this process's own"
+        );
+    }
+
+    /// PIN — **a name an environment block cannot spell never reaches one**
+    /// (review row R2-22).
+    ///
+    /// A block is a run of `NAME=VALUE` strings with a NUL between them, so the
+    /// first `=` is where a name ends and a NUL is where an entry does. A row
+    /// named `A=B` therefore does not make a variable of that name: it writes
+    /// `A=B=value`, which the child reads as `A` set to `B=value` — a row
+    /// overwriting a variable it does not mention. `crate`'s caller refuses the
+    /// same spellings at the profile row (`bt_app::shell_integration`); this is
+    /// the boundary where the grammar is real.
+    ///
+    /// MUTATION: write the entry anyway and the assertion below is a profile row
+    /// renaming the variable beside it.
+    #[cfg(windows)]
+    #[test]
+    fn an_environment_block_refuses_a_name_it_cannot_spell() {
+        use portable_pty::cmdbuilder::a_block_can_carry;
+
+        assert!(a_block_can_carry(OsStr::new("PATH"), OsStr::new("C:\\")));
+        assert!(
+            a_block_can_carry(OsStr::new("PATH"), OsStr::new("a=b")),
+            "a value may carry an equals sign; a great many do"
+        );
+        assert!(!a_block_can_carry(OsStr::new("A=B"), OsStr::new("v")));
+        assert!(!a_block_can_carry(OsStr::new("=C:"), OsStr::new("v")));
+        assert!(!a_block_can_carry(OsStr::new(""), OsStr::new("v")));
+        assert!(!a_block_can_carry(OsStr::new("A\u{0}B"), OsStr::new("v")));
+
+        let mut builder = CommandBuilder::new("dummy");
+        builder.env_clear();
+        builder.env("A=B", "renames the next one");
+        builder.env("KEPT", "value");
+        let written = String::from_utf16_lossy(&builder.environment_block());
+        assert!(
+            !written.contains("A=B"),
+            "the block carries no entry it cannot spell: {written:?}"
+        );
+        assert!(written.contains("KEPT=value"), "{written:?}");
+    }
+
+    /// PIN — **an interpreter's own line reaches the command line verbatim**
+    /// (review row R2-8).
+    ///
+    /// MUTATION: send the line through the launcher's argv quoting and every
+    /// quote in it comes out backslash-escaped, which `cmd.exe` does not read as
+    /// an escape at all.
+    #[cfg(windows)]
+    #[test]
+    fn an_interpreter_line_reaches_the_command_line_verbatim() {
+        let mut builder = CommandBuilder::new("C:\\Windows\\System32\\cmd.exe");
+        builder.arg("/s");
+        builder.arg("/c");
+        builder.set_interpreter_line("\"\"C:\\tools\\a&b.cmd\" \"one\"\"");
+        let (_, line) = builder.cmdline().expect("a command line");
+        let line = String::from_utf16_lossy(&line[..line.len() - 1]);
+        assert_eq!(
+            line, "C:\\Windows\\System32\\cmd.exe /s /c \"\"C:\\tools\\a&b.cmd\" \"one\"\"",
+            "the switches are quoted the ordinary way and the line after them is not \
+             quoted at all"
+        );
+    }
+
+    /// PIN — **a shell metacharacter in a batch profile's own path is a
+    /// character and not syntax** (review row R2-8).
+    ///
+    /// `cmd.exe` reads the line after `/c` itself, and `&`, `|`, `<`, `>` and
+    /// `^` are syntax to it everywhere outside a pair of double quotes. Argv
+    /// quoting adds quotes only around a token holding a space, a tab or a
+    /// quote, so `C:\tools\a&b.cmd` — a real spelling, and the reader's own
+    /// profile row — used to reach `cmd` as two commands: run `C:\tools\a`, then
+    /// run `b.cmd`.
+    ///
+    /// MUTATIONS: drop the outer pair and `cmd`'s documented rule strips the
+    /// first quote of the path and the last quote of the line instead, putting
+    /// the ampersand back in the open; quote nothing and the path splits at the
+    /// ampersand again.
+    #[test]
+    fn a_metacharacter_in_a_batch_profiles_path_reaches_cmd_quoted() {
+        for (program, args, expected) in [
+            (r"C:\tools\a&b.cmd", vec![], "\"\"C:\\tools\\a&b.cmd\"\""),
+            (
+                r"C:\tools\a|b.cmd",
+                vec![OsString::from("--flag")],
+                "\"\"C:\\tools\\a|b.cmd\" \"--flag\"\"",
+            ),
+            (
+                r"C:\tools\run.cmd",
+                vec![OsString::from("a^b"), OsString::from("c>d")],
+                "\"\"C:\\tools\\run.cmd\" \"a^b\" \"c>d\"\"",
+            ),
+            (
+                r"C:\tools\run.cmd",
+                vec![OsString::from("say \"hi\"")],
+                "\"\"C:\\tools\\run.cmd\" \"say \"\"hi\"\"\"\"",
+            ),
+        ] {
+            let (_, _, line) = through_the_interpreter(OsStr::new(program), &args)
+                .unwrap_or_else(|| panic!("{program} is a script"));
+            assert_eq!(
+                line,
+                OsString::from(expected),
+                "every token of {program}'s line is inside a pair of quotes"
+            );
+        }
+    }
+
+    /// PIN — **a closed ring does not stop the pipe being drained** (review row
+    /// R2-6).
+    ///
+    /// `ClosePseudoConsole` does not return until the console host's last output
+    /// has been flushed *and read*, and this thread is the only reader. A pane
+    /// shut down while its child was flooding a full ring used to have the ring
+    /// closed to release this thread — and this thread then stopped reading, so
+    /// the flush had nobody to go to and the window thread waited on the host
+    /// for as long as the host waited on the pipe.
+    ///
+    /// MUTATION: `break` instead of draining, and the bytes left on the pipe
+    /// here are the ones the host is waiting to be rid of.
+    #[test]
+    fn a_closed_ring_does_not_stop_the_pipe_being_drained() {
+        struct Pipe {
+            left: usize,
+        }
+        impl Read for Pipe {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let count = buffer.len().min(self.left);
+                self.left -= count;
+                Ok(count)
+            }
+        }
+
+        let ring = OutputRing::new(NonZeroUsize::new(4096).expect("a ring"));
+        ring.close();
+        let mut pipe = Pipe {
+            left: 8 * READER_CHUNK_BYTES,
+        };
+        let wake: OutputWake = Arc::new(|| {});
+        read_pty_output_without_dump(&mut pipe, &ring, &wake);
+        assert_eq!(
+            pipe.left, 0,
+            "the reader read the pipe to its end rather than leaving the host's \
+             flush with nobody to take it"
+        );
+    }
+
+    /// PIN — **a wait on a child that has been killed ends** (review row R2-6).
+    ///
+    /// MUTATION: wait without a bound — which is what `Child::wait` does,
+    /// `WaitForSingleObject(…, INFINITE)` — and a child inside an
+    /// uninterruptible driver call holds the window's own thread for as long as
+    /// it likes, one call after the pane was asked to close.
+    #[test]
+    fn a_shutdown_stops_waiting_for_a_child_that_will_not_end() {
+        let started = Instant::now();
+        let reaped = reap_within(Duration::from_millis(60), || None);
+        let spent = started.elapsed();
+        assert!(reaped.is_none(), "it says the child had not ended");
+        assert!(
+            spent >= Duration::from_millis(60) && spent < Duration::from_secs(5),
+            "it waited its budget and then stopped, not {spent:?}"
+        );
+
+        let mut asks = 0;
+        let reaped = reap_within(Duration::from_secs(30), || {
+            asks += 1;
+            (asks > 2).then(|| ExitStatus::with_exit_code(3))
+        });
+        assert_eq!(
+            reaped.map(|status| status.exit_code()),
+            Some(3),
+            "a child that does end is reported the moment it does"
+        );
     }
 
     #[test]

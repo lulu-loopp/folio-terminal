@@ -4938,10 +4938,6 @@ impl GpuContext {
         self.queue = queue;
         self.format = format;
         self.max_texture_dimension_2d = max_texture_dimension_2d;
-        // The latch is a new one, and that is what says the device is back:
-        // `OnceLock` cannot be un-set, and a context that kept the old one would
-        // refuse every frame it was ever asked for again.
-        self.device_loss = device_loss;
         self.glyphon_cache = glyphon_cache;
         self.atlas = atlas;
         // A fresh packing is not a repair of a fragmented one, so the episode
@@ -4980,6 +4976,20 @@ impl GpuContext {
         for renderer in offscreen {
             renderer.adopt_new_device(self, None)?;
         }
+        // **The latch is replaced last, after every window has adopted** (review
+        // row R2-7). Replacing it is what says the device is back — an
+        // `OnceLock` cannot be un-set, so a context that kept the old one would
+        // refuse every frame it was ever asked for again — and *when* it is
+        // replaced is what says the recovery is over. It used to be installed
+        // before this loop, so a window that failed to adopt left through the
+        // `?` above with the machine already reporting a device: the pilot's
+        // next question was answered "already back", the episode ended, and the
+        // window that had surrendered its swapchain and been given nothing sat
+        // blank for the rest of the run with nothing anywhere saying why. Left
+        // where it now is, that window's failure keeps the old latch set, the
+        // pilot tries the whole rebuild again, and a machine that will not give
+        // a device back reaches the exit that is there for it.
+        self.device_loss = device_loss;
         Ok(())
     }
 
@@ -24436,6 +24446,54 @@ mod tests {
                 ink_pixels(&second.read_back(&gpu).expect("it reads back")),
                 before_second,
                 "a window that never reported the loss is a window the rebuild still owes"
+            );
+        }
+
+        /// **A rebuild that could not give every window a device is not a
+        /// recovery**, and the machine goes on saying so (review row R2-7).
+        ///
+        /// The fresh loss latch is what says the device is back, and it used to
+        /// be installed before the windows adopted. A window that failed to
+        /// adopt then left through the `?` with the latch already replaced: the
+        /// pilot's next question — "is it still lost?" — answered no, the
+        /// episode ended as `AlreadyBack`, and the window that had surrendered
+        /// its swapchain and been given nothing stayed blank for the rest of the
+        /// run with nothing anywhere saying why.
+        ///
+        /// The window here fails to adopt because the format it was made at is
+        /// not the one the rebuilt context carries, which is the same refusal a
+        /// real adapter change can produce and the only one a test can make on
+        /// purpose.
+        ///
+        /// MUTATION: install the latch before the adopt loop again and the
+        /// second assertion is what happens — a machine reporting a device
+        /// while a window of its own has none.
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn a_window_that_could_not_adopt_leaves_the_device_still_lost() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 160, 96, 1.0, FORMAT).expect("a window");
+            // A window the rebuilt context cannot serve. Reached by hand
+            // because every door into this type asks the context first, which is
+            // the point: this is the state a context and a window disagreeing
+            // leaves, not a state a caller can ask for.
+            window.config.format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            assert_ne!(window.config.format, FORMAT);
+
+            gpu.lose_the_device_on_purpose();
+            let outcome = pollster::block_on(
+                gpu.rebuild_after_device_loss(vec![RebuiltWindow::Offscreen(&mut window)]),
+            );
+
+            assert!(
+                matches!(outcome, Err(RenderError::FormatMismatch { .. })),
+                "the window could not adopt: {outcome:?}"
+            );
+            assert!(
+                gpu.device_loss().is_some(),
+                "a rebuild that left a window blank has not recovered anything, and the \
+                 pilot asks this before it decides the episode is over"
             );
         }
     }

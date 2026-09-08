@@ -1,15 +1,23 @@
 use crate::{Child, ChildKiller, ExitStatus};
 use anyhow::Context as _;
 use std::io::{Error as IoError, Result as IoResult};
-use std::os::windows::io::{AsRawHandle, RawHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
 use std::pin::Pin;
 use std::sync::Mutex;
 use std::task::{Context, Poll};
+use std::{mem, ptr};
 use winapi::shared::minwindef::DWORD;
+use winapi::um::jobapi2::{
+    AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+};
 use winapi::um::minwinbase::STILL_ACTIVE;
 use winapi::um::processthreadsapi::*;
 use winapi::um::synchapi::WaitForSingleObject;
 use winapi::um::winbase::INFINITE;
+use winapi::um::winnt::{
+    JobObjectExtendedLimitInformation, HANDLE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
 
 pub mod conpty;
 mod procthreadattr;
@@ -19,9 +27,99 @@ pub use psuedocon::{CONPTY_SIDECAR_VERSION, ConPtySource, conpty_source};
 
 use filedescriptor::OwnedHandle;
 
+/// **A job object holding one pane's child and everything that child starts**
+/// (BetterTerminal, review row R2-6).
+///
+/// A pseudoconsole ends a *session*: closing it tells the console host to go,
+/// and the host's client — the shell — is killed by the terminal beside it. What
+/// neither of those reaches is what the shell itself started. A build left
+/// running, a server, a watcher: each is a grandchild of this process with no
+/// console of its own, and before this it went on running with nothing left to
+/// show it, until the machine was restarted or somebody found it in a task list.
+///
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is the documented way to say that: the
+/// job's processes are terminated when the last handle to it closes, and the
+/// only handle is the one this holds. So the job's life is the pane's, and
+/// closing the pane ends what the pane started.
+///
+/// **It does not fight the console host.** `OpenConsole.exe` is created by the
+/// pseudoconsole implementation and not by this call, so it is never in this
+/// job; what is in it is the client this function launched and its descendants.
+/// A job cannot be joined twice in the same nesting chain, so a machine where
+/// this process is itself inside a job (a packaged app, a debugger, a CI runner)
+/// nests one more level, which Windows 8 and later allow.
+///
+/// **A job that cannot be made or joined is not an error.** The pane is exactly
+/// as good as it was before this existed — the child runs, the terminal works —
+/// so the failure is logged and the field is `None`.
+#[derive(Debug)]
+pub struct Job {
+    /// Held, never read: the job's whole effect is what closing this handle
+    /// does to the processes inside it.
+    _handle: Option<OwnedHandle>,
+}
+
+impl Job {
+    /// Make a job that kills what it holds when it closes, and put `process` in
+    /// it. `process` must be a handle with `PROCESS_SET_QUOTA` and
+    /// `PROCESS_TERMINATE` — which is what `CreateProcessW` hands back.
+    pub fn holding(process: HANDLE) -> Self {
+        // SAFETY: an unnamed job object with default security, whose handle is
+        // owned below and closed exactly once.
+        let handle = unsafe { CreateJobObjectW(ptr::null_mut(), ptr::null()) };
+        if handle.is_null() {
+            log::warn!(
+                "could not create a job object for the child: {}",
+                IoError::last_os_error()
+            );
+            return Self { _handle: None };
+        }
+        // SAFETY: the handle above, owned from here on.
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle as _) };
+
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: the documented information class for this structure, whose
+        // size is passed as the same structure's own.
+        let set = unsafe {
+            SetInformationJobObject(
+                handle.as_raw_handle() as _,
+                JobObjectExtendedLimitInformation,
+                &mut limits as *mut _ as *mut _,
+                mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as DWORD,
+            )
+        };
+        if set == 0 {
+            log::warn!(
+                "could not set the job object's limits: {}",
+                IoError::last_os_error()
+            );
+            return Self { _handle: None };
+        }
+
+        // SAFETY: both handles are this function's own.
+        let assigned =
+            unsafe { AssignProcessToJobObject(handle.as_raw_handle() as _, process as _) };
+        if assigned == 0 {
+            log::warn!(
+                "could not put the child in its job object: {}",
+                IoError::last_os_error()
+            );
+            return Self { _handle: None };
+        }
+
+        Self {
+            _handle: Some(handle),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct WinChild {
     proc: Mutex<OwnedHandle>,
+    /// Closed when this child object is dropped, which kills whatever the child
+    /// started and has not ended. See [`Job`].
+    pub(crate) _job: Job,
 }
 
 impl WinChild {

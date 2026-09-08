@@ -4273,10 +4273,66 @@ mod windows_impl {
         shared: Arc<NotifierShared>,
         /// The toasts still able to route a click, newest last.
         live: std::collections::VecDeque<ToastNotification>,
+        /// **Declared last, and that is the whole of the ordering rule** (review
+        /// row R2-17). Rust drops a struct's fields in declaration order, so
+        /// every interface above is released while the apartment they were made
+        /// in is still standing, and the apartment goes last. A hand-written
+        /// `Drop` said the same thing in a comment and did not do it: it cleared
+        /// `live` and called `CoUninitialize`, and `notifier` — a `ToastNotifier`
+        /// proxy — was released afterwards, by the compiler, into an apartment
+        /// that had already been torn down, on every window close.
+        _apartment: Apartment,
+    }
+
+    /// The single-threaded apartment one object's interfaces live in, given back
+    /// when it drops.
+    ///
+    /// A field rather than a line in a `Drop`, because a field's position in the
+    /// struct is a thing the compiler keeps and a line in a `Drop` is a thing the
+    /// next edit can move. See [`Notifier`]'s own field for the order it buys.
+    pub struct Apartment {
         /// Whether this object's own `CoInitializeEx` counted — `Taskbar`'s
         /// balance rule, and for the same reason.
-        com_balance: bool,
+        balance: bool,
     }
+
+    impl Apartment {
+        /// An apartment guard that balances nothing — it only says, on the
+        /// ledger, when it was let go.
+        ///
+        /// The ordering test's stand-in: it needs a guard whose drop it can see
+        /// in [`apartments_left`] and no `CoInitializeEx` of its own to return.
+        #[cfg(test)]
+        pub fn counted_only() -> Self {
+            Self { balance: false }
+        }
+    }
+
+    impl Drop for Apartment {
+        fn drop(&mut self) {
+            if self.balance {
+                // SAFETY: dropped on the thread that initialised the apartment,
+                // after every interface declared above this field has been
+                // released.
+                unsafe { CoUninitialize() };
+            }
+            APARTMENTS_LEFT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// **How many COM apartments this process has given back through
+    /// [`Apartment`]**, counted whether or not the balance was this object's to
+    /// return.
+    ///
+    /// It is the ledger the ordering test reads: an interface released while
+    /// this number has not moved is an interface released inside its apartment,
+    /// which is the only order COM defines.
+    #[must_use]
+    pub fn apartments_left() -> u64 {
+        APARTMENTS_LEFT.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    static APARTMENTS_LEFT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     impl Notifier {
         /// Claim the identity and open the channel, or say why not.
@@ -4325,7 +4381,9 @@ mod windows_impl {
                     wake: Mutex::new(wake),
                 }),
                 live: std::collections::VecDeque::new(),
-                com_balance,
+                _apartment: Apartment {
+                    balance: com_balance,
+                },
             })
         }
 
@@ -4379,19 +4437,6 @@ mod windows_impl {
                 .lock()
                 .map(|mut queue| std::mem::take(&mut *queue))
                 .unwrap_or_default()
-        }
-    }
-
-    impl Drop for Notifier {
-        fn drop(&mut self) {
-            // SAFETY: dropped on the thread that initialised the apartment. The
-            // toasts and the notifier are released before the apartment they
-            // live in is let go, which is `Taskbar::drop`'s order and the only
-            // one that is defined.
-            self.live.clear();
-            if self.com_balance {
-                unsafe { CoUninitialize() };
-            }
         }
     }
 
@@ -8678,7 +8723,7 @@ impl TaskbarProgress {
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirChange, DirWatch, FilePickKind, FolderPicker, ImagePicker,
     ImeSystemCaret, MathContextMenu, Notifier, SystemSettingsWatch, Taskbar, adopt_parent_console,
-    announce_explorer_menu_change, client_area_animation_enabled, clipboard_text,
+    announce_explorer_menu_change, apartments_left, client_area_animation_enabled, clipboard_text,
     cloaked_from_attribute, current_thread_priority, current_user_registry_string,
     current_user_registry_subkeys, detach_console, documents_directory, dpi_at, exposed_from_probe,
     exposure_probe_points, file_product_version, flash_window, get_dpi_for_window, get_window_rect,
@@ -8809,6 +8854,78 @@ mod portable_priority_tests {
             seen,
             Some(("bt-portable-band-probe".to_owned(), ThreadPriority::Normal)),
             "the thread is named and runs; the band it asked for was simply not taken"
+        );
+    }
+}
+
+/// **The order a COM apartment is given back in.**
+#[cfg(all(test, windows))]
+mod apartment_order_tests {
+    use super::{apartments_left, windows_impl::Apartment};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// PIN — **every interface is released while its apartment is still
+    /// standing** (review row R2-17).
+    ///
+    /// COM defines exactly one order for this and it is not the one a hand
+    /// written `Drop` was keeping: [`super::Notifier`] cleared its toasts and
+    /// called `CoUninitialize`, and the `ToastNotifier` field — a proxy, whose
+    /// release is a call into the apartment — was dropped by the compiler
+    /// *after* that, into an apartment that no longer existed, on every window
+    /// close. The apartment is now a field, declared last, so the compiler keeps
+    /// the order rather than a comment asking for it.
+    ///
+    /// The interface here is a stand-in: what is under test is the guard's
+    /// place in the drop order, and a real `ToastNotifier` would need a toast
+    /// identity registered on the machine running the tests to make one.
+    ///
+    /// MUTATION: put the apartment field first and the recorded number below is
+    /// one higher than the one before — the interface released into an apartment
+    /// already given back.
+    #[test]
+    fn an_interface_is_released_before_the_apartment_it_lives_in() {
+        struct Interface {
+            apartments_when_released: Arc<AtomicU64>,
+        }
+
+        impl Drop for Interface {
+            fn drop(&mut self) {
+                self.apartments_when_released
+                    .store(apartments_left(), Ordering::Relaxed);
+            }
+        }
+
+        /// The same field order [`super::Notifier`] has. Neither field is ever
+        /// read, which is the point: what they are for is the order they are
+        /// dropped in.
+        #[allow(dead_code)]
+        struct Holder {
+            interface: Interface,
+            apartment: Apartment,
+        }
+
+        let seen = Arc::new(AtomicU64::new(u64::MAX));
+        let before = apartments_left();
+        let holder = Holder {
+            interface: Interface {
+                apartments_when_released: Arc::clone(&seen),
+            },
+            // `false`: this test balances no `CoInitializeEx` of its own, and
+            // what it is watching is the order, not the call.
+            apartment: Apartment::counted_only(),
+        };
+        drop(holder);
+
+        assert_eq!(
+            seen.load(Ordering::Relaxed),
+            before,
+            "the interface was released while its apartment was still standing"
+        );
+        assert_eq!(
+            apartments_left(),
+            before + 1,
+            "and the apartment went afterwards"
         );
     }
 }

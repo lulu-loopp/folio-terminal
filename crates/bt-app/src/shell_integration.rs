@@ -482,7 +482,7 @@ pub fn layer_profile_environment(
     mine: &[(String, String)],
 ) {
     for (name, value) in mine {
-        if name.is_empty() {
+        if !a_child_can_be_given(name) {
             continue;
         }
         let name = OsString::from(name);
@@ -495,6 +495,26 @@ pub fn layer_profile_environment(
             None => environment.push((name, value)),
         }
     }
+}
+
+/// **Whether a profile row names a variable a child can actually be given**
+/// (review row R2-22).
+///
+/// An environment block is a run of `NAME=VALUE` strings with a NUL between
+/// them, so the first `=` in an entry is where the name ends and a NUL is where
+/// the entry does. A row named `A=B` therefore does not create a variable called
+/// `A=B`: it writes `A=B=value`, which the child reads as `A` set to `B=value`
+/// — the row silently overwriting a *different* variable than the one it names.
+/// A row whose name carries a NUL ends the block early and takes every entry
+/// after it away from the child.
+///
+/// So such a row is not layered, exactly as a row with an empty name is not, and
+/// [`crate::profiles::Profile::env`] is where that is written down for a reader
+/// of the table. The launcher refuses the same two spellings again at the block
+/// itself (`portable_pty`'s `environment_block`), because that is the boundary
+/// where the grammar is real.
+fn a_child_can_be_given(name: &str) -> bool {
+    !name.is_empty() && !name.contains('=') && !name.contains('\0')
 }
 
 /// Windows environment variable names are case-insensitive, and a profile that
@@ -1469,6 +1489,43 @@ mod tests {
                 .collect(),
             ..row(id)
         }
+    }
+
+    /// PIN — **a profile row whose name an environment block cannot spell sets
+    /// nothing** (review row R2-22).
+    ///
+    /// A block ends a name at its first `=`, so a row named `A=B` does not make
+    /// a variable of that name: it writes `A=B=...`, which the child reads as
+    /// `A` set to `B=...` — the row quietly overwriting a variable it does not
+    /// mention. A name with a NUL in it ends the entry there and takes every
+    /// entry after it away from the child.
+    ///
+    /// MUTATION: layer the row anyway and the first assertion below is `PATH`
+    /// belonging to somebody who typed `PATH=C:\x` into the name box.
+    #[test]
+    fn a_profile_row_naming_something_a_block_cannot_carry_sets_nothing() {
+        assert!(a_child_can_be_given("PATH"));
+        assert!(!a_child_can_be_given(""));
+        assert!(!a_child_can_be_given("A=B"));
+        assert!(!a_child_can_be_given("=C:"));
+        assert!(!a_child_can_be_given("A\0B"));
+
+        let mut environment = vec![(OsString::from("PATH"), OsString::from("C:\\real"))];
+        layer_profile_environment(
+            &mut environment,
+            &[
+                ("PATH=C:\\hijacked".to_owned(), "anything".to_owned()),
+                ("KEPT".to_owned(), "value".to_owned()),
+            ],
+        );
+        assert_eq!(
+            environment,
+            vec![
+                (OsString::from("PATH"), OsString::from("C:\\real")),
+                (OsString::from("KEPT"), OsString::from("value")),
+            ],
+            "the row that cannot be spelled changed nothing, and the one beside it did"
+        );
     }
 
     fn args(command: &ShellCommand) -> Vec<String> {

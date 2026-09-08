@@ -356,7 +356,15 @@ pub struct Profile {
     /// therefore needs no third state to spell "remove": clearing a value box
     /// is that, and it is also what a reader clearing a value box means.
     /// A row with an empty **name** is not a variable at all and never reaches
-    /// a child (`crate::shell_integration::layer_profile_environment`).
+    /// a child (`crate::shell_integration::layer_profile_environment`), and
+    /// **neither does one whose name carries an `=` or a NUL** (review row
+    /// R2-22). An environment block ends a name at its first `=` and an entry at
+    /// its first NUL, so a row named `A=B` does not make a variable of that
+    /// name — it sets `A` to `B=` and whatever was typed in the value box,
+    /// quietly overwriting a variable the row does not mention — and a name with
+    /// a NUL in it cuts the block short and takes every entry after it away from
+    /// the child. Three spellings, one rule: a name a block cannot carry is a
+    /// row that does nothing.
     pub env: Vec<(String, String)>,
     /// Where a leaf of this profile opens when nothing else says.
     ///
