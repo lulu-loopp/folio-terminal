@@ -627,6 +627,22 @@ pub fn ref_name_fault(name: &str) -> Option<RefNameFault> {
     None
 }
 
+/// **The two flags every command that produces a diff carries**, because a
+/// repository gets to describe its own files but not to hand this window a
+/// program.
+///
+/// A `.gitattributes` can point a path at a diff driver, and a driver is two
+/// programs: `diff.<name>.command`, which git runs *instead of* diffing, and
+/// `diff.<name>.textconv`, which git runs over the blob before diffing it.
+/// `diff.external` is a third. `--no-ext-diff` refuses all of the command ones
+/// at once and `--no-textconv` the conversion, which is why this is two flags
+/// and not a row of `-c` overrides beside the ones in [`git_command`]: there is
+/// no config key that covers a driver named per path from inside the repository,
+/// and `-c diff.external=` — the one key that looks like it would help — sets an
+/// external diff that is the empty program, so every diff comes back blank
+/// (measured, git 2.52). Flags, on the commands that produce a diff.
+const NO_DIFF_DRIVERS: [&str; 2] = ["--no-ext-diff", "--no-textconv"];
+
 /// **The command line one file's diff is** — the three readings, in one place.
 ///
 /// Lifted out of [`answer`] on [`write_arguments`]'s own rule: a command line
@@ -645,6 +661,9 @@ pub fn ref_name_fault(name: &str) -> Option<RefNameFault> {
 /// shell — so a space, a quote or an ideograph in a name needs no escaping and
 /// gets none. `core.quotepath=false` is set for every question in
 /// [`git_command`], so what comes back names the file the same way.
+///
+/// [`NO_DIFF_DRIVERS`] rides on every one of the three, for the reason written
+/// where that pair is declared.
 #[must_use]
 pub fn diff_arguments(
     against: crate::preview::GitDiffAgainst,
@@ -652,7 +671,12 @@ pub fn diff_arguments(
     renamed_from: Option<&str>,
 ) -> Vec<String> {
     use crate::preview::GitDiffAgainst;
-    let mut words = vec!["diff".to_owned(), "--no-color".to_owned()];
+    let mut words = vec![
+        "diff".to_owned(),
+        "--no-color".to_owned(),
+        NO_DIFF_DRIVERS[0].to_owned(),
+        NO_DIFF_DRIVERS[1].to_owned(),
+    ];
     match against {
         GitDiffAgainst::Index => words.push("--cached".to_owned()),
         GitDiffAgainst::WorkingTree => {}
@@ -2072,6 +2096,18 @@ struct GitRun {
 ///   that blocks the terminal it lives next to is worse than a panel.
 /// * `core.quotepath=false`, so a path with a non-ASCII name arrives as itself
 ///   rather than as `\303\251` octal escapes.
+/// * `core.fsmonitor=false`, because **a repository this window is only reading
+///   does not get to choose a program for it to run.** A `.git/config` is a file
+///   like any other and it travels with the folder it is in; `core.fsmonitor`
+///   names a hook that git runs whenever it refreshes the index, which `status`
+///   does every time. It takes no keystroke to reach: with the Files column on
+///   its Git page, clicking a printed folder path reroots the column and the
+///   panel asks git about the new root, so an unpacked folder would run its own
+///   program on sight. The programs a repository can name for *diffing* are shut
+///   at [`NO_DIFF_DRIVERS`], on the commands that produce a diff — and by flag
+///   rather than by config, for the reason written there.
+/// * `--no-pager`, a pager git only opens for a terminal and this child has a
+///   pipe, but the flag costs nothing and says so.
 /// * `LC_ALL=C`, for the reason the module header gives.
 /// * `GIT_TERMINAL_PROMPT=0`, so no read can ever turn into a child sitting
 ///   forever waiting for a password nobody can see it asking for.
@@ -2087,7 +2123,14 @@ fn git_command(program: &Path, dir: &Path, arguments: &[&OsStr]) -> Command {
     command
         .arg("-C")
         .arg(dir)
-        .args(["--no-optional-locks", "-c", "core.quotepath=false"])
+        .args([
+            "--no-pager",
+            "--no-optional-locks",
+            "-c",
+            "core.quotepath=false",
+            "-c",
+            "core.fsmonitor=false",
+        ])
         .args(arguments)
         .env("LC_ALL", "C")
         .env("LANGUAGE", "")
@@ -2601,6 +2644,8 @@ pub fn answer(
             let mut arguments = vec![
                 OsStr::new("show"),
                 OsStr::new("--no-color"),
+                OsStr::new(NO_DIFF_DRIVERS[0]),
+                OsStr::new(NO_DIFF_DRIVERS[1]),
                 OsStr::new("--format="),
                 OsStr::new(hash),
                 OsStr::new("--"),
@@ -2631,7 +2676,13 @@ pub fn answer(
             path,
             renamed_from,
         } => {
-            let mut arguments = vec![OsStr::new("diff"), OsStr::new("--no-color"), OsStr::new(a)];
+            let mut arguments = vec![
+                OsStr::new("diff"),
+                OsStr::new("--no-color"),
+                OsStr::new(NO_DIFF_DRIVERS[0]),
+                OsStr::new(NO_DIFF_DRIVERS[1]),
+                OsStr::new(a),
+            ];
             if let Some(b) = b {
                 arguments.push(OsStr::new(b));
             }
@@ -2693,6 +2744,8 @@ pub fn answer(
                 &[
                     OsStr::new("show"),
                     OsStr::new("--no-color"),
+                    OsStr::new(NO_DIFF_DRIVERS[0]),
+                    OsStr::new(NO_DIFF_DRIVERS[1]),
                     // **`--raw` and not `--name-status`**, so that `--numstat`
                     // can stand beside it — see [`parse_diff_files`], which is
                     // where that ruling is written down.
@@ -2727,6 +2780,8 @@ pub fn answer(
             let mut arguments = vec![
                 OsStr::new("diff"),
                 OsStr::new("--no-color"),
+                OsStr::new(NO_DIFF_DRIVERS[0]),
+                OsStr::new(NO_DIFF_DRIVERS[1]),
                 OsStr::new("--raw"),
                 OsStr::new("--numstat"),
                 OsStr::new("-z"),
@@ -6379,6 +6434,83 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// RED GATE — **a repository this window only looked at cannot make git run
+    /// a program the repository chose.**
+    ///
+    /// `git status` refreshes the index, and refreshing the index runs the
+    /// `core.fsmonitor` hook a `.git/config` names. Nothing has to be typed to
+    /// get there: with the Files column on its Git page, clicking a printed
+    /// folder path reroots the column and the panel asks git about the new
+    /// root — so a folder someone unpacked runs its own program the moment it
+    /// is opened. `diff.external` is the same door on the reading side, and a
+    /// pager is one git only opens for a terminal but costs nothing to shut.
+    ///
+    /// The argv itself is the assertion, in [`git_command`] where every question
+    /// passes through, so no reading can be given the overrides and no other
+    /// reading miss them.
+    ///
+    /// MUTATION: drop `core.fsmonitor=false` and a hostile `.git/config` runs
+    /// its hook on a folder that was merely clicked.
+    #[test]
+    fn every_reading_shuts_the_doors_a_hostile_repository_would_come_through() {
+        let command = git_command(
+            Path::new("git"),
+            Path::new("C:\\repo"),
+            &[
+                OsStr::new("status"),
+                OsStr::new("--porcelain=v1"),
+                OsStr::new("-z"),
+                OsStr::new("--untracked-files=all"),
+                OsStr::new("--branch"),
+                OsStr::new("--ignore-submodules=none"),
+            ],
+        );
+        let argv: Vec<String> = command
+            .get_args()
+            .map(|word| word.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            argv,
+            [
+                "-C",
+                "C:\\repo",
+                "--no-pager",
+                "--no-optional-locks",
+                "-c",
+                "core.quotepath=false",
+                "-c",
+                "core.fsmonitor=false",
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--branch",
+                "--ignore-submodules=none",
+            ]
+        );
+
+        // The doors that no config key shuts. A `.gitattributes` in the
+        // repository can point a path at a `diff.<driver>.command` or a
+        // `diff.<driver>.textconv`, and both of those are programs; they are
+        // named per path from inside the repository, so they are refused by
+        // flag, on the commands that produce a diff.
+        use crate::preview::GitDiffAgainst;
+        for words in [
+            diff_arguments(GitDiffAgainst::Index, "src/main.rs", None),
+            diff_arguments(GitDiffAgainst::WorkingTree, "src/main.rs", None),
+            diff_arguments(GitDiffAgainst::Nothing, "src/main.rs", None),
+        ] {
+            assert!(
+                words.iter().any(|word| word == "--no-ext-diff"),
+                "a diff runs no driver the repository named — {words:?}"
+            );
+            assert!(
+                words.iter().any(|word| word == "--no-textconv"),
+                "and converts no blob through one — {words:?}"
+            );
+        }
+    }
+
     /// **The command line each of the three readings is** — no subprocess, so
     /// the argv itself is the assertion.
     ///
@@ -6397,17 +6529,34 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
         use crate::preview::GitDiffAgainst;
         assert_eq!(
             diff_arguments(GitDiffAgainst::Index, "src/main.rs", None),
-            ["diff", "--no-color", "--cached", "--", "src/main.rs"]
+            [
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--cached",
+                "--",
+                "src/main.rs"
+            ]
         );
         assert_eq!(
             diff_arguments(GitDiffAgainst::WorkingTree, "src/main.rs", None),
-            ["diff", "--no-color", "--", "src/main.rs"]
+            [
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--",
+                "src/main.rs"
+            ]
         );
         assert_eq!(
             diff_arguments(GitDiffAgainst::Nothing, "src/main.rs", None),
             [
                 "diff",
                 "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
                 "--no-index",
                 "--",
                 "/dev/null",
@@ -6418,11 +6567,28 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
         // rename can happen in.
         assert_eq!(
             diff_arguments(GitDiffAgainst::Index, "new.txt", Some("old.txt")),
-            ["diff", "--no-color", "--cached", "--", "old.txt", "new.txt"]
+            [
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--cached",
+                "--",
+                "old.txt",
+                "new.txt"
+            ]
         );
         assert_eq!(
             diff_arguments(GitDiffAgainst::WorkingTree, "new.txt", Some("old.txt")),
-            ["diff", "--no-color", "--", "old.txt", "new.txt"]
+            [
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--",
+                "old.txt",
+                "new.txt"
+            ]
         );
         // And never on the third: `--no-index` takes two operands and not a
         // pathspec, and a file git has never seen was never renamed.
@@ -6431,6 +6597,8 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             [
                 "diff",
                 "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
                 "--no-index",
                 "--",
                 "/dev/null",
