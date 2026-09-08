@@ -13,7 +13,7 @@ use alacritty_terminal::{
     grid::Dimensions,
     index::{Column, Line},
     term::{
-        Config, ScrollOutCause, ScrollRegionScope, TermDamage, TermMode, TranscriptEvent,
+        Config, Osc52, ScrollOutCause, ScrollRegionScope, TermDamage, TermMode, TranscriptEvent,
         TranscriptScreen, cell::Flags,
     },
     vte::{
@@ -30,6 +30,15 @@ use crate::inline_image::{InlineImageStreamAction, Osc1337Scanner, ShellIntegrat
 use crate::palette::{TerminalCanvas, TerminalPalette};
 
 pub const SCROLLBACK_LINES: usize = 0;
+
+/// How many uncommitted bytes the replay tail keeps before it stops keeping them.
+///
+/// The same number as vte's own synchronized-update buffer (`SYNC_BUFFER_SIZE`, 2 MiB), and that
+/// is where it comes from: the tail exists to hold what the vendored parser has not committed,
+/// the parser force-ends an update whose buffer reaches that size, and so a tail past it is
+/// holding bytes no replay can ever want. Reaching it is treated as the end of the update, which
+/// is the same conclusion the parser behind it has already come to.
+const PARSER_TAIL_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 struct GridSize {
@@ -311,7 +320,19 @@ pub struct TerminalAdapter {
     processor: Processor,
     listener: CaptureListener,
     parser_boundary: Parser,
+    /// The raw bytes the vendor terminal has taken but not yet committed: the sequence that is
+    /// still open at the end of a slice, and everything a synchronized update is holding back.
+    /// A resize replays exactly this into the canonical fork's parser.
+    ///
+    /// Bounded by [`PARSER_TAIL_MAX_BYTES`], because what goes in it is chosen by the child.
     parser_tail: Vec<u8>,
+    /// Where in [`Self::parser_tail`] the sequence that is still open begins — the tail's own
+    /// length when nothing is open.
+    ///
+    /// It is what makes releasing a synchronized update's retention exact: the update's bytes go
+    /// and the half-written sequence after them stays, instead of the whole tail being thrown
+    /// away and a resize seeding its parser mid-escape.
+    parser_tail_open_start: usize,
     parser_sync_active: bool,
     parser_dcs_active: bool,
     parser_sequence_open: bool,
@@ -469,8 +490,18 @@ impl Perform for BoundaryPerformer {
         self.complete = true;
     }
 
-    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        // The sequence ended either way — that is what closes the tail — but a sequence the real
+        // parser threw away must not be read for meaning here.
         self.complete = true;
+        // **The same refusal the vendored handler makes**, byte for byte
+        // (`vte-0.15.0/src/ansi.rs`, the head of its own `csi_dispatch`): a parameter list past
+        // vte's thirty-two, or more than two intermediates, and the sequence does nothing. Read
+        // any further and a `CSI ? 2026;2026;…h` with thirty-three parameters would open a
+        // synchronized update on this side that no ESU on the other side can ever close.
+        if ignore || intermediates.len() > 2 {
+            return;
+        }
         let sync_mode = intermediates == b"?"
             && params
                 .iter()
@@ -527,6 +558,14 @@ impl TerminalAdapter {
     pub fn new(columns: NonZeroU32, rows: NonZeroU32) -> Self {
         let config = Config {
             scrolling_history: SCROLLBACK_LINES,
+            // **This terminal does not act on OSC 52 in either direction**, so it says so here
+            // rather than decoding a store and dropping the result. The vendored default is
+            // `OnlyCopy`, which accepts a store, base64-decodes the whole payload into a `String`
+            // and sends it as an event — and [`CaptureListener`] has no arm for that event, so
+            // every byte of that work is spent on something nobody reads. Declaring the refusal
+            // is also the honest statement: a program cannot put text on this reader's clipboard,
+            // and cannot read it back either.
+            osc52: Osc52::Disabled,
             ..Config::default()
         };
         let size = GridSize { columns, rows };
@@ -540,6 +579,7 @@ impl TerminalAdapter {
             listener,
             parser_boundary: Parser::new(),
             parser_tail: Vec::new(),
+            parser_tail_open_start: 0,
             parser_sync_active: false,
             parser_dcs_active: false,
             parser_sequence_open: false,
@@ -869,6 +909,10 @@ impl TerminalAdapter {
     /// Commit a synchronized update whose ESU terminator did not arrive before its deadline.
     pub fn finish_synchronized_update(&mut self) -> Vec<AdapterEvent> {
         if self.synchronized_update_deadline().is_none() {
+            // The vendored parser has already ended the update, either because the ESU arrived or
+            // because its own buffer overflowed and it gave up. Either way this side stops
+            // retaining bytes for it.
+            self.release_synchronized_update_retention();
             return Vec::new();
         }
         self.processor.stop_sync(&mut self.term);
@@ -879,6 +923,8 @@ impl TerminalAdapter {
         self.parser_sync_active = false;
         self.parser_sequence_open = false;
         self.parser_tail.clear();
+        self.parser_tail.shrink_to_fit();
+        self.parser_tail_open_start = 0;
         let mut events = self.drain_transcript_events();
         events.extend(self.drain_adapter_events());
         events
@@ -1278,7 +1324,15 @@ impl TerminalAdapter {
     fn observe_parser_boundary(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             let execute_at_ground = !self.parser_sequence_open;
-            self.parser_tail.push(byte);
+            let sequence_was_open = self.parser_sequence_open;
+            if self.parser_tail.len() < PARSER_TAIL_MAX_BYTES {
+                self.parser_tail.push(byte);
+            } else {
+                // See [`PARSER_TAIL_MAX_BYTES`]: nothing is still legitimately uncommitted after
+                // this much, so the update the tail was being kept for is treated as ended. The
+                // next completed sequence clears the tail on the ordinary path below.
+                self.parser_sync_active = false;
+            }
             let mut performer = BoundaryPerformer {
                 execute_at_ground,
                 ..BoundaryPerformer::default()
@@ -1318,21 +1372,54 @@ impl TerminalAdapter {
                 self.parser_tail.pop();
             }
 
+            let mut tail_cleared = false;
             if performer.sync_start {
                 self.parser_sync_active = true;
             } else if performer.sync_end {
                 self.parser_sync_active = false;
                 self.parser_tail.clear();
+                tail_cleared = true;
             } else if performer.complete && !self.parser_sync_active {
                 self.parser_dcs_active = false;
                 self.parser_tail.clear();
+                tail_cleared = true;
                 // ESC can terminate OSC/DCS while simultaneously starting the ST escape. Keep it
                 // as the seed for the parser's new Escape state.
                 if byte == 0x1b {
                     self.parser_tail.push(byte);
                 }
             }
+
+            if tail_cleared {
+                // Whatever is left is the sequence this byte opened, and it starts at the front.
+                self.parser_tail_open_start = 0;
+            } else if !self.parser_sequence_open {
+                self.parser_tail_open_start = self.parser_tail.len();
+            } else if !sequence_was_open {
+                self.parser_tail_open_start = self.parser_tail.len().saturating_sub(1);
+            }
+            self.parser_tail_open_start = self.parser_tail_open_start.min(self.parser_tail.len());
         }
+
+        // **The vendored parser owns whether a synchronized update is open.** It force-ends one
+        // whose buffer overflows and clears its deadline in the same breath
+        // (`vte-0.15.0/src/ansi.rs` `advance_sync`), which leaves this side armed over a parser
+        // that has already put everything it was holding on the grid — and then every later byte
+        // is retained for a replay that will never happen, and every resize replays the lot. So
+        // the flag follows the parser rather than only the bytes.
+        if self.parser_sync_active && self.processor.sync_timeout().sync_timeout().is_none() {
+            self.release_synchronized_update_retention();
+        }
+    }
+
+    /// Stop retaining bytes for a synchronized update that is over, keeping the sequence that is
+    /// still open at the end of the tail.
+    fn release_synchronized_update_retention(&mut self) {
+        self.parser_sync_active = false;
+        let open = self.parser_tail_open_start.min(self.parser_tail.len());
+        self.parser_tail.drain(..open);
+        self.parser_tail_open_start = 0;
+        self.parser_tail.shrink_to_fit();
     }
 }
 
@@ -1367,6 +1454,7 @@ fn removal_context(cause: ScrollOutCause) -> RemovalContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inline_image::MAX_UNOWNED_OSC_BYTES;
 
     fn nz(value: u32) -> NonZeroU32 {
         NonZeroU32::new(value).unwrap()
@@ -2652,6 +2740,101 @@ mod tests {
                 .all(|event| matches!(event, AdapterEvent::GridWrites { .. }))
         );
         assert_eq!(terminal.visible_text()[0], "leftright");
+    }
+
+    /// R1-13. vte force-ends a DEC 2026 update once its own 2 MiB buffer overflows
+    /// (`vte-0.15.0/src/ansi.rs` `advance_sync`) and clears the deadline with it. The adapter's
+    /// own flag has to follow that, or every byte after the overflow is retained for a replay
+    /// that will never happen.
+    #[test]
+    fn a_forced_synchronized_end_stops_the_replay_tail_from_growing() {
+        let mut terminal = TerminalAdapter::new(nz(80), nz(24));
+        terminal.feed(b"\x1b[?2026h");
+        assert!(terminal.parser_sync_active, "the update opened");
+
+        // Past vte's own SYNC_BUFFER_SIZE, so the vendored parser gives up on the update.
+        terminal.feed(&vec![b'a'; 3 * 1024 * 1024]);
+        assert!(
+            terminal.synchronized_update_deadline().is_none(),
+            "the vendored parser force-ended the update on its buffer overflow"
+        );
+        assert!(
+            !terminal.parser_sync_active,
+            "so the adapter's own flag is down too"
+        );
+
+        terminal.feed(&vec![b'b'; 1024 * 1024]);
+        assert!(
+            terminal.parser_tail.len() <= 1,
+            "a printable byte outside an update completes a sequence and clears the tail, so \
+             nothing is retained: {} bytes",
+            terminal.parser_tail.len()
+        );
+    }
+
+    /// R3-2. `CSI ? 2026 h` carrying more than vte's 32 parameters is refused by the real parser
+    /// (`ignore` is set and its `csi_dispatch` returns before the mode is read), so it arms
+    /// nothing here either.
+    #[test]
+    fn a_synchronized_start_the_parser_refused_arms_no_retention() {
+        let mut terminal = TerminalAdapter::new(nz(80), nz(24));
+        let mut sequence = b"\x1b[?".to_vec();
+        for _ in 0..32 {
+            sequence.extend_from_slice(b"2026;");
+        }
+        sequence.extend_from_slice(b"2026h");
+        terminal.feed(&sequence);
+
+        assert!(
+            terminal.synchronized_update_deadline().is_none(),
+            "the vendored parser refused the sequence"
+        );
+        assert!(
+            !terminal.parser_sync_active,
+            "so no update is open here either"
+        );
+
+        terminal.feed(&vec![b'c'; 512 * 1024]);
+        assert!(
+            terminal.parser_tail.len() <= 1,
+            "nothing is retained for a replay: {} bytes",
+            terminal.parser_tail.len()
+        );
+    }
+
+    /// R1-14, the adapter's half: an OSC nobody terminates cannot make the replay tail grow
+    /// without end either.
+    #[test]
+    fn an_unterminated_osc_leaves_the_replay_tail_bounded() {
+        let mut terminal = TerminalAdapter::new(nz(80), nz(24));
+        let mut bytes = b"\x1b]0;".to_vec();
+        bytes.extend(std::iter::repeat_n(b'A', 4 * 1024 * 1024));
+        terminal.feed(&bytes);
+        assert!(
+            terminal.parser_tail.len() <= MAX_UNOWNED_OSC_BYTES + 16,
+            "the tail holds at most the scanner's own ceiling: {} bytes",
+            terminal.parser_tail.len()
+        );
+    }
+
+    /// R3-4. A grapheme cluster is tens of code points; a child sending ten thousand combining
+    /// marks is not describing one.
+    #[test]
+    fn a_grapheme_cluster_stops_growing_at_the_ceiling() {
+        let mut terminal = TerminalAdapter::new(nz(80), nz(24));
+        terminal.feed(b"\x1b[?2027h");
+        let mut bytes = "a".to_string();
+        for _ in 0..10_000 {
+            bytes.push('\u{301}');
+        }
+        terminal.feed(bytes.as_bytes());
+
+        let row = terminal.visible_row(0).expect("the first row");
+        let cluster = row.cells[0].text.as_str().chars().count();
+        assert!(
+            cluster <= bt_unicode::MAX_GRAPHEME_CLUSTER_CHARS,
+            "the cell holds a bounded cluster: {cluster} code points"
+        );
     }
 
     #[test]

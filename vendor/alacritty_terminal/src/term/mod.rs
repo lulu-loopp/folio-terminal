@@ -4,9 +4,9 @@
 // `TranscriptEvent` vocabulary an external scrollback owner reads; a resize
 // transaction that coalesces local resizes into one the PTY sees; a CPR
 // pending-wrap cursor fix; UAX #29 grapheme clustering (DEC 2027) and legacy
-// emoji-presentation width, both on `bt-unicode`; DEC 2031 theme-change
-// notification; per-row input-write tracking; `Term::fork`; and the tests for
-// all of it. The rest is this repository's rustfmt settings.
+// emoji-presentation width, both on `bt-unicode`, with a ceiling on how long one
+// cluster may grow; DEC 2031 theme-change notification; per-row input-write
+// tracking; `Term::fork`; and the tests for all of it. The rest is this repository's rustfmt settings.
 // Index: vendor/alacritty_terminal/CHANGES-FOLIO.md
 // Notice given under section 4(b) of the Apache License, Version 2.0.
 
@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as Base64;
 use bitflags::bitflags;
-use bt_unicode::{cluster_width, extends_grapheme_cluster};
+use bt_unicode::{MAX_GRAPHEME_CLUSTER_CHARS, cluster_width, extends_grapheme_cluster};
 use log::{debug, trace};
 use unicode_width::UnicodeWidthChar;
 
@@ -1795,6 +1795,17 @@ impl<T> Term<T> {
         T: EventListener,
     {
         let mut state = mem::take(&mut self.grapheme);
+        // **Change from upstream: the cluster is bounded.** Every mark added here re-copies and
+        // re-measures the whole cluster, on the thread that is drawing the window, so an
+        // unbounded one is quadratic work a child chooses. Past the ceiling the run is still one
+        // cluster — the cursor does not move and no second cell is opened — it simply stops being
+        // stored. See `bt_unicode::MAX_GRAPHEME_CLUSTER_CHARS`.
+        if state.cluster.chars().count() >= MAX_GRAPHEME_CLUSTER_CHARS {
+            state.expected_cursor = self.grid.cursor.point;
+            state.expected_wrap = self.grid.cursor.input_needs_wrap;
+            self.grapheme = state;
+            return;
+        }
         state.cluster.push(character);
         let new_width = cluster_width(&state.cluster);
         if new_width == state.width {

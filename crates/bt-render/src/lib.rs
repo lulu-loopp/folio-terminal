@@ -2319,11 +2319,13 @@ fn shape_entry_resident_bytes(key: &ShapeKey, buffer: &Buffer, value_bytes: usiz
 fn captured_cell_resident_bytes(cell: &CapturedCell) -> usize {
     size_of::<CapturedCell>()
         .saturating_add(cell.text.heap_bytes())
+        // The target is shared with every other cell of its run, so this counts what one cell
+        // would need if it were the only holder: the conservative reading a ceiling wants.
         .saturating_add(cell.hyperlink.as_ref().map_or(0, |hyperlink| {
             hyperlink
                 .uri
-                .capacity()
-                .saturating_add(hyperlink.id.as_ref().map_or(0, String::capacity))
+                .len()
+                .saturating_add(hyperlink.id.as_ref().map_or(0, |id| id.len()))
         }))
 }
 

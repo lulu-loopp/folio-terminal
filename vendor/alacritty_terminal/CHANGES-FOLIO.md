@@ -56,7 +56,7 @@ file produces the vendored file byte for byte. Upstream formats with its own
 | `src/index.rs` | Formatting only. |
 | `src/selection.rs` | Formatting only. |
 | `src/sync.rs` | Formatting only. |
-| `src/term/cell.rs` | Formatting only. |
+| `src/term/cell.rs` | **Code.** A ceiling on the zerowidth marks one cell stores (`push_zerowidth`), from `bt_unicode::MAX_GRAPHEME_CLUSTER_CHARS`. Otherwise formatting only. |
 | `src/term/search.rs` | Formatting only. |
 | `src/thread.rs` | Formatting only. |
 | `src/tty/mod.rs` | Formatting only. |
@@ -95,6 +95,13 @@ file produces the vendored file byte for byte. Upstream formats with its own
   that a `U+FE0F` variation selector now widens the preceding
   emoji-presentation base to two cells, which is what `wcwidth`-plus-emoji and
   `string-width` conventions expect. `U+FE0E` deliberately does not narrow.
+- **A ceiling on one cluster.** `extend_grapheme` stops storing past
+  `bt_unicode::MAX_GRAPHEME_CLUSTER_CHARS` code points, and `Cell::push_zerowidth`
+  refuses the same. Every mark added to a cluster re-copies and re-measures the
+  whole of it on the window thread, and the cell is cloned into every captured
+  row, so an unbounded cluster is a child choosing how much work a repaint does.
+  Past the ceiling the run stays one cluster and the cursor does not move; the
+  extra marks are simply not kept.
 - **Private mode 2031.** The dark/light theme-change notification subscription
   that kitty, foot, contour and WezTerm all speak is accepted and reported
   rather than falling into the unknown-mode branch.

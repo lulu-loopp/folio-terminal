@@ -15,6 +15,21 @@ pub enum AmbiguousWidth {
 
 pub const DEFAULT_AMBIGUOUS_WIDTH: AmbiguousWidth = AmbiguousWidth::Narrow;
 
+/// How many code points one extended grapheme cluster may hold.
+///
+/// A real cluster is tens of code points at the very most. Unicode itself says where the line is:
+/// UAX #15's Stream-Safe Text Format (§13) caps a sequence at **30 non-starters** in a row and
+/// inserts U+034F to break anything longer, which is the standard's own statement of "past here
+/// it is not a cluster any more". Thirty-two covers that, and covers every sequence a program
+/// actually sends — the longest RGI emoji ZWJ sequence, a four-person family with skin tones, is
+/// eleven code points, and an emoji tag sequence for a subdivision flag is eight.
+///
+/// The ceiling matters because a cluster is re-measured and re-copied on every mark added to it,
+/// on the thread that is drawing the window, and because the cell that holds it is copied into
+/// every captured row. Ten thousand combining marks on one cell is not text; it is a child
+/// choosing how much work the window does.
+pub const MAX_GRAPHEME_CLUSTER_CHARS: usize = 32;
+
 /// Measure one extended grapheme cluster and clamp it to the terminal consensus maximum of two
 /// cells. `unicode-width` 0.2 owns emoji presentation/VS15/VS16 handling; this function owns the
 /// product's ambiguous-width policy and the terminal-specific two-cell clamp.

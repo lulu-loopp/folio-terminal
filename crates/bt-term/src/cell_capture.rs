@@ -8,7 +8,10 @@ use alacritty_terminal::{
 use bt_transcript::{
     CapturedCell, CapturedRow, CellFlags, CellHyperlink, CellStyle, CellText, TerminalColor,
 };
-use std::hash::{Hash, Hasher};
+use std::{
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 #[cfg(test)]
 use alacritty_terminal::vte::ansi::Rgb;
@@ -136,6 +139,15 @@ pub(crate) fn to_captured_row(row: &[Cell]) -> CapturedRow {
     let continues = row
         .last()
         .is_some_and(|cell| cell.flags.contains(Flags::WRAPLINE));
+    // **One `OSC 8` target, one allocation, however many cells wear it.** The vendor holds the
+    // target behind an `Arc` shared by every cell of the run; this carries that sharing across
+    // the capture instead of minting a `String` per cell, which is what a two-hundred-column row
+    // under a long target used to cost on every repaint.
+    //
+    // The run is contiguous by construction, so remembering the last one is the whole cache. It
+    // is keyed on the *identity* of the vendor's string — two links cannot share a buffer — and
+    // never on its bytes, so a long target is not compared per cell either.
+    let mut last_link: Option<(*const u8, usize, CellHyperlink)> = None;
     let cells = row
         .iter()
         .map(|cell| {
@@ -158,9 +170,19 @@ pub(crate) fn to_captured_row(row: &[Cell]) -> CapturedRow {
                 // The vendor synthesizes a per-emission id when OSC 8 sends none, so one wrapped
                 // link's segments share an id. The fingerprint above deliberately hashes the uri
                 // only — synthesized ids change per repaint and must not perturb row stability.
-                hyperlink: cell.hyperlink().map(|link| CellHyperlink {
-                    id: Some(link.id().to_string()),
-                    uri: link.uri().to_string(),
+                hyperlink: cell.hyperlink().map(|link| {
+                    let identity = (link.uri().as_ptr(), link.uri().len());
+                    if let Some((pointer, length, captured)) = &last_link
+                        && (*pointer, *length) == identity
+                    {
+                        return captured.clone();
+                    }
+                    let captured = CellHyperlink {
+                        id: Some(Arc::from(link.id())),
+                        uri: Arc::from(link.uri()),
+                    };
+                    last_link = Some((identity.0, identity.1, captured.clone()));
+                    captured
                 }),
                 wide_spacer: cell
                     .flags

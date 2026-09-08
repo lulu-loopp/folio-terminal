@@ -26,6 +26,8 @@ rayon.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+# The grapheme-cluster ceiling this crate's captures are measured against lives there.
+bt-unicode = { path = "../bt-unicode" }
 proptest = "1"
 
 [lints]

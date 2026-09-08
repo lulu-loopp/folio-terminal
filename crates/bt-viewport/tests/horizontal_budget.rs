@@ -155,8 +155,8 @@ fn corpus() -> Vec<(&'static str, FrozenLine, Vec<InferredLink>)> {
                 background: TerminalColor::Named(17),
             },
             hyperlink: run.is_multiple_of(50).then(|| CellHyperlink {
-                id: Some(format!("run-{run}")),
-                uri: format!("https://example.test/{run}"),
+                id: Some(format!("run-{run}").into()),
+                uri: format!("https://example.test/{run}").into(),
             }),
         });
         byte = end;
