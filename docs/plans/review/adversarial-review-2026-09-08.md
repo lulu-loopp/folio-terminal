@@ -144,13 +144,13 @@ R1-5, R1-11, R1-12, R1-16, R1-17, R1-23, R1-26, R3-1.
 
 Why together: every row is on the route where Folio stops rendering and gives something to the machine, by shell, by browser or by spawn. The design is one hand-off point that normalises the target the way Windows will, refuses the shapes a real target never has, names every program absolutely, and states in one place which cards and which modifiers may reach it.
 
-### T4 `fix/bytes-from-the-child-are-bounded` (terminal side in flight; app side R1-7, R1-8, R1-20, R1-25, R1-28 queued)
+### T4 `fix/bytes-from-the-child-are-bounded` (terminal side merged, `becba80`; app side R1-7, R1-8, R1-20, R1-25, R1-28 in flight as `fix/decoders-and-caches-are-bounded`)
 
 R1-7, R1-8, R1-13, R1-14, R1-15, R1-20, R1-25, R1-27, R1-28, R3-2, R3-3, R3-4, R5-1.
 
 Why together: each row is a place where the size of what the window keeps or does is chosen by the child rather than by Folio. The design is a budget at each intake point: in the scanner for OSC payloads, in the caches as a byte ceiling with eviction, in the decoders as limits set before the first allocation, and in the mark and anchor registries as a release path owned by whoever drops the id. R3-2 and R1-13 are two armings of one wedge and a single disarm rule covers both.
 
-### T5 `fix/pipeline-invariants`
+### T5 `fix/pipeline-invariants` (in flight)
 
 R5-2, R5-3, R5-4, R5-5, R5-6, R5-7, R5-8.
 
