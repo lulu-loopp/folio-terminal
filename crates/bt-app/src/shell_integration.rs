@@ -8,9 +8,11 @@
 //! | profile | mechanism |
 //! |---|---|
 //! | PowerShell | none — the user dot-sources it into `$PROFILE` themselves |
-//! | Git Bash | `bash --init-file <script> -i`, replacing `--login -i` |
-//! | WSL | `wsl.exe … -e sh -c <the login-shell question> folio <script>` |
+//! | Git Bash | `bash --init-file <script> <its own words, less the login flag>` |
+//! | a zsh | `ZDOTDIR`, pointed at a directory holding the script three times |
+//! | WSL | `wsl.exe … -e sh -c <the login-shell question> folio <script> <zdotdir>` |
 //! | Command Prompt | the `PROMPT` variable, carrying `OSC 7` and `OSC 133;D`/`;A` |
+//! | `sh`, `dash`, anything else | none, and the pane's own state says so |
 //!
 //! PowerShell's absence from that list is not an omission. `pwsh` has one
 //! startup file at one well-known path and no argument that would source a
@@ -19,6 +21,14 @@
 //! `--init-file`, which names the startup file for one interactive shell and
 //! touches nothing on disk, so bash gets the automatic install and PowerShell
 //! keeps the manual one. The asymmetry is the shells', not a preference.
+//!
+//! zsh has neither: no `--init-file`, and a startup file it looks for in a
+//! *directory* rather than at a path. So zsh's automatic install is that
+//! directory — `ZDOTDIR` pointed at one of ours, holding `folio.zsh` under the
+//! three names zsh reads out of it, each of which sources the reader's file of
+//! the same name and hands `ZDOTDIR` back. `sh` and `dash` have no door at all,
+//! and it is `--init-file` accepted-and-ignored that made that worth saying
+//! outright (review row R3-6).
 //!
 //! `cmd.exe` has no startup file to name and no hook to install, so its whole
 //! integration is a *format string* — see [`profiles::Integration::CmdPrompt`]
@@ -51,13 +61,53 @@ const SCRIPT: &str = include_str!("../../../scripts/shell-integration/folio.bash
 /// The name it is written under, in `%APPDATA%\Folio\`.
 const SCRIPT_FILE: &str = "folio.bash";
 
+/// zsh's script, under the same roof.
+///
+/// Not a second copy of bash's: zsh has no `--init-file`, so what it is handed
+/// is a **directory** (see [`ZDOTDIR`]) holding this file under three names.
+const SCRIPT_ZSH: &str = include_str!("../../../scripts/shell-integration/folio.zsh");
+
+/// The directory `ZDOTDIR` is pointed at, under `%APPDATA%\Folio\`.
+const ZDOTDIR_DIRECTORY: &str = "zdotdir";
+
+/// The three names [`SCRIPT_ZSH`] is written under in that directory, and the
+/// whole of what zsh will look for there before it has read a line.
+///
+/// `.zlogin` is deliberately absent: `.zshrc` hands `ZDOTDIR` back to the reader
+/// at the end of itself, so zsh looks that one up in their own directory and
+/// finds their own file. Adding a fourth here would take it away from them.
+const ZDOTDIR_FILES: [&str; 3] = [".zshenv", ".zprofile", ".zshrc"];
+
 /// The variable that tells the script it is being used as an init file, and is
 /// therefore responsible for the startup chain `--init-file` displaced.
 ///
 /// Its absence is equally meaningful: a hand-installed copy dot-sourced from the
 /// user's own `~/.bashrc` must **not** source the login files, because bash
 /// already did.
+///
+/// **Its value is the mode and not a bare `1`** (review row R3-8). bash has two
+/// startup chains and reads exactly one of them: an interactive shell that is
+/// not a login shell reads `~/.bashrc` alone, and a login shell reads
+/// `/etc/profile` and then the first of `~/.bash_profile`, `~/.bash_login`,
+/// `~/.profile` and never `~/.bashrc`. Which of the two the pane is owed is a
+/// fact about the profile — whether its own arguments asked for a login shell —
+/// and this side is the only one that can read it, so this side says it.
 const INSTALLED_MARKER: &str = "BT_SHELL_INTEGRATION";
+
+/// The reader asked for a login shell, and its chain is the script's to put back.
+const MODE_LOGIN: &str = "login";
+
+/// The reader asked for a plain interactive shell, whose one file is `~/.bashrc`.
+const MODE_INTERACTIVE: &str = "interactive";
+
+/// Where zsh reads its startup files from, and the whole of zsh's door.
+const ZDOTDIR: &str = "ZDOTDIR";
+
+/// Where the reader's own `ZDOTDIR` is carried, since the real one is taken.
+///
+/// `folio.zsh` reads it to find the files it has to put back. Unset when the
+/// session had none, which is the same sentence as "their files are in `$HOME`".
+const USER_ZDOTDIR: &str = "BT_USER_ZDOTDIR";
 
 /// The variable `cmd.exe` prints its prompt from, and this build's only way in.
 const CMD_PROMPT: &str = "PROMPT";
@@ -174,12 +224,18 @@ const FORWARDED: [&str; 4] = [
 ///   `folio.bash` that it is responsible for the startup chain `--init-file`
 ///   displaced. Exported here rather than across the boundary so that it is set
 ///   for exactly the shell that reads it;
-/// * **anything else** — zsh, fish, a login shell somebody built themselves —
-///   keeps its shell and is started as the login shell `wsl.exe` would have
-///   started, which is the documented degradation
-///   (`docs/shell-integration.md`) rather than a substitution. Handing
-///   `--init-file` to a shell that is not bash would replace a reader's shell
-///   with one they did not choose, every time they opened a tab.
+/// * **zsh** takes `ZDOTDIR`, which is the directory zsh reads *all* its
+///   startup files out of and the only door zsh has — it has no `--init-file`
+///   and refuses the flag outright, which is what a zsh login used to be handed
+///   (review row R3-6). The reader's own `ZDOTDIR`, if they had one, travels in
+///   `BT_USER_ZDOTDIR` so that `folio.zsh` can put their files back. It is still
+///   the login shell `wsl.exe` would have started: `-l`, and their own shell;
+/// * **anything else** — fish, a login shell somebody built themselves — keeps
+///   its shell and is started as the login shell `wsl.exe` would have started,
+///   which is the documented degradation (`docs/shell-integration.md`) rather
+///   than a substitution. Handing either door to a shell that reads neither
+///   would replace a reader's shell with one they did not choose, every time
+///   they opened a tab.
 ///
 /// `getent passwd` and not `$SHELL`, for the reason the probe used it: this is
 /// not a login shell, so `SHELL` is either unset or inherited from the Win32
@@ -192,8 +248,12 @@ const WSL_LOGIN_SHELL: &str = concat!(
     r#"shell=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f7); "#,
     r#"[ -n "$shell" ] || shell=/bin/sh; "#,
     r#"case "${shell##*/}" in "#,
-    r#"bash) BT_SHELL_INTEGRATION=1; export BT_SHELL_INTEGRATION; "#,
+    r#"bash) [ -n "$1" ] || exec "$shell" -l; "#,
+    r#"BT_SHELL_INTEGRATION=login; export BT_SHELL_INTEGRATION; "#,
     r#"exec "$shell" --init-file "$1" -i;; "#,
+    r#"zsh) [ -n "$2" ] || exec "$shell" -l; "#,
+    r#"[ -n "${ZDOTDIR:-}" ] && { BT_USER_ZDOTDIR=$ZDOTDIR; export BT_USER_ZDOTDIR; }; "#,
+    r#"ZDOTDIR="$2"; export ZDOTDIR; exec "$shell" -l;; "#,
     r#"*) exec "$shell" -l;; "#,
     "esac",
 );
@@ -201,11 +261,53 @@ const WSL_LOGIN_SHELL: &str = concat!(
 /// The name [`WSL_LOGIN_SHELL`] answers to, so that a message `sh` prints about
 /// it says where it came from rather than `sh: 1: …`.
 ///
-/// It is `$0`, which is why the script's own argument is `$1`: the init file
-/// travels as an **argument** rather than spliced into the script text, so that
-/// a reader whose Windows account name has a space or a quote in it gets a path
-/// this shell reads verbatim instead of one it re-parses.
+/// It is `$0`, which is why the init file is `$1` and the `ZDOTDIR` directory is
+/// `$2`: both travel as **arguments** rather than spliced into the script text,
+/// so that a reader whose Windows account name has a space or a quote in it gets
+/// paths this shell reads verbatim instead of ones it re-parses.
 const WSL_ARGV0: &str = "folio";
+
+/// The arguments that ask bash for a **login** shell, and which therefore cannot
+/// travel beside `--init-file`.
+///
+/// bash's own rule, measured rather than assumed: `--init-file` names the
+/// startup file of an interactive shell that is *not* a login shell, and a shell
+/// started with `-l` never reads it. So the flag is dropped here and the chain
+/// it stands for is emulated by the script, which is told which one it owes by
+/// [`INSTALLED_MARKER`].
+///
+/// A cluster (`-li`) is one argument carrying several short flags, and dropping
+/// the whole of it would take the reader's other flags with it — so the `l` is
+/// removed from the cluster and what is left is kept. A cluster that was nothing
+/// but `l` disappears, because `-` on its own is not an argument bash reads.
+fn without_login_flag(argument: &OsStr) -> Option<OsString> {
+    let text = argument.to_string_lossy();
+    if text == "--login" {
+        return None;
+    }
+    if !text.starts_with('-') || text.starts_with("--") || text.len() < 2 {
+        return Some(argument.to_owned());
+    }
+    if !text.contains('l') {
+        return Some(argument.to_owned());
+    }
+    let kept: String = text[1..].chars().filter(|flag| *flag != 'l').collect();
+    if kept.is_empty() {
+        return None;
+    }
+    Some(OsString::from(format!("-{kept}")))
+}
+
+/// Whether this profile's own arguments asked for a login shell.
+///
+/// The **profile's** words and not the whole command line: a
+/// [`profiles::SpawnPlace`] argument says where to stand and never which mode to
+/// start in, and the question here is what the row asked for.
+fn asks_for_login(arguments: &[String]) -> bool {
+    arguments.iter().any(|argument| {
+        without_login_flag(OsStr::new(argument)).as_deref() != Some(OsStr::new(argument))
+    })
+}
 
 /// Where the script is on this machine, written out on first use.
 ///
@@ -232,6 +334,61 @@ fn install() -> Option<PathBuf> {
     Some(path)
 }
 
+/// The directory zsh is pointed at, written out on first use.
+///
+/// [`script_path`]'s twin, down to the compare-before-write, and the three files
+/// are one outcome: a directory holding two of them is a `ZDOTDIR` whose missing
+/// third file is a startup file of the reader's that silently stops running. So
+/// a write that fails leaves this `None`, and the pane takes the documented
+/// fallback — the shell the distribution logs into, with no integration — rather
+/// than a half-built directory.
+pub fn zdotdir_path() -> Option<&'static Path> {
+    static INSTALLED: OnceLock<Option<PathBuf>> = OnceLock::new();
+    INSTALLED.get_or_init(install_zdotdir).as_deref()
+}
+
+fn install_zdotdir() -> Option<PathBuf> {
+    let directory = persist::storage_dir()
+        .join("shell-integration")
+        .join(ZDOTDIR_DIRECTORY);
+    let stale = ZDOTDIR_FILES.iter().any(|name| {
+        !std::fs::read_to_string(directory.join(name)).is_ok_and(|existing| existing == SCRIPT_ZSH)
+    });
+    if !stale {
+        return Some(directory);
+    }
+    std::fs::create_dir_all(&directory).ok()?;
+    for name in ZDOTDIR_FILES {
+        std::fs::write(directory.join(name), SCRIPT_ZSH).ok()?;
+    }
+    Some(directory)
+}
+
+/// Where this build's installed halves are on this machine — **one per door
+/// that has a file**, because bash's is a file and zsh's is a directory.
+///
+/// A pair rather than two parameters, so that a caller cannot hand the bash
+/// script to a zsh: which one a profile is served by is [`profiles::Integration`]'s
+/// answer and not the caller's, and it is asked inside [`shell_command`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scripts<'a> {
+    /// `folio.bash`, named by `--init-file`.
+    pub bash: Option<&'a Path>,
+    /// The directory `folio.zsh` was written into, named by `ZDOTDIR`.
+    pub zdotdir: Option<&'a Path>,
+}
+
+impl<'a> Scripts<'a> {
+    /// The pair this machine has, both written out on first use.
+    #[must_use]
+    pub fn installed() -> Scripts<'static> {
+        Scripts {
+            bash: script_path(),
+            zdotdir: zdotdir_path(),
+        }
+    }
+}
+
 /// Everything the spawn needs to say, beyond the program itself.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ShellCommand {
@@ -250,9 +407,9 @@ pub struct ShellCommand {
 /// script is silently never read. That failure has no symptom other than the
 /// absence of markers, which is indistinguishable from a shell that has none.
 ///
-/// `place_arguments` are [`profiles::SpawnPlace`]'s and sit between the two,
-/// which matters for WSL alone: `--cd` is a flag to the *launcher* and must come
-/// before the `--` that ends the launcher's own arguments.
+/// `place_arguments` are [`profiles::SpawnPlace`]'s and follow the profile's own
+/// words, which matters for WSL alone: `--cd` is a flag to the *launcher* and
+/// must come before the `-e` that ends the launcher's own arguments.
 ///
 /// `environment` is read, not written: Command Prompt's integration is a
 /// variable this process already has one of, and prefixing rather than replacing
@@ -261,7 +418,7 @@ pub struct ShellCommand {
 pub fn shell_command(
     profile: &Profile,
     place_arguments: &[OsString],
-    script: Option<&Path>,
+    scripts: Scripts<'_>,
     environment: &dyn ShellEnvironment,
 ) -> ShellCommand {
     let own = || {
@@ -272,7 +429,7 @@ pub fn shell_command(
             .chain(place_arguments.iter().cloned())
             .collect::<Vec<_>>()
     };
-    let mut command = shell_command_for(profile, place_arguments, script, environment, &own);
+    let mut command = shell_command_for(profile, scripts, environment, &own);
     let mine = &profile.env;
     command.environment.extend(hyperlink_declaration(
         profiles::served_by(profile),
@@ -410,23 +567,45 @@ fn forward_into_wsl(environment: &mut Vec<(OsString, OsString)>, mine: &[(String
 
 fn shell_command_for(
     profile: &Profile,
-    place_arguments: &[OsString],
-    script: Option<&Path>,
+    scripts: Scripts<'_>,
     environment: &dyn ShellEnvironment,
     own: &dyn Fn() -> Vec<OsString>,
 ) -> ShellCommand {
-    match (profiles::served_by(profile), script) {
-        (Integration::BashInitFile, Some(script)) => match profile.paths {
-            // Git Bash: bash *is* the program, and takes the flag directly. The
-            // profile's own `--login -i` is dropped — the script puts the login
-            // chain back itself, which is the trade `--init-file` demands.
-            profiles::PathNamespace::Windows => ShellCommand {
-                arguments: [OsString::from("--init-file"), script.into(), "-i".into()]
-                    .into_iter()
-                    .chain(place_arguments.iter().cloned())
-                    .collect(),
-                environment: installed_environment(),
-            },
+    match profiles::served_by(profile) {
+        Integration::BashInitFile if scripts.bash.is_some() => match profile.paths {
+            // Git Bash: bash *is* the program, and takes the flag directly.
+            //
+            // **The profile's own words are kept** (review row R3-7). This arm
+            // used to build the whole command line out of three literals, so a
+            // reader who added `--noediting`, or `-O globstar`, or anything else
+            // to the row lost it the moment the row had integration — the
+            // profile said one thing and the spawn did another, with nothing to
+            // show why. What is dropped is the *login flag* alone, and only
+            // because bash will not read an init file for a login shell; the
+            // chain it stood for is put back by the script, which is told which
+            // one it owes.
+            profiles::PathNamespace::Windows => {
+                let Some(script) = scripts.bash else {
+                    unreachable!("guarded by the arm")
+                };
+                let mut arguments = vec![OsString::from("--init-file"), script.into()];
+                let mut interactive = false;
+                let login = asks_for_login(&profile.args);
+                for argument in own().iter().filter_map(|it| without_login_flag(it)) {
+                    interactive |= argument == *"-i" || argument == *"--interactive";
+                    arguments.push(argument);
+                }
+                // `-i` is what makes bash read the init file at all, and a
+                // profile that had only `--login` said it wanted an interactive
+                // shell by saying `--login` to a terminal.
+                if !interactive {
+                    arguments.push(OsString::from("-i"));
+                }
+                ShellCommand {
+                    arguments,
+                    environment: installed_environment(login),
+                }
+            }
             // WSL: `wsl.exe` is a launcher, so the shell and its flag come
             // after it — and *which* shell that is, is a question only the
             // distribution can answer, so what the launcher is handed is the
@@ -446,33 +625,29 @@ fn shell_command_for(
             // passing the path as an argument work at all. The old spelling was
             // `--` and survived only because none of `/bin/bash --init-file
             // <path> -i` had a space in it.
-            profiles::PathNamespace::Wsl => {
-                let Some(script) = windows_to_wsl(script)
-                    .and_then(|path| path.into_os_string().into_string().ok())
-                else {
-                    // A script this machine keeps somewhere WSL cannot name —
-                    // an `%APPDATA%` on a network share, say. The launcher is
-                    // told only where to stand, which is what every WSL pane
-                    // did before there was a script to hand over.
-                    return ShellCommand {
-                        arguments: own(),
-                        environment: Vec::new(),
-                    };
-                };
-                ShellCommand {
-                    arguments: own()
-                        .into_iter()
-                        .chain(
-                            ["-e", "sh", "-c", WSL_LOGIN_SHELL, WSL_ARGV0, &script]
-                                .into_iter()
-                                .map(OsString::from),
-                        )
-                        .collect(),
-                    environment: crossing_environment(),
-                }
-            }
+            profiles::PathNamespace::Wsl => wsl_command(scripts, own),
         },
-        (Integration::CmdPrompt, _) => ShellCommand {
+        // zsh's door is a directory and not a flag, so nothing is added to the
+        // command line at all: the profile's own words go through untouched and
+        // `ZDOTDIR` says where the startup files are. The reader's own
+        // `ZDOTDIR`, if this window inherited one, travels beside it so that
+        // `folio.zsh` can put their files back.
+        Integration::ZshDotDir if scripts.zdotdir.is_some() => {
+            let Some(zdotdir) = scripts.zdotdir else {
+                unreachable!("guarded by the arm")
+            };
+            match profile.paths {
+                profiles::PathNamespace::Windows => ShellCommand {
+                    arguments: own(),
+                    environment: zdotdir_environment(zdotdir.as_os_str().to_owned(), environment),
+                },
+                // Under WSL the launcher is handed the question, and the
+                // directory has to be named in the distribution's own spelling
+                // because it is the distribution that will open it.
+                profiles::PathNamespace::Wsl => wsl_command(scripts, own),
+            }
+        }
+        Integration::CmdPrompt => ShellCommand {
             arguments: own(),
             environment: vec![(
                 OsString::from(CMD_PROMPT),
@@ -484,6 +659,64 @@ fn shell_command_for(
             environment: Vec::new(),
         },
     }
+}
+
+/// The launcher's whole command line: where to stand, then the question only the
+/// distribution can answer, then both doors named in the distribution's own
+/// spelling ([`WSL_LOGIN_SHELL`]).
+///
+/// Both, and not the one this side guessed at: which shell a `wsl.exe` logs the
+/// reader into is a fact about a Linux password database, so the answer to
+/// "bash's init file or zsh's directory" is reached inside the distribution and
+/// each branch is handed what it needs. A path this machine keeps somewhere WSL
+/// cannot name travels as the empty string, and the branch that needed it falls
+/// through to the plain login shell — which is what every WSL pane did before
+/// there was anything to hand over.
+fn wsl_command(scripts: Scripts<'_>, own: &dyn Fn() -> Vec<OsString>) -> ShellCommand {
+    let named = |path: Option<&Path>| {
+        path.and_then(windows_to_wsl)
+            .and_then(|path| path.into_os_string().into_string().ok())
+            .unwrap_or_default()
+    };
+    let bash = named(scripts.bash);
+    let zdotdir = named(scripts.zdotdir);
+    if bash.is_empty() && zdotdir.is_empty() {
+        return ShellCommand {
+            arguments: own(),
+            environment: Vec::new(),
+        };
+    }
+    ShellCommand {
+        arguments: own()
+            .into_iter()
+            .chain(
+                [
+                    "-e",
+                    "sh",
+                    "-c",
+                    WSL_LOGIN_SHELL,
+                    WSL_ARGV0,
+                    &bash,
+                    &zdotdir,
+                ]
+                .into_iter()
+                .map(OsString::from),
+            )
+            .collect(),
+        environment: crossing_environment(),
+    }
+}
+
+/// `ZDOTDIR`, and the reader's own beside it when this window inherited one.
+fn zdotdir_environment(
+    ours: OsString,
+    environment: &dyn ShellEnvironment,
+) -> Vec<(OsString, OsString)> {
+    let mut declared = vec![(OsString::from(ZDOTDIR), ours)];
+    if let Some(theirs) = environment.var_os(ZDOTDIR) {
+        declared.push((OsString::from(USER_ZDOTDIR), theirs));
+    }
+    declared
 }
 
 /// `FORCE_HYPERLINK=1`, unless somebody has already answered that question.
@@ -640,8 +873,9 @@ fn cmd_prompt(existing: Option<OsString>) -> OsString {
 
 /// The marker that tells the script it is being used as an init file, for the
 /// door where this side of the boundary is the only side there is.
-fn installed_environment() -> Vec<(OsString, OsString)> {
-    vec![(OsString::from(INSTALLED_MARKER), OsString::from("1"))]
+fn installed_environment(login: bool) -> Vec<(OsString, OsString)> {
+    let mode = if login { MODE_LOGIN } else { MODE_INTERACTIVE };
+    vec![(OsString::from(INSTALLED_MARKER), OsString::from(mode))]
 }
 
 /// The list of what to carry over the WSL boundary.
@@ -897,15 +1131,23 @@ pub fn profile_declares_integration(text: &str) -> bool {
 /// rebuild while the reader is left looking at a shell with no markers and no
 /// error. Where the script is *not* under `%APPDATA%` — a build run with the
 /// variable redirected — the literal path is the only true thing to write.
+///
+/// **The two spellings are quoted differently, and they have to be** (review row
+/// R3-14). A double-quoted PowerShell string is interpolated: `$` opens a
+/// variable and a backtick opens an escape, both of them legal characters in a
+/// Windows directory name, so a literal path holding either was read by the shell
+/// as something other than itself and the line sourced nothing. A single-quoted
+/// string is not interpolated at all — the one thing it needs is its own quote
+/// doubled — so that is what the literal path gets. The `$env:APPDATA` spelling
+/// keeps its double quotes because it *is* an interpolation, and the tail behind
+/// it is this build's own constant path components rather than anything a reader
+/// can name.
 #[must_use]
 pub fn integration_line(script: &Path, appdata: Option<&Path>) -> String {
-    let spelled = appdata
-        .and_then(|appdata| script.strip_prefix(appdata).ok())
-        .map_or_else(
-            || script.display().to_string(),
-            |tail| format!(r"$env:APPDATA\{}", tail.display()),
-        );
-    format!(". \"{spelled}\"")
+    match appdata.and_then(|appdata| script.strip_prefix(appdata).ok()) {
+        Some(tail) => format!(". \"$env:APPDATA\\{}\"", tail.display()),
+        None => format!(". '{}'", script.display().to_string().replace('\'', "''")),
+    }
 }
 
 /// Where PowerShell's script is on this machine, written out on first use.
@@ -1202,6 +1444,12 @@ pub(crate) const fn script_source_ps1() -> &'static str {
     SCRIPT_PS1
 }
 
+/// zsh's script, for the tests that check what the three names in `ZDOTDIR` hold.
+#[cfg(test)]
+pub(crate) const fn script_source_zsh() -> &'static str {
+    SCRIPT_ZSH
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1329,7 +1577,7 @@ mod tests {
     #[test]
     fn git_bash_trades_its_login_flag_for_the_init_file() {
         let script = Path::new(r"C:\Users\dev\AppData\Roaming\Folio\shell-integration\folio.bash");
-        let command = shell_command(&row("gitbash"), &[], Some(script), &bare());
+        let command = shell_command(&row("gitbash"), &[], bash_only(script), &bare());
         assert_eq!(
             args(&command),
             [
@@ -1343,14 +1591,20 @@ mod tests {
             "`--login` and `--init-file` cannot both be honoured, so only one is passed"
         );
         assert!(
-            command
-                .environment
-                .contains(&(OsString::from("BT_SHELL_INTEGRATION"), OsString::from("1"))),
-            "the marker is what makes the script run the login chain it displaced"
+            command.environment.contains(&(
+                OsString::from("BT_SHELL_INTEGRATION"),
+                OsString::from(MODE_LOGIN)
+            )),
+            "the marker is what makes the script run the chain it displaced, and this row's own              arguments say which chain that is"
         );
         // No script on this machine, and Git Bash is the shell it always was.
         assert_eq!(
-            args(&shell_command(&row("gitbash"), &[], None, &bare())),
+            args(&shell_command(
+                &row("gitbash"),
+                &[],
+                Scripts::default(),
+                &bare()
+            )),
             ["--login", "-i"]
         );
     }
@@ -1399,8 +1653,14 @@ mod tests {
             WSL_LOGIN_SHELL,
             "folio",
             "/mnt/c/Users/dev/AppData/Roaming/Folio/shell-integration/folio.bash",
+            "/mnt/c/Users/dev/AppData/Roaming/Folio/shell-integration/zdotdir",
         ];
-        let first = shell_command(&row("wsl"), &place, Some(script), &bare());
+        let zdotdir = Path::new(r"C:\Users\dev\AppData\Roaming\Folio\shell-integration\zdotdir");
+        let doors = Scripts {
+            bash: Some(script),
+            zdotdir: Some(zdotdir),
+        };
+        let first = shell_command(&row("wsl"), &place, doors, &bare());
         assert_eq!(
             args(&first),
             expected,
@@ -1420,7 +1680,7 @@ mod tests {
         );
         // The whole of the defect, said as a sentence: the second pane of a run
         // used to be the first one that worked.
-        let second = shell_command(&row("wsl"), &place, Some(script), &bare());
+        let second = shell_command(&row("wsl"), &place, doors, &bare());
         assert_eq!(
             args(&second),
             args(&first),
@@ -1469,8 +1729,14 @@ mod tests {
         // bash, by the name it is invoked under rather than by where it lives:
         // `/bin/bash` and `/usr/bin/bash` are one shell on two machines.
         assert!(WSL_LOGIN_SHELL.contains(r#"case "${shell##*/}" in"#));
-        assert!(WSL_LOGIN_SHELL.contains(r#"bash) BT_SHELL_INTEGRATION=1"#));
+        assert!(WSL_LOGIN_SHELL.contains(r#"BT_SHELL_INTEGRATION=login"#));
         assert!(WSL_LOGIN_SHELL.contains(r#"exec "$shell" --init-file "$1" -i"#));
+        // zsh by its own door, because it has no `--init-file` and refuses the
+        // flag: `ZDOTDIR`, with the reader's own carried beside it, and still
+        // the login shell `wsl.exe` would have started.
+        assert!(WSL_LOGIN_SHELL.contains(r#"zsh) "#));
+        assert!(WSL_LOGIN_SHELL.contains(r#"ZDOTDIR="$2""#));
+        assert!(WSL_LOGIN_SHELL.contains("BT_USER_ZDOTDIR"));
         // Everything else keeps its own shell, started as the login shell
         // `wsl.exe` would have started.
         assert!(WSL_LOGIN_SHELL.contains(r#"*) exec "$shell" -l"#));
@@ -1492,13 +1758,328 @@ mod tests {
     fn a_script_wsl_cannot_name_is_not_handed_to_it() {
         let place = [OsString::from("--cd"), OsString::from("/mnt/d/Developer")];
         for unreachable in [r"\\nas\home\Folio\folio.bash", "relative\\folio.bash"] {
-            let command = shell_command(&row("wsl"), &place, Some(Path::new(unreachable)), &bare());
+            let command = shell_command(
+                &row("wsl"),
+                &place,
+                Scripts {
+                    bash: Some(Path::new(unreachable)),
+                    zdotdir: Some(Path::new(unreachable)),
+                },
+                &bare(),
+            );
             assert_eq!(
                 args(&command),
                 ["--cd", "/mnt/d/Developer"],
                 "{unreachable}"
             );
         }
+    }
+
+    /// The bash half alone, which is what most of these cases are about.
+    fn bash_only(script: &Path) -> Scripts<'_> {
+        Scripts {
+            bash: Some(script),
+            zdotdir: None,
+        }
+    }
+
+    /// Both halves, spelled the way the two installers spell them.
+    fn both(bash: &'static str, zdotdir: &'static str) -> Scripts<'static> {
+        Scripts {
+            bash: Some(Path::new(bash)),
+            zdotdir: Some(Path::new(zdotdir)),
+        }
+    }
+
+    /// PIN — **a profile's own arguments reach the bash it names** (review row
+    /// R3-7).
+    ///
+    /// This arm used to build the whole command line out of three literals, so a
+    /// row that carried anything of the reader's — `--noediting`, `-O globstar`,
+    /// a `--rcfile` of their own — lost it the moment the row had integration.
+    /// The profile said one thing and the spawn did another, and the only
+    /// symptom was a shell that did not behave the way the row described.
+    ///
+    /// What *is* dropped is the login flag, and only because bash will not read
+    /// an init file for a login shell — the chain it stood for is put back by the
+    /// script, which is told which one it owes.
+    ///
+    /// MUTATION: build the list from literals again and every word a reader
+    /// added to a Git Bash row is silently thrown away.
+    #[test]
+    fn a_bash_given_an_init_file_still_gets_the_words_its_profile_carries() {
+        let theirs = Profile {
+            args: vec![
+                "--login".to_owned(),
+                "-i".to_owned(),
+                "--noediting".to_owned(),
+            ],
+            ..row("gitbash")
+        };
+        let command = shell_command(
+            &theirs,
+            &[OsString::from("--rcfile-is-not-here")],
+            bash_only(Path::new(r"C:\Folio\folio.bash")),
+            &bare(),
+        );
+        assert_eq!(
+            args(&command),
+            [
+                "--init-file",
+                r"C:\Folio\folio.bash",
+                "-i",
+                "--noediting",
+                "--rcfile-is-not-here"
+            ],
+            "the reader's words are kept and only the login flag is dropped"
+        );
+        // A cluster is one argument carrying several flags, and only the `l`
+        // comes out of it.
+        let clustered = Profile {
+            args: vec!["-li".to_owned()],
+            ..row("gitbash")
+        };
+        let command = shell_command(
+            &clustered,
+            &[],
+            bash_only(Path::new(r"C:\Folio\folio.bash")),
+            &bare(),
+        );
+        assert_eq!(
+            args(&command),
+            ["--init-file", r"C:\Folio\folio.bash", "-i"]
+        );
+        // And a row that never said `-i` still gets one: `-i` is what makes bash
+        // read the init file at all.
+        let bare_row = Profile {
+            args: Vec::new(),
+            ..row("gitbash")
+        };
+        let command = shell_command(
+            &bare_row,
+            &[],
+            bash_only(Path::new(r"C:\Folio\folio.bash")),
+            &bare(),
+        );
+        assert_eq!(
+            args(&command),
+            ["--init-file", r"C:\Folio\folio.bash", "-i"]
+        );
+    }
+
+    /// PIN — **the startup chain a pane is owed is the one its profile asked
+    /// for** (review row R3-8).
+    ///
+    /// bash has two chains and reads exactly one of them, and which is a fact
+    /// about the profile: a row carrying `--login` wants `/etc/profile` and the
+    /// first of the three profile files, and a row that does not wants
+    /// `~/.bashrc` and nothing else. The script emulates whichever it is told,
+    /// and this side is the only half that can read the row.
+    ///
+    /// MUTATION: send `1` again and every pane emulates a login shell, so a
+    /// reader who kept their aliases in `~/.bashrc` — which is where bash's own
+    /// documentation puts them — has none of them.
+    #[test]
+    fn the_startup_chain_a_pane_emulates_is_the_one_its_profile_asked_for() {
+        let login = shell_command(
+            &row("gitbash"),
+            &[],
+            bash_only(Path::new(r"C:\Folio\folio.bash")),
+            &bare(),
+        );
+        assert_eq!(
+            value_of(&login, INSTALLED_MARKER).as_deref(),
+            Some(MODE_LOGIN),
+            "the shipped Git Bash row says `--login`"
+        );
+        let plain = Profile {
+            args: vec!["-i".to_owned()],
+            ..row("gitbash")
+        };
+        let plain = shell_command(
+            &plain,
+            &[],
+            bash_only(Path::new(r"C:\Folio\folio.bash")),
+            &bare(),
+        );
+        assert_eq!(
+            value_of(&plain, INSTALLED_MARKER).as_deref(),
+            Some(MODE_INTERACTIVE)
+        );
+        // The script reads both words, and neither of them is a bare `1`.
+        let source = script_source();
+        assert!(source.contains(MODE_INTERACTIVE), "{MODE_INTERACTIVE}");
+        assert!(
+            source.contains("$HOME/.bashrc"),
+            "the interactive chain is the one file bash reads"
+        );
+        assert!(
+            source.contains("/etc/profile") && source.contains("$HOME/.bash_login"),
+            "and the login chain is still all of bash's own order"
+        );
+    }
+
+    /// PIN — **zsh is pointed at a directory and never handed bash's flag**
+    /// (review row R3-6).
+    ///
+    /// `--init-file` is bash's, and zsh refuses it: a `zsh` row used to be sent
+    /// through the bash door, so the shell either would not start or started
+    /// with the flag treated as a file of its own. zsh's door is `ZDOTDIR`, and
+    /// nothing is added to the command line at all — the profile's own words go
+    /// through untouched.
+    ///
+    /// MUTATION: map `zsh` back to the init file and every zsh pane is handed an
+    /// argument its shell does not take.
+    #[test]
+    fn zsh_is_pointed_at_a_directory_and_never_handed_bashs_flag() {
+        assert_eq!(
+            profiles::derive_integration(&ProgramSource::Path(PathBuf::from("/usr/bin/zsh"))),
+            Integration::ZshDotDir
+        );
+        let theirs = Profile {
+            program: ProgramSource::Path(PathBuf::from(r"C:\msys64\usr\bin\zsh.exe")),
+            args: vec!["-l".to_owned()],
+            paths: profiles::PathNamespace::Windows,
+            ..row("gitbash")
+        };
+        let command = shell_command(
+            &theirs,
+            &[],
+            both(r"C:\Folio\folio.bash", r"C:\Folio\zdotdir"),
+            &bare(),
+        );
+        assert_eq!(args(&command), ["-l"], "zsh's door adds no argument");
+        assert_eq!(
+            value_of(&command, "ZDOTDIR").as_deref(),
+            Some(r"C:\Folio\zdotdir")
+        );
+        assert_eq!(value_of(&command, "BT_USER_ZDOTDIR"), None);
+        // A reader who keeps their own startup files somewhere else has said so
+        // in that variable, and the script needs it to put them back.
+        let inherited = shell_command(
+            &theirs,
+            &[],
+            both(r"C:\Folio\folio.bash", r"C:\Folio\zdotdir"),
+            &Env(vec![("ZDOTDIR", r"D:\dotfiles\zsh")]),
+        );
+        assert_eq!(
+            value_of(&inherited, "BT_USER_ZDOTDIR").as_deref(),
+            Some(r"D:\dotfiles\zsh")
+        );
+        // And the script it will read is the one that puts them back.
+        let script = script_source_zsh();
+        assert!(script.contains("BT_USER_ZDOTDIR"));
+        for name in ZDOTDIR_FILES {
+            assert!(script.contains(name), "{name} is one of the three");
+        }
+    }
+
+    /// PIN — **a Bourne shell is told it has no integration rather than handed
+    /// one it will ignore** (review row R3-6).
+    ///
+    /// `sh` accepts `--init-file` and does nothing with it — no error, no
+    /// marker, no directory — which is the one failure that looks exactly like a
+    /// shell with no integration at all. Now it *is* one, and the pane's own
+    /// capability sentence says so.
+    ///
+    /// MUTATION: map `sh` back to the init file and the pane claims a capability
+    /// it silently does not have.
+    #[test]
+    fn a_bourne_shell_is_told_it_has_no_integration_rather_than_handed_one() {
+        for program in ["/bin/sh", "/usr/bin/dash", r"C:\msys64\usr\bin\sh.exe"] {
+            assert_eq!(
+                profiles::derive_integration(&ProgramSource::Path(PathBuf::from(program))),
+                Integration::None,
+                "{program}"
+            );
+        }
+        let theirs = Profile {
+            program: ProgramSource::Path(PathBuf::from("/bin/sh")),
+            args: vec!["-i".to_owned()],
+            ..row("gitbash")
+        };
+        let command = shell_command(
+            &theirs,
+            &[],
+            both(r"C:\Folio\folio.bash", r"C:\Folio\zdotdir"),
+            &bare(),
+        );
+        assert_eq!(args(&command), ["-i"]);
+        assert_eq!(value_of(&command, INSTALLED_MARKER), None);
+        assert_eq!(value_of(&command, "ZDOTDIR"), None);
+        assert_eq!(
+            profiles::capability_of_parts(profiles::served_by(&theirs), theirs.paths, true, false),
+            crate::i18n::Text::CapNone
+        );
+    }
+
+    /// PIN — **the question asked inside the distribution names both doors.**
+    ///
+    /// Which shell a `wsl.exe` logs the reader into is a fact about a Linux
+    /// password database, so the answer is reached in there — and each branch
+    /// needs a different thing: bash needs the init file, zsh needs the
+    /// directory. Both travel as arguments, so a path with a space in it arrives
+    /// whole.
+    ///
+    /// MUTATION: hand the zsh branch nothing and a WSL login that lands in zsh
+    /// is back to a pane with no marks and no directory.
+    #[test]
+    fn the_question_asked_inside_the_distribution_names_both_doors() {
+        let place = [OsString::from("--cd"), OsString::from("/mnt/d/Developer")];
+        let command = shell_command(
+            &row("wsl"),
+            &place,
+            both(r"C:\Folio\folio.bash", r"C:\Folio\zdotdir"),
+            &bare(),
+        );
+        let words = args(&command);
+        assert_eq!(
+            words.last().map(String::as_str),
+            windows_to_wsl(Path::new(r"C:\Folio\zdotdir"))
+                .as_deref()
+                .and_then(Path::to_str),
+            "the directory is the last argument, which is `$2`"
+        );
+        assert!(words.contains(&WSL_ARGV0.to_owned()));
+        assert!(WSL_LOGIN_SHELL.contains("zsh)"), "{WSL_LOGIN_SHELL}");
+        assert!(WSL_LOGIN_SHELL.contains("ZDOTDIR=\"$2\""));
+        assert!(
+            WSL_LOGIN_SHELL.contains("BT_SHELL_INTEGRATION=login"),
+            "a wsl.exe starts a login shell, and the script owes that chain"
+        );
+    }
+
+    /// PIN — **the line written into a PowerShell profile survives the path it
+    /// names** (review row R3-14).
+    ///
+    /// A double-quoted PowerShell string is interpolated, and `$` and a backtick
+    /// are both legal in a Windows directory name — so the fallback line, the one
+    /// written when the script is not under `%APPDATA%`, used to hand the shell
+    /// something other than the path. A single-quoted string is not interpolated
+    /// at all.
+    ///
+    /// MUTATION: quote the literal path with `"` again and a reader whose folder
+    /// is called `C:\$dev` dot-sources a path that is missing a component.
+    #[test]
+    fn the_profile_line_survives_a_path_powershell_would_have_read() {
+        for awkward in [
+            r"C:\$dev\Folio\folio.ps1",
+            "C:\\dev`n\\Folio\\folio.ps1",
+            r"C:\it's here\folio.ps1",
+        ] {
+            let line = integration_line(Path::new(awkward), None);
+            let expected = format!(". '{}'", awkward.replace('\'', "''"));
+            assert_eq!(line, expected, "{awkward}");
+        }
+        // The `%APPDATA%` spelling is an interpolation on purpose, and what
+        // follows it is this build's own constant components.
+        assert_eq!(
+            integration_line(
+                Path::new(r"C:\Users\me\AppData\Roaming\Folio\shell-integration\folio.ps1"),
+                Some(Path::new(r"C:\Users\me\AppData\Roaming"))
+            ),
+            ". \"$env:APPDATA\\Folio\\shell-integration\\folio.ps1\""
+        );
     }
 
     /// PIN — PowerShell is not injected into, by any door.
@@ -1514,7 +2095,12 @@ mod tests {
                 Integration::PowerShellOptIn,
                 "{id}: PowerShell's script is the user's to install"
             );
-            let command = shell_command(&profile, &[], Some(Path::new(r"C:\script.bash")), &bare());
+            let command = shell_command(
+                &profile,
+                &[],
+                bash_only(Path::new(r"C:\script.bash")),
+                &bare(),
+            );
             assert_eq!(
                 command.arguments,
                 profile.args.iter().map(OsString::from).collect::<Vec<_>>(),
@@ -1548,7 +2134,7 @@ mod tests {
         let command = shell_command(
             &row("cmd"),
             &[],
-            Some(Path::new(r"C:\script.bash")),
+            bash_only(Path::new(r"C:\script.bash")),
             &bare(),
         );
         assert!(
@@ -1586,11 +2172,16 @@ mod tests {
     #[test]
     fn every_shell_is_told_this_terminal_renders_hyperlinks_unless_it_was_already_told() {
         let forced = |id: &str, environment: &dyn ShellEnvironment| {
-            shell_command(&row(id), &[], Some(Path::new(r"C:\s.bash")), environment)
-                .environment
-                .into_iter()
-                .find(|(key, _)| key == "FORCE_HYPERLINK")
-                .map(|(_, value)| value.to_string_lossy().into_owned())
+            shell_command(
+                &row(id),
+                &[],
+                bash_only(Path::new(r"C:\s.bash")),
+                environment,
+            )
+            .environment
+            .into_iter()
+            .find(|(key, _)| key == "FORCE_HYPERLINK")
+            .map(|(_, value)| value.to_string_lossy().into_owned())
         };
         for id in ["wsl", "gitbash", "cmd"] {
             assert_eq!(forced(id, &bare()).as_deref(), Some("1"), "{id}");
@@ -1617,7 +2208,7 @@ mod tests {
         let wsl = shell_command(
             &row("wsl"),
             &[],
-            Some(Path::new(r"C:\s.bash")),
+            bash_only(Path::new(r"C:\s.bash")),
             &Env(vec![("FORCE_HYPERLINK", "0")]),
         );
         assert!(
@@ -1637,7 +2228,12 @@ mod tests {
     /// *that* prints it three times.
     #[test]
     fn a_prompt_the_user_already_set_is_kept_and_reported_in_front_of_exactly_once() {
-        let theirs = shell_command(&row("cmd"), &[], None, &Env(vec![("PROMPT", "$T$S$P$G")]));
+        let theirs = shell_command(
+            &row("cmd"),
+            &[],
+            Scripts::default(),
+            &Env(vec![("PROMPT", "$T$S$P$G")]),
+        );
         assert_eq!(
             prompt_of(&theirs),
             r"$e]133;D$e\$e]7;file:///$P$e\$e]133;A$e\$T$S$P$G"
@@ -1646,7 +2242,7 @@ mod tests {
         let again = shell_command(
             &row("cmd"),
             &[],
-            None,
+            Scripts::default(),
             &Env(vec![(
                 "PROMPT",
                 r"$e]133;D$e\$e]7;file:///$P$e\$e]133;A$e\$T$S$P$G",
@@ -1660,7 +2256,12 @@ mod tests {
 
         // An empty `PROMPT` is not a prompt the user chose to have; it is what
         // `cmd` reads as "use the default", and the default is what it gets.
-        let empty = shell_command(&row("cmd"), &[], None, &Env(vec![("PROMPT", "")]));
+        let empty = shell_command(
+            &row("cmd"),
+            &[],
+            Scripts::default(),
+            &Env(vec![("PROMPT", "")]),
+        );
         assert_eq!(
             prompt_of(&empty),
             r"$e]133;D$e\$e]7;file:///$P$e\$e]133;A$e\$P$G"
@@ -1706,7 +2307,7 @@ mod tests {
                 &[("FOO", "bar"), ("TERM_PROGRAM", "xterm"), ("EMPTY", "")],
             ),
             &[],
-            Some(Path::new(r"C:\s.bash")),
+            bash_only(Path::new(r"C:\s.bash")),
             &bare(),
         );
         assert_eq!(value_of(&command, "FOO").as_deref(), Some("bar"));
@@ -1720,7 +2321,12 @@ mod tests {
         assert_eq!(value_of(&command, "EMPTY").as_deref(), Some(""));
         // And it is this row's sentence and no other's: the shipped table is
         // untouched, so a sibling profile still hears what the terminal says.
-        let sibling = shell_command(&row("gitbash"), &[], Some(Path::new(r"C:\s.bash")), &bare());
+        let sibling = shell_command(
+            &row("gitbash"),
+            &[],
+            bash_only(Path::new(r"C:\s.bash")),
+            &bare(),
+        );
         assert_eq!(value_of(&sibling, "FOO"), None);
         assert_eq!(value_of(&sibling, "TERM_PROGRAM"), None);
     }
@@ -1738,7 +2344,7 @@ mod tests {
         let command = shell_command(
             &row_with("cmd", &[("", "orphan"), ("KEPT", "1")]),
             &[],
-            None,
+            Scripts::default(),
             &bare(),
         );
         assert!(
@@ -1764,7 +2370,7 @@ mod tests {
             let command = shell_command(
                 &row_with("gitbash", &[(FORCE_HYPERLINK, answer)]),
                 &[],
-                Some(Path::new(r"C:\s.bash")),
+                bash_only(Path::new(r"C:\s.bash")),
                 &bare(),
             );
             assert_eq!(spelled(&command, FORCE_HYPERLINK), 1, "{answer}");
@@ -1772,14 +2378,19 @@ mod tests {
         }
         // `Auto` - no row of that name - is the behaviour that shipped before
         // the picker existed, unchanged.
-        let auto = shell_command(&row("gitbash"), &[], Some(Path::new(r"C:\s.bash")), &bare());
+        let auto = shell_command(
+            &row("gitbash"),
+            &[],
+            bash_only(Path::new(r"C:\s.bash")),
+            &bare(),
+        );
         assert_eq!(value_of(&auto, FORCE_HYPERLINK).as_deref(), Some("1"));
         // And a profile's own `0` beats an inherited `1`, which the declaration
         // would have left alone: this is not a declaration, it is the answer.
         let over_inherited = shell_command(
             &row_with("gitbash", &[(FORCE_HYPERLINK, "0")]),
             &[],
-            Some(Path::new(r"C:\s.bash")),
+            bash_only(Path::new(r"C:\s.bash")),
             &Env(vec![(FORCE_HYPERLINK, "1")]),
         );
         assert_eq!(
@@ -1802,7 +2413,7 @@ mod tests {
                 paths: profiles::PathNamespace::Windows,
                 ..row(id)
             };
-            let command = shell_command(&shut, &[], Some(Path::new(r"C:\s.bash")), &bare());
+            let command = shell_command(&shut, &[], bash_only(Path::new(r"C:\s.bash")), &bare());
             assert_eq!(
                 command.arguments,
                 shut.args.iter().map(OsString::from).collect::<Vec<_>>(),
@@ -1850,7 +2461,13 @@ mod tests {
                 Integration::BashInitFile,
             ),
             (r"C:\Windows\System32\wsl.exe", Integration::BashInitFile),
-            ("/usr/bin/zsh", Integration::BashInitFile),
+            // A zsh has a door of its own: `ZDOTDIR`, because `--init-file` is
+            // bash's flag and zsh refuses it (review row R3-6).
+            ("/usr/bin/zsh", Integration::ZshDotDir),
+            // And a Bourne shell has none, rather than one it accepts and
+            // ignores in silence.
+            ("/bin/sh", Integration::None),
+            ("/usr/bin/dash", Integration::None),
             (r"C:\Windows\System32\cmd.exe", Integration::CmdPrompt),
             (r"D:\pwsh.exe", Integration::PowerShellOptIn),
         ] {
@@ -1874,7 +2491,7 @@ mod tests {
         let script = Path::new(r"C:\Users\dev\AppData\Roaming\Folio\shell-integration\folio.bash");
         let listed = |profile: &Profile| {
             value_of(
-                &shell_command(profile, &[], Some(script), &bare()),
+                &shell_command(profile, &[], bash_only(script), &bare()),
                 "WSLENV",
             )
         };
@@ -1906,7 +2523,10 @@ mod tests {
         // The one WSL pane that lists nothing new is the one handed no script,
         // which is the pane that was never injected into.
         assert_eq!(
-            value_of(&shell_command(&row("wsl"), &[], None, &bare()), "WSLENV"),
+            value_of(
+                &shell_command(&row("wsl"), &[], Scripts::default(), &bare()),
+                "WSLENV"
+            ),
             None
         );
     }
@@ -1992,7 +2612,7 @@ mod tests {
             ..row("cmd")
         };
         assert_eq!(profiles::served_by(&theirs), Integration::None);
-        let command = shell_command(&theirs, &[], None, &bare());
+        let command = shell_command(&theirs, &[], Scripts::default(), &bare());
         assert_eq!(command.arguments, [OsString::from("--verbose")]);
         assert_eq!(
             value_of(&command, "ANTHROPIC_LOG").as_deref(),
@@ -2195,9 +2815,12 @@ mod tests {
             ),
             r#". "$env:APPDATA\Folio\shell-integration\folio.ps1""#
         );
+        // A path that is not under `%APPDATA%` is single-quoted: a
+        // double-quoted PowerShell string is interpolated, and `$` and a
+        // backtick are both legal in a directory name (review row R3-14).
         assert_eq!(
             integration_line(Path::new(r"D:\scratch\folio.ps1"), None),
-            r#". "D:\scratch\folio.ps1""#
+            r". 'D:\scratch\folio.ps1'"
         );
     }
 

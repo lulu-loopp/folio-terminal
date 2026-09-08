@@ -1136,17 +1136,20 @@ pub const HYPERLINK_OPTIONS: [ForceHyperlink; 3] = [
     ForceHyperlink::Off,
 ];
 
-/// The five answers to **which door serves this profile** — the mock-up's own
+/// The six answers to **which door serves this profile** — the mock-up's own
 /// list (`data-combo="pfintegration"`), in its order.
 ///
-/// `Auto` first because it is the rule and the default, then the three doors
-/// this terminal has, then the absence of one. Naming the mechanisms rather than
-/// the shells is the same ruling the i18n entries carry: a `zsh` under WSL and a
-/// Git Bash are both served by the init file.
-pub const INTEGRATION_OPTIONS: [IntegrationChoice; 5] = [
+/// `Auto` first because it is the rule and the default, then the four doors this
+/// terminal has, then the absence of one. Naming the mechanisms rather than the
+/// shells is the same ruling the i18n entries carry: a bash under WSL and a Git
+/// Bash are both served by the init file, and a zsh is served by the directory it
+/// reads its startup files out of whether it is a WSL login or a zsh on this side
+/// of the boundary.
+pub const INTEGRATION_OPTIONS: [IntegrationChoice; 6] = [
     IntegrationChoice::Auto,
     IntegrationChoice::Named(Integration::PowerShellOptIn),
     IntegrationChoice::Named(Integration::BashInitFile),
+    IntegrationChoice::Named(Integration::ZshDotDir),
     IntegrationChoice::Named(Integration::CmdPrompt),
     IntegrationChoice::Named(Integration::None),
 ];

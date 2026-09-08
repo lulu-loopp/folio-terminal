@@ -29600,7 +29600,7 @@ fn create_leaf_session(
         let mut command = shell_integration::shell_command(
             &row,
             &place.arguments,
-            shell_integration::script_path(),
+            shell_integration::Scripts::installed(),
             &bt_pty::SystemShellEnvironment,
         );
         // **The two variables that make an agent in this pane able to say something.**

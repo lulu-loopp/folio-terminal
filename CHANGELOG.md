@@ -35,6 +35,50 @@ All notable changes to Folio are recorded here. The format follows
   directory holds. Nothing about the program changed.
 ### Fixed
 
+- **A bash pane keeps the startup files, the hooks and the arguments it was
+  supposed to have.** A pane whose profile asked for a plain interactive shell
+  now reads `~/.bashrc`, which is where bash's own documentation puts your
+  aliases and functions; only a profile that asks for a login shell reads
+  `/etc/profile` and `~/.bash_profile`. Anything else you wrote in the profile's
+  arguments, such as `--noediting` or `-O globstar`, reaches the shell instead of
+  being dropped the moment that profile had shell integration. If your
+  `PROMPT_COMMAND` is a list, which is what bash 5.1 and later allow, your hooks
+  run once per prompt rather than twice, and the command mark belongs to the
+  command you typed, so the output of every command is decorated again. A DEBUG
+  trap you had already installed keeps running, and it no longer costs your shell
+  its positional parameters.
+- **zsh gets shell integration, and `sh` stops pretending to.** A zsh pane, on
+  Windows or inside WSL, is served through `ZDOTDIR`, so it draws command marks,
+  reports where it is standing and carries exit codes the way a bash pane does,
+  and your own `.zshenv`, `.zprofile` and `.zshrc` still run. A `sh` or `dash`
+  profile is told it has no integration rather than being handed bash's flag,
+  which it accepted and ignored, so the profile page says what that pane can
+  really do.
+- **A Command Prompt in a folder with a `#` or a space in its name is not
+  forgotten.** `cmd` can only spell a directory one way, and the terminal read
+  that spelling as a URI, so `D:\Code\C# Projects` was recorded as `D:\Code\C`
+  and a folder with a `%` in it was dropped. The directory a pane reports is now
+  read as the path it is.
+- **A WSL pane sitting at `/` still knows where it is.** The root was refused as
+  a directory, so the pane lost it and new tabs opened from that pane started
+  somewhere else.
+- **A PowerShell prompt of your own is told the truth.** A prompt this terminal
+  wraps, whether it is oh-my-posh, conda's or one you wrote, now sees whether
+  your last command succeeded instead of always seeing success, and a prompt that
+  changes directory is reported from where it left the shell rather than one
+  prompt behind. The line written into your `$PROFILE` survives a script path
+  holding a `$` or a backtick.
+- **A colour set right after a command mark is a colour again.** An escape
+  sequence that interrupted an unfinished `OSC 133` or `OSC 7` lost its first two
+  bytes, so the rest of it printed as text in the middle of the output.
+- **The cursor lands where a program put it inside a scrolling region.** With
+  origin mode on, moving the cursor to a column or up and down a line counted
+  from the top of the region twice, so full-screen programs drew rows further
+  down the screen than they meant to.
+- **A mouse encoding this terminal cannot write is refused rather than
+  promised.** A program that asked for UTF-8 mouse reporting was told it had it
+  and then sent coordinates in the ordinary encoding, which it could not frame
+  past column 95.
 - **A name ending in a dot or a space can no longer smuggle a program past the
   file column.** Double-clicking a row in the file column opens the file and
   refuses to run one, and the refusal read the name exactly as it was written.

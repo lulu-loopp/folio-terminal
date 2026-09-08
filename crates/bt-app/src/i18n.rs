@@ -1057,16 +1057,19 @@ pub enum Text {
     // the middle of the settings family is a conflict in every one of them. The
     // order of this enum carries no meaning — `visible_rows` and each row's own
     // `option_label` decide what is shown and where.
-    /// The four doors, as the `Shell integration` picker names them. `Auto` is
+    /// The five doors, as the `Shell integration` picker names them. `Auto` is
     /// [`Self::ProfilesAuto`] with the derived door in parentheses, composed by
     /// [`profile_integration_auto`], which is the mock-up's own `Auto (None)`.
     ///
     /// Named after the **mechanism** rather than after the shell, because that
-    /// is what the row chooses: a `zsh` under WSL and a Git Bash are both served
+    /// is what the row chooses: a bash under WSL and a Git Bash are both served
     /// by the init file, and a picker that said `Git Bash` on a row starting
-    /// `zsh` would be naming the wrong thing.
+    /// `bash` in a distribution would be naming the wrong thing. `zsh` gained a
+    /// door of its own (review row R3-6) and it is named the same way — the
+    /// directory it reads its startup files out of, not the shell.
     ProfilesIntegrationPowerShell,
     ProfilesIntegrationBash,
+    ProfilesIntegrationZsh,
     ProfilesIntegrationCmd,
     ProfilesIntegrationNone,
     /// The four capability sentences with their links struck out — a profile
@@ -3030,8 +3033,8 @@ impl Text {
             ),
             Self::CapWslBash => pick(
                 lang,
-                "Prompt marks, directory, exit codes and hyperlinks, on a bash login only",
-                "命令标记、当前目录、退出码、链接；只在登录 shell 是 bash 时生效",
+                "Prompt marks, directory, exit codes and hyperlinks, on a bash or zsh login",
+                "命令标记、当前目录、退出码、链接；登录 shell 是 bash 或 zsh 时生效",
             ),
             // Both halves moved on 2026-09-07, when `cmd` gained its prompt
             // marks; the Chinese is the Chinese writer's own.
@@ -3169,6 +3172,11 @@ impl Text {
                 pick(lang, "PowerShell script", "PowerShell 脚本")
             }
             Self::ProfilesIntegrationBash => pick(lang, "Bash init file", "Bash 初始文件"),
+            // Named after the mechanism and not after the shell, which is the
+            // ruling the rest of this list follows: what a reader picks here is
+            // the door, and zsh's door is the directory it reads its startup
+            // files out of.
+            Self::ProfilesIntegrationZsh => pick(lang, "Zsh startup directory", "Zsh 启动目录"),
             Self::ProfilesIntegrationCmd => pick(lang, "Command Prompt", "命令提示符"),
             Self::ProfilesIntegrationNone => pick(lang, "None", "无"),
             Self::CapFullNoLinks => pick(
@@ -3183,8 +3191,8 @@ impl Text {
             ),
             Self::CapWslBashNoLinks => pick(
                 lang,
-                "Prompt marks, directory and exit codes on a bash login only; no hyperlinks",
-                "只在登录 shell 是 bash 时有命令标记、当前目录、退出码；没有链接",
+                "Prompt marks, directory and exit codes on a bash or zsh login; no hyperlinks",
+                "登录 shell 是 bash 或 zsh 时有命令标记、当前目录、退出码；没有链接",
             ),
             // Same edit, same day.
             Self::CapCmdNoLinks => pick(
@@ -4281,7 +4289,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 592] = [
+    pub const ALL: [Self; 593] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4538,6 +4546,7 @@ impl Text {
         Self::ProfilesUndo,
         Self::ProfilesIntegrationPowerShell,
         Self::ProfilesIntegrationBash,
+        Self::ProfilesIntegrationZsh,
         Self::ProfilesIntegrationCmd,
         Self::ProfilesIntegrationNone,
         Self::CapFullNoLinks,

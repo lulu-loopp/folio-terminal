@@ -50,12 +50,16 @@ use std::{
 /// source on its own: a rewrite that moves a branch turns
 /// `the_question_this_test_runs_is_the_question_the_product_asks` red rather
 /// than leaving this file quietly exercising a script nothing ships.
-const QUESTION: [&str; 7] = [
+const QUESTION: [&str; 11] = [
     r#"shell=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f7); "#,
     r#"[ -n "$shell" ] || shell=/bin/sh; "#,
     r#"case "${shell##*/}" in "#,
-    r#"bash) BT_SHELL_INTEGRATION=1; export BT_SHELL_INTEGRATION; "#,
+    r#"bash) [ -n "$1" ] || exec "$shell" -l; "#,
+    r#"BT_SHELL_INTEGRATION=login; export BT_SHELL_INTEGRATION; "#,
     r#"exec "$shell" --init-file "$1" -i;; "#,
+    r#"zsh) [ -n "$2" ] || exec "$shell" -l; "#,
+    r#"[ -n "${ZDOTDIR:-}" ] && { BT_USER_ZDOTDIR=$ZDOTDIR; export BT_USER_ZDOTDIR; }; "#,
+    r#"ZDOTDIR="$2"; export ZDOTDIR; exec "$shell" -l;; "#,
     r#"*) exec "$shell" -l;; "#,
     "esac",
 ];
@@ -133,7 +137,9 @@ fn shell_fixture(directory: &Path, home: &str, name: &str) -> String {
         name,
         &format!(
             "echo 'shell={name}'\necho \"argv=$*\"\n\
-             echo \"BT_SHELL_INTEGRATION=${{BT_SHELL_INTEGRATION-<unset>}}\""
+             echo \"BT_SHELL_INTEGRATION=${{BT_SHELL_INTEGRATION-<unset>}}\"
+             echo \"ZDOTDIR=${{ZDOTDIR-<unset>}}\"
+             echo \"BT_USER_ZDOTDIR=${{BT_USER_ZDOTDIR-<unset>}}\""
         ),
     );
     msys_spelling(&home.join(name))
@@ -164,6 +170,14 @@ fn msys_spelling(path: &Path) -> String {
 /// `stdin` is closed, so a branch that really does exec a login shell ends at
 /// once rather than waiting to be typed into.
 fn ask(directory: &Path, login_shell: &str, init_file: &str) -> String {
+    ask_with(directory, login_shell, init_file, ZDOTDIR)
+}
+
+/// The directory zsh's branch is handed, in the spelling a distribution reads.
+const ZDOTDIR: &str = "/mnt/c/Users/dev/AppData/Roaming/Folio/shell-integration/zdotdir";
+
+/// The same, with both doors named — the shape the launcher really passes.
+fn ask_with(directory: &Path, login_shell: &str, init_file: &str, zdotdir: &str) -> String {
     let mut path = OsString::from(directory);
     path.push(";");
     path.push(std::env::var_os("PATH").unwrap_or_default());
@@ -172,12 +186,16 @@ fn ask(directory: &Path, login_shell: &str, init_file: &str) -> String {
         .arg(question())
         .arg("folio")
         .arg(init_file)
+        .arg(zdotdir)
         .current_dir(directory)
         .env("PATH", path)
         .env("FOLIO_TEST_LOGIN_SHELL", login_shell)
         // The one variable the bash branch is supposed to introduce. Cleared
         // here so that a branch which merely inherited it could not pass.
         .env_remove("BT_SHELL_INTEGRATION")
+        // The two zsh's branch introduces, cleared for the same reason.
+        .env_remove("ZDOTDIR")
+        .env_remove("BT_USER_ZDOTDIR")
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .output()
@@ -236,15 +254,36 @@ fn bash_is_handed_the_init_file_and_every_other_login_shell_is_left_alone() {
             "{home}: the init file is bash's own flag and its own argument: {said}"
         );
         assert!(
-            said.contains("BT_SHELL_INTEGRATION=1"),
-            "{home}: the script is told it owes the startup chain: {said}"
+            said.contains("BT_SHELL_INTEGRATION=login"),
+            "{home}: the script is told which chain it owes, and `wsl.exe` starts a login shell:              {said}"
         );
     }
+
+    // **zsh takes the directory** (review row R3-6). It has no `--init-file` and
+    // refuses the flag, so what it is handed is `ZDOTDIR` — and it is still the
+    // login shell `wsl.exe` would have started.
+    let shell = shell_fixture(&directory, "bin", "zsh");
+    let said = ask(&directory, &shell, init);
+    assert!(said.contains("shell=zsh"), "{said}");
+    assert!(said.contains("argv=-l"), "zsh keeps its own login: {said}");
+    assert!(
+        !said.contains("--init-file"),
+        "handing bash's flag to a zsh is handing it one it refuses: {said}"
+    );
+    assert!(said.contains(&format!("ZDOTDIR={ZDOTDIR}")), "{said}");
+    assert!(
+        said.contains("BT_SHELL_INTEGRATION=<unset>"),
+        "zsh never reads bash's script, so it must not inherit bash's marker: {said}"
+    );
+    assert!(
+        said.contains("BT_USER_ZDOTDIR=<unset>"),
+        "a session with no directory of its own says so by absence: {said}"
+    );
 
     // Anything else keeps its shell and is started as the login shell `wsl.exe`
     // would have started — and is *not* told that somebody ran its startup
     // files, because nobody did.
-    for name in ["zsh", "fish"] {
+    for name in ["fish", "elvish"] {
         let shell = shell_fixture(&directory, "bin", name);
         let said = ask(&directory, &shell, init);
         assert!(said.contains(&format!("shell={name}")), "{said}");
@@ -258,7 +297,23 @@ fn bash_is_handed_the_init_file_and_every_other_login_shell_is_left_alone() {
             "{name}: a shell that never reads the script must not inherit the marker, or every \
              nested bash is told its startup files have already been run: {said}"
         );
+        assert!(
+            said.contains("ZDOTDIR=<unset>"),
+            "{name}: and neither door is opened for a shell that reads neither: {said}"
+        );
     }
+
+    // A path this machine keeps somewhere the distribution cannot name travels
+    // as the empty string, and the branch that needed it falls through to the
+    // plain login shell rather than to a flag with nothing behind it.
+    let shell = shell_fixture(&directory, "bin", "zsh");
+    let said = ask_with(&directory, &shell, init, "");
+    assert!(said.contains("argv=-l"), "{said}");
+    assert!(said.contains("ZDOTDIR=<unset>"), "{said}");
+    let shell = shell_fixture(&directory, "bin", "bash");
+    let said = ask_with(&directory, &shell, "", ZDOTDIR);
+    assert!(said.contains("argv=-l"), "{said}");
+    assert!(!said.contains("--init-file"), "{said}");
 
     std::fs::remove_dir_all(&directory).ok();
 }
