@@ -1250,6 +1250,12 @@ pub struct DualPlaneSession {
     /// What this pane last told its projection, kept so the telling is free on the frames where
     /// nothing has changed — which is nearly all of them.
     printed_path_links: bt_transcript::paths::PrintedPathLinks,
+    /// Which spelling of an absolute path the shell in this pane prints (T-3, 2026-09-07).
+    ///
+    /// Pushed in by the spawn, exactly as [`Self::set_spawn_directory`] is and for the same reason:
+    /// it is a fact about the *profile* a pane was started from, nothing downstream can re-derive
+    /// it, and a second reader that tried would be a second opinion about which shell this is.
+    path_namespace: bt_transcript::paths::PrintedPathNamespace,
     /// Whether the last frame filled its printed-path question budget, and so has names it never
     /// got to report. It makes the next verdict — a "no" included — worth a frame, which is the
     /// only way the projection runs again to collect them.
@@ -1601,6 +1607,7 @@ impl DualPlaneSession {
             path_verify_tasks: VecDeque::new(),
             path_verify_in_flight: BTreeSet::new(),
             printed_path_links: bt_transcript::paths::PrintedPathLinks::default(),
+            path_namespace: bt_transcript::paths::PrintedPathNamespace::default(),
             printed_path_budget_full: false,
             spawn_directory: None,
             local_image_path_tasks: VecDeque::new(),
@@ -2387,9 +2394,10 @@ impl DualPlaneSession {
     fn rebuild_printed_path_links(&mut self) {
         // The whole ledger travels, both answers in it: a "no" is what stops the projection from
         // asking about the same dead name on every frame it draws (§7.1.5j).
-        self.printed_path_links = bt_transcript::paths::PrintedPathLinks::new(
+        self.printed_path_links = bt_transcript::paths::PrintedPathLinks::in_namespace(
             self.reference_directory().map(Path::to_path_buf),
             self.path_verdicts.clone(),
+            &self.path_namespace,
         );
     }
 
@@ -8926,6 +8934,22 @@ impl DualPlaneSession {
     /// The app pushes it once, at spawn, for the same reason `LeafSession::spawn_place` exists at
     /// all: it is an answer nobody downstream can re-derive, and copying the ladder into a second
     /// reader is how a tab comes to have two opinions about where its own shell is standing.
+    /// Tell this session which spelling of an absolute path its shell prints — T-3
+    /// (`docs/plans/shell-matrix-2026-09-07.md`), the pane's **namespace**.
+    ///
+    /// A Git Bash prints `/d/Demo/report.md` and a WSL bash prints `/mnt/d/Demo/report.md` for
+    /// files that are really on this disk, and neither spelling has a root the Windows grammar can
+    /// see. Which of the two a pane speaks is not in the text — `/d/Demo` inside a PowerShell pane
+    /// is not a path at all — it is a property of the profile the pane was started from, so it
+    /// arrives the way the spawn directory does: pushed once, at the spawn, by the layer that has
+    /// the profile's own row (`bt_app::profiles::printed_path_namespace`).
+    pub fn set_path_namespace(&mut self, namespace: bt_transcript::paths::PrintedPathNamespace) {
+        if self.path_namespace != namespace {
+            self.path_namespace = namespace;
+            self.rebuild_printed_path_links();
+        }
+    }
+
     pub fn set_spawn_directory(&mut self, directory: Option<PathBuf>) {
         if self.spawn_directory != directory {
             self.spawn_directory = directory;
@@ -21832,6 +21856,74 @@ mod tests {
                     .hyperlink_at(first + offset, 0)
                     .unwrap_or_else(|| panic!("alternate row {offset} carries the wrapped name")),
                 head
+            );
+        }
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// One Windows path said the two ways the shells on this machine that are not Windows
+    /// processes say it: `C:\a\b.md` as a Git Bash prints it, and as a WSL bash does.
+    fn foreign_spellings(path: &Path) -> (String, String) {
+        let text = path.to_string_lossy().replace('\\', "/");
+        let (drive, tail) = text.split_at(2);
+        let letter = drive[..1].to_ascii_lowercase();
+        (format!("/{letter}{tail}"), format!("/mnt/{letter}{tail}"))
+    }
+
+    /// PIN (T-3, `docs/plans/shell-matrix-2026-09-07.md`) — **a pane reads the spelling its own
+    /// shell prints, and only that one.**
+    ///
+    /// One real file, printed three times: in the MSYS spelling into a Git Bash pane, in the WSL
+    /// spelling into a WSL pane, and in both into a PowerShell pane. The first two are links to the
+    /// file; the third is text, because a namespace is a property of the pane and `/d/Demo` in a
+    /// shell that speaks drive letters names nothing.
+    ///
+    /// MUTATION: drop `detect_foreign_path_candidates` from `PrintedPathLinks::candidates_in` and
+    /// the first two go red — the file is on the disk, the pane knows which shell it is, and the
+    /// name on the screen is still dark.
+    #[test]
+    fn a_pane_reads_the_absolute_spelling_its_own_shell_prints() {
+        let (directory, path) = temporary_ordinary_file();
+        let (msys, wsl) = foreign_spellings(&path);
+        let target = bt_transcript::paths::local_path_to_file_uri(&path);
+        for (namespace, printed) in [
+            (
+                bt_transcript::paths::PrintedPathNamespace::Msys { home: None },
+                &msys,
+            ),
+            (bt_transcript::paths::PrintedPathNamespace::Wsl, &wsl),
+        ] {
+            let mut session = DualPlaneSession::new(nz(240), nz(6));
+            enable_path_detection(&mut session);
+            session.set_path_namespace(namespace.clone());
+            session
+                .feed(format!("ls {printed}\r\n").as_bytes())
+                .unwrap();
+            let mut projection = session.new_projection(session.layout_key());
+            let frame = frame_after_path_verification(&mut session, &mut projection);
+            assert_eq!(
+                frame
+                    .hyperlink_at(0, 3)
+                    .unwrap_or_else(|| panic!("{printed} names a file this machine holds"))
+                    .uri,
+                target,
+                "in a {namespace:?} pane"
+            );
+        }
+
+        let mut windows = DualPlaneSession::new(nz(240), nz(6));
+        enable_path_detection(&mut windows);
+        windows
+            .feed(format!("ls {msys}\r\nls {wsl}\r\n").as_bytes())
+            .unwrap();
+        let mut projection = windows.new_projection(windows.layout_key());
+        let frame = frame_after_path_verification(&mut windows, &mut projection);
+        for row in 0..2 {
+            assert!(
+                frame.hyperlink_at(row, 3).is_none(),
+                "row {row}: a pane whose shell spells this machine's paths reads no other spelling"
             );
         }
 

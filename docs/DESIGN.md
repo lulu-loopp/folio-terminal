@@ -5110,7 +5110,7 @@ quad  [18.0, 920.0, 614.0, 922.0]            ← 脚的横线
 
 **⑦ 没做的。** 文本卡的行数(理由见 ③);网络路径的卡仍旧一个字不说(不为一张卡去 stat 一个可能拨不通的共享,§7.1.3 的老规矩),文件已经不在的卡也一样——它们连带都不留,而不是留一条空带。
 
-### 7.30 半角标点后面紧跟一个汉字,那个标点就是名字的尽头:一个候选词的几种读法,从长到短问磁盘(裸路径不识别缺陷,2026-08-27 用户实证;**2026-08-28 复议:接缝从一张表改成一个类,反引号成为终止符,应用折断的下半截先切接缝再拼**;**2026-09-03 再补:接缝还有另一头——一个冒号前面站着别的文字,名字可以在它后面开口**;**2026-09-04 再补:`~` 是路径字符(8.3 短名里到处是它),只有名字开头那一个才是 home 展开**;**2026-09-05 再补:接缝的证人也可以是「后面什么都没有了」——token 尽头的 ASCII 句尾标点(句点在内)是接缝,第 16 行就地推翻**;`crates/bt-transcript/src/paths.rs`、`crates/bt-term/src/session.rs`)
+### 7.30 半角标点后面紧跟一个汉字,那个标点就是名字的尽头:一个候选词的几种读法,从长到短问磁盘(裸路径不识别缺陷,2026-08-27 用户实证;**2026-08-28 复议:接缝从一张表改成一个类,反引号成为终止符,应用折断的下半截先切接缝再拼**;**2026-09-03 再补:接缝还有另一头——一个冒号前面站着别的文字,名字可以在它后面开口**;**2026-09-04 再补:`~` 是路径字符(8.3 短名里到处是它),只有名字开头那一个才是 home 展开**;**2026-09-05 再补:接缝的证人也可以是「后面什么都没有了」——token 尽头的 ASCII 句尾标点(句点在内)是接缝,第 16 行就地推翻**;**2026-09-07 再补:一格 pane 的壳不止一种绝对拼法——`/d/…`(MSYS)与 `/mnt/d/…`(WSL)按命名空间翻译后识别**;`crates/bt-transcript/src/paths.rs`、`crates/bt-term/src/session.rs`、`crates/bt-app/src/profiles.rs`、`crates/bt-app/src/main.rs`)
 
 **由头。** Claude Code 往终端里印这一行:
 
@@ -5227,6 +5227,23 @@ docs/plans/release/clean-vm.md,这里是操作顺序):
 **这一片还改了两条既有判词的名字与措辞:**`an_ascii_full_stop_stays_inside_the_reference` → `an_ascii_full_stop_offers_the_name_behind_it_as_well`(第 16 行的钉子,判词换了它就得换名字),`the_truncation_gate_presses_the_whole_token_and_leaves_the_shorter_form_standing` 补三条断言(第 60 行那道边界)。**内联图片那条线又一次跟着一起改判**(⑦ 那句「共用词法」的第二次兑现):`bt_term::inline_image` 的 `the_image_lane_reads_the_boundary_rules_the_one_lexicon_holds` 里 `D:\shots\a.png.` 从「什么都不认」改成认出 `D:\shots\a.png`——整串的扩展名 `png.` 照旧被白名单拒,句尾那个点切出来的那一种被收下,英文句号结尾的图片和中文句号结尾的图片从此同判。这一行是本片**唯一**一条没预料到的红,它红得对。
 
 **日期:2026-08-27 用户实证,当日落地;2026-08-28 下午改「类」+反引号;同日晚 next16 验收再加开括号一条(并推翻当日下午的第 48 行),均当日落地;2026-09-03 next29 实证补接缝的另一头(候选开口那一侧的冒号),当日落地;2026-09-05 演示排练实测句尾标点(并推翻第 16 行),当日落地,改动跨 `bt-transcript`(读法)与 `bt-term`(「在不在」)两个 crate。**
+
+**由头(T-3,`docs/plans/shell-matrix-2026-09-07.md` §1 第 4 行,截图 `gitbash-03.png`、`wsl-01.png`)。** Git Bash 里印出的 `/d/Demo/report.md`、`/c/Users/…`,WSL 里印出的 `/mnt/d/Demo/report.md`,以及两种壳里的 `~/docs/a.md`,一个都不认;同一个文件写成 `D:\Demo\report.md` 或 `D:/Demo/report.md` 就认。成因不是两条各自对的规矩撞在一起——是整个文法只读**一台机器**的拼法。Windows 上「绝对」等于盘符开头,`/d/Demo` 是一串没有根的字符。这对**文字**是对的,对**那一格 pane** 是错的:Git Bash 和 WSL 都站在这台机器上,印出来的都是这块盘上真有的文件,只是拼法不同。
+
+**判词:检测器拿到的是每个 pane 一个「命名空间」(`PrintedPathNamespace`),不是一条对文字的猜测。** 三种:`Windows`(今天的文法本来就读的)、`Msys`(Git Bash:`/<盘符>/…` → `<盘符>:\…`,`~` = `%USERPROFILE%`)、`Wsl`(`/mnt/<盘符>/…` → `<盘符>:\…`)。`/d/Demo` 印在 PowerShell 或 cmd 那一格里**不是路径**,一个字都不认——因为命名空间是 pane 的属性而不是行的属性,那一格的命名空间是 `Windows`,而 `Windows` 只读盘符开头的拼法。这一条有专门的红测(`a_pane_reads_the_absolute_spelling_its_own_shell_prints` 的第三段:namespace 为 `Windows` 的 session 喂同样的 MSYS 和 WSL 拼法,两行都答 `None`)。
+
+**命名空间从 profile 的一对属性读,不从文字读,也不从 profile id 读。** `profiles::printed_path_namespace` 问的是「这一格的壳**印**什么拼法」,与 `profiles::paths`(回答「这一格的**工作目录**写在哪个命名空间里」)是两个问题。后者对 Git Bash 的答案是 `Windows`,而且那是**故意的**——gitbash 那一行自己的注释:一个目录两种拼法,Win32 那一种是真的,因为它是交给 `CreateProcess` 的那一个。但那把壳照样**印** `/d/Demo`。所以新函数从这一行已经带着的**一对**属性读出答案:目录是 `PathNamespace::Windows`、门是 `Integration::BashInitFile` —— 一把站在 Win32 世界里的 bash,也就是 MSYS;启动 `wsl.exe` 的那一行则不论有没有装集成都是 `Wsl`(WSL pane 印 `/mnt/d/…` 与集成无关)。**一行 profile id 都没读**。命名空间在 spawn 时推给 session(`DualPlaneSession::set_path_namespace`),与 §7.1.4 阶梯第二级(`set_spawn_directory`)同一条通道、同一个理由:只有 spawn 知道,下游谁都推不回来。
+
+**§7.1.5j ③「磁盘上有才划」一个字不动——翻译是存在性检查的前置,不是它的替代。** 一种这台机器叫不出名字的拼法**根本不成为候选**,于是它既不进 ledger 也不花一次探问。§7.30 「一个 token 几种读法、从长到短问盘」的纪律原样作用在新拼法上(接缝是文字的性质,不是根的性质)。盘符挂载的翻译规则只有一份,住在 `bt_transcript::paths::drive_mount_to_local_path`:一个 ASCII 字母后面跟 `/…`,翻成大写盘符加 `:\…`;不是单个字母的(如 `/mnt/cdrom`、`/data/x`)一律拒。`profiles::wsl_to_windows` 转而调用它——原先各写各的,现在同一条规矩只说一遍。
+
+**开口规矩借的是这套文法本来就有的 POSIX 那一臂。** `is_posix_root_prefix_at` 拒 `//`(那是 authority 和 `file://` 的事)、接受单 `/` 开头;后面照旧是 token 边界加**绑定冒号**(`scheme:/opaque`、bash 印出来的以 `:` 分隔的 `PATH`)。`~` 只有站在 token 开头并且后面紧跟 `/` 时才是 home 展开——这正是 2026-09-04 第 55–56 行那一条(`~` 是路径字符,只有名字开头那一个才是展开)在新命名空间里的同一句话,`PROGRA~1/tools` 照旧是名字。
+
+**留白也是判词。** `/home/alice`、`/usr/local/bin` 这类**发行版内部**的目录,以及 WSL pane 里的 `~`,原样留成文字。Windows 对它们唯一的拼法是 `\\wsl.localhost\<发行版>\…`,而那是 `decode_file_uri` 依约**必须**当作远端拒掉的 authority;要放行它是另一条关于「本地」二字的裁决,不在这一单里——`local_path_to_file_uri` / `file_uri_to_local_reference` / `is_local_absolute_path` 那一整条 `file:` 往返都要跟着改。MSYS 的 `/usr/bin`、`/etc/profile`、`/mingw64` 同理:它们在 Git 安装自己的树里,本窗没被告知那棵树在哪,也不许猜。
+
+**顺带扶正的一件事:WSL pane 里的相对引用。** WSL pane 自己用 `OSC 7` 报的目录是 `/mnt/d/Demo`,而 `resolve_relative_reference` 只认盘符开头的基准——所以在这次改动之前,WSL pane 里的相对引用(`./a.md`、`docs/a.md`)一条都不成立。基准在 `PrintedPathLinks::in_namespace` 里翻译**一次**(调用 `PrintedPathNamespace::to_local_directory`),不是每个候选翻一次——一个目录两种拼法说的是同一个地方,翻译它一次就够了。
+
+**日期:2026-09-07,T-3 落地,改动跨 `bt-transcript`(候选识别与翻译)、`bt-term`(session 持有命名空间)、`bt-app`(`profiles::printed_path_namespace` 与 spawn 推送)三个 crate。**
+
 ### 7.31 一页渲染出来的字是可以被拿走的:选区落在排版层,复制的是「读到的字」(md 预览选区块,2026-08-28 用户实证,已落地;`crates/bt-app/src/preview_select.rs`(新)、`crates/bt-app/src/{main,profiles,table_block}.rs`、`crates/bt-render/src/lib.rs`)
 
 **一句话:渲染 md 视图的选区锚在**文档**上(第几块、第几片、第几字节)而不是锚在玻璃上,因为屏幕上只排了看得见的那几块;而复制出去的是**读到的字**——标题不带 `#`、引用不带 `>`、粗体不带星号——只有两处例外,恰是「页面上的记号丢掉了文档的意思」的两处。**

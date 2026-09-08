@@ -4,6 +4,26 @@ All notable changes to Folio are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- **A path printed by Git Bash or by WSL is a link, in the spelling those
+  shells print it in.** `D:\Demo\report.md` was recognised in every pane and
+  `/d/Demo/report.md` was recognised in none — so in the two shells that spell
+  a path their own way, the names on the screen were the ones you could not
+  click, could not hover for a preview, and could not `Ctrl`-click into an
+  editor. A pane now reads the spelling its own shell prints: `/d/Demo` and
+  `/c/Users` in a Git Bash pane, `/mnt/d/Demo` in a WSL one, `~/notes/a.md` in
+  Git Bash, and a relative name in a WSL pane measured from the folder that
+  pane reported. The file still has to be on the disk before anything is drawn,
+  exactly as before. Which spelling a pane reads comes from the profile it was
+  started from and not from the text, so `/d/Demo` typed into a PowerShell or
+  Command Prompt pane is still ordinary words. Two things a Windows path cannot
+  name are still left alone: a folder inside the distribution, such as
+  `/home/you` or `/usr/local/bin`, and `~` in a WSL pane, which is the same
+  folder said another way.
+
 ## 0.2.3-preview — 2026-09-07
 
 Most of this release is about reading what a pane is showing, and about the
