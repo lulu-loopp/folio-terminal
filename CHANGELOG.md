@@ -35,6 +35,45 @@ All notable changes to Folio are recorded here. The format follows
   directory holds. Nothing about the program changed.
 ### Fixed
 
+- **The last shell exiting closes its tab, and closing the last tab ends the
+  program.** A tab holding one pane whose shell exited stayed open with a dead
+  shell inside it, and a window whose only tab ended that way went on running
+  with nothing left to show. Two sweeps ask each pane whether its shell has
+  ended, and the first one was taking the answer away from the second; a pane now
+  remembers that its shell ended and says so to everyone who asks.
+
+- **A formula printed in the pane you are not typing in gets drawn.** A block
+  between `$$` in a split pane that did not hold the keyboard stayed as its own
+  source until you clicked into that pane. Every pane on screen now settles its
+  rows and typesets what it printed, on the pass that was already drawing it.
+
+- **A display, font, theme or language change reaches every pane.** All four hand
+  every pane new measurements, but only the pane holding the keyboard was told
+  that the pictures it had already drawn were built for the old ones, so a split
+  pane kept formulas rastered for the previous cell size until something else
+  happened to rebuild them.
+
+- **A resize while a full-screen program is up leaves the command marks where
+  their commands are.** Dragging the window edge while an editor or a coding
+  agent is on screen re-wraps the screen behind it. The ticks on the command rail
+  kept the rows they stood on before that re-wrap, so leaving the program put
+  them in the middle of some other line. They now move with the lines they name.
+
+- **Running the same command twice keeps a mark for each run.** Two prompt lines
+  that read exactly alike were treated as one when the window was resized, so the
+  older command's tick was moved onto the newer command's prompt.
+
+- **A card in the focus column keeps up with a pane whose screen a timer
+  released.** A program can ask for a screenful to be held back and then never
+  say it is finished; Folio releases it on a timer. The cells moved with no
+  output arriving, and the card went on showing the picture from before the
+  release until the pane said something else.
+
+- **A search hit on a line with wide characters is highlighted on the character
+  it found.** A match on a line that has just left the screen was drawn one cell
+  to the right for every CJK character in front of it, and pressing Enter put the
+  view on the wrong character too.
+
 - **A name ending in a dot or a space can no longer smuggle a program past the
   file column.** Double-clicking a row in the file column opens the file and
   refuses to run one, and the refusal read the name exactly as it was written.

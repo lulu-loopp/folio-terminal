@@ -108,6 +108,13 @@ file produces the vendored file byte for byte. Upstream formats with its own
 - **Input-write tracking.** `take_input_writes` drains the set of rows that
   received printable input since the last drain — distinct from render damage,
   which is about what must be repainted.
+- **`primary_grid` is public.** The accessor itself is Folio's and already
+  existed for the resize transaction; only its visibility changed. `resize`
+  reflows the inactive grid as well as the active one, so a resize taken while a
+  full-screen program is showing re-cuts the primary screen's logical lines
+  behind it, and Folio — which keeps its scrollback and its anchors outside the
+  emulator — has to be able to read that screen at the one moment it is not the
+  one on display.
 - **Tests** for all of the above, added alongside upstream's.
 
 Upstream's own test suite still runs against this copy: `vendor/alacritty_terminal`

@@ -682,7 +682,12 @@ impl<T> Term<T> {
         (history_before, history_after)
     }
 
-    fn primary_grid(&self) -> &Grid<Cell> {
+    /// The primary screen's grid, whichever screen is currently active.
+    ///
+    /// Public because the primary grid is reflowed by [`Self::resize`] while a full-screen program
+    /// is showing — `inactive_grid.resize(is_alt, ..)` — so an owner of coordinates on that screen
+    /// has to be able to read it at exactly the moment it is not the one on display.
+    pub fn primary_grid(&self) -> &Grid<Cell> {
         if self.mode.contains(TermMode::ALT_SCREEN) {
             &self.inactive_grid
         } else {
