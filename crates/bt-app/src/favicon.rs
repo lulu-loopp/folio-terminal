@@ -120,6 +120,40 @@ pub const CAPACITY: usize = 64;
 /// draw fourteen pixels with.
 pub const SOURCE_CEILING_PX: u32 = 64;
 
+/// **The largest icon this window will decode at all** (review row R1-28,
+/// adversarial review 2026-09-08).
+///
+/// [`SOURCE_CEILING_PX`] is what is *kept*; this is what is *read*, and until
+/// this ticket there was no such number — the decode ran under the `image`
+/// crate's own default, which caps nothing but a half-gigabyte allocation, so a
+/// site serving a 10000-square PNG had four hundred megabytes decoded on the
+/// event loop and then thrown away to draw fourteen pixels with.
+///
+/// A kilobyte square, which is twice the largest icon real sites serve — 512 is
+/// the top of the usual set, and 192 is the common one. Above it the icon is
+/// refused rather than decoded and shrunk, which costs the site its icon and
+/// costs this window nothing.
+///
+/// **And this is where the cost of the whole lane is written down**, because
+/// [`Favicons::learn`] runs on the event loop and the review asked for a number
+/// rather than a move. Measured 2026-09-08 on this machine, optimised build,
+/// decode plus the Lanczos3 cut to [`SOURCE_CEILING_PX`], per icon:
+///
+/// | icon | time |
+/// |---|---|
+/// | 32 square | 0.007 ms |
+/// | 64 square | 0.011 ms |
+/// | 192 square | 1.45 ms |
+/// | 512 square | 9.20 ms |
+/// | 1024 square | 32.1 ms |
+///
+/// So the sizes sites actually serve are a frame or less, the ceiling is two
+/// frames, and what this constant bought is that there is a last row at all —
+/// the same table before it ran off the bottom of the page. Two frames once per
+/// site is a hitch and not a stall, and moving the decode to a worker is a
+/// change to the seat's own lane rather than to a limit; it is not this ticket.
+pub const DECODE_CEILING_PX: u32 = 1024;
+
 /// One decoded icon, ready to be handed to the renderer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Raster {
@@ -286,7 +320,21 @@ impl Favicons {
 /// site with a 512-pixel icon would otherwise cost is never stored at all.
 #[must_use]
 pub fn decode(png: &[u8]) -> Option<Raster> {
-    let decoded = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?;
+    // **Under limits, and they go on before the decode** (review row R1-28,
+    // adversarial review 2026-09-08). `load_from_memory_with_format` runs under
+    // the `image` crate's own default, which caps one allocation at half a
+    // gigabyte and the dimensions at nothing — so an icon of any size at all was
+    // decoded whole, on the event loop, and then shrunk to sixty-four pixels.
+    // `set_limits` reads the PNG header and fails on the declared dimensions,
+    // with no pixel buffer anywhere.
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(png));
+    reader.set_format(image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(DECODE_CEILING_PX);
+    limits.max_image_height = Some(DECODE_CEILING_PX);
+    limits.max_alloc = Some(u64::from(DECODE_CEILING_PX) * u64::from(DECODE_CEILING_PX) * 4);
+    reader.limits(limits);
+    let decoded = reader.decode().ok()?;
     let rgba = decoded.to_rgba8();
     let (width, height) = (rgba.width(), rgba.height());
     if width == 0 || height == 0 {
@@ -609,6 +657,41 @@ mod tests {
         assert_ne!(
             FaviconId(7).texture_key(14, 14),
             FaviconId(7).texture_key(28, 28)
+        );
+    }
+
+    /// RED — **an icon nothing could be is refused before it is decoded**
+    /// (review row R1-28, adversarial review 2026-09-08).
+    ///
+    /// RED EVIDENCE (2026-09-08), before the limits:
+    ///
+    /// ```text
+    /// a 4096-square icon is not an icon
+    /// ```
+    ///
+    /// The decode ran under `image`'s own default limits, which cap one
+    /// allocation at half a gigabyte and put no ceiling on the dimensions at
+    /// all — so a page whose `<link rel=icon>` pointed at a very large PNG had
+    /// that PNG decoded whole, **on the event loop**, and then resampled down to
+    /// sixty-four pixels. Sixty-four megabytes of RGBA to draw a fourteen-pixel
+    /// mark, at whatever moment the engine happened to answer.
+    ///
+    /// A real icon is unaffected: the control below is the 512-square one that
+    /// large sites actually serve, and it still arrives and still shrinks.
+    ///
+    /// MUTATION: take the limits off the reader and the first assertion goes red
+    /// with an icon this window resampled rather than refused.
+    #[test]
+    fn an_icon_far_past_the_ceiling_is_never_decoded() {
+        assert!(
+            decode(&a_png(4096, 4096, [1, 2, 3, 255])).is_none(),
+            "a 4096-square icon is not an icon",
+        );
+        let real = decode(&a_png(512, 512, [4, 5, 6, 255])).expect("512 is a size sites serve");
+        assert_eq!(
+            (real.width_px, real.height_px),
+            (SOURCE_CEILING_PX, SOURCE_CEILING_PX),
+            "and one that is kept is kept at the stored ceiling",
         );
     }
 }

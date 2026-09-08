@@ -268,6 +268,38 @@ All notable changes to Folio are recorded here. The format follows
   whole ladder the rest of the window already reads — the shell's last report,
   else the folder the profile started it in — so a pane whose shell reports no
   directory at all is named after where it was put down.
+- **A picture cannot ask Folio for more memory than it has, by saying it is
+  bigger than it is.** Resting the pointer on an animated `.gif` read the whole
+  file however large it was, and decoded its frames with no limit on the size
+  the file declared itself to be. Nine bytes of picture behind a header claiming
+  a 65535 by 65535 screen had Folio ask the machine for seventeen gigabytes
+  before deciding not to keep the result. Folio now reads at most the eight
+  megabytes it will read of any picture, and refuses a declared size larger than
+  it could ever draw before a single frame is made. Site icons and page
+  thumbnails are held to the same rule, so a very large picture served as a
+  favicon is refused rather than decoded and thrown away.
+- **Pictures Folio has decoded no longer pile up for as long as the window is
+  open.** Three stores held decoded pixels and nothing ever took anything out of
+  them: the pictures behind hover cards and previews, the pictures printed in a
+  pane, and the frames of animated files. Every distinct file the pointer had
+  rested on stayed in memory until the window closed, so a session spent
+  browsing a folder of screenshots kept all of them. Each store now has a size
+  it will not grow past and lets go of whatever has gone longest unlooked at.
+- **A rendered Markdown page reads the pictures near what you are looking at.**
+  Opening a page asked the disk for every image in the whole document at once,
+  so a README with hundreds of screenshots in it read hundreds of files to show
+  you the first screenful. It now reads the ones on screen and several either
+  side, and reads further ones as you scroll toward them.
+- **Hovering a large file named `.pdf` no longer holds up the previews behind
+  it.** Counting a document's pages read the file to its end however long it
+  was, on the one worker every preview waits for, so one hover over a three
+  hundred megabyte file stalled every card behind it. Folio now reads at most
+  the same amount it will parse, and states the file's size alone when it
+  cannot count within that.
+- **A folder with a hundred thousand names costs what it shows.** The file
+  column shows at most two thousand entries, and it read and sorted every name
+  in the folder before cutting the list down. It now keeps only the two thousand
+  it will draw, as it reads, and the rows it shows are the same rows as before.
 
 ## 0.2.3-preview — 2026-09-07
 

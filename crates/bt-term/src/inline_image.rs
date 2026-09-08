@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     fmt,
     fs::File,
     io::{Cursor, Read},
@@ -18,6 +17,18 @@ pub const MAX_INLINE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_INLINE_IMAGE_BASE64_BYTES: usize = MAX_INLINE_IMAGE_BYTES.div_ceil(3) * 4;
 /// Keep a compressed image from expanding into an unbounded CPU/GPU artifact.
 pub const MAX_INLINE_IMAGE_RGBA_BYTES: u64 = 64 * 1024 * 1024;
+/// **How many bytes of remembered decodes [`InlineImageDecoder`] may hold**
+/// (review row R1-8, adversarial review 2026-09-08).
+///
+/// 128 MiB, and the number follows from what this map is *for*. It is a memo and
+/// not a store: every picture in it is also held by whoever asked for it, so its
+/// whole job is to save a second read of a file that has not changed. A memo
+/// that grows past the pictures actually on the glass has stopped saving
+/// anything and started keeping things — which is what it did, without limit,
+/// for the life of the process. Two of the largest single decode this crate will
+/// admit ([`MAX_INLINE_IMAGE_RGBA_BYTES`]) is the ceiling, and an ordinary
+/// screenful of inline pictures is a long way under it.
+pub const MAX_LOCAL_IMAGE_MEMO_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_OSC_1337_FILE_HEADER_BYTES: usize = 4 * 1024;
 /// How many bytes of an `OSC 1337;<key>` are read before the key is abandoned.
 ///
@@ -524,6 +535,14 @@ struct CachedLocalImage {
     decoded: Result<DecodedImagePayload, InlineImageDecodeError>,
 }
 
+impl crate::bounded_cache::Weighed for CachedLocalImage {
+    fn bytes_held(&self) -> u64 {
+        self.decoded
+            .as_ref()
+            .map_or(0, |payload| payload.rgba.len() as u64)
+    }
+}
+
 /// Stateful decoration-worker decoder. Local paths are keyed lexically after slash/case
 /// normalization, so repeated occurrences reuse the one bounded read and decoded pixel artifact.
 ///
@@ -537,12 +556,33 @@ struct CachedLocalImage {
 /// identity; a path *and* what the file at it looked like is. One `metadata` per
 /// request answers it, on a worker thread, against a read of the whole file that
 /// it replaces whenever the answer is "unchanged".
-#[derive(Debug, Default)]
+/// **And it is bounded** (review row R1-8, adversarial review 2026-09-08). It
+/// used to be a plain `HashMap` that was inserted into and never emptied, so a
+/// session that walked a directory of screenshots kept every one of them decoded
+/// for as long as the process lived. See [`MAX_LOCAL_IMAGE_MEMO_BYTES`].
+#[derive(Debug)]
 pub struct InlineImageDecoder {
-    local_path_cache: HashMap<String, CachedLocalImage>,
+    local_path_cache: crate::bounded_cache::BoundedCache<String, CachedLocalImage>,
+}
+
+impl Default for InlineImageDecoder {
+    fn default() -> Self {
+        Self {
+            local_path_cache: crate::bounded_cache::BoundedCache::with_budget(
+                MAX_LOCAL_IMAGE_MEMO_BYTES,
+            ),
+        }
+    }
 }
 
 impl InlineImageDecoder {
+    /// **What the memo is holding**, in bytes — the counter the budget is kept
+    /// against.
+    #[must_use]
+    pub fn bytes_held(&self) -> u64 {
+        self.local_path_cache.bytes_held()
+    }
+
     pub fn decode(
         &mut self,
         task: InlineImageTask,
@@ -3196,6 +3236,76 @@ mod tests {
 
         std::fs::remove_file(fake).unwrap();
         std::fs::remove_file(oversized).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    /// RED — **the decoder's memo has a ceiling** (review row R1-8, adversarial
+    /// review 2026-09-08).
+    ///
+    /// RED EVIDENCE (2026-09-08), before the budget:
+    ///
+    /// ```text
+    /// the memo is bounded: it is holding 167777280 bytes
+    /// ```
+    ///
+    /// `local_path_cache` was a `HashMap` with one door in and none out, and the
+    /// comment above it said so — the invalidation it grew in August answers
+    /// whether an entry is *stale*, never whether there are too many of them. A
+    /// pane printing the screenshots in a folder, one `ls` at a time, filed every
+    /// one of them and kept it for the life of the process.
+    ///
+    /// Forty pictures of four megabytes each is a hundred and sixty megabytes of
+    /// decoded pixels through a memo allowed a hundred and twenty-eight, and the
+    /// picture asked for last is the one still in it.
+    ///
+    /// MUTATION: give the cache no budget and the first assertion goes red with
+    /// everything ever decoded still held.
+    #[test]
+    fn the_local_decode_memo_is_bounded_and_keeps_what_was_asked_for_last() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "betterterminal-inline-memo-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        // One megapixel each, so four megabytes of RGBA a picture; forty of them
+        // is well past the memo's own ceiling.
+        let mut decoder = InlineImageDecoder::default();
+        let mut paths = Vec::new();
+        for index in 0..40_u8 {
+            let path = directory.join(format!("shot-{index}.png"));
+            std::fs::write(&path, png_of(1024, 1024, [index, 20, 30, 255])).unwrap();
+            decoder
+                .decode(InlineImageTask {
+                    occurrence_id: u64::from(index),
+                    source: InlineImageSource::LocalPath(path.clone()),
+                })
+                .expect("a PNG this crate wrote decodes");
+            paths.push(path);
+        }
+        assert!(
+            decoder.bytes_held() <= MAX_LOCAL_IMAGE_MEMO_BYTES,
+            "the memo is bounded: it is holding {} bytes",
+            decoder.bytes_held(),
+        );
+        assert!(
+            decoder.local_path_cache.len() < 40,
+            "and it let go of the oldest to get there: {} entries",
+            decoder.local_path_cache.len(),
+        );
+        assert!(
+            decoder
+                .local_path_cache
+                .contains_key(&normalized_local_path_key(&paths[39])),
+            "the picture asked for last is the one it kept",
+        );
+
+        for path in paths {
+            std::fs::remove_file(path).unwrap();
+        }
         std::fs::remove_dir(directory).unwrap();
     }
 

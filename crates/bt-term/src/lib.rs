@@ -1,6 +1,7 @@
 //! Folio's logic-only terminal actor and alacritty compatibility seam.
 
 mod adapter;
+mod bounded_cache;
 mod cell_capture;
 mod command_marks;
 mod diagnostics;
@@ -15,6 +16,7 @@ pub use adapter::{
     RemovedLiveRow, SCROLLBACK_LINES, TerminalAdapter, TerminalCursor, TerminalDamage,
     TerminalModes,
 };
+pub use bounded_cache::{BoundedCache, Weighed};
 pub use bt_detect::DetectionTask;
 #[doc(hidden)]
 pub use bt_doc::LayoutKey;

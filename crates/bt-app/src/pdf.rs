@@ -316,18 +316,42 @@ fn raster_page(bytes: Vec<u8>, index: u32, fit_width: u32, fit_height: u32) -> O
 }
 
 /// [`page_count`] over any stream of bytes — the seam the tests feed.
-fn count_pages(mut reader: impl Read) -> Option<u32> {
+///
+/// **The stream is bounded by [`MAX_RASTER_BYTES`]** (review row R1-20). The
+/// scan holds sixty-four kilobytes whatever it is given, which is why it was
+/// written to run off a stream — but memory was never the whole cost. It runs on
+/// the one preview worker, and a hover over a three-hundred-megabyte file named
+/// `.pdf` used to read all three hundred megabytes of it before the worker was
+/// free to answer anything else. The cap is the module's own, the one the parse
+/// behind this already refuses past: a file this window will not parse is a file
+/// it will not read whole either.
+fn count_pages(reader: impl Read) -> Option<u32> {
+    let mut reader = reader.take(MAX_RASTER_BYTES);
     let mut scan = Scan::default();
     let mut buffer = vec![0_u8; CHUNK_BYTES];
+    let mut pulled = 0_u64;
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => break,
-            Ok(read) => scan.feed(&buffer[..read]),
+            Ok(read) => {
+                pulled += read as u64;
+                scan.feed(&buffer[..read]);
+            }
             // A file that stopped answering half way through is a file this
             // question has no answer about. The card says the size, which came
             // from a `metadata` call that already succeeded.
             Err(_) => return None,
         }
+    }
+    // The budget ran out rather than the file: everything past here is unread,
+    // so whatever the scan is holding is a reading of a fragment and not of a
+    // document. `None` is what the card already draws for a file it cannot
+    // count — its size alone — and it is the honest answer for one this window
+    // declined to finish reading. The parse behind this reader is bounded by the
+    // same number, so a file at the cap is answered by neither, which is the
+    // shape [`MAX_RASTER_BYTES`] already states.
+    if pulled >= MAX_RASTER_BYTES {
+        return None;
     }
     scan.finish()
 }
@@ -1137,5 +1161,63 @@ mod tests {
             scan.feed(&pdf[cut..]);
             assert_eq!(scan.finish(), Some(7), "cut at {cut}");
         }
+    }
+
+    /// Three hundred megabytes that are never held: the file the scan must
+    /// refuse to finish reading, handed over a chunk at a time and counted.
+    struct Filler {
+        left: u64,
+        pulled: u64,
+    }
+
+    impl Read for Filler {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let handed = self.left.min(buffer.len() as u64) as usize;
+            buffer[..handed].fill(b'A');
+            self.left -= handed as u64;
+            self.pulled += handed as u64;
+            Ok(handed)
+        }
+    }
+
+    /// RED — **a hover does not read three hundred megabytes to print a number**
+    /// (review row R1-20, adversarial review 2026-09-08).
+    ///
+    /// RED EVIDENCE (2026-09-08), before the cap:
+    ///
+    /// ```text
+    /// the scan reads at most its own cap: it pulled 314572800 bytes
+    /// ```
+    ///
+    /// The scan was written as a stream so that a large file costs it sixty-four
+    /// kilobytes of memory, and that half was always true. The half that was
+    /// missing is time: it runs on the single preview worker, and every byte of
+    /// a file *named* `.pdf` was pulled through it before that worker could
+    /// answer anything else — so one hover over a large file of any kind at all
+    /// stalled every card behind it.
+    ///
+    /// The bytes here are not a page tree and never become one, which is the
+    /// case that matters: a scan that finds its answer early still cannot stop,
+    /// because a later `/Type /Pages` would win.
+    ///
+    /// MUTATION: drop the `take` and the byte count goes back to the whole file;
+    /// drop the `pulled >= MAX_RASTER_BYTES` verdict and a fragment's reading is
+    /// reported as the document's.
+    #[test]
+    fn a_file_past_the_cap_is_not_read_past_it() {
+        let mut filler = Filler {
+            left: 300 * 1024 * 1024,
+            pulled: 0,
+        };
+        assert_eq!(
+            count_pages(&mut filler),
+            None,
+            "a file this window declined to finish reading has no count to give",
+        );
+        assert!(
+            filler.pulled <= MAX_RASTER_BYTES,
+            "the scan reads at most its own cap: it pulled {} bytes",
+            filler.pulled,
+        );
     }
 }
