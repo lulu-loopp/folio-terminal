@@ -126,6 +126,8 @@ Reported counts both reviewers of a slice. Deduplication folds a reviewer's find
 
 ## Tickets
 
+All nine tickets were merged to main on 2026-09-08, the last at `5516799`. Each heading below records its merge commit and what it left open.
+
 ### T1 `fix/svg-href-and-git-hooks` (merged, `95d9bd0`)
 
 R1-1, R1-6.
@@ -174,7 +176,7 @@ R1-24, R4-1, R4-2, R4-3, R4-4, R4-5, R4-6, R4-7, R4-8, R4-9, R4-10, R4-11, R4-12
 
 Why together: every row is a value read back from disk and trusted as though this process had written it a moment ago. The design is one intake rule for persisted documents, bound the read, keep the rejected bytes, resolve every reference against the machine as it is now rather than as it was, and one write rule, atomic, retried, and reported when it fails. R1-24 is filed here because the forged mark's damage lands in the restore path; R4-8 and R4-9 are not in this ticket's original list and sit here as the nearest home.
 
-### T9 `fix/webview-seat` (in flight)
+### T9 `fix/webview-seat` (merged, `5516799`; a previewed local page reaches its own folder and nothing else; left open: an http(s) subresource on a local page is reported as NotMinted, and the engine's internal schemes are an explicit list of three)
 
 R1-10, R1-21, R2-10, R2-12, R2-13, R2-16, R2-24.
 
