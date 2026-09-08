@@ -1828,6 +1828,17 @@ pub enum Text {
     /// Its one verb. `Retry` and not `Reload`: nothing was loaded, so there is
     /// nothing to load again — what is being asked for again is the engine.
     WebFailEngineVerb,
+    /// **The card that says a local file was not opened** (R2-16). The engine
+    /// on this machine will not take the handlers that decide what a document
+    /// may load, so a file off somebody's own disk is not put on a page that
+    /// cannot be held to them. The line under it names the handlers; the verb is
+    /// the runtime card's, because a newer runtime is the one thing that changes
+    /// the answer.
+    WebFailGuardsSay,
+    /// **The line the foot flashes when a page's dialog was turned away**
+    /// (R1-21). One of the three things that share the band's one clock, beside
+    /// the zoom's percentage and `Opened`.
+    WebDialogDismissed,
     /// The `Process stopped` card's sentence. Names the render process, because
     /// that is the fact a reader can act on: the window did not die, one page's
     /// renderer did.
@@ -3997,6 +4008,16 @@ impl Text {
                 pick(lang, "The web engine did not start.", "网页引擎没有启动。")
             }
             Self::WebFailEngineVerb => pick(lang, "Retry", "重试"),
+            Self::WebFailGuardsSay => pick(
+                lang,
+                "This version of the web engine cannot enforce this window's rules for a page, so the file was not opened.",
+                "当前网页引擎无法执行这个窗口对页面设定的规则，文件没有打开。",
+            ),
+            Self::WebDialogDismissed => pick(
+                lang,
+                "This page's message was dismissed.",
+                "页面弹窗已关闭。",
+            ),
             Self::WebFailCrashSay => {
                 pick(lang, "This page stopped running.", "这个页面停止运行了。")
             }
@@ -4313,7 +4334,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 596] = [
+    pub const ALL: [Self; 598] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4809,6 +4830,8 @@ impl Text {
         Self::WebFailRuntimeVerb,
         Self::WebFailEngineSay,
         Self::WebFailEngineVerb,
+        Self::WebFailGuardsSay,
+        Self::WebDialogDismissed,
         Self::WebFailCrashSay,
         Self::WebFailBlockedSay,
         Self::WebFailBlockedVerb,

@@ -10,7 +10,7 @@
 #     cargo test --workspace --locked -- --ignored --list
 #
 # Why any of them are ignored at all — the policy this list exists to state.
-# Twenty-two of the twenty-four are **probes**, not regressions:
+# Twenty-three of the twenty-five are **probes**, not regressions:
 #
 #   * nineteen in `bt-pty` drive real ConPTY sessions against a real PowerShell
 #     and read what comes back. Their assertions are about host timing and about
@@ -18,7 +18,12 @@
 #     which is a question with a different right answer on every machine.
 #   * two in `bt-transcript` are the reference-resolution probes over a printed
 #     scrollback.
-#   * one in `bt-app` writes a picture for a person to look at.
+#   * one in `bt-app` writes a picture for a person to look at;
+#   * one in `bt-platform` opens a real page in a real WebView2 and reads back
+#     what the page says loaded. It needs a runtime, a window and a message
+#     pump, which is the same "what does this machine do" question the ConPTY
+#     probes ask. Run it with
+#     `cargo test -p bt-platform -- --ignored --nocapture`.
 #
 # A test that belongs in CI does not go on this list; it stops being ignored.
 #
@@ -64,3 +69,4 @@ tests::resize_burst_composed_frame_probe
 tests::system_conpty_resize_cursor_outcome_matches_the_sidecar_contract
 tests::typed_input_gate_blank_window_probe
 tests::typed_input_resize_deferral_probe
+webview::webview2_runtime_probe::a_local_page_reaches_only_its_own_folder
