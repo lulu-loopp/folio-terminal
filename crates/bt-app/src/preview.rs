@@ -3439,6 +3439,36 @@ impl PreviewRefusal {
             Self::Fault(fault) => fault.notice(),
         }
     }
+
+    /// **Whether this card carries the button that hands the file to the
+    /// machine** (R1-12).
+    ///
+    /// The button says 「这扇窗读不了它,系统也许能」, and that sentence is only
+    /// true of a refusal about the *content*: a format nothing here reads, a
+    /// head full of NULs. Every card wore it, so the two refusals it is false
+    /// of wore it too, and one of them wore it dangerously.
+    ///
+    /// * [`Self::NetworkPath`] is not about the content at all — it is §7.1.3
+    ///   declining to touch another machine's share, because reading one stalls
+    ///   this window on somebody else's network for the operating system's own
+    ///   timeout. `ShellExecuteW` is synchronous on the window thread, so a
+    ///   button that hands the share over undoes that refusal on one press,
+    ///   from the very card that announced it.
+    /// * [`Self::Fault`] is the disk having already said no to this process.
+    ///   The registered handler is another process on the same machine reading
+    ///   the same file with the same rights, so the button would be offering to
+    ///   fail again somewhere the reader cannot see it — and for
+    ///   [`PreviewFault::NotFound`] there is nothing to open at all.
+    ///
+    /// A card with no button is still a card: it has the mark, the sentence and
+    /// the seat, which is the whole of what those two refusals have to say.
+    #[must_use]
+    pub fn offers_the_default_app(self) -> bool {
+        match self {
+            Self::Type | Self::Binary => true,
+            Self::NetworkPath | Self::Fault(_) => false,
+        }
+    }
 }
 
 /// The ways a file can decline to be read, mirroring [`crate::files::DirFault`].
@@ -10177,5 +10207,35 @@ mod tests {
             .min()
             .unwrap_or(rest.len());
         &rest[..end]
+    }
+
+    /// PIN (R1-12) — **the card's button belongs to the refusals that are about
+    /// the content, and to no others.**
+    ///
+    /// The button says "open this in whatever the machine has registered", and
+    /// that is an answer to 「这扇窗读不了这个内容」: an unknown format, a head
+    /// full of NULs, a reader this build does not have. It is not an answer to
+    /// 「这条路径不在这台机器上」 — §7.1.3 declines to read a share precisely
+    /// because touching one stalls the window on somebody else's network, and a
+    /// button that hands the same share to a synchronous `ShellExecuteW` undoes
+    /// that refusal on one press, from the very card that announced it.
+    ///
+    /// MUTATION: give every refusal the same button and the network card hands
+    /// the share over.
+    #[test]
+    fn only_a_refusal_about_the_content_offers_the_machine_its_handler() {
+        assert!(PreviewRefusal::Type.offers_the_default_app());
+        assert!(PreviewRefusal::Binary.offers_the_default_app());
+        assert!(!PreviewRefusal::NetworkPath.offers_the_default_app());
+        for fault in [
+            PreviewFault::PermissionDenied,
+            PreviewFault::NotFound,
+            PreviewFault::Unreadable,
+        ] {
+            assert!(
+                !PreviewRefusal::Fault(fault).offers_the_default_app(),
+                "the disk already said no about {fault:?}"
+            );
+        }
     }
 }

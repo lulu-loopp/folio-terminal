@@ -3991,15 +3991,23 @@ fn place_for(
     }
 }
 
-/// The first directory of `PATH` holding `file_name`, joined.
+/// The first **absolute** directory of `PATH` holding `file_name`, joined.
 ///
 /// `std::env::split_paths` only parses an already-fetched `PATH` string — it
 /// touches neither the real environment nor the real filesystem — so this stays
 /// a pure function of whatever `environment` reports, which is what lets a test
 /// hand it an imaginary machine.
+///
+/// **Absolute, and the empty entry is the reason** (R1-17). `PATH` may hold an
+/// empty entry and it may hold a relative one, and both mean *the working
+/// directory* to Windows. The working directory of a terminal emulator is
+/// whatever folder the reader was standing in, so a `git.exe` left in a cloned
+/// repository would be the git every panel in this window then ran. The
+/// programs this product starts are the ones somebody installed.
 fn search_path(environment: &dyn ShellEnvironment, file_name: &str) -> Option<PathBuf> {
     let path = environment.var_os("PATH")?;
     std::env::split_paths(&path)
+        .filter(|directory| directory.is_absolute())
         .map(|directory| directory.join(file_name))
         .find(|candidate| environment.is_file(candidate))
 }

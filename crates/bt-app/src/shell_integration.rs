@@ -834,7 +834,13 @@ fn begin_profile_probe(program: &Path) {
 fn run_profile_probe(program: &Path) -> Option<PathBuf> {
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen the first time a PowerShell pane is opened.
-    let output = bt_platform::quiet_command(program)
+    //
+    // **And through the named door** (R1-17): a profile may spell its shell
+    // `pwsh.exe` with no path at all, and a bare name is resolved by
+    // `CreateProcess` out of the working directory before `PATH`. The probe
+    // asks about the program a pane will run, so it asks about the one an
+    // administrator installed.
+    let output = bt_platform::quiet_command_named(program)?
         .args(["-NoProfile", "-NonInteractive", "-Command", PROFILE_COMMAND])
         .output()
         .ok()?;

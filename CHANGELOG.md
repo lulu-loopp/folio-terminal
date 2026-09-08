@@ -35,6 +35,74 @@ All notable changes to Folio are recorded here. The format follows
   directory holds. Nothing about the program changed.
 ### Fixed
 
+- **A name ending in a dot or a space can no longer smuggle a program past the
+  file column.** Double-clicking a row in the file column opens the file and
+  refuses to run one, and the refusal read the name exactly as it was written.
+  Windows does not: it drops trailing dots and spaces before it looks anything
+  up, so a file called `invoice.exe.` was read as a document by Folio and
+  started as a program by Windows. Folio now reads the name the way Windows
+  will, and the check and the launch use that one name. Paths written in the
+  form that asks Windows to skip its own reading are not opened at all.
+
+- **Show in Explorer only hands over a file that is really there.** The path
+  went onto Explorer's command line wrapped in quotes and nothing else was
+  asked about it, so a path that no longer existed opened whatever folder
+  Explorer falls back to — which looks like Folio having shown you the wrong
+  thing — and a name carrying a quote character would have been split into two
+  arguments. Folio now resolves the path against the disk first, hands over the
+  answer the operating system gives, and shows nothing at all when there is
+  nothing there.
+
+- **The card that refuses to read a file on another machine no longer offers to
+  open it.** Folio does not read a network share unless you ask, because a
+  disconnected share can hold the window for as long as the network takes to
+  give up. The card that says so carried the same *Open in default app* button
+  as every other card, and one press handed the share straight to the shell —
+  the wait that had just been refused. That button is now on the cards it is
+  true of: the ones that cannot read *what is in* the file. A card refusing a
+  share, or reporting that the disk said no, has no button.
+
+- **A local page in the preview stays a local page.** A `.html` file opened in
+  the preview could navigate itself anywhere: a link, a redirect, or the
+  page's own script would take the preview onto the network, carrying whatever the
+  local document had reached. The preview now goes to the file it was opened
+  with and nowhere else, and says so when a page tries.
+
+- **A page can no longer send an address to your browser on its own.** A page
+  that starts a download has that download cancelled, since Folio's preview writes
+  no files — and the address used to go straight to your real browser, at a
+  moment the page chose. It now goes onto the card the cancelled download
+  raises, and the browser opens when you press the button.
+
+- **A link with a name in front of the host is refused before your browser
+  opens.** `https://your-bank.example@somewhere-else/` shows one name and goes
+  to another, and Folio's address bar has always refused it. Ctrl-clicking the
+  same address printed in a pane handed it to your browser anyway. Both now
+  read the one rule, and the hover line says the address is refused.
+
+- **A title or a hover address cannot be written backwards.** A program can put
+  the invisible characters that reverse text into the title it sets, so a tab
+  could read `report.txt` over a pane running `report.exe`, and the address
+  under the pointer — the one a Ctrl-click is about to open — could show a
+  different host than it goes to. Folio now removes those characters from tab
+  titles and pane heads and marks them in the hover address. Titles in Chinese,
+  Arabic and Hebrew are unchanged.
+
+- **A program Folio starts to ask a question is the one that is installed.**
+  The agent version check, the PowerShell probes and the shell-integration
+  probe named their programs without a path, and Windows looks in the folder
+  the process is standing in before it looks anywhere else. So a `copilot.cmd`
+  or a `powershell.exe` left in a folder you had opened would run — opening
+  Settings ▸ Agents was enough. Folio now finds these programs itself, in the
+  places programs are installed, and never in a working folder.
+
+- **A directory a shell reports cannot turn into a network share.** A shell
+  says where it is standing with a short message, and a percent-escaped
+  backslash inside one was read back as a path separator, rebuilding a
+  `\\server\share` address that the next new tab then asked the network
+  about. Such a message now names nothing, and a shell's report is never read
+  as a share.
+
 - **An SVG can no longer make Folio open a file it names.** An SVG document can
   point an `<image>` at a path, and Folio's renderer used to follow it: a file
   anywhere on the machine, or on a network share, was read while the picture was

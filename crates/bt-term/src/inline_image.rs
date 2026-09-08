@@ -2294,9 +2294,6 @@ mod tests {
             ),
             ("file:///D:/x%20y.png", r"D:\x y.png"),
             ("file:///D:/%E5%9B%BE%E7%89%87.PNG", r"D:\图片.PNG"),
-            // A `%2F` is a literal slash inside one name, not a separator; the name simply will
-            // not exist, which the worker discovers as it discovers every other absence.
-            ("file:///D:/a%2Fb.png", "D:\\a/b.png"),
             ("FILE:///D:/a.png", r"D:\a.png"),
             ("file://localhost/D:/a.png", r"D:\a.png"),
             ("file:///D:/a.png#anchor", r"D:\a.png"),
@@ -2309,6 +2306,16 @@ mod tests {
             );
         }
         for rejected in [
+            // **An escaped separator is refused** (R3-1). This row used to read the other
+            // way, on the reasoning that `%2F` is a literal slash inside one name and that
+            // such a name simply will not exist. The reasoning was about the filesystem and
+            // the answer was already wrong before it reached one: Windows reads `/` as a
+            // separator, so `D:\a/b.png` is the file `b.png` inside `D:\a` — a different
+            // file from the one the URI named. The same escape in the OSC 7 decoder rebuilt
+            // a share out of two `%5C`s. An escape that decodes to a separator moves a
+            // boundary the URI did not have, so the URI names nothing.
+            "file:///D:/a%2Fb.png",
+            "file:///D:/a%5Cb.png",
             // A remote share is not the local image peek's business.
             "file://host/share/a.png",
             "file://192.168.0.2/pics/a.png",

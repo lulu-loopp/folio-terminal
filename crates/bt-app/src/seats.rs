@@ -19007,7 +19007,12 @@ pub struct PreviewCardGeometry {
     /// One line of that fact, so the painter can walk the block the same
     /// arithmetic laid it out with.
     pub detail_line: f32,
-    pub button: [f32; 4],
+    /// The button's rectangle, or nothing when this card has no button (R1-12).
+    /// A hit test on a card without one answers nothing, which is the same
+    /// sentence the paint makes: a control that answers a press it never drew
+    /// is the invisible button, and this window has paid for one of those
+    /// already.
+    pub button: Option<[f32; 4]>,
     pub notice_font: f32,
     pub detail_font: f32,
     pub button_font: f32,
@@ -19038,10 +19043,18 @@ pub struct PreviewCardContent<'a> {
     /// card, two owners, and the press has to reach the right one.
     pub fault: bool,
     /// The button's caption: "Open in default app", or the acknowledgement that
-    /// replaces it for 1300ms after a press.
-    pub button: &'a str,
+    /// replaces it for 1300ms after a press — and **`None` when this card has
+    /// no button at all** (R1-12).
+    ///
+    /// A refusal that is about where the file is rather than about what is in
+    /// it has nothing for the machine's handler to be offered: see
+    /// [`crate::preview::PreviewRefusal::offers_the_default_app`]. The absence
+    /// travels as an absence rather than as an empty caption, so the layout can
+    /// take the row back rather than leave a hole where a control was.
+    pub button: Option<&'a str>,
     /// How wide that caption is drawn, measured with the renderer's own font —
     /// the same reason [`ChromeContent::files_name_widths`] is measured outside.
+    /// Meaningless, and ignored, when there is no button.
     pub button_text_px: f32,
     pub button_hovered: bool,
 }
@@ -19079,7 +19092,7 @@ pub fn preview_card_detail_width(body: [f32; 4], scale: f32) -> f32 {
 /// 479-pixel seat and cut off at both ends.
 pub fn preview_card_geometry(
     body: [f32; 4],
-    button_text_px: f32,
+    button_text_px: Option<f32>,
     detail_lines: usize,
     scale: f32,
 ) -> PreviewCardGeometry {
@@ -19094,12 +19107,21 @@ pub fn preview_card_geometry(
             * scale)
         .round()
         .max(1.0);
-    let button_width = (button_text_px
-        + (PREVIEW_CARD_BUTTON_PADDING_X_LOGICAL_PX + PREVIEW_CARD_BUTTON_BORDER_LOGICAL_PX)
-            * 2.0
-            * scale)
-        .round()
-        .max(1.0);
+    let button_width = button_text_px.map(|text_px| {
+        (text_px
+            + (PREVIEW_CARD_BUTTON_PADDING_X_LOGICAL_PX + PREVIEW_CARD_BUTTON_BORDER_LOGICAL_PX)
+                * 2.0
+                * scale)
+            .round()
+            .max(1.0)
+    });
+    // A card with no button is that much shorter, and still centred: the stack
+    // is what it holds, not a fixed frame with a hole in it.
+    let button_run = if button_width.is_some() {
+        gap + button_height
+    } else {
+        0.0
+    };
     let detail_font = preview_card_detail_font_px(scale);
     let detail_line = (detail_font * CHROME_LINE_HEIGHT).round().max(1.0);
     let detail_height = detail_line * detail_lines as f32;
@@ -19108,7 +19130,7 @@ pub fn preview_card_geometry(
     } else {
         gap + detail_height
     };
-    let total = icon + gap + notice_height + detail_run + gap + button_height;
+    let total = icon + gap + notice_height + detail_run + button_run;
     let centre_x = (body[0] + body[2]) / 2.0;
     let top = (body[1] + (body[3] - body[1] - total) / 2.0).max(body[1]);
     let notice_top = top + icon + gap;
@@ -19137,12 +19159,14 @@ pub fn preview_card_geometry(
             detail_top + detail_height,
         ],
         detail_line,
-        button: [
-            centre_x - button_width / 2.0,
-            button_top,
-            centre_x + button_width / 2.0,
-            button_top + button_height,
-        ],
+        button: button_width.map(|button_width| {
+            [
+                centre_x - button_width / 2.0,
+                button_top,
+                centre_x + button_width / 2.0,
+                button_top + button_height,
+            ]
+        }),
         notice_font,
         detail_font,
         button_font,
@@ -19168,7 +19192,12 @@ pub fn push_preview_card(
     sprites: &mut Vec<ChromeSprite>,
     labels: &mut Vec<ChromeLabel>,
 ) {
-    let geometry = preview_card_geometry(body, card.button_text_px, card.detail.len(), scale);
+    let geometry = preview_card_geometry(
+        body,
+        card.button.map(|_| card.button_text_px),
+        card.detail.len(),
+        scale,
+    );
     // `.pv-unknown svg { opacity: .5 }` — the element's own opacity and not a
     // paler ink, which is the distinction `with_opacity` exists to keep.
     sprites.push(
@@ -19212,12 +19241,18 @@ pub fn push_preview_card(
             clip: None,
         });
     }
+    // **No button, nothing drawn** (R1-12). The card keeps its mark and its
+    // sentence, which is the whole of what a refusal about *where* a file is
+    // has to say.
+    let (Some(caption), Some(button)) = (card.button, geometry.button) else {
+        return;
+    };
     if card.button_hovered {
         sprites.push(ChromeSprite::new(
             ChromeMark::ControlPill {
                 radius_px: geometry.button_radius.max(0.0) as u32,
             },
-            geometry.button,
+            button,
             palette.files_row_hover,
         ));
     }
@@ -19229,13 +19264,13 @@ pub fn push_preview_card(
             radius_px: geometry.button_radius.max(0.0) as u32,
             stroke_px: (scale.round().max(1.0)) as u32,
         },
-        geometry.button,
+        button,
         palette.divider,
     ));
     labels.push(ChromeLabel {
         mono: false,
-        text: card.button.to_owned(),
-        rect: geometry.button,
+        text: caption.to_owned(),
+        rect: button,
         font_size_px: geometry.button_font,
         color: if card.button_hovered {
             palette.files_row_text_selected
@@ -19482,7 +19517,13 @@ pub fn hit_preview_card_button(
 ) -> Option<ChromeTarget> {
     let seat = seats.preview()?;
     let body = preview_body_rect(seats, layout, scale)?;
-    let box_ = preview_card_geometry(body, button.text_px, button.detail_lines, scale).button;
+    let box_ = preview_card_geometry(
+        body,
+        button.offers.then_some(button.text_px),
+        button.detail_lines,
+        scale,
+    )
+    .button?;
     if !contains(box_, x as f32, y as f32) {
         return None;
     }
@@ -19503,6 +19544,9 @@ pub fn hit_preview_card_button(
 /// frame would be answering for a button nobody can see.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PreviewCardButton {
+    /// **Whether this card has a button to hit at all** (R1-12). A refusal
+    /// about where a file is draws none, so there is none to press.
+    pub offers: bool,
     pub text_px: f32,
     /// How many lines the card's fact wrapped to this frame — zero when it has
     /// none. A count and no longer a `bool` since §7.43: a fact that wraps
@@ -21887,7 +21931,7 @@ mod tests {
             detail: &[],
             mark: ChromeMark::File,
             fault: false,
-            button: "Open in default app",
+            button: Some("Open in default app"),
             button_text_px: 120.0,
             button_hovered: false,
         };
@@ -26290,29 +26334,27 @@ mod tests {",
     #[test]
     fn the_cards_button_answers_for_exactly_the_box_it_is_drawn_in() {
         let body = [40.0, 60.0, 440.0, 460.0];
-        let geometry = preview_card_geometry(body, 120.0, 0, 1.0);
+        let geometry = preview_card_geometry(body, Some(120.0), 0, 1.0);
+        let button = geometry.button.expect("a card with a button");
         assert!(
-            geometry.icon[3] < geometry.notice[1] && geometry.notice[3] < geometry.button[1],
+            geometry.icon[3] < geometry.notice[1] && geometry.notice[3] < button[1],
             "icon over sentence over button, in that order"
         );
         assert_eq!(
-            (geometry.button[0] + geometry.button[2]) / 2.0,
+            (button[0] + button[2]) / 2.0,
             (body[0] + body[2]) / 2.0,
             "and the column is centred on the body"
         );
         // 120 of caption plus 12 of padding and 1 of border on each side.
-        assert_eq!(geometry.button[2] - geometry.button[0], 146.0);
-        let inside = (
-            (geometry.button[0] + geometry.button[2]) / 2.0,
-            (geometry.button[1] + geometry.button[3]) / 2.0,
-        );
-        assert!(contains(geometry.button, inside.0, inside.1));
+        assert_eq!(button[2] - button[0], 146.0);
+        let inside = ((button[0] + button[2]) / 2.0, (button[1] + button[3]) / 2.0);
+        assert!(contains(button, inside.0, inside.1));
         assert!(
-            !contains(geometry.button, geometry.button[0] - 1.0, inside.1),
+            !contains(button, button[0] - 1.0, inside.1),
             "one pixel to the left of the frame is not the button"
         );
         assert!(
-            !contains(geometry.button, inside.0, geometry.notice[1]),
+            !contains(button, inside.0, geometry.notice[1]),
             "and neither is the sentence above it"
         );
     }
@@ -44033,8 +44075,12 @@ mod tests {",
     #[test]
     fn the_card_stacks_a_fact_between_the_sentence_and_the_verb() {
         let body = [40.0, 60.0, 440.0, 460.0];
-        let plain = preview_card_geometry(body, 120.0, 0, 1.0);
-        let detailed = preview_card_geometry(body, 120.0, 1, 1.0);
+        let plain = preview_card_geometry(body, Some(120.0), 0, 1.0);
+        let detailed = preview_card_geometry(body, Some(120.0), 1, 1.0);
+        let (plain_button, detailed_button) = (
+            plain.button.expect("a card with a button"),
+            detailed.button.expect("a card with a button"),
+        );
         assert_eq!(
             plain.detail[3] - plain.detail[1],
             0.0,
@@ -44042,14 +44088,69 @@ mod tests {",
         );
         assert!(detailed.detail[3] > detailed.detail[1]);
         assert!(
-            detailed.notice[3] <= detailed.detail[1] && detailed.detail[3] <= detailed.button[1],
+            detailed.notice[3] <= detailed.detail[1] && detailed.detail[3] <= detailed_button[1],
             "icon, sentence, fact, verb — in that order"
         );
         // The column stays centred on the body: a taller card grows equally at
         // both ends rather than pushing its verb off the bottom.
-        let plain_middle = (plain.icon[1] + plain.button[3]) / 2.0;
-        let detailed_middle = (detailed.icon[1] + detailed.button[3]) / 2.0;
+        let plain_middle = (plain.icon[1] + plain_button[3]) / 2.0;
+        let detailed_middle = (detailed.icon[1] + detailed_button[3]) / 2.0;
         assert!((plain_middle - detailed_middle).abs() < 1.5);
+    }
+
+    /// PIN (R1-12) — **a card with no button is a card with no button-shaped
+    /// hole where one would have been.**
+    ///
+    /// The refusal that says "this file is on another machine" has nothing to
+    /// offer the machine's handler, so it draws no control at all — and the
+    /// stack it does draw is still centred in the body, shorter by exactly the
+    /// button and the gap above it.
+    ///
+    /// MUTATION: keep the button's height in the total and the card sits a row
+    /// too high with an empty strip under it.
+    #[test]
+    fn a_card_with_no_button_is_shorter_by_the_button_and_still_centred() {
+        let body = [40.0, 60.0, 440.0, 460.0];
+        let with = preview_card_geometry(body, Some(120.0), 0, 1.0);
+        let without = preview_card_geometry(body, None, 0, 1.0);
+        assert!(without.button.is_none(), "there is no rectangle to press");
+        let with_button = with.button.expect("a card with a button");
+        let with_height = with_button[3] - with.icon[1];
+        let without_height = without.notice[3] - without.icon[1];
+        assert!(
+            without_height < with_height,
+            "the card did not give the button's row back: {without_height} vs {with_height}"
+        );
+        let with_middle = (with.icon[1] + with_button[3]) / 2.0;
+        let without_middle = (without.icon[1] + without.notice[3]) / 2.0;
+        assert!(
+            (with_middle - without_middle).abs() < 1.5,
+            "and what is left is still in the middle of the body"
+        );
+        // And the hit test answers nothing where nothing was drawn.
+        let (mut sprites, mut labels) = (Vec::new(), Vec::new());
+        push_preview_card(
+            body,
+            &PreviewCardContent {
+                notice: "This file is on another machine.",
+                detail: &[],
+                mark: ChromeMark::File,
+                fault: false,
+                button: None,
+                button_text_px: 0.0,
+                button_hovered: false,
+            },
+            1.0,
+            &chrome_palette(),
+            &mut sprites,
+            &mut labels,
+        );
+        assert_eq!(
+            labels.len(),
+            1,
+            "the sentence and nothing else: {:?}",
+            labels.iter().map(|label| &label.text).collect::<Vec<_>>()
+        );
     }
 
     /// RED — **the absence card's fact wraps inside the seat instead of running
@@ -44089,7 +44190,7 @@ mod tests {",
                 detail: &lines,
                 mark: ChromeMark::Globe { favicon: None },
                 fault: true,
-                button: "Try again",
+                button: Some("Try again"),
                 button_text_px: 60.0,
                 button_hovered: false,
             };
@@ -44133,9 +44234,9 @@ mod tests {",
                 "the fact lost characters on its way onto the card"
             );
             // And the card grew: the button is below the last line, not under it.
-            let geometry = preview_card_geometry(body, 60.0, lines.len(), 1.0);
+            let geometry = preview_card_geometry(body, Some(60.0), lines.len(), 1.0);
             assert!(
-                geometry.detail[3] <= geometry.button[1],
+                geometry.detail[3] <= geometry.button.expect("a card with a button")[1],
                 "the fact and the verb share pixels at {seat_width}px: {geometry:?}"
             );
             assert!(

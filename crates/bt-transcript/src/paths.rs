@@ -2087,7 +2087,14 @@ pub fn file_uri_to_local_reference(uri: &str) -> Option<PathBuf> {
 ///
 /// Resolution is per URI segment: each is percent-decoded on its own and the results are joined with
 /// `\`. That is what RFC 3986 means — a `%2F` inside a segment decodes to a literal `/` in a
-/// filename, never to a separator — and it costs nothing, since such a name simply fails to exist. A
+/// filename, never to a separator — and **a segment that decodes to one is refused** (R3-1). It
+/// used to be kept as text, on the reasoning that such a name simply fails to exist; the reasoning
+/// was about the filesystem and the damage was upstream of it. `file:///%5Chost%5Cshare` decodes to
+/// the one segment `\host\share`, and the POSIX spelling below puts a root slash in front of every
+/// segment — so the answer was `/\host\share`, a string that opens with two separators, which is
+/// how Windows spells the start of a UNC. The next spawn asked `is_dir` about it from the window
+/// thread and dialled another machine. A separator inside a segment names nothing this operating
+/// system can hold, so the URI names nothing. A
 /// single **trailing** empty segment is a directory's trailing slash rather than an empty name
 /// (`file:///D:/src/` and `file:///D:/` both name directories); an interior one (`file:///D://a`)
 /// stays rejected.
@@ -2143,7 +2150,14 @@ pub fn decode_file_uri(
         return None;
     }
     let posix = format!("/{}", decoded_segments.join("/"));
-    (!posix.contains('\0')).then(|| PathBuf::from(posix))
+    // **And it is a root, never an authority** (R3-1). The segment rule above
+    // already makes this unreachable; it is stated here as well because this is
+    // the line that decides what the string *is*, and Windows reads two leading
+    // separators as the start of a share whatever produced them.
+    if posix.starts_with("//") || posix.starts_with("/\\") || posix.contains('\0') {
+        return None;
+    }
+    Some(PathBuf::from(posix))
 }
 
 /// The native spelling of a `file:` URI's already-decoded segments.
@@ -2174,8 +2188,22 @@ fn native_path_from_uri_segments(segments: &[String]) -> String {
     format!("/{}", segments.join("/"))
 }
 
-/// Percent-decode one URI segment. `None` when an escape is malformed, the result is not UTF-8, or
-/// it carries a control character — each of which means the text was never a path we may read.
+/// Percent-decode one URI segment. `None` when an escape is malformed, the result is not UTF-8, it
+/// carries a control character, or **an escape decoded to a separator** — each of which means the
+/// text was never a path we may read.
+///
+/// # An escaped separator is not a separator (R3-1)
+///
+/// `%2F` and `%5C` are how a filename containing a slash or a backslash would have to be spelled,
+/// and no Windows filename contains either. What such an escape does instead is move a boundary
+/// after the split has already happened: `file:///%5Chost%5Cshare` is one segment that decodes to
+/// `\\host\\share`, and the POSIX spelling below puts a root slash in front of every segment — so
+/// the answer was `/\\host\\share`, a string that opens with two separators, which is how Windows
+/// spells the start of a UNC. The next spawn asked `is_dir` about it from the window thread and
+/// dialled another machine.
+///
+/// A **raw** backslash in the URI is a different thing and is left alone: it is not a decode, it
+/// was in the text the shell printed, and `file:///D:\\src` is a spelling real shells emit.
 fn percent_decode(segment: &str) -> Option<String> {
     let bytes = segment.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -2193,7 +2221,15 @@ fn percent_decode(segment: &str) -> Option<String> {
         }
     }
     let decoded = String::from_utf8(decoded).ok()?;
-    (!decoded.chars().any(char::is_control)).then_some(decoded)
+    if decoded.chars().any(char::is_control) {
+        return None;
+    }
+    // The escape that would move a boundary, refused where it is read: the
+    // segment shrank, so something was decoded, and what came out is a
+    // separator that the split above never saw.
+    let escaped_a_separator =
+        segment.len() != decoded.len() && segment.contains('%') && decoded.contains(['\\', '/']);
+    (!escaped_a_separator).then_some(decoded)
 }
 
 /// Spell a local path as the `file://` URI a link target is written in — the inverse of
@@ -6467,6 +6503,67 @@ mod tests {
                 "ranges come back in reading order and disjoint"
             );
         }
+    }
+
+    /// PIN (R3-1) — **a decoded segment that carries a separator is not a
+    /// segment**, and an OSC 7 answer never becomes a share.
+    ///
+    /// `%5C` decodes to a backslash. Joining that into a path and then putting a
+    /// root slash in front of it hands `std::path` a string that opens with two
+    /// separators, and Windows reads two separators as the start of a UNC — so
+    /// `file:///%5Chost%5Cshare` came back as `\\host\share`, which the next
+    /// spawn asks `is_dir` about from the window thread and which dials another
+    /// machine to answer.
+    ///
+    /// RFC 3986 already says what a percent-escaped separator is: a character in
+    /// a name, never a boundary. This machine cannot name such a file, so the
+    /// URI names nothing.
+    ///
+    /// MUTATION: keep the escaped separator as text and the POSIX fall-back
+    /// rebuilds the share.
+    #[test]
+    fn an_escaped_separator_is_not_a_segment_and_never_a_share() {
+        for uri in [
+            "file:///%5Chost%5Cshare",
+            "file:///%5C%5Chost/share",
+            "file:///%2Fetc/passwd",
+            "file://localhost/%5C%5Cserver%5Cshare",
+        ] {
+            assert_eq!(
+                decode_file_uri(
+                    uri,
+                    None,
+                    TrailingSlash::Directory,
+                    Rooting::DriveOrPosixRoot
+                ),
+                None,
+                "{uri} names no file on this machine"
+            );
+            assert_eq!(
+                decode_file_uri(uri, None, TrailingSlash::Reject, Rooting::DriveOnly),
+                None,
+                "{uri} is no reference either"
+            );
+        }
+        // The shapes either rooting really does name are untouched.
+        assert_eq!(
+            decode_file_uri(
+                "file:///D:/src/a%20b.md",
+                None,
+                TrailingSlash::Reject,
+                Rooting::DriveOnly
+            ),
+            Some(PathBuf::from(r"D:\src\a b.md"))
+        );
+        assert_eq!(
+            decode_file_uri(
+                "file:///home/alice/src",
+                None,
+                TrailingSlash::Directory,
+                Rooting::DriveOrPosixRoot
+            ),
+            Some(PathBuf::from("/home/alice/src"))
+        );
     }
 }
 

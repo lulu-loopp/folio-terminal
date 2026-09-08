@@ -349,13 +349,54 @@ pub fn check(candidate: &str, origin: Origin<'_>) -> Decision {
                 None => Decision::Refuse(Refusal::NotMinted),
             };
         }
+        // **A mint that refuses is a refusal, not a fall-through** (R1-16).
+        //
+        // A seat carrying a mint is a seat the host put a specific document in
+        // front of: the one local file the files column handed over, or the
+        // blank page the host makes for itself. Everything else that seat could
+        // be asked to load — a link in that document, a redirect, a script —
+        // is a navigation *away* from the thing that was minted, and the
+        // allow-list is not the right question about it: the allow-list says
+        // which addresses this product will browse to, and browsing is what a
+        // seat with no mint does. Letting a refused mint fall through to it
+        // meant a local page could walk the seat onto the network, carrying
+        // whatever the local document's origin had reached.
+        //
+        // So the mint is the whole answer while there is one. `Mint::Nothing`
+        // is the resting state of an ordinary browsing seat and falls through
+        // exactly as it always did — which is why the host installs
+        // `Mint::Nothing` before it navigates to an ordinary address.
         Origin::NavigationStarting(mint) => {
             if let Some(url) = mint.admits(trimmed) {
                 return Decision::Navigate(url);
             }
+            if *mint != Mint::Nothing {
+                // The allow-list is still asked, but only so that the card can
+                // name the reason it already had words for: a `file:` URL is
+                // refused as `FileScheme`, `about:` as `BrowserInternalScheme`,
+                // and what the list would have *admitted* is refused as
+                // `NotMinted` rather than navigated to. One sentence changes —
+                // the one that used to be `Navigate`.
+                return match check_by_scheme(trimmed, origin) {
+                    Decision::Refuse(refusal) => Decision::Refuse(refusal),
+                    Decision::Navigate(_) | Decision::Search(_) => {
+                        Decision::Refuse(Refusal::NotMinted)
+                    }
+                };
+            }
         }
         Origin::AddressBar => {}
     }
+    check_by_scheme(trimmed, origin)
+}
+
+/// The allow-list half of [`check`] — what an address's own text says, for the
+/// doors that have nothing else to go on.
+///
+/// Split out so that [`check`]'s mint arm can name it rather than fall into it:
+/// a fall-through is a control-flow accident waiting to be read as a decision,
+/// and R1-16 is what that reading cost. Here the two callers are visible.
+fn check_by_scheme(trimmed: &str, origin: Origin<'_>) -> Decision {
     match split_scheme(trimmed) {
         Some((scheme, rest)) => {
             if let Err(refusal) = classify_scheme(&scheme) {
@@ -1617,6 +1658,70 @@ mod tests {
             site_key("https://example.com/"),
             site_key("http://example.com/"),
             "and two servers where the scheme differs"
+        );
+    }
+
+    /// PIN (R1-16) — **a mint that refuses is a refusal, not a fall-through.**
+    ///
+    /// A seat holding [`Mint::File`] is showing the one local document the
+    /// files column handed it. When the mint said no, the check went on to the
+    /// generic scheme test, which admits every `http(s)` address there is — so
+    /// a link, a redirect or a script inside that document could walk the seat
+    /// off the disk and onto the network, and the document's own origin went
+    /// with it.
+    ///
+    /// The blank page reads the same way: the host mints it for itself, so a
+    /// navigation away from it is a navigation the host did not ask for.
+    ///
+    /// A seat with no mint at all is the ordinary browsing seat and its rule
+    /// does not move — that is the last two assertions, and they are what makes
+    /// this a rule about *minted* seats rather than a rule that stops browsing.
+    ///
+    /// MUTATION: let the `NavigationStarting` arm fall through when `admits`
+    /// answers `None` and the first two assertions navigate.
+    #[test]
+    fn a_seat_the_host_minted_goes_where_the_mint_says_and_nowhere_else() {
+        let file = Mint::file(Path::new(r"D:\notes\report.html")).expect("a local page");
+        assert_eq!(
+            check("https://evil.test/steal", Origin::NavigationStarting(&file)),
+            Decision::Refuse(Refusal::NotMinted),
+            "a local document does not walk onto the network"
+        );
+        assert_eq!(
+            check(
+                "https://evil.test/steal",
+                Origin::NavigationStarting(&Mint::Blank)
+            ),
+            Decision::Refuse(Refusal::NotMinted),
+            "and neither does the page the host minted for itself"
+        );
+        // What the mint does hold still loads, fragment and all.
+        assert_eq!(
+            check(
+                "file:///D:/notes/report.html#ch3",
+                Origin::NavigationStarting(&file)
+            ),
+            Decision::Navigate("file:///D:/notes/report.html#ch3".to_owned())
+        );
+        assert_eq!(
+            check(BLANK_PAGE, Origin::NavigationStarting(&Mint::Blank)),
+            Decision::Navigate(BLANK_PAGE.to_owned())
+        );
+        // An ordinary browsing seat carries no mint, and its rule is the
+        // allow-list exactly as it always was.
+        assert_eq!(
+            check(
+                "https://example.test/next",
+                Origin::NavigationStarting(&Mint::Nothing)
+            ),
+            Decision::Navigate("https://example.test/next".to_owned())
+        );
+        assert_eq!(
+            check(
+                "javascript:alert(1)",
+                Origin::NavigationStarting(&Mint::Nothing)
+            ),
+            Decision::Refuse(Refusal::ScriptOrInlineScheme)
         );
     }
 }

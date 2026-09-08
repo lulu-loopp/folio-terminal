@@ -646,15 +646,42 @@ pub(crate) fn probe_settled() -> bool {
 /// `PATHEXT`, so spawning `copilot` directly finds nothing on the ordinary installation. `cmd /c`
 /// is what resolves a `.cmd` the way the user's own shell would, and it resolves a `.exe` too — so
 /// one call covers both ways this program gets onto a machine.
+///
+/// **But `cmd` is never asked to find it** (R1-17). `cmd /c copilot` resolves a bare name out of
+/// its own working directory before it looks at `PATH`, and this process's working directory is
+/// whatever folder the shell that started Folio was standing in. A `copilot.cmd` dropped into a
+/// cloned repository therefore ran the moment somebody opened Settings ▸ Agents — a page about
+/// agents, running a program nobody named, with no press on anything. So the search is this
+/// window's own ([`bt_platform::program_on_path`], which never looks at a working directory) and
+/// what `cmd` receives is the answer, quoted, with nothing left to resolve.
 #[cfg(windows)]
 fn run_probe() -> Option<Version> {
+    let copilot = bt_platform::program_on_path(Path::new("copilot"))?;
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen the first time somebody opens the settings dialog.
-    let output = bt_platform::quiet_command("cmd.exe")
-        .args(["/c", "copilot", "--version"])
-        .output()
-        .ok()?;
+    let mut command = bt_platform::quiet_command_named(Path::new("cmd.exe"))?;
+    // `raw_arg` and not `args`, because what is being built is a string `cmd`
+    // parses for itself: the outer quotes are the pair it strips, and the inner
+    // ones are what keep a program path holding a space one token.
+    let output = {
+        use std::os::windows::process::CommandExt as _;
+        command
+            .raw_arg(probe_command_tail(&copilot))
+            .output()
+            .ok()?
+    };
     Version::parse(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The whole of what `cmd.exe` is handed, as one string it parses itself.
+///
+/// `cmd /c "<command string>"` strips the outer pair of quotes and runs what is left, so a program
+/// path that contains a space needs quotes of its own **inside** that pair. Split out from the
+/// spawn so the shape can be pinned without a machine that has copilot on it.
+#[cfg(windows)]
+#[must_use]
+fn probe_command_tail(copilot: &Path) -> String {
+    format!("/c \"\"{}\" --version\"", copilot.display())
 }
 
 #[cfg(not(windows))]
@@ -669,6 +696,34 @@ mod tests {
 
     fn exe() -> PathBuf {
         PathBuf::from(r"C:\Program Files\Folio\folio.exe")
+    }
+
+    /// PIN (R1-17) — **the probe names the program it starts, absolutely.**
+    ///
+    /// `cmd /c copilot --version` is a bare name, and `cmd` resolves a bare
+    /// name out of its own working directory before it looks at `PATH`. The
+    /// working directory of this process is whatever the shell that started
+    /// Folio was standing in, so a `copilot.cmd` sitting in a folder somebody
+    /// cloned ran the moment Settings ▸ Agents was opened — no press on it, no
+    /// mention of it, and the page that ran it is the page about agents.
+    ///
+    /// So the search is this window's own ([`bt_platform::program_on_path`],
+    /// which never looks at a working directory) and what `cmd` is handed is
+    /// the answer, quoted, with nothing left for it to resolve.
+    ///
+    /// MUTATION: pass the bare name and the tail below stops naming a path.
+    #[cfg(windows)]
+    #[test]
+    fn the_probe_hands_cmd_a_path_and_never_a_name_to_look_up() {
+        let tail = probe_command_tail(Path::new(r"C:\Users\a b\AppData\npm\copilot.cmd"));
+        assert_eq!(
+            tail, "/c \"\"C:\\Users\\a b\\AppData\\npm\\copilot.cmd\" --version\"",
+            "one quoted absolute program and one argument"
+        );
+        assert!(
+            !tail.contains(" copilot "),
+            "nothing left for cmd to search for: {tail}"
+        );
     }
 
     /// **The consent disclosure names the file this machine will write** —
