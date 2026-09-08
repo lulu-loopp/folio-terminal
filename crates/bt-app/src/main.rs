@@ -7092,7 +7092,7 @@ fn preview_open_lane(path: &Path) -> PreviewOpenLane {
 /// and the scheme editor; not one of them mentions a page.
 ///
 /// A source with no file behind it is not a page however it is spelled — a git
-/// diff of `design/ui-mockup.html` is a reading of a repository — and
+/// diff of `docs/design/ui-mockup.html` is a reading of a repository — and
 /// [`preview::PreviewSource::Web`] is already one, so it is not here either.
 fn source_opens_as_a_page(source: &preview::PreviewSource) -> Option<PathBuf> {
     let path = source.file_path()?;
@@ -7150,7 +7150,7 @@ enum PeekBodyKind {
 /// before this ruling and still gives.
 ///
 /// A composed document has no path, so it is never a page however its name is
-/// spelled: a git diff of `design/ui-mockup.html` is a reading of a repository,
+/// spelled: a git diff of `docs/design/ui-mockup.html` is a reading of a repository,
 /// exactly as [`preview_page_hand_off`] has always said.
 ///
 /// # What a page's row earns (user ruling 2026-08-25)
@@ -96722,7 +96722,7 @@ fn startup_poll_delay(first_text_presented: bool) -> Option<std::time::Duration>
     (!first_text_presented).then_some(STARTUP_PTY_POLL_INTERVAL)
 }
 
-/// The longest a tab's name may be: `TITLE_MAX` (`design/ui-mockup.html` line
+/// The longest a tab's name may be: `TITLE_MAX` (`docs/design/ui-mockup.html` line
 /// 2603).
 ///
 /// Counted in characters rather than the mock-up's UTF-16 code units, which is
@@ -100785,7 +100785,7 @@ const PANIC_EXIT_CODE: i32 = 101;
 /// **`BT_PANIC_SELFTEST=<seconds>` — fault this window on purpose, once, so that
 /// the exit a crash takes can be measured on a real machine** (§7.43).
 ///
-/// Registered in `docs/HANDOFF-2026-08-21.md` §2 beside the other diagnostic
+/// Registered in `docs/handoff/HANDOFF-2026-08-21.md` §2 beside the other diagnostic
 /// switches, and shaped after `hang_watch`'s own selftest down to the parse: the
 /// same one-shot latch, the same "a number of seconds or nothing", the same
 /// `LazyLock` so that a turn of the loop costs no environment read.
@@ -112632,7 +112632,7 @@ mod tests {
     /// would move the picture, which is the thing a reader would notice first
     /// and be least able to describe.
     ///
-    /// The 160×120 case is the recording in this repository's `test-assets` and
+    /// The 160×120 case is the recording in this repository's `tests/assets` and
     /// the one the defect was reported on: the still fills the body, where
     /// [`image_destination`] would draw it at 160×120 in the middle of it.
     ///
@@ -112847,8 +112847,8 @@ mod tests {
     }
 
     /// **A detent delivered in pieces is worth exactly one detent** — the claim
-    /// `docs/HANDOFF-2026-08-21.md` §5 ⑮/⑳ made against this gesture, checked
-    /// rather than inherited.
+    /// `docs/handoff/HANDOFF-2026-08-21.md` §5 ⑮/⑳ made against this gesture,
+    /// checked rather than inherited.
     ///
     /// That report reasoned by analogy from the focus card's aim, which shares
     /// [`wheel_zoom_notches`] and *did* lose the remainder: the aim spends whole
@@ -122994,7 +122994,7 @@ mod tests {
     /// which is a page of text growing a horizontal scrollbar.
     #[test]
     fn only_the_blocks_that_refuse_to_reflow_ask_for_a_horizontal_scroll() {
-        let source = include_str!("../../../test-assets/preview-samples/stress.md");
+        let source = include_str!("../../../tests/assets/preview-samples/stress.md");
         let blocks = preview::parse_markdown(source);
         let fences = blocks
             .iter()
@@ -125359,7 +125359,7 @@ mod tests {
     #[test]
     fn nothing_a_preview_body_produces_is_drawn_outside_the_preview() {
         let palette = bt_render::chrome_palette();
-        let source = include_str!("../../../test-assets/preview-samples/stress.md");
+        let source = include_str!("../../../tests/assets/preview-samples/stress.md");
         let blocks = preview::parse_markdown(source);
         // A narrow pane, so every wide block overruns it and the crop is the only
         // thing standing between the document and the panes beside it.
@@ -130901,7 +130901,7 @@ mod tests {
         let path = dir.join("report.pdf");
         std::fs::write(
             &path,
-            include_bytes!("../../../test-assets/folio-pdf-test.pdf"),
+            include_bytes!("../../../tests/assets/folio-pdf-test.pdf"),
         )
         .expect("the fixture is copied where it can be re-stamped");
         let fit = (280_u32, 160_u32);
@@ -136446,7 +136446,7 @@ mod tests {
         use bt_platform::video::engine::engines_outstanding;
         let _ledger = ledger_gate();
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../test-assets/folio-video-test.mp4");
+            .join("../../tests/assets/folio-video-test.mp4");
         let before = engines_outstanding();
         let mut seats = video_seat::VideoSeats::default();
         let surfaces = [
@@ -136545,7 +136545,7 @@ mod tests {
     fn a_seat_that_changes_content_drops_its_video() {
         use bt_platform::video::engine::engines_outstanding;
         let _ledger = ledger_gate();
-        let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets");
+        let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/assets");
         let recording = assets.join("folio-video-test.wmv");
         let another = assets.join("folio-video-test.mp4");
         let document = assets.join("md-image-check.md");
@@ -136698,7 +136698,7 @@ mod tests {
         use bt_platform::video::engine::{engines_shut_down, engines_started};
         let _ledger = ledger_gate();
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../test-assets/folio-video-test.mp4");
+            .join("../../tests/assets/folio-video-test.mp4");
         let mut seats = video_seat::VideoSeats::default();
         let now = Instant::now();
         seats
@@ -136780,7 +136780,7 @@ mod tests {
         use bt_platform::video::engine::{engines_outstanding, engines_shut_down};
         let _ledger = ledger_gate();
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../test-assets/folio-video-test.mp4");
+            .join("../../tests/assets/folio-video-test.mp4");
         let before = engines_outstanding();
         let mut seats = video_seat::VideoSeats::default();
         let now = Instant::now();

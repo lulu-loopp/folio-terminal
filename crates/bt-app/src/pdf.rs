@@ -648,12 +648,12 @@ mod tests {
 
     /// The fixture the ruling was demonstrated on — three pages, printed by
     /// headless Edge.
-    const FIXTURE: &[u8] = include_bytes!("../../../test-assets/folio-pdf-test.pdf");
+    const FIXTURE: &[u8] = include_bytes!("../../../tests/assets/folio-pdf-test.pdf");
 
     /// The fixture the 2026-09-05 report was answered with — five pages, all of
     /// its structure inside one compressed object stream, so that nothing a scan
     /// looks for is anywhere in the bytes.
-    const OBJSTM_FIXTURE: &[u8] = include_bytes!("../../../test-assets/folio-pdf-objstm-test.pdf");
+    const OBJSTM_FIXTURE: &[u8] = include_bytes!("../../../tests/assets/folio-pdf-objstm-test.pdf");
 
     fn count(bytes: &[u8]) -> Option<u32> {
         count_pages(bytes)
@@ -663,7 +663,7 @@ mod tests {
     /// second reader opens the file itself.
     fn fixture_path(name: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../test-assets")
+            .join("../../tests/assets")
             .join(name)
     }
 

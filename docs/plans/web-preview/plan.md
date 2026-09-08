@@ -64,7 +64,7 @@
 ## 5. 切片(※ W2 预拆六片)
 
 - **W0′**:§2 十扇门(spike 复用,补洞,机器证据)。
-- **W1**:**已交付(2026-08-20)**——`design/ui-mockup.html` + `DESIGN.md §7.7`,产品代码一行未改。交付内容:①网页作为**预览缓冲**(不是第四种叶)进同一个池、同一张切换器、同一套 tab/Recent/卡片动词;②与 Document/Picture/Graph **逐格同族的头**——favicon/地球标、页面标题即地址输入(双击,继承改名编辑器)、三钮常驻坐在 `Save`/`Edit source` 那一格、DevTools 走悬停工具、查找沿用同一颗搜索胶囊(第二个 host,不是第二份实现);③脚同时是**外交带**与**悬停行**(解析后目标 + `· blocked`,点击惰性,照 §7.1.5g ⑤);④**五张失败态**,一图五行、一句话一事实一动词、无旁白,四张占座 + 下载那张覆页 sheet(Esc 收);⑤切换器网页行与 PINNED 段(同表同索引空间,`pins.json` 的 `url` 首个消费者,钉不是授权);⑥顺带清两笔小样欠账(Recent 的 preview 形、identity 座位改照原生 `seats::identity_seat`)。读法:`?web=ok|runtime|load|crash|blocked|download`(+`&scheme=`)。
+- **W1**:**已交付(2026-08-20)**——`docs/design/ui-mockup.html` + `DESIGN.md §7.7`,产品代码一行未改。交付内容:①网页作为**预览缓冲**(不是第四种叶)进同一个池、同一张切换器、同一套 tab/Recent/卡片动词;②与 Document/Picture/Graph **逐格同族的头**——favicon/地球标、页面标题即地址输入(双击,继承改名编辑器)、三钮常驻坐在 `Save`/`Edit source` 那一格、DevTools 走悬停工具、查找沿用同一颗搜索胶囊(第二个 host,不是第二份实现);③脚同时是**外交带**与**悬停行**(解析后目标 + `· blocked`,点击惰性,照 §7.1.5g ⑤);④**五张失败态**,一图五行、一句话一事实一动词、无旁白,四张占座 + 下载那张覆页 sheet(Esc 收);⑤切换器网页行与 PINNED 段(同表同索引空间,`pins.json` 的 `url` 首个消费者,钉不是授权);⑥顺带清两笔小样欠账(Recent 的 preview 形、identity 座位改照原生 `seats::identity_seat`)。读法:`?web=ok|runtime|load|crash|blocked|download`(+`&scheme=`)。
 
   **W1 留给用户的待裁决(五条)——已裁(2026-08-22,用户全按推荐)**:①三钮维持右侧工具格;②下载失败用覆页 sheet;③加 `Ctrl+L`(地址)与 `F12`(DevTools)进快捷键表;④Recent/session 扩到 URL(明文存储条款用户知情);⑤两枚「钉」的命名单独开小单,不挡 Web。原文如下——
   1. **三钮的位置**。现画在头的右侧工具区、坐 `Save`/`Edit source` 那一格(本窗每个 pane 的动词都在那儿)。代价:地址在最左、后退在最右,宽座位上手要横跨。备选是放到 mark 与 name 之间(浏览器惯例,但把记号与它标的名字拆开)。**推荐维持现状**——同族优先于外部惯例,本块的定位是终端里的浏览器而不是浏览器。

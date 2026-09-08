@@ -9,7 +9,7 @@
 //! function — it is built by handing a real file to a real engine, which is what
 //! this does.
 //!
-//! It is kept rather than deleted for the reason `test-assets/PROVENANCE.md`
+//! It is kept rather than deleted for the reason `tests/assets/PROVENANCE.md`
 //! keeps the ffmpeg command beside every fixture: a row of that table is a
 //! measurement, and a measurement nobody can repeat is a claim. Adding a row
 //! means making a fixture and running this against it.

@@ -75,6 +75,30 @@ Signing is a step of its own, because it is the one step that needs a person
 signed in to Azure rather than a machine: `docs/RELEASING.md` has how it is set
 up, how a release is signed, and why the time stamp is not optional.
 
+## The tree
+
+Nine directories at the root, and every one of them is what its name says:
+
+- `assets/` — files the build reads and the executable carries: the application
+  icon, the emoji font, the colour schemes, the PSReadLine module Folio repairs,
+  the MiTeX specification the formula engine imports, and the README's boards.
+- `crates/` — the product, cut into compilation units. `bt-app` is the window.
+- `docs/` — the design record, the plans behind each block of work, the spike
+  reports, the screenshots the README shows, and the prototypes in `docs/design/`.
+- `licenses/` — upstream licence texts, reproduced as their licences require.
+- `packaging/` — the MSIX manifest and logos, and the winget manifest.
+- `scripts/` — the gates, the release steps, the shell integration, the
+  development probes, and in `scripts/ci/` the two helpers the workflows call.
+- `tests/` — fixtures, not test code: `tests/corpus/` holds the recorded terminal
+  sessions replayed byte for byte, `tests/assets/` the documents, images and
+  videos the preview tests open.
+- `vendor/` — copied-in code, patched and declared. See above.
+- `.github/` — the workflows.
+
+Everything else at the root is a file: the two READMEs, the licences, the
+changelog, this project's conventions, and the cargo, clippy and rustfmt
+configuration.
+
 ## Where the decisions are written down
 
 - `docs/DESIGN.md` — what the program is supposed to do.

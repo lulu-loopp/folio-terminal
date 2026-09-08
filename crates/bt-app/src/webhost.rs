@@ -27,7 +27,7 @@
 //! [`WebMachine`] is that rule and the eight or so others §4 states, written as
 //! a type with no engine in it, so the whole recovery model can be shot at by
 //! `cargo test` on a machine with no runtime installed. It arrives here from the
-//! W0′ probe (`spikes/webview2-w0/src/machine.rs`) with its contract tests
+//! W0′ probe (`docs/plans/web-preview/w0-evidence.md`) with its contract tests
 //! intact, plus the two amendments the second round of evidence forced:
 //!
 //! - **the user data folder's wait has a deadline, and on the graceful path the
@@ -416,11 +416,11 @@ use crate::webnav::{
 
 /// `BT_WEB_DEV=<url>` — **the only way to a page in this build**.
 ///
-/// Registered in `docs/HANDOFF-2026-08-21.md` §2 beside the other diagnostic
-/// switches. Read once: an environment variable does not change under a running
-/// process, and the navigation gate is called from inside a COM callback where
-/// a syscall per keystroke of a page's own redirects would be a cost for
-/// nothing.
+/// Registered in `docs/handoff/HANDOFF-2026-08-21.md` §2 beside the other
+/// diagnostic switches. Read once: an environment variable does not change
+/// under a running process, and the navigation gate is called from inside a COM
+/// callback where a syscall per keystroke of a page's own redirects would be a
+/// cost for nothing.
 pub(crate) fn development_target() -> Option<&'static str> {
     use std::sync::OnceLock;
     static TARGET: OnceLock<Option<String>> = OnceLock::new();
@@ -473,10 +473,11 @@ pub(crate) struct ClaimedChord {
 /// # This is a derivation, not a transcription
 ///
 /// The W0′ probe carried a hand-copied table because it lives outside the
-/// workspace (`spikes/webview2-w0/src/bindings.rs`). Inside it, copying would be
-/// the bug: `Shortcuts` is `BINDINGS` **with the user's `keybindings.json` laid
-/// over it**, and a page that kept giving the window back the factory chords
-/// after somebody rebound one would be a shortcut table with two answers.
+/// workspace (`docs/plans/web-preview/w0-evidence.md`). Inside it, copying
+/// would be the bug: `Shortcuts` is `BINDINGS` **with the user's
+/// `keybindings.json` laid over it**, and a page that kept giving the window
+/// back the factory chords after somebody rebound one would be a shortcut table
+/// with two answers.
 ///
 /// # What cannot be claimed, and why nobody will notice until it is too late
 ///

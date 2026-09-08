@@ -1,6 +1,6 @@
 //! The settings dialog — the modal the gear opens.
 //!
-//! Spec authority is `design/ui-mockup.html`'s `#settings-overlay` block: the
+//! Spec authority is `docs/design/ui-mockup.html`'s `#settings-overlay` block: the
 //! `.overlay` scrim, the `.settings` dialog on it, its `header`/`h1`/`.dlg-close`,
 //! and the `.content` rows inside. Every number below is that stylesheet's own,
 //! and the ones that are line boxes rather than declarations were measured in the
@@ -563,7 +563,7 @@ const BUTTON_HEIGHT_LOGICAL_PX: f32 = 27.5;
 
 // ── the Profiles page (§7.1.6c-6) ───────────────────────────────────────────
 //
-// Every number here is `design/ui-mockup.html`'s own `.pf-*` block. The mark
+// Every number here is `docs/design/ui-mockup.html`'s own `.pf-*` block. The mark
 // column is `.ticon`'s, shared with the picker's option marks and with the `˅`
 // menu's rows, because it is the same 15px mark in the same 14px column.
 /// `.pf-row { gap: 12px }` — mark to text, and text to the action run.
@@ -604,7 +604,7 @@ const BUTTON_FONT_LOGICAL_PX: f32 = 13.0;
 
 // ── the profile editor (§7.1.6c-6b) ─────────────────────────────────────────
 //
-// Every number is `design/ui-mockup.html`'s own — the `.field`, `.field-pair`,
+// Every number is `docs/design/ui-mockup.html`'s own — the `.field`, `.field-pair`,
 // `.envtab`, `.pf-crumb` and `.pf-more` blocks, which were struck against the
 // dialog's existing recipes rather than beside them: a field borrows
 // `.combo > button`'s hairline, radius, size and padding exactly, because in
@@ -16609,7 +16609,7 @@ mod tests {
     }
 
     /// PIN (mock-up geometry): the dialog lands exactly where
-    /// `design/ui-mockup.html` puts it — `width: min(480px, 92%)`,
+    /// `docs/design/ui-mockup.html` puts it — `width: min(480px, 92%)`,
     /// `margin: 54px auto 0`, and a height its own content decides.
     ///
     /// The height is not a guess: it is `1 + 56 + content + 1` — two hairlines,
@@ -18627,7 +18627,7 @@ mod tests {
         // number with nothing behind it.
         assert!(
             MOCKUP.contains("max-height: min(600px, calc(100% - 72px));"),
-            "`design/ui-mockup.html` says `.settings {{ max-height: \
+            "`docs/design/ui-mockup.html` says `.settings {{ max-height: \
              min(600px, calc(100% - 72px)) }}`"
         );
     }
@@ -18968,7 +18968,7 @@ mod tests {
                 ".adv-head { padding-left: 12px; padding-right: 10px; \
                  margin-left: -10px; margin-right: -8px; }"
             ),
-            "`design/ui-mockup.html` puts the word on the heading column too — \
+            "`docs/design/ui-mockup.html` puts the word on the heading column too — \
              the band wears the picker's own paddings outwards and the \
              asymmetric margins cancel `.row`'s 2px, so the word never moves \
              while the focus ring stops landing on the `A` (user report \
@@ -19849,7 +19849,7 @@ mod tests {
 
     /// PIN (2026-08-18) — **the `Maximum height` row the mock-up drew, built.**
     ///
-    /// It stood in `design/ui-mockup.html` from the day the Rendered blocks page
+    /// It stood in `docs/design/ui-mockup.html` from the day the Rendered blocks page
     /// did (4370), with a working picker over a machine that had already been
     /// clamping and scrolling blocks to `block_max_height_px` since the formula
     /// slice — and no way for a person to name the number. A control drawn in
@@ -23050,7 +23050,7 @@ mod tests {
 
     /// The mock-up itself, so a claim about "what the mock-up says" is read out
     /// of it rather than transcribed once and left to rot.
-    const MOCKUP: &str = include_str!("../../../design/ui-mockup.html");
+    const MOCKUP: &str = include_str!("../../../docs/design/ui-mockup.html");
 
     /// The `.desc` line and the picker items of one `data-combo`, as the mock-up
     /// writes them.
@@ -23084,7 +23084,7 @@ mod tests {
     }
 
     /// PIN (Q5): **the Theme row is the mock-up's, in the mock-up's order, with
-    /// the mock-up's line** — read out of `design/ui-mockup.html` rather than
+    /// the mock-up's line** — read out of `docs/design/ui-mockup.html` rather than
     /// copied into an assertion.
     ///
     /// Both halves had drifted. The order was the enum's (`System` first) rather
@@ -24541,7 +24541,7 @@ mod tests {
     /// the day it was born**, and this reads it out of the file rather than
     /// trusting a memory of having done so.
     ///
-    /// `design/ui-mockup.html` is the only visual authority this dialog has. A
+    /// `docs/design/ui-mockup.html` is the only visual authority this dialog has. A
     /// surface built in the native tree and never written back is a surface with
     /// no authority at all — the next slice would have nothing to check itself
     /// against — so the rail's own words, its ids and the width that made room

@@ -1,6 +1,6 @@
 # BetterTerminal UI/UX 设计
 
-> 可交互原型：`design/ui-mockup.html`（浏览器打开即可）。
+> 可交互原型：`docs/design/ui-mockup.html`（浏览器打开即可）。
 > 原型是**代码**，这份文档是**为什么**——决策的理由只活在这里。
 > 需求编号见 `docs/PROBLEM-LIST.md`；架构见 `docs/DESIGN.md`。
 

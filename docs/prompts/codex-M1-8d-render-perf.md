@@ -49,5 +49,5 @@ xhigh,自主 debug。**定性优先**:先用数据钉死因果链,再谈修。
 ## 环境注意
 
 - 工作目录必须是仓库根 `D:\Developer\BetterTerminal`。
-- 工作树里有未提交的 UI/文档脏项(design/*、docs/*),保持原样别动。
+- 工作树里有未提交的 UI/文档脏项(docs/design/*、docs/*),保持原样别动。
 - GPU 在这台机器可用(wgpu 可真实创建 device);若 headless 呈现受限,合成/整形/上传阶段的 CPU 计时也足以定性,如实说明测到哪一层。

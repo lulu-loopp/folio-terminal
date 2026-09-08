@@ -1,5 +1,16 @@
 # M-1 spike 状态
 
+> **探针工作区已不在树里(2026-09-07,0.2.4)。** 每个 spike 当初都带一个独立的
+> cargo workspace(`spikes/03-math-engine/`、`spikes/04-ime-cjk/`、
+> `spikes/05-latency/`、`spikes/06-backpressure/`、`spikes/08-webview-rehost/`、
+> `spikes/webview2-w0/`),仓库根目录整理时整批删除——它们是研究记录,不是产品的
+> 一部分,也不在任何构建图里。**本目录下的报告、`docs/plans/` 里的证据单以及
+> `docs/handoff/` 里的交接文档仍然按原路径引用它们**,那些路径读作历史坐标:
+> `git show 7222f69:spikes/webview2-w0/src/host.rs` 取得任意一个文件,
+> `git log -- spikes/` 是它们的完整历史。产品真正需要的两样东西已经搬出来了:
+> MiTeX 的 spec(`assets/mitex-specs/`,`bt-math` 编译进二进制)与语料
+> (`tests/corpus/`)。
+
 | Spike | 结论 | 状态 |
 |---|---|---|
 | 00 工程基线清理 | go | 完成；概念拆分、稳定样式类型、公开 API 门禁、generation/LayoutKey 接线；241 tests，clippy 0 warning |

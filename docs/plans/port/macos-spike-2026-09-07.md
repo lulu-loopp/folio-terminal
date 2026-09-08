@@ -116,7 +116,7 @@ two tests that call them, the two sidecar tests and the probe that asks this
 machine about `%SystemRoot%` — because the crate is otherwise already a unix
 crate and gating the module would have taken thirty portable tests with it. The
 ignored A/B record keeps its name and therefore its row on
-`ci/check-ignored-tests.ps1`'s allowlist.
+`scripts/ci/check-ignored-tests.ps1`'s allowlist.
 
 **`bt-pty` is already a unix crate.** It calls `native_pty_system()`, and its
 ConPTY-specific entry points (`conpty_source`, `clear_host_buffer`) already

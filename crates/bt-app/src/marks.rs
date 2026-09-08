@@ -1,4 +1,4 @@
-//! The chrome's marks, taken from `design/ui-mockup.html` and rasterized.
+//! The chrome's marks, taken from `docs/design/ui-mockup.html` and rasterized.
 //!
 //! The mock-up draws every glyph in the window's own chrome as SVG: the caption
 //! buttons are `<symbol id="i-gear|i-min|i-max|i-close">`, a tab and a terminal
@@ -49,7 +49,7 @@ pub enum Corner {
 /// these was measured to hold its silhouette on both grounds — the same
 /// constraint that made `#p-cmd` charcoal rather than console black.
 ///
-/// The list is `design/ui-mockup.html`'s own `data-combo="pfcolour"`, in its
+/// The list is `docs/design/ui-mockup.html`'s own `data-combo="pfcolour"`, in its
 /// order. **It is not the plan's list**: plan §1.5 wrote `Orange` where the
 /// mock-up struck `Magenta`, and the mock-up is the contract — it landed after
 /// the plan and its eight were measured on both grounds, while an orange one
@@ -887,7 +887,7 @@ pub enum ChromeMark {
     /// (`docs/DESIGN.md` §7.21).
     ///
     /// Generated rather than quoted, on [`Self::ControlPill`]'s footing: the
-    /// quoted family is `design/ui-mockup.html`'s own artwork copied across, and
+    /// quoted family is `docs/design/ui-mockup.html`'s own artwork copied across, and
     /// this is not artwork at all — it is a box turned into a shape, at whatever
     /// size the surface that grew it happens to be. A `viewBox` written from the
     /// pixel box means the tail is exact at every scale factor with no
@@ -3396,7 +3396,7 @@ const SYMBOL_VIEW_BOX: [&str; 69] = [
     "0 0 16 16", // #i-speaker-mute
 ];
 
-/// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
+/// The `<symbol>` bodies, byte for byte from `docs/design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
 const SYMBOL_BODY: [&str; 69] = [
     // #i-gear. **Adapted from Google's Material Design `settings` icon** at 24dp
@@ -3789,8 +3789,9 @@ const SYMBOL_BODY: [&str; 69] = [
     // own note says and what the drawing did not do. Scaled about its own
     // centre by `11.6 / 8.8`; the arms are still two fifths of the shaft.
     r#"<path d="M7.2 2.2h6.6v6.6M13.8 2.2L2.2 13.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
-    // `#i-globe` — byte for byte from `design/ui-mockup.html:4358`: a circle, the
-    // two latitudes, and the ellipse that is every meridian seen edge on.
+    // `#i-globe` — byte for byte from `docs/design/ui-mockup.html:4358`: a
+    // circle, the two latitudes, and the ellipse that is every meridian seen
+    // edge on.
     concat!(
         r#"<circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/>"#,
         r#"<path d="M2.6 6.2h10.8M2.6 9.8h10.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,

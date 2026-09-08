@@ -17,8 +17,8 @@
 //!
 //! # A mark on the content, not a piece of furniture
 //!
-//! The whole of the design's scroll bar is two lines of the mock-up (`design/
-//! ui-mockup.html` 86-95): `scrollbar-width: thin` with
+//! The whole of the design's scroll bar is two lines of the mock-up
+//! (`docs/design/ui-mockup.html` 86-95): `scrollbar-width: thin` with
 //! `scrollbar-color: var(--thumb) transparent`, under a comment that says what
 //! they are for — *"the UA dark bar is still a chunky opaque thing, and a
 //! scrollbar in a terminal should be a mark on the text, not a piece of

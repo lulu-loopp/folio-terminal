@@ -81,7 +81,7 @@ toast 全链路是通的(`crates/bt-app/src/notify.rs` 全文、`bt-platform::No
 而 `reaches_the_desktop(enabled, tab_is_active, window_is_focused)`(`notify.rs:107-109`)只有两档:窗口没焦点就发。**副屏上完全可见的窗口与最小化的窗口今天同档**,这与 HANDOFF §4 g 用户要的三档正相反 —— 而副屏用 Claude Code 正是这一块的原始动机。
 
 **D7 —— 徽章不存在,于是队列没有可发现的入口。**
-`N waiting` 药丸只活在 `design/ui-mockup.html:4548`;Rust 侧零命中;`waiting_badge` 设置键零命中。HANDOFF `:400` 自己记着这条。后果:`Ctrl+Shift+A`(`crates/bt-app/src/shortcuts.rs:744-749`)是取用队列的唯一动词,而它没有任何看得见的入口 —— UI-UX §1.0「现代 app 该有的样子」的反面。
+`N waiting` 药丸只活在 `docs/design/ui-mockup.html:4548`;Rust 侧零命中;`waiting_badge` 设置键零命中。HANDOFF `:400` 自己记着这条。后果:`Ctrl+Shift+A`(`crates/bt-app/src/shortcuts.rs:744-749`)是取用队列的唯一动词,而它没有任何看得见的入口 —— UI-UX §1.0「现代 app 该有的样子」的反面。
 
 **D8 —— dead 未接线,`closeOnExit` 不存在。** 见 1.2 表末行。
 
@@ -210,7 +210,7 @@ Claude Code 自己开了 `?1004h`(录音 B 第 62 字节,在 ConPTY 第 7 字节
 ## 4. 注意力队列 P1-8 收尾(片 B)
 
 ### B1 徽章(D7)
-标题栏齿轮左侧一枚安静小徽章:5px 橙点 + `N waiting`,21px 药丸,次级墨色 hover 升满,**零等待 = 零占位卸载**(小样 `design/ui-mockup.html:4548` 就是定妆稿)。设置 `waiting_badge` 默认 On,**只关 UI 不关能力**(用户勘误原文),关掉后 `Ctrl+Shift+A` 照常。i18n 两条串。
+标题栏齿轮左侧一枚安静小徽章:5px 橙点 + `N waiting`,21px 药丸,次级墨色 hover 升满,**零等待 = 零占位卸载**(小样 `docs/design/ui-mockup.html:4548` 就是定妆稿)。设置 `waiting_badge` 默认 On,**只关 UI 不关能力**(用户勘误原文),关掉后 `Ctrl+Shift+A` 照常。i18n 两条串。
 实现教训照抄小样那条:显隐必须验计算样式而不是属性 —— 在原生这边的对应物是**别用「有没有构造那个矩形」当断言,用「它有没有进 chrome 的命中表」**。
 
 ### B2 出队门与入队门(**本方案最重要的一条,需用户裁**)

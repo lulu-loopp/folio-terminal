@@ -15,7 +15,7 @@ $env:LOCALAPPDATA = <scratch>\iso-<mode>\Local       # WebView2 的 UDF 与 %LOC
 $env:TEMP/$env:TMP= <scratch>\iso-<mode>\Tmp
 $env:BT_PTY_DUMP  = <scratch>\iso-<mode>\pty.log
 $env:BT_BG        = #1B1B1B (dark) | #FFFFFF (light)
-folio.exe <repo>\test-assets\folio-video-test.mp4
+folio.exe <repo>\tests\assets\folio-video-test.mp4
 ```
 
 `BT_BG` 是本仓自己的诊断入口（`ThemeState::from_environment`），它锁住画布底色，而

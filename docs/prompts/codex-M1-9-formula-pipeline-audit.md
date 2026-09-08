@@ -65,7 +65,7 @@
 
 ## 复现素材
 
-- 既有回归语料:`test-assets/latex-render-check.md`。
+- 既有回归语料:`tests/assets/latex-render-check.md`。
 - 用户的丰富语料含:多行内联-`$$`(FM1)、`\begin{pmatrix}`/`\begin{cases}`/
   `\begin{align}`、上下标与大算符(`\sum`/`\int`/`\oint`/`\iint`/`\lim`)、
   `\text{}` 内 CJK、行内 `$...$`(应保持禁用)、`\left(...\right)` 括号缩放。

@@ -11,7 +11,7 @@ use std::{
 
 use crate::scheme::{ColourScheme, FOLIO_DARK, FOLIO_LIGHT};
 
-/// The product's terminal defaults, from `design/ui-mockup.html` (the approved
+/// The product's terminal defaults, from `docs/design/ui-mockup.html` (the approved
 /// styling): dark `--termbg #1B1B1B`, ink `rgba(255,255,255,.87)` composited
 /// over it, light ink `--ink #37352F`. Explicit ANSI colors remain distinct
 /// from these defaults and use the palette selected by the current theme.
@@ -870,7 +870,7 @@ pub struct ChromePalette {
     pub accent: [u8; 3],
     // ── the command marks rail, mixed over the one ground a terminal pane has ──
     //
-    // Three declarations of `design/ui-mockup.html` 1362-1376, and three fields
+    // Three declarations of `docs/design/ui-mockup.html` 1362-1376, and three fields
     // rather than three borrowings, for the reason the pane head's `×` is not
     // [`Self::files_row_muted`]: the numbers coincide today and the rules do not,
     // so either could be re-struck without the other. The rail's rest ink is
@@ -916,7 +916,7 @@ pub struct ChromePalette {
     // ── the scroll thumb that runs in the lane beside the rail ──────────────
     //
     // `body, body * { scrollbar-width: thin; scrollbar-color: var(--thumb)
-    // transparent }` (`design/ui-mockup.html` 95) is the whole of the mock-up's
+    // transparent }` (`docs/design/ui-mockup.html` 95) is the whole of the mock-up's
     // scroll bar, and the comment above it says what the two tokens are for: *"a
     // chunky opaque thing, and a scrollbar in a terminal should be a mark on the
     // text, not a piece of furniture beside it"* (86-94). So this is a **thumb
@@ -1490,7 +1490,7 @@ impl ChromePalette {
     }
 }
 
-/// Chrome over a dark canvas — `design/ui-mockup.html` `body.dark`, with its
+/// Chrome over a dark canvas — `docs/design/ui-mockup.html` `body.dark`, with its
 /// alpha hairlines pre-composited over the surface each one actually sits on
 /// (our chrome quads are opaque): `--termbg #1B1B1B`, `--panel #252525`,
 /// `--ink/2/3` at .87/.55/.38 white, `--border` at .094 white,
@@ -2233,7 +2233,7 @@ pub const SEAT_TITLE_BAR_LOGICAL_PX: f32 = 30.0;
 /// it is the record of why the lane could be reserved two days early. When it
 /// was written there was no terminal scroll bar at all, and the constant existed
 /// precisely because there was not. The mock-up's rail carries an accident report
-/// in its own stylesheet (`design/ui-mockup.html` 1355-1357): *"inboard of the
+/// in its own stylesheet (`docs/design/ui-mockup.html` 1355-1357): *"inboard of the
 /// scrollbar gutter (thin ≈ 8px): the rail and the thumb are different
 /// instruments and may not share a lane (user report 2026-07-18 — ticks sat on
 /// top of the thumb)"*. A rail that measured its inset from the pane's own edge
@@ -2270,16 +2270,16 @@ pub const WINDOW_TAB_HEIGHT_LOGICAL_PX: f32 = 34.0;
 /// outward skirt corners that join it to the content plane
 /// (`.tab.active::before/::after`).
 pub const WINDOW_TAB_RADIUS_LOGICAL_PX: f32 = 7.0;
-/// One tab's CSS cap (`design/ui-mockup.html` line 208).
+/// One tab's CSS cap (`docs/design/ui-mockup.html` line 208).
 pub const WINDOW_TAB_MAX_WIDTH_LOGICAL_PX: f32 = 200.0;
-/// One tab's CSS floor (`.tab { min-width: 46px }`, `design/ui-mockup.html`
+/// One tab's CSS floor (`.tab { min-width: 46px }`, `docs/design/ui-mockup.html`
 /// line 208) — the point at which equal-share compression stops.
 ///
 /// It is a floor and not a suggestion: the stylesheet's own comment at line 187
 /// rules that *past* this width the strip scrolls rather than compressing
 /// further, because the alternative is tabs spilling into the caption buttons.
 pub const WINDOW_TAB_MIN_WIDTH_LOGICAL_PX: f32 = 46.0;
-/// Equal spacing between horizontal tabs (`design/ui-mockup.html` line 183).
+/// Equal spacing between horizontal tabs (`docs/design/ui-mockup.html` line 183).
 pub const WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX: f32 = 1.0;
 /// `.tab { padding: 0 6px 0 12px }` — the leading inset before the mark.
 pub const WINDOW_TAB_PADDING_LEFT_LOGICAL_PX: f32 = 12.0;
@@ -2370,12 +2370,12 @@ pub const WINDOW_TAB_BREATHE_REDUCED_OPACITY: f32 = 0.6;
 /// `.ticon-wrap.dead .ticon { opacity: .35 }` (line 285).
 pub const WINDOW_TAB_DEAD_MARK_OPACITY: f32 = 0.35;
 
-/// The tab close affordance (`design/ui-mockup.html` lines 305-311).
+/// The tab close affordance (`docs/design/ui-mockup.html` lines 305-311).
 pub const WINDOW_TAB_CLOSE_BOX_LOGICAL_PX: f32 = 17.0;
 pub const WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX: f32 = 8.0;
 /// `.tab .close { border-radius: 4px }` — the pill under the pointer.
 pub const WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX: f32 = 4.0;
-/// The pane-count badge (`.panecount`, `design/ui-mockup.html` lines 292-304):
+/// The pane-count badge (`.panecount`, `docs/design/ui-mockup.html` lines 292-304):
 /// a pill that states how many panes a tab holds.
 ///
 /// `min-width: 15px; height: 15px; padding: 0 4px` — so it is a 15px square
@@ -2401,7 +2401,7 @@ pub const WINDOW_TAB_TIGHT_LOGICAL_PX: f32 = 140.0;
 pub const WINDOW_TAB_SQUEEZED_LOGICAL_PX: f32 = 90.0;
 /// `.tab.squeezed { padding: 0 4px }` — the only padding a squeezed tab keeps.
 pub const WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX: f32 = 4.0;
-/// The new-tab button and its placement (`design/ui-mockup.html` lines 386-408).
+/// The new-tab button and its placement (`docs/design/ui-mockup.html` lines 386-408).
 pub const WINDOW_NEW_TAB_BOX_LOGICAL_PX: f32 = 28.0;
 /// The `+` inside that box.
 ///
@@ -2430,7 +2430,7 @@ pub const WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX: f32 = 3.0;
 pub const WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX: f32 = WINDOW_NEW_TAB_GLYPH_LOGICAL_PX;
 pub const WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX: f32 = WINDOW_NEW_TAB_GLYPH_LOGICAL_PX;
 
-// ── R1/R2: the vertical rail (`design/ui-mockup.html` 802-964) ──
+// ── R1/R2: the vertical rail (`docs/design/ui-mockup.html` 802-964) ──
 //
 // The rail is the same tab list on the other axis, so almost nothing here is a
 // new *idea* — it is the horizontal strip's furniture at the sizes a 220px
@@ -4674,7 +4674,7 @@ mod tests {
     /// PIN (settings dialog): every token the modal wears is the mock-up's own
     /// value, composited over the surface the mock-up actually puts it on.
     ///
-    /// The numbers were read out of `design/ui-mockup.html`'s own renderer, one
+    /// The numbers were read out of `docs/design/ui-mockup.html`'s own renderer, one
     /// composite per row: `--ink/2/3` and `--hover` over `--win` for the dialog,
     /// `--ink`/`--ink2`/`--hover` over `--menu` for its popup. Three surfaces
     /// have to stay apart on dark and the first assertion is that they do —

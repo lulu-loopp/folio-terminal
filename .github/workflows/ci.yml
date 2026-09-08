@@ -124,7 +124,7 @@ jobs:
       # A newly ignored test has to be a newly listed test. Planting one proves
       # the comparison is two-way and that the exit code is read before the
       # output — the two things the phrase-matching gate this replaced got
-      # wrong. See `ci/check-ignored-tests.ps1`.
+      # wrong. See `scripts/ci/check-ignored-tests.ps1`.
       - name: the ignored-test gate can actually fail
         shell: pwsh
         run: |
@@ -134,7 +134,7 @@ jobs:
             [IO.File]::AppendAllText($file, "`n#[test]`n#[ignore = `"planted`"]`nfn _ignored_gate_probe() {}`n")
             $failed = $false
             try {
-              & ./ci/check-ignored-tests.ps1
+              & ./scripts/ci/check-ignored-tests.ps1
             } catch {
               $failed = $true
             }
@@ -218,7 +218,7 @@ jobs:
 
       - name: the ignored tests are exactly the ones on the list
         shell: pwsh
-        run: ./ci/check-ignored-tests.ps1
+        run: ./scripts/ci/check-ignored-tests.ps1
 
       # `check-vendor-notices.ps1` reads upstream alacritty 0.26.0 out of the
       # registry to diff it against `vendor/`, so the sources have to be there.
@@ -323,7 +323,7 @@ jobs:
 
       - name: install WARP
         shell: pwsh
-        run: ./ci/install-warp.ps1 -TargetDir target/debug
+        run: ./scripts/ci/install-warp.ps1 -TargetDir target/debug
 
       - name: test bt-render on a real device
         run: cargo test -p bt-render --locked
@@ -351,7 +351,7 @@ jobs:
 
       - name: install WARP
         shell: pwsh
-        run: ./ci/install-warp.ps1 -TargetDir target/debug
+        run: ./scripts/ci/install-warp.ps1 -TargetDir target/debug
 
       - name: start it
         shell: pwsh

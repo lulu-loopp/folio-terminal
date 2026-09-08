@@ -4,7 +4,7 @@
 本机 WebView2 Runtime **151.0.4129.101**(`GetAvailableCoreWebView2BrowserVersionString`;注册表 `HKLM\WOW6432Node` 报同一版本)
 上一次取证 `w0-evidence.md`(2026-08-20)跑在 **151.0.4129.93** 上 —— **Evergreen 在两次取证之间把这台机器升了级**,见 §5。
 
-**这是复验单,不是产品单。** 没有改动任何产品 crate、`design/ui-mockup.html`,也没有碰 `dist\`。改动只在 `spikes/webview2-w0/`。
+**这是复验单,不是产品单。** 没有改动任何产品 crate、`docs/design/ui-mockup.html`,也没有碰 `dist\`。改动只在 `spikes/webview2-w0/`。
 
 复跑:
 

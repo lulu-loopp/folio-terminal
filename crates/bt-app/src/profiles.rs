@@ -1,9 +1,9 @@
 //! The profile picker — the menu the tab strip's `˅` opens.
 //!
-//! Spec authority is `design/ui-mockup.html`: the `.profile-menu` / `.profile-item`
-//! block (lines 1006-1030) for the surface and its rows, and `openProfileMenu`
-//! (line 7409) for where the menu lands and what a click on a row does. Every
-//! number below is that stylesheet's own.
+//! Spec authority is `docs/design/ui-mockup.html`: the `.profile-menu` /
+//! `.profile-item` block (lines 1006-1030) for the surface and its rows, and
+//! `openProfileMenu` (line 7409) for where the menu lands and what a click on a
+//! row does. Every number below is that stylesheet's own.
 //!
 //! Those two line numbers were written as 976-1002 and 7296 and had drifted about
 //! thirty lines as the mock-up grew above them. They are re-anchored here, and the

@@ -12,13 +12,13 @@ check before every shutter). Screen 2880×1800 physical; window 2560×1560 at
 (40, 40).
 
 **The subject is a burnt-in clock, not a coloured rectangle.** The shipped
-fixtures in `test-assets` are three seconds of flat colour, which cannot tell a
+fixtures in `tests/assets` are three seconds of flat colour, which cannot tell a
 playing video from a still of one in a screenshot. So the evidence fixtures are
 `<scratchpad>\vidshow\clock.{mp4,mov,mkv}` — 480×270, **120 s**, H.264,
 `ffmpeg -f lavfi -i testsrc` — whose picture carries ffmpeg's own second counter
 and a scrolling gradient. A frame that differs from the frame before it is a
 frame the decoder produced. These are evidence props and are **not** added to
-`test-assets`: the shipped fixtures are what the automated matrix opens.
+`tests/assets`: the shipped fixtures are what the automated matrix opens.
 
 ---
 

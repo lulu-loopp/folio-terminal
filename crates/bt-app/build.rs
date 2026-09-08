@@ -36,11 +36,7 @@ fn main() {
     let commit = commit_of(&workspace);
     println!("cargo:rustc-env=FOLIO_COMMIT={commit}");
 
-    let icon = workspace
-        .join("design")
-        .join("assets")
-        .join("app-icon")
-        .join("folio.ico");
+    let icon = workspace.join("assets").join("app-icon").join("folio.ico");
     println!("cargo:rerun-if-changed={}", icon.display());
 
     let resource = PathBuf::from(env("OUT_DIR")).join("folio.res");

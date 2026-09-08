@@ -10,7 +10,7 @@
 //! row of the same body, because a reader who meets both must not meet two
 //! heights, two grounds and two ideas of where the close button lives.
 //!
-//! Spec authority is `design/ui-mockup.html`: the `.pnotice` block for the
+//! Spec authority is `docs/design/ui-mockup.html`: the `.pnotice` block for the
 //! surface and its three design notes, and `psNoticeHtml` / `psNoticePress` for
 //! what it says and what a press means. Every number below is that stylesheet's.
 //!

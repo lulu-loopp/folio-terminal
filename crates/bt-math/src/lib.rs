@@ -190,15 +190,15 @@ impl MathEngine {
             .with_static_source_file_resolver([
                 (
                     "specs/mod.typ",
-                    include_str!("../../../spikes/03-math-engine/assets/specs/mod.typ"),
+                    include_str!("../../../assets/mitex-specs/mod.typ"),
                 ),
                 (
                     "specs/prelude.typ",
-                    include_str!("../../../spikes/03-math-engine/assets/specs/prelude.typ"),
+                    include_str!("../../../assets/mitex-specs/prelude.typ"),
                 ),
                 (
                     "specs/latex/standard.typ",
-                    include_str!("../../../spikes/03-math-engine/assets/specs/latex/standard.typ"),
+                    include_str!("../../../assets/mitex-specs/latex/standard.typ"),
                 ),
             ])
             .search_fonts_with(
@@ -1177,7 +1177,7 @@ mod tests {
 
     #[test]
     fn spike_310_valid_input_gate_has_metrics_and_pixels() {
-        let corpus = include_str!("../../../corpus/math-expressions.jsonl");
+        let corpus = include_str!("../../../tests/corpus/math-expressions.jsonl");
         let samples = corpus
             .lines()
             .map(|line| serde_json::from_str::<Sample>(line).unwrap())

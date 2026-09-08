@@ -1017,7 +1017,7 @@ mod tests {
     #[test]
     fn the_shipped_fixture_gives_up_a_frame() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../test-assets/folio-video-test.mp4");
+            .join("../../tests/assets/folio-video-test.mp4");
         let (frame, cost) = decode_first_frame_measured(&fixture, 280, 160);
         eprintln!(
             "VIDEO_FIRST_FRAME total={:?} session={:?} open={:?} output_type={:?} seek={:?} \
@@ -1096,7 +1096,7 @@ mod tests {
     #[test]
     fn one_process_starts_one_media_session() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../test-assets/folio-video-test.mp4");
+            .join("../../tests/assets/folio-video-test.mp4");
         let (first, cold) = decode_first_frame_measured(&fixture, 280, 160);
         let (second, warm) = decode_first_frame_measured(&fixture, 280, 160);
         eprintln!(
@@ -1135,7 +1135,7 @@ mod tests {
     #[test]
     fn the_shipped_mov_fixture_gives_up_a_frame_it_will_never_play() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../test-assets/folio-video-test.mov");
+            .join("../../tests/assets/folio-video-test.mov");
         let frame = first_frame(&fixture, 280, 160).expect("a real mov gives up a frame");
         assert_eq!(
             (frame.native_width, frame.native_height),

@@ -59,7 +59,7 @@ is the first line of prose under the image, so nothing is lost by leaving the
 picture in one language.
 
 The colours are the design's own tokens — `--page`, `--ink`, `--termbg`,
-`--border`, `--err`, `--cursor` from `design/ui-mockup.html`, composited the way
+`--border`, `--err`, `--cursor` from `docs/design/ui-mockup.html`, composited the way
 `crates/bt-render/src/theme.rs` composites them, so a light board and a light
 window are the same paper.
 

@@ -1,6 +1,6 @@
 //! **The Files column's second page** — what a repository looks like, drawn.
 //!
-//! The user direction this hangs from is one sentence (`design/ui-mockup.html`
+//! The user direction this hangs from is one sentence (`docs/design/ui-mockup.html`
 //! 1577-1580): *a files pane is a PLACE's view; the repo status is the same place
 //! seen another way — one chassis, a segmented switch, no metadata scattered into
 //! tooltips.* Everything here follows from taking that literally. The column

@@ -315,9 +315,9 @@ mod tests {
     fn fixture() -> Vec<u8> {
         std::fs::read(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../test-assets/folio-anim-test.gif"),
+                .join("../../tests/assets/folio-anim-test.gif"),
         )
-        .expect("the animation fixture is in test-assets")
+        .expect("the animation fixture is in tests/assets")
     }
 
     /// RED — **an animation advances by the delays its own file declares**

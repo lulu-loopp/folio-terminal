@@ -35,8 +35,8 @@ LFS 会给每个 clone 加一层必须配置的依赖,换来的只是三个文�
 | 14 | 1,200,188 | `crates/bt-app/src/settings.rs` | **keep** | 一方源码 |
 | 15 | 1,073,282 | `crates/bt-render/src/lib.rs` | **keep** | 一方源码 |
 | 16 | 981,714 | `crates/bt-app/src/profiles.rs` | **keep** | 一方源码 |
-| 17 | 959,220 | `design/assets/file-icons-r2/options.png` | **keep** | 图标 r2 轮的比选大图,`design/assets/file-icons-r2/options.html` 的渲染结果 —— 决策记录的证据面。自制,来源见 `design/PROVENANCE.md` |
-| 18 | 905,414 | `design/ui-mockup.html` | **keep** | 交互式设计母本;`crates/bt-app/src/marks.rs` 的符号表以它为来源。自制 |
+| 17 | 959,220 | `docs/design/file-icons-r2/options.png` | **keep** | 图标 r2 轮的比选大图,`docs/design/file-icons-r2/options.html` 的渲染结果 —— 决策记录的证据面。自制,来源见 `docs/design/PROVENANCE.md` |
+| 18 | 905,414 | `docs/design/ui-mockup.html` | **keep** | 交互式设计母本;`crates/bt-app/src/marks.rs` 的符号表以它为来源。自制 |
 | 19 | 853,061 | `docs/spikes/artifacts/win-landing/shot-02-actioncenter.png` | **keep** | spike 证据截图 |
 | 20 | 792,190 | `vendor/alacritty_terminal/tests/ref/vim_large_window_scroll/grid.json` | **keep** | 同 1 |
 | 21 | 773,961 | `vendor/alacritty_terminal/tests/ref/underline/grid.json` | **keep** | 同 1 |

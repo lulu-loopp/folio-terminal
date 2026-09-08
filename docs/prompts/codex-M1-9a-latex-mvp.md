@@ -6,7 +6,7 @@
 成功,resvg/typst 全家已入本机缓存)。你上一轮的检测层与 bt-math 原型保留在
 工作树,继续未竟部分:bt-math 编译入 workspace、纹理 LRU、视口块投影、异步
 worker 应用、失效链回归、310 条语料门禁、完整 workspace 门禁(test/clippy/
-fmt)。design/ui-mockup.html 与 docs/DESIGN.md 的并行改动已由协调者提交,
+fmt)。docs/design/ui-mockup.html 与 docs/DESIGN.md 的并行改动已由协调者提交,
 不属于你,照旧不动。完成后停下等审,不提交。
 
 ## 【续跑裁决 2026-07-18,用户已批】
