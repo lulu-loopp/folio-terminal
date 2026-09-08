@@ -469,7 +469,10 @@ mod tests {
                 &crate::profiles::row(crate::profiles::index_of_id("wsl"))
                     .expect("the shipped WSL row"),
                 &[std::ffi::OsString::from("--cd"), "~".into()],
-                Some(std::path::Path::new(r"C:\Folio\folio.bash")),
+                crate::shell_integration::Scripts {
+                    bash: Some(std::path::Path::new(r"C:\Folio\folio.bash")),
+                    zdotdir: Some(std::path::Path::new(r"C:\Folio\zdotdir")),
+                },
                 &bt_pty::SystemShellEnvironment,
             );
             let _ = tx.send((facts.distributions, command.arguments.len()));
@@ -483,9 +486,9 @@ mod tests {
             "no test starts the module, so the installation it reports is the empty one"
         );
         assert_eq!(
-            arguments, 8,
-            "`--cd ~ -e sh -c <question> folio <script>`: the place, then the question the \
-             pane puts to its own distribution"
+            arguments, 9,
+            "`--cd ~ -e sh -c <question> folio <script> <zdotdir>`: the place, then the question \
+             the pane puts to its own distribution, then a door for each shell that has one"
         );
     }
 }

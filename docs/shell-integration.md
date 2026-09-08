@@ -208,18 +208,38 @@ and the asymmetry is the shells':
 * `bash --init-file <file>` names the startup file for one interactive shell and touches nothing on
   disk.
 
-So a Git Bash profile is started as `bash --init-file <script> -i`, with `BT_SHELL_INTEGRATION=1` in
-the environment. A WSL profile is started as
+So a Git Bash profile is started as `bash --init-file <script> <the profile's own arguments, less
+its login flag>`, with `BT_SHELL_INTEGRATION` in the environment naming the startup chain the
+script owes. A WSL profile is started as
 
 ```
-wsl.exe [--cd <dir>] -e sh -c '<the login-shell question>' folio /mnt/c/…/folio.bash
+wsl.exe [--cd <dir>] -e sh -c '<the login-shell question>' folio /mnt/c/…/folio.bash /mnt/c/…/zdotdir
 ```
 
 where the question is the script `bt_app::shell_integration::WSL_LOGIN_SHELL` holds: read the login
-shell out of `getent passwd`, `exec` it with `--init-file` and `BT_SHELL_INTEGRATION=1` when it is a
-bash, and `exec` it with `-l` when it is anything else. The init file travels as `$1` rather than
-spliced into the text, so a reader whose Windows account name has a space in it gets a filename the
-shell reads verbatim.
+shell out of `getent passwd`; `exec` it with `--init-file` and `BT_SHELL_INTEGRATION=login` when it
+is a bash; `exec` it with `-l` and `ZDOTDIR` pointed at the directory when it is a zsh, carrying the
+reader's own `ZDOTDIR` in `BT_USER_ZDOTDIR`; and `exec` it with `-l` and nothing else when it is
+anything else. Both paths travel as `$1` and `$2` rather than spliced into the text, so a reader
+whose Windows account name has a space in it gets filenames the shell reads verbatim.
+
+**The profile's own arguments are kept, and only the login flag is dropped.** `--init-file` names
+the startup file of an interactive shell that is *not* a login shell, and a bash started with `-l`
+does not read it at all — measured, not assumed — so the flag cannot travel beside it. Everything
+else the row carries does. What stays undone is `shopt login_shell`, which is off in a pane whose
+profile asked for a login shell: a startup file that branches on it takes the non-login branch.
+
+**zsh has no `--init-file`, so zsh has a different door.** Folio writes `folio.zsh` under three
+names — `.zshenv`, `.zprofile`, `.zshrc` — into `%APPDATA%\Folio\shell-integration\zdotdir\` and
+points `ZDOTDIR` at it. Each of the three sources your file of the same name and nothing else, and
+`.zshrc` hands `ZDOTDIR` back at the end of itself, so `.zlogin` and every zsh started from the
+session read your own directory with no trace of the arrangement left in the environment. If you
+keep your startup files somewhere other than `$HOME`, that directory reaches the script in
+`BT_USER_ZDOTDIR`, because `ZDOTDIR` itself has already been taken by the time zsh reads a line.
+
+**`sh` and `dash` get no door at all.** They accept `--init-file` and ignore it in silence, which is
+the one failure indistinguishable from a shell that has no integration, so the profile says so
+outright and the capability row reads `No shell integration`.
 
 `-e` rather than `--`, and it is load-bearing: `wsl.exe --` joins everything after it into one
 command line and gives *that* to the login shell, which re-parses it — a question full of spaces,
@@ -232,15 +252,21 @@ copy compiled into the binary, so the two halves of the OSC 133 agreement always
 
 **What `--init-file` costs, and how it is paid back.** It replaces `~/.bashrc`, and because bash
 consults it only for a shell that is *not* a login shell, Folio also drops the `--login`
-that Git Bash's own shortcut passes. The script therefore runs the startup chain itself, in bash's
-documented order — `/etc/profile`, then the first of `~/.bash_profile`, `~/.bash_login`,
-`~/.profile` — before installing anything of its own. This is not cosmetic on Git for Windows:
+that Git Bash's own shortcut passes. The script therefore runs the startup chain itself — **the one
+the profile asked for**, which is what `BT_SHELL_INTEGRATION` names. `login` is bash's documented
+order for a login shell: `/etc/profile`, then the first of `~/.bash_profile`, `~/.bash_login`,
+`~/.profile`, and never `~/.bashrc`. `interactive` is bash's order for a shell that is not one:
+`~/.bashrc` and nothing else. Which is which is a fact about the profile's own arguments, and only
+the Windows side can read them. This is not cosmetic on Git for Windows:
 `/etc/profile` is what puts `/mingw64/bin` on the path, so a shell that skipped it is a Git Bash
 that cannot find git. The chain is a pinned test (`crates/bt-term/tests/shell_integration_bash.rs`),
 and `PATH`, `MSYSTEM` and `command -v git` were verified byte-identical to a plain `--login` shell.
 
-Everything the script finds, it keeps: your `PROMPT_COMMAND` is called rather than replaced, an
-existing `DEBUG` trap is chained rather than overwritten, and `PS1` is wrapped rather than rebuilt —
+Everything the script finds, it keeps: your `PROMPT_COMMAND` is called rather than replaced — as a
+string when it is one, and as a *list* when it is bash 5.1's array, where the script's two halves
+are prepended and appended rather than assigned over the first element — an existing `DEBUG` trap is
+chained rather than overwritten, read at the first prompt because that is the only place bash will
+answer `trap -p DEBUG` truthfully, and `PS1` is wrapped rather than rebuilt —
 re-wrapped on every prompt, because a theme that regenerates `PS1` in its own `PROMPT_COMMAND`
 (starship, powerline, and most prompt kits) would otherwise drop the markers after the first line.
 No `OSC 0`/`OSC 2` title is emitted: a title set by the shell outranks the working directory in the
@@ -268,10 +294,11 @@ existed, was started as a bare `wsl.exe --cd <dir>`, and reported neither `OSC 1
 while every WSL pane after it in the same process was served in full. On a machine whose default
 profile is WSL that first pane is the only one there is. Measured in
 `docs/plans/shell-matrix-2026-09-07.md` T-2 and fixed by moving the question into the pane, which
-leaves nothing in flight for a spawn to race. The init file is still offered **only** to a bash — a
-distribution logging into zsh or fish keeps its shell and goes without markers, which is the
-fallback path below rather than a broken shell — but that is now decided where the answer is,
-rather than from an answer that may not have arrived.
+leaves nothing in flight for a spawn to race. Each shell is offered **only** the door it has — the
+init file to a bash, `ZDOTDIR` to a zsh, and nothing to a fish or a shell somebody built themselves,
+which keeps its shell and goes without markers on the fallback path below rather than being replaced
+by one the reader did not choose. All of that is decided where the answer is, rather than from an
+answer that may not have arrived.
 
 When more than one distribution is installed, the profile is titled `WSL · <default>` so the row
 says which one it starts; a machine with one needs no qualifier and keeps the bare `WSL`.
@@ -299,11 +326,14 @@ fallback path described under **Authority and fallback** rather than on a guess.
 | **either PowerShell** (script not installed) | no | no | no | no | no | — | no | PSReadLine |
 | **Git Bash** | yes | yes | yes | yes | yes | none, deliberately | yes | bash's own |
 | **WSL** (bash login shell) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | bash's own |
-| **WSL** (zsh/fish login shell) | no | no | no | no | no | — | yes, via `WSLENV` | that shell's own |
+| **WSL** (zsh login shell) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | zsh's own |
+| **zsh** (on Windows, MSYS2 or similar) | yes | yes | yes | yes | yes | none, deliberately | yes | zsh's own |
+| **WSL** (fish or another login shell) | no | no | no | no | no | — | yes, via `WSLENV` | that shell's own |
+| **`sh` or `dash`** | no | no | no | no | no | — | yes | that shell's own |
 | **Command Prompt** | **yes** | **no** | no | **yes, no code** | **yes** | refused — see below | yes | not promised |
 | **a profile of the reader's own**, no door | no | no | no | no | no | — | yes | not promised |
 
-Six rows need their reasons stated, because each looks like an omission and is not.
+Several rows need their reasons stated, because each looks like an omission and is not.
 
 **The two PowerShells are two profiles** (user ruling 2026-08-11), which is Windows Terminal's own
 arrangement and what a machine with both installed makes necessary: 7 and 5.1 are different
@@ -483,6 +513,20 @@ install at all) and see stray/duplicated characters on a wrapped, unsubmitted in
 after narrowing the window, that is the PSReadLine 2.0.0 defect above — `Install-Module
 PSReadLine` (from the PowerShell Gallery) resolves it without changing anything else about your
 profile.
+
+## zsh
+
+`scripts/shell-integration/folio.zsh` is what Folio writes into the `ZDOTDIR` it hands a zsh pane,
+and it is installable by hand for any zsh it does not start itself. Dot-source it as the last
+relevant line of your own `~/.zshrc`:
+
+```zsh
+. "$HOME/folio.zsh"
+```
+
+Loaded that way it installs its `precmd` and `preexec` hooks through `add-zsh-hook`, so a prompt kit
+already in those lists keeps running, and it sources nothing on your behalf. It requires zsh, is
+idempotent within one shell, and does nothing at all in a non-interactive one.
 
 ## bash: Git Bash, WSL, and a hand-installed copy
 

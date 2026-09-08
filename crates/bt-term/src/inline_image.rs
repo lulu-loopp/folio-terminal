@@ -1268,12 +1268,20 @@ pub fn file_uri_to_local_image_path(uri: &str) -> Option<PathBuf> {
 /// therefore leaves relative image text undetected, which is the standing rule for a directory this
 /// terminal cannot vouch for (`docs/shell-integration.md` §34-35) rather than a new exception. The
 /// image peek keeps the strict reading too — see [`file_uri_to_local_image_path`].
+/// **And it accepts the directory a shell with no encoder can still say.** `cmd.exe`'s whole
+/// integration is its `PROMPT` variable, which has a substitution for the current directory and
+/// none that could percent-encode it, so `D:\Code\C# Projects` goes out with the hash and the space
+/// in it — and used to be recorded as `D:\Code\C`, or forgotten outright when a directory held a
+/// `%`. A payload that is not a percent-encoded URI is read as the path it plainly is
+/// (`bt_transcript::paths::Spelling`), which is the same acceptance the raw backslashes above
+/// already had. The printed-reference door keeps the strict reading.
 pub fn file_uri_to_local_path(uri: &str, local_host: Option<&str>) -> Option<PathBuf> {
     bt_transcript::paths::decode_file_uri(
         uri,
         local_host,
         bt_transcript::paths::TrailingSlash::Directory,
         bt_transcript::paths::Rooting::DriveOrPosixRoot,
+        bt_transcript::paths::Spelling::EncodedOrVerbatim,
     )
 }
 
@@ -1797,6 +1805,14 @@ impl Osc1337Scanner {
                             oversized,
                         }
                     } else {
+                        // Anything else cancels the string this scanner owns *and begins a
+                        // sequence of its own* — `ESC [` is the commonest of them, and it is what
+                        // a program prints when it sets a colour on the row after a mark. The
+                        // payload is dropped, because it was never terminated and half a mark is
+                        // not a mark; the two bytes that cancelled it are not ours to drop, and
+                        // dropping them printed the rest of the sequence as text (review row
+                        // R3-18). The OSC 1337 twin above has always re-emitted them.
+                        ordinary.extend_from_slice(&[0x1b, byte]);
                         StreamState::Ground
                     }
                 }
@@ -2601,13 +2617,25 @@ mod tests {
             "file://server/share/src",
             "file://MACHINE/D:/src",
             "file:///D://src",
-            "file:///D:/a%zz",
-            "file:///",
             "",
             "not a uri",
         ] {
             assert_eq!(file_uri_to_local_path(rejected, None), None, "{rejected:?}");
         }
+        // Two of these used to be on that list and are answers now, not refusals.
+        // `%zz` opens no escape, so the payload was never percent-encoded and the
+        // `%` is a character of a directory's name — which is the only reading a
+        // shell with no encoder leaves available (review row R3-9). `file:///` is
+        // the root of a POSIX namespace, which is a place a shell really stands
+        // in (review row R3-11).
+        assert_eq!(
+            file_uri_to_local_path("file:///D:/a%zz", None),
+            Some(PathBuf::from(r"D:\a%zz"))
+        );
+        assert_eq!(
+            file_uri_to_local_path("file:///", None),
+            Some(PathBuf::from("/"))
+        );
         // The image peek keeps its own stricter reading: no hostname authority, and a trailing
         // slash names a directory, which is never an image.
         assert_eq!(
@@ -2708,13 +2736,17 @@ mod tests {
         }
         // Every other gate still stands in front of it. A POSIX root buys no authority, no interior
         // empty segment and no broken escape.
-        for rejected in [
-            "file://server/home/alice",
-            "file:///home//alice",
-            "file:///home/%zz",
-        ] {
+        for rejected in ["file://server/home/alice", "file:///home//alice"] {
             assert_eq!(file_uri_to_local_path(rejected, None), None, "{rejected:?}");
         }
+        // `%zz` is not a broken escape any more, because a payload carrying one
+        // was never percent-encoded: it is a directory with a `%` in its name,
+        // which is what `cmd.exe` reports and cannot spell any other way (review
+        // row R3-9).
+        assert_eq!(
+            file_uri_to_local_path("file:///home/%zz", None),
+            Some(PathBuf::from("/home/%zz"))
+        );
         // **The image peek does not widen with it.** A reference is something this terminal opens,
         // and it opens through Windows; `/mnt/d/a.png` is a path only the shell that printed it can
         // resolve, so it is not a candidate here however plausible it looks.
@@ -3481,6 +3513,44 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(scanner.scan(payload), expected, "{payload:?}");
         }
+    }
+
+    /// PIN — **the sequence that cancelled an intercepted OSC still reaches the
+    /// screen** (review row R3-18).
+    ///
+    /// An `ESC` inside one of the four text payloads either ends it (`ESC \`)
+    /// or begins a sequence of its own, and the commonest of those is `ESC [` —
+    /// a program setting a colour on the row after a mark. The payload is
+    /// dropped, because a mark that was never terminated is not a mark; the two
+    /// bytes that cancelled it belong to the next sequence, and swallowing them
+    /// printed the rest of it as text. The OSC 1337 twin has always re-emitted
+    /// them, which is what makes this a difference rather than a rule.
+    ///
+    /// MUTATION: fall to `Ground` without re-emitting and `0m` is printed on the
+    /// screen where a colour should have been set.
+    #[test]
+    fn a_sequence_that_cancels_an_intercepted_osc_is_not_swallowed_with_it() {
+        for opener in [
+            &b"]133;A"[..],
+            &b"]7;file:///D:/src"[..],
+            &b"]9;hello"[..],
+            &b"]777;notify;a"[..],
+        ] {
+            let mut stream = opener.to_vec();
+            stream.extend_from_slice(b"[0m!");
+            let mut scanner = Osc1337Scanner::default();
+            assert_eq!(
+                scanner.scan(&stream),
+                vec![InlineImageStreamAction::Bytes(b"[0m!".to_vec())],
+                "{opener:?} was cancelled by a CSI, which is still the screen's"
+            );
+        }
+        // The 1337 payload's own arm, which is the one this now agrees with.
+        let mut scanner = Osc1337Scanner::default();
+        assert_eq!(
+            scanner.scan(b"]1337;File=inline=1:[0m!"),
+            vec![InlineImageStreamAction::Bytes(b"[0m!".to_vec())]
+        );
     }
 
     /// PIN — **both terminators, and a value too long to be one of the four.**

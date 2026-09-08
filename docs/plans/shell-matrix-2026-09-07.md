@@ -487,3 +487,108 @@ points at T-2.
 `fix/wsl-first-pane-integration` — see the note under that ticket. That
 documentation fix has been replaced by the description of what the pane now
 does.)*
+
+---
+
+## 6. What the 2026-09-08 review changed, per shell
+
+The adversarial review of 2026-09-08 read the injected scripts against the shells
+they claim to serve (`docs/plans/review/adversarial-review-2026-09-08.md`, rows
+R3-5 to R3-18). Every row was a shell or a directory that did not match the
+assumption, and the ticket `fix/shell-integration-scripts` answered them. What
+each row of the matrix above now gets:
+
+**Git Bash and any other bash.**
+
+* The pane emulates the startup chain its *profile* asked for, and not always the
+  login one. `BT_SHELL_INTEGRATION` now carries `login` or `interactive`: a row
+  whose arguments say `--login` — which the shipped Git Bash row does — gets
+  `/etc/profile` and the first of `~/.bash_profile`, `~/.bash_login`,
+  `~/.profile`, and a row that does not gets `~/.bashrc` and nothing else. Before
+  this, a plain interactive row read the login files and never `~/.bashrc`, so a
+  reader's aliases and functions were missing from a pane that had asked for
+  them (R3-8).
+* The login flag is still dropped at the spawn, and that is bash's rule rather
+  than a choice: measured on this machine, `bash -l --rcfile <file> -i` does not
+  read the file. What stays undone is `shopt login_shell`, which is off in a pane
+  whose profile asked for a login shell; a startup file that branches on it takes
+  the non-login branch.
+* Every other word the profile carries reaches the shell. The command line used
+  to be three literals, so `--noediting`, `-O globstar` or anything else a reader
+  put in the row was silently dropped the moment the row had integration (R3-7).
+* An array-valued `PROMPT_COMMAND` — bash 5.1 and later — keeps its shape. The
+  hook is prepended and appended as elements rather than assigned over element
+  zero, so the reader's own hooks run once per prompt and the `133;C` that opens
+  a command region belongs to the command they typed. Before this, the last
+  prompt hook ran twice and its second run took the command's mark, so the region
+  a `cd` or a `git status` printed into was never opened (R3-5).
+* A DEBUG trap that was already installed is kept and chained. It is read at the
+  first prompt, where the shell is at the top level and the trap is in effect:
+  inside a file being read by `.` bash puts no DEBUG trap in effect at all unless
+  `set -T` is on, so the read used to come back empty and the reader's trap was
+  replaced — and under `set -T`, where it did come back, parsing it wrote over
+  the shell's positional parameters (R3-17).
+
+**`sh` and `dash`.** No integration, and the pane says so. They used to be sent
+through bash's init-file door, which `sh` accepts and ignores in silence: no
+marks, no directory, no error, which is indistinguishable from a shell that has
+none. The profile editor's capability row now reads `No shell integration` for
+them (R3-6).
+
+**zsh, on Windows and inside WSL.** A door of its own, and the row of this matrix
+that could not be measured on 2026-09-07 is now implementable. zsh has no
+`--init-file` and refuses the flag, so it is served through `ZDOTDIR`: Folio
+writes `folio.zsh` under three names — `.zshenv`, `.zprofile`, `.zshrc` — into a
+directory of its own and points `ZDOTDIR` at it. Each of the three sources the
+reader's file of the same name, and `.zshrc` hands `ZDOTDIR` back at the end, so
+`.zlogin` and every zsh started from the session read the reader's own directory.
+A reader who keeps their files somewhere other than `$HOME` has that directory
+carried in `BT_USER_ZDOTDIR`. A WSL login that lands in zsh takes the same door,
+chosen inside the distribution by the same question that already chose bash's
+(R3-6).
+
+**Not measured, and it should be.** `folio.zsh` has not been run: there is no
+`zsh` on this Windows machine and none in this machine's Ubuntu-24.04, so the
+script is unexecuted while the Rust side that hands it over is pinned by tests.
+The first machine with a zsh should run `scripts/shell-integration/tests/run.ps1`,
+which skips the zsh suite where there is no zsh to skip it for.
+
+**Command Prompt.** The directory it reports is read as the path it is. `PROMPT`
+expands `$P` to `D:\Code\C# Projects` and has no substitution that could
+percent-encode a space or a hash, so the reader's side now accepts a payload that
+is not a percent-encoded URI as the path it plainly is. Before this the decoder
+cut that directory at the hash and recorded `D:\Code\C`, and a directory holding a
+stray `%` was forgotten outright (R3-9).
+
+**WSL, at the root.** `file:///` is the root of a POSIX namespace and is accepted
+as one. A WSL pane sitting at `/` used to lose its directory entirely, and new
+tabs opened from it inherited nothing (R3-11).
+
+**PowerShell, both editions.** The prompt this terminal wraps is told the truth
+about two things it could not previously see: `$?` is restored to the value the
+reader's line left before the chained prompt is called, and the working directory
+is read *after* that prompt has run, so a customizer that changes directory is
+reported from where it left the shell rather than one prompt behind (R3-15,
+R3-16). The line written into `$PROFILE` for a script that is not under
+`%APPDATA%` is single-quoted, so a path holding a `$` or a backtick is the path
+and not an interpolation (R3-14).
+
+**Not a shell, but in the same ticket.** Three rows are about the sequences
+rather than about who emits them, and they are here because that is where the
+review filed them. A CSI that cancels an unterminated `OSC 133` or `OSC 7` is
+re-emitted rather than swallowed with the payload, so the sequence that cancelled
+it stops printing as text (R3-18). In the vendored terminal, a relative cursor
+move no longer has the scroll region's offset added to it a second time under
+origin mode (R3-12), and `DECSET 1005` — UTF-8 mouse coordinates, an encoding
+this terminal does not write — is refused rather than recorded and reported as
+set (R3-13). Upstream `alacritty_terminal` has neither fix at 0.26.0 or on
+master, so both are Folio's own and both are recorded in
+`vendor/alacritty_terminal/CHANGES-FOLIO.md`.
+
+### The runner
+
+`scripts/shell-integration/tests/run.ps1` runs every measurement in that
+directory: `bash-hooks.sh` (the bash rows, in a temporary `HOME` with fixture
+startup files), `exit-status.ps1` and `prompt-chain.ps1` (both PowerShell
+generations). A shell that is not installed is reported as skipped rather than
+passed.

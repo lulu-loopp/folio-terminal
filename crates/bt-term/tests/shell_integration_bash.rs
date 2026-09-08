@@ -90,8 +90,9 @@ fn temporary_directory() -> PathBuf {
 /// running `commands`.
 ///
 /// The argument list is the product's: `--init-file <script> -i`, with
-/// `BT_SHELL_INTEGRATION` set — which is the whole of the injection, so a
-/// mistake in it fails here rather than only on a real machine.
+/// `BT_SHELL_INTEGRATION` naming the startup chain the script owes — which is
+/// the whole of the injection, so a mistake in it fails here rather than only on
+/// a real machine.
 ///
 /// **Both streams, joined by the shell itself.** `PS1` is written by readline,
 /// whose output stream is *stderr*, while the `printf`s in `PROMPT_COMMAND` go
@@ -112,7 +113,9 @@ fn session_bytes(directory: &Path, commands: &str) -> Vec<u8> {
             script_path().display()
         ))
         .current_dir(directory)
-        .env("BT_SHELL_INTEGRATION", "1")
+        // `login`, because that is what a Git Bash profile's own `--login`
+        // asks for and what the launcher therefore tells the script it owes.
+        .env("BT_SHELL_INTEGRATION", "login")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())

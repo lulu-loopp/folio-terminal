@@ -6,7 +6,10 @@
 // pending-wrap cursor fix; UAX #29 grapheme clustering (DEC 2027) and legacy
 // emoji-presentation width, both on `bt-unicode`, with a ceiling on how long one
 // cluster may grow; DEC 2031 theme-change notification; per-row input-write
-// tracking; `Term::fork`; and the tests for all of it. The rest is this repository's rustfmt settings.
+// tracking; `Term::fork`; an origin-mode cursor fix, so that a relative move is
+// not measured from the scroll region twice; UTF-8 mouse reporting refused
+// rather than recorded as set; and the tests for all of it. The rest is this
+// repository's rustfmt settings.
 // Index: vendor/alacritty_terminal/CHANGES-FOLIO.md
 // Notice given under section 4(b) of the Apache License, Version 2.0.
 
@@ -1904,6 +1907,36 @@ impl<T> Term<T> {
         true
     }
 
+    /// Put the cursor on an **absolute** line and column, clamped to the screen —
+    /// or, under origin mode, to the scroll region.
+    ///
+    /// Folio: split out of `Handler::goto`, which is the one entry point whose
+    /// line is measured from the top of the scroll region and therefore the one
+    /// that may add the region's offset. Every relative move — `CUU`, `CUD`,
+    /// `CNL`, `CPL`, and the column move, which keeps the line it is on — already
+    /// holds an absolute line, and passing it through `goto` added the offset to
+    /// it a second time: under origin mode with a region that does not start at
+    /// the top, a `CHA` walked the cursor down the screen (review row R3-12).
+    /// Upstream 0.26.0 and master both still do that.
+    #[inline]
+    fn goto_absolute(&mut self, line: Line, col: Column) {
+        let max_y = if self.mode.contains(TermMode::ORIGIN) {
+            self.scroll_region.end - 1
+        } else {
+            self.bottommost_line()
+        };
+
+        self.damage_cursor();
+        self.grid.cursor.point.line = cmp::max(cmp::min(line, max_y), Line(0));
+        self.grid.cursor.point.column = cmp::min(col, self.last_column());
+        self.damage_cursor();
+        let alternate = self.mode.contains(TermMode::ALT_SCREEN);
+        self.grid.cursor.input_needs_wrap = self
+            .reported_pending_wrap
+            .take()
+            .is_some_and(|reported| reported == (alternate, self.grid.cursor.point));
+    }
+
     #[inline]
     fn damage_cursor(&mut self) {
         // The normal cursor coordinates are always in viewport.
@@ -1999,25 +2032,16 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn goto(&mut self, line: i32, col: usize) {
-        let line = Line(line);
-        let col = Column(col);
-
         trace!("Going to: line={line}, col={col}");
-        let (y_offset, max_y) = if self.mode.contains(TermMode::ORIGIN) {
-            (self.scroll_region.start, self.scroll_region.end - 1)
+        // The line a `CUP` or a `VPA` carries is measured from the top of the
+        // scroll region under origin mode, so the offset is added exactly once,
+        // here, where a *relative* line arrives.
+        let y_offset = if self.mode.contains(TermMode::ORIGIN) {
+            self.scroll_region.start
         } else {
-            (Line(0), self.bottommost_line())
+            Line(0)
         };
-
-        self.damage_cursor();
-        self.grid.cursor.point.line = cmp::max(cmp::min(line + y_offset, max_y), Line(0));
-        self.grid.cursor.point.column = cmp::min(col, self.last_column());
-        self.damage_cursor();
-        let alternate = self.mode.contains(TermMode::ALT_SCREEN);
-        self.grid.cursor.input_needs_wrap = self
-            .reported_pending_wrap
-            .take()
-            .is_some_and(|reported| reported == (alternate, self.grid.cursor.point));
+        self.goto_absolute(Line(line) + y_offset, Column(col));
     }
 
     #[inline]
@@ -2029,7 +2053,8 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn goto_col(&mut self, col: usize) {
         trace!("Going to column: {col}");
-        self.goto(self.grid.cursor.point.line.0, col)
+        // The line is the one the cursor is already on, which is absolute.
+        self.goto_absolute(self.grid.cursor.point.line, Column(col))
     }
 
     #[inline]
@@ -2067,7 +2092,7 @@ impl<T: EventListener> Handler for Term<T> {
 
         let line = self.grid.cursor.point.line - lines;
         let column = self.grid.cursor.point.column;
-        self.goto(line.0, column.0)
+        self.goto_absolute(line, column)
     }
 
     #[inline]
@@ -2076,7 +2101,7 @@ impl<T: EventListener> Handler for Term<T> {
 
         let line = self.grid.cursor.point.line + lines;
         let column = self.grid.cursor.point.column;
-        self.goto(line.0, column.0)
+        self.goto_absolute(line, column)
     }
 
     #[inline]
@@ -2218,7 +2243,7 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Moving down and cr: {lines}");
 
         let line = self.grid.cursor.point.line + lines;
-        self.goto(line.0, 0)
+        self.goto_absolute(line, Column(0))
     }
 
     #[inline]
@@ -2226,7 +2251,7 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Moving up and cr: {lines}");
 
         let line = self.grid.cursor.point.line - lines;
-        self.goto(line.0, 0)
+        self.goto_absolute(line, Column(0))
     }
 
     /// Insert tab at cursor position.
@@ -2899,10 +2924,14 @@ impl<T: EventListener> Handler for Term<T> {
                 self.mode.remove(TermMode::UTF8_MOUSE);
                 self.mode.insert(TermMode::SGR_MOUSE);
             }
-            NamedPrivateMode::Utf8Mouse => {
-                self.mode.remove(TermMode::SGR_MOUSE);
-                self.mode.insert(TermMode::UTF8_MOUSE);
-            }
+            // **Refused, and it is refused rather than recorded** (Folio, review
+            // row R3-13). UTF-8 mouse reporting is an encoding this terminal does
+            // not write: the coordinate bytes it sends are the ordinary ones, so
+            // a program told the mode was set would frame every click past column
+            // 95 as something else. Nothing is inserted, nothing that was already
+            // chosen is removed, and `report_private_mode` therefore answers that
+            // the mode is not set — which is the truth a program can act on.
+            NamedPrivateMode::Utf8Mouse => (),
             NamedPrivateMode::AlternateScroll => self.mode.insert(TermMode::ALTERNATE_SCROLL),
             NamedPrivateMode::LineWrap => self.mode.insert(TermMode::LINE_WRAP),
             NamedPrivateMode::Origin => {
@@ -3488,6 +3517,73 @@ mod tests {
     use crate::term::cell::{Cell, Flags};
     use crate::term::test::TermSize;
     use crate::vte::ansi::{self, CharsetIndex, Handler, StandardCharset};
+
+    /// Folio, review row R3-12 — **a relative cursor move is measured from the
+    /// scroll region once, not twice.**
+    ///
+    /// Under origin mode a `CUP` counts from the top of the region, and `goto`
+    /// is where that offset is added. `CHA` (column address) keeps the line the
+    /// cursor is on, which is already absolute, and `CUU`/`CUD` count from it —
+    /// so passing any of them through `goto` added the offset a second time and
+    /// walked the cursor down the screen.
+    ///
+    /// MUTATION: send `goto_col` and the relative moves back through `goto` and
+    /// every line below is the region's own offset too far down.
+    #[test]
+    fn origin_mode_measures_a_relative_move_from_the_region_once() {
+        let mut term = Term::new(Config::default(), &TermSize::new(20, 10), VoidListener);
+        let mut processor: ansi::Processor = ansi::Processor::new();
+        // Rows 3 to 8 (one-based) are the region, and origin mode makes them the
+        // whole of the coordinate space.
+        processor.advance(&mut term, b"[3;8r[?6h");
+        // `CUP 1;1` under origin mode is the top of the region, which is line 2.
+        processor.advance(&mut term, b"[1;1H");
+        assert_eq!(term.grid().cursor.point.line, Line(2));
+        // A column move keeps the line it is on.
+        processor.advance(&mut term, b"[10G");
+        assert_eq!(term.grid().cursor.point.line, Line(2));
+        assert_eq!(term.grid().cursor.point.column, Column(9));
+        // Two lines down from there is line 4, and two back up is line 2 again.
+        processor.advance(&mut term, b"[2B");
+        assert_eq!(term.grid().cursor.point.line, Line(4));
+        processor.advance(&mut term, b"[2A");
+        assert_eq!(term.grid().cursor.point.line, Line(2));
+        // `CNL`/`CPL` are the same move with a carriage return.
+        processor.advance(&mut term, b"[3E");
+        assert_eq!(term.grid().cursor.point.line, Line(5));
+        assert_eq!(term.grid().cursor.point.column, Column(0));
+        processor.advance(&mut term, b"[1F");
+        assert_eq!(term.grid().cursor.point.line, Line(4));
+        // And the region is still the ceiling: it ends at line 7.
+        processor.advance(&mut term, b"[99B");
+        assert_eq!(term.grid().cursor.point.line, Line(7));
+        // With origin mode off the same sequences count from the screen.
+        processor.advance(&mut term, b"[?6l[1;1H[5G");
+        assert_eq!(term.grid().cursor.point.line, Line(0));
+        assert_eq!(term.grid().cursor.point.column, Column(4));
+    }
+
+    /// Folio, review row R3-13 — **an encoding this terminal does not write is
+    /// not reported as set.**
+    ///
+    /// `DECSET 1005` asks for UTF-8 mouse coordinates. Nothing here or in
+    /// `bt_app::input` ever writes them, so a program that was told the mode was
+    /// on would frame every click past column 95 as something else. The mode is
+    /// refused, and the encoding the session already chose is left alone.
+    ///
+    /// MUTATION: insert `TermMode::UTF8_MOUSE` again and the report says yes to
+    /// a question this terminal cannot answer.
+    #[test]
+    fn utf8_mouse_reporting_is_refused_rather_than_recorded() {
+        let mut term = Term::new(Config::default(), &TermSize::new(20, 10), VoidListener);
+        let mut processor: ansi::Processor = ansi::Processor::new();
+        processor.advance(&mut term, b"[?1005h");
+        assert!(!term.mode().contains(TermMode::UTF8_MOUSE));
+        // And it does not take the encoding a program had already chosen.
+        processor.advance(&mut term, b"[?1006h[?1005h");
+        assert!(term.mode().contains(TermMode::SGR_MOUSE));
+        assert!(!term.mode().contains(TermMode::UTF8_MOUSE));
+    }
 
     #[test]
     fn unfinished_resize_harvest_returns_to_native_history_for_the_next_grow() {

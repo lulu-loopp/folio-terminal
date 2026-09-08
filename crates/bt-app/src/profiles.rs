@@ -638,7 +638,29 @@ pub enum Integration {
     /// without touching anything on disk that belongs to the user. What that
     /// argument costs is the startup chain it replaces, which the script itself
     /// puts back — see `scripts/shell-integration/folio.bash`.
+    ///
+    /// **bash and nothing else.** The flag is bash's own, and a shell that is
+    /// not a bash either refuses it or opens it as a file: `sh` ignores
+    /// `--init-file` in silence and starts with no integration and no
+    /// complaint, and `zsh` refuses it outright. Both used to be sent here,
+    /// which is why they are not any more (review row R3-6).
     BashInitFile,
+    /// `folio.zsh`, read by zsh out of the directory `ZDOTDIR` names.
+    ///
+    /// zsh's door, and it is a different door because zsh has no `--init-file`:
+    /// what it has is the directory it reads *all* its startup files from, and
+    /// pointing that at a directory of ours costs the reader's own four files
+    /// rather than bash's one. So the script is installed under three names —
+    /// `.zshenv`, `.zprofile`, `.zshrc` — each of which sources the reader's
+    /// file of the same name and hands `ZDOTDIR` back at the end, so that
+    /// `.zlogin` and every zsh started from the session read the reader's own
+    /// directory with nothing of this arrangement left behind.
+    ///
+    /// What a pane of this door gets is what a bash pane gets: `OSC 133` A, B,
+    /// C and D with a status, and `OSC 7`. zsh has `preexec` and `precmd` as
+    /// hooks of its own, so the region is drawn from what the shell already
+    /// knows rather than from a DEBUG trap.
+    ZshDotDir,
     /// No script at all — the whole integration is the `PROMPT` variable
     /// `cmd.exe` prints its prompt from, and what fits in there is what
     /// describes the one moment it is expanded at: `OSC 7`, `OSC 133;D` and
@@ -784,8 +806,21 @@ pub fn derive_integration(program: &ProgramSource) -> Integration {
         .to_ascii_lowercase();
     match stem.as_str() {
         "pwsh" | "powershell" => Integration::PowerShellOptIn,
-        "bash" | "sh" | "zsh" | "wsl" => Integration::BashInitFile,
+        // `wsl` is a launcher and not a shell, and the question of which shell
+        // it logs the reader into is asked inside the distribution — by
+        // `shell_integration::WSL_LOGIN_SHELL`, which knows both this door and
+        // the one below.
+        "bash" | "wsl" => Integration::BashInitFile,
+        "zsh" => Integration::ZshDotDir,
         "cmd" => Integration::CmdPrompt,
+        // **`sh` is here rather than above** (review row R3-6). It used to be
+        // sent to bash's init file, which `sh` ignores in silence: the pane got
+        // no marks, no directory and no error, which is the one failure that
+        // looks exactly like a shell that has no integration. Now it says so.
+        // A `dash` and a `sh` are the same answer, and it is an honest whole
+        // one: a screen that never sees OSC 133 keeps the cursor/WRAPLINE
+        // heuristics, and one that never sees OSC 7 leaves the relative path
+        // undetected rather than guessing a directory.
         _ => Integration::None,
     }
 }
@@ -2011,8 +2046,9 @@ fn compose(seed: Option<&Profile>, entry: &ProfileEntryV1) -> Option<Profile> {
 /// It is a property of the program and not a taste: choose it wrong and a
 /// directory inherited from another pane is silently translated into
 /// `/mnt/c/...` or into somewhere that does not exist. Only `wsl.exe` behind a
-/// bash init file crosses the namespace, which is why this asks both questions
-/// and not either one.
+/// door that reaches inside the distribution — bash's init file or zsh's
+/// directory — crosses the namespace, which is why this asks both questions and
+/// not either one.
 fn derived_paths(profile: &Profile) -> PathNamespace {
     let names_the_launcher = |tail: &str| tail.to_ascii_lowercase().ends_with("wsl.exe");
     let launcher = match &profile.program {
@@ -2029,7 +2065,12 @@ fn derived_paths(profile: &Profile) -> PathNamespace {
         }),
         ProgramSource::PowerShellSeven => false,
     };
-    if launcher && served_by(profile) == Integration::BashInitFile {
+    if launcher
+        && matches!(
+            served_by(profile),
+            Integration::BashInitFile | Integration::ZshDotDir
+        )
+    {
         PathNamespace::Wsl
     } else {
         PathNamespace::Windows
@@ -2206,6 +2247,7 @@ fn integration_from_file(name: &str) -> Option<IntegrationChoice> {
         "auto" => Some(IntegrationChoice::Auto),
         "powershell" => Some(IntegrationChoice::Named(Integration::PowerShellOptIn)),
         "bash" => Some(IntegrationChoice::Named(Integration::BashInitFile)),
+        "zsh" => Some(IntegrationChoice::Named(Integration::ZshDotDir)),
         "cmd" => Some(IntegrationChoice::Named(Integration::CmdPrompt)),
         "none" => Some(IntegrationChoice::Named(Integration::None)),
         _ => None,
@@ -2217,6 +2259,7 @@ fn integration_to_file(integration: IntegrationChoice) -> &'static str {
         IntegrationChoice::Auto => "auto",
         IntegrationChoice::Named(Integration::PowerShellOptIn) => "powershell",
         IntegrationChoice::Named(Integration::BashInitFile) => "bash",
+        IntegrationChoice::Named(Integration::ZshDotDir) => "zsh",
         IntegrationChoice::Named(Integration::CmdPrompt) => "cmd",
         IntegrationChoice::Named(Integration::None) => "none",
     }
@@ -2517,13 +2560,15 @@ pub fn integration_name(integration: Integration) -> crate::i18n::Text {
     match integration {
         Integration::PowerShellOptIn => crate::i18n::Text::ProfilesIntegrationPowerShell,
         Integration::BashInitFile => crate::i18n::Text::ProfilesIntegrationBash,
+        Integration::ZshDotDir => crate::i18n::Text::ProfilesIntegrationZsh,
         Integration::CmdPrompt => crate::i18n::Text::ProfilesIntegrationCmd,
         Integration::None => crate::i18n::Text::ProfilesIntegrationNone,
     }
 }
 
-/// `Auto (Bash init file)` — that picker's **button** while the row is on the
-/// rule, interned so the caption can ride a `Copy` snapshot of the page.
+/// `Auto (Bash init file)`, or whichever door the row's program derives — that
+/// picker's **button** while the row is on the rule, interned so the caption can
+/// ride a `Copy` snapshot of the page.
 ///
 /// `None` when the row has named a door: the button then says the word on the
 /// item that is ticked, which is what every other picker in this dialog does.
@@ -2854,9 +2899,11 @@ pub fn printed_path_namespace(
             // (`PrintedPathNamespace::with_shell_home`).
             home: None,
         },
-        (PathNamespace::Windows, Integration::BashInitFile) => PrintedPathNamespace::Msys {
-            home: home_directory(environment),
-        },
+        (PathNamespace::Windows, Integration::BashInitFile | Integration::ZshDotDir) => {
+            PrintedPathNamespace::Msys {
+                home: home_directory(environment),
+            }
+        }
         (PathNamespace::Windows, _) => PrintedPathNamespace::Windows,
     }
 }
@@ -3191,10 +3238,21 @@ pub fn capability_of_parts(
         // The launcher is the difference: a Git Bash is handed its init file and
         // reads it, full stop, while `wsl.exe` hands it to whatever shell the
         // distribution logs the user into.
-        (Integration::BashInitFile, PathNamespace::Wsl, true, _) => Text::CapWslBash,
-        (Integration::BashInitFile, PathNamespace::Wsl, false, _) => Text::CapWslBashNoLinks,
-        (Integration::BashInitFile, PathNamespace::Windows, true, _) => Text::CapFull,
-        (Integration::BashInitFile, PathNamespace::Windows, false, _) => Text::CapFullNoLinks,
+        // zsh reads its own script out of `ZDOTDIR` and reports exactly what a
+        // bash reads out of its init file, so the two doors share the sentence:
+        // it names what the pane gets, not which file it came out of.
+        (Integration::BashInitFile | Integration::ZshDotDir, PathNamespace::Wsl, true, _) => {
+            Text::CapWslBash
+        }
+        (Integration::BashInitFile | Integration::ZshDotDir, PathNamespace::Wsl, false, _) => {
+            Text::CapWslBashNoLinks
+        }
+        (Integration::BashInitFile | Integration::ZshDotDir, PathNamespace::Windows, true, _) => {
+            Text::CapFull
+        }
+        (Integration::BashInitFile | Integration::ZshDotDir, PathNamespace::Windows, false, _) => {
+            Text::CapFullNoLinks
+        }
         (Integration::CmdPrompt, _, true, _) => Text::CapCmd,
         (Integration::CmdPrompt, _, false, _) => Text::CapCmdNoLinks,
         (Integration::None, _, _, false) => Text::CapNone,

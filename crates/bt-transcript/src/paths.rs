@@ -2076,10 +2076,69 @@ pub enum Rooting {
     DriveOrPosixRoot,
 }
 
+/// Whether a payload that is not a percent-encoded URI is read as the path it plainly is.
+///
+/// **A spelling the emitting side genuinely cannot encode is accepted on the reading side** (review
+/// row R3-9). `cmd.exe`'s whole integration is its `PROMPT` variable, whose alphabet is a dozen-odd
+/// substitutions: `$P` expands to `D:\Code\C# Projects` and there is no loop, no escape and no
+/// substitution that could turn a space into `%20` or a hash into `%23`. So `cmd` says the
+/// directory in the only spelling it has, and this side reads it — the same principle that already
+/// accepts the backslashes in `file:///D:\src`.
+///
+/// The two answers are told apart by the payload and not by a claim about who sent it: a path made
+/// only of the characters an encoder leaves alone, with every `%` opening a valid escape, is a URI
+/// and is decoded as one; anything else — a space, a backslash-free `#`, a `%` that opens nothing —
+/// is not a URI, was never produced by an encoder, and is the name it looks like. Every gate below
+/// still applies to it: no control character, no empty segment, no two leading separators, and the
+/// caller's own [`Rooting`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Spelling {
+    /// Percent-encoded, or nothing. What a printed `file://` reference is held to.
+    Encoded,
+    /// Percent-encoded when it is, and the path itself when it is not — the `OSC 7` report, which
+    /// is the one payload a shell with no encoder still has to be able to make.
+    EncodedOrVerbatim,
+}
+
+/// Whether every character of a URI path is one an encoder would have left alone, and every `%` in
+/// it opens a valid escape.
+///
+/// The safe set is RFC 3986 unreserved plus sub-delims plus `:`, `@` and `/`, which is the set all
+/// three of this product's shell scripts keep, plus `%` itself. A character outside it was put
+/// there by something that was not encoding.
+fn is_percent_encoded_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            let valid = path
+                .get(index + 1..index + 3)
+                .is_some_and(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            if !valid {
+                return false;
+            }
+            index += 3;
+            continue;
+        }
+        if !(byte.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/".contains(&byte)) {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
 /// The `file://` URI a printed reference may name a local file with: drive-rooted, no trailing
 /// slash, no host but this one.
 pub fn file_uri_to_local_reference(uri: &str) -> Option<PathBuf> {
-    decode_file_uri(uri, None, TrailingSlash::Reject, Rooting::DriveOnly)
+    decode_file_uri(
+        uri,
+        None,
+        TrailingSlash::Reject,
+        Rooting::DriveOnly,
+        Spelling::Encoded,
+    )
 }
 
 /// Decode a `file://` URI to the local path it names, applying only the shape gate every local
@@ -2108,6 +2167,7 @@ pub fn decode_file_uri(
     local_host: Option<&str>,
     trailing_slash: TrailingSlash,
     rooting: Rooting,
+    spelling: Spelling,
 ) -> Option<PathBuf> {
     let rest = uri
         .get(..7)
@@ -2120,9 +2180,18 @@ pub fn decode_file_uri(
     if !authority_is_this_host {
         return None;
     }
+    // **Is this a URI at all** — see [`Spelling`]. A payload the shell could not encode is read
+    // as the path it plainly is, and one that *is* encoded keeps every rule below.
+    let verbatim = spelling == Spelling::EncodedOrVerbatim && !is_percent_encoded_path(path);
     // Query and fragment are not part of the path; a filename containing `?` or `#` must have
-    // percent-encoded them.
-    let path = &path[..path.find(['?', '#']).unwrap_or(path.len())];
+    // percent-encoded them. A verbatim payload has no query and no fragment, because it has no
+    // syntax: `#` and `%` in it are characters of a directory's name and the presence of either is
+    // half of what said so.
+    let path = if verbatim {
+        path
+    } else {
+        &path[..path.find(['?', '#']).unwrap_or(path.len())]
+    };
     let mut segments = path.split('/').skip(1).collect::<Vec<_>>();
     if trailing_slash == TrailingSlash::Directory
         && segments.len() > 1
@@ -2130,9 +2199,26 @@ pub fn decode_file_uri(
     {
         segments.pop();
     }
+    // **`file:///` is the root of a POSIX namespace** (review row R3-11), and its one empty segment
+    // is that root rather than an empty name. It is the directory a WSL pane sits in whenever it is
+    // at `/`, and refusing it left that pane with no directory at all and new tabs inheriting
+    // nothing. Under `TrailingSlash::Reject` the slash is a trailing one like any other and the
+    // refusal stands.
+    if trailing_slash == TrailingSlash::Directory && segments == [""] {
+        segments.clear();
+    }
     let mut decoded_segments = Vec::with_capacity(segments.len());
     for segment in segments {
-        let decoded = percent_decode(segment)?;
+        let decoded = if verbatim {
+            // Every byte as the shell printed it, and the one rule a raw path still answers to:
+            // a control character is not part of any name this window may read.
+            if segment.chars().any(char::is_control) {
+                return None;
+            }
+            segment.to_owned()
+        } else {
+            percent_decode(segment)?
+        };
         if decoded.is_empty() {
             return None;
         }
@@ -2181,8 +2267,8 @@ fn native_path_from_uri_segments(segments: &[String]) -> String {
 ///
 /// A `file:` URI's path always opens with `/`, so the segments are exactly the
 /// components below the root and the spelling is the root's slash in front of
-/// each of them. `file:///` decodes to no segments at all and never reaches
-/// here — an empty segment is refused above as an empty name.
+/// each of them. `file:///` decodes to no segments at all, and the empty join
+/// below is `/` — the root itself, which is a directory a shell really stands in.
 #[cfg(not(windows))]
 fn native_path_from_uri_segments(segments: &[String]) -> String {
     format!("/{}", segments.join("/"))
@@ -6522,6 +6608,125 @@ mod tests {
     /// a name, never a boundary. This machine cannot name such a file, so the
     /// URI names nothing.
     ///
+    /// PIN — **`file:///` is the root of a POSIX namespace** (review row R3-11).
+    ///
+    /// It is one empty segment, and reading it as an empty *name* refused the
+    /// report outright: a WSL pane sitting at `/` — which is where a
+    /// `wsl.exe --cd /` lands, and where a `cd /` leaves any shell — lost its
+    /// directory, and every tab opened from it inherited nothing.
+    ///
+    /// MUTATION: refuse the sole empty segment and a shell at the root has no
+    /// directory to report.
+    #[test]
+    fn the_posix_root_is_a_directory_a_shell_can_stand_in() {
+        assert_eq!(
+            decode_file_uri(
+                "file:///",
+                None,
+                TrailingSlash::Directory,
+                Rooting::DriveOrPosixRoot,
+                Spelling::EncodedOrVerbatim
+            ),
+            Some(PathBuf::from("/"))
+        );
+        // A caller that refuses a trailing slash refuses this one too: there is
+        // nothing else the slash could be.
+        assert_eq!(
+            decode_file_uri(
+                "file:///",
+                None,
+                TrailingSlash::Reject,
+                Rooting::DriveOnly,
+                Spelling::Encoded
+            ),
+            None
+        );
+        // And an interior empty segment is still an empty name.
+        assert_eq!(
+            decode_file_uri(
+                "file:////etc",
+                None,
+                TrailingSlash::Directory,
+                Rooting::DriveOrPosixRoot,
+                Spelling::EncodedOrVerbatim
+            ),
+            None
+        );
+    }
+
+    /// PIN — **a directory a shell genuinely cannot encode is read as the path
+    /// it plainly is** (review row R3-9).
+    ///
+    /// `cmd.exe`'s whole integration is its `PROMPT` variable: `$P` expands to
+    /// the current directory and there is no substitution in that alphabet that
+    /// could percent-encode a space or a hash. So `D:\Code\C# Projects` went out
+    /// as itself and was recorded as `D:\Code\C` — the decoder cut it at the
+    /// fragment — while a directory holding a stray `%` was forgotten outright.
+    ///
+    /// MUTATION: hold the OSC 7 door to percent-encoding only and every `cmd`
+    /// pane in a directory with a space, a hash or a percent in it reports a
+    /// different directory or none.
+    #[test]
+    fn a_directory_a_shell_could_not_encode_is_read_as_the_path_it_is() {
+        for (uri, place) in [
+            (r"file:///D:\Code\C# Projects", r"D:\Code\C# Projects"),
+            (r"file:///D:\Code\100% done", r"D:\Code\100% done"),
+            (r"file:///C:\Program Files", r"C:\Program Files"),
+        ] {
+            assert_eq!(
+                decode_file_uri(
+                    uri,
+                    None,
+                    TrailingSlash::Directory,
+                    Rooting::DriveOrPosixRoot,
+                    Spelling::EncodedOrVerbatim
+                ),
+                Some(PathBuf::from(place)),
+                "{uri}"
+            );
+        }
+        // A payload that **is** encoded keeps every rule it always had: the
+        // escape is decoded, and the fragment is not part of the path.
+        assert_eq!(
+            decode_file_uri(
+                "file:///D:/Code/C%23%20Projects",
+                None,
+                TrailingSlash::Directory,
+                Rooting::DriveOrPosixRoot,
+                Spelling::EncodedOrVerbatim
+            ),
+            Some(PathBuf::from(r"D:\Code\C# Projects"))
+        );
+        // And the raw reading is the OSC 7 door's alone. A `file://` reference
+        // printed into the flow is held to the encoding, because the text around
+        // it is a program's and the spelling is how this window tells a reference
+        // from a sentence: a hash is still a fragment there, and an escape that
+        // opens nothing is still a refusal.
+        assert_eq!(
+            file_uri_to_local_reference(r"file:///D:/Code/C#fragment"),
+            Some(PathBuf::from(r"D:\Code\C"))
+        );
+        assert_eq!(file_uri_to_local_reference("file:///D:/Code/100%zz"), None);
+        // Nothing raw buys a share, a control character or an empty name.
+        for refused in [
+            r"file:///\\server\share",
+            "file:///D:/a\u{7}b",
+            "file:///D://a",
+        ] {
+            assert_eq!(
+                decode_file_uri(
+                    refused,
+                    None,
+                    TrailingSlash::Directory,
+                    Rooting::DriveOrPosixRoot,
+                    Spelling::EncodedOrVerbatim
+                ),
+                None,
+                "{refused:?}"
+            );
+        }
+    }
+
     /// MUTATION: keep the escaped separator as text and the POSIX fall-back
     /// rebuilds the share.
     #[test]
@@ -6537,13 +6742,20 @@ mod tests {
                     uri,
                     None,
                     TrailingSlash::Directory,
-                    Rooting::DriveOrPosixRoot
+                    Rooting::DriveOrPosixRoot,
+                    Spelling::EncodedOrVerbatim
                 ),
                 None,
                 "{uri} names no file on this machine"
             );
             assert_eq!(
-                decode_file_uri(uri, None, TrailingSlash::Reject, Rooting::DriveOnly),
+                decode_file_uri(
+                    uri,
+                    None,
+                    TrailingSlash::Reject,
+                    Rooting::DriveOnly,
+                    Spelling::Encoded
+                ),
                 None,
                 "{uri} is no reference either"
             );
@@ -6554,7 +6766,8 @@ mod tests {
                 "file:///D:/src/a%20b.md",
                 None,
                 TrailingSlash::Reject,
-                Rooting::DriveOnly
+                Rooting::DriveOnly,
+                Spelling::Encoded
             ),
             Some(PathBuf::from(r"D:\src\a b.md"))
         );
@@ -6563,7 +6776,8 @@ mod tests {
                 "file:///home/alice/src",
                 None,
                 TrailingSlash::Directory,
-                Rooting::DriveOrPosixRoot
+                Rooting::DriveOrPosixRoot,
+                Spelling::EncodedOrVerbatim
             ),
             Some(PathBuf::from("/home/alice/src"))
         );

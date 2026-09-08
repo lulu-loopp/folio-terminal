@@ -680,6 +680,37 @@ function Global:prompt {
         $state.CommandStarted = $false
     }
 
+    # The rest of the chain, still returning its text to the host through us. Depth is restored
+    # even if a customizer's prompt throws, because a prompt that failed once must not leave the
+    # session reporting every later prompt as a nested one.
+    #
+    # **Run before the directory is read, and its text kept back until after.** A prompt customizer
+    # that changes directory is not exotic — it is what a per-directory environment tool does — and
+    # the directory this pane is standing in, at the moment this prompt is drawn, is the one that
+    # prompt left it in. Reading it first reported the *previous* prompt's directory and left the
+    # pane one prompt behind for the whole session. The bytes still go out in the order they always
+    # did, `133;D`, `OSC 7`, `133;A`, the prompt's own text, `133;B`, because that is the order the
+    # markers describe: only the moment the question is asked has moved.
+    $state.PromptDepth = $inner + 1
+    $chained = ''
+    try {
+        $next = $state.PromptChain[$inner]
+        if ($null -ne $next) {
+            # `$?` as the reader's own prompt would have seen it, restored on the last line before
+            # the call. Everything between the top of this function and here — the two captures,
+            # the depth arithmetic, the assignment above — has overwritten it with its own success,
+            # so a chained prompt that colours its own arrow by `$?` was told every line succeeded.
+            # `Write-Error` is the one statement whose whole job is to leave `$?` false, and
+            # `Ignore` keeps it out of `$Error`, so nothing but the flag moves.
+            if (-not $lastSucceeded) {
+                Write-Error -Message '' -ErrorAction Ignore
+            }
+            $chained = (& $next)
+        }
+    } finally {
+        $state.PromptDepth = $depth
+    }
+
     # OSC 7: the authoritative working directory, reported once per prompt. It is what lets
     # Folio resolve './x.png' and '../a/b.svg' in this session's output; a terminal that
     # is never told a directory deliberately leaves relative paths undetected rather than guessing
@@ -696,18 +727,7 @@ function Global:prompt {
         $out += $esc + ']133;A' + $bel
     }
 
-    # The rest of the chain, still returning its text to the host through us. Depth is restored
-    # even if a customizer's prompt throws, because a prompt that failed once must not leave the
-    # session reporting every later prompt as a nested one.
-    $state.PromptDepth = $inner + 1
-    try {
-        $next = $state.PromptChain[$inner]
-        if ($null -ne $next) {
-            $out += (& $next)
-        }
-    } finally {
-        $state.PromptDepth = $depth
-    }
+    $out += $chained
 
     if ($depth -eq 0) {
         $out += $esc + ']133;B' + $bel

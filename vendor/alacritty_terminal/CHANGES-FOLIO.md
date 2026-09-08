@@ -105,6 +105,22 @@ file produces the vendored file byte for byte. Upstream formats with its own
 - **Private mode 2031.** The dark/light theme-change notification subscription
   that kitty, foot, contour and WezTerm all speak is accepted and reported
   rather than falling into the unknown-mode branch.
+- **An origin-mode cursor fix.** `goto` is the one entry point whose line is
+  measured from the top of the scroll region, so it is the only one that adds the
+  region's offset; the relative moves (`CUU`, `CUD`, `CNL`, `CPL`, and `CHA`,
+  which keeps the line it is on) go through a new `Term::goto_absolute` instead.
+  They used to pass their already-absolute line into `goto`, which added the
+  offset to it a second time — under origin mode with a region that does not
+  start at the top, a column move walked the cursor down the screen. Upstream
+  0.26.0 and master are both still written that way, so there is nothing to port:
+  this is Folio's own fix, and it is the smallest one that keeps every call
+  site's clamping byte for byte.
+- **UTF-8 mouse reporting refused.** `DECSET 1005` sets no mode and is reported
+  as not set. It used to be recorded and answered for, while the coordinates this
+  terminal actually writes are the ordinary ones — so a program that asked, was
+  told yes, and then framed every click past column 95 as something else.
+  Upstream has the same shape; refusing the mode is the honest half of the two
+  answers, and the one that costs no encoder nobody can decode.
 - **Input-write tracking.** `take_input_writes` drains the set of rows that
   received printable input since the last drain — distinct from render damage,
   which is about what must be repainted.
