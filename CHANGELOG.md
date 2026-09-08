@@ -35,6 +35,105 @@ All notable changes to Folio are recorded here. The format follows
   directory holds. Nothing about the program changed.
 ### Fixed
 
+- **A saved tab whose shell is no longer on the machine opens as a tab.**
+  Uninstalling Git with a Git Bash tab pinned stopped Folio before its first
+  window, on every launch, until the saved session was edited by hand. Such a
+  tab now opens in the folder it was standing in, running the shell the machine
+  does have, with a first line naming the one it could not start. A machine with
+  nothing at all to run gets a pane that says so.
+
+- **A terminal font size Folio cannot draw no longer stops it starting.** A
+  `terminal_font_size` of `0` in `settings.json`, from a hand edit or a
+  half-written file, reached the text layer and ended the launch before any
+  window opened. Any stored size is now brought into the range the Appearance
+  page offers, and a size inside that range is used exactly as written.
+
+- **A preferences or session file Folio cannot read is kept.** A file that would
+  not parse, or that a newer Folio wrote, was replaced by defaults with one line
+  on a console nobody was watching, and the first thing you did afterwards
+  overwrote it. Folio now copies it beside itself as `<name>.rejected-` and the
+  date and time before anything can replace it, and says on the window which
+  file it was and where the copy is. The same is true of `keybindings.json`,
+  `profiles.json` and `pins.json`.
+
+- **A second Folio no longer erases the first one's preferences and tabs.** Two
+  Folio windows started from two processes each held the whole of
+  `settings.json` and `session.json` from the moment they opened and wrote all
+  of it back, so whichever wrote last erased everything the other had done.
+  Only one process now writes those two files; a second one keeps its window,
+  keeps every gesture in it working, and says once that nothing in it is saved.
+
+- **A saved session larger than Folio will open says so.** A file describing
+  more windows, tabs and panes than Folio opens at once was expanded into that
+  many shells before the first frame. Folio now stops at a ceiling, keeps the
+  front of what you had arranged, and tells you the rest was left closed. Every
+  file it reads also has a size limit, and one past it is moved aside rather
+  than read whole.
+
+- **A restored window always comes back with its title bar on a monitor.** A
+  window whose recorded size still fitted its display kept its recorded corner
+  whatever that corner was, so a stale or hand-edited position could bring the
+  window back above the top of the desktop with nothing to take hold of. The
+  corner now comes back onto the display far enough for the title bar to be
+  caught, and a window parked half off the side is still left where you parked
+  it.
+
+- **A setting that could not be saved is saved when you choose it again.**
+  Choosing a row wrote the file and remembered the new value whether or not the
+  write worked, so choosing the same row a second time matched what was already
+  remembered and tried nothing. Folio now knows a value has not reached the
+  disk and writes it again at the next chance.
+
+- **A file that keeps refusing to be written says so and stops trying.** A full
+  disk or a folder gone read-only meant a save attempt every second and a half
+  for as long as the window stayed open, each one leaving a half-written file
+  behind, and nothing on screen about any of it. Folio now removes what it left,
+  gives up after a few tries, says which file could not be saved, and starts
+  again the next time you change something.
+
+- **The marker Folio leaves while it runs no longer empties whatever stands at
+  its name.** A link planted at `session.lock` was followed and emptied at every
+  launch. Folio now looks at the name before opening it, leaves a link alone,
+  and never truncates anything.
+
+- **Your PowerShell profile is replaced in one step, and every write takes a
+  copy.** Adding the integration line emptied the file and then wrote it, so a
+  shell starting at that instant read a profile with nothing in it; and a second
+  write on the same day took no copy at all, losing whatever you had typed into
+  the file since the first. The file is now replaced whole, and every write
+  keeps a copy of what was there.
+
+- **A PowerShell integration file that was upgraded, deleted or truncated is
+  written again.** Once the line was in your profile, the file it points at was
+  never looked at again, so a Folio upgrade left your shells reading an older
+  copy and a cleaner left them reading nothing, in both cases with the setting
+  still saying it was installed. It is now compared against what ships and
+  written again when it differs, the way the bash one already was.
+
+- **Turning the Explorer entry off while it is being installed takes effect.**
+  The switch compared your press against what the machine was before the install
+  started, so an Off pressed while On was still running matched, started
+  nothing, and the entry appeared anyway. A press made during that few seconds
+  is now kept and acted on the moment the first job ends.
+
+- **Folio's first-page Explorer entry reads as this copy's only when it would
+  open this copy.** The entry names one fixed program inside a folder, and Folio
+  compared only the folder, so an entry that would open a different Folio was
+  read as belonging to this one. Both are now compared, and a launch that could
+  not put itself behind the entry leaves it alone rather than re-registering it
+  at every start.
+
+- **Dismissing the update mark while a check is running is not undone by it.**
+  The daily check wrote back the state it read before asking, so a mark you had
+  just acknowledged came back lit and stayed that way until you acknowledged it
+  after every check. The check now writes only what it learned.
+
+- **A command line a program printed is never typed into a restored pane.** A
+  program in a pane could print shell markers around any text it liked, and that
+  text became the tab's last command and was put back on the prompt of the
+  restored pane with the cursor after it. Only a line your own keyboard was
+  present for is kept now, and only within a length anybody could have typed.
+
 - **The key that summons the quick terminal raises it when it is on screen and
   you are working somewhere else.** The chord read only whether the window was
   visible, so pressing it while the terminal stood behind your editor sent the

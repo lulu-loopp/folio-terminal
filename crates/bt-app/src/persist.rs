@@ -19,6 +19,180 @@ use bt_persist::{
     write_keybindings_atomic, write_profiles_atomic, write_session_atomic, write_settings_atomic,
 };
 
+/// The name the session document wears on disk, which is also what a notice
+/// about it has to say out loud — [`KEYBINDINGS_FILE_NAME`]'s rule, one file
+/// over.
+pub const SESSION_FILE_NAME: &str = "session.json";
+
+/// And the preferences document's, on the same terms.
+pub const SETTINGS_FILE_NAME: &str = "settings.json";
+
+/// **How many times in a row a document may fail to reach the disk before the
+/// reader is told and the retrying stops** (review rows R4-10 and R4-11).
+///
+/// The session store's retry lives on the debounce, so an unbounded one is a
+/// write attempt every 1.5 seconds for as long as the window is open — against a
+/// disk that is full, a folder that has gone read-only or a volume that was
+/// unplugged, none of which the next attempt is going to fix. Five is enough to
+/// ride out the transient case (an antivirus holding the file open for a moment,
+/// a sync client mid-rename) and short enough that the reader hears about the
+/// permanent one while they can still do something about it.
+///
+/// **It is a bound on retries and not a surrender.** Any new change re-arms the
+/// counter — see [`DocumentWrites::rearm`] — because a reader who has just
+/// changed something is a reader asking for it to be saved, and because the
+/// condition may well have gone away in the meantime.
+const MAX_WRITE_ATTEMPTS: u32 = 5;
+
+/// **The disk half of a store that writes a whole document on a press** (review
+/// row R4-10).
+///
+/// Every store here used to assign the new value into itself, write, and answer
+/// `true` whatever the write did. Two things followed, and both of them were
+/// silent. The first is that a failed save was remembered as done: the value the
+/// store holds is what the next call compares against, so picking the same row
+/// again was an early return and retried nothing — the one gesture a reader
+/// makes when something did not take. The second is that nothing anywhere
+/// counted, so a folder that had gone read-only produced one line on `stderr`
+/// per press, for ever.
+///
+/// So the value is adopted — the window must show what the reader chose — and
+/// this records that it is **not on the disk**, which is what makes the next
+/// press a real attempt rather than a comparison that matches.
+#[derive(Debug)]
+pub(crate) struct DocumentWrites {
+    failures: WriteFailureTracker,
+    /// The document the store holds has not reached the disk.
+    unsaved: bool,
+    /// Failures since the last success or the last re-arming.
+    streak: u32,
+    /// The sentence the reader is owed, once, when the streak has run out.
+    fault: Option<String>,
+}
+
+impl DocumentWrites {
+    pub(crate) fn new() -> Self {
+        Self {
+            failures: WriteFailureTracker::new(),
+            unsaved: false,
+            streak: 0,
+            fault: None,
+        }
+    }
+
+    /// Whether a store asked to hold a document it already holds should
+    /// nonetheless write it.
+    ///
+    /// The whole of R4-10's fix in one line: an unchanged value is normally
+    /// nothing to do, and is exactly something to do when the last attempt at it
+    /// did not land.
+    pub(crate) fn wants_write(&self, changed: bool) -> bool {
+        changed || self.unsaved
+    }
+
+    /// Whether there is any point trying again on a clock rather than on a
+    /// press.
+    pub(crate) fn may_retry(&self) -> bool {
+        self.streak < MAX_WRITE_ATTEMPTS
+    }
+
+    /// Book one attempt, and answer whether the document is on the disk now.
+    ///
+    /// `file` is named in both the `stderr` line (§5.3) and the sentence, because
+    /// a reader who is told a save failed can only act on it if they are told
+    /// which file.
+    pub(crate) fn record(&mut self, file: &str, result: Result<(), String>) -> bool {
+        let landed = result.is_ok();
+        if self.failures.record(landed) == WriteAlertAction::AlertOnce
+            && let Err(error) = &result
+        {
+            // §5.3: one line per failure streak, not one per attempt.
+            eprintln!("BT_PERSIST could not write {file}: {error}");
+        }
+        self.unsaved = !landed;
+        if landed {
+            self.streak = 0;
+            return true;
+        }
+        self.streak = self.streak.saturating_add(1);
+        if self.streak == MAX_WRITE_ATTEMPTS {
+            self.fault
+                .get_or_insert_with(|| crate::i18n::persisted_file_unwritable(file));
+        }
+        false
+    }
+
+    /// A new decision has been made, so the retrying starts again.
+    pub(crate) fn rearm(&mut self) {
+        self.streak = 0;
+    }
+
+    /// Take the sentence, so a card about it is raised once and not once a frame.
+    pub(crate) fn take_fault(&mut self) -> Option<String> {
+        self.fault.take()
+    }
+}
+
+/// **What a document that would not read owes the reader** — the sentence, and
+/// the copy of it that was kept (review row R4-3).
+///
+/// One function for all six files, because the fix is one rule: the read path
+/// now writes the refused bytes beside the file before anything can replace
+/// them, and the sentence the reader is shown has to name where they went or the
+/// copy might as well not exist. `in_force` is the half that differs per file —
+/// what stands in for the damaged document — and it is a closure rather than a
+/// parameter because a sentence that called all six "the defaults" would be the
+/// vaguest of the six everywhere.
+pub(crate) fn read_fault(
+    report: &ReadReport,
+    file: &str,
+    in_force: impl FnOnce(&str) -> String,
+) -> Option<String> {
+    let ReadReport::FellBackToDefaults { reason, kept } = report else {
+        return None;
+    };
+    eprintln!("BT_PERSIST {file} fell back to defaults: {reason:?} kept={kept:?}");
+    let sentence = in_force(file);
+    Some(match kept {
+        Some(kept) => crate::i18n::persisted_file_kept_copy(
+            &sentence,
+            &kept
+                .file_name()
+                .unwrap_or(kept.as_os_str())
+                .to_string_lossy(),
+        ),
+        None => sentence,
+    })
+}
+
+/// **Whether this process is the one that writes `%APPDATA%\Folio\`** (review
+/// row R4-5).
+///
+/// Two Folio processes over one data directory had no lock and no re-read: each
+/// held the whole of `settings.json` and `session.json` from the moment it
+/// started and wrote the whole document back, so the second one to write erased
+/// everything the first had done since — a preference, a window, every tab.
+///
+/// **A lock and a notice, not a hand-over.** The second process keeps its
+/// window, keeps every gesture in it working, and does not touch the two
+/// documents; it says so once, on that window. The alternative — handing the
+/// command line to the first process and exiting — is a *product* decision about
+/// whether Folio is a single-instance application, which it is not today: a
+/// reader can and does open a second one deliberately, and a launch that
+/// silently vanished into somebody else's window would be a surprise this
+/// review row did not ask for. What the row asked for is that the second one
+/// stops erasing the first one's work, and this is that and nothing more.
+///
+/// Asked once and remembered, because the claim is held for the life of the
+/// process: the answer cannot change while this process runs, and a second call
+/// that took a second claim would refuse itself.
+pub fn is_storage_writer() -> bool {
+    static CLAIM: OnceLock<Option<bt_platform::instance::DataDirectoryClaim>> = OnceLock::new();
+    CLAIM
+        .get_or_init(|| bt_platform::instance::claim_data_directory(&storage_dir()))
+        .is_some()
+}
+
 /// docs/M2-persistence-schema-v1.md §5.1 rules "debounce roughly 1-2 seconds
 /// after a meaningful change", and leaves the exact figure to the call site.
 /// The slower end of the band: a session write is never urgent, and every
@@ -189,11 +363,21 @@ pub struct SessionStore {
     sentinel_path: PathBuf,
     session: SessionV1,
     debouncer: Debouncer,
-    failures: WriteFailureTracker,
+    writes: DocumentWrites,
     writer: SessionWriter,
     /// True once the sentinel for *this* run exists, so a clean exit knows
     /// there is something to remove.
     armed: bool,
+    /// **Whether this process writes the session at all** (review row R4-5).
+    ///
+    /// False in the second Folio over one data directory: its window works, its
+    /// tabs are its own, and nothing it does reaches `session.json` — which is
+    /// the whole of the fix, because what a second writer costs is the first
+    /// one's windows.
+    writer_of_record: bool,
+    /// The sentence a startup owes about this file, if it owes one — a document
+    /// that would not read, or one larger than this build will open.
+    fault: Option<String>,
 }
 
 impl SessionStore {
@@ -207,9 +391,14 @@ impl SessionStore {
     /// its layout.
     pub fn open() -> Self {
         let dir = storage_dir();
-        let session_path = dir.join("session.json");
+        let session_path = dir.join(SESSION_FILE_NAME);
         let sentinel_path = dir.join("session.lock");
         let writable = std::fs::create_dir_all(&dir).is_ok();
+        // **Asked before the sentinel and before the read** (review row R4-5),
+        // because both of those are things only the writer of record may do: a
+        // second process that armed a sentinel would clear the first one's crash
+        // record on its own clean exit.
+        let writer_of_record = is_storage_writer();
         // Probe *before* creating: creating first would make every probe after
         // the first report a crash.
         let previous_exit = probe_sentinel(&sentinel_path).unwrap_or(ExitState::Normal);
@@ -217,28 +406,55 @@ impl SessionStore {
         // §5.4 case 1 — no file yet — is the normal first run and must not
         // alert; every other non-`Loaded` outcome must (§5.3: "explicit alert,
         // never pretend it succeeded").
-        if let ReadReport::FellBackToDefaults { reason } = &report {
-            eprintln!("BT_PERSIST session.json fell back to defaults: {reason:?}");
-        }
+        let mut fault = read_fault(
+            &report,
+            SESSION_FILE_NAME,
+            crate::i18n::session_file_unreadable,
+        );
         if !degradation.is_clean() {
             eprintln!(
-                "BT_PERSIST session.json degraded: {} clamped ratios, {} unknown leaves",
-                degradation.clamped_ratios, degradation.unknown_leaves
+                "BT_PERSIST session.json degraded: {} clamped ratios, {} unknown leaves, \
+                 {} windows, {} tabs and {} panes past the ceiling, {} impossible commands",
+                degradation.clamped_ratios,
+                degradation.unknown_leaves,
+                degradation.dropped_windows,
+                degradation.dropped_tabs,
+                degradation.dropped_panes,
+                degradation.dropped_commands
             );
+        }
+        // **Only the ceiling is said out loud** (review row R4-9). A clamped
+        // ratio and an unknown leaf are already visible — the divider sits where
+        // it can and the pane draws its placeholder — but a tab that was not
+        // opened at all looks exactly like a tab the reader forgot they had.
+        if degradation.dropped_windows + degradation.dropped_tabs + degradation.dropped_panes > 0 {
+            fault.get_or_insert_with(|| crate::i18n::session_file_trimmed(SESSION_FILE_NAME));
         }
         if previous_exit == ExitState::Crashed {
             eprintln!("BT_PERSIST previous session did not reach its clean-exit path");
         }
-        let armed = writable && create_sentinel(&sentinel_path).is_ok();
+        let armed = writable && writer_of_record && create_sentinel(&sentinel_path).is_ok();
         Self {
             session_path,
             sentinel_path,
             session,
             debouncer: Debouncer::new(),
-            failures: WriteFailureTracker::new(),
+            writes: DocumentWrites::new(),
             writer: SessionWriter::open(),
             armed,
+            writer_of_record,
+            fault,
         }
+    }
+
+    /// Take the sentence this store owes the reader, so a card about it is
+    /// raised once and not once a frame — every other store's `take_fault`, and
+    /// for its reason.
+    ///
+    /// Two sources, one sentence: a document that would not read (and the copy
+    /// of it that was kept), and a document whose writes have stopped landing.
+    pub fn take_fault(&mut self) -> Option<String> {
+        self.fault.take().or_else(|| self.writes.take_fault())
     }
 
     /// A store over two named paths, for the tests that have to watch a write
@@ -257,9 +473,13 @@ impl SessionStore {
             sentinel_path,
             session: SessionV1::default(),
             debouncer: Debouncer::new(),
-            failures: WriteFailureTracker::new(),
+            writes: DocumentWrites::new(),
             writer: SessionWriter::open(),
             armed: false,
+            // A named-path store is the one this process is writing, by
+            // construction: it is not `%APPDATA%` and no other process has it.
+            writer_of_record: true,
+            fault: None,
         }
     }
 
@@ -276,6 +496,11 @@ impl SessionStore {
             return;
         }
         self.session = session;
+        // **A new arrangement re-arms the retrying** (review row R4-11). The
+        // bound below is on repeating one failed write on a clock; a reader who
+        // has just moved a divider is asking for *this* document to be kept, and
+        // the condition that refused the last one may well be gone.
+        self.writes.rearm();
         self.debouncer.mark_dirty(now);
     }
 
@@ -300,6 +525,13 @@ impl SessionStore {
         }
     }
 
+    /// Whether this process is the one that writes `session.json` — see
+    /// [`is_storage_writer`]. A store that is not stays exactly as useful as one
+    /// that is, in memory; it simply reaches no disk.
+    fn writes_to_disk(&self) -> bool {
+        self.writer_of_record
+    }
+
     /// Hand the current document to the writer, without waiting for it to land.
     ///
     /// The debounce is marked flushed here rather than at the receipt, and the two are different
@@ -308,6 +540,14 @@ impl SessionStore {
     /// is [`Self::take_receipts`]'s, and a failure there marks the document dirty again so the
     /// next quiet window retries it.
     fn hand_over(&mut self, now: Instant) {
+        if !self.writes_to_disk() {
+            // The second Folio over this directory (review row R4-5). Marked
+            // flushed rather than left dirty, because nothing is owed: there is
+            // no attempt to retry and no failure to report — this process was
+            // never the one keeping this file.
+            self.debouncer.mark_flushed();
+            return;
+        }
         let bytes = match bt_persist::serialize_session(&self.session) {
             Ok(bytes) => bytes,
             // A document that cannot be turned into JSON is not a disk problem and no thread will
@@ -356,18 +596,32 @@ impl SessionStore {
         self.report_write(receipt.result, now);
     }
 
-    /// One alert per failure streak (§5.3), and a failure leaves the document owed.
+    /// One alert per failure streak (§5.3), and a failure leaves the document
+    /// owed — **for a bounded number of tries** (review row R4-11).
+    ///
+    /// The retry used to be unconditional, which over a full disk or a volume
+    /// that was unplugged meant one `atomic_write` every 1.5 seconds for as long
+    /// as the window stayed open, each of them leaving a temp file behind
+    /// (`bt_persist::atomic`'s own half of that row). Past the bound the document
+    /// stops going back on the clock and the reader is told instead — and the
+    /// next change re-arms it, because [`Self::record`] does.
     fn report_write(&mut self, result: Result<(), String>, now: Instant) {
-        if self.failures.record(result.is_ok()) == WriteAlertAction::AlertOnce
-            && let Err(error) = &result
-        {
-            // §5.3: one alert per failure streak, not one per attempt. A full
-            // disk must not turn into a message every 1.5 seconds.
-            eprintln!("BT_PERSIST could not write session.json: {error}");
+        if self.writes.record(SESSION_FILE_NAME, result) {
+            return;
         }
-        if result.is_err() {
+        if self.writes.may_retry() {
             self.debouncer.mark_dirty(now);
+            return;
         }
+        // **Past the bound the clock is stopped, not merely left un-wound.**
+        // Leaving the document dirty would keep `flush_if_due` handing it over
+        // every quiet window, which is the loop this bound exists to end; and
+        // it would keep the event loop waking for a deadline it can do nothing
+        // about. Marked flushed is the honest reading of "this store is not
+        // going to try again" — it is not a claim that anything landed, which
+        // is what the fault sentence taken by the window says instead. The next
+        // real change re-arms both, in [`Self::record`].
+        self.debouncer.mark_flushed();
     }
 
     /// Write now, whatever the debounce says. The clean-exit path uses this:
@@ -400,6 +654,15 @@ impl SessionStore {
     /// and a quit may not report as landed a document nobody has heard back about.
     pub fn flush_judged(&mut self) -> Result<(), String> {
         let now = Instant::now();
+        if !self.writes_to_disk() {
+            // The second Folio over this directory (review row R4-5). `Ok(())`
+            // and not an error, because the quit's question is "did what this
+            // process owed the disk reach it" and this process owes it nothing —
+            // an error here would refuse to close a window over a document that
+            // was never this window's.
+            self.debouncer.mark_flushed();
+            return Ok(());
+        }
         self.take_receipts(now);
         if !self.debouncer.is_dirty() {
             // Clean, but not necessarily *landed*: a document handed over a moment ago can still
@@ -475,7 +738,12 @@ impl SessionStore {
 pub struct SettingsStore {
     path: PathBuf,
     settings: SettingsV1,
-    failures: WriteFailureTracker,
+    writes: DocumentWrites,
+    /// The sentence a startup owes about this file, if it owes one.
+    fault: Option<String>,
+    /// Whether this process writes `settings.json` at all — [`SessionStore`]'s
+    /// field of this name, and review row R4-5's whole answer.
+    writer_of_record: bool,
     /// Whether there was no `settings.json` at all when this store opened.
     ///
     /// Kept rather than thrown away with the rest of the report, because it is
@@ -495,18 +763,44 @@ impl SettingsStore {
     /// be a worse product than one that starts with the default preferences.
     pub fn open() -> Self {
         let dir = storage_dir();
-        let path = dir.join("settings.json");
+        let path = dir.join(SETTINGS_FILE_NAME);
         let _ = std::fs::create_dir_all(&dir);
         let (settings, report) = read_settings(&path);
         // §5.4 case 1 — no file yet — is the normal first run and must not alert.
-        if let ReadReport::FellBackToDefaults { reason } = &report {
-            eprintln!("BT_PERSIST settings.json fell back to defaults: {reason:?}");
-        }
+        let fault = read_fault(
+            &report,
+            SETTINGS_FILE_NAME,
+            crate::i18n::settings_file_unreadable,
+        );
         Self {
             path,
             settings,
-            failures: WriteFailureTracker::new(),
+            writes: DocumentWrites::new(),
+            fault,
+            writer_of_record: is_storage_writer(),
             missing: report == ReadReport::NotFound,
+        }
+    }
+
+    /// Take the sentence this store owes the reader — [`SessionStore::take_fault`]
+    /// and every other store's, one file over.
+    pub fn take_fault(&mut self) -> Option<String> {
+        self.fault.take().or_else(|| self.writes.take_fault())
+    }
+
+    /// The same store over a named file, for the tests that have to watch a
+    /// write **fail** — [`SessionStore::at`]'s door and its reason: neither
+    /// resolving `%APPDATA%` nor writing into it is a thing a test may do to the
+    /// machine it runs on.
+    #[cfg(test)]
+    pub fn at(path: PathBuf) -> Self {
+        Self {
+            path,
+            settings: SettingsV1::default(),
+            writes: DocumentWrites::new(),
+            fault: None,
+            writer_of_record: true,
+            missing: true,
         }
     }
 
@@ -526,19 +820,32 @@ impl SettingsStore {
 
     /// Record a change and put it on disk now. Returns whether anything changed,
     /// so a caller can skip the repaint when a user picks the value already set.
+    ///
+    /// **A value that did not reach the disk is written again next time it is
+    /// chosen** (review row R4-10). The early return below used to be on
+    /// equality alone, so re-picking the row a failed save had already adopted
+    /// matched and retried nothing — and re-picking is exactly the gesture
+    /// somebody makes when a setting did not take.
     pub fn store(&mut self, settings: SettingsV1) -> bool {
-        if self.settings == settings {
+        let changed = self.settings != settings;
+        if !self.writes.wants_write(changed) {
             return false;
         }
         self.settings = settings;
-        let result = write_settings_atomic(&self.path, &self.settings);
-        if self.failures.record(result.is_ok()) == WriteAlertAction::AlertOnce
-            && let Err(error) = &result
-        {
-            // §5.3: one alert per failure streak, not one per attempt.
-            eprintln!("BT_PERSIST could not write settings.json: {error}");
+        if changed {
+            self.writes.rearm();
         }
-        true
+        if !self.writer_of_record {
+            // The second Folio over this directory (review row R4-5): the choice
+            // is live in this window and reaches no file. Not recorded as a
+            // failure, because nothing was attempted and nothing is owed.
+            return changed;
+        }
+        self.writes.record(
+            SETTINGS_FILE_NAME,
+            write_settings_atomic(&self.path, &self.settings).map_err(|error| error.to_string()),
+        );
+        changed
     }
 }
 
@@ -563,7 +870,9 @@ pub struct KeybindingsStore {
     overrides: Vec<BindingOverrideV1>,
     /// Why the file on disk was not usable, if it was not.
     fault: Option<String>,
-    failures: WriteFailureTracker,
+    writes: DocumentWrites,
+    /// Whether this process writes this file at all — review row R4-5.
+    writer_of_record: bool,
 }
 
 impl KeybindingsStore {
@@ -575,20 +884,17 @@ impl KeybindingsStore {
         let (file, report) = read_keybindings(&path);
         // §5.4 case 1 — no file — is the ordinary state of nearly every machine
         // and must not alert. Everything else must, naming the file (§5.3).
-        let fault = match &report {
-            ReadReport::FellBackToDefaults { reason } => {
-                eprintln!("BT_PERSIST {KEYBINDINGS_FILE_NAME} fell back to defaults: {reason:?}");
-                Some(crate::i18n::keybindings_file_unreadable(
-                    KEYBINDINGS_FILE_NAME,
-                ))
-            }
-            ReadReport::NotFound | ReadReport::Loaded => None,
-        };
+        let fault = read_fault(
+            &report,
+            KEYBINDINGS_FILE_NAME,
+            crate::i18n::keybindings_file_unreadable,
+        );
         Self {
             path,
             overrides: file.bindings,
             fault,
-            failures: WriteFailureTracker::new(),
+            writes: DocumentWrites::new(),
+            writer_of_record: is_storage_writer(),
         }
     }
 
@@ -598,32 +904,38 @@ impl KeybindingsStore {
     }
 
     /// Take the read fault, so a notice about it is raised once and not once a
-    /// frame.
+    /// frame. A write that has stopped landing is owed the same card, and is
+    /// taken through the same door.
     pub fn take_fault(&mut self) -> Option<String> {
-        self.fault.take()
+        self.fault.take().or_else(|| self.writes.take_fault())
     }
 
     /// Record the new set of departures and put them on disk now.
     ///
     /// Returns whether anything changed, so a caller can skip the write when a
-    /// user records the chord a row already had.
+    /// user records the chord a row already had — and writes anyway when the last
+    /// attempt did not land ([`SettingsStore::store`]'s rule, review row R4-10).
     pub fn store(&mut self, overrides: Vec<BindingOverrideV1>) -> bool {
-        if self.overrides == overrides {
+        let changed = self.overrides != overrides;
+        if !self.writes.wants_write(changed) {
             return false;
         }
         self.overrides = overrides;
+        if changed {
+            self.writes.rearm();
+        }
+        if !self.writer_of_record {
+            return changed;
+        }
         let file = KeybindingsV1 {
             schema_version: KEYBINDINGS_SCHEMA_VERSION,
             bindings: self.overrides.clone(),
         };
-        let result = write_keybindings_atomic(&self.path, &file);
-        if self.failures.record(result.is_ok()) == WriteAlertAction::AlertOnce
-            && let Err(error) = &result
-        {
-            // §5.3: one alert per failure streak, not one per attempt.
-            eprintln!("BT_PERSIST could not write {KEYBINDINGS_FILE_NAME}: {error}");
-        }
-        true
+        self.writes.record(
+            KEYBINDINGS_FILE_NAME,
+            write_keybindings_atomic(&self.path, &file).map_err(|error| error.to_string()),
+        );
+        changed
     }
 }
 
@@ -649,7 +961,9 @@ pub struct ProfilesStore {
     loaded: ProfilesV1,
     /// Why the file on disk was not usable, if it was not.
     fault: Option<String>,
-    failures: WriteFailureTracker,
+    writes: DocumentWrites,
+    /// Whether this process writes this file at all — review row R4-5.
+    writer_of_record: bool,
 }
 
 /// What a re-read of `profiles.json` found — [`ProfilesStore::reread`]'s answer.
@@ -688,18 +1002,17 @@ impl ProfilesStore {
         let (file, report) = read_profiles(&path);
         // §5.4 case 1 — no file — is the ordinary state of nearly every machine
         // and must not alert. Everything else must, naming the file (§5.3).
-        let fault = match &report {
-            ReadReport::FellBackToDefaults { reason } => {
-                eprintln!("BT_PERSIST {PROFILES_FILE_NAME} fell back to defaults: {reason:?}");
-                Some(crate::i18n::profiles_file_unreadable(PROFILES_FILE_NAME))
-            }
-            ReadReport::NotFound | ReadReport::Loaded => None,
-        };
+        let fault = read_fault(
+            &report,
+            PROFILES_FILE_NAME,
+            crate::i18n::profiles_file_unreadable,
+        );
         Self {
             path,
             loaded: file,
             fault,
-            failures: WriteFailureTracker::new(),
+            writes: DocumentWrites::new(),
+            writer_of_record: is_storage_writer(),
         }
     }
 
@@ -709,9 +1022,9 @@ impl ProfilesStore {
     }
 
     /// Take the read fault, so a notice about it is raised once and not once a
-    /// frame.
+    /// frame. A write that has stopped landing comes through the same door.
     pub fn take_fault(&mut self) -> Option<String> {
-        self.fault.take()
+        self.fault.take().or_else(|| self.writes.take_fault())
     }
 
     /// **Read the file again, because the folder moved** (§7.1.6c-6d).
@@ -740,8 +1053,8 @@ impl ProfilesStore {
     /// the caller's — this type has no way to say anything to anybody.
     pub fn reread(&mut self) -> ProfilesNews {
         let (file, report) = read_profiles(&self.path);
-        if let ReadReport::FellBackToDefaults { reason } = &report {
-            eprintln!("BT_PERSIST {PROFILES_FILE_NAME} would not parse: {reason:?}");
+        if let ReadReport::FellBackToDefaults { reason, kept } = &report {
+            eprintln!("BT_PERSIST {PROFILES_FILE_NAME} would not parse: {reason:?} kept={kept:?}");
             return ProfilesNews::Unreadable;
         }
         if self.loaded == file {
@@ -756,18 +1069,22 @@ impl ProfilesStore {
     /// Returns whether anything changed, so a caller can skip the write when a
     /// press moved nothing.
     pub fn store(&mut self, file: ProfilesV1) -> bool {
-        if self.loaded == file {
+        let changed = self.loaded != file;
+        if !self.writes.wants_write(changed) {
             return false;
         }
         self.loaded = file;
-        let result = write_profiles_atomic(&self.path, &self.loaded);
-        if self.failures.record(result.is_ok()) == WriteAlertAction::AlertOnce
-            && let Err(error) = &result
-        {
-            // §5.3: one alert per failure streak, not one per attempt.
-            eprintln!("BT_PERSIST could not write {PROFILES_FILE_NAME}: {error}");
+        if changed {
+            self.writes.rearm();
         }
-        true
+        if !self.writer_of_record {
+            return changed;
+        }
+        self.writes.record(
+            PROFILES_FILE_NAME,
+            write_profiles_atomic(&self.path, &self.loaded).map_err(|error| error.to_string()),
+        );
+        changed
     }
 }
 
@@ -1121,6 +1438,122 @@ mod tests {
 
     fn read(path: &Path) -> Option<String> {
         std::fs::read_to_string(path).ok()
+    }
+
+    /// RED (review row R4-10) — **a value that did not reach the disk is written
+    /// again the next time it is chosen.**
+    ///
+    /// Every store here assigned the new value into itself, wrote, and answered
+    /// `true` whatever the write did — so a failed save was *remembered as done*.
+    /// The value the store holds is what the next call compares against, so
+    /// picking the same row again matched, returned early and attempted nothing:
+    /// the one gesture a person makes when a setting did not take was the one
+    /// gesture guaranteed to do nothing.
+    ///
+    /// The failure is injected the way this file's other write tests inject one
+    /// — a path whose parent directory does not exist, which is what a store on a
+    /// volume that went away looks like from here. No mock, no flag: the real
+    /// `atomic_write` refusing for a real reason.
+    ///
+    /// Red gate: compare on equality alone (`if self.settings == settings { return
+    /// false }`) and the second write never happens, so the file below is still
+    /// missing after the directory comes back.
+    #[test]
+    fn a_setting_that_could_not_be_saved_is_saved_when_it_is_chosen_again() {
+        let root = appdata("retry");
+        let gone = root.join("not-yet").join("settings.json");
+        let mut store = SettingsStore::at(gone.clone());
+
+        let chosen = SettingsV1 {
+            terminal_font_size: 22,
+            ..SettingsV1::default()
+        };
+        assert!(store.store(chosen.clone()), "the value changed");
+        assert!(!gone.exists(), "and the write could not happen");
+        assert_eq!(
+            store.loaded().terminal_font_size,
+            22,
+            "the window still shows what the reader chose"
+        );
+
+        // The volume comes back — or the reader, seeing the size did not change,
+        // picks the same row again.
+        std::fs::create_dir_all(gone.parent().unwrap()).unwrap();
+        assert!(
+            !store.store(chosen),
+            "nothing changed, so no repaint is owed"
+        );
+        assert!(
+            gone.is_file(),
+            "but the write was attempted again, and this time it landed"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (review rows R4-10 and R4-11) — **a write that keeps failing stops
+    /// being retried and is said out loud.**
+    ///
+    /// The other half. `SessionStore` marked the document dirty again on every
+    /// failure, unconditionally, so a full disk or a volume that was unplugged
+    /// meant one `atomic_write` every 1.5 seconds for as long as the window
+    /// stayed open — each of them leaving a temp file behind, which is
+    /// `bt_persist::atomic`'s own half of R4-11 — and one line on a console
+    /// nobody was watching.
+    ///
+    /// Red gate: mark dirty without asking `may_retry` and the store is still
+    /// dirty after the bound; never fill `fault` and the card is never owed.
+    #[test]
+    fn a_document_that_will_not_write_stops_retrying_and_says_so() {
+        let root = appdata("give-up");
+        let gone = root.join("not-here");
+        let mut store = SessionStore::at(gone.join("session.json"), gone.join("session.lock"));
+
+        let mut document = SessionV1::default();
+        document.recent_folders.push(bt_persist::RecentFolderV1 {
+            path: r"D:\work".to_owned(),
+            opened_at: "2026-09-08T00:00:00Z".to_owned(),
+        });
+        let now = Instant::now();
+        store.record(document, now);
+
+        // Every attempt the bound allows. `flush_judged` rather than the
+        // autosave's own `hand_over`, because it is the one that waits for the
+        // writer thread's answer — the autosave hands a document over and hears
+        // about it a turn or two later, which is a race a test may not run on.
+        // The retry rule is the same either way: it lives in `report_write`.
+        for _ in 0..MAX_WRITE_ATTEMPTS {
+            assert!(store.debouncer.is_dirty(), "still owed");
+            assert!(store.flush_judged().is_err(), "and it still cannot be kept");
+        }
+        assert!(
+            !store.debouncer.is_dirty(),
+            "past the bound the document stops going back on the clock"
+        );
+        let fault = store.take_fault().expect("and the reader is told");
+        assert!(
+            fault.contains(SESSION_FILE_NAME),
+            "naming the file, so it can be acted on: {fault}"
+        );
+        assert!(store.take_fault().is_none(), "once, and not once a frame");
+
+        // And a new arrangement re-arms it, because a reader who has just moved
+        // something is asking for that to be kept.
+        let mut moved = SessionV1::default();
+        moved.recent_folders.push(bt_persist::RecentFolderV1 {
+            path: r"D:\other".to_owned(),
+            opened_at: "2026-09-08T00:00:01Z".to_owned(),
+        });
+        store.record(moved, Instant::now());
+        assert!(store.debouncer.is_dirty());
+        assert!(store.flush_judged().is_err());
+        assert!(
+            store.debouncer.is_dirty(),
+            "the retrying starts again from a fresh count"
+        );
+
+        store.writer.close();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// PIN — state one of three: nothing was ever written under the old name, so

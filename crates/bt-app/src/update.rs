@@ -443,8 +443,23 @@ pub fn run(dir: &Path, now_ms: u64, source: &dyn Releases) -> Outcome {
 
     match source.latest_tag() {
         Ok(tag) => {
-            state.latest_tag = Some(tag.clone());
-            let _ = bt_persist::write_update_check_atomic(&path, &state);
+            // **Read again before writing back** (review row R4-14). The claim
+            // above keeps other *processes* out; it does not keep this process's
+            // own window thread out, and [`mark_seen`] runs there — so a reader
+            // who opened the About page and dismissed the mark while this request
+            // was on the wire had their `seen_tag` written, and then overwritten
+            // by the snapshot this thread took before the request. The dot came
+            // back, on a version they had just acknowledged, and the only way out
+            // was to acknowledge it again after every check.
+            //
+            // The two fields this thread owns are re-applied to whatever the file
+            // says now: `checked_at_ms` because this thread is what advanced it,
+            // and `latest_tag` because this thread is what fetched it. Everything
+            // else in the document is somebody else's and is left alone.
+            let (mut current, _) = bt_persist::read_update_check(&path);
+            current.checked_at_ms = state.checked_at_ms;
+            current.latest_tag = Some(tag.clone());
+            let _ = bt_persist::write_update_check_atomic(&path, &current);
             Outcome::Answered(tag)
         }
         Err(_) => Outcome::Refused,
@@ -1009,6 +1024,62 @@ mod tests {
             state_of(&root).latest_tag.as_deref(),
             Some("v0.1.1"),
             "and the answer in the file is the one window that asked"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (review row R4-14) — **an acknowledgement made while the request was
+    /// in flight is not undone by it.**
+    ///
+    /// The claim keeps other *processes* out; it does not keep this process's
+    /// own window thread out, and [`mark_seen`] runs there — a reader opening
+    /// the About page while the daily check is on the wire. `run` took its whole
+    /// document before the request and wrote that document back after it, so the
+    /// `seen_tag` written in between was replaced by the one from before it
+    /// existed: the dot came back, on a version they had just dismissed, and the
+    /// only way out was to dismiss it again after every check.
+    ///
+    /// The source below is the reader, in the one place the race is
+    /// deterministic: inside the request.
+    ///
+    /// Red gate: write `state` back instead of re-reading, and `seen_tag` below
+    /// is `None`.
+    #[test]
+    fn a_mark_answered_while_the_request_was_running_survives_it() {
+        struct AnswersMidFlight {
+            dir: PathBuf,
+        }
+        impl Releases for AnswersMidFlight {
+            fn latest_tag(&self) -> Result<String, String> {
+                // The reader opens the About page and the mark goes out, on the
+                // window thread, while this request is still on the wire.
+                mark_seen(&self.dir, "v0.2.3");
+                Ok("v0.2.4".to_owned())
+            }
+        }
+
+        let root = dir("seen-mid-flight");
+        let source = AnswersMidFlight { dir: root.clone() };
+        assert_eq!(
+            run(&root, 1_756_000_000_000, &source),
+            Outcome::Answered("v0.2.4".to_owned())
+        );
+
+        let state = state_of(&root);
+        assert_eq!(
+            state.seen_tag.as_deref(),
+            Some("v0.2.3"),
+            "the acknowledgement the reader made is still in the file"
+        );
+        assert_eq!(
+            state.latest_tag.as_deref(),
+            Some("v0.2.4"),
+            "and this check's own answer is in it too"
+        );
+        assert_eq!(
+            state.checked_at_ms, 1_756_000_000_000,
+            "and so is the stamp this thread advanced"
         );
 
         let _ = std::fs::remove_dir_all(&root);

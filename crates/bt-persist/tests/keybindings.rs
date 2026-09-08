@@ -112,7 +112,8 @@ fn a_damaged_file_falls_back_to_no_overrides_and_is_left_on_disk() {
         matches!(
             report,
             ReadReport::FellBackToDefaults {
-                reason: FallbackReason::ParseError(_)
+                reason: FallbackReason::ParseError(_),
+                ..
             }
         ),
         "{report:?}"
@@ -141,7 +142,8 @@ fn a_file_from_a_future_build_is_refused_whole_rather_than_read_in_part() {
         matches!(
             report,
             ReadReport::FellBackToDefaults {
-                reason: FallbackReason::FutureSchemaVersion { found: 99, .. }
+                reason: FallbackReason::FutureSchemaVersion { found: 99, .. },
+                ..
             }
         ),
         "{report:?}"

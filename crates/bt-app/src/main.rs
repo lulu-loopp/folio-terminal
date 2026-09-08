@@ -8906,6 +8906,23 @@ struct App {
     /// Whether the last re-read of `pins.json` found a file that would not
     /// parse, so that it is said once — [`Self::profiles_file_broken`]'s rule.
     pins_file_broken: bool,
+    /// **What the two documents this window is made of owe the reader** (review
+    /// rows R4-3, R4-5, R4-9 and R4-10).
+    ///
+    /// [`Self::profiles_fault`] and [`Self::pins_fault`]'s third and fourth
+    /// members, and the ones that were missing: a `settings.json` or a
+    /// `session.json` that would not read was replaced by defaults with one line
+    /// on `stderr`, and the file itself was overwritten by the first thing the
+    /// reader did. Both are now kept beside themselves by the read path, and the
+    /// sentence here is what says so — with the same one-card-per-launch
+    /// discipline the two above it have.
+    ///
+    /// It carries three other findings on the same channel, because from the
+    /// reader's side they are the same kind of news about the same file: a
+    /// session larger than this build will open, a document that will not reach
+    /// the disk, and a second Folio holding this data directory.
+    settings_fault: Option<String>,
+    session_fault: Option<String>,
     /// The one store that pin, Recent and undo-close all draw from — kept beside
     /// the tabs rather than inside the session file's mirror so the three doors
     /// read live state, not the last thing that happened to be flushed.
@@ -13384,6 +13401,18 @@ impl TabState {
             // shell that has just drawn a prompt has an open mark with nothing typed
             // in it yet, and a document that recorded that would restore an empty
             // line over the command the reader actually left standing.
+            //
+            // **And a mark the reader was at** (review row R1-24). The text is
+            // read off the screen between one `OSC 133;B` and the `C` after it,
+            // and a program printing those marks chooses both the marks and the
+            // text between them — so `curl … | sh` in a pane can put any line it
+            // likes here, and the restored pane types it onto the reader's prompt
+            // with the cursor after it. `typed_by_user` is the one fact about a
+            // command that no program writing to the screen can produce: bytes
+            // reached the pty from this reader's keyboard while the shell was
+            // reading that line. A mark without it is still a mark — it draws its
+            // tick, it keeps its card — it is simply not a line this window will
+            // put back under somebody's hands.
             last_command: if remember_the_command {
                 self.sessions
                     .get(&seat)
@@ -13392,7 +13421,7 @@ impl TabState {
                             .command_marks()
                             .iter()
                             .rev()
-                            .find(|mark| !mark.command_text.is_empty())
+                            .find(|mark| !mark.command_text.is_empty() && mark.typed_by_user)
                             .map(|mark| mark.command_text.clone())
                     })
                     .unwrap_or_default()
@@ -29477,10 +29506,77 @@ fn apply_stored_terminal_font(
             .map(|candidate| candidate.files.clone())
             .unwrap_or_default()
     };
-    gpu.set_terminal_font(family, &files, f32::from(settings.terminal_font_size));
+    // **Clamped here and nowhere else** (review row R4-2). This is the one place
+    // a stored size crosses into the renderer, and a `0` past it is an assertion
+    // inside the text layer before there is a window to report it on. See
+    // `settings::drawable_font_size` for why the clamp belongs at this surface
+    // rather than in the file format.
+    gpu.set_terminal_font(
+        family,
+        &files,
+        f32::from(settings::drawable_font_size(settings.terminal_font_size)),
+    );
     renderer
         .apply_font_change(gpu)
         .context("remeasure the terminal grid at the chosen face")
+}
+
+/// **What a pane actually starts, given the profile it was asked for and what
+/// this machine has** (review row R4-1).
+///
+/// A free function of the two facts, for the reason [`split_axis`] is one: the
+/// thing that used to go wrong here is a *policy*, and the policy that needs a
+/// live window and a ConPTY to exercise is the policy nobody exercises.
+///
+/// # What was wrong
+///
+/// [`create_leaf_session`] took the resolved program with an `expect`, and the
+/// invariant behind it was the greying: the picker refuses to hand back a row it
+/// cannot start, and every other door carries a profile some earlier door
+/// resolved. **The startup restore is a door that resolves nothing.**
+/// `revive_plan` reads a profile id out of `session.json`, and its own rule is
+/// that an id this build does not *recognise* falls to the default — which
+/// leaves the case where the build recognises the id perfectly well and the
+/// machine no longer has the program: Git uninstalled, a `pwsh` upgraded away, a
+/// user profile pointing at a path that has moved. That is not a bug in the
+/// picker having come apart from the probe; it is the ordinary shape of a
+/// machine changing between two launches, and the answer to it was a panic
+/// before the first window, on every launch, until somebody hand-edited the
+/// session file.
+///
+/// # The rule
+///
+/// The same one `M2-restart-shell-contract.md` §3 already gives for a profile
+/// this build does not know — fall to the default profile, and never silently.
+/// The pane comes back, standing in the folder it was standing in, running the
+/// shell this machine does have, and its first line says which profile it could
+/// not start. [`Started::Nothing`] is the third answer and it is the machine
+/// with nothing at all: the pane exists, holds its place in the tree, and wears
+/// the face a pane whose shell could not start already wears.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Started {
+    /// The profile the caller asked for, which this machine can run.
+    AsAsked,
+    /// The default profile, because the asked-for one resolved to nothing here.
+    /// The index carried is the one to start; the one asked for is the caller's.
+    FellBack(usize),
+    /// Not even the default profile resolves. There is no shell to start.
+    Nothing,
+}
+
+fn startable_profile(requested: usize, programs: &profiles::ProfilePrograms) -> Started {
+    if programs.is_available(requested) {
+        return Started::AsAsked;
+    }
+    let fallback = profiles::fallback_profile();
+    // The fallback answering for itself is not a fallback: a default profile
+    // this machine cannot start has nowhere further to fall, and saying
+    // `FellBack(fallback)` there would put a banner on a pane about a swap that
+    // did not happen.
+    if fallback != requested && programs.is_available(fallback) {
+        return Started::FellBack(fallback);
+    }
+    Started::Nothing
 }
 
 /// Spawn one shell for one Terminal leaf, sized to the rectangle it will draw
@@ -29529,7 +29625,20 @@ fn create_leaf_session(
     line_wrapping: bool,
 ) -> Result<LeafSession> {
     let grid = renderer.metrics().grid_for_pixels(body.width, body.height);
-    let chosen_id = profiles::id(seed.profile);
+    // **The machine is asked before anything is composed for it** (review row
+    // R4-1). `startable_profile` carries the whole rule and its argument; what is
+    // decided here is which profile everything below is about, because the
+    // probe, the directory, the command line and the environment all belong to
+    // the profile that is actually going to be started rather than to the one
+    // the file named. A WSL leaf falling back to PowerShell must not be handed
+    // `/home/me`, and a Git Bash falling back to Windows PowerShell is a pane
+    // that does want the PSReadLine probe.
+    let started = startable_profile(seed.profile, programs);
+    let spawn_profile = match started {
+        Started::AsAsked | Started::Nothing => seed.profile,
+        Started::FellBack(to) => to,
+    };
+    let chosen_id = profiles::id(spawn_profile);
     // **The one trigger.** A user who only ever opens WSL or `pwsh` never starts
     // this process, because the module that is broken is the one `Windows
     // PowerShell 5.1` ships and nothing else on this machine is affected by it.
@@ -29567,7 +29676,7 @@ fn create_leaf_session(
     // second rung of §7.1.4's ladder and a leaf is asked where it stands whether
     // or not a process was started behind it.
     let place = profiles::spawn_place(
-        seed.profile,
+        spawn_profile,
         seed.cwd.clone(),
         &bt_pty::SystemShellEnvironment,
     );
@@ -29578,7 +29687,7 @@ fn create_leaf_session(
     // leaf — there is no table to prune, because the value lives on the thing it names.
     let capability = attention_wire::mint_capability();
     let mut resolved_program = None;
-    let mut pty = if probe_input.is_none() {
+    let mut pty = if probe_input.is_none() && started != Started::Nothing {
         // **The line the picker was missing.** Choosing a profile used to change
         // a tab's title and its mark and nothing else — `spawn_default_in` was
         // not told which one had been picked, so every row of the menu started
@@ -29586,21 +29695,17 @@ fn create_leaf_session(
         // this profile resolved to on this machine, with this profile's own
         // arguments.
         //
-        // `expect` rather than a fallback, and the invariant behind it is the
-        // greying: [`profiles::ProfilePrograms`] is probed before the first tab
-        // exists, the picker refuses to hand back a row it cannot start, and
-        // every other door into this function carries a profile that some
-        // earlier door already resolved. A profile with no program reaching here
-        // is not a machine without Git — it is those two facts having come
-        // apart, and quietly starting PowerShell instead would hide exactly the
-        // bug worth seeing.
-        let program = programs.program(seed.profile).unwrap_or_else(|| {
-            panic!(
-                "profile {:?} reached spawn with no resolved program: the picker \
-                 must not offer a profile this machine cannot start",
-                chosen_id
-            )
-        });
+        // **Resolved, never asserted** (review row R4-1). This used to be an
+        // `expect` on the invariant that the picker refuses a row it cannot
+        // start — which is true of the picker and was never true of the startup
+        // restore, where the profile comes out of a file written on a machine
+        // that has since changed. `startable_profile` has already chosen an
+        // index this machine can run, so the `expect` below is on that choice
+        // rather than on the file: `Started::Nothing` never reaches this branch,
+        // and neither of the other two names a profile with no program.
+        let program = programs
+            .program(spawn_profile)
+            .expect("startable_profile answers with a profile this machine can start");
         // **And what makes it legible.** The profile's own arguments, the place,
         // and — for the bash family — the init file that installs OSC 133 and
         // OSC 7 into this one shell without touching anything the user owns.
@@ -29608,7 +29713,7 @@ fn create_leaf_session(
         // environment is one of the things the spawn now lays down, and a
         // function that asked this module five separate questions about one
         // index is a function no test can put a profile in front of.
-        let row = profiles::row(seed.profile).unwrap_or_else(|| {
+        let row = profiles::row(spawn_profile).unwrap_or_else(|| {
             panic!(
                 "profile {:?} reached spawn with no row in the table: the picker                  must not offer a row the table does not hold",
                 chosen_id
@@ -29656,7 +29761,7 @@ fn create_leaf_session(
             .with_context(|| {
                 format!(
                     "spawn the {} profile in ConPTY",
-                    profiles::title(seed.profile)
+                    profiles::title(spawn_profile)
                 )
             })?,
         )
@@ -29689,7 +29794,14 @@ fn create_leaf_session(
         resolved_program = Some(PathBuf::from(fallback.started));
         profiles::fallback_profile()
     } else {
-        seed.profile
+        // **The profile that was started, not the one that was asked for**
+        // (review row R4-1). The same sentence the arm above it writes for
+        // `bt-pty`'s own swap, reached one step earlier: a pane whose saved
+        // profile has no program on this machine came up as the default, and a
+        // leaf still claiming to be Git Bash would write `"gitbash"` back into
+        // `session.json` for a shell that is not one — so the next launch would
+        // meet the same missing program and say the same thing again, for ever.
+        spawn_profile
     };
     let columns = nonzero_u32(grid.columns.get());
     let rows = nonzero_u32(grid.rows.get());
@@ -29728,6 +29840,28 @@ fn create_leaf_session(
         session
             .feed(unknown_profile_banner(unknown).as_bytes())
             .context("write the unknown-profile banner into the leaf's first line")?;
+    }
+    // **And the third way in, which used to be a panic** (review row R4-1). A
+    // profile this build knows perfectly well, whose program is not on this
+    // machine any more. It gets the same register as the two around it — the
+    // profile that was asked for, the one standing in for it, one line, dim —
+    // because from the reader's side it is the same event: the pane is back, and
+    // it is not the shell they left in it.
+    match started {
+        Started::AsAsked => {}
+        Started::FellBack(to) => {
+            session
+                .feed(missing_program_banner(seed.profile, to).as_bytes())
+                .context("write the missing-program banner into the leaf's first line")?;
+        }
+        // Nothing on this machine can stand in, so there is no shell behind this
+        // pane at all: `pty` is `None` above and what is left is a pane that
+        // holds its place in the tree and says why it is empty.
+        Started::Nothing => {
+            session
+                .feed(no_program_banner(seed.profile).as_bytes())
+                .context("write the no-program banner into the leaf's first line")?;
+        }
     }
     if let Some(fallback) = &shell_fallback {
         session
@@ -32076,8 +32210,23 @@ impl Runtime<'_> {
         // Read the previous session before the window exists, so its bounds can
         // be the window's opening bounds rather than a correction applied after
         // the user has already seen it somewhere else.
-        let session_store = persist::SessionStore::open();
+        let mut session_store = persist::SessionStore::open();
         let mut settings_store = persist::SettingsStore::open();
+        // **Taken here, said on the first window** (review rows R4-3, R4-5, R4-9).
+        // The stores open before there is any window to put a card on, which is
+        // the whole reason every other one of these is a field rather than a
+        // call: `announce_persistence_faults` spends them once the first window
+        // is up, beside the profile and shortcut files' own.
+        let mut settings_fault = settings_store.take_fault();
+        let mut session_fault = session_store.take_fault();
+        // **And the one that is about neither file** (review row R4-5). Said on
+        // the settings channel because that is the document a reader is most
+        // likely to change in the window that will not keep it; the sentence
+        // itself names no file, for the reason in `i18n::second_instance_notice`.
+        if !persist::is_storage_writer() {
+            eprintln!("BT_PERSIST another Folio holds this data directory; nothing here is saved");
+            settings_fault.get_or_insert_with(crate::i18n::second_instance_notice);
+        }
         // Before the first pane can start a probe of its own. A no-op unless
         // `BT_PSREADLINE_PROBE` is set — see `psreadline::probe_override_from_env`
         // for why the door exists and what it deliberately does not override.
@@ -32684,6 +32833,8 @@ impl Runtime<'_> {
             profiles_file_broken: false,
             pins_store,
             pins_fault,
+            settings_fault: settings_fault.take(),
+            session_fault: session_fault.take(),
             pins_file_broken: false,
             recent,
             recent_folders,
@@ -42957,6 +43108,36 @@ impl Runtime<'_> {
         )
     }
 
+    /// **Say once, on the window, what the two documents this window is made of
+    /// could not do** (review rows R4-3, R4-5, R4-9 and R4-10).
+    ///
+    /// [`Self::announce_profiles_fault`]'s third and fourth members, and the two
+    /// that were missing. Their fallbacks are the most invisible of all of them:
+    /// a `settings.json` that would not read gives back exactly the defaults a
+    /// machine that never had one gives back, and a `session.json` that would not
+    /// read gives back a window with one fresh tab — which is what a launch looks
+    /// like when nothing is wrong.
+    ///
+    /// Two cards and not one, for the reason the profile and shortcut files get
+    /// two: they name two files a reader would go and look at in two places.
+    fn announce_persistence_faults(&mut self) -> Result<()> {
+        for fault in [
+            self.app.settings_fault.take(),
+            self.app.session_fault.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                fault,
+            )?;
+        }
+        Ok(())
+    }
+
     /// One press, while a shortcut row is listening.
     ///
     /// **The judging happens in `shortcuts.rs`, the state machine in
@@ -46564,17 +46745,25 @@ impl Runtime<'_> {
         place: explorer_menu::ExplorerPlace,
         announce: Announce,
     ) -> Result<bool> {
-        let package_job = match explorer_menu::state() {
-            // **`Unknown` is not "nothing registered"** (`explorer_menu`'s own
-            // rule for this state): the first probe of a launch has not landed,
-            // and skipping the job here would leave a package standing under a
-            // row that says it is gone. So the job runs and answers the question
-            // properly — `request` re-reads the deployment database on its own
-            // thread before it does anything, which is the whole reason it is
-            // allowed to ask.
-            explorer_menu::PackageState::Unknown => true,
-            state => place.package() != state.registered(),
-        };
+        // **A job in flight makes the cached answer unusable** (review row
+        // R4-12). During an install the cached state still says nothing is
+        // registered, so an `Off` pressed two seconds in compared equal, started
+        // no job at all, and the install landed against the reader's own last
+        // choice. While something is running, what the machine will be is not
+        // what the row was drawn from, so the press is handed on and the module
+        // decides — it holds the only thing that knows.
+        let package_job = explorer_menu::job_in_flight()
+            || match explorer_menu::state() {
+                // **`Unknown` is not "nothing registered"** (`explorer_menu`'s own
+                // rule for this state): the first probe of a launch has not landed,
+                // and skipping the job here would leave a package standing under a
+                // row that says it is gone. So the job runs and answers the question
+                // properly — `request` re-reads the deployment database on its own
+                // thread before it does anything, which is the whole reason it is
+                // allowed to ask.
+                explorer_menu::PackageState::Unknown => true,
+                state => place.package() != state.registered(),
+            };
         if package_job {
             self.request_explorer_package(place, announce);
         }
@@ -46633,12 +46822,12 @@ impl Runtime<'_> {
         // deployment database happens to hold when the answer lands.
         self.app.explorer_package_announce = announce;
         self.app.explorer_package_asked_place = place;
-        if !explorer_menu::request(place.package()) {
-            // A press while the last one is still running. The machine is
-            // already going where this press wanted it, or it is going the other
-            // way and will be asked again by whoever is watching.
-            eprintln!("BT_EXPLORER_PACKAGE busy; press ignored place={place:?}");
-        }
+        // **Every press reaches the module** (review row R4-12). It used to be
+        // refused here while a job was running, on the reasoning that the
+        // machine was already going where the press wanted it — which is true of
+        // a second `On` and exactly wrong for an `Off`. The module now writes a
+        // press down and the running job spends it on its way out.
+        explorer_menu::request(place.package());
     }
 
     /// Put the finished registration's answer on the window in front of the
@@ -68844,6 +69033,9 @@ impl Runtime<'_> {
         // tab's own focused leaf and the one `shell_mut` just wrote through.
         let seat = self.window.tabs[active].focused_leaf;
         self.answer_attention(seat, UserInputKind::FilesRow);
+        // Review row R1-24 — a path put into the prompt by a row of the column is
+        // the reader's own hand, on the same footing as a paste.
+        self.note_user_typing(seat);
         self.pending_keyboard_at = Some(Instant::now());
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
@@ -76281,6 +76473,26 @@ impl Runtime<'_> {
             .get(&seat)
             .and_then(|leaf| leaf.pty.as_ref());
         write_pty_input(pty, bytes, context)
+    }
+
+    /// **The reader's own bytes went into this pane** (review row R1-24).
+    ///
+    /// Called from the four doors a person's own input reaches a shell through —
+    /// the keyboard, a paste, an IME commit and a files-row insert — and from
+    /// nowhere else. A wheel forwarded to a full-screen program is not somebody
+    /// typing at a prompt, and neither is a terminal protocol reply, a resize
+    /// repair chord, or the one line a restored pane puts back on the prompt
+    /// itself.
+    ///
+    /// What it buys is on `CommandMark::typed_by_user`: the command text this
+    /// window remembers across a restart is read off the screen, and a program
+    /// printing `OSC 133` marks decides what is on the screen. This is the one
+    /// fact about a command that such a program cannot produce.
+    fn note_user_typing(&mut self, seat: SeatId) {
+        let active = self.window.active_tab;
+        if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) {
+            leaf.session.note_user_input();
+        }
     }
 
     fn send_user_input(
@@ -86249,6 +86461,8 @@ impl Runtime<'_> {
         // `y`, `Esc` or `↓`, and a door that only heard `Enter` left the badge lit for a person who
         // had already replied.
         self.answer_attention(self.focused_leaf, UserInputKind::Keyboard);
+        // Review row R1-24 — see `Runtime::note_user_typing`.
+        self.note_user_typing(self.focused_leaf);
         self.send_user_input(
             &bytes,
             "write keyboard input to PTY",
@@ -86307,6 +86521,9 @@ impl Runtime<'_> {
         // asking — and it is the pane the clipboard went into, not the one holding the keyboard
         // (`attention` plan §10.3.2 row 3).
         self.answer_attention(seat, UserInputKind::Paste);
+        // Review row R1-24 — a paste is the reader putting bytes in, exactly as
+        // a keystroke is.
+        self.note_user_typing(seat);
         // **The keyboard's clock is the keyboard's pane's.** A paste into the
         // focused shell is a keystroke and is measured as one; a paste into the
         // pane a menu was raised over is not, and stamping `pending_keyboard_at`
@@ -86451,6 +86668,8 @@ impl Runtime<'_> {
                 // *preedit* is not: it puts no byte in the pipe and never reaches this arm at all,
                 // which is what keeps "IME counts" from being read as "mid-composition counts".
                 self.answer_attention(self.focused_leaf, UserInputKind::Ime);
+                // Review row R1-24 — a commit is what the reader typed.
+                self.note_user_typing(self.focused_leaf);
                 // IMM32 also emits this commit when focus/layout changes mid-composition. M0-beta
                 // deliberately accepts it exactly like Windows Terminal: every commit reaches PTY.
                 write_pty_input(
@@ -96595,6 +96814,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                         // user would fix in two different places.
                         .and_then(|()| runtime.announce_profiles_fault())
                         .and_then(|()| runtime.announce_pins_fault())
+                        // And the two documents the window itself is made of,
+                        // whose fallbacks are the most invisible of all of them
+                        // — see `announce_persistence_faults`.
+                        .and_then(|()| runtime.announce_persistence_faults())
                         // The command line's own two debts, in the same place and
                         // for the same reason: a document to show, and whatever
                         // could not be honoured. Both need a window — the preview
@@ -98444,6 +98667,39 @@ fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: usize) -> String
 fn unknown_profile_banner(unknown: &str) -> String {
     let started = profiles::title(profiles::fallback_profile());
     banner_line(&i18n::unknown_profile_banner_text(unknown, started))
+}
+
+/// The first line of a pane whose saved profile this build **does** have and
+/// this machine does not (review row R4-1).
+///
+/// [`fallback_banner`]'s sentence, reached one step earlier and for the reason
+/// that one exists: what the reader picked was a row of the profile menu, and
+/// the two names in this line are the two rows — not two executable paths, which
+/// are an implementation detail of those rows and change when somebody
+/// reinstalls Git.
+///
+/// The two banners are one string in two registers rather than two strings,
+/// because from the pane's side there is no difference worth a second sentence:
+/// the program the profile names would not run, and this one ran instead. Which
+/// half of the machine noticed — this process before the spawn, or `bt-pty`
+/// during it — is our bookkeeping and not the reader's.
+fn missing_program_banner(requested: usize, started: usize) -> String {
+    banner_line(&i18n::fallback_banner_text(
+        profiles::title(requested),
+        profiles::title(started),
+    ))
+}
+
+/// And the first line of a pane with no shell behind it at all, because nothing
+/// on this machine could stand in for the profile it was saved as.
+///
+/// Reachable, though barely: it needs a machine with no Windows PowerShell, or a
+/// default profile pointed by `BT_SHELL` at a program that is not there. The
+/// pane exists, holds its place in the tree, and says the one true thing about
+/// itself — which is strictly better than the panic before the first window that
+/// this replaced.
+fn no_program_banner(requested: usize) -> String {
+    banner_line(&i18n::profile_not_installed(profiles::title(requested)))
 }
 
 /// The layout identity this window hands every session it owns.
@@ -101649,11 +101905,49 @@ fn choose_restored_placement(
                     corner.y.min(target.bottom - size.height).max(target.top),
                 )
             } else {
-                corner
+                // **The floor still binds when nothing had to shrink** (review
+                // row R4-7). `shrank` was doing two jobs: it decided whether the
+                // rectangle was still the one the reader parked, and it decided
+                // whether the corner was checked at all — so a recorded size that
+                // fits its monitor kept its corner *whatever the corner was*, and
+                // a `y` of −900 in a hand-edited or stale `session.json` came back
+                // as a window whose title bar is above the desktop, with no way to
+                // reach it with the pointer and nothing on screen to say why.
+                //
+                // The allowance the `shrank` branch exists to give is horizontal
+                // and stays: a window parked half off the right of a monitor is a
+                // window somebody put there, and it can always be dragged back
+                // because its title bar is on screen. That last clause is the
+                // whole of the rule, so it is the whole of what is enforced here
+                // — the title bar's own band, and nothing else about the
+                // rectangle.
+                LogicalPosition::new(corner.x, reachable_top(corner.y, target))
             }
         }),
         maximized,
     })
+}
+
+/// **Where a restored window's top may be so that its title bar is on the
+/// monitor** (review row R4-7).
+///
+/// The band is the title bar's own height, because that is the strip a hand can
+/// take hold of: a window whose top is above the work area has none of it, and
+/// one whose top is below the work area's bottom has none of it either. Between
+/// those two the corner is left exactly where the file put it.
+///
+/// A monitor shorter than a title bar has no answer that satisfies the rule, and
+/// the top of the work area is the honest one: the reader can see the window,
+/// which is the thing being bought.
+///
+/// The height of the window itself is not consulted, and that is the difference
+/// between this and containment: a window taller than the display is a window
+/// whose bottom is off screen, which is a shape people arrange on purpose and
+/// which `shrank`'s own branch already answers when the size does not fit.
+fn reachable_top(top: f64, target: RestoreMonitor) -> f64 {
+    let bar = f64::from(bt_render::WINDOW_TITLE_BAR_LOGICAL_PX);
+    let lowest = (target.bottom - bar).max(target.top);
+    top.clamp(target.top, lowest)
 }
 
 /// [`choose_restored_placement`] asked of the machine this process is running on.
@@ -109199,6 +109493,147 @@ mod tests {
             .expect("a window with a tab in it has a placement");
         assert_eq!(placement.size, LogicalSize::new(1440.0, 900.0));
         assert_eq!(placement.position, Some(LogicalPosition::new(0.0, 0.0)));
+    }
+
+    /// RED (review row R1-24) — **only a line the reader was at is written into
+    /// the session, and only a bounded one is offered back.**
+    ///
+    /// The whole of the row lands in three places and this pins the one in this
+    /// file. `bt_term` records whether the reader's own keyboard reached the pane
+    /// while a mark was open (`CommandMark::typed_by_user`, tested there);
+    /// `bt_persist` clears a remembered line no keyboard could have produced
+    /// (`MAX_LAST_COMMAND_CHARS`, tested there); and this is the join — the
+    /// document written from a live window keeps a line only from a mark that
+    /// carries the witness.
+    ///
+    /// Read off the source because the alternative is a live window with a
+    /// ConPTY in it: the expression sits inside `TabState::persisted_term_leaf`,
+    /// which needs a solved layout, a spawned shell and a reader at a keyboard to
+    /// reach at all. What can go wrong is one clause in one filter, and one
+    /// clause in one filter is exactly what a source pin can hold.
+    ///
+    /// Red gate: drop `&& mark.typed_by_user` and this goes red — which is the
+    /// state in which a program printing `OSC 133` marks decides what the next
+    /// launch types onto the reader's prompt.
+    #[test]
+    fn a_remembered_line_comes_only_from_a_mark_the_reader_was_at() {
+        let source = include_str!("main.rs");
+        let at = source
+            .find("last_command: if remember_the_command {")
+            .expect("the one place a remembered line is written");
+        let clause = &source[at..at + 800];
+        assert!(
+            clause.contains("!mark.command_text.is_empty() && mark.typed_by_user"),
+            "the line written into session.json comes from a mark whose command              the reader's own keyboard was present for: {clause}"
+        );
+    }
+
+    /// RED (review row R4-1) — **a tab whose program is gone comes back as a
+    /// pane, not as a panic.**
+    ///
+    /// `create_leaf_session` took the resolved program with an `expect`, and the
+    /// invariant behind it was the picker's greying — which is true of the picker
+    /// and was never true of the startup restore. `revive_plan` reads a profile
+    /// id out of `session.json`; its own degradation covers an id this build does
+    /// not *recognise* and says nothing about one it recognises perfectly well
+    /// whose program is no longer installed. Uninstall Git with a Git Bash tab
+    /// pinned, and the next launch panicked before the first window — every
+    /// launch, until the session file was edited by hand.
+    ///
+    /// The three answers below are the whole rule, and the third one matters as
+    /// much as the second: falling back is only honest while there is something
+    /// to fall back to, and a machine with nothing at all gets a pane that says
+    /// so rather than a pane pretending to be a shell.
+    ///
+    /// Red gate: `panic!` when `programs.program(..)` is `None` — which is what
+    /// this replaced — and the second and third cases here are the panic.
+    #[test]
+    fn a_profile_this_machine_cannot_start_falls_back_instead_of_panicking() {
+        let git = profiles::index_of_id("gitbash");
+        let fallback = profiles::fallback_profile();
+        assert_ne!(git, fallback, "the fixture needs two different rows");
+
+        let equipped = profiles::ProfilePrograms::with_only(&[git, fallback]);
+        assert_eq!(startable_profile(git, &equipped), Started::AsAsked);
+
+        // Git uninstalled between two launches, which is the row's own case.
+        let gitless = profiles::ProfilePrograms::with_only(&[fallback]);
+        assert_eq!(
+            startable_profile(git, &gitless),
+            Started::FellBack(fallback),
+            "the pane comes back running what this machine does have"
+        );
+        assert_eq!(
+            startable_profile(fallback, &gitless),
+            Started::AsAsked,
+            "and the profile standing in for the others is not standing in for itself"
+        );
+
+        // Nothing at all: a machine with no Windows PowerShell, or a `BT_SHELL`
+        // pointed at a program that is not there.
+        let bare = profiles::ProfilePrograms::with_only(&[]);
+        assert_eq!(startable_profile(git, &bare), Started::Nothing);
+        assert_eq!(startable_profile(fallback, &bare), Started::Nothing);
+    }
+
+    /// RED (review row R4-7) — **a restored window's title bar is on a monitor,
+    /// whatever its size.**
+    ///
+    /// `shrank` was doing two jobs at once: deciding whether the rectangle was
+    /// still the one the reader parked, and deciding whether the corner was
+    /// looked at at all. So a recorded size that fits its display kept its corner
+    /// unexamined — and a `y` of −900, which is what a stale `session.json` from
+    /// a display that has gone away or one hand-edited digit produces, came back
+    /// as a window whose title bar is above the desktop. There is nothing to grab
+    /// and nothing on screen to say why.
+    ///
+    /// The horizontal allowance the test above it pins is untouched, and the two
+    /// together are the whole rule: a window parked half off the side can always
+    /// be dragged back, *because its title bar is on the screen*.
+    ///
+    /// Red gate: keep `corner` unchanged in the non-shrinking arm and the first
+    /// assertion reads −900.
+    #[test]
+    fn a_restored_window_never_comes_back_with_its_title_bar_off_the_screen() {
+        // Overlapping the display by a hundred rows — so it is a window this
+        // machine can see, and its title bar is above the top of the desktop.
+        let above = WindowBoundsV1 {
+            x: 200,
+            y: -200,
+            width: 400,
+            height: 300,
+        };
+        let placement = choose_restored_placement(&saved_window(above, false), &[LAPTOP])
+            .expect("a window with a tab in it has a placement");
+        assert_eq!(
+            placement.size,
+            LogicalSize::new(400.0, 300.0),
+            "nothing had to shrink: the size fits the display perfectly well"
+        );
+        assert_eq!(
+            placement.position,
+            Some(LogicalPosition::new(200.0, 0.0)),
+            "the corner comes down to the work area, and stays where it was across"
+        );
+
+        // And the other end: a top below the bottom of the work area is just as
+        // unreachable, and is brought back by the width of a title bar.
+        // Still overlapping the display — 20 rows of it — and still a window
+        // whose title bar is off the bottom.
+        let below = WindowBoundsV1 {
+            x: 200,
+            y: 880,
+            width: 400,
+            height: 300,
+        };
+        let placement = choose_restored_placement(&saved_window(below, false), &[LAPTOP])
+            .expect("a window with a tab in it has a placement");
+        let bar = f64::from(bt_render::WINDOW_TITLE_BAR_LOGICAL_PX);
+        assert_eq!(
+            placement.position,
+            Some(LogicalPosition::new(200.0, 900.0 - bar)),
+            "the last row a title bar can be caught on"
+        );
     }
 
     /// A window straddling a seam belongs to the screen holding most of it, and that is the

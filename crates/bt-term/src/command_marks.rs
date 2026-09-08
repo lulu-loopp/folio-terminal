@@ -100,6 +100,23 @@ pub struct CommandMark {
     /// to `D` has no `executed_at`, and a command still running has no `finished_at`.
     pub executed_at: Option<Instant>,
     pub finished_at: Option<Instant>,
+    /// **Whether the reader's own keyboard reached this pane while this command
+    /// was being read** (review row R1-24).
+    ///
+    /// [`Self::command_text`] is whatever the terminal saw between the shell's
+    /// `OSC 133;B` and the `C` after it — and a *program* can print those marks
+    /// with any text it likes between them, so the text is a claim by whoever was
+    /// writing to the screen rather than a record of what anybody typed. That is
+    /// harmless while the text is only drawn on a card; it stops being harmless
+    /// the moment the text is put back onto a prompt for the reader to press
+    /// Enter on, which is what a restored summoned terminal does with it.
+    ///
+    /// This is the fact that separates the two: bytes reached the pty from the
+    /// reader's keyboard, paste or IME between this mark opening and it ending.
+    /// It is not a claim that the text *is* what they typed — a shell may echo
+    /// anything — only that they were at this prompt. Nothing that is not offered
+    /// back to the keyboard consults it.
+    pub typed_by_user: bool,
 }
 
 impl CommandMark {
@@ -313,6 +330,7 @@ impl CommandMarkLedger {
             exit_code: None,
             executed_at: None,
             finished_at: None,
+            typed_by_user: false,
         });
         self.open = Some(id);
         self.revision += 1;
@@ -344,6 +362,24 @@ impl CommandMarkLedger {
         }
         mark.command_text = text;
         self.revision += 1;
+    }
+
+    /// **The reader's own bytes went into this pane** (review row R1-24).
+    ///
+    /// Booked against the mark that is open, which is the command the shell says
+    /// it is reading right now — so a keystroke between `B` and `C` marks that
+    /// command and a keystroke arriving while nothing is open marks nothing.
+    /// There is no marker for it and there could not be: it is a fact about this
+    /// process's own input, and the whole point is that a program writing to the
+    /// screen cannot produce it.
+    ///
+    /// Idempotent, and cheap enough to call on every keystroke: one branch and a
+    /// store, with no revision bump, because nothing on screen is drawn from it.
+    pub fn note_user_input(&mut self) {
+        let Some(mark) = self.open_mark_mut() else {
+            return;
+        };
+        mark.typed_by_user = true;
     }
 
     /// `D`. The command ended, with whatever status it reported.

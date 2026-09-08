@@ -1467,6 +1467,29 @@ pub fn scheme_index(name: &str, light: bool) -> usize {
 /// `bt_persist` deliberately does not clamp the stored size — a file written by
 /// a newer build may name 17 — so the degradation happens here, where the list
 /// that does not contain it lives.
+/// **The size the grid is actually drawn at** (review row R4-2).
+///
+/// `bt_persist` deliberately does not clamp the stored number — see
+/// [`font_size_index`] — and that is right for the *list*, where a 17 written by
+/// a newer build is a size this build can honour perfectly well even though no
+/// row of the picker ticks. It is not right for the renderer. A `0` reaches
+/// `bt_render`'s font system as a zero em size and asserts inside the text
+/// layer, before any window exists, on every launch — so a single hand-edited
+/// digit in `settings.json` is a build that will not start until somebody finds
+/// and edits the file back.
+///
+/// So the clamp lives here, at the surface that has to draw it — the rule
+/// `SettingsV1::quake_height` and `background_opacity` already state for
+/// themselves — and its range is the range the picker offers, because those are
+/// the sizes this product says it draws at. Everything inside the range,
+/// ticked or not, is passed through exactly as written.
+#[must_use]
+pub fn drawable_font_size(size: u8) -> u8 {
+    let smallest = FONT_SIZE_OPTIONS[0];
+    let largest = FONT_SIZE_OPTIONS[FONT_SIZE_OPTIONS.len() - 1];
+    size.clamp(smallest, largest)
+}
+
 #[must_use]
 pub fn font_size_index(size: u8) -> usize {
     FONT_SIZE_OPTIONS
@@ -25980,5 +26003,42 @@ mod tests {
                 "{lang:?}: the sentence does not fit the column: {lines:?}"
             );
         }
+    }
+    /// RED (review row R4-2) — **no stored number reaches the renderer as a size
+    /// it cannot draw.**
+    ///
+    /// A `terminal_font_size` of `0` in `settings.json` — one digit, from a hand
+    /// edit or a half-written file — reached `bt_render`'s font system as a zero
+    /// em size and asserted inside the text layer, before any window existed, on
+    /// every launch. The reader's terminal simply stopped starting, with no way
+    /// to find out why from inside the product.
+    ///
+    /// The clamp is at this surface rather than in the file format, which is the
+    /// house rule for a ranged value (`SettingsV1::quake_height` says it in as
+    /// many words) — and it is why the middle assertion matters: a size a newer
+    /// build wrote that this one's picker does not tick is still a size this one
+    /// draws perfectly well, and clamping it to the nearest offered row would be
+    /// this build changing somebody's preference behind them.
+    ///
+    /// Red gate: hand `settings.terminal_font_size` straight to
+    /// `gpu.set_terminal_font` and there is nothing here to call.
+    #[test]
+    fn a_stored_font_size_is_clamped_to_what_this_build_draws() {
+        let smallest = FONT_SIZE_OPTIONS[0];
+        let largest = FONT_SIZE_OPTIONS[FONT_SIZE_OPTIONS.len() - 1];
+
+        assert_eq!(drawable_font_size(0), smallest, "the launch-breaking one");
+        assert_eq!(drawable_font_size(1), smallest);
+        assert_eq!(drawable_font_size(255), largest);
+
+        // Between the ends nothing is moved, ticked or not.
+        assert_eq!(drawable_font_size(17), 17, "a size a newer build may write");
+        for size in FONT_SIZE_OPTIONS {
+            assert_eq!(drawable_font_size(size), size);
+        }
+        assert_eq!(
+            drawable_font_size(bt_persist::DEFAULT_TERMINAL_FONT_SIZE),
+            bt_persist::DEFAULT_TERMINAL_FONT_SIZE
+        );
     }
 }

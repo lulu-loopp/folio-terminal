@@ -41,7 +41,8 @@ fn corrupt_settings_json_falls_back_and_leaves_the_bad_file_alone() {
     assert!(matches!(
         report,
         ReadReport::FellBackToDefaults {
-            reason: FallbackReason::ParseError(_)
+            reason: FallbackReason::ParseError(_),
+            ..
         }
     ));
     assert_eq!(
@@ -75,15 +76,16 @@ fn settings_from_a_future_schema_version_refuses_and_does_not_partially_parse() 
     // just because that one field happens to still parse — §1.3 rule 2:
     // "不尝试部分解析".
     assert_eq!(settings.theme_mode, ThemeModeV1::System);
-    assert_eq!(
+    assert!(matches!(
         report,
         ReadReport::FellBackToDefaults {
             reason: FallbackReason::FutureSchemaVersion {
-                found: SETTINGS_SCHEMA_VERSION + 1,
+                found,
                 current: SETTINGS_SCHEMA_VERSION
-            }
-        }
-    );
+            },
+            ..
+        } if found == SETTINGS_SCHEMA_VERSION + 1
+    ));
 }
 
 #[test]
@@ -102,15 +104,16 @@ fn session_from_a_future_schema_version_refuses_and_does_not_partially_parse() {
         "must be the full default, not a partially-populated value"
     );
     assert!(degradation.is_clean());
-    assert_eq!(
+    assert!(matches!(
         report,
         ReadReport::FellBackToDefaults {
             reason: FallbackReason::FutureSchemaVersion {
                 found: 999,
                 current: SESSION_SCHEMA_VERSION
-            }
+            },
+            ..
         }
-    );
+    ));
 }
 
 #[test]

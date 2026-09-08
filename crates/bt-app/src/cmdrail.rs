@@ -1911,6 +1911,10 @@ mod tests {
             exit_code,
             executed_at: None,
             finished_at: None,
+            // The rail draws every mark the shell reported, whoever was at the
+            // keyboard: this field is read only where a line is offered back to
+            // one (review row R1-24).
+            typed_by_user: false,
         }
     }
 
