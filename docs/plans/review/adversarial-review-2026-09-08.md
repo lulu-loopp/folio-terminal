@@ -150,7 +150,7 @@ R1-7, R1-8, R1-13, R1-14, R1-15, R1-20, R1-25, R1-27, R1-28, R3-2, R3-3, R3-4, R
 
 Why together: each row is a place where the size of what the window keeps or does is chosen by the child rather than by Folio. The design is a budget at each intake point: in the scanner for OSC payloads, in the caches as a byte ceiling with eviction, in the decoders as limits set before the first allocation, and in the mark and anchor registries as a release path owned by whoever drops the id. R3-2 and R1-13 are two armings of one wedge and a single disarm rule covers both.
 
-### T5 `fix/pipeline-invariants` (in flight)
+### T5 `fix/pipeline-invariants` (merged, `21b7cea`; left open: `mark_pty_resize_requested_at` re-blesses coordinates without a witness snapshot, and a reflow on the alternate screen still loses the rows that leave the top)
 
 R5-2, R5-3, R5-4, R5-5, R5-6, R5-7, R5-8.
 
