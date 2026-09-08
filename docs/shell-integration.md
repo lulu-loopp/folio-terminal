@@ -169,12 +169,15 @@ resolution and every inheritance into another pane had to learn a spelling nothi
 when you `cd`, not on every prompt.
 
 WSL reports the POSIX path and does **not** convert. `wslpath -w` would answer
-`\\wsl.localhost\<distro>\home\weiyi` for a Linux home — a UNC whose authority the rules above are
+`\\wsl.localhost\<distro>\home\weiyi` for a Linux home — a UNC whose authority a `file:` report is
 obliged to reject as a remote share — so converting would make the most common directory in WSL
-unreportable. A POSIX directory is stored and displayed as it is, and relative image path text
-beside it stays undetected, exactly as it does for a session that reported nothing: the resolution
-gate is still "drive-rooted", and this is the standing rule for a directory this terminal cannot
-resolve against rather than a new exception.
+unreportable. A POSIX directory is stored and displayed as it is, and the pane translates it on
+this side, in the one place that knows which distribution the pane is standing in
+(`bt_transcript::paths::PrintedPathNamespace`, §7.30). That is what makes a name printed beside it
+resolvable: since 2026-09-07 a WSL pane standing in `/home/weiyi` measures `docs/a.md` from there,
+and `/etc/hosts` printed into it is the file Windows opens at `\\wsl.localhost\<distro>\etc\hosts`.
+The wire format did not move, and neither did the rule about authorities: a report that *carried*
+one would still be refused.
 
 ### Carrying a directory between profiles
 
@@ -187,9 +190,12 @@ mounts, and it is not total:
 | → Windows profile | `D:\src` | `D:\src` | *no answer* |
 | → WSL | `/mnt/d/src` | `/mnt/d/src` | `/home/weiyi` |
 
-The empty cell is the honest one: a directory inside the distribution's own filesystem has no
-Windows spelling, so the new tab starts at its own profile's starting directory rather than at a
-place that does not exist. Same rule, same reason as an unreported directory — never guess one.
+The empty cell is the honest one: a directory inside the distribution is not a place a Windows
+shell stands in — a `cmd.exe` handed a UNC working directory falls back to `C:\WINDOWS` and says
+nothing about it — so the new tab starts at its own profile's starting directory rather than
+somewhere it was not put. Same rule, same reason as an unreported directory: never guess one. This
+is a question about *starting a process*, and it is not the one §7.30 answers about *reading a
+file*, where `\\wsl.localhost\<distro>\…` is exactly the name that works.
 
 ## Injecting the script
 

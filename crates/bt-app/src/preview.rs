@@ -3398,12 +3398,23 @@ pub fn video_fact_lines(extension: Option<&str>, facts: VideoFacts) -> [Option<S
 ///
 /// Decided from the path's *prefix* rather than by looking for two backslashes,
 /// because `\\?\C:\…` also starts with two and is as local as a path gets.
+///
+/// **A WSL distribution's own share is the second such prefix** (user ruling
+/// 2026-09-07, §7.30). `\\wsl.localhost\Ubuntu\etc\hosts` is spelled like a
+/// share and is not one: the filesystem behind it is running on this machine,
+/// the transport is local, and there is no disconnected server for a hover to
+/// dial. The question this function exists to ask — "could reading this block
+/// the window on a network?" — is answered *no* there, so the answer is no. The
+/// prefix is read through `bt_transcript::paths::is_wsl_distribution_share`,
+/// which is the same function the path detector translates into it with, so the
+/// two halves of the ruling cannot come to disagree about which share it is.
 pub fn is_network_path(path: &Path) -> bool {
-    matches!(
-        path.components().next(),
-        Some(Component::Prefix(prefix))
-            if matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
-    )
+    !bt_transcript::paths::is_wsl_distribution_share(path)
+        && matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
+        )
 }
 
 /// The four ways a file declines to be previewed.
@@ -7250,6 +7261,18 @@ mod tests {
         )));
         assert!(!is_network_path(Path::new(r"C:\w\notes.txt")));
         assert!(!is_network_path(Path::new(r"\\?\C:\w\notes.txt")));
+        // **A WSL distribution's share is not a network path** (user ruling 2026-09-07, §7.30): the
+        // filesystem behind it runs on this machine and a read of it dials nothing. It is the one
+        // authority exempted, and the exemption is the share's own — a distribution named `server`
+        // would still be reached through `wsl.localhost`, and `\\server\…` above is still refused.
+        assert!(!is_network_path(Path::new(
+            r"\\wsl.localhost\Ubuntu\etc\hosts"
+        )));
+        assert!(!is_network_path(Path::new(r"\\WSL.LOCALHOST\Ubuntu\etc")));
+        assert!(
+            is_network_path(Path::new(r"\\wsl.localhost.example.test\Ubuntu\etc\hosts")),
+            "a host that merely begins with the share's name is somebody else's machine"
+        );
 
         let buffer = PreviewBuffer::new(
             PreviewSource::file(r"\\server\share\notes.txt"),

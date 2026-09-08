@@ -1263,6 +1263,21 @@ pub struct DualPlaneSession {
     /// Where this session's shell was put down (§7.1.4's second rung), pushed in by the app at
     /// spawn because it is an answer only the spawn knew.
     spawn_directory: Option<PathBuf>,
+    /// Whether [`Self::spawn_directory`] is a *mark* naming the shell's own home rather than a
+    /// place this machine can spell — `profiles::SpawnPlace::at_shell_home`, pushed in beside it.
+    spawn_at_shell_home: bool,
+    /// What the shell in this pane calls its own home, once it has said so — the answer to `~` in a
+    /// namespace where nothing on this side of the launcher could expand one (§7.30, 2026-09-07).
+    ///
+    /// Read from exactly one place: the **first** working directory this pane reports, and only
+    /// when the pane was put down at its shell's own home. That is not a guess about a report — it
+    /// is the answer to a question this window asked (`wsl.exe --cd ~`), read off the reply. A pane
+    /// that inherited a folder was put down somewhere that is not its home and never fills this in.
+    shell_home: Option<PathBuf>,
+    /// Whether this pane has heard a working-directory report at all, so that the **first** one is
+    /// the first one: a report that retracted a directory is still a report, and the prompt after
+    /// it may be standing somewhere the shell has `cd`-ed to.
+    heard_a_directory_report: bool,
     /// At most one outstanding resample per image occurrence, so the queue is bounded by the
     /// record set rather than by how often the layout moves.
     inline_image_scale_tasks: VecDeque<InlineImageScaleTask>,
@@ -1610,6 +1625,9 @@ impl DualPlaneSession {
             path_namespace: bt_transcript::paths::PrintedPathNamespace::default(),
             printed_path_budget_full: false,
             spawn_directory: None,
+            spawn_at_shell_home: false,
+            shell_home: None,
+            heard_a_directory_report: false,
             local_image_path_tasks: VecDeque::new(),
             inline_image_scale_tasks: VecDeque::new(),
             inline_images: BTreeMap::new(),
@@ -2399,7 +2417,12 @@ impl DualPlaneSession {
         self.printed_path_links = bt_transcript::paths::PrintedPathLinks::in_namespace(
             self.reference_directory().map(Path::to_path_buf),
             self.path_verdicts.clone(),
-            &self.path_namespace,
+            // The namespace the spawn pushed, plus the one thing only the shell could say
+            // (§7.30's `~`). Composed here rather than written back into the pushed value, so the
+            // profile's own answer stays the profile's and a re-push cannot lose the report.
+            &self
+                .path_namespace
+                .with_shell_home(self.shell_home.as_deref()),
         );
     }
 
@@ -8938,7 +8961,19 @@ impl DualPlaneSession {
     /// question.
     fn set_reported_working_directory(&mut self, uri: &str) {
         let reported = file_uri_to_local_path(uri, local_host_name());
-        if self.working_directory != reported {
+        // **The pane's first word about where it is standing is the answer to `~`** — but only for
+        // a pane this window asked to be put down in its shell's own home (§7.30, 2026-09-07). The
+        // launcher was handed a mark, the shell expanded it, and this is the shell saying what it
+        // expanded to; every later report is a place the shell walked to instead.
+        let learned_a_home = !self.heard_a_directory_report
+            && self.spawn_at_shell_home
+            && self.shell_home.is_none()
+            && reported.is_some();
+        self.heard_a_directory_report = true;
+        if learned_a_home {
+            self.shell_home.clone_from(&reported);
+        }
+        if learned_a_home || self.working_directory != reported {
             self.working_directory = reported;
             self.rebuild_printed_path_links();
         }
@@ -8977,6 +9012,16 @@ impl DualPlaneSession {
             self.spawn_directory = directory;
             self.rebuild_printed_path_links();
         }
+    }
+
+    /// Tell this session that the directory above is the **shell's own home, named to a launcher**
+    /// rather than a place this machine can spell (`profiles::SpawnPlace::at_shell_home`).
+    ///
+    /// It is what makes the pane's first `OSC 7` report readable as the answer to `~` — see
+    /// [`Self::shell_home`]. Pushed at the spawn beside the directory itself, because it is the
+    /// same fact about the same launch and a second reader could not re-derive it.
+    pub fn set_spawn_at_shell_home(&mut self, at_shell_home: bool) {
+        self.spawn_at_shell_home = at_shell_home;
     }
 
     /// Where relative text printed into this pane is measured from: §7.1.4's ladder read once —
@@ -22005,7 +22050,13 @@ mod tests {
                 bt_transcript::paths::PrintedPathNamespace::Msys { home: None },
                 &msys,
             ),
-            (bt_transcript::paths::PrintedPathNamespace::Wsl, &wsl),
+            (
+                bt_transcript::paths::PrintedPathNamespace::Wsl {
+                    distro: None,
+                    home: None,
+                },
+                &wsl,
+            ),
         ] {
             let mut session = DualPlaneSession::new(nz(240), nz(6));
             enable_path_detection(&mut session);
@@ -22041,6 +22092,85 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// Every name this session put in front of a worker for one line of text, answered "no" so the
+    /// ledger does not carry it into the next line — the app's own rhythm, run by hand.
+    fn names_asked_about(session: &mut DualPlaneSession, printed: &str) -> Vec<PathBuf> {
+        session.feed(printed.as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        let mut asked = Vec::new();
+        while let Some(task) = session.take_decoration_worker_task() {
+            if let SessionDecorationTask::VerifyPath(path) = task {
+                asked.push(path.clone());
+                session.complete_path_verification(path, false);
+            }
+        }
+        asked
+    }
+
+    /// PIN (user ruling 2026-09-07, §7.30) — **a WSL pane's `~` is the home its own shell reported,
+    /// and a pane that was not put down at its home has no `~` at all.**
+    ///
+    /// Nothing on this side of `wsl.exe` can expand a distribution's `$HOME`: the launcher is
+    /// handed the mark `--cd ~` and the shell is what reads it. So this window asks, and the reply
+    /// is the pane's **first** `OSC 7` report — the shell saying where it was put down. Every later
+    /// report is somewhere it walked to, which is why the second one below moves the working
+    /// directory and leaves `~` where it was.
+    ///
+    /// MUTATIONS: fill the home from *every* report and a `cd /etc` makes `~/notes.md` name
+    /// `\\wsl.localhost\Ubuntu\etc\notes.md`; drop the `spawn_at_shell_home` gate and a pane that
+    /// inherited `/mnt/d/Demo` calls that folder its home.
+    #[test]
+    fn a_wsl_panes_tilde_is_the_home_its_own_shell_reported() {
+        /// One WSL pane, told what its spawn would have told it, with `reports` already fed.
+        fn pane(at_shell_home: bool, reports: &[&str]) -> DualPlaneSession {
+            let mut session = DualPlaneSession::new(nz(120), nz(8));
+            enable_path_detection(&mut session);
+            session.set_path_namespace(bt_transcript::paths::PrintedPathNamespace::Wsl {
+                distro: Some("Ubuntu".to_owned()),
+                home: None,
+            });
+            session.set_spawn_directory(Some(PathBuf::from(if at_shell_home {
+                "~"
+            } else {
+                "/mnt/d/Demo"
+            })));
+            session.set_spawn_at_shell_home(at_shell_home);
+            for report in reports {
+                session
+                    .feed(format!("\u{1b}]7;file://{report}\u{7}").as_bytes())
+                    .unwrap();
+            }
+            session
+        }
+        let notes = PathBuf::from(r"\\wsl.localhost\Ubuntu\home\alice\notes.md");
+
+        assert_eq!(
+            names_asked_about(&mut pane(true, &["/home/alice"]), "see ~/notes.md\r\n"),
+            std::slice::from_ref(&notes),
+            "the pane's first report is what the launcher's `~` expanded to"
+        );
+        assert_eq!(
+            names_asked_about(
+                &mut pane(true, &["/home/alice", "/etc"]),
+                "see ~/notes.md\r\n"
+            ),
+            std::slice::from_ref(&notes),
+            "and every report after it is somewhere the shell walked to, not its home"
+        );
+        assert_eq!(
+            names_asked_about(&mut pane(true, &[]), "see ~/notes.md\r\n"),
+            Vec::<PathBuf>::new(),
+            "a pane whose shell has not spoken yet has no home, and asks about nothing"
+        );
+        assert_eq!(
+            names_asked_about(&mut pane(false, &["/mnt/d/Demo"]), "see ~/notes.md\r\n"),
+            Vec::<PathBuf>::new(),
+            "and a pane put down in a folder it inherited never reads that folder as a home"
+        );
     }
 
     /// PIN — **relative text is measured from §7.1.4's ladder and from nothing else**, and the
