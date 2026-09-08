@@ -724,6 +724,104 @@ pub fn live_row(row: u32, cells: &[bt_transcript::CapturedCell]) -> LiveRow {
     }
 }
 
+/// One staged row, as the searcher wants it: its text, and the byte each **grapheme cluster** of
+/// that text starts at.
+///
+/// The staging plane is a transcript plane and is addressed the way the other one is, in clusters —
+/// which is not the same number as a column the moment a wide glyph is on the row. See
+/// [`LineUnits`] for why the two tables are separate types and what went wrong while they were not.
+pub struct StagedLine {
+    /// The row's text, cell by cell.
+    pub text: String,
+    /// `graphemes[k]` is the byte the `k`th cluster starts at; the trailing entry is the text's
+    /// length, so a byte range converts to a cluster range by two searches.
+    pub grapheme_starts: Vec<u32>,
+}
+
+/// Turn one staged row into a searchable line.
+///
+/// The clusters are counted the way `bt_viewport`'s `captured_staged_visual_row` counts them when
+/// it builds that row's cell anchors — a wide glyph's spacer carries no cluster of its own, and
+/// neither does a cell with no text — because the anchors this scan mints and the anchors that
+/// projection mints have to name the same character.
+#[must_use]
+pub fn staged_line(cells: &[bt_transcript::CapturedCell]) -> StagedLine {
+    let mut text = String::new();
+    let mut grapheme_starts = Vec::with_capacity(cells.len() + 1);
+    for cell in cells {
+        if cell.wide_spacer || cell.text.is_empty() {
+            continue;
+        }
+        grapheme_starts.push(text.len() as u32);
+        text.push_str(&cell.text);
+    }
+    grapheme_starts.push(text.len() as u32);
+    StagedLine {
+        text,
+        grapheme_starts,
+    }
+}
+
+/// The unit a line's offsets are counted in.
+///
+/// **Two of them exist in this window and they are not the same number.** The live grid counts
+/// **columns** — a wide glyph takes two of them and its spacer is one — and the two transcript
+/// planes count **grapheme clusters**, of which that same glyph is one. Which unit a plane uses is
+/// not a taste: it is the unit the projection anchors that plane's cells in, so a hit measured in
+/// one and painted through the other lands one cell to the right for every wide glyph in front of
+/// it. That is what the staging plane did while its rows were measured in columns and the number
+/// was then labelled a `GraphemeOffset`.
+///
+/// So the two tables are separate types and the anchor each one mints is a separate type, which is
+/// the whole of the guard: a scan cannot hand one plane's units to the other plane's anchor,
+/// because the compiler will not have it.
+trait LineUnits {
+    /// The offset these units are counted in, as this plane's anchor constructor takes it.
+    type Offset;
+
+    /// The byte each unit starts at, ascending, ending at the text's length.
+    fn starts(&self) -> &[u32];
+
+    fn offset(index: u32) -> Self::Offset;
+}
+
+/// The byte each column of a grid row starts at — one entry per cell, a wide glyph's spacer
+/// included.
+#[derive(Clone, Copy, Debug)]
+struct ColumnStarts<'a>(&'a [u32]);
+
+/// A column of the live grid.
+#[derive(Clone, Copy, Debug)]
+struct GridColumn(u32);
+
+impl LineUnits for ColumnStarts<'_> {
+    type Offset = GridColumn;
+
+    fn starts(&self) -> &[u32] {
+        self.0
+    }
+
+    fn offset(index: u32) -> GridColumn {
+        GridColumn(index)
+    }
+}
+
+/// The byte each grapheme cluster of a transcript line starts at — one entry per cluster.
+#[derive(Clone, Copy, Debug)]
+struct GraphemeStarts<'a>(&'a [u32]);
+
+impl LineUnits for GraphemeStarts<'_> {
+    type Offset = GraphemeOffset;
+
+    fn starts(&self) -> &[u32] {
+        self.0
+    }
+
+    fn offset(index: u32) -> GraphemeOffset {
+        GraphemeOffset(index)
+    }
+}
+
 /// Where a byte lands in a line whose units start at `boundaries`.
 ///
 /// `boundaries` is ascending and ends with the text's length — a grapheme boundary table or a
@@ -761,11 +859,11 @@ pub fn scan_history(compiled: &CompiledSearch, transcript: &TranscriptStore) -> 
             &mut hits,
             compiled,
             &line.text,
-            &line.grapheme_boundaries,
+            GraphemeStarts(&line.grapheme_boundaries),
             SearchLine::History(line.id),
             |offset| ContentAnchor::History {
                 id: line.id,
-                offset: GraphemeOffset(offset),
+                offset,
                 bias: Bias::Before,
                 generation: line.source_generation,
             },
@@ -795,12 +893,16 @@ pub fn scan_volatile(
     let mut hits = Vec::new();
     let staging_generation = transcript.source_generation();
     for staged in transcript.staged_rows() {
-        let row = live_row(0, &staged.row.cells);
+        // **Clusters, not columns.** Staging is a transcript plane: the projection anchors its
+        // cells by counting clusters, so a scan that counted columns here handed the viewport an
+        // offset a wide glyph further along than the character the reader was shown (review row
+        // R5-8).
+        let row = staged_line(&staged.row.cells);
         push_hits(
             &mut hits,
             compiled,
             &row.text,
-            &row.column_starts,
+            GraphemeStarts(&row.grapheme_starts),
             SearchLine::Staging(staged.id),
             |offset| staging_anchor(staged.id, offset, staging_generation),
         );
@@ -810,13 +912,13 @@ pub fn scan_volatile(
             &mut hits,
             compiled,
             &row.text,
-            &row.column_starts,
+            ColumnStarts(&row.column_starts),
             SearchLine::Live { row: row.row },
-            |offset| ContentAnchor::Live {
+            |column| ContentAnchor::Live {
                 screen: ScreenId::Primary,
                 point: GridPoint {
                     row: row.row,
-                    column: offset,
+                    column: column.0,
                 },
                 bias: Bias::Before,
                 generation: grid_generation,
@@ -826,30 +928,34 @@ pub fn scan_volatile(
     hits
 }
 
-fn staging_anchor(id: StagingId, offset: u32, generation: SourceGeneration) -> ContentAnchor {
+fn staging_anchor(
+    id: StagingId,
+    offset: GraphemeOffset,
+    generation: SourceGeneration,
+) -> ContentAnchor {
     ContentAnchor::Staging {
         id,
-        offset: GraphemeOffset(offset),
+        offset,
         bias: Bias::Before,
         generation,
     }
 }
 
-fn push_hits(
+fn push_hits<U: LineUnits>(
     into: &mut Vec<Hit>,
     compiled: &CompiledSearch,
     text: &str,
-    boundaries: &[u32],
+    units: U,
     line: SearchLine,
-    anchor: impl Fn(u32) -> ContentAnchor,
+    anchor: impl Fn(U::Offset) -> ContentAnchor,
 ) {
     for range in bt_transcript::search::find_in_line(compiled, text) {
-        let (start, end) = unit_range(boundaries, range);
+        let (start, end) = unit_range(units.starts(), range);
         into.push(Hit {
             line,
             start,
             end,
-            anchor: anchor(start),
+            anchor: anchor(U::offset(start)),
         });
     }
 }
@@ -1853,6 +1959,47 @@ mod tests {
             (hits[0].start, hits[0].end),
             (4, 6),
             "the grid counts columns, and a wide glyph takes two of them"
+        );
+    }
+
+    /// RED (review row R5-8) — **a staged row is addressed in graphemes, like the plane it stands
+    /// on.**
+    ///
+    /// Staging is a transcript plane, and the projection builds its cell anchors by counting
+    /// clusters: a wide glyph's spacer carries no offset of its own. The scan measured the same
+    /// rows in *columns* and labelled the result a `GraphemeOffset`, so every staged highlight
+    /// landed one cell to the right per wide glyph in front of it — and the anchor the viewport is
+    /// moved to named a different character than the one the reader was shown.
+    #[test]
+    fn a_staged_hit_after_a_wide_glyph_is_measured_in_graphemes() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(200_000).unwrap());
+        store.stage_resize_rows(vec![CapturedRow {
+            cells: wide_row("\u{4e2d}\u{6587}ok"),
+            continues: false,
+            shell_mark: None,
+            captured_columns: 6,
+        }]);
+        let hits = scan_volatile(
+            &engine_for("ok", SearchFlags::default()),
+            &store,
+            &[],
+            GridGeneration(1),
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            (hits[0].start, hits[0].end),
+            (2, 4),
+            "two clusters stand in front of the hit, however many columns they take"
+        );
+        let ContentAnchor::Staging { offset, .. } = &hits[0].anchor else {
+            panic!(
+                "a staged hit is anchored on the staging plane: {:?}",
+                hits[0]
+            );
+        };
+        assert_eq!(
+            offset.0, 2,
+            "and the anchor says the same number the projection counts to"
         );
     }
 

@@ -1142,6 +1142,29 @@ impl TerminalAdapter {
         Some(captured)
     }
 
+    /// The same row read off the **primary** screen, whichever screen is showing.
+    ///
+    /// A full-screen program parks the primary grid; it does not freeze it. The vendor reflows the
+    /// inactive grid on every resize, so a window edge dragged while `vim` is up re-cuts every
+    /// logical line behind it, and an owner of coordinates on that screen has to be able to read
+    /// the rows at the one moment they are not on display.
+    ///
+    /// Uncached, unlike [`Self::visible_row`]: the capture cache is a per-frame instrument keyed to
+    /// the grid on screen, and this is asked on a resize rather than on a frame.
+    pub fn primary_row(&self, row: u32) -> Option<CapturedRow> {
+        if !self.term.mode().contains(TermMode::ALT_SCREEN) {
+            return self.visible_row(row);
+        }
+        if row >= self.rows.get() {
+            return None;
+        }
+        let grid = self.term.primary_grid();
+        let cells = (0..self.columns.get())
+            .map(|column| grid[Line(row as i32)][Column(column as usize)].clone())
+            .collect::<Vec<_>>();
+        Some(to_captured_row(&cells))
+    }
+
     /// How many rows have been captured out of this terminal since it opened.
     /// See [`Self::captures`].
     pub fn captures(&self) -> u64 {

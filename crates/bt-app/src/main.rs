@@ -36266,7 +36266,7 @@ impl Runtime<'_> {
                 .transcript()
                 .staged_rows()
                 .find(|staged| staged.id == id)
-                .map(|staged| search::live_row(0, &staged.row.cells).text),
+                .map(|staged| search::staged_line(&staged.row.cells).text),
             bt_viewport::SearchLine::Live { row } => leaf
                 .session
                 .live_rows()
@@ -43550,27 +43550,23 @@ impl Runtime<'_> {
     /// calling a setter would be inventing a second channel beside the one the
     /// theme, the font, the language and the DPI all already use.
     ///
-    /// **Every pane in every tab, and it has to be**, which is where this parts
-    /// company with [`Self::adopt_new_language`]. That function reaches the
-    /// focused shell through [`Self::sync_math_layout_key`] and lets the rest of
-    /// the window catch up in [`Self::activate_tab`], which works for a fact that
-    /// only becomes visible when a tab comes up. It does not work here: a split
-    /// is two panes of one tab, both on screen, and `activate_tab` never fires
-    /// for the sibling. The reader would press `Off`, watch one half of their
-    /// window stop folding, and have no gesture at all that would persuade the
-    /// other half. The road is therefore [`Self::apply_scale_factor`]'s — "no
-    /// screen anywhere in the window is exempt from it" — for the same reason it
-    /// is that function's: this is a fact about the product and not about the
-    /// pane the keyboard happens to be in.
+    /// **Every pane in every tab, and it has to be.** A split is two panes of one
+    /// tab, both on screen, and no gesture the reader has re-keys the one that is
+    /// not holding the keyboard: they would press `Off`, watch one half of their
+    /// window stop folding, and have nothing at all that would persuade the other
+    /// half. The road is therefore [`Self::apply_scale_factor`]'s — "no screen
+    /// anywhere in the window is exempt from it" — for the same reason it is that
+    /// function's, and [`Self::sync_math_layout_key`]'s for the same reason
+    /// again: this is a fact about the product and not about the pane the
+    /// keyboard happens to be in.
     ///
-    /// **The key is amended rather than rebuilt.** `window_layout_key` measures
-    /// the width in the *focused* pane's columns, and no two panes share a
-    /// width — building a fresh key for a pane from here would hand it somebody
-    /// else's geometry. Each session already holds a key that is right about
-    /// everything except the one member that moved, so the one member is what
-    /// changes; `DualPlaneSession::set_layout_key` compares and invalidates only
-    /// where it actually differs, which is why a pane that was already reading
-    /// this answer costs nothing.
+    /// **The key is amended rather than rebuilt.** No two panes share a width, so
+    /// a key built here would have to go and find each pane's own columns to say
+    /// anything true about it — and each session already holds a key that is
+    /// right about everything except the one member that moved, so the one member
+    /// is what changes. `DualPlaneSession::set_layout_key` compares and
+    /// invalidates only where it actually differs, which is why a pane that was
+    /// already reading this answer costs nothing.
     ///
     /// The publish is what puts the new answer on screen, in the frame the
     /// reader is watching.
@@ -72911,33 +72907,67 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// A tab with no shell has no live output to stabilise, so the deadline it
-    /// would be compared against does not exist and this is a no-op (§7.1.6h).
+    /// **The earliest settle any pane the reader can see still owes.**
+    ///
+    /// Every leaf of the tab on screen, for the reason the synchronized-update
+    /// deadline walks every leaf: a stability window is a property of one pane's
+    /// rows, and the pane that has just printed a `$$…$$` block is very often not
+    /// the pane holding the keyboard. Read through the tab's `Deref` this asked
+    /// the focused leaf alone, so a sibling that printed a block and then went
+    /// quiet had nothing to wake the loop on its behalf.
+    ///
+    /// Only the tab on screen, because the artifacts this settles are scheduled
+    /// off a frame and a tab nobody is looking at makes none; switching to it
+    /// projects it and asks the whole question again.
+    ///
+    /// A tab with no shell has no live output to stabilise and answers `None`,
+    /// which is the no-op §7.1.6h asks for.
+    fn live_stability_deadline(&self) -> Option<Instant> {
+        self.window.tabs[self.window.active_tab]
+            .leaves()
+            .filter_map(|(_, leaf)| leaf.session.live_stability_deadline())
+            .min()
+    }
+
+    /// Settle the rows of every pane on screen whose stability window has run
+    /// out, then hand whatever that produced to the engine.
+    ///
+    /// The walk is the whole of the fix: settling only the focused leaf left a
+    /// visible sibling showing its own LaTeX until somebody clicked into it.
+    /// `dispatch_tab_decoration_tasks` already visits every leaf of the tab, so
+    /// once the settle does too there is nothing else to route.
     fn advance_live_math_if_due(&mut self, now: Instant) -> Result<()> {
-        if self
-            .focused()
-            .and_then(|leaf| leaf.session.live_stability_deadline())
-            .is_some_and(|deadline| now >= deadline)
-        {
-            self.shell_mut().session.advance_live_stability(now);
-            let active = self.window.active_tab;
-            let tasks = self.app.math_worker.tasks.clone();
-            let scale_tasks = self.app.math_worker.scale_tasks.clone();
-            let window = self.window_id();
-            let disabled = dispatch_tab_decoration_tasks(
-                window,
-                &mut self.window.tabs[active],
-                &tasks,
-                &scale_tasks,
-                &mut self.app.math_worker_running,
-                &mut self.app.math_worker_notice_pending,
-            );
-            if disabled {
-                self.publish_frame(FrameTrigger {
-                    occurred_at: now,
-                    source: FrameSource::Expose,
-                })?;
+        let active = self.window.active_tab;
+        let mut settled = false;
+        for (_, leaf) in self.window.tabs[active].leaves_mut() {
+            if leaf
+                .session
+                .live_stability_deadline()
+                .is_some_and(|deadline| now >= deadline)
+            {
+                leaf.session.advance_live_stability(now);
+                settled = true;
             }
+        }
+        if !settled {
+            return Ok(());
+        }
+        let tasks = self.app.math_worker.tasks.clone();
+        let scale_tasks = self.app.math_worker.scale_tasks.clone();
+        let window = self.window_id();
+        let disabled = dispatch_tab_decoration_tasks(
+            window,
+            &mut self.window.tabs[active],
+            &tasks,
+            &scale_tasks,
+            &mut self.app.math_worker_running,
+            &mut self.app.math_worker_notice_pending,
+        );
+        if disabled {
+            self.publish_frame(FrameTrigger {
+                occurred_at: now,
+                source: FrameSource::Expose,
+            })?;
         }
         Ok(())
     }
@@ -73304,7 +73334,7 @@ impl Runtime<'_> {
         // `Vec::new` allocates nothing, and nothing is pushed at all unless the
         // column is up and its debt is not already standing.
         let mut spoke: Vec<usize> = Vec::new();
-        let collect_speakers = self.window.focus_mode && !self.window.cards.owes_frame();
+        let collect_speakers = self.collecting_card_speakers();
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             let outcome =
                 drain_tab_pty(tab, window_focused, index == active_tab, owner_is_a_shell)?;
@@ -73355,16 +73385,11 @@ impl Runtime<'_> {
         // `OSC 0`/`OSC 7` causes — see [`focus_thumb::CardClock`] for the gate and
         // for what a shell that reports neither was left showing.
         //
-        // **The damage key is checked, not the projection**, and it is checked
-        // against the cards that are actually on screen: a collapsed column, a
-        // window not in the mode, or a tab scrolled out of the rail leaves this at
-        // one rectangle comparison per speaking tab and no frame asked for.
-        if !spoke.is_empty()
-            && let Some(geometry) = self.focus_rail_geometry_now(now)
-            && spoke.iter().any(|index| geometry.card_is_in_view(*index))
-        {
-            self.window.cards.pane_spoke();
-        }
+        // Said through [`Self::panes_spoke`], which is the one place the judgement
+        // lives: the timeout release in `finish_synchronized_update_if_due` moves
+        // a pane's picture too, and two copies of "is this card on screen?" is how
+        // two roads start disagreeing.
+        self.panes_spoke(&spoke, now);
         // **A ring that still holds bytes is a turn this window owes itself.**
         //
         // [`drain_leaf_pty`] takes one quantum from a pane and returns, so the
@@ -73431,11 +73456,51 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// Whether it is worth writing down which tabs spoke on this turn.
+    ///
+    /// A window outside the mode has no cards to move, and one already owed a
+    /// frame is going to draw them anyway — so both gather nothing at all, which
+    /// is what keeps this off the price of an ordinary drain.
+    fn collecting_card_speakers(&self) -> bool {
+        self.window.focus_mode && !self.window.cards.owes_frame()
+    }
+
+    /// **A pane's picture moved, so the card that is a picture of it owes a
+    /// frame** (§7.1.6b′ T-5, review row R5-7).
+    ///
+    /// One function because there are two roads and they must not disagree. The
+    /// ordinary one is the drain: bytes reached a screen, which is the same
+    /// condition `DualPlaneSession::feed_at` bumps `screen_revision` on — the very
+    /// number [`focus_thumb::FocusThumbnails`]'s damage gate keys a terminal seat
+    /// to. The other passes through no ring at all: a DEC 2026 block whose
+    /// timeout expires is released turns after its bytes arrived, moving cells
+    /// with nothing coming through the drain, and the card column was never told.
+    ///
+    /// **The damage key is checked, not the projection**, and it is checked
+    /// against the cards that are actually on screen: a collapsed column, a
+    /// window not in the mode, or a tab scrolled out of the rail leaves this at
+    /// one rectangle comparison per speaking tab and no frame asked for.
+    fn panes_spoke(&mut self, spoke: &[usize], now: Instant) {
+        if spoke.is_empty() {
+            return;
+        }
+        if let Some(geometry) = self.focus_rail_geometry_now(now)
+            && spoke.iter().any(|index| geometry.card_is_in_view(*index))
+        {
+            self.window.cards.pane_spoke();
+        }
+    }
+
     fn finish_synchronized_update_if_due(&mut self, now: Instant) -> Result<()> {
         let mut active_finished = false;
         let mut active_finished_off_focus = false;
         let mut chrome_changed = false;
         let active = self.window.active_tab;
+        // Which tabs had a pane's screen move here, on the drain's own terms and
+        // for [`Self::panes_spoke`]'s reason: this release is the one way a pane's
+        // picture changes without a byte arriving.
+        let mut spoke: Vec<usize> = Vec::new();
+        let collect_speakers = self.collecting_card_speakers();
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             let focused = tab.focused_leaf;
             // Per leaf: a synchronized update is a property of one screen, and
@@ -73454,6 +73519,9 @@ impl Runtime<'_> {
                     .finish_synchronized_update(now)
                     .context("finish timed-out DEC 2026 synchronized update")?;
                 chrome_changed |= leaf.name_evidence() != name_before;
+                if collect_speakers && finished && spoke.last() != Some(&index) {
+                    spoke.push(index);
+                }
                 if index == active && finished {
                     active_finished = true;
                     // **A screen that changed with no byte arriving.** The block
@@ -73467,6 +73535,7 @@ impl Runtime<'_> {
             }
         }
         self.window.unpainted_pane_output |= active_finished_off_focus;
+        self.panes_spoke(&spoke, now);
         if chrome_changed {
             self.window.window.set_title(&self.display_title());
             self.refresh_chrome();
@@ -86481,20 +86550,27 @@ impl Runtime<'_> {
         Ok(true)
     }
 
+    /// **Re-key every pane of every tab** (review row R5-5).
+    ///
+    /// A theme switch, a scheme swap, a font change and a language switch all
+    /// have one required hook: move whatever they move, then call this. See
+    /// [`window_layout_key`] for which of the four revisions answers for
+    /// which. The session keeps same-source old pixels only while the
+    /// replacement is pending.
+    ///
+    /// Every pane, because every one of those facts is about the *window* or the
+    /// *display* and none of them is about the pane holding the keyboard.
+    /// `apply_scale_factor` and `adopt_terminal_font` already say so in as many
+    /// words, handing every leaf of every tab its new metrics; this is the
+    /// sentence that tells each session its rasters were built for the old ones,
+    /// and while it was said to the focused leaf alone a sibling went on drawing
+    /// pictures measured for a cell that no longer exists.
+    ///
+    /// **The width is each pane's own.** Two panes of one tab are two widths, so
+    /// there is no single key to compute once and hand round: the walk builds one
+    /// per leaf out of that leaf's columns. A tab with no shell has no leaves and
+    /// therefore no bands to re-key, which is the no-op §7.1.6h asks for.
     fn sync_math_layout_key(&mut self) {
-        // A theme switch, a scheme swap, a font change and a language switch all
-        // have one required hook: move whatever they move, then call this. See
-        // [`window_layout_key`] for which of the four revisions answers for
-        // which. The session keeps same-source old pixels only while the
-        // replacement is pending.
-        // No shell, no typeset bands to re-key: the layout key is a session's
-        // cache key, and there is no session (§7.1.6h).
-        let Some(width_cells) = self
-            .focused()
-            .map(|leaf| nonzero_u32(leaf.grid.columns.get()))
-        else {
-            return;
-        };
         let dpi_milli = self.window.renderer.metrics().dpi_milli();
         // The window's own count, not a constant. It was `1` for as long as
         // nothing could change the face; the Terminal font row can, and a frozen
@@ -86503,12 +86579,16 @@ impl Runtime<'_> {
         // include the thing that moved.
         let font_rev = self.window.renderer.font_revision();
         let line_wrapping = self.app.settings_store.loaded().line_wrapping;
-        self.shell_mut().session.set_layout_key(window_layout_key(
-            width_cells,
-            dpi_milli,
-            font_rev,
-            line_wrapping,
-        ));
+        for tab in self.window.tabs.iter_mut() {
+            for (_, leaf) in tab.leaves_mut() {
+                leaf.session.set_layout_key(window_layout_key(
+                    nonzero_u32(leaf.grid.columns.get()),
+                    dpi_milli,
+                    font_rev,
+                    line_wrapping,
+                ));
+            }
+        }
     }
 
     fn apply_scale_factor(&mut self, scale_factor: f64) -> Result<()> {
@@ -88942,6 +89022,16 @@ impl Runtime<'_> {
         let hovered_reference = self.hovered_image_reference();
         let hover_pane = self.window.hover_pane.filter(|seat| *seat != focused_leaf);
         let mut unfocused_frames: Vec<(PaneDraw, ViewportFrame)> = Vec::new();
+        // **And what those panes owe the typesetting engine** (review row R5-4).
+        // A settled `$$…$$` block becomes work for the engine when a frame is
+        // projected over it, and until this walk asked, the only frame that ever
+        // asked was the focused leaf's — so a block printed in the pane beside it
+        // stayed as its own LaTeX until somebody clicked into that pane. This is
+        // the road that already visits every visible leaf, so it is where the
+        // question belongs; the answer is gathered here and dispatched once
+        // below, because the dispatcher wants the tab and this loop is holding a
+        // leaf of it.
+        let mut owes_the_engine = false;
         for pane in &bodies {
             if pane.seat == focused_leaf {
                 continue;
@@ -88956,8 +89046,11 @@ impl Runtime<'_> {
                 .viewport_frame(&mut leaf.projection)
                 .context("project an unfocused pane's grid into a viewport frame")?;
             // A pane nobody has the keyboard in still draws paths, and still owes them an answer.
-            leaf.session
-                .absorb_printed_path_probes(&mut leaf.projection);
+            owes_the_engine |= leaf
+                .session
+                .absorb_printed_path_probes(&mut leaf.projection)
+                != 0;
+            owes_the_engine |= leaf.session.schedule_visible_artifacts(&projected) != 0;
             if hover_pane == Some(pane.seat) {
                 apply_hover_marks(
                     &mut projected,
@@ -88969,6 +89062,19 @@ impl Runtime<'_> {
                 );
             }
             unfocused_frames.push((*pane, projected));
+        }
+        if owes_the_engine {
+            let tasks = self.app.math_worker.tasks.clone();
+            let scale_tasks = self.app.math_worker.scale_tasks.clone();
+            let window = self.window_id();
+            dispatch_tab_decoration_tasks(
+                window,
+                &mut self.window.tabs[active],
+                &tasks,
+                &scale_tasks,
+                &mut self.app.math_worker_running,
+                &mut self.app.math_worker_notice_pending,
+            );
         }
         let focused_body = bodies
             .iter()
@@ -89356,9 +89462,11 @@ impl Runtime<'_> {
             .flat_map(|tab| tab.leaves())
             .filter_map(|(_, leaf)| leaf.session.synchronized_update_deadline())
             .min();
-        let live_stability_deadline = self
-            .focused()
-            .and_then(|leaf| leaf.session.live_stability_deadline());
+        // Every leaf of the tab on screen, for the reason the line above gives:
+        // a stability window is a property of one pane's rows, and the pane that
+        // printed the block is often not the one holding the keyboard. See
+        // [`Self::live_stability_deadline`].
+        let live_stability_deadline = self.live_stability_deadline();
         let wake_deadline = earliest_deadline([
             startup_deadline,
             self.window.ime_cursor_throttle.deadline(),
@@ -92970,16 +93078,12 @@ mod pty_drain_budget_tests {
         let gathered = drain
             .find("spoke.push(index)")
             .expect("`drain_pty` notes which tabs spoke");
-        let asked = drain
-            .find("card_is_in_view")
-            .expect("`drain_pty` asks whether any of them has a card on screen");
         let told = drain
-            .find("cards.pane_spoke()")
-            .expect("`drain_pty` puts the card column on the clock");
+            .find("self.panes_spoke(")
+            .expect("`drain_pty` says that those panes' pictures moved");
         assert!(
-            gathered < asked && asked < told,
-            "the speakers are gathered, then filtered by what is on screen, and \
-             only then is a frame owed"
+            gathered < told,
+            "the speakers are gathered before anybody is told about them"
         );
         assert!(
             drain.contains("outcome.arrived {"),
@@ -92987,9 +93091,26 @@ mod pty_drain_budget_tests {
              moves the damage key the card is drawn against"
         );
         assert!(
-            drain.contains("self.window.focus_mode && !self.window.cards.owes_frame()"),
+            drain.contains("self.collecting_card_speakers()"),
             "a window outside the mode, and one already owed a frame, gather \
              nothing at all"
+        );
+        assert!(
+            method_body("collecting_card_speakers")
+                .contains("self.window.focus_mode && !self.window.cards.owes_frame()"),
+            "and that is what those two words mean"
+        );
+        let spoke = method_body("panes_spoke");
+        let asked = spoke
+            .find("card_is_in_view")
+            .expect("the one function asks whether any of them has a card on screen");
+        let clock = spoke
+            .find("cards.pane_spoke()")
+            .expect("and puts the card column on the clock");
+        assert!(
+            asked < clock,
+            "the speakers are filtered by what is on screen, and only then is a \
+             frame owed"
         );
     }
 
@@ -93265,6 +93386,119 @@ mod pty_drain_budget_tests {
             body.contains("earliest_deadline("),
             "one window wakes at the earliest boundary any of its panes owes"
         );
+    }
+
+    /// RED (review row R5-4) — **every pane the reader can see settles its rows and typesets what
+    /// it printed.**
+    ///
+    /// A `$$…$$` block becomes a picture in two steps and both were asked of the pane holding the
+    /// keyboard alone: the stability window that decides a row has stopped moving, and the
+    /// scheduler that turns a settled block into work for the typesetting engine. A reader who
+    /// splits a pane, runs the command on the right and clicks back into the left is looking at a
+    /// pane that will never typeset anything — the "formula in the other pane never renders"
+    /// report.
+    ///
+    /// The road that already visits the other panes is the one that projects them for the present,
+    /// so that is where the scheduling belongs; the settle belongs beside the deadline that wakes
+    /// the loop for it, and that deadline has to come from the same walk or the window sleeps
+    /// through the window it owes.
+    ///
+    /// Mutation: put `self.shell_mut()` or `self.focused()` back into either and the sibling is
+    /// back to showing its own LaTeX.
+    #[test]
+    fn every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts() {
+        let deadline = method_body("live_stability_deadline");
+        assert!(
+            deadline.contains("leaves()"),
+            "the window wakes at the earliest settle any pane on screen owes"
+        );
+        let due = method_body("advance_live_math_if_due");
+        assert!(
+            due.contains("leaves_mut()"),
+            "and when it wakes, every pane of the tab on screen settles"
+        );
+        for focused_only in ["self.shell_mut()", "self.shell()", "self.focused()"] {
+            assert!(
+                !deadline.contains(focused_only) && !due.contains(focused_only),
+                "`{focused_only}` is the keyboard's pane, and a block prints in whichever pane \
+                 ran the command"
+            );
+        }
+        let redraw = method_body("redraw");
+        assert!(
+            redraw.contains("schedule_visible_artifacts("),
+            "and the pass that projects the panes nobody is typing in is the pass that schedules \
+             the artifacts it just found in them"
+        );
+        assert!(
+            redraw.contains("dispatch_tab_decoration_tasks("),
+            "scheduling work nobody dispatches is a block that stays LaTeX"
+        );
+    }
+
+    /// RED (review row R5-5) — **a metric that moved re-keys every pane, not the focused one.**
+    ///
+    /// A DPI change, a font change, a theme swap and a language switch all hand every leaf of
+    /// every tab new metrics — `apply_scale_factor` and `adopt_terminal_font` say so in as many
+    /// words — and then the layout key, which is the session's cache key for everything it has
+    /// rastered, was written onto the pane holding the keyboard alone. A sibling went on drawing
+    /// pictures built for the old cell.
+    ///
+    /// The width is part of that key and is a fact about **one pane**: two panes of one tab are
+    /// two widths, so the key cannot be computed once and handed round.
+    ///
+    /// Mutation: put `self.shell_mut()` back and a sibling keeps rasters built for the old
+    /// metrics; compute the width once outside the walk and a split re-keys both panes to the
+    /// focused one's column count.
+    #[test]
+    fn a_metric_that_moved_re_keys_every_pane() {
+        let sync = method_body("sync_math_layout_key");
+        assert!(
+            sync.contains("self.window.tabs.iter_mut()"),
+            "every tab, because a background tab is switched to and not rebuilt"
+        );
+        assert!(sync.contains("leaves_mut()"), "and every leaf of each");
+        for focused_only in ["self.shell_mut()", "self.shell()", "self.focused()"] {
+            assert!(
+                !sync.contains(focused_only),
+                "`{focused_only}` is the keyboard's pane and a display is not"
+            );
+        }
+        assert!(
+            sync.contains("leaf.grid.columns"),
+            "and each pane's key carries that pane's own width"
+        );
+    }
+
+    /// RED (review row R5-7) — **a pane's picture moving is one fact, said in one place.**
+    ///
+    /// The drain hears the ordinary case: bytes reached a screen. The other case reaches no drain
+    /// at all — a DEC 2026 block whose timeout expires is released here, moving cells with nothing
+    /// passing through the ring — and the card column was never told, so a focus card kept the
+    /// picture from before the release for as long as the pane then stayed quiet.
+    ///
+    /// Mutation: drop the call from either road and that road's cards stop moving; inline the
+    /// `card_is_in_view` test at one of them and the two roads start disagreeing about which cards
+    /// are worth a frame.
+    #[test]
+    fn a_picture_that_moved_tells_the_cards_whichever_road_moved_it() {
+        let spoke = method_body("panes_spoke");
+        assert!(
+            spoke.contains("card_is_in_view"),
+            "a card nobody can see is not worth a frame"
+        );
+        assert!(spoke.contains("cards.pane_spoke()"), "and one that is, is");
+        for road in ["drain_pty", "finish_synchronized_update_if_due"] {
+            let body = method_body(road);
+            assert!(
+                body.contains("self.panes_spoke("),
+                "`{road}` moves a pane's picture, so it says so"
+            );
+            assert!(
+                !body.contains("card_is_in_view"),
+                "`{road}` asks the one function rather than keeping a second copy of its judgement"
+            );
+        }
     }
 }
 

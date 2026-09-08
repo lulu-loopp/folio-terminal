@@ -4343,13 +4343,12 @@ impl DualPlaneSession {
     /// A mark whose line is gone therefore leaves, exactly as it does when the line is deleted
     /// (`retire_command_marks`) or evicted. The rail shows one tick fewer, which is true, instead
     /// of a tick that jumps somewhere the command never was.
+    ///
+    /// **Which screen is showing does not enter into it**, and the anchor says so itself: the
+    /// filter below is `ScreenId::Primary`, and the primary grid is reflowed by a resize whether or
+    /// not a full-screen program is standing in front of it.
     fn retire_marks_with_stale_anchors(&mut self) {
         let generation = self.grid_generation;
-        debug_assert_eq!(
-            self.live_screen,
-            ScreenId::Primary,
-            "only a reflow of the primary grid can have left a primary anchor behind"
-        );
         let doomed = self
             .command_marks
             .marks()
@@ -5051,13 +5050,17 @@ impl DualPlaneSession {
     /// anchor on one of those is exactly as temporary as one on a cell, so both are written down
     /// here and both are put back by [`Self::reseat_anchors_after_reflow`].
     fn reflow_witnesses(&self) -> ReflowSnapshot {
-        // **Primary only, and the guard is the live screen rather than the anchor's.** A full-screen
-        // program's grid is a different document (§3.2's isolated namespace): the primary plane's
-        // rows are parked, not reflowed, so a primary anchor read against the alternate screen's
-        // text would be matched against a canvas it has nothing to do with.
-        if self.live_screen != ScreenId::Primary {
-            return ReflowSnapshot::default();
-        }
+        // **Primary anchors, read off the primary grid, whichever screen is showing.** A
+        // full-screen program's grid is a different document (§3.2's isolated namespace) and no
+        // anchor on it is written down here — the filter below is `ScreenId::Primary` and nothing
+        // else. What the alternate screen does *not* do is park the primary plane's rows out of the
+        // reflow's way: the vendor resizes the inactive grid on every resize
+        // (`Term::resize`), so a window edge dragged while `vim` is up re-cuts every logical line
+        // behind it. This used to decline to look at all while the alternate screen was showing,
+        // and the return to primary then re-dated every live anchor into a fresh generation with
+        // the coordinates it had before the reflow — a promise that the cell still means something,
+        // made without looking. [`TerminalAdapter::primary_row`] is what makes the honest answer
+        // reachable, and [`Self::reflow_corpus`] reads the tail through it.
         // **Asked before the tail is read, not after.** A pane with nothing registered on it — no
         // command mark, no image, no open region — is the overwhelmingly common one, and reading
         // its rows into strings once per frame of a window drag is a cost with no question behind
@@ -5183,16 +5186,28 @@ impl DualPlaneSession {
         }
         let corpus = self.reflow_corpus(lines);
         // One entry per distinct line, newest first, so several anchors on one row are one claim.
-        let mut wanted: Vec<(&str, Vec<usize>)> = Vec::new();
+        //
+        // **A line's identity here is its text *and* its place, not its text alone.** Two runs of
+        // one command draw the same prompt line twice; grouping by text collapsed both commands'
+        // anchors into a single claim, and the claim was then seated on the newest occurrence — so
+        // the older command's `A` ended up on the newer command's prompt row while its `B`, which
+        // the region re-match had already placed, stayed where it belonged. `order.0` is the index
+        // of the logical line each witness was taken from, which is exactly what tells two
+        // identical lines apart, and it is already written down.
+        let mut wanted: Vec<(&str, usize, Vec<usize>)> = Vec::new();
         for (index, witness) in witnesses.iter().enumerate().rev() {
             match wanted.last_mut() {
-                Some((line, holders)) if *line == witness.line.as_str() => holders.push(index),
-                _ => wanted.push((witness.line.as_str(), vec![index])),
+                Some((line, source, holders))
+                    if *line == witness.line.as_str() && *source == witness.order.0 =>
+                {
+                    holders.push(index);
+                }
+                _ => wanted.push((witness.line.as_str(), witness.order.0, vec![index])),
             }
         }
         let mut placements = Vec::new();
         let mut ceiling = corpus.len();
-        for (line, holders) in wanted {
+        for (line, _, holders) in wanted {
             let Some(found) = corpus[..ceiling]
                 .iter()
                 .rposition(|candidate| candidate.text == line)
@@ -5251,7 +5266,10 @@ impl DualPlaneSession {
                 (ReflowPlane::Staged(staged.id), staged.row.clone())
             } else {
                 let row = u32::try_from(index - staged.len()).unwrap_or(u32::MAX);
-                match self.terminal.visible_row(row) {
+                // The **primary** plane's row and not the one on display: the anchors this corpus
+                // answers for are all `ScreenId::Primary`, and a resize taken while a full-screen
+                // program is up reflows that plane without showing it.
+                match self.terminal.primary_row(row) {
                     Some(captured) => (ReflowPlane::Live(row), captured),
                     None => continue,
                 }
@@ -28918,6 +28936,108 @@ mod tests {
             Some("PS> echo one"),
             "the row the first reflow put into staging is handed back and restaged by the second, \
              so the mark has to move with it there too"
+        );
+    }
+
+    /// RED (review row R5-3) — **a resize taken while a full-screen program is up still moves the
+    /// marks on the primary screen.**
+    ///
+    /// The primary grid is parked, not frozen: the vendor reflows the inactive grid on every
+    /// resize (`Term::resize`), so a window edge dragged while `vim` is on screen re-cuts every
+    /// logical line behind it. The witness snapshot used to refuse to look while the alternate
+    /// screen was showing, and the return to primary then re-dated every live anchor into a fresh
+    /// generation with the coordinates it had before the reflow — a promise that the cell still
+    /// means something, made without looking. The mark on this prompt then sat in the middle of
+    /// the line above it.
+    #[test]
+    fn a_resize_on_the_alternate_screen_carries_the_primary_marks_to_their_new_rows() {
+        let mut session = DualPlaneSession::new(nz(30), nz(24));
+        session
+            .feed(format!("{}\r\n", "x".repeat(50)).as_bytes())
+            .unwrap();
+        run_command(&mut session, "echo one", "out", "0");
+        let mark = session.command_marks()[0].clone();
+        assert_eq!(
+            mark_named_text(&session, &mark).as_deref(),
+            Some("PS> echo one"),
+            "the fixture starts with the mark on its own prompt row"
+        );
+
+        session.feed(b"\x1b[?1049h").unwrap();
+        assert_eq!(session.live_screen, ScreenId::Alternate);
+        session.resize(nz(60), nz(24)).unwrap();
+        session.feed(b"\x1b[?1049l").unwrap();
+        assert_eq!(session.live_screen, ScreenId::Primary);
+        assert_eq!(
+            session.command_marks().len(),
+            1,
+            "the mark is still in the ledger"
+        );
+        assert_eq!(
+            mark_named_text(&session, &session.command_marks()[0].clone()).as_deref(),
+            Some("PS> echo one"),
+            "the two rows above joined into one, so the prompt moved up one — and the mark names \
+             the prompt, not the cell it used to be in"
+        );
+    }
+
+    /// RED (review row R5-6) — **two commands whose prompt lines read the same keep a seat each.**
+    ///
+    /// Re-seating walks both sides of the reflow from the newest end backwards, which is the right
+    /// rule, but it grouped the witnesses by their line's *text*: two runs of one command draw the
+    /// same prompt line twice, so both marks collapsed onto one claim and both were placed on the
+    /// newest occurrence. The order the witnesses were taken in is what tells them apart, and it
+    /// is already recorded.
+    #[test]
+    fn two_commands_whose_prompt_lines_read_alike_keep_a_seat_each_across_a_reflow() {
+        /// A mark's `A` and its `B` are two anchors on one row — the prompt and the command that
+        /// was typed at it — which is what makes them a pair worth comparing after a reflow.
+        fn row_of(session: &DualPlaneSession, anchor: AnchorId) -> u32 {
+            match session.command_mark_anchor(anchor) {
+                Some(ContentAnchor::Live { point, .. }) => point.row,
+                other => panic!("the fixture keeps every anchor on the grid: {other:?}"),
+            }
+        }
+
+        let mut session = DualPlaneSession::new(nz(60), nz(24));
+        session
+            .feed(format!("{}\r\n", "x".repeat(50)).as_bytes())
+            .unwrap();
+        run_command(&mut session, "echo one", "aaa", "0");
+        run_command(&mut session, "echo one", "bbb", "0");
+        let marks = session.command_marks().to_vec();
+        assert_eq!(marks.len(), 2);
+        let prompts = [
+            marks[0].prompt.expect("`A` was reported"),
+            marks[1].prompt.expect("`A` was reported"),
+        ];
+        assert_ne!(
+            row_of(&session, prompts[0]),
+            row_of(&session, prompts[1]),
+            "the fixture starts with two prompts on two rows"
+        );
+
+        session.resize(nz(30), nz(24)).unwrap();
+
+        let marks = session.command_marks().to_vec();
+        assert_eq!(marks.len(), 2, "both marks are still in the ledger");
+        for mark in &marks {
+            assert_eq!(
+                mark_named_text(&session, mark).as_deref(),
+                Some("PS> echo one"),
+                "each mark still names a prompt row"
+            );
+            assert_eq!(
+                row_of(&session, mark.prompt.expect("`A` was reported")),
+                row_of(&session, mark.start),
+                "the `A` and the `B` of one command are on one row, and a reflow moves both of \
+                 them to the same new one"
+            );
+        }
+        assert_ne!(
+            row_of(&session, prompts[0]),
+            row_of(&session, prompts[1]),
+            "and the two commands hold two rows, not one seat shared between them"
         );
     }
 

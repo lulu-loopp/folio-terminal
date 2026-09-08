@@ -905,6 +905,18 @@ fn pump_pty_input(writer: &mut dyn Write, input: &InputRing) {
 pub struct PtySession {
     master: Option<Box<dyn MasterPty + Send>>,
     child: Option<Box<dyn Child + Send + Sync>>,
+    /// **How the child ended, once it has.**
+    ///
+    /// A process ending is a fact about this session, not a message handed to whoever asks first.
+    /// The child handle is dropped on the first `Some` so a dead process is not held open, and
+    /// without this the next asker is told `None` — which reads as *alive*.
+    ///
+    /// The window has two askers on every turn and they ask for different reasons: one sweep finds
+    /// the panes whose shell died so it can close them, and a second finds the tabs with no live
+    /// shell left. A tab with a single pane is deliberately never closed by the first — an empty
+    /// tab is not a state — so an exit consumed there and denied to the second left the tab open
+    /// with a dead shell in it, and the last tab of a window exiting closed nothing at all.
+    exited: Option<ExitStatus>,
     output: Arc<OutputRing>,
     input: Arc<InputRing>,
     reader: Option<JoinHandle<()>>,
@@ -1212,6 +1224,7 @@ impl PtySession {
         Ok(Self {
             master: Some(pair.master),
             child: Some(child),
+            exited: None,
             output,
             input,
             reader: Some(reader_thread),
@@ -1314,13 +1327,22 @@ impl PtySession {
         self.child.as_ref().and_then(|child| child.process_id())
     }
 
+    /// Has the child ended, and how — asked as many times as anyone likes.
+    ///
+    /// The answer is **remembered** ([`Self::exited`]) rather than handed over: a child that has
+    /// ended goes on having ended, so the first ask reaps and records, and every ask after it
+    /// reads what was recorded.
     pub fn try_wait(&mut self) -> Result<Option<ExitStatus>, PtyError> {
+        if let Some(status) = self.exited.as_ref() {
+            return Ok(Some(status.clone()));
+        }
         let Some(child) = self.child.as_mut() else {
             return Ok(None);
         };
         let status = child.try_wait()?;
         if status.is_some() {
             self.child = None;
+            self.exited = status.clone();
         }
         Ok(status)
     }
@@ -1346,8 +1368,11 @@ impl PtySession {
                 Some(child.wait()?)
             }
         } else {
-            None
+            // Nothing to reap because a `try_wait` already did, and it wrote down what it found:
+            // a shutdown after a reap reports how the child ended rather than reporting nothing.
+            self.exited.clone()
         };
+        self.exited = status.clone();
         self.master.take();
         self.output.close();
         if let Some(reader) = self.reader.take() {
@@ -2641,6 +2666,45 @@ mod tests {
             String::from_utf8_lossy(&output)
         );
         assert!(session.ring_stats().maximum_bytes <= PTY_RING_BYTES.get());
+    }
+
+    /// RED (review row R5-2) — **a child that has exited goes on having exited**, however many
+    /// times the window asks.
+    ///
+    /// The window asks twice on every turn and for two different reasons: once per pane, to find
+    /// the panes whose shell died, and once per tab, to find the tabs with no live shell left. A
+    /// reap that hands the exit to the first asker and `None` to the second tells the tab sweep
+    /// that a dead shell is alive, so a single-pane tab — which the pane sweep deliberately never
+    /// closes, because an empty tab is not a state — is never closed by anybody, and the last tab
+    /// in the window exiting never ends the process.
+    #[test]
+    fn a_child_that_exited_answers_the_second_asker_too() {
+        let command = PtyCommand::new("cmd.exe").arg("/D").arg("/C").arg("exit 7");
+        let mut session = PtySession::spawn(command, size(40, 8), no_wake()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let first = loop {
+            let _ = session.read_output();
+            if let Some(status) = session.try_wait().unwrap() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "the child never exited");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(first.exit_code(), 7);
+        let second = session
+            .try_wait()
+            .unwrap()
+            .expect("a second asker is told the child exited");
+        assert_eq!(
+            second.exit_code(),
+            first.exit_code(),
+            "and is told the same exit the first asker was"
+        );
+        let third = session
+            .shutdown()
+            .unwrap()
+            .expect("shutdown after a reap still reports how the child ended");
+        assert_eq!(third.exit_code(), first.exit_code());
     }
 
     #[test]
