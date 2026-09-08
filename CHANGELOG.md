@@ -20,6 +20,16 @@ All notable changes to Folio are recorded here. The format follows
   directory holds. Nothing about the program changed.
 ### Fixed
 
+- **A card of a pane that repaints its screen in one piece is no longer a frame
+  behind.** A full-screen program can ask the terminal to hold a whole frame
+  back and put it up at once. Where the terminal was the one to put it up — the
+  program's end-of-frame marker having come too late — the pane showed the new
+  frame and that pane's card in focus mode kept the picture from before it,
+  until the program printed something else. The card is keyed to a count of the
+  moments the screen could have changed, and putting a held frame up was the one
+  way to write the screen without moving that count. It moves now, the way a
+  resize's reflow has always moved it, so the card shows the frame on the frame
+  it lands. A held frame that turns out to carry nothing still costs nothing.
 - **A path printed by Git Bash or by WSL is a link, in the spelling those
   shells print it in.** `D:\Demo\report.md` was recognised in every pane and
   `/d/Demo/report.md` was recognised in none — so in the two shells that spell
