@@ -14460,8 +14460,8 @@ struct CardWords {
     /// number of lines is what decides how tall the card is and only something
     /// holding a font can say what it is.
     detail_lines: Vec<String>,
-    /// The one verb.
-    verb: String,
+    /// The one verb, or nothing when this card has none (R1-12).
+    verb: Option<String>,
     /// This content class's own mark, above the sentence.
     mark: marks::ChromeMark,
     /// Whether the button belongs to a page's fault rather than to a refused
@@ -17070,10 +17070,19 @@ impl ControlClickHint {
 /// it was *asked about* — the hover line under the cells it was printed in, the
 /// notice a refused press raises on a preview — spells it through here, so there
 /// is one answer to "how is an address printed" rather than one per surface.
+///
+/// **And format characters, for a second reason** (R1-23,
+/// [`is_format_or_bidi_control`]). The hover line exists so that a reader can
+/// check the host before they press, and a right-to-left override or a
+/// zero-width space inside the host makes what they read and what they would
+/// reach two different names. That is not a terminal being redrawn, it is the
+/// one sentence this line is for being false — so the same replacement mark
+/// stands in for these, and a mark the reader can see is the whole point of
+/// showing one rather than dropping the character.
 fn printable_address(uri: &str) -> String {
     uri.chars()
         .map(|character| {
-            if character.is_control() {
+            if character.is_control() || is_format_or_bidi_control(character) {
                 '\u{fffd}'
             } else {
                 character
@@ -18970,16 +18979,35 @@ fn web_address_activation(intent: ClickIntent, uri: &str) -> WebAddressActivatio
     // same gate, and every one of them is a string from outside judged by
     // `webnav::address_bar`. So the plain half is the seat, the `Ctrl` half is
     // the machine's browser, and the whole table is one sentence again.
-    let allowed = uri
+    // **The address door's own answer, and not a second reading of it**
+    // (R1-26). This row used to test the text itself — a `//` after the scheme,
+    // no control characters, no whitespace — which is most of what
+    // `webnav::address_bar` asks and is missing the one thing it asks that this
+    // row cannot afford to miss: `https://bank.test@evil.test/` names `evil.test`
+    // and shows `bank.test`, and the `Ctrl` half of this row goes straight to
+    // the machine's browser. The seat's half was refusing it all along, through
+    // that door; the browser's half was spelling the check again and had never
+    // grown this line. One door, asked once.
+    //
+    // The two halves ask it for two different things, and that is not a second
+    // rule. `Blocked` is the answer to a request, and the plain half's request
+    // is 「open this on the seat」 — which the seat's own door then judges and
+    // says a sentence about, under the very cells the address is printed in. So
+    // the plain half asks only whether the text *is* an address, and the seat
+    // speaks the refusal. The `Ctrl` half has no such second door: past it is
+    // the machine's browser, so the answer is decided here, and the hand-off
+    // asks the same door again at the point of use.
+    let parses = uri
         .split_once(':')
         .is_some_and(|(_, remainder)| remainder.starts_with("//") && remainder.len() > 2)
         && !uri
             .chars()
             .any(|character| character.is_control() || character.is_whitespace());
+    let admitted = matches!(webnav::address_bar(uri), webnav::Decision::Navigate(_));
     match intent {
-        ClickIntent::Here if allowed => WebAddressActivation::Page,
+        ClickIntent::Here if parses => WebAddressActivation::Page,
         ClickIntent::Here => WebAddressActivation::None,
-        ClickIntent::System if allowed => WebAddressActivation::Browser,
+        ClickIntent::System if admitted => WebAddressActivation::Browser,
         ClickIntent::System => WebAddressActivation::Blocked,
     }
 }
@@ -34611,7 +34639,7 @@ impl Runtime<'_> {
                             // minted goes through untouched.
                             detail: shown_address(fault.detail().unwrap_or_default()),
                             detail_lines: Vec::new(),
-                            verb: fault.verb_text().text().to_owned(),
+                            verb: Some(fault.verb_text().text().to_owned()),
                             // **The class's mark and never the site's**, the
                             // same ruling `websheet` states at length: §7.7 ④
                             // says a failure card wears 「一枚本类的记号」, and
@@ -34625,17 +34653,21 @@ impl Runtime<'_> {
                         },
                     ));
                 }
+                // **The button belongs to the refusals it is true of**
+                // (R1-12): a card that cannot read *this content* offers the
+                // machine's own handler, and a card refusing a share or
+                // reporting a disk that said no offers nothing, because there
+                // is nothing it could honestly offer.
+                let refusal = self.preview_buffer_on(self.preview_here(seat))?.refusal()?;
                 Some((
                     seat,
                     CardWords {
-                        notice: self
-                            .preview_buffer_on(self.preview_here(seat))?
-                            .refusal()?
-                            .notice()
-                            .to_owned(),
+                        notice: refusal.notice().to_owned(),
                         detail: String::new(),
                         detail_lines: Vec::new(),
-                        verb: preview_open_label.to_owned(),
+                        verb: refusal
+                            .offers_the_default_app()
+                            .then(|| preview_open_label.to_owned()),
                         mark: marks::ChromeMark::File,
                         fault: false,
                         width: 0.0,
@@ -34719,11 +34751,14 @@ impl Runtime<'_> {
         // the hit test reads that number.
         let mut preview_card_notices = preview_card_notices;
         for (seat, words) in &mut preview_card_notices {
-            words.width = self.window.renderer.measure_chrome_text(
-                &mut self.app.gpu,
-                &words.verb,
-                seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
-            );
+            words.width = match &words.verb {
+                Some(verb) => self.window.renderer.measure_chrome_text(
+                    &mut self.app.gpu,
+                    verb,
+                    seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
+                ),
+                None => 0.0,
+            };
             // **And the fact, wrapped to the seat it will be drawn in** (§7.43).
             // Gate 5 photographed the alternative on a 479-pixel seat: a
             // 92-character `CreateCoreWebView2EnvironmentWithOptions failed: …`
@@ -34758,6 +34793,7 @@ impl Runtime<'_> {
                 (
                     *seat,
                     seats::PreviewCardButton {
+                        offers: words.verb.is_some(),
                         text_px: words.width,
                         detail_lines: words.detail_lines.len(),
                         fault: words.fault,
@@ -34775,7 +34811,7 @@ impl Runtime<'_> {
                         detail: &words.detail_lines,
                         mark: words.mark,
                         fault: words.fault,
-                        button: &words.verb,
+                        button: words.verb.as_deref(),
                         button_text_px: words.width,
                         // The hover already named a seat; now the card it lights
                         // is that seat's, so two "Open in default app" buttons
@@ -68505,8 +68541,10 @@ impl Runtime<'_> {
             let card_button = self
                 .preview_buffer_on(PreviewSurface::Float(id))
                 .and_then(|buffer| buffer.refusal())
-                .map(|_| {
-                    seats::preview_card_geometry(geometry.body, open_button_px, 0, scale).button
+                .filter(|refusal| refusal.offers_the_default_app())
+                .and_then(|_| {
+                    seats::preview_card_geometry(geometry.body, Some(open_button_px), 0, scale)
+                        .button
                 });
             if let Some(part) = float::float_hit(&geometry, x, y, rail.as_ref(), |x, y| {
                 let (x, y) = (x + geometry.body[0], y + geometry.body[1]);
@@ -70774,10 +70812,10 @@ impl Runtime<'_> {
                 // pane's is (`FloatPart::CardButton`). A document with no refusal
                 // keeps the quiet centred notice an empty diff or unreadable
                 // repository prints.
-                if let Some(notice) = self
+                if let Some((notice, offers_the_handler)) = self
                     .preview_buffer_on(surface)
                     .and_then(|buffer| buffer.refusal())
-                    .map(|refusal| refusal.notice())
+                    .map(|refusal| (refusal.notice(), refusal.offers_the_default_app()))
                 {
                     let label = self.preview_open_button_label(now);
                     let button_text_px = self.window.renderer.measure_chrome_text(
@@ -70790,7 +70828,7 @@ impl Runtime<'_> {
                         detail: &[],
                         mark: marks::ChromeMark::File,
                         fault: false,
-                        button: label,
+                        button: offers_the_handler.then_some(label),
                         button_text_px,
                         button_hovered: self.window.float_hover
                             == Some((id, float::FloatPart::CardButton)),
@@ -75417,14 +75455,19 @@ impl Runtime<'_> {
         });
         match activation {
             HyperlinkActivation::None => {}
+            // **Through the one hand-off, like every other address that leaves**
+            // (R1-26). This arm used to call `shell_execute` itself, which is
+            // the raw bridge: it takes whatever string it is given and asks the
+            // machine what is registered for the scheme. The door in front of
+            // it — [`Self::hand_url_to_the_browser`] — is what puts the address
+            // through `webnav::address_bar` first, and that is the same
+            // judgement the seat's half of this row already makes. A refusal is
+            // said out loud here for the reason the page arm below says one: a
+            // press asked for something.
             HyperlinkActivation::Browser => {
-                let result = window_hwnd(&self.window.window).and_then(|hwnd| {
-                    bt_platform::shell_execute(hwnd, &hyperlink.uri)
-                        .map_err(|error| anyhow!(error))
-                        .context("open HTTP hyperlink in the system browser")
-                });
-                if let Err(error) = result {
-                    eprintln!("recoverable hyperlink open failure: {error:#}");
+                if !self.hand_url_to_the_browser(&hyperlink.uri)? {
+                    self.window.hyperlink_hover.show_blocked(hyperlink);
+                    self.publish_interaction_frame()?;
                 }
             }
             // **The same address, kept in this window** (§7.1.5g ①). One door
@@ -87014,7 +87057,6 @@ impl Runtime<'_> {
                 // goes for its reason — a fact with nowhere to be drawn is still
                 // a fact.
                 webhost::WebOutcome::Fault(text) => eprintln!("BT_WEB {text}"),
-                webhost::WebOutcome::HandOff(url) => self.hand_url_to_the_browser(&url)?,
                 webhost::WebOutcome::FindMatches { count, active } => {
                     self.web_find_reported(count, active)?;
                 }
@@ -87395,9 +87437,19 @@ impl Runtime<'_> {
     /// not at the point of storage. `shell_execute` is what hands an arbitrary
     /// scheme to whatever the machine registered for it, and `address_bar` is
     /// what makes sure the scheme is not arbitrary.
-    fn hand_url_to_the_browser(&mut self, url: &str) -> Result<()> {
+    /// **And only from a press** (R1-16). Every caller is a gesture: a card's
+    /// one button, a foot's one verb, a settings row's one press, a `Ctrl`
+    /// click on a printed address. There is deliberately no caller that is an
+    /// *event* — a page that starts a download reaches the reader through a
+    /// card whose button is this call, rather than through this call directly,
+    /// so one address leaving this window is always one press that asked for
+    /// it.
+    ///
+    /// Answers whether the address was handed over, so a caller that owes the
+    /// reader a refusal can say one.
+    fn hand_url_to_the_browser(&mut self, url: &str) -> Result<bool> {
         let webnav::Decision::Navigate(target) = webnav::address_bar(url) else {
-            return Ok(());
+            return Ok(false);
         };
         let result = window_hwnd(&self.window.window).and_then(|hwnd| {
             bt_platform::shell_execute(hwnd, &target)
@@ -87406,8 +87458,9 @@ impl Runtime<'_> {
         });
         if let Err(error) = result {
             eprintln!("recoverable web hand-off failure: {error:#}");
+            return Ok(false);
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Put one string on the clipboard, through the door every other copy in
@@ -87745,7 +87798,8 @@ impl Runtime<'_> {
         };
         match verb {
             webhost::WebFaultVerb::DownloadTheRuntime => {
-                self.hand_url_to_the_browser(webhost::RUNTIME_DOWNLOAD_PAGE)
+                self.hand_url_to_the_browser(webhost::RUNTIME_DOWNLOAD_PAGE)?;
+                Ok(())
             }
             // **Not the head's reload** (user ruling 2026-08-25): the head's
             // three buttons talk to a host that exists, and this card is on
@@ -87779,7 +87833,15 @@ impl Runtime<'_> {
                     .web_on(seat)
                     .map(|web| web.page().url.clone())
                     .unwrap_or_default();
-                self.hand_url_to_the_browser(&page)
+                self.hand_url_to_the_browser(&page)?;
+                Ok(())
+            }
+            // **The press a cancelled download now waits for** (R1-16). The
+            // address is the one the card is showing, and this is the only way
+            // it leaves the window.
+            webhost::WebFaultVerb::OpenDownloadInBrowser(target) => {
+                self.hand_url_to_the_browser(&target)?;
+                Ok(())
             }
         }
     }
@@ -90182,7 +90244,7 @@ mod files_locate_door_tests {
         let hit = body("    fn float_hit_at(");
         assert!(
             hit.contains("float::FloatPart::CardButton")
-                && hit.contains("preview_card_geometry(geometry.body, open_button_px"),
+                && hit.contains("preview_card_geometry(geometry.body, Some(open_button_px)"),
             "the float's no-preview button is not hit where the card drew it"
         );
         let press = body("    fn press_float(");
@@ -96975,12 +97037,67 @@ fn clean_title(text: &str) -> String {
 /// does not spend the cap on them.
 fn clean_title_capped(text: &str, maximum: usize) -> String {
     text.chars()
-        .filter(|character| !matches!(character, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}'))
+        .filter(|character| {
+            !matches!(character, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}')
+                && !is_format_or_bidi_control(*character)
+        })
         .collect::<String>()
         .trim()
         .chars()
         .take(maximum)
         .collect()
+}
+
+/// **A character that moves other characters without being one** — Unicode's
+/// `Cf`, the format category (R1-23).
+///
+/// The control ranges above are what a *terminal* can be made to do by text it
+/// printed. This is the other half, and it is what a *reader* can be made to
+/// believe: `U+202E` reverses the run after it, so a name written
+/// `report` + `U+202E` + `gnp.exe` draws as `reportexe.png`, and `U+2066`…`U+2069`
+/// do the same job in a
+/// nestable form. `U+200B`, `U+00AD` and `U+FEFF` draw as nothing at all, so a
+/// host in a hover line can be spelled with a gap through it that a reader
+/// cannot see and a comparison against a known name never survives. The tag
+/// block `U+E0000`…`U+E007F` is a whole second string riding invisibly inside
+/// the first.
+///
+/// Every surface that shows text this window did not write asks this: the tab
+/// title, the pane head's folder, and the address under the pointer. It is
+/// spelled out as ranges rather than taken from a table crate because the
+/// category is a fixed property of Unicode rather than a judgement — these are
+/// its assigned `Cf` ranges through Unicode 16, and an unassigned code point
+/// inside one of them is not a character anybody is drawing either.
+///
+/// Non-ASCII letters are untouched. The answer to a title in Chinese, Arabic or
+/// Hebrew is to draw it, and the bidi *algorithm* does its own work from the
+/// letters themselves — what is removed here is only the set of characters
+/// whose whole purpose is to override that.
+fn is_format_or_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{00ad}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061c}'
+            | '\u{06dd}'
+            | '\u{070f}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08e2}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{110bd}'
+            | '\u{110cd}'
+            | '\u{13430}'..='\u{1343f}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
+    )
 }
 
 /// `cwdLeaf` — "what to show when there is room for one word: the folder you are
@@ -109043,6 +109160,95 @@ mod tests {
         assert_eq!(
             hyperlink_activation(true, true, "http:8080/nohost", &no_directories),
             HyperlinkActivation::Blocked
+        );
+    }
+
+    /// PIN (R1-26) — **one refusal, shared.** The address field will not load
+    /// `https://user:pass@host`, and the browser door must not spend it either.
+    ///
+    /// The shape is the phishing one: what a reader checks before pressing is
+    /// the host, and userinfo puts a name they trust in front of a host they do
+    /// not. `webnav::address_bar` has refused it since the door was written;
+    /// the terminal's `Ctrl` half went straight to `ShellExecuteW` and never
+    /// asked.
+    ///
+    /// MUTATION: read the row without the address door and the first assertion
+    /// hands the shell the address.
+    #[test]
+    fn the_browser_door_refuses_the_userinfo_shape_the_address_field_refuses() {
+        let no_directories = |_: &Path| false;
+        for uri in [
+            "https://example.test@evil.test/",
+            "https://user:pass@evil.test/path",
+            "http://bank.test@203.0.113.9/",
+        ] {
+            assert_eq!(
+                hyperlink_activation(true, true, uri, &no_directories),
+                HyperlinkActivation::Blocked,
+                "{uri} is the shape the address field already refuses"
+            );
+            // The plain half is the seat's, and the seat's own door says the
+            // same word about it — under the cells the address is printed in,
+            // which is where a reader is looking.
+            assert_eq!(
+                hyperlink_activation(false, true, uri, &no_directories),
+                HyperlinkActivation::Page(uri.to_owned()),
+                "{uri} goes to the seat, whose door refuses it there"
+            );
+            assert_eq!(
+                webnav::address_bar(uri),
+                webnav::Decision::Refuse(webnav::Refusal::UserInfo),
+                "{uri} is refused by the one door both halves read"
+            );
+        }
+        // A bare `@` outside the authority is ordinary text and stays open.
+        assert_eq!(
+            hyperlink_activation(true, true, "https://example.test/a@b", &no_directories),
+            HyperlinkActivation::Browser
+        );
+    }
+
+    /// PIN (R1-23) — **a format character cannot reorder a name a reader is
+    /// told to check.**
+    ///
+    /// The sanitisers dropped `Cc` and stopped there, so `U+202E` and its
+    /// family reached the tab strip and the hover line. A right-to-left
+    /// override in a title reverses the run after it, which is how
+    /// `report.exe` prints as `report.txt` above the pane that will run it, and
+    /// a bidi isolate in the hover address reorders the host under the cells
+    /// the address was printed in.
+    ///
+    /// MUTATION: filter `char::is_control` alone and every string below keeps
+    /// the character that moved the text.
+    #[test]
+    fn a_title_and_a_hover_address_carry_no_format_characters() {
+        const REORDERING: [char; 9] = [
+            '\u{202e}', '\u{202a}', '\u{200b}', '\u{200f}', '\u{feff}', '\u{2066}', '\u{2069}',
+            '\u{00ad}', '\u{061c}',
+        ];
+        for character in REORDERING {
+            let sneaky = format!("a{character}b");
+            let cleaned = clean_title_capped(&sneaky, TITLE_MAX_CHARS);
+            assert_eq!(
+                cleaned, "ab",
+                "a title still carries U+{:04X}",
+                character as u32
+            );
+            let printed = printable_address(&sneaky);
+            assert!(
+                !printed.contains(character),
+                "a hover address still carries U+{:04X}: {printed:?}",
+                character as u32
+            );
+        }
+        // The tag block, which spells a whole second name inside one.
+        assert_eq!(clean_title_capped("a\u{e0041}\u{e007f}b", 40), "ab");
+        assert!(!printable_address("a\u{e0041}b").contains('\u{e0041}'));
+        // The letters themselves are untouched, in every script.
+        assert_eq!(clean_title_capped("  中文 README  ", 40), "中文 README");
+        assert_eq!(
+            printable_address("https://例え.test/ページ"),
+            "https://例え.test/ページ"
         );
     }
 

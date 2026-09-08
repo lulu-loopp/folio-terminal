@@ -824,9 +824,19 @@ pub(crate) enum WebFault {
     /// foot (§7.1.5g ⑤), and this card is for the case where there is no page to
     /// say it over — a stale pin, a restored session, the command palette.
     Blocked { url: String, refusal: Refusal },
-    /// A download was cancelled and could not be handed to the machine's
-    /// browser either.
-    DownloadRefused { file_name: String },
+    /// A download was cancelled, and this is the card that says so and offers
+    /// the one press that still gets the file.
+    ///
+    /// `target` is the download's own address when a plain link could replay it
+    /// — see [`download_answer`] — and `None` when it names memory inside the
+    /// page (`blob:`, `data:`) and therefore nothing anybody else can ask for.
+    /// The address rides on the card rather than leaving with it, because a
+    /// download is something the page started and a hand-off is something the
+    /// reader does.
+    DownloadRefused {
+        file_name: String,
+        target: Option<String>,
+    },
 }
 
 /// The one thing a failure card's button does.
@@ -847,6 +857,11 @@ pub(crate) enum WebFaultVerb {
     CopyAddress(String),
     /// Hand the **page** over, since the file could not be.
     OpenPageInBrowser,
+    /// Hand the **download's own address** over, which is the press that
+    /// replaces the hand-off a cancelled download used to make by itself
+    /// (R1-16). One press, one address, and the address is the one the card is
+    /// showing.
+    OpenDownloadInBrowser(String),
 }
 
 /// Where Microsoft publishes the runtime, and the only address this product
@@ -888,7 +903,7 @@ impl WebFault {
             // no code a renderer's exit hands over that a reader could act on.
             Self::RenderProcessGone => None,
             Self::Blocked { url, .. } => Some(url.as_str()),
-            Self::DownloadRefused { file_name } => {
+            Self::DownloadRefused { file_name, .. } => {
                 (!file_name.is_empty()).then_some(file_name.as_str())
             }
         }
@@ -903,7 +918,10 @@ impl WebFault {
                 crate::i18n::Text::PreviewWebReload
             }
             Self::Blocked { .. } => crate::i18n::Text::WebFailBlockedVerb,
-            Self::DownloadRefused { .. } => crate::i18n::Text::WebFailDownloadVerb,
+            Self::DownloadRefused {
+                target: Some(_), ..
+            } => crate::i18n::Text::WebFailDownloadOpenVerb,
+            Self::DownloadRefused { target: None, .. } => crate::i18n::Text::WebFailDownloadVerb,
         }
     }
 
@@ -914,7 +932,11 @@ impl WebFault {
             Self::EngineDidNotStart { .. } => WebFaultVerb::RestartTheEngine,
             Self::DidNotLoad { .. } | Self::RenderProcessGone => WebFaultVerb::Reload,
             Self::Blocked { url, .. } => WebFaultVerb::CopyAddress(url.clone()),
-            Self::DownloadRefused { .. } => WebFaultVerb::OpenPageInBrowser,
+            Self::DownloadRefused {
+                target: Some(target),
+                ..
+            } => WebFaultVerb::OpenDownloadInBrowser(target.clone()),
+            Self::DownloadRefused { target: None, .. } => WebFaultVerb::OpenPageInBrowser,
         }
     }
 
@@ -1004,16 +1026,27 @@ pub(crate) fn load_fault(uri: &str, success: bool, status: i32) -> Option<WebFau
 /// request anybody else can make, and those are exactly the ones that door
 /// already refuses. One rule, one door, and no second opinion about what a plain
 /// link can carry.
-pub(crate) fn download_answer(uri: &str, file_name: &str) -> Result<String, WebFault> {
-    match address_bar(uri) {
-        Decision::Navigate(target) => Ok(target),
-        Decision::Search(_) | Decision::Refuse(_) => Err(WebFault::DownloadRefused {
-            file_name: file_name
-                .rsplit(['\\', '/'])
-                .next()
-                .unwrap_or_default()
-                .to_owned(),
-        }),
+///
+/// **What moved is when the address leaves** (R1-16). The replayable arm used
+/// to hand its URL straight to the machine's real browser, and nobody had
+/// pressed anything: a download is started by the *page*, at a moment the page
+/// chooses, to an address the page chooses, and a seat that answers one by
+/// launching the reader's browser is a seat a page can aim. So both arms are a
+/// card now. The card is the same card and says the same sentence; what differs
+/// is what its one button spends — the download's own address when there is one
+/// to replay, and otherwise the page that asked, which is the only thing left
+/// that still gets the file.
+pub(crate) fn download_answer(uri: &str, file_name: &str) -> WebFault {
+    WebFault::DownloadRefused {
+        file_name: file_name
+            .rsplit(['\\', '/'])
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
+        target: match address_bar(uri) {
+            Decision::Navigate(target) => Some(target),
+            Decision::Search(_) | Decision::Refuse(_) => None,
+        },
     }
 }
 
@@ -1338,12 +1371,6 @@ pub(crate) enum WebOutcome {
     /// `BT_DPI` goes and for the same reason — a fact with nowhere to be drawn
     /// is still a fact.
     Fault(String),
-    /// A URL the window should hand to the machine's browser.
-    ///
-    /// Raised by a download the engine cancelled whose address a plain link can
-    /// replay (方案 §0). External hand-off is the window's verb and always has
-    /// been; the seat only says which address.
-    HandOff(String),
     /// The find session's tally, on its way to the search capsule.
     FindMatches { count: i32, active: i32 },
     /// **This seat's document started or stopped being audible** (user ruling
@@ -2107,10 +2134,12 @@ impl WebSeat {
                         crate::web_trace::seat(self.address.page),
                     )
                 });
-                match download_answer(uri, file_name) {
-                    Ok(target) => outcomes.push(WebOutcome::HandOff(target)),
-                    Err(fault) => self.fault = Some(fault),
-                }
+                // **Always a card, never a launch** (R1-16). The engine has
+                // already cancelled the transfer; what is decided here is what
+                // the reader is shown, and the one thing that is not decided
+                // here is whether an address leaves this window. That is the
+                // card's button, which is a press.
+                self.fault = Some(download_answer(uri, file_name));
                 WebEffect::Ignore
             }
             WebEvent::FindMatches { count, active } => {
@@ -4728,6 +4757,11 @@ mod fault_tests {
             },
             WebFault::DownloadRefused {
                 file_name: "report.pdf".to_owned(),
+                target: None,
+            },
+            WebFault::DownloadRefused {
+                file_name: "report.pdf".to_owned(),
+                target: Some("http://127.0.0.1:9134/report.pdf".to_owned()),
             },
         ]
     }
@@ -4976,34 +5010,59 @@ mod fault_tests {
         assert!(fault.say().starts_with("127.0.0.1"));
     }
 
-    /// PIN (方案 §0) — **a download is handed over exactly when the address door
-    /// would take its URL.**
+    /// PIN (方案 §0, R1-16) — **a cancelled download raises a card, and the
+    /// card's button is the press that hands anything over.**
     ///
-    /// 「取消并外开可重放的 GET URL,不可重放者提示无法下载」, and what
-    /// 「可重放」 means is that door's answer rather than a guess: a `blob:` or a
-    /// `data:` URL names memory inside a page rather than a request anybody else
-    /// can make, and those are the ones it already refuses.
+    /// 方案 §0 reads 「取消并外开可重放的 GET URL,不可重放者提示无法下载」, and
+    /// what 「可重放」 means is not guessed at — it is the address door's own
+    /// answer, because a `blob:` or a `data:` URL names memory inside a page
+    /// rather than a request anybody else can make. What moved is *when* the
+    /// address leaves: a page that starts a download the reader never asked for
+    /// used to reach the machine's real browser with no press at all, on an
+    /// address the page chose. So the replayable address goes on the card and
+    /// the reader's press is what spends it.
     ///
-    /// MUTATION: accept every scheme and a `blob:` download is handed to the
-    /// machine's browser, which opens nothing at all.
+    /// MUTATION: hand the replayable address over as an outcome and the first
+    /// case leaves the window with nobody having pressed anything.
     #[test]
-    fn a_download_is_handed_over_when_a_plain_link_could_replay_it() {
+    fn a_cancelled_download_offers_its_address_and_never_spends_it_alone() {
+        let replayable =
+            download_answer("http://127.0.0.1:9134/report.pdf", r"C:\Users\a\report.pdf");
         assert_eq!(
-            download_answer("http://127.0.0.1:9134/report.pdf", r"C:\Users\a\report.pdf"),
-            Ok("http://127.0.0.1:9134/report.pdf".to_owned())
-        );
-        // The card names the file and not the path it would have been written
-        // to: a reader is looking for the thing they asked for.
-        assert_eq!(
-            download_answer("blob:http://127.0.0.1/9f2", r"C:\Users\a\report.pdf"),
-            Err(WebFault::DownloadRefused {
+            replayable,
+            WebFault::DownloadRefused {
+                // The card names the file and not the path it would have been
+                // written to: a reader is looking for the thing they asked for.
                 file_name: "report.pdf".to_owned(),
-            })
+                target: Some("http://127.0.0.1:9134/report.pdf".to_owned()),
+            }
         );
-        assert!(matches!(
+        assert_eq!(
+            replayable.verb(),
+            WebFaultVerb::OpenDownloadInBrowser("http://127.0.0.1:9134/report.pdf".to_owned()),
+            "the address is on the button, which is where a press can reach it"
+        );
+
+        let unreplayable = download_answer("blob:http://127.0.0.1/9f2", r"C:\Users\a\report.pdf");
+        assert_eq!(
+            unreplayable,
+            WebFault::DownloadRefused {
+                file_name: "report.pdf".to_owned(),
+                target: None,
+            }
+        );
+        assert_eq!(
+            unreplayable.verb(),
+            WebFaultVerb::OpenPageInBrowser,
+            "nothing to replay, so the page that asked is what is offered"
+        );
+        assert_eq!(
             download_answer("data:text/csv,a%2Cb", "table.csv"),
-            Err(WebFault::DownloadRefused { .. })
-        ));
+            WebFault::DownloadRefused {
+                file_name: "table.csv".to_owned(),
+                target: None,
+            }
+        );
     }
 
     /// PIN (方案 §0's five extras) — **`Ctrl`+wheel walks a ladder, and the

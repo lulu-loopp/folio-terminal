@@ -1308,40 +1308,6 @@ mod visual_layer_tests {
     }
 }
 
-/// The parameters `explorer.exe` is handed to **reveal** a path (user ruling,
-/// 2026-08-13).
-///
-/// # 「Show me where this is」, not 「open the folder it is in」
-///
-/// Every foot in this window carries a path and offers to take you to it. What
-/// that used to mean was `ShellExecute("open", <the parent folder>)` — Explorer
-/// opened on a directory and the file the foot was actually naming was one of
-/// two hundred rows, indistinguishable from the rest. `/select` is the verb
-/// that means what the foot says: the folder opens **with that item
-/// highlighted**.
-///
-/// A directory keeps the old answer, and that is a judgement rather than a
-/// limitation: `/select` on a folder opens its *parent* with the folder
-/// highlighted, which is one level further out than a foot pointing at a root
-/// is offering. Looking *inside* it is the natural reading of a tree's own
-/// root, so a directory is opened and a file is selected.
-///
-/// Pure, because the one thing that can be wrong here is the string — Explorer
-/// parses `/select,<path>` as a single token and wants the path quoted, and a
-/// command line that is a quote out is a command line that silently opens
-/// `Documents` instead.
-#[must_use]
-pub fn reveal_arguments(path: &std::path::Path, is_directory: bool) -> std::ffi::OsString {
-    let mut arguments = std::ffi::OsString::new();
-    if !is_directory {
-        arguments.push("/select,");
-    }
-    arguments.push("\"");
-    arguments.push(path.as_os_str());
-    arguments.push("\"");
-    arguments
-}
-
 /// The Windows path one `file:` URI names, or nothing when it names none.
 ///
 /// # Why this is here and why it is pure
@@ -1991,6 +1957,30 @@ pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Comm
     command
 }
 
+/// **The same door, for a program named rather than located** (§7.40 ①, R1-17).
+///
+/// A command built from a bare name such as `powershell.exe` hands
+/// `CreateProcess` a bare name, and `CreateProcess` searches the application
+/// directory, then **the current directory**, then the system directories, then
+/// `PATH`. The current directory
+/// of a terminal emulator is whatever folder the shell that started it was
+/// standing in, so a `powershell.exe` sitting in a cloned repository is the one
+/// that runs — no press, no mention, no way for a reader to know.
+///
+/// So a caller that has a *name* asks for it here instead:
+/// [`handoff::program_on_path`] answers with an absolute path found somewhere a
+/// program is supposed to live, and `CreateProcess` given an absolute path
+/// searches nowhere at all. `None` is a refusal and never a fall-back to the
+/// bare name — falling back is exactly what would reach the working directory.
+///
+/// A caller that already holds an absolute path keeps using [`quiet_command`]:
+/// there is nothing to look up, and this would only add a `stat`.
+#[cfg(windows)]
+#[must_use]
+pub fn quiet_command_named(name: &std::path::Path) -> Option<std::process::Command> {
+    Some(quiet_command(handoff::program_on_path(name)?))
+}
+
 /// The family the renderer draws when a settings file names none.
 ///
 /// It is a constant here rather than a lookup because [`monospace_font_families`]
@@ -2054,6 +2044,16 @@ pub fn order_monospace_families(mut families: Vec<MonospaceFamily>) -> Vec<Monos
 /// user-mode locks that makes it illegal to touch. It is the only part of this
 /// crate that can deadlock the process if its statements are reordered.
 pub mod hang;
+
+/// **Everything this product gives to the machine** — the shell, the browser,
+/// Explorer, and the helper programs it starts to ask a question.
+///
+/// A module of its own rather than four bridges scattered through
+/// [`windows_impl`], and the reason is what the four of them had in common: each
+/// carried its own reading of the string it was handed, and none of the readings
+/// was the one Windows uses. The hand-off is the last place this product's own
+/// rules apply to a target, so it is one place.
+pub mod handoff;
 
 /// WebView2 in composition hosting — the web preview block's engine (slice ①).
 ///
@@ -2233,8 +2233,8 @@ mod windows_impl {
                 ITaskbarList3, KF_FLAG_DONT_VERIFY, RemoveWindowSubclass, SHAppBarMessage,
                 SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify, SHCreateItemFromParsingName,
                 SHFILEOPSTRUCTW, SHFileOperationW, SHGetKnownFolderPath, SIGDN_FILESYSPATH,
-                SetWindowSubclass, ShellExecuteW, TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS,
-                TBPF_NORMAL, TBPF_PAUSED, TaskbarList,
+                SetWindowSubclass, TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL,
+                TBPF_PAUSED, TaskbarList,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
@@ -2246,12 +2246,11 @@ mod windows_impl {
                 MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW, RegisterWindowMessageW, SM_CXFRAME,
                 SM_CXPADDEDBORDER, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
                 SM_YVIRTUALSCREEN, SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES,
-                SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-                SWP_NOZORDER, SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW,
-                TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE,
-                WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_NCCALCSIZE,
-                WM_NCHITTEST, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_WINDOWPOSCHANGING,
-                WindowFromPoint,
+                SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+                SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
+                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE, WM_DPICHANGED,
+                WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_NCCALCSIZE, WM_NCHITTEST,
+                WM_SETTINGCHANGE, WM_THEMECHANGED, WM_WINDOWPOSCHANGING, WindowFromPoint,
             },
         },
     };
@@ -4397,366 +4396,6 @@ mod windows_impl {
             )
         }
         .map_err(|error| format!("PostMessageW(WM_CLOSE) failed: {error}"))
-    }
-
-    /// Ask Windows to open one already-policy-checked target with its registered default handler.
-    /// Scheme allowlisting deliberately belongs to the caller; this bridge only supplies the
-    /// audited UTF-16 and ShellExecuteW boundary.
-    pub fn shell_execute(hwnd: NonZeroIsize, target: &str) -> Result<(), String> {
-        if target.contains('\0') {
-            return Err("ShellExecuteW target contains an embedded NUL".to_owned());
-        }
-        let hwnd = HWND(hwnd.get() as *mut c_void);
-        let mut operation = "open".encode_utf16().collect::<Vec<_>>();
-        operation.push(0);
-        let mut target = target.encode_utf16().collect::<Vec<_>>();
-        target.push(0);
-        // SAFETY: both strings are live, NUL-terminated UTF-16 buffers for the duration of the
-        // synchronous call. No parameters or working directory are supplied, so the URI is never
-        // reparsed as a command line. `hwnd` is winit's live top-level window.
-        let result = unsafe {
-            ShellExecuteW(
-                Some(hwnd),
-                PCWSTR(operation.as_ptr()),
-                PCWSTR(target.as_ptr()),
-                PCWSTR::null(),
-                PCWSTR::null(),
-                SW_SHOWNORMAL,
-            )
-        };
-        let code = result.0 as isize;
-        if code <= 32 {
-            Err(format!("ShellExecuteW failed with code {code}"))
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Open one worker-validated local image with its registered default handler.
-    ///
-    /// The caller must obtain `path` from a successful image decode record, never directly from
-    /// terminal text. This bridge independently enforces the slice's immutable syntax policy
-    /// (drive-rooted, supported extension, no embedded NUL) and supplies no parameters or working
-    /// directory, preventing command-line reinterpretation. It performs no event-thread file I/O.
-    pub fn open_local_file(hwnd: NonZeroIsize, path: &Path) -> Result<(), String> {
-        validate_local_image_path(path)?;
-        let hwnd = HWND(hwnd.get() as *mut c_void);
-        let mut operation = "open".encode_utf16().collect::<Vec<_>>();
-        operation.push(0);
-        let mut target = path.as_os_str().encode_wide().collect::<Vec<_>>();
-        target.push(0);
-        // SAFETY: the worker-success capability supplied an existing decoded image path, and both
-        // buffers remain live and NUL-terminated for this synchronous call. Parameters and working
-        // directory are null, so Windows never receives a command line to reparse.
-        let result = unsafe {
-            ShellExecuteW(
-                Some(hwnd),
-                PCWSTR(operation.as_ptr()),
-                PCWSTR(target.as_ptr()),
-                PCWSTR::null(),
-                PCWSTR::null(),
-                SW_SHOWNORMAL,
-            )
-        };
-        let code = result.0 as isize;
-        if code <= 32 {
-            Err(format!("ShellExecuteW failed with code {code}"))
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Open one file the user picked out of a directory listing with its
-    /// registered default handler — and never run a program.
-    ///
-    /// **Why a second bridge rather than widening the first.** [`open_local_file`]
-    /// serves paths *scraped out of terminal text*, where the only defence
-    /// against a hostile line of output is that the syntax policy is narrow
-    /// enough to be immutable. A row of the files tree has the opposite
-    /// provenance: the user chose the root, this process enumerated the
-    /// directory, and the user pressed the row. Making the two share one
-    /// validator would mean either the tree can open nothing but pictures or
-    /// terminal output can open anything.
-    ///
-    /// **Why programs are refused.** Not as a hedge — as the product rule
-    /// `DESIGN.md` §7.1.3 already implies by making activation mean *open the
-    /// preview*: the tree is a way of looking at files, and the thing next to it
-    /// that runs programs is the terminal, where running one is a line you typed
-    /// and can see. A double click that silently starts an executable is a verb
-    /// this pane does not have, and the fact that the pane sits half an inch
-    /// from a shell prompt is exactly why it should not acquire it by accident.
-    pub fn open_local_path(hwnd: NonZeroIsize, path: &Path) -> Result<(), String> {
-        validate_openable_path(path)?;
-        if names_a_program(path, std::env::var("PATHEXT").unwrap_or_default().as_str()) {
-            return Err(PROGRAM_REFUSED.to_owned());
-        }
-        let hwnd = HWND(hwnd.get() as *mut c_void);
-        let mut operation = "open".encode_utf16().collect::<Vec<_>>();
-        operation.push(0);
-        let mut target = path.as_os_str().encode_wide().collect::<Vec<_>>();
-        target.push(0);
-        // SAFETY: the path was enumerated by this process from a directory the
-        // user rooted a column at, both buffers stay live and NUL-terminated for
-        // this synchronous call, and parameters and working directory are null,
-        // so Windows never receives a command line to reparse.
-        let result = unsafe {
-            ShellExecuteW(
-                Some(hwnd),
-                PCWSTR(operation.as_ptr()),
-                PCWSTR(target.as_ptr()),
-                PCWSTR::null(),
-                PCWSTR::null(),
-                SW_SHOWNORMAL,
-            )
-        };
-        let code = result.0 as isize;
-        if code <= 32 {
-            Err(format!("ShellExecuteW failed with code {code}"))
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Open Explorer on a path, with a file **highlighted** inside its folder
-    /// (user ruling, 2026-08-13).
-    ///
-    /// **A third bridge, and deliberately not a widening of the second.**
-    /// [`open_local_path`] hands a path to *whatever the machine has registered
-    /// for it* — which is why it reads `PATHEXT` and refuses programs, since
-    /// the whole risk there is that opening a thing runs it. This one hands the
-    /// path to `explorer.exe` **as text to look at**, and never executes the
-    /// target at all: a `.exe` revealed is a `.exe` sitting highlighted in a
-    /// folder window, which is precisely what somebody asking "where is this"
-    /// wants to see and is not a way to start it. So the extension gate is
-    /// absent on purpose, and the shape gate — absolute, nameable, no embedded
-    /// NUL — is exactly the one its neighbour keeps.
-    ///
-    /// The one program this can ever launch is Explorer.
-    pub fn reveal_in_explorer(hwnd: NonZeroIsize, path: &Path) -> Result<(), String> {
-        validate_openable_path(path)?;
-        let hwnd = HWND(hwnd.get() as *mut c_void);
-        let mut operation = "open".encode_utf16().collect::<Vec<_>>();
-        operation.push(0);
-        let mut program = "explorer.exe".encode_utf16().collect::<Vec<_>>();
-        program.push(0);
-        let mut arguments = super::reveal_arguments(path, path.is_dir())
-            .encode_wide()
-            .collect::<Vec<_>>();
-        arguments.push(0);
-        // SAFETY: the target is a path this process enumerated or was given by
-        // the user, `validate_openable_path` has refused any embedded NUL, all
-        // three buffers stay live and NUL-terminated across this synchronous
-        // call, and the only program named is Explorer.
-        let result = unsafe {
-            ShellExecuteW(
-                Some(hwnd),
-                PCWSTR(operation.as_ptr()),
-                PCWSTR(program.as_ptr()),
-                PCWSTR(arguments.as_ptr()),
-                PCWSTR::null(),
-                SW_SHOWNORMAL,
-            )
-        };
-        let code = result.0 as isize;
-        if code <= 32 {
-            Err(format!("ShellExecuteW failed with code {code}"))
-        } else {
-            Ok(())
-        }
-    }
-
-    /// **Open Windows' own Fonts page** (user ruling 2026-08-19).
-    ///
-    /// **A fourth bridge, and the first one that hands `ShellExecuteW` a URI.**
-    /// That is exactly the thing this codebase refuses everywhere else —
-    /// `preview.rs` will open `http` and `https` and nothing else, because
-    /// handing an arbitrary scheme to the shell is handing it whatever the
-    /// machine has registered for that scheme. The difference here is that
-    /// nothing arbitrary reaches this function: there is no parameter. The two
-    /// strings it can pass are both constants of this build, and a reader who
-    /// presses `Install fonts…` gets the one page or the other.
-    ///
-    /// `ms-settings:fonts` first, because it is where a font is installed by
-    /// dropping a file on it and where the machine's own fonts already live. It
-    /// is a Windows 10+ protocol handler and a machine can have it unregistered
-    /// — policy-managed desktops do this — so the fall-back is the folder the
-    /// page is a view of, opened through Explorer exactly as [`reveal_in_explorer`]
-    /// opens any other folder. Two doors onto one place, and the reader is never
-    /// told which one they came through: the answer to "where do fonts come
-    /// from" is the same either way.
-    ///
-    /// **This product installs and deletes nothing.** A font is a machine-wide
-    /// resource, installing one affects every program on the desk, and removing
-    /// one a program is drawing with is a decision that was never a terminal's
-    /// to take. So there is no in-app font management behind this door and there
-    /// will not be — the door is the whole feature.
-    pub fn open_system_fonts_page(hwnd: NonZeroIsize) -> Result<(), String> {
-        let hwnd = HWND(hwnd.get() as *mut c_void);
-        let mut operation = "open".encode_utf16().collect::<Vec<_>>();
-        operation.push(0);
-        let mut uri = super::FONT_SETTINGS_URI.encode_utf16().collect::<Vec<_>>();
-        uri.push(0);
-        // SAFETY: the target is a compile-time constant with no embedded NUL,
-        // both buffers stay live and NUL-terminated across this synchronous
-        // call, and parameters and working directory are null so Windows never
-        // receives a command line to reparse.
-        let result = unsafe {
-            ShellExecuteW(
-                Some(hwnd),
-                PCWSTR(operation.as_ptr()),
-                PCWSTR(uri.as_ptr()),
-                PCWSTR::null(),
-                PCWSTR::null(),
-                SW_SHOWNORMAL,
-            )
-        };
-        if result.0 as isize > 32 {
-            return Ok(());
-        }
-        // The URI was refused — no handler, or a policy that removed the page.
-        // The folder it is a view of is still there, and Explorer is the one
-        // program this fall-back can launch.
-        let mut program = "explorer.exe".encode_utf16().collect::<Vec<_>>();
-        program.push(0);
-        let mut folder = super::fonts_folder()
-            .into_os_string()
-            .encode_wide()
-            .collect::<Vec<_>>();
-        folder.push(0);
-        // SAFETY: as above, and the only program named is Explorer.
-        let result = unsafe {
-            ShellExecuteW(
-                Some(hwnd),
-                PCWSTR(operation.as_ptr()),
-                PCWSTR(program.as_ptr()),
-                PCWSTR(folder.as_ptr()),
-                PCWSTR::null(),
-                SW_SHOWNORMAL,
-            )
-        };
-        let code = result.0 as isize;
-        if code <= 32 {
-            Err(format!("ShellExecuteW failed with code {code}"))
-        } else {
-            Ok(())
-        }
-    }
-
-    /// The refusal's own words, so the caller can tell "this window will not do
-    /// that" apart from "Windows could not".
-    pub const PROGRAM_REFUSED: &str = "the files tree does not run programs";
-
-    /// The extensions that are a program whatever this machine's `PATHEXT` says.
-    ///
-    /// `PATHEXT` is the system's own list of what a *command line* will execute
-    /// and it is read as well, but it is not the whole answer: a `.lnk` is not
-    /// on it and points at anything at all, a `.scr` is an executable wearing a
-    /// screensaver's name, and `.hta`, `.reg`, `.msi` and `.url` are each opened
-    /// by a handler whose whole job is to act. Reading both means the list grows
-    /// with a machine that has added to `PATHEXT` without shrinking on one that
-    /// has emptied it.
-    const ALWAYS_A_PROGRAM: &[&str] = &[
-        "appref-ms",
-        "bat",
-        "cmd",
-        "com",
-        "cpl",
-        "exe",
-        "hta",
-        "jar",
-        "js",
-        "jse",
-        "lnk",
-        "msc",
-        "msi",
-        "msp",
-        "ps1",
-        "pif",
-        "reg",
-        "scf",
-        "scr",
-        "url",
-        "vb",
-        "vbe",
-        "vbs",
-        "wsf",
-        "wsh",
-    ];
-
-    /// Whether opening this name would start something rather than show it.
-    ///
-    /// Split out and given `pathext` as an argument rather than reading the
-    /// environment itself, so the rule is answerable in a test on a machine
-    /// whose own `PATHEXT` is whatever it is.
-    fn names_a_program(path: &Path, pathext: &str) -> bool {
-        let Some(extension) = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .map(str::to_ascii_lowercase)
-        else {
-            // No extension means no registered handler to speak of, and
-            // `ShellExecute` falls back to the "open with" chooser rather than
-            // to running anything. That is a dialog, not an execution.
-            return false;
-        };
-        ALWAYS_A_PROGRAM.contains(&extension.as_str())
-            || pathext.split(';').any(|entry| {
-                entry
-                    .trim()
-                    .trim_start_matches('.')
-                    .eq_ignore_ascii_case(&extension)
-            })
-    }
-
-    /// The shape gate the tree's own bridge keeps: absolute and nameable.
-    ///
-    /// Wider than [`validate_local_image_path`] in exactly one way — a UNC share
-    /// is allowed — because a files column may legitimately be rooted at
-    /// `\\server\share`, and a tree that can list a path it then refuses to open
-    /// is a tree that lies about what its rows are.
-    fn validate_openable_path(path: &Path) -> Result<(), String> {
-        let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
-        if units.contains(&0) {
-            return Err("path contains an embedded NUL".to_owned());
-        }
-        let text = path.as_os_str().to_string_lossy();
-        let bytes = text.as_bytes();
-        let drive_rooted = bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && matches!(bytes[2], b'\\' | b'/');
-        let unc = text.starts_with(r"\\") && text.len() > 2;
-        if !drive_rooted && !unc {
-            return Err("path must be absolute".to_owned());
-        }
-        Ok(())
-    }
-
-    fn validate_local_image_path(path: &Path) -> Result<(), String> {
-        let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
-        if units.contains(&0) {
-            return Err("local image path contains an embedded NUL".to_owned());
-        }
-        let text = path.as_os_str().to_string_lossy();
-        let bytes = text.as_bytes();
-        if bytes.len() < 3
-            || !bytes[0].is_ascii_alphabetic()
-            || bytes[1] != b':'
-            || !matches!(bytes[2], b'\\' | b'/')
-        {
-            return Err("local image path must be drive-rooted and absolute".to_owned());
-        }
-        let allowed_extension = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| {
-                let extension = extension.to_ascii_lowercase();
-                crate::IMAGE_FILE_EXTENSIONS.contains(&extension.as_str())
-            });
-        if !allowed_extension {
-            return Err("local image path extension is not supported".to_owned());
-        }
-        Ok(())
     }
 
     /// Put the keyboard back on this window itself.
@@ -7391,9 +7030,10 @@ mod windows_impl {
     mod tests {
         use super::{
             CLIPBOARD_OPEN_RETRY_DELAYS, FolderPickerState, ImagePickerState, MathMenuState,
-            ShellPickKind, compositor_failure, names_a_program, primary_language_id,
-            retry_open_clipboard, validate_local_image_path, validate_openable_path, wide_null,
+            ShellPickKind, compositor_failure, primary_language_id, retry_open_clipboard,
+            wide_null,
         };
+        use crate::handoff::{validate_local_image_path, validate_openable_path};
         use std::path::{Path, PathBuf};
 
         /// A DirectComposition refusal has to be readable by the person holding
@@ -7638,54 +7278,6 @@ mod windows_impl {
                 "*.png;*.jpg"
             );
             assert_eq!(wide_null(""), vec![0]);
-        }
-
-        /// PIN — the tree's bridge opens documents and refuses programs, and the
-        /// refusal does not depend on this machine's `PATHEXT` being anything in
-        /// particular.
-        #[test]
-        fn the_tree_bridge_opens_what_it_can_show_and_never_what_it_would_run() {
-            let empty = "";
-            for document in [
-                r"C:\notes\readme.md",
-                r"C:\notes\report.pdf",
-                r"C:\notes\archive.zip",
-                r"C:\notes\NOEXTENSION",
-                r"C:\notes\photo.PNG",
-            ] {
-                assert!(
-                    !names_a_program(Path::new(document), empty),
-                    "{document} is something to look at"
-                );
-            }
-            for program in [
-                r"C:\bin\tool.exe",
-                r"C:\bin\TOOL.EXE",
-                r"C:\bin\run.bat",
-                r"C:\bin\install.msi",
-                r"C:\bin\shortcut.lnk",
-                r"C:\bin\saver.scr",
-                r"C:\bin\page.hta",
-                r"C:\bin\keys.reg",
-                r"C:\bin\script.ps1",
-            ] {
-                assert!(
-                    names_a_program(Path::new(program), empty),
-                    "{program} would run"
-                );
-            }
-        }
-
-        /// PIN — a machine that has taught its command line to execute a new
-        /// extension has taught this bridge to refuse it.
-        #[test]
-        fn a_machine_that_makes_something_executable_makes_it_refused_here() {
-            let path = Path::new(r"C:\bin\macro.xyz");
-            assert!(!names_a_program(path, ".EXE;.BAT"));
-            assert!(names_a_program(path, ".EXE;.XYZ"));
-            assert!(names_a_program(path, ".exe;.xyz"));
-            // An emptied `PATHEXT` cannot open the door the fixed list shuts.
-            assert!(names_a_program(Path::new(r"C:\bin\tool.exe"), ""));
         }
 
         /// A column may be rooted on a share, so its rows have to be openable —
@@ -9061,23 +8653,34 @@ impl TaskbarProgress {
 #[cfg(windows)]
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirChange, DirWatch, FilePickKind, FolderPicker, ImagePicker,
-    ImeSystemCaret, MathContextMenu, Notifier, PROGRAM_REFUSED, SystemSettingsWatch, Taskbar,
-    adopt_parent_console, announce_explorer_menu_change, client_area_animation_enabled,
-    clipboard_text, cloaked_from_attribute, current_thread_priority, current_user_registry_string,
+    ImeSystemCaret, MathContextMenu, Notifier, SystemSettingsWatch, Taskbar, adopt_parent_console,
+    announce_explorer_menu_change, client_area_animation_enabled, clipboard_text,
+    cloaked_from_attribute, current_thread_priority, current_user_registry_string,
     current_user_registry_subkeys, detach_console, documents_directory, dpi_at, exposed_from_probe,
     exposure_probe_points, file_product_version, flash_window, get_dpi_for_window, get_window_rect,
     get_work_area, hide_every_window_of_this_process, install_console_ctrl_handler,
     install_context_menu, install_window_class_background, is_window_cloaked, is_window_minimized,
-    leave_process, message_box, monitor_id_at, monospace_font_families, open_local_file,
-    open_local_path, open_system_fonts_page, os_ui_language, pointer_position, read_context_menu,
-    recycle, redirect_std_streams_to_file, remove_context_menu, request_window_close,
-    reveal_in_explorer, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
-    set_window_dark_mode, set_window_outer_rect, set_window_topmost, shell_execute,
+    leave_process, message_box, monitor_id_at, monospace_font_families, os_ui_language,
+    pointer_position, read_context_menu, recycle, redirect_std_streams_to_file,
+    remove_context_menu, request_window_close, set_clipboard_text, set_current_thread_priority,
+    set_system_backdrop, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
     silence_std_streams, spawn_at_priority, stand_window_at, std_error_is_console,
     system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
     taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
     top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
     window_is_exposed, work_area_at, write_to_console,
+};
+
+/// **The hand-off, spelled once** — see [`handoff`].
+///
+/// The four verbs that leave this window are re-exported at the crate root
+/// because that is where every caller has always found them, and moving the
+/// door is not the same as moving its handle.
+pub use handoff::{PROGRAM_REFUSED, program_in_directories, reveal_arguments};
+#[cfg(windows)]
+pub use handoff::{
+    open_local_file, open_local_path, open_system_fonts_page, program_on_path, reveal_in_explorer,
+    shell_execute,
 };
 
 /// The three thread-band calls, off Windows.
@@ -10337,7 +9940,7 @@ mod toast_tests {
 
 #[cfg(test)]
 mod reveal_tests {
-    use super::*;
+    use super::handoff::reveal_argument_form;
     use std::path::Path;
 
     /// PIN (user ruling, 2026-08-13) — **a foot reveals the thing it names**,
@@ -10353,6 +9956,11 @@ mod reveal_tests {
     /// one quote out opens `Documents` and reports success, which is the worst
     /// shape a failure can take.
     ///
+    /// The disk half of the promise — that there is really a file there, and
+    /// that the string is the operating system's own spelling of it — is
+    /// [`handoff::reveal_arguments`]' and is pinned beside it (R1-5). What is
+    /// asked here is the form.
+    ///
     /// MUTATIONS:
     /// ① go back to a bare folder open — drop `/select,` — and the first
     ///    assertion goes red, which is the reported behaviour written down;
@@ -10361,7 +9969,7 @@ mod reveal_tests {
     #[test]
     fn a_file_is_revealed_by_selecting_it_and_a_folder_by_opening_it() {
         let file = Path::new(r"C:\repo\test-assets\preview-samples\stress.md");
-        let arguments = reveal_arguments(file, false);
+        let arguments = reveal_argument_form(file, false).expect("an ordinary file path");
         let text = arguments.to_string_lossy();
         assert!(
             text.starts_with("/select,"),
@@ -10380,7 +9988,7 @@ mod reveal_tests {
         // A directory is opened rather than selected: `/select` on a folder
         // opens its *parent*, one level further out than a root is offering.
         let folder = Path::new(r"C:\repo\test-assets\preview-samples");
-        let opened = reveal_arguments(folder, true);
+        let opened = reveal_argument_form(folder, true).expect("an ordinary folder path");
         let text = opened.to_string_lossy();
         assert!(
             !text.contains("/select"),
@@ -10391,7 +9999,9 @@ mod reveal_tests {
         // A path with a space survives, which is what the quotes are for.
         let spaced = Path::new(r"C:\My Documents\a file.md");
         assert_eq!(
-            reveal_arguments(spaced, false).to_string_lossy(),
+            reveal_argument_form(spaced, false)
+                .expect("a path with a space")
+                .to_string_lossy(),
             "/select,\"C:\\My Documents\\a file.md\""
         );
     }

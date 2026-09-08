@@ -1830,9 +1830,15 @@ pub enum Text {
     /// which is the difference between this card and one that could offer a
     /// retry.
     WebFailDownloadSay,
-    /// Its one verb. The download is gone; the page that asked for it is not,
-    /// and handing *that* over is the one action that still gets the file.
+    /// Its one verb when there is nothing to replay. The download is gone; the
+    /// page that asked for it is not, and handing *that* over is the one action
+    /// that still gets the file.
     WebFailDownloadVerb,
+    /// Its verb when the download's own address is a plain link somebody else
+    /// could ask for. **This press is what a cancelled download now waits
+    /// for** (R1-16): the address used to leave the window on its own, with
+    /// nobody having asked, at a moment the page chose.
+    WebFailDownloadOpenVerb,
     /// `General ▸ Search engine` — the row.
     RowSearchEngine,
     /// Its sentence. Says the one thing the three names cannot: **when** this
@@ -3978,6 +3984,9 @@ impl Text {
                 "Open this page in your browser",
                 "在浏览器中打开这个页面",
             ),
+            Self::WebFailDownloadOpenVerb => {
+                pick(lang, "Open the download in your browser", "在浏览器中下载")
+            }
             // 「重命名」and not 「改名」: it is the word Explorer's own Chinese
             // uses on this exact row, so a reader meets it here already knowing
             // what it does.
@@ -4272,7 +4281,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 591] = [
+    pub const ALL: [Self; 592] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4769,6 +4778,7 @@ impl Text {
         Self::WebFailBlockedVerb,
         Self::WebFailDownloadSay,
         Self::WebFailDownloadVerb,
+        Self::WebFailDownloadOpenVerb,
         Self::RowSearchEngine,
         Self::DescSearchEngine,
         Self::PeekOpensAsPage,

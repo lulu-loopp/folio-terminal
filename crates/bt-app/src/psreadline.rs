@@ -428,7 +428,19 @@ fn run_probe() -> Probe {
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen every time a PowerShell pane is opened for the
     // first time in a session.
-    let output = bt_platform::quiet_command("powershell.exe")
+    //
+    // **By name and therefore by absolute path** (R1-17): `CreateProcess` reads
+    // the process's working directory before it reads `PATH`, and a
+    // `powershell.exe` left in a folder somebody cloned is not the PowerShell
+    // this probe is asking about. `quiet_command_named` looks where a program
+    // is supposed to live and nowhere else; nothing found there means no
+    // answer, never a bare name to fall back on.
+    let Some(mut command) =
+        bt_platform::quiet_command_named(std::path::Path::new("powershell.exe"))
+    else {
+        return Probe::default();
+    };
+    let output = command
         .args(["-NoProfile", "-NonInteractive", "-Command", PROBE_COMMAND])
         .output();
     let Ok(output) = output else {
