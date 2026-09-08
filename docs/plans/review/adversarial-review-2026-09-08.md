@@ -162,7 +162,7 @@ R3-5, R3-6, R3-7, R3-8, R3-9, R3-10, R3-11, R3-12, R3-13, R3-14, R3-15, R3-16, R
 
 Why together: the injected scripts and the sequences they emit assume one shell, one prompt shape and one spelling of a directory, and every row is a shell or a directory that does not match the assumption. The design is to ask the shell what it is rather than assume it, and to accept on the reading side the spellings the emitting side genuinely cannot encode.
 
-### T7 `fix/platform-boundary`
+### T7 `fix/platform-boundary` (first half in flight as `fix/platform-boundary-summon-and-pipes`: R2-1, R2-3, R2-5, R2-9, R2-11, R2-14, R2-20, R2-21, R2-23, R2-25, R2-26, R2-27, R2-28; second half queued: R2-2, R2-4, R2-6, R2-7, R2-8, R2-15, R2-17, R2-18, R2-19, R2-22)
 
 R2-1, R2-2, R2-3, R2-4, R2-5, R2-6, R2-7, R2-8, R2-9, R2-11, R2-14, R2-15, R2-17, R2-18, R2-19, R2-20, R2-21, R2-22, R2-23, R2-25, R2-26, R2-27, R2-28.
 
