@@ -21512,15 +21512,18 @@ mod tests {
         // Windows 10; Windows 11 with no package; the moved registration; the
         // registration this session made and Explorer may not have read yet
         // (§7.4b); and the machine that can do everything.
-        for (supported, package, elsewhere, pending) in [
-            (false, true, false, false),
-            (true, false, false, false),
-            (true, true, true, false),
-            (true, true, false, true),
-            (true, true, false, false),
+        // …and the machine whose deployment database would not answer (R2-20).
+        for (supported, package, elsewhere, pending, unreadable) in [
+            (false, true, false, false, false),
+            (true, false, false, false, false),
+            (true, true, true, false, false),
+            (true, true, false, true, false),
+            (true, true, false, false, false),
+            (true, true, false, false, true),
         ] {
-            let entry =
-                crate::explorer_menu::description_for(supported, package, elsewhere, pending);
+            let entry = crate::explorer_menu::description_for(
+                supported, package, elsewhere, pending, unreadable,
+            );
             for lang in [Lang::English, Lang::Chinese] {
                 let sentence = entry.in_lang(lang);
                 let lines = wrapped_description(

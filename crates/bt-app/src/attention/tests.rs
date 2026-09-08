@@ -1303,25 +1303,27 @@ fn a_disabled_turn_end_door_records_nothing_at_all() {
     );
 }
 
-/// PIN (`attention` plan §11.7, the deduplication rule read exactly) — **the bit swallows a
-/// second report of the same turn ending, and never a second thing a program said.**
+/// RED (R2-21) — **one turn, one toast, whatever the arrivals say.**
 ///
-/// The rule the bit exists for is "two sources will say the same sentence" — a hook `Stop` and the
-/// bare bell that follows it, neither of which carries a word. Those are one fact arriving twice
-/// and the second is silent, which is the whole of §13.3.
+/// The rule the bit was written for is "two sources will say the same sentence" — a hook `Stop`
+/// and the bare bell that follows it — and it carried an exception: an arrival with **words of its
+/// own** was not a restatement, so a second, different sentence in one turn raised a second toast.
+/// The exception was argued from §11.6 rule 2, that a program's own words are the thing this
+/// terminal must not throw away, and it read the surface wrong.
 ///
-/// **Applying that to a program's own sentences would take a delivery away.** `OSC 9;<text>` and
-/// `OSC 777;notify` are messages, and a build that swallowed the second of two different ones
-/// because nobody had pressed a key in between would be deciding that a build finishing and a
-/// deploy finishing are the same event. That is a regression against a delivery this product has
-/// always made, and §11.6 rule 2 is explicit that a program's own words are the thing this
-/// terminal must not throw away.
+/// A desktop notification is not a line in a pane. It carries Folio's name, it stands over
+/// whatever the reader is doing, and nothing beside it says which program asked for it. Latching
+/// on the sentence therefore handed any program in any pane an unbounded supply of Folio-branded
+/// interruptions: print a different sentence each time and the bit never closes. The dot has
+/// always latched on the turn; the toast now does too.
 ///
-/// MUTATIONS: gate on the bit alone and the second sentence goes silent; compare nothing and a
-/// program repeating one sentence interrupts twice; clear the remembered sentence without clearing
-/// the bit and a repeat in the *next* turn is swallowed by the last turn's words.
+/// The words are not thrown away. The first accepted arrival's sentence is the one the toast
+/// carries, and every arrival still writes its own trace line. What is refused is a second card.
+///
+/// MUTATION: put the `words != announced_words` clause back and the loop below raises a toast for
+/// every distinct sentence a pane prints between one turn and the next.
 #[test]
-fn a_second_report_of_one_turn_is_silent_and_a_second_sentence_is_not() {
+fn one_turn_raises_one_toast_however_many_sentences_arrive() {
     let mut pane = Pane::new();
     let first = pane.ledger.announce_turn_end(
         site(),
@@ -1335,43 +1337,34 @@ fn a_second_report_of_one_turn_is_silent_and_a_second_sentence_is_not() {
     assert_eq!(
         first.raised.expect("a delivery").body.as_deref(),
         Some("build finished"),
-        "the program's own words ride out with the decision"
+        "the first accepted arrival's own words ride out with the decision"
     );
 
-    // The same sentence again is the same fact, whatever carried it.
-    for words in [Some("build finished"), Some("  build finished  "), None] {
+    // Every later arrival for this turn is silent — the same sentence, a
+    // restatement with different spacing, no sentence at all, and a run of
+    // sentences nobody has seen before.
+    for words in [
+        Some("build finished"),
+        Some("  build finished  "),
+        None,
+        Some("deploy finished"),
+        Some("tests finished"),
+        Some("Folio: sign in to continue"),
+    ] {
         let repeat = pane.ledger.announce_turn_end(
             site(),
             Reach::Toast,
             BOTH_ON,
-            Transport::Bel,
-            Via::Bel,
+            Transport::Osc,
+            Via::Osc777,
             words,
         );
         assert_eq!(
             repeat,
             Outcome::default(),
-            "a restatement of one sentence changed no decision: {words:?}"
+            "this turn has already been announced: {words:?}"
         );
     }
-
-    // A different sentence is a different thing to have said.
-    let second = pane.ledger.announce_turn_end(
-        site(),
-        Reach::Toast,
-        BOTH_ON,
-        Transport::Osc,
-        Via::Osc777,
-        Some("deploy finished"),
-    );
-    assert_eq!(
-        second.lines,
-        ["toast tab=1 seat=SeatId(2) why=turn-end episode=- reach=toast src=osc via=osc-777"]
-    );
-    assert_eq!(
-        second.raised.expect("a delivery").body.as_deref(),
-        Some("deploy finished")
-    );
 
     // And with the door shut nothing gets through, sentence or no sentence.
     let mut shut = Pane::new();
@@ -2258,4 +2251,57 @@ fn the_two_lanes_write_the_lines_the_gate_greps_for() {
                 .to_owned()
         ]
     );
+}
+
+/// RED (R2-9) — **one pane's runaway hook spends its own allowance and nobody else's.**
+///
+/// The endpoint takes a line off the wire before anything has parsed it, so the bucket it charges
+/// cannot tell one sender from another: a pane whose hook had gone into a loop was spending the
+/// whole window's allowance, and every other pane's `PermissionRequest` was refused for the rest of
+/// that second. The bound that can tell them apart is charged here, one layer up, after the
+/// capability has named a pane.
+///
+/// MUTATION: hold one bucket for the whole process — a `static`, or a field on the window — and
+/// the second half fails: the quiet pane finds the allowance already spent.
+#[test]
+fn a_flooding_pane_spends_its_own_allowance_and_not_another_panes() {
+    let now = Instant::now();
+    let mut loud = AttentionLedger::default();
+    let mut quiet = AttentionLedger::default();
+
+    for frame in 0..MAX_FRAMES_PER_PANE_PER_SECOND {
+        assert!(
+            loud.admits_a_frame(now),
+            "frame {frame} of one pane's allowance was refused"
+        );
+    }
+    assert!(
+        !loud.admits_a_frame(now),
+        "the bound is the bound: a pane past it is refused"
+    );
+
+    // The pane next door has not said anything at all, and its turn ending is
+    // still delivered.
+    assert!(
+        quiet.admits_a_frame(now),
+        "one pane's flood must not close another pane's door"
+    );
+
+    // And the next second forgives, or one flood would break the feature until
+    // the window is closed.
+    assert!(
+        loud.admits_a_frame(now + Duration::from_millis(1001)),
+        "a bucket that never refills is a bucket that ends the feature"
+    );
+
+    // A pane that has been quiet for an hour gets a whole second's allowance the
+    // moment it speaks, rather than what is left of a window that opened when the
+    // pane did.
+    let mut slept = AttentionLedger::default();
+    for frame in 0..MAX_FRAMES_PER_PANE_PER_SECOND {
+        assert!(
+            slept.admits_a_frame(now + Duration::from_secs(3600)),
+            "frame {frame} after an hour of silence"
+        );
+    }
 }

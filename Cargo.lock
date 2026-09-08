@@ -353,6 +353,7 @@ dependencies = [
 name = "bt-platform"
 version = "0.2.3"
 dependencies = [
+ "bt-transcript",
  "webview2-com",
  "windows",
  "windows-core",

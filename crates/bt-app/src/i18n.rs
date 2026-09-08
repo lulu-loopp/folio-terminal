@@ -433,6 +433,9 @@ pub enum Text {
     /// until it is restarted. So the row says what to do about that, and says
     /// it only while this process is the one that made the change.
     DescExplorerFirstPageAwaitingShell,
+    /// The deployment database would not answer, so nothing below the two facts
+    /// about the machine can be claimed (R2-20).
+    DescExplorerFirstPageUnreadable,
     /// The sentence the row wears while there is nothing newer — what the check
     /// does, and the bound on what it can do. The other sentence names a version
     /// and is composed by [`update_row_available_in`].
@@ -560,6 +563,8 @@ pub enum Text {
     /// where the file is missing. It is the sentence for the file that goes away
     /// between the frame that offered that answer and the thread that acts on it.
     ExplorerFirstPageNoPackage,
+    /// The removal's own refusal when Windows would not say what is registered.
+    ExplorerFirstPageUnreadable,
 
     // ── the `˅` profile menu ───────────────────────────────────────────────
     /// Lower case is deliberate: it is an annotation, not a label.
@@ -1256,6 +1261,10 @@ pub enum Text {
     /// stay as they are; what is translated is the reason.
     ShortcutHintAltGrZone,
     ShortcutHintShellControlLetter,
+    /// The recorder's third, and the only one that is about which row is asking:
+    /// the summon's key is claimed from Windows, so a chord with no modifier on
+    /// it would be taken from every program on the machine.
+    ShortcutHintGlobalNeedsModifier,
 
     // ── the Git page (`crate::git_panel`) ──────────────────────────────────
     //
@@ -2564,6 +2573,11 @@ impl Text {
             // moment the package was registered; what it does with that is not
             // ours to promise, and the reader who is looking at a menu with no
             // Folio in it needs the one thing that always works.
+            Self::DescExplorerFirstPageUnreadable => pick(
+                lang,
+                "Windows would not say what is registered. Folio asks again at the next launch.",
+                "向 Windows 查询时没有得到回应。下次启动时 Folio 会重新查询。",
+            ),
             Self::DescExplorerFirstPageAwaitingShell => pick(
                 lang,
                 "Folio is registered for the first page. Explorer reads that list when it starts, so sign out and back in if the entry is not there yet.",
@@ -2775,6 +2789,11 @@ impl Text {
                 lang,
                 "Open in Folio is registered. Explorer may need a restart to show it",
                 "「在 Folio 中打开」已注册，资源管理器可能需要重启才会显示",
+            ),
+            Self::ExplorerFirstPageUnreadable => pick(
+                lang,
+                "Windows would not say whether the package is registered",
+                "无法从 Windows 确认注册状态",
             ),
             Self::ExplorerFirstPageNoPackage => pick(
                 lang,
@@ -3312,6 +3331,11 @@ impl Text {
                 lang,
                 "Ctrl+letter belongs to the shell",
                 "Ctrl+字母属于 shell",
+            ),
+            Self::ShortcutHintGlobalNeedsModifier => pick(
+                lang,
+                "A desktop-wide key needs Ctrl, Alt or Win",
+                "全局快捷键需要 Ctrl、Alt 或 Win",
             ),
 
             // ── the Git page ───────────────────────────────────────────────
@@ -4289,7 +4313,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 593] = [
+    pub const ALL: [Self; 596] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4348,6 +4372,7 @@ impl Text {
         Self::DescExplorerMenuNoFirstPage,
         Self::DescExplorerMenuNoPackage,
         Self::DescExplorerFirstPageElsewhere,
+        Self::DescExplorerFirstPageUnreadable,
         Self::DescExplorerFirstPageAwaitingShell,
         Self::DescTabLayout,
         Self::DescSidebar,
@@ -4385,6 +4410,7 @@ impl Text {
         Self::ExplorerFirstPageAddedToast,
         Self::ExplorerFirstPageAddedRestartToast,
         Self::ExplorerFirstPageNoPackage,
+        Self::ExplorerFirstPageUnreadable,
         Self::ProfileHintDefault,
         Self::ProfileHintUnavailable,
         Self::ProfileHintCurrent,
@@ -4611,6 +4637,7 @@ impl Text {
         Self::ShortcutReservedAltArrow,
         Self::ShortcutHintAltGrZone,
         Self::ShortcutHintShellControlLetter,
+        Self::ShortcutHintGlobalNeedsModifier,
         Self::GitNotARepository,
         Self::GitReading,
         Self::GitToastTitle,

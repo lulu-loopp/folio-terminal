@@ -185,14 +185,37 @@ const MAX_QUOTED_CHARACTERS: usize = crate::attention_words::LIMIT + 1;
 /// Three clauses and each is a different attack surface. Non-empty, because an empty quotation
 /// would raise a toast with a blank body — worse than the wording it replaced. Bounded in
 /// *characters*, matching the bound the verb cut it to, so a sentence in Chinese is allowed the
-/// same eighty words as one in English rather than a quarter of them. And no control characters at
-/// all: the body of this string is written onto a desktop notification, and a newline, a `\r` or an
-/// escape byte in one is a line of somebody else's making in a window Folio put up.
+/// same eighty words as one in English rather than a quarter of them. And nothing in it that moves
+/// text about rather than being text — see [`is_unquotable`].
 #[must_use]
 pub(crate) fn words_are_quotable(words: &str) -> bool {
     !words.is_empty()
         && words.chars().count() <= MAX_QUOTED_CHARACTERS
-        && !words.chars().any(char::is_control)
+        && !words.chars().any(is_unquotable)
+}
+
+/// **A character that has no business in a desktop notification's body** (R2-21).
+///
+/// Three categories, and the second and third were missing. `char::is_control` is Unicode's `Cc`
+/// alone — a newline, a `\r`, an escape byte — which is the half about a *line* of somebody else's
+/// making inside a card Folio put up.
+///
+/// The other half is about what a reader is made to *believe*, and it is `crate::
+/// is_format_or_bidi_control`'s subject one surface along: `Cf` includes `U+202E`, which reverses
+/// the run after it, and `U+200B`, `U+00AD` and `U+FEFF`, which draw as nothing at all — so a
+/// notification carrying Folio's own name can be made to read as a sentence nobody wrote. A toast
+/// is exactly the surface that matters for: it wears this product's identity, it appears over
+/// whatever the reader is doing, and there is nothing beside it to compare against.
+///
+/// `U+2028` and `U+2029` are the third, and they are neither of the first two: Unicode's `Zl` and
+/// `Zp` are separators rather than controls, `char::is_control` says nothing about them, and the
+/// notification renderer breaks a line on both. A program that could not put a `\n` in a toast
+/// could put one of these there instead.
+#[must_use]
+fn is_unquotable(character: char) -> bool {
+    character.is_control()
+        || crate::is_format_or_bidi_control(character)
+        || matches!(character, '\u{2028}' | '\u{2029}')
 }
 
 /// **The one place a `<family>:<event>` is split**, so the two ends cannot come to disagree.
@@ -747,6 +770,22 @@ mod tests {
             "two\nlines".to_owned(),
             "a\rb".to_owned(),
             "\u{1b}]9;spoof\u{7}".to_owned(),
+            // RED (R2-21) — the three classes `char::is_control` says nothing
+            // about. `U+202E` reverses the run after it, so a toast can be made
+            // to read as a sentence nobody wrote; `U+2066`…`U+2069` do it in a
+            // nestable form; `U+200B` and `U+FEFF` draw as nothing at all, so a
+            // name can be spelled with an invisible gap through it. And
+            // `U+2028`/`U+2029` are Unicode's line and paragraph separators —
+            // `Zl` and `Zp`, neither of them a control character — which the
+            // notification renderer breaks a line on exactly as it would on the
+            // `\n` four entries up.
+            "report\u{202e}gnp.exe".to_owned(),
+            "\u{2066}Folio\u{2069} needs your password".to_owned(),
+            "goo\u{200b}gle.com signed you out".to_owned(),
+            "\u{feff}sign in to continue".to_owned(),
+            "Folio\u{2028}sign in to continue".to_owned(),
+            "Folio\u{2029}sign in to continue".to_owned(),
+            "soft\u{ad}hyphen".to_owned(),
         ] {
             assert!(
                 !words_are_quotable(&bad),

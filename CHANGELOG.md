@@ -35,6 +35,71 @@ All notable changes to Folio are recorded here. The format follows
   directory holds. Nothing about the program changed.
 ### Fixed
 
+- **The key that summons the quick terminal raises it when it is on screen and
+  you are working somewhere else.** The chord read only whether the window was
+  visible, so pressing it while the terminal stood behind your editor sent the
+  terminal away and gave the keyboard to a third window. It now raises and
+  focuses a terminal that is up but not yours, and hides one you are typing in.
+
+- **The summon key needs Ctrl, Alt or Win.** Recording a bare letter, or a
+  letter with only Shift, claimed that key from every program on the machine for
+  as long as Folio ran, and brought the state back at the next launch because the
+  row is saved. The recorder refuses such a chord and says why, a line in
+  `keybindings.json` carrying one is refused with the same reason on its row, and
+  the claim is never made.
+
+- **A hung program in front does not stop Folio.** Summoning the terminal joins
+  the input queue of whichever window has the keyboard, and joining an
+  application that has stopped answering handed Folio that application's freeze.
+  Folio now asks Windows whether that window is answering before joining it, and
+  gives the whole handover a deadline.
+
+- **The quick terminal answers its own key and nobody else's.** Another program
+  running as you could post the same message Windows posts for the chord, and the
+  terminal came down for it even when the shortcut was cleared or when Windows
+  had refused Folio the key. A press is now acted on only while Folio's own claim
+  on that key is live.
+
+- **One pane's runaway hook no longer silences the others.** The endpoint an
+  agent's hooks speak into counted every message against one allowance for the
+  whole window, so a hook stuck in a loop in one pane spent it and the other
+  panes' notifications were dropped. Each pane now has its own allowance, counted
+  after the message says which pane it is for.
+
+- **One toast per turn, whatever a program prints.** A program in a pane could
+  raise a fresh Folio notification for every different sentence it wrote between
+  one turn and the next. A turn ending now raises one notification, the way the
+  attention dot always has, and the words in it can no longer carry the invisible
+  characters that reorder or hide the rest of the line.
+
+- **Folio's entry in the Explorer menu is repaired when it was left half
+  written.** A registration interrupted part way through leaves a menu entry with
+  nothing to run; Folio read that as no entry at all and left it alone at every
+  later launch. It now recognises it and writes it again, and a registration that
+  fails removes what it had written rather than leaving the half.
+
+- **The Explorer menu switch says so when Windows will not answer.** A failed
+  query to the Windows package database read as "nothing is registered", so
+  turning the switch off reported success over an entry that was still there. The
+  row now says the question could not be answered, and turning it off says so
+  rather than claiming to have removed something.
+
+- **Folio's menu entry registers correctly from a folder with `#`, `?` or `%` in
+  its name.** The folder's path was handed to Windows without being encoded, so
+  those three characters named a different folder and the entry pointed nowhere.
+
+- **The watchdog reports a window that stops answering while it is idle.** A
+  window parked with nothing to wait for was never asked whether it was alive, so
+  a freeze that began the moment something woke it produced no report at all. It
+  is now asked whenever the silence passes the threshold, whatever it was waiting
+  for.
+
+- Internal contracts at the Windows boundary: a cancelled read on the attention
+  endpoint is waited for before its storage is reused or freed, two error paths
+  there no longer leak a handle, and `folio attention` checks the endpoint name
+  it was given, asks for the narrowest impersonation level, and writes under a
+  deadline.
+
 - **The last shell exiting closes its tab, and closing the last tab ends the
   program.** A tab holding one pane whose shell exited stayed open with a dead
   shell inside it, and a window whose only tab ended that way went on running

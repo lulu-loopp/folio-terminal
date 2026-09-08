@@ -120,6 +120,21 @@ pub enum PackageState {
     Unsupported,
     /// No package of ours is registered for this user.
     Absent,
+    /// **Windows would not say** (R2-20).
+    ///
+    /// The deployment database refused the question — a service that is not
+    /// running, an API that answered an error. It used to be folded into
+    /// [`Self::Absent`], on the reasoning that "Windows would not answer" is
+    /// neither actionable nor a state a press could change, and the next launch
+    /// asks again.
+    ///
+    /// What that reasoning missed is the **removal**. `request(false)` asks this
+    /// module for the registration's name in order to take it away, and a
+    /// failure that reads as absence answers "there is no package" — so the row
+    /// reports the switch turned off, over a package that is still registered
+    /// and a menu item that is still on the reader's first page. Reported as
+    /// what it is, the removal says so instead, and the row says so too.
+    Unreadable,
     /// Registered, pointing at this executable's own folder.
     Current { full_name: String },
     /// Registered, pointing at a folder that is not this one — the executable
@@ -497,11 +512,14 @@ fn read_state() -> PackageState {
     }
     let registered = match msix::registered() {
         Ok(Some(registered)) => registered,
-        // A failure to *ask* is reported as absence rather than as an error the
-        // row could show. What the row would say is "Windows would not answer",
-        // which is neither actionable nor a state a press could change; the next
-        // launch asks again.
-        Ok(None) | Err(_) => return PackageState::Absent,
+        Ok(None) => return PackageState::Absent,
+        // **Nothing registered and "Windows would not say" are two answers**
+        // (R2-20). They used to be one, and the removal is where that cost
+        // something: a press on `Off` reads this state to find the name it has to
+        // hand `RemovePackageAsync`, and a refusal that reads as absence is a
+        // removal that reports success over a package that is still registered
+        // and a menu item still on the reader's first page.
+        Err(_) => return PackageState::Unreadable,
     };
     let here = std::env::current_exe()
         .ok()
@@ -638,6 +656,44 @@ pub fn reassert_wanted(
     }])
 }
 
+/// **What a press on `Off` may do about the state the machine reported** (R2-20).
+///
+/// Three answers, and the third is the one that was missing. It used to be two, read straight off
+/// [`PackageState::full_name`]: a name meant remove it, and no name meant there was nothing to
+/// remove. `Unreadable` has no name either — so a deployment database that would not answer looked
+/// exactly like a machine with no package on it, and the press reported success, and the row went
+/// to `Off`, over an item that is still on the reader's first page.
+///
+/// [`PackageState::Unknown`] is `Unanswerable` for the same reason and always was: the header's own
+/// note says a removal that read `Unknown` as "no package" would report success over a package that
+/// is still registered. What R2-20 found is that the *failure* to read has exactly that shape and
+/// was not being given exactly that answer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Removal<'a> {
+    /// A registration of ours, by the name `RemovePackageAsync` takes.
+    Remove(&'a str),
+    /// Nothing is registered, which is where the press wanted the machine to be.
+    AlreadyGone,
+    /// Nothing here is known well enough to act on, or to report success about.
+    Unanswerable,
+}
+
+/// The rule, as a function of the state so a test can ask it about a machine it is not on.
+#[must_use]
+pub fn removal_for(state: &PackageState) -> Removal<'_> {
+    match state {
+        PackageState::Unknown | PackageState::Unreadable => Removal::Unanswerable,
+        // A Windows with no first page has no package to remove and never had one; a machine that
+        // answered "none registered" is where the press wanted it.
+        PackageState::Absent | PackageState::Unsupported => Removal::AlreadyGone,
+        // Through [`PackageState::full_name`] and not by matching the two variants again, so that
+        // "the name a registration has" is spelled once.
+        registered => registered
+            .full_name()
+            .map_or(Removal::AlreadyGone, Removal::Remove),
+    }
+}
+
 /// Whether a path names the executable this process is running.
 ///
 /// `current_exe` failing answers `false`, which is the side that leaves another
@@ -658,17 +714,31 @@ pub fn begin_probe() {
     }
     std::thread::spawn(|| {
         let state = read_state();
-        // The repair, and the only place this module writes without being
-        // pressed. Which registrations it may take over is [`reassert_wanted`];
-        // `Absent` is left alone on purpose — see the module header.
-        if reassert_wanted(&state, |exe| exe.is_file(), is_this_executable)
+        // **The repair takes the same latch a press does** (R2-20). It is a
+        // deployment, exactly like the one behind the switch, and until this line
+        // existed the two could run at once: a reader who pressed `Off` in the
+        // first second of a launch had `RemovePackageAsync` and `AddPackageAsync`
+        // in flight against one package name, and whichever finished last decided
+        // what the machine ended up with — while the row was drawn from whichever
+        // `read_state` happened to run after that.
+        //
+        // The press wins ties by construction: it takes the latch on the window
+        // thread the instant it is pressed, and this runs seconds later on a
+        // thread of its own. A repair that finds the latch taken does nothing at
+        // all, which is right — the reader is in the middle of saying what they
+        // want the machine to be, and a launch does not argue with that.
+        let repairing = reassert_wanted(&state, |exe| exe.is_file(), is_this_executable)
+            && !BUSY.swap(true, Ordering::AcqRel);
+        if repairing
             && let Some(package) = package_file()
             && let Some(here) = package.parent()
         {
-            match msix::register(&package, here) {
+            let outcome = msix::register(&package, here);
+            match outcome {
                 Ok(()) => {
                     REGISTERED_HERE.store(true, Ordering::Release);
                     remember(read_state());
+                    BUSY.store(false, Ordering::Release);
                     wake();
                     return;
                 }
@@ -679,6 +749,9 @@ pub fn begin_probe() {
                     eprintln!("BT_EXPLORER_PACKAGE repair refused — {error}");
                 }
             }
+        }
+        if repairing {
+            BUSY.store(false, Ordering::Release);
         }
         remember(state);
         wake();
@@ -727,8 +800,14 @@ pub fn request(install: bool) -> bool {
             // package" would report success over a package that is still
             // registered. This thread can afford the question; the one that took
             // the press could not.
-            match read_state().full_name() {
-                Some(full_name) => msix::remove(full_name).map(|()| {
+            let state = read_state();
+            match removal_for(&state) {
+                // **A question Windows refused is not an answer** (R2-20).
+                // Reporting success here would put the row on `Off` over a
+                // package that may well still be registered; the press is told
+                // what actually happened, and the next one asks again.
+                Removal::Unanswerable => Err(Text::ExplorerFirstPageUnreadable.text().to_owned()),
+                Removal::Remove(full_name) => msix::remove(full_name).map(|()| {
                     // **And the sentence goes away with the registration it was
                     // about.** `REGISTERED_HERE` means "this process registered
                     // the package and has not since taken it back"; a flag that
@@ -740,7 +819,7 @@ pub fn request(install: bool) -> bool {
                 }),
                 // Nothing registered and a press asking for that: the machine is
                 // already where the press wanted it.
-                None => Ok(false),
+                Removal::AlreadyGone => Ok(false),
             }
         };
         remember(read_state());
@@ -779,11 +858,13 @@ pub fn take_outcome() -> Option<Result<bool, String>> {
 /// the control cannot say — asked now of a switch that is never refused.
 #[must_use]
 pub fn row_description() -> &'static str {
+    let state = state();
     description_for(
         supported(),
         package_file().is_some(),
-        matches!(state(), PackageState::Elsewhere { .. }),
+        matches!(state, PackageState::Elsewhere { .. }),
         shell_refresh_pending(),
+        state == PackageState::Unreadable,
     )
     .text()
 }
@@ -807,6 +888,7 @@ pub fn description_for(
     package_beside_exe: bool,
     elsewhere: bool,
     refresh_pending: bool,
+    unreadable: bool,
 ) -> Text {
     if !supported {
         // **This machine has one menu, and the sentence names no page at all.**
@@ -818,6 +900,15 @@ pub fn description_for(
     }
     if !package_beside_exe {
         return Text::DescExplorerMenuNoPackage;
+    }
+    // **Before every sentence that describes a registration** (R2-20): the two
+    // above are facts about the machine that hold whether or not the deployment
+    // database answered, and everything below this line is a claim about what is
+    // registered — which is exactly what could not be read. A row that went on
+    // making one of those claims would be the switch saying `Off` over a menu
+    // item that may well be there.
+    if unreadable {
+        return Text::DescExplorerFirstPageUnreadable;
     }
     if elsewhere {
         return Text::DescExplorerFirstPageElsewhere;
@@ -832,6 +923,83 @@ pub fn description_for(
 mod tests {
     use super::*;
     use crate::cli::PathKind;
+
+    /// RED (R2-20) — **a question Windows would not answer is not "there is
+    /// nothing there", and the row does not claim otherwise.**
+    ///
+    /// The deployment database can refuse a query: the service is not running, the API answers an
+    /// error. That used to be folded into [`PackageState::Absent`], on the reasoning that "Windows
+    /// would not answer" is neither actionable nor a state a press could change. What the reasoning
+    /// missed is the **removal**: it reads this state to find the name it has to hand
+    /// `RemovePackageAsync`, and a refusal that reads as absence answers "there is no package" — so
+    /// the press reports success and the row goes to `Off`, over an item that is still on the
+    /// reader's first page. And the description line goes on describing a registration that was
+    /// never read.
+    ///
+    /// MUTATIONS:
+    /// ① fold `Unreadable` back into `Absent` and the first block reads
+    ///    `AlreadyGone`, which is the removal reporting success over a package it never looked at;
+    /// ② let the row's sentence past the unreadable check and the second block claims one of the
+    ///    two registration states about a machine that said nothing.
+    #[test]
+    fn a_deployment_database_that_would_not_answer_is_not_an_empty_one() {
+        assert_eq!(
+            removal_for(&PackageState::Unreadable),
+            Removal::Unanswerable,
+            "a removal must not report success over a package it could not ask about"
+        );
+        assert_eq!(
+            removal_for(&PackageState::Unknown),
+            Removal::Unanswerable,
+            "and the first probe of a launch has not landed either"
+        );
+        assert_eq!(removal_for(&PackageState::Absent), Removal::AlreadyGone);
+        assert_eq!(
+            removal_for(&PackageState::Unsupported),
+            Removal::AlreadyGone
+        );
+        assert_eq!(
+            removal_for(&PackageState::Current {
+                full_name: "WeiyiShi.Folio_1.0.0.0_x64__abc".to_owned()
+            }),
+            Removal::Remove("WeiyiShi.Folio_1.0.0.0_x64__abc")
+        );
+        assert_eq!(
+            removal_for(&PackageState::Elsewhere {
+                full_name: "WeiyiShi.Folio_1.0.0.0_x64__abc".to_owned(),
+                at: PathBuf::from(r"D:\elsewhere"),
+            }),
+            Removal::Remove("WeiyiShi.Folio_1.0.0.0_x64__abc"),
+            "a registration serving another folder is still a registration a press may take away"
+        );
+
+        // The row's own sentence: an unreadable machine gets the sentence about
+        // *that*, and never one of the two that describe a registration.
+        assert_eq!(
+            description_for(true, true, false, false, true),
+            Text::DescExplorerFirstPageUnreadable
+        );
+        assert_eq!(
+            description_for(true, true, true, true, true),
+            Text::DescExplorerFirstPageUnreadable,
+            "the two claims about a registration are the ones that could not be read"
+        );
+        // And the two facts that are about the machine rather than about a
+        // registration are still reported first — they hold whatever the
+        // deployment database said.
+        assert_eq!(
+            description_for(false, true, false, false, true),
+            Text::DescExplorerMenuNoFirstPage
+        );
+        assert_eq!(
+            description_for(true, false, false, false, true),
+            Text::DescExplorerMenuNoPackage
+        );
+
+        // The switch does not read `On` over a machine that said nothing.
+        assert!(!PackageState::Unreadable.registered());
+        assert_eq!(PackageState::Unreadable.full_name(), None);
+    }
 
     /// PIN — **a folder opens itself and a file opens its folder.**
     ///
@@ -1101,23 +1269,23 @@ mod tests {
         // absence is reported before the file's: on a Windows 10 the file may
         // well be there and naming it would answer a question nobody asked.
         assert_eq!(
-            description_for(false, false, false, false),
+            description_for(false, false, false, false, false),
             Text::DescExplorerMenuNoFirstPage
         );
         assert_eq!(
-            description_for(false, true, false, false),
+            description_for(false, true, false, false, false),
             Text::DescExplorerMenuNoFirstPage
         );
         assert_eq!(
-            description_for(true, false, false, false),
+            description_for(true, false, false, false, false),
             Text::DescExplorerMenuNoPackage
         );
         assert_eq!(
-            description_for(true, true, true, false),
+            description_for(true, true, true, false, false),
             Text::DescExplorerFirstPageElsewhere
         );
         assert_eq!(
-            description_for(true, true, false, false),
+            description_for(true, true, false, false, false),
             Text::DescExplorerMenu
         );
     }
@@ -1189,22 +1357,22 @@ mod tests {
             Text::ExplorerFirstPageAddedRestartToast
         );
         assert_eq!(
-            description_for(true, true, false, true),
+            description_for(true, true, false, true, false),
             Text::DescExplorerFirstPageAwaitingShell
         );
         // And it is the last of the four to be reported: the two that say the
         // first page is out of reach registered nothing, and the moved folder
         // names a condition the reader can still act on.
         assert_eq!(
-            description_for(false, true, false, true),
+            description_for(false, true, false, true, false),
             Text::DescExplorerMenuNoFirstPage
         );
         assert_eq!(
-            description_for(true, false, false, true),
+            description_for(true, false, false, true, false),
             Text::DescExplorerMenuNoPackage
         );
         assert_eq!(
-            description_for(true, true, true, true),
+            description_for(true, true, true, true, false),
             Text::DescExplorerFirstPageElsewhere
         );
         // Both sentences carry the action, which is the whole of what they are
@@ -1296,19 +1464,19 @@ mod tests {
     #[test]
     fn the_row_says_what_on_does_on_this_machine() {
         use crate::i18n::Lang;
-        let ten = description_for(false, true, false, false).in_lang(Lang::English);
+        let ten = description_for(false, true, false, false, false).in_lang(Lang::English);
         assert!(
             !ten.contains("first page"),
             "a machine with one menu is told about one menu: {ten:?}"
         );
         assert!(!ten.contains("Show more options"), "{ten:?}");
-        let no_package = description_for(true, false, false, false).in_lang(Lang::English);
+        let no_package = description_for(true, false, false, false, false).in_lang(Lang::English);
         assert!(no_package.contains("Show more options"), "{no_package:?}");
         assert!(
             no_package.contains("folio.msix is not in this folder"),
             "{no_package:?}"
         );
-        let both = description_for(true, true, false, false).in_lang(Lang::English);
+        let both = description_for(true, true, false, false, false).in_lang(Lang::English);
         assert!(both.contains("first page"), "{both:?}");
         assert!(both.contains("Show more options"), "{both:?}");
     }

@@ -1363,6 +1363,11 @@ pub(crate) fn hint_shell_control_letter() -> &'static str {
     Text::ShortcutHintShellControlLetter.text()
 }
 
+#[must_use]
+pub(crate) fn hint_global_needs_modifier() -> &'static str {
+    Text::ShortcutHintGlobalNeedsModifier.text()
+}
+
 /// A row the audit **listed and did not take** — no [`Action`], no [`Chord`],
 /// and no way to record one.
 ///
@@ -1554,10 +1559,14 @@ impl Shortcuts {
                         });
                         continue;
                     };
-                    // Only the two keyboard disciplines can answer here: a
+                    // Only the three row-local disciplines can answer here: a
                     // conflict is a fact about the table the file describes, and
-                    // that table does not exist yet.
-                    match chord_discipline(&chord) {
+                    // that table does not exist yet. The row's own action is
+                    // known, though — the id was matched two statements up —
+                    // which is what lets a hand-edited bare summon chord be
+                    // refused **at load time** with the reason on its row, and
+                    // never registered (R2-14).
+                    match chord_discipline(self.rows[index].action, &chord) {
                         ChordVerdict::Free => {}
                         refused => {
                             faults.push(OverrideFault {
@@ -2071,6 +2080,22 @@ pub(crate) enum ChordVerdict {
     AltGrZone,
     /// Discipline ①: a bare `Ctrl+letter` is the shell's control-code alphabet.
     ShellControlLetter,
+    /// **Discipline ③: a key claimed from the whole desktop needs a modifier**
+    /// (R2-14).
+    ///
+    /// Only [`Action::is_claimed_from_windows`] rows can earn it, and that is the
+    /// whole of why it is a third discipline rather than a rule about chords in
+    /// general: every other row's key reaches this window and stops there, so a
+    /// bare `F9` bound to one is a key this window answers and every other
+    /// program still gets. A row Windows answers is different in kind —
+    /// `RegisterHotKey` takes the chord out of the input stream for the machine —
+    /// so a bare letter recorded here means nothing on this desktop sees that
+    /// letter again while Folio is running.
+    ///
+    /// **Shift alone does not satisfy it.** `Shift+A` is how a capital `A` is
+    /// typed; claiming it takes a letter from every program exactly as surely as
+    /// claiming the bare one would.
+    GlobalNeedsModifier,
     /// Another row in this table already answers to it, in a focus state this
     /// one is also in force in.
     ///
@@ -2097,6 +2122,7 @@ impl ChordVerdict {
             Self::Free => Cow::Borrowed(""),
             Self::AltGrZone => Cow::Borrowed(hint_altgr_zone()),
             Self::ShellControlLetter => Cow::Borrowed(hint_shell_control_letter()),
+            Self::GlobalNeedsModifier => Cow::Borrowed(hint_global_needs_modifier()),
             Self::AlreadyUsed { title, .. } => {
                 Cow::Owned(crate::i18n::shortcut_already_used(title.text()))
             }
@@ -2161,13 +2187,16 @@ impl ChordVerdict {
 /// [`Shortcuts::take_chord_from`], which is one call and writes both rows.
 #[must_use]
 pub(crate) fn chord_verdict(rows: &[Binding], id: &str, chord: &Chord) -> ChordVerdict {
-    match chord_discipline(chord) {
-        ChordVerdict::Free => {}
-        refused => return refused,
-    }
     let Some(subject) = rows.iter().find(|row| row.id == id) else {
         return ChordVerdict::Free;
     };
+    // **The row is found first**, because since R2-14 one of the disciplines is
+    // about which row is asking: a key Windows answers is claimed from the whole
+    // machine and a key this window answers is not.
+    match chord_discipline(subject.action, chord) {
+        ChordVerdict::Free => {}
+        refused => return refused,
+    }
     let claimed = Binding {
         chord: Some(chord.clone()),
         ..subject.clone()
@@ -2181,20 +2210,35 @@ pub(crate) fn chord_verdict(rows: &[Binding], id: &str, chord: &Chord) -> ChordV
         })
 }
 
-/// **The two refusals that are about the keyboard and not about the table** —
-/// the audit's own disciplines, asked of a chord with nothing else in the room.
+/// **The three refusals that need no other row to answer them** — the audit's own
+/// disciplines, asked of a chord and the row that wants it.
 ///
 /// Lifted out of [`chord_verdict`] the day [`Shortcuts::apply_overrides`] needed
-/// to ask them *before* it had a table to ask the third one of. They are the two
-/// that can be answered that early precisely because they are not about any
-/// other row: `Ctrl+Alt` is what a German keyboard sends for `@`, and
-/// `Ctrl+letter` is the shell's control-code alphabet, and neither fact changes
-/// with what the rest of the table happens to hold.
+/// to ask them *before* it had a table to ask the conflict question of. They can
+/// be answered that early precisely because they are not about any *other* row:
+/// `Ctrl+Alt` is what a German keyboard sends for `@`, `Ctrl+letter` is the
+/// shell's control-code alphabet, and whether Windows or this window answers a
+/// row's key is a property of the row itself. None of the three changes with what
+/// the rest of the table happens to hold.
 #[must_use]
-fn chord_discipline(chord: &Chord) -> ChordVerdict {
+fn chord_discipline(action: Action, chord: &Chord) -> ChordVerdict {
     let ctrl_alt = ModifiersState::CONTROL.union(ModifiersState::ALT);
     if chord.modifiers.contains(ctrl_alt) {
         return ChordVerdict::AltGrZone;
+    }
+    // **The one discipline that is about the row and not only about the keyboard**
+    // (R2-14). It is asked here beside the other two because it shares their
+    // property — it needs no other row to answer — and because
+    // `apply_overrides` has to be able to ask it before there is a table, which
+    // is the whole reason these three live in one function.
+    if action.is_claimed_from_windows()
+        && !chord.modifiers.intersects(
+            ModifiersState::CONTROL
+                .union(ModifiersState::ALT)
+                .union(ModifiersState::SUPER),
+        )
+    {
+        return ChordVerdict::GlobalNeedsModifier;
     }
     if chord.modifiers == ModifiersState::CONTROL
         && matches!(&chord.key, ChordKey::Character(text)
@@ -3797,6 +3841,99 @@ mod tests {
             table.verdict_for("new-tab", &Chord::new(CTRL_SHIFT, super::character("j"))),
             ChordVerdict::Free,
             "a chord nobody claims is free"
+        );
+    }
+
+    /// RED (R2-14) — **the summon's key is claimed from the whole desktop, so it
+    /// needs a modifier — at the recorder and at the file's door.**
+    ///
+    /// Every other row's key reaches this window and stops there: a bare `F9`
+    /// bound to one is a key this window answers and every other program still
+    /// gets. The summon is not like that. `RegisterHotKey` takes the chord out of
+    /// the input stream for the machine, so a bare letter recorded into it means
+    /// nothing on this desktop sees that letter again while Folio is running —
+    /// and, because the row is written to `keybindings.json`, it comes back that
+    /// way at every launch.
+    ///
+    /// **Shift alone is not a modifier for this purpose**, which is the clause
+    /// worth pinning: `Shift+A` is how a capital `A` is typed.
+    ///
+    /// MUTATIONS:
+    /// ① drop the discipline and the first loop hands `k`, `Shift+K` and `F9` to
+    ///    `RegisterHotKey`;
+    /// ② ask it of every row rather than of
+    ///    [`Action::is_claimed_from_windows`] and the third block goes red — a
+    ///    bare `F12` for the web page's dev tools is a key this window answers
+    ///    and nobody else loses;
+    /// ③ leave it out of `apply_overrides` and the last block goes red, which is
+    ///    a hand-edited file claiming a bare letter from the desktop at every
+    ///    launch with nothing said about it.
+    #[test]
+    fn a_summon_chord_with_no_modifier_is_refused_at_both_doors() {
+        let table = Shortcuts::defaults();
+        for bare in [
+            Chord::new(ModifiersState::empty(), super::character("k")),
+            Chord::new(ModifiersState::SHIFT, super::character("k")),
+            Chord::new(ModifiersState::empty(), ChordKey::Named(NamedKey::F9)),
+            Chord::new(ModifiersState::SHIFT, ChordKey::Named(NamedKey::F9)),
+        ] {
+            assert_eq!(
+                table.verdict_for("summon-quake", &bare),
+                ChordVerdict::GlobalNeedsModifier,
+                "a key the whole desktop gives up needs Ctrl, Alt or Win: {bare:?}"
+            );
+        }
+
+        // One of the three is enough, and Shift may ride along with any of them.
+        // The key is `F9` rather than a letter so that discipline ① — a bare
+        // `Ctrl+letter` belongs to the shell — is not the thing being read.
+        for held in [
+            ModifiersState::CONTROL,
+            ModifiersState::ALT,
+            WIN,
+            WIN.union(ModifiersState::SHIFT),
+        ] {
+            assert_eq!(
+                table.verdict_for(
+                    "summon-quake",
+                    &Chord::new(held, ChordKey::Named(NamedKey::F9))
+                ),
+                ChordVerdict::Free,
+                "{held:?} is a modifier a desktop-wide claim may be made on"
+            );
+        }
+
+        // And no other row is asked the question at all: their keys arrive here
+        // and are answered here, so nothing on the machine loses them.
+        assert_eq!(
+            table.verdict_for(
+                "web-devtools",
+                &Chord::new(ModifiersState::empty(), ChordKey::Named(NamedKey::F12))
+            ),
+            ChordVerdict::Free,
+            "a bare key on a row this window answers takes nothing from anybody"
+        );
+
+        // The file's door: a persisted bare chord is refused, the row keeps the
+        // default it shipped with, and the refusal says why.
+        let mut loaded = Shortcuts::defaults();
+        let faults = loaded.apply_overrides(&[Override {
+            id: "summon-quake".to_owned(),
+            chord: Some("K".to_owned()),
+        }]);
+        let [fault] = faults.as_slice() else {
+            panic!("one line, one refusal: {faults:?}");
+        };
+        assert_eq!(fault.id, "summon-quake");
+        assert_eq!(fault.reason, hint_global_needs_modifier());
+        assert_eq!(
+            loaded
+                .rows()
+                .iter()
+                .find(|row| row.id == "summon-quake")
+                .and_then(|row| row.chord.clone()),
+            Some(Chord::new(WIN, super::character("`"))),
+            "a refused line leaves the row at the default it shipped with"
         );
     }
 

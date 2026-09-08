@@ -7,6 +7,15 @@ rust-version.workspace = true
 publish.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# One spelling of "a path as a `file:` URI", shared with every other place this
+# workspace writes one (`bt_transcript::paths::local_path_to_file_uri`). It is
+# here for `src/msix.rs`, where the package location crosses into the deployment
+# API as a URI: a second, hand-rolled encoder is where a folder with a `#`, a
+# `?` or a `%` in its name becomes a registration that names a different folder
+# — R2-11, and the reason this edge exists at all. The crate is portable, has
+# `bt-unicode` as its only dependency of its own, and both are already in this
+# build.
+bt-transcript = { path = "../bt-transcript" }
 # The web preview's engine (`src/webview.rs`). It is a thin, generated binding
 # over the WebView2 SDK's COM interfaces on top of the same `windows` 0.62 this
 # crate already carries — three new packages (`webview2-com`,

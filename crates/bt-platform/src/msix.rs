@@ -388,17 +388,26 @@ mod deployment {
 
     /// A path as the `file:` address the deployment API takes.
     ///
-    /// Built by the operating system's own parser rather than by string
-    /// arithmetic here: a folder with a `#`, a space or a non-ASCII character in
-    /// it is the ordinary case on a desktop, and hand-rolled percent-encoding is
-    /// where that ordinary case turns into a registration that names the wrong
-    /// folder.
-    fn file_uri(path: &Path) -> Result<Uri, String> {
-        let text = path.as_os_str().to_string_lossy();
-        Uri::CreateUri(&HSTRING::from(format!(
-            "file:///{}",
-            text.replace('\\', "/")
-        )))
+    /// **Percent-encoded before it is parsed, and by the one encoder this
+    /// workspace has** (R2-11). The note that stood here said the address was
+    /// "built by the operating system's own parser rather than by string
+    /// arithmetic", and the line under it was string arithmetic: separators were
+    /// turned round and every other character was handed to `Uri::CreateUri` as
+    /// it stood. A parser is not an encoder, and the three characters it reads
+    /// as syntax are three characters Windows allows in a folder name —
+    /// `C:\Work#2\Folio` names `C:/Work` with a fragment on it, `C:\a?b` truncates
+    /// at the `?`, and a `%` in front of two hexadecimal digits decodes to a
+    /// different byte entirely. Each of those is a registration pointing at a
+    /// folder the reader does not have.
+    ///
+    /// [`bt_transcript::paths::local_path_to_file_uri`] is the encoder, shared
+    /// with the transcript's own links rather than written a second time here:
+    /// two spellings of "a path as a URI" is two places for one of them to be
+    /// wrong, and this is the one whose being wrong changes the machine.
+    pub(super) fn file_uri(path: &Path) -> Result<Uri, String> {
+        Uri::CreateUri(&HSTRING::from(
+            bt_transcript::paths::local_path_to_file_uri(path),
+        ))
         .map_err(|error| error.message())
     }
 }
@@ -416,6 +425,53 @@ pub fn explorer_command_clsid() -> windows::core::GUID {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (R2-11) — **a package location with punctuation in it names the folder
+    /// it is.**
+    ///
+    /// The location is a real folder on somebody's disk, and Windows lets a folder
+    /// be called `Work #2` or `100% done`. `#`, `?` and `%` are the three
+    /// characters a URI parser reads as syntax rather than as text, so a path
+    /// handed to `Uri::CreateUri` unencoded does not fail — it succeeds, naming a
+    /// **different location**, and the registration points there.
+    ///
+    /// MUTATION: put the old `format!("file:///{}", text.replace('\\', "/"))`
+    /// back and the fragment is `2/100% done/folio?x`, the query is `x`, and the
+    /// path stops at `Work `.
+    #[cfg(windows)]
+    #[test]
+    fn a_package_location_with_punctuation_in_it_names_the_folder_it_is() {
+        use std::path::Path;
+        let folder = Path::new(r"C:\Work #2\100% done\folio?x");
+        let uri = deployment::file_uri(folder).expect("a location is a URI");
+        assert_eq!(
+            uri.RawUri()
+                .expect("the URI has a spelling")
+                .to_string_lossy(),
+            "file:///C:/Work%20%232/100%25%20done/folio%3Fx",
+            "every character Windows allows in a folder name survives as itself"
+        );
+        assert!(
+            uri.Fragment()
+                .expect("a fragment")
+                .to_string_lossy()
+                .is_empty(),
+            "a `#` in a folder name is not the start of a fragment"
+        );
+        assert!(
+            uri.Query().expect("a query").to_string_lossy().is_empty(),
+            "a `?` in a folder name is not the start of a query"
+        );
+        // And the ordinary case is left looking like itself.
+        assert_eq!(
+            deployment::file_uri(Path::new(r"C:\Users\me\Folio"))
+                .expect("a location is a URI")
+                .RawUri()
+                .expect("the URI has a spelling")
+                .to_string_lossy(),
+            "file:///C:/Users/me/Folio"
+        );
+    }
 
     /// PIN — **a certificate subject and a manifest publisher differ by spacing
     /// and are the same name.**
