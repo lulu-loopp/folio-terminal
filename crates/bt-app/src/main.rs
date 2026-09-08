@@ -12991,9 +12991,27 @@ impl TabState {
         display_title(
             self.manual_name.as_deref(),
             leaf.announced_title(),
-            leaf.session.working_directory(),
+            leaf.standing_in(),
             self.focused_profile_title(),
+            &self.focused_announcement_set(),
         )
+    }
+
+    /// Every spelling of the focused pane's profile's own name — the set the
+    /// program layer of this tab's name is measured against.
+    ///
+    /// **Read off the focused leaf's profile, not the tab's**, for
+    /// [`Self::session_profile`]'s reason and for the one
+    /// [`Self::terminal_name`] states about the head: a `cmd.exe` pane split out
+    /// of a PowerShell tab is announcing something when it says
+    /// `Command Prompt`, and measuring it against the word `PowerShell` would
+    /// let that through while refusing a second PowerShell pane's.
+    ///
+    /// Paired with [`Self::focused_profile_title`] off the same leaf index, so
+    /// the layer that falls through and the set that decides whether it does are
+    /// describing one shell.
+    fn focused_announcement_set(&self) -> Vec<&'static str> {
+        profiles::announcement_set(self.leaf_profile(self.focused_leaf))
     }
 
     /// **What one seat calls itself**, through the one function every pane head
@@ -13062,12 +13080,14 @@ impl TabState {
         let (name, source) = resolve_title(
             self.manual_name.as_deref(),
             leaf.announced_title(),
-            leaf.session.working_directory(),
+            leaf.standing_in(),
             self.focused_profile_title(),
+            &self.focused_announcement_set(),
         );
+        // The same ladder the name was resolved from, so a tip cannot report a
+        // folder the first line was not named after.
         let cwd = leaf
-            .session
-            .working_directory()
+            .standing_in()
             .map(|path| path.to_string_lossy().into_owned());
         tooltip::tab_tip(&name, source, cwd.as_deref(), self.pinned)
     }
@@ -14062,8 +14082,9 @@ impl TabState {
     /// `.ptitle { overflow: hidden; text-overflow: ellipsis }` — done visually,
     /// at the width the head actually has, by the only thing that knows it.
     ///
-    /// `None` when that seat holds no session, or holds one that has said
-    /// nothing at all — no OSC 2 title and no OSC 7 folder. That is not a
+    /// `None` when that seat holds no session, or holds one with nothing at all
+    /// to be named by — no OSC 2 title, and no rung of [`LeafSession::standing_in`]
+    /// reached. That is not a
     /// failure to answer but the honest answer, and [`seats::seat_caption`]
     /// turns it into the kind's own name where the caption is drawn. Nothing is
     /// invented here: a name a shell did not say is a name nobody said.
@@ -14071,7 +14092,7 @@ impl TabState {
         let leaf = self.sessions.get(&seat)?;
         pane_head_title(
             leaf.announced_title(),
-            leaf.session.working_directory(),
+            leaf.standing_in(),
             // **This pane's own** profile, which is the one its shell was
             // actually launched from. The filter this feeds asks "has this
             // program announced anything, or is it merely agreeing with its own
@@ -14184,6 +14205,29 @@ impl LeafSession {
         (!announcement.is_empty()).then_some(announcement)
     }
 
+    /// **Where this pane is standing**, for the layer of its name that answers
+    /// that — §7.1.4's ladder, read through the one accessor that holds it:
+    /// the last trusted `OSC 7` report, else where the shell was put down
+    /// (`profiles::spawn_place`, with `HOME` already folded in).
+    ///
+    /// The name stack used to read `working_directory()`, which is the first
+    /// rung alone, and the user's 2026-09-07 ruling names all of them: "from
+    /// `OSC 7`, the integration's cwd report, or the profile's start folder
+    /// before the first report". The difference is a whole prompt long and it is
+    /// the one a reader sees first — a tab opened in `D:\Demo` was called
+    /// `PowerShell 7` until the shell finished starting, then jumped. It is also
+    /// the difference between a shell with integration and one without: a pane
+    /// that never reports `OSC 7` at all had no folder layer under the old
+    /// reading and now has the one the launcher gave it.
+    ///
+    /// One accessor and not a second ladder here, for
+    /// [`bt_term::Session::reference_directory`]'s own reason: a pane cannot be
+    /// standing in two places, and the ladder that answers `./a.md` is the
+    /// ladder that answers "what is this tab called".
+    fn standing_in(&self) -> Option<&Path> {
+        self.session.reference_directory()
+    }
+
     /// Everything the name stack reads off this shell, for deciding whether the
     /// chrome has to be relabelled.
     ///
@@ -14195,7 +14239,7 @@ impl LeafSession {
     fn name_evidence(&self) -> (Option<String>, Option<PathBuf>) {
         (
             self.announced_title().map(str::to_owned),
-            self.session.working_directory().map(Path::to_path_buf),
+            self.standing_in().map(Path::to_path_buf),
         )
     }
 
@@ -34196,8 +34240,9 @@ impl Runtime<'_> {
                             display_title(
                                 None,
                                 leaf.announced_title(),
-                                leaf.session.working_directory(),
+                                leaf.standing_in(),
                                 tab.focused_profile_title(),
+                                &tab.focused_announcement_set(),
                             )
                         }),
                 )
@@ -96905,7 +96950,7 @@ fn tooltip_anchor_for(target: seats::ChromeTarget) -> Option<tooltip::TooltipAnc
     }
 }
 
-/// A tab's name: 手动 > 程序标题 (OSC 2) > cwd (OSC 7) > the profile's own name.
+/// A tab's name: 手动 > 程序标题 (OSC 2) > cwd 叶名 > the profile's own name.
 ///
 /// "Each layer is more specific than the one under it, and each is something
 /// someone actually said: you typed it, the program announced it, or the shell
@@ -96917,13 +96962,36 @@ fn tooltip_anchor_for(target: seats::ChromeTarget) -> Option<tooltip::TooltipAnc
 /// nothing; if the raw value decided precedence, that program could blank a tab,
 /// which is precisely the impersonation the sanitiser exists to refuse. An empty
 /// answer therefore falls through to the layer beneath it.
+///
+/// **`announcements` is the second half of "someone actually said"** (user
+/// ruling 2026-09-07, §7.1.6c-6). The program layer used to admit any title at
+/// all, and `folio.ps1` ends every prompt by writing `ESC ]0;PowerShell 7 BEL`
+/// — deliberately the very name the profile already goes by. That is a shell
+/// agreeing with its launcher, not a program announcing itself, and admitting it
+/// pinned every PowerShell tab on `PowerShell 7` for the life of the pane while
+/// the pane stood in `D:\Demo`: the folder layer beneath it was never reached.
+/// So the program layer is filtered through [`profiles::announcement_set`]
+/// exactly as [`pane_head_title`] already filtered it, and the two stacks stop
+/// disagreeing about whether a shell has spoken. A shell that sets a title of
+/// its own — Git Bash's `MINGW64:/d/Demo`, WSL's `dev@host: /mnt/d/Demo` — is not
+/// in that set and still wins the stack, which is the same ruling read the other
+/// way round: what the shell said is shown, and what the launcher said is not
+/// shown twice.
 fn display_title(
     manual_name: Option<&str>,
     program_title: Option<&str>,
     working_directory: Option<&Path>,
     profile_title: &str,
+    announcements: &[&str],
 ) -> String {
-    resolve_title(manual_name, program_title, working_directory, profile_title).0
+    resolve_title(
+        manual_name,
+        program_title,
+        working_directory,
+        profile_title,
+        announcements,
+    )
+    .0
 }
 
 /// The same walk, keeping the answer to "which layer won?" that
@@ -97517,14 +97585,35 @@ fn resolve_title(
     program_title: Option<&str>,
     working_directory: Option<&Path>,
     profile_title: &str,
+    announcements: &[&str],
 ) -> (String, Option<tooltip::NameSource>) {
     title_layer(manual_name, TITLE_MAX_CHARS)
         .map(|text| (text, tooltip::NameSource::Manual))
-        .or_else(|| session_title(program_title, working_directory, CWD_AS_LEAF))
+        .or_else(|| session_title(program_title, working_directory, CWD_AS_LEAF, announcements))
         .map_or_else(
             || (profile_title.to_owned(), None),
             |(text, source)| (text, Some(source)),
         )
+}
+
+/// The program layer on its own: an OSC 0/2 title, sanitised, with one that
+/// merely repeats a name its own profile already goes by refused.
+///
+/// **One function because it is one ruling with two readers.** The head has
+/// applied it since §7.1.6c-6 and the tab did not, and the gap was not visible
+/// as a difference of opinion — it read as two functions that happened to be
+/// written at different times. A tab standing in `D:\Demo` was called
+/// `PowerShell 7` while the head above the very same pane said `D:\Demo`, for
+/// the whole life of every PowerShell pane in the product.
+///
+/// The comparison runs on the **sanitised** title, like every other decision in
+/// this stack, so a program cannot slip past the check with a control character
+/// glued to the profile's name. An empty set refuses nothing, which is the
+/// honest spelling of "there is no better answer underneath, so let the title
+/// stand" — the one place [`pane_head_title`] wants.
+fn announced_layer(program_title: Option<&str>, announcements: &[&str]) -> Option<String> {
+    title_layer(program_title, TITLE_MAX_CHARS)
+        .filter(|title| !announcements.contains(&title.as_str()))
 }
 
 /// One layer of a name, sanitised at the given bound, with an empty answer
@@ -97589,12 +97678,18 @@ fn title_layer(text: Option<&str>, maximum: usize) -> Option<String> {
 /// says *which layer spoke*, not how long the answer was, so a head and a tab
 /// standing in the same folder both report [`tooltip::NameSource::Cwd`] — as
 /// they should, because the shell said the same thing to both of them.
+///
+/// `announcements` is the second parameter the two readers may differ on, and it
+/// goes straight to [`announced_layer`]. A tab passes its pane's profile's own
+/// set; the one caller that passes an empty set is [`pane_head_title`]'s
+/// no-folder arm, which has the reason for it written down there.
 fn session_title(
     program_title: Option<&str>,
     working_directory: Option<&Path>,
     place: CwdRendering,
+    announcements: &[&str],
 ) -> Option<(String, tooltip::NameSource)> {
-    title_layer(program_title, TITLE_MAX_CHARS)
+    announced_layer(program_title, announcements)
         .map(|text| (text, tooltip::NameSource::Program))
         .or_else(|| {
             place_layer(working_directory, place).map(|text| (text, tooltip::NameSource::Cwd))
@@ -97670,7 +97765,7 @@ fn place_layer(working_directory: Option<&Path>, place: CwdRendering) -> Option<
 fn pane_head_title(
     program_title: Option<&str>,
     working_directory: Option<&Path>,
-    profile_titles: &[&str],
+    announcements: &[&str],
 ) -> Option<(String, tooltip::NameSource)> {
     let separator = tooltip::NAME_PLACE_SEPARATOR;
     let place = place_layer(working_directory, CWD_AS_WHOLE_PATH);
@@ -97684,16 +97779,24 @@ fn pane_head_title(
     // comparing only the shipped one lets the user's own word through as if a
     // program had said it. `profiles::announcement_set` is where the set is
     // built and where that argument is written down.
-    let announcement = title_layer(program_title, TITLE_MAX_CHARS)
-        .filter(|title| !profile_titles.contains(&title.as_str()));
+    //
+    // **And it is [`announced_layer`] and no longer a filter spelled here**
+    // (2026-09-07): the tab's own stack has the same rule now, and one rule
+    // written twice is how the head and the tab came to disagree about whether a
+    // shell had spoken at all.
+    let announcement = announced_layer(program_title, announcements);
     match (announcement, place) {
         (Some(title), Some(place)) => Some((
             format!("{title}{separator}{place}"),
             tooltip::NameSource::Program,
         )),
         (None, Some(place)) => Some((place, tooltip::NameSource::Cwd)),
-        // No folder to lead with: the chain the head has always had.
-        (_, None) => session_title(program_title, working_directory, CWD_AS_WHOLE_PATH),
+        // No folder to lead with: the chain the head has always had, and the
+        // empty set is what says so. Its whole justification is that a better
+        // answer exists underneath; where there is no folder there is no better
+        // answer, and suppressing `PowerShell 7` would leave the head emptier
+        // than the shell left it.
+        (_, None) => session_title(program_title, working_directory, CWD_AS_WHOLE_PATH, &[]),
     }
 }
 
@@ -104386,30 +104489,37 @@ mod tests {
         );
 
         // And the tab's own name is not in this stack at all: `resolve_title`
-        // adds it on top for the *tab*, and a pane never sees it. The tab's four
-        // layers are untouched by this ruling — a tab answers "what is this
-        // called" and keeps taking the program's title outright.
+        // adds it on top for the *tab*, and a pane never sees it.
         assert_eq!(
             resolve_title(
                 Some("my tab"),
                 None,
                 Some(cwd),
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &[profile],
             )
             .0,
             "my tab",
             "the tab wears the override"
         );
+        // **The filter, though, is now one ruling with two readers** (user
+        // ruling 2026-09-07). This assertion used to read `profile` and said
+        // "the tab takes a title over a folder, filter or no filter" — which is
+        // how a PowerShell tab came to sit on `PowerShell 7` while the head over
+        // its own pane said `D:\Demo`. What separates the two stacks is the
+        // *rendering* of the folder and the manual layer above it, not whether a
+        // shell agreeing with its launcher has spoken.
         assert_eq!(
             resolve_title(
                 None,
                 Some(profile),
                 Some(cwd),
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &[profile],
             )
             .0,
-            profile,
-            "and the tab still takes a title over a folder, filter or no filter"
+            cwd_leaf(cwd).expect("the folder this test stands in"),
+            "the tab takes the folder's leaf where the head takes the whole path"
         );
         assert_eq!(
             pane_head_title(None, Some(cwd), &[profile]).map(|(name, _)| name),
@@ -104485,7 +104595,8 @@ mod tests {
                 None,
                 Some(&"x".repeat(CWD_MAX_CHARS)),
                 None,
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             )
             .chars()
             .count(),
@@ -113569,7 +113680,8 @@ mod tests {
                 Some("我的构建"),
                 Some("pwsh"),
                 Some(cwd),
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             ),
             "我的构建",
             "what you typed outranks everything under it"
@@ -113579,7 +113691,8 @@ mod tests {
                 None,
                 Some("Claude ✳ 任务"),
                 Some(cwd),
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             ),
             "Claude ✳ 任务",
             "then what the program announced"
@@ -113589,7 +113702,8 @@ mod tests {
                 None,
                 None,
                 Some(cwd),
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             ),
             "folio-terminal",
             "then where the shell says it is standing"
@@ -113599,11 +113713,212 @@ mod tests {
                 None,
                 None,
                 None,
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             ),
             profiles::title(profiles::fallback_profile()),
             "and the profile catches what is left"
         );
+    }
+
+    /// PIN — **a tab's name follows the folder its pane is standing in, for
+    /// every shell** (user ruling 2026-09-07; ticket T-1 of
+    /// `docs/plans/shell-matrix-2026-09-07.md`).
+    ///
+    /// Red gate, and it is the measured defect: `folio.ps1` ends every prompt by
+    /// writing `ESC ]0;PowerShell 7 BEL`, deliberately the very name the profile
+    /// already goes by, and the program layer used to admit any title at all. So
+    /// every PowerShell tab in the product was called `PowerShell 7` for the
+    /// life of the pane while the pane stood in `D:\Demo` — the folder layer
+    /// beneath it was unreachable. With [`announced_layer`] gone the assertions
+    /// below read `PowerShell 7`, `Windows PowerShell 5.1` and `Command Prompt`
+    /// where they now read a folder.
+    ///
+    /// The other three rules are here because this ruling is the one place they
+    /// could be broken while looking fixed: a tab you named keeps your name, a
+    /// shell that says something of its own is shown saying it, and the profile
+    /// is what is left when no folder is known.
+    #[test]
+    fn a_tab_follows_its_folder_when_the_shell_only_repeats_its_launchers_name() {
+        let demo = Path::new(r"D:\Demo");
+        let named = |manual: Option<&str>, program: Option<&str>, cwd, id: &str| {
+            let profile = profiles::index_of_id(id);
+            display_title(
+                manual,
+                program,
+                cwd,
+                profiles::title(profile),
+                &profiles::announcement_set(profile),
+            )
+        };
+
+        // ① The defect itself, in all three shells whose integration announces
+        // the name their own launcher chose.
+        assert_eq!(
+            named(None, Some("PowerShell 7"), Some(demo), "pwsh"),
+            "Demo",
+            "a shell agreeing with its launcher has announced nothing, so the \
+             folder names the tab"
+        );
+        assert_eq!(
+            named(None, Some("Windows PowerShell 5.1"), Some(demo), "winps"),
+            "Demo"
+        );
+        assert_eq!(
+            named(None, Some("Command Prompt"), Some(demo), "cmd"),
+            "Demo"
+        );
+        // And the profile's *shipped* name is refused as well as its displayed
+        // one, which is what `announcement_set` exists to say: `WSL · Ubuntu`
+        // and the bare `WSL` are one name in two spellings.
+        assert_eq!(named(None, Some("WSL"), Some(demo), "wsl"), "Demo");
+
+        // ② A shell that sets a title of its own is shown saying it. Git Bash
+        // does, in Git for Windows' own MSYS spelling, and that title is not in
+        // its profile's set.
+        assert_eq!(
+            named(None, Some("MINGW64:/d/Demo"), Some(demo), "gitbash"),
+            "MINGW64:/d/Demo",
+            "what the shell said outranks where it is standing"
+        );
+        // Including the one thing a `cmd` pane can say about being busy: the
+        // remainder `LeafSession::announced_title` keeps off Windows' console
+        // convention is a program announcing what it is running.
+        assert_eq!(
+            named(None, Some("ping -n 8 127.0.0.1"), Some(demo), "cmd"),
+            "ping -n 8 127.0.0.1"
+        );
+
+        // ③ A tab you named keeps your name, over both of the layers above.
+        assert_eq!(
+            named(Some("构建"), Some("PowerShell 7"), Some(demo), "pwsh"),
+            "构建"
+        );
+        assert_eq!(
+            named(Some("构建"), Some("MINGW64:/d/Demo"), Some(demo), "gitbash"),
+            "构建"
+        );
+
+        // ④ And with no folder known at all, the profile is what is left —
+        // which is the same string the announcement was, so nothing regresses
+        // for a tab whose shell has not yet said where it is.
+        let pwsh = profiles::index_of_id("pwsh");
+        assert_eq!(
+            named(None, Some("PowerShell 7"), None, "pwsh"),
+            profiles::title(pwsh)
+        );
+        assert_eq!(named(None, None, None, "pwsh"), profiles::title(pwsh));
+
+        // The provenance the tip reports moves with the name, because it comes
+        // off the same walk: nobody announced anything, so the folder spoke.
+        assert_eq!(
+            resolve_title(
+                None,
+                Some("PowerShell 7"),
+                Some(demo),
+                profiles::title(pwsh),
+                &profiles::announcement_set(pwsh),
+            ),
+            ("Demo".to_owned(), Some(tooltip::NameSource::Cwd))
+        );
+        // And with no folder under it there is no claim left to report at all.
+        assert_eq!(
+            resolve_title(
+                None,
+                Some("PowerShell 7"),
+                None,
+                profiles::title(pwsh),
+                &profiles::announcement_set(pwsh),
+            ),
+            (profiles::title(pwsh).to_owned(), None)
+        );
+    }
+
+    /// PIN — the tab, the pane head and the strip are named by **one** walk, so
+    /// a PowerShell tab and the head over its own pane cannot disagree about
+    /// whether that shell has announced anything.
+    ///
+    /// Red gate: this is T-1's cause stated as a test. The head has filtered the
+    /// program layer through `profiles::announcement_set` since §7.1.6c-6 and
+    /// the tab did not, and the gap was invisible as a disagreement — it read as
+    /// two functions written at different times. Restore the tab's unfiltered
+    /// layer and the head says `D:\Demo` while the tab above it says
+    /// `Windows PowerShell 5.1`.
+    ///
+    /// Through [`TabState`] and not through the two pure functions, because
+    /// what has to agree is the wiring: the strip and the focus cards are
+    /// [`TabState::display_title`] and the head is [`TabState::terminal_name`].
+    #[test]
+    fn the_tab_and_the_head_over_its_own_pane_agree_about_what_the_shell_said() {
+        // The fixture's profile is the fallback one, whose integration
+        // announces `Windows PowerShell 5.1`.
+        let profile = profiles::fallback_profile();
+        let announcement = format!("\u{1b}]0;{}\u{7}", profiles::title(profile));
+        let mut leaf = leaf_saying("");
+        leaf.session
+            .feed(announcement.as_bytes())
+            .expect("the shell's own announcement");
+        leaf.session
+            .feed(b"\x1b]7;file:///D:\\Demo\x1b\\")
+            .expect("and the folder it is standing in");
+        let tab = tab_holding(leaf);
+        let seat = tab.seats.identity();
+
+        assert_eq!(tab.display_title(), "Demo", "the tab has room for one word");
+        assert_eq!(
+            tab.terminal_name(seat).as_deref(),
+            Some(r"D:\Demo"),
+            "and the head, which has a whole bar, the whole path — with no \
+             launcher's name prefixed to it"
+        );
+        assert_eq!(
+            tab.tooltip_text(),
+            "Demo\nWorking folder · D:\\Demo",
+            "and the tip names the folder that named the tab"
+        );
+    }
+
+    /// PIN — §7.1.4's ladder names a tab too: **before the first report, the
+    /// folder is where the shell was put down** (user ruling 2026-09-07 — "from
+    /// `OSC 7`, the integration's cwd report, or the profile's start folder
+    /// before the first report").
+    ///
+    /// Red gate: the name stack read `working_directory()`, which is the first
+    /// rung alone. A tab opened in `D:\Demo` was therefore called
+    /// `Windows PowerShell 5.1` until its shell finished starting and then
+    /// jumped — and a pane whose shell never reports `OSC 7` at all never
+    /// reached the folder layer at any point in its life.
+    #[test]
+    fn a_tab_is_named_where_its_shell_was_put_down_until_that_shell_reports() {
+        let started_in = PathBuf::from(r"D:\Demo");
+        let profile = profiles::fallback_profile();
+        let announcement = format!("\u{1b}]0;{}\u{7}", profiles::title(profile));
+        let mut leaf = leaf_saying("");
+        leaf.session
+            .feed(announcement.as_bytes())
+            .expect("the shell's own announcement");
+        // Both halves of one fact, exactly as the spawn writes them: the field
+        // the vault reads and the rung the session's own ladder stands on.
+        leaf.spawn_place = Some(started_in.clone());
+        leaf.session.set_spawn_directory(Some(started_in.clone()));
+
+        let mut tab = tab_holding(leaf);
+        let seat = tab.seats.identity();
+        assert_eq!(
+            tab.display_title(),
+            "Demo",
+            "no report yet, and the launcher already knows where it put this shell"
+        );
+        assert_eq!(tab.terminal_name(seat).as_deref(), Some(r"D:\Demo"));
+
+        // And the first report takes over from it, which is the rung above.
+        tab.sessions
+            .get_mut(&seat)
+            .expect("the fixture's one shell")
+            .session
+            .feed(b"\x1b]7;file:///D:\\Demo\\notes\x1b\\")
+            .expect("the shell says it moved");
+        assert_eq!(tab.display_title(), "notes");
     }
 
     /// M140: the tab's tip states which layer named it, and the answer comes
@@ -113617,7 +113932,8 @@ mod tests {
                 Some("build"),
                 Some("pwsh"),
                 Some(cwd),
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             )
             .1,
             Some(tooltip::NameSource::Manual)
@@ -113627,7 +113943,8 @@ mod tests {
                 None,
                 Some("pwsh"),
                 Some(cwd),
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             )
             .1,
             Some(tooltip::NameSource::Program)
@@ -113637,7 +113954,8 @@ mod tests {
                 None,
                 None,
                 Some(cwd),
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             )
             .1,
             Some(tooltip::NameSource::Cwd)
@@ -113649,7 +113967,8 @@ mod tests {
                 None,
                 None,
                 None,
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             )
             .1,
             None
@@ -113661,7 +113980,8 @@ mod tests {
                 Some("\u{7}"),
                 Some("pwsh"),
                 Some(cwd),
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             ),
             ("pwsh".to_owned(), Some(tooltip::NameSource::Program))
         );
@@ -113677,6 +113997,7 @@ mod tests {
             None,
             Some(cwd),
             profiles::title(profiles::fallback_profile()),
+            &profiles::announcement_set(profiles::fallback_profile()),
         );
         let path = cwd.to_string_lossy().into_owned();
         assert_eq!(
@@ -113859,8 +114180,9 @@ mod tests {
             display_title(
                 None,
                 leaf.announced_title(),
-                leaf.session.working_directory(),
+                leaf.standing_in(),
                 profiles::title(profiles::index_of_id("cmd")),
+                &profiles::announcement_set(profiles::index_of_id("cmd")),
             ),
             "src",
             "the tab wears the folder's leaf"
@@ -113868,7 +114190,7 @@ mod tests {
         assert_eq!(
             pane_head_title(
                 leaf.announced_title(),
-                leaf.session.working_directory(),
+                leaf.standing_in(),
                 &[profiles::title(profiles::index_of_id("cmd"))],
             )
             .map(|(name, _)| name),
@@ -114359,7 +114681,8 @@ mod tests {
                     None,
                     None,
                     Some(Path::new(path)),
-                    profiles::title(profiles::fallback_profile())
+                    profiles::title(profiles::fallback_profile()),
+                    &profiles::announcement_set(profiles::fallback_profile()),
                 ),
                 leaf,
                 "cwd {path}"
@@ -114380,7 +114703,8 @@ mod tests {
                 None,
                 Some("a\u{7}b\u{1b}c"),
                 None,
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             ),
             "abc",
             "C0 goes, including the escape that starts every sequence"
@@ -114390,7 +114714,8 @@ mod tests {
                 None,
                 Some("\u{9b}0m evil"),
                 None,
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             ),
             "0m evil",
             "and C1 goes, including the single-byte CSI"
@@ -114400,7 +114725,8 @@ mod tests {
                 None,
                 Some("  \tspaced  "),
                 None,
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             ),
             "spaced",
             "the trim happens after the strip, as `cleanTitle` writes it"
@@ -114410,7 +114736,8 @@ mod tests {
                 None,
                 Some(&"x".repeat(80)),
                 None,
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             )
             .chars()
             .count(),
@@ -114424,7 +114751,8 @@ mod tests {
                 None,
                 Some("\u{1}\u{2}"),
                 Some(Path::new(r"C:\work")),
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             ),
             "work"
         );
@@ -114433,7 +114761,8 @@ mod tests {
                 None,
                 Some(""),
                 None,
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             ),
             profiles::title(profiles::fallback_profile())
         );
@@ -114442,7 +114771,8 @@ mod tests {
                 Some("hi\u{0}there"),
                 Some("prog"),
                 None,
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             ),
             "hithere",
             "the name you type goes through the same sieve (mock-up line 5882)"
@@ -114452,7 +114782,8 @@ mod tests {
                 Some("   "),
                 Some("prog"),
                 None,
-                profiles::title(profiles::fallback_profile())
+                profiles::title(profiles::fallback_profile()),
+                &profiles::announcement_set(profiles::fallback_profile()),
             ),
             "prog",
             "emptying the override reveals the layer underneath"
