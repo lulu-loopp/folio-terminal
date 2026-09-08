@@ -528,6 +528,7 @@ fn read_state() -> PackageState {
         registered.full_name,
         registered.external_path,
         here.as_deref(),
+        is_this_executable,
     )
 }
 
@@ -561,10 +562,41 @@ fn read_state() -> PackageState {
 /// which is the conservative direction: the only thing this state buys is the
 /// silent re-registration in [`begin_probe`], and re-registering over an answer
 /// Windows would not give is a three-second deployment at every launch.
+///
+/// **The folder is not the whole question** (review row R4-13). A registration
+/// names a folder and `packaging/msix/AppxManifest.xml` names one fixed
+/// executable inside it — `folio.exe` — so what Windows actually runs for that
+/// menu item is the two of them joined. A comparison of parent directories
+/// alone reads `Current` over a registration whose `folio.exe` is a *different
+/// binary*: this build running under any other name, a second install's copy
+/// reached through a link, or a `folio.exe` that has been replaced since. Every
+/// one of those is a first-page item that opens a Folio the reader did not
+/// start, on a page Windows curates and they therefore trust.
+///
+/// So the folder has to be this one **and** the `folio.exe` in it has to be this
+/// very file, compared the way [`same_path`] compares — canonicalised where the
+/// operating system will do it, folded where it will not. Anything else reads
+/// [`PackageState::Elsewhere`], which is the state that already means "there is
+/// an item on that page and it is not serving this executable", and which the
+/// row already draws honestly.
+///
+/// `ours` is handed in rather than called, for [`reassert_wanted`]'s reason: the
+/// rule is then a function of its inputs and a test can ask it about a machine it
+/// is not running on.
 #[must_use]
-pub fn classify(full_name: String, external: Option<PathBuf>, here: Option<&Path>) -> PackageState {
+pub fn classify(
+    full_name: String,
+    external: Option<PathBuf>,
+    here: Option<&Path>,
+    ours: impl Fn(&Path) -> bool,
+) -> PackageState {
     match (external, here) {
         (Some(at), Some(here)) if !same_path(&at, here) => {
+            PackageState::Elsewhere { full_name, at }
+        }
+        // The folder is this one. Whether the item on the page runs *this file*
+        // is the second half, and the manifest is what makes it a second half.
+        (Some(at), Some(_)) if !ours(&package_exe_in(&at)) => {
             PackageState::Elsewhere { full_name, at }
         }
         _ => PackageState::Current { full_name },
@@ -640,12 +672,27 @@ pub fn package_exe_in(folder: &Path) -> PathBuf {
 /// a file system under it. The explicit switch is not routed through here: a
 /// press on the Explorer row is somebody asking for *this* Folio by hand, and
 /// [`request`] registers.
+///
+/// **And a repair that cannot repair anything is not wanted** (review row
+/// R4-13). Since [`classify`] began asking whether the registered folder's
+/// `folio.exe` is this very file, `Elsewhere` also covers "the registration
+/// already serves this folder and the `folio.exe` in it is not us" — which
+/// happens when this executable is not named `folio.exe`, because the manifest
+/// names one fixed program. Re-registering this folder then produces exactly the
+/// state it started from, so `here_serves_us` — whether registering this folder
+/// would put *this* executable behind the menu item — is asked first and a
+/// launch that cannot fix anything does nothing, rather than spending a
+/// three-second deployment on every start for ever.
 #[must_use]
 pub fn reassert_wanted(
     state: &PackageState,
+    here_serves_us: bool,
     on_disk: impl Fn(&Path) -> bool,
     ours: impl Fn(&Path) -> bool,
 ) -> bool {
+    if !here_serves_us {
+        return false;
+    }
     let PackageState::Elsewhere { at, .. } = state else {
         return false;
     };
@@ -727,8 +774,18 @@ pub fn begin_probe() {
         // thread of its own. A repair that finds the latch taken does nothing at
         // all, which is right — the reader is in the middle of saying what they
         // want the machine to be, and a launch does not argue with that.
-        let repairing = reassert_wanted(&state, |exe| exe.is_file(), is_this_executable)
-            && !BUSY.swap(true, Ordering::AcqRel);
+        // Whether registering this folder would put this executable behind the
+        // menu item at all — see `reassert_wanted`.
+        let here_serves_us = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(package_exe_in))
+            .is_some_and(|exe| is_this_executable(&exe));
+        let repairing = reassert_wanted(
+            &state,
+            here_serves_us,
+            |exe| exe.is_file(),
+            is_this_executable,
+        ) && !BUSY.swap(true, Ordering::AcqRel);
         if repairing
             && let Some(package) = package_file()
             && let Some(here) = package.parent()
@@ -737,8 +794,9 @@ pub fn begin_probe() {
             match outcome {
                 Ok(()) => {
                     REGISTERED_HERE.store(true, Ordering::Release);
-                    remember(read_state());
-                    BUSY.store(false, Ordering::Release);
+                    let state = read_state();
+                    remember(state.clone());
+                    finish_job(&state);
                     wake();
                     return;
                 }
@@ -751,7 +809,7 @@ pub fn begin_probe() {
             }
         }
         if repairing {
-            BUSY.store(false, Ordering::Release);
+            finish_job(&state);
         }
         remember(state);
         wake();
@@ -761,8 +819,11 @@ pub fn begin_probe() {
 /// Register the package, or take it back off — half of what the row's third
 /// answer means.
 ///
-/// Returns whether a job was started. `false` is a press with nothing to do:
-/// another job is already running.
+/// **Every press is acted on** (review row R4-12). It used to answer `false` for
+/// a press that arrived while a job was running, and the caller logged that and
+/// did nothing — so an `Off` two seconds into an `On` was thrown away and the
+/// install landed against the reader's last choice. Now the press is written
+/// down and the running job spends it on its way out; see [`QUEUED`].
 ///
 /// **No pre-flight refusal for a missing `folio.msix`** since the ruling of
 /// 2026-09-07: the answer that would need it is greyed on a machine that has
@@ -771,10 +832,53 @@ pub fn begin_probe() {
 /// order to explain a press they could not have made. The sentence stays for the
 /// one case that is still real — the file removed between the frame that offered
 /// the answer and the thread that acts on it.
-pub fn request(install: bool) -> bool {
+/// **What the last press asked for while a job was already running** (review row
+/// R4-12).
+///
+/// `request` refuses a press while a deployment is in flight, and the caller's
+/// `apply_explorer_place` computed whether a job was needed at all from the
+/// *cached* state — which, during an install, still says "not registered". So an
+/// `Off` pressed two seconds into an `On` computed no job, was never even
+/// offered to `request`, and the install landed: the entry went onto the first
+/// page against the reader's last choice, and the row that redraws from the
+/// machine then agreed with the machine rather than with them.
+///
+/// One slot and not a queue, because a queue of presses is not what the reader
+/// means: pressing a switch three times means the third press. The slot holds
+/// what was last asked for, and the running job reads it on its way out.
+static QUEUED: AtomicBool = AtomicBool::new(false);
+/// Whether [`QUEUED`] holds anything at all — the two are read together, and a
+/// bare `bool` cannot say "nothing was asked for" and "off was asked for" apart.
+static QUEUED_SET: AtomicBool = AtomicBool::new(false);
+
+pub fn request(install: bool) {
     if BUSY.swap(true, Ordering::AcqRel) {
-        return false;
+        // **The press is written down rather than dropped** (review row R4-12).
+        // The job in flight reads this on its way out and runs one more job if
+        // what it left the machine as is not what was last asked for. `true`,
+        // because from the caller's side the press *was* taken: an answer is
+        // owed and one will arrive.
+        QUEUED.store(install, Ordering::Release);
+        QUEUED_SET.store(true, Ordering::Release);
+        return;
     }
+    QUEUED_SET.store(false, Ordering::Release);
+    run_request(install);
+}
+
+/// **Whether a deployment is running right now** (review row R4-12).
+///
+/// The one question the cached [`state`] cannot answer, and the one the caller
+/// has to ask before deciding a press needs no job: during an install the cached
+/// answer still says nothing is registered, so "the machine is already where
+/// this press wants it" is true of the past and false of the next three seconds.
+#[must_use]
+pub fn job_in_flight() -> bool {
+    BUSY.load(Ordering::Acquire)
+}
+
+/// One deployment, on a thread of its own, with the latch already taken.
+fn run_request(install: bool) {
     let package = package_file();
     std::thread::spawn(move || {
         let outcome = if install {
@@ -822,11 +926,41 @@ pub fn request(install: bool) -> bool {
                 Removal::AlreadyGone => Ok(false),
             }
         };
-        remember(read_state());
+        let state = read_state();
+        remember(state.clone());
         report(outcome);
-        BUSY.store(false, Ordering::Release);
+        finish_job(&state);
     });
-    true
+}
+
+/// **The one exit every deployment takes** (review row R4-12).
+///
+/// Hands the latch straight on to the press that arrived while this job was
+/// running, or lets it go. Handing it on rather than releasing and re-taking is
+/// what stops a third press from starting a job between the two lines.
+///
+/// The comparison is against the machine as it now is rather than against what
+/// the job asked for, so a queued press that the finished job already satisfied
+/// — `Off` pressed during a removal that worked — starts nothing.
+fn finish_job(state: &PackageState) {
+    let queued = QUEUED_SET
+        .swap(false, Ordering::AcqRel)
+        .then(|| QUEUED.load(Ordering::Acquire));
+    match queued_next(queued, state.registered()) {
+        Some(wanted) => run_request(wanted),
+        None => BUSY.store(false, Ordering::Release),
+    }
+}
+
+/// **What a finished job owes the press that arrived while it was running**, as
+/// a function of the two facts so it can be read without a deployment.
+///
+/// `Some` is one more job; `None` is the latch let go. The comparison is against
+/// the machine as it now is rather than against what the finished job asked for,
+/// so a queued press the job already satisfied costs nothing.
+#[must_use]
+fn queued_next(queued: Option<bool>, registered: bool) -> Option<bool> {
+    queued.filter(|wanted| *wanted != registered)
 }
 
 fn report(outcome: Result<bool, String>) {
@@ -1127,17 +1261,17 @@ mod tests {
         let ours = |exe: &Path| same_path(exe, &here);
 
         assert!(
-            reassert_wanted(&elsewhere(r"D:\deleted\folio"), |_| false, ours),
+            reassert_wanted(&elsewhere(r"D:\deleted\folio"), true, |_| false, ours),
             "nothing stands at the folder that was registered, so this Folio is \
              the only one that can answer the item"
         );
         assert!(
-            reassert_wanted(&elsewhere(r"c:\TOOLS\FOLIO\"), |_| true, ours),
+            reassert_wanted(&elsewhere(r"c:\TOOLS\FOLIO\"), true, |_| true, ours),
             "the folder over there holds this very file, spelled the way Windows \
              also spells it, so the registration is this install's own"
         );
         assert!(
-            !reassert_wanted(&elsewhere(r"D:\installed\folio"), |_| true, ours),
+            !reassert_wanted(&elsewhere(r"D:\installed\folio"), true, |_| true, ours),
             "another live Folio is answering that item and a launch does not take \
              it away"
         );
@@ -1147,18 +1281,19 @@ mod tests {
                 &PackageState::Current {
                     full_name: "WeiyiShi.Folio_0.2.2.0_x64__abc".to_owned(),
                 },
+                true,
                 |_| false,
                 ours
             ),
             "a registration that already serves this folder has nothing to repair"
         );
         assert!(
-            !reassert_wanted(&PackageState::Absent, |_| false, ours),
+            !reassert_wanted(&PackageState::Absent, true, |_| false, ours),
             "and a machine that never asked for the package is never given one"
         );
         for state in [PackageState::Unknown, PackageState::Unsupported] {
             assert!(
-                !reassert_wanted(&state, |_| false, ours),
+                !reassert_wanted(&state, true, |_| false, ours),
                 "{state:?} is not a finding about any registration"
             );
         }
@@ -1406,8 +1541,12 @@ mod tests {
     fn a_registration_is_ours_when_the_folder_it_serves_is_this_one() {
         const NAME: &str = "WeiyiShi.Folio_0.2.2.0_x64__cffndppawf746";
         let here = Path::new(r"E:\Programs\Folio\dist\next45");
+        // The `folio.exe` in whatever folder is being asked about is this very
+        // file — the ordinary machine, where the only question left is which
+        // folder the registration serves.
+        let ours = |_: &Path| true;
         assert_eq!(
-            classify(NAME.to_owned(), Some(here.to_path_buf()), Some(here)),
+            classify(NAME.to_owned(), Some(here.to_path_buf()), Some(here), ours),
             PackageState::Current {
                 full_name: NAME.to_owned()
             }
@@ -1416,7 +1555,8 @@ mod tests {
             classify(
                 NAME.to_owned(),
                 Some(PathBuf::from(r"e:\programs\folio\dist\next45\")),
-                Some(here)
+                Some(here),
+                ours
             ),
             PackageState::Current {
                 full_name: NAME.to_owned()
@@ -1426,7 +1566,8 @@ mod tests {
             classify(
                 NAME.to_owned(),
                 Some(PathBuf::from(r"C:\Tools\folio")),
-                Some(here)
+                Some(here),
+                ours
             ),
             PackageState::Elsewhere {
                 full_name: NAME.to_owned(),
@@ -1436,10 +1577,100 @@ mod tests {
         // A staging folder under `WindowsApps` is not an answer to this
         // question, and neither is the operating system declining to give one.
         assert_eq!(
-            classify(NAME.to_owned(), None, Some(here)),
+            classify(NAME.to_owned(), None, Some(here), ours),
             PackageState::Current {
                 full_name: NAME.to_owned()
             }
+        );
+    }
+
+    /// RED (review row R4-13) — **the folder is not the whole of the question.**
+    ///
+    /// The registration names a folder; `packaging/msix/AppxManifest.xml` names
+    /// `folio.exe` inside it. A reading that compared parent directories alone
+    /// answered `Current` — the row says On, the launch repairs nothing — over a
+    /// first-page item that runs a `folio.exe` which is not this executable:
+    /// this build under another name, another install's copy reached through a
+    /// link, or a binary replaced since it registered. That item opens a Folio
+    /// the reader did not start, from the page Windows curates.
+    ///
+    /// Red gate: drop the `ours` arm from `classify` and the assertion below
+    /// reads `Current`.
+    #[test]
+    fn a_registration_serving_this_folder_but_not_this_executable_is_not_ours() {
+        const NAME: &str = "WeiyiShi.Folio_0.2.2.0_x64__cffndppawf746";
+        let here = Path::new(r"E:\Programs\Folio\dist\next45");
+        assert_eq!(
+            classify(
+                NAME.to_owned(),
+                Some(here.to_path_buf()),
+                Some(here),
+                // The folder is this one and the `folio.exe` in it is somebody
+                // else's file.
+                |_: &Path| false,
+            ),
+            PackageState::Elsewhere {
+                full_name: NAME.to_owned(),
+                at: here.to_path_buf(),
+            },
+            "an item that would launch a different binary is not this install's"
+        );
+    }
+
+    /// RED (review row R4-12) — **an Off pressed while an install is running is
+    /// spent, not dropped.**
+    ///
+    /// Two halves, both of which were wrong. `request` refused a press while a
+    /// deployment was in flight and its caller only logged that; and the caller
+    /// decided whether a job was needed at all by comparing the press against the
+    /// *cached* state, which during an install still says nothing is registered —
+    /// so an `Off` two seconds in compared equal, started nothing, was never even
+    /// offered to `request`, and the install landed on the reader's first page
+    /// against the last thing they asked for.
+    ///
+    /// Red gate: return `None` unconditionally from `queued_next` and the first
+    /// assertion fails; and `job_in_flight` is what the caller now asks before it
+    /// trusts the cached state at all.
+    #[test]
+    fn a_press_that_arrived_during_a_job_is_spent_when_that_job_ends() {
+        // The row's own case: `On` ran, the machine is registered, and `Off` was
+        // pressed while it ran.
+        assert_eq!(queued_next(Some(false), true), Some(false));
+        // The mirror: `On` pressed during a removal.
+        assert_eq!(queued_next(Some(true), false), Some(true));
+        // A press the finished job already satisfied costs nothing.
+        assert_eq!(queued_next(Some(true), true), None);
+        assert_eq!(queued_next(Some(false), false), None);
+        // And no press at all is the ordinary ending.
+        assert_eq!(queued_next(None, true), None);
+        assert_eq!(queued_next(None, false), None);
+    }
+
+    /// RED (review row R4-13) — **a repair that cannot repair anything is not
+    /// started.**
+    ///
+    /// The other half of the row. Once `classify` can answer `Elsewhere` about
+    /// this very folder, `reassert_wanted` would have re-registered it at every
+    /// launch — producing exactly the state it started from, for three seconds,
+    /// for ever. So it is asked first whether registering this folder would put
+    /// this executable behind the item at all.
+    ///
+    /// Red gate: delete the `here_serves_us` guard and the first assertion below
+    /// reads true.
+    #[test]
+    fn a_launch_that_cannot_serve_the_item_itself_registers_nothing() {
+        let state = PackageState::Elsewhere {
+            full_name: "WeiyiShi.Folio_0.2.2.0_x64__abc".to_owned(),
+            at: PathBuf::from(r"C:\Tools\folio"),
+        };
+        assert!(
+            !reassert_wanted(&state, false, |_| false, |_| false),
+            "registering this folder would not put this executable behind the item, so there is \
+             nothing a repair could achieve"
+        );
+        assert!(
+            reassert_wanted(&state, true, |_| false, |_| false),
+            "and where it would, the ordinary rule applies"
         );
     }
 

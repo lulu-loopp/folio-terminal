@@ -2176,6 +2176,14 @@ pub mod msix;
 #[cfg(windows)]
 pub mod explorer_command;
 
+/// **One data directory, one writer** — the claim two Folio processes settle
+/// which of them owns `%APPDATA%\Folio\` with (review row R4-5).
+///
+/// Not a boundary in the sense the modules above are: what is impure in it is
+/// one `CreateMutexW` and the `CloseHandle` that answers it, and the part worth
+/// testing — which directories claim the same name — is a string function.
+pub mod instance;
+
 #[cfg(windows)]
 mod webview;
 

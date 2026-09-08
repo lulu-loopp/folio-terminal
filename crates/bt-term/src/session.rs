@@ -4166,6 +4166,17 @@ impl DualPlaneSession {
         self.command_marks.get(id)
     }
 
+    /// **The reader's own keyboard reached this pane** (review row R1-24).
+    ///
+    /// Told to the session by whoever writes the reader's bytes into the pty —
+    /// this crate never sees them, which is exactly what makes the fact worth
+    /// recording: everything else the ledger knows was printed onto the screen,
+    /// and a program printing `OSC 133` marks can print anything it likes between
+    /// them. See [`crate::command_marks::CommandMark::typed_by_user`].
+    pub fn note_user_input(&mut self) {
+        self.command_marks.note_user_input();
+    }
+
     /// Bumps on every ledger change and on nothing else, so a rail painter can cache its geometry
     /// across frames and rebuild only when this number moves.
     pub fn command_marks_revision(&self) -> u64 {
@@ -28690,6 +28701,84 @@ mod tests {
         assert!(
             marks[0].prompt.is_some(),
             "the reclaimed mark takes the redrawn prompt's own coordinate"
+        );
+    }
+
+    /// RED (review row R1-24) — **a command region a program printed is not a
+    /// command the reader typed, and the ledger can tell them apart.**
+    ///
+    /// The text on a mark is whatever the terminal saw between one `OSC 133;B`
+    /// and the `C` after it, and any program writing to the screen can print
+    /// those marks with any text it likes between them. That is harmless while
+    /// the text is only drawn on a card; it stops being harmless where the text
+    /// is offered back to the reader's own prompt, which `bt_app` does for a
+    /// restored summoned terminal.
+    ///
+    /// So the ledger records the one fact about a command that a program writing
+    /// to the screen cannot produce: bytes reached the pty from this process's
+    /// own input while the shell was reading that line. Both marks below carry
+    /// the same text; only one of them was typed.
+    ///
+    /// Red gate: have `note_user_input` set nothing, or set it on every mark, and
+    /// the two assertions cannot both hold.
+    #[test]
+    fn a_forged_command_region_is_marked_as_one_nobody_typed() {
+        let mut session = DualPlaneSession::new(nz(80), nz(10));
+
+        // A program printing the marks itself, with no keystroke anywhere near
+        // it — `curl … | sh` writing a plausible line onto the screen.
+        session
+            .feed(b"]133;APS> ]133;Brm -rf /]133;C")
+            .unwrap();
+        session
+            .feed(
+                b"
+]133;D;0",
+            )
+            .unwrap();
+
+        // The reader, at the next prompt, typing.
+        session.feed(b"]133;APS> ]133;B").unwrap();
+        session.note_user_input();
+        session.feed(b"rm -rf /]133;C").unwrap();
+        session
+            .feed(
+                b"
+]133;D;0",
+            )
+            .unwrap();
+
+        let marks = session.command_marks();
+        assert_eq!(marks.len(), 2, "{:?}", command_texts(&session));
+        assert_eq!(marks[0].command_text, marks[1].command_text);
+        assert!(
+            !marks[0].typed_by_user,
+            "nothing reached the pty while the first region was open"
+        );
+        assert!(
+            marks[1].typed_by_user,
+            "the reader was at the prompt for the second one"
+        );
+    }
+
+    /// PIN (review row R1-24) — input that arrives when the shell is not reading
+    /// a line marks nothing, and a mark that has ended is not marked afterwards.
+    #[test]
+    fn keyboard_input_outside_an_open_command_marks_nothing() {
+        let mut session = DualPlaneSession::new(nz(80), nz(10));
+
+        // Before any prompt at all.
+        session.note_user_input();
+        run_command(&mut session, "echo one", "one", "0");
+        // And after the command has ended — Ctrl+C at a screen with no prompt on
+        // it, a key pressed while a program is still printing.
+        session.note_user_input();
+
+        let marks = session.command_marks();
+        assert_eq!(marks.len(), 1);
+        assert!(
+            !marks[0].typed_by_user,
+            "a mark is only marked while it is the one being read"
         );
     }
 

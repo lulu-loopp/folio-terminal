@@ -6885,6 +6885,116 @@ fn profiles_file_kept_in(lang: Lang, file: &str) -> String {
     }
 }
 
+/// `settings.json` refusing to read at startup — the fourth member of the
+/// family above, and the one whose stand-in is the product's own defaults.
+#[must_use]
+pub fn settings_file_unreadable(file: &str) -> String {
+    settings_file_unreadable_in(current(), file)
+}
+
+fn settings_file_unreadable_in(lang: Lang, file: &str) -> String {
+    match lang {
+        Lang::English => format!("{file} could not be read; the default preferences are in force"),
+        Lang::Chinese => format!("{file} 无法读取；现在生效的是默认设置"),
+    }
+}
+
+/// `session.json` refusing to read at startup, where the stand-in is not a set
+/// of defaults but an absence: nothing was reopened.
+#[must_use]
+pub fn session_file_unreadable(file: &str) -> String {
+    session_file_unreadable_in(current(), file)
+}
+
+fn session_file_unreadable_in(lang: Lang, file: &str) -> String {
+    match lang {
+        Lang::English => format!("{file} could not be read; no windows or tabs were restored"),
+        Lang::Chinese => format!("{file} 无法读取；没有恢复任何窗口或标签页"),
+    }
+}
+
+/// **And where the bytes went** (review row R4-3) — the clause every one of the
+/// sentences above takes when the read path kept a copy of what it refused.
+///
+/// A wrapper rather than a sixth spelling of each sentence, because the two
+/// halves answer two questions that do not vary together: what is in force is a
+/// fact about the file, and whether there is a copy is a fact about whether the
+/// directory could be written. The copy is named by its file name alone — the
+/// reader is looking at a card, and the folder it is in is the folder the file
+/// they were told about is in.
+#[must_use]
+pub fn persisted_file_kept_copy(sentence: &str, kept: &str) -> String {
+    persisted_file_kept_copy_in(current(), sentence, kept)
+}
+
+fn persisted_file_kept_copy_in(lang: Lang, sentence: &str, kept: &str) -> String {
+    match lang {
+        Lang::English => format!("{sentence}, and the file as it was is kept as {kept}"),
+        Lang::Chinese => format!("{sentence}；原文件已保存为 {kept}"),
+    }
+}
+
+/// **A saved session larger than this build will open** (review row R4-9).
+///
+/// Said out loud rather than left to the log, because the evidence is invisible:
+/// the reader sees a window with fewer tabs in it than they left, and nothing
+/// else distinguishes that from a document that was damaged.
+#[must_use]
+pub fn session_file_trimmed(file: &str) -> String {
+    session_file_trimmed_in(current(), file)
+}
+
+fn session_file_trimmed_in(lang: Lang, file: &str) -> String {
+    match lang {
+        Lang::English => format!(
+            "{file} described more windows, tabs and panes than Folio opens at once; the rest were \
+             left closed"
+        ),
+        Lang::Chinese => {
+            format!("{file} 中的窗口、标签页和窗格超出 Folio 同时打开的上限；多出的部分未打开")
+        }
+    }
+}
+
+/// **A document that keeps failing to reach the disk** (review rows R4-10 and
+/// R4-11).
+///
+/// The one sentence in this family that is about a *write*, and it is owed for
+/// the reason the read ones are: the failure is invisible from the window. What
+/// the reader chose is on their screen and working, and the only thing that is
+/// wrong is that it will not be there next time.
+#[must_use]
+pub fn persisted_file_unwritable(file: &str) -> String {
+    persisted_file_unwritable_in(current(), file)
+}
+
+fn persisted_file_unwritable_in(lang: Lang, file: &str) -> String {
+    match lang {
+        Lang::English => format!("{file} could not be saved; the change is only in this window"),
+        Lang::Chinese => format!("{file} 无法保存；改动仅在当前窗口中生效"),
+    }
+}
+
+/// **A second Folio over one data directory** (review row R4-5).
+///
+/// No file name in it, because the fact is not about a file: this whole window
+/// writes neither document, and naming one of the two would leave the reader
+/// believing the other was still being kept.
+#[must_use]
+pub fn second_instance_notice() -> String {
+    second_instance_notice_in(current())
+}
+
+fn second_instance_notice_in(lang: Lang) -> String {
+    match lang {
+        Lang::English => {
+            "Another Folio is already running; preferences and tabs are not saved from this window"
+                .to_owned()
+        }
+        Lang::Chinese => "另一个 Folio 正在运行；这个窗口不保存设置和标签页".to_owned(),
+    }
+}
+
 /// `pins.json` refusing to parse at startup, when there is nothing in force to
 /// keep — so what stands in for it is nothing at all, and the sentence says so.
 #[must_use]
@@ -8135,6 +8245,31 @@ mod tests {
                     pins_file_unreadable_in(lang, "pins.json"),
                 ),
                 ("pins_file_kept", pins_file_kept_in(lang, "pins.json")),
+                (
+                    "settings_file_unreadable",
+                    settings_file_unreadable_in(lang, "settings.json"),
+                ),
+                (
+                    "session_file_unreadable",
+                    session_file_unreadable_in(lang, "session.json"),
+                ),
+                (
+                    "persisted_file_kept_copy",
+                    persisted_file_kept_copy_in(
+                        lang,
+                        &settings_file_unreadable_in(lang, "settings.json"),
+                        "settings.json.rejected-20260908-010203",
+                    ),
+                ),
+                (
+                    "session_file_trimmed",
+                    session_file_trimmed_in(lang, "session.json"),
+                ),
+                (
+                    "persisted_file_unwritable",
+                    persisted_file_unwritable_in(lang, "session.json"),
+                ),
+                ("second_instance_notice", second_instance_notice_in(lang)),
                 (
                     "switcher_pin_refused",
                     switcher_pin_refused_in(lang, "file:///D:/site/report.html"),

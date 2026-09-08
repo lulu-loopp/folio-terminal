@@ -10,7 +10,7 @@
 //! touching the sentinel further) to learn last session's fate, then
 //! `create` for this session, then `remove` on clean exit.
 
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io;
 use std::path::Path;
 
@@ -37,12 +37,58 @@ pub fn probe_sentinel(path: &Path) -> io::Result<ExitState> {
     }
 }
 
-/// Creates (or truncates, if one somehow already exists) the sentinel file
-/// for this session. Content is irrelevant — presence is the entire signal
-/// (§5.5: "内容不重要,存在性即信号").
+/// Creates the sentinel file for this session. Content is irrelevant —
+/// presence is the entire signal (§5.5: "内容不重要,存在性即信号").
+///
+/// **It creates, and it never truncates** (review row R4-8). This used to be
+/// `File::create`, which opens the name with `TRUNCATE_EXISTING` and follows
+/// whatever the name resolves to — so a hard link or a symbolic link planted
+/// at `session.lock` emptied the file it pointed at, on every launch,
+/// silently, without ever needing the sentinel to be read. Since presence is
+/// the whole of the signal there was never anything to write, which makes the
+/// truncation pure cost.
+///
+/// So the name is inspected before it is opened, with
+/// [`std::fs::symlink_metadata`] — the one query that reports the link itself
+/// rather than what it points at:
+///
+/// * a **link** is refused outright. Nothing this crate wrote is a link, so
+///   one standing at this name is somebody else's doing, and a launch that
+///   quietly opened it would be acting on that somebody's behalf. The refusal
+///   costs this run its clean-exit claim (the caller leaves the sentinel
+///   unarmed) and costs nothing else;
+/// * a **directory** is refused for the same reason and with the same cost;
+/// * an ordinary **file already there** is a sentinel a previous run left
+///   behind — the crash case this whole module exists to detect — and it is
+///   left exactly as it is. Presence is the signal and it is already present;
+/// * **nothing there** is created with `create_new`, so a second process that
+///   reached the name first keeps its file rather than having it emptied.
 pub fn create_sentinel(path: &Path) -> io::Result<()> {
-    File::create(path)?;
-    Ok(())
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the sentinel name is a link, and this is not a name anything may follow",
+            ));
+        }
+        Ok(metadata) if metadata.is_dir() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the sentinel name is a directory",
+            ));
+        }
+        // Already standing: the previous run's, or this run's own second call.
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(_) => Ok(()),
+        // Somebody created it between the query above and this line. Presence
+        // is the signal, and it is present.
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Removes the sentinel file on a clean exit. Removing an already-absent
@@ -95,6 +141,36 @@ mod tests {
         create_sentinel(&sentinel).unwrap();
         remove_sentinel(&sentinel).unwrap();
         assert_eq!(probe_sentinel(&sentinel).unwrap(), ExitState::Normal);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// RED (review row R4-8) — **creating the sentinel empties nothing.**
+    ///
+    /// A hard link rather than a symbolic one, and not for convenience: a hard
+    /// link needs no privilege on Windows, so it is the version of this an
+    /// ordinary account can plant, and it is invisible to every check that asks
+    /// what a path *is* — the name is a second directory entry for one file.
+    /// `File::create` opens it with `TRUNCATE_EXISTING` and follows it, so the
+    /// file it names is emptied on every launch, with nothing written in its
+    /// place because presence is the whole of the signal.
+    ///
+    /// Red gate: put `File::create(path)?` back and `victim` reads empty.
+    #[test]
+    fn a_link_planted_at_the_sentinel_name_does_not_empty_what_it_names() {
+        let dir = unique_dir();
+        let victim = dir.join("something-of-mine.txt");
+        std::fs::write(&victim, b"CONTENT-THAT-MUST-SURVIVE").unwrap();
+        let sentinel = dir.join("session.lock");
+        std::fs::hard_link(&victim, &sentinel).expect("a hard link needs no privilege");
+
+        // The launch does what it always does.
+        create_sentinel(&sentinel).unwrap();
+
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"CONTENT-THAT-MUST-SURVIVE",
+            "the file the sentinel name pointed at must not be emptied"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

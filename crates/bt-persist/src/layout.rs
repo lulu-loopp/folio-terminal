@@ -237,10 +237,90 @@ impl LayoutNodeV1 {
             LayoutNodeV1::Leaf(LeafNodeV1::Unknown) => {
                 report.unknown_leaves += 1;
             }
+            LayoutNodeV1::Leaf(LeafNodeV1::Term(leaf)) => {
+                if leaf.last_command.chars().count() > MAX_LAST_COMMAND_CHARS {
+                    // **Cleared and not shortened** (review row R1-24). What this
+                    // field is for is a line the restored pane puts back on the
+                    // prompt, and half of a command line is not a shorter command
+                    // — it is a different one, standing under the reader's cursor
+                    // with the Enter key one press away. A line nobody could have
+                    // typed is dropped whole and said out loud.
+                    leaf.last_command.clear();
+                    report.dropped_commands += 1;
+                }
+            }
             LayoutNodeV1::Leaf(_) => {}
         }
     }
+
+    /// **Keep the leaves this budget can afford, in the tree's own order**
+    /// (review row R4-9).
+    ///
+    /// Answers whether this node survives at all. A split keeps both children
+    /// when both survive, becomes the survivor when one does, and does not
+    /// survive when neither does — which is the only shape a two-child split can
+    /// degrade into without inventing a node the file never held.
+    ///
+    /// Depth-first in document order, so what a reader keeps is the front of
+    /// their own layout rather than an arbitrary half of it.
+    pub(crate) fn prune_to_budget(&mut self, budget: &mut usize) -> bool {
+        match self {
+            LayoutNodeV1::Leaf(_) => {
+                if *budget == 0 {
+                    return false;
+                }
+                *budget -= 1;
+                true
+            }
+            LayoutNodeV1::Split(split) => {
+                let first = split.children[0].prune_to_budget(budget);
+                let second = split.children[1].prune_to_budget(budget);
+                match (first, second) {
+                    (true, true) => true,
+                    (true, false) => {
+                        let kept = std::mem::replace(
+                            &mut split.children[0],
+                            Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Unknown)),
+                        );
+                        *self = *kept;
+                        true
+                    }
+                    (false, true) => {
+                        let kept = std::mem::replace(
+                            &mut split.children[1],
+                            Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Unknown)),
+                        );
+                        *self = *kept;
+                        true
+                    }
+                    (false, false) => false,
+                }
+            }
+        }
+    }
+
+    /// How many leaves this tree holds.
+    pub(crate) fn leaf_count(&self) -> usize {
+        match self {
+            LayoutNodeV1::Leaf(_) => 1,
+            LayoutNodeV1::Split(split) => {
+                split.children[0].leaf_count() + split.children[1].leaf_count()
+            }
+        }
+    }
 }
+
+/// **The longest line a restored pane will put back on its prompt** (review row
+/// R1-24).
+///
+/// The field it bounds is written from what the terminal saw between one
+/// `OSC 133;B` and the `C` after it, and a program printing those markers itself
+/// decides both the marks and the text between them — so its length is a number
+/// this build reads off a disk rather than one it chose. Two thousand characters
+/// is well past any command a person types and well short of anything that costs
+/// a frame; a line longer than it is dropped rather than shortened, because half
+/// a command line is a different command line.
+pub const MAX_LAST_COMMAND_CHARS: usize = 2_000;
 
 #[cfg(test)]
 mod tests {

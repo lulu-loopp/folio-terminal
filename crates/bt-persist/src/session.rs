@@ -329,7 +329,39 @@ impl SessionV1 {
     /// degradation banner (§5.3: "显式告警,绝不假装成功").
     pub fn degrade_in_place(&mut self) -> DegradationReport {
         let mut report = DegradationReport::default();
+        // **The whole document is bounded before any of it is walked** (review
+        // row R4-9). Every window here becomes a window on a screen, every tab a
+        // tab strip entry, and every terminal leaf a `CreateProcess` — all of it
+        // before the first frame — so the three counts are the three costs, and
+        // the file is what says how large they are.
+        if self.windows.len() > MAX_RESTORED_WINDOWS {
+            report.dropped_windows = (self.windows.len() - MAX_RESTORED_WINDOWS) as u32;
+            self.windows.truncate(MAX_RESTORED_WINDOWS);
+        }
+        let mut panes = MAX_RESTORED_PANES;
         for window in &mut self.windows {
+            if window.tabs.len() > MAX_RESTORED_TABS_PER_WINDOW {
+                report.dropped_tabs += (window.tabs.len() - MAX_RESTORED_TABS_PER_WINDOW) as u32;
+                window.tabs.truncate(MAX_RESTORED_TABS_PER_WINDOW);
+            }
+            window.tabs.retain_mut(|tab| {
+                let before = tab.root.leaf_count();
+                if !tab.root.prune_to_budget(&mut panes) {
+                    // Not one pane of this tab fits under what is left of the
+                    // budget, and a tab with no tree is not a tab.
+                    report.dropped_tabs += 1;
+                    report.dropped_panes += before as u32;
+                    return false;
+                }
+                report.dropped_panes += (before - tab.root.leaf_count()) as u32;
+                true
+            });
+            // A tab index that named a tab which is no longer here is a strip
+            // pointing past its own end; the first tab is the one every other
+            // out-of-range index in this document degrades to.
+            if window.active_tab as usize >= window.tabs.len() {
+                window.active_tab = 0;
+            }
             for tab in &mut window.tabs {
                 tab.root.degrade_in_place(&mut report);
             }
@@ -338,6 +370,27 @@ impl SessionV1 {
     }
 }
 
+/// **The most windows one document may reopen** (review row R4-9).
+///
+/// A window is a top-level `HWND`, a swapchain and a message pump, so the
+/// ceiling is on a real and expensive thing rather than on a number in a file.
+/// Thirty-two is far past what anybody arranges by hand and far short of what
+/// hurts.
+pub const MAX_RESTORED_WINDOWS: usize = 32;
+
+/// The most tabs one restored window may carry, on [`MAX_RESTORED_WINDOWS`]'
+/// terms.
+pub const MAX_RESTORED_TABS_PER_WINDOW: usize = 128;
+
+/// **The most panes one document may reopen, across every window in it.**
+///
+/// The ceiling that actually matters, because a terminal pane is a ConPTY and a
+/// child process: five hundred of them is a machine working hard, and it is the
+/// number a hand-edited or repeated-block file has to get past before this build
+/// starts refusing. Counted over the whole document in document order, so what
+/// survives is the front of the reader's own arrangement.
+pub const MAX_RESTORED_PANES: usize = 512;
+
 /// Records what [`SessionV1::degrade_in_place`] had to fix, so a caller can
 /// decide whether to surface a banner without this crate reaching into UI
 /// concerns.
@@ -345,12 +398,28 @@ impl SessionV1 {
 pub struct DegradationReport {
     pub clamped_ratios: u32,
     pub unknown_leaves: u32,
+    /// Windows past [`MAX_RESTORED_WINDOWS`] that this document will not open.
+    pub dropped_windows: u32,
+    /// Tabs past [`MAX_RESTORED_TABS_PER_WINDOW`], plus every tab whose whole
+    /// tree fell outside the pane budget.
+    pub dropped_tabs: u32,
+    /// Panes past [`MAX_RESTORED_PANES`] that this document will not spawn.
+    pub dropped_panes: u32,
+    /// Remembered command lines longer than
+    /// [`crate::layout::MAX_LAST_COMMAND_CHARS`], which are cleared rather than
+    /// shortened (review row R1-24).
+    pub dropped_commands: u32,
 }
 
 impl DegradationReport {
     /// True when at least one leaf needed degrading.
     pub fn is_clean(&self) -> bool {
-        self.clamped_ratios == 0 && self.unknown_leaves == 0
+        self.clamped_ratios == 0
+            && self.unknown_leaves == 0
+            && self.dropped_windows == 0
+            && self.dropped_tabs == 0
+            && self.dropped_panes == 0
+            && self.dropped_commands == 0
     }
 }
 
@@ -838,5 +907,144 @@ mod tests {
             report.clamped_ratios, 2,
             "one clamp per window, not one clamp for the first one"
         );
+    }
+
+    /// One terminal leaf, with whatever line it claims to have last run.
+    fn term_leaf(last_command: &str) -> LayoutNodeV1 {
+        LayoutNodeV1::Leaf(crate::layout::LeafNodeV1::Term(crate::layout::TermLeafV1 {
+            profile_id: "pwsh".to_string(),
+            cwd: String::new(),
+            manual_name: None,
+            card_skip: 0,
+            last_command: last_command.to_string(),
+        }))
+    }
+
+    fn one_tab(root: LayoutNodeV1) -> TabV1 {
+        TabV1 {
+            root,
+            pinned: false,
+            focused_leaf: "leaf-0".to_string(),
+            preview: None,
+        }
+    }
+
+    /// RED (review row R4-9) — **a document cannot ask this build to open more
+    /// panes than it will open.**
+    ///
+    /// Every terminal leaf here becomes a `CreateProcess` before the first frame,
+    /// so the number of them is a cost the file gets to name and nothing checked
+    /// it. The tree below is one window of one tab holding four times the whole
+    /// document's pane budget, which is the cheapest shape that can state the
+    /// property; a real oversized file states it with thousands of tabs.
+    ///
+    /// Red gate: delete the `prune_to_budget` call and the count below is the
+    /// file's own, not the ceiling.
+    #[test]
+    fn a_document_never_opens_more_panes_than_the_ceiling() {
+        let mut root = term_leaf("");
+        for _ in 0..(MAX_RESTORED_PANES * 4 - 1) {
+            root = LayoutNodeV1::Split(crate::layout::SplitNodeV1 {
+                dir: crate::layout::SplitDirV1::Row,
+                ratio: 500_000,
+                children: [Box::new(term_leaf("")), Box::new(root)],
+            });
+        }
+        let mut session = SessionV1 {
+            windows: vec![SessionWindowV1 {
+                tabs: vec![one_tab(root)],
+                ..SessionWindowV1::default()
+            }],
+            ..SessionV1::default()
+        };
+
+        let report = session.degrade_in_place();
+        let kept: usize = session.windows[0]
+            .tabs
+            .iter()
+            .map(|tab| tab.root.leaf_count())
+            .sum();
+        assert_eq!(kept, MAX_RESTORED_PANES, "the ceiling is what is opened");
+        assert_eq!(report.dropped_panes, (MAX_RESTORED_PANES * 3) as u32);
+        assert!(!report.is_clean(), "and it is reported rather than silent");
+    }
+
+    /// RED (review row R4-9) — **windows and tabs are bounded too, and a tab
+    /// index that outlived its tab comes back to the first one.**
+    #[test]
+    fn windows_and_tabs_are_bounded_and_the_active_index_follows() {
+        let mut session = SessionV1 {
+            windows: (0..MAX_RESTORED_WINDOWS + 3)
+                .map(|_| SessionWindowV1 {
+                    tabs: (0..MAX_RESTORED_TABS_PER_WINDOW + 5)
+                        .map(|_| one_tab(term_leaf("")))
+                        .collect(),
+                    active_tab: MAX_RESTORED_TABS_PER_WINDOW as u32 + 4,
+                    ..SessionWindowV1::default()
+                })
+                .collect(),
+            ..SessionV1::default()
+        };
+
+        let report = session.degrade_in_place();
+        assert_eq!(session.windows.len(), MAX_RESTORED_WINDOWS);
+        assert_eq!(report.dropped_windows, 3);
+        assert!(
+            session
+                .windows
+                .iter()
+                .all(|window| window.tabs.len() <= MAX_RESTORED_TABS_PER_WINDOW),
+            "no window keeps more tabs than the ceiling"
+        );
+        assert!(
+            session
+                .windows
+                .iter()
+                .all(|window| (window.active_tab as usize) < window.tabs.len().max(1)),
+            "and none of them points past its own strip"
+        );
+    }
+
+    /// RED (review row R1-24) — **a remembered command line longer than anybody
+    /// types is dropped, not shortened.**
+    ///
+    /// The field is written from the text a program printed between its own
+    /// `OSC 133` marks, so its length is a number this build reads off a disk. It
+    /// is restored by being *typed into the reader's prompt*, which is what makes
+    /// the bound about more than memory.
+    ///
+    /// Red gate: remove the clear in `LayoutNodeV1::degrade_in_place` and the
+    /// leaf comes back carrying every character of it.
+    #[test]
+    fn a_remembered_line_nobody_could_have_typed_is_dropped() {
+        let forged = "echo ".to_owned() + &"A".repeat(crate::layout::MAX_LAST_COMMAND_CHARS);
+        let mut session = SessionV1 {
+            windows: vec![SessionWindowV1 {
+                tabs: vec![
+                    one_tab(term_leaf(&forged)),
+                    one_tab(term_leaf("cargo build")),
+                ],
+                ..SessionWindowV1::default()
+            }],
+            ..SessionV1::default()
+        };
+
+        let report = session.degrade_in_place();
+        let lines: Vec<String> = session.windows[0]
+            .tabs
+            .iter()
+            .map(|tab| match &tab.root {
+                LayoutNodeV1::Leaf(crate::layout::LeafNodeV1::Term(leaf)) => {
+                    leaf.last_command.clone()
+                }
+                other => panic!("a term leaf, not {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            vec![String::new(), "cargo build".to_owned()],
+            "the impossible one is cleared and the ordinary one is untouched"
+        );
+        assert_eq!(report.dropped_commands, 1);
     }
 }

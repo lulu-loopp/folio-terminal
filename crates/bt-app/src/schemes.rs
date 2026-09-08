@@ -43,7 +43,7 @@
 //! list their scheme is not in with nothing to read.
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, RwLock, atomic::AtomicU64},
 };
 
@@ -757,6 +757,36 @@ fn bundled_sources() -> impl Iterator<Item = SchemeSource> {
 /// that does not exist is not an error: it is the ordinary case, and creating it
 /// here would put an empty directory in every user's `%APPDATA%` to advertise a
 /// feature they have not asked for.
+/// **The most one scheme file may be** (review row R4-9).
+///
+/// A colour scheme is sixteen colours, a name and four more keys: the ones this
+/// build ships are two kilobytes, and Windows Terminal's own are the same size.
+/// The folder is one a person drops files into, so what is actually in it is
+/// whatever they dropped — and this whole folder is read in one pass at startup,
+/// every file of it, before the first frame. A megabyte is three hundred times
+/// the largest real scheme and small enough that a folder full of them costs
+/// nothing worth measuring.
+const MAX_SCHEME_BYTES: u64 = 1024 * 1024;
+
+/// One user scheme file, read under the ceiling above.
+///
+/// A file over it is refused with a sentence, exactly as an unreadable one is —
+/// the reject list is already drawn for the reader, so this is a row in it rather
+/// than a new surface.
+fn read_scheme_file(path: &Path) -> Result<String, String> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.len() > MAX_SCHEME_BYTES => {
+            return Err(format!(
+                "the file is larger than a colour scheme can be ({} bytes)",
+                metadata.len()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) => return Err(format!("the file could not be read: {error}")),
+    }
+    std::fs::read_to_string(path).map_err(|error| format!("the file could not be read: {error}"))
+}
+
 fn user_sources() -> impl Iterator<Item = SchemeSource> {
     let directory = crate::persist::storage_dir().join(USER_SCHEME_DIR);
     let Ok(listing) = std::fs::read_dir(&directory) else {
@@ -773,8 +803,7 @@ fn user_sources() -> impl Iterator<Item = SchemeSource> {
         .map(|entry| SchemeSource {
             file: entry.file_name().to_string_lossy().into_owned(),
             origin: SchemeOrigin::User,
-            text: std::fs::read_to_string(entry.path())
-                .map_err(|error| format!("the file could not be read: {error}")),
+            text: read_scheme_file(&entry.path()),
         })
         .collect();
     found.sort_by(|left, right| left.file.cmp(&right.file));

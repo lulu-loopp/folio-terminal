@@ -54,11 +54,29 @@ fn write_temp(tmp_path: &Path, contents: &[u8]) -> io::Result<()> {
 /// a single filesystem operation (`MoveFileExW`/`MOVEFILE_REPLACE_EXISTING`
 /// on Windows, `rename(2)` on Unix) — there is no window in which `target`
 /// is observably partial.
+///
+/// **A rename that fails takes its temp file with it** (review row R4-11).
+/// The failure modes are all of the "this write is not going to work" family
+/// — the target is a directory, the volume is full, the file is held open by
+/// something that refuses a replace — and every one of them is retried by
+/// the caller on its own clock. Until this line existed, each of those
+/// retries left one more `session.json.tmp-…` in `%APPDATA%\Folio\`, so a
+/// disk that had filled up was answered by filling it further, once every
+/// debounce, for as long as the window stayed open. The removal is
+/// best-effort for [`write_temp`]'s reason: if it also fails there is
+/// nothing further to try that does not risk the real file, and the error
+/// the caller is told about is the rename's, which is the one worth reading.
 fn commit_rename(tmp_path: &Path, target: &Path) -> Result<(), WriteError> {
-    fs::rename(tmp_path, target).map_err(|source| WriteError::Io {
-        path: target.to_path_buf(),
-        source,
-    })
+    match fs::rename(tmp_path, target) {
+        Ok(()) => Ok(()),
+        Err(source) => {
+            let _ = fs::remove_file(tmp_path);
+            Err(WriteError::Io {
+                path: target.to_path_buf(),
+                source,
+            })
+        }
+    }
 }
 
 fn temp_sibling_path(path: &Path) -> Result<PathBuf, WriteError> {
@@ -174,6 +192,43 @@ mod tests {
             fs::read(&target).unwrap(),
             b"OLD-CONTENT",
             "target must be untouched by a failed temp write"
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// RED (review row R4-11) — **a rename that could not happen leaves nothing
+    /// behind.**
+    ///
+    /// The caller of this function is a debounce that retries, so a temp file
+    /// that survives one failure survives every one of them: the reported
+    /// failure was a full disk, and the answer to it was one more file in the
+    /// same directory every 1.5 seconds. The target here is a *directory*, which
+    /// is a rename Windows and Unix both refuse for a reason nothing in this
+    /// process can fix, so the retry loop it stands for is the real one.
+    ///
+    /// Red gate: put `fs::rename(..).map_err(..)` back in `commit_rename` and
+    /// the directory listing below holds the temp file.
+    #[test]
+    fn a_rename_that_fails_takes_its_temp_file_with_it() {
+        let dir = std::env::temp_dir().join(format!("bt-persist-atomic-stuck-{}", unique_suffix()));
+        fs::create_dir_all(&dir).unwrap();
+        // A directory cannot be replaced by a file, and it is the one refusal
+        // available without a full volume or a permission edit.
+        let target = dir.join("session.json");
+        fs::create_dir(&target).unwrap();
+
+        let result = atomic_write(&target, b"NEW-CONTENT");
+        assert!(result.is_err(), "renaming over a directory must fail");
+
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name != "session.json")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a failed rename must not leave its temp file behind: {leftovers:?}"
         );
 
         fs::remove_dir_all(&dir).unwrap();

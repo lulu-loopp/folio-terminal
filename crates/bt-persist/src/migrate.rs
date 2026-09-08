@@ -18,7 +18,8 @@
 //!    purpose; it is default behavior being *relied on*, not implemented.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -1275,7 +1276,26 @@ pub enum FallbackReason {
     /// written such a file (nothing precedes v1), so this only fires for
     /// hand-edited or foreign files.
     NoMigrationPath { found: u32 },
+    /// **The file is larger than any document this crate writes** (review row
+    /// R4-9). Refused on its size alone, before a byte of it is read, so an
+    /// oversized file costs a `stat` rather than the memory to hold it.
+    TooLarge { bytes: u64, cap: u64 },
 }
+
+/// **The most any document this crate reads may be** (review row R4-9).
+///
+/// Every read here used to be a `std::fs::read` of whatever was at the path,
+/// which is the whole file however large — so a `session.json` grown to a
+/// gigabyte, by a hand edit or by a disk that repeated a block, was held in
+/// memory in full before the first frame and again as a `serde_json::Value`
+/// during migration.
+///
+/// Sixteen mebibytes is deliberately far above anything this product writes and
+/// far below anything that hurts: the largest of these documents in practice is
+/// a `session.json` with a few hundred tabs in it, which is tens of kilobytes,
+/// and the ceiling is here to stop the pathological case rather than to police
+/// the ordinary one. A file over it is refused whole, kept, and reported.
+pub const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Outcome of a `read_settings`/`read_session` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1288,9 +1308,25 @@ pub enum ReadReport {
     Loaded,
     /// The file existed and was read, but could not be used as-is; the
     /// returned value is `T::default()`. §5.4 case 2: callers must alert,
-    /// naming the file and `reason`. The original file is never touched by
-    /// the read path — only a later write can replace it.
-    FellBackToDefaults { reason: FallbackReason },
+    /// naming the file and `reason`.
+    FellBackToDefaults {
+        reason: FallbackReason,
+        /// **Where the bytes that were refused now are** (review row R4-3).
+        ///
+        /// The read path used to leave the file alone and say one line on
+        /// `stderr`, and the next write then replaced it — so a document
+        /// somebody had spent an afternoon hand-editing was gone, with the
+        /// only account of it in a console nobody was watching. Now the
+        /// refused bytes are kept beside the file under a
+        /// `.rejected-<timestamp>` name before anything can overwrite them,
+        /// and this is where they went, so the caller can say it out loud.
+        ///
+        /// `None` when there was nothing to keep — the bytes were never
+        /// obtained ([`FallbackReason::Io`]) — or when the keeping itself
+        /// failed, which is a directory nobody can write and therefore a
+        /// directory where the original is in no danger either.
+        kept: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -1310,89 +1346,225 @@ pub(crate) fn read_with_fallback<T>(
 where
     T: DeserializeOwned + Default,
 {
-    let bytes = match std::fs::read(path) {
+    let bytes = match read_bounded(path, MAX_DOCUMENT_BYTES) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return (T::default(), ReadReport::NotFound);
-        }
-        Err(e) => {
+        Err(BoundedRead::NotFound) => return (T::default(), ReadReport::NotFound),
+        Err(BoundedRead::Io(message)) => {
+            // Nothing was obtained, so there is nothing to keep: the file is
+            // exactly as it was and this build simply could not open it.
             return (
                 T::default(),
                 ReadReport::FellBackToDefaults {
-                    reason: FallbackReason::Io(e.to_string()),
+                    reason: FallbackReason::Io(message),
+                    kept: None,
                 },
             );
         }
+        Err(BoundedRead::TooLarge { bytes }) => {
+            return (
+                T::default(),
+                ReadReport::FellBackToDefaults {
+                    reason: FallbackReason::TooLarge {
+                        bytes,
+                        cap: MAX_DOCUMENT_BYTES,
+                    },
+                    // Moved rather than copied — see [`keep_oversized`].
+                    kept: keep_oversized(path),
+                },
+            );
+        }
+    };
+
+    // Every refusal below this line has the bytes in hand, so every one of them
+    // keeps them. One closure rather than five call sites, so a reason added
+    // later cannot be the one that forgets.
+    let refuse = |reason: FallbackReason| -> (T, ReadReport) {
+        (
+            T::default(),
+            ReadReport::FellBackToDefaults {
+                kept: keep_rejected(path, &bytes),
+                reason,
+            },
+        )
     };
 
     let envelope: VersionEnvelope = match serde_json::from_slice(&bytes) {
         Ok(env) => env,
-        Err(e) => {
-            return (
-                T::default(),
-                ReadReport::FellBackToDefaults {
-                    reason: FallbackReason::ParseError(e.to_string()),
-                },
-            );
-        }
+        Err(e) => return refuse(FallbackReason::ParseError(e.to_string())),
     };
 
     if envelope.schema_version > current_version {
-        return (
-            T::default(),
-            ReadReport::FellBackToDefaults {
-                reason: FallbackReason::FutureSchemaVersion {
-                    found: envelope.schema_version,
-                    current: current_version,
-                },
-            },
-        );
+        return refuse(FallbackReason::FutureSchemaVersion {
+            found: envelope.schema_version,
+            current: current_version,
+        });
     }
 
     if envelope.schema_version < current_version {
         let value: Value = match serde_json::from_slice(&bytes) {
             Ok(v) => v,
-            Err(e) => {
-                return (
-                    T::default(),
-                    ReadReport::FellBackToDefaults {
-                        reason: FallbackReason::ParseError(e.to_string()),
-                    },
-                );
-            }
+            Err(e) => return refuse(FallbackReason::ParseError(e.to_string())),
         };
         let migrated =
             match migrate_value(value, envelope.schema_version, current_version, migrations) {
                 Ok(v) => v,
-                Err(found) => {
-                    return (
-                        T::default(),
-                        ReadReport::FellBackToDefaults {
-                            reason: FallbackReason::NoMigrationPath { found },
-                        },
-                    );
-                }
+                Err(found) => return refuse(FallbackReason::NoMigrationPath { found }),
             };
         return match serde_json::from_value::<T>(migrated) {
             Ok(v) => (v, ReadReport::Loaded),
-            Err(e) => (
-                T::default(),
-                ReadReport::FellBackToDefaults {
-                    reason: FallbackReason::ParseError(e.to_string()),
-                },
-            ),
+            Err(e) => refuse(FallbackReason::ParseError(e.to_string())),
         };
     }
 
     match serde_json::from_slice::<T>(&bytes) {
         Ok(v) => (v, ReadReport::Loaded),
-        Err(e) => (
-            T::default(),
-            ReadReport::FellBackToDefaults {
-                reason: FallbackReason::ParseError(e.to_string()),
-            },
-        ),
+        Err(e) => refuse(FallbackReason::ParseError(e.to_string())),
     }
+}
+
+/// Why [`read_bounded`] answered with nothing.
+enum BoundedRead {
+    NotFound,
+    Io(String),
+    TooLarge { bytes: u64 },
+}
+
+/// **Every byte this crate reads off a disk passes through here** (review row
+/// R4-9).
+///
+/// The size is asked of the directory entry first, so a file over the ceiling
+/// costs a `stat` and no memory at all; then the read itself is taken through
+/// `Read::take` at the same ceiling, because a file can grow between the two and
+/// the second bound is the one that is actually true of the bytes in hand. A
+/// file that grew past the ceiling in that window reads as oversized, which is
+/// the answer a `stat` a moment later would have given.
+fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, BoundedRead> {
+    use std::io::Read;
+
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(BoundedRead::NotFound),
+        Err(e) => return Err(BoundedRead::Io(e.to_string())),
+    };
+    if metadata.len() > cap {
+        return Err(BoundedRead::TooLarge {
+            bytes: metadata.len(),
+        });
+    }
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(BoundedRead::NotFound),
+        Err(e) => return Err(BoundedRead::Io(e.to_string())),
+    };
+    // `cap + 1` so that a file which reached exactly the ceiling reads whole and
+    // one which passed it is caught rather than silently truncated into a parse
+    // error about a document nobody wrote.
+    let mut bytes = Vec::new();
+    if let Err(e) = file.take(cap + 1).read_to_end(&mut bytes) {
+        return Err(BoundedRead::Io(e.to_string()));
+    }
+    if bytes.len() as u64 > cap {
+        return Err(BoundedRead::TooLarge {
+            bytes: bytes.len() as u64,
+        });
+    }
+    Ok(bytes)
+}
+
+/// Put the bytes this read refused beside the file they came from, and answer
+/// where they went (review row R4-3).
+///
+/// Written rather than moved, which is what keeps the read path's own promise:
+/// the file itself is not touched here, only copied, so a build that stopped
+/// between this line and the next write leaves the reader with both the original
+/// and the copy rather than with neither.
+///
+/// Best-effort by design. A directory that refuses the write is a directory the
+/// later write will be refused by too, so the original is in no danger there;
+/// and a launch that could not take a copy is not a launch that should stop.
+fn keep_rejected(path: &Path, bytes: &[u8]) -> Option<PathBuf> {
+    let kept = rejected_sibling(path, SystemTime::now())?;
+    std::fs::write(&kept, bytes).ok()?;
+    Some(kept)
+}
+
+/// The same keeping for a document too large to have been read (review row
+/// R4-9), which is the one case where the bytes are not in hand.
+///
+/// **Moved rather than copied**, and it is the size that decides it: copying is
+/// what [`keep_rejected`] can afford precisely because the bytes fit under the
+/// ceiling, and a file that does not fit is one this build must not read in
+/// order to duplicate. A rename moves no bytes at all, is a single directory
+/// operation, and leaves the whole of the reader's file where they can find it —
+/// the same outcome the copy buys, reached the only way that is affordable here.
+/// Leaving it in place instead would mean refusing it again at every launch
+/// until some later write replaced it with no copy at all.
+fn keep_oversized(path: &Path) -> Option<PathBuf> {
+    let kept = rejected_sibling(path, SystemTime::now())?;
+    std::fs::rename(path, &kept).ok()?;
+    Some(kept)
+}
+
+/// `<file name>.rejected-<YYYYMMDD-HHMMSS>`, beside the file it is about.
+///
+/// Beside it rather than in a folder of its own, so it is found by looking where
+/// the file is rather than by being told where copies go — the rule
+/// `shell_integration`'s `$PROFILE` backup already follows one directory over.
+/// UTC, because this crate has no time-zone source and a name that disagreed
+/// with the timestamp Explorer shows by a few hours is a smaller problem than
+/// one invented from a guess.
+///
+/// A second refusal within the same second finds the name taken and counts up,
+/// so no copy is ever written over another one.
+fn rejected_sibling(path: &Path, at: SystemTime) -> Option<PathBuf> {
+    let file_name = path.file_name()?;
+    let stamp = utc_stamp(at);
+    for attempt in 0..64u32 {
+        let mut name = file_name.to_os_string();
+        if attempt == 0 {
+            name.push(format!(".rejected-{stamp}"));
+        } else {
+            name.push(format!(".rejected-{stamp}-{attempt}"));
+        }
+        let candidate = path.with_file_name(name);
+        if !candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// `YYYYMMDD-HHMMSS` in UTC, from a wall clock.
+///
+/// The calendar is Howard Hinnant's `civil_from_days`, the same arithmetic
+/// `bt_app::seed` uses for the timestamps inside `session.json`; it is written
+/// again here because this crate has no dependency to borrow it from, and the
+/// alternative — a bare epoch number in a file name a person is meant to find —
+/// is a name nobody can read.
+fn utc_stamp(at: SystemTime) -> String {
+    let seconds = match at.duration_since(UNIX_EPOCH) {
+        Ok(delta) => i64::try_from(delta.as_secs()).unwrap_or(i64::MAX),
+        Err(error) => -i64::try_from(error.duration().as_secs()).unwrap_or(i64::MAX),
+    };
+    let days = seconds.div_euclid(86_400);
+    let rest = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let (hour, minute, second) = (rest / 3_600, (rest % 3_600) / 60, rest % 60);
+    format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")
+}
+
+/// The civil date a count of days since 1970-01-01 names.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = u32::try_from(if mp < 10 { mp + 3 } else { mp - 9 }).unwrap_or(1);
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 /// Walks `from..to`, applying the registered step for each version in turn.
@@ -2687,7 +2859,8 @@ mod tests {
         assert!(matches!(
             report,
             ReadReport::FellBackToDefaults {
-                reason: FallbackReason::ParseError(_)
+                reason: FallbackReason::ParseError(_),
+                ..
             }
         ));
         // The corrupt file itself must survive the read untouched (§5.4: "原文件不覆盖、不删除").
@@ -2705,15 +2878,16 @@ mod tests {
         );
         let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[]);
         assert_eq!(value, Fixture::default());
-        assert_eq!(
+        assert!(matches!(
             report,
             ReadReport::FellBackToDefaults {
                 reason: FallbackReason::FutureSchemaVersion {
                     found: 99,
                     current: 1
-                }
+                },
+                ..
             }
-        );
+        ));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -2727,12 +2901,13 @@ mod tests {
         );
         let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[]);
         assert_eq!(value, Fixture::default());
-        assert_eq!(
+        assert!(matches!(
             report,
             ReadReport::FellBackToDefaults {
-                reason: FallbackReason::NoMigrationPath { found: 0 }
+                reason: FallbackReason::NoMigrationPath { found: 0 },
+                ..
             }
-        );
+        ));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -2777,5 +2952,137 @@ mod tests {
         let round_tripped = serde_json::to_string(&value).unwrap();
         assert!(!round_tripped.contains("from_a_third_party_tool"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// RED (review row R4-3) — **the bytes a read refused are still on the disk
+    /// afterwards, under a name that says what happened.**
+    ///
+    /// The document that comes back is defaults, which is §5.4's rule and stays.
+    /// What was missing is the copy: the caller writes its own document over this
+    /// path within seconds, and until this test the reader's own file — the one
+    /// they may have spent an evening hand-editing — was gone with one line on a
+    /// console nobody was watching.
+    ///
+    /// Red gate: return `ReadReport::FellBackToDefaults` without calling
+    /// `keep_rejected` and the directory holds one file instead of two.
+    #[test]
+    fn a_document_that_will_not_parse_is_kept_beside_itself() {
+        let dir = unique_dir("kept");
+        let path = write_fixture(&dir, "settings.json", "{ this is not json ");
+
+        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[]);
+        assert_eq!(value, Fixture::default(), "defaults, as §5.4 requires");
+
+        let ReadReport::FellBackToDefaults { reason, kept } = report else {
+            panic!("a document that will not parse falls back");
+        };
+        assert!(matches!(reason, FallbackReason::ParseError(_)));
+        let kept = kept.expect("the refused bytes are kept");
+        assert_eq!(
+            std::fs::read_to_string(&kept).unwrap(),
+            "{ this is not json ",
+            "byte for byte, so a hand edit can be recovered from it"
+        );
+        assert_eq!(
+            kept.parent(),
+            path.parent(),
+            "beside the file it is about, not in a folder nobody was told about"
+        );
+        assert!(
+            kept.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("settings.json.rejected-"),
+            "the name says which file and when: {kept:?}"
+        );
+        assert!(path.exists(), "and the original is not moved by the read");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// RED (review row R4-3) — **a document from a newer build is kept too.**
+    ///
+    /// The arm that costs the most, because it is the one that fires on a
+    /// perfectly good file: a reader who ran a newer Folio once and went back to
+    /// this one had every preference in it replaced by defaults, and the file
+    /// that held them overwritten by the first click they made afterwards.
+    #[test]
+    fn a_document_from_a_future_version_is_kept_beside_itself() {
+        let dir = unique_dir("future");
+        let path = write_fixture(
+            &dir,
+            "settings.json",
+            r#"{"schema_version": 99, "value": "theirs"}"#,
+        );
+
+        let (_, report) = read_with_fallback::<Fixture>(&path, 1, &[]);
+        let ReadReport::FellBackToDefaults { reason, kept } = report else {
+            panic!("a future version falls back");
+        };
+        assert_eq!(
+            reason,
+            FallbackReason::FutureSchemaVersion {
+                found: 99,
+                current: 1
+            }
+        );
+        assert!(
+            std::fs::read_to_string(kept.expect("kept"))
+                .unwrap()
+                .contains("theirs"),
+            "the newer build's own document survives being refused"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// RED (review row R4-9) — **a document larger than the ceiling is refused on
+    /// its size, and is not read.**
+    ///
+    /// Every read here was a `std::fs::read` of whatever was at the path, so the
+    /// bound on how much memory a launch spends before its first frame was
+    /// whatever the file happened to be. The file below is one byte past the
+    /// ceiling, which is the smallest thing that proves the ceiling is applied at
+    /// all; the point is that the answer does not depend on the content, because
+    /// the content is never looked at.
+    ///
+    /// Red gate: read with `std::fs::read` and the report is a parse error rather
+    /// than a size, because the bytes were read after all.
+    #[test]
+    fn a_document_past_the_ceiling_is_refused_without_being_read() {
+        let dir = unique_dir("huge");
+        let path = dir.join("session.json");
+        // Valid JSON, so nothing but the size can be what refuses it.
+        let mut text = String::from("{\"schema_version\": 1, \"value\": \"");
+        text.push_str(&"x".repeat(MAX_DOCUMENT_BYTES as usize + 1));
+        text.push_str("\"}");
+        std::fs::write(&path, &text).unwrap();
+
+        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[]);
+        assert_eq!(value, Fixture::default());
+        let ReadReport::FellBackToDefaults { reason, kept } = report else {
+            panic!("an oversized document falls back");
+        };
+        assert!(
+            matches!(reason, FallbackReason::TooLarge { cap, .. } if cap == MAX_DOCUMENT_BYTES),
+            "refused for its size: {reason:?}"
+        );
+        let kept = kept.expect("an oversized document is kept");
+        assert!(kept.exists(), "moved aside rather than copied");
+        assert!(
+            !path.exists(),
+            "and the name is clear, so the next launch is not refused all over again"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// PIN — the stamp in a kept document's name is a date a person can read.
+    #[test]
+    fn a_kept_document_is_named_by_the_moment_it_was_refused() {
+        // 2026-09-08T01:02:03Z.
+        let at = UNIX_EPOCH + std::time::Duration::from_secs(1_788_829_323);
+        assert_eq!(utc_stamp(at), "20260908-010203");
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(-1), (1969, 12, 31));
     }
 }

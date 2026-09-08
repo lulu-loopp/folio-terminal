@@ -4189,6 +4189,31 @@ impl ProfilePrograms {
         self.resolved.get(profile)?.as_deref()
     }
 
+    /// **A machine on which exactly these profiles resolve**, for tests about
+    /// what a *caller* does with the answer rather than about the probe.
+    ///
+    /// Test-only, on `SessionStore::at`'s footing: [`Self::probe`] is the
+    /// product's one door and it walks the shipped table against a real
+    /// environment, which is the right shape for the tests that are about
+    /// resolution and the wrong one for the tests that are about the rule a
+    /// missing program triggers — those would have to spell out the candidate
+    /// list of every shipped row in order to say "Git Bash is not here".
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_only(available: &[usize]) -> Self {
+        Self {
+            resolved: with_table(|table| {
+                (0..table.profiles.len())
+                    .map(|index| {
+                        available
+                            .contains(&index)
+                            .then(|| OsString::from(format!("C:\\fake\\{index}.exe")))
+                    })
+                    .collect()
+            }),
+        }
+    }
+
     /// Where one candidate says to look, or `None` when the machine cannot even
     /// name the place — an environment variable that is unset, or an anchor that
     /// is nowhere on `PATH`.

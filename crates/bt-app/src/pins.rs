@@ -41,10 +41,7 @@
 
 use std::path::PathBuf;
 
-use bt_persist::{
-    PinEntryV1, PinKind, PinsV1, ReadReport, WriteAlertAction, WriteFailureTracker, read_pins,
-    write_pins_atomic,
-};
+use bt_persist::{PinEntryV1, PinKind, PinsV1, ReadReport, read_pins, write_pins_atomic};
 
 /// The name the pin file wears on disk, which is also what a notice about it has
 /// to say out loud.
@@ -124,7 +121,9 @@ pub struct PinsStore {
     loaded: PinsV1,
     /// Why the file on disk was not usable, if it was not.
     fault: Option<String>,
-    failures: WriteFailureTracker,
+    writes: crate::persist::DocumentWrites,
+    /// Whether this process writes this file at all — review row R4-5.
+    writer_of_record: bool,
 }
 
 /// What a re-read of `pins.json` found — [`PinsStore::reread`]'s answer.
@@ -158,25 +157,21 @@ impl PinsStore {
         // §5.4 case 1 — no file — is the ordinary state of a machine where
         // nobody has pinned anything, and must not alert. Everything else must,
         // naming the file (§5.3).
-        let fault = match &report {
-            ReadReport::FellBackToDefaults { reason } => {
-                eprintln!("BT_PERSIST {PINS_FILE_NAME} fell back to defaults: {reason:?}");
-                Some(crate::i18n::pins_file_unreadable(PINS_FILE_NAME))
-            }
-            ReadReport::NotFound | ReadReport::Loaded => None,
-        };
+        let fault =
+            crate::persist::read_fault(&report, PINS_FILE_NAME, crate::i18n::pins_file_unreadable);
         Self {
             path,
             loaded: file,
             fault,
-            failures: WriteFailureTracker::new(),
+            writes: crate::persist::DocumentWrites::new(),
+            writer_of_record: crate::persist::is_storage_writer(),
         }
     }
 
     /// Take the read fault, so a notice about it is raised once and not once a
-    /// frame.
+    /// frame. A write that has stopped landing comes through the same door.
     pub fn take_fault(&mut self) -> Option<String> {
-        self.fault.take()
+        self.fault.take().or_else(|| self.writes.take_fault())
     }
 
     /// Every pinned target of one category, in the file's own order.
@@ -211,8 +206,8 @@ impl PinsStore {
     /// typed a comma wrong is the one outcome a hand-editable file must not have.
     pub fn reread(&mut self) -> PinsNews {
         let (file, report) = read_pins(&self.path);
-        if let ReadReport::FellBackToDefaults { reason } = &report {
-            eprintln!("BT_PERSIST {PINS_FILE_NAME} would not parse: {reason:?}");
+        if let ReadReport::FellBackToDefaults { reason, kept } = &report {
+            eprintln!("BT_PERSIST {PINS_FILE_NAME} would not parse: {reason:?} kept={kept:?}");
             return PinsNews::Unreadable;
         }
         if self.loaded == file {
@@ -227,18 +222,22 @@ impl PinsStore {
     /// Returns whether anything changed, so a press that moved nothing costs no
     /// write.
     pub fn store(&mut self, file: PinsV1) -> bool {
-        if self.loaded == file {
+        let changed = self.loaded != file;
+        if !self.writes.wants_write(changed) {
             return false;
         }
         self.loaded = file;
-        let result = write_pins_atomic(&self.path, &self.loaded);
-        if self.failures.record(result.is_ok()) == WriteAlertAction::AlertOnce
-            && let Err(error) = &result
-        {
-            // §5.3: one alert per failure streak, not one per attempt.
-            eprintln!("BT_PERSIST could not write {PINS_FILE_NAME}: {error}");
+        if changed {
+            self.writes.rearm();
         }
-        true
+        if !self.writer_of_record {
+            return changed;
+        }
+        self.writes.record(
+            PINS_FILE_NAME,
+            write_pins_atomic(&self.path, &self.loaded).map_err(|error| error.to_string()),
+        );
+        changed
     }
 }
 

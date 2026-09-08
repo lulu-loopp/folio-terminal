@@ -56,12 +56,13 @@ pub use debounce::Debouncer;
 pub use error::WriteError;
 pub use keybindings::{BindingOverrideV1, KEYBINDINGS_SCHEMA_VERSION, KeybindingsV1};
 pub use layout::{
-    FilesLeafV1, FilesViewV1, LayoutNodeV1, LeafNodeV1, PreviewLeafV1, RATIO_PPM_MAX, SplitDirV1,
-    SplitNodeV1, TermLeafV1,
+    FilesLeafV1, FilesViewV1, LayoutNodeV1, LeafNodeV1, MAX_LAST_COMMAND_CHARS, PreviewLeafV1,
+    RATIO_PPM_MAX, SplitDirV1, SplitNodeV1, TermLeafV1,
 };
 pub use migrate::{
-    FallbackReason, KEYBINDINGS_MIGRATIONS, MigrationStep, PINS_MIGRATIONS, PROFILES_MIGRATIONS,
-    ReadReport, SESSION_MIGRATIONS, SETTINGS_MIGRATIONS, UPDATE_CHECK_MIGRATIONS,
+    FallbackReason, KEYBINDINGS_MIGRATIONS, MAX_DOCUMENT_BYTES, MigrationStep, PINS_MIGRATIONS,
+    PROFILES_MIGRATIONS, ReadReport, SESSION_MIGRATIONS, SETTINGS_MIGRATIONS,
+    UPDATE_CHECK_MIGRATIONS,
 };
 pub use pins::{PINS_SCHEMA_VERSION, PinEntryV1, PinKind, PinsV1};
 pub use profiles::{
@@ -71,10 +72,11 @@ pub use profiles::{
 pub use scheme::{SchemeFileV1, SchemeParseError, parse_scheme, write_scheme};
 pub use sentinel::{ExitState, create_sentinel, probe_sentinel, remove_sentinel};
 pub use session::{
-    DegradationReport, GraphFilterV1, PreviewPaneV1, PreviewPoolEntryV1, PreviewSourceV1,
-    QuakePlacementV1, RecentEntryV1, RecentFolderV1, RecentPreviewV1, RecentSeedV1,
-    SESSION_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1,
-    SessionThemeV1, SessionV1, SessionWindowV1, TabPreviewV1, TabV1, WindowBoundsV1, WindowStateV1,
+    DegradationReport, GraphFilterV1, MAX_RESTORED_PANES, MAX_RESTORED_TABS_PER_WINDOW,
+    MAX_RESTORED_WINDOWS, PreviewPaneV1, PreviewPoolEntryV1, PreviewSourceV1, QuakePlacementV1,
+    RecentEntryV1, RecentFolderV1, RecentPreviewV1, RecentSeedV1, SESSION_SCHEMA_VERSION,
+    SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1,
+    SessionWindowV1, TabPreviewV1, TabV1, WindowBoundsV1, WindowStateV1,
 };
 pub use settings::{
     BackgroundFitV1, DEFAULT_BACKGROUND_IMAGE, DEFAULT_BACKGROUND_IMAGE_OPACITY,

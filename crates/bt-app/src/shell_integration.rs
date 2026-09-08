@@ -321,16 +321,33 @@ pub fn script_path() -> Option<&'static Path> {
 }
 
 fn install() -> Option<PathBuf> {
-    let directory = persist::storage_dir().join("shell-integration");
-    let path = directory.join(SCRIPT_FILE);
-    // Rewritten only when it differs, so that the common start — the same build
-    // opening a bash tab again — is one read rather than one write, and an open
-    // shell reading the file at that moment is not reading a truncated one.
-    if std::fs::read_to_string(&path).is_ok_and(|existing| existing == SCRIPT) {
+    install_script_at(
+        &persist::storage_dir().join(SCRIPT_DIRECTORY),
+        SCRIPT_FILE,
+        SCRIPT,
+    )
+}
+
+/// **One file of this build's, written into a directory, and kept current**
+/// (review row R4-6).
+///
+/// The compare-and-repair all three installed scripts go through, as a function
+/// of a directory so it can be exercised against a temp one rather than against
+/// the machine's own `%APPDATA%`.
+///
+/// Rewritten only when it differs, so that the common start — the same build
+/// opening the same kind of tab again — is one read rather than one write, and
+/// an open shell reading the file at that moment is not reading a truncated one.
+/// Rewritten *whenever* it differs, which is the half that was missing for
+/// PowerShell: an upgraded, deleted or truncated copy is the same finding as a
+/// copy that was never there.
+fn install_script_at(directory: &Path, name: &str, text: &str) -> Option<PathBuf> {
+    let path = directory.join(name);
+    if std::fs::read_to_string(&path).is_ok_and(|existing| existing == text) {
         return Some(path);
     }
-    std::fs::create_dir_all(&directory).ok()?;
-    std::fs::write(&path, SCRIPT).ok()?;
+    std::fs::create_dir_all(directory).ok()?;
+    std::fs::write(&path, text).ok()?;
     Some(path)
 }
 
@@ -349,7 +366,7 @@ pub fn zdotdir_path() -> Option<&'static Path> {
 
 fn install_zdotdir() -> Option<PathBuf> {
     let directory = persist::storage_dir()
-        .join("shell-integration")
+        .join(SCRIPT_DIRECTORY)
         .join(ZDOTDIR_DIRECTORY);
     let stale = ZDOTDIR_FILES.iter().any(|name| {
         !std::fs::read_to_string(directory.join(name)).is_ok_and(|existing| existing == SCRIPT_ZSH)
@@ -1158,14 +1175,42 @@ pub fn integration_line(script: &Path, appdata: Option<&Path>) -> String {
 /// bash's is written because a bash is starting, and this one is written
 /// because somebody pressed the verb that is about to name it.
 pub fn script_path_ps1() -> Option<PathBuf> {
-    let directory = persist::storage_dir().join(SCRIPT_DIRECTORY);
-    let path = directory.join(SCRIPT_FILE_PS1);
-    if std::fs::read_to_string(&path).is_ok_and(|existing| existing == SCRIPT_PS1) {
-        return Some(path);
-    }
-    std::fs::create_dir_all(&directory).ok()?;
-    std::fs::write(&path, SCRIPT_PS1).ok()?;
-    Some(path)
+    install_script_at(
+        &persist::storage_dir().join(SCRIPT_DIRECTORY),
+        SCRIPT_FILE_PS1,
+        SCRIPT_PS1,
+    )
+}
+
+/// **The installed script, compared against the one this build ships, once per
+/// run** (review row R4-6).
+///
+/// [`script_path`]'s discipline for bash, given to PowerShell — and PowerShell
+/// is where it was missing, because the two doors are not the same. Bash's
+/// script is named on every spawn by `--init-file`, so the compare-and-repair
+/// happens whether or not anybody ever pressed anything. PowerShell's is named
+/// by a line inside the reader's own `$PROFILE`, written once, and after that
+/// nothing looked at the file again: an upgrade that changed `folio.ps1`, a
+/// cleaner that deleted it, or a copy that was truncated left the reader's
+/// shells sourcing something that is no longer this build's integration — or
+/// nothing at all — and [`offer_for`] went on reading the line in their profile
+/// and answering [`Offer::Silent`], which is this build saying "installed".
+///
+/// So the file is compared and repaired on the same clock bash's is: once per
+/// process, on the first pane that needs the answer. [`script_path_ps1`] already
+/// *is* the compare-and-repair — it reads the file and rewrites it when it
+/// differs — so what this adds is a caller that runs it without waiting for a
+/// press, and a `OnceLock` so four PowerShell panes are one read rather than
+/// four.
+///
+/// `None` is a directory that could not be written, which is the one case a
+/// repair cannot answer. It is not silent to the reader: their own PowerShell
+/// prints an error about the file its profile dot-sources, on every shell, which
+/// is a louder and more accurate report than anything this side could raise —
+/// and it is the same condition under which the install button itself fails.
+pub fn powershell_script_repaired() -> Option<&'static Path> {
+    static REPAIRED: OnceLock<Option<PathBuf>> = OnceLock::new();
+    REPAIRED.get_or_init(script_path_ps1).as_deref()
 }
 
 /// What one write into a profile did.
@@ -1187,10 +1232,14 @@ pub struct ProfileWrite {
 /// beside the file it copies, so it is found by looking where the change was
 /// made rather than by being told where backups go.
 ///
-/// **A backup already taken today is not overwritten.** The copy worth keeping
-/// is the first one — the one from before this product touched the file at all —
-/// and a second write on the same day would otherwise replace it with a copy
-/// that already carries our line.
+/// **No backup is ever written over, and none is ever skipped** (review row
+/// R4-4). The copy worth keeping most is the first one — from before this
+/// product touched the file at all — so the day's name is never replaced; but
+/// the rule used to *stop there*, and a second write on the same day therefore
+/// took no copy at all. That is precisely the write with something to lose:
+/// whatever the reader typed into their profile between the two. The taken name
+/// counts up instead, so every write into somebody else's file has a copy of
+/// what that file was a moment before it.
 ///
 /// The line ending is the file's own: a profile written with LF keeps LF, and a
 /// file with neither gets CRLF, which is what every Windows editor puts in a
@@ -1222,10 +1271,8 @@ pub fn add_to_profile(
     }
     let backup = match existing.as_deref() {
         Some(bytes) => {
-            let path = backup_path(profile, at);
-            if !path.exists() {
-                std::fs::write(&path, bytes)?;
-            }
+            let path = free_backup_path(profile, at);
+            std::fs::write(&path, bytes)?;
             Some(path)
         }
         None => {
@@ -1258,7 +1305,21 @@ pub fn add_to_profile(
     }
     bytes.extend_from_slice(line.as_bytes());
     bytes.extend_from_slice(newline);
-    std::fs::write(profile, &bytes)?;
+    // **Replaced atomically, not truncated and rewritten** (review row R4-4).
+    // `std::fs::write` opens the reader's `$PROFILE` with `TRUNCATE_EXISTING`
+    // and then writes — so between those two the file is empty, and a machine
+    // that loses power there, or a `PowerShell` that starts there, meets a
+    // profile with nothing in it. It is the one file this product writes that
+    // belongs to somebody else, which makes it the last one that should be
+    // written the least safe way available.
+    //
+    // The temp file is a sibling, which is what makes the rename atomic: it is
+    // on the profile's own volume by construction, and `bt_persist::atomic_write`
+    // is the same temp-then-rename this product's own documents go through. A
+    // failure at any step leaves the profile exactly as it was, which is what
+    // the backup above is otherwise for.
+    bt_persist::atomic_write(profile, &bytes)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(ProfileWrite {
         profile: profile.to_path_buf(),
         backup,
@@ -1271,6 +1332,33 @@ pub fn add_to_profile(
 /// (`seed::format_iso8601_utc`): it has no time-zone source, and a backup whose
 /// name disagreed with the timestamp beside it in Explorer by a few hours is a
 /// smaller problem than one whose name was invented from a guess.
+/// The first `<profile>.bak-<YYYYMMDD>` name that is free, counting up.
+///
+/// The day alone would collide on the second write of one day (review row
+/// R4-4), and a collision there used to mean no copy at all. Counting up keeps
+/// the first copy of the day where somebody looking for "before Folio touched
+/// this" will find it, and still gives every later write one of its own.
+///
+/// The count is bounded: a hundred writes into one profile in one day is not a
+/// reader, and the hundred-and-first is given the plain day name — which by then
+/// exists, so the copy replaces one from earlier the same day rather than
+/// growing the folder without end.
+fn free_backup_path(profile: &Path, at: std::time::SystemTime) -> PathBuf {
+    let base = backup_path(profile, at);
+    if !base.exists() {
+        return base;
+    }
+    for attempt in 1..100u32 {
+        let mut name = base.file_name().unwrap_or_default().to_os_string();
+        name.push(format!("-{attempt}"));
+        let candidate = base.with_file_name(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    base
+}
+
 fn backup_path(profile: &Path, at: std::time::SystemTime) -> PathBuf {
     let seconds = match at.duration_since(std::time::UNIX_EPOCH) {
         Ok(delta) => i64::try_from(delta.as_secs()).unwrap_or(i64::MAX),
@@ -1364,7 +1452,16 @@ impl Offer {
 #[must_use]
 pub fn offer_for(profile: &Path) -> Offer {
     match std::fs::read_to_string(profile) {
-        Ok(text) if profile_declares_integration(&text) => Offer::Silent,
+        Ok(text) if profile_declares_integration(&text) => {
+            // **And the file that line points at is checked** (review row
+            // R4-6). A declared integration is only an integration while the
+            // script it names is this build's; the repair is idempotent and
+            // costs one read per run. Its answer is not consulted — see
+            // [`powershell_script_repaired`] for why a directory that cannot be
+            // written is reported by the reader's own shell rather than here.
+            let _ = powershell_script_repaired();
+            Offer::Silent
+        }
         // A profile that is not there is a profile with no line in it, which is
         // the case this offer was written for: a reader who has never had one.
         Ok(_) | Err(_) => Offer::Owed(profile.to_path_buf()),
@@ -2921,20 +3018,162 @@ mod tests {
         );
     }
 
-    /// The first backup of a day is the one worth keeping: a second write must
-    /// not overwrite the pristine copy with one that already carries our line.
+    /// RED (review row R4-4) — **the first backup of a day is kept, and the
+    /// second write still takes one.**
+    ///
+    /// Half of this test is the old one and stays: the pristine copy — from
+    /// before this product touched the file at all — is not replaced by one that
+    /// already carries our line. What was missing is the other half. The rule
+    /// used to be "a backup already taken today is not overwritten", implemented
+    /// as *no backup at all*, so the second write into somebody's `$PROFILE`
+    /// went in with no copy of what they had typed into it since the first.
+    ///
+    /// Red gate: put back the `if !path.exists()` around the copy and the second
+    /// write's `backup` is the first one's path, holding the wrong bytes.
     #[test]
-    fn a_backup_already_taken_today_is_not_overwritten() {
+    fn a_second_write_the_same_day_keeps_the_first_copy_and_takes_one_of_its_own() {
         let documents = temp_dir("twice");
         let profile = documents.join("PowerShell").join(PROFILE_LEAF);
         std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
         std::fs::write(&profile, "# mine\n").unwrap();
+
         let first = add_to_profile(&profile, LINE, EPOCH_DAY)
             .expect("the write")
             .backup
             .expect("a backup");
-        add_to_profile(&profile, LINE, EPOCH_DAY).expect("the second write");
-        assert_eq!(std::fs::read_to_string(&first).unwrap(), "# mine\n");
+        // What the reader typed between the two writes, which is exactly what a
+        // skipped second backup loses.
+        let between = std::fs::read_to_string(&profile).unwrap() + "# and this is mine too\n";
+        std::fs::write(&profile, &between).unwrap();
+
+        let second = add_to_profile(&profile, LINE, EPOCH_DAY)
+            .expect("the second write")
+            .backup
+            .expect("a second backup");
+
+        assert_ne!(first, second, "two writes, two copies");
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            "# mine\n",
+            "the pristine copy is never written over"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&second).unwrap(),
+            between,
+            "and the second copy is the file as it stood a moment before"
+        );
+    }
+
+    /// RED (review row R4-4) — **the profile is never observably empty.**
+    ///
+    /// `std::fs::write` truncates and then writes, so between those two calls the
+    /// reader's `$PROFILE` is a zero-byte file — and this is the one file this
+    /// product writes that belongs to somebody else's shell. The property is
+    /// asserted the only way it can be from one thread: the write goes through
+    /// `bt_persist::atomic_write`, so what appears at the profile's own name is a
+    /// rename of a file that was already complete, and no temp file survives it.
+    ///
+    /// Red gate: put `std::fs::write(profile, &bytes)?` back and the directory
+    /// listing is the same — but `add_to_profile` no longer goes through the
+    /// atomic path, which the second assertion pins by name.
+    #[test]
+    fn writing_the_profile_leaves_no_half_written_file_in_the_folder() {
+        let documents = temp_dir("atomic");
+        let profile = documents.join("PowerShell").join(PROFILE_LEAF);
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, "# mine\n").unwrap();
+
+        add_to_profile(&profile, LINE, EPOCH_DAY).expect("the write");
+
+        let folder = profile.parent().unwrap();
+        let leftovers: Vec<String> = std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp file survives: {leftovers:?}");
+        assert!(
+            std::fs::read_to_string(&profile).unwrap().contains(LINE),
+            "and the line is in the file the shell will read"
+        );
+
+        let source = include_str!("shell_integration.rs");
+        let body = source
+            .split_once("pub fn add_to_profile(")
+            .expect("the writer")
+            .1;
+        let end = body.find("\n}\n").expect("its end");
+        assert!(
+            body[..end].contains("bt_persist::atomic_write(profile"),
+            "the profile is replaced atomically, not truncated and rewritten"
+        );
+        assert!(
+            !body[..end].contains("std::fs::write(profile"),
+            "and the truncating write is gone"
+        );
+    }
+
+    /// RED (review row R4-6) — **an installed script that is not this build's is
+    /// rewritten, and a `$PROFILE` that declares one is what triggers the
+    /// comparison.**
+    ///
+    /// Two halves, because the defect is in the join between them. The first is
+    /// the repair itself, over a temp directory rather than the machine's own
+    /// `%APPDATA%`: a stale copy (an upgrade), a truncated one (a half-finished
+    /// write) and a missing one (a cleaner) are one finding and get one answer.
+    /// The second is that anything ever asks — the repair existed for bash,
+    /// which names its script on every spawn, and had no caller at all for
+    /// PowerShell, whose script is named by a line in a file written once. So an
+    /// upgraded `folio.ps1` was never noticed and `offer_for` went on answering
+    /// `Silent`, which is this build saying "installed".
+    ///
+    /// Red gate: remove the `powershell_script_repaired()` call from
+    /// `offer_for`'s first arm and the second half fails; make
+    /// `install_script_at` return early whenever the file merely exists and the
+    /// first half fails.
+    #[test]
+    fn an_installed_script_that_is_not_this_builds_is_rewritten() {
+        let directory = temp_dir("stale-script");
+        let name = "folio.ps1";
+        let shipped = "# this build\n";
+
+        // Nothing there at all.
+        let path = install_script_at(&directory, name, shipped).expect("written");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), shipped);
+
+        // An older build's copy, and a truncated one.
+        for existing in ["# an older build\n", ""] {
+            std::fs::write(&path, existing).unwrap();
+            install_script_at(&directory, name, shipped).expect("repaired");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                shipped,
+                "an installed copy that is not this build's is replaced by this build's"
+            );
+        }
+
+        // And one that is already right is left alone rather than rewritten
+        // under an open shell that may be reading it.
+        std::fs::write(&path, shipped).unwrap();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        install_script_at(&directory, name, shipped).expect("unchanged");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before,
+            "an identical file is read, not written"
+        );
+
+        // The second half: a profile that declares the integration is what asks.
+        let source = include_str!("shell_integration.rs");
+        let body = source
+            .split_once("pub fn offer_for(profile: &Path) -> Offer {")
+            .expect("the offer")
+            .1;
+        let end = body.find("\n}\n").expect("its end");
+        assert!(
+            body[..end].contains("powershell_script_repaired()"),
+            "a declared integration is compared against what this build ships"
+        );
     }
 
     /// What the two constants above stand for: one day, and one line.
