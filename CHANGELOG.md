@@ -4,7 +4,7 @@ All notable changes to Folio are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.2.3-preview (unreleased)
+## 0.2.3-preview — 2026-09-07
 
 Most of this release is about reading what a pane is showing, and about the
 panes that were left out. Command Prompt carries command marks and its working
