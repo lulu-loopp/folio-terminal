@@ -7671,7 +7671,7 @@ v3 那张卡按本节其余各段的样子落地进了未发布的 0.2.2,读者�
 - **卡上第七行会让它重新开始滚。** 参照窗上 v4 是 273 在 308 里,一行 42;再加一行就是 315 在 308。地方是有的(548 高的窗里卡才 445),但只剩一行深。今天什么都不用定,记在这里是为了下一行是有意加的。
 - **一次部分完成之后,卡上那些行的最终状态只在设置页可见。** 这是有意的(⑤),但意味着一个四行全开、其中一行失败的读者,拿到的是一张失败卡加三行静默;哪三行成了要去设置页数。给成功也发卡会把这件事说全,代价是新装第一分钟里的四张卡。
 
-### 7.57 `cmd.exe` 的命令轨终于有刻度了:一根没有钩子的壳靠格式串搬运 `A` 与 `D`,`B` 在没有 `C` 的地方仍然被拒(2026-09-07,已落地;`crates/bt-app/src/shell_integration.rs`、`crates/bt-app/src/profiles.rs`、`crates/bt-app/src/i18n.rs`、`crates/bt-term/src/{session,command_marks}.rs`、`crates/bt-term/tests/shell_integration_cmd.rs`(新)、`docs/shell-integration.md`)
+### 7.57 `cmd.exe` 的命令轨终于有刻度了:一根没有钩子的壳靠格式串搬运 `A` 与 `D`,`B` 在没有 `C` 的地方仍然被拒;一条只被 `A` 开过的记录在卡上说「在提示符上」而不是「运行中」(2026-09-07,已落地;`crates/bt-app/src/shell_integration.rs`、`crates/bt-app/src/profiles.rs`、`crates/bt-app/src/i18n.rs`、`crates/bt-app/src/cmdrail.rs`、`crates/bt-term/src/{session,command_marks}.rs`、`crates/bt-term/tests/shell_integration_cmd.rs`(新)、`docs/shell-integration.md`)
 
 在今天之前,一个 Command Prompt(`cmd.exe`)窗格的命令轨是空的——跑了多少条命令都没有一格可以数、没有一格可以按,`Ctrl+Shift+↑`/`↓` 无处可去。每一个其它内置档案都能被交一份脚本;`cmd` 不能。
 
@@ -7711,7 +7711,17 @@ $e]133;D$e\$e]7;file:///$P$e\$e]133;A$e\<读者自己的 PROMPT>
 
 旧钉 `a_prompt_that_can_never_send_c_must_not_send_a_or_b_either` 被 `a_prompt_only_shell_gets_its_ticks_and_keeps_the_cursor_heuristic` 替换,旁边是 `crates/bt-term/tests/shell_integration_cmd.rs` 里一趟通过真 `cmd.exe` 的往返。
 
-#### ⑧ 挂账
+#### ⑧ 一条只被 `A` 开过的记录不叫「运行中」
+
+⑥ 把开记的位置从 `B` 移到 `A`,每一个提示符一画出来,账本里就多一条记录,命令轨上就多一格刻度。这条记录的 `finished` 是 `None`——它确实没有结束,因为它根本还没开始。`CommandMark::is_running()` 的判据是 `finished.is_none()`,于是答「是」;`peek_text` 在命中这条分支之后把正文包进 `rail_glance_running`,卡上就印出「运行中 · 命令」。两条规矩各自都没说错:记录确实没有结束标记,空缺词确实是账本给不出文字时该说的话。问题是合起来说的那句——「有一条命令正在跑」——从来没发生过。
+
+**判词:一条只被 `A` 开过、没见过 `C`、也没收到过任何输入的记录,卡上说的状态是「在提示符上」,不是「有条命令在跑」。** 判据就是 `CommandMark` 自己那条既有的谓词——`executed` 无、`finished` 无、`command_text` 空。它原本只有一个读者:重画的提示符认领空稿那条规矩(⑥ 与 `open_command` 里的那条谓词)。现在它有第二个读者——`peek_text` 在走进 `is_running` 分支之前先问一句这条记录是不是空白草稿;是,就跳过「运行中 ·」前缀,换成一个自己的类别词。谓词不复制,只从 `fn` 可见性变成 `pub fn`,并改名 `is_at_the_prompt`:两处读者说的都是这一句,而「在提示符上」比「空白草稿」更准确地说出这条记录**是什么**,不只是它**缺了什么**。
+
+这不是 `cmd` 独有的毛病,只是在 `cmd` 上先被看见。任何一根发 `A` 的壳——PowerShell、Git Bash 都在内——在读者还没敲字的那一刻都有这样一条记录。所以修的是卡(`cmdrail.rs` 的 `peek_text`),不是 `cmd` 那扇门。被 Ctrl+C 丢掉的那一行不在此列:它带着读者真敲过的字,`command_text` 不为空,`is_at_the_prompt` 答「否」,照旧走原来的空缺词分支。
+
+卡的写法:新字面量 `Text::RailPeekAtPrompt`,和 `命令`(command)、`行`(line)同一类——类别而不是引文,小写,走暗一档的墨(muted),不加「运行中 ·」前缀。红证:`crates/bt-term/tests/shell_integration_cmd.rs` 里那趟真 `cmd.exe` 往返,断言最后一条记录 `is_at_the_prompt`;`crates/bt-app/src/cmdrail.rs` 的卡测断言这一格的正文是类别词、`muted` 为真、不含 `running` / `运行中`。
+
+#### ⑨ 挂账
 
 Clink 会同时供上 `C` 和一个真的退出码,Folio 仍然不要求装它。
 

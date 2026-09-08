@@ -161,5 +161,26 @@ fn command_prompt_marks_every_prompt_and_reports_its_working_directory() {
          `PROMPT` cannot read ERRORLEVEL"
     );
 
+    // **The prompt this shell is standing at is a record that has been told nothing
+    // else** (user report 2026-09-07, §7.57 ⑧). It is what the rail's last tick
+    // points at, and what the glance card has to describe: `finished` is `None`
+    // there, so `is_running` answers yes and the card said `running · command` over
+    // a prompt nobody had typed into.
+    //
+    // Red gate: drop `is_at_the_prompt` from `CommandMark` and there is no predicate
+    // that tells this record from a command in flight — the card's own test then has
+    // nothing to ask, and the card is back to reporting a command that never began.
+    let last = marks.last().expect("three prompts, three records");
+    assert!(
+        last.is_at_the_prompt(),
+        "the last prompt has no `C`, no `D` and no typed line: {last:?}"
+    );
+    assert!(
+        marks[..marks.len() - 1]
+            .iter()
+            .all(|mark| !mark.is_at_the_prompt()),
+        "and every prompt before it was ended by the next one's `D`"
+    );
+
     std::fs::remove_dir(&directory).unwrap();
 }

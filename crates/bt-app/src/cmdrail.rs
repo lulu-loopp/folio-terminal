@@ -240,6 +240,15 @@ pub const PEEK_RISE_LOGICAL_PX: f32 = 8.0;
 pub fn peek_empty_text() -> &'static str {
     crate::i18n::Text::RailPeekEmptyCommand.text()
 }
+/// What the card says about the tick that belongs to the prompt the shell is standing at right now
+/// (user report 2026-09-07, §7.57 ⑧).
+///
+/// Its sibling above, and drawn the same way for the same reason: a state is a *category*, not a
+/// quotation of a command that does not exist yet.
+#[must_use]
+pub fn peek_at_prompt_text() -> &'static str {
+    crate::i18n::Text::RailPeekAtPrompt.text()
+}
 /// How many times [`resolve`] may lay the rail out again before it answers.
 ///
 /// The mock-up's own `depth < 2` (8443, 8449), kept as a number because the
@@ -1674,10 +1683,23 @@ pub fn peek_text(
         }
         Target::Command(_) => {
             let text = mark.map_or("", |mark| mark.command_text.trim());
-            if text.is_empty() {
-                (peek_empty_text().to_owned(), true)
-            } else {
-                (text.replace('\n', " "), false)
+            match text {
+                // **The prompt the shell is standing at is not a command with no text.** A record
+                // opened by `A` and told nothing since carries no `D`, so `is_running` — whose whole
+                // test is `finished.is_none()` — answers yes, and the card used to read
+                // *running · command* over a prompt nobody had typed a character into (user report
+                // 2026-09-07, on a `cmd` pane, whose integration is `A` and `D` alone). Both halves
+                // were true and the sentence they made was not. This is the same ledger predicate
+                // the redrawn-prompt reclaim reads, asked here for the same state.
+                //
+                // Not a `cmd` rule: every shell that sends `A` has such a record between commands.
+                // A line abandoned with Ctrl+C is not one of them — it carries the text the reader
+                // typed, which is a fact about a real line, and it takes the arms below.
+                "" if mark.is_some_and(CommandMark::is_at_the_prompt) => {
+                    (peek_at_prompt_text().to_owned(), true)
+                }
+                "" => (peek_empty_text().to_owned(), true),
+                text => (text.replace('\n', " "), false),
             }
         }
     };
@@ -1698,8 +1720,9 @@ pub fn peek_text(
         return (crate::i18n::rail_glance_latest(&count, &body), muted);
     }
     // *"running · {cmd}"* — a command with no `D` yet. Only ever a command: a
-    // matched line has no lifetime of its own to report.
-    if mark.is_some_and(CommandMark::is_running) {
+    // matched line has no lifetime of its own to report. And never the prompt the
+    // shell is standing at, which has no `D` because it has not begun.
+    if mark.is_some_and(|mark| mark.is_running() && !mark.is_at_the_prompt()) {
         return (crate::i18n::rail_glance_running(&body), muted);
     }
     // The quoted error, on its own line. Only for a command the shell called
@@ -2492,6 +2515,60 @@ mod tests {
             centre(&single.ticks[2]),
         );
         assert_eq!(stale.expanded, None);
+    }
+
+    /// PIN (user report 2026-09-07, §7.57 ⑧) — **the tick that belongs to the
+    /// prompt the shell is standing at says so, and does not say a command is
+    /// running.**
+    ///
+    /// Reported on a Command Prompt pane, whose integration is `A` and `D` alone,
+    /// so its every prompt opens a record the moment it is drawn; but the record
+    /// is the same in every shell that sends `A`, which is why the fix is here and
+    /// not at that profile's door. The line abandoned with `Ctrl+C` is the control:
+    /// it has no `D` either, and it *does* carry what the reader typed.
+    ///
+    /// MUTATION: ask `is_running` alone again — either at the prefix or at the
+    /// empty-text arm — and the card reads `running · command` over a prompt
+    /// nobody has typed into.
+    #[test]
+    fn the_tick_on_the_prompt_the_shell_is_standing_at_does_not_claim_a_command_is_running() {
+        let at_prompt = CommandMark {
+            executed: None,
+            finished: None,
+            command_text: String::new(),
+            exit_code: None,
+            ..ok(1)
+        };
+        let abandoned = CommandMark {
+            executed: None,
+            finished: None,
+            command_text: "cargo build".to_owned(),
+            exit_code: None,
+            ..ok(2)
+        };
+        let marks = vec![at_prompt, abandoned];
+        let tick = |mark: u64| Tick {
+            target: Target::Command(CommandMarkId(mark)),
+            members: 1,
+            matched: 0,
+            commanded: 1,
+            signal: Signal::Command,
+            slot: 0,
+            sub: false,
+            rect: [0.0; 4],
+        };
+        let (body, muted) = peek_text(&tick(1), &marks, None, None);
+        assert_eq!(body, peek_at_prompt_text());
+        assert!(muted, "a state is a category, drawn like the honest gap");
+        assert!(
+            !body.contains("running"),
+            "nothing has begun, so nothing is running: {body:?}"
+        );
+        assert_eq!(
+            peek_text(&tick(2), &marks, None, None),
+            ("running · cargo build".to_owned(), false),
+            "a line the reader actually typed is unchanged, `D` or no `D`"
+        );
     }
 
     /// The card's four readings.

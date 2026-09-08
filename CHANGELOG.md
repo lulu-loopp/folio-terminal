@@ -23,6 +23,14 @@ All notable changes to Folio are recorded here. The format follows
   name are still left alone: a folder inside the distribution, such as
   `/home/you` or `/usr/local/bin`, and `~` in a WSL pane, which is the same
   folder said another way.
+- **The tick on the prompt you are typing at no longer says a command is
+  running.** Every prompt gets a tick the moment it is drawn, and hovering the
+  newest one — the prompt with nothing typed into it yet — read `running ·
+  command`. Nothing was running and nothing had been typed: the record had no
+  ending because it had no beginning. It now says `at the prompt`. Reported in a
+  Command Prompt pane, where the shell reports its prompts and nothing else, but
+  the tick was the same in every shell. A line you started and abandoned with
+  `Ctrl+C` still shows what you typed.
 
 ## 0.2.3-preview — 2026-09-07
 
