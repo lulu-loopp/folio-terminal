@@ -156,13 +156,13 @@ R5-2, R5-3, R5-4, R5-5, R5-6, R5-7, R5-8.
 
 Why together: all seven are a fact that is window-wide or transcript-wide being computed on the focused leaf, the visible plane or the newest match. The design is to move each of these onto the road that already visits every leaf of every tab, and to key marks and search on the identity the other consumer uses rather than on a coordinate that looks close enough. R3-10 is the eighth row of this family and is filed under T6 with the rest of that slice.
 
-### T6 `fix/shell-integration-scripts` (in flight)
+### T6 `fix/shell-integration-scripts` (merged, `96a3401`; left open: `folio.zsh` has not run on a real zsh, `shopt login_shell` stays off for a login profile, a `PROMPT_COMMAND` element appended mid-session takes the next mark)
 
 R3-5, R3-6, R3-7, R3-8, R3-9, R3-10, R3-11, R3-12, R3-13, R3-14, R3-15, R3-16, R3-17, R3-18.
 
 Why together: the injected scripts and the sequences they emit assume one shell, one prompt shape and one spelling of a directory, and every row is a shell or a directory that does not match the assumption. The design is to ask the shell what it is rather than assume it, and to accept on the reading side the spellings the emitting side genuinely cannot encode.
 
-### T7 `fix/platform-boundary` (first half in flight as `fix/platform-boundary-summon-and-pipes`: R2-1, R2-3, R2-5, R2-9, R2-11, R2-14, R2-20, R2-21, R2-23, R2-25, R2-26, R2-27, R2-28; second half queued: R2-2, R2-4, R2-6, R2-7, R2-8, R2-15, R2-17, R2-18, R2-19, R2-22)
+### T7 `fix/platform-boundary` (first half in flight as `fix/platform-boundary-summon-and-pipes`: R2-1, R2-3, R2-5, R2-9, R2-11, R2-14, R2-20, R2-21, R2-23, R2-25, R2-26, R2-27, R2-28; second half in flight as `fix/platform-boundary-pty-video-render`: R2-2, R2-4, R2-6, R2-7, R2-8, R2-15, R2-17, R2-18, R2-19, R2-22)
 
 R2-1, R2-2, R2-3, R2-4, R2-5, R2-6, R2-7, R2-8, R2-9, R2-11, R2-14, R2-15, R2-17, R2-18, R2-19, R2-20, R2-21, R2-22, R2-23, R2-25, R2-26, R2-27, R2-28.
 
