@@ -46,8 +46,8 @@ caveat 是 recorder 仍不是完整终端前端：当前自动回答 DSR 6n，�
 `pwsh-daily` 9），全部是可打印 ASCII 换可打印 ASCII，文件长度、事件数、时间戳、长度前缀与全部控制序列
 一字未动；回放得到的 live grid 与原始录制逐行相同，只是那几处字母不同。
 
-替换的类别与逐份清单记在 `corpus/PROVENANCE.md`（不写原值）。回归门是
-`crates/bt-corpus/tests/corpus_privacy.rs::no_recording_carries_a_person`：它扫描 `corpus/` 下**全部**
+替换的类别与逐份清单记在 `tests/corpus/PROVENANCE.md`（不写原值）。回归门是
+`crates/bt-corpus/tests/corpus_privacy.rs::no_recording_carries_a_person`：它扫描 `tests/corpus/` 下**全部**
 `.btcr`，既扫原始字节，也扫把 ConPTY 换行还原后的逻辑字节流，任何身份重新出现都判红。
 
 ## 支撑数据

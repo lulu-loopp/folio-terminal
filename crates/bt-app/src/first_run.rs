@@ -683,7 +683,7 @@ const PADDING_TOP_LOGICAL_PX: f32 = 20.0;
 const PADDING_X_LOGICAL_PX: f32 = 22.0;
 const PADDING_BOTTOM_LOGICAL_PX: f32 = 16.0;
 
-/// The Folio mark on the header line — `design/assets/app-icon/folio.ico`, the
+/// The Folio mark on the header line — `assets/app-icon/folio.ico`, the
 /// icon `build.rs` links into `folio.exe` as group 1.
 const MARK_LOGICAL_PX: f32 = 22.0;
 const MARK_GAP_LOGICAL_PX: f32 = 10.0;
@@ -1180,7 +1180,7 @@ fn clipped(rect: [f32; 4], clip: [f32; 4]) -> Option<[f32; 4]> {
 /// with the icon they just double-clicked. Restating the drawing's geometry in
 /// Rust would be a second source free to drift from the file, so the file is
 /// what is read.
-const FOLIO_ICO: &[u8] = include_bytes!("../../../design/assets/app-icon/folio.ico");
+const FOLIO_ICO: &[u8] = include_bytes!("../../../assets/app-icon/folio.ico");
 
 /// One entry of `folio.ico`, decoded.
 struct MarkEntry {
@@ -1484,7 +1484,7 @@ pub fn build(
 }
 
 /// The tile's corner radius as a fraction of its side — `GROUND_RADIUS` in
-/// `design/assets/app-icon/make-folio-ico.py`, which is the file that draws
+/// `assets/app-icon/make-folio-ico.py`, which is the file that draws
 /// `folio.ico`.
 const MARK_TILE_RADIUS_UNITS: f32 = 0.22;
 
@@ -2791,7 +2791,7 @@ mod tests {
     /// PIN (v4 §1, user ruling 2026-09-06) — **the header is the shipped icon
     /// and the greeting, and the greeting stands clear of the mark.**
     ///
-    /// `design/assets/app-icon/folio.ico` is what `build.rs` links into
+    /// `assets/app-icon/folio.ico` is what `build.rs` links into
     /// `folio.exe`, so the first thing a reader sees agrees with the icon they
     /// just double-clicked. There is no third line: v4 dropped the muted
     /// sentence under the title (user ruling), so the header is two things.

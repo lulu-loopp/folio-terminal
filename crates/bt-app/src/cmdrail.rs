@@ -1,5 +1,5 @@
 //! **The command marks rail** — the column of ticks down a terminal pane's right
-//! edge, one per command the shell reported (`design/ui-mockup.html` 1346-1383
+//! edge, one per command the shell reported (`docs/design/ui-mockup.html` 1346-1383
 //! and 4603-4707; `docs/DESIGN.md` §7.1.5c).
 //!
 //! # What it is, in the one sentence the ruling gives it

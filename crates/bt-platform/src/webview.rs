@@ -18,7 +18,7 @@
 //! and that is the thread that owns the message pump, the window and the visual
 //! tree. So the queue is an `Rc<RefCell<_>>` rather than a channel — the same
 //! shape, and for the same reason, as the W0′ probe's evidence table
-//! (`spikes/webview2-w0/src/host.rs`).
+//! (`docs/plans/web-preview/w0-evidence.md`).
 //!
 //! # Nothing here blocks
 //!

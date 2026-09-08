@@ -6,11 +6,11 @@
 今天不能公开。阻塞项按类分七道门;每道门是一片施工单,可并行,全部绿再定日期。时机裁决(用户):打磨期跑一轮后发;发布前一天零在飞线时做历史重写(②:filter-repo 去 `Claude-Session` trailer、邮箱 `weiyishi@umich.edu`→`weiyishi197@gmail.com`(用户裁 2026-08-28;`git config user.email` 已就地改为此,发布前 filter-repo 把历史全部改写为它)、`Co-Authored-By` 留)。
 
 ## 门 0 清洁(必须)
-- `corpus/claude-code-session.btcr`、`cargo-build-flood.btcr` 含真实姓名/邮箱/组织/用户名/安装路径(Codex 错1):**重录或脱敏重写**,并让 `corpus/README.md` 的「已做环境替换」成真;加一条红门:`rg -a` 扫全部跟踪文件不得命中邮箱/`C:\Users\`/`D:\Developer\`。
+- `tests/corpus/claude-code-session.btcr`、`cargo-build-flood.btcr` 含真实姓名/邮箱/组织/用户名/安装路径(Codex 错1):**重录或脱敏重写**,并让 `tests/corpus/README.md` 的「已做环境替换」成真;加一条红门:`rg -a` 扫全部跟踪文件不得命中邮箱/`C:\Users\`/`D:\Developer\`。
 - `scripts/dev/width-acceptance.ps1:2`、`ui-probe.ps1:672` 绝对路径→相对仓根;`folio.bash:109-111` 示例用户名换通用。
 - `.gitignore` 加 `.env*`、`*.pfx/*.p12/*.pem/*.key`、`.vs/`、`.vscode/`,并忽略整个 `.claude/`(现只忽略 worktrees)。
 - 大文件签收表(Codex 漏1):`vendor/alacritty_terminal/tests/ref/*/grid.json`(19MB+9.7MB)、`assets/fonts/NotoColorEmoji_WindowsCompatible.ttf`(10.7MB)、两份 ConPTY nupkg(1.7MB×2)——逐项 keep/remove 写理由(倾向:测试 JSON 留(vendor 原样)、字体留、nupkg 留并补微软 MIT 文本)。
-- `design/`、`test-assets/`、`corpus/` 各补 `PROVENANCE.md`(自制/上游/生成物 + 许可)。
+- `docs/design/`、`tests/assets/`、`tests/corpus/` 各补 `PROVENANCE.md`(自制/上游/生成物 + 许可)。
 - 最终历史跑 gitleaks/trufflehog 全历史扫描,结果入库。
 
 ## 门 1 法律(必须)

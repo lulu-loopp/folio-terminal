@@ -6,6 +6,7 @@ use bt_term::DualPlaneSession;
 fn corpus_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
+        .join("tests")
         .join("corpus")
         .join(name)
 }

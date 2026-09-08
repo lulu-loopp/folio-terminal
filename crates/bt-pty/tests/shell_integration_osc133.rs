@@ -125,8 +125,8 @@ fn script_path() -> PathBuf {
 /// resolved through the product's own `resolve_powershell_seven` and, when that
 /// answers `None`, the arm is skipped with a line on stderr saying so. Asking the
 /// resolver rather than composing a path is the 2026-08-21 lesson from `$PROFILE`
-/// (`docs/HANDOFF-2026-08-21.md` §5): whether a machine has something is a question
-/// for the machine.
+/// (`docs/handoff/HANDOFF-2026-08-21.md` §5): whether a machine has something is
+/// a question for the machine.
 fn generations() -> Vec<String> {
     let mut shells = vec![WINDOWS_POWERSHELL.to_owned()];
     match resolve_powershell_seven(&SystemShellEnvironment) {

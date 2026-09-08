@@ -11,7 +11,7 @@ fn nz(value: u32) -> NonZeroU32 {
 #[test]
 fn recorded_width_corpus_drives_legacy_and_mode_2027_oracles_byte_by_byte() {
     let cases: Vec<Value> =
-        serde_json::from_str(include_str!("../../../corpus/cjk-width-cases.json")).unwrap();
+        serde_json::from_str(include_str!("../../../tests/corpus/cjk-width-cases.json")).unwrap();
     for case in cases {
         let id = case["id"].as_str().unwrap();
         let text = case["text"].as_str().unwrap();

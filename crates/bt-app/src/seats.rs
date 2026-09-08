@@ -39325,7 +39325,7 @@ mod tests {",
     }
 
     /// **RED GATE — 卡上/缝间的动词不随列表滚动摇摆**(§7.1.6k 挂账,
-    /// `docs/HANDOFF-2026-08-21.md` 「§7.1.6k 卡上/缝间动词随滚动摇摆」;
+    /// `docs/handoff/HANDOFF-2026-08-21.md` 「§7.1.6k 卡上/缝间动词随滚动摇摆」;
     /// §7.1.6b⁗ 「没做的,如实记」③ 是同一条的文字记录).
     ///
     /// The backlog line is the whole specification: a hand parked below a

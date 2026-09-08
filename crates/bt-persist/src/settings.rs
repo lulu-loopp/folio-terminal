@@ -113,9 +113,9 @@ use serde::{Deserialize, Serialize};
 /// `powershell_integration_offer` reached `main` first and took v18, and this table is
 /// walked one step at a time (`crate::migrate::migrate_value`), so a branch cannot reserve
 /// a number whose step it does not also build. The standing rule
-/// (`docs/HANDOFF-2026-08-21.md` §2) settles it the way it was written for: whichever
-/// merges second yields, and yielding is renaming the step rather than renumbering a file
-/// anybody already has.
+/// (`docs/handoff/HANDOFF-2026-08-21.md` §2) settles it the way it was written for:
+/// whichever merges second yields, and yielding is renaming the step rather than
+/// renumbering a file anybody already has.
 ///
 /// **v21 carries `line_wrapping`**, whether a logical line too long for the pane wraps onto the
 /// next row or is flattened onto one row and read through a horizontal window

@@ -4,6 +4,21 @@ All notable changes to Folio are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- **The repository tree is nine directories.** Fixtures moved under `tests/`
+  (`tests/corpus/` for the recorded sessions, `tests/assets/` for the documents
+  and videos the preview tests open), the two CI helpers under `scripts/ci/`,
+  the design prototypes and the icon round under `docs/design/` with the shipped
+  mark and its generators under `assets/app-icon/`, and the August handoff under
+  `docs/handoff/`. The spike workspaces left the tree — they were research
+  records in no build graph, `docs/spikes/README.md` says where to read them in
+  history, and the two files the program actually needed from them are now
+  `assets/mitex-specs/` and `tests/corpus/`. `docs/BUILDING.md` lists what each
+  directory holds. Nothing about the program changed.
+
 ## 0.2.3-preview — 2026-09-07
 
 Most of this release is about reading what a pane is showing, and about the

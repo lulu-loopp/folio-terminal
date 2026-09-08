@@ -65,7 +65,7 @@ v2 已实质修掉首轮多数问题：应用级 Quit 事务、最终写盘失�
 - `DESIGN.md` §7.1.6i 明写独 pane 右上角常驻角落幽灵 `⌄`，静息墨量 `.45`，点击或 hover 250ms 开同一张 pane 菜单；搜索胶囊占位时才整体让位。
 - `Seats::seat_wears_ghost` 只让没有 pane head 的 Terminal seat 戴幽灵；画与命中共用这一谓词。
 - `hit_pane_ghost` 返回的就是 `ChromeTarget::PaneMenu(seat)`；`pane_ghost_geometry` 同时供画、命中和测试使用。
-- 代码测试钉住了独 pane 命中 pane menu、分屏 pane 不重复戴幽灵、静息墨为 `0.45`，以及搜索胶囊打开时画与命中一起让位。`docs/HANDOFF-2026-08-21.md` 也把 `78d3224` 记为该落地提交。
+- 代码测试钉住了独 pane 命中 pane menu、分屏 pane 不重复戴幽灵、静息墨为 `0.45`，以及搜索胶囊打开时画与命中一起让位。`docs/handoff/HANDOFF-2026-08-21.md` 也把 `78d3224` 记为该落地提交。
 
 所以首轮 #11 中“独 pane 根本没有 `⌄` 可按”确为错误事实前提。F1 把 `Move pane to new window` 加进共享 pane 菜单后，分屏 pane 由 head `⌄` 抵达，独 pane 由 ghost `⌄` 抵达；要求 F1 因发现性而捆绑完成终端右键动词段，不再构成阻断。
 

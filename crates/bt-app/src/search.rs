@@ -1,5 +1,5 @@
 //! **In-pane search** — the capsule riding a terminal pane's top-right corner, the hits it lights
-//! in the text, and the walk between them (`design/ui-mockup.html` 1493-1551 and 8505-8737;
+//! in the text, and the walk between them (`docs/design/ui-mockup.html` 1493-1551 and 8505-8737;
 //! `docs/DESIGN.md` §7.1.5d).
 //!
 //! # What it is, in the sentence the ruling gives it

@@ -6587,7 +6587,7 @@ mod tests {
     /// PIN (W2 slice 5) - **`.htm` and `.html` are one object in every table.**
     ///
     /// The account this pays was opened by the head's hand-off arrow and
-    /// recorded in `docs/HANDOFF-2026-08-21.md` section 5, item 18:
+    /// recorded in `docs/handoff/HANDOFF-2026-08-21.md` section 5, item 18:
     /// the path-side predicate has read both spellings since the day it was
     /// written (Windows registers them against the same handler) while this
     /// table listed only `html`. So a `.htm` file drew the "no preview for this
@@ -7802,7 +7802,7 @@ mod tests {
     }
 
     /// PIN (user report, 2026-08-25, second pass: two whole families in
-    /// `test-assets/latex-render-check.md` stood as literal text) —
+    /// `tests/assets/latex-render-check.md` stood as literal text) —
     /// **`\[…\]` is display mathematics**, on one line or spread over several,
     /// and it is the same block `$$…$$` opens.
     ///
@@ -8009,7 +8009,7 @@ mod tests {
     /// error, and a corpus that is edited is a test that reads the edit.
     #[test]
     fn the_latex_corpus_sets_every_section_it_promises() {
-        let blocks = parse_markdown(include_str!("../../../test-assets/latex-render-check.md"));
+        let blocks = parse_markdown(include_str!("../../../tests/assets/latex-render-check.md"));
         let sources: Vec<&str> = blocks
             .iter()
             .filter_map(|block| match block {
@@ -9406,7 +9406,7 @@ mod tests {
     /// that depend on it fail somewhere far less obvious than here.
     #[test]
     fn the_stress_sample_carries_every_block_the_measure_has_a_rule_for() {
-        let source = include_str!("../../../test-assets/preview-samples/stress.md");
+        let source = include_str!("../../../tests/assets/preview-samples/stress.md");
         let blocks = parse_markdown(source);
         let count = |f: fn(&MarkdownBlock) -> bool| blocks.iter().filter(|b| f(b)).count();
         assert!(count(|b| matches!(b, MarkdownBlock::Heading { level: 1, .. })) >= 1);

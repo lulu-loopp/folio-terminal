@@ -16,7 +16,7 @@
 ## 交付物
 
 - 独立 workspace：`spikes/03-math-engine/`
-- 语料：`corpus/math-expressions.jsonl`，360 条
+- 语料：`tests/corpus/math-expressions.jsonl`，360 条
 - A/C benchmark 与 Windows Job Object 探针：`src/bin/math-bench.rs`
 - ReX core probe：`rex-probe/`
 - ReX SVG 失败 probe：`rex-svg-probe/`

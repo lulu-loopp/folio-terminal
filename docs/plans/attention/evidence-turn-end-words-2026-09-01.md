@@ -60,7 +60,7 @@ Folio 本身与另外四个项目(LaTeX 报告、控制课作业、研究笔记�
 
 ### 方法(可复现)
 
-仓里没有任何 codex 的 `.btcr`(`corpus/claude-code-session.btcr` 是 Claude Code 的),所以
+仓里没有任何 codex 的 `.btcr`(`tests/corpus/claude-code-session.btcr` 是 Claude Code 的),所以
 现录。用仓里已经构建好的 `target/release/bt-record.exe`,在仓根跑(该目录已被 codex 信任,
 避开信任对话框),`-s read-only` 使 codex 碰不到任何文件:
 

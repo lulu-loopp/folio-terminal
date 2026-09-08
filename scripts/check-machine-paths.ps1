@@ -23,8 +23,8 @@
 #     licence texts carry their own authors' names and addresses. Those addresses
 #     are the attribution; removing them is the breach, not the fix.
 #   * `docs/` — the internal planning record. Gate 7 decides what of it ships.
-#   * `corpus/` — terminal recordings, cleaned on their own line, with their own
-#     gate.
+#   * `tests/corpus/` — terminal recordings, cleaned on their own line, with
+#     their own gate.
 #   * this file — it has to spell the forbidden strings in order to forbid them,
 #     and a rule that cannot state its own subject is not a rule.
 # Binary payloads are skipped by extension: a 10 MB font is a lottery of byte
@@ -38,7 +38,7 @@ try {
     $tracked = @(& git ls-files)
     if ($LASTEXITCODE -ne 0) { throw "git ls-files failed" }
 
-    $skipPaths = @("corpus/", "docs/", "vendor/", "licenses/", "THIRD-PARTY-NOTICES.md",
+    $skipPaths = @("tests/corpus/", "docs/", "vendor/", "licenses/", "THIRD-PARTY-NOTICES.md",
                    "scripts/check-machine-paths.ps1")
     $skipExt = @(".ttf", ".otf", ".pfb", ".icc", ".nupkg", ".zip", ".png", ".jpg",
                  ".jpeg", ".ico", ".pdf", ".dll", ".exe", ".recording", ".btcr",

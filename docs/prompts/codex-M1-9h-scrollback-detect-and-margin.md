@@ -12,7 +12,7 @@
   `real_powershell_input_reaches_a_viewport_owned_frame`——协调者跑 4 次
   1 次通过,**确认是真起 PowerShell 子进程的 flaky**(宿主此刻 ConPTY
   不稳,与今日 CreateProcessAsUserW 1312 同源),**不是你的回归**,忽略;
-- 另有未跟踪 `test-assets/`,应是你为回归造的素材,保留。
+- 另有未跟踪 `tests/assets/`,应是你为回归造的素材,保留。
 
 请**接着继续**,不要推倒重来:逐条自查三条完成度(回看态检测 / 冻结侧
 滚动闪回 / 左缩进),补齐未完成的,跑完整门禁并从实跑输出抄数字。

@@ -1,4 +1,4 @@
-# make-objstm-pdf.py — writes `test-assets/folio-pdf-objstm-test.pdf`.
+# make-objstm-pdf.py — writes `tests/assets/folio-pdf-objstm-test.pdf`.
 #
 # The fixture for a PDF that keeps its catalogue, its page tree and its page
 # objects inside a **compressed object stream** (PDF 1.5's `/Type /ObjStm`),
@@ -103,7 +103,7 @@ def main():
     out.write(f"startxref\n{offsets[XREF_OBJ]}\n%%EOF\n".encode("ascii"))
 
     here = os.path.dirname(os.path.abspath(__file__))
-    target = os.path.join(here, "..", "..", "test-assets", "folio-pdf-objstm-test.pdf")
+    target = os.path.join(here, "..", "..", "tests", "assets", "folio-pdf-objstm-test.pdf")
     with io.open(os.path.normpath(target), "wb") as handle:
         handle.write(out.getvalue())
     print(f"{os.path.normpath(target)}: {out.tell()} bytes, {PAGES} pages")

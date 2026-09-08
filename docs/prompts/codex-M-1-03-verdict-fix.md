@@ -13,7 +13,7 @@
 
 **报告第 10 行**说 A 的 9 个自定义宏缺 h/d 是"按任务定义一票否决"。**这个读法错了，而报告自己的数据就是反证。**
 
-**去核语料**：`corpus/math-expressions.jsonl` 的 30 条 `custom-macro` **结构完全相同**——都是 `\newcommand{\vect}[1]{\mathbf{#1}} \vect{v_N} \cdot \vect{w_{N+1}}`，只差一个整数下标。引擎每次都渲染"粗体向量·粗体向量"。**而 `docs/spikes/artifacts/03-math-engine.json` 里，这 30 条完全相同的输入，21 条出 h/d、9 条不出。**
+**去核语料**：`tests/corpus/math-expressions.jsonl` 的 30 条 `custom-macro` **结构完全相同**——都是 `\newcommand{\vect}[1]{\mathbf{#1}} \vect{v_N} \cdot \vect{w_{N+1}}`，只差一个整数下标。引擎每次都渲染"粗体向量·粗体向量"。**而 `docs/spikes/artifacts/03-math-engine.json` 里，这 30 条完全相同的输入，21 条出 h/d、9 条不出。**
 
 **同样的输入，时灵时不灵，这不是"引擎给不出基线"，是 adapter 的 `find_math_metrics`（`src/lib.rs:288` 那段 ~40 行的 Typst frame 遍历）对某些 frame 布局返回了 `None`。** 报告的"待确认根因"（建议里写着"确认是 MiTeX 输出、Typst frame 结构还是 adapter 提取错误"）和"一票否决"**自相矛盾**——一个东西不可能既是"先修这个"又是"这个杀死整条路"。
 

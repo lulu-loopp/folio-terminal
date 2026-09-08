@@ -1,6 +1,6 @@
 //! The command palette: a floating intent box over a window that stays visible.
 //!
-//! DESIGN.md §7.55. The surface is `design/ui-mockup.html` 2363-2394 (its style),
+//! DESIGN.md §7.55. The surface is `docs/design/ui-mockup.html` 2363-2394 (its style),
 //! 4629-4636 (its shape) and 6677-6840 (its behaviour); this module is the port
 //! of the last of those three, and of nothing else — the rectangles it draws and
 //! the sections it draws them in live here, the five suppliers that fill those
@@ -15,17 +15,17 @@
 /// one is worth twice its place in the run, so `nt` inside `New tab` beats the
 /// same two letters scattered across it.
 ///
-/// DESIGN.md §7.55 ①; `design/ui-mockup.html:6688`.
+/// DESIGN.md §7.55 ①; `docs/design/ui-mockup.html:6688`.
 const RUN_WEIGHT: f32 = 2.0;
 
 /// A query character landing at the start of a word is worth this much on top.
 ///
-/// DESIGN.md §7.55 ①; `design/ui-mockup.html:6690`.
+/// DESIGN.md §7.55 ①; `docs/design/ui-mockup.html:6690`.
 const WORD_START_BONUS: f32 = 3.0;
 
 /// What each skipped character costs.
 ///
-/// DESIGN.md §7.55 ①; `design/ui-mockup.html:6691`.
+/// DESIGN.md §7.55 ①; `docs/design/ui-mockup.html:6691`.
 const GAP_COST_PER_CHAR: f32 = 0.15;
 
 /// A gap stops getting worse after this many characters.
@@ -34,7 +34,7 @@ const GAP_COST_PER_CHAR: f32 = 0.15;
 /// the label's own length rather than by anything about the match, and the file
 /// section's labels are the longest strings in the list.
 ///
-/// DESIGN.md §7.55 ①; `design/ui-mockup.html:6691`.
+/// DESIGN.md §7.55 ①; `docs/design/ui-mockup.html:6691`.
 const GAP_COST_CAP: usize = 8;
 
 /// The characters a word may start after, beyond whitespace.
@@ -680,7 +680,7 @@ pub fn step(len: usize, current: usize, forwards: bool) -> usize {
 //   the box
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Every constant here is `design/ui-mockup.html` 2363-2394 read as a number,
+// Every constant here is `docs/design/ui-mockup.html` 2363-2394 read as a number,
 // and every one of them is logical pixels — the layout multiplies by the
 // surface's scale exactly once, at the top of `layout`.
 

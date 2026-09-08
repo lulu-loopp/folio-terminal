@@ -42,6 +42,7 @@ const PLACEHOLDER_MAIL_DOMAIN: &str = "example.com";
 fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
+        .join("tests")
         .join("corpus")
 }
 

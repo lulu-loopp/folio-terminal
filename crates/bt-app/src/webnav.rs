@@ -829,7 +829,7 @@ mod tests {
         }
     }
 
-    // ---- the twelve carried over from the W0′ probe (spikes/webview2-w0) ----
+    // ---- the twelve carried over from the W0′ probe (w0-evidence.md) ----
 
     #[test]
     fn loopback_is_syntax_only() {

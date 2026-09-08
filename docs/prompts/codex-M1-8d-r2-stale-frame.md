@@ -60,7 +60,7 @@ C:\Users\Weiyi\AppData\Local\Temp\claude\D--Developer-BetterTerminal\ff11be2c-05
   永久扣押;④ A-B-A pending 等价误判的构造用例。全部进 bt-app 测试。
 - 门禁:cargo test --workspace --locked、clippy --all-targets -D warnings、
   fmt --check;vendor 零改动;m1.8d 的 2026 批帧收益(中间态不呈现)不得回退。
-- 工作树 design/*、docs/UI-UX.md、docs/prompts/codex-M1-8e-row-cache.md 脏项
+- 工作树 docs/design/*、docs/UI-UX.md、docs/prompts/codex-M1-8e-row-cache.md 脏项
   保持原样。结果写
   C:\Users\Weiyi\AppData\Local\Temp\claude\D--Developer-BetterTerminal\ff11be2c-05c5-4a23-840f-a94405b44c35\scratchpad\m1-8d-r2-result.md
   (绝对路径),停下等审,不提交。

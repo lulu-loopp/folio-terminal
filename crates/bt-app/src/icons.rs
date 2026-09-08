@@ -2,7 +2,7 @@
 //! big a surface draws it.
 //!
 //! [`crate::marks`] holds the third table, the artwork, and it has held it
-//! alone: forty-six symbol bodies quoted from `design/ui-mockup.html`, every one
+//! alone: forty-six symbol bodies quoted from `docs/design/ui-mockup.html`, every one
 //! of them drawn through one rasterizer in one colour discipline. The two
 //! audits of 2026-08-25 both arrived at the same sentence about what was still
 //! missing — *the geometry has a single source, the size and the meaning do

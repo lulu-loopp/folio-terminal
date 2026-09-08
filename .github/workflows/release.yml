@@ -174,7 +174,7 @@ jobs:
       # nobody has tested.
       - name: install WARP
         shell: pwsh
-        run: ./ci/install-warp.ps1 -TargetDir target/release
+        run: ./scripts/ci/install-warp.ps1 -TargetDir target/release
 
       - name: start what was built
         shell: pwsh

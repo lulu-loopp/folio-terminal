@@ -77,7 +77,7 @@ bt-replay --synthetic 扩为固定矩阵并断言量级:
   presentation_equivalent 键有交互,以呈现等价键为准并补测试。
 - 门禁:cargo test --workspace --locked、clippy --all-targets -D warnings、
   fmt --check;vendor 182 上游断言零改;新回归矩阵纳入。
-- 工作树 design/*、docs/UI-UX.md 脏项不属于你,保持原样。
+- 工作树 docs/design/*、docs/UI-UX.md 脏项不属于你,保持原样。
 - 结果写 C:\Users\Weiyi\AppData\Local\Temp\claude\D--Developer-BetterTerminal\ff11be2c-05c5-4a23-840f-a94405b44c35\scratchpad\m1-8e-result.md
   (绝对路径),含:修前/修后矩阵对照表、缓存驻留字节数、门禁数字、
   file:line 审阅入口。停下等审,不提交。

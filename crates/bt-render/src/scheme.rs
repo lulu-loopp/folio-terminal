@@ -159,7 +159,7 @@ struct Canvas {
     rail_shade: u8,
 }
 
-/// A dark canvas — `design/ui-mockup.html` `body.dark`.
+/// A dark canvas — `docs/design/ui-mockup.html` `body.dark`.
 const NIGHT: Canvas = Canvas {
     ink: 870,
     ink2: 550,
@@ -642,7 +642,7 @@ mod tests {
     /// PIN — **the two thumb tokens are the mock-up's own declarations**
     /// (P2-9 slice 1).
     ///
-    /// `design/ui-mockup.html` 53-54 and 75-76 declare `--thumb` and
+    /// `docs/design/ui-mockup.html` 53-54 and 75-76 declare `--thumb` and
     /// `--thumb-hover` as four `rgba()` literals, and line 95 lays them straight
     /// on the terminal's canvas (`scrollbar-color: var(--thumb) transparent`).
     /// This restates that composite here rather than trusting the two struck

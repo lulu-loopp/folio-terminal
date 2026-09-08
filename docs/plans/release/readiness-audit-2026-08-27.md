@@ -58,7 +58,7 @@ ConPTY sidecar 不进 zip 会**静默**退回 inbox 实现(resize 稳定性回�
 
 | | |
 |---|---|
-| **证据** | `git ls-files \| grep -iE "^readme"` 只有 `assets/schemes/README.md`、`corpus/README.md`、`docs/spikes/README.md`、`vendor/*/README.md`。根目录没有。全仓 931 个跟踪文件,`docs/` 295 份里 **235 份含中文**(`git grep -lP "[\x{4e00}-\x{9fff}]" -- docs CONVENTIONS.md \| wc -l` = 235,分母 296) |
+| **证据** | `git ls-files \| grep -iE "^readme"` 只有 `assets/schemes/README.md`、`tests/corpus/README.md`、`docs/spikes/README.md`、`vendor/*/README.md`。根目录没有。全仓 931 个跟踪文件,`docs/` 295 份里 **235 份含中文**(`git grep -lP "[\x{4e00}-\x{9fff}]" -- docs CONVENTIONS.md \| wc -l` = 235,分母 296) |
 | **必须写进去的八件** | ① 这是什么 + 截图;② **系统要求**(Windows 10 1809+/11、WebView2、VC++ 运行库或 crt-static);③ 安装 = 解压运行 `folio.exe`;④ **未签名 exe 的 SmartScreen 怎么过**;⑤ **数据落在哪 + 无遥测声明**(见 M8);⑥ 从源码构建;⑦ 已知问题;⑧ 许可 |
 | **建议** | README 用**英文**。中文内部文档的公开范围另裁(见 S11) |
 | **工作量** | 中 |
@@ -115,7 +115,7 @@ ConPTY sidecar 不进 zip 会**静默**退回 inbox 实现(resize 稳定性回�
 | ② | **嵌入字体 —— `assets/fonts/NotoColorEmoji_WindowsCompatible.ttf`,10.7 MB,OFL-1.1** | `crates/bt-render/src/lib.rs:350` `include_bytes!`。**实测字体 name 表**:family=`Noto Color Emoji`、copyright=`Copyright 2022 Google Inc.`、version=`2.051;GOOG;noto-emoji:20250818:e92753bfa55fd449e427d4d325f9c8c40408c74e`、license=OFL-1.1、CBDT/CBLC 位图。`assets/fonts/NotoColorEmoji-LICENSE:1` = `Copyright 2013 Google LLC`,**未声明 Reserved Font Name** → 磁盘上改名不受 OFL §3 约束;但 §1 要求版权与许可随字体分发 —— **字体嵌进了二进制,zip 里就得有 NOTICE** |
 | ③ | **hayro 的 14 款标准 PDF 字体 —— PDFium/Foxit,BSD-3-Clause** | `Cargo.toml` 的 `hayro = { version = "=0.7.1", …, features = ["embed-fonts"] }`;实物 `~/.cargo/registry/src/…/hayro-interpret-0.7.0/assets/Foxit*.pfb` 共 14 个,许可原文 `assets/LICENSE_FOXIT` 首行 `Copyright 2014 PDFium Authors`,**含"Neither the name of Google Inc. … endorse or promote"第三条** |
 | ④ | **typst 内嵌字体 —— OFL + GUST + Bitstream Vera + PDFium + CC0 五种** | `Cargo.toml` 的 `typst-as-lib = { …, features = ["typst-kit-fonts", "typst-kit-embed-fonts"] }`。`typst-assets-0.15.1/NOTICE` 分节:`:4` OFL-1.1 → Libertinus Serif(**有 Reserved Font Name**:"Linux Libertine"/"Biolinum"/"STIX Fonts");`:99` **GUST Font License v1.0** → NewComputerModern;`:136` **Bitstream Vera** → DejaVu Sans Mono;`:329` CC0 → ICC profiles;`:864` PDFium BSD → Foxit;`:899` NewCM10-Regular 的 Distribution Exception。包本身 `Cargo.toml:28` `license = "Apache-2.0"` |
-| ⑤ | **一枚逐字复制的 Google Material 图标** | `crates/bt-app/src/marks.rs:2842` 是 `SYMBOL_VIEW_BOX`(63 个条目)里**唯一**的 `"0 0 24 24"`,其余是 `0 0 16 16` / `0 0 10 10`;对应 `SYMBOL_BODY[0]`(`marks.rs:2977-2978`)`// #i-gear`,path 数据 `M19.14 12.94c.04-.3.06-.61.06-.94…` 与 `design/ui-mockup.html:4505` 逐字相同 —— 这是 Material Design `settings` 24dp 的规范路径。**全仓 `viewBox="0 0 24 24"` 只此一处**(`grep -oE '<symbol id="[^"]+" viewBox="0 0 24 24"' design/ui-mockup.html` 单条),其余图标是本项目按 Fluent 2 惯例自绘(`marks.rs:1-3` 自述来源为 `design/ui-mockup.html`)。Material Icons 是 **Apache-2.0**,要许可副本 + 变更声明 |
+| ⑤ | **一枚逐字复制的 Google Material 图标** | `crates/bt-app/src/marks.rs:2842` 是 `SYMBOL_VIEW_BOX`(63 个条目)里**唯一**的 `"0 0 24 24"`,其余是 `0 0 16 16` / `0 0 10 10`;对应 `SYMBOL_BODY[0]`(`marks.rs:2977-2978`)`// #i-gear`,path 数据 `M19.14 12.94c.04-.3.06-.61.06-.94…` 与 `docs/design/ui-mockup.html:4505` 逐字相同 —— 这是 Material Design `settings` 24dp 的规范路径。**全仓 `viewBox="0 0 24 24"` 只此一处**(`grep -oE '<symbol id="[^"]+" viewBox="0 0 24 24"' docs/design/ui-mockup.html` 单条),其余图标是本项目按 Fluent 2 惯例自绘(`marks.rs:1-3` 自述来源为 `docs/design/ui-mockup.html`)。Material Icons 是 **Apache-2.0**,要许可副本 + 变更声明 |
 | ⑥ | **十份配色方案的上游 MIT** | `assets/schemes/README.md:36-68` **已把出处与许可写得很干净**(microsoft/terminal MIT、mbadolato/iTerm2-Color-Schemes MIT,并逐一点名 Son A. Pham / Ethan Schoonover / Pavel Pertsev / Zeno Rocha / Sven Greb)。**缺的只是许可全文** —— MIT 要求副本随分发 |
 | ⑦ | **PSReadLine 二进制被嵌入并安装到用户 Documents** | `crates/bt-app/src/psreadline.rs:131-160` 的 `BUNDLED_FILES` 九个文件含两个 `.dll` + 两个 Polyfiller;装到 `Documents\WindowsPowerShell\Modules\PSReadLine`(`psreadline.rs:103`)。**这一条已经做对了** —— `License.txt` 在数组里,注释(`:122-127`)明写"不是可选项,PSReadLine 是 BSD-2,二进制分发必须携带声明"。实测 `assets/psreadline/2.4.6/License.txt` = **BSD-2-Clause,Copyright (c) 2013, Jason Shirk**。只需在总 NOTICE 里再列一次 |
 
@@ -241,7 +241,7 @@ i18n 是双语的(`i18n.rs:107-121` `Language::{English, Chinese}`,`:154-157` `L
 
 ### S5 · 已知问题列表要从内部文档里摘出来
 
-`docs/HANDOFF-2026-08-21.md:504` 的 §6「如实挂着的缺口」已经是一份**很诚实**的清单,但它是中文内部文档且混着裁决过程。
+`docs/handoff/HANDOFF-2026-08-21.md:504` 的 §6「如实挂着的缺口」已经是一份**很诚实**的清单,但它是中文内部文档且混着裁决过程。
 里面对外有意义的至少包括:未装 PowerShell 整合时鼠标残留修复不生效;X10 抬起残留;
 "等你回答"只有 BELL 那一半、没有命令面板、没有标题栏 waiting 药丸;
 横滚没有 Line wrapping 设置、CSI 14t 被丢弃;
@@ -324,7 +324,7 @@ v0.2 写的新键就没了。
 
 ### S11 · 中文内部文档的公开范围
 
-`docs/` 295 份、`spikes/` 74 份、`design/` 28 份全部签入,其中 **235 份含中文**。
+`docs/` 295 份、`spikes/` 74 份、`docs/design/` 28 份全部签入,其中 **235 份含中文**。
 内容包括:`docs/PROBLEM-LIST.md`(含逐家竞品评估与产品策略)、`docs/HANDOFF-*.md`(交接与待裁决清单)、
 `docs/prompts/` **52 份 `codex-*.md` 任务单**、`docs/reviews/` 23 份、`docs/plans/` 97 份(含大量证据 jsonl / 截图)。
 **扫出来的机器痕迹**:`git grep -c "Weiyi"` 全仓 **341 处 / 39 个文件**(其中 `crates/` 里 8 个文件是**测试夹具字符串**,
@@ -423,7 +423,7 @@ exe 77 MB → 说清即可;
 
 | # | 面 | 状态 |
 |---|---|---|
-| 1 | **仓库清洁** | ✅ **完整盘完**。`git ls-files dist` / `.claude` / `.agents` 三个零输出;`.gitignore` 逐行读过;`Weiyi` 341 处 / `AppData` 30 文件全扫;历史用 `git log -S` 搜过五类密钥;`test-assets` / `corpus` / `design` / `spikes` 逐目录列过;`test.md` 与 11 个 worktree 分支是新发现 |
+| 1 | **仓库清洁** | ✅ **完整盘完**。`git ls-files dist` / `.claude` / `.agents` 三个零输出;`.gitignore` 逐行读过;`Weiyi` 341 处 / `AppData` 30 文件全扫;历史用 `git log -S` 搜过五类密钥;`tests/assets` / `corpus` / `design` / `spikes` 逐目录列过;`test.md` 与 11 个 worktree 分支是新发现 |
 | 2 | **许可与第三方声明** | ✅ **完整盘完,且比原单要求更细**。554 个外部 crate 的 license 字段**逐包实测**(工具没装,改读注册表缓存);嵌入字体逐个定位并读了 NOTICE;Material `#i-gear` 定位到唯一一处;WebView2 是静态链接这点由导入表反证 |
 | 3 | **安全与信任** | ✅ **盘完**,但过程有波折:安全面子代理**第一版报告有编造**(它自己承认并更正了 §5/§7/§8 的数字),更正后的部分我采信;而它的 §1–§4、§6 原始报告**未送达我这里**,所以**hooks 安装器、管道 DACL、`session.json` 字段、WebView2 六项设置我全部自己重新 grep 验证过一遍**,本文里的行号都是我亲自跑出来的。**一处更正了子代理的说法**:它称"无 `NavigationStarting` 拦截",实际 `webview.rs:1147-1180` **有**顶层拦截,缺的是 `FrameNavigationStarting` 与 `WebResourceRequested` |
 | 4 | **签名与分发** | ⚠ **一半未盘**。**已盘**:zip 该装什么(由 ConPTY 加载器契约与导入表推出)、exe 未签名、WebView2 静态链接不用带 loader、`folio.ps1` 不进包(因为 `include_str!`)。**未盘**:SmartScreen 的确切文案与 EV 是否仍即时放行、**SignPath.io OSS 计划的资格与流程**、**Azure Trusted Signing 的资格与价格**、Certum / sigstore、winget 与 scoop 的提交要求、GitHub runner 是否预装 WebView2 —— 这些需要联网核实官方页面,**负责该项检索的子代理未返回结果,我拒绝凭记忆填空**。**建议交给 Codex 或另开一单专门补** |

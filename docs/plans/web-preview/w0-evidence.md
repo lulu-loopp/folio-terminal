@@ -3,7 +3,7 @@
 日期 2026-08-20 · 分支 `webview2-w0-spike` · 探针 `spikes/webview2-w0/`(独立 workspace,不进产品依赖图)
 本机 WebView2 Runtime **151.0.4129.93**(`GetAvailableCoreWebView2BrowserVersionString`);注册表报同一版本。
 
-**这是取证单,不是产品单。** 没有改动任何产品 crate、`design/ui-mockup.html` 或 `dist\`。
+**这是取证单,不是产品单。** 没有改动任何产品 crate、`docs/design/ui-mockup.html` 或 `dist\`。
 
 复跑:
 

@@ -20110,12 +20110,12 @@ mod tests {
     ///
     /// **A software adapter cannot host a soak, and there is nothing the caller
     /// can do about that.** A GitHub runner has no display adapter; what
-    /// `ci/install-warp.ps1` puts beside the test binaries is WARP, a *software*
-    /// rasteriser whose every buffer is the process's own RAM. Measured on WARP
-    /// on 2026-08-31, this fixture died of an access violation at **frame 67 of
-    /// 240** with 1.6 GB resident, `glyph_atlas_refits` still at zero and the
-    /// atlas still on its first packing — that is, before the packer it exists to
-    /// examine was under any pressure at all. On the runner the same run reported
+    /// `scripts/ci/install-warp.ps1` puts beside the test binaries is WARP, a
+    /// *software* rasteriser whose every buffer is the process's own RAM.
+    /// Measured on WARP on 2026-08-31, this fixture died of an access violation
+    /// at **frame 67 of 240** with 1.6 GB resident, `glyph_atlas_refits` still
+    /// at zero and the atlas still on its first packing — that is, before the
+    /// packer it exists to examine was under any pressure at all. On the runner the same run reported
     /// `Out of Memory` and lost the device.
     ///
     /// The cause is not ours and is not reachable from here. WARP holds roughly
@@ -20130,7 +20130,7 @@ mod tests {
     /// (`PollType::Wait`: frame 60). On a real adapter the whole 240 frames run
     /// in 25 seconds at a flat 214 MB.
     ///
-    /// So it is on `ci/ignored-tests.txt`, which is a place this repository has
+    /// So it is on `scripts/ci/ignored-tests.txt`, which is a place this repository has
     /// so far kept only probes, and this is not a probe — it is a RED gate for a
     /// user's report, and ignoring it means CI does not stand behind §7.1.3m any
     /// more. That is the cost, written here rather than left to be discovered.

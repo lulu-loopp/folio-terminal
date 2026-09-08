@@ -8,10 +8,10 @@
 
    - 原审计 docs/plans/release/readiness-audit-2026-08-27.md:199-201 使用 git grep -I；-I 会跳过被 Git 判为 binary 的 BTCR，因此给出了假阴性。
    - rg -a -n -m 4 'weiyishi024@gmail\.com|Welcome back Weiyi|C:\\Users\\Weiyi|D:\\Developer\\BetterTerminal' corpus 的输出包括：
-     - corpus/claude-code-session.btcr:29：Welcome back Weiyi、weiyishi024@gmail.com's Organization、D:\Developer\BetterTerminal。
-     - corpus/claude-code-session.btcr:1：C:\Users\Weiyi\.local\bin\claude.EXE。
-     - corpus/cargo-build-flood.btcr:1：C:\Users\Weiyi\.cargo\bin\cargo.exe；同文件 :57、:62-63 等含 D:\Developer\BetterTerminal。
-   - docs/spikes/01-corpus.md:30、:34 明说 claude-code-session.btcr 是 Claude Code 2.1.210 的真实交互录制，不是合成夹具；corpus/README.md:9-10 又声称每份夹具的来源与环境替换已记录。这里不是“可能泄露”，而是文件中实际存在姓名、邮箱、组织名、用户名、安装路径和真实会话 UI。
+     - tests/corpus/claude-code-session.btcr:29：Welcome back Weiyi、weiyishi024@gmail.com's Organization、D:\Developer\BetterTerminal。
+     - tests/corpus/claude-code-session.btcr:1：C:\Users\Weiyi\.local\bin\claude.EXE。
+     - tests/corpus/cargo-build-flood.btcr:1：C:\Users\Weiyi\.cargo\bin\cargo.exe；同文件 :57、:62-63 等含 D:\Developer\BetterTerminal。
+   - docs/spikes/01-corpus.md:30、:34 明说 claude-code-session.btcr 是 Claude Code 2.1.210 的真实交互录制，不是合成夹具；tests/corpus/README.md:9-10 又声称每份夹具的来源与环境替换已记录。这里不是“可能泄露”，而是文件中实际存在姓名、邮箱、组织名、用户名、安装路径和真实会话 UI。
 
 2. **554 个外部包的许可证表少了 4 个条目。**
 
@@ -138,10 +138,10 @@
    - scripts/shell-integration/folio.bash:109-111 的说明示例使用 /home/weiyi/src。
    - 这些至少会让公开脚本在别人的 checkout 上不可复现或继续传播个人用户名；原审计的 Weiyi 扫描只讨论 crates/ 夹具，漏了 scripts/。
 
-4. **design/ 与 test-assets/ 没有仓内来源/许可说明，不能据“列过目录”宣告来源已核。**
+4. **docs/design/ 与 tests/assets/ 没有仓内来源/许可说明，不能据“列过目录”宣告来源已核。**
 
    - git ls-files 统计 design 下有 21 个 PNG/JPG/SVG/ICO 类资产，design 内 README/LICENSE/NOTICE 数为 0；.gitignore:7-10 又专门把这些 PNG 重新纳入版本控制。
-   - test-assets 有 22 个跟踪文件，README/LICENSE/NOTICE 数为 0；folio-pdf-test.html 与 folio-pdf-test.pdf 同在，可证明 PDF 至少有仓内源文档，但其余夹具没有统一的生成/来源清单。
+   - tests/assets 有 22 个跟踪文件，README/LICENSE/NOTICE 数为 0；folio-pdf-test.html 与 folio-pdf-test.pdf 同在，可证明 PDF 至少有仓内源文档，但其余夹具没有统一的生成/来源清单。
    - 这不是断言资产来自第三方；可证结论是审计 :426 没有留下足以复核“自制/上游/生成物及许可”的证据。公开前应为这两个目录补一份逐类 provenance 清单。
 
 5. **两份 Microsoft ConPTY NuGet 包的 MIT 文本没有随源码仓分发。**
@@ -203,8 +203,8 @@
 1. **增加“公开源码快照清洁门”，并放到现有六条之前。**
 
    - 对拟打 tag 的 commit 运行二进制感知扫描，而不是 git grep -I：至少 rg -a 搜邮箱、C:\Users、/home/、D:\Developer、常见 token/private-key 形状；检查 git ls-files -ci --exclude-standard、git ls-files dist、git status --porcelain。
-   - 必须先替换或删除 corpus/claude-code-session.btcr 与 cargo-build-flood.btcr 中本次已证实的个人/机器数据；scripts/dev 两个绝对路径和 folio.bash 的个人用户名也应清理。
-   - 生成并人工签收 tracked top-30 大文件表；对两个大型 alacritty JSON、Noto 字体、两份 ConPTY nupkg逐项写 keep/remove 理由。对 design/、test-assets/、corpus/ 给出仓内 provenance 清单。
+   - 必须先替换或删除 tests/corpus/claude-code-session.btcr 与 cargo-build-flood.btcr 中本次已证实的个人/机器数据；scripts/dev 两个绝对路径和 folio.bash 的个人用户名也应清理。
+   - 生成并人工签收 tracked top-30 大文件表；对两个大型 alacritty JSON、Noto 字体、两份 ConPTY nupkg逐项写 keep/remove 理由。对 docs/design/、tests/assets/、tests/corpus/ 给出仓内 provenance 清单。
    - 当前更宽 secret regex 对工作树扫描除审计文档自述外未发现 AKIA/AIza/GitHub token/OpenAI key/private key 形状；这不替代带规则库的全历史扫描。发布门应对最终历史选择执行 gitleaks/trufflehog 等扫描并保存结果。
 
 2. **把构建/分发门改成“由 tag 自动产出的可审计归档”。**

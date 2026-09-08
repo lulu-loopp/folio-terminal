@@ -72,7 +72,7 @@
 你的判定规则没错（`:109` 要求肉眼表），但**脚本的绿会被读成"过了"**。
 **修**：探针加 checklist-item marker（如 F4 循环当前项号并 emit `checklist_item`），审计器断言 10 项都出现过。最低限度也要在清单和脚本输出里写明"**退出 0 只表示最低证据存在，逐项结论以肉眼表为准**"。
 
-**3.2 oracle 真值来源未标注**（违 CONVENTIONS §0）。`corpus/cjk-width-cases.json` 的 22 条 `expected_cells` 是**裸字面量**，审核实测它**逐条等于 `unicode-width 0.2` 的 grapheme 求和**。所以 §3.3 那句"什么情况下它会红"的答案是：**"unicode-width 改行为时"，而不是"我们的策略选错时"**。**门会响，但它守的不是我们以为的东西。** 修：每条标 UAX #11 / UTS #51 / wcwidth 出处，与实现来源解耦。
+**3.2 oracle 真值来源未标注**（违 CONVENTIONS §0）。`tests/corpus/cjk-width-cases.json` 的 22 条 `expected_cells` 是**裸字面量**，审核实测它**逐条等于 `unicode-width 0.2` 的 grapheme 求和**。所以 §3.3 那句"什么情况下它会红"的答案是：**"unicode-width 改行为时"，而不是"我们的策略选错时"**。**门会响，但它守的不是我们以为的东西。** 修：每条标 UAX #11 / UTS #51 / wcwidth 出处，与实现来源解耦。
 
 **3.3 ambiguous width 是个未申报的产品决策。** `corpus:6` 的 class 直接叫 `ambiguous-narrow-policy`，`wt-370-ambiguous-star` expected 7 = narrow；审核实测 `width_cjk` 给 **9**。**WT #370 的本体就是"CJK 语境下 ambiguous 该判宽"**——你把 narrow 一侧钉进了测试，**DESIGN 里找不到依据，也没写偏离申请**。所以"#370 已覆盖"是**名义覆盖**。**这不是你选错，是你没把它作为发现报上来**（规格缺口是既有的，见第四节）。修：报告写明两种策略的数值差、指出规格缺口、请裁决。
 

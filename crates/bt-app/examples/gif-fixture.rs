@@ -1,4 +1,4 @@
-//! **Write `test-assets/folio-anim-test.gif`, then read it back through the
+//! **Write `tests/assets/folio-anim-test.gif`, then read it back through the
 //! decoder the product uses** (route B slice ②, 2026-08-28; `docs/DESIGN.md`
 //! §7.44 ⑤).
 //!
@@ -8,7 +8,7 @@
 //! first frame's delay applied to all of them.
 //!
 //! ```text
-//! cargo run --example gif-fixture -- test-assets\folio-anim-test.gif
+//! cargo run --example gif-fixture -- tests\assets\folio-anim-test.gif
 //! ```
 //!
 //! Kept beside the fixture rather than deleted, on `PROVENANCE.md`'s own rule:

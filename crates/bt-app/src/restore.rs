@@ -1,7 +1,7 @@
 //! The restore prompt — "Reopen your other tabs?", the question a launch asks
 //! once and never again.
 //!
-//! Spec authority is `design/ui-mockup.html`: the `.restore` block (lines
+//! Spec authority is `docs/design/ui-mockup.html`: the `.restore` block (lines
 //! 1931-1969) for the surface, its list and its two buttons, the markup and its
 //! two design notes at 2219-2233, and `openRestore` / `finishLaunch`
 //! (7467-7521) for what a row says and what a press means. Every number below is
@@ -496,7 +496,7 @@ pub fn wrap(text: &str, max_width: f32, mut measure: impl FnMut(&str) -> f32) ->
 ///
 /// **The second wrapper this file will ever have, and it is the same one.** The
 /// mock-up asks for it by name on exactly one element: `.pv-blank .pvb-detail`,
-/// the failure card's fact line (`design/ui-mockup.html`, `overflow-wrap:
+/// the failure card's fact line (`docs/design/ui-mockup.html`, `overflow-wrap:
 /// anywhere`). That line is a URL or an SDK error string — one token forty or
 /// eighty characters long with no space, no path separator and no ideograph in
 /// it, so none of [`crate::linebreak`]'s opportunities reaches inside it — and

@@ -4,14 +4,13 @@
 **/*.rs.bk
 .playwright-mcp/
 *.png
-!design/assets/*.png
-!design/assets/wordmark-r2/*.png
-!design/assets/file-icons-r2/*.png
-!design/assets/file-icons-r3/*.png
-!design/assets/app-icon/*.png
+!docs/design/wordmark-r2/*.png
+!docs/design/file-icons-r2/*.png
+!docs/design/file-icons-r3/*.png
+!docs/design/app-icon/*.png
 # The three logos `packaging/msix/AppxManifest.xml` names. Checked in, and
 # not generated at packaging time, because a release must not need a Python
-# to build; `design/assets/app-icon/make-msix-logos.py` is how they can be
+# to build; `assets/app-icon/make-msix-logos.py` is how they can be
 # checked rather than how they are obtained.
 !packaging/msix/images/*.png
 !docs/spikes/artifacts/03-visual/comparison.png
@@ -32,6 +31,10 @@
 dist/
 .tmp-repaint-capture/
 local-images/
+# Cover images and other pictures composed for a release, written here by
+# hand or by a tool. They are drafts of something that ships elsewhere, not
+# part of the tree.
+output/
 !docs/spikes/artifacts/win-landing/*.png
 # The README's own pictures, taken by hand. docs/screenshots/README.md is the list.
 !docs/screenshots/*.png
