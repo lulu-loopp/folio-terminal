@@ -1363,6 +1363,11 @@ pub enum Text {
     /// drawn in the muted ink.
     RailPeekEmptyCommand,
     RailPeekEmptyLine,
+    /// What the card says about the tick that belongs to the prompt the shell is
+    /// standing at right now — a record opened by `A` that has seen no `C` and
+    /// carries no typed line. The third of the same kind: a state rather than a
+    /// quotation, lower case, in the muted ink.
+    RailPeekAtPrompt,
 
     // ── the search capsule (`crate::search`) ───────────────────────────────
     //
@@ -3405,6 +3410,7 @@ impl Text {
             // ── the command rail's glance card ─────────────────────────────
             Self::RailPeekEmptyCommand => pick(lang, "command", "命令"),
             Self::RailPeekEmptyLine => pick(lang, "line", "行"),
+            Self::RailPeekAtPrompt => pick(lang, "at the prompt", "等待输入"),
 
             // ── the search capsule ─────────────────────────────────────────
             Self::SearchPlaceholder => pick(lang, "Find", "查找"),
@@ -4266,7 +4272,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 590] = [
+    pub const ALL: [Self; 591] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4640,6 +4646,7 @@ impl Text {
         Self::GraphClickToList,
         Self::RailPeekEmptyCommand,
         Self::RailPeekEmptyLine,
+        Self::RailPeekAtPrompt,
         Self::SearchPlaceholder,
         Self::SearchTipCase,
         Self::SearchTipWord,

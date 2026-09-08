@@ -18,6 +18,31 @@ All notable changes to Folio are recorded here. The format follows
   history, and the two files the program actually needed from them are now
   `assets/mitex-specs/` and `tests/corpus/`. `docs/BUILDING.md` lists what each
   directory holds. Nothing about the program changed.
+### Fixed
+
+- **A path printed by Git Bash or by WSL is a link, in the spelling those
+  shells print it in.** `D:\Demo\report.md` was recognised in every pane and
+  `/d/Demo/report.md` was recognised in none — so in the two shells that spell
+  a path their own way, the names on the screen were the ones you could not
+  click, could not hover for a preview, and could not `Ctrl`-click into an
+  editor. A pane now reads the spelling its own shell prints: `/d/Demo` and
+  `/c/Users` in a Git Bash pane, `/mnt/d/Demo` in a WSL one, `~/notes/a.md` in
+  Git Bash, and a relative name in a WSL pane measured from the folder that
+  pane reported. The file still has to be on the disk before anything is drawn,
+  exactly as before. Which spelling a pane reads comes from the profile it was
+  started from and not from the text, so `/d/Demo` typed into a PowerShell or
+  Command Prompt pane is still ordinary words. Two things a Windows path cannot
+  name are still left alone: a folder inside the distribution, such as
+  `/home/you` or `/usr/local/bin`, and `~` in a WSL pane, which is the same
+  folder said another way.
+- **The tick on the prompt you are typing at no longer says a command is
+  running.** Every prompt gets a tick the moment it is drawn, and hovering the
+  newest one — the prompt with nothing typed into it yet — read `running ·
+  command`. Nothing was running and nothing had been typed: the record had no
+  ending because it had no beginning. It now says `at the prompt`. Reported in a
+  Command Prompt pane, where the shell reports its prompts and nothing else, but
+  the tick was the same in every shell. A line you started and abandoned with
+  `Ctrl+C` still shows what you typed.
 
 ## 0.2.3-preview — 2026-09-07
 

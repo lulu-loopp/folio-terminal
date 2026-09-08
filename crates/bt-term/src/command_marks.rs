@@ -122,7 +122,16 @@ impl CommandMark {
     /// prompt has not executed either, but it *does* carry the text that was typed, and that text
     /// is a fact about a real line the reader wrote. A repaint carries nothing, and an empty record
     /// was never a command.
-    fn is_blank_draft(&self) -> bool {
+    ///
+    /// **The second reader is the rail's glance card** (user report 2026-09-07, §7.57 ⑧), and it is
+    /// why the predicate is public and named for the state rather than for the reclaim. Opening a
+    /// record at `A` gives every prompt a tick the moment it is drawn, and such a record has no `D`
+    /// — so [`Self::is_running`], whose whole test is `finished.is_none()`, answers yes and the card
+    /// said *running · command* over a prompt nobody had typed a character into. Both halves were
+    /// true and the sentence they made was not. What this predicate says about such a record is
+    /// what the card now says about it: the shell is standing at this prompt.
+    #[must_use]
+    pub fn is_at_the_prompt(&self) -> bool {
         self.executed.is_none() && self.finished.is_none() && self.command_text.is_empty()
     }
 
@@ -229,10 +238,10 @@ impl CommandMarkLedger {
     ///
     /// Nothing here asks *why* the prompt was drawn again, because OSC 133 does not say and no
     /// shell can be relied on to. What separates a repaint from an abandoned command is what the
-    /// mark was told, not what the shell meant: see [`CommandMark::is_blank_draft`].
+    /// mark was told, not what the shell meant: see [`CommandMark::is_at_the_prompt`].
     pub fn open_command(&mut self, start: AnchorId) -> CommandMarkId {
         let prompt = self.pending_prompt.take();
-        if let Some(mark) = self.marks.last_mut().filter(|mark| mark.is_blank_draft()) {
+        if let Some(mark) = self.marks.last_mut().filter(|mark| mark.is_at_the_prompt()) {
             // A `B` with no `A` before it leaves the prompt this mark already had: the repaint
             // reported no new one, so the old one is still the best coordinate we were given.
             mark.prompt = prompt.or(mark.prompt);

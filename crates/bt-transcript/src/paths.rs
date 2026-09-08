@@ -31,6 +31,153 @@ pub enum PrintedPathSpelling {
     /// A `file://` URI printed as **text** — never an OSC 8 target, which is a different shape
     /// carried by a different field and read by a different pass.
     Uri,
+    /// An absolute path spelled in the **pane's own namespace** rather than in this machine's:
+    /// `/d/src/a.md` in a Git Bash pane, `/mnt/d/src/a.md` in a WSL one, `~/src/a.md` in either.
+    ///
+    /// It is a rooted spelling like [`Self::Absolute`] and not a relative one — nothing is joined
+    /// to a working directory to read it — but the root is a root of somebody else's filesystem,
+    /// so the text names a file only after [`PrintedPathNamespace`] has said what this machine
+    /// calls the same place (§7.30, 2026-09-07).
+    Foreign,
+}
+
+/// Which spelling of an absolute path the shell standing in one pane prints — the pane's
+/// **namespace**, and the whole of what T-3 adds to this module
+/// (`docs/plans/shell-matrix-2026-09-07.md`).
+///
+/// The grammar in this file has always read one machine's spelling: on Windows a path is rooted by
+/// a drive letter, and `/d/Demo/report.md` printed by a Git Bash is a run of characters with no
+/// root in it. That is right about the *text* and wrong about the *pane*: a Git Bash and a WSL bash
+/// are both standing on this machine, both print names of files that are really there, and both
+/// spell them in a namespace only that shell speaks. Which namespace it is is not readable off the
+/// line — `/c/Users/alice` and `/mnt/c/Users/alice` are the same directory under two shells, and
+/// `/d/Demo` inside a PowerShell pane is not a path at all — so it is a property of the pane, told
+/// to the detector by the one layer that knows it (`bt_app::profiles::printed_path_namespace`).
+///
+/// **The translation is the existence check's own prerequisite.** §7.30 promises nothing it has not
+/// read off the disk, and a read goes through Win32; so a spelling this machine has no name for is
+/// not a candidate at all, and never reaches the ledger or the probe queue.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum PrintedPathNamespace {
+    /// This machine's own: a path is rooted by a drive letter and nothing else is rooted.
+    #[default]
+    Windows,
+    /// Git for Windows' MSYS layer, where `/d/Demo` is `D:\Demo` and `~` is the Windows home.
+    ///
+    /// The drive map is MSYS's own and it is the one thing about that layer this window needs: a
+    /// fixed drive appears at `/<letter>`, lower-cased. Everything else under the MSYS root —
+    /// `/usr/bin`, `/etc/profile`, `/mingw64` — lives inside the Git installation's own tree, whose
+    /// location this window has not been told and may not guess, so it stays plain text.
+    ///
+    /// `home` is `%USERPROFILE%`, which is the same belief the `gitbash` profile's own
+    /// `StartingDir::WindowsHome` already acts on: Git for Windows maps `$HOME` onto the Windows
+    /// home. `None` is a machine that could not name one, and then `~` names nothing here either.
+    Msys { home: Option<PathBuf> },
+    /// A WSL distribution, where `/mnt/d/Demo` is `D:\Demo`.
+    ///
+    /// The mount rule is WSL's own documented one — every fixed drive under `/mnt` at its
+    /// lower-cased letter — and it is the same rule `bt_app::profiles::wsl_to_windows` translates a
+    /// working directory by; that function is this arm, read from the one place both callers can
+    /// reach.
+    ///
+    /// **A distribution-internal path stays plain text**, and so does `~`. `/home/alice` is a
+    /// directory inside the distribution's own filesystem; the only Windows spelling of it is the
+    /// `\\wsl.localhost\<distro>\home\alice` share, which is a `file:` authority this product's
+    /// decoder is obliged to refuse as remote (`decode_file_uri`). Admitting it is a ruling about
+    /// what "local" means and it is not this ticket's — see the note under §7.30.
+    Wsl,
+}
+
+impl PrintedPathNamespace {
+    /// Whether this pane prints a spelling the ordinary rooted scan cannot read — the one question
+    /// the scan asks before it runs at all, so a Windows pane pays nothing for this rule.
+    #[must_use]
+    pub fn reads_a_foreign_spelling(&self) -> bool {
+        !matches!(self, Self::Windows)
+    }
+
+    /// What this machine calls the place `printed` names, or `None` when it has no name for it.
+    ///
+    /// The refusals are the honest half of the rule and each is a real case: an MSYS path outside
+    /// the drive mounts, a distribution-internal path, a `~` in a namespace whose home this window
+    /// has not been told, and a root with nothing below it (`/` names a filesystem, not a file).
+    #[cfg(windows)]
+    #[must_use]
+    pub fn to_local_path(&self, printed: &str) -> Option<PathBuf> {
+        match self {
+            Self::Windows => None,
+            Self::Msys { home } => match printed.strip_prefix('~') {
+                Some(tail) => Some(join_below(home.as_deref()?, tail.strip_prefix('/')?)),
+                None => drive_mount_to_local_path(printed.strip_prefix('/')?),
+            },
+            // `~` is deliberately absent: see the arm's own note.
+            Self::Wsl => drive_mount_to_local_path(printed.strip_prefix("/mnt/")?),
+        }
+    }
+
+    /// The same question where this machine *is* the machine those spellings belong to.
+    ///
+    /// A POSIX host reads `/mnt/d/Demo` with the grammar it already has — it is an absolute path
+    /// there, rooted by the root every path on that filesystem is rooted by — so there is nothing
+    /// for a namespace to translate and no arm of it can arise. The function exists so that the
+    /// type crosses the portable core unchanged.
+    #[cfg(not(windows))]
+    #[must_use]
+    pub fn to_local_path(&self, _printed: &str) -> Option<PathBuf> {
+        None
+    }
+
+    /// The directory this pane is standing in, spelled the way this machine spells it — what a
+    /// relative reference printed in this pane is measured from.
+    ///
+    /// A shell reports `OSC 7` in the namespace it stands in (`folio.bash` says so in as many
+    /// words), so a WSL pane's own report is `/mnt/d/Demo` and every `./a.md` printed in it was
+    /// measured from a directory this machine spells `D:\Demo`. Without this the join was asked of
+    /// a base `resolve_relative_reference` refuses, and a WSL pane had no relative references at
+    /// all.
+    #[must_use]
+    pub fn to_local_directory(&self, reported: &Path) -> Option<PathBuf> {
+        if !self.reads_a_foreign_spelling() || is_local_absolute_path(reported) {
+            return Some(reported.to_path_buf());
+        }
+        self.to_local_path(reported.to_str()?)
+    }
+}
+
+/// `d/Demo/report.md` → `D:\Demo\report.md` — one of WSL's and MSYS's drive mounts, read below the
+/// prefix that says which of the two it was.
+///
+/// The segment naming the drive has to be a **single ASCII letter**, because that is what makes it
+/// a drive mount rather than an ordinary directory somebody made: `/mnt/cdrom` and `/data/x` are
+/// not drives, and neither is `/mnt` on its own.
+///
+/// A drive with nothing below it is the drive's root, exactly as `D:\` printed into a pane is: the
+/// two spellings say the same thing and this module has always read the second one.
+#[must_use]
+pub fn drive_mount_to_local_path(below_root: &str) -> Option<PathBuf> {
+    let (drive, tail) = below_root.split_once('/').unwrap_or((below_root, ""));
+    let &[letter] = drive.as_bytes() else {
+        return None;
+    };
+    if !letter.is_ascii_alphabetic() {
+        return None;
+    }
+    let mut translated = format!("{}:\\", char::from(letter).to_ascii_uppercase());
+    translated.push_str(&tail.replace('/', "\\"));
+    Some(PathBuf::from(translated))
+}
+
+/// `~/src/a.md` → `<home>\src\a.md`, with the tail's separators turned into this machine's.
+///
+/// Nothing is normalized here: a `..` inside the tail reaches [`is_promisable`]'s and the ledger's
+/// readings exactly as it does in a printed `D:\…\..\…`, which is the same text a person could have
+/// typed and the same file the disk answers for.
+#[cfg(windows)]
+fn join_below(home: &Path, tail: &str) -> PathBuf {
+    if tail.is_empty() {
+        return home.to_path_buf();
+    }
+    home.join(tail.replace('/', "\\"))
 }
 
 /// The `:line[:col]` a printed reference may end with — the shape an agent, a compiler, a linter
@@ -241,6 +388,64 @@ fn is_windows_drive_absolute(text: &str) -> bool {
 /// one token and not several references: whoever goes to the disk asks about the longest of them
 /// first and stops at the first that is there.
 pub fn detect_absolute_path_candidates(text: &str) -> Vec<PrintedPathCandidate> {
+    detect_rooted_candidates(
+        text,
+        PrintedPathSpelling::Absolute,
+        &absolute_candidate_opens_at,
+        &|path| is_local_absolute_path(Path::new(path)),
+    )
+}
+
+/// The same scan for the spelling the **pane's own shell** roots a path with (T-3, 2026-09-07):
+/// `/d/src/a.md`, `/mnt/d/src/a.md`, `~/src/a.md`.
+///
+/// It is the rooted scan with two of its three parts replaced and the third — the quoting, the
+/// prose tail and §7.30's several readings of one token — shared, because none of that is about
+/// which machine's root a path opens with. What changes is where a candidate may open
+/// ([`foreign_candidate_opens_at`]) and what counts as rooted, which here is the namespace's own
+/// question: a spelling this machine has no name for is not a candidate, so it never reaches the
+/// ledger and never spends a probe.
+#[cfg(windows)]
+pub fn detect_foreign_path_candidates(
+    text: &str,
+    namespace: &PrintedPathNamespace,
+) -> Vec<PrintedPathCandidate> {
+    if !namespace.reads_a_foreign_spelling() {
+        return Vec::new();
+    }
+    detect_rooted_candidates(
+        text,
+        PrintedPathSpelling::Foreign,
+        &foreign_candidate_opens_at,
+        &|path| namespace.to_local_path(path).is_some(),
+    )
+}
+
+/// The same scan where these spellings are the host's own and the rooted scan above already reads
+/// them — see [`PrintedPathNamespace::to_local_path`]'s POSIX arm.
+#[cfg(not(windows))]
+pub fn detect_foreign_path_candidates(
+    _text: &str,
+    _namespace: &PrintedPathNamespace,
+) -> Vec<PrintedPathCandidate> {
+    Vec::new()
+}
+
+/// Where a rooted candidate may open, as the walk asks it: the line, its bytes, the offset, and
+/// whether a quote has already declared the extent (which is also a declaration of the opening).
+///
+/// An alias because the two scans hand [`detect_rooted_candidates`] the same sentence and a
+/// signature spelled twice is a signature that can drift once.
+type RootedOpensAt = dyn Fn(&str, &[u8], usize, bool) -> bool;
+
+/// The walk both rooted scans are: find where a token opens, take its extent (quoted or not),
+/// release its prose tail, offer §7.30's shorter readings, and keep the ones `rooted` accepts.
+fn detect_rooted_candidates(
+    text: &str,
+    spelling: PrintedPathSpelling,
+    opens_at: &RootedOpensAt,
+    rooted: &dyn Fn(&str) -> bool,
+) -> Vec<PrintedPathCandidate> {
     let bytes = text.as_bytes();
     let mut candidates = Vec::new();
     let mut cursor = 0usize;
@@ -251,7 +456,7 @@ pub fn detect_absolute_path_candidates(text: &str) -> Vec<PrintedPathCandidate> 
         } else {
             cursor
         };
-        if !absolute_candidate_opens_at(text, bytes, start, quoted) {
+        if !opens_at(text, bytes, start, quoted) {
             cursor += 1;
             continue;
         }
@@ -286,12 +491,12 @@ pub fn detect_absolute_path_candidates(text: &str) -> Vec<PrintedPathCandidate> 
         for form_end in std::iter::once(end).chain(seams.into_iter().map(|offset| start + offset)) {
             let (path_length, location) = split_printed_location(&text[start..form_end]);
             let path_byte_end = start + path_length;
-            if is_local_absolute_path(Path::new(&text[start..path_byte_end])) {
+            if rooted(&text[start..path_byte_end]) {
                 candidates.push(PrintedPathCandidate {
                     byte_start: start,
                     path_byte_end,
                     byte_end: form_end,
-                    spelling: PrintedPathSpelling::Absolute,
+                    spelling,
                     location,
                 });
             }
@@ -710,6 +915,32 @@ fn absolute_candidate_opens_at(text: &str, bytes: &[u8], start: usize, quoted: b
                 && !a_binding_colon_stands_before(text, start)))
 }
 
+/// Where a path spelled in the **pane's** namespace may open (T-3, 2026-09-07).
+///
+/// The mark is a POSIX root or a leading `~`, and both of them are common characters rather than
+/// rare ones, so the opening test is the POSIX arm's and not the drive arm's: the token boundary
+/// and the binding colon are both asked, which is what keeps `scheme:/opaque` and the `:`-separated
+/// `PATH` a bash prints out of this scan.
+///
+/// **A `~` is only home at the front of a token**, which is §7.30's own 2026-09-04 ruling read in
+/// this namespace: `PROGRA~1/tools` carries one in the middle and is a name, and the boundary test
+/// is what tells the two apart. It must additionally be followed by the separator, because a `~`
+/// with a word glued to it is prose (`~5`, `~ish`) far more often than it is a home directory, and
+/// because a bare `~` names a directory nobody printed a file in.
+#[cfg(windows)]
+fn foreign_candidate_opens_at(text: &str, bytes: &[u8], start: usize, quoted: bool) -> bool {
+    (is_posix_root_prefix_at(bytes, start) || is_home_prefix_at(bytes, start))
+        && (quoted
+            || (candidate_start_boundary(text, start)
+                && !a_binding_colon_stands_before(text, start)))
+}
+
+/// A `~` that opens a home expansion: the mark and the separator that makes it a directory.
+#[cfg(windows)]
+fn is_home_prefix_at(bytes: &[u8], start: usize) -> bool {
+    bytes.get(start) == Some(&b'~') && bytes.get(start + 1) == Some(&b'/')
+}
+
 /// A `/` that opens a path rather than continuing a URL.
 ///
 /// Two refusals, and both are about the same shape. `//` is refused because the
@@ -727,7 +958,9 @@ fn absolute_candidate_opens_at(text: &str, bytes: &[u8], start: usize, quoted: b
 /// `PATH` a POSIX shell prints both put a rooted-looking run behind a colon,
 /// and a colon binds leftward: what follows it belongs to whatever the colon
 /// already made absolute or schemed.
-#[cfg(not(windows))]
+///
+/// Compiled on every platform since T-3: off Windows it is the absolute scan's own mark, and on
+/// Windows it is the [`PrintedPathNamespace`] scan's.
 fn is_posix_root_prefix_at(bytes: &[u8], start: usize) -> bool {
     bytes.get(start) == Some(&b'/') && bytes.get(start + 1) != Some(&b'/')
 }
@@ -1253,6 +1486,16 @@ fn is_promisable(
         // decoder has refused an interior empty segment since it was written.
         PrintedPathSpelling::Uri => file_uri_to_local_reference(path)
             .is_none_or(|decoded| !names_a_dos_device(&decoded.to_string_lossy())),
+        // The same two refusals, asked **below the root**: the separator that roots `/d/Demo` is
+        // the root's own and is no more an empty component than a drive's `D:\` is. Reading it as
+        // one would refuse every path this namespace can spell.
+        PrintedPathSpelling::Foreign => {
+            let below_root = path
+                .strip_prefix('/')
+                .or_else(|| path.strip_prefix("~/"))
+                .unwrap_or(path);
+            !has_interior_empty_component(below_root) && !names_a_dos_device(below_root)
+        }
         // `D:\\case\\src\\main.rs` on the screen is a serialized string, not a path literal.
         // Windows may collapse the repeats onto the same file, but that is a coincidence of the API
         // rather than something the printed text said, and one round of unescaping is a guess about
@@ -1688,10 +1931,15 @@ pub fn local_path_to_file_uri(path: &Path) -> String {
 /// however long the program repainted (§7.1.5j, user report 2026-08-23).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PrintedPathLinks {
+    /// Where a relative reference printed in this pane is measured from, **already in this
+    /// machine's spelling** — see [`PrintedPathNamespace::to_local_directory`], which is what
+    /// translates a WSL pane's own `/mnt/d/Demo` report into the base a join can use.
     working_directory: Option<PathBuf>,
     /// Every name this window has been given an answer for, and what the answer was. Absence means
     /// "nobody has looked", which is the one state that is worth a question.
     verdicts: BTreeMap<PathBuf, bool>,
+    /// Which spelling of an absolute path the shell in this pane prints (T-3, 2026-09-07).
+    namespace: PrintedPathNamespace,
 }
 
 /// A reference an application cut across one or more real newlines, put back together — and the
@@ -1744,9 +1992,26 @@ pub struct ContinuationRow<'a> {
 
 impl PrintedPathLinks {
     pub fn new(working_directory: Option<PathBuf>, verdicts: BTreeMap<PathBuf, bool>) -> Self {
+        Self::in_namespace(working_directory, verdicts, &PrintedPathNamespace::Windows)
+    }
+
+    /// The same ledger for a pane whose shell spells an absolute path in its own namespace
+    /// (T-3, 2026-09-07).
+    ///
+    /// The working directory is translated **here, once**, rather than at every join: it is the
+    /// same directory said two ways, and a base that had to be re-translated per candidate would be
+    /// a second reading of one fact on the hottest path in this module.
+    #[must_use]
+    pub fn in_namespace(
+        working_directory: Option<PathBuf>,
+        verdicts: BTreeMap<PathBuf, bool>,
+        namespace: &PrintedPathNamespace,
+    ) -> Self {
         Self {
-            working_directory,
+            working_directory: working_directory
+                .and_then(|directory| namespace.to_local_directory(&directory)),
             verdicts,
+            namespace: namespace.clone(),
         }
     }
 
@@ -2122,6 +2387,7 @@ impl PrintedPathLinks {
     /// and the rejoin read, so the two can never disagree about where a reference stops.
     fn candidates_in(&self, text: &str) -> Vec<PrintedPathCandidate> {
         let mut candidates = detect_absolute_path_candidates(text);
+        candidates.extend(detect_foreign_path_candidates(text, &self.namespace));
         if self.working_directory.is_some() {
             candidates.extend(detect_relative_path_candidates(text, &|_| true));
         }
@@ -2167,6 +2433,10 @@ impl PrintedPathLinks {
                 resolve_relative_reference(self.working_directory.as_deref()?, text)
             }
             PrintedPathSpelling::Uri => file_uri_to_local_reference(text),
+            // The namespace answered this once already, at the scan: a spelling it has no name for
+            // never became a candidate. Asking it again here is what keeps the resolution in one
+            // place rather than carrying a translated path on the candidate.
+            PrintedPathSpelling::Foreign => self.namespace.to_local_path(text),
         }
     }
 }
@@ -2384,6 +2654,216 @@ mod tests {
                 .is_empty()
         );
         assert!(unknown.is_empty());
+    }
+
+    /// The namespaces the matrix's three pane kinds stand in.
+    fn msys() -> PrintedPathNamespace {
+        PrintedPathNamespace::Msys {
+            home: Some(PathBuf::from("C:\\Users\\alice")),
+        }
+    }
+
+    /// Every link one line offers **in one namespace**, as `(printed span, target)`.
+    fn linked_in(
+        namespace: &PrintedPathNamespace,
+        verdicts: &[(&str, bool)],
+        line: &str,
+    ) -> Vec<String> {
+        let links = PrintedPathLinks::in_namespace(
+            None,
+            verdicts
+                .iter()
+                .map(|(path, answer)| (PathBuf::from(path), *answer))
+                .collect(),
+            namespace,
+        );
+        let mut unknown = BTreeSet::new();
+        links
+            .links_in(line, None, &mut unknown)
+            .into_iter()
+            .map(|(range, uri)| format!("{} → {uri}", &line[range.byte_start..range.byte_end]))
+            .collect()
+    }
+
+    /// PIN (T-3, 2026-09-07): the four spellings a Git Bash prints, each read as the file this
+    /// machine holds — the drive mounts, a location, and the home mark that only counts at the
+    /// front of a token.
+    #[test]
+    fn an_msys_pane_reads_the_drive_mounts_and_its_own_home() {
+        assert_eq!(
+            linked_in(
+                &msys(),
+                &[("D:\\Demo\\report.md", true)],
+                "wrote /d/Demo/report.md",
+            ),
+            ["/d/Demo/report.md → file:///D:/Demo/report.md"]
+        );
+        assert_eq!(
+            linked_in(
+                &msys(),
+                &[("C:\\Windows\\System32\\drivers\\etc\\hosts", true)],
+                "/c/Windows/System32/drivers/etc/hosts",
+            ),
+            [
+                "/c/Windows/System32/drivers/etc/hosts → file:///C:/Windows/System32/drivers/etc/hosts"
+            ]
+        );
+        assert_eq!(
+            linked_in(
+                &msys(),
+                &[("C:\\Users\\alice\\notes\\a.md", true)],
+                "see ~/notes/a.md:12 for it",
+            ),
+            ["~/notes/a.md:12 → file:///C:/Users/alice/notes/a.md#L12"]
+        );
+        // §7.30's 2026-09-04 ruling, unchanged in this namespace: the mark inside a name is a
+        // character and not an expansion, so an 8.3 short name still reads as itself.
+        assert_eq!(
+            linked_in(
+                &msys(),
+                &[("D:\\PROGRA~1\\a.txt", true)],
+                "D:\\PROGRA~1\\a.txt",
+            ),
+            ["D:\\PROGRA~1\\a.txt → file:///D:/PROGRA~1/a.txt"]
+        );
+    }
+
+    /// PIN (T-3): a WSL pane reads `/mnt/<drive>/…`, and the paths that live inside the
+    /// distribution stay plain text because this machine has no name for them.
+    #[test]
+    fn a_wsl_pane_reads_its_drive_mounts_and_leaves_the_distribution_alone() {
+        assert_eq!(
+            linked_in(
+                &PrintedPathNamespace::Wsl,
+                &[("D:\\Demo\\report.md", true)],
+                "ls /mnt/d/Demo/report.md",
+            ),
+            ["/mnt/d/Demo/report.md → file:///D:/Demo/report.md"]
+        );
+        for inside in ["/home/alice/notes.md", "~/notes.md", "/usr/local/bin/tool"] {
+            assert!(
+                linked_in(
+                    &PrintedPathNamespace::Wsl,
+                    &[("D:\\Demo\\report.md", true)],
+                    inside,
+                )
+                .is_empty(),
+                "{inside} names a place inside the distribution, which Windows cannot open"
+            );
+        }
+        // The MSYS spelling is not the WSL one, and neither pane reads the other's.
+        assert!(
+            linked_in(
+                &PrintedPathNamespace::Wsl,
+                &[("D:\\Demo\\report.md", true)],
+                "/d/Demo/report.md",
+            )
+            .is_empty()
+        );
+        assert!(
+            linked_in(
+                &msys(),
+                &[("D:\\Demo\\report.md", true)],
+                "/mnt/d/Demo/report.md"
+            )
+            .is_empty(),
+            "an MSYS shell has no /mnt, so this is a path inside the Git installation"
+        );
+    }
+
+    /// PIN (T-3): **the namespace is the pane's, not the line's.** The same three spellings printed
+    /// into a PowerShell pane name nothing, however real the files behind them are — which is the
+    /// whole reason this is told to the detector rather than guessed from the text.
+    #[test]
+    fn a_windows_pane_reads_no_unix_spelling_however_real_the_file_is() {
+        for printed in [
+            "/d/Demo/report.md",
+            "/mnt/d/Demo/report.md",
+            "~/notes/a.md",
+            "/c/Windows/System32/drivers/etc/hosts",
+        ] {
+            assert!(
+                linked_in(
+                    &PrintedPathNamespace::Windows,
+                    &[
+                        ("D:\\Demo\\report.md", true),
+                        ("C:\\Users\\alice\\notes\\a.md", true),
+                        ("C:\\Windows\\System32\\drivers\\etc\\hosts", true),
+                    ],
+                    printed,
+                )
+                .is_empty(),
+                "{printed} is not a path in a pane whose shell spells this machine's paths"
+            );
+        }
+    }
+
+    /// PIN (T-3): the refusals a foreign spelling keeps, so that a namespace does not become a
+    /// licence. A root with no drive under it, a mount that is not a drive, a `~` glued to a word,
+    /// a device name and a scheme's opaque tail are each read exactly as they are.
+    #[test]
+    fn a_foreign_spelling_keeps_every_refusal_the_windows_one_has() {
+        for printed in [
+            "/",
+            "//d/Demo/report.md",
+            "/mnt/cdrom/disc/report.md",
+            "~notes/a.md",
+            "/d/Demo/NUL",
+            "scheme:/d/Demo/report.md",
+        ] {
+            assert!(
+                linked_in(
+                    &PrintedPathNamespace::Wsl,
+                    &[("D:\\Demo\\report.md", true), ("D:\\Demo\\NUL", true)],
+                    printed,
+                )
+                .is_empty(),
+                "{printed} in a WSL pane"
+            );
+            assert!(
+                linked_in(
+                    &msys(),
+                    &[("D:\\Demo\\report.md", true), ("D:\\Demo\\NUL", true)],
+                    printed,
+                )
+                .is_empty(),
+                "{printed} in an MSYS pane"
+            );
+        }
+    }
+
+    /// PIN (T-3): a pane reports `OSC 7` in the namespace it stands in, so the base a relative
+    /// reference is measured from is translated once, with the printed text left alone.
+    #[test]
+    fn a_wsl_panes_own_directory_is_what_a_relative_reference_is_measured_from() {
+        let links = PrintedPathLinks::in_namespace(
+            Some(PathBuf::from("/mnt/d/Demo")),
+            [(PathBuf::from("D:\\Demo\\docs\\a.md"), true)]
+                .into_iter()
+                .collect(),
+            &PrintedPathNamespace::Wsl,
+        );
+        assert_eq!(
+            linked(&links, "see docs/a.md", None),
+            [("docs/a.md", "file:///D:/Demo/docs/a.md".to_owned())]
+        );
+    }
+
+    /// PIN (T-3): §7.30's several readings of one token are the same readings in a foreign
+    /// spelling — the seam is a property of the text and not of the machine that roots it.
+    #[test]
+    fn a_foreign_spelling_offers_the_same_shorter_readings_a_seam_makes() {
+        assert_eq!(
+            linked_in(
+                &msys(),
+                &[
+                    ("D:\\Demo\\report.md", true),
+                    ("D:\\Demo\\report.md,这里是说明", false),
+                ],
+                "/d/Demo/report.md,这里是说明",
+            ),
+            ["/d/Demo/report.md → file:///D:/Demo/report.md"]
+        );
     }
 
     /// The last visual cell of `text`, as the gate reads it when the whole line is one row of

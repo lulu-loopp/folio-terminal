@@ -362,6 +362,33 @@ already has.
 **Size.** Crosses `bt-app` and `bt-transcript` and adds a per-pane parameter to
 the detector. Not a one-file fix.
 
+**Fixed, 2026-09-07, on the user's ruling** (`fix/unix-path-spellings-and-cmd-hover`).
+The recommended shape: `bt_transcript::paths::PrintedPathNamespace` is the
+per-pane parameter, `bt_app::profiles::printed_path_namespace` derives it from
+the pair a profile already carries — Windows directories behind a bash init file
+is an MSYS bash, `wsl.exe` is a distribution, everything else speaks this
+machine's own spelling — and the spawn pushes it into the session beside
+`set_spawn_directory`. Nothing reads a profile id, and nothing guesses from the
+text: `/d/Demo` printed into a PowerShell pane is still prose. Two corrections
+the shape above did not reach:
+
+* `~` is expanded for MSYS (Git for Windows maps `$HOME` onto `%USERPROFILE%`,
+  which is what the `gitbash` row's `StartingDir::WindowsHome` already acts on)
+  and **not** for WSL, for the same reason `/home/alice` stays plain text.
+* the fix carries a second one with it: a WSL pane reports `OSC 7` as
+  `/mnt/d/Demo`, which `resolve_relative_reference` refuses as a base, so
+  **relative** references in a WSL pane were dead too. The base is translated
+  once, in `PrintedPathLinks::in_namespace`.
+
+`\\wsl.localhost\<distro>\…` was **considered and not taken**, and it is the one
+piece of this ticket still open: a UNC target is a `file:` authority
+`decode_file_uri` is obliged to refuse as remote, so admitting it means widening
+`is_local_absolute_path`, `local_path_to_file_uri` and every `Rooting::DriveOnly`
+call site — a ruling about what "local" means, with a security-shaped edge
+(`\\server\share\…` printed in any pane becomes clickable with it), rather than a
+translation. Until it is taken, a distribution-internal path is the same empty
+cell `docs/shell-integration.md`'s own table has.
+
 ### T-4 — a posted chord cannot drive this window
 
 Not a product defect; a limit of the probe, recorded so the next run does not

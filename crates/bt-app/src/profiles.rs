@@ -49,6 +49,7 @@ use bt_render::{
     ChromeLabel, ChromeLabelWeight, ChromePalette, FLOAT_WINDOW_BORDER_LOGICAL_PX,
     FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad, Travel, chrome_palette, rounded_overlay_fill,
 };
+use bt_transcript::paths::PrintedPathNamespace;
 
 use crate::{
     LeafId,
@@ -2820,6 +2821,39 @@ pub fn integration(index: usize) -> Integration {
     with_table(|table| table.get(index).map_or(Integration::None, served_by))
 }
 
+/// Which spelling of an absolute path one row's shell **prints**, for the path
+/// detector — T-3 (`docs/plans/shell-matrix-2026-09-07.md`).
+///
+/// Not the same question as [`paths`], and the difference is the whole of this
+/// function. [`PathNamespace`] answers *where this pane's working directory is*,
+/// and its answer for Git Bash is `Windows` on purpose: that shell's process is
+/// standing in `D:\Demo`, one directory under two spellings, and the Win32 one is
+/// the true one because it is what `CreateProcess` was handed. But the shell
+/// still **prints** `/d/Demo/report.md`, and text on the screen is read in the
+/// spelling it was written in.
+///
+/// So the third namespace the `gitbash` row's own note refuses to become is a
+/// namespace here, and it is read off the pair the row already carries rather
+/// than off its id: a row whose directories are Windows and whose door is a
+/// **bash init file** is a bash standing in a Win32 world, which is what MSYS is.
+/// A row that starts `wsl.exe` is the distribution's own filesystem, door or no
+/// door — a WSL pane prints `/mnt/d/…` whether or not anything integrated it.
+/// Everything else prints this machine's spelling and reads it with the grammar
+/// it always had, which is why `/d/Demo` inside a PowerShell pane is not a path.
+#[must_use]
+pub fn printed_path_namespace(
+    index: usize,
+    environment: &dyn ShellEnvironment,
+) -> PrintedPathNamespace {
+    match (paths(index), integration(index)) {
+        (PathNamespace::Wsl, _) => PrintedPathNamespace::Wsl,
+        (PathNamespace::Windows, Integration::BashInitFile) => PrintedPathNamespace::Msys {
+            home: home_directory(environment),
+        },
+        (PathNamespace::Windows, _) => PrintedPathNamespace::Windows,
+    }
+}
+
 /// One whole row, cloned — **what the spawn path is handed** (§7.1.6c-6c).
 ///
 /// `shell_command` used to take an index and ask this module four separate
@@ -3694,22 +3728,13 @@ pub fn windows_to_wsl(path: &Path) -> Option<PathBuf> {
 /// ASCII letter, because that is what makes it one of WSL's drive mounts rather
 /// than an ordinary directory somebody made.
 #[must_use]
+///
+/// The mount rule itself lives in `bt_transcript::paths` since T-3 (2026-09-07),
+/// because the path detector needs the same translation for a `/mnt/d/…` a WSL
+/// pane *prints* and two copies of "which segment names a drive" is exactly the
+/// second opinion this module refuses everywhere else.
 pub fn wsl_to_windows(path: &Path) -> Option<PathBuf> {
-    let (drive, tail) = match path.to_str()?.strip_prefix("/mnt/")?.split_once('/') {
-        Some((drive, tail)) => (drive, tail),
-        None => (path.to_str()?.strip_prefix("/mnt/")?, ""),
-    };
-    let &[letter] = drive.as_bytes() else {
-        return None;
-    };
-    if !letter.is_ascii_alphabetic() {
-        return None;
-    }
-    let mut translated = format!("{}:\\", char::from(letter).to_ascii_uppercase());
-    if !tail.is_empty() {
-        translated.push_str(&tail.replace('/', "\\"));
-    }
-    Some(PathBuf::from(translated))
+    bt_transcript::paths::drive_mount_to_local_path(path.to_str()?.strip_prefix("/mnt/")?)
 }
 
 /// Where `cwd` — a directory written in `from`'s namespace — is, said in `to`'s,
@@ -14932,6 +14957,47 @@ mod tests {
                 directory: Some(PathBuf::from("/mnt/d/Developer")),
             },
             "the launcher is told the place, in the namespace the shell reads"
+        );
+    }
+
+    /// PIN (T-3, 2026-09-07) — **which spelling of an absolute path a row's shell
+    /// prints**, which is not the same question as which namespace its working
+    /// directory is written in.
+    ///
+    /// Git Bash is the row that separates the two: its directories are Windows
+    /// (`paths` says so on purpose, and that note is a ruling of its own), and it
+    /// prints `/d/Demo/report.md` all the same. The pair that answers is the one
+    /// the row already carries — Windows directories behind a bash init file is a
+    /// bash standing in a Win32 world, which is what MSYS is — so nothing here
+    /// reads a profile id.
+    ///
+    /// MUTATION: answer `Windows` for a `BashInitFile` row and Git Bash's own
+    /// spelling goes unread, which is the ticket.
+    #[test]
+    fn a_row_says_which_spelling_of_an_absolute_path_its_shell_prints() {
+        let machine = FakeMachine::fully_equipped().with_var("USERPROFILE", r"C:\Users\alice");
+        assert_eq!(
+            printed_path_namespace(index_of_id("gitbash"), &machine),
+            PrintedPathNamespace::Msys {
+                home: Some(PathBuf::from(r"C:\Users\alice"))
+            },
+            "a bash whose directories are Windows directories is an MSYS bash"
+        );
+        assert_eq!(
+            printed_path_namespace(index_of_id("wsl"), &machine),
+            PrintedPathNamespace::Wsl
+        );
+        for windows_speaking in ["pwsh", "powershell", "cmd"] {
+            assert_eq!(
+                printed_path_namespace(index_of_id(windows_speaking), &machine),
+                PrintedPathNamespace::Windows,
+                "{windows_speaking} spells this machine's own paths"
+            );
+        }
+        assert_eq!(
+            printed_path_namespace(index_of_id("gitbash"), &FakeMachine::default()),
+            PrintedPathNamespace::Msys { home: None },
+            "a machine that cannot name a home has no `~` to expand either"
         );
     }
 

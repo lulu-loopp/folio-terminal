@@ -29299,6 +29299,14 @@ fn create_leaf_session(
     // knows it (`profiles::spawn_place` has already folded HOME into it), so pushing it here is
     // what keeps relative text in this pane from being measured by a second copy of the ladder.
     session.set_spawn_directory(spawn_place.clone());
+    // T-3, and it arrives beside the rung above for the same reason: which spelling of an absolute
+    // path this pane's shell prints is a fact about the profile, and `seed.profile` is the last
+    // place that holds it. A Git Bash prints `/d/Demo/report.md` and a WSL bash prints
+    // `/mnt/d/Demo/report.md` for files that are really on this disk.
+    session.set_path_namespace(profiles::printed_path_namespace(
+        seed.profile,
+        &bt_pty::SystemShellEnvironment,
+    ));
     let projection = session.new_projection(session.layout_key());
     Ok(LeafSession {
         // A wake-up is the other end of a reader thread, and there is no thread
