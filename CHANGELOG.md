@@ -6,6 +6,21 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **A file inside the folder card previews on hover, like a file anywhere
+  else.** Hovering a folder path printed in a pane opens the folder card and its
+  tree; resting on a file row inside that tree showed nothing, while the same
+  name in the file column, in a window you tore off, or printed in the output
+  all answer a resting hand with a preview. It now opens that file's preview
+  beside the folder card — on whichever side has more room — after the same
+  350ms, at the same size, showing the same thing: a Markdown file rendered, an
+  image drawn, a PDF as a column of pages you can scroll. Move off the row and
+  it goes; rest on another file and the preview follows you to it. The folder
+  card stays where it is the whole time, including while you are reading the
+  card it opened. It stops at one: the preview never opens a card of its own,
+  and a folder row inside the folder card still just expands.
+
 ### Changed
 
 - **The repository tree is nine directories.** Fixtures moved under `tests/`

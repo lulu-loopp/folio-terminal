@@ -1023,14 +1023,87 @@ pub struct PeekLayout {
     pub foot: [f32; 4],
 }
 
-/// Lay the card out beside `row`, inside `window`.
+/// **Which side of its anchor a card takes.**
+///
+/// Two rules, and the second one exists because a card that stands beside
+/// *another card* is answering a different question from a card that stands
+/// beside a row (user ruling 2026-09-07, `docs/DESIGN.md` §7.58).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PeekSide {
+    /// **The mock-up's own order** (6413-6420): to the right of the anchor,
+    /// flipped left only when there is no room there.
+    ///
+    /// It is the right rule for a row that is itself the anchor, because those
+    /// rows live in surfaces pinned to an edge of the window — a files column, a
+    /// Git page, a run of cells in a terminal — and "right unless it does not
+    /// fit" lands the card in the open middle of the window every time.
+    Right,
+    /// **The side of the anchor with more room.**
+    ///
+    /// A folder card floats: it can be dragged anywhere, so there is no edge to
+    /// argue from and "right unless it does not fit" would squeeze a 300px card
+    /// into a 310px sliver while half the window stood empty on the other side.
+    /// The roomier side is the one a reader would have chosen.
+    Roomier,
+}
+
+/// **What a card is placed against**: the box it stands beside, and which side
+/// of that box it takes.
+///
+/// A type rather than two arguments because the two travel together and are
+/// wrong apart — a rectangle with the wrong rule beside it is a card in the
+/// wrong place, and there is exactly one constructor for each of the two shapes
+/// a glance is ever raised in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PeekAnchor {
+    /// The box the card stands beside, in physical pixels.
+    pub rect: [f32; 4],
+    /// Which side of it the card takes.
+    pub side: PeekSide,
+}
+
+impl PeekAnchor {
+    /// **A row that is itself the anchor** — a files column's row, a Git page's
+    /// row, a run of verified cells in a terminal pane.
+    #[must_use]
+    pub fn row(rect: [f32; 4]) -> Self {
+        Self {
+            rect,
+            side: PeekSide::Right,
+        }
+    }
+
+    /// **A row inside a card** — a file row of the folder card, and of any other
+    /// floating tree (user ruling 2026-09-07).
+    ///
+    /// The card is what the glance stands *beside* and the row is only what it
+    /// is hung *at*, so the two rectangles contribute one axis each: the card's
+    /// left and right edges decide which side and how far out, the row's top and
+    /// bottom decide how high. Taking the row's own edges instead would measure
+    /// the 10px gap from inside the card the row is drawn in, and the glance
+    /// would come to rest on that card's border and its shadow.
+    #[must_use]
+    pub fn row_in_a_card(row: [f32; 4], card: [f32; 4]) -> Self {
+        Self {
+            rect: [card[0], row[1], card[2], row[3]],
+            side: PeekSide::Roomier,
+        }
+    }
+}
+
+/// Lay the card out beside `anchor`, inside `window`.
 ///
 /// **The placement is the mock-up's, in its own order** (6413-6420): to the
-/// right of the row with a 10px gap; flipped to the *left* when there is no room
-/// there; and vertically hung 8px above the row's own top, clamped to an 8px
-/// margin at both ends of the viewport. Main-axis flip, cross-axis clamp — the
-/// rule `M2-tiny-window-priority.md` §3.3 asks every floating thing in this
+/// right of the anchor with a 10px gap; flipped to the *left* when there is no
+/// room there; and vertically hung 8px above the anchor's own top, clamped to an
+/// 8px margin at both ends of the viewport. Main-axis flip, cross-axis clamp —
+/// the rule `M2-tiny-window-priority.md` §3.3 asks every floating thing in this
 /// window to follow, and the same one [`crate::float::float_placement`] obeys.
+///
+/// **[`PeekSide::Roomier`] changes the first of those three and nothing else**
+/// (user ruling 2026-09-07): the main axis picks the side with more room instead
+/// of preferring the right. The gap, the rise, the clamp and every number below
+/// them are the one card's, whichever side it lands on.
 ///
 /// `name_width` and `ftype_width` are measured by the caller, beside the
 /// renderer, exactly as the tip's and the ghost's are: only the font knows how
@@ -1038,12 +1111,13 @@ pub struct PeekLayout {
 #[must_use]
 pub fn layout(
     content: &PeekContent,
-    row: [f32; 4],
+    anchor: PeekAnchor,
     window: (f32, f32),
     name_width: f32,
     ftype_width: f32,
     scale: f32,
 ) -> PeekLayout {
+    let row = anchor.rect;
     let px = |logical: f32| logical * scale;
     let margin = px(PEEK_VIEWPORT_MARGIN_LOGICAL_PX);
     let border = px(PEEK_BORDER_LOGICAL_PX).max(1.0).round();
@@ -1070,12 +1144,34 @@ pub fn layout(
     let height = natural.min(px(PEEK_MAX_HEIGHT_LOGICAL_PX).round());
     let body_height = (height - border * 2.0 - head_height - meta_height - foot_height).max(0.0);
 
-    let right = row[2] + px(PEEK_ROW_GAP_LOGICAL_PX);
-    let left = if right + width > window.0 - margin {
-        (row[0] - width - px(PEEK_ROW_GAP_LOGICAL_PX)).max(margin)
-    } else {
-        right
+    let gap = px(PEEK_ROW_GAP_LOGICAL_PX);
+    let right = row[2] + gap;
+    let flipped = row[0] - width - gap;
+    let left = match anchor.side {
+        PeekSide::Right => {
+            if right + width > window.0 - margin {
+                flipped
+            } else {
+                right
+            }
+        }
+        // Which side has more room for the card *and its gap* — the two are one
+        // reach, and a side that fits the card by cutting the gap has not fitted
+        // it. Ties go right, which is where the other rule starts from.
+        PeekSide::Roomier => {
+            if (window.0 - margin) - right >= (row[0] - gap) - margin {
+                right
+            } else {
+                flipped
+            }
+        }
     }
+    // **And then inside the viewport, whichever side was chosen.** The flip is
+    // the answer to "which side"; this is the answer to "and what if neither
+    // side has room", which is a window too narrow for a 300px card at all — the
+    // same last resort `float::clamp_pinned` takes, rather than a card half off
+    // the glass.
+    .clamp(margin, (window.0 - width - margin).max(margin))
     .round();
     let top = (row[1] - px(PEEK_ROW_RISE_LOGICAL_PX))
         .clamp(margin, (window.1 - height - margin).max(margin))
@@ -1656,7 +1752,7 @@ mod tests {
         };
         let gone_layout = layout(
             &card,
-            [40.0, 300.0, 240.0, 320.0],
+            PeekAnchor::row([40.0, 300.0, 240.0, 320.0]),
             (1600.0, 900.0),
             ruler(&card.name, PEEK_HEAD_FONT_LOGICAL_PX),
             0.0,
@@ -1694,7 +1790,7 @@ mod tests {
         };
         let typed_layout = layout(
             &typed,
-            [40.0, 300.0, 240.0, 320.0],
+            PeekAnchor::row([40.0, 300.0, 240.0, 320.0]),
             (1600.0, 900.0),
             ruler(&typed.name, PEEK_HEAD_FONT_LOGICAL_PX),
             ruler("text", PEEK_TYPE_FONT_LOGICAL_PX),
@@ -1757,7 +1853,7 @@ mod tests {
         };
         let card_layout = layout(
             &card,
-            [40.0, 300.0, 240.0, 320.0],
+            PeekAnchor::row([40.0, 300.0, 240.0, 320.0]),
             (1600.0, 900.0),
             ruler(NAME, PEEK_HEAD_FONT_LOGICAL_PX),
             ruler("text", PEEK_TYPE_FONT_LOGICAL_PX),
@@ -1861,7 +1957,7 @@ mod tests {
         let card = content(lines(6));
         let layout = layout(
             &card,
-            [40.0, 300.0, 240.0, 320.0],
+            PeekAnchor::row([40.0, 300.0, 240.0, 320.0]),
             window,
             60.0,
             24.0,
@@ -1926,7 +2022,7 @@ mod tests {
         let card = content(lines(3));
         let roomy = layout(
             &card,
-            [40.0, 300.0, 240.0, 320.0],
+            PeekAnchor::row([40.0, 300.0, 240.0, 320.0]),
             window,
             60.0,
             24.0,
@@ -1939,7 +2035,7 @@ mod tests {
 
         let tight = layout(
             &card,
-            [900.0, 300.0, 1180.0, 320.0],
+            PeekAnchor::row([900.0, 300.0, 1180.0, 320.0]),
             window,
             60.0,
             24.0,
@@ -1956,6 +2052,197 @@ mod tests {
         );
     }
 
+    /// RED GATE (user ruling 2026-09-07, `docs/DESIGN.md` §7.58) — **a glance
+    /// a card's own row raised stands beside the card, on the side with more
+    /// room.**
+    ///
+    /// The report was the folder card: a hand resting on a file row inside it
+    /// was answered by nothing, while every other row in this window answers one
+    /// with a glance. The card that answers it cannot be placed the way a
+    /// column's row is placed, for two separate reasons, and this gate is those
+    /// two reasons:
+    ///
+    /// * **A row inside a window runs to that window's inner edge**, so ten
+    ///   pixels off the row's own right edge is ten pixels measured from a line
+    ///   drawn *inside* the folder card — the glance would come to rest on that
+    ///   card's border and its shadow. The card is what it stands beside; the row
+    ///   is only how high it hangs.
+    /// * **"Right unless it does not fit" is a rule for a surface pinned to an
+    ///   edge of the window** — a files column, a Git page, a run of cells. A
+    ///   folder card floats: dragged just left of centre it leaves more room on
+    ///   its left than on its right and still passes that test, and the reader
+    ///   gets a 300px card wedged into the narrower half of the window while the
+    ///   wider half stands empty.
+    ///
+    /// MUTATIONS that must turn this red:
+    ///
+    /// * [`PeekAnchor::row_in_a_card`] taking the row's own left and right edges
+    ///   instead of the card's — ① comes back at `row[2] + 10` and the glance is
+    ///   drawn over the folder card.
+    /// * [`PeekAnchor::row_in_a_card`] taking the card's top instead of the
+    ///   row's — ② comes back at the card's own rise and the glance stops
+    ///   pointing at anything.
+    /// * [`PeekSide::Roomier`] falling back to [`PeekSide::Right`]'s test — ④
+    ///   comes back on the right, which is the half of the window with less room
+    ///   in it.
+    /// * dropping the viewport clamp — ⑤ runs off the glass.
+    #[test]
+    fn a_glance_raised_inside_a_card_stands_beside_the_card_on_the_roomier_side() {
+        let window = (1200.0, 800.0);
+        let card = content(lines(3));
+        // A folder card near the left edge, and one of its file rows: the row is
+        // inset from the card by its border and its own padding, exactly as a
+        // float's tree rows are.
+        let folder = [60.0, 200.0, 360.0, 620.0];
+        let row = [70.0, 300.0, 350.0, 322.0];
+        let beside = layout(
+            &card,
+            PeekAnchor::row_in_a_card(row, folder),
+            window,
+            60.0,
+            24.0,
+            SCALE,
+        );
+
+        // ① Ten pixels off the *card*'s edge, not off the row drawn inside it.
+        assert_eq!(
+            beside.frame[0],
+            folder[2] + PEEK_ROW_GAP_LOGICAL_PX,
+            "the glance stands beside the card, not beside the row: {:?}",
+            beside.frame
+        );
+        assert!(
+            beside.frame[0] > folder[2],
+            "so no part of it is drawn over the card that raised it"
+        );
+        // ② And hung at the row it is about, which is the one axis the row still
+        // owns — the card says which side, the row says how high.
+        assert_eq!(
+            beside.frame[1],
+            row[1] - PEEK_ROW_RISE_LOGICAL_PX,
+            "hung eight pixels above the row's own top, as every glance is"
+        );
+
+        // ③ The card near the right edge: the roomier side is the left one, and
+        // the glance clears the card there too.
+        let right_hand = [840.0, 200.0, 1140.0, 620.0];
+        let flipped = layout(
+            &card,
+            PeekAnchor::row_in_a_card([850.0, 300.0, 1130.0, 322.0], right_hand),
+            window,
+            60.0,
+            24.0,
+            SCALE,
+        );
+        assert_eq!(
+            flipped.frame[2],
+            right_hand[0] - PEEK_ROW_GAP_LOGICAL_PX,
+            "and ten pixels off the card's left edge when that is the roomier \
+             side: {:?}",
+            flipped.frame
+        );
+
+        // ④ **The two rules pulled apart.** A card just left of centre: the
+        // right side fits — so the row rule would take it — and the left side is
+        // wider, so this one does not.
+        let middling = [500.0, 200.0, 800.0, 620.0];
+        let middle_row = [510.0, 300.0, 790.0, 322.0];
+        let roomier = layout(
+            &card,
+            PeekAnchor::row_in_a_card(middle_row, middling),
+            window,
+            60.0,
+            24.0,
+            SCALE,
+        );
+        let preferring_right = layout(
+            &card,
+            PeekAnchor {
+                rect: PeekAnchor::row_in_a_card(middle_row, middling).rect,
+                side: PeekSide::Right,
+            },
+            window,
+            60.0,
+            24.0,
+            SCALE,
+        );
+        assert_eq!(
+            preferring_right.frame[0],
+            middling[2] + PEEK_ROW_GAP_LOGICAL_PX,
+            "the right side does fit, which is the whole point of this case"
+        );
+        assert_eq!(
+            roomier.frame[2],
+            middling[0] - PEEK_ROW_GAP_LOGICAL_PX,
+            "and the roomier side is the left one, so that is where it goes: \
+             {:?}",
+            roomier.frame
+        );
+
+        // ⑤ A window with no room on either side still keeps the whole card on
+        // the glass — the last resort, and the same one a pinned float takes.
+        let narrow = (620.0, 800.0);
+        let cramped = layout(
+            &card,
+            PeekAnchor::row_in_a_card([50.0, 300.0, 330.0, 322.0], [40.0, 200.0, 340.0, 620.0]),
+            narrow,
+            60.0,
+            24.0,
+            SCALE,
+        );
+        assert!(
+            cramped.frame[0] >= PEEK_VIEWPORT_MARGIN_LOGICAL_PX
+                && cramped.frame[2] <= narrow.0 - PEEK_VIEWPORT_MARGIN_LOGICAL_PX,
+            "neither side has room, so the card is clamped whole: {:?}",
+            cramped.frame
+        );
+
+        // ⑥ **The pair is one region.** The folder card stands between the row
+        // and the glance, so the gap that joins them runs across it: a hand
+        // reaching for the glance is never outside the corridor on the way, and
+        // a hand inside the glance is inside the glance.
+        assert_eq!(
+            life(
+                row,
+                beside.frame,
+                Some([folder[2] - 5.0, row[1] + 5.0]),
+                false
+            ),
+            Life::Kept,
+            "on the card, at the row's own height — still reaching"
+        );
+        assert_eq!(
+            life(
+                row,
+                beside.frame,
+                Some([folder[2] + 5.0, row[1] + 5.0]),
+                false
+            ),
+            Life::Kept,
+            "in the gap between the two cards — still reaching"
+        );
+        assert_eq!(
+            life(
+                row,
+                beside.frame,
+                Some([beside.frame[0] + 20.0, beside.frame[1] + 20.0]),
+                false
+            ),
+            Life::Held,
+            "and inside the glance it is being read"
+        );
+        assert_eq!(
+            life(
+                row,
+                beside.frame,
+                Some([folder[0] + 5.0, folder[3] - 5.0]),
+                false
+            ),
+            Life::Released,
+            "off the pair, and the grace starts"
+        );
+    }
+
     /// PIN — the 8px margin holds at both ends of the vertical axis.
     ///
     /// A row at the very top of a tree would hang the card above the window, and
@@ -1968,11 +2255,18 @@ mod tests {
     fn the_card_keeps_eight_pixels_of_air_at_both_ends() {
         let window = (1200.0, 400.0);
         let card = content(lines(14));
-        let high = layout(&card, [40.0, 2.0, 240.0, 22.0], window, 60.0, 24.0, SCALE);
+        let high = layout(
+            &card,
+            PeekAnchor::row([40.0, 2.0, 240.0, 22.0]),
+            window,
+            60.0,
+            24.0,
+            SCALE,
+        );
         assert_eq!(high.frame[1], PEEK_VIEWPORT_MARGIN_LOGICAL_PX);
         let low = layout(
             &card,
-            [40.0, 380.0, 240.0, 398.0],
+            PeekAnchor::row([40.0, 380.0, 240.0, 398.0]),
             window,
             60.0,
             24.0,
@@ -2000,7 +2294,7 @@ mod tests {
         let window = (1200.0, 900.0);
         let long = layout(
             &content(lines(40)),
-            [40.0, 300.0, 240.0, 320.0],
+            PeekAnchor::row([40.0, 300.0, 240.0, 320.0]),
             window,
             60.0,
             24.0,
@@ -2023,7 +2317,7 @@ mod tests {
         // A short body shrink-wraps instead: the cap is a maximum, not a height.
         let short = layout(
             &content(lines(2)),
-            [40.0, 300.0, 240.0, 320.0],
+            PeekAnchor::row([40.0, 300.0, 240.0, 320.0]),
             window,
             60.0,
             24.0,
@@ -2049,10 +2343,24 @@ mod tests {
     fn an_unsaved_buffer_gets_a_dot_and_the_name_makes_room_for_it() {
         let window = (1200.0, 900.0);
         let row = [40.0, 300.0, 240.0, 320.0];
-        let clean = layout(&content(lines(2)), row, window, 400.0, 24.0, SCALE);
+        let clean = layout(
+            &content(lines(2)),
+            PeekAnchor::row(row),
+            window,
+            400.0,
+            24.0,
+            SCALE,
+        );
         let mut dirty_card = content(lines(2));
         dirty_card.dirty = true;
-        let dirty = layout(&dirty_card, row, window, 400.0, 24.0, SCALE);
+        let dirty = layout(
+            &dirty_card,
+            PeekAnchor::row(row),
+            window,
+            400.0,
+            24.0,
+            SCALE,
+        );
 
         assert!(clean.dirty.is_none(), "a clean buffer says nothing");
         let dot = dirty.dirty.expect("an unsaved buffer shows its dot");
@@ -2089,7 +2397,7 @@ mod tests {
         let card = content(lines(6));
         let layout = layout(
             &card,
-            [40.0, 300.0, 240.0, 320.0],
+            PeekAnchor::row([40.0, 300.0, 240.0, 320.0]),
             window,
             60.0,
             24.0,
@@ -2240,7 +2548,7 @@ mod tests {
         let [recording, _] = crate::preview::video_fact_lines(Some("mp4"), facts);
         card.meta = meta_line(recording, facts.bytes);
         let row = [40.0, 300.0, 240.0, 320.0];
-        let laid = layout(&card, row, window, 120.0, 24.0, SCALE);
+        let laid = layout(&card, PeekAnchor::row(row), window, 120.0, 24.0, SCALE);
         let picture: std::sync::Arc<[u8]> = std::sync::Arc::from(vec![0_u8; 4].into_boxed_slice());
         let layer = build(
             &laid,
@@ -2321,7 +2629,7 @@ mod tests {
         });
         empty.name = "clip.mp4".to_owned();
         empty.meta = meta_line(None, facts.bytes);
-        let pending = layout(&empty, row, window, 120.0, 24.0, SCALE);
+        let pending = layout(&empty, PeekAnchor::row(row), window, 120.0, 24.0, SCALE);
         assert_eq!(
             pending.frame[3] - pending.frame[1],
             laid.frame[3] - laid.frame[1],
@@ -2400,7 +2708,7 @@ mod tests {
             crate::preview::type_label(&card.name, crate::preview::PreviewFtype::Web).to_owned();
         card.meta = meta_line(Some(crate::i18n::peek_page_count(3)), Some(83_387));
         let row = [40.0, 300.0, 240.0, 320.0];
-        let laid = layout(&card, row, window, 120.0, 24.0, SCALE);
+        let laid = layout(&card, PeekAnchor::row(row), window, 120.0, 24.0, SCALE);
         let layer = build(
             &laid,
             &card,
@@ -2455,7 +2763,7 @@ mod tests {
         });
         empty.name = card.name.clone();
         empty.meta = meta_line(None, Some(83_387));
-        let pending = layout(&empty, row, window, 120.0, 24.0, SCALE);
+        let pending = layout(&empty, PeekAnchor::row(row), window, 120.0, 24.0, SCALE);
         assert_eq!(
             pending.frame[3] - pending.frame[1],
             laid.frame[3] - laid.frame[1],
@@ -2544,7 +2852,7 @@ mod tests {
             Some(crate::preview::format_pixel_size(1180, 800)),
             Some(12_288),
         );
-        let laid = layout(&card, row, window, 120.0, 24.0, SCALE);
+        let laid = layout(&card, PeekAnchor::row(row), window, 120.0, 24.0, SCALE);
         let pixels: std::sync::Arc<[u8]> = std::sync::Arc::from(vec![0_u8; 4].into_boxed_slice());
         let layer = build(
             &laid,
@@ -2574,7 +2882,7 @@ mod tests {
             pages: Some(3),
         });
         page.meta = meta_line(Some(crate::i18n::peek_page_count(3)), Some(83_387));
-        let page_laid = layout(&page, row, window, 120.0, 24.0, SCALE);
+        let page_laid = layout(&page, PeekAnchor::row(row), window, 120.0, 24.0, SCALE);
         assert_eq!(
             page_laid.frame[3] - page_laid.meta.expect("a strip")[3],
             laid.frame[3] - laid.meta.expect("a strip")[3],
@@ -2657,9 +2965,16 @@ mod tests {
             })
         };
         let rested = card(0.0);
-        let at_rest = layout(&rested, row, window, 120.0, 24.0, SCALE);
+        let at_rest = layout(&rested, PeekAnchor::row(row), window, 120.0, 24.0, SCALE);
         let wound_card = card(peek_page_column_max_scroll(3, SCALE));
-        let wound = layout(&wound_card, row, window, 120.0, 24.0, SCALE);
+        let wound = layout(
+            &wound_card,
+            PeekAnchor::row(row),
+            window,
+            120.0,
+            24.0,
+            SCALE,
+        );
         assert_eq!(
             at_rest.frame, wound.frame,
             "the card is the same card wherever the column is wound to"
@@ -2724,7 +3039,14 @@ mod tests {
         let one_slot = (PEEK_PAGE_H_LOGICAL_PX + PEEK_PAGE_GAP_LOGICAL_PX) * SCALE;
         let half = (one_slot / 2.0).round();
         let notched_card = card(half);
-        let notched = layout(&notched_card, row, window, 120.0, 24.0, SCALE);
+        let notched = layout(
+            &notched_card,
+            PeekAnchor::row(row),
+            window,
+            120.0,
+            24.0,
+            SCALE,
+        );
         let after = drawn(
             &notched,
             &notched_card,
@@ -2889,11 +3211,18 @@ mod tests {
     fn the_page_body_reserves_its_picture_and_the_card_reserves_its_line() {
         let window = (1200.0, 900.0);
         let row = [40.0, 300.0, 240.0, 320.0];
-        let refusal = layout(&content(PeekBody::Refused), row, window, 60.0, 24.0, SCALE);
+        let refusal = layout(
+            &content(PeekBody::Refused),
+            PeekAnchor::row(row),
+            window,
+            60.0,
+            24.0,
+            SCALE,
+        );
         let facts = |pages, scroll| {
             layout(
                 &content(PeekBody::Facts { scroll, pages }),
-                row,
+                PeekAnchor::row(row),
                 window,
                 60.0,
                 24.0,
@@ -2983,7 +3312,7 @@ mod tests {
         card.ftype = "image".to_owned();
         let layout = layout(
             &card,
-            [40.0, 300.0, 240.0, 320.0],
+            PeekAnchor::row([40.0, 300.0, 240.0, 320.0]),
             window,
             60.0,
             24.0,
@@ -3038,7 +3367,7 @@ mod tests {
         });
         let empty = self::layout(
             &waiting,
-            [40.0, 300.0, 240.0, 320.0],
+            PeekAnchor::row([40.0, 300.0, 240.0, 320.0]),
             window,
             60.0,
             24.0,
@@ -3060,7 +3389,14 @@ mod tests {
     /// A card over a row, with a document too tall for it — the shape every
     /// test below is about.
     fn tall_card(row: [f32; 4]) -> PeekLayout {
-        self::layout(&content(lines(40)), row, (1200.0, 800.0), 60.0, 24.0, SCALE)
+        self::layout(
+            &content(lines(40)),
+            PeekAnchor::row(row),
+            (1200.0, 800.0),
+            60.0,
+            24.0,
+            SCALE,
+        )
     }
 
     /// PIN — **the corridor: the row, the gap and the card are one region for
@@ -3397,7 +3733,14 @@ mod tests {
 
         // ⑤ A document that fits wears nothing: a track with no thumb is a
         //    promise of somewhere to go in a card that has nowhere.
-        let short = self::layout(&content(lines(2)), row, (1200.0, 800.0), 60.0, 24.0, SCALE);
+        let short = self::layout(
+            &content(lines(2)),
+            PeekAnchor::row(row),
+            (1200.0, 800.0),
+            60.0,
+            24.0,
+            SCALE,
+        );
         assert!(
             crate::preview_body_bar(
                 short.body,
