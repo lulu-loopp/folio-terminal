@@ -126,25 +126,25 @@ Reported counts both reviewers of a slice. Deduplication folds a reviewer's find
 
 ## Tickets
 
-### T1 `fix/svg-href-and-git-hooks` (in flight)
+### T1 `fix/svg-href-and-git-hooks` (merged, `95d9bd0`)
 
 R1-1, R1-6.
 
 Why together: both are a third party's configuration file choosing what Folio's own subprocess or parser reaches. The fix in each is one explicit override where the tool's options are built: a resolver that returns nothing for an external `href`, and `core.fsmonitor=false` beside the `core.quotepath=false` already passed.
 
-### T2 `fix/untrusted-path-locality` (in flight)
+### T2 `fix/untrusted-path-locality` (merged, `a7fc271`; left open: a junction in an ancestor directory is still traversed, and `\?\` verbatim paths are now refused everywhere)
 
 R1-2, R1-3, R1-4, R1-9, R1-18, R1-19, R1-22.
 
 Why together: one question, may this window touch this path without a click, is currently answered by a handful of lexical prefix tests spread across the preview, the decoder, the detector and the window thread, and each row is a route that misses one of them. The design is a single locality answer computed once per reference and off the window thread, covering the device namespace, a symlink's target, a share and a reserved device, which every hover, card layout, decoder and document-image route asks instead of testing a prefix itself.
 
-### T3 `fix/hand-off-to-the-machine`
+### T3 `fix/hand-off-to-the-machine` (merged, `9f5c4d0`; left open: `open_local_path` does not stat before the hand-off)
 
 R1-5, R1-11, R1-12, R1-16, R1-17, R1-23, R1-26, R3-1.
 
 Why together: every row is on the route where Folio stops rendering and gives something to the machine, by shell, by browser or by spawn. The design is one hand-off point that normalises the target the way Windows will, refuses the shapes a real target never has, names every program absolutely, and states in one place which cards and which modifiers may reach it.
 
-### T4 `fix/bytes-from-the-child-are-bounded`
+### T4 `fix/bytes-from-the-child-are-bounded` (terminal side in flight; app side R1-7, R1-8, R1-20, R1-25, R1-28 queued)
 
 R1-7, R1-8, R1-13, R1-14, R1-15, R1-20, R1-25, R1-27, R1-28, R3-2, R3-3, R3-4, R5-1.
 
