@@ -35,6 +35,27 @@ All notable changes to Folio are recorded here. The format follows
   directory holds. Nothing about the program changed.
 ### Fixed
 
+- **An SVG can no longer make Folio open a file it names.** An SVG document can
+  point an `<image>` at a path, and Folio's renderer used to follow it: a file
+  anywhere on the machine, or on a network share, was read while the picture was
+  being drawn. A `.svg` file only has to be printed in a pane to get there,
+  because a printed image path is drawn on sight, so a file someone sent you
+  could read `C:\Users\you\.ssh\id_rsa` into the picture, or reach a share
+  belonging to whoever wrote it and hand over your Windows sign-in along the
+  way. Folio now draws only the images an SVG carries inside itself and follows
+  no path out of one. Formulas and the author's own artwork are unchanged: they
+  never pointed anywhere.
+
+- **A repository Folio only reads no longer gets to run a program of its
+  choosing.** A repository keeps its settings in a file that travels with the
+  folder, and two of those settings name programs for git to run: one on every
+  status check, one whenever a file is diffed. Folio ran git without turning
+  them off, so opening the Git page on a folder somebody sent you ran whatever
+  that folder asked for, and a click on a printed folder path is enough to open
+  it. Every git command Folio runs now switches those off, along with the
+  per-file diff and text-conversion programs a repository can name for its own
+  paths.
+
 - **Starting Folio no longer takes the right-click menu's first page off
   another copy of Folio that is still installed.** On Windows 11 the entry on
   the first page of the menu belongs to whichever folder Folio was last

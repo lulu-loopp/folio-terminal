@@ -525,7 +525,7 @@ fn rasterize_svg(
     elapsed: Duration,
 ) -> Result<MathRaster, MathRenderError> {
     static OPTIONS: OnceLock<resvg::usvg::Options<'static>> = OnceLock::new();
-    let options = OPTIONS.get_or_init(resvg::usvg::Options::default);
+    let options = OPTIONS.get_or_init(svg_options_without_external_images);
     let tree = resvg::usvg::Tree::from_str(svg, options)
         .map_err(|error| MathRenderError::Svg(error.to_string()))?;
     let scale = svg_scale(key.dpi_milli);
@@ -615,14 +615,32 @@ pub enum SvgRasterError {
     Dimensions(String),
 }
 
-/// Rasterize a standalone SVG document at its intrinsic size (one user unit per pixel). Serves
-/// the inline-image pipeline's SVG admission (M2 preview matrix §2: SVG displays as a static
-/// raster); this crate owns the resvg dependency, so image decoding borrows the rasterizer
-/// instead of growing its own.
-pub fn rasterize_svg_document(bytes: &[u8]) -> Result<SvgRaster, SvgRasterError> {
+/// The base parse options every SVG this crate reads is parsed under.
+///
+/// **An `<image href>` is not a door onto this machine.** usvg's stock string
+/// resolver treats every href that is not a `data:` URI as a path and reads it,
+/// which makes `<image href="\\attacker\share\p.png"/>` a connection to whoever
+/// owns that share and `<image href="C:\secrets\x.svg"/>` a way to draw a file
+/// nobody asked to see. Neither needs a click: a `.svg` path printed into a pane
+/// is queued for decoding on sight, and decoding arrives here.
+///
+/// So `resolve_string` returns nothing, for every href, always. What survives is
+/// `resolve_data`, which decodes `data:` URIs the document carries itself — and
+/// the sub-SVGs it can hold are parsed under these same options, so the rule
+/// holds however deep the nesting goes. Nothing legitimate is lost: the
+/// typesetter's own documents come out of Typst as paths, and an author's SVG
+/// that wants a bitmap in it can embed one.
+fn svg_options_without_external_images() -> resvg::usvg::Options<'static> {
+    let mut options = resvg::usvg::Options::default();
+    options.image_href_resolver.resolve_string = Box::new(|_href, _options| None);
+    options
+}
+
+/// The parse options every standalone SVG document is read under, built once.
+fn svg_document_options() -> &'static resvg::usvg::Options<'static> {
     static OPTIONS: OnceLock<resvg::usvg::Options<'static>> = OnceLock::new();
-    let options = OPTIONS.get_or_init(|| {
-        let mut options = resvg::usvg::Options::default();
+    OPTIONS.get_or_init(|| {
+        let mut options = svg_options_without_external_images();
         // **The machine's own fonts, or an SVG with words in it draws none of
         // them** (2026-08-28, `docs/DESIGN.md` §7.1.3k).
         //
@@ -640,7 +658,15 @@ pub fn rasterize_svg_document(bytes: &[u8]) -> Result<SvgRaster, SvgRasterError>
         // milliseconds of typesetting off the window's thread.
         options.fontdb_mut().load_system_fonts();
         options
-    });
+    })
+}
+
+/// Rasterize a standalone SVG document at its intrinsic size (one user unit per pixel). Serves
+/// the inline-image pipeline's SVG admission (M2 preview matrix §2: SVG displays as a static
+/// raster); this crate owns the resvg dependency, so image decoding borrows the rasterizer
+/// instead of growing its own.
+pub fn rasterize_svg_document(bytes: &[u8]) -> Result<SvgRaster, SvgRasterError> {
+    let options = svg_document_options();
     let tree = resvg::usvg::Tree::from_data(bytes, options)
         .map_err(|error| SvgRasterError::Parse(error.to_string()))?;
     let size = tree.size();
@@ -1159,6 +1185,90 @@ mod tests {
             "a machine with fonts on it can set five letters; \
              an empty font database silently sets none",
         );
+    }
+
+    /// RED GATE — **an SVG cannot name a file on this machine and have it
+    /// opened.**
+    ///
+    /// usvg's stock `<image href>` resolver treats every href that is not a
+    /// `data:` URI as a path and reads it, so a document saying
+    /// `<image href="\\attacker\share\p.png"/>` makes this process open that
+    /// path — a read of a local file, or a connection to whoever owns that
+    /// share. The document does not have to be clicked to get here: a printed
+    /// `.svg` path is queued for decoding on sight, and decoding lands in
+    /// [`rasterize_svg_document`].
+    ///
+    /// Three assertions, because no one of them says the whole thing. The first
+    /// is what a user could see: an `<image>` naming a real `.svg` on disk drew
+    /// that file's contents into the raster. The second says the raster is
+    /// byte-for-byte what the same document produces when the file it names is
+    /// not there, which is only true if nothing was read. The third asks the
+    /// resolver itself, for the formats this build would not have drawn anyway
+    /// — the danger in a `.png` href is the open, not the pixels.
+    ///
+    /// MUTATION: restore `ImageHrefResolver::default_string_resolver()` and the
+    /// magenta is drawn, the two rasters differ, and the resolver hands back
+    /// the bytes of both files.
+    #[test]
+    fn an_svg_cannot_make_folio_open_a_file_it_names() {
+        let dir = std::env::temp_dir().join(format!("bt-math-svg-href-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Each file is nothing but the one colour, so a single pixel of it in
+        // the raster is proof the file was read.
+        let secret_svg = dir.join("secret.svg");
+        std::fs::write(
+            &secret_svg,
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+                <rect width="16" height="16" fill="#ff00ff"/>
+            </svg>"##,
+        )
+        .unwrap();
+        let secret_png = dir.join("secret.png");
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(16, 16).unwrap();
+        pixmap.fill(resvg::tiny_skia::Color::from_rgba8(255, 0, 255, 255));
+        std::fs::write(&secret_png, pixmap.encode_png().unwrap()).unwrap();
+
+        let href = |path: &std::path::Path| path.to_string_lossy().replace('\\', "/");
+        let document = |href: &str| {
+            format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="16" height="16">
+                    <image href="{href}" xlink:href="{href}" x="0" y="0" width="16" height="16"/>
+                </svg>"##
+            )
+            .into_bytes()
+        };
+
+        let named = rasterize_svg_document(&document(&href(&secret_svg))).unwrap();
+        let missing =
+            rasterize_svg_document(&document(&href(&dir.join("no-such-file.svg")))).unwrap();
+
+        assert!(
+            !named
+                .rgba
+                .chunks_exact(4)
+                .any(|pixel| pixel[..3] == [255, 0, 255]),
+            "the file this document named is on disk, and none of it reached the raster"
+        );
+        assert_eq!(
+            (named.width_px, named.height_px),
+            (missing.width_px, missing.height_px)
+        );
+        assert_eq!(
+            named.rgba, missing.rgba,
+            "naming a file that exists draws exactly what naming one that does not draws"
+        );
+
+        let options = svg_document_options();
+        for path in [&secret_svg, &secret_png] {
+            assert!(
+                (options.image_href_resolver.resolve_string)(&href(path), options).is_none(),
+                "an href is not a door onto {}",
+                path.display()
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
