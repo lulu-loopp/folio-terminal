@@ -335,6 +335,11 @@ impl RestoreRow {
                         None,
                         Some(Path::new(cwd)),
                         &profiles::display_title(profile),
+                        // Nothing announced, so there is nothing to measure
+                        // against a launcher's own name. The set that filters
+                        // that layer belongs to a live shell, and this row's
+                        // shell is exactly the thing that is gone.
+                        &[],
                     ),
                     cwd.clone(),
                 )

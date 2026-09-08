@@ -44,6 +44,23 @@ All notable changes to Folio are recorded here. The format follows
   the tick was the same in every shell. A line you started and abandoned with
   `Ctrl+C` still shows what you typed.
 
+### Fixed
+
+- **A tab is named after the folder its pane is standing in, whatever shell is
+  in it.** A PowerShell tab used to be called `PowerShell 7` for the life of the
+  pane — with the pane standing in `D:\Demo`, and its own pane head saying so —
+  because the integration script ends every prompt by announcing the name the
+  profile already goes by, and the tab believed it. A shell that merely repeats
+  its launcher's name has announced nothing, so the folder names the tab. A
+  shell that sets a title of its own is still shown saying it (Git Bash's
+  `MINGW64:/d/Demo`, and the command a Command Prompt pane is running), and a
+  tab you renamed still keeps your name.
+- **A tab wears its folder from the moment it opens**, rather than the profile's
+  name until its shell gets as far as its first prompt. The name now reads the
+  whole ladder the rest of the window already reads — the shell's last report,
+  else the folder the profile started it in — so a pane whose shell reports no
+  directory at all is named after where it was put down.
+
 ## 0.2.3-preview — 2026-09-07
 
 Most of this release is about reading what a pane is showing, and about the
