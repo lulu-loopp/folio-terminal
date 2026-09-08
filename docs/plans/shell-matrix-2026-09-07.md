@@ -394,8 +394,9 @@ It is one namespace-scoped translation and not a change to what "local" means:
 only from `PrintedPathNamespace::Wsl { distro, home }`, and produces only this one
 share. `is_local_absolute_path` admits that share as a **root**, `resolve_relative_reference`
 takes it as one, `local_path_to_file_uri` writes it as RFC 8089's `file://wsl.localhost/…`,
-and `preview::is_network_path` answers "no" for the same prefix through the same
-function — while `decode_file_uri` still refuses every foreign authority and no scan
+and `is_readable_unasked` (`bt_transcript::paths::may_read_unasked` — may this
+window read this path without being asked) answers "yes" for this share: it belongs
+to the pane's own WSL distribution — while `decode_file_uri` still refuses every foreign authority and no scan
 opens a candidate on a printed `\\` or `//`, so `\\server\share\…` is exactly as
 unrecognised as it was, in every pane. The distribution comes from the profile's
 own `-d` argument or the machine's default; `~` is the home the pane's shell
