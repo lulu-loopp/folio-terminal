@@ -69,8 +69,6 @@ All notable changes to Folio are recorded here. The format follows
   the tick was the same in every shell. A line you started and abandoned with
   `Ctrl+C` still shows what you typed.
 
-### Fixed
-
 - **A tab is named after the folder its pane is standing in, whatever shell is
   in it.** A PowerShell tab used to be called `PowerShell 7` for the life of the
   pane — with the pane standing in `D:\Demo`, and its own pane head saying so —
