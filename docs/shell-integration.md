@@ -376,9 +376,17 @@ to be emitted from — there is no pre-execution moment in this shell.
 That measurement found `A` and `B` to be a claim of *authority* rather than two more facts, charged
 for in a `C` this shell cannot send, and it was right about `B`: the marker opens an input region
 whose only closers are `C` and the *next* `A`, so without `C` every row a `cmd` command printed
-would sit inside the region that means "this is what the reader is typing" — no display mathematics,
-no image previews, and the post-resize `InvokePrompt` chord owed to a shell with no such binding. So
-`cmd` panes go on decorating their output exactly as they always have.
+would sit inside the region that means "this is what the reader is typing" — no display mathematics
+and no image previews. So `cmd` panes go on decorating their output exactly as they always have.
+
+The third item that stood in this list — the post-resize `InvokePrompt` chord, owed to a shell with
+no such binding — has been struck out, and the reason it went is a defect it caused elsewhere. The
+chord is a key `folio.ps1` binds, and it was sent to any pane whose input region was open on the
+reading that a shell without the binding would drop it. GNU readline does not: it decodes what it
+recognises of `CSI 24;8~` and inserts the rest, so a single resize typed `;8~` into a Git Bash or
+WSL prompt and the next command died on a syntax error. The chord is gated on the profile's door
+now (`psreadline_resize_repaint_input`), so no shell but a PowerShell can be sent it whatever its
+markers say. `B` is still refused here for the first reason alone.
 
 What has expired is the other half — that `A` alone was worse than silence, because it retired the
 cursor-line heuristic without building the region that replaces it. That is now false of the
