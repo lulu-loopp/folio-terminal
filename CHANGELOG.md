@@ -38,6 +38,16 @@ All notable changes to Folio are recorded here. The format follows
   the same way: where a line was broken across rows at a width the pane has since
   stopped having, the card puts it back together instead of drawing the old
   break.
+- **Text follows the edge of the window again while you drag it, with several
+  tabs open.** A pane re-wraps its lines as the window is made narrower, and
+  since every tab started following the window's size that stayed true only for
+  the tab you could see: each tab behind it laid its own pane out again on every
+  step of the drag, ahead of the one in front of you. With six tabs open the
+  picture arrived about a third less often, and with a dozen it arrived rarely
+  enough that the text looked frozen at the old width until the drag stopped. A
+  tab you are not looking at now takes the new size the way its shell already
+  did — once, when the drag settles — and the pane in front of you re-wraps on
+  every step, as it always has.
 
 ## 0.2.4-preview — 2026-09-08
 
