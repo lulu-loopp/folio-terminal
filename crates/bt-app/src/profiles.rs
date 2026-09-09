@@ -9196,6 +9196,13 @@ const PICKER_ZONE_RADIUS_LOGICAL_PX: f32 = 3.0;
 /// The hairline the pane and the four slabs are outlined in — one logical pixel,
 /// the same weight `#file-menu`'s own edge wears.
 const PICKER_EDGE_LOGICAL_PX: f32 = 1.0;
+/// The floor the diagram's strokes have to clear against the card behind them.
+///
+/// 3:1, which is what a graphical object that carries meaning owes a reader
+/// (WCAG 2.1 SC 1.4.11) and the rung this house already holds its non-text marks
+/// to. A row of prose can be quieter than this; a drawing whose *shape* is the
+/// whole message cannot, because a shape nobody can trace says nothing at all.
+const PICKER_STROKE_MINIMUM_CONTRAST: f64 = 3.0;
 /// `--accent` at 15% is the wash a zone takes under the pointer.
 ///
 /// A wash and not a fill: the slab has to go on reading as an outline with
@@ -9243,6 +9250,39 @@ fn picker_diagram_width_logical_px() -> f32 {
 fn picker_diagram_height_logical_px() -> f32 {
     PICKER_PANE_HEIGHT_LOGICAL_PX
         + 2.0 * (PICKER_ZONE_GAP_LOGICAL_PX + PICKER_ZONE_THICKNESS_LOGICAL_PX)
+}
+
+/// The ink the pane and the four slabs are drawn in at rest (user report
+/// 2026-09-09).
+///
+/// **The menu's row ink, not the menu's border** (`--ink2`, which is what the
+/// words on every row under this diagram are set in). The first draft borrowed
+/// `menu_border` on the argument that the slabs are outlines and outlines are
+/// what that colour is for — but `--border` is an alpha hairline built to mark
+/// *where a surface ends*, and it is read against the thing on the other side of
+/// it rather than off the surface itself. Laid on the card with the card on both
+/// sides of it, the light theme's composites to `#E9E9E9` on white and the
+/// drawing is gone.
+///
+/// So it takes the ink of the thing it actually is. The diagram is not a border
+/// on the menu; it is the menu's topmost *entry*, a drawing you press, and the
+/// entries beside it are legible because they are drawn in `--ink2`. That also
+/// leaves the hovered state exactly as distinct as it was — the lit slab turns
+/// `--accent` and takes the accent wash, and a quiet grey going blue is a
+/// clearer step than a near-invisible grey going blue ever was.
+///
+/// **Raised to the floor rather than trusted to it**, on `float_tag`'s own
+/// precedent and for a reason this build can actually meet: a colour scheme is a
+/// JSON file a reader writes, `--ink2` is derived from it, and a scheme whose
+/// ink sits close to its own surface would otherwise take the diagram back down
+/// with it. The two palettes that ship clear 3:1 untouched, so this changes
+/// nothing for them and holds for the ones it cannot see.
+fn picker_ink(palette: ChromePalette) -> [u8; 3] {
+    bt_render::raise_against(
+        palette.menu_item_text,
+        palette.menu_surface,
+        PICKER_STROKE_MINIMUM_CONTRAST,
+    )
 }
 
 /// The four sides a pane can be split toward.
@@ -10696,18 +10736,22 @@ fn push_picker(
 ) {
     let px = |value: f32| value * scale;
     let edge = (PICKER_EDGE_LOGICAL_PX * scale).round().max(1.0);
-    let alpha = |value: u8| f32::from(value) / 255.0;
-    // A bordered box is two fills — the whole box in the border's colour, the
+    // A bordered box is two fills — the whole box in the stroke's colour, the
     // face laid one border in with one border less radius — which is exactly
     // what a browser leaves for `border: 1px solid`. See `rounded_overlay_fill`.
+    //
+    // The stroke is opaque, and that is this drawing's own rule rather than a
+    // value that happens to be 1.0 at both call sites: a stroke laid at a
+    // fraction is a colour nobody chose, and [`picker_ink`] chooses one and then
+    // has to be able to promise it. The *face* still carries an alpha, because
+    // the lit slab's wash is exactly the thing an alpha is for.
     let outlined = |rect: [f32; 4],
                     radius: f32,
                     ink: [u8; 3],
-                    ink_alpha: f32,
                     face: [u8; 3],
                     face_alpha: f32,
                     quads: &mut Vec<OverlayQuad>| {
-        quads.extend(rounded_overlay_fill(rect, radius, ink, ink_alpha));
+        quads.extend(rounded_overlay_fill(rect, radius, ink, 1.0));
         quads.extend(rounded_overlay_fill(
             [
                 rect[0] + edge,
@@ -10721,11 +10765,11 @@ fn push_picker(
         ));
     };
 
+    let ink = picker_ink(palette);
     outlined(
         layout.picker_pane,
         px(PICKER_PANE_RADIUS_LOGICAL_PX),
-        palette.menu_border,
-        alpha(palette.menu_border_alpha),
+        ink,
         palette.menu_surface,
         1.0,
         quads,
@@ -10735,16 +10779,7 @@ fn push_picker(
         outlined(
             rect,
             px(PICKER_ZONE_RADIUS_LOGICAL_PX),
-            if lit {
-                palette.accent
-            } else {
-                palette.menu_border
-            },
-            if lit {
-                1.0
-            } else {
-                alpha(palette.menu_border_alpha)
-            },
+            if lit { palette.accent } else { ink },
             if lit {
                 palette.accent
             } else {
@@ -18586,6 +18621,102 @@ mod tests {
         );
         assert_eq!(picker_diagram_height_logical_px(), 60.0);
         assert_eq!(picker_diagram_width_logical_px(), 74.0);
+    }
+
+    /// RED GATE (user report 2026-09-09, with a screenshot of the light theme)
+    /// — **the diagram is drawn in an ink that can be read off the card it
+    /// stands on, in both themes.**
+    ///
+    /// It used to be outlined in `menu_border`, the hairline the menu's own
+    /// frame wears, and a hairline is built to be *found* rather than *read*:
+    /// black at 22/255 over the white card composites to `#E9E9E9`, which is
+    /// 1.21:1 against that card where the row marks beside it read at 5.92:1.
+    /// The four slabs and the little pane vanished.
+    /// Only the light theme was reported, and the arithmetic says why rather
+    /// than letting the dark half off: white at 24/255 over `#2A2A2A` is a step
+    /// *up* of nearly half the surface's own brightness, where the light one is
+    /// a step down of eight per cent of it, so one was faint and the other was
+    /// gone. Both were under the floor.
+    ///
+    /// The floor is 3:1, because this drawing is a graphical object that
+    /// carries meaning and that is what one owes (WCAG 2.1 SC 1.4.11). The
+    /// number is not chosen to fit the answer: the same claim is made of the
+    /// marks on the rows directly under the diagram, in the same breath, so a
+    /// floor the diagram could only just clear would be visibly out of line
+    /// with its own neighbours.
+    ///
+    /// Mutation: give the pane and the four slabs `palette.menu_border` at
+    /// `menu_border_alpha` again and both themes go red at once.
+    #[test]
+    fn the_pickers_strokes_clear_the_contrast_floor_the_row_marks_clear() {
+        let layout = pane_menu(false);
+        for (theme, palette) in [
+            ("light", bt_render::LIGHT_CHROME),
+            ("dark", bt_render::DARK_CHROME),
+        ] {
+            let card = palette.menu_surface;
+            // What the rows beside the diagram put on this same card. Asserted
+            // rather than merely quoted: the floor is only meaningful as a
+            // statement about this menu, and a build whose row marks had sunk
+            // under it would make the diagram's own claim meaningless too.
+            let marks = bt_render::contrast_ratio(palette.accent, card);
+            assert!(
+                marks >= PICKER_STROKE_MINIMUM_CONTRAST,
+                "{theme}: the row marks themselves read at {marks:.2}:1 against \
+                 the card, under the {PICKER_STROKE_MINIMUM_CONTRAST}:1 floor"
+            );
+            let mut quads = Vec::new();
+            let mut labels = Vec::new();
+            push_picker(
+                &layout,
+                None,
+                palette,
+                layout.scale,
+                &mut quads,
+                &mut labels,
+            );
+            // **The strokes as they are laid down, not the antialiasing on
+            // their corners.** `rounded_overlay_fill` scales the alpha it is
+            // given by each pixel's own coverage, so the corner of a wholly
+            // opaque stroke is a pale version of it — and nobody is asked to
+            // read a shape off a corner pixel. What the eye takes the drawing's
+            // colour from is the run where the shape covers the pixel whole,
+            // which is the strongest alpha any quad of that colour carries.
+            let mut strongest: Vec<([u8; 3], f32)> = Vec::new();
+            for quad in &quads {
+                match strongest.iter_mut().find(|(ink, _)| *ink == quad.color) {
+                    Some((_, alpha)) => *alpha = alpha.max(quad.alpha),
+                    None => strongest.push((quad.color, quad.alpha)),
+                }
+            }
+            let mut strokes = 0_usize;
+            for (colour, alpha) in strongest {
+                let ink = bt_render::ink_over_bp(
+                    card,
+                    colour,
+                    (f64::from(alpha) * 10_000.0).round() as i32,
+                );
+                if ink == card {
+                    // A face, not a stroke: the inner fill of a bordered box is
+                    // the card again, and the card cannot contrast with itself.
+                    continue;
+                }
+                strokes += 1;
+                let ratio = bt_render::contrast_ratio(ink, card);
+                assert!(
+                    ratio >= PICKER_STROKE_MINIMUM_CONTRAST,
+                    "{theme}: a stroke laid as {colour:?} at {alpha} composites \
+                     to {ink:?} and reads at {ratio:.2}:1 against the card \
+                     {card:?}, under the {PICKER_STROKE_MINIMUM_CONTRAST}:1 \
+                     floor the row marks clear at {marks:.2}:1"
+                );
+            }
+            assert_eq!(
+                strokes, 1,
+                "{theme}: the resting diagram is drawn in exactly one ink, and \
+                 this run found {strokes}"
+            );
+        }
     }
 
     /// PIN — **a hovered zone is washed in the accent and outlined in it**, and

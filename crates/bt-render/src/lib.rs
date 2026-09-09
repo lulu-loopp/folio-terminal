@@ -47,7 +47,7 @@ pub use glyph_census::{GlyphCensus, LaneGlyphDemand};
 
 pub use contrast::{
     ALWAYS_REACHABLE_RATIO_LIMIT, MinimumContrast, contrast_ratio, current_minimum_contrast,
-    relative_luminance, set_minimum_contrast,
+    raise_against, relative_luminance, set_minimum_contrast,
 };
 pub use ground::{
     BackgroundFit, BackgroundImage, MINIMUM_GROUND_ALPHA, WindowGround, background_uv_rect,
