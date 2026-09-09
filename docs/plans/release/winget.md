@@ -1,7 +1,10 @@
 # Publishing Folio to winget
 
-Research only — no manifest has been submitted, no `package.ps1` change has
-been made. This is what a submission would need to say, and where the current
+Written as research before the first submission. Since 2026-09-07 the 0.2.2
+manifests under `packaging/winget/manifests/` are submitted as
+microsoft/winget-pkgs#431006 (pipeline passed, waiting for a manual review); no
+`package.ps1` change was needed. The rest of this note is what a submission
+has to say, and where the current
 release shape (a signed portable zip, `folio.msix` as a sparse identity riding
 inside it) does and does not fit the winget community repository's model.
 
