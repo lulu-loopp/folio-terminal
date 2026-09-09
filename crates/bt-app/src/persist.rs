@@ -8,8 +8,9 @@
 //! duration, when `mark_dirty` fires, and who calls `probe_sentinel` at
 //! startup.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, mpsc};
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use bt_persist::{
@@ -187,10 +188,48 @@ pub(crate) fn read_fault(
 /// process: the answer cannot change while this process runs, and a second call
 /// that took a second claim would refuse itself.
 pub fn is_storage_writer() -> bool {
-    static CLAIM: OnceLock<Option<bt_platform::instance::DataDirectoryClaim>> = OnceLock::new();
-    CLAIM
-        .get_or_init(|| bt_platform::instance::claim_data_directory(&storage_dir()))
+    is_writer_of(&storage_dir())
+}
+
+/// **Whether this process is the one that writes `directory`** — the question
+/// above, asked of the directory that is about to be written rather than of the
+/// one this process happens to own.
+///
+/// The two are the same question for the product, where every store opens under
+/// `%APPDATA%\Folio`, and they are not the same question for anything opened
+/// anywhere else: a claim is on a *directory*, and a store that answered with
+/// [`is_storage_writer`] was answering about a directory it never touches. That
+/// is a wrong answer in both directions — it refuses to write a directory nobody
+/// holds because some other Folio holds the data directory, and it writes into a
+/// directory another process does hold.
+///
+/// **One claim per directory, taken once and held for the life of the process.**
+/// Two stores over one directory are one writer rather than a first one and a
+/// refused second: the claim is a kernel name, so a second attempt at it — from
+/// this thread or any other — is refused while the first is held, and a store
+/// that asked again would refuse itself. That is `is_storage_writer`'s own
+/// argument for remembering the answer, one directory wider; the table below is
+/// keyed by [`bt_platform::instance::claim_name`] rather than by the path so
+/// that two spellings of one directory are one row, which is the same folding
+/// the kernel name itself is under.
+pub(crate) fn is_writer_of(directory: &Path) -> bool {
+    static CLAIMS: OnceLock<
+        Mutex<HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>>,
+    > = OnceLock::new();
+    CLAIMS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("the claim table is locked to read or take one entry and nothing else")
+        .entry(bt_platform::instance::claim_name(directory))
+        .or_insert_with(|| bt_platform::instance::claim_data_directory(directory))
         .is_some()
+}
+
+/// Whether this process may write the document at `path` — [`is_writer_of`]
+/// asked of the directory the document lives in, because that is what a claim is
+/// on.
+pub(crate) fn is_writer_of_document(path: &Path) -> bool {
+    is_writer_of(path.parent().unwrap_or_else(|| Path::new("")))
 }
 
 /// docs/M2-persistence-schema-v1.md §5.1 rules "debounce roughly 1-2 seconds
@@ -397,8 +436,9 @@ impl SessionStore {
         // **Asked before the sentinel and before the read** (review row R4-5),
         // because both of those are things only the writer of record may do: a
         // second process that armed a sentinel would clear the first one's crash
-        // record on its own clean exit.
-        let writer_of_record = is_storage_writer();
+        // record on its own clean exit. Asked of `dir`, which is the directory
+        // this store's two files are in — see `is_writer_of`.
+        let writer_of_record = is_writer_of(&dir);
         // Probe *before* creating: creating first would make every probe after
         // the first report a crash.
         let previous_exit = probe_sentinel(&sentinel_path).unwrap_or(ExitState::Normal);
@@ -468,6 +508,12 @@ impl SessionStore {
     /// which is exactly what a caller-named path buys.
     #[cfg(test)]
     pub fn at(session_path: PathBuf, sentinel_path: PathBuf) -> Self {
+        // **Asked of the directory this store writes, not asserted.** A named
+        // path is very nearly always a directory nobody else holds — which is
+        // what the assertion this replaces was reaching for — but "nearly
+        // always" is a thing a store finds out by asking, and asking is what
+        // makes a claim held on that directory mean something here.
+        let writer_of_record = is_writer_of_document(&session_path);
         Self {
             session_path,
             sentinel_path,
@@ -476,9 +522,7 @@ impl SessionStore {
             writes: DocumentWrites::new(),
             writer: SessionWriter::open(),
             armed: false,
-            // A named-path store is the one this process is writing, by
-            // construction: it is not `%APPDATA%` and no other process has it.
-            writer_of_record: true,
+            writer_of_record,
             fault: None,
         }
     }
@@ -526,8 +570,9 @@ impl SessionStore {
     }
 
     /// Whether this process is the one that writes `session.json` — see
-    /// [`is_storage_writer`]. A store that is not stays exactly as useful as one
-    /// that is, in memory; it simply reaches no disk.
+    /// [`is_writer_of`], asked of the directory this store's file is in. A store
+    /// that is not stays exactly as useful as one that is, in memory; it simply
+    /// reaches no disk.
     fn writes_to_disk(&self) -> bool {
         self.writer_of_record
     }
@@ -777,7 +822,7 @@ impl SettingsStore {
             settings,
             writes: DocumentWrites::new(),
             fault,
-            writer_of_record: is_storage_writer(),
+            writer_of_record: is_writer_of(&dir),
             missing: report == ReadReport::NotFound,
         }
     }
@@ -794,12 +839,15 @@ impl SettingsStore {
     /// machine it runs on.
     #[cfg(test)]
     pub fn at(path: PathBuf) -> Self {
+        let writer_of_record = is_writer_of_document(&path);
         Self {
             path,
             settings: SettingsV1::default(),
             writes: DocumentWrites::new(),
             fault: None,
-            writer_of_record: true,
+            // [`SessionStore::at`]'s rule: asked of the directory this store
+            // writes, rather than asserted about it.
+            writer_of_record,
             missing: true,
         }
     }
@@ -894,7 +942,7 @@ impl KeybindingsStore {
             overrides: file.bindings,
             fault,
             writes: DocumentWrites::new(),
-            writer_of_record: is_storage_writer(),
+            writer_of_record: is_writer_of(&dir),
         }
     }
 
@@ -1007,12 +1055,13 @@ impl ProfilesStore {
             PROFILES_FILE_NAME,
             crate::i18n::profiles_file_unreadable,
         );
+        let writer_of_record = is_writer_of_document(&path);
         Self {
             path,
             loaded: file,
             fault,
             writes: DocumentWrites::new(),
-            writer_of_record: is_storage_writer(),
+            writer_of_record,
         }
     }
 
@@ -1488,6 +1537,54 @@ mod tests {
             "but the write was attempted again, and this time it landed"
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED — **a store asks whether it may write the folder it writes to.**
+    ///
+    /// The same rule `pins.rs` pins one file over, and the reason it is pinned
+    /// here as well: the writer-of-record question belongs to a *directory*, and
+    /// every store that answered it with `is_storage_writer()` — or, in the
+    /// test-only doors, asserted `true` without asking — was answering about
+    /// `%APPDATA%\Folio` while writing somewhere else entirely.
+    ///
+    /// Red gate: hard-code `writer_of_record: true` in `SettingsStore::at` and
+    /// the second half fails; ask `is_storage_writer()` there and the first half
+    /// fails whenever a Folio is running on this machine.
+    #[test]
+    fn a_settings_store_asks_the_folder_it_writes_to_and_not_the_process_one() {
+        let root = appdata("claims");
+        let held = root.join("held");
+        let free = root.join("free");
+        std::fs::create_dir_all(&held).expect("a scratch folder");
+        std::fs::create_dir_all(&free).expect("a scratch folder");
+
+        let claim = bt_platform::instance::claim_data_directory(&held)
+            .expect("nothing else on this machine has this folder");
+
+        let chosen = SettingsV1 {
+            terminal_font_size: 22,
+            ..SettingsV1::default()
+        };
+
+        let mut free_store = SettingsStore::at(free.join(SETTINGS_FILE_NAME));
+        assert!(free_store.store(chosen.clone()), "the value changed");
+        assert!(
+            free.join(SETTINGS_FILE_NAME).is_file(),
+            "a store over a folder nobody holds writes it"
+        );
+
+        let mut held_store = SettingsStore::at(held.join(SETTINGS_FILE_NAME));
+        assert!(
+            held_store.store(chosen),
+            "the choice is live in this window"
+        );
+        assert!(
+            !held.join(SETTINGS_FILE_NAME).exists(),
+            "and a store over a folder somebody else holds writes nothing into it"
+        );
+
+        drop(claim);
         let _ = std::fs::remove_dir_all(&root);
     }
 

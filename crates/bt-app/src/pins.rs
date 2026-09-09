@@ -159,12 +159,18 @@ impl PinsStore {
         // naming the file (§5.3).
         let fault =
             crate::persist::read_fault(&report, PINS_FILE_NAME, crate::i18n::pins_file_unreadable);
+        // **The directory this file is in, and no other** — see
+        // `crate::persist::is_writer_of`. Asking `is_storage_writer` here made
+        // the answer a fact about `%APPDATA%\Folio` whatever path this store was
+        // handed, which is a question about a directory a store opened anywhere
+        // else never touches.
+        let writer_of_record = crate::persist::is_writer_of_document(&path);
         Self {
             path,
             loaded: file,
             fault,
             writes: crate::persist::DocumentWrites::new(),
-            writer_of_record: crate::persist::is_storage_writer(),
+            writer_of_record,
         }
     }
 
@@ -483,5 +489,60 @@ mod tests {
             2,
             "the chevron follows the list, and the list is longer than the pool"
         );
+    }
+
+    /// RED — **the writer-of-record question is about the directory this store
+    /// writes to, and no other.**
+    ///
+    /// `at` used to answer it with `is_storage_writer()`, which claims
+    /// `%APPDATA%\Folio` — a directory a store opened over a scratch folder
+    /// never touches. That made the answer a fact about the machine rather than
+    /// about the file: with the reader's own Folio running, a store over a
+    /// folder nobody holds refused to write; with no Folio running, a store over
+    /// a folder somebody else holds wrote into it.
+    ///
+    /// The claim on `held` here is taken the way a second Folio takes it, from
+    /// the same primitive, so nothing about this test is a mock.
+    ///
+    /// Red gate: ask `is_storage_writer()` in `at` and one of the two halves
+    /// below fails on every machine — the first when a Folio is running, the
+    /// second when none is.
+    #[test]
+    fn a_store_writes_the_folder_it_holds_and_not_the_one_somebody_else_does() {
+        let root = std::env::temp_dir().join(format!(
+            "folio-pins-claim-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let held = root.join("held");
+        let free = root.join("free");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&held).expect("a scratch folder");
+        std::fs::create_dir_all(&free).expect("a scratch folder");
+
+        // Somebody else is the writer of record for `held` — here this test
+        // itself, which is exactly what the second Folio is to the first.
+        let claim = bt_platform::instance::claim_data_directory(&held)
+            .expect("nothing else on this machine has this folder");
+
+        let mut free_store = PinsStore::at(free.join(PINS_FILE_NAME));
+        assert!(free_store.toggle(PinKind::Folder, r"C:\work"));
+        assert!(
+            free.join(PINS_FILE_NAME).exists(),
+            "a store over a folder nobody holds writes it, whatever else this machine is running"
+        );
+
+        let mut held_store = PinsStore::at(held.join(PINS_FILE_NAME));
+        assert!(
+            held_store.toggle(PinKind::Folder, r"C:\work"),
+            "the table is live in this window either way"
+        );
+        assert!(
+            !held.join(PINS_FILE_NAME).exists(),
+            "and a store over a folder somebody else holds writes nothing into it"
+        );
+
+        drop(claim);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
