@@ -91,8 +91,8 @@ top of a pane's menu can be seen in the light theme.
   Scroll the heading back into view and the table is drawn again.
 - **A space dropped at a program's line break inside a table cell is not always
   put back.** A break between two ordinary words is rejoined with its space; a
-  break beside punctuation, or between two CJK characters, is rejoined without
-  one, since a program that wraps there took no space out.
+  break beside punctuation, a number or a CJK character is rejoined without one,
+  so `受命 −28°` comes back as `受命−28°`.
 - **The note the web preview shows after answering a page's message box is
   hidden behind the page.** The page is answered and goes on running; the line
   saying so on the bottom strip cannot be read.
