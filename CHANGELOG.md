@@ -6,6 +6,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.2.4-preview — 2026-09-08
+
 ### Added
 
 - **A file inside the folder card previews on hover, like a file anywhere

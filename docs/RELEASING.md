@@ -222,7 +222,7 @@ cargo build --release
 ./scripts/release/sbom.ps1
 ./scripts/release/package.ps1 -Sign
 ./scripts/release/smoke.ps1 -Exe target/release/folio.exe -ExpectSigned `
-    -Msix target/release-package/folio-0.2.3-windows-x64.zip
+    -Msix target/release-package/folio-0.2.4-windows-x64.zip
 ```
 
 `package.ps1 -Sign` signs `folio.exe` where the build left it and `folio.msix`
@@ -357,10 +357,10 @@ out of the directory the signed files are in.
 
 ```powershell
 $assets = @(Get-ChildItem target/release-package -File | ForEach-Object { $_.FullName })
-$arguments = @('release', 'create', 'v0.2.3-preview') + $assets + @(
+$arguments = @('release', 'create', 'v0.2.4-preview') + $assets + @(
     '--draft', '--prerelease',
-    '--title', 'Folio 0.2.3',
-    '--notes-file', 'docs/plans/release/release-note-v0.2.3-preview.md')
+    '--title', 'Folio 0.2.4',
+    '--notes-file', 'docs/plans/release/release-note-v0.2.4-preview.md')
 & gh @arguments
 ```
 
