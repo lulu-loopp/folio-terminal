@@ -15532,8 +15532,26 @@ fn commit_leaf_resize(
     })
 }
 
-/// **One pane hears one solved rectangle** — its own actor at once, its child at the quiet
-/// boundary.
+/// **Whether this leaf's picture is on the glass this turn** — the one thing that decides when its
+/// own actor reflows.
+///
+/// The 2026-08-06 ruling is about the *picture*: the glass follows the hand. A pane behind another
+/// tab has no picture in this frame and none in any frame until somebody looks at it, so reflowing
+/// its actor inside the `Resized` buys nothing anyone can see and costs a full vendor reflow of
+/// that pane's grid on the window thread, per hidden pane, per OS event. See
+/// [`Runtime::resize_hidden_leaves_to_layout`], and [`schedule_leaf_grid_change`] for what
+/// `Behind` defers and what it does not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LeafOnStage {
+    /// A pane of the tab on screen. Its actor reflows in this very turn.
+    Shown,
+    /// A pane of a tab nobody is looking at. Its child is still told at the quiet boundary, and
+    /// its actor reflows there too — once for the gesture instead of once per event.
+    Behind,
+}
+
+/// **One pane hears one solved rectangle** — its own actor at once if it is on the glass, its
+/// child at the quiet boundary.
 ///
 /// The single door every geometry solve takes on its way to a leaf, focused or not. Splitting the
 /// timing in two is the whole point and is the user's 2026-08-06 ruling written down: the
@@ -15548,12 +15566,31 @@ fn commit_leaf_resize(
 /// anchor repairs per event on top. The pane with the keyboard is not the pane that can afford
 /// this; it is only the pane whose defect was noticed first.
 ///
+/// **And a pane behind another tab defers its own reflow too** (user report 2026-09-09). The walk
+/// that carries a solve to every tab is right and stays: the rectangle this window has is a fact
+/// about the window, and a tab that answered it only when somebody looked at it is a tab whose
+/// shell believes whatever was true last time it was on stage. What was wrong is the *timing* it
+/// borrowed. `resize_at` is a full vendor reflow of that pane's grid, on the window thread; six
+/// tabs made five of them per `Resized` and twelve made eleven, and measured on the reporter's
+/// machine that is what stopped the pane the hand was actually dragging from keeping up — the
+/// frame this window owes the glass was queued behind reflows of panes nobody could see. The
+/// ruling those reflows were paying is a ruling about the picture, and a hidden pane has none.
+///
+/// So `Behind` schedules and does not reflow, and [`commit_leaf_resize`] does the reflow at the
+/// quiet boundary in the same breath as the ConPTY notification — the deferred-local-reflow path
+/// that release already documents and already runs whenever our own actor is behind the released
+/// rectangle. A hidden pane therefore still follows every resize; it arrives once per gesture
+/// rather than once per event, exactly like its child. [`Runtime::activate_tab`] re-solves and
+/// reflows the tab it puts on stage, so a tab brought forward mid-gesture is on the glass at the
+/// width it is being shown at.
+///
 /// Answers whether our own grid moved, so a caller that keeps a shadow of it can follow.
 fn schedule_leaf_grid_change(
     leaf: &mut LeafSession,
     next_grid: GridSize,
     physical: PhysicalSize<u32>,
     observed_at: Instant,
+    on_stage: LeafOnStage,
     context: &'static str,
 ) -> Result<bool> {
     let Some(reflow) = plan_grid_change(
@@ -15566,6 +15603,9 @@ fn schedule_leaf_grid_change(
     ) else {
         return Ok(false);
     };
+    if on_stage == LeafOnStage::Behind {
+        return Ok(false);
+    }
     leaf.session
         .resize_at(
             nonzero_u32(reflow.columns.get()),
@@ -75004,7 +75044,14 @@ impl Runtime<'_> {
         let Some(leaf) = self.window.tabs[active].focused_mut() else {
             return Ok(());
         };
-        schedule_leaf_grid_change(leaf, next_grid, physical, observed_at, context)?;
+        schedule_leaf_grid_change(
+            leaf,
+            next_grid,
+            physical,
+            observed_at,
+            LeafOnStage::Shown,
+            context,
+        )?;
         Ok(())
     }
 
@@ -75069,7 +75116,14 @@ impl Runtime<'_> {
             let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
                 continue;
             };
-            schedule_leaf_grid_change(leaf, next_grid, physical, observed_at, context)?;
+            schedule_leaf_grid_change(
+                leaf,
+                next_grid,
+                physical,
+                observed_at,
+                LeafOnStage::Shown,
+                context,
+            )?;
         }
         // And the tabs nobody is looking at, before the focused pane for the
         // reason its siblings go before it.
@@ -75125,6 +75179,18 @@ impl Runtime<'_> {
     /// The solve is pure and `O(seats)` and each leaf's notification is coalesced
     /// on its own queue, so a window with a dozen tabs pays a dozen tree walks
     /// per gesture and one `ResizePseudoConsole` per pane per gesture.
+    ///
+    /// **And one reflow per pane per gesture, which is the half this arrived
+    /// without** (user report 2026-09-09). A tree walk is pure and cheap; the
+    /// `resize_at` at the end of [`schedule_leaf_grid_change`] is a full vendor
+    /// reflow of that pane's grid on the window thread, and taking it per hidden
+    /// pane per OS event put the frame the visible pane owes the glass behind
+    /// eleven of them on a twelve-tab window. So every leaf here is `Behind`:
+    /// the notification and the reflow are both released at the quiet boundary,
+    /// which is the same sentence the child was already being told and the same
+    /// one [`commit_leaf_resize`] was already written to say. Nothing about
+    /// *which* size a hidden tab ends at changes — only when its own actor hears
+    /// it, and no frame is drawn from a hidden tab in between.
     fn resize_hidden_leaves_to_layout(
         &mut self,
         observed_at: Instant,
@@ -75164,7 +75230,14 @@ impl Runtime<'_> {
                 let Some(leaf) = tab.sessions.get_mut(&seat) else {
                     continue;
                 };
-                schedule_leaf_grid_change(leaf, next_grid, physical, observed_at, context)?;
+                schedule_leaf_grid_change(
+                    leaf,
+                    next_grid,
+                    physical,
+                    observed_at,
+                    LeafOnStage::Behind,
+                    context,
+                )?;
             }
         }
         Ok(())
@@ -75203,6 +75276,13 @@ impl Runtime<'_> {
         let mut committed_any = false;
         let mut active_tab_wants_a_frame = false;
         let mut focused_reflow: Option<GridSize> = None;
+        // **Any leaf at all, because the key is that leaf's own columns.**
+        // `sync_math_layout_key` writes every leaf of every tab a key built out
+        // of `leaf.grid`, and this release is where a pane behind another tab
+        // moves that field (`LeafOnStage::Behind` defers the reflow to here). A
+        // key gated on the focused pane alone would leave a hidden pane's
+        // typeset bands rastered for the width it had before the gesture.
+        let mut reflowed_any = false;
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             for (seat, leaf) in tab.sessions.iter_mut() {
                 // The deferred local reflow lands inside this, immediately before the child hears
@@ -75229,6 +75309,7 @@ impl Runtime<'_> {
                     );
                 }
                 committed_any = true;
+                reflowed_any |= commit.reflowed;
                 if index == active {
                     active_tab_wants_a_frame |= commit.worth_a_frame();
                     if commit.reflowed && *seat == focused_seat {
@@ -75237,8 +75318,13 @@ impl Runtime<'_> {
                 }
             }
         }
-        if focused_reflow.is_some() {
+        if reflowed_any {
             self.sync_math_layout_key();
+        }
+        // The present gate is the focused pane's alone: it admits the grid the
+        // frame this window is about to draw really carries, and a pane nobody
+        // is looking at draws no frame.
+        if focused_reflow.is_some() {
             self.pending_resize_present = focused_reflow;
         }
         if committed_any {
@@ -118640,7 +118726,15 @@ mod tests {
             let next = grid_of(41 + u16::try_from(step).unwrap(), 4);
             let physical = PhysicalSize::new(u32::from(next.columns.get()) * 8, 88);
             assert!(
-                schedule_leaf_grid_change(&mut leaf, next, physical, at, "drag").unwrap(),
+                schedule_leaf_grid_change(
+                    &mut leaf,
+                    next,
+                    physical,
+                    at,
+                    LeafOnStage::Shown,
+                    "drag"
+                )
+                .unwrap(),
                 "every one of these rectangles is a new one, so every one is a reflow"
             );
             assert_eq!(
@@ -118685,6 +118779,130 @@ mod tests {
         assert!(
             again.is_none(),
             "one drag is one notification; a second turn finds the queue empty"
+        );
+    }
+
+    /// RED — **the pane on the glass re-wraps at every width the hand passes through, and a pane
+    /// behind another tab reflows once for the whole gesture** (user report 2026-09-09).
+    ///
+    /// Two halves of the 2026-08-06 ruling, and the second is the one that broke. The walk that
+    /// carries a window's rectangle to every tab arrived on 2026-09-09 with the timing of a pane
+    /// on the stage: `resize_at` — a full vendor reflow of that pane's grid — for every hidden
+    /// leaf, on the window thread, inside every OS `Resized`. Measured on the reporter's machine
+    /// with six tabs open, that put the frame the visible pane owes the glass behind five reflows
+    /// of panes nobody could see, and the picture stopped following the hand: event-to-present
+    /// went from 82 ms to 117 ms and the gap between pictures from 128 ms to 186 ms, growing with
+    /// the number of tabs and flat in it before. The ruling those reflows were paying is a ruling
+    /// about the *picture*, and a hidden pane has none.
+    ///
+    /// So the front half here is the ruling said in frames rather than in fields: between two
+    /// steps of a drag, the pane on the glass **projects** a frame at the width the hand is at.
+    /// The back half is the fix: `Behind` schedules and does not reflow, its actor is untouched
+    /// through all sixty events, and the one reflow it owes lands at the quiet boundary with the
+    /// notification its child was already waiting for.
+    ///
+    /// Red gate: give the hidden leaf `LeafOnStage::Shown` — which is what the window did — and
+    /// its actor moves sixty times instead of once, and the release finds nothing left to reflow.
+    #[test]
+    fn a_drag_rewraps_the_pane_on_the_glass_and_reflows_a_hidden_pane_once() {
+        let start = Instant::now();
+        // Long enough that every width in the drag wraps it differently, so a reflow is real work
+        // and a frame's column count is a reading of the width it was projected at.
+        let printed = "#".repeat(197);
+        let mut shown = leaf_saying(&printed);
+        let mut behind = leaf_saying(&printed);
+        let born = shown.grid;
+        assert_eq!(
+            behind.grid, born,
+            "both fixtures start where the other does"
+        );
+
+        const EVENTS: u32 = 60;
+        const FRAME: Duration = Duration::from_millis(16);
+        let mut last = born;
+        for step in 0..EVENTS {
+            let at = start + FRAME * step;
+            let next = grid_of(41 + u16::try_from(step).unwrap(), 4);
+            let physical = PhysicalSize::new(u32::from(next.columns.get()) * 8, 88);
+
+            assert!(
+                schedule_leaf_grid_change(
+                    &mut shown,
+                    next,
+                    physical,
+                    at,
+                    LeafOnStage::Shown,
+                    "drag"
+                )
+                .unwrap(),
+                "every one of these rectangles is a new one, so every one is a reflow"
+            );
+            // The two lines the window runs between the solve and the frame:
+            // `sync_math_layout_key` amends the key with the width that moved,
+            // and the projection is taken against it.
+            let mut key = shown.session.layout_key();
+            key.width_cells = nonzero_u32(next.columns.get());
+            shown.session.set_layout_key(key);
+            shown.projection = shown.session.new_projection(key);
+            let frame = shown
+                .session
+                .viewport_frame(&mut shown.projection)
+                .expect("project the pane on the glass between two steps of the drag");
+            assert_eq!(
+                frame.columns.get(),
+                u32::from(next.columns.get()),
+                "the frame between two resize steps carries the width the hand is at, not the \
+                 width it started from"
+            );
+
+            assert!(
+                !schedule_leaf_grid_change(
+                    &mut behind,
+                    next,
+                    physical,
+                    at,
+                    LeafOnStage::Behind,
+                    "drag"
+                )
+                .unwrap(),
+                "a pane behind another tab reports no reflow, because it did none"
+            );
+            assert_eq!(
+                behind.session.live_dimensions().0.get(),
+                u32::from(born.columns.get()),
+                "and its actor is where it was: the window thread spent nothing on a picture \
+                 nobody can see"
+            );
+            assert_eq!(
+                behind.grid, born,
+                "the shadow follows the actor, so it has not moved either"
+            );
+            last = next;
+        }
+
+        let quiet = start + FRAME * (EVENTS - 1) + WINDOW_RESIZE_QUIET;
+        let (commit, _) = release_due_leaf_resize(&mut behind, quiet, false).unwrap();
+        let commit = commit.expect("the quiet boundary releases what the hidden pane owes");
+        assert!(
+            commit.reflowed,
+            "and the one reflow a hidden pane owes a gesture lands here"
+        );
+        assert_eq!(
+            behind.session.live_dimensions().0.get(),
+            u32::from(last.columns.get()),
+            "at the last width of the gesture, not at an intermediate one"
+        );
+        assert_eq!(behind.grid, last, "with the shadow caught up");
+        assert_eq!(
+            behind.conpty_grid, last,
+            "in the same breath as the notification its child was waiting for"
+        );
+
+        let (commit, _) = release_due_leaf_resize(&mut shown, quiet, false).unwrap();
+        let commit = commit.expect("the pane on the glass owes its child the same notification");
+        assert!(
+            !commit.reflowed,
+            "its own actor was never behind, so the release defers no reflow to here"
         );
     }
 
