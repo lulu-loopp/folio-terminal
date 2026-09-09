@@ -176,7 +176,7 @@ R1-24, R4-1, R4-2, R4-3, R4-4, R4-5, R4-6, R4-7, R4-8, R4-9, R4-10, R4-11, R4-12
 
 Why together: every row is a value read back from disk and trusted as though this process had written it a moment ago. The design is one intake rule for persisted documents, bound the read, keep the rejected bytes, resolve every reference against the machine as it is now rather than as it was, and one write rule, atomic, retried, and reported when it fails. R1-24 is filed here because the forged mark's damage lands in the restore path; R4-8 and R4-9 are not in this ticket's original list and sit here as the nearest home.
 
-### T9 `fix/webview-seat` (merged, `5516799`; a previewed local page reaches its own folder and nothing else; left open: an http(s) subresource on a local page is reported as NotMinted, and the engine's internal schemes are an explicit list of three)
+### T9 `fix/webview-seat` (merged, `5516799`; a previewed local page reaches its own folder and nothing else; left open: an http(s) subresource on a local page is reported as NotMinted, the engine's internal schemes are an explicit list of three, and the dismissed-dialog note on the foot is drawn under the composited page so a reader never sees it, found in the next49 acceptance run)
 
 R1-10, R1-21, R2-10, R2-12, R2-13, R2-16, R2-24.
 
