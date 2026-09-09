@@ -44016,12 +44016,17 @@ impl Runtime<'_> {
 
     /// Lay one table out at this window's current metrics and inks.
     ///
+    /// `source` is the block's **render source**: the rows exactly as the detector resolved them,
+    /// one row to a line ([`bt_detect::table::TableSpan::resolved_source`]). The detector is the
+    /// only place that holds the capture geometry a program's own wrap is read with, so the rows
+    /// are resolved once, there, and written down — reading them back needs no geometry and can
+    /// reach no other answer, which is why a rejoined row is still one row after a resize.
+    ///
     /// `None` only when `source` is not a table, which cannot happen for a proven block and is
     /// answered honestly rather than asserted: the source travels through the transcript, and a
     /// function that took an unparseable one on trust would be a panic waiting for a reflow.
     fn build_table_block(&mut self, source: &str) -> Option<table_block::TableBlock> {
-        let lines: Vec<&str> = source.lines().collect();
-        let span = bt_detect::table::table_at(&lines)?;
+        let span = bt_detect::table::from_resolved_source(source)?;
         let metrics = table_block::metrics(self.window.renderer.metrics().font_size_px);
         let palette = bt_render::chrome_palette();
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
