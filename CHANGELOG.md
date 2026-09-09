@@ -8,6 +8,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **The four split pictures at the top of a pane's menu can be seen.** The
+  little pane and the four bars around it were drawn in the same hairline the
+  menu's own edge is drawn in, and a hairline is meant to be found rather than
+  read: on the white card of the light theme it came out a shade off white, so
+  the picture the menu opens with was there and invisible, and on the dark card
+  it was only just there. Both are now drawn in the ink the words on the rows
+  under them are set in, which is a colour a reader can trace, and any theme
+  whose own ink sits too close to its card has the picture lifted clear of it.
+  The bar under the pointer still turns and fills with the accent colour, so
+  pointing at one reads as clearly as it ever did.
 - **A table whose rows the printing program wrapped is drawn whole.** An agent
   printing a wide table lays it out to the width of the pane and wraps a long
   row onto a second line, usually stopping a word or two short of the last
