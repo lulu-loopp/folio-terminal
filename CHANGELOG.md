@@ -13,13 +13,17 @@ All notable changes to Folio are recorded here. The format follows
   row onto a second line, usually stopping a word or two short of the last
   column. Folio drew the heading and the first row and left every row after
   them as text, which is worse than drawing no table at all. A wrapped row is
-  now put back together whenever the two lines spell exactly the row the
-  heading calls for, whether or not the program ran the first line right to the
-  edge, and while the rest of a row is still on its way nothing is drawn from
-  the half that has arrived. A pipe anywhere in the same paragraph that the
-  table cannot account for takes the whole table down, so a table can no longer
-  end halfway through the block it was printed in; a pipe after a blank line,
-  and a second table under a caption line, still leave it standing.
+  now put back together whenever the lines spell exactly the row the heading
+  calls for, whether or not the program ran the first line right to the edge,
+  and while the rest of a row is still on its way nothing is drawn from the part
+  that has arrived. A row is read across as many lines as it takes rather than
+  two, so a row a narrow pane broke into three or four comes back as one row,
+  and a break that lands right beside one of the row's own bars is read as the
+  break it is instead of ending the row there. A pipe anywhere in the same
+  paragraph that the table cannot account for takes the whole table down, so a
+  table can no longer end halfway through the block it was printed in; a pipe
+  after a blank line, and a second table under a caption line, still leave it
+  standing.
 - **A pane restored behind another tab comes up at the width it is going to
   have.** A window that was closed maximized is put back at its own rectangle
   first and maximized a moment later, and until now the panes of every tab were
