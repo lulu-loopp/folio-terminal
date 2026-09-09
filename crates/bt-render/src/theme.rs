@@ -2279,6 +2279,22 @@ pub const WINDOW_TAB_MAX_WIDTH_LOGICAL_PX: f32 = 200.0;
 /// rules that *past* this width the strip scrolls rather than compressing
 /// further, because the alternative is tabs spilling into the caption buttons.
 pub const WINDOW_TAB_MIN_WIDTH_LOGICAL_PX: f32 = 46.0;
+/// **The band of title bar the tab strip never takes**, immediately left of the
+/// app's own buttons in the caption corner (user ruling 2026-09-09).
+///
+/// A window with no title bar of its own is dragged by the bar it draws itself,
+/// and the only stretch of that bar Win32 is told to answer `HTCAPTION` for is
+/// whatever the tab strip leaves over. With enough tabs open the strip used to
+/// leave nothing: it compressed to its floor, began to scroll, and claimed every
+/// pixel up to the gear — and a window in that state could not be dragged or
+/// double-clicked to maximise anywhere along its top edge at all.
+///
+/// So the run stops short by this much whatever the strip is wearing. Ninety-six
+/// is a little over two caption buttons, which is the smallest band that still
+/// reads as a place to put your hand rather than as a gap the tabs failed to
+/// fill, and it costs the tabs half of one tab at the width where they are
+/// already at their floor and scrolling.
+pub const WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX: f32 = 96.0;
 /// Equal spacing between horizontal tabs (`docs/design/ui-mockup.html` line 183).
 pub const WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX: f32 = 1.0;
 /// `.tab { padding: 0 6px 0 12px }` — the leading inset before the mark.

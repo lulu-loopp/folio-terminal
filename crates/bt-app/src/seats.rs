@@ -73,8 +73,8 @@ use bt_render::{
     WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_RING_STROKE_LOGICAL_PX,
     WINDOW_TAB_SQUEEZED_LOGICAL_PX, WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX,
     WINDOW_TAB_STATUS_DOT_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX,
-    WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX, WINDOW_TAB_TIGHT_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX,
-    chrome_palette,
+    WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX, WINDOW_TAB_TIGHT_LOGICAL_PX,
+    WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, chrome_palette,
 };
 
 use crate::focus_thumb::MiniMetrics;
@@ -3143,9 +3143,14 @@ pub struct TabStripGeometry {
     ///
     /// The left edge is the window's, not the first tab's inset: content scrolled
     /// off that end leaves the surface entirely and the framebuffer is its clip.
-    /// The right edge is where the caption run begins, and it is the edge that
+    /// The right edge is where the caption run begins *less*
+    /// [`WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX`], and it is the edge that
     /// matters — the mock-up added the scroller precisely so that many tabs stop
-    /// "spilling into the caption buttons" (line 187).
+    /// "spilling into the caption buttons" (line 187), and the reserve is the
+    /// same sentence said about the window's own drag handle (user ruling
+    /// 2026-09-09): the strip may not spill into that either, so the band is
+    /// taken off the run before anything is shared out and every tab, the `+`
+    /// and the `˅` included, is cropped here.
     pub viewport: [f32; 2],
     /// The furthest this strip may be scrolled, and therefore also the test for
     /// whether it scrolls at all: `0.0` exactly when everything fits.
@@ -3189,13 +3194,26 @@ pub fn tab_strip_geometry(
     let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
     let caption = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
     let run_left = (width - 4.0 * caption).max(0.0);
+    // **The drag reserve** (user ruling 2026-09-09): the strip stops this far
+    // short of the app's buttons and never crosses the line, so the band between
+    // the two is `HTCAPTION` however many tabs are open. It is taken out here,
+    // at the top of the solver, rather than clamped onto the answers below,
+    // because everything the strip decides is decided against `strip_right`: the
+    // tabs walk down their width tiers inside the smaller run first and the run
+    // begins to scroll only once they are on their floor, which is the order the
+    // ruling asks for and would be the wrong way round if the reserve were
+    // subtracted after the fact. `viewport` and therefore
+    // [`title_bar_app_run_right_px`] are the same number read back out, so the
+    // picture and the bridge cannot disagree about where the app's run ends.
+    let reserve = WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX * scale;
+    let strip_right = (run_left - reserve).max(0.0);
     let gap = WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX * scale;
     let new_box = WINDOW_NEW_TAB_BOX_LOGICAL_PX * scale;
     let new_margin = WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX * scale;
     // Two buttons now stand at the end of the run, and both of them have to fit
     // before a tab may claim the rest — the `˅` is `margin-left: 0`, so the pair
     // costs one margin and two boxes.
-    let available = (run_left - radius - new_margin - 2.0 * new_box).max(0.0);
+    let available = (strip_right - radius - new_margin - 2.0 * new_box).max(0.0);
     let total_gaps = gap * tab_count.saturating_sub(1) as f32;
     let tab_width = if tab_count == 0 {
         0.0
@@ -3213,7 +3231,7 @@ pub fn tab_strip_geometry(
     // now that they stop at 46px it is allowed to exceed it, and the excess is
     // exactly how far the strip may be scrolled.
     let content = tab_count as f32 * tab_width + total_gaps + new_margin + 2.0 * new_box;
-    let max_scroll = (radius + content - run_left).max(0.0);
+    let max_scroll = (radius + content - strip_right).max(0.0);
     let scroll = scroll.clamp(0.0, max_scroll);
     let origin = radius - scroll;
     let tier = tab_width_tier(tab_width, scale);
@@ -3411,7 +3429,7 @@ pub fn tab_strip_geometry(
             menu_left + new_box,
             new_bottom,
         ],
-        viewport: [0.0, run_left],
+        viewport: [0.0, strip_right],
         max_scroll,
     }
 }
@@ -5639,7 +5657,12 @@ fn tab_width_tier(tab_width: f32, scale: f32) -> TabWidthTier {
 ///
 /// **Horizontal** — the tab strip runs across the bar, so the app owns up to the
 /// `˅` (or, under scroll, the strip's whole viewport; see
-/// [`tab_strip_right_px`]).
+/// [`tab_strip_right_px`]). Either way it stops at least
+/// [`WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX`] short of the app's buttons,
+/// because the strip's own run was cut that short before a single tab was placed
+/// in it (user ruling 2026-09-09). That is the whole of the reserve, stated
+/// once: this number is read *off* the strip rather than clamped after it, so
+/// there is no second place for the band to be got wrong.
 ///
 /// **Vertical** — the tabs have moved down the side and the bar is left holding
 /// the panel toggle and the program's name. Only the toggle is a *control*:
@@ -5690,6 +5713,11 @@ pub fn title_bar_app_run_right_px(
 /// and the `˅` that used to mark the end of the app's territory is now somewhere
 /// off to the right of the viewport. Reporting the button's edge there would
 /// hand the app's own tabs to the window's drag handler.
+///
+/// Both arms therefore land inside the strip's own viewport, which already ends
+/// [`WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX`] short of the caption corner — so
+/// the drag band is not maintained here at all, and cannot drift from the
+/// picture.
 ///
 /// Callers outside this module want [`title_bar_app_run_right_px`], which is
 /// this answer for the layout that has a strip and a different one for the
@@ -25227,6 +25255,159 @@ mod tests {",
         );
     }
 
+    /// PIN — **a full strip still leaves the window somewhere to be dragged by**
+    /// (user report with screenshot, ruling 2026-09-09).
+    ///
+    /// The report was a window with a dozen tabs open: the strip had run all the
+    /// way to the gear and [`title_bar_app_run_right_px`] said so, so the
+    /// `WM_NCHITTEST` bridge answered `HTCLIENT` for every pixel of the top edge
+    /// and there was nothing left to take hold of. Neither dragging the window
+    /// nor double-clicking to maximise had a place to happen. It did not even
+    /// take a scroll to get there: whenever the tabs are between their two
+    /// clamps the run comes out exactly as long as the space it was handed, so a
+    /// strip that merely *fitted* already ended on the gear's own left edge.
+    ///
+    /// The ruling is a band of [`WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX`] that
+    /// the strip never takes, and three things follow from it, asserted here:
+    ///
+    /// * the app's run ends at least that far short of the gear, whatever the
+    ///   strip is wearing, and Win32 hears `HTCAPTION` across the whole band;
+    /// * the strip's own viewport ends on the same number rather than near it —
+    ///   [`title_bar_app_run_right_px`] is read *off* the strip, so the picture
+    ///   and the bridge cannot disagree about where the band starts;
+    /// * the band is bought out of the run before the tabs are shared out, so
+    ///   the tabs walk down their width tiers first and the strip begins to
+    ///   scroll only once they are on their floor. A bar wider by exactly the
+    ///   reserve is the same strip the old code drew, which is how "the tabs pay
+    ///   for it in width, not in scroll" is said without naming a tier.
+    ///
+    /// Red gate before the fix: with twelve and with thirty tabs the run ended
+    /// on the gear itself — `the app's run stops short of the gear: left 776,
+    /// run 776` — and the reserve's own pixels answered `Client`.
+    #[test]
+    fn a_full_tab_strip_still_leaves_the_window_a_handle_to_drag_by() {
+        use bt_platform::{CustomFrameHit, CustomFrameMetrics, custom_frame_hit_test};
+        let (width, scale) = (960.0_f32, 1.0_f32);
+        let rail = RailState::default();
+        let reserve = WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX * scale;
+        // The gear leads the caption run, and the strip reserves that run's four
+        // slots on every window (see `caption_run_left`), so this is the edge the
+        // band is measured back from.
+        let gear_left = window_caption_boxes(width, scale, false)[0].1[0];
+
+        // The dozen the report was made with — a strip pressed flat against the
+        // gear without yet scrolling — and two counts past the floor, where it
+        // scrolls as well.
+        assert_eq!(
+            tab_strip_geometry(width, scale, &resting(12), 0, 0.0).max_scroll,
+            0.0,
+            "twelve tabs fit this bar, which is what made the report's window a \
+             window with no handle rather than merely a crowded one"
+        );
+        assert!(
+            tab_strip_geometry(width, scale, &resting(30), 0, 0.0).max_scroll > 0.0,
+            "thirty do not, and the reserve holds under scroll too"
+        );
+        for tabs in [12_usize, 16, 30] {
+            let geometry = tab_strip_geometry(width, scale, &resting(tabs), 0, 0.0);
+            let run_right = title_bar_app_run_right_px(width, scale, tabs, rail);
+            assert_eq!(
+                run_right,
+                geometry.viewport[1].ceil() as i32,
+                "the number the bridge is given is the strip's own right edge \
+                 with {tabs} tabs, not a second opinion about it"
+            );
+            assert!(
+                run_right as f32 <= gear_left - reserve,
+                "the app's run stops short of the gear: left {gear_left}, run \
+                 {run_right}, with {tabs} tabs"
+            );
+
+            let frame = CustomFrameMetrics {
+                width: width as i32,
+                height: 700,
+                title_bar_height: 40,
+                tab_strip_right_px: run_right,
+                caption_button_width: 46,
+                caption_button_count: 4,
+                resize_border: 8,
+                resizable: true,
+            };
+            let y = 20;
+            for x in (run_right..gear_left as i32).step_by(7) {
+                assert_eq!(
+                    custom_frame_hit_test(frame, x, y),
+                    CustomFrameHit::Caption,
+                    "x={x} is inside the reserve with {tabs} tabs, and the whole \
+                     of it is the window's handle"
+                );
+                assert_eq!(
+                    hit_tab_chrome(
+                        width,
+                        scale,
+                        &resting(tabs),
+                        0,
+                        0.0,
+                        f64::from(x),
+                        f64::from(y)
+                    ),
+                    None,
+                    "x={x} is past the strip's crop, so nothing in it is clicked \
+                     through the handle"
+                );
+            }
+        }
+
+        // A short strip is untouched: its tabs are at their cap, so the run ends
+        // where the `˅` ends and the band beside it was always there.
+        let roomy = tab_strip_geometry(1920.0, scale, &resting(2), 0, 0.0);
+        assert_eq!(roomy.max_scroll, 0.0);
+        assert_eq!(
+            title_bar_app_run_right_px(1920.0, scale, 2, rail),
+            470,
+            "two tabs on a wide bar end their run exactly where they did before \
+             the reserve existed"
+        );
+        assert_eq!(roomy.new_tab_menu[2], 470.0, "and that is the `˅`'s edge");
+
+        // The tabs pay in width before they pay in scroll: a bar wider by the
+        // reserve draws the strip the old arithmetic drew, and five tabs on this
+        // one are narrower without having begun to scroll.
+        let squeezed = tab_strip_geometry(width, scale, &resting(5), 0, 0.0);
+        let unreserved = tab_strip_geometry(width + reserve, scale, &resting(5), 0, 0.0);
+        assert_eq!(squeezed.max_scroll, 0.0, "five tabs still fit, tighter");
+        assert_eq!(unreserved.max_scroll, 0.0);
+        let tab_of = |strip: &TabStripGeometry| strip.tabs[0].body[2] - strip.tabs[0].body[0];
+        assert!(
+            tab_of(&squeezed) < tab_of(&unreserved),
+            "the reserve comes out of the tabs' width: {} against {}",
+            tab_of(&squeezed),
+            tab_of(&unreserved)
+        );
+        assert_eq!(
+            squeezed.viewport[1],
+            unreserved.viewport[1] - reserve,
+            "and it is exactly the band, taken off the run before it is shared out"
+        );
+
+        // The vertical layout keeps the answer it already had: its bar holds the
+        // toggle and the name, and the name has always been part of the handle,
+        // so there was never a strip up here to take a band out of.
+        let vertical = RailState {
+            layout: TabLayoutMode::Vertical,
+            mode: RailMode::Expanded,
+            ..RailState::default()
+        };
+        for tabs in [1_usize, 12, 30] {
+            assert_eq!(
+                title_bar_app_run_right_px(width, scale, tabs, vertical),
+                42,
+                "the tabs are down the side, so {tabs} of them still buy the app \
+                 nothing but its toggle"
+            );
+        }
+    }
+
     /// The caption run's boxes and its hit test are one arithmetic, and this is
     /// what says so: every box answers with its own target when asked at its
     /// centre, and the run tiles the corner with no seam between the buttons.
@@ -27958,15 +28139,20 @@ mod tests {",
             );
         }
         // The anchor, worked through by hand at 1x: a 960px window leaves a
-        // 776px run, 707px of it for tabs once the 7px inset and the 62px of
-        // button furniture are taken. Fifteen tabs share that at 46.2px each and
-        // still fit; the sixteenth puts every tab on the floor and starts the
-        // scroller.
+        // 776px run, of which the strip may have all but the 96px drag reserve
+        // (`WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX`, user ruling 2026-09-09) —
+        // 680px, 611px of it for tabs once the 7px inset and the 62px of button
+        // furniture are taken. Thirteen tabs share that at 46.1px each and still
+        // fit; the fourteenth puts every tab on the floor and starts the
+        // scroller. The reserve moved this pair down from fifteen and sixteen,
+        // which is the cost the ruling accepted: the band is bought out of the
+        // run before the tabs are shared out, so it is felt as two tabs' worth of
+        // room rather than as a strip that overhangs its own drag handle.
         assert_eq!(
-            tab_strip_geometry(960.0, 1.0, &resting(15), 0, 0.0).max_scroll,
+            tab_strip_geometry(960.0, 1.0, &resting(13), 0, 0.0).max_scroll,
             0.0
         );
-        assert!(tab_strip_geometry(960.0, 1.0, &resting(16), 0, 0.0).max_scroll > 0.0);
+        assert!(tab_strip_geometry(960.0, 1.0, &resting(14), 0, 0.0).max_scroll > 0.0);
     }
 
     /// PIN — A7/A8: the strip is cropped to its viewport, and no caller can park
@@ -28010,12 +28196,17 @@ mod tests {",
         }
     }
 
-    /// PIN — A7/A8: a scrolling strip leaves no slack, so it leaves no window
-    /// drag room either. `tab_strip_right_px` is the boundary the platform's
-    /// hit-test uses, and reporting the `˅`'s edge under scroll would hand the
-    /// app's own tabs to the window drag handler.
+    /// PIN — A7/A8: a scrolling strip leaves no slack inside its own run, so the
+    /// boundary the platform's hit-test uses is that run's end and not the `˅`'s
+    /// edge — reporting the button under scroll would hand the app's own tabs to
+    /// the window drag handler.
+    ///
+    /// What lies beyond the run is the 2026-09-09 ruling's business and is
+    /// asserted in `a_full_tab_strip_still_leaves_the_window_a_handle_to_drag_by`:
+    /// the run itself now stops short of the gear, so "owns its whole run" and
+    /// "the window still has a handle" are both true at once.
     #[test]
-    fn a_scrolling_strip_leaves_no_window_drag_room_beside_it() {
+    fn a_scrolling_strip_owns_its_whole_run_and_no_more() {
         let (scale, width) = (1.0_f32, 960.0_f32);
         let roomy = tab_strip_geometry(width, scale, &resting(2), 0, 0.0);
         assert_eq!(roomy.max_scroll, 0.0);

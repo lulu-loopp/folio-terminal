@@ -8,6 +8,17 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A window with a full row of tabs can still be dragged by its title bar.**
+  Folio draws its own title bar, and the only stretch of it a window may be
+  moved by is whatever the row of tabs leaves over. With a dozen open the row
+  reached all the way to the settings gear and left nothing: the top edge could
+  not be dragged anywhere along its length, and double clicking it to maximise
+  had no place to happen either. The row now stops 96 pixels short of the
+  buttons in the corner whatever it is carrying, so there is always a band there
+  to take hold of. The tabs pay for it the way they already pay for one more
+  tab, by growing narrower first and scrolling only once they are as narrow as
+  they go. A window with the tabs down its side is unaffected, and so is a
+  window with room to spare in the bar.
 - **The four split pictures at the top of a pane's menu can be seen.** The
   little pane and the four bars around it were drawn in the same hairline the
   menu's own edge is drawn in, and a hairline is meant to be found rather than
