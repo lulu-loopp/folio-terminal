@@ -277,6 +277,12 @@ changed; this is for anybody who builds it from source.
 
 ## Also fixed
 
+- **Changing the window's size no longer types into a bash or WSL prompt.** After
+  a resize Folio asks PowerShell to redraw its input line with a key sequence
+  PSReadLine understands; the same sequence used to reach every shell with
+  Folio's marks, and bash pasted its tail, `;8~`, onto the prompt, so the next
+  command failed on a stray semicolon. The sequence now goes to PowerShell and
+  to no other shell.
 - **The key that summons the quick terminal raises it when it is on screen and
   you are working somewhere else**, rather than sending it away and giving the
   keyboard to a third window. A hung program in front no longer stops Folio doing
