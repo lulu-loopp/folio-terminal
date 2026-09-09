@@ -7886,6 +7886,22 @@ struct LeafSession {
     /// a Git Bash pane out of a PowerShell tab produced a tab that said
     /// PowerShell over a running bash.
     profile: usize,
+    /// **Which shell integration door this pane's shell was started behind.**
+    ///
+    /// Beside [`Self::profile`] rather than read back off the table through it,
+    /// because a row is editable and a running shell is not: changing a
+    /// profile's `Shell integration` picker changes what the *next* pane of that
+    /// row is started with, and this pane goes on being whatever it was started
+    /// as until it is restarted. Re-deriving would let an edit made in Settings
+    /// decide what bytes an already-running shell is sent.
+    ///
+    /// It is the door and not the proof the script loaded: PowerShell's is
+    /// opt-in, so a `PowerShellOptIn` pane whose reader never dot-sourced
+    /// `folio.ps1` is still a PowerShell. What answers "is the integration
+    /// actually running" is the pane's own `OSC 133`, and the one place that
+    /// distinction matters — the post-resize anchor chord — asks both
+    /// (`psreadline_resize_repaint_input`).
+    integration: profiles::Integration,
     /// The executable this pane's shell was actually started from, as the
     /// machine resolved it.
     ///
@@ -15364,23 +15380,55 @@ fn service_pending_pty_resize(
 
 /// The private shell-integration input owed after one successful ConPTY resize commit.
 ///
-/// `false` includes every session that has never emitted OSC 133, every closed input region, and
-/// every alternate screen. Returning `None` is what makes those cases a byte-for-byte no-op rather
-/// than a best-effort guess about which shell might be present.
-fn psreadline_resize_repaint_input(shell_input_region_open: bool) -> Option<&'static [u8]> {
-    shell_input_region_open.then_some(PSREADLINE_INVOKE_PROMPT_INPUT)
+/// Two questions, and **both of them have to be asked**. The open input region says a shell is
+/// reading a line right now: closed regions, alternate screens and shells that have never emitted
+/// OSC 133 are all `false`, and none of them is a moment to put bytes in front of. The door says
+/// *which* shell that is, and it is the half this used to be missing.
+///
+/// `ESC[24;8~` is not a repaint. It is the key `folio.ps1` binds `InvokePrompt` to, and it means
+/// something only to a PSReadLine holding that binding. The chord used to be sent to any pane with
+/// a region open, on the reading that a shell without the binding would drop it — which was true
+/// while PowerShell was the only shell here that emitted OSC 133 at all. It has not been true since
+/// `folio.bash` and `folio.zsh` shipped: GNU readline does not know this sequence, decodes what it
+/// can and inserts the rest, so one resize typed `;8~` into a bash prompt and the next command died
+/// on `syntax error near unexpected token ';'`. A cmd pane would be no better off, which is one of
+/// the reasons its `PROMPT` integration still declines to open a region at all.
+///
+/// So the chord goes to the door it was cut for and nowhere else. Every other shell keeps the
+/// byte-for-byte no-op it was always promised, and keeps its own screen: the reflow the resize
+/// caused is repaired by the shell that owns the prompt, not by this terminal typing at it.
+fn psreadline_resize_repaint_input(
+    integration: profiles::Integration,
+    shell_input_region_open: bool,
+) -> Option<&'static [u8]> {
+    (integration == profiles::Integration::PowerShellOptIn && shell_input_region_open)
+        .then_some(PSREADLINE_INVOKE_PROMPT_INPUT)
 }
 
-fn replace_psreadline_resize_reanchor_debt(pending: &mut bool, shell_input_region_open: bool) {
-    *pending = psreadline_resize_repaint_input(shell_input_region_open).is_some();
+/// **One pane's anchor-repair account** — what it owes, and the shell the repair would go to.
+///
+/// One argument and not two, because neither half answers on its own. A debt with no door is a
+/// chord looking for somewhere to go, which is the defect the door was added to end; a door with
+/// no debt is a fact about a profile that no resize has made owing.
+struct ResizeReanchor<'a> {
+    pending: &'a mut bool,
+    integration: profiles::Integration,
+}
+
+fn replace_psreadline_resize_reanchor_debt(
+    reanchor: ResizeReanchor<'_>,
+    shell_input_region_open: bool,
+) {
+    *reanchor.pending =
+        psreadline_resize_repaint_input(reanchor.integration, shell_input_region_open).is_some();
 }
 
 fn take_psreadline_resize_reanchor_input(
-    pending: &mut bool,
+    reanchor: ResizeReanchor<'_>,
     shell_input_region_open: bool,
 ) -> Option<&'static [u8]> {
-    std::mem::take(pending)
-        .then(|| psreadline_resize_repaint_input(shell_input_region_open))
+    std::mem::take(reanchor.pending)
+        .then(|| psreadline_resize_repaint_input(reanchor.integration, shell_input_region_open))
         .flatten()
 }
 
@@ -15451,7 +15499,7 @@ impl LeafResizeCommit {
 fn commit_leaf_resize(
     session: &mut DualPlaneSession,
     pty: Option<&mut PtySession>,
-    pending_reanchor: &mut bool,
+    reanchor: ResizeReanchor<'_>,
     local_grid: GridSize,
     next_grid: GridSize,
     physical: PhysicalSize<u32>,
@@ -15472,7 +15520,7 @@ fn commit_leaf_resize(
         pty.resize(pty_size(next_grid, physical))
             .context("commit a coalesced final ConPTY resize")?;
     }
-    replace_psreadline_resize_reanchor_debt(pending_reanchor, shell_input_region_open);
+    replace_psreadline_resize_reanchor_debt(reanchor, shell_input_region_open);
     let reconciled = session.mark_pty_resize_requested_at(
         nonzero_u32(next_grid.columns.get()),
         nonzero_u32(next_grid.rows.get()),
@@ -15545,10 +15593,14 @@ fn release_due_leaf_resize(
         return Ok((None, wake));
     };
     let local_grid = leaf.grid;
+    let integration = leaf.integration;
     let commit = commit_leaf_resize(
         &mut leaf.session,
         leaf.pty.as_mut(),
-        &mut leaf.pending_psreadline_resize_reanchor,
+        ResizeReanchor {
+            pending: &mut leaf.pending_psreadline_resize_reanchor,
+            integration,
+        },
         local_grid,
         pending.grid,
         pending.physical,
@@ -29921,6 +29973,11 @@ fn create_leaf_session(
         wake: pty.is_some().then_some(wake),
         pty,
         profile,
+        // The door of the profile this pane actually came up as, read once,
+        // here, where that profile is finally known — after both fallbacks. See
+        // the field for why it is not read again later.
+        integration: profiles::row(profile)
+            .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
         program: resolved_program,
         spawn_place,
         // **What this pane is owed at its first prompt** (§7.54e ④). `None` for every pane in the
@@ -74896,8 +74953,12 @@ impl Runtime<'_> {
                 // child byte it caused have been quiet. A new geometry event re-opens the transaction,
                 // so a divider storm cannot install an intermediate commit's still-moving cursor.
                 let shell_input_region_open = leaf.session.shell_input_region_open();
+                let integration = leaf.integration;
                 if let Some(reanchor_input) = take_psreadline_resize_reanchor_input(
-                    &mut leaf.pending_psreadline_resize_reanchor,
+                    ResizeReanchor {
+                        pending: &mut leaf.pending_psreadline_resize_reanchor,
+                        integration,
+                    },
                     shell_input_region_open,
                 ) {
                     write_pty_input(
@@ -93845,9 +93906,9 @@ mod pty_drain_budget_tests {
         let call = ["commit_leaf_", "resize("].concat();
         assert_eq!(
             SOURCE.matches(call.as_str()).count(),
-            // its own declaration, the one release that calls it, and the two tests that drive
+            // its own declaration, the one release that calls it, and the three tests that drive
             // the four steps directly.
-            4,
+            5,
             "the commit has one caller in the product, and that caller is the release"
         );
         assert!(
@@ -118028,43 +118089,153 @@ mod tests {
     #[test]
     fn private_resize_repaint_input_is_exact_and_integration_gated() {
         assert_eq!(
-            psreadline_resize_repaint_input(true),
+            psreadline_resize_repaint_input(profiles::Integration::PowerShellOptIn, true),
             Some(PSREADLINE_INVOKE_PROMPT_INPUT)
         );
         assert_eq!(
-            psreadline_resize_repaint_input(false),
+            psreadline_resize_repaint_input(profiles::Integration::PowerShellOptIn, false),
             None,
             "a session without an open OSC 133 input region injects zero bytes"
         );
     }
 
+    /// RED — **`ESC[24;8~` is PowerShell's key, and only a PowerShell pane may be sent it.**
+    ///
+    /// The chord is what `folio.ps1` binds `InvokePrompt` to. It was gated on the input region
+    /// alone, on the reading that a shell holding no such binding would drop it — true while
+    /// PowerShell was the only shell here that emitted `OSC 133` at all, and false since
+    /// `folio.bash` and `folio.zsh` shipped. GNU readline decodes what it recognises of the
+    /// sequence and inserts the rest as text, so one window resize put `;8~` on a Git Bash prompt
+    /// and the next `Enter` answered `syntax error near unexpected token ';'`. Two resizes of a
+    /// WSL pane read `;8~;8~`.
+    ///
+    /// Three panes in the one state that used to send bytes: a bash door, a PowerShell door, and a
+    /// PowerShell door whose prompt has closed. Only the middle one may hear anything.
+    #[test]
+    fn the_resize_anchor_chord_goes_to_a_powershell_pane_and_to_no_other_shell() {
+        let start = Instant::now();
+        let open_prompt = |session: &mut DualPlaneSession| {
+            session
+                .feed_at(b"\x1b]133;A\x07$ \x1b]133;B\x07", start)
+                .unwrap();
+        };
+        let commit = |session: &mut DualPlaneSession, integration| {
+            let mut pending = false;
+            commit_leaf_resize(
+                session,
+                None,
+                ResizeReanchor {
+                    pending: &mut pending,
+                    integration,
+                },
+                grid_of(80, 24),
+                grid_of(60, 24),
+                PhysicalSize::new(480, 600),
+                start,
+            )
+            .unwrap();
+            let open = session.shell_input_region_open();
+            take_psreadline_resize_reanchor_input(
+                ResizeReanchor {
+                    pending: &mut pending,
+                    integration,
+                },
+                open,
+            )
+        };
+
+        let mut bash = DualPlaneSession::new(nonzero_u32(80), nonzero_u32(24));
+        open_prompt(&mut bash);
+        assert!(
+            bash.shell_input_region_open(),
+            "the fixture has to leave a prompt open, or there is nothing to withhold"
+        );
+        assert_eq!(
+            commit(&mut bash, profiles::Integration::BashInitFile),
+            None,
+            "a resize types nothing into a bash prompt: readline would insert what it cannot decode"
+        );
+
+        let mut zsh = DualPlaneSession::new(nonzero_u32(80), nonzero_u32(24));
+        open_prompt(&mut zsh);
+        assert_eq!(
+            commit(&mut zsh, profiles::Integration::ZshDotDir),
+            None,
+            "and nothing into a zsh prompt, which is served through its own door"
+        );
+
+        let mut cmd = DualPlaneSession::new(nonzero_u32(80), nonzero_u32(24));
+        open_prompt(&mut cmd);
+        assert_eq!(
+            commit(&mut cmd, profiles::Integration::CmdPrompt),
+            None,
+            "nor into a cmd prompt, whose PROMPT integration binds no keys at all"
+        );
+
+        let mut bare = DualPlaneSession::new(nonzero_u32(80), nonzero_u32(24));
+        open_prompt(&mut bare);
+        assert_eq!(
+            commit(&mut bare, profiles::Integration::None),
+            None,
+            "nor into a shell this product installed nothing in, whatever it emits"
+        );
+
+        let mut powershell = DualPlaneSession::new(nonzero_u32(80), nonzero_u32(24));
+        open_prompt(&mut powershell);
+        assert_eq!(
+            commit(&mut powershell, profiles::Integration::PowerShellOptIn),
+            Some(PSREADLINE_INVOKE_PROMPT_INPUT),
+            "the pane the chord was cut for still gets its anchor repaired"
+        );
+
+        let mut closed = DualPlaneSession::new(nonzero_u32(80), nonzero_u32(24));
+        closed
+            .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07ls\r\x1b]133;C\x07", start)
+            .unwrap();
+        assert!(
+            !closed.shell_input_region_open(),
+            "the fixture has to leave the region closed, or the door is the only thing tested"
+        );
+        assert_eq!(
+            commit(&mut closed, profiles::Integration::PowerShellOptIn),
+            None,
+            "a PowerShell running a command is not at a prompt, and hears nothing"
+        );
+    }
+
     #[test]
     fn resize_storm_reanchor_debt_is_replaced_and_paid_once() {
+        fn powershell(pending: &mut bool) -> ResizeReanchor<'_> {
+            ResizeReanchor {
+                pending,
+                integration: profiles::Integration::PowerShellOptIn,
+            }
+        }
         let mut pending = false;
         for _ in 0..3 {
-            replace_psreadline_resize_reanchor_debt(&mut pending, true);
+            replace_psreadline_resize_reanchor_debt(powershell(&mut pending), true);
         }
         assert_eq!(
-            take_psreadline_resize_reanchor_input(&mut pending, true),
+            take_psreadline_resize_reanchor_input(powershell(&mut pending), true),
             Some(PSREADLINE_INVOKE_PROMPT_INPUT),
             "three commits in one open-input transaction coalesce to one chord"
         );
         assert_eq!(
-            take_psreadline_resize_reanchor_input(&mut pending, true),
+            take_psreadline_resize_reanchor_input(powershell(&mut pending), true),
             None,
             "the repair debt is one shot"
         );
 
-        replace_psreadline_resize_reanchor_debt(&mut pending, true);
-        replace_psreadline_resize_reanchor_debt(&mut pending, false);
+        replace_psreadline_resize_reanchor_debt(powershell(&mut pending), true);
+        replace_psreadline_resize_reanchor_debt(powershell(&mut pending), false);
         assert_eq!(
-            take_psreadline_resize_reanchor_input(&mut pending, true),
+            take_psreadline_resize_reanchor_input(powershell(&mut pending), true),
             None,
             "a later closed-region commit replaces stale open-prompt debt"
         );
-        replace_psreadline_resize_reanchor_debt(&mut pending, true);
+        replace_psreadline_resize_reanchor_debt(powershell(&mut pending), true);
         assert_eq!(
-            take_psreadline_resize_reanchor_input(&mut pending, false),
+            take_psreadline_resize_reanchor_input(powershell(&mut pending), false),
             None,
             "a prompt that closes before quiescence receives no stale chord"
         );
@@ -118097,7 +118268,10 @@ mod tests {
         commit_leaf_resize(
             &mut session,
             None,
-            &mut pending,
+            ResizeReanchor {
+                pending: &mut pending,
+                integration: profiles::Integration::PowerShellOptIn,
+            },
             grid_of(80, 24),
             grid_of(60, 24),
             PhysicalSize::new(480, 600),
@@ -118121,7 +118295,13 @@ mod tests {
             "the transaction closes at its own deadline"
         );
         assert_eq!(
-            take_psreadline_resize_reanchor_input(&mut pending, session.shell_input_region_open()),
+            take_psreadline_resize_reanchor_input(
+                ResizeReanchor {
+                    pending: &mut pending,
+                    integration: profiles::Integration::PowerShellOptIn,
+                },
+                session.shell_input_region_open(),
+            ),
             Some(PSREADLINE_INVOKE_PROMPT_INPUT),
             "the pane nobody is watching gets the same anchor repair as the focused one"
         );
@@ -133196,6 +133376,10 @@ mod tests {
             // panes exist to carry scrollback, and the default profile is what
             // the pane they stand in for would have been started as.
             profile: profiles::fallback_profile(),
+            // And the door that profile is served through, which is the one the
+            // spawn would have read for it.
+            integration: profiles::row(profiles::fallback_profile())
+                .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
             // And no program either, which is the honest shape of the same
             // fact: nothing was started, so nothing can have announced itself.
             program: None,
@@ -133323,10 +133507,14 @@ mod tests {
             // carried through the real transaction, because a resize left open withholds every
             // decoration for as long as it stays open (`decorations_allowed`).
             let local_grid = leaf.grid;
+            let integration = leaf.integration;
             commit_leaf_resize(
                 &mut leaf.session,
                 None,
-                &mut leaf.pending_psreadline_resize_reanchor,
+                ResizeReanchor {
+                    pending: &mut leaf.pending_psreadline_resize_reanchor,
+                    integration,
+                },
                 local_grid,
                 grid_of(200, 8),
                 PhysicalSize::new(1600, 200),

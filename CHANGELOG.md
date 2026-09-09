@@ -39,6 +39,15 @@ Nothing yet.
   directory holds. Nothing about the program changed.
 ### Fixed
 
+- **Resizing a window no longer types into a bash prompt.** A Git Bash or WSL
+  pane running Folio's shell integration picked up `;8~` at its prompt every
+  time the window changed size, and the next command answered `bash: syntax
+  error near unexpected token ';'`. What arrived there is a key of PowerShell's:
+  Folio presses it after a resize so PowerShell can put its prompt back in the
+  right place, and bash, which has no such key, typed the part of it that it
+  could read. It now goes only to the PowerShell panes it was written for.
+  Resizing a bash, zsh or Command Prompt pane sends that pane nothing.
+
 - **A printed table is drawn whole or not at all.** A table an agent prints
   arrives a row at a time, and a row can arrive damaged: a cell holding a bare
   `|` counts as extra columns, and a program that lays out its own output wraps
