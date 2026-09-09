@@ -2010,14 +2010,14 @@ impl DualPlaneSession {
         changed
     }
 
-    /// Is the resident line immediately above `id` shaped like a table row? The other half of
-    /// [`may_arm_table`]'s two-line question, asked of the frozen document.
-    fn history_row_above_is_table_row(&self, id: TranscriptId) -> bool {
+    /// Is there a resident line immediately above `id`, and is it part of the same paragraph? The
+    /// other half of [`may_arm_table`]'s two-line question, asked of the frozen document.
+    fn history_line_above_continues_paragraph(&self, id: TranscriptId) -> bool {
         self.document
             .entries()
             .range(..id)
             .next_back()
-            .is_some_and(|(_, entry)| bt_detect::table::is_row_shaped(&entry.line.text))
+            .is_some_and(|(_, entry)| !entry.line.text.trim().is_empty())
     }
 
     /// Which of the two Rendered-blocks switches decides this block, and what it says.
@@ -5924,11 +5924,9 @@ impl DualPlaneSession {
         let armed = inputs
             .iter()
             .any(|input| may_arm_math(input.text.trim(), self.inline_math_bands, || input.site))
-            || inputs.windows(2).any(|pair| {
-                may_arm_table(pair[1].text.trim(), || {
-                    bt_detect::table::is_row_shaped(pair[0].text.trim())
-                })
-            });
+            || inputs
+                .windows(2)
+                .any(|pair| may_arm_table(pair[1].text.trim(), || !pair[0].text.trim().is_empty()));
         if !armed {
             return Vec::new();
         }
@@ -7145,9 +7143,10 @@ impl DualPlaneSession {
     ///
     /// **A table is the one block whose extent a later line can change.** A `$$` block is settled
     /// by its own two delimiters, so nothing printed under it can unmake it; a table ends wherever
-    /// its rows stop, and `bt_detect::table`'s rule 2 says a line that leads with a pipe and is not
-    /// one of its rows refuses the whole table rather than ending it. That line arrives after the
-    /// block was drawn — often long after, once the rows have scrolled into history — so the
+    /// its rows stop, and `bt_detect::table`'s rule 2 says a pipe anywhere in the paragraph that
+    /// runs on past them, and that none of them can account for, refuses the whole table rather
+    /// than ending it. That pipe arrives after the block was drawn — often long after, once the
+    /// rows have scrolled into history, and not necessarily on the line under the last row — so the
     /// verdict has to be able to travel backwards, and this is the only place it does.
     ///
     /// The record goes back to exactly what it was before the block was proven: no artifact, no
@@ -7531,7 +7530,7 @@ impl DualPlaneSession {
                     may_arm_math(&entry.line.text, inline_formulas, || {
                         self.history_inline_site(**id)
                     }) || may_arm_table(&entry.line.text, || {
-                        self.history_row_above_is_table_row(**id)
+                        self.history_line_above_continues_paragraph(**id)
                     })
                 })
             })
@@ -7555,7 +7554,7 @@ impl DualPlaneSession {
                 && (may_arm_math(&entry.line.text, inline_formulas, || {
                     self.history_inline_site(*id)
                 }) || may_arm_table(&entry.line.text, || {
-                    self.history_row_above_is_table_row(*id)
+                    self.history_line_above_continues_paragraph(*id)
                 }))
             {
                 candidates.insert(*id);
@@ -10332,10 +10331,11 @@ impl DualPlaneSession {
         let Some(entry) = self.document.entries().get(&id) else {
             return;
         };
-        let armed_for_math =
-            may_arm_math(&entry.line.text, self.inline_math_bands, || {
-                inline_math_site(ScreenId::Primary, self.command_output_covers_history(id))
-            }) || may_arm_table(&entry.line.text, || self.history_row_above_is_table_row(id));
+        let armed_for_math = may_arm_math(&entry.line.text, self.inline_math_bands, || {
+            inline_math_site(ScreenId::Primary, self.command_output_covers_history(id))
+        }) || may_arm_table(&entry.line.text, || {
+            self.history_line_above_continues_paragraph(id)
+        });
         let versions = VersionStamp {
             source: entry.line.source_generation,
             detection: self.detection_revision,
@@ -10632,7 +10632,7 @@ impl DualPlaneSession {
                 (may_arm_math(&entry.line.text, inline_formulas, || {
                     self.history_inline_site(*id)
                 }) || may_arm_table(&entry.line.text, || {
-                    self.history_row_above_is_table_row(*id)
+                    self.history_line_above_continues_paragraph(*id)
                 }))
                 .then_some(*id)
             })
@@ -10727,11 +10727,14 @@ impl DualPlaneSession {
     /// **A scan window is only ever as wide as the question it has to answer**, and for `$$` that
     /// width is the certified frontier — the last place the parser was provably between blocks. A
     /// table has no such phase to carry: it is proven by two adjacent lines and extended by every
-    /// row after them, so what its window has to reach is simply the top of the run of rows this
-    /// candidate sits in. Walk back while the line above is still shaped like a row, stop at the
-    /// first line that is not, and stop at the byte cap the whole scanner is bounded by.
+    /// row after them, and refused by a pipe anywhere in the paragraph that runs on past its last
+    /// row. So what its window has to reach is the top of the paragraph this candidate sits in:
+    /// the refusing pipe is not always the table's neighbour, and the table it refuses may stand
+    /// several pipeless lines above it. Walk back while the line above is not blank, stop at the
+    /// blank line that opens the paragraph, and stop at the byte cap the whole scanner is bounded
+    /// by.
     ///
-    /// `None` when the candidate is not a row at all, which is the ordinary case and costs one
+    /// `None` when the candidate carries no pipe at all, which is the ordinary case and costs one
     /// pipe scan of one line.
     fn frozen_table_window_start(&self, candidate: TranscriptId) -> Option<TranscriptId> {
         let entries = self.document.entries();
@@ -10739,7 +10742,7 @@ impl DualPlaneSession {
         let mut start = candidate;
         let mut bytes = entries[&candidate].line.text.len();
         for (id, entry) in entries.range(..candidate).rev() {
-            if !bt_detect::table::is_row_shaped(&entry.line.text) {
+            if entry.line.text.trim().is_empty() {
                 break;
             }
             bytes = bytes
@@ -10753,24 +10756,41 @@ impl DualPlaneSession {
         (start != candidate).then_some(start)
     }
 
-    /// The one resident line past `candidate` a table ending there has to be read with.
+    /// The resident lines past `candidate` a table ending there has to be read with.
     ///
     /// The same sentence as [`Self::frozen_table_window_start`], pointing the other way. Rule 2 of
-    /// `bt_detect::table` is a statement about the line *after* the last row — a line that leads
-    /// with a pipe and is not a row refuses the whole table — so a window that stopped at the
-    /// candidate could only ever answer half the question, and would go on proving a table every
-    /// time one of its own rows was re-armed, however plainly the line under it had refused it.
-    /// One line is the whole of the lookahead: rule 2 reads exactly one.
+    /// `bt_detect::table` is a statement about the *paragraph* after the last row — a pipe anywhere
+    /// in it that the table can account for neither as a row nor as a continuation refuses the
+    /// whole table — so a window that stopped at the candidate could only ever answer half the
+    /// question, and would go on proving a table every time one of its own rows was re-armed,
+    /// however plainly the paragraph under it had refused it.
     ///
-    /// `None` when the candidate is not a row, or when it is the newest resident line — in which
+    /// The lookahead is exactly the rule's own: it ends at the first line that carries an unescaped
+    /// pipe, or at the blank line that closes the paragraph, whichever comes first, and at the
+    /// scanner's byte cap. Since a table opens on a header row, which carries a pipe, no two
+    /// candidates' lookaheads overlap and the whole of this walk costs one pass over the paragraph.
+    ///
+    /// `None` when the candidate carries no pipe, or when it is the newest resident line — in which
     /// case there is nothing after it yet, and the table stands until something arrives.
     fn frozen_table_window_end(&self, candidate: TranscriptId) -> Option<TranscriptId> {
         let entries = self.document.entries();
         bt_detect::table::body_row(&entries.get(&candidate)?.line.text)?;
-        entries
-            .range((Bound::Excluded(candidate), Bound::Unbounded))
-            .next()
-            .map(|(id, _)| *id)
+        let mut end = None;
+        let mut bytes = entries[&candidate].line.text.len();
+        for (id, entry) in entries.range((Bound::Excluded(candidate), Bound::Unbounded)) {
+            bytes = bytes
+                .saturating_add(entry.line.text.len())
+                .saturating_add(1);
+            if bytes > MAX_MATH_SOURCE_BYTES {
+                break;
+            }
+            end = Some(*id);
+            let text = entry.line.text.as_str();
+            if text.trim().is_empty() || bt_detect::table::holds_unescaped_pipe(text) {
+                break;
+            }
+        }
+        end
     }
 
     fn frozen_anchor_is_neutral(&self, anchor: TranscriptId) -> bool {
@@ -12253,24 +12273,27 @@ pub(crate) mod heap_ledger {
     static HEAP_COUNTER: HeapCounter = HeapCounter;
 }
 
-/// The arming pre-filter for tables: could this line be the *last* line of a table?
+/// The arming pre-filter for tables: could this line be the last line of a table, or the line that
+/// refuses one?
 ///
 /// **Two lines, because two lines is where the answer lives.** A table is proven by a header row
 /// standing over a delimiter row, so no single line can be a table and no single line can be ruled
 /// out by itself either — the delimiter row `|---|---|` is armed by the header above it, and every
-/// body row by the row above *it*. So the question this asks is the smallest one that can have an
-/// answer: *this line is a row, and the line before it is a row too.*
+/// body row by the row above *it*. And a table is refused by a pipe anywhere in the paragraph past
+/// its last row (`bt_detect::table` rule 2), which may stand several pipeless lines below the table
+/// it unmakes. So the question this asks is the smallest one that can have an answer for both:
+/// *this line is a row, and it is not the first line of its paragraph.*
 ///
 /// It is deliberately not gated on the "Tables" switch, and that is the same ruling
 /// `display_math_bands` carries: the switch is presentation, so detection keeps running with it
 /// off and turning it back on costs one frame instead of a re-scan.
 ///
-/// Two adjacent log lines that both happen to carry a pipe will arm and then prove nothing. That
-/// is the honest cost of a two-line question, it is bounded by one scan of an already-bounded
+/// A log line that carries a pipe under any other non-blank line will arm and then prove nothing.
+/// That is the honest cost of a two-line question, it is bounded by one scan of an already-bounded
 /// window, and the alternative — remembering which lines were part of a table — would be a second
 /// piece of state saying what the transcript already says.
-fn may_arm_table(text: &str, previous_is_row: impl FnOnce() -> bool) -> bool {
-    bt_detect::table::is_row_shaped(text) && previous_is_row()
+fn may_arm_table(text: &str, previous_continues_paragraph: impl FnOnce() -> bool) -> bool {
+    bt_detect::table::is_row_shaped(text) && previous_continues_paragraph()
 }
 
 fn empty_live_math_span() -> MathSpan {
@@ -13042,8 +13065,8 @@ fn live_candidate_rows(
     // — far worse — drop rows the scan would have rendered.
     let mut logical_site = None;
     // The other half of [`may_arm_table`]'s two-line question, asked of the live grid: a logical
-    // row arms only when the logical row before it was a row too.
-    let mut previous_logical_is_row = false;
+    // row arms only when there was a logical line before it and that line was not blank.
+    let mut previous_logical_continues_paragraph = false;
     for input in inputs {
         logical_text.push_str(&input.text);
         logical_site = Some(match logical_site {
@@ -13060,7 +13083,7 @@ fn live_candidate_rows(
         if !hidden_code_prefix
             && (may_arm_math(&logical_text, inline_formulas, || {
                 logical_site.unwrap_or(InlineMathSite::Ineligible)
-            }) || may_arm_table(&logical_text, || previous_logical_is_row))
+            }) || may_arm_table(&logical_text, || previous_logical_continues_paragraph))
             && let Some(row) = logical_grid_rows
                 .last()
                 .copied()
@@ -13072,7 +13095,7 @@ fn live_candidate_rows(
         if hidden_code_prefix && !context.is_commonmark_code() {
             hidden_code_prefix = false;
         }
-        previous_logical_is_row = bt_detect::table::is_row_shaped(&logical_text);
+        previous_logical_continues_paragraph = !logical_text.trim().is_empty();
         logical_text.clear();
         logical_grid_rows.clear();
         logical_site = None;
@@ -15136,7 +15159,10 @@ mod tests {
         assert!(session.frozen_detection_contexts.is_empty());
     }
 
-    fn complete_detected_live_tasks(session: &mut DualPlaneSession, raster: MathRaster) -> usize {
+    pub(super) fn complete_detected_live_tasks(
+        session: &mut DualPlaneSession,
+        raster: MathRaster,
+    ) -> usize {
         let mut completed = 0;
         while let Some(mut task) = session.take_live_worker_task() {
             if resolve_live_detection_task(&mut task) {
@@ -29675,7 +29701,7 @@ mod math_overflow_tests {
 /// let the two drift apart the first time either moved.
 #[cfg(test)]
 mod pipe_table_blocks {
-    use super::tests::{nz, synthetic_raster};
+    use super::tests::{complete_detected_live_tasks, nz, synthetic_raster};
     use super::*;
 
     const TABLE: &[u8] =
@@ -30030,6 +30056,143 @@ tail four
             table_sources(&session).is_empty(),
             "no record still holds a table"
         );
+    }
+
+    /// PIN: while the tail of a wrapped row is still on its way, no table is drawn with the head of
+    /// that row standing in it — and when the tail lands the whole table appears at once.
+    ///
+    /// This is the 2026-09-09 report driven through the session: the head of the wrapped row splits
+    /// into exactly as many cells as the headings have, so reading it alone would draw a table whose
+    /// last row ends mid-sentence. A one-row grid freezes every line the moment the next one
+    /// arrives, so each feed below is one frame of the report arriving.
+    #[test]
+    fn the_head_of_a_wrapped_row_never_stands_in_a_drawn_table_on_its_own() {
+        let mut session = DualPlaneSession::new(nz(60), nz(1));
+        let raster = synthetic_raster(300, 40);
+        let mut drawn = Vec::new();
+        for line in [
+            "| a | b |",
+            "| --- | --- |",
+            "| 1 | 2 |",
+            // The head of a row the printing program wrapped: two cells under two headings, and
+            // nothing on this line says the rest of it is coming.
+            "| 3 | four and",
+            "five |",
+            "tail",
+        ] {
+            session.feed(line.as_bytes()).unwrap();
+            session.feed(b"\r\n").unwrap();
+            drain_tasks(&mut session, &raster);
+            drawn.push(table_sources(&session));
+        }
+        assert!(
+            drawn
+                .iter()
+                .flatten()
+                .all(|source| !source.contains("four") || source.contains("| 3 | four and five |")),
+            "no frame drew the head of the wrapped row as a row: {drawn:?}"
+        );
+        assert_eq!(
+            drawn[3],
+            Vec::<String>::new(),
+            "the frame that holds only the head draws no table at all"
+        );
+        let whole = "| a | b |
+|---|---|
+| 1 | 2 |
+| 3 | four and five |";
+        assert_eq!(
+            drawn[4],
+            vec![whole.to_owned()],
+            "the frame the tail lands in draws the whole table, the wrapped row rejoined"
+        );
+        assert_eq!(drawn[5], vec![whole.to_owned()], "and it stays drawn");
+        assert_eq!(ready_tables(&session), 1);
+    }
+
+    /// The same report on the **live** plane, where the rows are still on the grid and no line has
+    /// frozen: the head of the wrapped row must not be drawn as a row of its own there either.
+    #[test]
+    fn the_live_plane_draws_no_table_while_the_tail_of_a_wrapped_row_is_still_coming() {
+        let raster = synthetic_raster(300, 40);
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(12));
+        let mut drawn = Vec::new();
+        for (frame, line) in [
+            "| a | b |",
+            "| --- | --- |",
+            "| 1 | 2 |",
+            "| 3 | four and",
+            "five |",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            session.feed(line.as_bytes()).unwrap();
+            session.feed(b"\r\n").unwrap();
+            let at = started + LIVE_MATH_STABLE_INTERVAL * (u32::try_from(frame).unwrap() + 1) * 2;
+            session.advance_live_stability(at);
+            complete_detected_live_tasks(&mut session, raster.clone());
+            drawn.push(
+                session
+                    .live_decorations
+                    .values()
+                    .filter(|record| record.span.kind == BlockKind::Table)
+                    .map(|record| record.span.render_source.clone())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert!(
+            drawn
+                .iter()
+                .flatten()
+                .all(|source| !source.contains("four") || source.contains("| 3 | four and five |")),
+            "no live frame drew the head of the wrapped row as a row: {drawn:?}"
+        );
+        assert_eq!(
+            drawn[4],
+            vec![
+                "| a | b |
+|---|---|
+| 1 | 2 |
+| 3 | four and five |"
+                    .to_owned()
+            ],
+            "and the frame the tail lands in draws the whole table"
+        );
+    }
+
+    /// PIN: a pipe further down the same paragraph takes a drawn table down, however many pipeless
+    /// lines stand between them — which is what the paragraph-wide lookahead of rule 2 buys, and
+    /// what the frozen scan window has to be sized for.
+    #[test]
+    fn a_pipe_further_down_the_paragraph_still_retires_the_table_above_it() {
+        let mut session = DualPlaneSession::new(nz(60), nz(1));
+        let raster = synthetic_raster(300, 40);
+        for line in ["| name | count |", "| --- | ---: |", "| alpha | 3 |"] {
+            session.feed(line.as_bytes()).unwrap();
+            session.feed(b"\r\n").unwrap();
+            drain_tasks(&mut session, &raster);
+        }
+        assert_eq!(ready_tables(&session), 1, "the table is drawn");
+        for line in ["a note about the table", "and one more note"] {
+            session.feed(line.as_bytes()).unwrap();
+            session.feed(b"\r\n").unwrap();
+            drain_tasks(&mut session, &raster);
+        }
+        assert_eq!(
+            ready_tables(&session),
+            1,
+            "prose with no pipe in it ends the table and leaves it standing"
+        );
+        session.feed(b"12:00:04 WARN | disconnected\r\n").unwrap();
+        drain_tasks(&mut session, &raster);
+        assert_eq!(
+            ready_tables(&session),
+            0,
+            "and a pipe in the same paragraph takes it down from two lines away"
+        );
+        assert!(table_sources(&session).is_empty());
     }
 
     /// PIN: a row the printing program wrapped is one row, and dragging the pane does not un-join
