@@ -126,7 +126,7 @@ Reported counts both reviewers of a slice. Deduplication folds a reviewer's find
 
 ## Tickets
 
-All nine tickets were merged to main on 2026-09-08, the last at `5516799`. Each heading below records its merge commit and what it left open.
+All nine tickets were merged to main on 2026-09-08, the last at `5516799`, and shipped in v0.2.4-preview (tag `2d05ae3`, 2026-09-09). Each heading below records its merge commit and what it left open.
 
 ### T1 `fix/svg-href-and-git-hooks` (merged, `95d9bd0`)
 
