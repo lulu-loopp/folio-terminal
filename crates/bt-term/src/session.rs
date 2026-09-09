@@ -30195,6 +30195,150 @@ tail four
         assert!(table_sources(&session).is_empty());
     }
 
+    /// The 2026-09-09 acceptance fixtures, verbatim, fed into a pane 61 columns wide — the run the
+    /// acceptance report drove by hand, driven here instead.
+    const ACCEPT_W5: [&str; 7] = [
+        "| Chrono plant | 参考 | 执行发卡 β | 备注 |",
+        "|---|---|---|---|",
+        "| 软胎(Pac89,v10/v11) | 自由 min-time(自选",
+        "−23.5°) | −3.3°,发卡处侧滑反号 | 规划器全额承诺,s≈161",
+        "一步塌掉 |",
+        "",
+        "这一段是普通散文,不是表格的一部分,后面没有竖线。",
+    ];
+
+    const ACCEPT_W6: [&str; 8] = [
+        "| Chrono plant | 参考 | 执行发卡 β | 备注 |",
+        "|---|---|---|---|",
+        "| 硬胎(TMeasy,v9,run24 配方) | 受命",
+        "−28°(窗) | −21.5°(Win) /",
+        "−23.6°(Spark),零越界 | 完美状态知识下;1 cm 噪声下 12/16",
+        "更浅、3/11 退成 grip 圈 |",
+        "",
+        "这一段是普通散文,不是表格的一部分,后面没有竖线。",
+    ];
+
+    const ACCEPT_W8: [&str; 6] = [
+        "| Chrono plant | 参考 | 执行发卡 β | 备注 |",
+        "|---|---|---|---|",
+        "| 硬胎(TMeasy,v9,run24 配方) | 受命 −28°(窗) | −21.5°(Win) /",
+        "−23.6°(Spark),零越界 | 完美状态知识下;1 cm 噪声下 12/16 更浅、3/11 退成 grip 圈 |",
+        "",
+        "这一段是普通散文,不是表格的一部分,后面没有竖线。",
+    ];
+
+    const ACCEPT_T: [&str; 16] = [
+        "| Chrono plant | 参考 | 执行发卡 β | 备注 |",
+        "|---|---|---|---|",
+        "| 硬胎(TMeasy,v9,run24 配方) | 受命",
+        "−28°(窗) | −21.5°(Win) /",
+        "−23.6°(Spark),零越界 | 完美状态知识下;1 cm 噪声下 12/16",
+        "更浅、3/11 退成 grip 圈 |",
+        "| 硬胎 | 自由 min-time(自选 −14°) | −10.6° | 这是 Chrono",
+        "上唯一一次“没人命令它”的漂移,10° |",
+        "| 软胎(Pac89,v10/v11) | 自由 min-time(自选",
+        "−23.5°) | −3.3°,发卡处侧滑反号 | 规划器全额承诺,s≈161",
+        "一步塌掉 |",
+        "| 软胎 | 受命 −31° | −2.9° | 命令更深,执行更浅 |",
+        "| 软胎,matched own-sim(非 Chrono) | 自由",
+        "−23.5° | −24.4° | tracker 无罪;差在 plant-模型 |",
+        "",
+        "这一段是普通散文,不是表格的一部分,后面没有竖线。",
+    ];
+
+    const ACCEPT_P: [&str; 14] = [
+        "| Chrono plant | 参考 | 执行发卡 β | 备注 |",
+        "|---|---|---|---|",
+        "| 硬胎(TMeasy,v9,run24 配方) | 受命 −28°(窗) |",
+        "−21.5°(Win) / −23.6°(Spark),零越界 | 完美状态知识下;1 cm",
+        "噪声下 12/16 更浅、3/11 退成 grip 圈 |",
+        "| 硬胎 | 自由 min-time(自选 −14°) | −10.6° | 这是 Chrono",
+        "上唯一一次“没人命令它”的漂移,10° |",
+        "| 软胎(Pac89,v10/v11) | 自由 min-time(自选 −23.5°) |",
+        "−3.3°,发卡处侧滑反号 | 规划器全额承诺,s≈161 一步塌掉 |",
+        "| 软胎 | 受命 −31° | −2.9° | 命令更深,执行更浅 |",
+        "| 软胎,matched own-sim(非 Chrono) | 自由 −23.5° | −24.4°",
+        "| tracker 无罪;差在 plant-模型 |",
+        "",
+        "这一段是普通散文,不是表格的一部分,后面没有竖线。",
+    ];
+
+    const ACCEPT_W7N: [&str; 9] = [
+        "| Chrono plant | 参考 | 执行发卡 β | 备注 |",
+        "|---|---|---|---|",
+        "| 硬胎 | 自由 min-time(自选 −14°) | −10.6° | 这是 Chrono",
+        "上唯一一次“没人命令它”的漂移,10° |",
+        "| 软胎 | 受命 −31° | −2.9° |",
+        "| 软胎,matched own-sim(非 Chrono) | 自由",
+        "−23.5° | −24.4° | tracker 无罪;差在 plant-模型 |",
+        "",
+        "这一段是普通散文,不是表格的一部分,后面没有竖线。",
+    ];
+    /// Print `fixture` into a fresh 61-column pane and finish every task it asks for.
+    fn accept_session(fixture: &[&str], raster: &MathRaster) -> DualPlaneSession {
+        let mut session = DualPlaneSession::new(nz(61), nz(4));
+        for line in fixture {
+            session.feed(line.as_bytes()).unwrap();
+            session.feed(b"\r\n").unwrap();
+            drain_tasks(&mut session, raster);
+        }
+        for _ in 0..4 {
+            session.feed(b"tail\r\n").unwrap();
+            drain_tasks(&mut session, raster);
+        }
+        session
+    }
+
+    /// PIN — every shape the 2026-09-09 acceptance run found undrawn is drawn, in the session and
+    /// not only in the recogniser: a row of three physical lines, a row of four, a row whose own
+    /// continuation is wider than the pane, and the report's whole table at the width it was
+    /// printed at, breaks beside a cell separator and all.
+    #[test]
+    fn every_shape_the_acceptance_run_found_undrawn_is_drawn_whole() {
+        let raster = synthetic_raster(300, 40);
+        // Every fixture is read before anything is asserted, so a red run names all of them
+        // rather than the first: `None` is a table nobody drew, and the number is the rows the
+        // one table drawn resolved to, heading and rule included.
+        let drawn: Vec<(&str, Option<usize>)> = [
+            ("w5", &ACCEPT_W5[..]),
+            ("w6", &ACCEPT_W6[..]),
+            ("w8", &ACCEPT_W8[..]),
+            ("t", &ACCEPT_T[..]),
+            ("p", &ACCEPT_P[..]),
+        ]
+        .into_iter()
+        .map(|(name, fixture)| {
+            let session = accept_session(fixture, &raster);
+            let sources = table_sources(&session);
+            let rows = (sources.len() == 1).then(|| sources[0].lines().count());
+            (name, rows)
+        })
+        .collect();
+        assert_eq!(
+            drawn,
+            vec![
+                ("w5", Some(3)),
+                ("w6", Some(3)),
+                ("w8", Some(3)),
+                ("t", Some(7)),
+                ("p", Some(7)),
+            ],
+            "one table each, with the heading, the rule and every row of it"
+        );
+    }
+
+    /// PIN — and the acceptance run's negative still takes the whole table down.
+    #[test]
+    fn the_acceptance_negative_is_drawn_nowhere() {
+        let raster = synthetic_raster(300, 40);
+        let session = accept_session(&ACCEPT_W7N, &raster);
+        assert!(
+            table_sources(&session).is_empty(),
+            "a row with a cell missing refuses the table it stands in"
+        );
+        assert_eq!(ready_tables(&session), 0);
+    }
+
     /// PIN: a row the printing program wrapped is one row, and dragging the pane does not un-join
     /// it.
     ///
