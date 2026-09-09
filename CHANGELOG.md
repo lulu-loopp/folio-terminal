@@ -6,6 +6,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.2.5-preview — 2026-09-09
+
 ### Fixed
 
 - **A window with a full row of tabs can still be dragged by its title bar.**

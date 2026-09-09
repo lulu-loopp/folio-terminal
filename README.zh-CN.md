@@ -13,14 +13,14 @@ Folio 是一个 Windows 终端。公式在命令输出中原位排版，文件�
 [English](README.md) · [快捷键](docs/shortcuts.md) ·
 [安全](SECURITY.md) · [更新记录](CHANGELOG.md)
 
-> **预览版。** 0.2.4 是预览构建，由 Weiyi Shi 签名——见下方[下载](#下载)。
+> **预览版。** 0.2.5 是预览构建，由 Weiyi Shi 签名——见下方[下载](#下载)。
 
 ---
 
 ## 下载
 
 从[发布页](https://github.com/lulu-loopp/folio-terminal/releases)下载
-[`folio-0.2.4-windows-x64.zip`](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.2.4-preview/folio-0.2.4-windows-x64.zip)，解压到任意目录，运行 `folio.exe`。无需安装。`SHA256SUMS.txt` 是下载文件的校验和。系统要求：**Windows 10 1809 及以上或 Windows 11，64 位**。
+[`folio-0.2.5-windows-x64.zip`](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.2.5-preview/folio-0.2.5-windows-x64.zip)，解压到任意目录，运行 `folio.exe`。无需安装。`SHA256SUMS.txt` 是下载文件的校验和。系统要求：**Windows 10 1809 及以上或 Windows 11，64 位**。
 
 `folio.exe` 和 `folio.msix` 由 **Weiyi Shi** 签名，证书来自 Microsoft Artifact Signing 服务。首次运行时 Windows 可能弹出 **"Windows 已保护你的电脑"**：点击 **"更多信息"**，再点 **"仍要运行"**，其中显示的发布者为 **Weiyi Shi**。
 
