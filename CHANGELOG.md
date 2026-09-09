@@ -6,7 +6,20 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+- **A table whose rows the printing program wrapped is drawn whole.** An agent
+  printing a wide table lays it out to the width of the pane and wraps a long
+  row onto a second line, usually stopping a word or two short of the last
+  column. Folio drew the heading and the first row and left every row after
+  them as text, which is worse than drawing no table at all. A wrapped row is
+  now put back together whenever the two lines spell exactly the row the
+  heading calls for, whether or not the program ran the first line right to the
+  edge, and while the rest of a row is still on its way nothing is drawn from
+  the half that has arrived. A pipe anywhere in the same paragraph that the
+  table cannot account for takes the whole table down, so a table can no longer
+  end halfway through the block it was printed in; a pipe after a blank line,
+  and a second table under a caption line, still leave it standing.
 
 ## 0.2.4-preview — 2026-09-08
 

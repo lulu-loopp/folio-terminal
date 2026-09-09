@@ -35,28 +35,45 @@
 //!    pipe encodes the outcome without depending on setext precedence, which
 //!    this scanner does not implement.
 //! 2. **A body row whose cell count differs from the header's ends the table,
-//!    and refuses it whole if that row begins with a pipe.** GFM pads a short
-//!    row with empty cells and drops a long row's excess (§4.10: "The remainder
-//!    of the table's rows may vary in the number of cells"). That rule is right
-//!    for an authored document, where the text after a table is more of the same
-//!    document; it is wrong here, where the text after a table is arbitrary
-//!    program output that may well contain a pipe — `git log --graph`'s `|/`, a
-//!    rustc gutter's `  | ^^^ expected integer`, an ASCII frame's
-//!    `| WARNING: disconnected |`, a psql row with more columns than these
-//!    headings have. Padding any of those into the table would print somebody
-//!    else's output as this table's data.
+//!    and a pipe anywhere in the paragraph that runs on from there refuses it
+//!    whole.** GFM pads a short row with empty cells and drops a long row's
+//!    excess (§4.10: "The remainder of the table's rows may vary in the number
+//!    of cells"). That rule is right for an authored document, where the text
+//!    after a table is more of the same document; it is wrong here, where the
+//!    text after a table is arbitrary program output that may well contain a
+//!    pipe — `git log --graph`'s `|/`, a rustc gutter's
+//!    `  | ^^^ expected integer`, an ASCII frame's `| WARNING: disconnected |`,
+//!    a psql row with more columns than these headings have. Padding any of
+//!    those into the table would print somebody else's output as this table's
+//!    data.
 //!
-//!    So the count stays exact, and what a mismatching line does depends on
-//!    whether it leads with a pipe. A line that does not — prose, a blank line,
-//!    the end of the input — simply ends the table where GFM ends it, and the
-//!    rows above it are drawn. A line that **does** lead with an unescaped `|`
-//!    (after any indentation) and is not a row of this table refuses the whole
-//!    candidate: nothing is drawn and every line of it stays text. That line is
-//!    either this table's own row arriving damaged — the report of 2026-09-08,
-//!    where a cell held an unescaped `|β|` and counted five cells against three
-//!    — or it is unrelated output, and nothing here can tell the two apart. A
-//!    half-drawn table is worse than none: it publishes a table with a row
-//!    missing and says nothing about the row.
+//!    So the count stays exact, and the **paragraph** decides what a mismatch
+//!    means. After the last row the table could accept, the run of non-blank
+//!    lines is read to its end. If any line in that run holds an unescaped `|`
+//!    — leading or not — that this table could absorb neither as a row nor as
+//!    the continuation of one, the whole candidate is refused: nothing is drawn
+//!    and every line of it stays text. That pipe is either this table's own row
+//!    arriving damaged — the report of 2026-09-08, where a cell held an
+//!    unescaped `|β|` and counted five cells against three — or it is unrelated
+//!    output, and nothing here can tell the two apart. A half-drawn table is
+//!    worse than none: it publishes a table with a row missing and says nothing
+//!    about the row, which is the ruling of 2026-09-09.
+//!
+//!    The table ends the way GFM ends it, with the rows above it drawn, when the
+//!    run after the last row holds no pipe at all before the next blank line, or
+//!    when there is no run because a blank line or the end of the input came
+//!    first. And one pipe is accounted for rather than unexplained: a header row
+//!    standing over a delimiter row is the *next* table, which answers for
+//!    itself and for everything below it, so two tables with a caption line
+//!    between them are two tables and not none.
+//!
+//!    **The lookahead is the paragraph, and it cannot be made quadratic.** The
+//!    walk stops at the first blank line and at the first pipe, whichever comes
+//!    first, so every line it reads is non-blank and pipe-free — and a table
+//!    candidate opens on a header row, which holds a pipe. So no candidate can
+//!    begin inside another candidate's lookahead, the lookahead ranges of the
+//!    candidates in one scan are pairwise disjoint, and their total cost is one
+//!    pass over the scan window however many candidates the window holds.
 //! 3. **A header row that is itself a delimiter row is not a header.** Two rule
 //!    lines stacked (`|---|---|` twice) is somebody drawing a box, and GFM's own
 //!    answer — a table whose headings are the three characters `---` — is a
@@ -70,26 +87,45 @@
 //! the wrong width and, by rule 2, the end of the table — with the first half
 //! left standing as a complete row, its last cell cut in two.
 //!
-//! Such a row is rejoined, but only on evidence, and the evidence is provenance
-//! rather than punctuation. [`TableLine::captured_columns`] is the width of the
-//! grid the physical row was taken off, recorded at capture time and immutable
-//! afterwards, so it still answers after the pane has been resized. A line joins
-//! the line under it only when all three hold:
+//! Such a row is rejoined, and **the evidence is the reconstruction**: the
+//! rejoined line has to split into exactly the header's number of cells, and
+//! nothing less will do. That is the only thing that can tell a wrap from two
+//! unrelated lines that happen to sit next to each other, because a prompt and
+//! the status line under it join into one cell and not three.
 //!
-//! * the line **filled the row it was printed on** — its own cells, counting
-//!   indentation and counting a wide character as the two it occupies, come to
-//!   exactly its captured column count, which is what a program running out of
-//!   row looks like;
-//! * the line under it **does not begin with an unescaped `|`**, because that is
-//!   a row opening and never a row's tail;
-//! * and the rejoined line splits into **exactly the header's number of cells**.
+//! A line is read as the head of a wrapped row when it holds an unescaped `|`
+//! and either witness says it may have stopped mid-row:
 //!
-//! More than one continuation is allowed while each line before it filled its
-//! row too. The join puts back one space when the two characters either side of
-//! the break are both ASCII word characters — a Latin word wrap dropped one —
-//! and nothing otherwise, since a CJK or mid-token break dropped nothing. A row
-//! that cannot be rejoined under these conditions is not a row, and rule 2 then
-//! says what happens to the table.
+//! * **the text** — it does not close with an unescaped `|`;
+//! * **the capture geometry** — [`TableLine::captured_columns`] is the width of
+//!   the grid the physical row was taken off, recorded at capture time and
+//!   immutable afterwards, so it still answers after the pane has been resized.
+//!   A line whose cells come to exactly that width ran out of row, whatever
+//!   character it ends on, and that is the one wrap the text cannot show: the
+//!   one that fell right after a pipe.
+//!
+//! The geometry corroborates a join and is not required for one. Requiring it
+//! was the rule of 2026-09-08 and it was too strong: a program that wraps on
+//! word boundaries stops a word or two short of the width, so its rows filled
+//! nothing and were never read back.
+//!
+//! A continuation must not begin with an unescaped `|`, which is a row's own
+//! opening and never a row's tail, and must not be blank, because a blank line
+//! ends the paragraph. At most three of them are read, so the walk is bounded
+//! wherever it starts. The join puts back one space when the two characters
+//! either side of the break are both ASCII word characters — a Latin word wrap
+//! dropped one — and nothing otherwise, since a CJK or mid-token break dropped
+//! nothing.
+//!
+//! **A line that could not be rejoined is read alone only where the header says
+//! it may be.** A table whose header row closes with an unescaped `|` is written
+//! with edge pipes, so a body row of that table that does not close with one has
+//! not finished arriving: it is not a row. That is what stops a wrapped row's
+//! head from being drawn as a row with its tail missing while the tail is still
+//! on its way, and rule 2 then says what happens to the table. A table whose
+//! header does not close with a pipe is written without edge pipes — GFM makes
+//! them optional — and there a missing closing pipe says nothing, so the line is
+//! read as the row it is.
 //!
 //! Everything else is GFM's own answer, including the one the real-world sample
 //! asked about: **an empty header cell is legal.** `| | 计划发卡 β 峰 | 时间 |`
@@ -103,13 +139,15 @@ use bt_unicode::text_width;
 
 /// One input line, and the terminal geometry it was captured on.
 ///
-/// The text alone cannot say whether a program wrapped a row: `| a | b` is the same string
-/// whether the program ended it there or ran out of row. `captured_columns` is the grid width the
-/// physical row was taken off — immutable provenance recorded at capture time, exactly as
-/// `bt_transcript::PhysicalFragment::captured_columns` records it — and it is the only thing that
-/// can answer the question. Zero means a line with no capture geometry (a fixture, a synthetic
-/// line, a logical line the terminal itself rejoined out of several physical rows), and a line
-/// with no geometry never joins a continuation onto itself.
+/// The text alone cannot always say whether a program wrapped a row: `| a | b |` is the same
+/// string whether the program ended it there or ran out of row right after the pipe.
+/// `captured_columns` is the grid width the physical row was taken off — immutable provenance
+/// recorded at capture time, exactly as `bt_transcript::PhysicalFragment::captured_columns`
+/// records it — and it is the only thing that can answer *that* question. Zero means a line with
+/// no capture geometry (a fixture, a synthetic line, a logical line the terminal itself rejoined
+/// out of several physical rows); such a line is still rejoined when the text says it stopped
+/// mid-row and the reconstruction comes out exact, because the geometry corroborates a join and is
+/// not required for one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TableLine<'a> {
     pub text: &'a str,
@@ -160,14 +198,18 @@ pub fn lines_without_geometry<'a>(texts: &[&'a str]) -> Vec<TableLine<'a>> {
 pub enum TableCandidate {
     /// A table, and the rows it resolved.
     Proven(TableSpan),
-    /// A header row over a delimiter row stood here, and the line immediately after the last row
-    /// it could accept begins with an unescaped `|` and is not a row of this table. Nothing is
-    /// drawn: see the module's rule 2.
+    /// A header row over a delimiter row stood here, and somewhere in the paragraph that runs on
+    /// past the last row it could accept there is an unescaped `|` this table could absorb neither
+    /// as a row nor as a continuation. Nothing is drawn: see the module's rule 2.
     ///
-    /// `line_count` counts the header row through the last row that *would* have been accepted,
-    /// so `lines[line_count]` is the refusing line itself — which is not part of the refusal and
-    /// may open a table of its own.
-    Refused { line_count: usize },
+    /// `line_count` counts the header row through the last row that *would* have been accepted, so
+    /// `lines[line_count]` is the first line past the candidate — which is not part of the refusal
+    /// and may open a table of its own. `refused_at` is the index of the line that carried the
+    /// refusing pipe, which is `line_count` or later.
+    Refused {
+        line_count: usize,
+        refused_at: usize,
+    },
 }
 
 /// What a delimiter-row cell's colons declared for its column.
@@ -291,40 +333,29 @@ fn push_resolved_row(source: &mut String, cells: &[String]) {
 ///
 /// `None` unless `lines[0]` is a header row and `lines[1]` is a delimiter row of the same width.
 /// The table then extends over every following line that is a row of that same width — including a
-/// row the printing program wrapped over two or more lines, which the capture geometry proves and
-/// which is rejoined here.
+/// row the printing program wrapped over two or more lines, which is rejoined here.
 ///
-/// The first line that is not a row ends the run and is never consumed. If it leads with an
-/// unescaped pipe the whole candidate is [`TableCandidate::Refused`] and nothing is drawn;
-/// otherwise the rows above it are a table. Both halves are rule 2 — see the module documentation.
+/// The first line that is not a row ends the run and is never consumed. The paragraph that runs on
+/// from there then decides whether there is a table here at all: a pipe anywhere in it is
+/// [`TableCandidate::Refused`] and nothing is drawn, and only a paragraph with no pipe in it — or
+/// no paragraph, because a blank line or the end of the input came first — leaves the rows above
+/// standing. Both halves are rule 2 — see the module documentation.
 #[must_use]
 pub fn table_at(lines: &[TableLine]) -> Option<TableCandidate> {
-    let header = split_row(lines.first()?.text)?;
-    // Rule 3: two stacked rule lines are a box, not a heading over a rule.
-    if delimiter_row(lines[0].text).is_some() {
-        return None;
-    }
-    let alignments = delimiter_row(lines.get(1)?.text)?;
-    // GFM §4.10: "The header row must match the delimiter row in the number of
-    // cells. If not, a table will not be recognized."
-    if alignments.len() != header.len() {
-        return None;
-    }
+    let (header, alignments) = opening_at(lines, 0)?;
+    // The header declares whether this table's rows carry a closing pipe: see `row_at`.
+    let header_closes = ends_with_unescaped_pipe(lines[0].text);
     let mut body = Vec::new();
     let mut line_count = 2;
-    while let Some((row, consumed)) = row_at(lines, line_count, header.len()) {
+    while let Some((row, consumed)) = row_at(lines, line_count, header.len(), header_closes) {
         body.push(row);
         line_count += consumed;
     }
-    // Rule 2. The line that ended the run decides whether there is a table here at all: one that
-    // leads with a pipe and is not a row of this table is either the table's own row damaged in
-    // transit or somebody else's pipe, and neither can be told from the other. Drawing the rows
-    // above it would publish a table that is missing a row and say nothing about it.
-    if lines
-        .get(line_count)
-        .is_some_and(|line| begins_with_unescaped_pipe(line.text))
-    {
-        return Some(TableCandidate::Refused { line_count });
+    if let Some(refused_at) = refusing_pipe(lines, line_count) {
+        return Some(TableCandidate::Refused {
+            line_count,
+            refused_at,
+        });
     }
     Some(TableCandidate::Proven(TableSpan {
         alignments,
@@ -334,50 +365,124 @@ pub fn table_at(lines: &[TableLine]) -> Option<TableCandidate> {
     }))
 }
 
+/// A header row over a delimiter row of the same width at `lines[index]`, and what its colons said.
+///
+/// The whole of rule 1 and rule 3 and GFM §4.10's count rule, in one place, because rule 2's
+/// lookahead has to ask the same question [`table_at`] opens on.
+fn opening_at(lines: &[TableLine], index: usize) -> Option<(Vec<String>, Vec<ColumnAlignment>)> {
+    let header = split_row(lines.get(index)?.text)?;
+    // Rule 3: two stacked rule lines are a box, not a heading over a rule.
+    if delimiter_row(lines[index].text).is_some() {
+        return None;
+    }
+    let alignments = delimiter_row(lines.get(index + 1)?.text)?;
+    // GFM §4.10: "The header row must match the delimiter row in the number of
+    // cells. If not, a table will not be recognized."
+    (alignments.len() == header.len()).then_some((header, alignments))
+}
+
+/// Rule 2's lookahead: the first line of the paragraph past the last accepted row that carries a
+/// pipe this table could account for neither as a row nor as a continuation.
+///
+/// **A pipe that opens a table of its own is accounted for.** The reason an unabsorbed pipe refuses
+/// is that it is either this table's own row arriving damaged or somebody else's output and nothing
+/// can tell the two apart — but a header row standing over a delimiter row *can* be told apart: it
+/// is the next table, which answers for itself and for everything below it. Only that one shape is
+/// excused, and it is read with the same [`opening_at`] the scan opens on rather than by scanning
+/// ahead, so the exception costs two line reads and cannot recurse.
+///
+/// **The bound is the paragraph, and it is self-limiting.** The walk stops at the first blank line
+/// and at the first line holding an unescaped pipe, whichever comes first, so the lines it reads
+/// are pipe-free and non-blank — and a table candidate opens on a header row, which holds a pipe.
+/// No candidate can therefore begin inside another candidate's lookahead: candidate A's walk ends
+/// at the first pipe-bearing line at or after its rows, and any candidate B further down begins at
+/// or after that line, so B's own walk starts past where A's stopped. The lookahead ranges of the
+/// candidates in one scan are pairwise disjoint and their total cost is one pass over the window,
+/// however many candidates the window holds.
+fn refusing_pipe(lines: &[TableLine], line_count: usize) -> Option<usize> {
+    let index = lines
+        .iter()
+        .enumerate()
+        .skip(line_count)
+        .take_while(|(_, line)| !line.text.trim().is_empty())
+        .find(|(_, line)| has_unescaped_pipe(line.text))
+        .map(|(index, _)| index)?;
+    (opening_at(lines, index).is_none()).then_some(index)
+}
+
+/// The most continuation lines one row may be rejoined from.
+///
+/// A printing program wraps a row it could not fit; it does not wrap it four times over a pane the
+/// user can read. The bound is what keeps the join from being quadratic in a contrived window: a
+/// row that does not reconstruct within four physical lines is not a row, and the walk stops
+/// instead of running to the end of the input at every index.
+const MAX_CONTINUATION_LINES: usize = 3;
+
 /// One body row starting at `lines[index]`, and how many input lines it took.
 ///
-/// The joined reading wins whenever it is available, and it has to: a row the program wrapped
-/// after its last complete cell (`| a | b | c` over `d |`) is a perfectly well-formed row of the
-/// right width on its own, and reading it that way draws the row with its tail missing.
-fn row_at(lines: &[TableLine], index: usize, columns: usize) -> Option<(Vec<String>, usize)> {
+/// Three questions in order, and the order is the rule.
+///
+/// **Is a join even possible here?** A line that does not close with an unescaped `|` may have
+/// stopped in the middle of a row, and so may a line whose cells come to exactly the width of the
+/// grid it was printed on, whatever character it ends on — the one wrap the text cannot show, the
+/// one that fell right after a pipe. A line with no unescaped pipe at all is neither: it is not the
+/// head of a row and is never continued, or prose under a table would join the prose under *it*
+/// into a two-cell row.
+///
+/// **Did the join reconstruct a row?** If it did, that reading wins outright.
+///
+/// **And if it did not, may the line still be read alone?** Here the header's style answers. A
+/// table whose header row closes with an unescaped `|` is written with edge pipes, so a body row of
+/// that table that does not close with one has not finished arriving, and reading it alone would
+/// draw the row with its tail missing — a row wrapped after its last complete cell (`| a | b | c`
+/// over `d |`) is a perfectly well-formed row of the right width on its own. A table whose header
+/// does not close with one is written without them, GFM makes the edge pipes optional, and there a
+/// missing closing pipe says nothing and the line is read as the row it is.
+fn row_at(
+    lines: &[TableLine],
+    index: usize,
+    columns: usize,
+    header_closes: bool,
+) -> Option<(Vec<String>, usize)> {
     let line = *lines.get(index)?;
-    if line.filled_its_row()
+    let lacks_closing_pipe = !ends_with_unescaped_pipe(line.text);
+    if has_unescaped_pipe(line.text)
+        && (lacks_closing_pipe || line.filled_its_row())
         && let Some(joined) = joined_row(lines, index, columns)
     {
         return Some(joined);
+    }
+    if lacks_closing_pipe && header_closes {
+        return None;
     }
     body_row(line.text)
         .filter(|row| row.len() == columns)
         .map(|row| (row, 1))
 }
 
-/// Rejoin a row the printing program wrapped, or `None` if nothing proves one was wrapped.
+/// Rejoin a row the printing program wrapped, or `None` if the join does not reconstruct one.
 ///
-/// Three things have to hold together, and each is doing its own work. The line being continued
-/// **filled the row it was printed on** — the caller has checked it, and every further line must
-/// too, which is what lets a row wrapped onto three physical lines rejoin while a row that simply
-/// ended stops at one. The continuation **does not lead with a pipe**, because a line that leads
-/// with a pipe is a row's own opening and never the tail of one. And the rejoined line **splits
-/// into exactly the header's number of cells**, which is the only thing that can tell a wrap from
-/// two unrelated lines that happen to sit next to each other: a prompt and the status line under it
-/// join into one cell, not three, and are refused here.
+/// **The reconstruction is the evidence.** The rejoined line has to split into exactly the header's
+/// number of cells, and nothing less will do: that is what tells a wrap from two unrelated lines
+/// that happen to sit next to each other, because a prompt and the status line under it join into
+/// one cell and not three. Two conditions hold the walk in: a continuation **does not lead with an
+/// unescaped pipe**, which is a row's own opening and never a row's tail, and is **not blank**,
+/// because a blank line ends the paragraph and everything in it. The capture geometry corroborates
+/// a join when it is there — see [`row_at`] — and is not required for one, because a program that
+/// word-wraps stops a word short of the width and its rows would never be read back.
 fn joined_row(lines: &[TableLine], index: usize, columns: usize) -> Option<(Vec<String>, usize)> {
     let mut text = lines[index].text.to_owned();
-    let mut consumed = 1;
-    loop {
-        let next = *lines.get(index + consumed)?;
-        if begins_with_unescaped_pipe(next.text) {
+    for continuations in 1..=MAX_CONTINUATION_LINES {
+        let next = *lines.get(index + continuations)?;
+        if next.text.trim().is_empty() || begins_with_unescaped_pipe(next.text) {
             return None;
         }
         text = join_continuation(&text, next.text);
-        consumed += 1;
         if let Some(row) = body_row(&text).filter(|row| row.len() == columns) {
-            return Some((row, consumed));
-        }
-        if !next.filled_its_row() {
-            return None;
+            return Some((row, continuations + 1));
         }
     }
+    None
 }
 
 /// Put two physical lines of one row back together.
@@ -403,6 +508,23 @@ fn is_ascii_word(character: Option<char>) -> bool {
 /// Whether the first thing on the line, after any indentation, is an unescaped pipe.
 fn begins_with_unescaped_pipe(text: &str) -> bool {
     text.trim_start().starts_with('|')
+}
+
+/// Whether the last thing on the line, before any trailing spaces, is an unescaped pipe.
+fn ends_with_unescaped_pipe(text: &str) -> bool {
+    let trimmed = text.trim_end();
+    trimmed
+        .strip_suffix('|')
+        .is_some_and(|body| !ends_with_escape(body))
+}
+
+/// Whether this line carries a pipe that is not escaped.
+///
+/// The question rule 2's paragraph lookahead asks of every line after a table's last row, exported
+/// so a caller sizing a scan window can stop it at the same place the rule does.
+#[must_use]
+pub fn holds_unescaped_pipe(text: &str) -> bool {
+    has_unescaped_pipe(text)
 }
 
 /// Whether a line, on its own, could be a table row: it holds an unescaped pipe
@@ -587,7 +709,8 @@ mod tests {
     }
 
     /// Read `source` with no capture geometry at all, which is what every test that is not about
-    /// a program's own wrap wants: no line can be shown to have filled its row, so no line joins.
+    /// a program's own wrap wants: no line can be shown to have filled its row, so the only join
+    /// left is the one the text itself asks for.
     fn table(source: &str) -> Option<TableSpan> {
         match candidate(source, 0) {
             Some(TableCandidate::Proven(span)) => Some(span),
@@ -752,20 +875,27 @@ mod tests {
     }
 
     #[test]
-    fn a_body_row_of_another_width_ends_the_table_instead_of_poisoning_it() {
+    fn a_body_row_of_another_width_refuses_the_table_instead_of_poisoning_it() {
         assert_eq!(
             candidate(
                 "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 | 5 |\n| 6 | 7 |",
                 0
             ),
-            Some(TableCandidate::Refused { line_count: 3 }),
-            "the jagged row leads with a pipe, so it is never padded and never drawn around"
+            Some(TableCandidate::Refused {
+                line_count: 3,
+                refused_at: 3
+            }),
+            "the jagged row is never padded and never drawn around"
         );
-        // The same jaggedness without the leading pipe is an ordinary boundary: the table ends
-        // above it and the rows that were proven are drawn.
-        let span = table("| a | b |\n|---|---|\n| 1 | 2 |\n3 | 4 | 5").expect("a table");
-        assert_eq!(span.body, vec![vec!["1".to_owned(), "2".to_owned()]]);
-        assert_eq!(span.line_count, 3, "the jagged row is not consumed");
+        // Dropping the leading pipe changes nothing: the pipes are still in the paragraph, and a
+        // pipe this table cannot absorb refuses it wherever in the paragraph it stands.
+        assert_eq!(
+            candidate("| a | b |\n|---|---|\n| 1 | 2 |\n3 | 4 | 5", 0),
+            Some(TableCandidate::Refused {
+                line_count: 3,
+                refused_at: 3
+            }),
+        );
     }
 
     #[test]
@@ -819,14 +949,17 @@ mod tests {
     }
 
     /// The table from the 2026-09-08 report, at the width Claude Code printed it: a body row
-    /// carrying an unescaped `|β|` counts five cells against three, and it begins with a pipe, so
-    /// the whole candidate is refused and nothing is drawn.
+    /// carrying an unescaped `|β|` counts five cells against three, so it is no row of this table
+    /// and its pipes refuse the whole candidate; nothing is drawn.
     #[test]
     fn the_reported_table_is_refused_whole_because_of_its_unescaped_bars() {
         let refused = candidate(REPORTED_TABLE, reported_grid()).expect("a candidate stands here");
         assert_eq!(
             refused,
-            TableCandidate::Refused { line_count: 2 },
+            TableCandidate::Refused {
+                line_count: 2,
+                refused_at: 2
+            },
             "the header and the delimiter row stood, and the very next line refused them"
         );
     }
@@ -886,23 +1019,27 @@ six | seven";
     /// The same bytes, captured on a wider grid: the first line stopped short of the row it was
     /// printed on, so nothing proves the program wrapped it and nothing is joined.
     #[test]
-    fn the_same_bytes_on_a_wider_grid_are_not_joined() {
+    fn the_same_bytes_on_a_wider_grid_are_still_read_as_one_row() {
         let TableCandidate::Proven(span) = candidate(WRAPPED, 23).expect("a table") else {
             panic!("a table, not a refusal");
         };
         assert_eq!(
             span.body,
-            vec![vec!["one".to_owned(), "two".to_owned(), "three".to_owned()]],
-            "the table ends before the half row"
+            vec![
+                vec!["one".to_owned(), "two".to_owned(), "three".to_owned()],
+                vec![
+                    "four".to_owned(),
+                    "five and six".to_owned(),
+                    "seven".to_owned()
+                ],
+            ],
+            "the reconstruction is the evidence, and the grid only ever corroborated it"
         );
-        assert_eq!(
-            span.line_count, 3,
-            "and the half row is not consumed; it does not begin with a pipe, so the rows above              it stand"
-        );
+        assert_eq!(span.line_count, 5);
     }
 
     /// Everything the review named as output that leads with a pipe and is not a row. Each one
-    /// refuses the table it stands under, whole.
+    /// stands in the table's own paragraph and refuses it whole.
     #[test]
     fn a_pipe_leading_line_that_is_not_a_row_refuses_the_table_whole() {
         for poison in [
@@ -919,7 +1056,10 @@ six | seven";
             );
             assert_eq!(
                 candidate(&source, 0),
-                Some(TableCandidate::Refused { line_count: 3 }),
+                Some(TableCandidate::Refused {
+                    line_count: 3,
+                    refused_at: 3
+                }),
                 "{poison}"
             );
         }
@@ -936,12 +1076,15 @@ status |"
         );
         assert_eq!(
             candidate(&source, fills("| enter command>")),
-            Some(TableCandidate::Refused { line_count: 3 }),
+            Some(TableCandidate::Refused {
+                line_count: 3,
+                refused_at: 3
+            }),
         );
     }
 
-    /// GFM's own ending is untouched: a line that does not begin with a pipe ends the table where
-    /// it stands, and the rows above it are drawn.
+    /// GFM's own ending is untouched: a paragraph with no pipe in it ends the table where it
+    /// stands, and the rows above it are drawn.
     #[test]
     fn a_line_that_does_not_begin_with_a_pipe_still_only_ends_the_table() {
         let TableCandidate::Proven(span) = candidate(
@@ -989,5 +1132,245 @@ and then some prose"
         let four = table("| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |").expect("a table");
         assert_eq!(four.row_count(), 3);
         assert_eq!(four.line_count, 4);
+    }
+
+    /// The table from the 2026-09-09 report, one row to a line, as the program composed it.
+    const USER_TABLE: [&str; 7] = [
+        "| Chrono plant | 参考 | 执行发卡 β | 备注 |",
+        "| --- | --- | --- | --- |",
+        "| 硬胎(TMeasy,v9,run24 配方) | 受命 −28°(窗) | −21.5°(Win) / −23.6°(Spark),零越界 | 完美状态知识下;1 cm 噪声下 12/16 更浅、3/11 退成 grip 圈 |",
+        "| 硬胎 | 自由 min-time(自选 −14°) | −10.6° | 这是 Chrono 上唯一一次\"没人命令它\"的漂移,10° |",
+        "| 软胎(Pac89,v10/v11) | 自由 min-time(自选 −23.5°) | −3.3°,发卡处侧滑反号 | 规划器全额承诺,s≈161 一步塌掉 |",
+        "| 软胎 | 受命 −31° | −2.9° | 命令更深,执行更浅 |",
+        "| 软胎,matched own-sim(非 Chrono) | 自由 −23.5° | −24.4° | tracker 无罪;差在 plant-模型 |",
+    ];
+
+    /// The same table as the pane received it: every body row wrapped once, and every break a word
+    /// or two short of the last column, which is where a word-wrapping printer stops.
+    const USER_TABLE_WRAPPED: [&str; 12] = [
+        "| Chrono plant | 参考 | 执行发卡 β | 备注 |",
+        "| --- | --- | --- | --- |",
+        "| 硬胎(TMeasy,v9,run24 配方) | 受命 −28°(窗) | −21.5°(Win) / −23.6°(Spark),零越界 | 完美状态知识下;1 cm 噪声下 12/16 更浅、",
+        "3/11 退成 grip 圈 |",
+        "| 硬胎 | 自由 min-time(自选 −14°) | −10.6° | 这是 Chrono 上唯一一次\"没人命令它\"的",
+        "漂移,10° |",
+        "| 软胎(Pac89,v10/v11) | 自由 min-time(自选 −23.5°) | −3.3°,发卡处侧滑反号 | 规划器全额承诺,",
+        "s≈161 一步塌掉 |",
+        "| 软胎 | 受命 −31° | −2.9° | 命令更深,",
+        "执行更浅 |",
+        "| 软胎,matched own-sim(非 Chrono) | 自由 −23.5° | −24.4° | tracker 无罪;",
+        "差在 plant-模型 |",
+    ];
+
+    /// The five rows the report's table says, whatever shape they arrived in.
+    fn user_table_body() -> Vec<Vec<String>> {
+        [
+            [
+                "硬胎(TMeasy,v9,run24 配方)",
+                "受命 −28°(窗)",
+                "−21.5°(Win) / −23.6°(Spark),零越界",
+                "完美状态知识下;1 cm 噪声下 12/16 更浅、3/11 退成 grip 圈",
+            ],
+            [
+                "硬胎",
+                "自由 min-time(自选 −14°)",
+                "−10.6°",
+                "这是 Chrono 上唯一一次\"没人命令它\"的漂移,10°",
+            ],
+            [
+                "软胎(Pac89,v10/v11)",
+                "自由 min-time(自选 −23.5°)",
+                "−3.3°,发卡处侧滑反号",
+                "规划器全额承诺,s≈161 一步塌掉",
+            ],
+            ["软胎", "受命 −31°", "−2.9°", "命令更深,执行更浅"],
+            [
+                "软胎,matched own-sim(非 Chrono)",
+                "自由 −23.5°",
+                "−24.4°",
+                "tracker 无罪;差在 plant-模型",
+            ],
+        ]
+        .iter()
+        .map(|row| row.iter().map(|cell| (*cell).to_owned()).collect())
+        .collect()
+    }
+
+    /// Read `texts` as lines captured on a grid `columns` wide.
+    fn candidate_of(texts: &[&str], columns: u32) -> Option<TableCandidate> {
+        let lines: Vec<TableLine> = texts
+            .iter()
+            .map(|text| TableLine::on_grid(text, columns))
+            .collect();
+        table_at(&lines)
+    }
+
+    /// The table `texts` proves on a grid `columns` wide, or `None` if nothing is drawn.
+    fn proven(texts: &[&str], columns: u32) -> Option<TableSpan> {
+        match candidate_of(texts, columns) {
+            Some(TableCandidate::Proven(span)) => Some(span),
+            _ => None,
+        }
+    }
+
+    fn is_refused(texts: &[&str], columns: u32) -> bool {
+        matches!(
+            candidate_of(texts, columns),
+            Some(TableCandidate::Refused { .. })
+        )
+    }
+
+    /// A grid one cell wider than the widest line of `texts`, so that no line of it filled its row
+    /// and the capture geometry corroborates nothing at all.
+    fn grid_no_line_fills(texts: &[&str]) -> u32 {
+        texts.iter().map(|text| fills(text)).max().expect("lines") + 1
+    }
+
+    /// The report of 2026-09-09: four columns, five body rows, every row wrapped by the printing
+    /// program a word short of the last column. Every row is rejoined and the whole table is drawn.
+    #[test]
+    fn the_reported_table_is_drawn_whole_when_its_printer_wrapped_every_row() {
+        let grid = grid_no_line_fills(&USER_TABLE_WRAPPED);
+        assert!(
+            !USER_TABLE_WRAPPED
+                .iter()
+                .any(|text| TableLine::on_grid(text, grid).filled_its_row()),
+            "no line filled its row, so nothing but the reconstruction proves the wrap"
+        );
+        let span = proven(&USER_TABLE_WRAPPED, grid).expect("the whole table is drawn");
+        assert_eq!(span.columns(), 4);
+        assert_eq!(span.body, user_table_body(), "all five rows, each rejoined");
+        assert_eq!(span.line_count, USER_TABLE_WRAPPED.len());
+    }
+
+    /// The same table on a pane wide enough that the printer wrapped nothing.
+    #[test]
+    fn the_reported_table_is_the_same_table_when_nothing_wraps() {
+        for grid in [0, grid_no_line_fills(&USER_TABLE)] {
+            let span = proven(&USER_TABLE, grid).expect("the whole table is drawn");
+            assert_eq!(span.body, user_table_body(), "grid {grid}");
+            assert_eq!(span.line_count, USER_TABLE.len());
+        }
+    }
+
+    /// One row of the report's table with a cell missing: it cannot be reconstructed to four
+    /// cells, so the whole candidate is refused and every line of it stays text.
+    #[test]
+    fn one_row_that_cannot_be_reconstructed_takes_the_whole_table_down() {
+        let mut wrapped = USER_TABLE_WRAPPED.to_vec();
+        wrapped[6] = "| 软胎(Pac89,v10/v11) | 自由 min-time(自选 −23.5°) | 规划器全额承诺,";
+        let grid = grid_no_line_fills(&wrapped);
+        assert!(
+            is_refused(&wrapped, grid),
+            "a row three cells wide under four headings refuses the table whole"
+        );
+    }
+
+    /// A pipe on the other side of a blank line is a different paragraph and refuses nothing.
+    #[test]
+    fn a_pipe_after_a_blank_line_does_not_refuse_the_table() {
+        let span = proven(
+            &[
+                "| a | b |",
+                "| --- | --- |",
+                "| 1 | 2 |",
+                "| 3 | 4 |",
+                "",
+                "and the prose after it says a | b",
+            ],
+            0,
+        )
+        .expect("a table");
+        assert_eq!(span.body.len(), 2);
+        assert_eq!(span.line_count, 4);
+    }
+
+    /// A pipe further down the *same* paragraph refuses it, even with a pipeless line in between:
+    /// the refusal is over the whole contiguous block, not over the one line after the last row.
+    #[test]
+    fn a_pipe_later_in_the_same_paragraph_refuses_the_table_whole() {
+        assert!(
+            is_refused(
+                &[
+                    "| a | b |",
+                    "| --- | --- |",
+                    "| 1 | 2 |",
+                    "| 3 | 4 |",
+                    "and then some prose",
+                    "and a line that says a | b",
+                ],
+                0,
+            ),
+            "nothing is drawn while a pipe this table could not absorb stands in its paragraph"
+        );
+    }
+
+    /// The review's counter-examples, at the widths that make each one hardest.
+    #[test]
+    fn the_reviews_counter_examples_still_refuse_the_table_they_stand_under() {
+        // A prompt and the status line under it, under a three-column heading: the join
+        // reconstructs one cell and needs three, so no row is fabricated.
+        assert!(is_refused(
+            &[
+                "| a | b | c |",
+                "| --- | --- | --- |",
+                "| 1 | 2 | 3 |",
+                "| enter command>",
+                "status |",
+            ],
+            fills("| enter command>"),
+        ));
+        // A psql row of more columns than these headings have is neither joined nor absorbed.
+        assert!(is_refused(
+            &[
+                "| a | b |",
+                "| --- | --- |",
+                "| 1 | 2 |",
+                " id | name | email | created_at ",
+            ],
+            0,
+        ));
+        for poison in [
+            "| * abc123 topic",
+            "|/",
+            "  | ^^^ expected integer",
+            "| WARNING: disconnected |",
+        ] {
+            assert!(
+                is_refused(&["| a | b |", "| --- | --- |", "| 1 | 2 |", poison], 0),
+                "{poison}"
+            );
+        }
+    }
+
+    /// The join reads a bounded number of continuation lines and stops, whatever the input does.
+    #[test]
+    fn the_join_reads_no_more_than_three_continuation_lines() {
+        let within = [
+            "| a | b |",
+            "| --- | --- |",
+            "| one",
+            "two",
+            "three",
+            "four | five |",
+        ];
+        let span = proven(&within, 0).expect("three continuations are inside the bound");
+        assert_eq!(
+            span.body,
+            vec![vec!["one two three four".to_owned(), "five".to_owned()]]
+        );
+        let beyond = [
+            "| a | b |",
+            "| --- | --- |",
+            "| one",
+            "two",
+            "three",
+            "four",
+            "five | six |",
+        ];
+        assert!(
+            is_refused(&beyond, 0),
+            "a fourth continuation is past the bound, and the pipe below refuses the table"
+        );
     }
 }

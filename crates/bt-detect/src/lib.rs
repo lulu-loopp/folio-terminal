@@ -1120,7 +1120,8 @@ pub struct RefusedTable {
     pub start: TranscriptId,
     /// The last row the candidate could have accepted.
     pub end: TranscriptId,
-    /// The line that refused it.
+    /// The line that carried the refusing pipe. It stands somewhere in the paragraph that runs on
+    /// past `end` and need not be `end`'s neighbour: see `bt_detect::table` rule 2.
     pub refused_at: TranscriptId,
 }
 
@@ -1597,7 +1598,7 @@ fn append_table_blocks(
     }
     // The geometry travels beside the text, one entry a line, exactly as `sites` does. A scan with
     // none — a probe, a certification pass, a fixture — reads every line as having no capture
-    // geometry, which is the reading under which no row joins the row under it.
+    // geometry, which is the reading under which only the text can ask for a join.
     let candidate_lines: Vec<table::TableLine> = lines
         .iter()
         .enumerate()
@@ -1644,15 +1645,19 @@ fn append_table_blocks(
             table::TableCandidate::Proven(span) => span,
             // Rule 2's whole refusal. Nothing is drawn and nothing is claimed, so every line of the
             // candidate stays text; the refusal is reported so a caller holding a block built from
-            // these rows before the refusing line arrived can take it down. Scanning resumes *at*
-            // the refusing line, which is free to be a header of its own.
-            table::TableCandidate::Refused { line_count } => {
+            // these rows before the refusing line arrived can take it down. Scanning resumes at the
+            // first line past the candidate, which is free to be a header of its own — the pipe
+            // that refused this candidate may be several lines further down the same paragraph.
+            table::TableCandidate::Refused {
+                line_count,
+                refused_at,
+            } => {
                 let end_index = index + line_count - 1;
                 if !claimed[index..=end_index].iter().any(|it| *it) {
                     result.refused_tables.push(RefusedTable {
                         start: lines[index].0,
                         end: lines[end_index].0,
-                        refused_at: lines[index + line_count].0,
+                        refused_at: lines[index + refused_at].0,
                     });
                 }
                 index += line_count;
