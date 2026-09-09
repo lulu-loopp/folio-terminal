@@ -35,6 +35,20 @@ All notable changes to Folio are recorded here. The format follows
   directory holds. Nothing about the program changed.
 ### Fixed
 
+- **A printed table is drawn whole or not at all.** A table an agent prints
+  arrives a row at a time, and a row can arrive damaged: a cell holding a bare
+  `|` counts as extra columns, and a program that lays out its own output wraps
+  a long row onto a second line. Either one used to stop the table where it
+  stood, so the rows above were drawn as a table and everything after them
+  stayed text, with no sign that a row was missing. Now a row the program itself
+  wrapped is put back together and drawn as the one row it was printed as, using
+  the width the terminal was when it was printed, so dragging the window does
+  not split it again. And a line that starts with `|` and is not a row of the
+  table takes the whole table down: every line goes back to text, including the
+  rows that were already drawn. Output that merely starts with a pipe — a branch
+  graph, a compiler's underline, the side of somebody else's box — no longer
+  ends a table halfway and leaves half of one on the screen.
+
 - **A saved tab whose shell is no longer on the machine opens as a tab.**
   Uninstalling Git with a Git Bash tab pinned stopped Folio before its first
   window, on every launch, until the saved session was edited by hand. Such a

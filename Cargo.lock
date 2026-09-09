@@ -309,6 +309,7 @@ version = "0.2.3"
 dependencies = [
  "bt-doc",
  "bt-transcript",
+ "bt-unicode",
 ]
 
 [[package]]

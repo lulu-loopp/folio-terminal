@@ -141,8 +141,7 @@ mod tests {
     }
 
     fn span(source: &str) -> TableSpan {
-        let lines: Vec<&str> = source.lines().collect();
-        bt_detect::table::table_at(&lines).expect("a table")
+        bt_detect::table::from_resolved_source(source).expect("a table")
     }
 
     #[test]

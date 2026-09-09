@@ -3564,6 +3564,7 @@ impl DualPlaneSession {
                 },
                 detection_complete: false,
                 resolved: false,
+                refused_table_rows: Vec::new(),
             };
             new_tasks.push(task);
         }
@@ -5614,6 +5615,7 @@ impl DualPlaneSession {
                         source: LiveDetectionSource::History { id: *id },
                         text: entry.line.text.clone(),
                         continues: false,
+                        captured_columns: frozen_line_captured_columns(&entry.line),
                         cell_boundaries: frozen_cell_boundaries(&entry.line),
                         site: self.history_inline_site(*id),
                     }),
@@ -5639,6 +5641,7 @@ impl DualPlaneSession {
                     },
                     text,
                     continues: captured.continues,
+                    captured_columns: captured.captured_columns,
                     site: inline_math_site(
                         self.live_screen,
                         self.command_output_covers_live(
@@ -5963,6 +5966,7 @@ impl DualPlaneSession {
                 span: empty_live_math_span(),
                 detection_complete: false,
                 resolved: false,
+                refused_table_rows: Vec::new(),
             })
             .collect::<Vec<_>>();
         resolve_live_detection_tasks(&mut tasks);
@@ -6181,6 +6185,7 @@ impl DualPlaneSession {
                     span: record.span.clone(),
                     detection_complete: true,
                     resolved: true,
+                    refused_table_rows: Vec::new(),
                 });
             }
             if let Some(record) =
@@ -6497,6 +6502,7 @@ impl DualPlaneSession {
                     span: record.span.clone(),
                     detection_complete: true,
                     resolved: true,
+                    refused_table_rows: Vec::new(),
                 });
             }
             occupied.extend(record.band_start_row..=record.band_end_row);
@@ -7038,6 +7044,12 @@ impl DualPlaneSession {
             self.live_decorations.retain(|_, record| {
                 !(record.start.row <= task.candidate_row && task.candidate_row <= record.end.row)
             });
+            // The live half of `retire_refused_table`, and for its reason: a table drawn from rows
+            // that were on the grid before this one arrived stands above the candidate rather than
+            // over it, so the retain above never reaches it.
+            for row in &task.refused_table_rows {
+                self.live_decorations.remove(row);
+            }
             return true;
         }
         if self.semantic_input_overlaps_live(task.screen, task.start, task.end) {
@@ -7129,6 +7141,38 @@ impl DualPlaneSession {
         true
     }
 
+    /// Take down a drawn table whose rows this scan has just proved are not a table after all.
+    ///
+    /// **A table is the one block whose extent a later line can change.** A `$$` block is settled
+    /// by its own two delimiters, so nothing printed under it can unmake it; a table ends wherever
+    /// its rows stop, and `bt_detect::table`'s rule 2 says a line that leads with a pipe and is not
+    /// one of its rows refuses the whole table rather than ending it. That line arrives after the
+    /// block was drawn — often long after, once the rows have scrolled into history — so the
+    /// verdict has to be able to travel backwards, and this is the only place it does.
+    ///
+    /// The record goes back to exactly what it was before the block was proven: no artifact, no
+    /// span, lifecycle `None`. It stops covering the rows under it, so every one of them is text
+    /// again, which is what a refusal means.
+    fn retire_refused_table(&mut self, start: TranscriptId) {
+        let Some(record) = self.decorations.get_mut(&start) else {
+            return;
+        };
+        if record
+            .span
+            .as_ref()
+            .is_none_or(|span| span.kind != BlockKind::Table)
+        {
+            return;
+        }
+        record.decoration = DecorationLifecycle::None;
+        record.artifact = None;
+        record.stale_artifact = None;
+        record.span = None;
+        record.block_end = None;
+        record.failure_reason = None;
+        self.document.set_decoration(start, DecorationIntent::Plain);
+    }
+
     fn apply_worker_completion(
         &mut self,
         task: DetectionTask,
@@ -7137,6 +7181,9 @@ impl DualPlaneSession {
     ) -> bool {
         if !self.worker_task_is_current(&task) {
             return false;
+        }
+        for start in &task.refused_table_starts {
+            self.retire_refused_table(*start);
         }
         if !task.resolved {
             return self
@@ -10012,6 +10059,7 @@ impl DualPlaneSession {
                         source: LiveDetectionSource::Grid { row, revision: 0 },
                         text,
                         continues: captured.continues,
+                        captured_columns: captured.captured_columns,
                         cell_boundaries,
                         // A row-identity probe, never a scan input: `exactly_matches` compares the
                         // captured text, wrap flag and cell map. The site would be noise here.
@@ -10538,6 +10586,7 @@ impl DualPlaneSession {
                 span: record.span.clone(),
                 detection_complete: true,
                 resolved: true,
+                refused_table_rows: Vec::new(),
             });
         }
         for record in &mut self.offscreen_decorations {
@@ -10704,22 +10753,45 @@ impl DualPlaneSession {
         (start != candidate).then_some(start)
     }
 
+    /// The one resident line past `candidate` a table ending there has to be read with.
+    ///
+    /// The same sentence as [`Self::frozen_table_window_start`], pointing the other way. Rule 2 of
+    /// `bt_detect::table` is a statement about the line *after* the last row — a line that leads
+    /// with a pipe and is not a row refuses the whole table — so a window that stopped at the
+    /// candidate could only ever answer half the question, and would go on proving a table every
+    /// time one of its own rows was re-armed, however plainly the line under it had refused it.
+    /// One line is the whole of the lookahead: rule 2 reads exactly one.
+    ///
+    /// `None` when the candidate is not a row, or when it is the newest resident line — in which
+    /// case there is nothing after it yet, and the table stands until something arrives.
+    fn frozen_table_window_end(&self, candidate: TranscriptId) -> Option<TranscriptId> {
+        let entries = self.document.entries();
+        bt_detect::table::body_row(&entries.get(&candidate)?.line.text)?;
+        entries
+            .range((Bound::Excluded(candidate), Bound::Unbounded))
+            .next()
+            .map(|(id, _)| *id)
+    }
+
     fn frozen_anchor_is_neutral(&self, anchor: TranscriptId) -> bool {
         self.frozen_detection_contexts
             .get(&anchor)
             .is_some_and(DetectionContext::is_neutral)
     }
 
-    /// Gather the resync window `[anchor..=candidate_id]` as worker inputs, or `None` if it does not
+    /// Gather the resync window `[anchor..=window_end]` as worker inputs, or `None` if it does not
     /// span exactly that range or exceeds the source-byte cap (the proof-epoch budget).
+    ///
+    /// `window_end` is the candidate itself for a `$$` scan, and one line past it for a table (see
+    /// [`Self::frozen_table_window_end`]).
     fn frozen_window_inputs(
         &self,
         anchor: TranscriptId,
-        candidate_id: TranscriptId,
+        window_end: TranscriptId,
     ) -> Option<Vec<DetectionInput>> {
         let mut inputs = Vec::new();
         let mut source_bytes = 0usize;
-        for (id, entry) in self.document.entries().range(anchor..=candidate_id) {
+        for (id, entry) in self.document.entries().range(anchor..=window_end) {
             source_bytes = source_bytes
                 .saturating_add(entry.line.text.len())
                 .saturating_add(1);
@@ -10729,12 +10801,13 @@ impl DualPlaneSession {
             inputs.push(DetectionInput {
                 id: *id,
                 text: entry.line.text.clone(),
+                captured_columns: frozen_line_captured_columns(&entry.line),
                 cell_boundaries: frozen_cell_boundaries(&entry.line),
                 site: self.history_inline_site(*id),
             });
         }
         (inputs.first().is_some_and(|input| input.id == anchor)
-            && inputs.last().is_some_and(|input| input.id == candidate_id))
+            && inputs.last().is_some_and(|input| input.id == window_end))
         .then_some(inputs)
     }
 
@@ -10759,10 +10832,15 @@ impl DualPlaneSession {
             (Some(certified), Some(table)) => Some(certified.min(table)),
             (certified, table) => certified.or(table),
         };
+        // And one line past the candidate when the candidate is a table row, because that line is
+        // half of rule 2's question (see `frozen_table_window_end`).
+        let window_end = self
+            .frozen_table_window_end(candidate_id)
+            .unwrap_or(candidate_id);
         if let Some(anchor) = anchor
             && anchor <= candidate_id
             && self.frozen_anchor_is_neutral(anchor)
-            && let Some(inputs) = self.frozen_window_inputs(anchor, candidate_id)
+            && let Some(inputs) = self.frozen_window_inputs(anchor, window_end)
         {
             let Some(mut task) = self.decorations.get_mut(&candidate_id).and_then(|record| {
                 record.schedule_scan(
@@ -10804,6 +10882,7 @@ impl DualPlaneSession {
                 inputs.push(DetectionInput {
                     id: *id,
                     text: entry.line.text.clone(),
+                    captured_columns: frozen_line_captured_columns(&entry.line),
                     cell_boundaries: frozen_cell_boundaries(&entry.line),
                     site: self.history_inline_site(*id),
                 });
@@ -10821,6 +10900,7 @@ impl DualPlaneSession {
             inputs.push(DetectionInput {
                 id: candidate_id,
                 text: entry.line.text.clone(),
+                captured_columns: frozen_line_captured_columns(&entry.line),
                 cell_boundaries: frozen_cell_boundaries(&entry.line),
                 site: self.history_inline_site(candidate_id),
             });
@@ -13101,6 +13181,21 @@ fn captured_row_text_and_boundaries_with_trailing_glyphs(
     (text, boundaries)
 }
 
+/// The grid width a frozen logical line's own physical row was captured on, and zero when there is
+/// no such row.
+///
+/// A line the terminal soft-wrapped is several physical rows rejoined into the one line the program
+/// printed, and a line whose only fragment is itself soft-wrapped (a `wrap_split` tail) is half of
+/// one. Neither has a row a *program's* own wrap could have ended, so neither offers geometry: the
+/// question `bt_detect::table` asks of this number is whether the application ran out of row, and
+/// only a line that is exactly one row it ended itself can answer.
+fn frozen_line_captured_columns(line: &FrozenLine) -> u32 {
+    match line.fragments.as_slice() {
+        [fragment] if !fragment.soft_wrapped => fragment.captured_columns,
+        _ => 0,
+    }
+}
+
 fn frozen_cell_boundaries(line: &FrozenLine) -> Vec<(u32, u32)> {
     let mut boundaries = Vec::with_capacity(line.grapheme_boundaries.len());
     let mut cell = 0u32;
@@ -14021,6 +14116,7 @@ mod tests {
                 },
                 text: (*text).to_owned(),
                 continues: false,
+                captured_columns: 0,
                 site: InlineMathSite::Ineligible,
                 cell_boundaries: std::iter::once((0, 0))
                     .chain(
@@ -20371,6 +20467,7 @@ mod tests {
             },
             text: input_text.clone(),
             continues: false,
+            captured_columns: 0,
             cell_boundaries: ascii_boundaries(&input_text),
             site: InlineMathSite::Ineligible,
         };
@@ -20398,6 +20495,7 @@ mod tests {
             },
             text: chrome_text.to_owned(),
             continues: false,
+            captured_columns: 0,
             cell_boundaries: vec![(0, 0), (u32::try_from(chrome_text.len()).unwrap(), 16)],
             site: InlineMathSite::Ineligible,
         };
@@ -29660,8 +29758,18 @@ tail four
         assert_eq!(blocks.len(), 1, "the table is drawn, exactly once");
         assert_eq!(blocks[0].display, MathBlockDisplay::Rendered);
         assert_eq!(
-            blocks[0].source, "| name | count |\n| --- | ---: |\n| alpha | 3 |\n| beta | 41 |",
-            "the block's source is the bytes the shell wrote, delimiter row included"
+            blocks[0].source, "| name | count |\n|---|--:|\n| alpha | 3 |\n| beta | 41 |",
+            "the block is drawn from the rows the detector resolved, one row to a line"
+        );
+        assert_eq!(
+            session
+                .decorations
+                .values()
+                .filter_map(|record| record.span.as_ref())
+                .find(|span| span.kind == BlockKind::Table)
+                .map(|span| span.original_source.clone()),
+            Some("| name | count |\n| --- | ---: |\n| alpha | 3 |\n| beta | 41 |".to_owned()),
+            "and the bytes the shell wrote are kept beside it, delimiter row included"
         );
         assert_eq!(
             blocks[0].anchor,
@@ -29869,6 +29977,107 @@ tail four
         assert!(
             table_blocks(&frame).is_empty(),
             "and no table product reaches the frame"
+        );
+    }
+
+    /// Every table a frozen record holds, as the rows the detector resolved.
+    fn table_sources(session: &DualPlaneSession) -> Vec<String> {
+        session
+            .decorations
+            .values()
+            .filter_map(|record| record.span.as_ref())
+            .filter(|span| span.kind == BlockKind::Table)
+            .map(|span| span.render_source.clone())
+            .collect()
+    }
+
+    /// PIN: a table is the one block a line printed after it can unmake, and the rows it was drawn
+    /// from go back to text when that happens.
+    ///
+    /// The refusing row arrives long after the block was proven — here, after four more lines have
+    /// frozen — so the verdict has to travel backwards to a record that was finished and drawn.
+    #[test]
+    fn a_row_that_refuses_a_table_retires_the_block_drawn_from_the_rows_above_it() {
+        let mut session = DualPlaneSession::new(nz(60), nz(1));
+        let raster = synthetic_raster(300, 40);
+        for line in [
+            "| name | count |",
+            "| --- | ---: |",
+            "| alpha | 3 |",
+            "| beta | 41 |",
+        ] {
+            session.feed(line.as_bytes()).unwrap();
+            session.feed(b"\r\n").unwrap();
+            drain_tasks(&mut session, &raster);
+        }
+        assert_eq!(
+            ready_tables(&session),
+            1,
+            "the rows that arrived are a table"
+        );
+        // A row of three cells under two headings, leading with a pipe: `bt_detect::table` rule 2.
+        for line in ["| gamma | 5 | 9 |", "tail"] {
+            session.feed(line.as_bytes()).unwrap();
+            session.feed(b"\r\n").unwrap();
+            drain_tasks(&mut session, &raster);
+        }
+        assert_eq!(
+            ready_tables(&session),
+            0,
+            "and the row that refuses them takes the whole block down"
+        );
+        assert!(
+            table_sources(&session).is_empty(),
+            "no record still holds a table"
+        );
+    }
+
+    /// PIN: a row the printing program wrapped is one row, and dragging the pane does not un-join
+    /// it.
+    ///
+    /// The join is over the bytes the program printed and the width it printed them at, and both
+    /// are frozen: the transcript never rewrites a finalized line, and `captured_columns` is the
+    /// grid the row came off rather than the grid it is being read on. So the second reading, after
+    /// a resize, is the first reading.
+    #[test]
+    fn a_rejoined_row_survives_a_resize_as_one_row() {
+        let mut session = DualPlaneSession::new(nz(15), nz(1));
+        let raster = synthetic_raster(300, 40);
+        // `four | five and` is exactly fifteen cells, so it filled the row it was printed on.
+        for line in [
+            "a | b | c",
+            "--- | --- | ---",
+            "one | two | 3",
+            "four | five and",
+            "six | seven",
+            "tail",
+        ] {
+            session.feed(line.as_bytes()).unwrap();
+            session.feed(b"\r\n").unwrap();
+            drain_tasks(&mut session, &raster);
+        }
+        let joined = "| a | b | c |
+|---|---|---|
+| one | two | 3 |
+| four | five and six | seven |";
+        assert_eq!(
+            table_sources(&session),
+            vec![joined.to_owned()],
+            "the two printed lines are one row"
+        );
+        let at = Instant::now();
+        session.resize_at(nz(40), nz(1), at).unwrap();
+        session.mark_pty_resize_requested_at(nz(40), nz(1), at);
+        assert!(
+            session
+                .finish_resize_if_quiescent(at + Duration::from_millis(400))
+                .unwrap()
+        );
+        drain_tasks(&mut session, &raster);
+        assert_eq!(
+            table_sources(&session),
+            vec![joined.to_owned()],
+            "and they are still one row on a wider pane"
         );
     }
 

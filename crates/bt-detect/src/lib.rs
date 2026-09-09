@@ -155,12 +155,22 @@ pub struct DetectionTask {
     pub initial_context: DetectionContext,
     pub inputs: Arc<[DetectionInput]>,
     pub resolved: bool,
+    /// The header row of every table this scan refused whole. A block already drawn from the rows
+    /// above a refusing line is no longer a table and the session takes it down; see
+    /// [`RefusedTable`].
+    pub refused_table_starts: Vec<TranscriptId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DetectionInput {
     pub id: TranscriptId,
     pub text: String,
+    /// The width of the grid this line's own physical row was captured on, or zero when the line
+    /// has no single such row — a logical line the terminal soft-wrapped out of several, or a
+    /// fixture with no capture geometry at all. It is the provenance
+    /// `bt_detect::table`'s wrap join runs on, and it is recorded rather than recomputed because
+    /// the pane is resized and a frozen line is not.
+    pub captured_columns: u32,
     /// UTF-8 byte boundary to terminal cell-column mappings from the captured logical line.
     pub cell_boundaries: Vec<(u32, u32)>,
     /// Where this frozen line sat in the shell's command lifecycle, captured from bt-term's OSC 133
@@ -247,6 +257,9 @@ pub struct LiveDetectionInput {
     pub text: String,
     /// True when this physical row soft-wraps into the next input row.
     pub continues: bool,
+    /// The width of the grid this physical row was captured on; zero when it carries no capture
+    /// geometry. See [`DetectionInput::captured_columns`].
+    pub captured_columns: u32,
     /// UTF-8 byte boundary to terminal cell-column mappings, including `(0, 0)` and the final
     /// source boundary. These come from captured terminal cells, never Unicode-width inference.
     pub cell_boundaries: Vec<(u32, u32)>,
@@ -282,6 +295,10 @@ pub struct LiveDetectionTask {
     /// non-occurrence, so a worker never rescans the same window per candidate.
     pub detection_complete: bool,
     pub resolved: bool,
+    /// The first live-grid row of every table this scan refused whole. A live block already drawn
+    /// from the rows above a refusing row is no longer a table and the session takes it down; see
+    /// [`RefusedTable`].
+    pub refused_table_rows: Vec<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -350,6 +367,7 @@ impl DecorationRecord {
             initial_context: DetectionContext::default(),
             inputs: Arc::from([]),
             resolved: true,
+            refused_table_starts: Vec::new(),
         })
     }
 
@@ -387,6 +405,7 @@ impl DecorationRecord {
             initial_context,
             inputs,
             resolved: false,
+            refused_table_starts: Vec::new(),
         })
     }
 
@@ -1070,6 +1089,7 @@ pub fn detect_math_blocks_with_sites<'a>(
         None,
         None,
         None,
+        None,
         false,
         None,
     )
@@ -1087,6 +1107,21 @@ pub struct AmbiguousMathBlock {
 pub struct MathScanResult {
     pub blocks: Vec<DetectedMathBlock>,
     pub ambiguous: Vec<AmbiguousMathBlock>,
+    /// Every table candidate this window refused whole (`bt_detect::table` rule 2). A table drawn
+    /// from rows that arrived earlier stands over lines this scan can now see are not its rows, so
+    /// the caller has to take it down: the refusal is the only place that fact exists.
+    pub refused_tables: Vec<RefusedTable>,
+}
+
+/// A header row over a delimiter row that a later line refused, and the lines it covered.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RefusedTable {
+    /// The header row — the line a block built from these rows would be keyed at.
+    pub start: TranscriptId,
+    /// The last row the candidate could have accepted.
+    pub end: TranscriptId,
+    /// The line that refused it.
+    pub refused_at: TranscriptId,
 }
 
 #[derive(Clone, Debug)]
@@ -1120,6 +1155,7 @@ pub fn scan_math_blocks_in_context_with_options<'a>(
         None,
         None,
         None,
+        None,
         false,
         None,
     )
@@ -1143,12 +1179,18 @@ pub fn scan_math_blocks_in_context_with_options<'a>(
 /// `sites` is the per-line OSC 133 lifecycle, indexed in parallel with the collected `lines`. It is
 /// the structural half of the inline disambiguator and only bt-term can compute it, so every scan
 /// that does not carry one reads as [`InlineMathSite::Ineligible`] — see [`site_at`].
+///
+/// `captured_columns` is the per-line capture geometry, indexed the same way: the width of the grid
+/// each logical line's own physical row came off, and zero for a line that has no single such row.
+/// Only bt-term can know it, and it is what `table`'s wrap join runs on, so a scan that does not
+/// carry one joins nothing.
 #[allow(clippy::too_many_arguments)]
 fn scan_math_blocks_impl<'a>(
     lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
     initial_context: DetectionContext,
     options: DetectionOptions,
     sites: Option<&[InlineMathSite]>,
+    captured_columns: Option<&[u32]>,
     live_grid_boundary: Option<usize>,
     clipped_open_index: Option<u32>,
     mut recorder: Option<&mut OwnershipRecorder>,
@@ -1525,7 +1567,7 @@ fn scan_math_blocks_impl<'a>(
     if let Some(slot) = final_neutral {
         *slot = opening.is_none() && fence.is_none();
     }
-    append_table_blocks(&lines, initial_fence, &mut result);
+    append_table_blocks(&lines, captured_columns, initial_fence, &mut result);
     result
 }
 
@@ -1546,12 +1588,28 @@ fn scan_math_blocks_impl<'a>(
 /// line, and the display scan is the older and stricter claim.
 fn append_table_blocks(
     lines: &[(TranscriptId, &str)],
+    captured_columns: Option<&[u32]>,
     initial_fence: Option<(char, usize)>,
     result: &mut MathScanResult,
 ) {
     if lines.len() < 2 {
         return;
     }
+    // The geometry travels beside the text, one entry a line, exactly as `sites` does. A scan with
+    // none — a probe, a certification pass, a fixture — reads every line as having no capture
+    // geometry, which is the reading under which no row joins the row under it.
+    let candidate_lines: Vec<table::TableLine> = lines
+        .iter()
+        .enumerate()
+        .map(|(index, (_, text))| {
+            table::TableLine::on_grid(
+                text,
+                captured_columns
+                    .and_then(|columns| columns.get(index).copied())
+                    .unwrap_or(0),
+            )
+        })
+        .collect();
     let texts: Vec<&str> = lines.iter().map(|(_, text)| *text).collect();
     let mut claimed = vec![false; lines.len()];
     for block in &result.blocks {
@@ -1578,16 +1636,35 @@ fn append_table_blocks(
             index += 1;
             continue;
         }
-        let Some(span) = table::table_at(&texts[index..]) else {
+        let Some(candidate) = table::table_at(&candidate_lines[index..]) else {
             index += 1;
             continue;
+        };
+        let span = match candidate {
+            table::TableCandidate::Proven(span) => span,
+            // Rule 2's whole refusal. Nothing is drawn and nothing is claimed, so every line of the
+            // candidate stays text; the refusal is reported so a caller holding a block built from
+            // these rows before the refusing line arrived can take it down. Scanning resumes *at*
+            // the refusing line, which is free to be a header of its own.
+            table::TableCandidate::Refused { line_count } => {
+                let end_index = index + line_count - 1;
+                if !claimed[index..=end_index].iter().any(|it| *it) {
+                    result.refused_tables.push(RefusedTable {
+                        start: lines[index].0,
+                        end: lines[end_index].0,
+                        refused_at: lines[index + line_count].0,
+                    });
+                }
+                index += line_count;
+                continue;
+            }
         };
         let end_index = index + span.line_count - 1;
         if claimed[index..=end_index].iter().any(|it| *it) {
             index += 1;
             continue;
         }
-        let source = joined_range(lines, index, end_index, 0, texts[end_index].len());
+        let original = joined_range(lines, index, end_index, 0, texts[end_index].len());
         result.blocks.push(DetectedMathBlock {
             start: lines[index].0,
             end: lines[end_index].0,
@@ -1599,8 +1676,11 @@ fn append_table_blocks(
                     byte_start: 0,
                     byte_end: texts[end_index].len(),
                 },
-                source.clone(),
-                source,
+                original,
+                // The render source is the rows as this scan resolved them, one row to a line:
+                // see `TableSpan::resolved_source`. It is what the painter reads, and it is why a
+                // row this scan rejoined out of two printed lines is still one row after a resize.
+                span.resolved_source(),
                 DelimiterKind::Table,
                 BlockKind::Table,
             ),
@@ -1696,8 +1776,10 @@ fn grid_dollars_opens_valid_block(
         DetectionContext::default(),
         options,
         // A forward display-validity probe, not a detection pass: it asks only whether this `$$`
-        // opens a block that closes. No site means no inline run can enter the answer, which is
-        // exactly the verdict this probe has always produced.
+        // opens a block that closes. No site means no inline run can enter the answer, and no
+        // geometry means no table row joins the one under it — which is exactly the verdict this
+        // probe has always produced.
+        None,
         None,
         None,
         None,
@@ -2200,18 +2282,42 @@ pub fn detect_live_math_blocks_in_context<'a>(
     live_grid_boundary: Option<usize>,
     clipped_open_index: Option<u32>,
 ) -> Vec<DetectedMathBlock> {
+    scan_live_math_blocks_in_context(
+        lines,
+        initial_context,
+        options,
+        sites,
+        None,
+        live_grid_boundary,
+        clipped_open_index,
+    )
+    .blocks
+}
+
+/// The same scan, carrying the capture geometry in and the refused table candidates out. The live
+/// resolver reads it because a refusal takes down a table the grid has already drawn; a caller that
+/// only wants the blocks uses the wrapper above.
+pub fn scan_live_math_blocks_in_context<'a>(
+    lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
+    initial_context: DetectionContext,
+    options: DetectionOptions,
+    sites: Option<&[InlineMathSite]>,
+    captured_columns: Option<&[u32]>,
+    live_grid_boundary: Option<usize>,
+    clipped_open_index: Option<u32>,
+) -> MathScanResult {
     scan_math_blocks_impl(
         lines,
         initial_context,
         options,
         sites,
+        captured_columns,
         live_grid_boundary,
         clipped_open_index,
         None,
         false,
         None,
     )
-    .blocks
 }
 
 /// Frozen-history variant that resolves a lost-opener `$$` parity phantom left by a history reflow
@@ -2229,18 +2335,30 @@ pub fn detect_frozen_math_blocks_in_context_with_options<'a>(
     options: DetectionOptions,
     sites: Option<&[InlineMathSite]>,
 ) -> Vec<DetectedMathBlock> {
+    scan_frozen_math_blocks_in_context_with_options(lines, initial_context, options, sites, None)
+        .blocks
+}
+
+/// The same frozen scan, carrying the capture geometry in and the refused table candidates out.
+pub fn scan_frozen_math_blocks_in_context_with_options<'a>(
+    lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
+    initial_context: DetectionContext,
+    options: DetectionOptions,
+    sites: Option<&[InlineMathSite]>,
+    captured_columns: Option<&[u32]>,
+) -> MathScanResult {
     scan_math_blocks_impl(
         lines,
         initial_context,
         options,
         sites,
+        captured_columns,
         None,
         None,
         None,
         true,
         None,
     )
-    .blocks
 }
 
 /// Frozen resync scan that also reports whether the parser phase is neutral after the last line, so
@@ -2257,6 +2375,7 @@ pub fn frozen_resync_scan_with_options<'a>(
         lines,
         initial_context,
         options,
+        None,
         None,
         None,
         None,
@@ -2371,6 +2490,7 @@ pub fn live_detection_ownership_ledger(
         initial_context,
         options,
         Some(&live_logical_sites(&logical)),
+        Some(&live_logical_captured_columns(&logical)),
         boundary,
         clipped,
         Some(&mut recorder),
@@ -2486,16 +2606,33 @@ pub fn resolve_detection_task(task: &mut DetectionTask) -> bool {
         .iter()
         .map(|input| input.site)
         .collect::<Vec<_>>();
-    let detected = detect_frozen_math_blocks_in_context_with_options(
+    let columns = task
+        .inputs
+        .iter()
+        .map(|input| input.captured_columns)
+        .collect::<Vec<_>>();
+    let scan = scan_frozen_math_blocks_in_context_with_options(
         task.inputs
             .iter()
             .map(|input| (input.id, input.text.as_str())),
         task.initial_context.clone(),
         task.options,
         Some(&sites),
-    )
-    .into_iter()
-    .find(|block| block.end == task.candidate_id);
+        Some(&columns),
+    );
+    // A refusal is the one verdict that travels backwards: it unmakes a table the session may
+    // already have drawn from rows that arrived before the refusing line existed. Every refusal
+    // this window saw travels, not only the one at this candidate, because the line that refuses a
+    // table need not be a candidate itself.
+    task.refused_table_starts = scan
+        .refused_tables
+        .iter()
+        .map(|refused| refused.start)
+        .collect();
+    let detected = scan
+        .blocks
+        .into_iter()
+        .find(|block| block.end == task.candidate_id);
     let Some(block) = detected else {
         return false;
     };
@@ -2564,16 +2701,20 @@ pub fn resolve_live_detection_task(task: &mut LiveDetectionTask) -> bool {
         &task.initial_context,
         task.options,
     );
-    let detected = detect_live_math_blocks_in_context(
+    let scan = scan_live_math_blocks_in_context(
         logical.iter().map(|line| (line.id, line.text.as_str())),
         task.initial_context.clone(),
         task.options,
         Some(&live_logical_sites(&logical)),
+        Some(&live_logical_captured_columns(&logical)),
         live_grid_boundary,
         clipped,
-    )
-    .into_iter()
-    .find(|block| block.end == candidate_id);
+    );
+    task.refused_table_rows = refused_table_rows(&scan, &row_to_logical);
+    let detected = scan
+        .blocks
+        .into_iter()
+        .find(|block| block.end == candidate_id);
     task.detection_complete = true;
     let Some(block) = detected else {
         return false;
@@ -2600,17 +2741,20 @@ pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
         &initial_context,
         options,
     );
-    let blocks = detect_live_math_blocks_in_context(
+    let scan = scan_live_math_blocks_in_context(
         logical.iter().map(|line| (line.id, line.text.as_str())),
         initial_context.clone(),
         options,
         Some(&live_logical_sites(&logical)),
+        Some(&live_logical_captured_columns(&logical)),
         live_grid_boundary,
         clipped,
-    )
-    .into_iter()
-    .map(|block| (block.end, block))
-    .collect::<BTreeMap<_, _>>();
+    );
+    let blocks = scan
+        .blocks
+        .iter()
+        .map(|block| (block.end, block))
+        .collect::<BTreeMap<_, _>>();
     for task in tasks {
         if task.resolved || task.detection_complete {
             continue;
@@ -2623,6 +2767,7 @@ pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
             continue;
         }
         task.detection_complete = true;
+        task.refused_table_rows = refused_table_rows(&scan, &row_to_logical);
         let Some(block) = row_to_logical
             .get(&task.candidate_row)
             .and_then(|id| blocks.get(id))
@@ -2631,6 +2776,26 @@ pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
         };
         let _ = apply_live_detected_block(task, block, &logical);
     }
+}
+
+/// The first live-grid row of every table this scan refused.
+///
+/// A candidate whose rows are all still in the frozen prefix has no live row to name and no live
+/// record to take down; the frozen plane owns that one.
+fn refused_table_rows(
+    scan: &MathScanResult,
+    row_to_logical: &BTreeMap<u32, TranscriptId>,
+) -> Vec<u32> {
+    scan.refused_tables
+        .iter()
+        .filter_map(|refused| {
+            row_to_logical
+                .iter()
+                .filter(|(_, id)| (refused.start..=refused.end).contains(id))
+                .map(|(row, _)| *row)
+                .min()
+        })
+        .collect()
 }
 
 fn apply_live_detected_block(
@@ -2755,6 +2920,10 @@ struct LiveLogicalFragment {
 struct LiveLogicalLine {
     id: TranscriptId,
     text: String,
+    /// The grid width this line's single physical row was captured on, and zero the moment a
+    /// second row joins it: a line the terminal soft-wrapped is one line the program printed, so
+    /// there is no row of it for a program's own wrap to have ended.
+    captured_columns: u32,
     fragments: Vec<LiveLogicalFragment>,
     /// The joined line's site. A soft-wrapped line is several physical rows scanned as one string,
     /// and the disambiguator judges that string whole — so the line carries a site only when every
@@ -2775,6 +2944,7 @@ fn live_logical_lines(inputs: &[LiveDetectionInput]) -> Vec<LiveLogicalLine> {
             logical.push(LiveLogicalLine {
                 id,
                 text: String::new(),
+                captured_columns: input.captured_columns,
                 fragments: Vec::new(),
                 site: input.site,
             });
@@ -2783,6 +2953,9 @@ fn live_logical_lines(inputs: &[LiveDetectionInput]) -> Vec<LiveLogicalLine> {
             continue;
         };
         let byte_start = line.text.len();
+        if !line.fragments.is_empty() {
+            line.captured_columns = 0;
+        }
         line.text.push_str(&input.text);
         line.fragments.push(LiveLogicalFragment {
             input_index,
@@ -2800,6 +2973,11 @@ fn live_logical_lines(inputs: &[LiveDetectionInput]) -> Vec<LiveLogicalLine> {
         }
     }
     logical
+}
+
+/// The per-logical-line capture geometry a live scan hands to the scanner, in scanner index order.
+fn live_logical_captured_columns(logical: &[LiveLogicalLine]) -> Vec<u32> {
+    logical.iter().map(|line| line.captured_columns).collect()
 }
 
 /// The per-logical-line site slice a live scan hands to the scanner, in scanner index order.
@@ -3485,6 +3663,7 @@ mod tests {
                 Arc::from([DetectionInput {
                     id: TranscriptId(1),
                     text: text.to_owned(),
+                    captured_columns: 0,
                     cell_boundaries: boundaries,
                     site: InlineMathSite::CommandOutput,
                 }]),
@@ -4285,6 +4464,7 @@ abla f",
                         },
                         text: (*text).to_owned(),
                         continues: false,
+                        captured_columns: 0,
                         cell_boundaries: scalar_boundaries(text),
                         site: InlineMathSite::Ineligible,
                     })
@@ -4313,6 +4493,7 @@ abla f",
             },
             detection_complete: false,
             resolved: false,
+            refused_table_rows: Vec::new(),
         }
     }
 
@@ -4464,6 +4645,7 @@ abla f",
                 source: *source,
                 text: (*text).to_owned(),
                 continues: false,
+                captured_columns: 0,
                 cell_boundaries: scalar_boundaries(text),
                 site: InlineMathSite::Ineligible,
             })
@@ -4509,6 +4691,7 @@ abla f",
                     text: "abc".to_owned(),
                     // The first two rows soft-wrap into the next, so all three join into one line.
                     continues: row < 2,
+                    captured_columns: 0,
                     cell_boundaries: scalar_boundaries("abc"),
                     site: *site,
                 })
