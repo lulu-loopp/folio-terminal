@@ -20,6 +20,20 @@ All notable changes to Folio are recorded here. The format follows
   table cannot account for takes the whole table down, so a table can no longer
   end halfway through the block it was printed in; a pipe after a blank line,
   and a second table under a caption line, still leave it standing.
+- **A pane restored behind another tab comes up at the width it is going to
+  have.** A window that was closed maximized is put back at its own rectangle
+  first and maximized a moment later, and until now the panes of every tab were
+  measured against that first rectangle. A tab you were not looking at kept
+  those measurements until you clicked it, so a tab holding three panes in a
+  window too narrow for three could start a shell two columns wide: its first
+  prompt came out two characters to a line, and widening the pane afterwards
+  could not put back together what had already scrolled past. Every tab now
+  follows the window, whether or not it is the one on screen, and a pane is
+  never started at the width of the little bar the layout shows in place of a
+  pane it has no room for. The little picture on a tab's card follows the pane
+  the same way: where a line was broken across rows at a width the pane has since
+  stopped having, the card puts it back together instead of drawing the old
+  break.
 
 ## 0.2.4-preview — 2026-09-08
 
