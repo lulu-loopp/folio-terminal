@@ -30078,21 +30078,24 @@ fn create_tab_state(
     // they dragged narrow must look like its neighbours — panes, not bars. The
     // rail is the same argument on the other axis: a tab born while the sidebar
     // is out gets the width the sidebar left, not the whole window's.
-    let (seat_layout, seat_overflow, terminal_seat, _) =
+    let (seat_layout, seat_overflow, _, _) =
         solve_seats(&seats, renderer, render_physical, policy, rail);
     // Captured before `seats` moves into the tab: the seat the tab's identity
     // shell draws into is the key its session is filed under.
     let terminal_seat_id = seats.identity();
     let scale = renderer.metrics().scale_factor as f32;
+    let metrics = seats::seat_metrics(renderer.metrics().dpi_milli().get());
     let mut sessions = BTreeMap::new();
     for seat in seats.terminals() {
-        let body = if seat == terminal_seat_id {
-            terminal_seat
-        } else {
-            seats::pane_body_viewport(&seats, &seat_layout, seat, scale).with_context(|| {
-                format!("place a body rectangle for terminal seat {seat:?} from its own solve")
-            })?
-        };
+        // **Each seat's own rectangle, and never a bar's** (user report
+        // 2026-09-09) — see [`seats::birth_body_viewport`]. Two things used to
+        // happen here instead, and both of them handed a shell a width nobody
+        // was looking at: the identity seat was sized from the *focused* seat's
+        // rectangle, which is a different pane the moment a restore comes back on
+        // a leaf that is not the first; and every other seat took whatever the
+        // solve had put under it, including the twenty-four logical pixels the
+        // ladder gives a seat it has folded into a bar.
+        let body = seats::birth_body_viewport(&seats, &seat_layout, seat, &metrics, scale);
         // A seat with no seed of its own is a seat the caller had nothing saved
         // for — `Seats::lone_terminal`'s stand-in when a persisted tree held no
         // Term leaf to pair with, and the window's very first tab on a machine
@@ -75068,6 +75071,9 @@ impl Runtime<'_> {
             };
             schedule_leaf_grid_change(leaf, next_grid, physical, observed_at, context)?;
         }
+        // And the tabs nobody is looking at, before the focused pane for the
+        // reason its siblings go before it.
+        self.resize_hidden_leaves_to_layout(observed_at, context)?;
         // A seat the solver could not place has no rectangle, so there is no
         // size to carry and the leaf keeps the one it has until a later solve
         // places it. Substituting some other rectangle here — the window's, the
@@ -75089,6 +75095,79 @@ impl Runtime<'_> {
             context,
         )?;
         Ok(Some(next_grid))
+    }
+
+    /// **Every tab's panes, because a window's rectangle is a fact about the
+    /// window** (user report 2026-09-09).
+    ///
+    /// [`Self::resize_leaves_to_layout`] is the tab on the stage; this is every
+    /// other one, and it is here for the reason [`Self::apply_scale_factor`] and
+    /// [`Self::sync_math_layout_key`] already walk every leaf of every tab. A
+    /// DPI, a face and the rectangle this window has are facts about the
+    /// *window*; not one of them is about the pane holding the keyboard, and a
+    /// tab that answered them only when somebody looked at it would be a tab
+    /// whose shells believe whatever was true the last time it was on stage.
+    ///
+    /// **What that cost.** A session saved `maximized: true` records the window's
+    /// *normal* rectangle beside the flag, so the window opens at that rectangle,
+    /// every restored tab is built against it, and `put_the_window_on_the_glass`
+    /// asks Windows to maximize only after every shell is already running. The
+    /// tab on the stage was put right by the `Resized` that followed; the tabs
+    /// behind it were not. On the report's machine 960 logical pixels less the
+    /// focus column is too narrow for three panes, so one of them was born a bar
+    /// — and stayed one, through the whole of its shell's first prompt, until the
+    /// tab was clicked.
+    ///
+    /// Each tab is solved into [`WindowRuntime::seat_viewport`], the very
+    /// rectangle the stage was solved into and stored rather than recomputed for
+    /// A12's reason, so "every tab is solved into the same box"
+    /// ([`TabState::seat_layout`]) is true of the box as well as of the sentence.
+    /// The solve is pure and `O(seats)` and each leaf's notification is coalesced
+    /// on its own queue, so a window with a dozen tabs pays a dozen tree walks
+    /// per gesture and one `ResizePseudoConsole` per pane per gesture.
+    fn resize_hidden_leaves_to_layout(
+        &mut self,
+        observed_at: Instant,
+        context: &'static str,
+    ) -> Result<()> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let metrics = seats::seat_metrics(self.window.renderer.metrics().dpi_milli().get());
+        let viewport = self.window.seat_viewport;
+        let policy = self.window.size_policy;
+        let active = self.window.active_tab;
+        for index in 0..self.window.tabs.len() {
+            if index == active {
+                continue;
+            }
+            let tab = &self.window.tabs[index];
+            let (layout, overflow) = solve_tree(&tab.seats, viewport, &metrics, policy);
+            // Read while the renderer is still only borrowed, because the tab it
+            // is about is borrowed mutably the moment its layout lands on it.
+            let sized: Vec<(SeatId, GridSize, PhysicalSize<u32>)> =
+                leaf_resize_plan(&tab.seats, &layout, tab.focused_leaf, scale)
+                    .into_iter()
+                    .map(|target| {
+                        (
+                            target.seat,
+                            self.window
+                                .renderer
+                                .metrics()
+                                .grid_for_pixels(target.body.width, target.body.height),
+                            PhysicalSize::new(target.body.width, target.body.height),
+                        )
+                    })
+                    .collect();
+            let tab = &mut self.window.tabs[index];
+            tab.seat_layout = layout;
+            tab.seat_overflow = overflow;
+            for (seat, next_grid, physical) in sized {
+                let Some(leaf) = tab.sessions.get_mut(&seat) else {
+                    continue;
+                };
+                schedule_leaf_grid_change(leaf, next_grid, physical, observed_at, context)?;
+            }
+        }
+        Ok(())
     }
 
     /// **Every leaf of every tab, because every leaf now has a queue.**
@@ -93929,6 +94008,43 @@ mod pty_drain_budget_tests {
         );
     }
 
+    /// **PIN (user report, 2026-09-09) — a solve reaches every tab, and not only
+    /// the one on the stage.**
+    ///
+    /// `Runtime` derefs to the active tab, so `self.seats` and `self.seat_layout`
+    /// are that tab's and a walk written in terms of them is a walk over one tab.
+    /// That is the right reading of a *gesture* — the pane a hand is aimed at is
+    /// on the stage — and the wrong one for the fact underneath it, which is that
+    /// this window has a rectangle and every pane in it is inside that rectangle.
+    ///
+    /// The report is what the gap costs on the one launch where the window is not
+    /// yet the size it is going to be: a session saved `maximized: true` opens at
+    /// its normal rectangle, every restored tab is built against that, and the
+    /// maximize lands after the shells are running. The stage was corrected; the
+    /// tabs behind it kept a geometry that had already stopped being true, and one
+    /// of their panes had been born a bar.
+    ///
+    /// Mutation: take the call out of `resize_leaves_to_layout` and a tab that is
+    /// not on the stage keeps the grid it was born with until somebody clicks it.
+    #[test]
+    fn a_window_resize_reaches_the_tabs_nobody_is_looking_at() {
+        assert!(
+            method_body("resize_leaves_to_layout").contains("self.resize_hidden_leaves_to_layout("),
+            "only the stage is solved, so the tabs behind it keep the size they were born with"
+        );
+        let hidden = method_body("resize_hidden_leaves_to_layout");
+        assert!(
+            hidden.contains("self.window.seat_viewport"),
+            "a tab off the stage is solved into the box the stage was solved into, never into one \
+             derived a second time from the same inputs"
+        );
+        assert_eq!(
+            hidden.matches("schedule_leaf_grid_change(").count(),
+            1,
+            "one scheduler, the same one every leaf on the stage goes through"
+        );
+    }
+
     /// PIN — **the release walks every leaf, because every leaf now has a queue.**
     ///
     /// A coalescer whose release only ever asked the focused leaf would be worse than no
@@ -101615,6 +101731,12 @@ struct LeafResizeTarget {
 /// rectangle, and which pane holds the keyboard is not one of that rectangle's
 /// inputs — the version of this code that let the two mix is the one that told a
 /// narrow focused pane it had the primary pane's columns.
+///
+/// **A seat that is not being shown as a pane is not in the plan at all**, which
+/// is [`seats::shell_body_viewport`]'s whole subject: an unplaced seat has no
+/// rectangle, and a seat the concession ladder folded into a bar has one that is
+/// chrome. Either way the leaf keeps the width it last really had until a later
+/// solve puts a pane back under it.
 fn leaf_resize_plan(
     seats: &seats::Seats,
     layout: &SeatLayout,
@@ -101625,13 +101747,36 @@ fn leaf_resize_plan(
         .terminals()
         .into_iter()
         .filter_map(|seat| {
-            seats::pane_body_viewport(seats, layout, seat, scale).map(|body| LeafResizeTarget {
+            seats::shell_body_viewport(seats, layout, seat, scale).map(|body| LeafResizeTarget {
                 seat,
                 body,
                 focused: seat == focused,
             })
         })
         .collect()
+}
+
+/// One tree solved into one box, with L4's presentation standing behind it.
+///
+/// [`solve_seats`]' middle, lifted out so that a tab which is not on the stage is
+/// solved by the very same two lines rather than by a second reading of them
+/// (see [`Runtime::resize_hidden_leaves_to_layout`]). The rectangle-to-viewport
+/// conversion above it stays where it is, because only a window can make it.
+///
+/// Under `Sovereign` the solver has no way to fail, so `fit_what_fits` is
+/// unreachable from a window the user sized — which is the ruling: the fold is
+/// the program's answer to a rectangle it chose, not an answer anyone gets for
+/// dragging their own window narrow.
+fn solve_tree(
+    seats: &seats::Seats,
+    viewport: LogicalRect,
+    metrics: &SeatMetrics,
+    policy: SizePolicy,
+) -> (SeatLayout, Option<seats::FitOverflow>) {
+    match seats.solve(viewport, metrics, policy) {
+        Ok(layout) => (layout, None),
+        Err(_) => seats::fit_what_fits(seats, viewport, metrics),
+    }
 }
 
 /// Solve the tree against the current surface, and pick out the terminal seat.
@@ -101666,14 +101811,7 @@ fn solve_seats(
         // the panes never reflow just because you went looking for a tab.
         seats::rail_inset_device_px(rail, scale_ppm),
     );
-    // Under `Sovereign` the solver has no way to fail, so `fit_what_fits` is
-    // unreachable from a window the user sized — which is the ruling: the fold
-    // is the program's answer to a rectangle it chose, not an answer anyone
-    // gets for dragging their own window narrow.
-    let (layout, overflow) = match seats.solve(viewport, &metrics, policy) {
-        Ok(layout) => (layout, None),
-        Err(_) => seats::fit_what_fits(seats, viewport, &metrics),
-    };
+    let (layout, overflow) = solve_tree(seats, viewport, &metrics, policy);
     // **The focused seat's body, which is what the renderer keeps this for.**
     //
     // `bt_render`'s own `self.seat` says so twice — "outside this function
@@ -105474,6 +105612,165 @@ mod tests {
             .find(|placement| placement.id == seat)
             .expect("the seat was placed")
             .presentation
+    }
+
+    /// The window a restore opens in on the machine the report came off: 960x600
+    /// logical at 200%, which is the *normal* rectangle `session.json` records
+    /// beside `maximized: true`, and the tree that window is asked to hold —
+    /// three terminals side by side, which by the metrics table want 260 apiece
+    /// and cannot have it once the focus column has taken its 280.
+    fn restored_three_terminals_before_the_window_is_maximized()
+    -> (seats::Seats, SeatMetrics, SeatLayout) {
+        let dpi_milli = 2_000_u32;
+        let metrics = seats::seat_metrics(dpi_milli);
+        let scale_ppm = seats::scale_ppm(dpi_milli);
+        // Focus mode, which is what the report's `settings.json` says and what
+        // costs the stage the card column's own width.
+        let rail = seats::RailState {
+            focus: true,
+            ..seats::RailState::default()
+        };
+        let viewport = seats::logical_viewport(
+            1920,
+            1200,
+            scale_ppm,
+            seats::rail_inset_device_px(rail, scale_ppm),
+        );
+        let mut seats = seats::Seats::lone_terminal();
+        let first = seats.identity();
+        let second = seats
+            .split_terminal(&metrics, first, bt_layout::Axis::Row, false)
+            .expect("a second terminal seats beside the first");
+        seats
+            .split_terminal(&metrics, second, bt_layout::Axis::Row, false)
+            .expect("and a third beside that");
+        let layout = seats
+            .solve(viewport, &metrics, SizePolicy::Lawful)
+            .expect("L3 buys the room rather than refusing");
+        (seats, metrics, layout)
+    }
+
+    /// One pane's column count, from the rectangle it is sized from.
+    ///
+    /// The solve is stood in for the way
+    /// [`minimizing_a_window_never_tells_its_shell_the_width_of_the_icon`] stands
+    /// it in — a cell of the shipped face at 200% is 19 physical pixels wide —
+    /// and `CellMetrics::grid_for_pixels`' own floor is applied, because the
+    /// floor is where the two columns in the report came from.
+    fn columns_of(width: u32) -> u32 {
+        (width / 19).clamp(
+            u32::from(bt_render::CellMetrics::MIN_COLUMNS),
+            u32::from(u16::MAX),
+        )
+    }
+
+    /// **PIN (user report, 2026-09-09) — a pane is never born at the width of a
+    /// bar.**
+    ///
+    /// The report is a restored window in focus mode whose tab held three
+    /// PowerShell panes: the third pane's first prompt read `(b` on one line and
+    /// `ase) PS D:\Documents\SyncFolder\Application> ` on the next, and that
+    /// tab's card drew the seat as rows of two characters. `session.json` names
+    /// the cause — the window is saved `maximized: true` beside a *normal*
+    /// rectangle of 960x600, and `put_the_window_on_the_glass` asks Windows to
+    /// maximize it only after every shell has been spawned. So the tabs are
+    /// built against 960 logical pixels, focus mode takes 280 of them for the
+    /// card column, and L3 buys the missing room exactly as it is supposed to:
+    /// the seat farthest from the focus stops being a pane and becomes a
+    /// [`bt_layout::COLLAPSED_EXTENT`] bar.
+    ///
+    /// **A bar is a presentation, and 24 logical pixels is not a size a shell may
+    /// be told about.** At 200% it is 48 physical pixels, which is
+    /// `CellMetrics::MIN_COLUMNS`, which is two — so the ConPTY was spawned two
+    /// columns wide and the shell printed its prompt there. A reflow is not an
+    /// undo (the same sentence
+    /// [`minimizing_a_window_never_tells_its_shell_the_width_of_the_icon`]
+    /// writes): every row that scrolled off at that width stays two characters
+    /// to the row for the rest of the pane's life.
+    ///
+    /// Red gate: size the shell from [`seats::pane_body_viewport`], which is what
+    /// `create_tab_state` did, and the bar's own 48 pixels come through as two
+    /// columns.
+    #[test]
+    fn a_pane_is_never_born_at_the_width_of_a_bar() {
+        let (seats, metrics, layout) = restored_three_terminals_before_the_window_is_maximized();
+        // The ladder did what the ladder is for, and this test is not an argument
+        // against it: one of the three is a bar.
+        let bar = seats
+            .terminals()
+            .into_iter()
+            .find(|seat| presentation_of(&layout, *seat).is_collapsed_along(bt_layout::Axis::Row))
+            .expect("the window is too narrow for three panes, so L3 folded one");
+        // What that bar is worth as a terminal, and it is the number in the
+        // report.
+        let folded = seats::pane_body_viewport(&seats, &layout, bar, 2.0)
+            .expect("a collapsed seat still holds its place in the tree");
+        assert_eq!(
+            columns_of(folded.width),
+            u32::from(bt_render::CellMetrics::MIN_COLUMNS),
+            "the bar really is worth two columns — this is the rectangle the report came off"
+        );
+        // And what the shell is actually born into.
+        let born = seats::birth_body_viewport(&seats, &layout, bar, &metrics, 2.0);
+        assert!(
+            columns_of(born.width) > u32::from(bt_render::CellMetrics::MIN_COLUMNS),
+            "a shell was spawned at the width of a bar: {} columns",
+            columns_of(born.width)
+        );
+        // Not merely "more than two" — the floor is the solver's own minimum for
+        // a terminal, which is the smallest rectangle this product ever shows one
+        // in.
+        let floor = bt_layout::MIN_PANE_W.floor_px() as u32 * 2;
+        assert!(
+            born.width >= floor,
+            "born {} physical pixels wide, and a terminal pane is never narrower than {floor}",
+            born.width
+        );
+        // The two panes the ladder left alone are untouched: this rule is about
+        // seats that are not being shown as panes, and about nothing else.
+        for seat in seats.terminals().into_iter().filter(|seat| *seat != bar) {
+            assert_eq!(
+                seats::birth_body_viewport(&seats, &layout, seat, &metrics, 2.0).width,
+                seats::pane_body_viewport(&seats, &layout, seat, 2.0)
+                    .expect("a pane was placed")
+                    .width,
+                "a pane's own rectangle is the one it is born into"
+            );
+        }
+    }
+
+    /// **The other half of it: a seat that is a bar is not resized either.**
+    ///
+    /// The birth is only the first of the two roads from a solved rectangle to a
+    /// ConPTY. The second is [`Runtime::resize_leaves_to_layout`], which reads
+    /// one rectangle per terminal leaf out of [`leaf_resize_plan`] — and a window
+    /// dragged narrow enough to fold a pane used to send that fold's 24 pixels
+    /// down the same road, live, to a shell that had been running for hours.
+    ///
+    /// A seat the solver did not place at all already answers this way ("the leaf
+    /// keeps the one it has until a later solve places it"); a bar is the same
+    /// fact said about a seat that is on screen as chrome.
+    ///
+    /// Red gate: read the plan off `pane_body_viewport` and the folded seat comes
+    /// back in it, 48 pixels wide.
+    #[test]
+    fn a_seat_the_ladder_folded_into_a_bar_carries_no_resize() {
+        let (seats, _, layout) = restored_three_terminals_before_the_window_is_maximized();
+        let bar = seats
+            .terminals()
+            .into_iter()
+            .find(|seat| presentation_of(&layout, *seat).is_collapsed_along(bt_layout::Axis::Row))
+            .expect("the window is too narrow for three panes, so L3 folded one");
+        let plan = leaf_resize_plan(&seats, &layout, seats.focus(), 2.0);
+        assert!(
+            !plan.iter().any(|target| target.seat == bar),
+            "a bar was handed to a shell as a width"
+        );
+        assert_eq!(
+            plan.len(),
+            seats.terminals().len() - 1,
+            "and every seat that is still a pane is still in the plan"
+        );
     }
 
     /// **A window too narrow for its restored tree degrades explicitly, and the

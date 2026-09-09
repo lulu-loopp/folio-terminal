@@ -2375,6 +2375,89 @@ pub fn pane_body_viewport(
     Some(viewport)
 }
 
+/// The rectangle a **shell** in this seat is sized from, or `None` when the
+/// solver is not showing this seat as a pane at all.
+///
+/// [`pane_body_viewport`]'s answer for a seat that is on screen as a pane, and
+/// `None` for one the concession ladder has turned into a *bar*: L3 squeezes a
+/// non-focus seat to [`bt_layout::COLLAPSED_EXTENT`] along the axis it had to
+/// give on, and L4's foot strip does the same on the other one. Twenty-four
+/// logical pixels carries a name and a mark. It is chrome, and the grid it
+/// divides down to is `CellMetrics::MIN_COLUMNS`, which is two.
+///
+/// **A fold is a presentation, not a size the shell is owed.** Telling a child
+/// it is two columns wide re-wraps everything on its screen at two columns, and
+/// a reflow is not an undo — the rows that scroll off at that width stay two
+/// characters to the row for the rest of the pane's life. So the answer for a
+/// bar is the answer this already gives for a seat the solver could not place at
+/// all: nothing, and the leaf keeps the width it last really had.
+///
+/// A rectangle the *user* chose is untouched, which is the same rule read from
+/// the other side: under [`SizePolicy::Sovereign`] nothing is ever collapsed —
+/// the floors relax together instead — so a divider dragged until a pane really
+/// is two columns wide still says so to the shell.
+#[must_use]
+pub fn shell_body_viewport(
+    seats: &Seats,
+    layout: &SeatLayout,
+    seat: SeatId,
+    scale: f32,
+) -> Option<SeatViewport> {
+    if layout.get(seat)?.presentation != Presentation::Full {
+        return None;
+    }
+    pane_body_viewport(seats, layout, seat, scale)
+}
+
+/// The rectangle a shell is **born** into.
+///
+/// The pane's own body where the solver is showing a pane, and where it is not —
+/// a seat the ladder folded into a bar, or one a refused solve left unplaced —
+/// the smallest body this product ever shows a pane of this kind in.
+///
+/// A birth is the one moment [`shell_body_viewport`]'s answer will not do. Every
+/// later solve can say "nothing, keep what you have"; a leaf being built has
+/// nothing to keep, and the two rectangles it could be handed instead are both
+/// wrong — a bar's are two columns, and no rectangle at all is an error thrown in
+/// front of a window that was only ever asked to open a tab.
+///
+/// The floor is the solver's own `min_size` for the kind rather than a number of
+/// this module's, so the day §2.1's table is overturned this moves with it.
+#[must_use]
+pub fn birth_body_viewport(
+    seats: &Seats,
+    layout: &SeatLayout,
+    seat: SeatId,
+    metrics: &SeatMetrics,
+    scale: f32,
+) -> SeatViewport {
+    let kind = layout
+        .get(seat)
+        .map_or(SeatKind::Terminal, |placement| placement.kind);
+    let floor = |axis| {
+        logical_to_device(
+            metrics.min_size(kind, axis).subpixels() as f32 / SUBPIXELS_PER_PX as f32,
+            metrics.scale_ppm(),
+        )
+        .max(1)
+    };
+    let (width, height) = (floor(Axis::Row), floor(Axis::Col));
+    if let Some(body) = shell_body_viewport(seats, layout, seat, scale) {
+        return body;
+    }
+    // A bar keeps its place — the pane it stands for is at that corner of the
+    // window and the tree still says so — and only its extent is refused.
+    let mut body = pane_body_viewport(seats, layout, seat, scale).unwrap_or(SeatViewport {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    });
+    body.width = body.width.max(width);
+    body.height = body.height.max(height);
+    body
+}
+
 /// The seat, less its head and nothing else.
 fn pane_body_below_head(
     seats: &Seats,

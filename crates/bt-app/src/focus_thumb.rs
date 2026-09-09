@@ -1013,46 +1013,100 @@ fn transcript_tail(
     if rows == 0 {
         return (Vec::new(), false);
     }
-    let (_, grid_rows) = session.live_dimensions();
+    let (grid_columns, grid_rows) = session.live_dimensions();
+    let grid_columns = grid_columns.get();
     let wanted = rows.saturating_add(skip);
     let mut climb: Vec<String> = Vec::with_capacity(wanted);
-    for row in (0..grid_rows.get()).rev() {
-        let Some(captured) = session.live_row(row) else {
-            continue;
-        };
-        let text = row_text(&captured);
-        let text = text.trim_end();
-        // Still climbing past the blank floor: nothing has been kept yet, so an
-        // empty row is not a blank line inside the tail, it is the floor.
-        if text.is_empty() && climb.is_empty() {
-            continue;
-        }
-        climb.push(cut_to(text, columns));
-        if climb.len() == wanted {
-            break;
-        }
-    }
+    let live = (0..grid_rows.get())
+        .rev()
+        .filter_map(|row| session.live_row(row))
+        .map(|captured| {
+            (
+                Cow::Owned(row_text(&captured)),
+                wrapped_at_a_width_the_pane_no_longer_has(
+                    captured.continues,
+                    captured.captured_columns,
+                    grid_columns,
+                ),
+            )
+        });
     // **And on past the top of the screen, into the two planes the pane draws
     // above it** — the staged rows first, because they left the screen after
     // every frozen line did. Nothing here asks anybody anything: both are this
     // session's own memory, and the walk stops the moment the card is full.
-    if climb.len() < wanted && !session.terminal_modes().alternate_screen {
-        let staged = session
-            .transcript()
-            .staged_rows_newest_first()
-            .map(|staged| Cow::Owned(row_text(&staged.row)));
-        let frozen = session
-            .document()
-            .entries()
-            .values()
-            .rev()
-            .map(|entry| Cow::Borrowed(entry.line.text.as_str()));
-        for text in staged.chain(frozen) {
-            climb.push(cut_to(text.trim_end(), columns));
-            if climb.len() == wanted {
-                break;
-            }
+    let behind = (!session.terminal_modes().alternate_screen)
+        .then(|| {
+            let staged = session
+                .transcript()
+                .staged_rows_newest_first()
+                .map(|staged| {
+                    (
+                        Cow::Owned(row_text(&staged.row)),
+                        wrapped_at_a_width_the_pane_no_longer_has(
+                            staged.row.continues,
+                            staged.row.captured_columns,
+                            grid_columns,
+                        ),
+                    )
+                });
+            let frozen = session.document().entries().values().rev().map(|entry| {
+                (
+                    Cow::Borrowed(entry.line.text.as_str()),
+                    wrapped_at_a_width_the_pane_no_longer_has(
+                        entry.line.wrap_split,
+                        entry
+                            .line
+                            .fragments
+                            .last()
+                            .map_or(0, |fragment| fragment.captured_columns),
+                        grid_columns,
+                    ),
+                )
+            });
+            staged.chain(frozen)
+        })
+        .into_iter()
+        .flatten();
+    // **A wrap the pane no longer has is not a wrap the card draws** (user
+    // report, 2026-09-09).
+    //
+    // A row is the unit here and stays the unit: the pane broke that line at that
+    // column and the card is a picture of the pane, which is
+    // `the_tail_carries_the_rows_staged_between_the_screen_and_history`'s whole
+    // subject. What `wrapped_at_a_width_the_pane_no_longer_has` adds is
+    // the one case where the row is not the pane's own — the two planes behind
+    // the screen keep the geometry each row was *captured* on, and a row captured
+    // narrower than the pane is now is a break at a column the pane has not had
+    // since. The screen itself re-wrapped when the pane was resized; the planes
+    // behind it did not, and cannot, because that width is the provenance the
+    // rest of the product reads them by.
+    //
+    // The report is what that looks like when the two widths are far apart: a
+    // shell born in a folded seat printed its prompt two columns wide, and the
+    // card went on drawing `(b`, `as`, `e)`, ` P`, `S` down the side of a pane
+    // sixty columns across long after the pane's own screen had put the line back
+    // together.
+    //
+    // The cut stays where it was. A card is a **narrower** picture of a pane, so
+    // its right edge is its own (`cut_to`) and never the width the text happened
+    // to be captured at.
+    let mut line: Option<String> = None;
+    for (text, continues) in live.chain(behind) {
+        if continues && let Some(open) = line.as_mut() {
+            open.insert_str(0, &text);
+            continue;
         }
+        let Some(done) = line.replace(text.into_owned()) else {
+            continue;
+        };
+        if keep_card_line(&done, columns, wanted, &mut climb) {
+            break;
+        }
+    }
+    if let Some(done) = line
+        && climb.len() < wanted
+    {
+        keep_card_line(&done, columns, wanted, &mut climb);
     }
     // **Clamped to what is there**, which is the whole of "a window driven past
     // the top stops at the top". A seat holding fewer rows than the reader asked
@@ -1065,6 +1119,49 @@ fn transcript_tail(
     let aimed = skip.min(climb.len().saturating_sub(rows));
     let window: Vec<String> = climb.into_iter().skip(aimed).take(rows).rev().collect();
     (window, aimed > 0)
+}
+
+/// Whether this piece of text was broken off the one below it at a column the
+/// pane does not have any more.
+///
+/// `continues` and `wrap_split` both say "the row below this one is the rest of
+/// this line". That is a fact about the grid the row was *captured* on, which the
+/// two planes behind the screen keep for ever — `captured_columns` is immutable
+/// provenance, and the rest of the product reads them by it — while the screen
+/// re-wraps on every resize. So the two agree while the pane is the width it was,
+/// and stop agreeing the moment it is not.
+///
+/// A card draws rows, and a row is the pane's own break. This is the exception,
+/// and the whole of it: a break at a column the pane has not had since is not a
+/// break the pane is drawing, so the pieces it separated are rejoined before the
+/// card cuts them to its own width.
+///
+/// Zero is a row with no capture geometry at all — a synthetic row, a fixture —
+/// and it answers `false` rather than guessing a width, exactly as the
+/// transcript's own truncation gate declines such a row.
+fn wrapped_at_a_width_the_pane_no_longer_has(
+    continues: bool,
+    captured_columns: u32,
+    columns: u32,
+) -> bool {
+    continues && captured_columns > 0 && captured_columns < columns
+}
+
+/// Keep one line of the climb, and answer whether the card is now full.
+///
+/// The blank floor is this function's rather than the walk's, because the climb
+/// it guards assembles each of its lines out of however many rows the terminal
+/// broke that line across: a line is blank when the whole of it is, and asking
+/// that of one row at a time was an answer about a fragment.
+fn keep_card_line(text: &str, columns: usize, wanted: usize, climb: &mut Vec<String>) -> bool {
+    let text = text.trim_end();
+    // Still climbing past the blank floor: nothing has been kept yet, so an
+    // empty row is not a blank line inside the tail, it is the floor.
+    if text.is_empty() && climb.is_empty() {
+        return false;
+    }
+    climb.push(cut_to(text, columns));
+    climb.len() >= wanted
 }
 
 /// One captured row's text.
@@ -1977,6 +2074,58 @@ mod tests {
     /// is what the branch adds: the walk skips blanks only while it is still
     /// under the floor. What was wrong was the doc comment above it, which said
     /// "the last N rows that have anything on them".
+    /// **PIN (user report, 2026-09-09) — a card draws lines, and never two
+    /// characters to the row.**
+    ///
+    /// The report is a tab whose third pane came up in a seat the layout ladder
+    /// had folded into a bar, so its ConPTY was spawned two columns wide and the
+    /// shell printed its first prompt there. By the time the tab was on the stage
+    /// the pane was 60 columns across and its own screen had re-wrapped, but the
+    /// card went on drawing `(b`, `as`, `e)`, ` P`, `S`, ` D:` — one row of the
+    /// pane's staging plane per line of the card.
+    ///
+    /// A card draws rows, and that is right — the pane broke the line there and
+    /// the card is a picture of the pane, which is
+    /// [`the_tail_carries_the_rows_staged_between_the_screen_and_history`]'s
+    /// subject. What is wrong here is that these breaks are not the pane's. The
+    /// screen re-wrapped when the pane was widened; the two planes behind it keep
+    /// the geometry each row was captured on, because that width is the
+    /// provenance the rest of the product reads them by — so they went on
+    /// offering breaks at column two to a pane that had not been two columns wide
+    /// for minutes.
+    ///
+    /// Red gate: drop the `captured_columns` term from
+    /// [`wrapped_at_a_width_the_pane_no_longer_has`] and the sibling test above
+    /// goes red instead, with five rows of one line drawn as one; drop the whole
+    /// call and this one comes back in pieces.
+    #[test]
+    fn a_card_draws_a_wrapped_line_whole_and_never_two_characters_to_the_row() {
+        // The pane the report came off: a shell born in a folded seat, two
+        // columns wide, and a screen too short to hold what it printed — so most
+        // of the prompt is in staging by the time anything looks at it.
+        let mut shell = DualPlaneSession::new(
+            NonZeroU32::new(2).expect("2 is not zero"),
+            NonZeroU32::new(3).expect("3 is not zero"),
+        );
+        shell
+            .feed(b"(base) PS D:\\Documents> ")
+            .expect("a shell takes its own output");
+        // And then given the width the seat always had for it.
+        shell
+            .resize(
+                NonZeroU32::new(60).expect("60 is not zero"),
+                NonZeroU32::new(24).expect("24 is not zero"),
+            )
+            .expect("a pane is resized when its tab reaches the stage");
+        let (lines, _) = transcript_tail(&shell, 40, 8, 0);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("(base) PS D:\\Documents>")),
+            "the card drew the fragments instead of the line: {lines:?}"
+        );
+    }
+
     #[test]
     fn blank_rows_inside_the_tail_are_kept() {
         let mut shell = session();
