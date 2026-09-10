@@ -28,6 +28,19 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A long animated GIF now plays in the preview instead of showing its first
+  frame.** Folio used to read every frame of an animation into memory before
+  drawing any of it, and a file whose frames did not all fit was drawn as its
+  first frame and left there, with nothing to say why — which for a screen
+  recording is most of them: a few hundred frames at any useful size is more
+  pixels than a preview of one file is worth holding. Frames are now read a
+  second or so ahead of the one on the screen and let go of behind it, so the
+  length of the file no longer decides whether it moves, and what it costs while
+  it plays is the same whether it is eight frames long or four hundred. A file
+  Folio still will not play — one whose single frames are larger than it will
+  hold, or that will not read past the first — says so in the foot of the pane
+  instead of just sitting still.
+
 - **A file that says what it is keeps saying it after you save.** Some files
   begin with a few bytes that name their own encoding — the ones Windows
   PowerShell writes are the common case here — and Folio read those bytes,

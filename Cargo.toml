@@ -105,6 +105,14 @@ glyphon = "0.12"
 #   accept the four packages then rather than on a guess.
 hayro = { version = "=0.7.1", default-features = false, features = ["embed-fonts"] }
 image = { version = "=0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+# **The GIF container, named directly rather than reached through `image`.** It is
+# already in the lock file — `image`'s own `gif` feature is what put it there, at
+# this exact version — so this adds no package to the tree and nothing to
+# `THIRD-PARTY-NOTICES.md`. What it adds is a *sequential* reader: `image` hands
+# an animation back as a `Frames<'a>`, which is a `Box<dyn Iterator>` and is not
+# `Send`, and `crates/bt-app/src/animation.rs` needs a decoder that can be moved
+# to a worker and back to stream a long file a ring at a time.
+gif = { version = "=0.14.2", default-features = false, features = ["std", "color_quant"] }
 mitex = "=0.2.4"
 mitex-spec-gen = "=0.2.4"
 pollster = "0.4"
