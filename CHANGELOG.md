@@ -92,6 +92,14 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- **The preview's `Open` menu opens when the pointer rests on it, as the other
+  menus do.** Resting on the `Open` control at the right of a preview's
+  breadcrumb row for a quarter of a second brings up the same menu a click
+  brings up, and clicking still opens it at once. Moving onto the menu keeps it
+  there; leaving both the control and the menu puts it away. This is the rule the
+  `⌄` in a pane's head and the one beside the tab strip's `+` have always
+  followed, and it applies to a preview in a pane and to one in a window of its
+  own.
 - **Opening Folio while it is already running opens a tab in the window you used
   last, instead of a second window.** From Explorer's menu, from
   `folio-here.cmd`, from a pinned icon or a shortcut: the folder you asked for

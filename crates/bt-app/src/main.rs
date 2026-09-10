@@ -7116,6 +7116,9 @@ struct FileMenuTarget {
     /// The folded levels this menu is a list of, **deepest first** — empty on
     /// every face but the `…` chip's (user ruling 2026-08-25).
     crumbs: Vec<FoldedLevel>,
+    /// The preview rail whose `Open ⌄` raised it, or `None` on every other door
+    /// — see [`FileMenuState::rail`], whose field this fills in.
+    rail: Option<PreviewSurface>,
 }
 
 /// **One level a folded breadcrumb is standing in for** — a row of the `…`
@@ -7177,6 +7180,21 @@ struct FileMenuState {
     /// under a hand already moving down it.
     crumbs: Vec<FoldedLevel>,
     hover: Option<profiles::FileMenuRow>,
+    /// **Which preview rail's `Open ⌄` this menu belongs to**, or `None` when it
+    /// was raised by anything else (user ruling 2026-09-10).
+    ///
+    /// [`PaneMenuState::seat`]'s field, one menu over and for its reason: the
+    /// hover clock has to be able to tell "the menu that is up is *this* pill's"
+    /// from "some other menu is up", and the two answers are the difference
+    /// between a hand resting on a pill doing nothing and a hand resting on a
+    /// pill that is owed a menu. A window can show two preview rails at once — a
+    /// split, or a float over a docked pane — so "the document menu is up"
+    /// cannot stand in for it.
+    ///
+    /// A surface and not a rectangle, because the rectangle moves: a divider
+    /// dragged while the menu is up puts the pill somewhere else, and the menu is
+    /// still that pill's.
+    rail: Option<PreviewSurface>,
 }
 
 /// The pane head's context menu, and the head it was raised on (user ruling,
@@ -7275,56 +7293,80 @@ struct TabMenuState {
     submenu_hold_until: Option<Instant>,
 }
 
-/// **Both chevrons' clocks, and the one place their policy is applied** (user
-/// ruling, 2026-08-16).
+/// **Every hover-opening control's clock, and the one place their policy is
+/// applied** (user ruling, 2026-08-16; the preview rail's `Open ⌄` joined them
+/// on 2026-09-10).
 ///
 /// The ruling's whole content is that the tab strip's `⌄` and the pane head's
 /// `⌄` behave identically — "和 tab 那边语义对齐" — and the one way to make that
 /// structurally true rather than true-for-now is to give them no separate code
 /// to drift in. [`Self::observe`] is the only function in this program that
-/// starts either clock and [`Self::due`] the only one that reads either, so a
-/// change to the policy is a change to one function that both buttons already
-/// go through.
+/// starts any of these clocks and [`Self::due`] the only one that reads any of
+/// them, so a change to the policy is a change to one function that every one of
+/// these buttons already goes through.
 ///
-/// Two [`profiles::ChevronGate`]s rather than one, because they are two
+/// **What decides membership is the owner's principle of 2026-09-10: a control
+/// that expands a menu opens on hover; a control that performs an action must be
+/// clicked.** The rail's `Open` pill was click-only for a fortnight for no reason
+/// but that it is spelled with a word instead of with a `⌄` — it raises
+/// [`profiles::FileMenuSubject::Document`] and nothing else, so it is a
+/// menu-opener and it belongs here. Adding it was adding a field and a tuple:
+/// that is the shape this type exists to have.
+///
+/// Three [`profiles::ChevronGate`]s rather than one, because they are three
 /// *clocks*: a pointer resting on the pane head's chevron while the strip's menu
 /// is up is one gate opening and the other one's grace running, at the same
-/// instant, and a shared clock could only tell one of those two stories.
+/// instant, and a shared clock could only tell one of those stories.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ChevronGates {
     /// The tab strip's `⌄`, beside the `+`.
     profile: profiles::ChevronGate,
     /// The pane head's.
     pane: profiles::ChevronGate,
+    /// A preview rail's `Open ⌄` pill — [`Runtime::open_preview_rail_menu`]'s
+    /// button, on whichever of the two preview hosts is wearing it.
+    ///
+    /// One gate for both hosts and not one per surface, on the pane gate's own
+    /// reasoning: a window has one file menu, so at most one of these pills can
+    /// be owed anything, and *which* pill the rest belongs to is re-asked of the
+    /// pointer at maturity rather than remembered with the clock.
+    rail: profiles::ChevronGate,
 }
 
 impl ChevronGates {
-    /// Tell both gates where the pointer stands and which menus are up.
+    /// Tell every gate where the pointer stands and which menus are up.
     ///
-    /// One call taking four arguments rather than two calls taking two, and that
-    /// shape is the point: a caller cannot update one gate and forget the other,
+    /// One call taking three pairs rather than three calls taking one, and that
+    /// shape is the point: a caller cannot update one gate and forget another,
     /// because there is no way to say so.
     fn observe(
         &mut self,
         profile: (profiles::ChevronPointer, bool),
         pane: (profiles::ChevronPointer, bool),
+        rail: (profiles::ChevronPointer, bool),
         now: Instant,
     ) {
         self.profile.observe(profile.0, profile.1, now);
         self.pane.observe(pane.0, pane.1, now);
+        self.rail.observe(rail.0, rail.1, now);
     }
 
-    /// The earliest instant either gate has something to do.
+    /// The earliest instant any gate has something to do.
     fn deadline(&self) -> Option<Instant> {
-        earliest_deadline([self.profile.deadline(), self.pane.deadline()])
+        earliest_deadline([
+            self.profile.deadline(),
+            self.pane.deadline(),
+            self.rail.deadline(),
+        ])
     }
 
-    /// Both gates are cleared together by everything that is not a pointer move
+    /// Every gate is cleared together by everything that is not a pointer move
     /// — Esc, a click, another popup opening. Whatever put a menu away has
     /// already answered the question the clocks were asking.
     fn clear(&mut self) {
         self.profile.clear();
         self.pane.clear();
+        self.rail.clear();
     }
 }
 
@@ -52753,6 +52795,10 @@ impl Runtime<'_> {
                     levels: crumbs.len(),
                 },
                 crumbs,
+                // The `…` chip is the pill's neighbour and not the pill: its
+                // list is the folded path's, and the hover rule the pill is
+                // under is written against the pill's own box.
+                rail: None,
             },
             [chip[0], chip[3]],
         )
@@ -52793,6 +52839,10 @@ impl Runtime<'_> {
                 activation: RowActivation::DefaultApp(path),
                 subject: profiles::FileMenuSubject::Document,
                 crumbs: Vec::new(),
+                // **Whose menu this is**, for the hover clock — the one door
+                // that fills this in, because it is the one control the clock is
+                // about.
+                rail: Some(surface),
             },
             [pill[0], pill[3]],
         )
@@ -66842,6 +66892,7 @@ impl Runtime<'_> {
             subject: target.subject,
             crumbs: target.crumbs,
             hover: None,
+            rail: target.rail,
         });
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -66895,6 +66946,7 @@ impl Runtime<'_> {
                 activation: files_row_activation(&root, key),
                 subject,
                 crumbs: Vec::new(),
+                rail: None,
             },
             [rect[0], rect[3]],
         )
@@ -66922,6 +66974,7 @@ impl Runtime<'_> {
                 activation: files_row_activation(&files.files.root, &row.key),
                 subject,
                 crumbs: Vec::new(),
+                rail: None,
             });
         }
         let Some(seats::ChromeTarget::FilesRow { seat, index }) = self.chrome_target_at(position)
@@ -66965,6 +67018,7 @@ impl Runtime<'_> {
             }),
             subject,
             crumbs: Vec::new(),
+            rail: None,
         })
     }
 
@@ -67063,6 +67117,11 @@ impl Runtime<'_> {
         if self.window.file_menu.take().is_none() {
             return Ok(false);
         }
+        // The pill's gate goes with it, on [`Self::close_profile_menu`]'s note: a
+        // grace still running against a menu that has already gone would fire a
+        // second close on an empty state, and a rest maturing a frame later would
+        // raise a menu the thing that closed this one had just answered.
+        self.window.chevrons.rail.clear();
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -70245,20 +70304,81 @@ impl Runtime<'_> {
             (None, true) => (profiles::ChevronPointer::Surface, pane_open),
             (None, false) => (profiles::ChevronPointer::Away, pane_open),
         };
+        // **And the preview rail's `Open ⌄`, by the same three questions** (user
+        // ruling 2026-09-10: 「展开菜单的控件 hover 就开,执行动作的控件必须点」).
+        //
+        // `on_rail_pill` names a *surface* where the pane's names a seat, and
+        // `rail_menu` is the surface whose pill raised the menu that is up — so
+        // the `open` flag handed to the gate is again "the menu that is up is
+        // this button's", and a hand walking from a docked rail's pill onto a
+        // float's arms the float's exactly as it arms a second pane head's.
+        //
+        // The menu's own region is its frame: this face has no submenu, so
+        // [`profiles::file_menu_hit`] answering at all is the whole of "the hand
+        // is still on the menu" — no safety triangle, because there is no child
+        // to cut a corner towards.
+        let rail_menu = self.window.file_menu.as_ref().and_then(|menu| menu.rail);
+        let rail_open = rail_menu.is_some();
+        let on_rail_pill =
+            position.and_then(|position| self.preview_open_pill_at(position, target));
+        let rail_on_surface = rail_open
+            && position.is_some_and(|position| {
+                self.file_menu_layout().is_some_and(|layout| {
+                    profiles::file_menu_hit(&layout, position.x, position.y).is_some()
+                })
+            });
+        let (rail_where, rail_owner_open) = match (on_rail_pill, rail_on_surface) {
+            (Some(surface), _) => (profiles::ChevronPointer::Button, rail_menu == Some(surface)),
+            (None, true) => (profiles::ChevronPointer::Surface, rail_open),
+            (None, false) => (profiles::ChevronPointer::Away, rail_open),
+        };
         self.window.chevrons.observe(
             (profile_where, profile_open),
             (pane_where, pane_owner_open),
+            (rail_where, rail_owner_open),
             now,
         );
     }
 
-    /// **The two `⌄` clocks, matured** — the one place either menu is opened or
-    /// closed by time rather than by a press.
+    /// **Which preview rail's `Open ⌄` the pointer is standing on**, if it is
+    /// standing on one (user ruling 2026-09-10).
     ///
-    /// Both gates are read through [`profiles::ChevronGate::due`] and acted on by
+    /// Both hosts, floats first, on [`Self::file_row_under`]'s own order: a
+    /// window is drawn over the panes, so a point inside a float belongs to the
+    /// float — and a float that covers a docked pill without offering one of its
+    /// own is an answer of "no pill", not a fall-through to the pane underneath.
+    ///
+    /// The docked answer is the [`seats::ChromeTarget`] the caller has already
+    /// paid for rather than a second walk of the tree; the float sweep is only
+    /// entered when there is a float to sweep, because [`Self::float_hit_at`]
+    /// measures two captions before it looks at anything.
+    fn preview_open_pill_at(
+        &mut self,
+        position: PhysicalPosition<f64>,
+        docked: Option<seats::ChromeTarget>,
+    ) -> Option<PreviewSurface> {
+        let any_float = self.window.float.hit_order().next().is_some();
+        if any_float && let Some((id, part)) = self.float_hit_at(position) {
+            return matches!(
+                part,
+                float::FloatPart::Rail(seats::PreviewRailPart::OpenWith)
+            )
+            .then_some(PreviewSurface::Float(id));
+        }
+        match docked {
+            Some(seats::ChromeTarget::PreviewOpenWith(seat)) => Some(self.preview_here(seat)),
+            _ => None,
+        }
+    }
+
+    /// **The three hover-open clocks, matured** — the one place any of these
+    /// menus is opened or closed by time rather than by a press.
+    ///
+    /// Every gate is read through [`profiles::ChevronGate::due`] and acted on by
     /// the same two verbs each button already has, which is what makes the
-    /// ruling's "两处 ⌄ 语义完全对齐" a property of the code rather than a
-    /// coincidence of two implementations.
+    /// ruling's "两处 ⌄ 语义完全对齐" — and the rail pill's later enrolment in it
+    /// — a property of the code rather than a coincidence of three
+    /// implementations.
     fn advance_chevrons(&mut self, now: Instant) -> Result<()> {
         if let Some(action) = self.window.chevrons.profile.due(now) {
             self.window.chevrons.profile.clear();
@@ -70289,6 +70409,38 @@ impl Runtime<'_> {
                 }
                 profiles::ChevronAction::Close => {
                     self.close_pane_menu()?;
+                }
+            }
+        }
+        if let Some(action) = self.window.chevrons.rail.due(now) {
+            self.window.chevrons.rail.clear();
+            match action {
+                profiles::ChevronAction::Open => {
+                    // Which pill is under the pointer is asked again here, for
+                    // the pane head's reason one arm up — and through the very
+                    // door a press on it goes through, so the menu a rest raises
+                    // and the menu a click raises are one menu in one place.
+                    if let Some(position) = self.window.pointer_position
+                        && let Some(surface) =
+                            self.preview_open_pill_at(position, self.chrome_target_at(position))
+                    {
+                        self.open_preview_rail_menu(surface)?;
+                    }
+                }
+                // **Only the menu a pill raised is closed by a pill's grace.**
+                // A file menu a right press put on a tree row is not this
+                // clock's, and the clock never runs against one — but the
+                // ownership is re-asked here rather than trusted across the
+                // 150ms, exactly as the head under the pointer is above.
+                profiles::ChevronAction::Close => {
+                    if self
+                        .window
+                        .file_menu
+                        .as_ref()
+                        .is_some_and(|menu| menu.rail.is_some())
+                    {
+                        self.close_file_menu()?;
+                    }
                 }
             }
         }
@@ -141042,6 +141194,7 @@ mod tests {
         gates.observe(
             (ChevronPointer::Button, false),
             (ChevronPointer::Away, false),
+            (ChevronPointer::Away, false),
             start,
         );
         assert_eq!(
@@ -141062,6 +141215,7 @@ mod tests {
         mirrored.observe(
             (ChevronPointer::Away, false),
             (ChevronPointer::Button, false),
+            (ChevronPointer::Away, false),
             start,
         );
         assert_eq!(mirrored.profile, gates.pane);
@@ -141074,6 +141228,7 @@ mod tests {
         leaving.observe(
             (ChevronPointer::Away, true),
             (ChevronPointer::Away, true),
+            (ChevronPointer::Away, false),
             start,
         );
         assert_eq!(
@@ -141154,6 +141309,7 @@ mod tests {
         left.observe(
             (profiles::ChevronPointer::Away, true),
             (profiles::ChevronPointer::Away, true),
+            (profiles::ChevronPointer::Away, true),
             start,
         );
         assert_eq!(left.deadline(), Some(start + profiles::CHEVRON_LEAVE_GRACE));
@@ -141163,13 +141319,166 @@ mod tests {
             None,
             "the grace is not skipped for a hand that has left the client rect"
         );
-        for gate in [left.profile, left.pane] {
+        for gate in [left.profile, left.pane, left.rail] {
             assert_eq!(
                 gate.due(start + profiles::CHEVRON_LEAVE_GRACE),
                 Some(profiles::ChevronAction::Close),
-                "both `⌄` answer a departure with the same verb at the same instant"
+                "every hover-opening control answers a departure with the same \
+                 verb at the same instant"
             );
         }
+    }
+
+    /// PIN (**menu-openers hover, actions click**) — user ruling, 2026-09-10.
+    ///
+    /// The preview rail's `Open` pill expands
+    /// [`profiles::FileMenuSubject::Document`] and does nothing else, so by the
+    /// owner's principle of this day — 「展开菜单的控件 hover 就开,执行动作的控
+    /// 件必须点」 — it is a menu-opener and it rests open. It had been click-only
+    /// since it was drawn, for no reason but that it is spelled with a word
+    /// instead of with a `⌄`: the 2026-08-16 ruling drew its boundary around the
+    /// *glyph*, and this one redraws it around the *behaviour*.
+    ///
+    /// So the pill is enrolled in the very clock the two `⌄` already run on
+    /// rather than given a second one, and that is what is asserted: the rail
+    /// gate is driven through the same [`ChevronGates::observe`] and answers the
+    /// same verbs at the same instants as the strip's. A second clock at 250ms
+    /// would pass a test that only checked the pill; it cannot pass one written
+    /// as an equality against the chevron beside it.
+    ///
+    /// Red gate: give the pill its own `Duration` or its own `observe` call and
+    /// the equalities fail; delete the rail arm and the `Open` answers vanish.
+    #[test]
+    fn the_rails_open_pill_rests_open_on_the_chevrons_own_clock() {
+        use profiles::{ChevronAction, ChevronPointer};
+        let start = Instant::now();
+
+        // A rest on the pill and a rest on the strip's `⌄`, told to the gates in
+        // one call: the same deadline, the same verb, the same instant.
+        let mut resting = ChevronGates::default();
+        resting.observe(
+            (ChevronPointer::Button, false),
+            (ChevronPointer::Away, false),
+            (ChevronPointer::Button, false),
+            start,
+        );
+        assert_eq!(
+            resting.rail, resting.profile,
+            "one policy: the pill's clock and the chevron's are the same state"
+        );
+        assert_eq!(
+            resting.rail.deadline(),
+            Some(start + profiles::CHEVRON_HOVER_OPEN_DELAY)
+        );
+        assert_eq!(
+            resting.rail.due(start + profiles::CHEVRON_HOVER_OPEN_DELAY),
+            Some(ChevronAction::Open),
+            "resting on `Open` for the ruling's quarter second raises the \
+             document menu"
+        );
+
+        // A hand that left before the rest matured has raised nothing and owes
+        // nothing — leaving a shut control clears the clock outright rather than
+        // pausing it, so coming back starts the quarter second again from zero.
+        let mut left_early = resting;
+        left_early.observe(
+            (ChevronPointer::Away, false),
+            (ChevronPointer::Away, false),
+            (ChevronPointer::Away, false),
+            start + profiles::CHEVRON_HOVER_OPEN_DELAY - Duration::from_millis(1),
+        );
+        assert_eq!(left_early.rail.deadline(), None);
+        assert_eq!(
+            left_early
+                .rail
+                .due(start + profiles::CHEVRON_HOVER_OPEN_DELAY * 4),
+            None,
+            "no menu is ever raised by a rest the hand did not finish"
+        );
+
+        // The pointer moving into the menu the pill opened keeps it up: on the
+        // surface, no clock runs in either direction.
+        let mut on_menu = ChevronGates::default();
+        on_menu.observe(
+            (ChevronPointer::Away, false),
+            (ChevronPointer::Away, false),
+            (ChevronPointer::Surface, true),
+            start,
+        );
+        assert_eq!(
+            on_menu.rail.deadline(),
+            None,
+            "a hand on the menu is a hand still dealing with the pill"
+        );
+
+        // And leaving both of them runs the chevrons' own 150ms grace.
+        let mut leaving = ChevronGates::default();
+        leaving.observe(
+            (ChevronPointer::Away, true),
+            (ChevronPointer::Away, true),
+            (ChevronPointer::Away, true),
+            start,
+        );
+        assert_eq!(leaving.rail, leaving.profile);
+        assert_eq!(
+            leaving.rail.due(start + profiles::CHEVRON_LEAVE_GRACE),
+            Some(ChevronAction::Close)
+        );
+    }
+
+    /// PIN (**one hover-open path, and the press still goes straight through**)
+    /// — user ruling, 2026-09-10.
+    ///
+    /// The ticket's own words: not a second clock. The pill registers with the
+    /// clock the chevrons already run — one `ChevronGates::observe` takes all
+    /// three buttons' states, one `advance_chevrons` reads all three — and the
+    /// rest, when it matures, opens the menu through
+    /// [`Runtime::open_preview_rail_menu`], which is the very function a press
+    /// on the pill calls. One menu, one anchor, two doors.
+    ///
+    /// Read as **text**, for [`both_pointer_doors_tell_the_chevron_clocks_where_
+    /// the_hand_is`]' reason and only that reason: what this guards against is a
+    /// *second implementation*, and a second implementation that agrees today
+    /// cannot be driven into disagreeing by any state machine.
+    ///
+    /// Red gate: give the pill its own gate field of its own type, its own
+    /// `observe` call, or its own menu-raising body, and the matching assertion
+    /// fails by name.
+    #[test]
+    fn the_rails_open_and_the_chevrons_share_one_hover_open_path() {
+        const SOURCE: &str = include_str!("main.rs");
+        let body = |signature: &str| -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        };
+        assert!(
+            SOURCE.contains("    rail: profiles::ChevronGate,"),
+            "the pill's clock is the chevron's own type — a second kind of clock \
+             is a second policy however equal its constants are today"
+        );
+        assert!(
+            body("    fn observe_chevrons(").contains("(rail_where, rail_owner_open),"),
+            "the pill is one of the states the one `observe` is handed, so a \
+             caller cannot tell two of these buttons where the hand is and \
+             forget the third"
+        );
+        assert!(
+            body("    fn advance_chevrons(").contains("self.window.chevrons.rail.due(now)"),
+            "and one function reads all three matured clocks"
+        );
+        assert!(
+            body("    fn advance_chevrons(").contains("self.open_preview_rail_menu(surface)?"),
+            "a matured rest raises the menu through the pill's own door, so the \
+             menu a hand rests open is the menu a hand clicks open"
+        );
+        assert!(
+            body("    fn press_preview_rail(").contains("self.open_preview_rail_menu(surface)"),
+            "and the press is still a press: a click on a menu-opener opens it \
+             at once and is never made to wait for a clock"
+        );
     }
 
     /// PIN (**a hand that has left the window is in no pane**) — user report
