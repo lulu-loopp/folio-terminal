@@ -1290,6 +1290,180 @@ pub fn root_is_addressable(root: &str) -> bool {
     !root.trim().is_empty()
 }
 
+/// **Why a typed name cannot become an entry in a folder** (0.3), or `None` when
+/// it can.
+///
+/// Pure, and every case is a fact about the *string* rather than about the disk
+/// — except [`NewNameRefusal::Taken`], which is why that one is decided by the
+/// caller against a listing and merely named here. That split is what keeps the
+/// whole judgement testable without a filesystem, which is the same division
+/// `rename_preview_file` already draws between its four silent refusals and the
+/// one card it raises.
+///
+/// The refusals, and each one's own reason for being here rather than left to
+/// the platform:
+///
+/// * **Nothing at all.** A name of only spaces is the empty name with a
+///   different spelling — the trim is the same one every other door onto a name
+///   in this window takes.
+/// * **A separator.** `a/b` typed into a folder is not a name, it is a second
+///   folder somebody meant; taken literally, `create_dir` would refuse and taken
+///   generously it would make a thing the reader did not ask for.
+/// * **`.` or `..`.** Both name a folder that is already there, and on this
+///   platform the call would fail with a message about a path rather than about
+///   the name that was typed.
+/// * **A reserved device name.** `CON`, `NUL`, `COM1`, and each of them with any
+///   suffix at all (`NUL.txt` is still the device). Windows accepts the create
+///   call and hands back something that is not a file in the folder — the one
+///   case where letting the platform answer produces a *silent* wrong result.
+/// * **A trailing dot.** Win32 strips it before it ever sees the name, so
+///   `notes.` becomes `notes`: the row the reader was promised is not the row
+///   they get, and a second press with the same draft would then collide with
+///   the file the first one made. A trailing *space* is the same hazard and
+///   never reaches here — the trim above takes it, which is what every other
+///   door onto a name in this window does with one.
+/// * **A character the filesystem will not take**, which is [`name_is_writable`]
+///   read from this side — the nine Windows reserves, and the controls.
+#[must_use]
+pub fn judge_new_name(name: &str) -> Option<NewNameRefusal> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Some(NewNameRefusal::Empty);
+    }
+    if name == "." || name == ".." {
+        return Some(NewNameRefusal::Dots);
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Some(NewNameRefusal::Separator);
+    }
+    if name.chars().any(|character| {
+        matches!(character, ':' | '*' | '?' | '"' | '<' | '>' | '|') || character.is_control()
+    }) {
+        return Some(NewNameRefusal::Unwritable);
+    }
+    if name.ends_with('.') {
+        return Some(NewNameRefusal::Trailing);
+    }
+    // The stem, because the device is reserved with every suffix: `NUL`,
+    // `NUL.txt` and `NUL.tar.gz` all reach the device rather than the folder.
+    let stem = name.split('.').next().unwrap_or(name);
+    if is_reserved_device(stem) {
+        return Some(NewNameRefusal::Reserved);
+    }
+    None
+}
+
+/// Whether a name's stem is one of the DOS devices every Windows path still
+/// resolves to, whatever folder it is typed in.
+///
+/// `COM0` and `LPT0` are **not** reserved, which is why the digit is checked
+/// rather than assumed: the reserved set is `1`–`9`, and refusing `COM0` would
+/// be this window inventing a rule the platform does not have.
+fn is_reserved_device(stem: &str) -> bool {
+    let upper = stem.to_ascii_uppercase();
+    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+        return true;
+    }
+    let Some(number) = upper
+        .strip_prefix("COM")
+        .or_else(|| upper.strip_prefix("LPT"))
+    else {
+        return false;
+    };
+    matches!(number, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+}
+
+/// Why a folder will not take a typed name.
+///
+/// A closed list rather than a message, for [`TreeCommand`]'s own reason: what
+/// is wrong with a name is a fact that has to be assertable without a window,
+/// and the sentence it is *said* in belongs where the saying happens. Today the
+/// saying is one thing — the draft goes red where it is being typed — so no arm
+/// carries words; the enum exists so that a test can name which refusal it
+/// meant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NewNameRefusal {
+    /// Nothing was typed, or only spaces.
+    Empty,
+    /// A path separator: this is a name, not a path.
+    Separator,
+    /// `.` or `..` — the folder itself, or its parent.
+    Dots,
+    /// A DOS device name, with or without a suffix.
+    Reserved,
+    /// A trailing dot, which Win32 strips before it looks.
+    Trailing,
+    /// One of the nine characters Windows reserves, or a control character.
+    Unwritable,
+    /// The folder already holds an entry with this name.
+    ///
+    /// The one refusal this module does not decide: it is a fact about a
+    /// listing, and the listing lives in the window.
+    Taken,
+}
+
+/// **Put the row a new entry is being named into where it will appear**, and
+/// answer which row that is (0.3).
+///
+/// At the **end of the parent's own run** — after the parent row and everything
+/// open beneath it — and not at the place the finished name will sort to. The
+/// sorted place is a function of what has been typed so far, so a row that took
+/// it would walk up and down the list on every keystroke, under a caret standing
+/// still. Explorer puts the new item in its sorted place the moment it *exists*,
+/// which is what the folder's re-read after Enter does here.
+///
+/// `None` when the parent is not in the list at all — a folder scrolled out of
+/// the viewport is still in it, but one whose tree has been re-rooted underneath
+/// the open editor is not, and a row placed by guesswork would be a field
+/// standing over somebody else's name.
+///
+/// **The row wears the kind it is going to be** — a folder gets the folder glyph
+/// and a shut triangle, a file gets the file glyph — because that is the one
+/// thing about it already settled, and a reader typing into a row that showed
+/// the wrong picture would have to remember which row of the menu they pressed.
+///
+/// Its key is the parent's with an **empty segment** under it, which no real row
+/// can have: a directory entry always has a name. Until Enter is pressed the row
+/// is a place in a list and nothing more, so a key that cannot resolve is the
+/// honest one — the selection never lands on it and no verb can be raised from
+/// it.
+///
+/// A folder whose own listing is a notice — `Empty folder`, `Loading…` — gets
+/// the new row *before* the notice, which falls out of the walk rather than
+/// being a case: a notice row is keyed by the folder it belongs to and not by a
+/// child of it, so the run of children stops before it. That is the ordinary
+/// path for making the first file in an empty folder.
+pub fn insert_pending_row(rows: &mut Vec<TreeRow>, parent: &str, folder: bool) -> Option<usize> {
+    let (start, depth) = if parent.is_empty() {
+        (0, 0)
+    } else {
+        let at = rows.iter().position(|row| row.key == parent)?;
+        (at + 1, rows[at].depth + 1)
+    };
+    let under = format!("{parent}/");
+    let at = rows
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take_while(|(_, row)| row.key.starts_with(&under))
+        .last()
+        .map_or(start, |(index, _)| index + 1);
+    rows.insert(
+        at,
+        TreeRow {
+            key: child_key(parent, ""),
+            name: String::new(),
+            depth,
+            kind: if folder {
+                RowKind::Directory { open: false }
+            } else {
+                RowKind::File
+            },
+        },
+    );
+    Some(at)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2395,5 +2569,215 @@ mod tests {
             cache.accept("", DirOutcome::Failed(DirFault::NotFound)),
             "and so is the folder going away under it"
         );
+    }
+
+    /// PIN (0.3, the files column's second batch) — **every reason a folder will
+    /// not take a typed name, one case each.**
+    ///
+    /// The judgement is pure and the refusals are a closed list, which is what
+    /// lets this be asserted without a disk: what is wrong with a name is a fact
+    /// about the string, and the one refusal that is not — `Taken` — is decided
+    /// by the caller against a listing and only *named* here.
+    ///
+    /// The cases that make this a rule rather than a character filter are the
+    /// last three. `NUL.txt` is still the device, so the stem is what is
+    /// checked; `COM0` is **not** reserved, so refusing it would be this window
+    /// inventing a rule Windows does not have; and `notes.` is the silent one —
+    /// Win32 strips the trailing dot before it looks, so the row the reader was
+    /// promised is not the row they would get.
+    ///
+    /// RED GATES: check the whole name instead of the stem and `NUL.txt` is
+    /// admitted; drop the trailing-dot arm and `notes.` is admitted and makes
+    /// `notes`; add `0` to the device digits and `COM0` is refused for no
+    /// reason.
+    #[test]
+    fn a_new_name_is_refused_for_every_reason_a_folder_has() {
+        use NewNameRefusal as R;
+        for (name, refusal) in [
+            ("", R::Empty),
+            ("   ", R::Empty),
+            (".", R::Dots),
+            ("..", R::Dots),
+            ("a/b", R::Separator),
+            (r"a\b", R::Separator),
+            ("a:b", R::Unwritable),
+            ("a*b", R::Unwritable),
+            ("a?b", R::Unwritable),
+            ("a\"b", R::Unwritable),
+            ("a<b", R::Unwritable),
+            ("a>b", R::Unwritable),
+            ("a|b", R::Unwritable),
+            ("a\tb", R::Unwritable),
+            ("notes.", R::Trailing),
+            ("notes. ", R::Trailing),
+            ("CON", R::Reserved),
+            ("nul", R::Reserved),
+            ("NUL.txt", R::Reserved),
+            ("com1", R::Reserved),
+            ("LPT9.tar.gz", R::Reserved),
+        ] {
+            assert_eq!(
+                judge_new_name(name),
+                Some(refusal),
+                "{name:?} is not a name this folder can take"
+            );
+        }
+        for name in [
+            "notes.md",
+            ".gitignore",
+            "a b c.txt",
+            "笔记.md",
+            "COM0",
+            "LPT0",
+            "console.log",
+            "nullable.rs",
+            "auxiliary",
+        ] {
+            assert_eq!(
+                judge_new_name(name),
+                None,
+                "{name:?} is a name a file really can have"
+            );
+        }
+        // A name with spaces round it is the name inside them, which is the same
+        // trim every other door onto a name in this window takes — so a draft of
+        // spaces is the empty name, `  notes.md  ` is `notes.md`, and a trailing
+        // space is not a hazard here because it never survives to be one.
+        assert_eq!(judge_new_name("  notes.md  "), None);
+        assert_eq!(judge_new_name("notes "), None);
+    }
+
+    /// PIN (0.3) — **every name the judge admits, the filesystem really takes**,
+    /// and the ones it refuses would have gone somewhere else.
+    ///
+    /// The half of the judgement that cannot be argued from a string: it is a
+    /// claim about *this platform*, so it is made against a real folder under
+    /// `std::env::temp_dir()`. What it catches is the judge being too strict —
+    /// a refusal nobody can work around is worse than a wrong error message —
+    /// and the one refusal that is silent rather than loud: `notes.` is accepted
+    /// by `create_new` and produces `notes`, which is the row the reader was not
+    /// promised.
+    ///
+    /// RED GATE: drop the trailing-dot arm from `judge_new_name` and the last
+    /// assertion goes red with `notes` standing where `notes.` was asked for.
+    #[test]
+    fn the_names_this_judge_admits_are_the_names_the_disk_keeps() {
+        let folder = std::env::temp_dir().join(format!(
+            "folio-new-name-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).expect("a temp folder can be made");
+
+        for name in ["notes.md", ".gitignore", "a b c.txt", "笔记.md", "COM0"] {
+            assert_eq!(judge_new_name(name), None, "{name} is admitted");
+            let path = folder.join(name);
+            std::fs::File::create_new(&path)
+                .unwrap_or_else(|error| panic!("{name} is a name this disk takes: {error}"));
+            assert!(
+                std::fs::read_dir(&folder)
+                    .expect("the folder lists")
+                    .filter_map(Result::ok)
+                    .any(|entry| entry.file_name().to_string_lossy() == name),
+                "{name} is in the folder under the name that was typed"
+            );
+        }
+
+        // And the silent one: the platform takes the call and makes a different
+        // entry, which is exactly why the judge refuses it rather than leaving
+        // it to `create_new`.
+        assert_eq!(judge_new_name("stripped."), Some(NewNameRefusal::Trailing));
+        if std::fs::File::create_new(folder.join("stripped.")).is_ok() {
+            assert!(
+                folder.join("stripped").exists(),
+                "a trailing dot is stripped before the filesystem looks, so the \
+                 row the reader asked for is not the row they got"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// PIN (0.3) — **the row a new entry is named in stands at the end of its
+    /// folder's own run**, wearing the kind it is going to be.
+    ///
+    /// Not at the place the finished name will sort to: that place is a function
+    /// of what has been typed so far, so a row that took it would walk up and
+    /// down the list on every keystroke under a caret standing still. The sorted
+    /// place is where the folder's re-read puts it, once it exists.
+    ///
+    /// **After everything open beneath the folder**, which is the case a naive
+    /// "just after the parent row" gets wrong: a folder with an open subfolder
+    /// in it would take the new row *inside* the child.
+    ///
+    /// **Its key cannot collide**, because a real entry always has a name and
+    /// this one's last segment is empty.
+    ///
+    /// RED GATES: insert at `parent + 1` and the open-subfolder case puts the
+    /// row under `/src/deep`; give the row the parent's own depth and it draws
+    /// one level too far out.
+    #[test]
+    fn the_row_a_new_entry_is_named_in_stands_at_the_end_of_its_folders_run() {
+        let row = |key: &str, depth: usize, kind: RowKind| TreeRow {
+            key: key.to_owned(),
+            name: key.rsplit('/').next().unwrap_or(key).to_owned(),
+            depth,
+            kind,
+        };
+        let shut = RowKind::Directory { open: false };
+        let open = RowKind::Directory { open: true };
+        let base = vec![
+            row("/src", 0, open),
+            row("/src/deep", 1, open),
+            row("/src/deep/a.rs", 2, RowKind::File),
+            row("/src/main.rs", 1, RowKind::File),
+            row("/README.md", 0, RowKind::File),
+        ];
+
+        let mut inside = base.clone();
+        let at = insert_pending_row(&mut inside, "/src", false).expect("the folder is in the list");
+        assert_eq!(
+            at, 4,
+            "after the folder's whole open run, not inside the child"
+        );
+        assert_eq!(inside[at].depth, 1, "one level in from the folder it is in");
+        assert_eq!(inside[at].kind, RowKind::File, "a file wears the file");
+        assert_eq!(inside[at].name, "", "there is no name to draw yet");
+        assert_eq!(
+            inside[at].key,
+            child_key("/src", ""),
+            "a key no real entry can have, because an entry always has a name"
+        );
+        assert!(
+            base.iter().all(|existing| existing.key != inside[at].key),
+            "so it collides with nothing that is really there"
+        );
+
+        let mut deeper = base.clone();
+        let at = insert_pending_row(&mut deeper, "/src/deep", true).expect("in the list");
+        assert_eq!(at, 3, "the child folder's own run ends after its one file");
+        assert_eq!(deeper[at].depth, 2);
+        assert_eq!(deeper[at].kind, shut, "a folder wears a shut folder");
+
+        let mut root = base.clone();
+        let at = insert_pending_row(&mut root, "", false).expect("the root is always in the list");
+        assert_eq!(at, base.len(), "the root's run is the whole list");
+        assert_eq!(root[at].depth, 0);
+
+        // An empty folder's list is a notice keyed by the folder itself, so the
+        // run of children stops before it and the new row goes in front — which
+        // is the ordinary way of making the first file in an empty folder.
+        let mut empty = vec![notice_row("", 0, RowNotice::Empty)];
+        let at = insert_pending_row(&mut empty, "", false).expect("the root");
+        assert_eq!(
+            at, 0,
+            "in front of the sentence about the folder being empty"
+        );
+
+        // A folder the tree no longer holds — re-rooted under an open box —
+        // places nothing rather than guessing.
+        let mut gone = base;
+        assert_eq!(insert_pending_row(&mut gone, "/vanished", false), None);
+        assert_eq!(gone.len(), 5, "and left the list alone");
     }
 }

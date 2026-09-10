@@ -2038,6 +2038,29 @@ pub enum Text {
     // a name, and a gesture is not a word.
     /// **`Rename`** — a tree row's name, changed where it stands.
     FileMenuRename,
+
+    // ── the files column's second batch (0.3) ─────────────────────────────
+    //
+    // Three rows, and the same rule the block above them keeps: one entry per
+    // verb, however many faces offer it. `Delete` is on a file row and a folder
+    // row and says one word on both, because moving a row to the Recycle Bin is
+    // the same act whichever kind of row it is.
+    /// **`New file…`** — an empty file made in the folder that was right-clicked.
+    ///
+    /// The three dots are the promise of a field: the row asks for a name where
+    /// the row will be, which is the same convention `New terminal in folder…`
+    /// spends its ellipsis on one menu over. `New terminal here` has none
+    /// because it already knows everything it needs.
+    FolderMenuNewFile,
+    /// **`New folder…`** — the same row with the other kind.
+    FolderMenuNewFolder,
+    /// **`Delete`** — the row goes to the Recycle Bin.
+    ///
+    /// The bare verb and not `Move to Recycle Bin`: what the reader is asking
+    /// for is that this row stop being there, and the bin is *where it goes*
+    /// rather than what they meant. Explorer's own row says the same one word
+    /// for the same reason.
+    FileMenuDelete,
     /// **`Discard all`** — the exit card's destructive answer (B1, user ruling
     /// 2026-08-25).
     ///
@@ -4062,6 +4085,12 @@ impl Text {
             // uses on this exact row, so a reader meets it here already knowing
             // what it does.
             Self::FileMenuRename => pick(lang, "Rename", "重命名"),
+            // zh: pending
+            Self::FolderMenuNewFile => pick(lang, "New file…", "New file…"),
+            // zh: pending
+            Self::FolderMenuNewFolder => pick(lang, "New folder…", "New folder…"),
+            // zh: pending
+            Self::FileMenuDelete => pick(lang, "Delete", "Delete"),
             Self::GateDiscardAll => pick(lang, "Discard all", "全部放弃"),
             // 「移到窗口」and not 「移动到窗口」: the two rows above it read
             // 「移到新标签」/「移到新窗口」, and a third exit spelling the same
@@ -4352,7 +4381,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 600] = [
+    pub const ALL: [Self; 603] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4881,6 +4910,9 @@ impl Text {
         Self::FolderMenuCollapse,
         Self::FolderMenuNewTerminal,
         Self::FileMenuRename,
+        Self::FolderMenuNewFile,
+        Self::FolderMenuNewFolder,
+        Self::FileMenuDelete,
         Self::GateDiscardAll,
         Self::PaneMenuMoveToWindow,
         Self::CategoryAgents,
@@ -4963,7 +4995,7 @@ impl Text {
     /// program is not called. Every entry not on this list must differ between
     /// the columns and must carry Chinese in the Chinese one.
     #[cfg(test)]
-    const UNTRANSLATED: [Self; 4] = [
+    const UNTRANSLATED: [Self; 7] = [
         // The class of program the page is about, and the word every one of them
         // calls itself — Claude Code, codex — in Chinese prose as much as in
         // English. A page named 「代理」 would be naming a proxy server (user
@@ -4982,6 +5014,18 @@ impl Text {
         // `FilesViewFiles` is not `SeatFiles`: shortening the segmented
         // control must not be a change to a toast.
         Self::GitToastTitle,
+        // ── awaiting their Chinese (0.3, the files column's second batch) ──
+        //
+        // **Here because the Chinese is written by somebody else, not because
+        // these words stay English.** Every entry above this line is a proper
+        // noun or a word Chinese prose uses as it stands; these three are
+        // ordinary menu rows carrying their English in both columns until the
+        // translation lands, and each is marked `// zh: pending` where it is
+        // written. They come off this list in the same change that fills the
+        // second column in.
+        Self::FolderMenuNewFile,
+        Self::FolderMenuNewFolder,
+        Self::FileMenuDelete,
     ];
 }
 
@@ -5922,6 +5966,23 @@ pub fn not_deleted(reason: &str) -> String {
     match current() {
         Lang::English => format!("Not deleted — {reason}"),
         Lang::Chinese => format!("未删除 —— {reason}"),
+    }
+}
+
+/// A file or folder the disk would not make, and why (0.3) — [`not_deleted`]'s
+/// shape one verb over, carrying the operating system's own sentence for the
+/// reason [`not_renamed`] does.
+///
+/// It is the one refusal `New file…` speaks. Every other one — a name with a
+/// separator in it, a name the folder already has, a device name — is a fact
+/// about the *draft*, said in the box the draft was typed in by turning it red;
+/// a folder this account may not write to is a fact about the machine that no
+/// box can show.
+#[must_use]
+pub fn not_created(reason: &str) -> String {
+    match current() {
+        Lang::English => format!("Not created — {reason}"),
+        Lang::Chinese => format!("未创建 —— {reason}"),
     }
 }
 

@@ -329,7 +329,26 @@ pub enum ActionIcon {
     // ── a file row's menu ────────────────────────────────────────────────
     OpenFile,
     OpenWith,
+    /// `New file…` — a folder row's own verb (0.3).
+    ///
+    /// **The object, and not the plus.** [`ChromeMark::Plus`] is this table's
+    /// mark for making something that was not there, and it is right for
+    /// `New tab` because a tab has no other picture; spent here it would put one
+    /// glyph on two rows that stand next to each other, and the column would
+    /// stop saying which of the two a hand is over.
+    CreateFile,
+    /// `New folder…` — [`Self::CreateFile`]'s row with the other object, struck
+    /// because it stands in a column of verbs (P2's fill policy).
+    CreateFolder,
     RenameFile,
+    /// `Delete` — a tree row sent to the Recycle Bin (0.3).
+    ///
+    /// It joins the four destroying rows on the bin rather than [`Self::
+    /// ClosePane`]'s cross, along the line this table already draws: a cross
+    /// closes something and leaves it where it was, and this moves the row off
+    /// the disk. That the bin can hand it back is what makes the row safe to
+    /// press, not what makes it something other than a delete.
+    DeleteFile,
     CopyPath,
     InsertPath,
     /// `Reveal in folder`, and the Git row menu's `Reveal in Explorer` — one
@@ -480,7 +499,7 @@ pub enum ActionIcon {
 impl ActionIcon {
     /// Every verb, for the reverse index to walk.
     #[cfg(test)]
-    pub const ALL: [Self; 89] = [
+    pub const ALL: [Self; 92] = [
         Self::OpenSettings,
         Self::MinimiseWindow,
         Self::MaximiseWindow,
@@ -509,7 +528,10 @@ impl ActionIcon {
         Self::RestartShell,
         Self::OpenFile,
         Self::OpenWith,
+        Self::CreateFile,
+        Self::CreateFolder,
         Self::RenameFile,
+        Self::DeleteFile,
         Self::CopyPath,
         Self::InsertPath,
         Self::RevealInFolder,
@@ -605,7 +627,10 @@ impl ActionIcon {
             Self::RestartShell => "RestartShell",
             Self::OpenFile => "OpenFile",
             Self::OpenWith => "OpenWith",
+            Self::CreateFile => "CreateFile",
+            Self::CreateFolder => "CreateFolder",
             Self::RenameFile => "RenameFile",
+            Self::DeleteFile => "DeleteFile",
             Self::CopyPath => "CopyPath",
             Self::InsertPath => "InsertPath",
             Self::RevealInFolder => "RevealInFolder",
@@ -806,6 +831,9 @@ impl ActionIcon {
             | Self::RemoveEnvironmentRow
             | Self::DeleteBranch
             | Self::DeleteTag
+            // A tree row, whose destination is the Recycle Bin — which is the
+            // same sentence `Delete scheme` already tells with this glyph.
+            | Self::DeleteFile
             | Self::DiscardChanges => ChromeMark::Trash,
             Self::StopNavigating => ChromeMark::Stop,
             // **Making something that was not there.** `Load more` is off this
@@ -859,7 +887,9 @@ impl ActionIcon {
             // against it — see `a_folder_is_struck_in_a_column_of_verbs_and_
             // solid_where_it_is_a_place`.
             Self::FolderObject | Self::FilesSeat => ChromeMark::Folder,
-            Self::OpenFilesPane | Self::NewTerminalInFolder => ChromeMark::FolderOutline,
+            Self::OpenFilesPane | Self::NewTerminalInFolder | Self::CreateFolder => {
+                ChromeMark::FolderOutline
+            }
             Self::OpenFolderObject => ChromeMark::FolderOpen,
             Self::RevealInFolder | Self::BrowseForFolder => ChromeMark::FolderOpenOutline,
             // **One gesture, four containers.** The frame says which one, which
@@ -897,9 +927,11 @@ impl ActionIcon {
             Self::RestoreRowDefaults => ChromeMark::HistoryRestore,
             Self::OpenRowMenu => ChromeMark::More,
             Self::FindInTerminal => ChromeMark::Search,
-            Self::OpenFile | Self::OpenDiff | Self::FileObject | Self::PreviewSeat => {
-                ChromeMark::File
-            }
+            Self::OpenFile
+            | Self::OpenDiff
+            | Self::CreateFile
+            | Self::FileObject
+            | Self::PreviewSeat => ChromeMark::File,
             Self::PageObject => ChromeMark::Globe { favicon: None },
             Self::MouseWheel => ChromeMark::MouseWheel,
             Self::PlayVideo => ChromeMark::Play,
@@ -1771,6 +1803,10 @@ mod tests {
                 ActionIcon::RemoveEnvironmentRow,
                 ActionIcon::DeleteBranch,
                 ActionIcon::DeleteTag,
+                // And, since 0.3, a row of a files column: what the bin means
+                // here is *where it goes*, which is the same sentence the
+                // settings dialog's `Delete scheme` tells with this shape.
+                ActionIcon::DeleteFile,
                 ActionIcon::DiscardChanges,
             ],
             false,
@@ -1893,7 +1929,13 @@ mod tests {
         ),
         (
             "i-folder-line",
-            &[ActionIcon::OpenFilesPane, ActionIcon::NewTerminalInFolder],
+            &[
+                ActionIcon::OpenFilesPane,
+                ActionIcon::NewTerminalInFolder,
+                // `New folder…` (0.3): a folder standing in a column of verbs,
+                // so it takes the struck rendition its neighbours take.
+                ActionIcon::CreateFolder,
+            ],
             false,
         ),
         // Going and looking at a folder somewhere outside this window — in File
@@ -1909,6 +1951,10 @@ mod tests {
             &[
                 ActionIcon::OpenFile,
                 ActionIcon::OpenDiff,
+                // `New file…` (0.3): the thing the row makes, drawn as the act's
+                // own picture — see the entry, which argues why it is not
+                // `#i-plus`.
+                ActionIcon::CreateFile,
                 ActionIcon::FileObject,
                 ActionIcon::PreviewSeat,
             ],

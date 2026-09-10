@@ -177,12 +177,13 @@ pub fn inline_rename_marks(box_: [f32; 4], edit: &TabEdit, scale: f32) -> Inline
     // a field anybody can type in.
     let roomy = box_[2] - box_[0] >= width;
     let field = roomy.then_some([box_[0], top, box_[2], bottom]);
-    let selection = (edit.selection_px > 0.0)
-        .then(|| {
+    let selection = edit
+        .selection
+        .map(|(from, to)| {
             [
-                box_[0],
+                (box_[0] + from).clamp(box_[0], box_[2]),
                 top,
-                (box_[0] + edit.selection_px).min(box_[2]),
+                (box_[0] + to).clamp(box_[0], box_[2]),
                 bottom,
             ]
         })
@@ -8043,6 +8044,12 @@ pub struct TabEdit {
     /// The draft from its first visible character on — a box narrower than its
     /// text scrolls by cutting the head off, and the label's own rect clips the
     /// tail. Empty means the placeholder shows through.
+    ///
+    /// **What is on the glass, which since 0.3 includes the composition**: an
+    /// unfinished IME pre-edit is spliced in at the caret and the caret stands
+    /// after it, which is the reading `search_field_look` already takes on the
+    /// one other chrome field that composes. It is deliberately not the
+    /// *buffer* — the buffer is what survives an Escape.
     pub text: String,
     /// The auto name an empty draft reveals: `input.placeholder = autoName(s)`
     /// (mock-up 5866). Not a hint and not a label — it is the layer *underneath*
@@ -8051,10 +8058,16 @@ pub struct TabEdit {
     pub placeholder: String,
     /// The caret's offset from the box's left edge.
     pub caret_px: f32,
-    /// How much of the visible draft is selected, from the box's left edge —
-    /// the one selection this editor has (`input.select()`, mock-up 5870). Zero
-    /// when nothing is selected.
-    pub selection_px: f32,
+    /// **The selection band, as a pair of offsets from the box's left edge**,
+    /// low end first — or `None` when nothing is selected.
+    ///
+    /// It was one number until 0.3, because the only selection this editor could
+    /// make began at the draft's start: `input.select()` (mock-up 5870) takes
+    /// the whole of it and a file's box takes its stem. The migration onto
+    /// `text_field::TextField` gave the field `Shift`-motions and word verbs, so
+    /// a selection can now begin anywhere — and a band drawn from the left edge
+    /// whatever the selection was would wash letters nobody had selected.
+    pub selection: Option<(f32, f32)>,
     /// Whether the caret is in its lit phase.
     pub caret_lit: bool,
 }
@@ -14635,8 +14648,9 @@ pub struct PreviewNameEdit<'a> {
     pub text: &'a str,
     /// The caret's offset from the name box's left edge.
     pub caret_px: f32,
-    /// How much of the visible draft is selected, from that same edge.
-    pub selection_px: f32,
+    /// The selection band's two offsets from that same edge, or `None` when
+    /// nothing is selected — [`TabEdit::selection`]'s field and its reason.
+    pub selection: Option<(f32, f32)>,
     /// Whether the caret is in the lit half of its blink.
     pub caret_lit: bool,
     /// **The draft will not be navigated to** (§7.7 ④, W2 slice ④).
@@ -15898,6 +15912,18 @@ pub struct FilesTreeContent {
     /// the same swap the float's foot makes because it is the same function
     /// making it.
     pub foot_revealed: bool,
+    /// **The open name editor, when one of this column's rows is holding it**
+    /// (B5's promise, drawn since 0.3).
+    ///
+    /// The tree's own row *is* the field — same box, same face, same ink — which
+    /// is the arrangement the preview head and the tab strip already keep and
+    /// the reason [`inline_rename_marks`] is one function: a box drawn on top of
+    /// the name would be a field *about* the row rather than the row in edit
+    /// mode.
+    ///
+    /// A column with nothing open carries `None` and draws exactly what it drew
+    /// before this existed.
+    pub edit: Option<FilesRowEdit>,
     /// How far the foot's phrase has dissolved — [`FootStrip::dissolved`].
     ///
     /// A field on the *content* and not a second reading of the clock, for
@@ -15906,6 +15932,70 @@ pub struct FilesTreeContent {
     /// clock is, and a painter that worked one of them out for itself would be a
     /// painter that can disagree with the words it was handed.
     pub foot_dissolved: f32,
+}
+
+/// **The open name editor, as one tree row has to draw it** (0.3).
+///
+/// [`TabEdit`] with the placeholder gone and a row index put in its place. The
+/// placeholder cannot come along for [`PreviewNameEdit`]'s reason — a row on the
+/// disk has no name under its name — and the index has to, because unlike a
+/// preview head this surface draws many names and only one of them is the field.
+///
+/// **Owned, not borrowed**, which is [`FilesTreeContent`]'s own arrangement: the
+/// rows this struct rides beside are derived per frame and nothing upstream
+/// holds them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FilesRowEdit {
+    /// Which row of [`FilesTreeContent::rows`] carries the field.
+    ///
+    /// An index rather than a key, because the row a *new* entry is being named
+    /// into has no key on the disk yet — it is a place in the list and nothing
+    /// more until Enter is pressed.
+    pub at: usize,
+    /// The draft as it is drawn, composition and all — [`TabEdit::text`].
+    pub text: String,
+    /// The caret's offset from the name box's left edge.
+    pub caret_px: f32,
+    /// The selection band's two offsets from that same edge.
+    pub selection: Option<(f32, f32)>,
+    /// Whether the caret is in the lit half of its blink.
+    pub caret_lit: bool,
+    /// **The draft will not be taken** — an empty name, a name with a path
+    /// separator in it, a name the folder already has (0.3).
+    ///
+    /// Said *where it is typed*, which is the address field's own answer
+    /// ([`PreviewNameEdit::refused`]) and the search capsule's to a regex that
+    /// will not parse: the reader is looking straight at the thing that is
+    /// wrong, so a card would be telling them what they can already see.
+    ///
+    /// A **rename** never sets it. Renaming refuses in silence and leaves the
+    /// name as it was, which is a ruling of its own (2026-08-19) and still
+    /// stands — there is a name under that draft to fall back to. A new entry
+    /// has none, so a silent refusal there would be Enter doing nothing for no
+    /// reason the glass gives.
+    pub refused: bool,
+}
+
+/// **Where one tree row's name is written**, given the row's own rectangle.
+///
+/// One function for the painter and for whoever measures a draft into it, which
+/// is [`FilesTreeGeometry`]'s own rule read one level down: a caret placed
+/// against a box the painter did not use is a caret in the wrong place.
+///
+/// The git badge's margin is deliberately **not** taken off here. It is width a
+/// *name* gives up to a letter, and a row that is being typed into is showing a
+/// field rather than a name — see `push_files_tree`, which skips the badge on
+/// that row for the same reason.
+#[must_use]
+pub fn files_row_name_box(row: [f32; 4], depth: usize, scale: f32) -> [f32; 4] {
+    let row_pad = FILES_ROW_PADDING_X_LOGICAL_PX * scale;
+    let indent = FILES_ROW_INDENT_LOGICAL_PX * scale;
+    let gap = FILES_ROW_GAP_LOGICAL_PX * scale;
+    let tri = (FILES_ROW_TRI_LOGICAL_PX * scale).round().max(1.0);
+    let icon = (FILES_ROW_ICON_LOGICAL_PX * scale).round().max(1.0);
+    #[allow(clippy::cast_precision_loss)]
+    let left = row[0] + row_pad + indent * depth as f32 + tri + gap + icon + gap;
+    [left, row[1], (row[2] - row_pad).max(left), row[3]]
 }
 
 /// Which page one files column is on, and how wide its switch's words are.
@@ -17227,8 +17317,13 @@ pub(crate) fn push_files_tree(
         // what the badge costs is width the name does not get, and a name laid
         // out first and then covered would be a letter drawn over a letter.
         let mut name_right = rect[2] - row_pad;
+        // The row holding the open editor, if this is it. A field takes the
+        // row's whole name run: a git letter beside a half-typed name is a fact
+        // about a file that does not exist yet, or about one whose name is in
+        // the middle of changing.
+        let editing = tree.edit.as_ref().filter(|edit| edit.at == index);
         match row.kind {
-            crate::files::RowKind::File => {
+            crate::files::RowKind::File if editing.is_none() => {
                 let letters = tree.badges.letters(&row.key);
                 let cell = (crate::git_panel::FILES_BADGE_CELL_LOGICAL_PX * scale).round();
                 let badge_font = crate::git_panel::FILES_BADGE_FONT_LOGICAL_PX * scale;
@@ -17259,7 +17354,9 @@ pub(crate) fn push_files_tree(
                         + crate::git_panel::FILES_BADGE_GAP_LOGICAL_PX * scale;
                 }
             }
-            crate::files::RowKind::Directory { .. } | crate::files::RowKind::Cycle => {
+            crate::files::RowKind::Directory { .. } | crate::files::RowKind::Cycle
+                if editing.is_none() =>
+            {
                 if tree.badges.touched(&row.key) {
                     let dot = (crate::git_panel::FILES_BADGE_DOT_LOGICAL_PX * scale)
                         .round()
@@ -17282,7 +17379,10 @@ pub(crate) fn push_files_tree(
                     name_right -= dot + crate::git_panel::FILES_BADGE_GAP_LOGICAL_PX * scale;
                 }
             }
-            crate::files::RowKind::Notice(_) => {}
+            crate::files::RowKind::File
+            | crate::files::RowKind::Directory { .. }
+            | crate::files::RowKind::Cycle
+            | crate::files::RowKind::Notice(_) => {}
         }
         match row.kind {
             RowKind::Notice(_) => {
@@ -17385,13 +17485,51 @@ pub(crate) fn push_files_tree(
                 }
             }
         }
-        let name_rect = [name_left, rect[1], name_right.max(name_left), rect[3]];
+        let name_rect = if editing.is_some() {
+            files_row_name_box(rect, row.depth, scale)
+        } else {
+            [name_left, rect[1], name_right.max(name_left), rect[3]]
+        };
+        // **The field's marks go down before the text**, exactly as the tab
+        // strip's and the preview head's do, and through the same function they
+        // do: the ground says the name is a field for as long as the editor is
+        // open, and the band under it says what typing will replace.
+        if let Some(edit) = editing {
+            let marks = inline_rename_marks(
+                name_rect,
+                &TabEdit {
+                    text: edit.text.clone(),
+                    placeholder: String::new(),
+                    caret_px: edit.caret_px,
+                    selection: edit.selection,
+                    caret_lit: edit.caret_lit,
+                },
+                scale,
+            );
+            if let Some(field) = marks.field {
+                sprites.push(ChromeSprite::new(ChromeMark::Fill, crop(field), ink.hover));
+            }
+            if let Some(band) = marks.selection {
+                sprites.push(
+                    ChromeSprite::new(ChromeMark::Fill, crop(band), palette.accent)
+                        .with_opacity(INLINE_RENAME_SELECTION_ALPHA),
+                );
+            }
+            if let Some(caret) = marks.caret {
+                sprites.push(ChromeSprite::new(ChromeMark::Fill, crop(caret), text));
+            }
+        }
         labels.push(ChromeLabel {
             mono: false,
-            text: row.name.clone(),
+            text: editing.map_or_else(|| row.name.clone(), |edit| edit.text.clone()),
             rect: name_rect,
             font_size_px: font,
-            color: text,
+            // A draft the folder will not take is said in the error ink where it
+            // is being typed — [`FilesRowEdit::refused`].
+            color: match editing {
+                Some(edit) if edit.refused => palette.status_err,
+                _ => text,
+            },
             align_right: false,
             align_center: false,
             letter_spacing_em: 0.0,
@@ -17477,7 +17615,7 @@ fn push_preview_head(
                 text: edit.text.to_owned(),
                 placeholder: String::new(),
                 caret_px: edit.caret_px,
-                selection_px: edit.selection_px,
+                selection: edit.selection,
                 caret_lit: edit.caret_lit,
             },
             scale,
@@ -18045,7 +18183,7 @@ pub(crate) fn push_preview_rail(
                         text: edit.text.to_owned(),
                         placeholder: String::new(),
                         caret_px: edit.caret_px,
-                        selection_px: edit.selection_px,
+                        selection: edit.selection,
                         caret_lit: edit.caret_lit,
                     },
                     scale,
@@ -18196,7 +18334,7 @@ pub(crate) fn push_preview_rail(
                             text: edit.text.to_owned(),
                             placeholder: String::new(),
                             caret_px: edit.caret_px,
-                            selection_px: edit.selection_px,
+                            selection: edit.selection,
                             caret_lit: edit.caret_lit,
                         },
                         scale,
@@ -23696,7 +23834,7 @@ mod tests {
             text: "notes.md".to_owned(),
             placeholder: String::new(),
             caret_px: 20.0,
-            selection_px: 34.0,
+            selection: Some((0.0, 34.0)),
             caret_lit: true,
         };
         for scale in [1.0_f32, 1.5, 2.0] {
@@ -23767,7 +23905,7 @@ mod tests {
         // This is the drawn half of `TabRename::seed`'s invariant, and it is the
         // reason the clamp above is not a licence to put every caret at the far
         // edge: a file rename opens with the stem selected, so `caret_px` equals
-        // `selection_px`, and what the reader must see is one hairline standing
+        // the band's far edge, and what the reader must see is one hairline standing
         // where the wash stops — inside a box the head sized to the whole name.
         // The box here is the draft's own width the way the preview head sizes
         // it, so "on the band's edge" and "on the box's edge" are genuinely
@@ -23775,7 +23913,7 @@ mod tests {
         let box_ = [100.0_f32, 0.0, 100.0 + 62.0, 32.0];
         let opened = TabEdit {
             caret_px: 34.0,
-            selection_px: 34.0,
+            selection: Some((0.0, 34.0)),
             ..edit.clone()
         };
         let marks = inline_rename_marks(box_, &opened, 1.0);
@@ -23833,10 +23971,11 @@ mod tests {",
             .expect("a split always yields a first piece");
         assert_eq!(
             source.matches("inline_rename_marks(").count(),
-            6,
-            "one definition and five callers — the strip, the rail, the preview \
+            7,
+            "one definition and six callers — the strip, the rail, the preview \
              head, the address row that took the head's field on 2026-08-24, \
-             and the breadcrumb's last segment since B5"
+             the breadcrumb's last segment since B5, and a files tree row since \
+             0.3"
         );
         // The hairline's width and the line it stands on are named in exactly
         // one place each, and that place is the shared function.
@@ -23921,7 +24060,7 @@ mod tests {",
             text: String::new(),
             placeholder: "PowerShell 7".to_owned(),
             caret_px: 0.0,
-            selection_px: 0.0,
+            selection: None,
             caret_lit: true,
         }));
         assert_eq!(
@@ -23947,7 +24086,7 @@ mod tests {",
             text: "left".to_owned(),
             placeholder: String::new(),
             caret_px: 22.0,
-            selection_px: 22.0,
+            selection: Some((0.0, 22.0)),
             caret_lit: true,
         }));
         assert_eq!(selected.len(), 3, "field, selection, caret");
@@ -24005,7 +24144,7 @@ mod tests {",
         let editing_head = head(Some(PreviewNameEdit {
             text: "CONVENTIONS.md",
             caret_px: 4_000.0,
-            selection_px: 80.0,
+            selection: Some((0.0, 80.0)),
             caret_lit: true,
             refused: false,
         }));
@@ -26014,6 +26153,7 @@ mod tests {",
             scroll_px: 0.0,
             selected: None,
             turns: BTreeMap::new(),
+            edit: None,
             focus_ring: false,
             foot_path: String::new(),
             foot_revealed: false,
@@ -28394,7 +28534,7 @@ mod tests {",
                 text: "draft".to_owned(),
                 placeholder: "auto".to_owned(),
                 caret_px: 10.0 * scale,
-                selection_px: 0.0,
+                selection: None,
                 caret_lit: false,
             });
             let (resting_quads, resting_labels, resting_sprites) =
@@ -28484,7 +28624,7 @@ mod tests {",
             text: String::new(),
             placeholder: "bt-app".to_owned(),
             caret_px: 0.0,
-            selection_px: 0.0,
+            selection: None,
             caret_lit: false,
         });
         let (_, labels, _) = strip_chrome_of(1.0, &[empty], 0, 0.0, None, false);
@@ -28501,7 +28641,7 @@ mod tests {",
             text: "mine".to_owned(),
             placeholder: "bt-app".to_owned(),
             caret_px: 0.0,
-            selection_px: 0.0,
+            selection: None,
             caret_lit: false,
         });
         let (_, labels, _) = strip_chrome_of(1.0, &[typed], 0, 0.0, None, false);
@@ -28531,7 +28671,7 @@ mod tests {",
                 text: "draft".to_owned(),
                 placeholder: String::new(),
                 caret_px,
-                selection_px: 0.0,
+                selection: None,
                 caret_lit: true,
             });
             let dark = editing_tab(TabEdit {
@@ -28540,7 +28680,7 @@ mod tests {",
                     text: "draft".to_owned(),
                     placeholder: String::new(),
                     caret_px,
-                    selection_px: 0.0,
+                    selection: None,
                     caret_lit: true,
                 }
             });
@@ -28598,7 +28738,7 @@ mod tests {",
             text: "build".to_owned(),
             placeholder: String::new(),
             caret_px: 30.0,
-            selection_px: 30.0,
+            selection: Some((0.0, 30.0)),
             caret_lit: false,
         });
         let (_, _, sprites) = strip_chrome_of(1.0, &[selected], 0, 0.0, None, false);
@@ -28620,7 +28760,7 @@ mod tests {",
             text: "a very long name indeed".to_owned(),
             placeholder: String::new(),
             caret_px: 0.0,
-            selection_px: box_width * 4.0,
+            selection: Some((0.0, box_width * 4.0)),
             caret_lit: false,
         });
         let (_, _, sprites) = strip_chrome_of(1.0, &[overflowing], 0, 0.0, None, false);
@@ -28636,7 +28776,7 @@ mod tests {",
             text: "build".to_owned(),
             placeholder: String::new(),
             caret_px: 30.0,
-            selection_px: 0.0,
+            selection: None,
             caret_lit: false,
         });
         let (_, _, sprites) = strip_chrome_of(1.0, &[plain], 0, 0.0, None, false);
@@ -28660,7 +28800,7 @@ mod tests {",
             text: "draft".to_owned(),
             placeholder: String::new(),
             caret_px: 10.0,
-            selection_px: 20.0,
+            selection: Some((0.0, 20.0)),
             caret_lit: true,
         });
         let (_, _, sprites) = strip_chrome_of(1.0, &[editing], 0, 0.0, None, false);
@@ -35329,7 +35469,7 @@ mod tests {",
                 text: "draft".to_owned(),
                 placeholder: String::new(),
                 caret_px: 10.0,
-                selection_px: 20.0,
+                selection: Some((0.0, 20.0)),
                 caret_lit: true,
             }),
             ..TabContent::default()
@@ -35381,7 +35521,7 @@ mod tests {",
                 text: String::new(),
                 placeholder: "PowerShell".to_owned(),
                 caret_px: 0.0,
-                selection_px: 0.0,
+                selection: None,
                 caret_lit: false,
             }),
             ..TabContent::default()

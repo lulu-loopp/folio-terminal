@@ -6481,6 +6481,31 @@ pub enum FileMenuRow {
     Fold,
     /// A tab of the default profile, standing in this folder.
     NewTerminal,
+    /// **An empty file, made in this folder** (0.3, the files column's second
+    /// batch).
+    ///
+    /// A folder row only, and a *verb about this folder* rather than about the
+    /// row's path — which is why it stands above the rule with the fold and the
+    /// shell rather than below it with the three path questions. A file row does
+    /// not offer it: the folder a file lives in is a *different row of the same
+    /// tree*, and a `New file…` raised on `notes.md` would have to invent which
+    /// of the two places it meant.
+    ///
+    /// **The three dots are this menu's own convention** and not decoration:
+    /// [`Self::Rename`] opens a field where the name is and carries none because
+    /// the name it edits is already on the glass, while this row has no name to
+    /// stand on until it has asked for one. The pane menu's `New terminal in
+    /// folder…` spends its ellipsis on the same promise one surface over.
+    NewFile,
+    /// **A folder, made in this folder** (0.3) — [`Self::NewFile`]'s row with
+    /// one kind substituted for the other.
+    ///
+    /// Written as a second variant rather than as one row carrying a kind, for
+    /// [`FileMenuRow`]'s own reason: which rows a face shows is a list, and a
+    /// list is walked, hit-tested and hovered by value. What the two share is the
+    /// field they open and the refusals it makes, and that is shared where it
+    /// lives — in the editor, not in this enum.
+    NewFolder,
     /// **Change the name this row has on the disk** (B5, user ruling
     /// 2026-08-25).
     ///
@@ -6493,6 +6518,25 @@ pub enum FileMenuRow {
     /// [`Self::hands_out_the_path`] is about handing the text of a path
     /// somewhere, and this changes the thing the path points at.
     Rename,
+    /// **Send this row to the Recycle Bin** (0.3, the files column's second
+    /// batch).
+    ///
+    /// A file row's and a folder row's last verb, and a folder goes **whole** —
+    /// one call naming the folder, not a walk of what is in it, because a folder
+    /// is put back out of the bin in one piece too.
+    ///
+    /// **It asks nothing before it acts, and the bin is the reason it can.** The
+    /// confirmation every other product hangs on this row is a stand-in for an
+    /// undo; here the undo is the thing itself — `bt_platform::recycle` never
+    /// deletes permanently, and the one case the bin cannot take raises the
+    /// shell's own "this will be deleted permanently" warning rather than going
+    /// quietly. A dialog on top of that is asking a reader to confirm something
+    /// that is already reversible.
+    ///
+    /// It stands above the rule because it is a fact about *what this row is*
+    /// and not about its path — and it stands alone up there, which is what
+    /// [`Self::stands_alone`] exists to say.
+    Delete,
     // `ShowInFiles` is **retired** (user ruling 2026-08-25). It was the
     // breadcrumb face's answer to "where does this live", and the breadcrumb it
     // was hung under grew the same answer four times over: every segment of the
@@ -6589,7 +6633,14 @@ impl FileMenuRow {
                 }
             }
             Self::NewTerminal => crate::i18n::Text::FolderMenuNewTerminal.text(),
+            Self::NewFile => crate::i18n::Text::FolderMenuNewFile.text(),
+            Self::NewFolder => crate::i18n::Text::FolderMenuNewFolder.text(),
             Self::Rename => crate::i18n::Text::FileMenuRename.text(),
+            // One word on both faces, exactly as `Rename` is one word on both:
+            // what the row does to a file and what it does to a folder is the
+            // same act, and a `Delete file` / `Delete folder` pair would be the
+            // row naming a kind the row above it has already named.
+            Self::Delete => crate::i18n::Text::FileMenuDelete.text(),
             Self::CopyPath => copy_path_text(),
             Self::InsertPath => insert_path_text(),
             Self::Reveal => reveal_in_explorer_text(),
@@ -6627,6 +6678,31 @@ impl FileMenuRow {
             Self::Reveal => !matches!(subject, FileMenuSubject::Document),
             _ => false,
         }
+    }
+
+    /// Whether this row is **kept out of the run it stands in** by a rule of its
+    /// own.
+    ///
+    /// [`Self::hands_out_the_path`]'s sibling and written the same way — a
+    /// property of the row, so the second rule is derived from the list rather
+    /// than counted into it — for that predicate's own stated reason: a rule
+    /// placed by index is a rule that can be broken by inserting a row above it,
+    /// which is exactly what happened to the first one.
+    ///
+    /// **[`Self::Delete`] is the whole of it**, and the reason is what the row
+    /// costs to press by accident. Every other verb above the line either opens
+    /// something or is undone by typing the old name back; this one moves the
+    /// row off the tree. Sitting hard against `Rename` it would be one pixel's
+    /// travel from the row a reader raised the menu for, which is how a hand
+    /// aiming at the pencil lands on the bin. The gap is not decoration: it is
+    /// the distance.
+    ///
+    /// It says nothing about *where* the rule falls — that is `file_menu`'s
+    /// arithmetic, and it falls above this row rather than below it because what
+    /// the gap protects is the approach.
+    #[must_use]
+    pub fn stands_alone(self) -> bool {
+        matches!(self, Self::Delete)
     }
 
     /// The mark in the row's icon column — **the row's verb, asked of
@@ -6670,6 +6746,20 @@ impl FileMenuRow {
             // already stripped, because `Runtime::file_menu_look` is the one
             // place that knows which profile is the default.
             Self::NewTerminal => look.terminal,
+            // **The thing each row makes, and not the plus that makes it.** Both
+            // of these are `Making something that was not there`, which is
+            // `ActionIcon`'s own sense for `Plus` — and spending it here would
+            // put the same glyph on two rows that stand next to each other, so
+            // the column would say "new" twice and "file or folder" never.
+            // What tells them apart is their object, drawn as the act's own
+            // picture, which is `Reveal in folder`'s settled answer (2026-08-27)
+            // read on a row whose object is what the press produces.
+            Self::NewFile => ActionIcon::CreateFile.mark(),
+            // Struck, and that is the fill policy rather than a second opinion
+            // about folders: this is a column of verbs, so the folder in it is
+            // the act's object and wears the line rendition — the same one
+            // `New terminal in folder…` wears one menu over.
+            Self::NewFolder => ActionIcon::CreateFolder.mark(),
             // The pencil, which is this window's one glyph for *you are about to
             // write this yourself* — the shortcut page already spends it on the
             // row a chord is being recorded into. Not the row's own kind: a
@@ -6677,6 +6767,13 @@ impl FileMenuRow {
             // that changed with the subject would be saying which kind of thing
             // is being renamed, which the row above it already said.
             Self::Rename => ActionIcon::RenameFile.mark(),
+            // The bin, which is the one glyph in this window that means *this
+            // goes to the Recycle Bin* — the settings dialog's `Delete scheme`
+            // already spends it on the same platform call. Not the cross: a
+            // cross closes something and leaves it where it was, which is the
+            // distinction `ActionIcon`'s own table draws between `ClosePane` and
+            // the four destroying rows.
+            Self::Delete => ActionIcon::DeleteFile.mark(),
             Self::CopyPath => ActionIcon::CopyPath.mark(),
             Self::InsertPath => ActionIcon::InsertPath.mark(),
             // The Git row's `Reveal in Explorer` wears this one, for the reason
@@ -6700,6 +6797,20 @@ pub struct FileMenu {
     /// [`FileMenuRow::hands_out_the_path`] rather than written down per subject,
     /// exactly as [`GitMenu::separator_after`] is.
     pub separator_after: Option<usize>,
+    /// The index the **second** rule is drawn under — the one that stands
+    /// [`FileMenuRow::stands_alone`]'s row off from the doors above it, or
+    /// `None` on a list that has no such row.
+    ///
+    /// Derived from that predicate exactly as the field above is derived from
+    /// its own, and a second field rather than a `Vec<usize>` because the two
+    /// rules are two different sentences: one divides *what this row is* from
+    /// *what its path is* and is a property of the whole list, the other holds a
+    /// gap in front of one row. A list of indices would let a reader ask "how
+    /// many rules are there" and get an answer that means nothing.
+    ///
+    /// [`TermMenuLayout::lone_separator`] is the same arrangement drawn on the
+    /// other menu that grew a second rule, and it is named for the same thing.
+    pub lone_separator_after: Option<usize>,
 }
 
 /// What this subject's menu holds.
@@ -6713,12 +6824,27 @@ pub struct FileMenu {
 /// rather than at its call site:
 ///
 /// - **[`FileMenuSubject::File`]** — the tree's file row. Two doors: this
-///   window's preview seat and the machine's default program. Then
+///   window's preview seat and the machine's default program. Then `Rename`, a
+///   rule, `Delete`, and the path questions
 ///   `Copy path / Insert path / Reveal in Explorer`. No `Show in files column`:
 ///   the press that raised it *was* in the files column.
-/// - **[`FileMenuSubject::Folder`]** — the tree's folder row. Two verbs no other
-///   surface offers at the row — the fold, and a shell standing in it — and then
-///   the same three path questions. A folder has no preview seat.
+/// - **[`FileMenuSubject::Folder`]** — the tree's folder row. Four verbs no
+///   other surface offers at the row — the fold, a shell standing in it, and the
+///   two things this folder can be asked to make — then `Rename`, the same rule,
+///   the same `Delete`, and the same three path questions. A folder has no
+///   preview seat.
+///
+/// **`New file…` and `New folder…` are the folder's and only the folder's**
+/// (0.3). They are verbs about the folder the press landed on, so they stand
+/// where the folder's other verbs stand — under `New terminal here`, which is
+/// the row they are most like: it too acts *in* this folder rather than *on* it.
+/// A file row does not offer them, because the folder a file lives in is a
+/// different row of the same tree and a menu that made a file two levels from
+/// where it was raised would be a menu whose subject the reader has to work out.
+///
+/// **`Delete` is the last row above the rule on both tree faces, alone between
+/// two rules** — see [`FileMenuRow::stands_alone`] for why the gap is there, and
+/// [`FileMenu::lone_separator_after`] for how it is derived rather than placed.
 /// - **[`FileMenuSubject::Document`]** — a preview's breadcrumb. No preview door
 ///   (the preview is what asked), so the default program is the first row, then
 ///   `Show in files column`, which is this face's answer to "where does this
@@ -6735,17 +6861,21 @@ pub struct FileMenu {
 /// subject, so no reader can index it with a number another reader computed.
 #[must_use]
 pub fn file_menu(subject: FileMenuSubject) -> FileMenu {
-    let mut rows = Vec::with_capacity(6);
+    let mut rows = Vec::with_capacity(10);
     match subject {
         FileMenuSubject::File => {
             rows.push(FileMenuRow::Open);
             rows.push(FileMenuRow::OpenWith);
             rows.push(FileMenuRow::Rename);
+            rows.push(FileMenuRow::Delete);
         }
         FileMenuSubject::Folder { .. } => {
             rows.push(FileMenuRow::Fold);
             rows.push(FileMenuRow::NewTerminal);
+            rows.push(FileMenuRow::NewFile);
+            rows.push(FileMenuRow::NewFolder);
             rows.push(FileMenuRow::Rename);
+            rows.push(FileMenuRow::Delete);
         }
         // **`Reveal in Explorer` and not `Show in files column`** (user ruling
         // 2026-08-25). Two rulings of the same day met on this row. The
@@ -6770,6 +6900,7 @@ pub fn file_menu(subject: FileMenuSubject) -> FileMenu {
             return FileMenu {
                 rows,
                 separator_after: None,
+                lone_separator_after: None,
             };
         }
     }
@@ -6786,9 +6917,21 @@ pub fn file_menu(subject: FileMenuSubject) -> FileMenu {
         .position(|row| row.hands_out_the_path(subject))
         .filter(|at| *at > 0 && *at < rows.len())
         .map(|at| at - 1);
+    // The same arithmetic asked of the other predicate: the rule goes under the
+    // row *before* the one that stands alone, because what the gap protects is
+    // the approach to it and not the departure. A list whose lone row is its
+    // first has no approach to protect, which is what the `> 0` filter says —
+    // and it is not a case any face reaches today, because `Delete` is offered
+    // only where a door already stands above it.
+    let lone_separator_after = rows
+        .iter()
+        .position(|row| row.stands_alone())
+        .filter(|at| *at > 0)
+        .map(|at| at - 1);
     FileMenu {
         rows,
         separator_after,
+        lone_separator_after,
     }
 }
 
@@ -6864,6 +7007,11 @@ pub struct FileMenuLayout {
     /// The rule under the last row that acts on the row itself — mock-up 8089,
     /// which separates *what this row is* from *what its path is*.
     separator: Option<[f32; 4]>,
+    /// The rule that holds the gap in front of [`FileMenuRow::stands_alone`]'s
+    /// row, or `None` on a face that has no such row — [`FileMenu::
+    /// lone_separator_after`] placed, and [`TermMenuLayout::lone_separator`]'s
+    /// own field one menu over.
+    lone_separator: Option<[f32; 4]>,
     /// Which way it grew — [`ProfileMenuLayout::travel`]'s field.
     travel: Travel,
 }
@@ -6943,7 +7091,8 @@ pub fn file_menu_layout(
     let rows_height = menu.rows.len() as f32 * item_height;
     let height = (2.0 * (border + padding)
         + rows_height
-        + menu.separator_after.map_or(0.0, |_| separator_block))
+        + menu.separator_after.map_or(0.0, |_| separator_block)
+        + menu.lone_separator_after.map_or(0.0, |_| separator_block))
     .round();
 
     // Both axes clamped, unlike the root menu's one. A menu hung under a button
@@ -6965,22 +7114,38 @@ pub fn file_menu_layout(
     let mut cursor = frame[1] + border + padding;
     let mut items = Vec::with_capacity(menu.rows.len());
     let mut separator = None;
+    let mut lone_separator = None;
+    // One rule per index at most, because the two are placed at different
+    // indices by construction: the lone rule is under the row *before* the one
+    // that stands alone, and the path rule is under that row itself. Written as
+    // two independent tests rather than as an `else` so that a third face whose
+    // arithmetic ever put them together would draw two hairlines and be caught,
+    // instead of quietly losing one.
+    let rule_at = |cursor: f32| {
+        [
+            content_left,
+            cursor + separator_margin,
+            content_right,
+            cursor + separator_margin + separator_thickness,
+        ]
+    };
     for (at, row) in menu.rows.iter().enumerate() {
         items.push(FileMenuItem {
             row: *row,
             rect: [content_left, cursor, content_right, cursor + item_height],
         });
         cursor += item_height;
+        // The gap in front of the row that stands alone, before the rule below —
+        // it is the earlier of the two on every list that has both.
+        if menu.lone_separator_after == Some(at) {
+            lone_separator = Some(rule_at(cursor));
+            cursor += separator_block;
+        }
         // The rule goes under the last row that is not yet a path question,
         // which is where it has always gone: it used to be "under `Open`"
         // because `Open` was the only one above it.
         if menu.separator_after == Some(at) {
-            separator = Some([
-                content_left,
-                cursor + separator_margin,
-                content_right,
-                cursor + separator_margin + separator_thickness,
-            ]);
+            separator = Some(rule_at(cursor));
             cursor += separator_block;
         }
     }
@@ -6989,6 +7154,7 @@ pub fn file_menu_layout(
         frame,
         items,
         separator,
+        lone_separator,
         travel: Travel::away_from(pressed_at(point), frame),
     }
 }
@@ -7062,7 +7228,10 @@ pub fn file_menu_build(
             &mut sprites,
         );
     }
-    if let Some(rect) = layout.separator {
+    // Both rules, drawn by one loop for the reason the terminal's menu draws its
+    // pair that way: they are the same hairline in the same ink, and two pushes
+    // spelled out separately are two places one of them can be forgotten.
+    for rect in layout.separator.into_iter().chain(layout.lone_separator) {
         quads.push(OverlayQuad {
             rect,
             color: palette.menu_border,
@@ -16895,11 +17064,13 @@ mod tests {
                 crate::i18n::Text::FileMenuOpenPreview.text(),
                 crate::i18n::Text::FileMenuOpenWith.text(),
                 crate::i18n::Text::FileMenuRename.text(),
+                crate::i18n::Text::FileMenuDelete.text(),
                 copy_path_text(),
                 insert_path_text(),
                 reveal_in_explorer_text(),
             ],
-            "six rows since B5, top to bottom, and no heading over them"
+            "seven rows since the 0.3 batch, top to bottom, and no heading over \
+             them"
         );
         let ways_in = layout
             .items
@@ -16922,6 +17093,9 @@ mod tests {
                 ChromeMark::File,
                 ChromeMark::External,
                 ChromeMark::Pencil,
+                // The bin, which is where this row's subject goes — and not the
+                // cross, which closes something and leaves it where it was.
+                ChromeMark::Trash,
                 ChromeMark::Copy,
                 ChromeMark::Paste,
                 // The *act* of revealing, so the struck rendition (P2's fill
@@ -17056,9 +17230,9 @@ mod tests {
     #[test]
     fn a_menus_length_is_a_fact_about_its_subject_and_nothing_else() {
         for (subject, rows) in [
-            (FileMenuSubject::File, 6),
-            (FileMenuSubject::Folder { expanded: false }, 6),
-            (FileMenuSubject::Folder { expanded: true }, 6),
+            (FileMenuSubject::File, 7),
+            (FileMenuSubject::Folder { expanded: false }, 9),
+            (FileMenuSubject::Folder { expanded: true }, 9),
             (FileMenuSubject::Document, 4),
             (FileMenuSubject::FoldedPath { levels: 3 }, 3),
         ] {
@@ -17187,7 +17361,7 @@ mod tests {
         // And the two verbs about the path are the same two the tree's rows
         // offer, in the same order, so a rename in one menu cannot drift.
         let tree_rows = file_menu(FileMenuSubject::File).rows;
-        assert_eq!(rows[rows.len() - 2..], tree_rows[3..5]);
+        assert_eq!(rows[rows.len() - 2..], tree_rows[4..6]);
         // The rule falls under Explorer here and over it on a tree row: two
         // rows above the line on this face, one on that one.
         let rule = layout.separator.expect("a menu with both kinds of row");
@@ -17204,15 +17378,202 @@ mod tests {
             &mut fake_measure,
         );
         let tree_rule = tree_layout.separator.expect("both kinds of row");
+        let tree_doors = tree_layout
+            .items
+            .iter()
+            .filter(|item| !item.row.hands_out_the_path(tree.subject))
+            .count();
         assert!(
-            tree_rule[1] >= tree_layout.items[2].rect[3]
-                && tree_rule[3] <= tree_layout.items[3].rect[1],
+            tree_rule[1] >= tree_layout.items[tree_doors - 1].rect[3]
+                && tree_rule[3] <= tree_layout.items[tree_doors].rect[1],
             "and on a tree row it is one of the three path verbs under the rule"
         );
         assert_eq!(
             tree_layout.items.last().map(|item| item.row),
             Some(FileMenuRow::Reveal),
             "which is where the tree row's own Explorer is: last, below the line"
+        );
+    }
+
+    /// PIN (0.3, the files column's second batch) — **`Delete` is the last row
+    /// above the line on both tree faces, and it stands alone between two
+    /// rules.**
+    ///
+    /// Three claims, and each of them is a different way for the row to be
+    /// wrong:
+    ///
+    /// ① it is on the **two faces that are a thing on the disk** and on neither
+    /// of the other two, which is `Rename`'s own division read one row down —
+    /// the `Document` face is the preview asking about the file it is already
+    /// showing, and the `FoldedPath` face carries no verb about any one of the
+    /// folders it hides;
+    /// ② it is **above the rule**, because sending a row to the bin is a fact
+    /// about what the row *is* and not about the text of its path;
+    /// ③ it has **a rule of its own in front of it**, so a hand aiming at
+    /// `Rename` cannot land on it — and that rule is *derived* from
+    /// [`FileMenuRow::stands_alone`], exactly as the first one is derived from
+    /// [`FileMenuRow::hands_out_the_path`], so a row inserted above it moves the
+    /// gap rather than breaking it.
+    ///
+    /// The two rules are asserted as **drawn rectangles in the right gaps**
+    /// rather than as indices, because an index is a promise until something
+    /// places a hairline by it: the earlier version of this menu's rule was
+    /// right in the model and drawn at a fixed offset.
+    ///
+    /// RED GATES: hand-write `lone_separator_after` as an index and inserting
+    /// `New file…` above `Rename` slides the gap onto the wrong row; return
+    /// `false` from `stands_alone` and the second rule vanishes, leaving the bin
+    /// hard against the pencil; move `Delete` below `CopyPath` and ② fails with
+    /// the bin under the line.
+    #[test]
+    fn the_bin_stands_alone_between_two_rules_on_both_tree_faces() {
+        for subject in [
+            FileMenuSubject::File,
+            FileMenuSubject::Folder { expanded: false },
+            FileMenuSubject::Folder { expanded: true },
+        ] {
+            let menu = file_menu(subject);
+            let at = menu
+                .rows
+                .iter()
+                .position(|row| *row == FileMenuRow::Delete)
+                .unwrap_or_else(|| panic!("{subject:?} offers the bin"));
+            assert!(
+                !menu.rows[at].hands_out_the_path(subject),
+                "{subject:?}: the bin is about the row, not about its path"
+            );
+            assert_eq!(
+                menu.separator_after,
+                Some(at),
+                "{subject:?}: it is the last row above the line"
+            );
+            assert_eq!(
+                menu.lone_separator_after,
+                Some(at - 1),
+                "{subject:?}: and the second rule stands in front of it"
+            );
+            assert_eq!(
+                menu.rows[at - 1],
+                FileMenuRow::Rename,
+                "{subject:?}: which is what holds it off the pencil"
+            );
+
+            let look = plain_look(subject);
+            let layout = file_menu_layout(
+                [300.0, 200.0],
+                (960.0, 600.0),
+                1.0,
+                &look,
+                &mut fake_measure,
+            );
+            let bin = layout.items[at].rect;
+            let above = layout.items[at - 1].rect;
+            let below = layout.items[at + 1].rect;
+            let lone = layout
+                .lone_separator
+                .unwrap_or_else(|| panic!("{subject:?} draws the gap it declared"));
+            let rule = layout
+                .separator
+                .unwrap_or_else(|| panic!("{subject:?} draws its path rule"));
+            assert!(
+                lone[1] >= above[3] && lone[3] <= bin[1],
+                "{subject:?}: the gap is drawn between the pencil and the bin"
+            );
+            assert!(
+                rule[1] >= bin[3] && rule[3] <= below[1],
+                "{subject:?}: and the path rule under the bin"
+            );
+            // Two hairlines and not one, and the frame was measured for both:
+            // a menu that grew a rule without paying for its height would draw
+            // its last row past its own bottom edge.
+            assert!(
+                below[3] <= layout.frame[3],
+                "{subject:?}: the frame holds every row it drew"
+            );
+        }
+        for subject in [
+            FileMenuSubject::Document,
+            FileMenuSubject::FoldedPath { levels: 3 },
+        ] {
+            assert!(
+                !file_menu(subject).rows.contains(&FileMenuRow::Delete),
+                "{subject:?} is not a thing on the disk with a name of its own"
+            );
+            assert_eq!(
+                file_menu(subject).lone_separator_after,
+                None,
+                "{subject:?}: no lone row, so no gap to hold in front of one"
+            );
+        }
+    }
+
+    /// PIN (0.3) — **`New file…` and `New folder…` are the folder's own two
+    /// rows, they follow the shell, and both of them promise a field.**
+    ///
+    /// They are verbs about *this folder* rather than about the row's path, so
+    /// they stand above the rule with the fold and the shell — and they follow
+    /// `New terminal here` because that is the row they are most like: it too
+    /// acts *in* this folder rather than *on* it.
+    ///
+    /// **A file row does not offer them.** The folder a file lives in is a
+    /// different row of the same tree, and a `New file…` raised on `notes.md`
+    /// would have to invent which of the two places it meant.
+    ///
+    /// **The three dots are load-bearing.** This menu spends an ellipsis on a
+    /// row that asks something before anything happens, and withholds it from
+    /// one that already knows — `New terminal here` has none, because you
+    /// right-clicked the folder. A `New file…` with no dots would be promising a
+    /// file called something this window chose.
+    ///
+    /// RED GATES: put either row on the `File` arm and the second half names the
+    /// face that took it; drop the ellipsis from either string and the third
+    /// half goes red beside `New terminal here`, which must keep having none.
+    #[test]
+    fn the_two_new_rows_are_the_folders_own_and_ask_for_a_name() {
+        for expanded in [false, true] {
+            let subject = FileMenuSubject::Folder { expanded };
+            let rows = file_menu(subject).rows;
+            let shell = rows
+                .iter()
+                .position(|row| *row == FileMenuRow::NewTerminal)
+                .expect("a folder row opens a shell");
+            assert_eq!(
+                rows[shell + 1..shell + 3],
+                [FileMenuRow::NewFile, FileMenuRow::NewFolder],
+                "the two things a folder can be asked to make follow the shell"
+            );
+            for row in [FileMenuRow::NewFile, FileMenuRow::NewFolder] {
+                assert!(
+                    !row.hands_out_the_path(subject),
+                    "{row:?} is a verb about this folder, not about its path"
+                );
+            }
+        }
+        for subject in [
+            FileMenuSubject::File,
+            FileMenuSubject::Document,
+            FileMenuSubject::FoldedPath { levels: 2 },
+        ] {
+            let rows = file_menu(subject).rows;
+            assert!(
+                !rows.contains(&FileMenuRow::NewFile) && !rows.contains(&FileMenuRow::NewFolder),
+                "{subject:?} is not a folder to make anything in"
+            );
+        }
+        let look = plain_look(FileMenuSubject::Folder { expanded: false });
+        for row in [FileMenuRow::NewFile, FileMenuRow::NewFolder] {
+            assert!(
+                row.text(&look).ends_with('\u{2026}'),
+                "{row:?} opens a field, so it ends in three dots"
+            );
+        }
+        assert!(
+            !FileMenuRow::NewTerminal.text(&look).ends_with('\u{2026}'),
+            "and the row that already knows its folder keeps having none"
+        );
+        assert!(
+            !FileMenuRow::Delete.text(&look).ends_with('\u{2026}'),
+            "the bin asks nothing before it acts, so it promises no field either"
         );
     }
 
@@ -17359,19 +17720,35 @@ mod tests {
             vec![
                 crate::i18n::Text::FolderMenuExpand.text(),
                 crate::i18n::Text::FolderMenuNewTerminal.text(),
+                crate::i18n::Text::FolderMenuNewFile.text(),
+                crate::i18n::Text::FolderMenuNewFolder.text(),
                 crate::i18n::Text::FileMenuRename.text(),
+                crate::i18n::Text::FileMenuDelete.text(),
                 copy_path_text(),
                 insert_path_text(),
                 reveal_in_explorer_text(),
             ],
-            "a folder has no preview seat, so its ways in are its own two — and              since B5 the name it has on the disk is a third"
+            "a folder has no preview seat, so its ways in are its own — the fold, \
+             a shell, the two things it can be asked to make, its own name, and \
+             the bin"
         );
+        let rows = file_menu(subject).rows;
+        let doors = rows
+            .iter()
+            .filter(|row| !row.hands_out_the_path(subject))
+            .count();
         let separator = layout.separator.expect("a menu with both kinds of row");
-        assert!(separator[1] >= layout.items[2].rect[3] && separator[3] <= layout.items[3].rect[1]);
+        assert!(
+            separator[1] >= layout.items[doors - 1].rect[3]
+                && separator[3] <= layout.items[doors].rect[1],
+            "the rule still lies between the last door and the first path verb, \
+             however many doors this face grows"
+        );
         // The path half is one list shared with the file row's menu, so the two
-        // cannot drift apart by a rename in one of them.
+        // cannot drift apart by a rename in one of them — and so is the tail
+        // above it, which is `Rename` then the bin on both faces.
         assert_eq!(
-            file_menu(subject).rows[2..],
+            rows[rows.len() - 5..],
             file_menu(FileMenuSubject::File).rows[2..],
         );
     }
@@ -20187,8 +20564,14 @@ mod tests {
         );
         assert_eq!(
             step(file, Some(FileMenuRow::CopyPath), false),
+            FileMenuRow::Delete,
+            "the 0.3 batch put the bin between the doors and the path verbs"
+        );
+        assert_eq!(
+            step(file, Some(FileMenuRow::Delete), false),
             FileMenuRow::Rename,
-            "B5 put a row between the doors and the path verbs"
+            "and the walk crosses the rule that holds the bin apart, because a \
+             rule is drawn between rows and is not one"
         );
 
         let folder = FileMenuSubject::Folder { expanded: false };
@@ -20199,13 +20582,28 @@ mod tests {
             FileMenuRow::NewTerminal
         );
         assert_eq!(
+            step(folder, Some(FileMenuRow::NewTerminal), true),
+            FileMenuRow::NewFile,
+            "the two things a folder can be asked to make follow the shell"
+        );
+        assert_eq!(
+            step(folder, Some(FileMenuRow::NewFile), true),
+            FileMenuRow::NewFolder
+        );
+        assert_eq!(
             step(folder, Some(FileMenuRow::CopyPath), false),
-            FileMenuRow::Rename
+            FileMenuRow::Delete
         );
         assert_eq!(
             step(folder, Some(FileMenuRow::Rename), false),
-            FileMenuRow::NewTerminal,
+            FileMenuRow::NewFolder,
             "and it steps over a row this subject does not have"
+        );
+        assert_eq!(
+            step(file, Some(FileMenuRow::NewFile), true),
+            FileMenuRow::Reveal,
+            "a hover a file's list has not got does not wedge the walk: the step \
+             lands at the end it was travelling towards"
         );
 
         let document = FileMenuSubject::Document;
