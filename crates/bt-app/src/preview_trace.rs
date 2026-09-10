@@ -25,6 +25,10 @@
 //!   `built seat=<n> leave=<no-rect|no-buffer|picture>` — what came out.
 //! * `frame bodies=<n> paragraphs=<n> quads=<n> drawn=<n> prepared=<0|1>` — what
 //!   the renderer then did with all of them.
+//! * `document bytes=<n> blocks=<n> source=<index|none> parse_us=<n>
+//!   intrinsic_us=<n> layout_us=<n> total_us=<n> hits=<n> misses=<n>` — what one
+//!   markdown document cost to build, split three ways (ticket T4). This is the
+//!   station a keystroke is measured with: see [`DocumentBuild`].
 //!
 //! **The frame station writes on a change and never otherwise**, which is
 //! [`crate::attention_trace`]'s rule and for its reason exactly: a preview pane
@@ -69,6 +73,62 @@ impl FrameEcho {
         self.0 = Some(frame);
         true
     }
+}
+
+/// **What one markdown document cost to build** — the third station, and the
+/// one a keystroke is measured with (ticket T4; `docs/DESIGN.md` §7.1.3q).
+///
+/// Research open question 5 asks whether the whole-document re-parse survives a
+/// keystroke and answers "measure first": 64 KiB through a hand-written line
+/// parser is probably far inside budget, and the expensive halves were expected
+/// to be the intrinsics and the fence highlighting — which are now keyed per
+/// block content ([`crate::MarkdownIntrinsicKey`]) rather than thrown away on
+/// every edit. This is what says so on a real document rather than in an
+/// argument: three durations, and the two cache counters that explain the middle
+/// one.
+///
+/// **The clock only runs when the trace is open.** The three `Instant`s are
+/// taken inside `preview_trace::global().map(...)`, so a window with the
+/// variable unset does not time anything at all — the same discipline the two
+/// stations above keep, one level down.
+#[derive(Clone, Copy, Debug)]
+pub struct DocumentBuild {
+    pub bytes: usize,
+    pub blocks: usize,
+    /// Which block was drawn as source, if any — §7.1.3q's own rule, in the
+    /// line that shows what it cost.
+    pub source: Option<usize>,
+    /// [`crate::MarkdownIntrinsicCache`]'s two counters, since the window
+    /// opened: what an edit to one block did *not* have to measure again is the
+    /// difference between two of these lines.
+    pub hits: u64,
+    pub misses: u64,
+    pub parse: std::time::Duration,
+    pub intrinsic: std::time::Duration,
+    pub layout: std::time::Duration,
+}
+
+/// `document bytes=<n> blocks=<n> source=<index|none> parse_us=<n>
+/// intrinsic_us=<n> layout_us=<n> total_us=<n> hits=<n> misses=<n>`
+pub fn document(trace: Option<&Trace>, build: DocumentBuild) {
+    emit(trace, || {
+        let total = build.parse + build.intrinsic + build.layout;
+        format!(
+            "document bytes={} blocks={} source={} parse_us={} intrinsic_us={} \
+             layout_us={} total_us={} hits={} misses={}",
+            build.bytes,
+            build.blocks,
+            build
+                .source
+                .map_or_else(|| "none".to_owned(), |index| index.to_string()),
+            build.parse.as_micros(),
+            build.intrinsic.as_micros(),
+            build.layout.as_micros(),
+            total.as_micros(),
+            build.hits,
+            build.misses,
+        )
+    });
 }
 
 /// `frame …` — what the renderer did with every preview body it holds.

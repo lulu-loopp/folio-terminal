@@ -84,6 +84,7 @@ mod persist;
 mod pins;
 mod preview;
 mod preview_edit;
+mod preview_live;
 mod preview_select;
 mod preview_trace;
 mod preview_undo;
@@ -1421,6 +1422,30 @@ enum PreviewDocument {
     },
     Markdown {
         blocks: Vec<preview::MarkdownBlock>,
+        /// One byte range per block, into the buffer this was parsed from —
+        /// [`preview::parse_markdown_ranged`]'s second half (§7.1.3o).
+        ///
+        /// **Carried on the document so that the caret's block can be found
+        /// without parsing again.** Which block is the source block is asked
+        /// once per rebuild, including on the rebuilds that do not re-parse
+        /// (a resize, a picture landing, a caret moving), and the ranges are the
+        /// only thing that can answer it. They describe the bytes this parse was
+        /// made of, so they are true for exactly as long as
+        /// [`PreviewParseKey`] stands — which is the same life the blocks
+        /// beside them have.
+        ranges: Vec<std::ops::Range<usize>>,
+        /// **The block the caret is in, drawn as the file's own bytes**
+        /// (§7.1.3q). `None` when nothing on this surface holds a caret, and
+        /// when the caret stands in the tissue between two blocks
+        /// ([`preview_live::CaretSeat::Gap`]).
+        ///
+        /// **Boxed**, which is the one place in this enum that pays for a
+        /// pointer: `None` is the answer on every document in the window until the
+        /// markdown block's T5, and a variant carrying the block's bytes inline
+        /// would make every
+        /// `PreviewDocument` — a diff, a table, an empty pane — as large as the
+        /// rarest thing any of them can hold.
+        source: Option<Box<MarkdownSourceBlock>>,
         /// One entry per block, measured **once per content change** — see
         /// [`MarkdownBlockIntrinsic`].
         intrinsic: Vec<MarkdownBlockIntrinsic>,
@@ -1442,6 +1467,67 @@ enum PreviewDocument {
         /// [`math`]: PreviewDocument::Markdown::math
         pictures: DocumentPictures,
     },
+}
+
+/// **The block the caret is in, ready to be drawn as the file's own bytes**
+/// (§7.1.3q, ticket T4).
+///
+/// Everything here is a fact about the *content* and the scale, so it is built
+/// with the parse and cached with it: the bytes of the block, the lines they
+/// draw as, and the three numbers the source face is set in. What is **not**
+/// here is the caret's own position, and that omission is the design — a caret
+/// moving inside one block must not re-lay-out the document, so where the caret
+/// is is worked out at paint time ([`MarkdownCaretPaint`]) and only *which
+/// block it is in* is part of the document's identity ([`PreviewDocumentKey`]).
+#[derive(Clone, Debug, PartialEq)]
+struct MarkdownSourceBlock {
+    /// Which block of the document is drawn as source.
+    index: usize,
+    /// The block's byte range in the buffer — its identity in the key, and what
+    /// a caret offset is turned into a row and a column against.
+    range: std::ops::Range<usize>,
+    /// The block's own bytes, its trailing line ending off
+    /// ([`preview_live::block_source`]). The coordinate every offset in here is
+    /// measured from is this string's start, not the file's.
+    text: String,
+    /// The same bytes as the painter draws them: one entry per line, tabs
+    /// already the spaces they stand in for. [`preview_edit::display_lines`]'s
+    /// answer, minus the phantom last line, for the same reason `text` has no
+    /// trailing break — see [`preview_live::block_source`].
+    lines: Vec<String>,
+    /// The source face's own three numbers, taken from
+    /// [`seats::preview_text_metrics`] at the scale this document was measured
+    /// at. Carried rather than re-derived because the layout pass and the paint
+    /// pass must fold the block's lines at the same column, and a second
+    /// derivation is a second chance to disagree.
+    font_size: f32,
+    line_height: f32,
+    /// One monospace column, in pixels. Zero until the face has been measured,
+    /// which is the same "cannot wrap yet" [`preview_wrap_columns`] answers.
+    advance: f32,
+}
+
+impl MarkdownSourceBlock {
+    /// How the block's lines fold into the width they are drawn in.
+    ///
+    /// **One derivation, called by both passes.** The layout asks it for the
+    /// row count that becomes the block's height and the painter asks it for the
+    /// span of every row it draws; a block whose height was measured at one fold
+    /// and drawn at another is a block that ends in the middle of the paragraph
+    /// under it. The rule is the source face's own ([`preview_wrap_columns`]):
+    /// a line wider than the pane folds at a word where it can, and a pane too
+    /// narrow for one column does not fold at all.
+    fn wrap(&self, width: f32) -> preview_edit::WrapLayout {
+        if self.advance <= 0.0 {
+            return preview_edit::WrapLayout::unwrapped(&self.lines);
+        }
+        let columns = (width / self.advance).floor();
+        if columns >= 1.0 {
+            preview_edit::WrapLayout::wrapped(&self.lines, columns as usize)
+        } else {
+            preview_edit::WrapLayout::unwrapped(&self.lines)
+        }
+    }
 }
 
 /// What one markdown block is worth **whatever width the pane happens to be**
@@ -1479,6 +1565,137 @@ struct MarkdownBlockIntrinsic {
     /// putting the highlighting anywhere on the *layout* side would have
     /// re-created it in a new place.
     highlight: highlight::Highlighting,
+}
+
+/// **Everything that decides what one block is worth whatever width the pane
+/// is** — the identity a [`MarkdownBlockIntrinsic`] is remembered under
+/// (§7.1.3q, ticket T4).
+///
+/// [`PreviewMathKey`]'s shape one block kind up, and for the same reason: the
+/// answer depends on the content, the size and nothing else, so two documents
+/// holding the same fence are looking at one measurement and one walk of the
+/// grammar.
+///
+/// **The block's own source bytes are its identity.** A parse is a function of
+/// the bytes, so two blocks spelled the same are the same block — and the bytes
+/// are what a keystroke changes, which is the whole point: an edit to one
+/// paragraph leaves every other block's key untouched, so the tables keep their
+/// columns and the fences keep their highlighting across it. Before this, the
+/// whole vector was thrown away on any edit and `highlight.rs` said so in as
+/// many words: every fence in a document was re-walked by syntect on every
+/// keystroke anywhere in it.
+///
+/// **The scale, because a measurement is in pixels.** The same em at 100% and at
+/// 150% is two different column widths, and a monitor crossing is exactly the
+/// moment a re-measure is owed ([`PreviewParseKey::scale_ppm`]).
+///
+/// **The formulas' generation, and only for a table.** A cell holding a formula
+/// is as wide as that formula's picture, so a column measured before the picture
+/// landed reserved the width of the LaTeX instead — which is why
+/// [`Runtime::rebuild_preview_document`] re-measures on an arrival. Nothing else
+/// this pass computes asks the formulas anything: a fence's width is its longest
+/// line and its highlighting is its own grammar's. So `None` for every kind but
+/// a table, and a formula landing does not throw away a document's fences.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct MarkdownIntrinsicKey {
+    source: String,
+    scale_ppm: u32,
+    math_generation: Option<u64>,
+}
+
+/// How many block measurements one window keeps.
+///
+/// **Counted in entries and not in bytes**, which is the opposite of
+/// [`PREVIEW_MATH_CACHE_BUDGET_BYTES`] and honest for the opposite reason: an
+/// entry here is a handful of floats and a line's worth of spans, so what it
+/// costs is bounded by what it *is*, while a formula's cost is its pixels. The
+/// number is a document's own tables and fences several times over — a file
+/// being edited mints one new entry per keystroke inside the block under the
+/// caret, and the ones it leaves behind are what an undo walks back through.
+const PREVIEW_INTRINSIC_CACHE_ENTRIES: usize = 512;
+
+/// The window's block measurements: what has been measured, and when it was last
+/// asked for.
+///
+/// **Only the two kinds that cost anything are in here.** Every other block's
+/// intrinsic is [`MarkdownBlockIntrinsic::default`] — no shaping, no grammar,
+/// nothing to remember — so putting them in would be a hash of a paragraph for a
+/// value that is four zeroes.
+#[derive(Debug, Default)]
+struct MarkdownIntrinsicCache {
+    entries: std::collections::HashMap<MarkdownIntrinsicKey, (MarkdownBlockIntrinsic, u64)>,
+    /// Ticks once per pass, which is what "least recently used" is counted in —
+    /// [`PreviewMathCache::tick`]'s own note: two documents measured in one
+    /// frame are equally recent, and that is exactly right.
+    tick: u64,
+    /// **The test seam.** How many blocks this cache has answered for and how
+    /// many it has had to measure, since the window opened. "An edit to one
+    /// block keeps every other block's measurement" is a sentence about these
+    /// two numbers, and a test that could only time a window could not say it.
+    hits: u64,
+    misses: u64,
+}
+
+impl MarkdownIntrinsicCache {
+    /// Open a pass: nothing is evicted until it ends, so a document whose
+    /// blocks outnumber the budget still finds every one of its own.
+    ///
+    /// **Named for the pass and not `begin`/`close`**, because three of this
+    /// file's own tests read it as *text*: `floated_page_tests::fn_body` finds
+    /// the first method in `main.rs` whose name is `close`, and asserts about
+    /// the window that closes. A second method of that name higher up the file
+    /// answers in its place — and so, it turns out, does a doc comment that
+    /// spells one.
+    fn begin_pass(&mut self) {
+        self.tick = self.tick.saturating_add(1);
+    }
+
+    fn get(&mut self, key: &MarkdownIntrinsicKey) -> Option<MarkdownBlockIntrinsic> {
+        let tick = self.tick;
+        let Some((intrinsic, used)) = self.entries.get_mut(key) else {
+            self.misses = self.misses.saturating_add(1);
+            return None;
+        };
+        *used = tick;
+        let intrinsic = intrinsic.clone();
+        self.hits = self.hits.saturating_add(1);
+        Some(intrinsic)
+    }
+
+    fn insert(&mut self, key: MarkdownIntrinsicKey, intrinsic: MarkdownBlockIntrinsic) {
+        let tick = self.tick;
+        self.entries.insert(key, (intrinsic, tick));
+    }
+
+    /// Drop the least recently used measurements until the budget is met.
+    ///
+    /// **Never anything measured in this pass**: a document with more blocks
+    /// than the budget would otherwise evict its own first fence to make room
+    /// for its last one and re-measure the whole file on every frame. The
+    /// budget is a ceiling on memory, not a promise about a single document.
+    ///
+    /// See [`Self::begin_pass`] for why neither of these is called `close`.
+    fn end_pass(&mut self) {
+        if self.entries.len() <= PREVIEW_INTRINSIC_CACHE_ENTRIES {
+            return;
+        }
+        let tick = self.tick;
+        let mut older: Vec<(u64, MarkdownIntrinsicKey)> = self
+            .entries
+            .iter()
+            .filter(|(_, (_, used))| *used != tick)
+            .map(|(key, (_, used))| (*used, key.clone()))
+            .collect();
+        older.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        let mut over = self.entries.len() - PREVIEW_INTRINSIC_CACHE_ENTRIES;
+        for (_, key) in older {
+            if over == 0 {
+                break;
+            }
+            self.entries.remove(&key);
+            over -= 1;
+        }
+    }
 }
 
 /// **Everything that decides what one formula's picture looks like.**
@@ -2366,6 +2583,33 @@ struct PreviewDocumentKey {
     /// exactly what these are: nothing about the document changed, only how tall
     /// one of its blocks now is. So an arrival re-flows and does not re-parse.
     art: PageArtKey,
+    /// **Which block is drawn as source, and what its bytes are** (§7.1.3q):
+    /// the caret's block by index and by range, or `None` when no caret stands
+    /// on this surface or it stands in the tissue between two blocks.
+    ///
+    /// **On the width's side of the split, and that is the whole placement
+    /// argument.** The caret moving from one block to the next changes not one
+    /// byte of the file: the same parse, the same blocks, the same intrinsics —
+    /// one block stops being wrapped prose and becomes monospace lines, and the
+    /// blocks under it move by the difference. That is precisely a *re-flow*, so
+    /// it is keyed here beside the width and it re-uses the parse, exactly as a
+    /// window drag does. Keying it beside the revision would re-parse and
+    /// re-highlight the whole document every time an arrow key crossed a
+    /// paragraph, which is the 2026-08-13 resize stutter with a different
+    /// gesture in front of it.
+    ///
+    /// **The index and the range together**, not the index alone: an edit can
+    /// leave the caret in block 4 and make block 4 a different four hundred
+    /// bytes, and an edit that only *adds* a block above the caret leaves the
+    /// index moving under a range that did not. Either half alone lets a stale
+    /// body stand.
+    ///
+    /// **Not the caret's offset.** A caret walking along one paragraph would
+    /// then re-lay-out the whole document per keypress for a body that is
+    /// identical; where the caret sits *inside* its block is a paint-time
+    /// question ([`MarkdownCaretPaint`]) and the page is rebuilt every frame
+    /// anyway.
+    source: Option<(usize, std::ops::Range<usize>)>,
 }
 
 /// The half of [`PreviewDocumentKey`] that has **nothing to do with the pane's
@@ -2376,6 +2620,37 @@ struct PreviewDocumentKey {
 /// markdown for every pixel the window edge moved. The scale is on this side
 /// rather than the other because it is not a live-drag quantity — it changes when
 /// a window crosses monitors, which is exactly the moment a re-measure is owed.
+///
+/// # What one keystroke costs, measured (ticket T4, 2026-09-10)
+///
+/// [`Self::revision`] moves on every edit, so **one keystroke re-parses the
+/// whole document**. Research open question 5 asked whether that survives a live
+/// preview and answered "measure first, and do not build an incremental parser
+/// on a guess". It was measured, on this repository's own `docs/UI-UX.md`, in
+/// the test profile, by
+/// `a_one_character_edit_rebuilds_a_document_inside_the_frame_budget`:
+///
+/// | document | blocks | parse | intrinsics | layout | total |
+/// |---|---|---|---|---|---|
+/// | 64 KiB | 200 | 1.01 ms | 8 µs | 0.37 ms | **1.39 ms** |
+/// | 1.1 MiB | 3 164 | 15.4 ms | 121 µs | 2.8 ms | **18.3 ms** |
+///
+/// Two things follow, and the second is a ticket this one did not open. **At 64
+/// KiB the whole-document re-parse stands**: a keystroke costs a tenth of a
+/// frame, and the two passes the research expected to dominate — the intrinsics
+/// and the fence highlighting — now cost eight microseconds instead of
+/// milliseconds, because they are keyed per block content
+/// ([`MarkdownIntrinsicKey`]) rather than thrown away on every edit. **At a
+/// megabyte the parse alone is over a frame**, which is past the ~4 ms the
+/// ticket set as the line: an incremental parser is owed there and it is its own
+/// ticket, not a corner of this one. Nothing in this design blocks it — the
+/// ranges are already per block (§7.1.3o), which is the input such a parser
+/// needs.
+///
+/// (The shaper is stubbed in that measurement, because a real one wants a GPU;
+/// what is timed is everything a keystroke re-derives *except* the proportional
+/// shaping, which this ticket did not change and which is already paid per
+/// visible block.)
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PreviewParseKey {
     source: preview::PreviewSource,
@@ -2709,6 +2984,31 @@ struct PreviewPane {
     page_source: Option<PathBuf>,
 }
 
+/// **Who moved the bytes a parse is being replaced over** (§7.1.3q; research
+/// `docs/plans/markdown-edit/research-2026-09-10.md` open question 15).
+///
+/// One boolean's worth of meaning, spelled as two names because the two are not
+/// each other's negation in any way a reader would guess: this is not "did the
+/// content change" and not "is the buffer dirty", it is *whose hand* the new
+/// bytes came from. It is decided at the one call site that knows —
+/// [`Runtime::rebuild_preview_document`], which holds the key it is replacing —
+/// and it decides exactly one thing: whether what a reader had marked survives.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Reparse {
+    /// **This window put these bytes here, or nobody did.** A keystroke, an undo,
+    /// a redo — and every re-parse where the content did not move at all: the
+    /// face flipped, the window crossed a monitor, the pane changed shape past
+    /// the point where a re-layout is owed. Everything a reader marked is still
+    /// about the words it was about.
+    Ours,
+    /// **The bytes arrived from outside this window**: a head landing, the whole
+    /// file bought for an edit, another program's save taken with
+    /// `take_the_disks_copy`. A [`preview_select::Place`] is an offset into a
+    /// piece of a *particular* parse and a selection left standing over somebody
+    /// else's sentence would put those bytes on the clipboard, so the mark goes.
+    Elsewhere,
+}
+
 impl PreviewPane {
     /// **Put a freshly parsed document on this surface**, and let go of
     /// anything selected in the last one.
@@ -2723,10 +3023,37 @@ impl PreviewPane {
     ///
     /// The boxes go with it for a plainer reason: they are where the *last*
     /// document was drawn, and nothing has drawn this one yet.
-    fn show_document(&mut self, doc: PreviewDocument) {
+    ///
+    /// **Except when the parse is our own** (§7.1.3q, research open question 15
+    /// — "the single most dangerous line in T4"). The rule above was written
+    /// when the only thing that could replace a parse was the file changing
+    /// underneath it. A document that re-parses on every keystroke re-parses for
+    /// a second reason now, and it is the opposite reason: the bytes are the
+    /// reader's own, typed a moment ago, and everything they had marked still
+    /// names the words they marked. Dropping it there would mean a selection
+    /// that could not survive being typed next to, which is the one thing an
+    /// editor may not do. See [`Reparse`] for how the two are told apart.
+    fn show_document(&mut self, doc: PreviewDocument, reparse: Reparse) {
         self.doc = doc;
-        self.md_select = None;
+        // **The boxes go whatever happened.** They are where the *last* document
+        // was drawn — a geometry, not a mark — and this one has not been drawn
+        // yet.
         self.md_text = Vec::new();
+        if reparse == Reparse::Ours {
+            return;
+        }
+        self.md_select = None;
+        // **The caret is not thrown away; what it had dragged over is.** A
+        // caret is a byte offset into the buffer's own body and every door that
+        // moves that body already puts it back inside it
+        // (`preview_edit::EditCaret::heal`, at the arrival of a disk copy and at
+        // the head of every edit and every motion), while a *session* restores
+        // one from [`PreviewViewState`] before the file it belongs to has even
+        // landed — so a re-parse that zeroed it would throw away the place a
+        // reader was last at every time a buffer was re-read. What cannot
+        // survive is the mark: a selection is a claim about two ends of somebody
+        // else's text, and both selection models on this surface drop it here.
+        self.caret.anchor = self.caret.caret;
     }
 
     /// **The same document, laid out again** — a pane that changed width, or a
@@ -3110,6 +3437,15 @@ impl PreviewViewStore {
     }
 }
 
+/// A scale factor as something a key can be compared by.
+///
+/// **One definition**, for [`math_em_milli`]'s reason: the scale arrives as a
+/// float, two roundings of one float are two different keys, and a `HashMap`
+/// cannot be asked about a float at all.
+fn scale_ppm(scale: f32) -> u32 {
+    (scale * 1_000_000.0).round().max(0.0) as u32
+}
+
 /// The key one buffer earns at one width and scale.
 ///
 /// A free function rather than a method so the identity can be asserted without
@@ -3121,16 +3457,18 @@ fn preview_document_key(
     body_width_px: f32,
     scale: f32,
     art: PageArtKey,
+    source: Option<(usize, std::ops::Range<usize>)>,
 ) -> PreviewDocumentKey {
     PreviewDocumentKey {
         parse: PreviewParseKey {
             source: buffer.source.clone(),
             md_source,
             revision: buffer.revision,
-            scale_ppm: (scale * 1_000_000.0).round() as u32,
+            scale_ppm: scale_ppm(scale),
         },
         body_width_px: body_width_px.max(0.0).round() as u32,
         art,
+        source,
     }
 }
 
@@ -4311,6 +4649,81 @@ struct BlockScrollPaint<'a> {
     scale: f32,
 }
 
+/// **Where the caret stands on a rendered markdown page** (§7.1.3q).
+///
+/// The two arms are [`preview_live::CaretSeat`]'s two arms with the geometry
+/// each of them needs added, and they are an enum here for the reason they are
+/// one there: a caret is in a block or between two, never both, and a painter
+/// given two independent options could be told it is in neither and asked to
+/// draw one anyway.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MarkdownCaretSeat {
+    /// Inside the block the document is already carrying as its source block:
+    /// the line of that block's own source, and the column in it.
+    Source(usize, usize),
+    /// In the tissue between two blocks, where no block was parsed from and none
+    /// ever will be. **One empty source line, standing immediately under the
+    /// block in front of it** — see [`preview_live`]'s module note for why that
+    /// slot and not the following block's top, and why nothing moves to make
+    /// room for it.
+    Gap {
+        after: Option<usize>,
+        line_height: f32,
+    },
+}
+
+/// **The caret and what it has dragged over, on a rendered page** —
+/// [`PreviewEditPaint`]'s opposite number, and deliberately its shape.
+///
+/// Built per frame and never cached, which is the other half of
+/// [`PreviewDocumentKey::source`]'s argument: *which* block is source is the
+/// document's identity, and where the caret is inside it is not, so a caret
+/// walking along a paragraph costs a repaint and never a re-layout.
+#[derive(Clone, Debug, PartialEq)]
+struct MarkdownCaretPaint {
+    seat: MarkdownCaretSeat,
+    /// **Drawn only while this surface holds the keyboard.** The text face's own
+    /// rule ([`build_preview_text_body`]): a body you have clicked away from
+    /// keeps what it had marked and has no caret, because nothing is going to
+    /// land there.
+    lit: bool,
+    /// What the caret has dragged over, in the file's own bytes. Cut against the
+    /// source block's range by the painter, so a selection that began in another
+    /// block draws the part of itself that is in this one.
+    selection: std::ops::Range<usize>,
+    caret_width: f32,
+}
+
+/// **Everything the live preview adds to a rendered page** (§7.1.3q): the block
+/// that is drawn as source, and the caret standing in it.
+///
+/// Empty on every surface that holds no caret, which — until the markdown
+/// block's T5 gives the rendered face one — is every surface in the window. That is why this ticket
+/// changes nothing a reader can see.
+#[derive(Clone, Copy, Default)]
+struct MarkdownLive<'a> {
+    source: Option<&'a MarkdownSourceBlock>,
+    caret: Option<&'a MarkdownCaretPaint>,
+}
+
+/// **One parsed page, in the four things the painter walks together**: the
+/// blocks, what each is worth whatever the width is, where each ended up, and
+/// what the caret does to them.
+///
+/// The three vectors travelled as a tuple until the caret joined them, and the
+/// reason they travel together at all is [`MarkdownBlockIntrinsic`]'s: a fence's
+/// highlighting is width-free, so it was measured with the rest of what a block
+/// is worth and is read at paint time beside the layout that used it. Zipped by
+/// index, always — a page whose three lists came apart would draw one block's
+/// letters in another block's box.
+#[derive(Clone, Copy)]
+struct MarkdownPage<'a> {
+    blocks: &'a [preview::MarkdownBlock],
+    intrinsic: &'a [MarkdownBlockIntrinsic],
+    layout: &'a [MarkdownBlockLayout],
+    live: MarkdownLive<'a>,
+}
+
 /// What a block with no highlighting carries — every block that is not a fence,
 /// and every fence whose info string named nothing this window has a grammar
 /// for. A `static` so the fence painter can borrow it for the length of its
@@ -4327,11 +4740,7 @@ fn build_preview_markdown_body(
     metrics: seats::PreviewMarkdownMetrics,
     scroll: [f32; 2],
     bars: BlockScrollPaint<'_>,
-    document: (
-        &[preview::MarkdownBlock],
-        &[MarkdownBlockIntrinsic],
-        &[MarkdownBlockLayout],
-    ),
+    document: MarkdownPage<'_>,
     palette: &bt_render::ChromePalette,
     art: PageArt<'_>,
 ) -> BuiltMarkdown {
@@ -4346,7 +4755,12 @@ fn build_preview_markdown_body(
     // The intrinsics travel with the blocks now, and for one reason: a fence's
     // syntax highlighting is width-free, so it was measured with the rest of
     // what a block is worth whatever the pane does (#49).
-    let (blocks, intrinsic, layout) = document;
+    let MarkdownPage {
+        blocks,
+        intrinsic,
+        layout,
+        live,
+    } = document;
     let PageArt {
         math,
         pictures,
@@ -4460,6 +4874,27 @@ fn build_preview_markdown_body(
         // place built from the wrong one of the two is a selection that copies
         // somebody else's paragraph.
         let block_index = index;
+        // **The caret's block is drawn as the file's own bytes and none of the
+        // arms below run for it** (§7.1.3q). It is the one rule of the live
+        // preview, and it is a whole branch rather than an eleventh arm because
+        // what is drawn here is not a *kind* of block: a table, a fence and a
+        // paragraph under the caret are the same monospace lines, and the only
+        // thing the block's kind still decides is whether the highlighting the
+        // measuring pass computed for it applies.
+        if let Some(source) = live.source.filter(|source| source.index == block_index) {
+            push_markdown_source_block(
+                (quads, paragraphs),
+                source,
+                live.caret,
+                intrinsic
+                    .get(index)
+                    .map_or(&NO_HIGHLIGHTING, |block| &block.highlight),
+                [left, top, right, top + height],
+                body,
+                palette,
+            );
+            continue;
+        }
         match block {
             preview::MarkdownBlock::Heading { level, spans } => {
                 note_link_sites(&mut links, spans, (region, paragraphs.len(), 0));
@@ -5003,6 +5438,25 @@ fn build_preview_markdown_body(
             }
         }
     }
+    // **A caret standing in no block still has to be somewhere** (§7.1.3q).
+    // Drawn from the layout rather than from a block, because that is exactly
+    // what a gap is: the space between where one block ended and where the next
+    // one begins. Nothing was measured for it and nothing moves — the empty line
+    // stands in the margin the page had already collapsed between the two.
+    if let Some(caret) = live.caret.filter(|caret| caret.lit)
+        && let MarkdownCaretSeat::Gap { after, line_height } = caret.seat
+    {
+        let top = origin
+            + after
+                .and_then(|index| layout.get(index))
+                .map_or(0.0, |placed| placed.top + placed.height);
+        if top + line_height > body[1] && top < body[3] {
+            quads.push(bt_render::PreviewQuad {
+                rect: [left, top, left + caret.caret_width, top + line_height],
+                color: palette.preview_caret,
+            });
+        }
+    }
     // The bars, after the blocks so they stand over their own contents.
     for (block, indicator) in &mut scrollers {
         push_block_scroll_indicator(block, *indicator, lit, scale, palette);
@@ -5018,6 +5472,137 @@ fn build_preview_markdown_body(
         links,
         math: math_sites,
         text: text_sites,
+    }
+}
+
+/// **The caret's block, drawn as the file's own bytes** (§7.1.3q, ticket T4).
+///
+/// The source face's body ([`build_preview_text_body`]) over one block instead
+/// of one document, and every line of arithmetic in here is that function's:
+/// the rows are visual rows and a folded line has several of them, a column is
+/// x over the monospace advance, the bands are cut per row rather than per line,
+/// and the caret is a bar the width of a terminal's.
+///
+/// **It is not that function called with a smaller rectangle**, and that is
+/// worth saying because it was the first thing tried. `build_preview_text_body`
+/// is written against a [`seats::PreviewMonoGeometry`], which is a *document's*
+/// geometry: row zero is the top of the body, every row is `index × line
+/// height` from it, the viewport is the pane's and the body it hands back owns
+/// the surface's one clip. A source block is none of those things — it stands at
+/// a `top` the layout gave it, between blocks of proportional prose, and it is
+/// one contributor to a body somebody else owns. Pointing the geometry at a
+/// sub-rectangle would mean lying to it about where row zero is and then
+/// subtracting the lie back out at every call, in a type whose whole job is that
+/// the three passes reading it agree.
+///
+/// **The fence's highlighting is the measuring pass's, offset by its own opening
+/// line.** [`MarkdownBlockIntrinsic::highlight`] is one entry per line of what is
+/// *inside* the fence, because that is what the grammar was walked over; the
+/// source block draws the markers too, so the file's first line is the fence
+/// spelling and is set plain. That is what "a fence keeps its syntax
+/// highlighting" costs, and it costs nothing else: the walk itself is not
+/// re-run, because the highlighting is keyed on the block's own content
+/// ([`MarkdownIntrinsicKey`]) and the caret standing in a block does not change
+/// what it says.
+fn push_markdown_source_block(
+    into: (
+        &mut Vec<bt_render::PreviewQuad>,
+        &mut Vec<bt_render::PreviewParagraph>,
+    ),
+    source: &MarkdownSourceBlock,
+    caret: Option<&MarkdownCaretPaint>,
+    highlight: &highlight::Highlighting,
+    box_of_block: [f32; 4],
+    clip: [f32; 4],
+    palette: &bt_render::ChromePalette,
+) {
+    let (quads, paragraphs) = into;
+    let [left, top, right, _] = box_of_block;
+    let wrap = source.wrap((right - left).max(1.0));
+    let rows = visible_range(top, source.line_height, wrap.rows(), clip);
+    let row_rect = |row: usize| {
+        let row_top = top + source.line_height * row as f32;
+        [left, row_top, right.max(left), row_top + source.line_height]
+    };
+    // **The fills first and the letters after**, which is not a preference:
+    // [`bt_render::PreviewBody`] draws its quads and then its text, so a band is
+    // under the words it is about by construction and a caret is a hairline
+    // behind them rather than a bar over them — the same order the source face
+    // draws in.
+    if let Some(caret) = caret {
+        // The selection is the file's and this block is a window onto it: what
+        // began in the paragraph above draws the part of itself that is here,
+        // and what began after it draws nothing.
+        let starts = preview_edit::line_starts(&source.text);
+        let cut = |offset: usize| {
+            offset
+                .saturating_sub(source.range.start)
+                .min(source.text.len())
+        };
+        let selection = cut(caret.selection.start)..cut(caret.selection.end);
+        for (row, from, to) in preview_edit_bands(
+            &source.text,
+            &starts,
+            &selection,
+            &wrap,
+            rows.start..rows.end,
+        ) {
+            let box_of_row = row_rect(row);
+            quads.push(bt_render::PreviewQuad {
+                rect: [
+                    box_of_row[0] + source.advance * from as f32,
+                    box_of_row[1],
+                    box_of_row[0] + source.advance * to as f32,
+                    box_of_row[3],
+                ],
+                color: palette.preview_selection,
+            });
+        }
+        if caret.lit
+            && let MarkdownCaretSeat::Source(line, column) = caret.seat
+        {
+            let (row, column) = preview_caret_row(&wrap, line, column);
+            if rows.contains(&row) {
+                let box_of_row = row_rect(row);
+                let x = box_of_row[0] + source.advance * column as f32;
+                quads.push(bt_render::PreviewQuad {
+                    rect: [x, box_of_row[1], x + caret.caret_width, box_of_row[3]],
+                    color: palette.preview_caret,
+                });
+            }
+        }
+    }
+    let ink = highlight::HighlightInk {
+        palette,
+        body: palette.preview_body_text,
+    };
+    for row in rows {
+        let Some((line, from, to)) = wrap.row_span(row) else {
+            continue;
+        };
+        let Some(text) = source.lines.get(line) else {
+            continue;
+        };
+        // The fence's opening line is markup and not code; the grammar's answer
+        // begins one line under it. Everything that is not a fence carries no
+        // highlighting at all, and an empty one answers every line plain.
+        let (spans, at) = match line.checked_sub(1) {
+            Some(inner) => (highlight, inner),
+            None => (&NO_HIGHLIGHTING, 0),
+        };
+        paragraphs.push(bt_render::PreviewParagraph {
+            runs: spans.runs(at, text, (from, to.max(from)), ink),
+            rect: row_rect(row),
+            font_size_px: source.font_size,
+            line_height_px: source.line_height,
+            // A source line is already folded into the rows above it; a shaper
+            // asked to wrap it again would fold what it had been handed and put
+            // the second half of a row under the first.
+            wrap: false,
+            letter_spacing_em: 0.0,
+            align_right: false,
+            align_center: false,
+        });
     }
 }
 
@@ -9989,6 +10574,11 @@ struct WindowRuntime {
     /// the thing it is keyed by is content, and the same formula in two tabs is
     /// one picture. See [`PreviewMathCache`].
     preview_math: PreviewMathCache,
+    /// **What every block this window has measured is worth, whatever width it
+    /// was measured for** — see [`MarkdownIntrinsicCache`]. The window's for
+    /// [`PreviewMathCache`]'s reason a third time: the key is content, and the
+    /// same fence in two tabs is one walk of one grammar.
+    markdown_intrinsics: MarkdownIntrinsicCache,
     /// **The pictures the markdown pages in this window are showing** — see
     /// [`MarkdownPictures`]. One per window for [`PreviewMathCache`]'s reason:
     /// two panes showing one README are looking at one set of screenshots.
@@ -32313,6 +32903,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         peek_hover: PeekHover::default(),
         peek_cache: PeekCache::with_budget(MAX_PEEK_CACHE_BYTES),
         preview_math: PreviewMathCache::default(),
+        markdown_intrinsics: MarkdownIntrinsicCache::default(),
         markdown_pictures: MarkdownPictures::default(),
         peek_thumbnail: None,
         peek_thumbnail_pending: None,
@@ -50580,7 +51171,9 @@ impl Runtime<'_> {
             };
             pane.caret = preview_edit::EditCaret::default();
             pane.scroll = [0.0, 0.0];
-            pane.show_document(PreviewDocument::Empty);
+            // The surface is being emptied, not re-parsed: there is nothing left
+            // for a mark to be about, so this is the arm that clears.
+            pane.show_document(PreviewDocument::Empty, Reparse::Elsewhere);
             pane.doc_key = None;
             // The block offsets this document was scrolled by mean nothing to
             // the next one.
@@ -55361,8 +55954,23 @@ impl Runtime<'_> {
             picture_reach,
             theme,
         };
+        // **Which block the caret is in** (§7.1.3q). Read before the key,
+        // because it is part of it — and read off the document *already* on this
+        // surface, which is the only parse whose ranges describe the bytes the
+        // caret is an offset into. When the content has moved under it, the
+        // answer below is stale and the key differs on its revision anyway; the
+        // parse that follows fills the true one in.
+        let live_caret = self.preview_live_caret(surface);
+        let standing_source = self.standing_source_block(surface, live_caret);
         let key = self.preview_buffer_on(surface).map(|buffer| {
-            preview_document_key(buffer, md_source, body[2] - body[0], scale, art_key)
+            preview_document_key(
+                buffer,
+                md_source,
+                body[2] - body[0],
+                scale,
+                art_key,
+                standing_source.clone(),
+            )
         });
         if key == self.preview_pane_mut(surface).doc_key {
             return;
@@ -55376,6 +55984,11 @@ impl Runtime<'_> {
         let pane = self.preview_pane_mut(surface);
         let reflow_only =
             key.as_ref().map(|key| &key.parse) == pane.doc_key.as_ref().map(|key| &key.parse);
+        // **Did the bytes actually move?** Read here, while the key being
+        // replaced is still standing, and spent at the bottom of this function
+        // on the one question it decides — see [`Reparse`].
+        let content_moved = key.as_ref().map(|key| key.parse.revision)
+            != pane.doc_key.as_ref().map(|key| key.parse.revision);
         // **A formula arriving is not a resize**, and the one intrinsic that
         // notices is a table's columns: a cell holding a formula is as wide as
         // that formula's picture, and a column measured before the picture
@@ -55395,6 +56008,8 @@ impl Runtime<'_> {
         if reflow_only
             && let PreviewDocument::Markdown {
                 blocks,
+                ranges,
+                source: _,
                 intrinsic,
                 layout,
                 math: _,
@@ -55409,17 +56024,41 @@ impl Runtime<'_> {
             let (measure_left, measure_right) = preview::markdown_measure_box(body, metrics);
             let width = (measure_right - measure_left).max(1.0);
             let _ = layout;
+            // **The caret's block is re-cut here and not carried over**
+            // (§7.1.3q). This is the path a caret crossing a block boundary
+            // takes — the parse stands, one block stops being prose and another
+            // becomes it — so the block the last layout was drawn against is
+            // exactly what must not be reused.
+            let source = self.markdown_source_block(surface, standing_source.as_ref(), scale);
             let math = self.resolve_document_math(&blocks, metrics, &bt_render::chrome_palette());
             let pictures =
                 self.resolve_document_pictures(&blocks, document.as_deref(), width, picture_reach);
             let intrinsic = if math_changed {
-                self.measure_markdown_intrinsics(&blocks, metrics, &math)
+                let content = self
+                    .preview_buffer_on(surface)
+                    .and_then(|buffer| buffer.content.clone())
+                    .unwrap_or_default();
+                self.measure_markdown_intrinsics(
+                    &blocks,
+                    MarkdownSourceBytes {
+                        content: &content,
+                        ranges: &ranges,
+                    },
+                    IntrinsicPass {
+                        metrics,
+                        math: &math,
+                        palette: &bt_render::chrome_palette(),
+                        scale_ppm: scale_ppm(scale),
+                        math_generation,
+                    },
+                )
             } else {
                 intrinsic
             };
             let layout = self.lay_markdown_out(
                 &blocks,
                 &intrinsic,
+                source.as_deref(),
                 width,
                 metrics,
                 PageArt {
@@ -55431,6 +56070,8 @@ impl Runtime<'_> {
             self.preview_pane_mut(surface)
                 .reflow_document(PreviewDocument::Markdown {
                     blocks,
+                    ranges,
+                    source,
                     intrinsic,
                     layout,
                     math,
@@ -55446,7 +56087,7 @@ impl Runtime<'_> {
             )
         }) else {
             self.preview_pane_mut(surface)
-                .show_document(PreviewDocument::Empty);
+                .show_document(PreviewDocument::Empty, Reparse::Elsewhere);
             return;
         };
         let text_metrics = seats::preview_text_metrics(scale);
@@ -55455,6 +56096,10 @@ impl Runtime<'_> {
             .renderer
             .preview_mono_advance(&mut self.app.gpu, text_metrics.font_size);
         self.preview_pane_mut(surface).mono_advance = advance;
+        // Filled in by the markdown arm alone, and written back into the key
+        // under the match: every other view has no blocks and therefore no block
+        // the caret could be in.
+        let mut parsed_source: Option<(usize, std::ops::Range<usize>)> = None;
         let doc = match view {
             // The editor's own line model, not [`str::lines`]: a body ending in
             // a break has an empty line after it, the caret can stand on that
@@ -55525,9 +56170,20 @@ impl Runtime<'_> {
             }
             preview::PreviewView::Markdown => {
                 let metrics = seats::preview_markdown_metrics(scale);
-                let blocks = preview::parse_markdown(&content);
+                let clock = preview_trace::global().map(|_| Instant::now());
+                let (blocks, ranges) = preview::parse_markdown_ranged(&content);
+                let parsed = clock.map(|clock| clock.elapsed());
                 let (measure_left, measure_right) = preview::markdown_measure_box(body, metrics);
                 let width = (measure_right - measure_left).max(1.0);
+                // **The caret's own block, now that there is a parse to index**
+                // (§7.1.3q). Written back into the key below, because the key
+                // was built before this parse existed and a key that said `None`
+                // where the document says `Some` would re-lay-out the whole page
+                // on the very next frame.
+                parsed_source = live_caret
+                    .and_then(|caret| preview_live::caret_seat(&ranges, caret.caret).block())
+                    .and_then(|index| Some((index, ranges.get(index)?.clone())));
+                let source = self.markdown_source_block(surface, parsed_source.as_ref(), scale);
                 let math =
                     self.resolve_document_math(&blocks, metrics, &bt_render::chrome_palette());
                 let pictures = self.resolve_document_pictures(
@@ -55536,10 +56192,27 @@ impl Runtime<'_> {
                     width,
                     picture_reach,
                 );
-                let intrinsic = self.measure_markdown_intrinsics(&blocks, metrics, &math);
+                let clock = clock.map(|_| Instant::now());
+                let intrinsic = self.measure_markdown_intrinsics(
+                    &blocks,
+                    MarkdownSourceBytes {
+                        content: &content,
+                        ranges: &ranges,
+                    },
+                    IntrinsicPass {
+                        metrics,
+                        math: &math,
+                        palette: &bt_render::chrome_palette(),
+                        scale_ppm: scale_ppm(scale),
+                        math_generation,
+                    },
+                );
+                let measured = clock.map(|clock| clock.elapsed());
+                let clock = clock.map(|_| Instant::now());
                 let layout = self.lay_markdown_out(
                     &blocks,
                     &intrinsic,
+                    source.as_deref(),
                     width,
                     metrics,
                     PageArt {
@@ -55548,8 +56221,29 @@ impl Runtime<'_> {
                         theme,
                     },
                 );
+                if let Some((((parsed, measured), laid), trace)) = parsed
+                    .zip(measured)
+                    .zip(clock.map(|clock| clock.elapsed()))
+                    .zip(preview_trace::global())
+                {
+                    preview_trace::document(
+                        Some(trace),
+                        preview_trace::DocumentBuild {
+                            bytes: content.len(),
+                            blocks: blocks.len(),
+                            source: parsed_source.as_ref().map(|(index, _)| *index),
+                            hits: self.window.markdown_intrinsics.hits,
+                            misses: self.window.markdown_intrinsics.misses,
+                            parse: parsed,
+                            intrinsic: measured,
+                            layout: laid,
+                        },
+                    );
+                }
                 PreviewDocument::Markdown {
                     blocks,
+                    ranges,
+                    source,
                     intrinsic,
                     layout,
                     math,
@@ -55577,7 +56271,102 @@ impl Runtime<'_> {
             | preview::PreviewView::Web
             | preview::PreviewView::None => PreviewDocument::Empty,
         };
-        self.preview_pane_mut(surface).show_document(doc);
+        // **Whose bytes these are** (§7.1.3q; research open question 15). The
+        // one call site that can answer it, because it is the one that holds
+        // both keys: the content moved only if the revision did, and the buffer
+        // says whether the hand that moved it was in this window. A re-parse
+        // with the revision standing — the face flipped, the window crossed a
+        // monitor — is nobody's doing and drops nothing.
+        let ours = self
+            .preview_buffer_on(surface)
+            .is_some_and(preview::PreviewBuffer::was_edited_here);
+        let reparse = if content_moved && !ours {
+            Reparse::Elsewhere
+        } else {
+            Reparse::Ours
+        };
+        if let Some(key) = self.preview_pane_mut(surface).doc_key.as_mut() {
+            key.source = parsed_source;
+        }
+        self.preview_pane_mut(surface).show_document(doc, reparse);
+    }
+
+    /// **The caret standing in a rendered markdown document, when there is one**
+    /// (§7.1.3q).
+    ///
+    /// `None` on every surface that cannot take a keystroke, which — until the
+    /// markdown block's T5 lets `is_editable` answer for a rendered page — is
+    /// every surface showing
+    /// one. That is the whole of why this ticket changes nothing a reader can
+    /// see: the source block is `None` everywhere, so every block is drawn
+    /// rendered exactly as it was.
+    ///
+    /// **Not gated on the keyboard focus**, and that is deliberate: which block
+    /// is drawn as source is a property of the *document*, and a page that
+    /// re-flowed itself every time the reader clicked into a terminal and back
+    /// would be a page that moves under a hand that is not on it. What the focus
+    /// decides is whether the caret is *drawn* ([`MarkdownCaretPaint::lit`]),
+    /// which is the text face's own rule.
+    fn preview_live_caret(&self, surface: PreviewSurface) -> Option<preview_edit::EditCaret> {
+        let md_source = self.preview_md_source(surface);
+        if md_source {
+            return None;
+        }
+        let buffer = self.preview_buffer_on(surface)?;
+        if buffer.view(md_source) != preview::PreviewView::Markdown
+            || !buffer.is_editable(md_source)
+        {
+            return None;
+        }
+        Some(self.preview_pane(surface)?.caret)
+    }
+
+    /// Which block of the parse **already on this surface** holds that caret.
+    ///
+    /// The ranges are the standing document's, so this is true for exactly as
+    /// long as [`PreviewParseKey`] is — which is the only span of time the answer
+    /// is asked for outside a parse. See [`PreviewDocumentKey::source`].
+    fn standing_source_block(
+        &self,
+        surface: PreviewSurface,
+        caret: Option<preview_edit::EditCaret>,
+    ) -> Option<(usize, std::ops::Range<usize>)> {
+        let caret = caret?;
+        let PreviewDocument::Markdown { ranges, .. } = &self.preview_pane(surface)?.doc else {
+            return None;
+        };
+        let index = preview_live::caret_seat(ranges, caret.caret).block()?;
+        Some((index, ranges.get(index)?.clone()))
+    }
+
+    /// **The caret's block, cut out of the buffer and dressed in the source
+    /// face** (§7.1.3q) — everything [`MarkdownSourceBlock`] is.
+    ///
+    /// Built from the buffer rather than from the parse, because the whole point
+    /// of the source block is that it is **the file's own bytes** and not a
+    /// rendering of them: the block beside it in `blocks` has already lost its
+    /// hashes, its pipes and its indent.
+    fn markdown_source_block(
+        &self,
+        surface: PreviewSurface,
+        source: Option<&(usize, std::ops::Range<usize>)>,
+        scale: f32,
+    ) -> Option<Box<MarkdownSourceBlock>> {
+        let (index, range) = source?;
+        let content = self.preview_buffer_on(surface)?.content.as_deref()?;
+        let text = preview_live::block_source(content, range).to_owned();
+        let metrics = seats::preview_text_metrics(scale);
+        Some(Box::new(MarkdownSourceBlock {
+            index: *index,
+            range: range.clone(),
+            lines: preview_edit::display_lines(&text),
+            text,
+            font_size: metrics.font_size,
+            line_height: metrics.line_height,
+            advance: self
+                .preview_pane(surface)
+                .map_or(0.0, |pane| pane.mono_advance),
+        }))
     }
 
     /// Everything about a document that a pane's width cannot change.
@@ -55839,26 +56628,165 @@ impl Runtime<'_> {
     fn measure_markdown_intrinsics(
         &mut self,
         blocks: &[preview::MarkdownBlock],
-        metrics: seats::PreviewMarkdownMetrics,
-        math: &DocumentMath,
+        source: MarkdownSourceBytes<'_>,
+        pass: IntrinsicPass<'_>,
     ) -> Vec<MarkdownBlockIntrinsic> {
-        let palette = bt_render::chrome_palette();
-        blocks
-            .iter()
-            .map(|block| match block {
+        // Three disjoint fields of the runtime, taken together because the
+        // measurer borrows two of them for as long as the pass runs.
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let cache = &mut self.window.markdown_intrinsics;
+        let mut measure = |runs: &[bt_render::PreviewRun], font: f32, line: f32| {
+            renderer.measure_preview_paragraph_width(gpu, runs, font, line)
+        };
+        measure_markdown_intrinsics(blocks, source, pass, cache, &mut measure)
+    }
+
+    /// Stack the blocks down the page at this width, collapsing their margins.
+    ///
+    /// **The per-width pass, and all of it.** What it still asks the shaper is
+    /// only the question that genuinely has a different answer at every width:
+    /// how many lines a block that reflows takes.
+    fn lay_markdown_out(
+        &mut self,
+        blocks: &[preview::MarkdownBlock],
+        intrinsic: &[MarkdownBlockIntrinsic],
+        source: Option<&MarkdownSourceBlock>,
+        width: f32,
+        metrics: seats::PreviewMarkdownMetrics,
+        art: PageArt<'_>,
+    ) -> Vec<MarkdownBlockLayout> {
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut wrapped = |runs: &[bt_render::PreviewRun], width: f32, font: f32, line: f32| {
+            renderer.measure_preview_paragraph(gpu, runs, width, font, line)
+        };
+        lay_markdown_out(blocks, intrinsic, source, width, metrics, art, &mut wrapped)
+    }
+}
+
+/// How many pixels tall a run of styled text is when wrapped into a width.
+///
+/// The one question the per-width pass still asks the shaper — see
+/// [`MarkdownBlockIntrinsic`] for the ones it stopped asking. Named so that the
+/// two functions taking it read as taking *a shaper*, which is what makes the
+/// call-count test possible: the measurer is injected, so a test can own it.
+type WrapMeasure<'a> = dyn FnMut(&[bt_render::PreviewRun], f32, f32, f32) -> f32 + 'a;
+
+/// How wide a run of styled text is when nothing wraps it — the width-free
+/// pass's own question, and [`WrapMeasure`]'s sibling for its reason: injected
+/// so that "an edit re-measures only the block that changed" is assertable by
+/// counting the calls.
+type WidthMeasure<'a> = dyn FnMut(&[bt_render::PreviewRun], f32, f32) -> f32 + 'a;
+
+/// **The bytes a document was parsed from, beside the range each block took**
+/// (§7.1.3o).
+///
+/// One value rather than two parameters because the two are useless apart: a
+/// range with no bytes under it names nothing, and the bytes with no ranges over
+/// them cannot say which block is which. Empty ranges are the honest answer for
+/// a caller that has no parse in hand — a document assembled by a test, a
+/// terminal's own table block — and a block whose range is missing is simply
+/// measured rather than remembered.
+#[derive(Clone, Copy)]
+struct MarkdownSourceBytes<'a> {
+    content: &'a str,
+    ranges: &'a [std::ops::Range<usize>],
+}
+
+impl MarkdownSourceBytes<'_> {
+    /// The identity block `index` is remembered under, or `None` when this
+    /// document cannot name its own bytes.
+    fn key(
+        &self,
+        index: usize,
+        scale_ppm: u32,
+        math_generation: Option<u64>,
+    ) -> Option<MarkdownIntrinsicKey> {
+        let range = self.ranges.get(index)?;
+        Some(MarkdownIntrinsicKey {
+            source: preview_live::block_source(self.content, range).to_owned(),
+            scale_ppm,
+            math_generation,
+        })
+    }
+}
+
+/// What the width-free pass measures a block *against*.
+///
+/// One value rather than five parameters, on [`BlockScrollPaint`]'s own
+/// argument: the five are one subject — the size the page is set at, the
+/// pictures its formulas have, the inks, and the two halves of a measurement's
+/// identity that are not the block itself.
+#[derive(Clone, Copy)]
+struct IntrinsicPass<'a> {
+    metrics: seats::PreviewMarkdownMetrics,
+    math: &'a DocumentMath,
+    palette: &'a bt_render::ChromePalette,
+    /// See [`MarkdownIntrinsicKey::scale_ppm`] — the same number
+    /// [`PreviewParseKey`] carries, and for the same reason.
+    scale_ppm: u32,
+    /// See [`MarkdownIntrinsicKey::math_generation`]. Read for a table and for
+    /// nothing else.
+    math_generation: u64,
+}
+
+/// Everything about a document that a pane's width cannot change, **measured
+/// once per block content and remembered** (§7.1.3q, ticket T4).
+///
+/// A free function with the measurer and the cache both injected, for
+/// [`lay_markdown_out`]'s reason twice over: the expensive thing is the
+/// measurer, and "an edit to one paragraph re-measured nothing else" is a
+/// sentence about how often it was asked — which a test can only say if it owns
+/// it.
+///
+/// **Two kinds are remembered and the rest cost nothing.** A table's columns are
+/// a shaping call per cell and a fence's highlighting is a walk of a grammar;
+/// every other block's intrinsic is [`MarkdownBlockIntrinsic::default`], which
+/// is four zeroes and is cheaper to build than to look up. Before this, one
+/// keystroke anywhere in a document re-walked syntect over every fence in it —
+/// `highlight.rs` said so in as many words — because the whole vector hung off
+/// the document's revision.
+fn measure_markdown_intrinsics(
+    blocks: &[preview::MarkdownBlock],
+    source: MarkdownSourceBytes<'_>,
+    pass: IntrinsicPass<'_>,
+    cache: &mut MarkdownIntrinsicCache,
+    measure: &mut WidthMeasure<'_>,
+) -> Vec<MarkdownBlockIntrinsic> {
+    let IntrinsicPass {
+        metrics,
+        math,
+        palette,
+        scale_ppm,
+        math_generation,
+    } = pass;
+    cache.begin_pass();
+    let intrinsics = blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            // Which of the two halves of the key this kind needs — and `None`
+            // for every kind that is not measured at all, which is what keeps a
+            // paragraph out of the map entirely.
+            let generation = match block {
+                preview::MarkdownBlock::Table { .. } => Some(Some(math_generation)),
+                preview::MarkdownBlock::Code { .. } => Some(None),
+                _ => None,
+            };
+            let key = generation.and_then(|generation| source.key(index, scale_ppm, generation));
+            if let Some(key) = &key
+                && let Some(intrinsic) = cache.get(key)
+            {
+                return intrinsic;
+            }
+            let intrinsic = match block {
                 preview::MarkdownBlock::Table { rows, .. } => {
                     let count = rows.iter().map(Vec::len).max().unwrap_or(0);
                     if count == 0 {
                         return MarkdownBlockIntrinsic::default();
                     }
                     let columns = markdown_table_columns(rows, metrics, |cell, heading| {
-                        let runs = markdown_runs(cell, &palette, heading, math, metrics.font_size);
-                        self.window.renderer.measure_preview_paragraph_width(
-                            &mut self.app.gpu,
-                            &runs,
-                            metrics.font_size,
-                            metrics.line_height,
-                        )
+                        let runs = markdown_runs(cell, palette, heading, math, metrics.font_size);
+                        measure(&runs, metrics.font_size, metrics.line_height)
                     });
                     // Plus the hairline that closes the last row and the one down
                     // the far edge: `border-collapse` draws one between
@@ -55876,50 +56804,23 @@ impl Runtime<'_> {
                     // longest line measured at the prose size would reserve a
                     // scroll extent the fence never uses.
                     width: markdown_fence_width(text, metrics, |runs| {
-                        self.window.renderer.measure_preview_paragraph_width(
-                            &mut self.app.gpu,
-                            runs,
-                            metrics.code_font,
-                            metrics.code_line_height,
-                        )
+                        measure(runs, metrics.code_font, metrics.code_line_height)
                     }),
                     rows: text.lines().count().max(1),
                     highlight: markdown_fence_highlight(lang.as_deref(), text),
                     ..MarkdownBlockIntrinsic::default()
                 },
                 _ => MarkdownBlockIntrinsic::default(),
-            })
-            .collect()
-    }
-
-    /// Stack the blocks down the page at this width, collapsing their margins.
-    ///
-    /// **The per-width pass, and all of it.** What it still asks the shaper is
-    /// only the question that genuinely has a different answer at every width:
-    /// how many lines a block that reflows takes.
-    fn lay_markdown_out(
-        &mut self,
-        blocks: &[preview::MarkdownBlock],
-        intrinsic: &[MarkdownBlockIntrinsic],
-        width: f32,
-        metrics: seats::PreviewMarkdownMetrics,
-        art: PageArt<'_>,
-    ) -> Vec<MarkdownBlockLayout> {
-        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-        let mut wrapped = |runs: &[bt_render::PreviewRun], width: f32, font: f32, line: f32| {
-            renderer.measure_preview_paragraph(gpu, runs, width, font, line)
-        };
-        lay_markdown_out(blocks, intrinsic, width, metrics, art, &mut wrapped)
-    }
+            };
+            if let Some(key) = key {
+                cache.insert(key, intrinsic.clone());
+            }
+            intrinsic
+        })
+        .collect();
+    cache.end_pass();
+    intrinsics
 }
-
-/// How many pixels tall a run of styled text is when wrapped into a width.
-///
-/// The one question the per-width pass still asks the shaper — see
-/// [`MarkdownBlockIntrinsic`] for the ones it stopped asking. Named so that the
-/// two functions taking it read as taking *a shaper*, which is what makes the
-/// call-count test possible: the measurer is injected, so a test can own it.
-type WrapMeasure<'a> = dyn FnMut(&[bt_render::PreviewRun], f32, f32, f32) -> f32 + 'a;
 
 /// Stack the blocks down the page at this width, with the shaper injected.
 ///
@@ -55930,6 +56831,7 @@ type WrapMeasure<'a> = dyn FnMut(&[bt_render::PreviewRun], f32, f32, f32) -> f32
 fn lay_markdown_out(
     blocks: &[preview::MarkdownBlock],
     intrinsic: &[MarkdownBlockIntrinsic],
+    source: Option<&MarkdownSourceBlock>,
     width: f32,
     metrics: seats::PreviewMarkdownMetrics,
     art: PageArt<'_>,
@@ -55940,9 +56842,21 @@ fn lay_markdown_out(
         let mut top = 0.0_f32;
         let mut previous_bottom = 0.0_f32;
         let mut previous: Option<&preview::MarkdownBlock> = None;
-        for (block, intrinsic) in blocks.iter().zip(intrinsic) {
-            let mut measured =
-                measure_markdown_block(block, intrinsic, width, metrics, art, measure);
+        for (index, (block, intrinsic)) in blocks.iter().zip(intrinsic).enumerate() {
+            // **The caret's block is as tall as its own source is** (§7.1.3q):
+            // its folded rows in the text face, at the text face's line height,
+            // and the blocks under it move by the difference between that and
+            // what it was worth rendered. The shaper is not asked — a monospace
+            // line's height is a fact, and asking would be asking a proportional
+            // question about a monospace body.
+            let source = source.filter(|source| source.index == index);
+            let mut measured = match source {
+                Some(source) => {
+                    let rows = source.wrap(width).rows().max(1);
+                    MarkdownBlockLayout::rows(vec![source.line_height; rows], 0.0)
+                }
+                None => measure_markdown_block(block, intrinsic, width, metrics, art, measure),
+            };
             // **Asymmetric since 2026-08-16**: github.css gives a heading more
             // air above it than below (`margin: 24px 0 16px`), which is what
             // binds a heading to the paragraph it introduces instead of to the
@@ -56360,6 +57274,9 @@ impl Runtime<'_> {
         let mut sites = Vec::new();
         let mut math_sites: Vec<PreviewMathSite> = Vec::new();
         let mut text_sites: Vec<PreviewTextSite> = Vec::new();
+        // Before the document is borrowed, because this asks the pane and the
+        // buffer the same questions the body below is about to hold.
+        let caret_paint = self.preview_markdown_caret(surface, scale);
         let mut built = match &self.preview_pane(surface)?.doc {
             PreviewDocument::Text {
                 lines,
@@ -56411,10 +57328,12 @@ impl Runtime<'_> {
             ),
             PreviewDocument::Markdown {
                 blocks,
+                source,
                 intrinsic,
                 layout,
                 math,
                 pictures,
+                ranges: _,
             } => {
                 let rendered = build_preview_markdown_body(
                     body,
@@ -56425,7 +57344,15 @@ impl Runtime<'_> {
                         lit,
                         scale,
                     },
-                    (blocks, intrinsic, layout),
+                    MarkdownPage {
+                        blocks,
+                        intrinsic,
+                        layout,
+                        live: MarkdownLive {
+                            source: source.as_deref(),
+                            caret: caret_paint.as_ref(),
+                        },
+                    },
                     &palette,
                     PageArt {
                         math,
@@ -56544,6 +57471,59 @@ impl Runtime<'_> {
     /// built on: a selection over a 64KB file covers two thousand rows and a
     /// pane shows forty, and a band per row would put the file's size into the
     /// frame's cost.
+    /// **The caret on a rendered markdown page, ready to be drawn** (§7.1.3q) —
+    /// [`Self::preview_edit_paint`]'s twin, one face over.
+    ///
+    /// Every number in it is a paint-time number, which is the other half of
+    /// [`PreviewDocumentKey::source`]'s argument: the document knows *which*
+    /// block is source and nothing more, so a caret walking along one paragraph
+    /// costs this function per frame and never a re-layout.
+    ///
+    /// **The seat is re-asked here and matched against the document's**, not
+    /// taken from it. The two can disagree for exactly one frame — a keystroke
+    /// moved the caret into another block and the parse that follows it has not
+    /// been laid out yet — and drawing this frame's caret into the last frame's
+    /// source block would put it in the wrong paragraph. When they disagree the
+    /// caret is simply not drawn for that frame, which is a frame, and the next
+    /// one has both.
+    fn preview_markdown_caret(
+        &self,
+        surface: PreviewSurface,
+        scale: f32,
+    ) -> Option<MarkdownCaretPaint> {
+        let caret = self.preview_live_caret(surface)?;
+        let content = self.preview_buffer_on(surface)?.content.as_deref()?;
+        let PreviewDocument::Markdown { ranges, source, .. } = &self.preview_pane(surface)?.doc
+        else {
+            return None;
+        };
+        let seat = match preview_live::caret_seat(ranges, caret.caret) {
+            preview_live::CaretSeat::Block(index) => {
+                if source.as_ref().map(|source| source.index) != Some(index) {
+                    return None;
+                }
+                let (line, column) =
+                    preview_live::place_in_block(content, ranges, index, caret.caret)?;
+                MarkdownCaretSeat::Source(line, column)
+            }
+            preview_live::CaretSeat::Gap { after } => MarkdownCaretSeat::Gap {
+                after,
+                line_height: seats::preview_text_metrics(scale).line_height,
+            },
+        };
+        Some(MarkdownCaretPaint {
+            seat,
+            // The caret belongs to the focus and the selection does not — a body
+            // you have clicked away from keeps what it had marked, greyed, and
+            // has no caret because nothing is going to land there.
+            lit: self.preview_edit_focus() == Some(surface),
+            selection: caret.range(),
+            caret_width: (bt_render::CURSOR_BAR_WIDTH_LOGICAL_PX * scale)
+                .round()
+                .max(1.0),
+        })
+    }
+
     fn preview_edit_paint(
         &self,
         surface: PreviewSurface,
@@ -127347,6 +128327,8 @@ mod tests {
         let document = PreviewDocument::Markdown {
             intrinsic: Vec::new(),
             blocks: Vec::new(),
+            ranges: Vec::new(),
+            source: None,
             layout: prose_only,
             math: DocumentMath::default(),
             pictures: DocumentPictures::default(),
@@ -127368,6 +128350,8 @@ mod tests {
         let with_a_fence = PreviewDocument::Markdown {
             intrinsic: Vec::new(),
             blocks: Vec::new(),
+            ranges: Vec::new(),
+            source: None,
             layout: vec![
                 MarkdownBlockLayout::solid(metrics.line_height),
                 MarkdownBlockLayout {
@@ -127953,7 +128937,12 @@ mod tests {
             metrics,
             [0.0, 0.0],
             rested_bars(&[]),
-            (&blocks, &[], &layout),
+            MarkdownPage {
+                blocks: &blocks,
+                intrinsic: &[],
+                layout: &layout,
+                live: MarkdownLive::default(),
+            },
             &palette,
             PageArt {
                 math: &math,
@@ -127985,7 +128974,12 @@ mod tests {
             metrics,
             [0.0, 0.0],
             rested_bars(&[]),
-            (&blocks, &[], &layout),
+            MarkdownPage {
+                blocks: &blocks,
+                intrinsic: &[],
+                layout: &layout,
+                live: MarkdownLive::default(),
+            },
             &palette,
             PageArt {
                 math: &DocumentMath::default(),
@@ -128304,7 +129298,12 @@ mod tests {
             metrics,
             [0.0, 0.0],
             rested_bars(&[]),
-            (&blocks, &[], &[MarkdownBlockLayout::solid(20.0)]),
+            MarkdownPage {
+                blocks: &blocks,
+                intrinsic: &[],
+                layout: &[MarkdownBlockLayout::solid(20.0)],
+                live: MarkdownLive::default(),
+            },
             &bt_render::chrome_palette(),
             PageArt {
                 math: &DocumentMath::default(),
@@ -128460,11 +129459,12 @@ mod tests {
             metrics,
             [0.0, 0.0],
             rested_bars(&[]),
-            (
-                &blocks,
-                &[],
-                &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
-            ),
+            MarkdownPage {
+                blocks: &blocks,
+                intrinsic: &[],
+                layout: &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
+                live: MarkdownLive::default(),
+            },
             &bt_render::chrome_palette(),
             PageArt {
                 math: &DocumentMath::default(),
@@ -128518,11 +129518,12 @@ mod tests {
             metrics,
             [0.0, 0.0],
             rested_bars(&[]),
-            (
-                &blocks,
-                &[],
-                &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
-            ),
+            MarkdownPage {
+                blocks: &blocks,
+                intrinsic: &[],
+                layout: &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
+                live: MarkdownLive::default(),
+            },
             &bt_render::chrome_palette(),
             PageArt {
                 math: &DocumentMath::default(),
@@ -128555,11 +129556,12 @@ mod tests {
             metrics,
             [0.0, 0.0],
             rested_bars(&[]),
-            (
-                &blocks,
-                &[],
-                &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
-            ),
+            MarkdownPage {
+                blocks: &blocks,
+                intrinsic: &[],
+                layout: &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
+                live: MarkdownLive::default(),
+            },
             &bt_render::chrome_palette(),
             PageArt {
                 math: &DocumentMath::default(),
@@ -128814,6 +129816,7 @@ mod tests {
             lay_markdown_out(
                 &blocks,
                 &intrinsic,
+                None,
                 right - left,
                 metrics,
                 PageArt {
@@ -128965,7 +129968,12 @@ mod tests {
             metrics,
             [0.0, 0.0],
             rested_bars(&[]),
-            (&blocks, &[], &layout),
+            MarkdownPage {
+                blocks: &blocks,
+                intrinsic: &[],
+                layout: &layout,
+                live: MarkdownLive::default(),
+            },
             &palette,
             PageArt {
                 math: &math,
@@ -129060,7 +130068,12 @@ mod tests {
             metrics,
             [0.0, 0.0],
             rested_bars(&[]),
-            (&blocks, &[], &layout),
+            MarkdownPage {
+                blocks: &blocks,
+                intrinsic: &[],
+                layout: &layout,
+                live: MarkdownLive::default(),
+            },
             &palette,
             PageArt {
                 math: &DocumentMath::default(),
@@ -129185,7 +130198,12 @@ mod tests {
             metrics,
             [0.0, 0.0],
             rested_bars(&[]),
-            (&blocks, &[], &layout),
+            MarkdownPage {
+                blocks: &blocks,
+                intrinsic: &[],
+                layout: &layout,
+                live: MarkdownLive::default(),
+            },
             &palette,
             PageArt {
                 math: &DocumentMath::default(),
@@ -129453,13 +130471,26 @@ mod tests {
     }
 
     /// **A document that has been re-read leaves no selection standing** (the
-    /// file changed on disk; the offsets are about text that is gone).
+    /// file changed on disk; the offsets are about text that is gone) — **and a
+    /// document re-parsed because the reader typed into it leaves both marks
+    /// exactly where they were** (§7.1.3q; research open question 15, "the
+    /// single most dangerous line in T4").
     ///
-    /// MUTATION: assign `pane.doc` directly at the refresh and a selection made
+    /// The two halves are one test because the danger is in the *difference*:
+    /// the clearing rule was written when the only thing that could replace a
+    /// parse was the disk, and a live preview re-parses on every keystroke. A
+    /// rule that could not tell the two apart would either highlight somebody
+    /// else's sentence or drop the reader's own selection every time they typed
+    /// beside it.
+    ///
+    /// MUTATION ①: assign `pane.doc` directly at the refresh and a selection made
     /// before a save goes on being drawn over whatever replaced it.
+    /// MUTATION ②: clear on both arms and a selection cannot survive being typed
+    /// next to; keep on both and an external save keeps a highlight over text
+    /// that is gone.
     #[test]
     fn a_freshly_parsed_document_leaves_no_selection_standing() {
-        let mut pane = PreviewPane {
+        let marked = || PreviewPane {
             md_select: Some(preview_select::Selection::collapsed(
                 preview_select::Place::new(3, 1, 4),
                 preview_select::Grain::Character,
@@ -129469,21 +130500,59 @@ mod tests {
                 9,
                 "somewhere",
             )],
+            caret: preview_edit::EditCaret {
+                anchor: 12,
+                caret: 20,
+                desired_column: None,
+            },
             ..PreviewPane::default()
         };
-        pane.show_document(PreviewDocument::Markdown {
-            blocks: vec![preview::MarkdownBlock::Paragraph(vec![
-                preview::Span::plain("new"),
-            ])],
+        // "new\n\nlines\n" — two paragraphs and the blank line between them,
+        // which belongs to neither of them (§7.1.3o).
+        let parsed = || PreviewDocument::Markdown {
+            blocks: vec![
+                preview::MarkdownBlock::Paragraph(vec![preview::Span::plain("new")]),
+                preview::MarkdownBlock::Paragraph(vec![preview::Span::plain("lines")]),
+            ],
+            ranges: vec![0..4, 5..11],
+            source: None,
             intrinsic: Vec::new(),
             layout: Vec::new(),
             math: DocumentMath::default(),
             pictures: DocumentPictures::default(),
-        });
-        assert_eq!(pane.md_select, None, "the selection went with the document");
+        };
+
+        let mut disk = marked();
+        disk.show_document(parsed(), Reparse::Elsewhere);
+        assert_eq!(disk.md_select, None, "the selection went with the document");
         assert!(
-            pane.md_text.is_empty(),
+            disk.md_text.is_empty(),
             "and so did the boxes it was drawn in"
+        );
+        assert_eq!(
+            (disk.caret.anchor, disk.caret.caret),
+            (20, 20),
+            "and what the caret had dragged over went with it — but not the \
+             caret, which is a byte offset the buffer's own doors heal and a \
+             session restores before the file it belongs to has even landed",
+        );
+
+        let mut ours = marked();
+        ours.show_document(parsed(), Reparse::Ours);
+        assert!(
+            ours.md_select.is_some(),
+            "a keystroke is not a stranger's save: what was marked is still \
+             about the words it was about",
+        );
+        assert_eq!(
+            (ours.caret.anchor, ours.caret.caret),
+            (12, 20),
+            "and the caret keeps both its ends",
+        );
+        assert!(
+            ours.md_text.is_empty(),
+            "the boxes go whatever happened: they are where the *last* document \
+             was drawn and nothing has drawn this one",
         );
     }
 
@@ -129845,6 +130914,8 @@ mod tests {
         let document = PreviewDocument::Markdown {
             intrinsic: Vec::new(),
             blocks: blocks.clone(),
+            ranges: Vec::new(),
+            source: None,
             layout: layout.clone(),
             math: DocumentMath::default(),
             pictures: DocumentPictures::default(),
@@ -130100,6 +131171,7 @@ mod tests {
         let heavy_layout = lay_markdown_out(
             &heavy,
             &heavy_intrinsic,
+            None,
             400.0,
             metrics,
             PageArt {
@@ -130126,6 +131198,7 @@ mod tests {
             let layout = lay_markdown_out(
                 &blocks,
                 &intrinsic,
+                None,
                 width,
                 metrics,
                 PageArt {
@@ -130142,6 +131215,756 @@ mod tests {
                 pair[1] > pair[0],
                 "a narrower pane wraps to more lines: {pair:?}"
             );
+        }
+    }
+
+    /// A source block standing at a given index, in a face eight pixels wide and
+    /// twenty tall — the numbers a test can do arithmetic in its head with.
+    fn source_block(index: usize, at: usize, text: &str) -> MarkdownSourceBlock {
+        MarkdownSourceBlock {
+            index,
+            range: at..at + text.len() + 1,
+            lines: preview_edit::display_lines(text),
+            text: text.to_owned(),
+            font_size: 14.0,
+            line_height: 20.0,
+            advance: 8.0,
+        }
+    }
+
+    /// A page of paragraphs, one word each.
+    fn prose(words: &[&str]) -> Vec<preview::MarkdownBlock> {
+        words
+            .iter()
+            .map(|word| preview::MarkdownBlock::Paragraph(vec![preview::Span::plain(word)]))
+            .collect()
+    }
+
+    /// How wide a run of text is in a face eight pixels to the character — the
+    /// half of a stub shaper that is worth naming once. The counting closure
+    /// around it stays in each test, because what a test asserts about a shaper
+    /// is how often *it* asked.
+    fn cell_ink(runs: &[bt_render::PreviewRun]) -> f32 {
+        runs.iter()
+            .map(|run| run.text.chars().count())
+            .sum::<usize>() as f32
+            * 8.0
+    }
+
+    /// **The caret's block is as tall as its own source, and the page under it
+    /// moves by the difference** (§7.1.3q, ticket T4).
+    ///
+    /// The one rule of the live preview, stated as geometry: a block drawn as
+    /// the file's own bytes is its folded line count times the source face's
+    /// line height, the shaper is never asked about it — a monospace row's
+    /// height is a fact, not a measurement — and every block after it starts
+    /// exactly that much further down.
+    ///
+    /// MUTATION ①: drop the `source.filter(...)` arm in `lay_markdown_out` and
+    /// the block under the caret is laid out as wrapped prose, so the source
+    /// lines are drawn into a box measured for something else and the blocks
+    /// below overlap them.
+    /// MUTATION ②: measure the block's height from `lines.len()` instead of from
+    /// `wrap(width).rows()` and a source line wider than the column is drawn on
+    /// rows the layout did not reserve.
+    #[test]
+    fn the_carets_block_is_laid_out_as_its_own_source_lines() {
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let blocks = prose(&["first", "middle", "last"]);
+        let intrinsic = vec![MarkdownBlockIntrinsic::default(); blocks.len()];
+        let art = PageArt {
+            math: &DocumentMath::default(),
+            pictures: &DocumentPictures::default(),
+            theme: bt_render::Theme::Dark,
+        };
+        let calls = std::cell::Cell::new(0usize);
+        let mut shaper = |runs: &[bt_render::PreviewRun], width: f32, _: f32, line: f32| {
+            calls.set(calls.get() + 1);
+            line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
+        };
+        let width = 400.0;
+        let rendered =
+            lay_markdown_out(&blocks, &intrinsic, None, width, metrics, art, &mut shaper);
+
+        let source = source_block(1, 6, "one\ntwo\nthree\nfour");
+        let asked = calls.get();
+        let live = lay_markdown_out(
+            &blocks,
+            &intrinsic,
+            Some(&source),
+            width,
+            metrics,
+            art,
+            &mut shaper,
+        );
+        assert_eq!(
+            calls.get() - asked,
+            blocks.len() - 1,
+            "the shaper is asked about every block but the one drawn as source",
+        );
+        assert_eq!(
+            (live[1].height, live[1].rows.len()),
+            (80.0, 4),
+            "four source lines at the source face's own line height",
+        );
+        assert_eq!(
+            live[0], rendered[0],
+            "the block in front of it is untouched",
+        );
+        assert_eq!(
+            live[2].top - rendered[2].top,
+            live[1].height - rendered[1].height,
+            "and the block under it moves by exactly the difference",
+        );
+
+        // **And a source line too wide for the column folds**, on the source
+        // face's own terms — the block is taller, and it is taller by whole
+        // rows.
+        let long = source_block(1, 6, &"x".repeat(200));
+        let folded = lay_markdown_out(
+            &blocks,
+            &intrinsic,
+            Some(&long),
+            width,
+            metrics,
+            art,
+            &mut shaper,
+        );
+        let (measure_left, measure_right) =
+            preview::markdown_measure_box([0.0, 0.0, width, 400.0], metrics);
+        let _ = (measure_left, measure_right);
+        assert_eq!(
+            folded[1].rows.len(),
+            (200.0_f32 / (width / 8.0)).ceil() as usize,
+            "one row per column-full of a two-hundred-character line",
+        );
+    }
+
+    /// **The caret's block is drawn as the file's own bytes, and a fence keeps
+    /// its highlighting while it is** (§7.1.3q, ticket T4).
+    ///
+    /// The rule on the glass rather than in the layout: the rows the page draws
+    /// for the source block are the file's lines, in the source face's own line
+    /// height, with the caret standing where its row and column say — and the
+    /// fence's syntect walk, which was computed against the fence's *content*,
+    /// still applies one line down, because the source block draws the markers
+    /// the content does not have.
+    ///
+    /// MUTATION ①: draw the block's rendered arm as well as its source rows and
+    /// the paragraph count doubles — the words are set twice, over themselves.
+    /// MUTATION ②: read the highlighting at `line` instead of at `line - 1` and
+    /// the fence's first code line is set in the ink of its own opening
+    /// backticks, one row out for the whole fence.
+    #[test]
+    fn the_carets_block_is_drawn_as_source_and_a_fence_keeps_its_highlighting() {
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let palette = bt_render::chrome_palette();
+        let body = [0.0, 0.0, 400.0, 400.0];
+        let (left, _) = preview::markdown_measure_box(body, metrics);
+        let blocks = prose(&["first", "middle", "last"]);
+        let intrinsic = vec![MarkdownBlockIntrinsic::default(); blocks.len()];
+        let art = PageArt {
+            math: &DocumentMath::default(),
+            pictures: &DocumentPictures::default(),
+            theme: bt_render::Theme::Dark,
+        };
+        let calls = std::cell::Cell::new(0usize);
+        let mut shaper = |runs: &[bt_render::PreviewRun], width: f32, _: f32, line: f32| {
+            calls.set(calls.get() + 1);
+            line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
+        };
+        let source = source_block(1, 6, "one\ntwo");
+        let layout = lay_markdown_out(
+            &blocks,
+            &intrinsic,
+            Some(&source),
+            400.0,
+            metrics,
+            art,
+            &mut shaper,
+        );
+        let caret = MarkdownCaretPaint {
+            seat: MarkdownCaretSeat::Source(1, 2),
+            lit: true,
+            selection: 0..0,
+            caret_width: 2.0,
+        };
+        let built = build_preview_markdown_body(
+            body,
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            MarkdownPage {
+                blocks: &blocks,
+                intrinsic: &intrinsic,
+                layout: &layout,
+                live: MarkdownLive {
+                    source: Some(&source),
+                    caret: Some(&caret),
+                },
+            },
+            &palette,
+            art,
+        );
+        let words: Vec<String> = built
+            .body
+            .paragraphs
+            .iter()
+            .map(|paragraph| {
+                paragraph
+                    .runs
+                    .iter()
+                    .map(|run| run.text.as_str())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(
+            words,
+            ["first", "one", "two", "last"],
+            "the middle block is its own two source lines and is set once",
+        );
+        let rows: Vec<[f32; 4]> = built.body.paragraphs[1..3]
+            .iter()
+            .map(|paragraph| paragraph.rect)
+            .collect();
+        let top = metrics.padding_y + layout[1].top;
+        assert_eq!(
+            rows[0][1], top,
+            "the first row starts at the block's own top"
+        );
+        assert_eq!(
+            rows[1][1] - rows[0][1],
+            source.line_height,
+            "and the rows are the source face's line apart",
+        );
+        assert!(
+            built.body.paragraphs[1..3].iter().all(|paragraph| paragraph
+                .runs
+                .iter()
+                .all(|run| run.mono)
+                && !paragraph.wrap),
+            "monospace, and already folded: a shaper asked to wrap them again \
+             would put the second half of a row under the first",
+        );
+        let [caret_quad] = built.body.quads.as_slice() else {
+            panic!("one caret and nothing else: {:#?}", built.body.quads);
+        };
+        assert_eq!(
+            [caret_quad.rect[0], caret_quad.rect[1]],
+            [left + source.advance * 2.0, top + source.line_height],
+            "two columns into the second row",
+        );
+
+        // **A fence under the caret keeps its own colours**, offset by the
+        // opening line the grammar was never walked over.
+        let fence = "```rust\nfn main() {}\n```";
+        let blocks = vec![preview::MarkdownBlock::Code {
+            lang: Some("rust".to_owned()),
+            text: "fn main() {}\n".to_owned(),
+        }];
+        let intrinsic = vec![MarkdownBlockIntrinsic {
+            highlight: markdown_fence_highlight(Some("rust"), "fn main() {}\n"),
+            ..MarkdownBlockIntrinsic::default()
+        }];
+        assert!(
+            !intrinsic[0].highlight.is_plain(),
+            "the fixture is highlighted, or this proves nothing",
+        );
+        let source = source_block(0, 0, fence);
+        let layout = lay_markdown_out(
+            &blocks,
+            &intrinsic,
+            Some(&source),
+            400.0,
+            metrics,
+            art,
+            &mut shaper,
+        );
+        let built = build_preview_markdown_body(
+            body,
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            MarkdownPage {
+                blocks: &blocks,
+                intrinsic: &intrinsic,
+                layout: &layout,
+                live: MarkdownLive {
+                    source: Some(&source),
+                    caret: None,
+                },
+            },
+            &palette,
+            art,
+        );
+        let runs: Vec<usize> = built
+            .body
+            .paragraphs
+            .iter()
+            .map(|paragraph| paragraph.runs.len())
+            .collect();
+        assert_eq!(runs.len(), 3, "three source lines, markers included");
+        assert_eq!(runs[0], 1, "the opening fence is markup and is set plain");
+        assert!(
+            runs[1] > 1,
+            "and the code under it wears the grammar's inks: {runs:?}",
+        );
+    }
+
+    /// **A caret between two blocks is drawn as one empty source line under the
+    /// block in front of it** (§7.1.3q, and [`preview_live`]'s module note for
+    /// why that slot).
+    ///
+    /// The gap is the one place the rule as written leaves the caret nowhere to
+    /// be: the blank line that ends a paragraph belongs to no block and never
+    /// will, because nothing is built out of it (§7.1.3o).
+    ///
+    /// MUTATION ①: draw the slot at the *following* block's top and the caret
+    /// jumps a collapsed margin away from the letters it was just beside — the
+    /// gesture that reaches a gap is leaving the block above it.
+    /// MUTATION ②: measure the empty line into the layout and every blank line
+    /// in a document pushes the page down as the caret walks through it.
+    #[test]
+    fn a_caret_in_the_gap_between_two_blocks_is_one_empty_source_line() {
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let palette = bt_render::chrome_palette();
+        let body = [0.0, 0.0, 400.0, 400.0];
+        let (left, _) = preview::markdown_measure_box(body, metrics);
+        let blocks = prose(&["first", "second"]);
+        let intrinsic = vec![MarkdownBlockIntrinsic::default(); blocks.len()];
+        let art = PageArt {
+            math: &DocumentMath::default(),
+            pictures: &DocumentPictures::default(),
+            theme: bt_render::Theme::Dark,
+        };
+        let calls = std::cell::Cell::new(0usize);
+        let mut shaper = |runs: &[bt_render::PreviewRun], width: f32, _: f32, line: f32| {
+            calls.set(calls.get() + 1);
+            line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
+        };
+        let layout = lay_markdown_out(&blocks, &intrinsic, None, 400.0, metrics, art, &mut shaper);
+        let page = |caret: &MarkdownCaretPaint| {
+            build_preview_markdown_body(
+                body,
+                metrics,
+                [0.0, 0.0],
+                rested_bars(&[]),
+                MarkdownPage {
+                    blocks: &blocks,
+                    intrinsic: &intrinsic,
+                    layout: &layout,
+                    live: MarkdownLive {
+                        source: None,
+                        caret: Some(caret),
+                    },
+                },
+                &palette,
+                art,
+            )
+        };
+        let between = MarkdownCaretPaint {
+            seat: MarkdownCaretSeat::Gap {
+                after: Some(0),
+                line_height: 20.0,
+            },
+            lit: true,
+            selection: 0..0,
+            caret_width: 2.0,
+        };
+        let built = page(&between);
+        assert_eq!(
+            built.body.paragraphs.len(),
+            2,
+            "both blocks are still rendered: a gap turns nothing into source",
+        );
+        let [quad] = built.body.quads.as_slice() else {
+            panic!("one caret: {:#?}", built.body.quads);
+        };
+        assert_eq!(
+            [quad.rect[0], quad.rect[1], quad.rect[2], quad.rect[3]],
+            [
+                left,
+                metrics.padding_y + layout[0].top + layout[0].height,
+                left + 2.0,
+                metrics.padding_y + layout[0].top + layout[0].height + 20.0,
+            ],
+            "one line tall, at the column a line starts in, directly under the \
+             block the caret has just left",
+        );
+        let laid_again =
+            lay_markdown_out(&blocks, &intrinsic, None, 400.0, metrics, art, &mut shaper);
+        assert_eq!(layout, laid_again, "and the page did not move to make room");
+
+        let ahead = MarkdownCaretPaint {
+            seat: MarkdownCaretSeat::Gap {
+                after: None,
+                line_height: 20.0,
+            },
+            ..between.clone()
+        };
+        let built = page(&ahead);
+        assert_eq!(
+            built.body.quads[0].rect[1], metrics.padding_y,
+            "a caret in front of every block stands at the top of the page",
+        );
+        let dark = MarkdownCaretPaint {
+            lit: false,
+            ..between
+        };
+        assert!(
+            page(&dark).body.quads.is_empty(),
+            "and a page whose surface does not hold the keyboard draws no caret \
+             at all, which is the text face's own rule",
+        );
+    }
+
+    /// **The caret crossing a block boundary re-lays-out and does not
+    /// re-parse** (§7.1.3q).
+    ///
+    /// Asserted through the key, which is this pipeline's own seam for it and
+    /// the very one `a_resize_reflows_the_markdown_without_re_measuring_it` uses
+    /// one clause up: `rebuild_preview_document` re-parses exactly when the
+    /// *parse* half of the key moves, so "the same content re-lays-out" is
+    /// `key != key` with `key.parse == key.parse`, in as many words.
+    ///
+    /// MUTATION ①: leave the source block out of `PreviewDocumentKey` and the
+    /// first assertion goes red — the caret leaves a block and the page goes on
+    /// drawing it as source, because nothing in the key moved.
+    /// MUTATION ②: put it in `PreviewParseKey` instead and the second goes red —
+    /// every arrow key across a paragraph re-parses and re-highlights the whole
+    /// document, which is the 2026-08-13 resize stutter with a keyboard in front
+    /// of it.
+    /// MUTATION ③: key on the caret's offset rather than on the block and the
+    /// third goes red — a caret walking along one paragraph re-lays-out the page
+    /// per keypress for a body that is identical.
+    #[test]
+    fn the_caret_changing_block_is_a_layout_change_and_not_a_parse_change() {
+        let source = "# head\n\nfirst paragraph\n\nsecond paragraph\n";
+        let mut buffer = preview::PreviewBuffer::new(
+            preview::PreviewSource::file(r"C:\w\live.md"),
+            "live.md".to_owned(),
+        );
+        buffer.accept(preview::HeadOutcome::Read {
+            text: source.to_owned(),
+            truncated: false,
+            mtime: None,
+            content_says_text: true,
+            encoding: preview::HeadEncoding::Utf8,
+            lossy: false,
+        });
+        let (_, ranges) = preview::parse_markdown_ranged(source);
+        let key = |caret: Option<usize>| {
+            let seat = caret.and_then(|caret| {
+                let index = preview_live::caret_seat(&ranges, caret).block()?;
+                Some((index, ranges[index].clone()))
+            });
+            preview_document_key(
+                &buffer,
+                false,
+                1200.0,
+                1.0,
+                PageArtKey {
+                    math_generation: 0,
+                    body_ink: [0, 0, 0],
+                    picture_generation: 0,
+                    picture_reach: PictureReach::from_the_top(),
+                    theme: bt_render::Theme::Dark,
+                },
+                seat,
+            )
+        };
+        let heading = key(Some(1));
+        let paragraph = key(Some(10));
+        assert_ne!(
+            heading, paragraph,
+            "① a different block is drawn as source, so the page is laid out again",
+        );
+        assert_eq!(
+            heading.parse, paragraph.parse,
+            "② and not parsed again: the caret moved, the bytes did not",
+        );
+        assert_eq!(
+            paragraph,
+            key(Some(14)),
+            "③ a caret walking along one block is not a layout change at all",
+        );
+        assert_ne!(
+            paragraph,
+            key(Some(8 + ranges[1].len())),
+            "and stepping off the end of it into the blank line is one, because \
+             the blank line belongs to no block",
+        );
+        assert_ne!(
+            heading,
+            key(None),
+            "a page with no caret has no source block"
+        );
+    }
+
+    /// **An edit to one block re-measures that block and nothing else**
+    /// (§7.1.3q, ticket T4) — the cache that ended `highlight.rs`'s own line,
+    /// 「an edit bumps the buffer's revision, which is what re-runs it」.
+    ///
+    /// Every fence in a document used to be re-walked by syntect and every table
+    /// re-shaped cell by cell on **every keystroke anywhere in the file**,
+    /// because the whole vector of intrinsics hung off the buffer's revision.
+    /// Keyed per block content, an edit inside one fence is one miss.
+    ///
+    /// MUTATION ①: key the intrinsic on the block's *range* instead of its bytes
+    /// and the last assertion collapses — one inserted character moves every
+    /// range after it, so every block below the edit is measured again.
+    /// MUTATION ②: drop the cache and measure unconditionally — the second
+    /// assertion goes red on the very same document twice.
+    #[test]
+    fn an_edit_to_one_block_keeps_every_other_blocks_measurement() {
+        let source = include_str!("../../../docs/UI-UX.md");
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let palette = bt_render::chrome_palette();
+        let math = DocumentMath::default();
+        let calls = std::cell::Cell::new(0usize);
+        let mut measure = |runs: &[bt_render::PreviewRun], _: f32, _: f32| {
+            calls.set(calls.get() + 1);
+            runs.iter()
+                .map(|run| run.text.chars().count())
+                .sum::<usize>() as f32
+                * 8.0
+        };
+        let pass = IntrinsicPass {
+            metrics,
+            math: &math,
+            palette: &palette,
+            scale_ppm: scale_ppm(1.0),
+            math_generation: 0,
+        };
+        let mut cache = MarkdownIntrinsicCache::default();
+        let (blocks, ranges) = preview::parse_markdown_ranged(source);
+        let cold = measure_markdown_intrinsics(
+            &blocks,
+            MarkdownSourceBytes {
+                content: source,
+                ranges: &ranges,
+            },
+            pass,
+            &mut cache,
+            &mut measure,
+        );
+        let asked = calls.get();
+        assert!(
+            asked > 100,
+            "the fixture's tables and fences really are a measurable share \
+             ({asked} shaping calls), or this proves nothing",
+        );
+
+        let warm = measure_markdown_intrinsics(
+            &blocks,
+            MarkdownSourceBytes {
+                content: source,
+                ranges: &ranges,
+            },
+            pass,
+            &mut cache,
+            &mut measure,
+        );
+        assert_eq!(
+            calls.get(),
+            asked,
+            "the same document twice is measured once",
+        );
+        assert_eq!(cold, warm, "and answers the same thing both times");
+
+        // One character typed inside the first fence — which moves the byte
+        // range of every block after it, and the content of none of them.
+        let fence = blocks
+            .iter()
+            .position(|block| matches!(block, preview::MarkdownBlock::Code { .. }))
+            .expect("the fixture has a fence");
+        let inside = source[ranges[fence].clone()]
+            .find('\n')
+            .map(|at| ranges[fence].start + at + 1)
+            .expect("a fence has a line under its opening");
+        let mut edited = source.to_owned();
+        edited.insert(inside, 'x');
+        let (typed, typed_ranges) = preview::parse_markdown_ranged(&edited);
+        assert_eq!(
+            typed.len(),
+            blocks.len(),
+            "one character is not a new block"
+        );
+        assert_ne!(
+            typed_ranges[typed_ranges.len() - 1],
+            ranges[ranges.len() - 1],
+            "and it did move every range after it, which is the point",
+        );
+        let (hits, misses) = (cache.hits, cache.misses);
+        let after = measure_markdown_intrinsics(
+            &typed,
+            MarkdownSourceBytes {
+                content: &edited,
+                ranges: &typed_ranges,
+            },
+            pass,
+            &mut cache,
+            &mut measure,
+        );
+        assert_eq!(
+            cache.misses - misses,
+            1,
+            "one block changed, so one block was measured",
+        );
+        assert!(
+            cache.hits - hits > 5,
+            "and every other table and fence was remembered ({} of them)",
+            cache.hits - hits,
+        );
+        for (index, (before, now)) in cold.iter().zip(&after).enumerate() {
+            if index == fence {
+                continue;
+            }
+            assert_eq!(
+                before, now,
+                "block {index} kept its measurement and its highlighting",
+            );
+        }
+    }
+
+    /// **What a one-character edit costs, measured** (research open question 5;
+    /// §7.1.3q).
+    ///
+    /// The question the research refused to guess at: does the whole-document
+    /// re-parse survive a keystroke, or is an incremental parser owed? The
+    /// numbers are printed rather than only asserted, because the ruling was
+    /// "measure first" and a number nobody can read is not a measurement — run
+    /// it with `--nocapture`.
+    ///
+    /// **What is in the clock and what is not.** The parse is real, the fence
+    /// highlighting is real (syntect, the half the research expected to
+    /// dominate), and the layout arithmetic is real; the *shaper* is the stub
+    /// above, because a real one needs a GPU and a window. So this is the cost
+    /// of everything a keystroke re-derives except the proportional shaping,
+    /// which is unchanged by this ticket and already paid per visible block.
+    ///
+    /// **What it said** (2026-09-10, `docs/UI-UX.md` as the fixture): 64 KiB /
+    /// 200 blocks — parse 1.01 ms, intrinsics 8 µs, layout 0.37 ms, **total 1.39
+    /// ms**; 1.1 MiB / 3 164 blocks — parse 15.4 ms, intrinsics 121 µs, layout
+    /// 2.8 ms, **total 18.3 ms**. So the whole-document re-parse stands at 64
+    /// KiB and the parse alone is over a frame at a megabyte — see
+    /// [`PreviewParseKey`] for what that rules and what it leaves owed.
+    ///
+    /// The budget is **one frame**, asserted on the 64 KiB document alone, on
+    /// the ticket's own terms. It is a whole frame rather than the 1.39 ms
+    /// measured because the measurement is of a machine: this runs on whatever
+    /// CI happens to be, and a budget tight enough to catch a slow machine is a
+    /// budget that fails on one. What it does catch is the thing worth catching
+    /// — a change that puts the *shape* of the cost back, an un-keyed intrinsic
+    /// pass or a re-highlight per keystroke, which is an order of magnitude and
+    /// not a percentage.
+    #[test]
+    fn a_one_character_edit_rebuilds_a_document_inside_the_frame_budget() {
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let palette = bt_render::chrome_palette();
+        let math = DocumentMath::default();
+        let art = PageArt {
+            math: &math,
+            pictures: &DocumentPictures::default(),
+            theme: bt_render::Theme::Dark,
+        };
+        let pass = IntrinsicPass {
+            metrics,
+            math: &math,
+            palette: &palette,
+            scale_ppm: scale_ppm(1.0),
+            math_generation: 0,
+        };
+        let calls = std::cell::Cell::new(0usize);
+        let mut width_of = |runs: &[bt_render::PreviewRun], _: f32, _: f32| {
+            runs.iter()
+                .map(|run| run.text.chars().count())
+                .sum::<usize>() as f32
+                * 8.0
+        };
+        let mut shaper = |runs: &[bt_render::PreviewRun], width: f32, _: f32, line: f32| {
+            calls.set(calls.get() + 1);
+            line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
+        };
+
+        // The keystroke, from the bytes to a page ready to draw. The cache is
+        // warm, because that is what a keystroke meets: the document was on the
+        // glass a frame ago.
+        let mut rebuild = |content: &str, cache: &mut MarkdownIntrinsicCache| {
+            let clock = Instant::now();
+            let (blocks, ranges) = preview::parse_markdown_ranged(content);
+            let parse = clock.elapsed();
+            let clock = Instant::now();
+            let intrinsic = measure_markdown_intrinsics(
+                &blocks,
+                MarkdownSourceBytes {
+                    content,
+                    ranges: &ranges,
+                },
+                pass,
+                cache,
+                &mut width_of,
+            );
+            let intrinsics = clock.elapsed();
+            let clock = Instant::now();
+            let source = MarkdownSourceBlock {
+                index: 0,
+                range: ranges[0].clone(),
+                text: preview_live::block_source(content, &ranges[0]).to_owned(),
+                lines: preview_edit::display_lines(preview_live::block_source(content, &ranges[0])),
+                font_size: 14.0,
+                line_height: 20.0,
+                advance: 8.0,
+            };
+            let layout = lay_markdown_out(
+                &blocks,
+                &intrinsic,
+                Some(&source),
+                1000.0,
+                metrics,
+                art,
+                &mut shaper,
+            );
+            let laid = clock.elapsed();
+            assert_eq!(layout.len(), blocks.len());
+            (blocks.len(), parse, intrinsics, laid)
+        };
+
+        let one = include_str!("../../../docs/UI-UX.md");
+        let cut = one[..64 * 1024].rfind('\n').unwrap_or(one.len());
+        let sixty_four = &one[..cut];
+        let mut mega = String::new();
+        while mega.len() < 1024 * 1024 {
+            mega.push_str(one);
+            mega.push_str("\n\n");
+        }
+
+        for (name, document) in [("64 KiB", sixty_four.to_owned()), ("1 MiB", mega)] {
+            let mut cache = MarkdownIntrinsicCache::default();
+            rebuild(&document, &mut cache);
+            let mut typed = document.clone();
+            let at = typed.len() / 2;
+            let at = typed[..at].rfind('\n').map_or(0, |line| line + 1);
+            typed.insert(at, 'x');
+            let (blocks, parse, intrinsics, laid) = rebuild(&typed, &mut cache);
+            let total = parse + intrinsics + laid;
+            println!(
+                "{name}: {} bytes, {blocks} blocks — parse {:?}, intrinsics {:?}, \
+                 layout {:?}, total {:?}",
+                typed.len(),
+                parse,
+                intrinsics,
+                laid,
+                total,
+            );
+            if name == "64 KiB" {
+                assert!(
+                    total < std::time::Duration::from_millis(16),
+                    "a keystroke in a 64 KiB document has to fit in a frame, and \
+                     this one took {total:?} (parse {parse:?}, intrinsics \
+                     {intrinsics:?}, layout {laid:?})",
+                );
+            }
         }
     }
 
@@ -130723,7 +132546,12 @@ mod tests {
     ) -> bt_render::PreviewBody {
         // The intrinsics are the fences' highlighting and nothing else here, so
         // a test about pixels can pass none and get the ink it always got.
-        let document = (document.0, [].as_slice(), document.1);
+        let document = MarkdownPage {
+            blocks: document.0,
+            intrinsic: &[],
+            layout: document.1,
+            live: MarkdownLive::default(),
+        };
         build_preview_markdown_body(
             body,
             metrics,
@@ -130766,6 +132594,7 @@ mod tests {
                 picture_reach: PictureReach::from_the_top(),
                 theme: bt_render::Theme::Dark,
             },
+            None,
         )
     }
 
@@ -131607,6 +133436,8 @@ mod tests {
         let expected = last.top + last.height + metrics.padding_y * 2.0 - (body[3] - body[1]);
         let markdown = PreviewDocument::Markdown {
             blocks,
+            ranges: Vec::new(),
+            source: None,
             intrinsic: Vec::new(),
             layout,
             math: DocumentMath::default(),
@@ -139801,7 +141632,12 @@ mod tests {
             metrics,
             [0.0, 0.0],
             rested_bars(&[]),
-            (&blocks, &intrinsic, &layout),
+            MarkdownPage {
+                blocks: &blocks,
+                intrinsic: &intrinsic,
+                layout: &layout,
+                live: MarkdownLive::default(),
+            },
             &palette,
             PageArt {
                 math: &DocumentMath::default(),
