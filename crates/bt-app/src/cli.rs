@@ -69,6 +69,23 @@ pub struct CliRequest {
     pub profile: Option<String>,
     /// The bare positional: a folder is a place, a file is a document.
     pub path: Option<PathBuf>,
+    /// `--new-window` — **open a window, not a tab in the one you were last
+    /// using** (`docs/DESIGN.md` §7.59).
+    ///
+    /// The opt-out of single instance, and it opts out of the *behaviour* and
+    /// not of the *channel*: a second launch carrying this still hands its
+    /// request to the Folio that is already running, which opens a second window
+    /// of its own. A second `folio.exe` process is started only when nobody
+    /// holds the data directory's claim, because that is the condition R4-5's
+    /// lock exists to answer and a flag on a command line cannot change it.
+    ///
+    /// Beside `embedding` and not among the three above it for that field's
+    /// reason: it says *how* this launch should land, not what to open. So it
+    /// is deliberately not one of [`Self::names_a_place`]'s three — `folio
+    /// --new-window` with nothing else asked for a window, not for a pane in a
+    /// particular place, and a launch that read it as a place would give the
+    /// reader a fresh tab instead of the session they left.
+    pub new_window: bool,
     /// `-Embedding`, accepted and inert.
     ///
     /// Reserved by `spike-win-landing.md` §8 as part of this slice, and reserved
@@ -199,6 +216,11 @@ pub fn refusal_text(fault: &CliFault) -> String {
 const CWD_FLAG: &str = "--cwd";
 /// `--profile`, spelled once — see [`CWD_FLAG`].
 const PROFILE_FLAG: &str = "--profile";
+/// `--new-window`, spelled once — see [`CWD_FLAG`]. Public because
+/// `crate::launch_wire` names it in the one sentence it prints about a launch
+/// that could not be handed over, and two spellings of a flag is how a message
+/// comes to name one that does not exist.
+pub const NEW_WINDOW_FLAG: &str = "--new-window";
 
 /// Turn a command line into a request, or into the fault that ends the launch.
 ///
@@ -255,6 +277,16 @@ where
                     || flag.eq_ignore_ascii_case("/Embedding") =>
             {
                 request.embedding = true;
+            }
+            // **Exact, and not through [`is_flag`]**: this one takes no value,
+            // so `--new-window=1` is a caller who believes it does and is
+            // answered as the unknown flag it is rather than silently accepted
+            // with its value dropped on the floor.
+            Some(flag) if flag == NEW_WINDOW_FLAG => {
+                if request.new_window {
+                    return Err(CliFault::Repeated(NEW_WINDOW_FLAG));
+                }
+                request.new_window = true;
             }
             Some(flag) if is_flag(flag, CWD_FLAG) => {
                 if request.cwd.is_some() {
@@ -758,6 +790,43 @@ mod tests {
         }
     }
 
+    /// **RED (§7.59) — `--new-window` is read, and it is not a place.**
+    ///
+    /// Four things at once and each is a different failure. It parses at all,
+    /// which before this slice was `CliFault::UnknownFlag` and a usage block. It
+    /// does **not** name a place: `folio --new-window` asked for a window, not
+    /// for a fresh pane, and a launch that read it as a place would hand the
+    /// reader an empty tab instead of the session they left — which is §7.2's
+    /// composition rule turned on by the wrong switch. It rides beside the three
+    /// that *are* places, because `folio --new-window --cwd D:\x` is the ordinary
+    /// way to ask for a second window on a folder. And it is refused twice, on
+    /// the grammar's own rule for a flag given twice.
+    ///
+    /// MUTATION: fold it into `names_a_place` and the second assertion goes red;
+    /// accept it through `is_flag` and `--new-window=1` stops being refused.
+    #[test]
+    fn a_window_of_its_own_is_asked_for_by_a_flag_that_names_no_place() {
+        assert!(parsed(&[NEW_WINDOW_FLAG]).new_window);
+        assert!(
+            !parsed(&[NEW_WINDOW_FLAG]).names_a_place(),
+            "asking for a window is not asking for a pane somewhere"
+        );
+        let both = parsed(&[NEW_WINDOW_FLAG, "--cwd", r"D:\Developer"]);
+        assert!(both.new_window);
+        assert_eq!(both.cwd, Some(PathBuf::from(r"D:\Developer")));
+        assert!(!parsed(&["--cwd", r"D:\Developer"]).new_window);
+        assert_eq!(
+            refused(&[NEW_WINDOW_FLAG, NEW_WINDOW_FLAG]),
+            CliFault::Repeated(NEW_WINDOW_FLAG)
+        );
+        assert_eq!(
+            refused(&["--new-window=1"]),
+            CliFault::UnknownFlag("--new-window=1".to_owned()),
+            "it takes no value, so a caller who gave it one is told the flag \
+             they wrote does not exist rather than having their value dropped"
+        );
+    }
+
     /// PIN — `--flag=value` is the same value as `--flag value`.
     ///
     /// Both spellings, on both flags, because the `=` half is parsed by hand out
@@ -789,6 +858,7 @@ mod tests {
                 profile: Some("gitbash".to_owned()),
                 path: Some(PathBuf::from(r"D:\a\b.rs")),
                 embedding: false,
+                new_window: false,
             }
         );
     }

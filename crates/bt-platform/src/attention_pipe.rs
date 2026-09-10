@@ -275,7 +275,7 @@ pub fn security_descriptor_sddl(logon_sid: &str) -> String {
 /// [`AttentionPipe::start`], no endpoint at all. **A missing logon SID must never fall back to a
 /// default descriptor**: that is the exact failure this module exists to prevent, and a fallback
 /// would make it happen precisely on the machines nobody tests on.
-fn logon_sid() -> Option<String> {
+pub(crate) fn logon_sid() -> Option<String> {
     let mut token = HANDLE::default();
     // SAFETY: `GetCurrentProcess` is a pseudo-handle needing no close, and `token` is a live local
     // for the duration of the call.
@@ -344,7 +344,12 @@ use windows::Win32::Security::GetTokenInformation;
 ///
 /// Small enough to be written out, and worth writing out: every early return below is a place a
 /// hand-closed handle would leak on, and the paths that fail are the ones nobody exercises.
-struct OwnedHandle(HANDLE);
+///
+/// **Lent to [`crate::launch_pipe`] rather than copied into it.** That module opens a second
+/// well-known pipe with the same descriptor and the same deadlines, and a second spelling of this
+/// type would be a second place for `Drop` to be got wrong — see that module's header for why the
+/// two channels share every unsafe primitive and nothing else.
+pub(crate) struct OwnedHandle(pub(crate) HANDLE);
 
 impl OwnedHandle {
     /// Give the handle up, so that something else can be the thing that closes it.
@@ -352,7 +357,7 @@ impl OwnedHandle {
     /// The one legitimate way out of this type, and it exists so that ownership can be taken
     /// *before* the first step that can fail and released only once somebody else is holding it —
     /// which is the order R2-25 found missing at the endpoint's stop event.
-    fn into_raw(self) -> HANDLE {
+    pub(crate) fn into_raw(self) -> HANDLE {
         let handle = self.0;
         std::mem::forget(self);
         handle
@@ -375,7 +380,7 @@ impl Drop for OwnedHandle {
 /// Same reasoning as `DirWatch`'s: these are process-wide kernel objects with one user apiece, and
 /// [`AttentionPipe::drop`] joins the thread before closing any of them.
 #[derive(Clone, Copy)]
-struct SendHandle(HANDLE);
+pub(crate) struct SendHandle(pub(crate) HANDLE);
 
 // SAFETY: see the type's own note.
 unsafe impl Send for SendHandle {}
@@ -525,14 +530,14 @@ impl Drop for AttentionPipe {
 }
 
 /// A `LocalAlloc`ed security descriptor, freed when it goes out of scope.
-struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
+pub(crate) struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
 
 // SAFETY: the descriptor is a plain kernel-format buffer with one owner; it crosses to the
 // listener thread and is freed there.
 unsafe impl Send for SecurityDescriptor {}
 
 impl SecurityDescriptor {
-    fn from_sddl(sddl: &str) -> io::Result<Self> {
+    pub(crate) fn from_sddl(sddl: &str) -> io::Result<Self> {
         let wide = wide(sddl);
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         // SAFETY: `wide` is NUL-terminated and outlives the call; the out-parameter receives a
@@ -549,7 +554,7 @@ impl SecurityDescriptor {
         Ok(Self(descriptor))
     }
 
-    fn attributes(&self) -> SECURITY_ATTRIBUTES {
+    pub(crate) fn attributes(&self) -> SECURITY_ATTRIBUTES {
         SECURITY_ATTRIBUTES {
             nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(0),
             lpSecurityDescriptor: self.0.0,
@@ -1089,7 +1094,7 @@ fn sweep(pool: &mut Vec<Instance>, counts: &Mutex<PipeCounts>) {
     }
 }
 
-fn cancel(pipe: HANDLE) {
+pub(crate) fn cancel(pipe: HANDLE) {
     // SAFETY: cancelling this thread's own outstanding operations on a handle it owns.
     unsafe {
         let _ = CancelIoEx(pipe, None);
@@ -1097,10 +1102,10 @@ fn cancel(pipe: HANDLE) {
 }
 
 /// An event and the `OVERLAPPED` that names it.
-struct Overlapped(HANDLE);
+pub(crate) struct Overlapped(HANDLE);
 
 impl Overlapped {
-    fn new() -> io::Result<Self> {
+    pub(crate) fn new() -> io::Result<Self> {
         // Manual-reset and initially unsignalled; each of these lives for exactly one operation, so
         // there is no stale signal to reset by hand.
         // SAFETY: a nameless, unowned event.
@@ -1109,11 +1114,11 @@ impl Overlapped {
         Ok(Self(event))
     }
 
-    fn handle(&self) -> HANDLE {
+    pub(crate) fn handle(&self) -> HANDLE {
         self.0
     }
 
-    fn overlapped(&self) -> OVERLAPPED {
+    pub(crate) fn overlapped(&self) -> OVERLAPPED {
         OVERLAPPED {
             hEvent: self.0,
             ..Default::default()
@@ -1158,7 +1163,7 @@ pub fn send_line(endpoint: &str, line: &str) -> io::Result<()> {
         ));
     }
     let wide_name = wide(endpoint);
-    let handle = open_client(&wide_name)?;
+    let handle = open_client(&wide_name, GENERIC_WRITE.0)?;
     write_bounded(handle.0, line.as_bytes())
 }
 
@@ -1199,7 +1204,7 @@ const WRITE_DEADLINE_MS: u32 = 250;
 /// argument that says otherwise. A write that runs out of time is cancelled and then **collected**
 /// — the buffer is the caller's stack and the kernel has to be finished with it before this
 /// returns, which is `Instance::settle`'s rule at the other end of the same file.
-fn write_bounded(pipe: HANDLE, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_bounded(pipe: HANDLE, bytes: &[u8]) -> io::Result<()> {
     let event = Overlapped::new()?;
     let mut overlapped = Box::new(event.overlapped());
     let mut written = 0u32;
@@ -1247,7 +1252,14 @@ fn write_bounded(pipe: HANDLE, bytes: &[u8]) -> io::Result<()> {
     done.map_err(win32_io_error)
 }
 
-fn open_client(wide_name: &[u16]) -> io::Result<OwnedHandle> {
+/// **One client handle onto a Folio pipe**, under the busy rule the verb's contract is written in.
+///
+/// `access` is the caller's, because this is now opened by two channels that want different things
+/// of it: the attention endpoint writes and never reads, and [`crate::launch_pipe`] writes a
+/// request and reads the answer back. Everything else about the open — the impersonation level, the
+/// overlapped flag, the one retry past a busy endpoint — is the same discipline for both and is
+/// therefore written once.
+pub(crate) fn open_client(wide_name: &[u16], access: u32) -> io::Result<OwnedHandle> {
     // **What the server may do with this client's token** (R2-27). Without `SECURITY_SQOS_PRESENT`
     // the level is the driver's default, which for a named pipe is impersonation — a server that
     // opened this handle could act as the caller against anything on the machine. `IDENTIFICATION`
@@ -1261,7 +1273,7 @@ fn open_client(wide_name: &[u16]) -> io::Result<OwnedHandle> {
         let handle = unsafe {
             CreateFileW(
                 PCWSTR(wide_name.as_ptr()),
-                GENERIC_WRITE.0,
+                access,
                 FILE_SHARE_MODE(0),
                 None,
                 OPEN_EXISTING,
@@ -1294,7 +1306,7 @@ fn open_client(wide_name: &[u16]) -> io::Result<OwnedHandle> {
     ))
 }
 
-fn wide(text: &str) -> Vec<u16> {
+pub(crate) fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
@@ -1325,7 +1337,7 @@ pub fn unguessable_bits() -> u128 {
     (u128::from(half()) << 64) | u128::from(half())
 }
 
-fn win32_io_error(error: windows::core::Error) -> io::Error {
+pub(crate) fn win32_io_error(error: windows::core::Error) -> io::Error {
     io::Error::from_raw_os_error(crate::windows_impl::win32_code(error.code()))
 }
 
@@ -1334,7 +1346,7 @@ fn win32_io_error(error: windows::core::Error) -> io::Error {
 /// One spelling, because the alternative — `error.code().0 as u32 == 0x8007_0000 | CODE.0` written
 /// out at each site — is a place for the facility bits to be got wrong once and read as a code that
 /// never matches, which is a branch that silently never runs.
-fn win32_of(error: &windows::core::Error) -> u32 {
+pub(crate) fn win32_of(error: &windows::core::Error) -> u32 {
     crate::windows_impl::win32_code(error.code()) as u32
 }
 
@@ -1567,7 +1579,8 @@ mod tests {
         // A client that attaches and then says nothing: the read this posts stays with the kernel
         // for as long as the client holds the connection open, which is what makes the cancellation
         // below a cancellation of something real.
-        let _client = open_client(&wide_name).expect("connect to our own endpoint");
+        let _client =
+            open_client(&wide_name, GENERIC_WRITE.0).expect("connect to our own endpoint");
         let handles = [instance.event.handle()];
         // SAFETY: the handle belongs to the instance this thread owns.
         let answer = unsafe { WaitForMultipleObjects(&handles, false, 5_000) };

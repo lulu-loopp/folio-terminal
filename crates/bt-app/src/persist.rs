@@ -174,15 +174,22 @@ pub(crate) fn read_fault(
 /// started and wrote the whole document back, so the second one to write erased
 /// everything the first had done since — a preference, a window, every tab.
 ///
-/// **A lock and a notice, not a hand-over.** The second process keeps its
-/// window, keeps every gesture in it working, and does not touch the two
-/// documents; it says so once, on that window. The alternative — handing the
-/// command line to the first process and exiting — is a *product* decision about
-/// whether Folio is a single-instance application, which it is not today: a
-/// reader can and does open a second one deliberately, and a launch that
-/// silently vanished into somebody else's window would be a surprise this
-/// review row did not ask for. What the row asked for is that the second one
-/// stops erasing the first one's work, and this is that and nothing more.
+/// **A lock, and — since 2026-09-08 — a hand-over** (§7.59). R4-5 asked only for
+/// the lock, and for one release that is all this was: the second process kept
+/// its window, kept every gesture in it working, and did not touch the two
+/// documents. Whether Folio is a single-instance application was a *product*
+/// decision this row deliberately did not take, and the owner took it after
+/// 0.2.4: it is. So a launch that finds this claim already held now hands its
+/// command line down `crate::launch_wire`'s pipe and exits, and the running
+/// Folio opens the tab.
+///
+/// **The lock is still the thing that decides**, and that is why this function
+/// has not changed. A second *process* is started only when this answers `true`
+/// — including for `--new-window`, which asks the running Folio for a second
+/// window rather than starting a second program. What the safety net now catches
+/// is the launches that could not reach the running process at all: no endpoint,
+/// nobody listening, an answer that never came. Those still open a window, and
+/// that window still writes nothing here.
 ///
 /// Asked once and remembered, because the claim is held for the life of the
 /// process: the answer cannot change while this process runs, and a second call

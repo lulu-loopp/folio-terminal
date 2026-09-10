@@ -6124,17 +6124,20 @@ impl CliText<'_> {
         match self {
             Self::Usage { profile_ids } => match lang {
                 Lang::English => format!(
-                    "folio [--cwd <folder>] [--profile <id>] [<path>]\n\n\
+                    "folio [--cwd <folder>] [--profile <id>] [--new-window] [<path>]\n\n\
                      \x20 --cwd <folder>    the first pane opens in that folder\n\
                      \x20 --profile <id>    the first pane's shell: {profile_ids}\n\
+                     \x20 --new-window      a window of its own, not a tab in the Folio already \
+                     running\n\
                      \x20 <path>            a folder opens a pane there; a file opens a preview\n\
                      \x20 -h, --help        this text\n\
                      \x20 --version         which build this is"
                 ),
                 Lang::Chinese => format!(
-                    "folio [--cwd <文件夹>] [--profile <id>] [<路径>]\n\n\
+                    "folio [--cwd <文件夹>] [--profile <id>] [--new-window] [<路径>]\n\n\
                      \x20 --cwd <文件夹>    第一个窗格在这个文件夹里打开\n\
                      \x20 --profile <id>    第一个窗格用哪种 shell：{profile_ids}\n\
+                     \x20 --new-window      另开一扇窗，不在已经开着的 Folio 里加标签\n\
                      \x20 <路径>            文件夹等同 --cwd，文件则打开预览\n\
                      \x20 -h, --help        显示这段说明\n\
                      \x20 --version         显示这是哪一个构建"
@@ -7509,7 +7512,7 @@ mod tests {
             }
             .in_lang(lang);
             let lines: Vec<&str> = usage.lines().collect();
-            assert_eq!(lines.len(), 7, "{lang:?}: {usage}");
+            assert_eq!(lines.len(), 8, "{lang:?}: {usage}");
             assert!(lines[0].starts_with("folio [--cwd "), "{lang:?}");
             assert!(lines[1].is_empty(), "{lang:?}");
             for line in &lines[2..] {

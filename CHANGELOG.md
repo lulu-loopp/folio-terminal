@@ -47,6 +47,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- **Opening Folio while it is already running opens a tab in the window you used
+  last, instead of a second window.** From Explorer's menu, from
+  `folio-here.cmd`, from a pinned icon or a shortcut: the folder you asked for
+  arrives as a new tab in the window you were last in, and that window comes to
+  the front. `--new-window` still opens a window — one belonging to the Folio
+  that is already running, rather than a second copy of the program. A second
+  copy now starts only when there is no Folio running to answer, which is also
+  what happens if the one that is running has stopped responding: after two
+  seconds the new one opens a window of its own rather than leaving you with
+  nothing.
 - **A text or Markdown file larger than the preview's first look can be
   edited.** The pane reads the first 64 KB of a file to show it to you, which is
   what keeps opening a huge file as quick as opening a small one, and until now

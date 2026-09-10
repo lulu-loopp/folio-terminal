@@ -243,7 +243,8 @@ fn note_released(id: i32) {
 
 #[cfg(windows)]
 pub use windows_hotkey::{
-    GlobalHotkey, foreground_window, give_foreground_to, register, summon_message_hook,
+    GlobalHotkey, allow_foreground_for, foreground_window, give_foreground_to, register,
+    summon_message_hook,
 };
 
 #[cfg(windows)]
@@ -263,8 +264,8 @@ mod windows_hotkey {
         HOT_KEY_MODIFIERS, RegisterHotKey, UnregisterHotKey,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsHungAppWindow, IsWindow,
-        MSG, SetForegroundWindow,
+        AllowSetForegroundWindow, BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId,
+        IsHungAppWindow, IsWindow, MSG, SetForegroundWindow,
     };
 
     use super::{Hotkey, HotkeyFault, registration_bits};
@@ -420,6 +421,35 @@ mod windows_hotkey {
         // immediately narrowed to an integer and never dereferenced.
         let hwnd = unsafe { GetForegroundWindow() };
         NonZeroIsize::new(hwnd.0 as isize)
+    }
+
+    /// **Hand this process's foreground rights to another process** (`docs/DESIGN.md` §7.59).
+    ///
+    /// The other half of [`give_foreground_to`], seen from the side that *has*
+    /// the keyboard: that function is a window trying to come to the front, and
+    /// Windows refuses it unless the process that owns the foreground has said
+    /// otherwise first. This is that sentence. A second `folio.exe` started from
+    /// Explorer, a shortcut or a pinned icon holds foreground rights because the
+    /// user just started it, and it spends them here — on the Folio that is
+    /// already running — before it exits.
+    ///
+    /// **Not `ASFW_ANY`**, which is the same call with `-1` and grants the right
+    /// to whatever asks next. A launch knows exactly which process it is handing
+    /// its command line to, because that process wrote its own id into the reply
+    /// ([`crate::launch_pipe`]), so naming it is free and a wildcard would be
+    /// this program lifting the foreground lock for the machine.
+    ///
+    /// The answer is read back and handed to the caller for [`give_foreground_to`]'s
+    /// reason: it fails by answering `false` rather than by raising, and a caller
+    /// that did not look would report a handover that never happened. Failure is
+    /// never reported to a reader — there is nothing a person can do about a
+    /// foreground lock, and the worst it costs is a window that opens behind
+    /// another one.
+    pub fn allow_foreground_for(process: u32) -> bool {
+        // SAFETY: a call taking one integer; it names a process id and
+        // dereferences nothing. A process id that has gone is a legal argument
+        // and answers `false`.
+        unsafe { AllowSetForegroundWindow(process) }.is_ok()
     }
 
     /// **Put this window back in front**, and say whether it actually got there.
