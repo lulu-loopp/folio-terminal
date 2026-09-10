@@ -27,6 +27,7 @@
 //! worker's to answer.
 
 use std::io::Read;
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
 use std::time::SystemTime;
@@ -1109,7 +1110,24 @@ pub struct ImageCandidate {
 /// `` `code` `` inside a table cell works without a line of its own: there is no
 /// second inline parser to teach.
 pub fn parse_inline(line: &str) -> Vec<Span> {
-    let mut pieces = scan_line(line);
+    parse_inline_marked(line, &mut Vec::new())
+}
+
+/// The same runs, and **where in `line` each picture was spelled**.
+///
+/// One entry in `images` per [`SpanStyle::Image`] run the walk returns, in the
+/// order they stand, covering the whole of the `![alt](src)` that made it — the
+/// `!` included and the closing parenthesis included. It is what
+/// [`push_prose`] needs and only [`push_prose`] asks for: a paragraph is cut at
+/// its pictures, and a cut that could not say where it fell would leave the two
+/// halves and the picture without a source between them.
+///
+/// **Only pictures, and only the outermost.** This is not
+/// [`Span`]-wide provenance — that is a slice of its own (research §9.6 T6) and
+/// it wants the joins as well as the scan. What is here is the one position the
+/// block walk cannot do without.
+fn parse_inline_marked(line: &str, images: &mut Vec<Range<usize>>) -> Vec<Span> {
+    let mut pieces = scan_line_marked(line, images);
     resolve_emphasis(&mut pieces);
     settle(pieces)
 }
@@ -1320,7 +1338,7 @@ struct OpenBracket {
 /// is flushed to [`push_delimiter_runs`] the moment a bracket or a claim
 /// interrupts it, which is what keeps a delimiter run's neighbours the line's
 /// own and not a chunk boundary's.
-fn scan_line(line: &str) -> Vec<Piece> {
+fn scan_line_marked(line: &str, images: &mut Vec<Range<usize>>) -> Vec<Piece> {
     let claims = claimed_runs(line);
     let bytes = line.as_bytes();
     let mut pieces = Vec::new();
@@ -1372,7 +1390,7 @@ fn scan_line(line: &str) -> Vec<Piece> {
                 at += 1;
                 plain = at;
             }
-            b']' => match close_bracket(line, at, plain, &mut brackets, &mut pieces) {
+            b']' => match close_bracket(line, at, plain, &mut brackets, &mut pieces, images) {
                 Some(resume) => {
                     at = resume;
                     plain = resume;
@@ -1422,6 +1440,7 @@ fn close_bracket(
     plain: usize,
     brackets: &mut Vec<OpenBracket>,
     pieces: &mut Vec<Piece>,
+    images: &mut Vec<Range<usize>>,
 ) -> Option<usize> {
     let opener = brackets.pop()?;
     if !opener.active {
@@ -1447,6 +1466,15 @@ fn close_bracket(
     let spans = settle(label);
     if opener.image {
         let alt: String = spans.iter().map(|span| span.text.as_str()).collect();
+        // A picture inside a picture's label became alt *text* on the line
+        // above, so it is no longer a run of its own and the marks it left
+        // behind are marks for a run that will not arrive. They go with it —
+        // the walk deposits in source order, so everything at or past this
+        // opener came out of this label.
+        while images.last().is_some_and(|marks| marks.start >= opener.at) {
+            images.pop();
+        }
+        images.push(opener.at..close + 1);
         pieces.push(Piece::Claimed(Span::image(&alt, &target)));
     } else {
         for bracket in brackets.iter_mut().filter(|bracket| !bracket.image) {
@@ -2060,22 +2088,49 @@ fn push_text(text: &str, bold: bool, italic: bool, spans: &mut Vec<Span>) {
 /// gathering can never swallow a heading, a fence, a rule, a table, a quote or a
 /// list marker.
 pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
+    parse_markdown_ranged(src).0
+}
+
+/// The same walk, and **beside each block the source it was parsed from**.
+///
+/// One byte range per block, in block order, into the very `src` that was
+/// handed in. See [`RangedBlocks`] for what a range covers and what the bytes
+/// between two of them are.
+///
+/// **The second entry point rather than a field on the block** (research
+/// `docs/plans/markdown-edit/research-2026-09-10.md` §9.2 and open question 4).
+/// [`MarkdownBlock`] derives `Eq` and is compared by value across this file's
+/// test module and shared with the terminal's own table renderer
+/// (`table_block::from_rows`); a range inside it would make every one of those
+/// comparisons range-sensitive for the sake of the one caller that wants the
+/// ranges. [`parse_markdown`] is this function with them dropped, which is why
+/// nothing else in the crate had to change.
+pub fn parse_markdown_ranged(src: &str) -> (Vec<MarkdownBlock>, Vec<Range<usize>>) {
     let lines: Vec<&str> = src.lines().collect();
-    let mut blocks = Vec::new();
+    let mut out = RangedBlocks::new(src);
     // Both accumulators hold **source text**, not spans, because both of them
     // join across source lines and inline parsing has to see the joined text.
+    // Each carries the source lines it ate beside it, because both destroy that
+    // source on the way past — the paragraph trims and joins, the list strips
+    // markers — and a block cannot be handed a range it can no longer name.
     let mut list: Vec<String> = Vec::new();
+    let mut list_lines: Option<(usize, usize)> = None;
     let mut ordered: Option<u64> = None;
     let mut paragraph: Vec<&str> = Vec::new();
+    let mut paragraph_lines: Vec<usize> = Vec::new();
     let mut index = 0usize;
 
     while index < lines.len() {
-        let line = lines[index];
+        // The line this turn of the walk starts on. Every branch below moves
+        // `index`, several of them by more than one line, so the *first* line of
+        // whatever is about to be pushed has to be taken before any of them do.
+        let at = index;
+        let line = lines[at];
 
         // ── the fence, which swallows everything until it closes ────────────
         if let Some(rest) = line.strip_prefix("```") {
-            flush_paragraph(&mut paragraph, &mut blocks);
-            flush_list(&mut list, &mut ordered, &mut blocks);
+            flush_paragraph(&mut paragraph, &mut paragraph_lines, &mut out);
+            flush_list(&mut list, &mut ordered, &mut list_lines, &mut out);
             let lang = rest.trim();
             let lang = (!lang.is_empty()).then(|| lang.to_owned());
             let mut body = Vec::new();
@@ -2088,10 +2143,14 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
             // of the document in silence (mock-up 4939) — which is what the
             // `index < len` bound above means when the loop runs off the end.
             index += usize::from(index < lines.len());
-            blocks.push(MarkdownBlock::Code {
-                lang,
-                text: body.join("\n"),
-            });
+            out.push_lines(
+                MarkdownBlock::Code {
+                    lang,
+                    text: body.join("\n"),
+                },
+                at,
+                index - 1,
+            );
             continue;
         }
 
@@ -2102,8 +2161,8 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
         // `$$` anywhere else is the author opening a formula, and nothing below
         // may see those lines as prose, as a rule or as a table.
         if let Some(rest) = line.strip_prefix("$$") {
-            flush_paragraph(&mut paragraph, &mut blocks);
-            flush_list(&mut list, &mut ordered, &mut blocks);
+            flush_paragraph(&mut paragraph, &mut paragraph_lines, &mut out);
+            flush_list(&mut list, &mut ordered, &mut list_lines, &mut out);
             index += 1;
             let mut body: Vec<&str> = Vec::new();
             // `$$E = mc^2$$` — opened and closed on one line. Asked of the line
@@ -2135,9 +2194,13 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
                     // ruling the unterminated fence above is decided by.
                 }
             }
-            blocks.push(MarkdownBlock::Math {
-                source: body.join("\n"),
-            });
+            out.push_lines(
+                MarkdownBlock::Math {
+                    source: body.join("\n"),
+                },
+                at,
+                index - 1,
+            );
             continue;
         }
 
@@ -2149,9 +2212,9 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
         // it, and before every branch that would otherwise read these lines as
         // prose, as a rule or as a table.
         if let Some((source, after)) = display_math_block(&lines, index) {
-            flush_paragraph(&mut paragraph, &mut blocks);
-            flush_list(&mut list, &mut ordered, &mut blocks);
-            blocks.push(MarkdownBlock::Math { source });
+            flush_paragraph(&mut paragraph, &mut paragraph_lines, &mut out);
+            flush_list(&mut list, &mut ordered, &mut list_lines, &mut out);
+            out.push_lines(MarkdownBlock::Math { source }, at, after - 1);
             index = after;
             continue;
         }
@@ -2165,9 +2228,9 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
         // and a refusal costs nothing, because the lines then travel on to the
         // very branch that would have taken them.
         if let Some((image, after)) = html_image_block(&lines, index) {
-            flush_paragraph(&mut paragraph, &mut blocks);
-            flush_list(&mut list, &mut ordered, &mut blocks);
-            blocks.push(MarkdownBlock::Image(image));
+            flush_paragraph(&mut paragraph, &mut paragraph_lines, &mut out);
+            flush_list(&mut list, &mut ordered, &mut list_lines, &mut out);
+            out.push_lines(MarkdownBlock::Image(image), at, after - 1);
             index = after;
             continue;
         }
@@ -2178,8 +2241,8 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
                 .get(index + 1)
                 .is_some_and(|next| is_table_separator(next))
         {
-            flush_paragraph(&mut paragraph, &mut blocks);
-            flush_list(&mut list, &mut ordered, &mut blocks);
+            flush_paragraph(&mut paragraph, &mut paragraph_lines, &mut out);
+            flush_list(&mut list, &mut ordered, &mut list_lines, &mut out);
             let mut rows = vec![split_pipe_row(line)];
             let index_of_separator = index + 1;
             // Past the separator, then every pipe row that follows without a
@@ -2190,16 +2253,16 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
                 index += 1;
             }
             let alignments = table_alignments(lines[index_of_separator], rows[0].len());
-            blocks.push(MarkdownBlock::Table { rows, alignments });
+            out.push_lines(MarkdownBlock::Table { rows, alignments }, at, index - 1);
             continue;
         }
 
         index += 1;
 
         if let Some(heading) = parse_heading(line) {
-            flush_paragraph(&mut paragraph, &mut blocks);
-            flush_list(&mut list, &mut ordered, &mut blocks);
-            blocks.push(heading);
+            flush_paragraph(&mut paragraph, &mut paragraph_lines, &mut out);
+            flush_list(&mut list, &mut ordered, &mut list_lines, &mut out);
+            out.push_lines(heading, at, at);
             continue;
         }
         // **After the table and before the list**, which is what keeps a `---`
@@ -2208,27 +2271,28 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
         // consumed it), and a rule is three or more of one character with
         // nothing else on the line, which `- item` is not.
         if is_thematic_break(line) {
-            flush_paragraph(&mut paragraph, &mut blocks);
-            flush_list(&mut list, &mut ordered, &mut blocks);
-            blocks.push(MarkdownBlock::Rule);
+            flush_paragraph(&mut paragraph, &mut paragraph_lines, &mut out);
+            flush_list(&mut list, &mut ordered, &mut list_lines, &mut out);
+            out.push_lines(MarkdownBlock::Rule, at, at);
             continue;
         }
         if let Some((number, item)) = parse_list_row(line) {
-            flush_paragraph(&mut paragraph, &mut blocks);
+            flush_paragraph(&mut paragraph, &mut paragraph_lines, &mut out);
             // A bulleted list and a numbered one standing next to each other are
             // two lists, not one list that changes its mind halfway down.
             if !list.is_empty() && ordered.is_some() != number.is_some() {
-                flush_list(&mut list, &mut ordered, &mut blocks);
+                flush_list(&mut list, &mut ordered, &mut list_lines, &mut out);
             }
             if list.is_empty() {
                 ordered = number;
             }
             list.push(item.trim().to_owned());
+            list_lines = Some(list_lines.map_or((at, at), |(first, _)| (first, at)));
             continue;
         }
         if let Some(first) = strip_quote(line) {
-            flush_paragraph(&mut paragraph, &mut blocks);
-            flush_list(&mut list, &mut ordered, &mut blocks);
+            flush_paragraph(&mut paragraph, &mut paragraph_lines, &mut out);
+            flush_list(&mut list, &mut ordered, &mut list_lines, &mut out);
             // A quote's own lines gather exactly as prose does — a wrapped quote
             // is one quoted paragraph — and a bare `>` is the blank line that
             // separates two of them.
@@ -2251,12 +2315,12 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
                 index += usize::from(quoted_line.is_some());
             }
             push_run(&mut run, &mut quoted);
-            blocks.push(MarkdownBlock::Quote(quoted));
+            out.push_lines(MarkdownBlock::Quote(quoted), at, index - 1);
             continue;
         }
         if line.trim().is_empty() {
-            flush_paragraph(&mut paragraph, &mut blocks);
-            flush_list(&mut list, &mut ordered, &mut blocks);
+            flush_paragraph(&mut paragraph, &mut paragraph_lines, &mut out);
+            flush_list(&mut list, &mut ordered, &mut list_lines, &mut out);
             continue;
         }
         // **Lazy continuation** (CommonMark §5.2): a plain line under an open
@@ -2268,13 +2332,139 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
             Some(item) if paragraph.is_empty() => {
                 item.push(' ');
                 item.push_str(line.trim());
+                list_lines = Some(list_lines.map_or((at, at), |(first, _)| (first, at)));
             }
-            _ => paragraph.push(line),
+            _ => {
+                paragraph.push(line);
+                paragraph_lines.push(at);
+            }
         }
     }
-    flush_paragraph(&mut paragraph, &mut blocks);
-    flush_list(&mut list, &mut ordered, &mut blocks);
-    blocks
+    flush_paragraph(&mut paragraph, &mut paragraph_lines, &mut out);
+    flush_list(&mut list, &mut ordered, &mut list_lines, &mut out);
+    (out.blocks, out.ranges)
+}
+
+/// The blocks of one document, and beside each the source it was parsed from.
+///
+/// **What a range covers**: the span the block was parsed from — the first byte
+/// of its first line to the end of its last line, *that line's own ending
+/// included*, so a CRLF file's ranges cover both bytes of the break and a file
+/// that ends without one has a last range that ends at the last byte. A
+/// paragraph cut at a picture is the one block that stops inside a line; see
+/// [`push_prose`].
+///
+/// **What the bytes between two ranges are**: the document's connective tissue,
+/// which belongs to no block — the blank line that ends a paragraph is consumed
+/// by the flush and is a member of nothing. The ranges are ordered and never
+/// overlap, so a save that rewrote one block splices it back between two runs of
+/// bytes it must not touch. A file ending in a break has an empty last line that
+/// [`crate::preview_edit::line_starts`] counts and `str::lines` denies: the walk
+/// never reaches it, so it is tissue too, and the break itself belongs to the
+/// block on the line above.
+struct RangedBlocks<'a> {
+    src: &'a str,
+    /// Where every line of `src` begins, in bytes.
+    ///
+    /// **Byte offsets and not a running sum of line lengths**, because
+    /// `str::lines` strips the `\r` of a CRLF as well as the `\n`: on a file
+    /// written by any editor on this platform, a line's length is a byte short
+    /// of its span, and a walk that added them up would drift by one byte a line
+    /// until the ranges named the wrong text entirely. This is the editor's own
+    /// vector, from the module that already had to answer the same question for
+    /// the caret.
+    starts: Vec<usize>,
+    blocks: Vec<MarkdownBlock>,
+    ranges: Vec<Range<usize>>,
+}
+
+impl<'a> RangedBlocks<'a> {
+    fn new(src: &'a str) -> Self {
+        Self {
+            src,
+            starts: crate::preview_edit::line_starts(src),
+            blocks: Vec::new(),
+            ranges: Vec::new(),
+        }
+    }
+
+    /// Where line `line` begins, or the end of the file for a line past its end.
+    fn line_start(&self, line: usize) -> usize {
+        self.starts.get(line).copied().unwrap_or(self.src.len())
+    }
+
+    /// One past line `line`'s own ending: the next line's first byte, or the end
+    /// of the file when there is no next line — which is the same answer for a
+    /// last line that ends in a break and for one that does not.
+    fn line_end(&self, line: usize) -> usize {
+        self.line_start(line + 1)
+    }
+
+    /// A block parsed from source lines `first` through `last`, inclusive.
+    fn push_lines(&mut self, block: MarkdownBlock, first: usize, last: usize) {
+        self.push(block, self.line_start(first)..self.line_end(last));
+    }
+
+    fn push(&mut self, block: MarkdownBlock, range: Range<usize>) {
+        self.blocks.push(block);
+        self.ranges.push(range);
+    }
+}
+
+/// **Where a paragraph's joined text came from**, so that a cut in the joined
+/// text can be made in the file.
+///
+/// [`join_source_lines`] trims each line and joins them with a single space, so
+/// the string [`parse_inline`] reads is nobody's bytes: the indent is gone, the
+/// breaks are gone, and a CRLF's carriage return is gone with them. This is the
+/// map back — one entry per line, and every byte of joined text that is a copy
+/// of a source byte answers with the byte it is a copy of.
+struct ParagraphSource {
+    /// The paragraph's own span, the last line's ending included.
+    span: Range<usize>,
+    /// Per line: where its trimmed text begins in the joined string, how many
+    /// bytes of it there are, and where those same bytes begin in the source.
+    lines: Vec<(usize, usize, usize)>,
+}
+
+impl ParagraphSource {
+    fn new(paragraph: &[&str], at: &[usize], out: &RangedBlocks, span: Range<usize>) -> Self {
+        let mut lines = Vec::with_capacity(paragraph.len());
+        let mut joined = 0usize;
+        for (line, index) in paragraph.iter().zip(at) {
+            let text = line.trim();
+            let indent = line.len() - line.trim_start().len();
+            lines.push((joined, text.len(), out.line_start(*index) + indent));
+            // The single space [`join_source_lines`] puts between two lines.
+            joined += text.len() + 1;
+        }
+        Self { span, lines }
+    }
+
+    /// The source byte the joined byte at `offset` is a copy of.
+    ///
+    /// The joining spaces are copies of nothing, so one of those answers with
+    /// the first byte of the line it stands in front of. That keeps the map
+    /// total and keeps it from ever running backwards, which is what the
+    /// partition below relies on.
+    fn source_start(&self, offset: usize) -> usize {
+        self.at(offset, false)
+    }
+
+    /// One past the source byte the joined byte *before* `offset` is a copy of —
+    /// the exclusive end that answers [`Self::source_start`]'s inclusive start.
+    fn source_end(&self, offset: usize) -> usize {
+        self.at(offset, true)
+    }
+
+    fn at(&self, offset: usize, end: bool) -> usize {
+        for (joined, len, source) in &self.lines {
+            if offset < joined + len || (end && offset == joined + len) {
+                return source + offset.saturating_sub(*joined);
+            }
+        }
+        self.span.end
+    }
 }
 
 /// The display formula the line at `start` opens with `\[` or with a bare
@@ -2591,13 +2781,22 @@ fn join_source_lines(lines: &[&str]) -> String {
         .join(" ")
 }
 
-fn flush_paragraph(paragraph: &mut Vec<&str>, blocks: &mut Vec<MarkdownBlock>) {
-    if paragraph.is_empty() {
+fn flush_paragraph(paragraph: &mut Vec<&str>, at: &mut Vec<usize>, out: &mut RangedBlocks) {
+    let (Some(first), Some(last)) = (at.first().copied(), at.last().copied()) else {
         return;
-    }
+    };
     let text = join_source_lines(paragraph);
+    let source = ParagraphSource::new(
+        paragraph,
+        at,
+        out,
+        out.line_start(first)..out.line_end(last),
+    );
     paragraph.clear();
-    push_prose(parse_inline(&text), blocks);
+    at.clear();
+    let mut images = Vec::new();
+    let spans = parse_inline_marked(&text, &mut images);
+    push_prose(spans, &images, &source, out);
 }
 
 /// **Cut one paragraph's runs into the blocks they are drawn as**: prose,
@@ -2607,30 +2806,76 @@ fn flush_paragraph(paragraph: &mut Vec<&str>, blocks: &mut Vec<MarkdownBlock>) {
 /// ordinary case, and every picture in this repository's own `README.md` — comes
 /// out as one image block with no prose either side of it, because the runs
 /// either side are empty.
-fn push_prose(spans: Vec<Span>, blocks: &mut Vec<MarkdownBlock>) {
+///
+/// **And the paragraph's source is cut with it.** The blocks this makes are the
+/// only ones that do not each own whole lines, because a picture in the middle
+/// of a sentence has prose to its left and prose to its right on the same line
+/// and no two blocks may share a byte. So the paragraph's span is *partitioned*:
+///
+/// * a picture's range begins at the first byte of its own `![…](…)` spelling,
+///   which is where the prose before it ends;
+/// * the prose after a picture begins one past its closing parenthesis — so
+///   when nothing but the line's break follows the picture, that break is the
+///   following prose's;
+/// * and whatever no block was made of — a line's indent, the space between two
+///   pictures, the markup of a link wrapped round a picture, the break at the
+///   end of a picture's own line — goes to the block on its left, or to the
+///   block on its right when it stands before the first one.
+///
+/// So a picture alone on its line owns that line, break and all, and a picture
+/// inside a sentence owns nothing but its spelling. Nothing between the
+/// paragraph's first byte and its last is left to no block at all.
+fn push_prose(
+    spans: Vec<Span>,
+    images: &[Range<usize>],
+    source: &ParagraphSource,
+    out: &mut RangedBlocks,
+) {
     let mut run: Vec<Span> = Vec::new();
+    let mut marks = images.iter();
+    let mut cursor = source.span.start;
+    let first_block = out.blocks.len();
     for span in spans {
         if span.style != SpanStyle::Image {
             run.push(span);
             continue;
         }
-        push_paragraph_run(&mut run, blocks);
-        let source = span.target.unwrap_or_default();
-        blocks.push(MarkdownBlock::Image(MarkdownImage::named(
-            &span.text, &source,
-        )));
+        // One mark per picture run, in the order they stand — see
+        // [`parse_inline_marked`], which is the pass that made both.
+        let marks = marks
+            .next()
+            .expect("every picture run was marked where the scan found it");
+        let start = source.source_start(marks.start);
+        let end = source.source_end(marks.end);
+        if push_paragraph_run(&mut run, cursor..start, out) {
+            cursor = start;
+        }
+        let target = span.target.unwrap_or_default();
+        out.push(
+            MarkdownBlock::Image(MarkdownImage::named(&span.text, &target)),
+            cursor..end,
+        );
+        cursor = end;
     }
-    push_paragraph_run(&mut run, blocks);
+    push_paragraph_run(&mut run, cursor..source.span.end, out);
+    // The tail nobody was made of, given to the last block there is.
+    if out.blocks.len() > first_block
+        && let Some(last) = out.ranges.last_mut()
+    {
+        last.end = source.span.end;
+    }
 }
 
 /// The prose on one side of a picture, dropped when it is nothing but the space
-/// that stood between two of them.
-fn push_paragraph_run(run: &mut Vec<Span>, blocks: &mut Vec<MarkdownBlock>) {
+/// that stood between two of them — and whether it was kept, which is what tells
+/// the cut above whether those bytes found an owner.
+fn push_paragraph_run(run: &mut Vec<Span>, range: Range<usize>, out: &mut RangedBlocks) -> bool {
     if run.iter().all(|span| span.text.trim().is_empty()) {
         run.clear();
-        return;
+        return false;
     }
-    blocks.push(MarkdownBlock::Paragraph(std::mem::take(run)));
+    out.push(MarkdownBlock::Paragraph(std::mem::take(run)), range);
+    true
 }
 
 /// `#` through `######` followed by a space.
@@ -2741,19 +2986,30 @@ fn split_pipe_row(line: &str) -> TableRow {
         .collect()
 }
 
-fn flush_list(list: &mut Vec<String>, ordered: &mut Option<u64>, blocks: &mut Vec<MarkdownBlock>) {
-    if !list.is_empty() {
-        blocks.push(MarkdownBlock::List {
-            ordered: *ordered,
-            // Parsed here rather than as each row arrives, because a row may
-            // still grow: an item's continuation lines are appended to its
-            // source, and inline runs cut before the last of them would split a
-            // code span or an emphasis pair across the fold.
-            items: std::mem::take(list)
-                .iter()
-                .map(|item| parse_inline(item))
-                .collect(),
-        });
+fn flush_list(
+    list: &mut Vec<String>,
+    ordered: &mut Option<u64>,
+    at: &mut Option<(usize, usize)>,
+    out: &mut RangedBlocks,
+) {
+    // The lines are recorded when a row or a continuation is taken, so they are
+    // there exactly when there are rows to flush.
+    if let Some((first, last)) = at.take() {
+        out.push_lines(
+            MarkdownBlock::List {
+                ordered: *ordered,
+                // Parsed here rather than as each row arrives, because a row may
+                // still grow: an item's continuation lines are appended to its
+                // source, and inline runs cut before the last of them would split a
+                // code span or an emphasis pair across the fold.
+                items: std::mem::take(list)
+                    .iter()
+                    .map(|item| parse_inline(item))
+                    .collect(),
+            },
+            first,
+            last,
+        );
     }
     *ordered = None;
 }
@@ -10237,5 +10493,279 @@ mod tests {
                 "the disk already said no about {fault:?}"
             );
         }
+    }
+
+    // ── the source each block was parsed from ───────────────────────────────
+
+    /// One document with every block this parser has in it, written as its lines
+    /// so that a line ending in blanks can say so in a way no editor and no
+    /// whitespace-trimming hook can quietly take back.
+    fn ranged_page() -> String {
+        [
+            // A leading blank line: the file opens on bytes no block owns.
+            "",
+            "# A heading",
+            "",
+            "The first paragraph wraps",
+            // Trailing whitespace, spelled so it survives being read by a tool.
+            "across two lines.\u{20}\u{20}\u{20}",
+            "",
+            "Second prose with ![a picture](one.png) in the middle of it.",
+            "",
+            "![alone](two.png)",
+            "",
+            "<img src=\"three.png\" alt=\"a picture in html\">",
+            "",
+            "```rust",
+            "let x = 1;",
+            "```",
+            "",
+            "$$",
+            "E = mc^2",
+            "$$",
+            "",
+            "| a | b |",
+            "|---|---|",
+            "| 1 | 2 |",
+            "",
+            "> a quote",
+            "> that wraps",
+            "",
+            "---",
+            "",
+            "1. first",
+            "2. second",
+            "",
+            "- bullet",
+            "  its lazy continuation",
+            "- another",
+        ]
+        .join("\n")
+            + "\n"
+    }
+
+    /// A fence nobody closed swallows the rest of the document, so it gets a
+    /// document of its own.
+    fn ranged_open_fence() -> String {
+        ["Prose.", "", "```text", "still inside", ""].join("\n")
+    }
+
+    /// The same bytes as a file written on this platform: every break two bytes,
+    /// which `str::lines` hides and a byte range must not.
+    fn crlf(src: &str) -> String {
+        src.replace('\n', "\r\n")
+    }
+
+    /// Every document the range tests are asked of, LF and CRLF, with and
+    /// without the break the last line usually ends on.
+    fn ranged_fixtures() -> Vec<(String, String)> {
+        let mut fixtures = Vec::new();
+        for (name, src) in [
+            ("the page", ranged_page()),
+            ("the open fence", ranged_open_fence()),
+            ("nothing at all", String::new()),
+            ("one break", "\n".to_owned()),
+            ("one word", "word".to_owned()),
+            (
+                "a picture in a link",
+                "[![alt](one.png)](where)\n".to_owned(),
+            ),
+            (
+                "two pictures on one line",
+                "![one](one.png) ![two](two.png)\n".to_owned(),
+            ),
+            // Two documents nobody wrote for this test: the product's own front
+            // page, which is markdown with pictures, tables, fences and an HTML
+            // `<picture>` in it, and this file, which is not markdown at all and
+            // is therefore the walk asked about text it was never shaped for.
+            (
+                "this repository's front page",
+                include_str!("../../../README.md").to_owned(),
+            ),
+            (
+                "this file's own source",
+                include_str!("preview.rs").to_owned(),
+            ),
+        ] {
+            let bare = src.strip_suffix('\n').map(str::to_owned);
+            fixtures.push((format!("{name}, LF"), src.clone()));
+            fixtures.push((format!("{name}, CRLF"), crlf(&src)));
+            if let Some(bare) = bare {
+                fixtures.push((format!("{name}, LF, no final break"), bare.clone()));
+                fixtures.push((format!("{name}, CRLF, no final break"), crlf(&bare)));
+            }
+        }
+        fixtures
+    }
+
+    /// **RED GATE** — the ranges are a partition of the file (§9.2, ticket T1).
+    ///
+    /// Ordered, non-overlapping, each one a real slice of the source, and the
+    /// file comes back byte for byte from the ranges plus the bytes between
+    /// them. That last clause is the one that matters: it is what lets a save
+    /// splice one block back into the document and leave every other byte —
+    /// carriage returns, trailing blanks, the missing final break — exactly
+    /// where the author left it.
+    ///
+    /// MUTATION: sum `line.len()` instead of reading
+    /// [`crate::preview_edit::line_starts`] and every CRLF fixture comes back
+    /// short by a byte a line.
+    #[test]
+    fn the_block_ranges_partition_the_file_and_the_file_comes_back_whole() {
+        for (name, src) in ranged_fixtures() {
+            let (blocks, ranges) = parse_markdown_ranged(&src);
+            assert_eq!(blocks.len(), ranges.len(), "{name}: one range per block");
+            let mut rebuilt = String::new();
+            let mut cursor = 0usize;
+            for (block, range) in blocks.iter().zip(&ranges) {
+                assert!(
+                    range.start < range.end,
+                    "{name}: {block:?} was parsed from no bytes at all"
+                );
+                assert!(
+                    cursor <= range.start,
+                    "{name}: {block:?} at {range:?} runs back over the block before it"
+                );
+                assert!(
+                    range.end <= src.len(),
+                    "{name}: {block:?} at {range:?} runs off the end of {} bytes",
+                    src.len()
+                );
+                rebuilt.push_str(&src[cursor..range.start]);
+                rebuilt.push_str(&src[range.clone()]);
+                cursor = range.end;
+            }
+            rebuilt.push_str(&src[cursor..]);
+            assert_eq!(rebuilt, src, "{name}: the file does not come back");
+        }
+    }
+
+    /// The connective tissue between two blocks is blank and nothing else.
+    ///
+    /// Not a restatement of the test above: that one says the bytes are all
+    /// accounted for, this one says the accounting is honest. A block that
+    /// shortened its range by a line would still reconstruct — the line would
+    /// simply become a gap — and this is what notices.
+    #[test]
+    fn the_bytes_no_block_was_parsed_from_are_blank() {
+        for (name, src) in ranged_fixtures() {
+            let (_, ranges) = parse_markdown_ranged(&src);
+            let mut cursor = 0usize;
+            for range in &ranges {
+                assert!(
+                    src[cursor..range.start].trim().is_empty(),
+                    "{name}: {:?} belongs to no block",
+                    &src[cursor..range.start]
+                );
+                cursor = range.end;
+            }
+            assert!(
+                src[cursor..].trim().is_empty(),
+                "{name}: {:?} is left over at the end",
+                &src[cursor..]
+            );
+        }
+    }
+
+    /// The wrapper changes nothing: [`parse_markdown`] is the ranged walk with
+    /// the ranges dropped, which is what keeps `attention_words` and every
+    /// assertion in this module and in `main` reading the same blocks.
+    #[test]
+    fn the_wrapper_hands_back_the_blocks_the_ranged_walk_found() {
+        for (name, src) in ranged_fixtures() {
+            assert_eq!(
+                parse_markdown(&src),
+                parse_markdown_ranged(&src).0,
+                "{name}: the wrapper and the walk disagree"
+            );
+        }
+    }
+
+    /// Per kind: what a range covers is the block's own lines, their own line
+    /// endings included.
+    #[test]
+    fn a_range_covers_its_blocks_lines_and_the_breaks_that_end_them() {
+        let lf = "# Title\n\ntwo\nlines\n\n```rust\nlet x = 1;\n```\n";
+        for (src, break_bytes) in [(lf.to_owned(), "\n"), (crlf(lf), "\r\n")] {
+            let (blocks, ranges) = parse_markdown_ranged(&src);
+            let text: Vec<&str> = ranges.iter().map(|range| &src[range.clone()]).collect();
+            assert!(
+                matches!(blocks[0], MarkdownBlock::Heading { .. }),
+                "the first block is the heading"
+            );
+            assert_eq!(
+                text[0],
+                format!("# Title{break_bytes}"),
+                "a heading's range covers its hashes, its text and its break"
+            );
+            assert_eq!(
+                text[1],
+                format!("two{break_bytes}lines{break_bytes}"),
+                "a paragraph's range is all of its lines"
+            );
+            assert!(
+                matches!(blocks[2], MarkdownBlock::Code { .. }),
+                "the third block is the fence"
+            );
+            assert_eq!(
+                text[2],
+                format!("```rust{break_bytes}let x = 1;{break_bytes}```{break_bytes}"),
+                "a fence's range covers both of its fence lines"
+            );
+        }
+    }
+
+    /// A file that ends without a break: the last block ends at the last byte.
+    #[test]
+    fn the_last_block_of_a_file_with_no_final_break_ends_at_the_last_byte() {
+        for src in [
+            "# Title\n\nlast line",
+            "# Title\r\n\r\nlast line",
+            "one\ntwo",
+        ] {
+            let (_, ranges) = parse_markdown_ranged(src);
+            assert_eq!(
+                ranges.last().expect("the file has blocks in it").end,
+                src.len(),
+                "{src:?}: the last block stops short of the end"
+            );
+        }
+    }
+
+    /// **The picture cut out of a sentence** — the case the ticket asks to be
+    /// written down. A picture's range is its own `![…](…)` spelling and the
+    /// prose either side keeps the rest of the line, so no two blocks share a
+    /// byte and the line still reconstructs.
+    #[test]
+    fn a_picture_inside_a_sentence_owns_its_spelling_and_the_prose_keeps_the_rest() {
+        let src = "before ![alt](one.png) after\n";
+        let (blocks, ranges) = parse_markdown_ranged(src);
+        let text: Vec<&str> = ranges.iter().map(|range| &src[range.clone()]).collect();
+        assert_eq!(blocks.len(), 3, "prose, picture, prose");
+        assert!(matches!(blocks[1], MarkdownBlock::Image(_)));
+        assert_eq!(text, ["before ", "![alt](one.png)", " after\n"]);
+    }
+
+    /// **The picture alone on its line** owns the line, its break included:
+    /// nothing else on the line was parsed into anything, so there is nobody
+    /// else for those bytes to belong to.
+    #[test]
+    fn a_picture_alone_on_its_line_owns_the_line() {
+        let src = "![alt](one.png)\n";
+        let (blocks, ranges) = parse_markdown_ranged(src);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(&src[ranges[0].clone()], "![alt](one.png)\n");
+    }
+
+    /// A picture on its own line inside a wrapped paragraph: the prose above it
+    /// ends where its spelling begins and the prose below it starts one past the
+    /// closing parenthesis, which is the break that ended the picture's line.
+    #[test]
+    fn a_picture_on_its_own_line_inside_a_paragraph_cuts_the_paragraph_at_it() {
+        let src = "before\n![alt](one.png)\nafter\n";
+        let (blocks, ranges) = parse_markdown_ranged(src);
+        let text: Vec<&str> = ranges.iter().map(|range| &src[range.clone()]).collect();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(text, ["before\n", "![alt](one.png)", "\nafter\n"]);
     }
 }
