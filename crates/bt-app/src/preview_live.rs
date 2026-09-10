@@ -173,6 +173,176 @@ pub fn place_in_block(
     Some((line, column))
 }
 
+/// **The source block as something a caret can be walked through** (T5,
+/// §7.1.3t): its bytes, where they begin in the file, and how they fold into the
+/// width they are drawn in.
+///
+/// Borrowed rather than owned because both the callers hold all three already —
+/// the painter built the fold to draw the rows and the hit test has to read it
+/// back — and a fourth derivation of the same fold is a fourth chance to
+/// disagree about which row a line is on.
+#[derive(Clone, Copy, Debug)]
+pub struct BlockRows<'a> {
+    /// The block's own bytes, its trailing line ending off ([`block_source`]).
+    pub text: &'a str,
+    /// The file offset those bytes begin at — the block's `range.start`.
+    pub start: usize,
+    /// How they fold, at the width the block is drawn in.
+    pub wrap: &'a preview_edit::WrapLayout,
+}
+
+impl BlockRows<'_> {
+    /// Whether a file offset stands inside these bytes.
+    ///
+    /// Inclusive at both ends: `start` is the block's first byte and
+    /// `start + text.len()` is the end of its last line, which is where a caret
+    /// at the end of a paragraph stands. One past *that* is the block's own line
+    /// ending, and [`caret_seat`] has already given it to whatever comes next.
+    #[must_use]
+    pub fn holds(&self, offset: usize) -> bool {
+        (self.start..=self.start + self.text.len()).contains(&offset)
+    }
+
+    /// **Where a file offset is drawn**: the row of this block, and how far into
+    /// that row it stands.
+    ///
+    /// The column is measured *inside the row* rather than inside the line,
+    /// which is what [`step_by_row`] carries as the desired column — a walk down
+    /// a folded paragraph that kept the line's column would leap to the far end
+    /// of the second row.
+    #[must_use]
+    pub fn row_of(&self, offset: usize) -> Option<(usize, usize)> {
+        if !self.holds(offset) {
+            return None;
+        }
+        let local = preview_edit::normalize(self.text, offset - self.start);
+        let starts = preview_edit::line_starts(self.text);
+        let line = preview_edit::line_index(&starts, local);
+        let (from, _) = preview_edit::line_bounds(self.text, &starts, line);
+        let column = preview_edit::column_of(
+            preview_edit::line_text(self.text, &starts, line),
+            local.saturating_sub(from),
+        );
+        let (row, row_start) = self.wrap.row_of(line, column);
+        Some((row, column.saturating_sub(row_start)))
+    }
+
+    /// **The file byte a drawn row and a column inside it name** — [`Self::row_of`]
+    /// read backwards, and the whole of a click landing in the source block.
+    ///
+    /// A column past the end of the row lands at the end of the row's own text,
+    /// which is what makes clicking in the space after a short line put the
+    /// caret at the end of that line; a row past the end of the block is the end
+    /// of the block, which is where a click below its last line lands.
+    #[must_use]
+    pub fn offset_at(&self, row: usize, column: usize) -> usize {
+        let Some((line, from, to)) = self.wrap.row_span(row) else {
+            return self.start + self.text.len();
+        };
+        let starts = preview_edit::line_starts(self.text);
+        let text = preview_edit::line_text(self.text, &starts, line);
+        // `to` runs one column past the last row of a line — the cell the break
+        // is drawn in — and a caret may not stand past the end of a line.
+        let column =
+            (from + column.min(to.saturating_sub(from))).min(preview_edit::line_columns(text));
+        let (line_start, _) = preview_edit::line_bounds(self.text, &starts, line);
+        self.start + line_start + preview_edit::byte_at_column(text, column)
+    }
+}
+
+/// **One row up or down on a live-preview page**, wherever the caret happens to
+/// be standing (T5 ②, §7.1.3t).
+///
+/// `true` when the motion was a vertical one and the caret has been moved;
+/// `false` for every other motion, which the file's own line model answers
+/// unchanged ([`preview_edit::move_caret`]).
+///
+/// **Two coordinate systems, and the seam between them is the whole function.**
+/// Inside the source block a row is a *folded* row of that block, because that
+/// is what the reader can see: a paragraph written as one long line is drawn as
+/// four, and Down that jumped the whole paragraph would skip three of them.
+/// Step off the block's top or bottom row and there is no fold to walk any more
+/// — the neighbour is drawn as prose and has no rows of its own until the caret
+/// arrives in it and it becomes the source block — so the step becomes a step of
+/// the *file's* lines, which lands in the block above, the block below, or the
+/// blank line of a gap between them, and the next parse makes whichever it is
+/// the source block. That is §7.1.3q's own account of Arrow-Up out of a block,
+/// and it is why nothing here needs a "leaving a block" event.
+///
+/// **The desired column carries in monospace columns** across the seam, which is
+/// honest because both sides are drawn in the same monospace face by the time
+/// the caret is in them. What it cannot promise is the column of a *folded* row
+/// against the column of a whole line: leaving a folded block at row three
+/// carries the column of that row, not of the line it is part of. That is the
+/// same compromise the source face's own [`crate::step_preview_caret_by_row`]
+/// makes, said once here rather than discovered twice.
+pub fn step_by_row(
+    content: &str,
+    block: Option<BlockRows<'_>>,
+    caret: &mut preview_edit::EditCaret,
+    motion: preview_edit::Motion,
+    page_rows: usize,
+) -> bool {
+    let step = match motion {
+        preview_edit::Motion::Up => -1isize,
+        preview_edit::Motion::Down => 1,
+        preview_edit::Motion::PageUp => -(page_rows.max(1) as isize),
+        preview_edit::Motion::PageDown => page_rows.max(1) as isize,
+        _ => return false,
+    };
+    caret.heal(content);
+    if let Some(block) = block.filter(|block| block.holds(caret.caret))
+        && let Some((row, column)) = block.row_of(caret.caret)
+    {
+        let wanted = caret.desired_column.unwrap_or(column);
+        let target = row as isize + step;
+        if target >= 0 && (target as usize) < block.wrap.rows() {
+            caret.caret =
+                preview_edit::normalize(content, block.offset_at(target as usize, wanted));
+            caret.desired_column = Some(wanted);
+            return true;
+        }
+        return step_by_line(content, caret, step, wanted);
+    }
+    // In a gap, or on a page whose caret has no block: the file's lines, which
+    // is the only model there is out here.
+    let starts = preview_edit::line_starts(content);
+    let line = preview_edit::line_index(&starts, caret.caret);
+    let (start, _) = preview_edit::line_bounds(content, &starts, line);
+    let column = preview_edit::column_of(
+        preview_edit::line_text(content, &starts, line),
+        caret.caret.saturating_sub(start),
+    );
+    let wanted = caret.desired_column.unwrap_or(column);
+    step_by_line(content, caret, step, wanted)
+}
+
+/// The file's own line model, stepped — the other side of [`step_by_row`]'s
+/// seam.
+///
+/// Off either end of the file is that end, which is what a text field does, and
+/// the desired column is kept either way so that coming back returns to it.
+fn step_by_line(
+    content: &str,
+    caret: &mut preview_edit::EditCaret,
+    step: isize,
+    wanted: usize,
+) -> bool {
+    let starts = preview_edit::line_starts(content);
+    let line = preview_edit::line_index(&starts, caret.caret);
+    let target = line as isize + step;
+    caret.caret = if target < 0 {
+        0
+    } else if target as usize >= starts.len() {
+        content.len()
+    } else {
+        preview_edit::offset_at(content, target as usize, wanted)
+    };
+    caret.caret = preview_edit::normalize(content, caret.caret);
+    caret.desired_column = Some(wanted);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,5 +513,187 @@ mod tests {
             "para  ",
             "trailing whitespace is the file's too",
         );
+    }
+
+    /// The three things a walk through the source block needs, built the way
+    /// the painter builds them: the block's own bytes and the fold they draw in.
+    fn folded(
+        content: &str,
+        range: &Range<usize>,
+        columns: Option<usize>,
+    ) -> (String, preview_edit::WrapLayout) {
+        let text = block_source(content, range).to_owned();
+        let lines = preview_edit::display_lines(&text);
+        let wrap = match columns {
+            Some(columns) => preview_edit::WrapLayout::wrapped(&lines, columns),
+            None => preview_edit::WrapLayout::unwrapped(&lines),
+        };
+        (text, wrap)
+    }
+
+    /// **A click inside the source block names a byte of the file** (T5 ①), and
+    /// the arithmetic is the painter's read backwards: the row is a folded row
+    /// of *this block*, the column is a column of that row, and the answer is an
+    /// offset into the whole file.
+    ///
+    /// MUTATION: leave `self.start` off [`BlockRows::offset_at`]'s answer and
+    /// every click in the second block of a document lands in the first one.
+    #[test]
+    fn a_row_and_a_column_of_the_source_block_name_a_file_byte() {
+        let content = "# head\n\nthe paragraph\n";
+        let (text, wrap) = folded(content, &(8..22), None);
+        let rows = BlockRows {
+            text: &text,
+            start: 8,
+            wrap: &wrap,
+        };
+        assert_eq!(rows.offset_at(0, 0), 8, "the block's first byte");
+        assert_eq!(rows.offset_at(0, 4), 12, "four columns in");
+        assert_eq!(
+            rows.offset_at(0, 900),
+            21,
+            "past the end of the row is the end of its own line",
+        );
+        assert_eq!(
+            rows.offset_at(9, 0),
+            21,
+            "a row past the end of the block is the end of the block",
+        );
+        assert_eq!(rows.row_of(12), Some((0, 4)), "and back again");
+        assert_eq!(rows.row_of(3), None, "a byte of another block is not ours");
+    }
+
+    /// **A folded block answers in its own rows**, which is what the reader can
+    /// see: one long paragraph line drawn as three rows is three rows to walk.
+    #[test]
+    fn a_folded_line_answers_in_the_rows_it_draws_as() {
+        // One block, one line, eighteen columns, folded at six.
+        let content = "aaa bbb ccc ddd\n";
+        let (text, wrap) = folded(content, &(0..16), Some(7));
+        let rows = BlockRows {
+            text: &text,
+            start: 0,
+            wrap: &wrap,
+        };
+        assert!(wrap.rows() > 1, "the fixture has to actually fold");
+        let (row, column) = rows.row_of(9).expect("inside the block");
+        assert!(row > 0, "the tenth byte is on the second row or later");
+        assert_eq!(
+            rows.offset_at(row, column),
+            9,
+            "a row and a column round-trip through the fold",
+        );
+    }
+
+    /// **Down inside the source block walks its rows; down off the bottom walks
+    /// the file's lines** (T5 ②, §7.1.3t) — and the byte it lands on is in the
+    /// next block or in the gap, where [`caret_seat`] answers again.
+    ///
+    /// MUTATION: drop the `target < wrap.rows()` guard and Down at the bottom of
+    /// a block clamps to the block's own end for ever, so no arrow key can ever
+    /// leave the block the caret is in.
+    #[test]
+    fn down_out_of_the_bottom_row_walks_into_what_is_under_it() {
+        // "one\n\ntwo\n" — two paragraphs with a blank line between them.
+        let content = "one\n\ntwo\n";
+        let spans = ranges(&[(0, 4), (5, 9)]);
+        let (text, wrap) = folded(content, &spans[0], None);
+        let rows = BlockRows {
+            text: &text,
+            start: spans[0].start,
+            wrap: &wrap,
+        };
+        let mut caret = preview_edit::EditCaret {
+            anchor: 1,
+            caret: 1,
+            desired_column: None,
+        };
+        assert!(step_by_row(
+            content,
+            Some(rows),
+            &mut caret,
+            preview_edit::Motion::Down,
+            10
+        ));
+        assert_eq!(caret.caret, 4, "the blank line between the two paragraphs");
+        assert_eq!(
+            caret_seat(&spans, caret.caret),
+            CaretSeat::Gap { after: Some(0) },
+            "which is a gap, and a gap is drawn as one empty source line",
+        );
+        // And on again into the block under it, the column kept.
+        assert!(step_by_row(
+            content,
+            None,
+            &mut caret,
+            preview_edit::Motion::Down,
+            10
+        ));
+        assert_eq!(caret.caret, 6, "one column into the second paragraph");
+        assert_eq!(caret_seat(&spans, caret.caret), CaretSeat::Block(1));
+    }
+
+    /// **Up off the top row lands in the block above**, and the desired column
+    /// survives a short line on the way — the behaviour every editor has.
+    #[test]
+    fn up_out_of_the_top_row_lands_above_and_keeps_the_column() {
+        let content = "a long first line\nx\nthe third line\n";
+        let spans = ranges(&[(0, 35)]);
+        let (text, wrap) = folded(content, &spans[0], None);
+        let rows = BlockRows {
+            text: &text,
+            start: spans[0].start,
+            wrap: &wrap,
+        };
+        let mut caret = preview_edit::EditCaret {
+            anchor: 26,
+            caret: 26,
+            desired_column: None,
+        };
+        assert_eq!(rows.row_of(26), Some((2, 6)), "six columns into line three");
+        assert!(step_by_row(
+            content,
+            Some(rows),
+            &mut caret,
+            preview_edit::Motion::Up,
+            10
+        ));
+        assert_eq!(caret.caret, 19, "the short line, at its end");
+        assert!(step_by_row(
+            content,
+            Some(rows),
+            &mut caret,
+            preview_edit::Motion::Up,
+            10
+        ));
+        assert_eq!(caret.caret, 6, "and the column comes back on the long one");
+    }
+
+    /// **A caret in a gap has no block and walks the file's lines**, which is
+    /// how it gets out again.
+    #[test]
+    fn a_caret_in_a_gap_walks_the_files_lines() {
+        let content = "one\n\ntwo\n";
+        let mut caret = preview_edit::EditCaret {
+            anchor: 4,
+            caret: 4,
+            desired_column: None,
+        };
+        assert!(step_by_row(
+            content,
+            None,
+            &mut caret,
+            preview_edit::Motion::Up,
+            10
+        ));
+        assert_eq!(caret.caret, 0, "the paragraph above it");
+        assert!(!step_by_row(
+            content,
+            None,
+            &mut caret,
+            preview_edit::Motion::Left,
+            10
+        ));
+        assert_eq!(caret.caret, 0, "a horizontal motion is not this one's");
     }
 }
