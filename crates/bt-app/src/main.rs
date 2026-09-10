@@ -1449,17 +1449,28 @@ enum PreviewDocument {
         /// [`PreviewParseKey`] stands — which is the same life the blocks
         /// beside them have.
         ranges: Vec<std::ops::Range<usize>>,
+        /// **Per block, where every byte its pieces draw was copied from**
+        /// ([`preview::parse_markdown_mapped`]'s third half, §7.1.3r).
+        ///
+        /// Carried beside the ranges for the ranges' own reason, one grain
+        /// finer: a range turns a *caret* into a block and this turns a *click*
+        /// into a caret, and both are asked of the parse that is standing on the
+        /// glass rather than of a parse made again to answer them. T5 is what
+        /// spends it — a press on rendered text asks
+        /// [`preview_provenance::file_offset_of`] which byte of the file the
+        /// letter under the pointer is, and the highlight of a caret selection
+        /// asks [`preview_provenance::place_of`] the same question backwards.
+        maps: Vec<preview_provenance::BlockOrigins>,
         /// **The block the caret is in, drawn as the file's own bytes**
         /// (§7.1.3q). `None` when nothing on this surface holds a caret, and
         /// when the caret stands in the tissue between two blocks
         /// ([`preview_live::CaretSeat::Gap`]).
         ///
         /// **Boxed**, which is the one place in this enum that pays for a
-        /// pointer: `None` is the answer on every document in the window until the
-        /// markdown block's T5, and a variant carrying the block's bytes inline
-        /// would make every
-        /// `PreviewDocument` — a diff, a table, an empty pane — as large as the
-        /// rarest thing any of them can hold.
+        /// pointer: `None` is the answer on every rendered document nobody has
+        /// clicked into, and a variant carrying the block's bytes inline would
+        /// make every `PreviewDocument` — a diff, a table, an empty pane — as
+        /// large as the rarest thing any of them can hold.
         source: Option<Box<MarkdownSourceBlock>>,
         /// One entry per block, measured **once per content change** — see
         /// [`MarkdownBlockIntrinsic`].
@@ -2936,6 +2947,39 @@ struct PreviewPane {
     /// document rather than the glass, and it does **not** survive a re-parse:
     /// see [`Self::show_document`].
     md_select: Option<preview_select::Selection>,
+    /// **Whether the caret is standing on this surface's *rendered* face**
+    /// (T5, §7.1.3t) — which is the whole of "this page is being edited".
+    ///
+    /// The one piece of state entering and leaving are made of. A press in the
+    /// body sets it, `Esc` clears it, and while it is set the block the caret is
+    /// in is drawn as the file's own bytes ([`preview_live`]) and every key is
+    /// the editor's.
+    ///
+    /// **It is not the keyboard focus**, and the gap between the two is
+    /// deliberate. [`Runtime::preview_edit_focus`] is dropped by a press
+    /// anywhere else in the window — into the terminal beside this pane, onto
+    /// another tab — and a page that re-flowed itself every time a hand left it
+    /// would be a page that moves while nobody is looking at it (§7.1.3q). So
+    /// losing the keyboard puts the *caret* out ([`MarkdownCaretPaint::lit`])
+    /// and leaves the source block standing; only leaving on purpose renders it
+    /// again. What survives either way is the caret's own byte offset, which is
+    /// [`Self::caret`] and is shared with the source face.
+    md_caret: bool,
+    /// **A press that asked to edit and has not been able to yet** (T5 ①) — the
+    /// file byte it named, waiting for the body it names to arrive.
+    ///
+    /// [`Self::goto_line`]'s shape and its reason exactly. A press inside a page
+    /// whose glance only bought the file's head buys the rest of it (T2 ③), and
+    /// the read is a read: the bytes are on the worker for as long as a disk
+    /// takes. Without this the press would be spent — the reader would click,
+    /// watch nothing happen, and click again — so the offset waits here until
+    /// [`Runtime::settle_preview_caret`] has a body to put it in.
+    ///
+    /// A file offset and not the point pressed, because the head is a prefix of
+    /// the whole file: the byte the pointer named in the head is the same byte
+    /// of the same file when the rest of it lands, whatever the page does to
+    /// re-flow around it.
+    md_caret_wanted: Option<usize>,
     /// Every piece of the rendered page on screen, boxed where it was drawn — a
     /// paint artifact rather than state, rebuilt with the body exactly as
     /// [`Self::links`] is, and read by the pointer that arrives between two
@@ -5619,6 +5663,52 @@ fn push_markdown_source_block(
             align_center: false,
         });
     }
+}
+
+/// **A point inside the source block, as a byte of the file** (T5 ①,
+/// §7.1.3t) — [`push_markdown_source_block`]'s geometry read backwards.
+///
+/// A free function over the block and its box, so that the whole of "where does
+/// a click in the source block land" is answerable in a test with no window in
+/// it, and so that the two directions cannot drift apart: the painter puts row
+/// `n` at `top + n × line_height` and this divides by the same number, through
+/// the same fold ([`MarkdownSourceBlock::wrap`]).
+///
+/// Both coordinates are clamped rather than refused. A y above the block is its
+/// first row and a y below it its last, because a press has already been judged
+/// to belong to this block by the time it arrives; a column past the end of a
+/// row is the end of that row's own line, which is what makes clicking in the
+/// space after a short line put the caret at the end of it. A face whose advance
+/// or line height has not been measured yet answers with the block's first byte
+/// — the honest answer for a block nothing can say the geometry of.
+fn markdown_source_offset_at(
+    source: &MarkdownSourceBlock,
+    box_of_block: [f32; 4],
+    x: f32,
+    y: f32,
+) -> usize {
+    let [left, top, right, _] = box_of_block;
+    let wrap = source.wrap((right - left).max(1.0));
+    let row = if source.line_height > 0.0 {
+        ((y - top) / source.line_height).floor().max(0.0) as usize
+    } else {
+        0
+    };
+    let row = row.min(wrap.rows().saturating_sub(1));
+    // The *nearest* cell boundary and not the one the pointer is inside, which
+    // is the source face's own rule: a click on the right half of a character
+    // puts the caret after it.
+    let column = if source.advance > 0.0 {
+        ((x - left) / source.advance).round().max(0.0) as usize
+    } else {
+        0
+    };
+    preview_live::BlockRows {
+        text: &source.text,
+        start: source.range.start,
+        wrap: &wrap,
+    }
+    .offset_at(row, column)
 }
 
 /// **Every piece of a built document, boxed where it was drawn.**
@@ -19777,6 +19867,15 @@ struct PreviewTextDrag {
     /// `Ctrl` let go of during the click, or pressed during it, would otherwise
     /// change the destination underneath a gesture already begun.
     control: bool,
+    /// **Whether this gesture is drawing the caret's selection** rather than the
+    /// page's pieces (T5 ④, §7.1.3t).
+    ///
+    /// Decided by the press and carried, for [`Self::control`]'s reason: which
+    /// of the two models a drag is extending must not be able to change under a
+    /// hand that is already moving — a page that became editable mid-drag,
+    /// because the whole file it was asked for landed, would otherwise swap the
+    /// anchor out from under the selection being drawn.
+    caret: bool,
 }
 
 /// The press that may still turn out to be the second or third of a run.
@@ -50119,6 +50218,28 @@ impl Runtime<'_> {
             .is_some_and(|buffer| buffer.is_editable(md_source))
     }
 
+    /// **Whether this surface is the rendered face of a Markdown file that can
+    /// be typed into** (T5, §7.1.3t).
+    ///
+    /// The one question that separates the two editors this window now has, and
+    /// it is asked wherever they would otherwise both answer: the press ladder
+    /// (a rendered page is not the quick edit's `<textarea>`), the vertical
+    /// motion (rows of a block against rows of a file), and the composition's
+    /// caret box. Both faces of one buffer are editable now, so
+    /// [`Self::preview_is_editable`] alone can no longer tell them apart.
+    ///
+    /// It says nothing about whether a caret is *in* the page — that is
+    /// [`PreviewPane::md_caret`] — because the two are asked at different
+    /// moments: this is asked by the press that is about to put one there.
+    fn preview_shows_live_markdown(&self, surface: PreviewSurface) -> bool {
+        if self.preview_md_source(surface) {
+            return false;
+        }
+        self.preview_buffer_on(surface).is_some_and(|buffer| {
+            buffer.view(false) == preview::PreviewView::Markdown && buffer.is_editable(false)
+        })
+    }
+
     /// **Somebody has asked to edit what is on this surface** — buy the whole
     /// file if the glance only bought its head (T2 ③, owner's ruling on research
     /// §10 Q2, 2026-09-10).
@@ -51318,6 +51439,15 @@ impl Runtime<'_> {
             // nothing.
             pane.links.clear();
             pane.notice = None;
+            // **The caret is not standing on the next document's page** (T5,
+            // §7.1.3t). Filed with the caret it belongs to and taken off here
+            // with it: a surface that comes back to this file brings back the
+            // byte offset it was left at, and a surface handed a different file
+            // opens it as a page to read rather than as one being typed into.
+            // The pending press goes for the plainer reason — the body it was
+            // waiting for is not the body that is coming.
+            pane.md_caret = false;
+            pane.md_caret_wanted = None;
             if let Some(source) = left {
                 // The memory is per buffer and the buffer is the tab's, so it is
                 // filed in the same tab the view came out of.
@@ -54246,6 +54376,84 @@ impl Runtime<'_> {
         })
     }
 
+    /// **The box the source block is drawn in**, when this surface is drawing
+    /// one (T5, §7.1.3t).
+    ///
+    /// The layout pass's own arithmetic, read back a frame later: the measure
+    /// box for the sides, and the block's `top` out of the layout, lifted into
+    /// window pixels by the body's origin and this surface's scroll. Said here
+    /// rather than at the three call sites — the hit test, the reveal and the
+    /// composition's caret box — because a source block hit-tested in one
+    /// rectangle and drawn in another is a caret that lands where nobody
+    /// pointed.
+    ///
+    /// A source block never scrolls sideways inside itself (it folds on the
+    /// source face's own terms, §7.1.3q), so unlike a table or a fence its box
+    /// is the page's column and no block offset is subtracted from it.
+    fn markdown_source_box(
+        &self,
+        surface: PreviewSurface,
+        scale: f32,
+    ) -> Option<([f32; 4], &MarkdownSourceBlock)> {
+        let body = self.preview_surface_body_rect(surface, scale)?;
+        let metrics = seats::preview_markdown_metrics(scale);
+        let (left, right) = preview::markdown_measure_box(body, metrics);
+        let pane = self.preview_pane(surface)?;
+        let PreviewDocument::Markdown { source, layout, .. } = &pane.doc else {
+            return None;
+        };
+        let source = source.as_deref()?;
+        let placed = layout.get(source.index)?;
+        let top = body[1] + metrics.padding_y - pane.scroll[1] + placed.top;
+        Some(([left, top, right.max(left), top + placed.height], source))
+    }
+
+    /// **Which byte of the file a point in a rendered markdown page names**
+    /// (T5 ①) — the two halves of one question, in the order that makes them one
+    /// answer.
+    ///
+    /// **The source block is hit-tested first**, and that is not an
+    /// optimisation. It pushes no [`PreviewTextSite`]s — it is monospace rows
+    /// and not shaped prose, so there is no piece of a parse under it — which
+    /// means [`preview_text_box_at`] would answer a press inside it with the
+    /// nearest box that *is* a piece: the paragraph above or below. Clicking
+    /// into the block you are editing would put the caret in its neighbour.
+    ///
+    /// Only the rows are asked about and not the columns, for
+    /// [`preview_text_box_at`]'s own reason one block along: the margin either
+    /// side of the column of prose belongs to the row it is beside, so a click
+    /// out at the edge of the pane lands at the end of the line it is level
+    /// with.
+    ///
+    /// Everything else goes through the rendered page's own hit test and then
+    /// through T6's provenance (§7.1.3r), which is what makes a click land on
+    /// the word it was aimed at rather than at the top of its paragraph.
+    fn preview_md_file_offset_at(
+        &mut self,
+        surface: PreviewSurface,
+        position: PhysicalPosition<f64>,
+    ) -> Option<usize> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (x, y) = (position.x as f32, position.y as f32);
+        if let Some((box_of_block, source)) = self.markdown_source_box(surface, scale)
+            && y >= box_of_block[1]
+            && y < box_of_block[3]
+        {
+            return Some(markdown_source_offset_at(source, box_of_block, x, y));
+        }
+        let place = self.preview_place_at(surface, position)?;
+        let PreviewDocument::Markdown {
+            blocks,
+            ranges,
+            maps,
+            ..
+        } = &self.preview_pane(surface)?.doc
+        else {
+            return None;
+        };
+        preview_provenance::file_offset_of(&place, blocks, ranges, maps)
+    }
+
     /// The rendered page under the pointer, if the pointer is over one.
     ///
     /// A *rendered* page and not merely a preview surface: the source face has
@@ -54277,9 +54485,29 @@ impl Runtime<'_> {
         let Some(surface) = self.preview_rendered_surface_at(position) else {
             return Ok(false);
         };
-        let Some(place) = self.preview_place_at(surface, position) else {
-            return Ok(false);
-        };
+        let shift = self.window.modifiers.shift_key();
+        let link = self
+            .preview_link_at(position)
+            .map(|(_, link)| link.target.clone());
+        // **The third mouth on this press** (T5 ①, §7.1.3t). The other two are
+        // already here — a press that travels draws a selection, and a press
+        // that does not opens the link it landed on — and the one this ticket
+        // adds is the plainest of the three: a press in the body of a document
+        // you can type into puts the caret where the pointer is. There is no
+        // pencil to press first and no double click to earn it, because a
+        // document you can type into is one you type into.
+        //
+        // **A plain press on a link is still the link's**, which is the one
+        // exception and is what the six-pixel latch is for: the reader is
+        // following it, not aiming at the letters inside it. A *shift* press is
+        // an extension whatever it is standing over, so it is the caret's even
+        // on a link — the run being drawn across may well contain one.
+        let live = self.preview_shows_live_markdown(surface);
+        let takes_a_caret = self.preview_caret_takes_the_press(surface);
+        let caret_at = takes_a_caret
+            .then(|| self.preview_md_file_offset_at(surface, position))
+            .flatten();
+        let placing = caret_at.filter(|_| link.is_none() || shift);
         let point = [position.x as f32, position.y as f32];
         let clicks = self
             .preview_text_clicks
@@ -54291,26 +54519,220 @@ impl Runtime<'_> {
         let standing = self
             .preview_pane(surface)
             .and_then(|pane| pane.md_select)
-            .filter(|_| self.window.modifiers.shift_key());
-        let selection = match standing {
-            Some(was) => preview_select::Selection { head: place, ..was },
-            None => preview_select::Selection::collapsed(place, grain),
-        };
-        self.preview_pane_mut(surface).md_select = Some(selection);
-        let link = self
-            .preview_link_at(position)
-            .map(|(_, link)| link.target.clone());
+            .filter(|_| shift && placing.is_none());
+        if let Some(offset) = placing {
+            if live {
+                self.place_preview_caret_on(surface, offset, shift)?;
+                // **And the grain of a repeated press survives the new model**
+                // (§7.31 ⑦, said in the caret's own coordinate). A double click
+                // in a rendered page took a word and a triple click took a
+                // paragraph before this ticket, and a page that lost both the
+                // day it became editable would be a page that had traded a
+                // gesture for a gesture. A shift-press is an extension and has
+                // its own grain already.
+                if !shift {
+                    self.widen_preview_caret(surface, grain)?;
+                }
+            } else {
+                // **The press that buys the file keeps the caret it asked for**
+                // (T2 ③, T5 ①). The read is a read — the bytes are on the worker
+                // for as long as a disk takes — and the alternative is a reader
+                // clicking, watching nothing happen, and clicking again. It is
+                // spent by [`Self::settle_preview_caret`] on the frame the body
+                // lands.
+                self.preview_pane_mut(surface).md_caret_wanted = Some(offset);
+            }
+        } else {
+            // **The piece selection, for a page with no caret in it** (research
+            // §10 Q3): a document this window will not edit — truncated, lossy,
+            // over the cap, a diff — is still a page to read and to copy out of,
+            // and this is the model that reads it.
+            let Some(place) = self.preview_place_at(surface, position) else {
+                return Ok(caret_at.is_some());
+            };
+            let selection = match standing {
+                Some(was) => preview_select::Selection { head: place, ..was },
+                None => preview_select::Selection::collapsed(place, grain),
+            };
+            self.preview_pane_mut(surface).md_select = Some(selection);
+        }
         self.preview_text_drag = Some(PreviewTextDrag {
             surface,
             // A shift-click has already extended the selection and must not have
             // to travel to keep it; the latch is what decides whether the *link*
             // answers, and a shift-click on one is not asking for the link.
             latch: DragLatch::new(position),
-            link: link.filter(|_| standing.is_none()),
+            link: link.filter(|_| standing.is_none() && placing.is_none()),
             control: self.window.modifiers.control_key(),
+            // A press that placed a caret drags the caret's own selection, in
+            // the file's bytes; a press on a link that did not place one becomes
+            // one the moment it travels, because a drag across a page with a
+            // caret in it is one model and not two. A press still waiting for
+            // its body has no caret to drag yet, and the drag is a reader's.
+            caret: live && caret_at.is_some(),
         });
         self.repaint_preview()?;
         Ok(true)
+    }
+
+    /// **Whether a press on this surface may put a caret in the page** (T5 ①).
+    ///
+    /// Three answers folded into one so that the press does not have to hold
+    /// three: the page edits, and the caret lands now; the page is waiting for
+    /// the whole file it has just been asked to buy, and the caret lands when
+    /// the body does ([`Self::settle_preview_caret`]); or neither, and the press
+    /// is a reader's.
+    ///
+    /// **The glance card is never one of the three.** It is read-only by its
+    /// founding ruling — a thumbnail must not ask the disk — and
+    /// [`Self::preview_surfaces`] never lists it, so a caret placed on it could
+    /// never be typed into and would be a caret drawn where no keystroke goes.
+    fn preview_caret_takes_the_press(&self, surface: PreviewSurface) -> bool {
+        if matches!(surface, PreviewSurface::Peek) {
+            return false;
+        }
+        self.preview_shows_live_markdown(surface) || self.preview_awaits_the_whole_file(surface)
+    }
+
+    /// Whether this surface's body is the head of a Markdown file whose rest is
+    /// already on the worker — [`preview::PreviewBuffer::awaits_the_whole_file`]
+    /// asked of the face as well as of the buffer.
+    fn preview_awaits_the_whole_file(&self, surface: PreviewSurface) -> bool {
+        if self.preview_md_source(surface) {
+            return false;
+        }
+        self.preview_buffer_on(surface).is_some_and(|buffer| {
+            buffer.view(false) == preview::PreviewView::Markdown && buffer.awaits_the_whole_file()
+        })
+    }
+
+    /// **Put the caret in the rendered page** — the whole of entering
+    /// (§7.1.3t).
+    ///
+    /// Five writes, and they are one gesture: the caret moves, the page's other
+    /// selection model lets go, the page starts drawing the caret's block as
+    /// source, the press that was waiting for a body is spent, and the keyboard
+    /// arrives. One door because every one of them is what "there is a caret in
+    /// this page" means, and a caller that remembered four of the five would
+    /// leave a surface drawing a source block nothing can be typed into.
+    ///
+    /// **`md_select` goes** (research §10 Q3, ruled): two anchors on one surface
+    /// are two answers to "what is selected", so the moment the caret becomes
+    /// the model the piece selection stops being one.
+    fn place_preview_caret_on(
+        &mut self,
+        surface: PreviewSurface,
+        offset: usize,
+        extend: bool,
+    ) -> Result<()> {
+        if !self.seat_preview_caret(surface, offset, extend) {
+            return Ok(());
+        }
+        self.repaint_preview()
+    }
+
+    /// **A repeated press takes more than a character** (T5 ①, §7.31 ⑦'s grain
+    /// carried onto the caret).
+    ///
+    /// The word is `preview_select`'s own — one classifier, so a double click in
+    /// a rendered paragraph takes exactly what a double click in the terminal
+    /// beside it takes — walked over the *file's* bytes rather than a piece's,
+    /// because that is the coordinate the caret is in.
+    ///
+    /// A triple click takes the **block**, which is the caret model's answer to
+    /// `Grain::Piece` and is the same thing said in file bytes: a paragraph on
+    /// this page has no lines of its own, so what a third press can honestly
+    /// take is the run of the file the block was parsed from — its trailing
+    /// break off, because the blank line after a paragraph is nobody's
+    /// (§7.1.3o). In a gap, where no block was parsed from, the file's own line
+    /// is what there is.
+    fn widen_preview_caret(
+        &mut self,
+        surface: PreviewSurface,
+        grain: preview_select::Grain,
+    ) -> Result<()> {
+        if grain == preview_select::Grain::Character {
+            return Ok(());
+        }
+        let Some(content) = self
+            .preview_buffer_on(surface)
+            .and_then(|buffer| buffer.content.clone())
+        else {
+            return Ok(());
+        };
+        let Some(at) = self.preview_pane(surface).map(|pane| pane.caret.caret) else {
+            return Ok(());
+        };
+        let range = match grain {
+            preview_select::Grain::Word => {
+                preview_select::word_start(&content, at)..preview_select::word_end(&content, at)
+            }
+            _ => match self.standing_block_range(surface, at) {
+                Some(range) => {
+                    range.start..range.start + preview_live::block_source(&content, &range).len()
+                }
+                None => {
+                    let starts = preview_edit::line_starts(&content);
+                    let line = preview_edit::line_index(&starts, at);
+                    let (from, to) = preview_edit::line_bounds(&content, &starts, line);
+                    from..to
+                }
+            },
+        };
+        if range.is_empty() {
+            return Ok(());
+        }
+        let pane = self.preview_pane_mut(surface);
+        pane.caret.anchor = preview_edit::normalize(&content, range.start);
+        pane.caret.caret = preview_edit::normalize(&content, range.end);
+        pane.caret.desired_column = None;
+        self.repaint_preview()
+    }
+
+    /// The byte range of the block a file offset stands in, off the parse this
+    /// surface is already showing.
+    fn standing_block_range(
+        &self,
+        surface: PreviewSurface,
+        offset: usize,
+    ) -> Option<std::ops::Range<usize>> {
+        let PreviewDocument::Markdown { ranges, .. } = &self.preview_pane(surface)?.doc else {
+            return None;
+        };
+        let index = preview_live::caret_seat(ranges, offset).block()?;
+        ranges.get(index).cloned()
+    }
+
+    /// The five writes on their own, with no frame asked for.
+    ///
+    /// Split from [`Self::place_preview_caret_on`] for exactly one caller:
+    /// [`Self::settle_preview_caret`] runs *inside* the layout refresh, which is
+    /// about to rebuild the body anyway, and a repaint asked for from in there
+    /// would be the refresh calling itself.
+    ///
+    /// Reports whether anything was written, which is `false` only for a surface
+    /// whose bytes are not in hand — and then the caret has nothing to be an
+    /// offset into.
+    fn seat_preview_caret(&mut self, surface: PreviewSurface, offset: usize, extend: bool) -> bool {
+        let Some(content) = self
+            .preview_buffer_on(surface)
+            .and_then(|buffer| buffer.content.clone())
+        else {
+            return false;
+        };
+        let pane = self.preview_pane_mut(surface);
+        // A shift-press extends only from a caret that was already standing in
+        // this page: the first press into a page has nothing to extend from.
+        let extend = extend && pane.md_caret;
+        let mut caret = pane.caret;
+        caret.place(&content, offset, extend);
+        pane.caret = caret;
+        pane.md_select = None;
+        pane.md_caret = true;
+        pane.md_caret_wanted = None;
+        self.preview_edit_focus = Some(surface);
+        self.reveal_preview_caret(surface);
+        true
     }
 
     /// The pointer travelling with the button down, drawing across a page.
@@ -54326,6 +54748,7 @@ impl Runtime<'_> {
         let surface = drag.surface;
         let crossed = drag.latch.travelled(position, scale);
         let begun = drag.latch.begun;
+        let caret_drag = drag.caret;
         if crossed {
             // A press that travelled is not half of a double click — J99's rule,
             // at this window's third double-click surface.
@@ -54335,6 +54758,22 @@ impl Runtime<'_> {
             // Still a click. Nothing has been selected yet, so nothing is drawn
             // — the six pixels are what keep a press meant for a link from
             // flashing a character of highlight under the hand.
+            return Ok(true);
+        }
+        // **A drag over a page with a caret in it extends the caret** (T5 ④):
+        // one selection model, in the file's own bytes, whichever end of it the
+        // hand is moving. The anchor is where the press landed and was written
+        // there by [`Self::place_preview_caret_on`], so nothing has to be
+        // remembered here beyond which model this gesture belongs to.
+        if caret_drag {
+            let Some(offset) = self.preview_md_file_offset_at(surface, position) else {
+                return Ok(true);
+            };
+            let standing = self.preview_pane(surface).map(|pane| pane.caret.caret);
+            if standing == Some(offset) {
+                return Ok(true);
+            }
+            self.place_preview_caret_on(surface, offset, true)?;
             return Ok(true);
         }
         let Some(place) = self.preview_place_at(surface, position) else {
@@ -54402,6 +54841,28 @@ impl Runtime<'_> {
     /// of the same thing: not "is there a pair of places" but "are there bytes
     /// between them". A bare click has places and no bytes.
     fn preview_selected_text(&self, surface: PreviewSurface) -> Option<String> {
+        // **One selection model, so one answer** (research §10 Q3, ruled). While
+        // a caret is standing in this page the range is the caret's, and what
+        // goes on the clipboard is the file's own bytes between its two ends.
+        //
+        // **That is a departure from §7.31 ⑥ and it is a narrow one.** "Copy
+        // what you read" still decides the *range* — the run of the document the
+        // two ends name is the run the reader dragged across — and what changes
+        // is that the marks inside it come with it: the `#` of the heading, the
+        // `>` of the quote, the `**` around the bold word. They come because
+        // they are the characters the caret was dragged over. That is what an
+        // editor's copy is, it is what a paste of the result puts back, and it
+        // is the only answer that lets `Ctrl+X` be the inverse of `Ctrl+V` on a
+        // surface where both are now possible. A page with no caret in it — one
+        // being read rather than edited — copies what it draws, exactly as it
+        // always has, through the piece walk below.
+        if let Some(caret) = self.preview_live_caret(surface)
+            && !caret.is_empty()
+        {
+            let content = self.preview_buffer_on(surface)?.content.as_deref()?;
+            let text = caret.selected(content);
+            return (!text.is_empty()).then(|| text.to_owned());
+        }
         let pane = self.preview_pane(surface)?;
         let selection = pane.md_select?;
         let PreviewDocument::Markdown { blocks, .. } = &pane.doc else {
@@ -55085,6 +55546,17 @@ impl Runtime<'_> {
             // only when the owner is the terminal.
             preview_edit::EditCommand::Release => {
                 self.preview_edit_focus = None;
+                // **And on a rendered page it renders the block again** (T5 ③,
+                // §7.1.3t). `Esc` is the one gesture that means "I have finished
+                // editing this", so it is the one that puts the source block
+                // back into prose — losing the keyboard to a click somewhere
+                // else deliberately does not, because a page that re-flowed
+                // itself every time a hand left it would move while nobody was
+                // looking at it (§7.1.3q). The caret itself is kept: it is a
+                // byte offset into the buffer, the flip to the source face finds
+                // it exactly where this left it, and so does the next press back
+                // into the page.
+                self.preview_pane_mut(surface).md_caret = false;
                 self.repaint_preview()?;
             }
             preview_edit::EditCommand::Ignore => {}
@@ -55301,6 +55773,16 @@ impl Runtime<'_> {
         let surface = self.preview_edit_focus()?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let body = self.preview_surface_body_rect(surface, scale)?;
+        // **On a rendered page the box comes from the source block** (T5 ②,
+        // §7.1.3t), for [`Self::reveal_live_markdown_caret`]'s reason: the
+        // geometry below is the whole body's monospace grid, and this page is
+        // one monospace block standing between paragraphs of prose. A caret in a
+        // gap has no block, and then this turn simply has nothing to say —
+        // [`Self::offer_ime_caret`] leaves the candidate list where it was
+        // rather than moving it somewhere invented.
+        if self.preview_shows_live_markdown(surface) {
+            return self.live_markdown_ime_cursor_area(surface, body, scale);
+        }
         let (line, column) = self.preview_caret_position(surface)?;
         let advance = self.preview_pane(surface)?.mono_advance;
         let (rows_height, columns) = self.preview_content_extent(surface, scale);
@@ -55320,6 +55802,38 @@ impl Runtime<'_> {
             y: y.round() as i32,
             width: advance.round().max(1.0) as u32,
             height: (box_of_row[3] - box_of_row[1]).round().max(1.0) as u32,
+        })
+    }
+
+    /// **Where the composition hangs while a rendered Markdown page is being
+    /// typed into** (T5 ②, §7.1.3t) — the source block's own row and column,
+    /// through the very fold the painter drew them at.
+    ///
+    /// Clamped into the body for [`Self::preview_ime_cursor_area`]'s reason: a
+    /// caret scrolled out of sight would put the candidate list somewhere the
+    /// reader is not looking, or off the window entirely.
+    fn live_markdown_ime_cursor_area(
+        &self,
+        surface: PreviewSurface,
+        body: [f32; 4],
+        scale: f32,
+    ) -> Option<ImeCursorArea> {
+        let caret = self.preview_live_caret(surface)?;
+        let (box_of_block, source) = self.markdown_source_box(surface, scale)?;
+        let wrap = source.wrap((box_of_block[2] - box_of_block[0]).max(1.0));
+        let (row, column) = preview_live::BlockRows {
+            text: &source.text,
+            start: source.range.start,
+            wrap: &wrap,
+        }
+        .row_of(caret.caret)?;
+        let x = (box_of_block[0] + source.advance * column as f32).clamp(body[0], body[2]);
+        let y = (box_of_block[1] + source.line_height * row as f32).clamp(body[1], body[3]);
+        Some(ImeCursorArea {
+            x: x.round() as i32,
+            y: y.round() as i32,
+            width: source.advance.round().max(1.0) as u32,
+            height: source.line_height.round().max(1.0) as u32,
         })
     }
 
@@ -55474,10 +55988,42 @@ impl Runtime<'_> {
         // wrapped line, Down that jumped the whole paragraph would skip most of
         // what is on the screen, while a Home that stopped at the start of the
         // *row* would leave no key that reaches the start of the line at all.
-        let stepped = self
-            .preview_wrap(surface)
-            .filter(|wrap| wrap.wraps())
-            .and_then(|wrap| step_preview_caret_by_row(&content, &mut caret, motion, wrap, rows));
+        //
+        // **And on a rendered page they walk the source block's rows, then the
+        // file's lines** (T5 ②, §7.1.3t). The block under the caret is the only
+        // part of that page with rows at all; step off its top or its bottom and
+        // the step becomes a step of the file's lines, which lands in the
+        // neighbouring block or in the gap between them — and the next parse
+        // makes whichever it is the source block.
+        let stepped = if self.preview_shows_live_markdown(surface) {
+            let scale = self.window.renderer.metrics().scale_factor as f32;
+            let moved = match self.markdown_source_box(surface, scale) {
+                Some((box_of_block, source)) => {
+                    let wrap = source.wrap((box_of_block[2] - box_of_block[0]).max(1.0));
+                    preview_live::step_by_row(
+                        &content,
+                        Some(preview_live::BlockRows {
+                            text: &source.text,
+                            start: source.range.start,
+                            wrap: &wrap,
+                        }),
+                        &mut caret,
+                        motion,
+                        rows,
+                    )
+                }
+                // A caret in a gap has no block to walk: the gap's empty line is
+                // one place, and the way out of it is the file's own lines.
+                None => preview_live::step_by_row(&content, None, &mut caret, motion, rows),
+            };
+            moved.then_some(())
+        } else {
+            self.preview_wrap(surface)
+                .filter(|wrap| wrap.wraps())
+                .and_then(|wrap| {
+                    step_preview_caret_by_row(&content, &mut caret, motion, wrap, rows)
+                })
+        };
         if stepped.is_none() {
             preview_edit::move_caret(&content, &mut caret, motion, extend, rows);
         } else if !extend {
@@ -55539,6 +56085,15 @@ impl Runtime<'_> {
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             return;
         };
+        // **A rendered page counts in blocks, not in lines** (T5, §7.1.3t).
+        // Every number below is the source face's — a row is a line height from
+        // the top of the body — and on a page of headings, tables and pictures
+        // the caret's line number says nothing about where on the glass it is.
+        // The block's own box does, and that is what the other reading uses.
+        if self.preview_shows_live_markdown(surface) {
+            self.reveal_live_markdown_caret(surface, body, scale);
+            return;
+        }
         let Some((line, column)) = self.preview_caret_position(surface) else {
             return;
         };
@@ -55568,6 +56123,55 @@ impl Runtime<'_> {
             .min(left - metrics.padding_x)
             .max(left + advance + metrics.padding_x - width);
         let scrolled = self.clamped_preview_scroll(surface, body, scale, scroll);
+        self.preview_pane_mut(surface).scroll = scrolled;
+    }
+
+    /// **Bring the caret's row of the source block into view** — the rendered
+    /// page's half of [`Self::reveal_preview_caret`] (T5, §7.1.3t).
+    ///
+    /// Vertically only, because the page has no horizontal axis: every block is
+    /// laid out inside the measure column and a source block folds rather than
+    /// running off the side (§7.1.3q), so there is never a column out of reach
+    /// to scroll to.
+    ///
+    /// A caret in a gap moves nothing at all, and that is the gap rule saying
+    /// so: its empty line is drawn into the margin the page had already
+    /// collapsed between two blocks, so it is on the glass exactly when the
+    /// block above it is.
+    fn reveal_live_markdown_caret(&mut self, surface: PreviewSurface, body: [f32; 4], scale: f32) {
+        let Some(caret) = self.preview_live_caret(surface) else {
+            return;
+        };
+        let scroll = self
+            .preview_pane(surface)
+            .map_or([0.0, 0.0], |pane| pane.scroll);
+        // The block's borrow ends with this expression, before the scroll is
+        // written back through the same runtime.
+        let seat = {
+            let Some((box_of_block, source)) = self.markdown_source_box(surface, scale) else {
+                return;
+            };
+            let wrap = source.wrap((box_of_block[2] - box_of_block[0]).max(1.0));
+            let rows = preview_live::BlockRows {
+                text: &source.text,
+                start: source.range.start,
+                wrap: &wrap,
+            };
+            rows.row_of(caret.caret).map(|(row, _)| {
+                // Back out of window pixels into the content the scroll is
+                // measured in, so the number written below is the same kind of
+                // number the one being replaced was.
+                let block_top = box_of_block[1] - body[1] + scroll[1];
+                let top = block_top + source.line_height * row as f32;
+                (top, top + source.line_height)
+            })
+        };
+        let Some((top, bottom)) = seat else {
+            return;
+        };
+        let mut wanted = scroll;
+        wanted[1] = wanted[1].min(top).max(bottom - (body[3] - body[1]));
+        let scrolled = self.clamped_preview_scroll(surface, body, scale, wanted);
         self.preview_pane_mut(surface).scroll = scrolled;
     }
 
@@ -55802,6 +56406,17 @@ impl Runtime<'_> {
         let Some((surface, body)) = self.preview_edit_body(position) else {
             return Ok(false);
         };
+        // **A rendered Markdown page is not this door's surface** (T5,
+        // §7.1.3t). Both faces of a `.md` buffer edit now, so
+        // `preview_edit_body` — which asks the *buffer* — can no longer tell
+        // them apart, and every line below this is the monospace one: an offset
+        // is a row times a line height over the whole file, which on a page of
+        // proportional blocks names a byte nobody pointed at. The rendered
+        // face's own press is [`Self::press_preview_text`], three rungs down the
+        // ladder, and it falls through to it by declining here.
+        if self.preview_shows_live_markdown(surface) {
+            return Ok(false);
+        }
         let Some(offset) = self.preview_offset_at(surface, body, scale, position) else {
             return Ok(false);
         };
@@ -56143,6 +56758,7 @@ impl Runtime<'_> {
             && let PreviewDocument::Markdown {
                 blocks,
                 ranges,
+                maps,
                 source: _,
                 intrinsic,
                 layout,
@@ -56205,6 +56821,11 @@ impl Runtime<'_> {
                 .reflow_document(PreviewDocument::Markdown {
                     blocks,
                     ranges,
+                    // **The parse stands, so the maps stand with it.** They
+                    // describe the bytes these very blocks were made of; a
+                    // re-flow is a width changing and a width changes nothing
+                    // about where a letter came from.
+                    maps,
                     source,
                     intrinsic,
                     layout,
@@ -56305,7 +56926,10 @@ impl Runtime<'_> {
             preview::PreviewView::Markdown => {
                 let metrics = seats::preview_markdown_metrics(scale);
                 let clock = preview_trace::global().map(|_| Instant::now());
-                let (blocks, ranges) = preview::parse_markdown_ranged(&content);
+                // **The maps come off the same walk** (§7.1.3r): a click on this
+                // page has to name a byte of the file, and asking a second parse
+                // for the answer would be a second parse per press.
+                let (blocks, ranges, maps) = preview::parse_markdown_mapped(&content);
                 let parsed = clock.map(|clock| clock.elapsed());
                 let (measure_left, measure_right) = preview::markdown_measure_box(body, metrics);
                 let width = (measure_right - measure_left).max(1.0);
@@ -56377,6 +57001,7 @@ impl Runtime<'_> {
                 PreviewDocument::Markdown {
                     blocks,
                     ranges,
+                    maps,
                     source,
                     intrinsic,
                     layout,
@@ -56428,20 +57053,24 @@ impl Runtime<'_> {
     /// **The caret standing in a rendered markdown document, when there is one**
     /// (§7.1.3q).
     ///
-    /// `None` on every surface that cannot take a keystroke, which — until the
-    /// markdown block's T5 lets `is_editable` answer for a rendered page — is
-    /// every surface showing
-    /// one. That is the whole of why this ticket changes nothing a reader can
-    /// see: the source block is `None` everywhere, so every block is drawn
-    /// rendered exactly as it was.
+    /// `None` on every surface that cannot take a keystroke, and on every page
+    /// nobody has put a caret in: **entering is a press in the body**
+    /// ([`PreviewPane::md_caret`], §7.1.3t), so a page being read is a page with
+    /// no source block in it, drawn exactly as it was before this feature
+    /// existed.
     ///
     /// **Not gated on the keyboard focus**, and that is deliberate: which block
     /// is drawn as source is a property of the *document*, and a page that
     /// re-flowed itself every time the reader clicked into a terminal and back
     /// would be a page that moves under a hand that is not on it. What the focus
     /// decides is whether the caret is *drawn* ([`MarkdownCaretPaint::lit`]),
-    /// which is the text face's own rule.
+    /// which is the text face's own rule. Leaving on purpose — `Esc` — is what
+    /// puts the block back, and it does it by clearing the flag rather than by
+    /// being a second kind of focus.
     fn preview_live_caret(&self, surface: PreviewSurface) -> Option<preview_edit::EditCaret> {
+        if !self.preview_pane(surface)?.md_caret {
+            return None;
+        }
         let md_source = self.preview_md_source(surface);
         if md_source {
             return None;
@@ -57468,6 +58097,10 @@ impl Runtime<'_> {
                 math,
                 pictures,
                 ranges: _,
+                // The painter walks pieces it has boxes for; where those pieces
+                // came from is the press's question and the highlight's, both of
+                // which are answered off the pane rather than in here.
+                maps: _,
             } => {
                 let rendered = build_preview_markdown_body(
                     body,
@@ -57548,12 +58181,23 @@ impl Runtime<'_> {
         // after: `range_in` builds only the two blocks the ends stand in, which
         // is what makes a highlight on a 64KB page cost two blocks a frame
         // rather than every string in the file.
-        let range = self.preview_pane(surface).and_then(|pane| {
-            let selection = pane.md_select?;
-            let PreviewDocument::Markdown { blocks, .. } = &pane.doc else {
-                return None;
-            };
-            Some(selection.range_in(blocks))
+        // **The caret's selection first, because on a page that has one it is
+        // the only one** (T5 ④, research §10 Q3). It arrives here as a range of
+        // *file* bytes and leaves as the two places a highlight is drawn
+        // between, mapped by T6's provenance (§7.1.3r) — so a selection begun in
+        // the source block and dragged into the prose under it is one band
+        // across both, each face drawing its own half in its own arithmetic.
+        // The source block's half is the painter's
+        // ([`push_markdown_source_block`], which cuts the same range against the
+        // block it is drawing); this is every other block's.
+        let range = self.preview_caret_selection_places(surface).or_else(|| {
+            self.preview_pane(surface).and_then(|pane| {
+                let selection = pane.md_select?;
+                let PreviewDocument::Markdown { blocks, .. } = &pane.doc else {
+                    return None;
+                };
+                Some(selection.range_in(blocks))
+            })
         });
         if let Some((start, end)) = range {
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
@@ -57620,6 +58264,43 @@ impl Runtime<'_> {
     /// source block would put it in the wrong paragraph. When they disagree the
     /// caret is simply not drawn for that frame, which is a frame, and the next
     /// one has both.
+    /// **What a caret's selection covers, in the page's own places** (T5 ④,
+    /// §7.1.3t).
+    ///
+    /// The inverse of the press: a press asks
+    /// [`preview_provenance::file_offset_of`] which byte of the file a place is,
+    /// and the highlight asks [`preview_provenance::place_of`] where in the page
+    /// a byte of the file is drawn. Both ends are rounded by that module's own
+    /// rule when they name a byte the page does not draw — a heading's hashes, a
+    /// quote's `>` — which is what keeps a band a band rather than making it
+    /// vanish at the marks inside it.
+    ///
+    /// `None` for a page with no caret in it and for an empty selection, which
+    /// is the same `None` the piece model gives and lets the caller fall through
+    /// to it.
+    fn preview_caret_selection_places(
+        &self,
+        surface: PreviewSurface,
+    ) -> Option<(preview_select::Place, preview_select::Place)> {
+        let caret = self.preview_live_caret(surface)?;
+        let range = caret.range();
+        if range.is_empty() {
+            return None;
+        }
+        let PreviewDocument::Markdown {
+            blocks,
+            ranges,
+            maps,
+            ..
+        } = &self.preview_pane(surface)?.doc
+        else {
+            return None;
+        };
+        let start = preview_provenance::place_of(range.start, blocks, ranges, maps)?;
+        let end = preview_provenance::place_of(range.end, blocks, ranges, maps)?;
+        Some((start, end))
+    }
+
     fn preview_markdown_caret(
         &self,
         surface: PreviewSurface,
@@ -58185,8 +58866,20 @@ impl Runtime<'_> {
         // so the offset it writes is clamped by the same authority every other
         // scroll on this surface is clamped by. It costs nothing on the frames
         // that owe nothing — the pending line is `None` and the walk stops there.
+        let mut seated = false;
         for surface in self.preview_surfaces() {
             self.settle_preview_goto(surface);
+            // **And the press that bought a whole file gets its caret** (T5 ①),
+            // in the same walk and for the same reason: the answer needs a body
+            // that was not there when the gesture was made, and the frame the
+            // body lands on is this one.
+            seated |= self.settle_preview_caret(surface);
+        }
+        if seated {
+            // The body a moment ago was built for a page with no caret in it, so
+            // the block the caret has just landed in has not been cut out of the
+            // file yet. One rebuild, on the frames a press was waiting on.
+            self.refresh_preview_body();
         }
         // **And the heal's own rebuild, for `settle_preview_goto`'s reason.** The
         // body a moment ago was built from the offset the heal has just replaced,
@@ -74448,6 +75141,40 @@ impl Runtime<'_> {
     /// opened a file has not been anywhere in it, so there is no reading position
     /// to disturb, and the line the reference named is the first thing the reader
     /// wants to see with its own text under it.
+    /// **Spend the press that could not have a caret yet** (T5 ①, §7.1.3t).
+    ///
+    /// [`Self::settle_preview_goto`]'s shape and its argument, one gesture over:
+    /// a press inside a page whose glance only bought the file's head asks for
+    /// the rest of it (T2 ③), and the rest of it arrives some frames later. The
+    /// offset the press named waits on the pane until it does, and is spent here
+    /// — as a caret, with the keyboard, exactly as if the body had been there
+    /// when the button went down.
+    ///
+    /// **The intent is dropped when the answer comes back "no".** A whole-file
+    /// read can land and still leave the buffer read-only — past the 8 MB
+    /// editing cap, or bytes that would not decode — and the buffer says so by
+    /// no longer awaiting anything. The foot has the sentence for it (T2's
+    /// channel); what must not happen is a press left pending for the life of
+    /// the pane, ready to plant a caret the day something unrelated makes the
+    /// file editable.
+    fn settle_preview_caret(&mut self, surface: PreviewSurface) -> bool {
+        let Some(offset) = self
+            .preview_pane(surface)
+            .and_then(|pane| pane.md_caret_wanted)
+        else {
+            return false;
+        };
+        if !self.preview_shows_live_markdown(surface) {
+            if !self.preview_awaits_the_whole_file(surface) {
+                self.preview_pane_mut(surface).md_caret_wanted = None;
+            }
+            return false;
+        }
+        // Through the same writes entering goes through, so that a caret placed
+        // a frame late is a caret placed the same way as every other.
+        self.seat_preview_caret(surface, offset, false)
+    }
+
     fn settle_preview_goto(&mut self, surface: PreviewSurface) {
         let Some(line) = self.preview_pane(surface).and_then(|pane| pane.goto_line) else {
             return;
@@ -128886,6 +129613,7 @@ mod tests {
             intrinsic: Vec::new(),
             blocks: Vec::new(),
             ranges: Vec::new(),
+            maps: Vec::new(),
             source: None,
             layout: prose_only,
             math: DocumentMath::default(),
@@ -128909,6 +129637,7 @@ mod tests {
             intrinsic: Vec::new(),
             blocks: Vec::new(),
             ranges: Vec::new(),
+            maps: Vec::new(),
             source: None,
             layout: vec![
                 MarkdownBlockLayout::solid(metrics.line_height),
@@ -131073,6 +131802,7 @@ mod tests {
                 preview::MarkdownBlock::Paragraph(vec![preview::Span::plain("lines")]),
             ],
             ranges: vec![0..4, 5..11],
+            maps: Vec::new(),
             source: None,
             intrinsic: Vec::new(),
             layout: Vec::new(),
@@ -131112,6 +131842,330 @@ mod tests {
             "the boxes go whatever happened: they are where the *last* document \
              was drawn and nothing has drawn this one",
         );
+    }
+
+    // ── T5: the caret and the keys on the rendered face (§7.1.3t) ───────────
+
+    /// **A press inside the source block lands on the byte it pointed at**
+    /// (T5 ①, §7.1.3t) — the painter's arithmetic read backwards, through the
+    /// same fold.
+    ///
+    /// The source block pushes no [`PreviewTextSite`]s, so this is the *only*
+    /// reading that can answer a press inside it: [`preview_text_box_at`] would
+    /// hand back the nearest piece it does have boxes for, which is the
+    /// paragraph above or below, and clicking into the block you are editing
+    /// would put the caret in its neighbour.
+    ///
+    /// MUTATION: divide by the page's line height instead of the block's own and
+    /// every press below the first row of a block lands a row or two out — the
+    /// two faces are set in different sizes and only one of them drew this.
+    #[test]
+    fn a_press_inside_the_source_block_names_the_byte_it_pointed_at() {
+        let content = "# head\n\none\ntwo\n";
+        let source = source_block(1, 8, "one\ntwo");
+        assert_eq!(
+            preview_live::block_source(content, &source.range),
+            source.text,
+            "the fixture is the block the document would have cut",
+        );
+        let box_of_block = [100.0, 40.0, 500.0, 80.0];
+        let at = |x: f32, y: f32| markdown_source_offset_at(&source, box_of_block, x, y);
+        assert_eq!(at(100.0, 44.0), 8, "the block's first byte");
+        assert_eq!(at(116.0, 44.0), 10, "two columns into its first line");
+        assert_eq!(
+            at(490.0, 44.0),
+            11,
+            "past the end of a short line is the end of that line",
+        );
+        assert_eq!(at(100.0, 65.0), 12, "the second row is the second line");
+        assert_eq!(
+            at(100.0, 4000.0),
+            12,
+            "and below the block is its last row, because the press has already \
+             been judged to be this block's",
+        );
+        assert_eq!(at(100.0, 0.0), 8, "as above it is its first");
+    }
+
+    /// **A press on rendered text lands on the file byte that letter was copied
+    /// from** (T5 ①), which is the whole of what T6 was built for: a heading is
+    /// drawn without its hashes and a click on its first letter must not land on
+    /// the `#`.
+    ///
+    /// MUTATION: answer with the block's `range.start` instead of asking the
+    /// piece, and every click in a paragraph lands at the top of it — the
+    /// gesture the research said would have to be taken away again.
+    #[test]
+    fn a_press_on_rendered_text_names_the_file_byte_it_draws() {
+        let content = "# Title\n\nplain words here\n";
+        let (blocks, ranges, maps) = preview::parse_markdown_mapped(content);
+        assert_eq!(blocks.len(), 2, "a heading and a paragraph");
+        let at = |block, piece, offset| {
+            preview_provenance::file_offset_of(
+                &preview_select::Place::new(block, piece, offset),
+                &blocks,
+                &ranges,
+                &maps,
+            )
+        };
+        assert_eq!(
+            at(0, 0, 0),
+            Some(2),
+            "the first letter of the heading is the byte after `# `",
+        );
+        assert_eq!(at(1, 0, 6), Some(15), "the seventh letter of the paragraph");
+        assert_eq!(
+            at(1, 0, 16),
+            Some(25),
+            "and a click past the last letter is one past the last byte copied, \
+             which is where a caret at the end of a paragraph stands",
+        );
+    }
+
+    /// **A press in the tissue between two blocks is the nearer block's** (T5's
+    /// gap arm).
+    ///
+    /// Nothing is ever parsed out of a blank line (§7.1.3o), so there is no
+    /// piece under the pointer out here; the page answers with the piece it is
+    /// nearest to in document order, and that piece then names a byte of the
+    /// file exactly as one under the pointer would.
+    #[test]
+    fn a_press_in_the_gap_between_two_blocks_is_answered_by_the_nearer_one() {
+        let content = "# Title\n\nplain words here\n";
+        let (blocks, ranges, maps) = preview::parse_markdown_mapped(content);
+        let boxes = vec![
+            row_box(preview_select::Place::new(0, 0, 0), 5, "Title", 0.0, 20.0),
+            row_box(
+                preview_select::Place::new(1, 0, 0),
+                16,
+                "plain words here",
+                60.0,
+                80.0,
+            ),
+        ];
+        let nearer = |y: f32| {
+            let at = preview_text_box_at(&boxes, 10.0, y).expect("a page with text answers");
+            preview_provenance::file_offset_of(&boxes[at].piece.at, &blocks, &ranges, &maps)
+        };
+        assert_eq!(nearer(30.0), Some(2), "nearer the heading above it");
+        assert_eq!(nearer(55.0), Some(9), "nearer the paragraph below it");
+        assert_eq!(
+            nearer(900.0),
+            Some(9),
+            "and past the end of the document is its last block",
+        );
+    }
+
+    /// **Typing moves the file and the source block follows it** (T5 ②).
+    ///
+    /// The parse is the whole mechanism: nothing tells a block it has been typed
+    /// into, the bytes move, the document is parsed again, and the block whose
+    /// range holds the caret is the one drawn as source.
+    #[test]
+    fn typing_moves_the_file_and_the_source_block_follows() {
+        let mut content = String::from("# head\n\nbody\n");
+        let (_, ranges) = preview::parse_markdown_ranged(&content);
+        let mut caret = preview_edit::EditCaret {
+            anchor: 12,
+            caret: 12,
+            desired_column: None,
+        };
+        assert_eq!(
+            preview_live::caret_seat(&ranges, caret.caret),
+            preview_live::CaretSeat::Block(1),
+        );
+        assert!(preview_edit::insert(&mut content, &mut caret, "!"));
+        assert_eq!(content, "# head\n\nbody!\n");
+        let (_, ranges) = preview::parse_markdown_ranged(&content);
+        assert_eq!(
+            preview_live::caret_seat(&ranges, caret.caret),
+            preview_live::CaretSeat::Block(1),
+            "still the paragraph, one byte longer",
+        );
+        assert_eq!(preview_live::block_source(&content, &ranges[1]), "body!");
+    }
+
+    /// **Enter splits a block and Backspace at a block start merges two**, and
+    /// neither is a case anybody wrote: the keys move bytes and the parser
+    /// answers.
+    ///
+    /// MUTATION: make Backspace refuse to cross a block boundary and the two
+    /// paragraphs can never be joined again — which is the special case §9.1
+    /// exists to avoid having.
+    #[test]
+    fn enter_and_backspace_split_and_merge_blocks_through_the_reparse() {
+        let mut content = String::from("one two\n");
+        let mut caret = preview_edit::EditCaret {
+            anchor: 3,
+            caret: 3,
+            desired_column: None,
+        };
+        let eol = preview_edit::eol_of(&content).to_owned();
+        assert!(preview_edit::insert(&mut content, &mut caret, &eol));
+        assert!(preview_edit::insert(&mut content, &mut caret, &eol));
+        assert_eq!(content, "one\n\n two\n");
+        let (_, ranges) = preview::parse_markdown_ranged(&content);
+        assert_eq!(ranges.len(), 2, "one paragraph has become two");
+        assert_eq!(
+            preview_live::caret_seat(&ranges, caret.caret),
+            preview_live::CaretSeat::Block(1),
+            "and the caret is in the new one, which is therefore the source block",
+        );
+
+        let mut content = String::from("one\n\ntwo\n");
+        let (_, ranges) = preview::parse_markdown_ranged(&content);
+        assert_eq!(ranges.len(), 2);
+        let mut caret = preview_edit::EditCaret {
+            anchor: 5,
+            caret: 5,
+            desired_column: None,
+        };
+        assert!(preview_edit::backspace(&mut content, &mut caret));
+        assert_eq!(content, "one\ntwo\n");
+        let (_, ranges) = preview::parse_markdown_ranged(&content);
+        assert_eq!(ranges.len(), 1, "and two paragraphs have become one");
+        assert_eq!(
+            preview_live::block_source(&content, &ranges[0]),
+            "one\ntwo",
+            "the merged block is drawn as both of its lines",
+        );
+    }
+
+    /// **A caret's selection is the file's own bytes, marks and all** (T5 ④,
+    /// research §10 Q3) — the copy semantics, said as an assertion.
+    ///
+    /// This is where the rendered page's copy parts company with §7.31 ⑥, and
+    /// the departure is narrow: the *range* is still the run of the document the
+    /// reader dragged across, and what comes with it is the `#` and the `**`
+    /// inside that run, because they are the characters the caret was dragged
+    /// over. It is what a paste of the result puts back.
+    #[test]
+    fn a_caret_selection_copies_the_files_own_bytes() {
+        let content = "# head\n\nsome **bold** words\n";
+        let caret = preview_edit::EditCaret {
+            anchor: 0,
+            caret: 6,
+            desired_column: None,
+        };
+        assert_eq!(
+            caret.selected(content),
+            "# head",
+            "the hashes are inside the range and come with it",
+        );
+        let across = preview_edit::EditCaret {
+            anchor: 13,
+            caret: 21,
+            desired_column: None,
+        };
+        assert_eq!(across.selected(content), "**bold**");
+    }
+
+    /// **A double click takes the word and a triple click the block**, in the
+    /// caret's own coordinate (T5 ①, §7.31 ⑦).
+    ///
+    /// The word is the classifier the terminal beside the pane uses, walked over
+    /// the file's bytes; the block is the run of the file it was parsed from,
+    /// its trailing break off, because the blank line after a paragraph belongs
+    /// to no block.
+    #[test]
+    fn a_repeated_press_takes_a_word_and_then_the_block() {
+        let content = "# head\n\nsome bold words\n";
+        let (_, ranges) = preview::parse_markdown_ranged(content);
+        assert_eq!(
+            (
+                preview_select::word_start(content, 14),
+                preview_select::word_end(content, 14)
+            ),
+            (13, 17),
+            "the word the pointer is inside, and not the spaces round it",
+        );
+        let block = ranges[1].clone();
+        assert_eq!(block, 8..24);
+        assert_eq!(
+            block.start + preview_live::block_source(content, &block).len(),
+            23,
+            "a triple click takes the paragraph and stops before its own break",
+        );
+    }
+
+    /// **A caret selection is drawn on both faces at once** (T5 ④): the source
+    /// block cuts the file range against itself, and every other block is found
+    /// by mapping the same two file bytes back onto the page.
+    ///
+    /// MUTATION: map only the start and reuse it for the end and a selection
+    /// that leaves its block draws a band of nothing.
+    #[test]
+    fn a_caret_selection_spanning_two_blocks_maps_onto_both() {
+        let content = "# Title\n\nplain words here\n";
+        let (blocks, ranges, maps) = preview::parse_markdown_mapped(content);
+        let start = preview_provenance::place_of(2, &blocks, &ranges, &maps)
+            .expect("a page with words answers");
+        let end = preview_provenance::place_of(15, &blocks, &ranges, &maps)
+            .expect("a page with words answers");
+        assert_eq!(
+            (start.block, start.offset),
+            (0, 0),
+            "the byte after the hashes is the heading's first drawn letter",
+        );
+        assert_eq!(
+            (end.block, end.offset),
+            (1, 6),
+            "and the far end is six letters into the paragraph under it",
+        );
+    }
+
+    /// **The refusals are the buffer's and they stay honest** (T5 ⑥).
+    ///
+    /// Turning the rendered face on turned it on for the *name and the type*
+    /// (`preview::is_editable`); everything a buffer can be wrong about is still
+    /// asked separately, and each of these is a page that draws, reads and
+    /// copies exactly as before and takes no caret at all.
+    #[test]
+    fn a_page_this_window_will_not_edit_takes_no_caret_on_either_face() {
+        let whole = text_buffer("notes.md", "# head\n\nbody\n");
+        assert!(
+            whole.is_editable(false) && whole.is_editable(true),
+            "the ordinary Markdown file, both faces",
+        );
+
+        let mut truncated = preview::PreviewBuffer::new(
+            preview::PreviewSource::file(r"C:\w\long.md"),
+            "long.md".to_owned(),
+        );
+        truncated.accept(preview::HeadOutcome::Read {
+            text: "# head\n".to_owned(),
+            truncated: true,
+            mtime: None,
+            content_says_text: true,
+            encoding: preview::HeadEncoding::Utf8,
+            lossy: false,
+        });
+        assert!(
+            !truncated.is_editable(false),
+            "a head nobody has asked to edit is read-only on the page too",
+        );
+
+        let mut lossy = preview::PreviewBuffer::new(
+            preview::PreviewSource::file(r"C:\w\odd.md"),
+            "odd.md".to_owned(),
+        );
+        lossy.accept(preview::HeadOutcome::Read {
+            text: "# head\u{fffd}\n".to_owned(),
+            truncated: false,
+            mtime: None,
+            content_says_text: true,
+            encoding: preview::HeadEncoding::Utf8,
+            lossy: true,
+        });
+        assert!(
+            !lossy.is_editable(false),
+            "and bytes this window invented a stand-in for are never written back",
+        );
+
+        let table = text_buffer("cases.csv", "a,b\n1,2\n");
+        assert!(!table.is_editable(false) && !table.is_editable(true));
+        let diff = text_buffer("change.diff", "--- a\n+++ b\n");
+        assert!(!diff.is_editable(false) && !diff.is_editable(true));
     }
 
     /// One piece of a rendered document, boxed on a page 400px wide.
@@ -131473,6 +132527,7 @@ mod tests {
             intrinsic: Vec::new(),
             blocks: blocks.clone(),
             ranges: Vec::new(),
+            maps: Vec::new(),
             source: None,
             layout: layout.clone(),
             math: DocumentMath::default(),
@@ -133845,8 +134900,9 @@ mod tests {
             "one file, two faces, at the same instant"
         );
         assert!(
-            buffer.is_editable(true) && !buffer.is_editable(false),
-            "the source face has a caret and the rendered page has not"
+            buffer.is_editable(true) && buffer.is_editable(false),
+            "both faces of one Markdown buffer edit (T5, §7.1.3t) — what differs \
+             between them is where the caret is drawn, not whether there is one"
         );
         assert_ne!(
             document_key(buffer, true, 400.0, 1.0),
@@ -133995,6 +135051,7 @@ mod tests {
         let markdown = PreviewDocument::Markdown {
             blocks,
             ranges: Vec::new(),
+            maps: Vec::new(),
             source: None,
             intrinsic: Vec::new(),
             layout,
@@ -146154,6 +147211,218 @@ mod summon_key_wiring_tests {
                 .count(),
             0,
             "no statement may stand above the gate (the first one is line {first})"
+        );
+    }
+}
+
+/// **Where entering and leaving a rendered Markdown page are wired** (T5,
+/// `docs/DESIGN.md` §7.1.3t).
+///
+/// Six of this ticket's promises are not values any assertion can read: they are
+/// *which function does what*, on a surface that needs a GPU window to exist at
+/// all. A press ladder that asked the wrong door first, a float that grew a
+/// second dispatch of its own, a caret that let go of the page's other selection
+/// model on some paths and not others — none of them would fail a test, and each
+/// is a defect this window has already had once on this very surface (§7.39's
+/// float, §7.1.5f's ladder).
+///
+/// So these read the file as text, for [`mouse_trace_station_tests`]' stated
+/// reason, and they assert only the wiring: not what a function computes, but
+/// that it is the one being asked.
+#[cfg(test)]
+mod live_markdown_edit_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// **The window, without the pins that read it.**
+    ///
+    /// Every count below is a count of how many places in this file do a thing,
+    /// and the assertions themselves spell that thing out in a string literal —
+    /// so a count over the whole file would count the questions as well as the
+    /// answers. This module stands last, which is what makes the cut one line.
+    fn window() -> &'static str {
+        let end = SOURCE
+            .find("mod live_markdown_edit_tests {")
+            .expect("this module is declared in this file");
+        &SOURCE[..end]
+    }
+
+    /// **Entering is one door and it does all five things** (T5 ①).
+    ///
+    /// The caret moves, the page's other selection model lets go (research §10
+    /// Q3: two anchors on one surface are two answers to "what is selected"), the
+    /// page starts drawing the caret's block as source, the press that was
+    /// waiting for a body is spent, and the keyboard arrives. A second entrance
+    /// that remembered four of the five would leave a surface drawing a source
+    /// block nothing can be typed into.
+    #[test]
+    fn entering_writes_all_five_things_in_one_place() {
+        let door = body("    fn seat_preview_caret(");
+        for promise in [
+            "caret.place(&content, offset, extend)",
+            "pane.md_select = None",
+            "pane.md_caret = true",
+            "pane.md_caret_wanted = None",
+            "self.preview_edit_focus = Some(surface)",
+        ] {
+            assert!(
+                door.contains(promise),
+                "entering no longer does `{promise}`"
+            );
+        }
+        assert_eq!(
+            window().matches("pane.md_caret = true").count(),
+            1,
+            "one entrance, counted here on purpose — a second is a ruling and \
+             not an edit",
+        );
+    }
+
+    /// **Leaving is `Esc` and nothing else** (T5 ③).
+    ///
+    /// The block renders again only for the gesture that means "I have finished
+    /// with this". Losing the keyboard deliberately does not (§7.1.3q: a page
+    /// that re-flowed itself every time a hand left it would move while nobody
+    /// was looking at it), which is why `md_caret` is cleared in the `Release`
+    /// arm and in the door that hands a pane a different file, and nowhere else.
+    ///
+    /// MUTATION: clear it beside `preview_edit_focus = None` in the blur check
+    /// and clicking into the terminal beside the pane re-flows the document.
+    #[test]
+    fn leaving_is_escape_and_the_pane_changing_file() {
+        assert!(
+            body("    fn preview_key(").contains("md_caret = false"),
+            "`Esc` renders the block again",
+        );
+        assert!(
+            body("    fn leave_preview_buffer_in(").contains("pane.md_caret = false"),
+            "and so does handing this surface a different file",
+        );
+        assert_eq!(
+            window().matches("md_caret = false").count(),
+            2,
+            "two, and the blur is not one of them",
+        );
+        assert!(
+            !body("    fn preview_key(").contains("pane.caret ="),
+            "and leaving keeps the caret: it is a byte offset, and the flip to \
+             the source face finds it where this left it",
+        );
+    }
+
+    /// **The float gets the caret by the dispatch line it already had** (T5 ⑤,
+    /// research §10 Q8, the precedent §7.31 ⑥ set).
+    ///
+    /// A window torn off a pane is the same surface with a different rectangle,
+    /// so the press that puts a caret in a docked page is the press that puts one
+    /// in a floated one — reached through `press_preview_text`, which the float's
+    /// own ladder already calls. What must not appear is a second door: a float
+    /// with an entrance of its own would be two answers to "where is the caret".
+    #[test]
+    fn a_floated_page_takes_the_caret_through_the_docked_press() {
+        assert!(
+            body("    fn press_float(").contains("self.press_preview_text(position)"),
+            "the float's body branch no longer reaches the rendered page's press",
+        );
+        assert_eq!(
+            window().matches("self.place_preview_caret_on(").count(),
+            2,
+            "the press and the drag, and no third entrance beside them",
+        );
+    }
+
+    /// **The glance card stays read-only** (T5 ⑤).
+    ///
+    /// It is a hover, it is never in [`super::Runtime::preview_surfaces`], and it
+    /// cannot hold the keyboard — so a caret drawn on it would be a caret drawn
+    /// where no keystroke goes. Said out loud in the press's own gate rather than
+    /// left to the focus healing to notice.
+    #[test]
+    fn the_glance_card_refuses_the_caret_by_name() {
+        assert!(
+            body("    fn preview_caret_takes_the_press(")
+                .contains("matches!(surface, PreviewSurface::Peek)"),
+            "the card is no longer refused where the press decides",
+        );
+    }
+
+    /// **The two faces' presses are alternatives, and the rendered one is
+    /// underneath** (T5 ①).
+    ///
+    /// Both faces of a Markdown buffer edit now, so `preview_edit_body` — which
+    /// asks the *buffer* — can no longer tell the quick edit's `<textarea>` from
+    /// a page of blocks. `press_preview_body` says so itself and falls through,
+    /// which is what puts the press on the ladder's next rung.
+    ///
+    /// MUTATION: take the guard out and every click in a rendered page is
+    /// answered by the monospace hit test, which divides the whole file by a line
+    /// height and lands the caret nowhere near the pointer.
+    #[test]
+    fn the_quick_edits_press_declines_a_rendered_page() {
+        let press = body("    fn press_preview_body(");
+        assert!(
+            press.contains("if self.preview_shows_live_markdown(surface) {"),
+            "the quick edit's press no longer stands aside for the rendered page",
+        );
+        let guard = press
+            .find("preview_shows_live_markdown")
+            .expect("the guard is there");
+        let offset = press
+            .find("self.preview_offset_at(")
+            .expect("and the monospace hit test after it");
+        assert!(
+            guard < offset,
+            "the guard has to stand above the arithmetic it is guarding",
+        );
+        assert!(
+            press.contains("self.ask_to_edit_preview_on(surface)"),
+            "and the press still buys the whole file first, on either face",
+        );
+    }
+
+    /// **One selection model on the rendered face** (T5 ④, research §10 Q3,
+    /// ruled).
+    ///
+    /// Two readers of "what is selected here" — the clipboard and the highlight —
+    /// and each of them asks the caret first and the piece model only when there
+    /// is no caret. A reader that asked the other way round would copy one range
+    /// and draw another.
+    #[test]
+    fn the_caret_answers_before_the_piece_selection_everywhere() {
+        for (signature, first, second) in [
+            (
+                "    fn preview_selected_text(",
+                "self.preview_live_caret(surface)",
+                "pane.md_select?",
+            ),
+            (
+                "    fn preview_caret_selection_places(",
+                "self.preview_live_caret(surface)?",
+                "preview_provenance::place_of(",
+            ),
+        ] {
+            let text = body(signature);
+            let one = text
+                .find(first)
+                .unwrap_or_else(|| panic!("{signature} no longer asks `{first}`"));
+            let two = text
+                .find(second)
+                .unwrap_or_else(|| panic!("{signature} no longer reaches `{second}`"));
+            assert!(one < two, "{signature} asks the two in the wrong order");
+        }
+        assert!(
+            body("    fn preview_selected_text(").contains("caret.selected(content)"),
+            "and a caret selection copies the file's own bytes",
         );
     }
 }

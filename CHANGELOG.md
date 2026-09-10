@@ -8,6 +8,18 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
+- **A Markdown file can be edited where it is shown.** Click into the text and
+  the paragraph, list, table or formula under the caret turns into its own
+  source, while everything else on the page stays as it reads; type, and it is
+  back to its rendered form as soon as you leave it. The caret moves between
+  blocks the way it moves between lines, so there is nothing to enter and
+  nothing to leave — arrows, Home and End, Enter and Backspace all do what they
+  do anywhere else. Escape leaves the page, Ctrl+S saves, Ctrl+Z undoes. What
+  you select is what you copy, and copying out of a document you are editing
+  brings the marks with it, so what you paste back is what was there. A file
+  that cannot be edited — one Folio could not fully read, one past the size
+  limit, a table or a patch — still opens, reads and copies exactly as before,
+  and the foot of the pane says why it is read-only.
 - **The files column's menu can create a file or a folder and send either to the
   Recycle Bin.** Right-clicking a folder row now offers `New file…` and
   `New folder…` above the line, and both file rows and folder rows offer

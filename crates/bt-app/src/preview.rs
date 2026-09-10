@@ -528,15 +528,24 @@ pub fn is_diff_name(name: &str) -> bool {
 /// mdSource)` — and both were wrong in the same way: they named types rather
 /// than the view those types actually get. A table is a grid and a diff is a
 /// reading, so neither is editable however much its extension looks like text,
-/// and a rendered markdown view is not an editor until it has been flipped to
-/// source.
+///
+/// **`md_source` no longer decides anything, and that one word is ticket T5**
+/// (§7.1.3t). It used to be the whole of the Markdown arm: a rendered page had
+/// no caret to put anywhere, so the only editor a `.md` file had was its source
+/// face. Both faces edit now — the rendered one by drawing the caret's block as
+/// the file's own bytes (§7.1.3q) — so the *view* has stopped being part of the
+/// judgement, and what is left is the name and the type, which is what this
+/// function always said it was about. The parameter stays because the flip is
+/// still the view's and every caller still has to say which face it is asking
+/// about; the day one of them stops passing it is the day it has stopped
+/// knowing.
 pub fn is_editable(name: &str, ftype: PreviewFtype, md_source: bool) -> bool {
+    let _ = md_source;
     if is_diff_name(name) {
         return false;
     }
     match ftype {
-        PreviewFtype::Text => true,
-        PreviewFtype::Markdown => md_source,
+        PreviewFtype::Text | PreviewFtype::Markdown => true,
         // A page has no text of this window's to put a caret in: what is on the
         // glass belongs to the engine, and the one place typing goes is inside
         // the page itself. A video is a picture here, and for the same reason a
@@ -5126,6 +5135,24 @@ impl PreviewBuffer {
         self.mark_stale()
     }
 
+    /// **A whole-file read is out and the body it will replace is still the
+    /// head** (T5 ①, 2026-09-10).
+    ///
+    /// The one question a gesture has to ask between the press that bought the
+    /// file and the frame the file lands on: this buffer is not editable *yet*
+    /// and the only thing standing between it and editable is a read already on
+    /// the worker. A press that gets this answer keeps its caret on the pane
+    /// until the body arrives ([`Runtime::settle_preview_caret`]) instead of
+    /// making the reader click a second time.
+    ///
+    /// Both halves are needed and neither is the other. `reads_whole` alone is
+    /// true for ever after the first ask, including long after the file landed;
+    /// `truncated` alone is true for every head nobody has asked about.
+    #[must_use]
+    pub fn awaits_the_whole_file(&self) -> bool {
+        self.reads_whole && self.truncated
+    }
+
     /// **Which of the two reads this buffer is owed** (T2 ③, 2026-09-10).
     ///
     /// [`Self::claim_head_read`]'s answer, asked without taking the read — for
@@ -8572,10 +8599,19 @@ mod tests {
         assert!(!is_editable("a.diff", PreviewFtype::Text, false));
         assert!(!is_editable("a.patch", PreviewFtype::Text, false));
         assert!(!is_editable("a.PATCH", PreviewFtype::Text, false));
-        assert!(!is_editable("README.md", PreviewFtype::Markdown, false));
+        // **Both faces of a Markdown file edit** (T5, §7.1.3t). The flip used to
+        // be the whole of the answer here — a rendered page had no caret in it,
+        // so it had nothing to type into — and now the block under the caret is
+        // the file's own bytes on either face.
+        assert!(is_editable("README.md", PreviewFtype::Markdown, false));
         assert!(is_editable("README.md", PreviewFtype::Markdown, true));
         assert!(!is_editable("a.png", PreviewFtype::Image, true));
         assert!(!is_editable("a.exe", PreviewFtype::Unknown, true));
+        // **And the refusals are the name's, on both faces** (T5 ⑥): a diff and
+        // a table have no source face to fall back to and never had a caret, so
+        // turning the rendered page on must not turn them on with it.
+        assert!(!is_editable("changes.md.diff", PreviewFtype::Text, false));
+        assert!(!is_editable("cases.csv", PreviewFtype::Table, true));
     }
 
     /// ⑤ A NUL in the head is a binary file, whatever its name claims.
@@ -10429,12 +10465,20 @@ mod tests {
         assert!(buffer.truncated, "the glance took the head and said so");
         assert!(!buffer.is_editable(true));
         assert_eq!(buffer.read_only_notice(), Some(preview_truncated_notice()));
+        // **A press in the rendered page is somebody asking to edit too**
+        // (T5 ①, §7.1.3t). It was not when this test was written — a rendered
+        // page had no caret to put anywhere, so the flip was the only gesture
+        // that could mean it — and now it is the commonest of the two: the
+        // reader clicks into the text, and the click that buys the rest of the
+        // file is the click that gets the caret when it lands.
         assert!(
-            !buffer.ask_for_the_whole_file(false),
-            "a rendered page is not somebody asking to edit"
+            buffer.ask_for_the_whole_file(false),
+            "a press in a rendered page asks to edit"
         );
-
-        assert!(buffer.ask_for_the_whole_file(true), "and the flip is");
+        assert!(
+            !buffer.ask_for_the_whole_file(true),
+            "and asking twice buys one read: the flip after it finds the ask made"
+        );
         // The head is still on the glass while the rest is on its way: nothing
         // was unloaded, so the page does not flash.
         assert!(buffer.content.is_some() && buffer.load == PreviewLoad::Ready);
