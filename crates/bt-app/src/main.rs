@@ -84,6 +84,7 @@ mod persist;
 mod pins;
 mod preview;
 mod preview_edit;
+mod preview_provenance;
 mod preview_select;
 mod preview_trace;
 mod preview_undo;
