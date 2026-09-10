@@ -1204,6 +1204,10 @@ pub enum Text {
     ShortcutFilesPane,
     ShortcutGitPage,
     ShortcutSavePreview,
+    /// The preview editor's two history rows (ticket T3). // zh: pending
+    ShortcutUndoPreview,
+    /// // zh: pending
+    ShortcutRedoPreview,
     ShortcutPrevCommandMark,
     ShortcutNextCommandMark,
     ShortcutOpenSearch,
@@ -3290,6 +3294,12 @@ impl Text {
             Self::ShortcutFilesPane => pick(lang, "Files column", "文件列"),
             Self::ShortcutGitPage => pick(lang, "Show Git in the files column", "文件列切到 Git"),
             Self::ShortcutSavePreview => pick(lang, "Save the open document", "保存打开的文档"),
+            // zh: pending — the Chinese column is the English one until the
+            // translation lands, and both rows are on `UNTRANSLATED` so the two
+            // gates that would catch that say so out loud instead of failing.
+            Self::ShortcutUndoPreview => pick(lang, "Undo the last edit", "Undo the last edit"),
+            // zh: pending
+            Self::ShortcutRedoPreview => pick(lang, "Redo the last edit", "Redo the last edit"),
             Self::ShortcutPrevCommandMark => pick(lang, "Previous command", "上一条命令"),
             Self::ShortcutNextCommandMark => pick(lang, "Next command", "下一条命令"),
             // **"in this pane" since 2026-08-22**, and the row's scope is why:
@@ -4334,7 +4344,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 598] = [
+    pub const ALL: [Self; 600] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4635,6 +4645,8 @@ impl Text {
         Self::ShortcutFilesPane,
         Self::ShortcutGitPage,
         Self::ShortcutSavePreview,
+        Self::ShortcutUndoPreview,
+        Self::ShortcutRedoPreview,
         Self::ShortcutPrevCommandMark,
         Self::ShortcutNextCommandMark,
         Self::ShortcutOpenSearch,
@@ -4943,7 +4955,7 @@ impl Text {
     /// program is not called. Every entry not on this list must differ between
     /// the columns and must carry Chinese in the Chinese one.
     #[cfg(test)]
-    const UNTRANSLATED: [Self; 4] = [
+    const UNTRANSLATED: [Self; 6] = [
         // The class of program the page is about, and the word every one of them
         // calls itself — Claude Code, codex — in Chinese prose as much as in
         // English. A page named 「代理」 would be naming a proxy server (user
@@ -4962,6 +4974,16 @@ impl Text {
         // `FilesViewFiles` is not `SeatFiles`: shortening the segmented
         // control must not be a change to a toast.
         Self::GitToastTitle,
+        // **Two entries waiting for their Chinese, and not a third kind of
+        // exception** (ticket T3, 2026-09-10). The rows above are words that are
+        // the same in both languages; these two are not, and they are here only
+        // so that the two gates below name them once in this list instead of
+        // failing the whole suite while the translation is written. Both are
+        // marked `// zh: pending` where their strings are, and **both come off
+        // this list the day the Chinese lands** — leaving one here would be this
+        // table quietly deciding a sentence needs no translation.
+        Self::ShortcutUndoPreview,
+        Self::ShortcutRedoPreview,
     ];
 }
 

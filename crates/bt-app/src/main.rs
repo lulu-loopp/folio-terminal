@@ -86,6 +86,7 @@ mod preview;
 mod preview_edit;
 mod preview_select;
 mod preview_trace;
+mod preview_undo;
 mod preview_watch;
 mod profiles;
 mod psreadline;
@@ -48535,6 +48536,11 @@ impl Runtime<'_> {
             // Ruling 9's row, dispatched like every other: the same verb the
             // header's save button and the editor's own `Ctrl+S` reach.
             shortcuts::Action::SavePreview => self.save_preview(),
+            // T3's two rows, dispatched beside the save because they are reached
+            // the same way: the buffer the keyboard's surface is looking at, and
+            // silence on a surface with nothing to type into.
+            shortcuts::Action::UndoPreview => self.step_preview_history(Step::Back),
+            shortcuts::Action::RedoPreview => self.step_preview_history(Step::Forward),
             // §7.1.5c ③, and the whole of it: the walk is over the **full**
             // history, never over the ticks the rail happened to draw. A
             // collapsed bucket is a density decision made by a painter with a
@@ -54282,7 +54288,10 @@ impl Runtime<'_> {
         let Some(buffer) = self.preview_buffer_on_mut(surface) else {
             return Ok(());
         };
-        let changed = buffer.edit_content(|content| edit(content, &mut caret));
+        // Through the caret's own door, because this is the one caller that has
+        // a caret to file: the undo log lives on the buffer and the caret it
+        // remembers is the one that made the change (T3, `preview_undo`).
+        let changed = buffer.edit_by_caret(&mut caret, |content, caret| edit(content, caret));
         let pane = self.preview_pane_mut(surface);
         pane.caret = caret;
         if changed {
@@ -54480,6 +54489,54 @@ impl Runtime<'_> {
             return Ok(());
         };
         self.save_preview_on(surface)
+    }
+
+    /// **Walk the buffer's history**, one entry either way (ticket T3).
+    ///
+    /// Reached exactly as [`Self::save_preview`] is, and for the same reason:
+    /// `Ctrl+Z` means "wherever the keyboard is", so the surface is
+    /// [`Self::preview_keyboard_surface`] — the edit focus if there is one, else
+    /// the focused float, else the focused seat's pane. A surface with nothing to
+    /// type into answers `preview_is_editable` with `false` and this does
+    /// nothing, which is the same silence a rendered page keeps for every other
+    /// key it swallows.
+    ///
+    /// **The log is the buffer's and the caret is the pane's**, so an undo
+    /// pressed in either of two panes on one file takes back that file's last
+    /// change whichever pane made it, and hands *this* pane the caret that made
+    /// it. The other pane's caret is not touched: it is clamped into the body the
+    /// next time it is used — every edit and every motion begins with
+    /// [`preview_edit::EditCaret::heal`], and the caret the glass draws goes
+    /// through `normalize` — and otherwise left where its own reader left it.
+    /// That is already what happens when the other pane types, and an undo is a
+    /// change to the body like any other.
+    ///
+    /// The notice comes down for `edit_preview`'s reason: a conflict still
+    /// standing over a body that has moved on is a sentence about a state that no
+    /// longer exists.
+    fn step_preview_history(&mut self, step: Step) -> Result<()> {
+        let Some(surface) = self.preview_keyboard_surface() else {
+            return Ok(());
+        };
+        if !self.preview_is_editable(surface) {
+            return Ok(());
+        }
+        let Some(buffer) = self.preview_buffer_on_mut(surface) else {
+            return Ok(());
+        };
+        let moved = match step {
+            Step::Back => buffer.undo_edit(),
+            Step::Forward => buffer.redo_edit(),
+        };
+        // Nothing left in that direction is a press with nothing to say.
+        let Some(caret) = moved else {
+            return Ok(());
+        };
+        let pane = self.preview_pane_mut(surface);
+        pane.caret = caret;
+        pane.notice = None;
+        self.reveal_preview_caret(surface);
+        self.repaint_preview()
     }
 
     /// The same, for a **named** surface — what a head's own `Save` button

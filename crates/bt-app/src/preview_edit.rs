@@ -487,7 +487,12 @@ pub fn command(key: &Key, modifiers: ModifiersState) -> EditCommand {
                 // rather than a chord two layers both claim. It is still
                 // *swallowed* here rather than typed, which is what keeps the
                 // rule true if the registry is ever asked later than it is now.
-                "s" => EditCommand::Ignore,
+                // **And the same for the two history keys** (ticket T3): `Ctrl+Z`
+                // and `Ctrl+Y` are scoped rows of the table beside `Ctrl+S`,
+                // resolved above this surface, and named here so that the rule
+                // reads as a rule rather than as three chords that happen to fall
+                // through the arm below.
+                "s" | "z" | "y" => EditCommand::Ignore,
                 "c" => EditCommand::Copy,
                 "x" => EditCommand::Cut,
                 "v" => EditCommand::Paste,

@@ -6,7 +6,24 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Added
+
+- **Undo and redo while editing a file in a preview, on Ctrl+Z and Ctrl+Y.** The
+  little editor a text or Markdown file opens in had no way back: a line deleted
+  by accident was gone, and the only thing that could restore it was closing the
+  file without saving and losing everything else with it. Ctrl+Z now takes back
+  the last change and Ctrl+Y puts it again. A run of typing comes back in one
+  press rather than one letter at a time — the run ends where you moved the
+  caret, pressed Enter, changed from typing to deleting, or saved — and a paste
+  comes back in one press however much it brought. Both keys work only while a
+  preview holds the keyboard, so Ctrl+Z still suspends a job in every terminal.
+  The history belongs to the file, so the same file open in two panes has one
+  history and either pane can walk it.
+- **The unsaved dot goes out when you undo back to your last save.** It used to
+  stay lit until the file was written, because there was no history to compare
+  against; now there is, so returning to the words the file was saved with is
+  being saved again as far as the dot is concerned, and one more change lights
+  it back up.
 
 ## 0.2.5-preview — 2026-09-09
 
