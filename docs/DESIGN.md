@@ -7813,9 +7813,10 @@ spike 量出来的数字说的正是这件事。`bt-app` 在 macOS 上停在 **3
 | 守卫 | 它问的问题 |
 |---|---|
 | `.github/workflows/ci.yml` 的 `core-macos`(`macos-latest`) | 上面那十四个 `cargo check --locked --all-targets`;其中十个 `cargo test --locked`(`bt-unicode`、`bt-doc`、`bt-detect`、`bt-layout`、`bt-persist`、`bt-winres`、`bt-math`、`bt-transcript`、`bt-viewport`、`alacritty_terminal`) |
+| `.github/workflows/ci.yml` 的 `core-linux`(`ubuntu-latest`) | 同样十四个 `cargo check --locked --all-targets`;`cargo test --locked` 的名单是 mac 那十个加 `bt-pty`、减 `bt-math`——Linux 有真的 pty 而不是 ConPTY,`bt-pty` 的测试能在这里跑(21 过、18 忽略,忽略的是 PSReadLine 与 ConPTY 探针);`bt-math` 有三个测试点名机器上真装着的字体(Arial 与 CJK 字面),跑器没有。这个 job 用 `RUSTFLAGS: -C target-feature=-crt-static` 压过 `.cargo/config.toml` 的 `+crt-static`——glibc 上静态链接的宿主装不了 proc-macro 的动态库,而这个 job 不发布任何东西 |
 | `scripts/check-portable-core.ps1` | 那些 crate 的源码里有没有 `windows::`、`windows_sys::`、`winapi`、`webview2`、`std::os::windows`,而所在的项不在 `#[cfg(windows)]` / `#[cfg(target_os = "windows")]` 之下 |
 
-**为什么 check 十四个而只 test 十个。** `bt-render` 与 `bt-pty` 只 check 不 test,理由和 `gpu`、`conpty` 两个 job 说的是同一条:一个要真的 adapter,另一个要真的 ConPTY 子进程,而跑器两样都没有。`bt-term` 与 `bt-corpus` 只 check 不 test,理由是**还没有人在那边量过它们的测试**——这是一句关于本仓知道什么的陈述,不是关于那两个 crate 的判断。这个 job 和 `ci.yml` 里其余每一个 job 一样是必过的:那里没有任何一处 `continue-on-error`。
+**为什么 check 十四个而两台跑器各 test 不一样多。** 十四个包在两台机器上都 check;能不能 test 取决于跑器上有什么。`bt-render` 两边都只 check:它要真的 adapter。`bt-pty` 在 mac 上只 check——它要 ConPTY,macOS 没有;在 Linux 上进 test——Linux 有真的 pty,21 个测试过、18 个忽略,忽略的是 PSReadLine 与 ConPTY 探针。`bt-math` 反过来:mac 上进 test,Linux 上只 check——它有三个测试点名机器上真装着的字体(Arial 与 CJK 字面),Linux 跑器没有。`bt-term` 与 `bt-corpus` 两边都只 check,理由是**还没有人在那边量过它们的测试**——这是一句关于本仓知道什么的陈述,不是关于那两个 crate 的判断。Linux 那个 job 还多一件事:`.cargo/config.toml` 给所有平台设了 `+crt-static`,glibc 上静态链接的宿主装不了 proc-macro 的动态库,所以 `core-linux` 用 `RUSTFLAGS: -C target-feature=-crt-static` 压过它——只在这个不发布任何东西的 job 里。两个 job 和 `ci.yml` 里其余每一个 job 一样是必过的:那里没有任何一处 `continue-on-error`。
 
 **门为什么是词法的。** 它走一遍文件、跟着花括号深度记「哪一层开着一个 windows gate」,不做语法分析。代价是它读不懂某些写法,换来的是**它能在一棵编不过的树上五秒钟跑完**——而一棵编不过的树恰恰是最需要有人告诉你哪条规矩被破了的时候。谓词里的 `not(...)` 在提问之前先被剥掉:一个被 gate 到**另一个**平台上去的项还在点名 Win32,正是这道门要抓的错。门自己也照本仓的规矩证明自己会红:`gates-can-fail` 里种一个违规、要求它红、再把文件放回去。(脚本扫的是 `crates/` 下那十三个;vendored 的 `alacritty_terminal` 由 `core-macos` 编译来管,别人的字节不归这条规矩裁。)
 
