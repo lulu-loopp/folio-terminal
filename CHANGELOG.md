@@ -6,7 +6,34 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+- **A file that says what it is keeps saying it after you save.** Some files
+  begin with a few bytes that name their own encoding — the ones Windows
+  PowerShell writes are the common case here — and Folio read those bytes,
+  showed the file correctly, and then threw the answer away. Editing one line of
+  such a file and pressing Ctrl+S wrote the whole of it back in a different
+  encoding, without the opening bytes: every character outside the line you
+  touched came out different, and nothing said so. The encoding now travels with
+  the text from the moment it is read to the moment it is written, so a save
+  changes the part you edited and leaves the rest of the file identical, down to
+  the byte. Line endings, trailing spaces and a missing last line survived
+  before and still do.
+- **A file Folio cannot fully read is no longer offered for editing.** Where a
+  few bytes will not read as text, they are drawn as the replacement character
+  so the rest of the file can still be looked at — but saving would have put
+  that stand-in character on the disk in place of whatever was really there.
+  Such a file is now read-only, and the foot of the pane says why.
+
+### Changed
+
+- **A text or Markdown file larger than the preview's first look can be
+  edited.** The pane reads the first 64 KB of a file to show it to you, which is
+  what keeps opening a huge file as quick as opening a small one, and until now
+  that was also as much of it as there was: anything longer stayed read-only.
+  Turning a Markdown file to its source, or clicking into the text of a file
+  that has a caret, now reads the rest of it, once, and the file becomes
+  editable — up to 8 MB, past which it stays read-only and says so.
 
 ## 0.2.5-preview — 2026-09-09
 
