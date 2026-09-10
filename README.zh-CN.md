@@ -198,7 +198,7 @@ Agent 页的三个开关**默认关闭**，各自读取对应工具的配置文�
        右侧预览窗格中打开了一个 Markdown 文档。">
 </picture>
 
-- **设置 > General > 资源管理器菜单**：打开时写入两个注册表键到 `HKEY_CURRENT_USER\Software\Classes`，加入「在 Folio 中打开」。在 Windows 11 上这项在「显示更多选项」页；在 Windows 10 上它在唯一的菜单中。如果 Windows 11 的文件夹里有 `folio.msix`，则同时注册该包到当前账户，使菜单项出现在第一页。无需管理员。关闭时移除已注册的项。正在运行的资源管理器只在启动时读取第一页的条目，如果「在 Folio 中打开」还没有出现，注销后重新登录。
+- **设置 > General > 资源管理器菜单**：打开时写入两个注册表键到 `HKEY_CURRENT_USER\Software\Classes`，加入「在 Folio 中打开」。在 Windows 11 上这项在「显示更多选项」页；在 Windows 10 上它在唯一的菜单中。如果 Windows 11 的文件夹里有 `folio.msix`，则同时注册该包到当前账户，使菜单项出现在第一页。无需管理员。关闭时移除已注册的项。正在运行的资源管理器只在启动时读取第一页的条目，如果「在 Folio 中打开」还没有出现，注销后重新登录。Folio 已在运行时，在上次使用的窗口中将文件夹打开为新标签页，并将窗口带到前台。`folio.exe --new-window` 另开一个窗口。
 - Windows PowerShell 5.1 自带的 PSReadLine 2.0.0 在窗口缩放后会错位输入行。Folio 附带修补版 2.4.6，可按需安装到用户模块目录。执行策略为 `Restricted` 时开关会提示，并给出对应的 `Set-ExecutionPolicy` 命令。
 
 ### Visual Studio Code

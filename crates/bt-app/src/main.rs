@@ -71,6 +71,7 @@ mod i18n;
 mod icons;
 mod input;
 mod keyhint;
+mod launch_wire;
 mod linebreak;
 mod marks;
 mod mouse_trace;
@@ -401,6 +402,19 @@ enum AppEvent {
     /// this says only that there are some, which is the shape every other member of the family has
     /// and for the same reason — one nudge for any number of arrivals.
     AttentionSpoke,
+    /// **A second `folio.exe` handed this one its command line** (§7.59, `launch_wire`).
+    ///
+    /// The same family as [`Self::AttentionSpoke`] and owed a wake of its own for that variant's
+    /// reason in its most literal form: the person who asked for this tab is looking at a taskbar
+    /// icon they just clicked, and this window may have been sitting untouched for an hour. There
+    /// is no output, no keystroke and no hover that would otherwise produce the turn on which the
+    /// request is read, and a tab that appeared the next time somebody moved the pointer would be a
+    /// launch that looked like it had done nothing at all.
+    ///
+    /// Carries nothing, on the same footing: the requests are parked in `launch_wire`'s inbox by
+    /// the listener thread and this says only that there are some — one nudge for any number of
+    /// arrivals.
+    LaunchAsked,
     /// **The kernel says a file in the schemes folder moved** (§7.1.6c-4c,
     /// `scheme_watch`).
     ///
@@ -9686,6 +9700,22 @@ struct App {
     /// invariant lives; walking a handful of windows once a turn costs nothing
     /// and cannot go stale.
     windows_open: Vec<OpenWindow>,
+    /// **The windows of this run, oldest visit first** (§7.59).
+    ///
+    /// The one question a second `folio.exe` asks that nothing else in this
+    /// process ever needed: *which window was the reader last in*. `windows_open`
+    /// cannot answer it — it is the opening order, refreshed every turn — and
+    /// neither can the platform, because the foreground at the moment a request
+    /// arrives belongs to the process that just started.
+    ///
+    /// **Maintained rather than refreshed**, which is the opposite of the field
+    /// above it and for the reason that field gives turned round: this is a
+    /// history and not a census. There is nothing to walk that would recover the
+    /// order a reader visited windows in, so it is written down as it happens —
+    /// once per window, on the transition into focus, and dropped when the window
+    /// is. See [`most_recently_active_window`], which is the rule this list is
+    /// read by.
+    activated: Vec<WindowId>,
     /// **The window a `Move to window ▸` row is pointing at**, if a hand is on
     /// one (B9).
     ///
@@ -9865,6 +9895,28 @@ impl NewWindowPlan {
             ask_about_unpinned: false,
             receives: None,
             quake: true,
+        }
+    }
+
+    /// **A window a second `folio.exe` asked for** (§7.59).
+    ///
+    /// `like` is `None` for [`Self::summoned`]'s reason exactly: nothing in this
+    /// process asked, so there is no window whose strip and sidebar this one
+    /// should be copying. It opens wearing the resting shape a window with
+    /// nothing to inherit opens wearing, which is the answer a cold launch
+    /// already gives — and a cold launch is precisely what this request would
+    /// have been if the reader had not already had a Folio running.
+    ///
+    /// Used only when the run has no window to copy from; a request that found
+    /// one goes through [`Self::fresh`], because a second window opened from a
+    /// window the reader is looking at is the same event `Ctrl+Shift+M` is.
+    const fn requested() -> Self {
+        Self {
+            like: None,
+            saved: None,
+            ask_about_unpinned: false,
+            receives: None,
+            quake: false,
         }
     }
 
@@ -33276,6 +33328,22 @@ impl Runtime<'_> {
                 let _ = proxy.send_event(AppEvent::AttentionSpoke);
             });
         }
+        // **And the second launch's door, beside it** (§7.59).
+        //
+        // This process holds the data directory's claim — `main` decided that above, and a process
+        // that did not hold it never reached here — so it is this process's job to answer for the
+        // name. It is opened here rather than in `main` for one reason: the answer to a launch is a
+        // tab or a window, and neither exists until the loop does.
+        //
+        // A failure is silent and total, on the attention endpoint's own footing: no endpoint means
+        // a second launch finds no door and opens its own window, which is where every machine was
+        // before this slice, and the terminal is otherwise unaffected.
+        {
+            let proxy = proxy.clone();
+            launch_wire::open(&persist::storage_dir(), move || {
+                let _ = proxy.send_event(AppEvent::LaunchAsked);
+            });
+        }
         // **The language, before anything is measured.** Every width in this
         // window is measured from the words that go in it, and the first of
         // those measurements happens as soon as a chrome frame is built — so the
@@ -33829,6 +33897,7 @@ impl Runtime<'_> {
             quit_requested: false,
             quit: None,
             windows_open: Vec::new(),
+            activated: Vec::new(),
             window_ring: None,
             window_ring_shown: None,
             quake: quake::Quake::default(),
@@ -34678,6 +34747,70 @@ impl Runtime<'_> {
     /// it is.
     fn is_quake_window(&self) -> bool {
         self.app.quake.is_quake(self.window.window.id())
+    }
+
+    /// **This window is the one the reader is in now** (§7.59).
+    ///
+    /// Moved to the back rather than appended, so the list stays a history with
+    /// one entry per window instead of a log with one entry per visit: a reader
+    /// alternating between two windows all afternoon would otherwise grow a
+    /// vector for as long as the process runs.
+    ///
+    /// **The summoned terminal writes itself down like any other window**, and
+    /// is filtered out where the list is *read* ([`most_recently_active_window`])
+    /// rather than where it is written. One exclusion, at the one door that
+    /// cares, is a rule that cannot be half-applied — and the fact this records
+    /// is true of it: the reader really was in it.
+    fn note_this_window_was_visited(&mut self) {
+        let id = self.window.window.id();
+        self.app.activated.retain(|visited| *visited != id);
+        self.app.activated.push(id);
+    }
+
+    /// **Which profile a second launch's tab starts as, and what could not be
+    /// honoured** (§7.59).
+    ///
+    /// Through [`cli::resolve`] and not through a rule of this door's own, which
+    /// is the whole reason the request carries the id the caller *typed* rather
+    /// than an index: `folio --profile fish` means the same thing whether or not
+    /// a Folio was already running, including what it means when this build has
+    /// no such profile — the default, and a card that says so.
+    ///
+    /// The folder is handed to [`Self::new_tab_with_profile`] in Windows' own
+    /// namespace rather than the crossed one this returns beside the profile,
+    /// because that door crosses it itself; what is taken from here is the
+    /// profile and the list of things to say out loud.
+    fn launch_profile(
+        &self,
+        request: &launch_wire::LaunchRequest,
+    ) -> (usize, Vec<cli::CliRefusal>) {
+        let plan = cli::resolve(
+            &cli::CliRequest {
+                cwd: request.cwd.clone(),
+                profile: request.profile.clone(),
+                path: None,
+                embedding: false,
+                new_window: request.new_window,
+            },
+            self.default_profile(),
+            cli::machine_path_kind,
+        );
+        (plan.profile, plan.refusals)
+    }
+
+    /// One card per thing a second launch asked for and did not get — the same
+    /// door and the same cap [`Self::honour_command_line`] uses, because they are
+    /// the same event arriving through two front doors.
+    fn report_launch_refusals(&mut self, refusals: Vec<cli::CliRefusal>) -> Result<()> {
+        for refusal in refusals {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                refusal.notice(),
+            )?;
+        }
+        Ok(())
     }
 
     /// The `+`'s verb: a tab on the default profile, which is what the button's
@@ -92550,6 +92683,209 @@ impl<K: Copy + Eq + std::hash::Hash, W> Windows<K, W> {
     }
 }
 
+/// **Which window a second `folio.exe`'s request lands in** (§7.59) — pure, and
+/// the whole of the rule.
+///
+/// `visited` is [`App::activated`], oldest first; `open` is the windows that are
+/// actually on the screen this turn, in the order they opened; `quake` names the
+/// summoned terminal if this run has one.
+///
+/// Three clauses, and each answers a case the others cannot:
+///
+/// * **The last window the reader was in**, which is the whole request: somebody
+///   pressed a taskbar icon, and what they mean by "Folio" is the window they
+///   were last looking at.
+/// * **Never the summoned terminal** (§7.54). It is a companion and not a window
+///   a reader came to, and it spends most of its life hidden — a tab that landed
+///   in it would be a tab nobody can see, opened in answer to a click.
+/// * **A window that has never been focused is still a window.** A run restored
+///   from `session.json` and left alone has an `activated` list with nothing in
+///   it that is still open, and the honest answer then is the oldest window
+///   rather than none at all: the fallback opens a *window*, and a run that
+///   already has one does not need a second.
+///
+/// `None` only when every open window is the summoned one, or when there are no
+/// windows at all — and the caller opens an ordinary window, which is the
+/// ruling's own sentence for that case.
+///
+/// Generic over the key for [`Windows`]' reason: `WindowId` is winit's and a test
+/// cannot make one, while the rule is not about winit.
+fn most_recently_active_window<K: Copy + Eq>(
+    visited: &[K],
+    open: &[K],
+    quake: Option<K>,
+) -> Option<K> {
+    let eligible = |key: &&K| open.contains(key) && Some(**key) != quake;
+    visited
+        .iter()
+        .rev()
+        .find(eligible)
+        .or_else(|| open.iter().find(eligible))
+        .copied()
+}
+
+/// **Where a second `folio.exe`'s request lands** (§7.59).
+///
+/// Two halves, and they are two halves because only one of them stands up in a
+/// test process. The rule for *which* window is a function of three lists and is
+/// held directly. What is done to that window is a tab, a swap chain and a Win32
+/// foreground, none of which exists here — so what is held for those is the
+/// shape of the four functions that do it: which door each reaches for, and in
+/// what order. That is `key_hint_spend_tests`' own device and it is used for its
+/// reason: every one of these calls is a promise the ruling made.
+#[cfg(test)]
+mod launch_landing_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The body of a method, from its signature to the next method's.
+    ///
+    /// **Every caller spells the signature through `concat!`**, because this
+    /// module stands *above* the methods it reads: a needle written as one
+    /// literal would be found here first, and the test would assert against
+    /// itself.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+    }
+
+    /// **RED (§7.59) — a launch lands in the window the reader was last in, and
+    /// never in the summoned terminal.**
+    ///
+    /// Five cases and each is one clause of the ruling. Before this slice there
+    /// was no such question in this program: a second `folio.exe` was a second
+    /// process and never had to choose a window at all.
+    ///
+    /// MUTATIONS: drop the `quake` filter and the second case answers the
+    /// companion; drop the `open` filter and the third answers a window that has
+    /// been closed; drop the `or_else` and the fourth answers `None`, so a
+    /// restored run that nobody has clicked in yet grows a second window for
+    /// every launch.
+    #[test]
+    fn a_launch_lands_in_the_window_the_reader_was_last_in() {
+        let chosen = super::most_recently_active_window;
+        assert_eq!(
+            chosen(&[1, 2, 3], &[1, 2, 3], None),
+            Some(3),
+            "the last window visited is the window a launch means"
+        );
+        assert_eq!(
+            chosen(&[1, 2, 9], &[1, 2, 9], Some(9)),
+            Some(2),
+            "the summoned terminal is a companion and not a window a reader came to"
+        );
+        assert_eq!(
+            chosen(&[1, 2, 3], &[1, 2], None),
+            Some(2),
+            "a window that has been closed is not one a launch can land in"
+        );
+        assert_eq!(
+            chosen(&[], &[4, 5], None),
+            Some(4),
+            "a run nobody has clicked in yet still has windows, and the oldest \
+             is a better answer than a second window the reader did not ask for"
+        );
+        assert_eq!(
+            chosen(&[9], &[9], Some(9)),
+            None,
+            "a run whose only window is the summoned one has nowhere to put a \
+             tab, and the caller opens an ordinary window"
+        );
+        assert_eq!(chosen(&[], &[], None), None);
+    }
+
+    /// **RED — the request reaches the tab door with the folder and the profile
+    /// it was sent with, and the window comes to the front.**
+    ///
+    /// The tab half of the ruling, held at the two seams the ticket names.
+    /// `new_tab_with_profile` is the door `New terminal in folder…` already goes
+    /// through, and the folder is handed to it **uncrossed** — the profile's
+    /// namespace is that door's business, and a launch that crossed it here
+    /// would cross it twice.
+    ///
+    /// MUTATIONS: pass `None` for the place and a second start opens a tab in
+    /// somebody else's folder; pass the resolved plan's `cwd` instead of the
+    /// request's and a WSL profile is handed a path that has already been
+    /// translated once.
+    #[test]
+    fn a_request_opens_its_tab_where_it_asked_and_raises_the_window() {
+        let tab = body(concat!("    fn ", "open_a_tab_for_a_launch("));
+        assert!(
+            tab.contains("runtime.new_tab_with_profile(profile, request.cwd.clone())"),
+            "the tab door is not reached with the request's own folder:\n{tab}"
+        );
+        assert!(
+            tab.contains("runtime.launch_profile(request)"),
+            "the profile is decided somewhere other than `cli::resolve`:\n{tab}"
+        );
+        let settle = body(concat!("    fn ", "settle_launch_requests("));
+        assert!(
+            settle.contains("most_recently_active_window("),
+            "the window is chosen by some rule other than the one that is \
+             tested:\n{settle}"
+        );
+        assert!(
+            settle.contains("self.raise_for_a_launch(id)"),
+            "a tab opens and the window it opened in stays behind whatever the \
+             reader was looking at:\n{settle}"
+        );
+        let raise = body(concat!("    fn ", "raise_for_a_launch("));
+        let restore = raise.find("set_minimized(false)").unwrap_or(usize::MAX);
+        let front = raise.find("give_foreground_to(").unwrap_or(0);
+        assert!(
+            restore < front,
+            "an iconified window is asked to the front before it is restored, \
+             which on some configurations is a click answered twice and seen \
+             never:\n{raise}"
+        );
+    }
+
+    /// **RED — `--new-window` opens a window in this process, through the door
+    /// `Ctrl+Shift+M` already goes through.**
+    ///
+    /// The opt-out, and the two things about it that are the ruling rather than
+    /// an implementation: it is a `NewWindowPlan` spent by this process's own
+    /// window door — never a second process — and the stand-in tab a window
+    /// cannot be built without is retired when the request named a place, which
+    /// is `settle_tear_out`'s rule at a second door.
+    ///
+    /// MUTATIONS: drop the `open_pending_window` call and the plan sits unspent
+    /// until something else opens a window; drop the retirement and every
+    /// `--new-window --cwd` opens a window with two tabs, one of them nobody
+    /// asked for.
+    #[test]
+    fn a_window_asked_for_by_a_second_start_is_opened_by_this_process() {
+        let settle = body(concat!("    fn ", "settle_launch_requests("));
+        assert!(
+            settle.contains("request.new_window"),
+            "the opt-out is never read:\n{settle}"
+        );
+        assert!(
+            settle.contains("self.open_a_window_for_a_launch(event_loop, target, &request)"),
+            "a request that asked for a window has no door to it:\n{settle}"
+        );
+        let door = body(concat!("    fn ", "open_a_window_for_a_launch("));
+        assert!(
+            door.contains("app.pending_new_windows.push(plan)")
+                && door.contains("self.open_pending_window(event_loop)?"),
+            "a window is opened by something other than this process's own \
+             window door:\n{door}"
+        );
+        assert!(
+            door.contains("NewWindowPlan::requested") && door.contains("NewWindowPlan::fresh"),
+            "a run with no window to copy from and a run with one are not told \
+             apart:\n{door}"
+        );
+        assert!(
+            door.contains("runtime.retire_the_stand_in(stand_in)?"),
+            "the stand-in a window is built holding is never taken away:\n{door}"
+        );
+    }
+}
+
 /// **Every answer the hand gives spends a raised hint card** (§7.1.5e′, user
 /// ruling 2026-08-25).
 ///
@@ -97385,6 +97721,13 @@ impl FolioApp {
             // same sentence the first press said.
             if let Some(app) = self.app.as_mut() {
                 app.quake.forget(id);
+                // **A window the reader closed is not a window they were last
+                // in** (§7.59). Here rather than in `close`, at the one door
+                // every road out of the registry passes through, so the visit
+                // history and the registry cannot come to disagree — and a
+                // `WindowId` is reused by winit, so a stale entry is not a miss,
+                // it names somebody else's window.
+                app.activated.retain(|visited| *visited != id);
             }
         }
         // **An empty registry is the end of the run** (§7.54e ①, user ruling
@@ -97574,6 +97917,155 @@ impl FolioApp {
             }
         }
         Ok(())
+    }
+
+    /// **Everything a second `folio.exe` asked for, in the turn it was asked**
+    /// (§7.59).
+    ///
+    /// **After [`Self::open_pending_window`] and not before it**, which is the
+    /// one ordering constraint this function has: it queues a plan and spends it
+    /// on the very next line — the drag handover's own shape — and doing that
+    /// before the chain's own door would spend somebody else's plan as well and
+    /// then read the wrong window back as "the one that just opened".
+    ///
+    /// Each request lands in one of two places and there is no third:
+    ///
+    /// * **A tab in the window the reader was last in.** The place and the
+    ///   profile go through [`Runtime::new_tab_with_profile`], which is the door
+    ///   `New terminal in folder…` already goes through, so a folder the chosen
+    ///   profile cannot name is inherited-from rather than opened at — one rule,
+    ///   stated once, and this door does not get a second.
+    /// * **A window**, when the request asked for one, or when this run has no
+    ///   window that is not the summoned terminal.
+    ///
+    /// **And then the window comes to the front**, which is the half a person
+    /// actually sees. It can only work because the process that made the request
+    /// spent its own foreground rights on this one before it exited — see
+    /// `bt_platform::launch_pipe`'s four steps — and it is asked for through the
+    /// recipe §7.54 already uses rather than a second one.
+    fn settle_launch_requests(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        let requests = launch_wire::take();
+        for request in requests {
+            let target = self.app.as_ref().and_then(|app| {
+                most_recently_active_window(
+                    &app.activated,
+                    &app.windows_open
+                        .iter()
+                        .map(|open| open.id)
+                        .collect::<Vec<_>>(),
+                    app.quake.window(),
+                )
+            });
+            let landed = match target {
+                Some(id) if !request.new_window => {
+                    self.open_a_tab_for_a_launch(id, &request)?;
+                    Some(id)
+                }
+                _ => self.open_a_window_for_a_launch(event_loop, target, &request)?,
+            };
+            let Some(id) = landed else {
+                continue;
+            };
+            // **The window a request landed in is the window the reader is in
+            // now**, written here as well as on the focus transition: a second
+            // request arriving in the same turn must not be sent back to the
+            // window the first one has just left behind, and the focus event
+            // that would have said so has not been delivered yet.
+            if let Some(app) = self.app.as_mut() {
+                app.activated.retain(|visited| *visited != id);
+                app.activated.push(id);
+            }
+            self.raise_for_a_launch(id);
+        }
+        Ok(())
+    }
+
+    /// One launch's tab, in a window that is already standing.
+    fn open_a_tab_for_a_launch(
+        &mut self,
+        id: WindowId,
+        request: &launch_wire::LaunchRequest,
+    ) -> Result<()> {
+        let Some(mut runtime) = self.runtime(id) else {
+            return Ok(());
+        };
+        let (profile, refusals) = runtime.launch_profile(request);
+        runtime.new_tab_with_profile(profile, request.cwd.clone())?;
+        runtime.report_launch_refusals(refusals)
+    }
+
+    /// One launch's window, and the tab it opens holding.
+    ///
+    /// `like` is the window the rail is copied from, or `None` for a run whose
+    /// only window is the summoned terminal — see [`NewWindowPlan::requested`].
+    ///
+    /// **The stand-in goes**, and it goes for [`Self::settle_tear_out`]'s reason
+    /// and through its door: a window cannot be built holding nothing, so it
+    /// opens with the default profile's one tab, and a request that named a place
+    /// is answered by a tab standing in that place with the stand-in retired
+    /// behind it. A request that named none is already holding exactly what it
+    /// asked for, and nothing further happens to it.
+    fn open_a_window_for_a_launch(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        like: Option<WindowId>,
+        request: &launch_wire::LaunchRequest,
+    ) -> Result<Option<WindowId>> {
+        let plan = like.map_or_else(NewWindowPlan::requested, NewWindowPlan::fresh);
+        match self.app.as_mut() {
+            Some(app) => app.pending_new_windows.push(plan),
+            None => return Ok(None),
+        }
+        self.open_pending_window(event_loop)?;
+        // The window that has just opened is the last one in the opening order,
+        // which is `Windows::insert`'s own contract: it goes to the back.
+        let Some(opened) = self.windows.key_at(self.windows.len().saturating_sub(1)) else {
+            return Ok(None);
+        };
+        if request.cwd.is_none() && request.profile.is_none() {
+            return Ok(Some(opened));
+        }
+        let stand_in = self
+            .windows
+            .get_mut(opened)
+            .and_then(|window| window.tabs.first())
+            .map(|tab| tab.id);
+        let Some(mut runtime) = self.runtime(opened) else {
+            return Ok(Some(opened));
+        };
+        let (profile, refusals) = runtime.launch_profile(request);
+        runtime.new_tab_with_profile(profile, request.cwd.clone())?;
+        if let Some(stand_in) = stand_in {
+            runtime.retire_the_stand_in(stand_in)?;
+        }
+        runtime.report_launch_refusals(refusals)?;
+        Ok(Some(opened))
+    }
+
+    /// Bring the window a launch landed in to the front.
+    ///
+    /// **Un-minimised first**, which is `open_from_notification`'s own note at a
+    /// second door and for its reason: a foreground call on an iconified window
+    /// brings it forward on some configurations without restoring it, and a
+    /// restored window that never came forward is the same click going
+    /// unanswered twice.
+    ///
+    /// **Failure is silent to the reader and not reported at all.** There is
+    /// nothing a person can do about a foreground lock, and the tab they asked
+    /// for is there either way — see `bt_platform::hotkey::give_foreground_to`,
+    /// whose own note this is.
+    fn raise_for_a_launch(&mut self, id: WindowId) {
+        let Some(runtime) = self.runtime(id) else {
+            return;
+        };
+        if runtime.window.window.is_minimized() == Some(true) {
+            runtime.window.window.set_minimized(false);
+        }
+        if let Ok(hwnd) = window_hwnd(&runtime.window.window)
+            && !bt_platform::hotkey::give_foreground_to(hwnd)
+        {
+            eprintln!("BT_LAUNCH the window a second start asked for could not take the keyboard");
+        }
     }
 
     /// **The summon's whole turn** (§7.54): make the claim on the chord agree
@@ -98558,6 +99050,12 @@ impl FolioApp {
             // ever drawn of a window half way through it.
             .and_then(|()| self.settle_drag_handover())
             .and_then(|()| self.open_pending_window(event_loop))
+            // **After the window door** (§7.59), because a request that asked for
+            // a window queues the plan and spends it on the very next statement
+            // of its own — running before this line would spend the drag
+            // handover's plan alongside it and then read the wrong window back as
+            // the one that had just opened.
+            .and_then(|()| self.settle_launch_requests(event_loop))
             // **After the window door**, because a press with no window yet has
             // to open one - and it spends the plan it queues on the very next
             // line, exactly as the drag handover above does, so that the press,
@@ -98926,6 +99424,14 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 }
                 Ok(())
             }
+            // **Nothing is done here** (§7.59), on `QuakeSummoned`'s own
+            // reasoning: the requests are already parked in `launch_wire`'s
+            // inbox by the listener thread, and what is owed is the turn that
+            // reads them. `about_to_wait` runs immediately after this arm returns
+            // and `settle_launch_requests` is on its chain, so acting here would
+            // be doing the work one statement early and outside the order every
+            // other window verb is settled in.
+            AppEvent::LaunchAsked => Ok(()),
             AppEvent::MathReady => {
                 let (mut batch, gone) = self.drain_math_answers();
                 self.for_each_window(|runtime| runtime.apply_math_results(&mut batch, gone))
@@ -99385,6 +99891,15 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // there is no observed flap to debounce, and a timer put in
                 // against one would be exactly the machine this rule is about.
                 let regained = !runtime.window.window_focused;
+                // **The one place the visit order is written** (§7.59). On the
+                // transition and not on the event, which is `regained`'s own
+                // rule read one line down: a platform that re-announced a focus
+                // this window already had must not move it up the list, because
+                // then "most recently active" would mean "most recently
+                // re-announced" on the machines that do that.
+                if regained {
+                    runtime.note_this_window_was_visited();
+                }
                 runtime.set_cursor_focus(true, Instant::now());
                 let reread = if regained {
                     // And the documents whose folders no kernel would speak for
@@ -104329,12 +104844,23 @@ fn panic_report(unix_ms: u128, thread: &str, panic_text: &str, backtrace: &str) 
 /// exiting in silence would be a program that refused an argument and never said
 /// so.
 fn report_at_the_front_door(fault: &cli::CliFault) {
+    say_at_the_front_door(&cli::refusal_text(fault));
+}
+
+/// **One block of text, where the caller of a launch that is about to exit will
+/// see it** — the tail [`report_at_the_front_door`] and `launch_wire` share.
+///
+/// Split out when the second caller arrived (§7.59) rather than copied, because
+/// what the two share is every line of it: the language, the console, and the
+/// box for when there is no console. A second spelling would be a second place
+/// for the `install` to be forgotten, and a refusal in the wrong language is
+/// exactly the kind of thing nobody notices until it ships.
+fn say_at_the_front_door(text: &str) {
     i18n::install(resolved_language(
         persist::SettingsStore::open().loaded().language,
     ));
-    let text = cli::refusal_text(fault);
     if !bt_platform::write_to_console(&format!("{text}\n")) {
-        bt_platform::message_box(APP_NAME, &text);
+        bt_platform::message_box(APP_NAME, text);
     }
 }
 
@@ -104391,6 +104917,38 @@ fn main() -> Result<()> {
             std::process::exit(fault.exit_code());
         }
     };
+    // **And the third doorbell, which is this program ringing its own** (§7.59).
+    //
+    // The claim on the data directory is R4-5's and is taken exactly where it
+    // was: `is_writer_of` takes it on the first ask and holds it for the life of
+    // the process. What is new is what happens when it is *refused* — a Folio is
+    // already running, and since the ruling of 2026-09-08 this launch is that
+    // Folio's, not a second one. So the command line goes down the well-known
+    // pipe and this process leaves.
+    //
+    // **Above `enter_resident_run` and below the parse**, and both halves of that
+    // are deliberate. Below, because what is handed over is the request the parse
+    // produced. Above, because the one sentence this path can print — a folder
+    // that is not there — belongs on the console it was typed at; from the next
+    // line down, this program's words go into a file, and a person who typed
+    // `folio --cwd D:\gone` would be answered in a log they do not know exists.
+    //
+    // `None` is every reason to carry on and open a window, which is the
+    // behaviour every Folio had before this channel existed — see
+    // `launch_wire::hand_over` for the five of them and for why they are one
+    // branch.
+    //
+    // The binding is `handed` and not `code` on purpose: `main`'s own tail is
+    // pinned by `the_process_leaves_by_the_one_road_a_webview2_host_may_take` on
+    // the literal `leave_process(code)`, and a second call spelled the same way
+    // would answer that search first — turning a pin on where the run's last
+    // line is written into a pin on a branch that never writes one.
+    let storage = persist::storage_dir();
+    if !persist::is_writer_of(&storage)
+        && let Some(handed) = launch_wire::hand_over(&storage, &request, say_at_the_front_door)
+    {
+        bt_platform::leave_process(handed);
+    }
     // **The thread that owns the window says so, before it owns one.** Every
     // worker this process starts is spawned into the band below normal
     // (`bt_platform::spawn_at_priority`), and this is the other half of that
@@ -104405,7 +104963,6 @@ fn main() -> Result<()> {
     // console this process borrowed is very often a pane inside another Folio.
     // Before `hang_watch::start`, so the watchdog's own line lands in the log
     // and never in somebody's shell — which is the report that opened this.
-    let storage = persist::storage_dir();
     let channel = diagnostics::enter_resident_run(&storage);
     if diagnostics::switched_on(std::env::var_os("BT_STARTUP_TRACE")) {
         eprintln!(

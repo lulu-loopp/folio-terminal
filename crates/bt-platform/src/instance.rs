@@ -108,11 +108,14 @@ pub fn claim_data_directory(directory: &Path) -> Option<DataDirectoryClaim> {
     Some(DataDirectoryClaim { handle })
 }
 
-/// The kernel name one directory's claim is taken under.
+/// **One directory, reduced to the segment every name for it is built out of.**
 ///
-/// Pure, and public to this crate's tests, because the two properties that
-/// matter are properties of a string: two spellings of one directory claim one
-/// name, and two different directories claim two.
+/// Pure, and public because two names are now derived from one directory — the
+/// claim below and the launch endpoint in [`crate::launch_pipe`] — and the
+/// property that matters is a property of *both*: a test window under an
+/// isolated `APPDATA` must miss the reader's everyday Folio at every door, not
+/// at one of them. Two spellings that claim one mutex have to address one pipe,
+/// and the only way to guarantee that is for there to be one folding.
 ///
 /// The spelling is folded the way Windows folds a path — case, and a trailing
 /// separator — and then reduced to a fixed-length digest, because a kernel object
@@ -121,7 +124,7 @@ pub fn claim_data_directory(directory: &Path) -> Option<DataDirectoryClaim> {
 /// secret, and what it has to do is not collide between the handful of
 /// directories one machine has.
 #[must_use]
-pub fn claim_name(directory: &Path) -> String {
+pub fn directory_tag(directory: &Path) -> String {
     let folded = directory
         .to_string_lossy()
         .trim_end_matches(['\\', '/'])
@@ -131,7 +134,18 @@ pub fn claim_name(directory: &Path) -> String {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    format!("Local\\Folio.data.{hash:016x}")
+    format!("{hash:016x}")
+}
+
+/// The kernel name one directory's claim is taken under.
+///
+/// Pure, and public to this crate's tests, because the two properties that
+/// matter are properties of a string: two spellings of one directory claim one
+/// name, and two different directories claim two. Both of them are
+/// [`directory_tag`]'s, which is why the folding is there and not here.
+#[must_use]
+pub fn claim_name(directory: &Path) -> String {
+    format!("Local\\Folio.data.{}", directory_tag(directory))
 }
 
 /// A machine with no kernel to ask always answers "you are the one writer",

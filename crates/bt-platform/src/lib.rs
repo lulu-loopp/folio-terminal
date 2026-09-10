@@ -2136,6 +2136,17 @@ pub mod handoff;
 #[cfg(windows)]
 pub mod attention_pipe;
 
+/// **The second launch's door into the first** — one well-known named pipe per data directory
+/// (`docs/DESIGN.md` §7.59).
+///
+/// Not a seventh unsafe boundary but a second door onto the fourth: it shares
+/// [`attention_pipe`]'s descriptor, its owned handle, its overlapped event and
+/// its bounded write rather than restating any of them, and what is written in
+/// it is the two things a launch needs that a doorbell does not — a name a
+/// stranger can compute, and an answer.
+#[cfg(windows)]
+pub mod launch_pipe;
+
 /// The global summon key, and the foreground it hands back — the quake
 /// terminal's other half (`docs/DESIGN.md` §7.54).
 ///
