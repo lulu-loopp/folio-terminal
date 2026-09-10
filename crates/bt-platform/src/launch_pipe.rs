@@ -658,7 +658,11 @@ fn read_reply(pipe: HANDLE, buffer: &mut [u8], budget: Duration) -> io::Result<u
         Err(error) => return Err(win32_io_error(error)),
     }
     let handles = [event.handle()];
-    let milliseconds = u32::try_from(budget.as_millis()).unwrap_or(u32::MAX);
+    // Rounded **up**: a budget of 1999.6 ms waited as 1999 ms is a launch that gave up a hair
+    // before its allowance, and the allowance is the one number this module promises.
+    let milliseconds =
+        u32::try_from(budget.as_millis() + u128::from(budget.subsec_nanos() % 1_000_000 != 0))
+            .unwrap_or(u32::MAX);
     // SAFETY: the event belongs to this call and outlives the wait.
     let answer = unsafe { WaitForMultipleObjects(&handles, false, milliseconds) };
     let timed_out = answer != WAIT_OBJECT_0;
@@ -864,8 +868,14 @@ mod tests {
         })
         .expect_err("a Folio that never answers cannot be handed anything");
         assert_eq!(refused.kind(), io::ErrorKind::TimedOut);
+        // **One timer tick of slack.** The kernel wait counts in interrupt time and may return up
+        // to a tick (15.6 ms on a machine nobody has asked for a finer clock) before the
+        // monotonic clock this test reads says the budget is spent; a CI runner is such a
+        // machine. The promise under test is that the launch does not give up *early*, and a
+        // tick is not early — it is the resolution of the wait.
+        const TICK: Duration = Duration::from_millis(20);
         assert!(
-            began.elapsed() >= HANDOVER_BUDGET,
+            began.elapsed() + TICK >= HANDOVER_BUDGET,
             "the budget is waited out before the launch gives up"
         );
         assert!(
