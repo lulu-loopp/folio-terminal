@@ -4052,6 +4052,15 @@ mod keyboard_tests {
         ("git-page", "Ctrl+Shift+g"),
         ("open-settings", "Ctrl+,"),
         ("save-preview", "Ctrl+s"),
+        // **Two more on 2026-09-10** (ticket T3), and they are the two rows on
+        // this list a focused page does **not** hand back — the only such pair
+        // this window ships, and `KEPT_BY_A_PAGE` is where that is counted. A
+        // page *is* a preview seat, so a `Scope::Preview` row would be in force
+        // over one; `Ctrl+Z` and `Ctrl+Y` are a page's own undo inside its own
+        // fields (§2.2, and `the_page_keeps_every_key_the_window_does_not_claim`
+        // below), so the two rows carry `Scope::PreviewDocument` instead.
+        ("undo-preview", "Ctrl+z"),
+        ("redo-preview", "Ctrl+y"),
         ("prev-command-mark", "Ctrl+Shift+ArrowUp"),
         ("next-command-mark", "Ctrl+Shift+ArrowDown"),
         ("open-search", "Ctrl+f"),
@@ -4154,6 +4163,17 @@ mod keyboard_tests {
         assert!(!claims_chord(&cleared, b'Y' as u16, true, true, false));
     }
 
+    /// How many of [`EXPECTED_CHORDS`] a focused page keeps for itself,
+    /// because their rows are out of force over one (ticket T3, 2026-09-10).
+    ///
+    /// A literal rather than a filter over `BINDINGS`, and deliberately: a
+    /// count derived from the same scopes the claim is derived from would
+    /// agree with itself whatever anybody did to it. This is a number a
+    /// person has to change on purpose, which is what makes the next row
+    /// scoped away from a page a decision somebody took rather than one that
+    /// happened.
+    const KEPT_BY_A_PAGE: usize = 2;
+
     /// RED — and every one of them reaches a virtual key, because
     /// `AcceleratorKeyPressed` speaks Win32 and nothing else.
     #[test]
@@ -4161,7 +4181,7 @@ mod keyboard_tests {
         let claims = claimable_chords(&Shortcuts::defaults(), every_focus());
         assert_eq!(
             claims.len(),
-            EXPECTED_CHORDS.len(),
+            EXPECTED_CHORDS.len() - KEPT_BY_A_PAGE,
             "a chord this window owns that the web host cannot name in Win32 is \
              a chord that silently stops working while a page has the focus"
         );

@@ -131,6 +131,22 @@ pub(crate) enum Action {
     /// The one row in the table that is not the window's everywhere. See
     /// [`Scope`].
     SavePreview,
+    /// **Take back the last change to the preview seat's buffer** (ticket T3,
+    /// 2026-09-10).
+    ///
+    /// Scoped for [`Self::SavePreview`]'s reason and reached through the same
+    /// door: the log is on the **buffer**, so this undoes the last change to the
+    /// file whatever pane made it, and the caret it hands back is the one the
+    /// pane that made it was using. On a surface with nothing to type into — a
+    /// rendered page today — there is nothing to take back and the key is
+    /// swallowed like every other key there.
+    UndoPreview,
+    /// The same, forwards.
+    ///
+    /// **`Ctrl+Y` and not `Ctrl+Shift+Z`**, which is the other half of the
+    /// desktop's answer and the only half this window has free: `Ctrl+Shift+Z` is
+    /// [`Self::ToggleFocusMode`] and has been since 2026-08-10.
+    RedoPreview,
     /// Walk the command marks rail backwards — the previous command relative to
     /// the one the viewport is showing (§7.1.5c ③).
     ///
@@ -304,6 +320,33 @@ pub(crate) enum Scope {
     Window,
     /// Only while the preview seat holds the keyboard focus.
     Preview,
+    /// Only while the preview seat holds the keyboard **and there is a document
+    /// of this window's under it** — a preview seat that is not showing a page
+    /// (ticket T3, 2026-09-10).
+    ///
+    /// [`Self::Preview`] minus one surface, and that surface is why this is a
+    /// scope rather than a guard inside a handler. A hosted page **is** a preview
+    /// seat with a page on it (see [`Self::WebPage`]), so a [`Self::Preview`] row
+    /// is in force over one — which is right for the save, whose chord this
+    /// window has claimed over every preview since ruling 9, and wrong for the
+    /// two rows added here. `Ctrl+Z` and `Ctrl+Y` are a *page's* own undo and
+    /// redo inside its own fields; W0′ measured that a focused page expects to
+    /// keep them (`w0p-evidence.md` §2.2) and
+    /// `webhost::keyboard_tests::the_page_keeps_every_key_the_window_does_not_claim`
+    /// holds the line. A window that claimed them in order to do nothing would be
+    /// taking undo away from every form on the web.
+    ///
+    /// Said here, the row is simply **not in the table** for that press and the
+    /// key is left to the page; said as an early return at the dispatch site, the
+    /// chord would be claimed back through `AcceleratorKeyPressed` and then
+    /// dropped, which is [`Self::TerminalPrimary`]'s own argument one surface
+    /// over and leaves the page silent.
+    ///
+    /// **It wears [`Self::Preview`]'s tag** rather than a sixth line of its own,
+    /// because the tag is what a reader acts on: both scopes say "in a preview",
+    /// which is true of both, and the difference between them shows up only on a
+    /// surface where neither key does anything this window can be seen doing.
+    PreviewDocument,
     /// Only while a **terminal** holds the keyboard and is showing its **primary
     /// screen**.
     ///
@@ -420,7 +463,8 @@ impl Scope {
     pub(crate) const fn tag(self) -> Option<Text> {
         match self {
             Self::Window => None,
-            Self::Preview => Some(Text::ShortcutScopePreview),
+            // One tag for two scopes — see [`Self::PreviewDocument`].
+            Self::Preview | Self::PreviewDocument => Some(Text::ShortcutScopePreview),
             Self::TerminalPrimary => Some(Text::ShortcutScopeTerminalPrimary),
             Self::SearchOpen => Some(Text::ShortcutScopeSearchOpen),
             Self::WebPage => Some(Text::ShortcutScopeWebPage),
@@ -442,6 +486,7 @@ impl Scope {
         match self {
             Self::Window => true,
             Self::Preview => focus.preview,
+            Self::PreviewDocument => focus.preview && !focus.web_page,
             Self::TerminalPrimary => focus.terminal_primary,
             Self::SearchOpen => focus.search_open,
             Self::WebPage => focus.web_page,
@@ -626,6 +671,19 @@ impl Binding {
             action,
             chord: Some(chord),
             scope: Scope::Preview,
+            surfaced: true,
+        }
+    }
+
+    /// A row in force only on a preview seat with a document of ours under it.
+    const fn preview_document(id: &'static str, title: Text, action: Action, chord: Chord) -> Self {
+        Self {
+            id,
+            title,
+            family: None,
+            action,
+            chord: Some(chord),
+            scope: Scope::PreviewDocument,
             surfaced: true,
         }
     }
@@ -1063,6 +1121,31 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutSavePreview,
         Action::SavePreview,
         Chord::new(CTRL, character("s")),
+    ),
+    // **The scoped row's two companions** (ticket T3, 2026-09-10), on ruling 9's
+    // own footing and reaching the buffer through the same door the save does.
+    //
+    // `^Z` suspends a job and `^Y` is readline's yank, so discipline (1) forbids
+    // taking either **from a terminal** — and the scope is what means it is not
+    // taken from one. Inside a preview there is no shell to take them from, and
+    // `Ctrl+Z` is what every editor on this platform undoes with.
+    //
+    // **The redo is `Ctrl+Y` and not `Ctrl+Shift+Z`.** The desktop is split
+    // between the two and this window has only one of them free: `Ctrl+Shift+Z`
+    // is `focus-mode` above, ruled on 2026-08-10, and it has been under a user's
+    // fingers ever since. Re-pointing it to settle a question that user has not
+    // been asked is the thing `new-window` two hundred lines up refused to do.
+    Binding::preview_document(
+        "undo-preview",
+        Text::ShortcutUndoPreview,
+        Action::UndoPreview,
+        Chord::new(CTRL, character("z")),
+    ),
+    Binding::preview_document(
+        "redo-preview",
+        Text::ShortcutRedoPreview,
+        Action::RedoPreview,
+        Chord::new(CTRL, character("y")),
     ),
     // **`Ctrl+Shift` and an arrow, and pointedly not the mock-up's `Ctrl+Alt`
     // and one** (user ruling 2026-08-16, inventory D-1).
@@ -3081,6 +3164,116 @@ mod tests {
         assert_eq!(press_in_preview(character("s"), CTRL_SHIFT), None);
     }
 
+    /// RED (ticket T3, 2026-09-10) — **`Ctrl+Z` and `Ctrl+Y` are the preview's
+    /// two history keys, on `Ctrl+S`'s own footing.**
+    ///
+    /// They are scoped for the reason the save is scoped and not for a new one:
+    /// `^Z` is the shell's suspend and `^Y` is readline's yank, and discipline
+    /// (1) does not let this table take either **from a terminal** — but there is
+    /// no terminal inside a preview to take them from. Out of the scope they are
+    /// not in the table at all and the shell hears them exactly as before.
+    ///
+    /// **Not `Ctrl+Shift+Z` for the redo**, which is what half the desktop uses:
+    /// that chord is `focus-mode` in this window, it has been under a user's
+    /// fingers since 2026-08-10, and a Markdown editor is not a reason to move
+    /// the Cards column out from under them. `Ctrl+Y` is the other half of the
+    /// desktop's answer and it is free.
+    ///
+    /// MUTATIONS:
+    /// ① give either row `Scope::Window` — the terminal assertions go red and so
+    ///    does `bare_control_letters_stay_with_the_terminal`;
+    /// ② point the redo at `CTRL_SHIFT` and `character("z")` — the conflict gate
+    ///    `every_chord_is_claimed_once` goes red on `focus-mode`;
+    /// ③ drop either row — the first two assertions go red, and so does
+    ///    `every_action_is_a_row_of_the_table`.
+    #[test]
+    fn control_z_and_control_y_are_the_previews_history_and_nobody_elses() {
+        assert_eq!(
+            press_in_preview(character("z"), CTRL),
+            Some(Action::UndoPreview)
+        );
+        assert_eq!(
+            press_in_preview(character("y"), CTRL),
+            Some(Action::RedoPreview)
+        );
+        assert_eq!(
+            press(character("z"), CTRL),
+            None,
+            "^Z suspends a job wherever there is a job to suspend"
+        );
+        assert_eq!(
+            press(character("y"), CTRL),
+            None,
+            "^Y is readline's yank and stays with the shell"
+        );
+        // The Cards column keeps the chord it has had since 2026-08-10, inside a
+        // preview as much as outside one.
+        assert_eq!(
+            press_in_preview(character("z"), CTRL_SHIFT),
+            Some(Action::ToggleFocusMode)
+        );
+        // **And a page keeps its own undo.** A hosted page is a preview seat
+        // with a page on it, so these two rows are scoped to exclude one — see
+        // `Scope::PreviewDocument`, and `webhost`'s own gate, which is where the
+        // measurement that this matters is written down.
+        let on_a_page = Focus {
+            preview: true,
+            terminal_primary: false,
+            search_open: false,
+            web_page: true,
+        };
+        let table = Shortcuts::defaults();
+        for letter in ["z", "y"] {
+            assert_eq!(
+                table.lookup(&character(letter), &character(letter), CTRL, on_a_page),
+                None,
+                "Ctrl+{letter} is the page's own"
+            );
+        }
+        // The save is not: it has been the preview's over every surface since
+        // ruling 9, and a page is a preview.
+        assert_eq!(
+            table.lookup(&character("s"), &character("s"), CTRL, on_a_page),
+            Some(Action::SavePreview)
+        );
+    }
+
+    /// RED (ticket T3) — **the two new rows are rows like any other**: named
+    /// once, scoped to the preview, out of the AltGr zone, off `Enter`, and
+    /// reachable through the same lookup dispatch uses.
+    ///
+    /// The whole-table invariants already assert each of those over every row;
+    /// this asks them of these two by name, so a row that quietly loses its scope
+    /// or its id fails here as well as in a loop that names nobody.
+    ///
+    /// MUTATION: rename either id — the file that spells a user's override by id
+    /// stops finding the row, and this goes red before anybody's
+    /// `keybindings.json` does.
+    #[test]
+    fn the_history_rows_are_scoped_named_and_out_of_the_forbidden_zone() {
+        let ctrl_alt = ModifiersState::CONTROL.union(ModifiersState::ALT);
+        for (id, action, key) in [
+            ("undo-preview", Action::UndoPreview, "z"),
+            ("redo-preview", Action::RedoPreview, "y"),
+        ] {
+            let row = BINDINGS
+                .iter()
+                .find(|binding| binding.id == id)
+                .unwrap_or_else(|| panic!("{id} is a row of the table"));
+            assert_eq!(row.action, action);
+            assert_eq!(
+                row.scope,
+                Scope::PreviewDocument,
+                "{id} answers on a preview with a document under it"
+            );
+            assert!(row.surfaced, "{id} is a row a reader may rebind");
+            let chord = row.chord.as_ref().expect("{id} ships with a key");
+            assert_eq!(chord.key, ChordKey::Character(Cow::Borrowed(key)));
+            assert_eq!(chord.modifiers, CTRL);
+            assert!(!chord.modifiers.contains(ctrl_alt));
+        }
+    }
+
     /// PIN (§7.7 ②, user ruling 2026-08-22) — **the address field and the
     /// developer tools answer over a page and nowhere else.**
     ///
@@ -3459,7 +3652,10 @@ mod tests {
         // **And back on 2026-09-02** (DESIGN.md §7.55): `command-palette`, the
         // verb landed and the row returned to the chord it had left — 25 single
         // actions and 41 rows.
-        assert_eq!(BINDINGS.len(), 41);
+        // **Two more on 2026-09-10** (ticket T3): `undo-preview` and
+        // `redo-preview`, the preview editor's history keys — 27 single
+        // actions and 43 rows.
+        assert_eq!(BINDINGS.len(), 43);
         assert_eq!(
             BINDINGS
                 .iter()
@@ -3605,6 +3801,8 @@ mod tests {
             Action::GitPage,
             Action::OpenSettings,
             Action::SavePreview,
+            Action::UndoPreview,
+            Action::RedoPreview,
             Action::PrevCommandMark,
             Action::NextCommandMark,
             Action::OpenSearch,
@@ -4759,7 +4957,9 @@ mod tests {
             };
             let focus = match binding.scope {
                 Scope::Window => Focus::default(),
-                Scope::Preview => Focus {
+                // A page is deliberately absent from the second of these — see
+                // [`Scope::PreviewDocument`].
+                Scope::Preview | Scope::PreviewDocument => Focus {
                     preview: true,
                     terminal_primary: false,
                     search_open: false,

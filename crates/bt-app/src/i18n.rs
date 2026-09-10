@@ -1212,6 +1212,9 @@ pub enum Text {
     ShortcutFilesPane,
     ShortcutGitPage,
     ShortcutSavePreview,
+    /// The preview editor's two history rows (ticket T3).
+    ShortcutUndoPreview,
+    ShortcutRedoPreview,
     ShortcutPrevCommandMark,
     ShortcutNextCommandMark,
     ShortcutOpenSearch,
@@ -3308,6 +3311,8 @@ impl Text {
             Self::ShortcutFilesPane => pick(lang, "Files column", "文件列"),
             Self::ShortcutGitPage => pick(lang, "Show Git in the files column", "文件列切到 Git"),
             Self::ShortcutSavePreview => pick(lang, "Save the open document", "保存打开的文档"),
+            Self::ShortcutUndoPreview => pick(lang, "Undo the last edit", "撤销上次改动"),
+            Self::ShortcutRedoPreview => pick(lang, "Redo the last edit", "重做上次改动"),
             Self::ShortcutPrevCommandMark => pick(lang, "Previous command", "上一条命令"),
             Self::ShortcutNextCommandMark => pick(lang, "Next command", "下一条命令"),
             // **"in this pane" since 2026-08-22**, and the row's scope is why:
@@ -4352,7 +4357,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 600] = [
+    pub const ALL: [Self; 602] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4655,6 +4660,8 @@ impl Text {
         Self::ShortcutFilesPane,
         Self::ShortcutGitPage,
         Self::ShortcutSavePreview,
+        Self::ShortcutUndoPreview,
+        Self::ShortcutRedoPreview,
         Self::ShortcutPrevCommandMark,
         Self::ShortcutNextCommandMark,
         Self::ShortcutOpenSearch,

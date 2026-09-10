@@ -37,6 +37,8 @@ Every key here can be changed on the Shortcuts page in Settings. Changing one wr
 | Ctrl+Shift+G | Show Git in the files column |  | `git-page` |
 | Ctrl+, | Settings |  | `open-settings` |
 | Ctrl+S | Save the open document | In a preview | `save-preview` |
+| Ctrl+Z | Undo the last edit | In a preview | `undo-preview` |
+| Ctrl+Y | Redo the last edit | In a preview | `redo-preview` |
 | Ctrl+Shift+↑ | Previous command | On a terminal's own scrollback | `prev-command-mark` |
 | Ctrl+Shift+↓ | Next command | On a terminal's own scrollback | `next-command-mark` |
 | Ctrl+F | Find in this pane | Where there is text to search | `open-search` |
@@ -81,6 +83,8 @@ Every key here can be changed on the Shortcuts page in Settings. Changing one wr
 | Ctrl+Shift+G | 文件列切到 Git |  | `git-page` |
 | Ctrl+, | 设置 |  | `open-settings` |
 | Ctrl+S | 保存打开的文档 | 在预览里 | `save-preview` |
+| Ctrl+Z | 撤销上次改动 | 在预览里 | `undo-preview` |
+| Ctrl+Y | 重做上次改动 | 在预览里 | `redo-preview` |
 | Ctrl+Shift+↑ | 上一条命令 | 在终端回滚区中 | `prev-command-mark` |
 | Ctrl+Shift+↓ | 下一条命令 | 在终端回滚区中 | `next-command-mark` |
 | Ctrl+F | 在本窗格中查找 | 有内容可搜索的地方 | `open-search` |

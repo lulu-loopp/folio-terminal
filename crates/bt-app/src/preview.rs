@@ -4110,12 +4110,24 @@ pub struct PreviewBuffer {
     pub truncated: bool,
     /// Unsaved edits.
     ///
-    /// **Set by the first real change and cleared only by a save.** Editing a
-    /// file back to the words it started with does not clean it: the buffer has
-    /// been through a state the disk never saw, the undo history a real editor
-    /// would compare against does not exist here, and a dot that went out
-    /// because you happened to retype what you deleted is a dot that cannot be
-    /// trusted the one time it matters.
+    /// **The body is somewhere other than where the disk last saw it**, and
+    /// since ticket T3 that is a question about [`Self::undo`] rather than a bit
+    /// that only a save could turn off. The log remembers the position it stood
+    /// at when the file was written, so undoing back to it is being clean again
+    /// and editing away from it is being dirty again — which is what every
+    /// editor's dot does and what this one could not do while there was no
+    /// history to compare against.
+    ///
+    /// **Retyping what you deleted still leaves it dirty**, and that is the same
+    /// ruling it always was rather than an exception to the new one: two changes
+    /// that happen to cancel out are two entries in the log, the position has
+    /// moved twice, and the only way back to the saved position is back through
+    /// them. What cleans the dot is the road back, never the coincidence.
+    ///
+    /// A saved position the log can no longer reach — thrown away with a redo
+    /// tail, or fallen off the front of a very long session — is dirty from then
+    /// on, because the bytes the file holds are no longer anywhere in this
+    /// history.
     pub dirty: bool,
     /// How many times this body has changed.
     ///
@@ -4243,6 +4255,21 @@ pub struct PreviewBuffer {
     /// fact about the file rather than about the reading, so like
     /// [`Self::lossy`] it is answered by [`Self::read_only_notice`].
     too_large_to_edit: bool,
+    /// **What this body has been through** — the undo log (ticket T3,
+    /// 2026-09-10; [`crate::preview_undo`]).
+    ///
+    /// **On the buffer and not on the pane**, which is research §9.2's ruling and
+    /// this file's own: a file open in two panes is one buffer, so a history kept
+    /// beside a pane's caret would fork the one thing the pool exists to keep
+    /// unforked. An undo pressed in either pane therefore takes back the buffer's
+    /// last change, whichever pane made it, and the caret it restores is the one
+    /// the pane that made it was using — the other pane's caret is clamped into
+    /// range the next time it is used and otherwise left alone, exactly as it
+    /// already is when the *other* pane types.
+    ///
+    /// Not persisted, and emptied whenever the body is replaced by the disk's:
+    /// every offset in it names a place in the body it was recorded against.
+    pub undo: crate::preview_undo::UndoLog,
 }
 
 impl PreviewBuffer {
@@ -4366,6 +4393,7 @@ impl PreviewBuffer {
             lossy: false,
             reads_whole: false,
             too_large_to_edit: false,
+            undo: crate::preview_undo::UndoLog::default(),
         }
     }
 
@@ -4736,6 +4764,9 @@ impl PreviewBuffer {
         }
         self.disk = DiskNews::Level;
         self.dirty = false;
+        // The edits this discards are not edits an undo may reach back into: the
+        // body they were recorded against is about to be replaced by the file's.
+        self.undo.forget();
         self.mark_stale()
     }
 
@@ -4799,17 +4830,107 @@ impl PreviewBuffer {
     /// call sites each remembering all three is three chances to forget one.
     /// The closure reports whether anything actually changed, so an insert of
     /// nothing does not dirty a file.
+    ///
+    /// **Compiled for the tests alone since ticket T3**, and that is a statement
+    /// about this window rather than about this method: every edit a body
+    /// actually receives comes from the keyboard and carries a caret, so the one
+    /// production door is [`Self::edit_by_caret`] and this is the shape the
+    /// assertions poke bytes through. The caret it files is the one the change
+    /// implies (`preview_undo::Change::implied`); the day a verb edits a document
+    /// without a hand on it — a formatter, a rename across a file — this is the
+    /// door it comes through and the `#[cfg(test)]` comes off.
+    #[cfg(test)]
     pub fn edit_content(&mut self, edit: impl FnOnce(&mut String) -> bool) -> bool {
         let Some(content) = self.content.as_mut() else {
             return false;
         };
+        let was = content.clone();
         if !edit(content) {
             return false;
         }
+        let change = crate::preview_undo::Change::implied(&was, content);
+        self.file_the_edit(change);
+        true
+    }
+
+    /// **The keyboard's own door** — [`Self::edit_content`] with the caret that
+    /// made the edit (ticket T3).
+    ///
+    /// The caret is the *view's* (ruling 8⑧) and the log is the buffer's, which
+    /// is why the two arrive here from different places and are filed together:
+    /// an entry has to remember where the caret stood before the keystroke and
+    /// where it ended up, or an undo can put the bytes back and not the hand.
+    ///
+    /// **The change is worked out from the bytes** and not reported by the
+    /// closure. This door takes a closure precisely because a keystroke's effect
+    /// is the closure's to decide, so a closure that also described its own edit
+    /// would be a second account of it — and the two accounts would part company
+    /// the first time somebody wrote a third kind of edit. Comparing costs a copy
+    /// of the body per keystroke, which is a memory move next to the
+    /// whole-document re-parse already standing beside it.
+    pub fn edit_by_caret(
+        &mut self,
+        caret: &mut crate::preview_edit::EditCaret,
+        edit: impl FnOnce(&mut String, &mut crate::preview_edit::EditCaret) -> bool,
+    ) -> bool {
+        let Some(content) = self.content.as_mut() else {
+            return false;
+        };
+        let before = *caret;
+        let was = content.clone();
+        if !edit(content, caret) {
+            return false;
+        }
+        let change = crate::preview_undo::Change::between(&was, content, before, *caret);
+        self.file_the_edit(change);
+        true
+    }
+
+    /// **Take back the buffer's last change**, and answer with the caret of
+    /// whoever made it (ticket T3).
+    ///
+    /// `None` when there is nothing left to take back, which is a press with
+    /// nothing to say rather than a failure — the same silence [`Self::save`]
+    /// keeps over a clean buffer.
+    pub fn undo_edit(&mut self) -> Option<crate::preview_edit::EditCaret> {
+        let content = self.content.as_mut()?;
+        let caret = self.undo.undo(content)?;
+        self.settle_after_a_change();
+        Some(caret)
+    }
+
+    /// The same, forwards.
+    pub fn redo_edit(&mut self) -> Option<crate::preview_edit::EditCaret> {
+        let content = self.content.as_mut()?;
+        let caret = self.undo.redo(content)?;
+        self.settle_after_a_change();
+        Some(caret)
+    }
+
+    /// File a change and everything it implies.
+    fn file_the_edit(&mut self, change: Option<crate::preview_undo::Change>) {
+        // **A change that moved no bytes is not filed**, which is the same
+        // sentence the `if !edit(content)` guard above says one level up: an
+        // insert that replaced a selection with the very text it already held
+        // reports `true` and has changed nothing a reader or a disk could see.
+        // The revision still moves, because a cache keyed on it was invalidated
+        // by the asking and re-deriving is cheap beside being wrong.
+        if let Some(change) = change {
+            self.undo.record(change);
+        }
+        self.settle_after_a_change();
+    }
+
+    /// What every move of the body owes, whichever direction it went in.
+    ///
+    /// **One place**, for [`Self::edit_content`]'s own reason: an edit owes the
+    /// widest line the horizontal scroller is derived from, the revision every
+    /// cache is keyed on, and the dirty bit — and an undo owes exactly the same
+    /// three, because an undo is a change to the body like any other.
+    fn settle_after_a_change(&mut self) {
         self.max_columns = widest_line_columns(self.content.as_deref().unwrap_or_default());
         self.revision += 1;
-        self.dirty = true;
-        true
+        self.dirty = self.undo.is_dirty();
     }
 
     /// Write the body back to its file.
@@ -4862,7 +4983,13 @@ impl PreviewBuffer {
             return SaveOutcome::Failed(error.to_string());
         }
         self.disk_mtime = file_mtime(&path);
-        self.dirty = false;
+        // **Where the file now stands in this body's history** (ticket T3). The
+        // dirty bit is read off the log rather than set beside it, so a save and
+        // an undo back to a save cannot come to disagree about what clean means;
+        // and the run is closed, so the next keystroke starts an entry of its own
+        // instead of joining one the reader has already watched being written.
+        self.undo.mark_saved();
+        self.dirty = self.undo.is_dirty();
         SaveOutcome::Saved
     }
 
@@ -5021,6 +5148,14 @@ impl PreviewBuffer {
     /// File the worker's answer.
     pub fn accept(&mut self, outcome: HeadOutcome) {
         self.revision += 1;
+        // **A body arriving from a disk is a different body**, so the history of
+        // the one it replaces goes with it (ticket T3). This is the door
+        // [`Self::take_the_disks_copy`]'s own line ends at — the reload asks for
+        // the read and the read lands here — and it is also every other way a new
+        // body can arrive: a first read, a re-read after the file moved, a buffer
+        // evicted and fetched again. Every offset in the log names a place in the
+        // body that is being thrown away.
+        self.undo.forget();
         // The question is closed by its answer — and the load it lands in
         // (`Ready`, `Refused`) is already not one this lane asks about, so
         // clearing the bit re-opens nothing. It keeps the bit meaning exactly
@@ -9324,13 +9459,16 @@ mod tests {
     /// ① The first real change dirties the buffer, and editing back to the
     /// original does not clean it.
     ///
-    /// The second half is the ruling and the reason the bit is monotonic: the
-    /// buffer has been through a state the disk never saw, and a dot that goes
-    /// out because you happened to retype what you deleted is a dot nobody can
-    /// trust the one time it matters. Only a save cleans it.
+    /// The second half is the ruling, and ticket T3 left it standing: a dot that
+    /// goes out because you happened to retype what you deleted is a dot nobody
+    /// can trust the one time it matters. Retyping is two entries in the log and
+    /// not a road back to the saved position, so the bit stays set. What T3 did
+    /// change is that there is now a second way to clean it, and it is the road
+    /// back itself — see
+    /// `undoing_back_to_the_last_save_cleans_the_buffer_and_a_change_away_dirties_it`.
     ///
     /// Mutation: set `dirty` from `content != original` rather than from the
-    /// fact of an edit; or drop the `if !edit(content)` guard, which dirties a
+    /// log's position; or drop the `if !edit(content)` guard, which dirties a
     /// file for a keystroke that changed nothing.
     #[test]
     fn the_first_real_change_dirties_the_buffer_and_nothing_cleans_it_but_a_save() {
@@ -9356,6 +9494,116 @@ mod tests {
         }));
         assert_eq!(buffer.content.as_deref(), Some("fn main() {}\n"));
         assert!(buffer.dirty, "editing back to the original does not clean");
+    }
+
+    /// RED (ticket T3 ③, 2026-09-10) — **the dirty bit is honest now: undoing
+    /// back to the last save cleans the buffer, and a change away from it
+    /// dirties it again.**
+    ///
+    /// The sentence this file used to carry — "the undo history a real editor
+    /// would compare against does not exist here" — is what made the bit
+    /// one-way. It exists, so the bit is a question about a position in it.
+    ///
+    /// MUTATIONS:
+    /// ① set `dirty = true` in `settle_after_a_change` again — every assertion
+    ///    after the first undo goes red;
+    /// ② drop `undo.mark_saved()` from `PreviewBuffer::save` — the buffer is
+    ///    clean only at the top of the file, which is where the log started;
+    /// ③ keep the log across `take_the_disks_copy` — the last block goes red and
+    ///    an undo replays an offset from a body the file has replaced.
+    #[test]
+    fn undoing_back_to_the_last_save_cleans_the_buffer_and_a_change_away_dirties_it() {
+        let mut caret = crate::preview_edit::EditCaret::default();
+        let mut buffer = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.md"), "a.md".to_owned());
+        buffer.accept(read("one\n", false));
+        assert!(!buffer.dirty);
+
+        let type_in = |buffer: &mut PreviewBuffer, caret: &mut _, text: &str| {
+            buffer.edit_by_caret(caret, |content, caret| {
+                crate::preview_edit::insert(content, caret, text)
+            })
+        };
+        caret.place("one\n", 4, false);
+        assert!(type_in(&mut buffer, &mut caret, "t"));
+        assert!(type_in(&mut buffer, &mut caret, "w"));
+        assert!(type_in(&mut buffer, &mut caret, "o"));
+        assert_eq!(buffer.content.as_deref(), Some("one\ntwo"));
+        assert!(buffer.dirty);
+
+        // One press, because three keystrokes in a row are one run.
+        let back = buffer.undo_edit().expect("there is a change to take back");
+        assert_eq!(buffer.content.as_deref(), Some("one\n"));
+        assert_eq!(back.caret, 4, "and the caret the run started from");
+        assert!(!buffer.dirty, "back where the disk left it");
+
+        let forward = buffer.redo_edit().expect("and it can be played again");
+        assert_eq!(buffer.content.as_deref(), Some("one\ntwo"));
+        assert_eq!(forward.caret, 7);
+        assert!(buffer.dirty);
+
+        // An undo is a change to the body like any other: the revision moves and
+        // the widest line follows it.
+        let revision = buffer.revision;
+        buffer.undo_edit().expect("one more");
+        assert_ne!(buffer.revision, revision);
+        assert_eq!(buffer.max_columns, 3);
+
+        // The disk's copy empties the log outright.
+        assert!(type_in(&mut buffer, &mut caret, "x"));
+        assert!(buffer.dirty);
+        buffer.take_the_disks_copy();
+        assert!(!buffer.dirty);
+        assert_eq!(buffer.undo_edit(), None, "there is no history to walk");
+    }
+
+    /// RED (ticket T3 ④) — **two panes are one buffer, so an undo pressed in
+    /// either takes back the buffer's last change.**
+    ///
+    /// The pool is what makes this true and this asserts it through the pool
+    /// rather than around it: one source, two readers, one history. The caret
+    /// that comes back belongs to whoever made the change — the pane pressing
+    /// takes it, and the other pane's caret is nobody's business here (it is
+    /// clamped into range the next time it is used).
+    ///
+    /// MUTATION: put the log on the pane instead — there is no pane in this test
+    /// at all, which is the point: a history that needed one could not be
+    /// asserted here.
+    #[test]
+    fn either_pane_undoes_the_one_buffers_last_change() {
+        let mut caret = crate::preview_edit::EditCaret::default();
+        let mut pool = PreviewPool::default();
+        let source = PreviewSource::file(r"C:\w\shared.md");
+        pool.open(source.clone(), "shared.md".to_owned(), &[])
+            .accept(read("shared\n", false));
+
+        // The first pane types.
+        caret.place("shared\n", 7, false);
+        assert!(
+            pool.get_mut(&source)
+                .expect("one buffer")
+                .edit_by_caret(&mut caret, |content, caret| {
+                    crate::preview_edit::insert(content, caret, "!")
+                })
+        );
+        assert_eq!(
+            pool.get(&source)
+                .and_then(|buffer| buffer.content.as_deref()),
+            Some("shared\n!")
+        );
+
+        // The second pane presses undo, and reaches the same buffer.
+        let caret_back = pool
+            .get_mut(&source)
+            .expect("one buffer")
+            .undo_edit()
+            .expect("the change the other pane made");
+        assert_eq!(
+            pool.get(&source)
+                .and_then(|buffer| buffer.content.as_deref()),
+            Some("shared\n")
+        );
+        assert_eq!(caret_back.caret, 7, "the caret of whoever typed it");
+        assert!(!pool.get(&source).expect("one buffer").dirty);
     }
 
     /// ⑥ An edit is counted, so a cache keyed on the count sees a change that
