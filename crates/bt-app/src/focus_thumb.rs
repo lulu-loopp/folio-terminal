@@ -1431,6 +1431,8 @@ mod tests {
             truncated: false,
             mtime: None,
             content_says_text: true,
+            encoding: crate::preview::HeadEncoding::Utf8,
+            lossy: false,
         });
         buffer
     }

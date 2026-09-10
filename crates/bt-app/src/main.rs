@@ -34312,7 +34312,12 @@ impl Runtime<'_> {
                 tab.preview_pool
                     .get(source)
                     .filter(|buffer| buffer.wants_head_read())
-                    .map(|_| (source.clone(), preview::PreviewWant::Head))
+                    // Which of the two reads this buffer is owed is the
+                    // buffer's own answer since T2 — a document somebody is
+                    // editing must not be revived as the first 64KB of itself.
+                    // The size question below is a picture's and has no such
+                    // choice to make.
+                    .map(|buffer| (source.clone(), buffer.read_want()))
             })
             .collect();
         // **A revived tab's pictures are opened, not remembered** (user report
@@ -34336,13 +34341,14 @@ impl Runtime<'_> {
             // buffer whose read is already out with the worker is not asked
             // again. A size is a question about a picture and has no such
             // ledger — the decode lane is what owns a picture's arrival.
-            if want == preview::PreviewWant::Head
-                && !self
+            if want != preview::PreviewWant::Size
+                && self
                     .window
                     .tabs
                     .get_mut(index)
                     .and_then(|tab| tab.preview_pool.get_mut(&source))
-                    .is_some_and(preview::PreviewBuffer::claim_head_read)
+                    .and_then(preview::PreviewBuffer::claim_head_read)
+                    .is_none()
             {
                 continue;
             }
@@ -46398,20 +46404,24 @@ impl Runtime<'_> {
             .map(|buffer| buffer.source.clone())
             .collect();
         for source in stale {
-            if !self
+            // The one door files the question *and* says which of the two reads
+            // it took (T2 ③): a document that bought the whole file is re-read
+            // whole, so a save in another window does not quietly put the
+            // reader back on the first 64KB of what they are editing.
+            let Some(want) = self
                 .window
                 .tabs
                 .get_mut(index)
                 .and_then(|tab| tab.preview_pool.get_mut(&source))
-                .is_some_and(preview::PreviewBuffer::claim_head_read)
-            {
+                .and_then(preview::PreviewBuffer::claim_head_read)
+            else {
                 continue;
-            }
+            };
             if !self.app.preview_worker.request(preview::PreviewRequest {
                 window: self.window_id(),
                 tab: id,
                 source,
-                want: preview::PreviewWant::Head,
+                want,
             }) {
                 self.disable_preview_worker();
                 return;
@@ -49029,6 +49039,64 @@ impl Runtime<'_> {
             .is_some_and(|buffer| buffer.is_editable(md_source))
     }
 
+    /// **Somebody has asked to edit what is on this surface** — buy the whole
+    /// file if the glance only bought its head (T2 ③, owner's ruling on research
+    /// §10 Q2, 2026-09-10).
+    ///
+    /// [`Self::preview_is_editable`]'s active twin, and the reason it is a
+    /// separate door rather than a line inside that one: `preview_is_editable`
+    /// is asked by every frame that draws a head button, and a disk read on the
+    /// strength of a frame is a disk read sixty times a second. This is asked by
+    /// the two *gestures* that mean it — see
+    /// [`preview::PreviewBuffer::ask_for_the_whole_file`], which names them and
+    /// says why they are the two:
+    ///
+    /// * the flip to the source face of a Markdown buffer
+    ///   ([`Self::flip_preview_source_on`]), which is the moment a rendered page
+    ///   becomes something with a caret in it; and
+    /// * a press inside the body of a surface whose *face* edits
+    ///   ([`Self::press_preview_body`]), which is the moment a reader of a text
+    ///   file becomes its writer. It is hung above that method's editability
+    ///   gate rather than beside `preview_edit_focus`, and both halves of that
+    ///   are deliberate: the gate is what a truncated buffer fails, so a trigger
+    ///   below it could never fire for the files this exists for; and
+    ///   `preview_edit_focus` is re-read on every frame, so a disk read hung
+    ///   there would be sixty a second.
+    ///
+    /// The read goes out on the ordinary lane, through the ordinary ledger, and
+    /// lands through the ordinary door — so the whole document arrives *on top
+    /// of* the head that is already on the glass rather than in place of it, and
+    /// the page does not flash. That is [`preview::PreviewBuffer::mark_stale`]'s
+    /// standing behaviour and nothing here is a second copy of it.
+    fn ask_to_edit_preview_on(&mut self, surface: PreviewSurface) {
+        let Some(tab) = self.preview_tab_id(surface) else {
+            return;
+        };
+        let window = self.window_id();
+        let md_source = self.preview_md_source(surface);
+        // The same door every host asks this surface's body through, so a page
+        // turned to its source asks about the *file's* buffer and not about the
+        // page's.
+        let Some(buffer) = self.preview_buffer_on_mut(surface) else {
+            return;
+        };
+        if !buffer.ask_for_the_whole_file(md_source) {
+            return;
+        }
+        let Some(want) = buffer.claim_head_read() else {
+            return;
+        };
+        let source = buffer.source.clone();
+        if !self.app.preview_worker.request(preview::PreviewRequest {
+            window,
+            tab,
+            source,
+            want,
+        }) {
+            self.disable_preview_worker();
+        }
+    }
+
     /// **Whose content plane a surface reads from.**
     ///
     /// A seat belongs to the tab whose tree it is in, which is the active one at
@@ -50065,12 +50133,12 @@ impl Runtime<'_> {
         pane.buffer = Some(source.clone());
         pane.caret = view.caret;
         pane.scroll = view.scroll;
-        if wants_read
+        if let Some(want) = wants_read
             && !self.app.preview_worker.request(preview::PreviewRequest {
                 window: self.window_id(),
                 tab,
                 source,
-                want: preview::PreviewWant::Head,
+                want,
             })
         {
             self.disable_preview_worker();
@@ -51505,6 +51573,14 @@ impl Runtime<'_> {
         }
         let pane = self.preview_pane_mut(surface);
         pane.md_source = !pane.md_source;
+        // **Turning to the source face is asking to edit** (T2 ③, 2026-09-10) —
+        // the far side of this flip is the one with a caret in it, so if the
+        // glance only bought the head of this document, this is where the rest
+        // of it is bought. Asked after the flag has moved, because the buffer is
+        // judged as the surface is now showing it; and asked on the way back as
+        // well, where it costs nothing — a buffer that already has the whole
+        // file, or has been told the file is too large, refuses at the door.
+        self.ask_to_edit_preview_on(surface);
         // The keyboard cannot stay in an editor that is no longer on screen. The
         // flag is healed at the read (`preview_edit_focus`), so this is belt and
         // braces — but the caret it would otherwise leave behind is not, and a
@@ -51574,12 +51650,12 @@ impl Runtime<'_> {
         buffer.read_a_pages_bytes_as_text();
         let wants_read = buffer.claim_head_read();
         self.preview_pane_mut(surface).page_source = Some(path);
-        if wants_read
+        if let Some(want) = wants_read
             && !self.app.preview_worker.request(preview::PreviewRequest {
                 window,
                 tab,
                 source,
-                want: preview::PreviewWant::Head,
+                want,
             })
         {
             self.disable_preview_worker();
@@ -54332,22 +54408,25 @@ impl Runtime<'_> {
     ///
     /// Standing facts only, and the word is doing work: what belongs here is
     /// true of the buffer for as long as you are looking at it, which is what
-    /// earns a permanent corner of the strip. Truncation is one — a read-only
-    /// head read stays a read-only head read. A save's *refusal* is the other,
-    /// and it qualifies for the same reason the wording says it does: it does
-    /// not expire, because a warning that fades is a warning the user is
-    /// entitled to have missed.
+    /// earns a permanent corner of the strip. **Being read-only is one**, in all
+    /// three of the ways a body can be
+    /// ([`preview::PreviewBuffer::read_only_notice`]): the head of a file nobody
+    /// has asked to edit yet, a body some of whose bytes would not read, and a
+    /// file past the editing ceiling. A save's *refusal* is the other, and it
+    /// qualifies for the same reason the wording says it does: it does not
+    /// expire, because a warning that fades is a warning the user is entitled to
+    /// have missed.
     ///
     /// A successful save is **not** one. It is news, it expires, and it has its
     /// own place at the strip's left where the reveal's confirmation goes —
     /// which is also why it is filtered out here rather than ranked below the
     /// others: the two halves of the strip answer different questions.
     ///
-    /// The two can never both be owed: a truncated buffer is read-only and has
-    /// no save to report.
+    /// The two can never both be owed: a read-only buffer has no save to
+    /// report.
     fn preview_foot_notice(&self, surface: PreviewSurface, now: Instant) -> Option<&str> {
         self.preview_buffer_on(surface)
-            .and_then(preview::PreviewBuffer::truncation_notice)
+            .and_then(preview::PreviewBuffer::read_only_notice)
             .or_else(|| {
                 self.preview_save_notice(surface, now)
                     .filter(|notice| *notice != preview::preview_saved_notice())
@@ -54574,6 +54653,19 @@ impl Runtime<'_> {
     /// Returns whether the press was the surface's.
     fn press_preview_body(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
+        // **A press inside a face that edits is asking to edit** (T2 ③,
+        // 2026-09-10) — asked *above* the gate below, because for a file the
+        // glance read only the head of, that gate is exactly what this buys the
+        // way past. [`Self::ask_to_edit_preview_on`] asks the same question of
+        // the face that the gate asks of the body, so a press inside a rendered
+        // Markdown page, a table or a diff still reaches no disk.
+        //
+        // The read is a read: this press does not get a caret out of it, and the
+        // next one does. There is no version of "buy the rest of the file" that
+        // both answers now and does not put a disk in the gesture.
+        if let Some((surface, _)) = self.preview_surface_at(position) {
+            self.ask_to_edit_preview_on(surface);
+        }
         let Some((surface, body)) = self.preview_edit_body(position) else {
             return Ok(false);
         };
@@ -57798,6 +57890,8 @@ impl Runtime<'_> {
                                     // program as a `String`; there are no bytes
                                     // here to be in doubt about (§7.32).
                                     content_says_text: true,
+                                    encoding: preview::HeadEncoding::Utf8,
+                                    lossy: false,
                                 }),
                                 Err(fault) => {
                                     peek.decline(git_panel::fault_sentence(&fault));
@@ -57819,6 +57913,8 @@ impl Runtime<'_> {
                             // a program handed this window a `String`
                             // (§7.32).
                             content_says_text: true,
+                            encoding: preview::HeadEncoding::Utf8,
+                            lossy: false,
                         }),
                         Err(fault) => buffer.decline(git_panel::fault_sentence(&fault)),
                     }
@@ -61596,13 +61692,13 @@ impl Runtime<'_> {
             // an empty card forever.)
             let wants_read = pooled.claim_head_read();
             self.window.peek_buffer = None;
-            if wants_read {
+            if let Some(want) = wants_read {
                 let tab = self.id;
                 if !self.app.preview_worker.request(preview::PreviewRequest {
                     window: self.window_id(),
                     tab,
                     source,
-                    want: preview::PreviewWant::Head,
+                    want,
                 }) {
                     self.disable_preview_worker();
                 }
@@ -61636,13 +61732,13 @@ impl Runtime<'_> {
             }
             return true;
         }
-        if wants_read {
+        if let Some(want) = wants_read {
             let tab = self.id;
             if !self.app.preview_worker.request(preview::PreviewRequest {
                 window: self.window_id(),
                 tab,
                 source,
-                want: preview::PreviewWant::Head,
+                want,
             }) {
                 self.disable_preview_worker();
             }
@@ -83542,18 +83638,18 @@ impl Runtime<'_> {
             // The buffer's own ledger says whether this is the first asking, and
             // says it while filing that it was asked (P151's restore, the
             // glance's card and an opened pane all come through the same door).
-            if !tab
+            let Some(want) = tab
                 .preview_pool
                 .get_mut(&source)
-                .is_some_and(preview::PreviewBuffer::claim_head_read)
-            {
+                .and_then(preview::PreviewBuffer::claim_head_read)
+            else {
                 continue;
-            }
+            };
             if !self.app.preview_worker.request(preview::PreviewRequest {
                 window: self.window_id(),
                 tab: id,
                 source,
-                want: preview::PreviewWant::Head,
+                want,
             }) {
                 self.disable_preview_worker();
                 break;
@@ -128808,6 +128904,8 @@ mod tests {
             truncated: false,
             mtime: None,
             content_says_text: true,
+            encoding: preview::HeadEncoding::Utf8,
+            lossy: false,
         });
         let wide = document_key(&buffer, false, 1200.0, 1.0);
         let narrow = document_key(&buffer, false, 400.0, 1.0);
@@ -130215,6 +130313,8 @@ mod tests {
             truncated: false,
             mtime: None,
             content_says_text: true,
+            encoding: preview::HeadEncoding::Utf8,
+            lossy: false,
         });
         buffer
     }
@@ -132135,6 +132235,8 @@ mod tests {
             truncated: false,
             mtime: None,
             content_says_text: true,
+            encoding: preview::HeadEncoding::Utf8,
+            lossy: false,
         });
         buffer
     }

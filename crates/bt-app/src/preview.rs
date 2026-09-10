@@ -55,6 +55,24 @@ pub const PV_BUFFER_CAP: usize = 8;
 /// design asks for expressible rather than silent.
 pub const PREVIEW_HEAD_BYTES: usize = 64 * 1024;
 
+/// How much of a file this window will take responsibility for editing.
+///
+/// **The head read stays the glance, and asking to edit buys a whole-file read**
+/// (research §10 Q2, owner's ruling 2026-09-10). [`PREVIEW_HEAD_BYTES`] is what
+/// a *look* costs, and it has to stay small for the reason written above it; but
+/// a cap on the look became a cap on the feature, and the document that motivates
+/// Markdown editing — `docs/DESIGN.md` — is far over 64KB. So there are two
+/// reads on one lane now: the head, which every glance takes, and the whole
+/// file, which is bought by asking to edit ([`PreviewBuffer::ask_for_the_whole_file`]).
+///
+/// This is the second read's own ceiling, and it exists because the first one's
+/// reason does not go away — the body is a `String` in memory, re-parsed and
+/// re-measured on every keystroke, and there is a size past which that is not an
+/// editor but a hang. Past it the buffer keeps the head it has and stays
+/// read-only, saying so through the same channel a truncated buffer already
+/// speaks on.
+pub const PREVIEW_EDIT_BYTES: usize = 8 * 1024 * 1024;
+
 /// The notice shown once when the preview worker has stopped.
 ///
 /// Worded like [`crate::files::files_worker_stopped_notice()`] and for the same
@@ -3240,6 +3258,29 @@ pub fn preview_truncated_notice() -> &'static str {
     crate::i18n::Text::PreviewTruncated.text()
 }
 
+/// **What a body this window could not fully read says instead** (T2 ②,
+/// 2026-09-10).
+///
+/// [`preview_truncated_notice`]'s neighbour on the same strip and in the same
+/// shape — the two facts and then stop — because it answers the same reader's
+/// question: why can I not type in this. Truncation is about the end of a file
+/// that is missing; this is about bytes in the middle of it that did not decode,
+/// and a save would write this window's guesses over them.
+pub fn preview_lossy_notice() -> &'static str {
+    crate::i18n::Text::PreviewLossy.text()
+}
+
+/// **What a file past [`PREVIEW_EDIT_BYTES`] says** (T2 ③, 2026-09-10).
+///
+/// The third phrase on that strip, and the one that means "this is as far as
+/// asking to edit gets you": the whole-file read was made and the file is larger
+/// than this window will put in memory and re-parse on every keystroke. The size
+/// is the constant said the way [`format_byte_size`] says it, pinned by a test
+/// rather than left as two numbers that can drift apart.
+pub fn preview_too_large_notice() -> &'static str {
+    crate::i18n::Text::PreviewTooLargeToEdit.text()
+}
+
 /// A byte count the way a file manager says it.
 ///
 /// Binary units, because that is what Explorer's own column shows on this
@@ -3902,6 +3943,50 @@ pub struct PreviewBuffer {
     /// `false` until a head lands, which is the honest answer for a buffer that
     /// has not been read: nothing has said anything about these bytes yet.
     content_says_text: bool,
+    /// **What the file said it was, kept so that a save can say it back** (T2 ①,
+    /// 2026-09-10).
+    ///
+    /// The buffer holds a `String`, and a `String` has no encoding — by the time
+    /// the body is here the mark has been eaten and UTF-16 has become `char`s.
+    /// That was the defect: [`Self::save`] wrote UTF-8 octets over a file that
+    /// had told this window twice what it was, so one edited line rewrote every
+    /// byte of a PowerShell transcript. The encoding rides beside the body from
+    /// the read that decoded it to the write that encodes it back, and
+    /// [`HeadEncoding::encode`] is the one place the mark is put back on.
+    ///
+    /// [`HeadEncoding::Utf8`] until a body lands, which is what a file with no
+    /// mark is anyway and therefore the only default that cannot invent a
+    /// sentence the file never said.
+    pub encoding: HeadEncoding,
+    /// **The decode had to invent characters this file does not contain** (T2 ②,
+    /// 2026-09-10).
+    ///
+    /// [`decode_head`]'s second answer, kept for the one caller that cares:
+    /// [`Self::is_editable`]. A lossy body is shown — that is what lossy is
+    /// *for*, and a preview that refused a Latin-1 log file would be refusing
+    /// log files — but it is never offered a caret, because the save would put
+    /// each U+FFFD on the disk over the byte it was standing in for and nothing
+    /// would have said so.
+    lossy: bool,
+    /// **The reader asked to edit this file, so its reads are whole-file reads
+    /// now** (T2 ③, owner's ruling 2026-09-10; research §10 Q2).
+    ///
+    /// Written through one door ([`Self::ask_for_the_whole_file`]) and never
+    /// cleared, and *never cleared* is the load-bearing half. The re-read a
+    /// watcher asks for goes down the same lane the first read went down
+    /// ([`Self::claim_head_read`]), so a buffer that forgot this would answer an
+    /// external change by replacing the whole document it is being edited in
+    /// with the first 64KB of it and going read-only under the reader's hands.
+    reads_whole: bool,
+    /// **This file is past [`PREVIEW_EDIT_BYTES`]** — [`HeadOutcome::TooLargeToEdit`]
+    /// filed.
+    ///
+    /// The bit that stops [`Self::reads_whole`] from asking for ever: the whole
+    /// read came back saying the file is too large, so the head on the glass
+    /// stands, the buffer stays read-only, and no further read is owed. It is a
+    /// fact about the file rather than about the reading, so like
+    /// [`Self::lossy`] it is answered by [`Self::read_only_notice`].
+    too_large_to_edit: bool,
 }
 
 impl PreviewBuffer {
@@ -4021,6 +4106,10 @@ impl PreviewBuffer {
             disk: DiskNews::Level,
             max_columns: 0,
             content_says_text: false,
+            encoding: HeadEncoding::Utf8,
+            lossy: false,
+            reads_whole: false,
+            too_large_to_edit: false,
         }
     }
 
@@ -4130,9 +4219,18 @@ impl PreviewBuffer {
     /// a question about bytes, bytes come off a disk, and the disk is this
     /// worker's. Nothing new reads a file — the read that was already the
     /// preview's one trip is the read the verdict comes back on.
+    /// **And a body that is only the head of a file somebody has asked to edit
+    /// is owed the rest of it** (T2 ③, 2026-09-10). The third clause is what
+    /// makes the two-stage read converge rather than stall: the read the flip
+    /// files is a `Whole` one, but a head read already out with the worker can
+    /// land after it and put the first 64KB back, and this is the line that
+    /// notices and asks again. [`Self::too_large_to_edit`] is what stops it,
+    /// because past the editing cap the head is the honest final answer.
     pub fn wants_head_read(&self) -> bool {
         self.source.file_path().is_some()
-            && (self.load == PreviewLoad::Pending || self.stale)
+            && (self.load == PreviewLoad::Pending
+                || self.stale
+                || (self.reads_whole && self.truncated && !self.too_large_to_edit))
             && !self.head_asked
             && matches!(
                 self.ftype,
@@ -4141,6 +4239,76 @@ impl PreviewBuffer {
                     | PreviewFtype::Table
                     | PreviewFtype::Unknown
             )
+    }
+
+    /// **The reader has asked to edit this file, so the next read is the whole
+    /// of it** (T2 ③, owner's ruling on research §10 Q2, 2026-09-10).
+    ///
+    /// The one door onto [`Self::reads_whole`], and the whole of what "asking to
+    /// edit buys a whole-file read" means on this side. Answers whether a read
+    /// is now owed, so that the caller can put the question on the worker's lane
+    /// through [`Self::claim_head_read`] exactly as every other read goes.
+    ///
+    /// **The two gestures that call it, and why they are the two** (T2's own
+    /// choice, written down here because it is the sort of thing a later reader
+    /// has to be able to find):
+    ///
+    /// 1. **The flip to the source face of a Markdown buffer.** The rendered
+    ///    page has nothing to type into and its source has, so the flip *is* the
+    ///    asking.
+    /// 2. **A press inside the body of a surface whose face edits** — a text
+    ///    file, or a Markdown file already flipped. A reader who has just put
+    ///    the pointer in a document has said what they intend.
+    ///
+    /// They are the two places a *person* asks, and that is the whole of the
+    /// choice: every other consultation of [`Self::is_editable`] is a frame
+    /// drawing itself — a head button, a foot notice, a shortcut table — and a
+    /// disk read on that beat is sixty a second. A glance, a hover card and a
+    /// focus card therefore still cost exactly one head read, which is the whole
+    /// point of the head read.
+    ///
+    /// **Nothing is asked for a body that could not be edited anyway**: a lossy
+    /// decode, a file past the editing cap, a face with no caret. A read whose
+    /// answer changes nothing is a trip to a disk for nothing. `md_source` is
+    /// the *view's*, exactly as [`Self::is_editable`] takes it and for that
+    /// method's own recorded reason — a press inside a rendered Markdown page is
+    /// not somebody asking to edit, and the flip is what turns that page into a
+    /// surface with a caret.
+    pub fn ask_for_the_whole_file(&mut self, md_source: bool) -> bool {
+        if self.reads_whole
+            || !self.truncated
+            || self.lossy
+            || self.too_large_to_edit
+            || self.source.file_path().is_none()
+            || !is_editable(&self.name, self.ftype, md_source)
+        {
+            return false;
+        }
+        self.reads_whole = true;
+        // A truncated buffer is read-only and therefore cannot be dirty, so
+        // `mark_stale`'s refusals are all about kinds this one has already
+        // passed — but it is still the door onto the bit, and the quiet re-read
+        // it arms is exactly the one wanted here: the head on the glass stays
+        // until the whole document lands on top of it.
+        self.mark_stale()
+    }
+
+    /// **Which of the two reads this buffer is owed** (T2 ③, 2026-09-10).
+    ///
+    /// [`Self::claim_head_read`]'s answer, asked without taking the read — for
+    /// the one caller that has to name the question before it can file it, the
+    /// revived tab's walk over its own panes. A buffer that has bought the whole
+    /// file is owed the whole file every time afterwards, including the read
+    /// that brings a restored tab back: reviving a document somebody is editing
+    /// as the first 64KB of itself would take the caret away and the ceiling
+    /// back.
+    #[must_use]
+    pub fn read_want(&self) -> PreviewWant {
+        if self.reads_whole {
+            PreviewWant::Whole
+        } else {
+            PreviewWant::Head
+        }
     }
 
     /// **This body is behind its file** — [`Self::stale`] read from outside.
@@ -4176,13 +4344,25 @@ impl PreviewBuffer {
     /// without asking is a document that never arrives. Every send on
     /// [`PreviewWorker`]'s channel comes through here, so "one document, one
     /// read" is true by construction rather than by five call sites agreeing.
+    ///
+    /// **And it says which read it took** (T2 ③, 2026-09-10). Since a buffer can
+    /// be owed either the head or the whole file, the answer is the
+    /// [`PreviewWant`] to send rather than a `bool` the caller then pairs with a
+    /// want of its own: a call site that filed the question and then asked for
+    /// the first 64KB of a document being edited would be a silent truncation,
+    /// and this shape makes that unspellable.
+    ///
+    /// The lane keeps the word *head* in its name — here, in
+    /// [`Self::wants_head_read`] and in [`Self::head_asked`] — because it is the
+    /// same one question about the same file with the same ledger in front of
+    /// it. Only how much comes back has changed.
     #[must_use]
-    pub fn claim_head_read(&mut self) -> bool {
+    pub fn claim_head_read(&mut self) -> Option<PreviewWant> {
         if !self.wants_head_read() {
-            return false;
+            return None;
         }
         self.head_asked = true;
-        true
+        Some(self.read_want())
     }
 
     /// **Give up on the read that is still out** (F1b, `plan.md` v4 增补 ②).
@@ -4338,11 +4518,20 @@ impl PreviewBuffer {
     /// bytes back, and a document with no file behind it has nowhere to write
     /// them. A git diff is a reading of a repository, not a second place to type
     /// into it.
+    /// **And one fact only the decode knows** (T2 ②, 2026-09-10): a body that
+    /// came back with characters this window invented is not a body it will
+    /// write. `truncated` is the same sentence about a different half of the
+    /// file — what is missing off the end — and since T2 it is answerable: the
+    /// reader asks to edit, [`Self::ask_for_the_whole_file`] buys the rest, and
+    /// the clause below stops refusing on its own. What it never stops refusing
+    /// is a file past [`PREVIEW_EDIT_BYTES`], where the head is all there will
+    /// ever be.
     pub fn is_editable(&self, md_source: bool) -> bool {
         self.source.file_path().is_some()
             && self.load == PreviewLoad::Ready
             && self.content.is_some()
             && !self.truncated
+            && !self.lossy
             && is_editable(&self.name, self.ftype, md_source)
     }
 
@@ -4379,7 +4568,26 @@ impl PreviewBuffer {
     ///   (ruling 8⑨). **Not a prompt and not a blind write** — this slice's
     ///   minimum is that the window says so and keeps the edits, because the
     ///   one unrecoverable outcome is overwriting a change nobody has seen.
-    /// * The write itself is atomic ([`save_atomically`]).
+    /// * The write itself is atomic ([`bt_persist::atomic_write`]).
+    ///
+    /// **In the encoding the file was read in, mark included** (T2 ①,
+    /// 2026-09-10). See [`Self::encoding`] for the defect this pays: the body is
+    /// a `String` and a `String` remembers nothing, so a save that reached for
+    /// `as_bytes` rewrote every marked and every UTF-16 file it touched.
+    ///
+    /// **And through one atomic writer** (research §10 Q14). There were two
+    /// implementations of the same temp-sibling-fsync-rename algorithm — this
+    /// module's and `bt-persist`'s — and `bt-persist`'s is the one that stays:
+    /// it is not welded to the config directory (its staging path is derived
+    /// from the target's own parent) and it already writes user files elsewhere
+    /// in this window, the PowerShell profile among them. One algorithm, one
+    /// place to fix.
+    ///
+    /// **Two gaps stay open and are named rather than papered over**: neither
+    /// writer clears a read-only or hidden attribute on the target, and neither
+    /// asks whether the target is a symlink — a rename replaces the link, not
+    /// what it points at, which is the question the read side asks with
+    /// `may_read_unasked_through_links` and the write side still does not.
     ///
     /// The mtime is re-read from the file that was just written rather than
     /// remembered from the write, so the next save compares against what the
@@ -4394,7 +4602,7 @@ impl PreviewBuffer {
         if file_mtime(&path) != self.disk_mtime {
             return SaveOutcome::Conflict;
         }
-        if let Err(error) = save_atomically(&path, content) {
+        if let Err(error) = bt_persist::atomic_write(&path, &self.encoding.encode(content)) {
             return SaveOutcome::Failed(error.to_string());
         }
         self.disk_mtime = file_mtime(&path);
@@ -4402,13 +4610,32 @@ impl PreviewBuffer {
         SaveOutcome::Saved
     }
 
-    /// The sentence a body that was cut short owes its reader, if it was.
+    /// **The sentence a body that cannot be edited owes its reader**, if it owes
+    /// one.
     ///
     /// §7.1.3's "超大文件只读降级": the degradation is not that the file failed,
     /// it is that what is on screen is the beginning of it — and a preview that
     /// showed the first 64KB without saying so would be a preview quietly
     /// claiming the file ends there.
-    pub fn truncation_notice(&self) -> Option<&'static str> {
+    ///
+    /// **It was `read_only_notice` until 2026-09-10**, when T2 gave the reader
+    /// two more ways to be told the same thing, and one channel is the ruling
+    /// here: a refused edit is explained in the right hand of the pane's foot
+    /// and nowhere else, so a second notice surface for "this file decoded
+    /// lossily" would be a second place to look for one kind of answer.
+    ///
+    /// The order is the order a reader can act on. **Lossy first**, because it
+    /// is a fact about bytes and no amount of reading more of them changes it.
+    /// **Then the editing cap**, which is why a truncated body is staying
+    /// truncated. **Then truncation itself**, which since T2 is the temporary
+    /// one — the head of a file nobody has asked to edit yet.
+    pub fn read_only_notice(&self) -> Option<&'static str> {
+        if self.lossy {
+            return Some(preview_lossy_notice());
+        }
+        if self.too_large_to_edit {
+            return Some(preview_too_large_notice());
+        }
         self.truncated.then_some(preview_truncated_notice())
     }
 
@@ -4526,6 +4753,10 @@ impl PreviewBuffer {
         self.disk = DiskNews::Level;
         self.content = None;
         self.truncated = false;
+        // [`Self::accept`]'s refusal arm's own line: a buffer with no body
+        // decoded nothing, so it says nothing about how.
+        self.encoding = HeadEncoding::Utf8;
+        self.lossy = false;
         self.max_columns = 0;
         self.disk_mtime = None;
         self.load = PreviewLoad::Unavailable(words);
@@ -4549,6 +4780,8 @@ impl PreviewBuffer {
                 truncated,
                 mtime,
                 content_says_text,
+                encoding,
+                lossy,
             } => {
                 self.content_says_text = content_says_text;
                 // **The sniff, and the one place it is read** (user ruling
@@ -4576,6 +4809,13 @@ impl PreviewBuffer {
                 self.max_columns = widest_line_columns(&text);
                 self.content = Some(text);
                 self.truncated = truncated;
+                // **Both facts about the decode land with the body they are
+                // about** (T2, 2026-09-10). Re-filed rather than accumulated:
+                // this is a *new* reading of the file, and a file rewritten in
+                // another encoding, or rewritten as valid UTF-8, has to be able
+                // to say so.
+                self.encoding = encoding;
+                self.lossy = lossy;
                 self.disk_mtime = mtime;
                 self.load = PreviewLoad::Ready;
             }
@@ -4598,9 +4838,28 @@ impl PreviewBuffer {
                 };
                 self.content = None;
                 self.truncated = false;
+                // A buffer with no body has nothing that was decoded, so it says
+                // nothing about an encoding either — `Utf8` is what a file with
+                // no mark is, and therefore the only default that does not
+                // invent a sentence this file never said.
+                self.encoding = HeadEncoding::Utf8;
+                self.lossy = false;
                 self.max_columns = 0;
                 self.disk_mtime = None;
                 self.load = PreviewLoad::Refused(refusal);
+            }
+            // **The file read, and it is too big to take responsibility for**
+            // (T2 ③). Nothing on the glass is replaced and nothing about the
+            // body is re-filed: the head this buffer is already showing is the
+            // right head, it is simply the last one there is going to be. What
+            // changes is one bit and the sentence in the foot that hangs off it.
+            //
+            // The read that was out is closed by this answer exactly as the two
+            // arms above close it, which is what keeps
+            // [`Self::wants_head_read`]'s third clause from asking again for
+            // ever.
+            HeadOutcome::TooLargeToEdit => {
+                self.too_large_to_edit = true;
             }
         }
     }
@@ -4850,6 +5109,16 @@ impl PreviewPool {
 pub enum PreviewWant {
     /// At most [`PREVIEW_HEAD_BYTES`] of the body.
     Head,
+    /// **The whole file, up to [`PREVIEW_EDIT_BYTES`]** — what asking to edit
+    /// buys (T2 ③, research §10 Q2, owner's ruling 2026-09-10).
+    ///
+    /// [`Self::Head`]'s own question with a larger answer, and on this lane
+    /// rather than a second one for the reason this enum exists: it is the same
+    /// question about the same file, answered by the same bytes off the same
+    /// thread. What separates the two is only how much of the file comes back,
+    /// and [`PreviewBuffer::claim_head_read`] is the one place that decides
+    /// which of them a buffer is owed.
+    Whole,
     /// How large the whole file is — the third field of a picture's meta line
     /// (mock-up 4955), which is the only thing on that line the decoder cannot
     /// answer for itself.
@@ -5038,8 +5307,41 @@ pub enum HeadOutcome {
         /// text came out of a program that handed this window a `String`, and
         /// there are no bytes here to be in doubt about.
         content_says_text: bool,
+        /// **What the file said it was**, carried back with the body that was
+        /// decoded through it (T2 ①, 2026-09-10).
+        ///
+        /// It rides on the answer for `content_says_text`'s reason exactly: it
+        /// is a fact about the very bytes that were just read, and a second trip
+        /// to ask it could answer about a file that had since been replaced. The
+        /// buffer keeps it so that a save can write the file back in it — see
+        /// [`HeadEncoding::encode`] for why the mark is not this window's to
+        /// drop.
+        ///
+        /// A composed document — a git diff, a git show — passes
+        /// [`HeadEncoding::Utf8`]: its text came out of a program as a `String`
+        /// and there is no file behind it to write back to.
+        encoding: HeadEncoding,
+        /// **Whether the decode had to invent a character** (T2 ②, 2026-09-10).
+        ///
+        /// [`decode_head`] is lossy on purpose, and that is right for a *look*:
+        /// a preview that refused a file over one bad byte is a preview that
+        /// refuses log files. It is not right for an *edit*, because the save
+        /// would put every invention on the disk over the byte it stood in for.
+        /// So the fact travels with the body and
+        /// [`PreviewBuffer::is_editable`] reads it.
+        lossy: bool,
     },
     Refused(PreviewRefusal),
+    /// **The file is past [`PREVIEW_EDIT_BYTES`]** — the one answer only
+    /// [`read_whole`] gives (T2 ③, 2026-09-10).
+    ///
+    /// Not a [`Self::Refused`], because nothing was refused: the file read
+    /// perfectly well and the reader is looking at the head of it. What could
+    /// not be granted is the *edit*, and this is the buffer being told so —
+    /// nothing it holds is replaced, and the sentence it puts up is the one a
+    /// truncated buffer already speaks
+    /// ([`PreviewBuffer::read_only_notice`]).
+    TooLargeToEdit,
 }
 
 /// **How many bytes of a head decide whether an unnamed kind of file is text**
@@ -5071,9 +5373,10 @@ pub const TEXT_SNIFF_BYTES: usize = 8000;
 /// `>` redirect in Windows PowerShell 5.1 produce UTF-16 LE with a mark, so a
 /// window that treated a NUL as proof of binary would refuse the transcripts its
 /// own shell writes — which is exactly what this window did until this ruling.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum HeadEncoding {
     /// No mark. Read as UTF-8.
+    #[default]
     Utf8,
     /// `EF BB BF`.
     Utf8Bom,
@@ -5118,6 +5421,35 @@ impl HeadEncoding {
     #[must_use]
     fn body(self, head: &[u8]) -> &[u8] {
         &head[self.mark_len().min(head.len())..]
+    }
+
+    /// The bytes a file in this encoding holds for this text — [`Self::body`]
+    /// and [`decode_head`] run backwards, **mark included**.
+    ///
+    /// The mark is written back because it was read: a file that begins by
+    /// saying what it is has said something, and a save that dropped the
+    /// sentence would be this window answering a question it was not asked. That
+    /// is the whole of the 2026-09-10 defect — a UTF-16 transcript, which is what
+    /// Windows PowerShell 5.1 writes, came back as unmarked UTF-8 after one line
+    /// of it was edited, and every byte of it outside that line had changed.
+    ///
+    /// Nothing here touches line endings or the final newline: they are
+    /// characters in the body, they survived the read, and they survive this.
+    #[must_use]
+    pub fn encode(self, text: &str) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(text.len() + self.mark_len());
+        match self {
+            Self::Utf8 => {}
+            Self::Utf8Bom => bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]),
+            Self::Utf16Le => bytes.extend_from_slice(&[0xFF, 0xFE]),
+            Self::Utf16Be => bytes.extend_from_slice(&[0xFE, 0xFF]),
+        }
+        match self {
+            Self::Utf8 | Self::Utf8Bom => bytes.extend_from_slice(text.as_bytes()),
+            Self::Utf16Le => bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes)),
+            Self::Utf16Be => bytes.extend(text.encode_utf16().flat_map(u16::to_be_bytes)),
+        }
+        bytes
     }
 }
 
@@ -5239,54 +5571,6 @@ pub fn file_mtime(path: &Path) -> Option<SystemTime> {
         .and_then(|meta| meta.modified().ok())
 }
 
-/// Where a save stages its bytes before they become the file.
-///
-/// A sibling of the target and not a `%TEMP%` entry, for the one reason that
-/// decides it: [`save_atomically`]'s last step is a rename, and a rename is only
-/// atomic *within a volume*. A staging file on another drive would turn the
-/// whole guarantee into a copy — which is the non-atomic write this exists to
-/// avoid, wearing a temporary name.
-///
-/// Named from the process as well as the file so two windows saving the same
-/// path cannot stage over each other, and dot-prefixed so it is hidden by the
-/// same convention every tool on this platform already honours.
-pub fn preview_temp_path(path: &Path) -> PathBuf {
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    path.with_file_name(format!(".{name}.bt-save-{}", std::process::id()))
-}
-
-/// Write a file so that it is either the old one or the new one, never half of
-/// either.
-///
-/// **Staged and renamed.** Opening the target and writing into it is the way
-/// every editor loses a file to a full disk: the truncate has already happened
-/// when the write fails, and what is left is neither version. Here the target is
-/// not touched at all until the bytes are on the disk and flushed, and the last
-/// step is a single rename the filesystem either performs or does not.
-pub fn save_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    let temp = preview_temp_path(path);
-    let staged = (|| {
-        let mut file = std::fs::File::create(&temp)?;
-        file.write_all(contents.as_bytes())?;
-        // Flushed before the rename, so a crash between the two cannot leave the
-        // *name* switched over to a body that never reached the platter.
-        file.sync_all()
-    })();
-    if let Err(error) = staged {
-        let _ = std::fs::remove_file(&temp);
-        return Err(error);
-    }
-    if let Err(error) = std::fs::rename(&temp, path) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(error);
-    }
-    Ok(())
-}
-
 /// Read at most [`PREVIEW_HEAD_BYTES`] of a file, and decide what it is.
 ///
 /// **The size question and the binary question are the same read.** Both are
@@ -5294,6 +5578,38 @@ pub fn save_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
 /// two chances to disagree — the head is taken once, its length answers
 /// truncation, and its bytes answer whether this is text at all.
 pub fn read_head(path: &Path) -> HeadOutcome {
+    read_up_to(path, PREVIEW_HEAD_BYTES)
+}
+
+/// Read the whole file, up to [`PREVIEW_EDIT_BYTES`] — **the read asking to edit
+/// buys** (T2 ③, research §10 Q2).
+///
+/// [`read_head`]'s own body with a larger limit, and deliberately the same
+/// function underneath: it goes through the same
+/// [`bt_transcript::paths::may_read_unasked_through_links`] door, on the same
+/// worker thread, and comes back as the same [`HeadOutcome`] that the same
+/// [`PreviewBuffer::accept`] files — so the disk news, the stamp and the sniff
+/// are answered once each and by one author, not twice by two.
+///
+/// The one thing it says that a head read cannot: a file past the editing cap is
+/// [`HeadOutcome::TooLargeToEdit`] rather than another truncated body. Truncated
+/// is what a *glance* is, and a second truncated body would replace the 64KB on
+/// the glass with 8MB of the same document to no one's benefit; what the reader
+/// is owed here is the sentence that this file stays read-only, and the head
+/// they are already reading.
+pub fn read_whole(path: &Path) -> HeadOutcome {
+    match read_up_to(path, PREVIEW_EDIT_BYTES) {
+        // Truncated at *this* limit means the file is past the editing cap —
+        // there is nothing else a whole-file read can be cut short by.
+        HeadOutcome::Read {
+            truncated: true, ..
+        } => HeadOutcome::TooLargeToEdit,
+        outcome => outcome,
+    }
+}
+
+/// The read both lanes are, with the limit as the only difference.
+fn read_up_to(path: &Path, limit: usize) -> HeadOutcome {
     // **The read is behind this line, so the question is asked in front of it** (route B of the
     // untrusted-path audit, 2026-09-08). `File::open` followed by `read_to_end` has no end when
     // what was opened is a door somebody else is holding — `\\.\pipe\name` accepts and never
@@ -5317,15 +5633,11 @@ pub fn read_head(path: &Path) -> HeadOutcome {
     // there *is* more: a length is a second question and a metadata read can
     // disagree with the bytes on a file being written to right now.
     let mut head = Vec::new();
-    if let Err(error) = file
-        .by_ref()
-        .take(PREVIEW_HEAD_BYTES as u64 + 1)
-        .read_to_end(&mut head)
-    {
+    if let Err(error) = file.by_ref().take(limit as u64 + 1).read_to_end(&mut head) {
         return HeadOutcome::Refused(PreviewRefusal::Fault(PreviewFault::from_io(&error)));
     }
-    let truncated = head.len() > PREVIEW_HEAD_BYTES;
-    head.truncate(PREVIEW_HEAD_BYTES);
+    let truncated = head.len() > limit;
+    head.truncate(limit);
     // Asked of the handle the bytes came out of, not of the path: between two
     // calls by name a file can be replaced entirely, and a stamp belonging to a
     // file other than the one that was read is worse than no stamp at all.
@@ -5354,11 +5666,14 @@ pub fn read_head(path: &Path) -> HeadOutcome {
     if holds_a_nul {
         return HeadOutcome::Refused(PreviewRefusal::Binary);
     }
+    let (text, lossy) = decode_head(&head, truncated);
     HeadOutcome::Read {
-        text: decode_head(&head, truncated),
+        text,
         truncated,
         mtime,
         content_says_text,
+        encoding,
+        lossy,
     }
 }
 
@@ -5375,7 +5690,16 @@ pub fn read_head(path: &Path) -> HeadOutcome {
 /// drawn as `` at the top of the body — one function, because the encoding a
 /// file is *judged* under ([`head_reads_as_text`]) and the encoding it is *shown*
 /// in have to be the same one or a promoted file would be drawn as mojibake.
-fn decode_head(head: &[u8], truncated: bool) -> String {
+///
+/// **And it says whether it had to invent anything** (T2 ②, 2026-09-10). The
+/// second half of the answer is the whole reason an edit can be refused
+/// honestly: a body holding replacement characters this function put there is a
+/// body that no longer knows what some of the file's bytes were, and saving it
+/// would write those inventions over the originals. The lossiness is a fact
+/// about the decode, so it is reported by the decode rather than guessed at
+/// afterwards by looking for U+FFFD — which would also find the ones a file
+/// genuinely contains.
+fn decode_head(head: &[u8], truncated: bool) -> (String, bool) {
     let encoding = HeadEncoding::of(head);
     let body = encoding.body(head);
     if encoding.is_utf16() {
@@ -5384,16 +5708,31 @@ fn decode_head(head: &[u8], truncated: bool) -> String {
         // cut's artefact, and a replacement character parked at the end of every
         // long UTF-16 document is a lie about the file.
         let units = utf16_units(body, encoding == HeadEncoding::Utf16Le, truncated);
-        return char::decode_utf16(units)
-            .map(|decoded| decoded.unwrap_or(char::REPLACEMENT_CHARACTER))
+        let mut lossy = false;
+        let text = char::decode_utf16(units)
+            .map(|decoded| {
+                decoded.unwrap_or_else(|_| {
+                    lossy = true;
+                    char::REPLACEMENT_CHARACTER
+                })
+            })
             .collect();
+        // An odd trailing byte is a code unit this decode never saw, and at the
+        // end of a whole file that is a byte the save would drop.
+        return (text, lossy || (!truncated && !body.len().is_multiple_of(2)));
     }
     let body = if truncated {
         trim_partial_utf8(body)
     } else {
         body
     };
-    String::from_utf8_lossy(body).into_owned()
+    match String::from_utf8_lossy(body) {
+        // Borrowed is exactly "every byte decoded as itself"; owned is
+        // `from_utf8_lossy` having built a new string around a replacement
+        // character, which is the one case there is to report.
+        std::borrow::Cow::Borrowed(text) => (text.to_owned(), false),
+        std::borrow::Cow::Owned(text) => (text, true),
+    }
 }
 
 /// Drop a trailing UTF-8 sequence the caller's cut left incomplete.
@@ -5515,6 +5854,9 @@ impl PreviewWorker {
                     };
                     let answer = match request.want {
                         PreviewWant::Head => PreviewAnswer::Head(read_head(path)),
+                        // The same lane and the same answer shape — see
+                        // [`PreviewWant::Whole`].
+                        PreviewWant::Whole => PreviewAnswer::Head(read_whole(path)),
                         PreviewWant::Size => PreviewAnswer::Size(read_size(path)),
                         // Straight off the file's structure: the wrapper that
                         // used to stat the file beside this call is gone with
@@ -6092,6 +6434,8 @@ mod tests {
             truncated,
             mtime: None,
             content_says_text: true,
+            encoding: HeadEncoding::Utf8,
+            lossy: false,
         }
     }
 
@@ -6350,9 +6694,12 @@ mod tests {
             buffer.wants_head_read(),
             "nobody has asked for this body yet"
         );
-        assert!(buffer.claim_head_read(), "the first caller takes the read");
         assert!(
-            !buffer.claim_head_read(),
+            buffer.claim_head_read().is_some(),
+            "the first caller takes the read"
+        );
+        assert!(
+            buffer.claim_head_read().is_none(),
             "and every caller after it finds the question already asked"
         );
         assert!(
@@ -6369,7 +6716,7 @@ mod tests {
             PreviewFault::PermissionDenied,
         )));
         assert!(
-            !buffer.claim_head_read(),
+            buffer.claim_head_read().is_none(),
             "a refusal is an answer, and the card draws the sentence it earns \
              rather than asking again"
         );
@@ -6379,14 +6726,19 @@ mod tests {
             PreviewSource::file(r"C:\w\repo\main.rs"),
             "main.rs".to_owned(),
         );
-        assert!(read.claim_head_read());
+        assert!(read.claim_head_read().is_some());
         read.accept(HeadOutcome::Read {
             text: "fn main() {}\n".to_owned(),
             truncated: false,
             mtime: None,
             content_says_text: true,
+            encoding: HeadEncoding::Utf8,
+            lossy: false,
         });
-        assert!(!read.claim_head_read(), "there is nothing left to ask");
+        assert!(
+            read.claim_head_read().is_none(),
+            "there is nothing left to ask"
+        );
     }
 
     /// ① One file, one buffer — a second open of the same path is the same
@@ -6593,12 +6945,14 @@ mod tests {
     #[test]
     fn a_saved_file_is_read_again_without_unloading_it_and_never_over_an_edit() {
         let mut buffer = PreviewBuffer::new(PreviewSource::file(r"D:\notes\a.md"), "a.md".into());
-        assert!(buffer.claim_head_read(), "the opening read");
+        assert!(buffer.claim_head_read().is_some(), "the opening read");
         buffer.accept(HeadOutcome::Read {
             text: "# one\n".into(),
             truncated: false,
             mtime: None,
             content_says_text: true,
+            encoding: HeadEncoding::Utf8,
+            lossy: false,
         });
         assert_eq!(buffer.load, PreviewLoad::Ready);
         assert!(!buffer.wants_head_read(), "nothing is owed");
@@ -6620,13 +6974,15 @@ mod tests {
             "and a second notification about the same unread change owes nothing new"
         );
 
-        assert!(buffer.claim_head_read());
+        assert!(buffer.claim_head_read().is_some());
         assert!(!buffer.wants_head_read(), "one question, once");
         buffer.accept(HeadOutcome::Read {
             text: "# two\n".into(),
             truncated: false,
             mtime: None,
             content_says_text: true,
+            encoding: HeadEncoding::Utf8,
+            lossy: false,
         });
         assert!(!buffer.wants_head_read(), "and the answer closes it");
 
@@ -7299,6 +7655,8 @@ mod tests {
                 truncated: false,
                 mtime: file_mtime(&small),
                 content_says_text: true,
+                encoding: HeadEncoding::Utf8,
+                lossy: false,
             }
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -7306,17 +7664,26 @@ mod tests {
 
     /// A cut that lands inside a character drops the half rather than showing a
     /// replacement the file does not contain.
+    ///
+    /// **And the decode says which of those two it did** (T2 ②): the half the
+    /// *limit* made is not a lossy decode — nothing about the file was lost, the
+    /// reader is simply looking at less of it — while the same bytes at the real
+    /// end of a file are, and only the second may be refused an edit.
     #[test]
     fn a_cut_inside_a_character_drops_the_half_it_made() {
         // "你" is three bytes; keep two of them.
         let broken = [0xE4, 0xBD];
-        assert_eq!(decode_head(&broken, true), "");
+        assert_eq!(decode_head(&broken, true), (String::new(), false));
         // The same bytes from a file that simply ends there are the file's own
         // problem, not the limit's, and are shown lossily.
-        assert_eq!(decode_head(&broken, false), "\u{fffd}");
+        assert_eq!(
+            decode_head(&broken, false),
+            ("\u{fffd}".to_owned(), true),
+            "and a body this window had to invent a character for says so"
+        );
         // A whole character at the cut survives.
         let whole = [0xE4, 0xBD, 0xA0];
-        assert_eq!(decode_head(&whole, true), "\u{4f60}");
+        assert_eq!(decode_head(&whole, true), ("\u{4f60}".to_owned(), false));
     }
 
     /// ⑦ A network path is refused without a read.
@@ -7386,12 +7753,14 @@ mod tests {
             "the name has no opinion, so the bytes are asked"
         );
         assert!(buffer.wants_head_read());
-        assert!(buffer.claim_head_read());
+        assert!(buffer.claim_head_read().is_some());
         buffer.accept(HeadOutcome::Read {
             text: "MZ\u{0}".to_owned(),
             truncated: false,
             mtime: None,
             content_says_text: false,
+            encoding: HeadEncoding::Utf8,
+            lossy: false,
         });
         assert_eq!(
             buffer.load,
@@ -7410,6 +7779,8 @@ mod tests {
             truncated: false,
             mtime: None,
             content_says_text: false,
+            encoding: HeadEncoding::Utf8,
+            lossy: false,
         });
         assert_eq!(text.ftype, PreviewFtype::Text);
         assert_eq!(text.load, PreviewLoad::Ready);
@@ -8531,9 +8902,9 @@ mod tests {
     fn only_a_truncated_buffer_carries_the_read_only_notice() {
         let mut buffer = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.rs"), "a.rs".to_owned());
         buffer.accept(read("fn main() {}\n", false));
-        assert_eq!(buffer.truncation_notice(), None);
+        assert_eq!(buffer.read_only_notice(), None);
         buffer.accept(read("fn main() {}\n", true));
-        assert_eq!(buffer.truncation_notice(), Some(preview_truncated_notice()));
+        assert_eq!(buffer.read_only_notice(), Some(preview_truncated_notice()));
     }
 
     /// PIN (user ruling, 2026-08-15) — **the conflict phrase still says all
@@ -8782,6 +9153,305 @@ mod tests {
         assert!(!buffer.is_editable(false));
     }
 
+    /// The bytes a file in this encoding holds for this text.
+    ///
+    /// The fixture's own spelling of the four encodings, written out here rather
+    /// than borrowed from [`HeadEncoding::encode`], so that the round trip below
+    /// is asserted by a second author and not by the code under test agreeing
+    /// with itself.
+    fn file_bytes(encoding: HeadEncoding, text: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        match encoding {
+            HeadEncoding::Utf8 => bytes.extend_from_slice(text.as_bytes()),
+            HeadEncoding::Utf8Bom => {
+                bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+                bytes.extend_from_slice(text.as_bytes());
+            }
+            HeadEncoding::Utf16Le => {
+                bytes.extend_from_slice(&[0xFF, 0xFE]);
+                bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+            }
+            HeadEncoding::Utf16Be => {
+                bytes.extend_from_slice(&[0xFE, 0xFF]);
+                bytes.extend(text.encode_utf16().flat_map(u16::to_be_bytes));
+            }
+        }
+        bytes
+    }
+
+    /// RED (T2 ①, `docs/plans/markdown-edit/research-2026-09-10.md` §4) — **a
+    /// file that says what it is keeps saying it after a save.**
+    ///
+    /// The reported defect: the mark is read, the body is decoded through it,
+    /// and then the encoding is dropped on the floor — the buffer never held it,
+    /// [`PreviewBuffer::accept`] was handed a body with the mark already
+    /// stripped, and the write put UTF-8 octets down whatever the file had been.
+    /// So editing one line of a UTF-16 transcript — which is what Windows
+    /// PowerShell 5.1 writes, and therefore what a great many files on this
+    /// platform are — silently rewrote the whole file in another encoding, and
+    /// the bytes outside the edited line were all different afterwards.
+    ///
+    /// Sixteen fixtures: the four encodings this window reads, each on LF and on
+    /// CRLF, each ending with a newline and without one. Every one of them is
+    /// edited in the middle and saved, and what is asserted is the strong claim
+    /// — not "it reads back the same", which a re-encode would also satisfy, but
+    /// **the bytes before and after the edited span are the file's own, byte for
+    /// byte**.
+    ///
+    /// Red gate: before the encoding rides on the buffer, the twelve marked
+    /// fixtures fail on their first byte.
+    #[test]
+    fn a_save_writes_the_file_back_in_the_encoding_it_was_read_in() {
+        let dir = scratch("encoding-round-trip");
+        let mut cases = 0;
+        for encoding in [
+            HeadEncoding::Utf8,
+            HeadEncoding::Utf8Bom,
+            HeadEncoding::Utf16Le,
+            HeadEncoding::Utf16Be,
+        ] {
+            for newline in ["\n", "\r\n"] {
+                for last in ["", "\n"] {
+                    let last = if last.is_empty() { "" } else { newline };
+                    // Trailing whitespace on the third line and a missing final
+                    // newline on half the fixtures: both already survive a read,
+                    // and both are exactly what a re-encode would tidy away.
+                    let text = format!("alpha{newline}beta{newline}gamma  {newline}omega{last}");
+                    let original = file_bytes(encoding, &text);
+                    let path = dir.join(format!("case-{cases}.txt"));
+                    std::fs::write(&path, &original).unwrap();
+                    cases += 1;
+
+                    let mut buffer = PreviewBuffer::new(
+                        PreviewSource::file(path.clone()),
+                        "case.txt".to_owned(),
+                    );
+                    buffer.accept(read_head(&path));
+                    assert_eq!(
+                        buffer.content.as_deref(),
+                        Some(text.as_str()),
+                        "the fixture reads back as itself before anything is edited"
+                    );
+
+                    // One small edit in the middle, and a non-ASCII one so that
+                    // the encoding has to do real work on the way out.
+                    let at = text.find("beta").expect("the fixture's middle word");
+                    assert!(buffer.edit_content(|content| {
+                        content.replace_range(at..at + "beta".len(), "bêta");
+                        true
+                    }));
+                    assert_eq!(buffer.save(), SaveOutcome::Saved);
+
+                    let saved = std::fs::read(&path).unwrap();
+                    let mark = file_bytes(encoding, "").len();
+                    let head = file_bytes(encoding, &text[..at]);
+                    let tail = file_bytes(encoding, &text[at + "beta".len()..]);
+                    let tail = &tail[mark..];
+                    assert!(
+                        original.starts_with(&head) && original.ends_with(tail),
+                        "the fixture's own bytes bracket the edit: {encoding:?}"
+                    );
+                    assert_eq!(
+                        &saved[..head.len()],
+                        &head[..],
+                        "every byte before the edit is the file's own: {encoding:?}"
+                    );
+                    assert_eq!(
+                        &saved[saved.len() - tail.len()..],
+                        tail,
+                        "and every byte after it: {encoding:?}"
+                    );
+                    assert_eq!(
+                        HeadEncoding::of(&saved),
+                        encoding,
+                        "the mark and its endianness are still what the file said"
+                    );
+                }
+            }
+        }
+        assert_eq!(cases, 16, "four encodings, two line endings, two endings");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED (T2 ②) — **a body this window could not read is not a body it offers
+    /// to write.**
+    ///
+    /// [`decode_head`] is lossy on purpose: a preview that refused a file over
+    /// one bad byte is a preview that refuses log files. What must not follow is
+    /// an edit surface over that body, because a save would put every
+    /// replacement character it invented into somebody's file — the bytes it
+    /// could not read would be gone, and nothing would have said so.
+    ///
+    /// The reason is said through the channel a refused edit already speaks on
+    /// ([`PreviewBuffer::read_only_notice`]), which is the right hand of the
+    /// pane's foot.
+    ///
+    /// Red gate: before the lossy bit exists, the file is editable and the
+    /// notice is `None`.
+    #[test]
+    fn a_body_that_decoded_lossily_is_shown_and_not_edited() {
+        let dir = scratch("lossy");
+        let path = dir.join("latin.txt");
+        // Latin-1, which is not UTF-8 and is exactly what an old log file is.
+        std::fs::write(&path, b"caf\xE9 latte\nand a second line\n").unwrap();
+
+        let mut buffer =
+            PreviewBuffer::new(PreviewSource::file(path.clone()), "latin.txt".to_owned());
+        buffer.accept(read_head(&path));
+        assert!(
+            buffer
+                .content
+                .as_deref()
+                .is_some_and(|body| body.contains(char::REPLACEMENT_CHARACTER)),
+            "it is still shown — that is what lossy is for"
+        );
+        assert!(
+            !buffer.is_editable(false),
+            "and it is not written back over the bytes it could not read"
+        );
+        assert_eq!(
+            buffer.read_only_notice(),
+            Some(preview_lossy_notice()),
+            "and the reason is said where a refused edit is already explained"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED (T2 ③, research §10 Q2 — the owner's ruling) — **the glance reads the
+    /// head; asking to edit buys the rest of the file.**
+    ///
+    /// The cap on the *look* had become a cap on the feature: past
+    /// [`PREVIEW_HEAD_BYTES`] a buffer is truncated, a truncated buffer refuses
+    /// a caret, and `docs/DESIGN.md` — the document that motivates editing
+    /// Markdown in this pane at all — is far over 64KB. So the read is in two
+    /// stages now, and this is both of them: the glance costs one head read and
+    /// the file stays read-only; the asking costs one whole-file read and the
+    /// same buffer becomes editable, without ever having unloaded what was on
+    /// the glass.
+    ///
+    /// Red gate: without the third clause of
+    /// [`PreviewBuffer::wants_head_read`] and the `Whole` want beside it, the
+    /// second half of the file never arrives and the buffer is read-only for
+    /// ever.
+    #[test]
+    fn asking_to_edit_a_file_too_big_to_glance_at_buys_the_whole_of_it() {
+        let dir = scratch("whole-read");
+        let path = dir.join("long.md");
+        let body = "a line of a long document\n".repeat(4000);
+        assert!(
+            body.len() > PREVIEW_HEAD_BYTES,
+            "the fixture is over the cap"
+        );
+        std::fs::write(&path, &body).unwrap();
+
+        let mut buffer =
+            PreviewBuffer::new(PreviewSource::file(path.clone()), "long.md".to_owned());
+        assert_eq!(buffer.claim_head_read(), Some(PreviewWant::Head));
+        buffer.accept(read_head(&path));
+        assert!(buffer.truncated, "the glance took the head and said so");
+        assert!(!buffer.is_editable(true));
+        assert_eq!(buffer.read_only_notice(), Some(preview_truncated_notice()));
+        assert!(
+            !buffer.ask_for_the_whole_file(false),
+            "a rendered page is not somebody asking to edit"
+        );
+
+        assert!(buffer.ask_for_the_whole_file(true), "and the flip is");
+        // The head is still on the glass while the rest is on its way: nothing
+        // was unloaded, so the page does not flash.
+        assert!(buffer.content.is_some() && buffer.load == PreviewLoad::Ready);
+        assert_eq!(buffer.claim_head_read(), Some(PreviewWant::Whole));
+        buffer.accept(read_whole(&path));
+
+        assert!(!buffer.truncated, "the whole file is here");
+        assert_eq!(buffer.content.as_deref(), Some(body.as_str()));
+        assert!(buffer.is_editable(true), "so there is something to type in");
+        assert_eq!(buffer.read_only_notice(), None);
+        assert!(!buffer.wants_head_read(), "and nothing further is owed");
+
+        // **And it stays a whole-file reader.** A watcher's re-read that came
+        // back as a head would put the reader on the first 64KB of the document
+        // they are editing, with the ceiling back.
+        assert!(buffer.mark_stale());
+        assert_eq!(buffer.claim_head_read(), Some(PreviewWant::Whole));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED (T2 ③) — **past the editing ceiling the head stands and says why.**
+    ///
+    /// [`PREVIEW_EDIT_BYTES`] is the second read's own cap, and what happens at
+    /// it is not a second truncated body: the whole-file read answers
+    /// [`HeadOutcome::TooLargeToEdit`], nothing the reader is looking at is
+    /// replaced, and the buffer says through the one notice channel that this is
+    /// as far as asking gets. The bytes are built here rather than committed,
+    /// for the obvious reason.
+    ///
+    /// Red gate: let `read_whole` return its truncated body and the buffer
+    /// silently swaps 64KB of document for 8MB of it and is still read-only,
+    /// with nothing said.
+    #[test]
+    fn a_file_past_the_editing_ceiling_keeps_its_head_and_says_so() {
+        let dir = scratch("edit-ceiling");
+        let path = dir.join("enormous.txt");
+        let line = "an enormous file, one line at a time\n";
+        let mut body = String::with_capacity(PREVIEW_EDIT_BYTES + line.len());
+        while body.len() <= PREVIEW_EDIT_BYTES {
+            body.push_str(line);
+        }
+        std::fs::write(&path, &body).unwrap();
+
+        let mut buffer =
+            PreviewBuffer::new(PreviewSource::file(path.clone()), "enormous.txt".to_owned());
+        assert_eq!(buffer.claim_head_read(), Some(PreviewWant::Head));
+        buffer.accept(read_head(&path));
+        let head = buffer.content.clone().expect("the glance landed");
+
+        assert!(
+            buffer.ask_for_the_whole_file(false),
+            "a text file's face edits"
+        );
+        assert_eq!(buffer.claim_head_read(), Some(PreviewWant::Whole));
+        assert_eq!(read_whole(&path), HeadOutcome::TooLargeToEdit);
+        buffer.accept(HeadOutcome::TooLargeToEdit);
+
+        assert_eq!(
+            buffer.content.as_deref(),
+            Some(head.as_str()),
+            "what the reader is looking at is untouched"
+        );
+        assert!(buffer.truncated && !buffer.is_editable(false));
+        assert_eq!(buffer.read_only_notice(), Some(preview_too_large_notice()));
+        assert!(
+            !buffer.wants_head_read(),
+            "and the answer is final — nothing asks again"
+        );
+        assert!(
+            !buffer.ask_for_the_whole_file(false),
+            "including the next time somebody presses in the body"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// PIN — **the editing ceiling's phrase names the real ceiling.**
+    ///
+    /// `the_read_only_fact_hangs_on_the_path_foots_right_hand` says this about
+    /// [`preview_truncated_notice`] and [`PREVIEW_HEAD_BYTES`]; this is the same
+    /// line held for the second number, so that a ceiling that moves cannot
+    /// leave a phrase behind claiming the old one.
+    ///
+    /// Mutation: change [`PREVIEW_EDIT_BYTES`] and leave the string alone.
+    #[test]
+    fn the_editing_ceilings_phrase_names_the_size_it_is() {
+        assert_eq!(
+            preview_too_large_notice(),
+            format!(
+                "Read-only · {}",
+                format_byte_size(PREVIEW_EDIT_BYTES as u64)
+            ),
+            "the phrase names the editing cap's real size, not a number typed twice"
+        );
+    }
+
     /// ② A save writes the body to the disk and cleans the buffer.
     ///
     /// Mutation: return [`SaveOutcome::Saved`] without calling
@@ -8809,41 +9479,71 @@ mod tests {
             true
         });
         assert_eq!(buffer.save(), SaveOutcome::Saved);
-        // Nothing is left behind beside the file.
-        assert!(!preview_temp_path(on_disk(&buffer)).exists());
+        // Nothing is left beside the file: the staging sibling went with the
+        // rename that spent it.
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "one entry in the directory, and it is the file that was saved"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// ③ A write that fails leaves the file it was aimed at untouched.
+    /// ③ A write the filesystem refuses is reported, and leaves nothing behind.
     ///
-    /// The failure is injected the only honest way a filesystem allows: the
-    /// staging path is occupied by a *directory*, so creating the staging file
-    /// cannot succeed. Under the mutation the target is opened directly, the
-    /// truncate has already happened when the failure arrives, and what is left
-    /// on the disk is neither version.
+    /// The refusal is injected the one way a filesystem allows without a full
+    /// volume or an access-control edit: the target is a **directory**, which
+    /// neither Windows nor Unix will let a file be renamed over. The buffer
+    /// keeps its edits, the entry it was aimed at is untouched, and — the part
+    /// that used to cost this window a temp file per retry — the staging sibling
+    /// does not survive the failure.
     ///
-    /// Mutation: write straight to `path` in [`save_atomically`] instead of
-    /// staging and renaming.
+    /// **The atomicity itself is pinned one crate over** since T2 folded the two
+    /// writers into one (research §10 Q14): `bt_persist::atomic`'s own
+    /// `interrupted_write_leaves_old_file_intact` stops between the two phases
+    /// and asserts the target is still the old bytes, which is the crash window
+    /// the staging exists for and a test that can only be written where the
+    /// phases are.
+    ///
+    /// Mutation: return `SaveOutcome::Saved` regardless of what the writer
+    /// answered, and the first assertion goes red.
     #[test]
-    fn a_failed_write_leaves_the_original_file_whole() {
+    fn a_write_the_disk_refuses_is_reported_and_leaves_nothing_behind() {
         let dir = scratch("atomic");
         let path = dir.join("notes.txt");
-        std::fs::write(&path, "the original\n").unwrap();
-        std::fs::create_dir_all(preview_temp_path(&path)).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("inside.txt"), "somebody else's file\n").unwrap();
 
-        let error = save_atomically(&path, "the replacement\n")
-            .expect_err("a staging file cannot be created over a directory");
-        assert!(!error.to_string().is_empty());
+        let mut buffer =
+            PreviewBuffer::new(PreviewSource::file(path.clone()), "notes.txt".to_owned());
+        buffer.accept(HeadOutcome::Read {
+            text: "the replacement\n".to_owned(),
+            truncated: false,
+            mtime: file_mtime(&path),
+            content_says_text: true,
+            encoding: HeadEncoding::Utf8,
+            lossy: false,
+        });
+        buffer.edit_content(|content| {
+            content.push_str("and a second line\n");
+            true
+        });
+
+        let SaveOutcome::Failed(said) = buffer.save() else {
+            panic!("a file cannot be renamed over a directory");
+        };
+        assert!(!said.is_empty(), "and the window is told what happened");
+        assert!(buffer.dirty, "the edits are still here");
         assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "the original\n",
-            "the target was never opened"
+            std::fs::read_to_string(path.join("inside.txt")).unwrap(),
+            "somebody else's file\n",
+            "and what the target held was never touched"
         );
-
-        // With the staging path free again the same call goes through.
-        std::fs::remove_dir_all(preview_temp_path(&path)).unwrap();
-        save_atomically(&path, "the replacement\n").unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "the replacement\n");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "a refused write leaves no staging file behind to be retried into"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -8874,7 +9574,11 @@ mod tests {
             "the other writer's file is still theirs"
         );
         assert!(buffer.dirty, "and the edits are still here");
-        assert!(!preview_temp_path(on_disk(&buffer)).exists());
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "a refusal this early stages nothing at all"
+        );
 
         // Re-reading the file settles the conflict, and the same save lands.
         buffer.disk_mtime = file_mtime(on_disk(&buffer));
@@ -8892,9 +9596,8 @@ mod tests {
     ///
     /// Three buffers and three fates, injected the way the two cases already
     /// pinned above inject theirs — a stamp the disk has moved past, and a
-    /// staging path a directory is sitting on — so nothing here is mocked: the
-    /// real conflict check refuses one and the real `atomic_write` refuses
-    /// another.
+    /// target a directory is sitting on — so nothing here is mocked: the real
+    /// conflict check refuses one and the real `atomic_write` refuses another.
     ///
     /// What the case holds is the three sentences the ruling is made of. **The
     /// one that could be written is honestly clean** — it is not rolled back to
@@ -8923,13 +9626,26 @@ mod tests {
             true
         });
         conflicted.disk_mtime = Some(SystemTime::UNIX_EPOCH);
-        // And this one's staging path is occupied, so the atomic write refuses.
-        let mut refused = opened(&dir, "refused.txt", "as it was\n");
+        // And this one's target is a directory, which nothing can be renamed
+        // over, so the atomic write refuses.
+        let refused_at = dir.join("refused.txt");
+        std::fs::create_dir(&refused_at).unwrap();
+        let mut refused = PreviewBuffer::new(
+            PreviewSource::file(refused_at.clone()),
+            "refused.txt".to_owned(),
+        );
+        refused.accept(HeadOutcome::Read {
+            text: "as it was\n".to_owned(),
+            truncated: false,
+            mtime: file_mtime(&refused_at),
+            content_says_text: true,
+            encoding: HeadEncoding::Utf8,
+            lossy: false,
+        });
         refused.edit_content(|content| {
             content.push_str("and as it is\n");
             true
         });
-        std::fs::create_dir_all(preview_temp_path(on_disk(&refused))).unwrap();
         // A clean buffer, which a save branch has no business writing at all.
         let untouched = opened(&dir, "clean.txt", "unchanged\n");
 
@@ -8965,10 +9681,14 @@ mod tests {
             "theirs\n",
             "the other writer's file is still theirs"
         );
-        assert_eq!(
-            std::fs::read_to_string(dir.join("refused.txt")).unwrap(),
-            "as it was\n",
-            "and the file the write could not reach was never opened"
+        assert!(
+            dir.join("refused.txt").is_dir()
+                && std::fs::read_dir(dir.join("refused.txt"))
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "and what the write could not reach is exactly as it was found — \
+             not replaced, and with no staging file dropped inside it"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -9598,7 +10318,7 @@ mod tests {
         );
         assert_eq!(buffer.load, PreviewLoad::Ready);
         assert!(!buffer.wants_head_read(), "there is no disk to ask");
-        assert!(!buffer.claim_head_read());
+        assert!(buffer.claim_head_read().is_none());
         assert!(!buffer.is_editable(false) && !buffer.is_editable(true));
         assert!(matches!(buffer.save(), SaveOutcome::Failed(_)));
         assert_eq!(
@@ -9710,7 +10430,7 @@ mod tests {
             "so the name refuses nothing — the bytes have not been asked yet"
         );
         assert!(
-            buffer.claim_head_read(),
+            buffer.claim_head_read().is_some(),
             "and the question that asks them is the preview's own one read"
         );
 
@@ -9758,7 +10478,7 @@ mod tests {
             "a NUL inside the sniff window is the whole of git's own rule"
         );
         let mut buffer = PreviewBuffer::new(PreviewSource::file(&path), "bundle.pak".to_owned());
-        assert!(buffer.claim_head_read());
+        assert!(buffer.claim_head_read().is_some());
         buffer.accept(read_head(&path));
         assert_eq!(
             buffer.ftype,
@@ -9805,7 +10525,7 @@ mod tests {
         let path = dir.join("transcript.log1");
         std::fs::write(&path, &le).unwrap();
         let mut buffer = PreviewBuffer::new(PreviewSource::file(&path), "transcript.log1".into());
-        assert!(buffer.claim_head_read());
+        assert!(buffer.claim_head_read().is_some());
         buffer.accept(read_head(&path));
         assert_eq!(buffer.ftype, PreviewFtype::Text);
         assert_eq!(
@@ -9849,22 +10569,29 @@ mod tests {
             .expect("this file carries its tests at the end");
         assert!(!tests.is_empty(), "and the split found them");
 
-        // The definition, and the one call.
-        assert_eq!(
-            module.matches("read_head(").count(),
-            2,
-            "read_head is defined once and called once outside the tests"
-        );
+        // The definition, and the one call — **for each of the two reads**
+        // (T2 ③, 2026-09-10). The whole-file read is a second, larger trip to
+        // the same disk, and the line it must stay behind is this one: a body
+        // read on the window thread is the frame budget spent on a file's size,
+        // and 8MB of it would be worse than 64KB by exactly the factor between
+        // them.
         let spawned_at = module
             .find("pub fn spawn(proxy: EventLoopProxy<AppEvent>)")
             .expect("PreviewWorker::spawn is declared here");
-        let called_at = module
-            .rfind("read_head(")
-            .expect("the call the count above just found");
-        assert!(
-            called_at > spawned_at,
-            "and that one call is inside the worker's thread body"
-        );
+        for reader in ["read_head(", "read_whole("] {
+            assert_eq!(
+                module.matches(reader).count(),
+                2,
+                "{reader} is defined once and called once outside the tests"
+            );
+            let called_at = module
+                .rfind(reader)
+                .expect("the call the count above just found");
+            assert!(
+                called_at > spawned_at,
+                "and {reader}'s one call is inside the worker's thread body"
+            );
+        }
 
         // Neither door the window thread asks is allowed to touch a disk. Both
         // are pure functions of a name and a source, and the assertions say so

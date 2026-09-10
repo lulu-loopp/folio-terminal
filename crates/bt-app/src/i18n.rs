@@ -695,6 +695,14 @@ pub enum Text {
     PreviewOpenExternally,
     PreviewOpened,
     PreviewTruncated,
+    /// **Why a file this window could not fully read is not edited** (T2 ②,
+    /// 2026-09-10). Shares the right hand of the path foot with
+    /// [`Self::PreviewTruncated`] and answers the same reader's question.
+    PreviewLossy,
+    /// **Why a file past the editing ceiling stays read-only** (T2 ③,
+    /// 2026-09-10). The size is generated from `PREVIEW_EDIT_BYTES` the way
+    /// [`Self::PreviewTruncated`]'s is generated from `PREVIEW_HEAD_BYTES`.
+    PreviewTooLargeToEdit,
     PreviewSaved,
     PreviewConflict,
     /// The clause that gets filled into [`not_saved`].
@@ -2912,6 +2920,16 @@ impl Text {
             Self::PreviewOpened => pick(lang, "Opened \u{2713}", "已打开 \u{2713}"),
             // `64 KB` is a quantity, not a word.
             Self::PreviewTruncated => pick(lang, "Read-only · 64 KB", "只读 · 64 KB"),
+            // The other half of the same question: truncation is about the end
+            // of the file that is missing, this is about bytes in the middle of
+            // it that would not read.
+            Self::PreviewLossy => pick(
+                lang,
+                "Read-only · unreadable bytes",
+                "只读 · 部分内容无法读取",
+            ),
+            // `8.0 MB` is a quantity, not a word, and it is generated.
+            Self::PreviewTooLargeToEdit => pick(lang, "Read-only · 8.0 MB", "只读 · 8.0 MB"),
             Self::PreviewSaved => pick(lang, "Saved", "已保存"),
             Self::PreviewConflict => pick(
                 lang,
@@ -4334,7 +4352,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 598] = [
+    pub const ALL: [Self; 600] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4473,6 +4491,8 @@ impl Text {
         Self::PreviewOpenExternally,
         Self::PreviewOpened,
         Self::PreviewTruncated,
+        Self::PreviewLossy,
+        Self::PreviewTooLargeToEdit,
         Self::PreviewSaved,
         Self::PreviewConflict,
         Self::PreviewNothingToSave,
