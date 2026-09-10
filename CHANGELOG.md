@@ -6,6 +6,26 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **The files column's menu can create a file or a folder and send either to the
+  Recycle Bin.** Right-clicking a folder row now offers `New file…` and
+  `New folder…` above the line, and both file rows and folder rows offer
+  `Delete`. The two New rows put a field in the tree where the new row will
+  appear, so the name is typed where the name is going to be: Enter creates,
+  Escape cancels, and a name the folder will not take — nothing at all, a path
+  separator, a name something in that folder already has, a Windows device name
+  like `NUL` — turns red in the box rather than being explained somewhere else.
+  A new file is created empty and selected; opening it is your next click.
+  `Delete` asks nothing first, because what it does is reversible: the row goes
+  to the Recycle Bin and never to a permanent delete, and a folder goes whole.
+  The name editor behind all of this — the one a tab, a file's name, a
+  breadcrumb and an address already use — has grown the things a text field
+  should have: shift-selection, word jumps with Ctrl and the arrow keys,
+  Ctrl+Backspace, copy, cut, paste, and an in-progress Chinese or Japanese
+  composition drawn where it is being typed instead of appearing a syllable at a
+  time.
+
 ### Fixed
 
 - **A file that says what it is keeps saying it after you save.** Some files

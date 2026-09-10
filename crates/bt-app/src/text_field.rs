@@ -16,12 +16,20 @@
 //! the in-pane search the preview is owed can have the same field rather than a
 //! fourth one.
 //!
-//! **The tab rename should migrate to this**, and is deliberately not migrated
-//! by this slice — recorded in `docs/DESIGN.md` §7.1.3g rather than left as a
-//! comment nobody will find. Moving it is a change to a surface with its own
-//! tests and its own IME path, and doing it in the same breath as introducing
-//! the type would mean the type's first proof was a refactor rather than a
-//! feature.
+//! **The tab rename has migrated** (0.3, the files column's second batch). It
+//! was deliberately left behind by the slice that introduced this type — a
+//! surface with its own tests and its own IME path, and moving it in the same
+//! breath would have made the type's first proof a refactor rather than a
+//! feature — and it moved the day the files column needed a *second* field of
+//! the same kind, to type a new file's name into. That is the moment the debt
+//! had to be paid rather than a tidy-up: the alternative was a fourth
+//! single-line editor, written beside the third, in the same file.
+//!
+//! What that editor keeps for itself is what this module says it holds no
+//! opinion about — where the drawn window onto a long draft starts
+//! (`TabRename::first_visible`), and what a name may legally be. What it gains
+//! is everything here: shift-selection, the word verbs, a clipboard, and a
+//! composition drawn at the caret instead of thrown away.
 //!
 //! # Bytes, not characters
 //!
@@ -96,9 +104,47 @@ impl TextField {
         }
     }
 
+    /// **A field holding `text` with its first `selected` bytes selected**, and
+    /// the caret at that selection's far end.
+    ///
+    /// The constructor a *rename* opens through (`TabRename::seed`), which is
+    /// why it is a prefix and not an arbitrary pair: every door onto that editor
+    /// selects from the start of the name — the whole draft on a tab, the stem
+    /// on a file — and one constructor is what stops each door seeding its own
+    /// pair of numbers and disagreeing with the next.
+    ///
+    /// The caret goes to the **end** of the prefix rather than to zero because
+    /// that is what a forward selection is: the anchor is where the drag began
+    /// and the caret is the end it was dragged to, which is what the browser's
+    /// `setSelectionRange(0, dot)` means and what every verb below already
+    /// assumes.
+    ///
+    /// `selected == 0` is the honest way to say "no selection", and it is what a
+    /// field opened on a name with nothing worth pre-selecting gets.
+    #[must_use]
+    pub fn holding_selected(text: &str, selected: usize) -> Self {
+        debug_assert!(
+            text.is_char_boundary(selected),
+            "a selection ends on a character boundary"
+        );
+        Self {
+            caret: selected,
+            anchor: 0,
+            text: text.to_owned(),
+            preedit: String::new(),
+        }
+    }
+
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// The run the selection covers, empty when there is none — what a copy or
+    /// a cut puts on the clipboard.
+    #[must_use]
+    pub fn selected_text(&self) -> &str {
+        &self.text[self.selection()]
     }
 
     #[must_use]
