@@ -528,7 +528,7 @@ jobs:
       # weakened by a Linux runner that cannot.
       - name: test the portable crates
         run: >
-          cargo test --locked --no-fail-fast
+          cargo test --locked
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-transcript -p bt-viewport
           -p bt-pty -p alacritty_terminal
