@@ -660,9 +660,10 @@ fn read_reply(pipe: HANDLE, buffer: &mut [u8], budget: Duration) -> io::Result<u
     let handles = [event.handle()];
     // Rounded **up**: a budget of 1999.6 ms waited as 1999 ms is a launch that gave up a hair
     // before its allowance, and the allowance is the one number this module promises.
-    let milliseconds =
-        u32::try_from(budget.as_millis() + u128::from(budget.subsec_nanos() % 1_000_000 != 0))
-            .unwrap_or(u32::MAX);
+    let milliseconds = u32::try_from(
+        budget.as_millis() + u128::from(!budget.subsec_nanos().is_multiple_of(1_000_000)),
+    )
+    .unwrap_or(u32::MAX);
     // SAFETY: the event belongs to this call and outlives the wait.
     let answer = unsafe { WaitForMultipleObjects(&handles, false, milliseconds) };
     let timed_out = answer != WAIT_OBJECT_0;
