@@ -4668,6 +4668,23 @@ pub struct PreviewBuffer {
     /// swapping one letter for another left the cache convinced it was still
     /// looking at the old text.
     pub revision: u64,
+    /// **Whether the body this revision names was typed here** (ticket T4;
+    /// `docs/DESIGN.md` §7.1.3q).
+    ///
+    /// One bit, read by exactly one question: when a pane throws away its parse
+    /// and builds another, does what the reader had marked go with it? It has to,
+    /// when the bytes changed under the parse because another program wrote the
+    /// file — a highlight over somebody else's sentence would put those bytes on
+    /// the clipboard. It must **not**, when the bytes changed because the reader
+    /// typed them, because a document that re-parses on every keystroke would
+    /// then drop its own selection on every keystroke.
+    ///
+    /// **On the buffer and not on the pane**, for [`Self::undo`]'s reason: two
+    /// panes on one file are one buffer, and an edit made through either of them
+    /// is this window's doing as far as the other one is concerned.
+    ///
+    /// `false` to begin with, because a buffer's first body is a file's.
+    edited_here: bool,
     /// When the file was last written, as of the read this body came from.
     ///
     /// The other half of ruling 8⑨'s minimum concurrent-edit story: a save
@@ -4913,6 +4930,7 @@ impl PreviewBuffer {
             truncated: false,
             dirty: false,
             revision: 0,
+            edited_here: false,
             disk_mtime: None,
             load,
             head_asked: false,
@@ -5384,6 +5402,16 @@ impl PreviewBuffer {
         true
     }
 
+    /// **Whether the body this buffer is holding was typed here** — see
+    /// [`Self::edited_here`].
+    ///
+    /// A reader rather than a public field, because it is written in exactly
+    /// three places and every one of them is a door in this file: the two the
+    /// disk arrives through and the one every change of ours settles in.
+    pub fn was_edited_here(&self) -> bool {
+        self.edited_here
+    }
+
     /// **The keyboard's own door** — [`Self::edit_content`] with the caret that
     /// made the edit (ticket T3).
     ///
@@ -5462,6 +5490,12 @@ impl PreviewBuffer {
         self.max_columns = widest_line_columns(self.content.as_deref().unwrap_or_default());
         self.revision += 1;
         self.dirty = self.undo.is_dirty();
+        // Every road into here is a hand on this window's keyboard — a
+        // keystroke, an undo, a redo — which is the whole of what
+        // [`Self::edited_here`] means. The disk's two doors ([`Self::accept`],
+        // [`Self::decline`]) move the revision without coming through here, and
+        // each of them says so on its own line.
+        self.edited_here = true;
     }
 
     /// Write the body back to its file.
@@ -5659,6 +5693,9 @@ impl PreviewBuffer {
     /// a head read has to be told never happens.
     pub fn decline(&mut self, words: String) {
         self.revision += 1;
+        // Whatever body was here is the disk's to take away — see
+        // [`Self::edited_here`].
+        self.edited_here = false;
         // The question is closed by its answer, whichever lane answered it.
         self.head_asked = false;
         self.stale = false;
@@ -5679,6 +5716,12 @@ impl PreviewBuffer {
     /// File the worker's answer.
     pub fn accept(&mut self, outcome: HeadOutcome) {
         self.revision += 1;
+        // **These bytes are the file's, not the reader's** — see
+        // [`Self::edited_here`]. The same sentence the line below writes about
+        // the undo log, about the other thing that cannot survive a body being
+        // replaced: what a reader had marked is a claim about the text that is
+        // going away.
+        self.edited_here = false;
         // **A body arriving from a disk is a different body**, so the history of
         // the one it replaces goes with it (ticket T3). This is the door
         // [`Self::take_the_disks_copy`]'s own line ends at — the reload asks for
