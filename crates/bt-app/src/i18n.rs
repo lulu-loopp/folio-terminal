@@ -703,6 +703,16 @@ pub enum Text {
     /// 2026-09-10). The size is generated from `PREVIEW_EDIT_BYTES` the way
     /// [`Self::PreviewTruncated`]'s is generated from `PREVIEW_HEAD_BYTES`.
     PreviewTooLargeToEdit,
+    /// **Why an animated picture is standing on its first frame** (user report
+    /// 2026-09-10): its frames are each too large for this window to keep two of
+    /// at once. The right hand of the same foot strip
+    /// [`Self::PreviewTruncated`] stands on, and in the same two-fact shape —
+    /// what you are looking at, then why.
+    PreviewAnimationTooLarge,
+    /// The other reason a `.gif` does not move: the frames behind the first one
+    /// would not read. A file that is one still frame says **nothing** — it
+    /// looks like a still picture because it is one.
+    PreviewAnimationBroken,
     PreviewSaved,
     PreviewConflict,
     /// The clause that gets filled into [`not_saved`].
@@ -2956,6 +2966,16 @@ impl Text {
             ),
             // `8.0 MB` is a quantity, not a word, and it is generated.
             Self::PreviewTooLargeToEdit => pick(lang, "Read-only · 8.0 MB", "只读 · 8.0 MB"),
+            // The state first and the reason second, which is this strip's own
+            // shape. 「画面太大」 and not 「文件太大」 because the fact is about a
+            // frame and not about a file: a 2000-square animation is a few
+            // megabytes on disk and sixteen decoded.
+            Self::PreviewAnimationTooLarge => {
+                pick(lang, "First frame · too large", "首帧 · 画面太大")
+            }
+            Self::PreviewAnimationBroken => {
+                pick(lang, "First frame · would not play", "首帧 · 无法播放")
+            }
             Self::PreviewSaved => pick(lang, "Saved", "已保存"),
             Self::PreviewConflict => pick(
                 lang,
@@ -4383,7 +4403,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 605] = [
+    pub const ALL: [Self; 607] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4524,6 +4544,8 @@ impl Text {
         Self::PreviewTruncated,
         Self::PreviewLossy,
         Self::PreviewTooLargeToEdit,
+        Self::PreviewAnimationTooLarge,
+        Self::PreviewAnimationBroken,
         Self::PreviewSaved,
         Self::PreviewConflict,
         Self::PreviewNothingToSave,

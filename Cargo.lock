@@ -275,6 +275,7 @@ dependencies = [
  "bt-unicode",
  "bt-viewport",
  "bt-winres",
+ "gif",
  "hayro",
  "image",
  "pollster",

@@ -689,8 +689,10 @@ impl MathWorkerResult {
             | DecorationWorkerCompletion::PeekVideoFrame { .. }
             // And an animation's frames on the identical terms: one map per
             // window keyed by the file, so three surfaces over one `loading.gif`
-            // read one answer at one phase.
+            // read one answer at one phase. Its refills travel the same road for
+            // the same reason — they are frames of the same file.
             | DecorationWorkerCompletion::PeekAnimation { .. }
+            | DecorationWorkerCompletion::AnimationFill { .. }
             | DecorationWorkerCompletion::PeekScaledImage { .. }
             // A glance card's page is the window's on the same terms: one slot per window, keyed
             // by the file it was drawn from, and no pane owns it.
@@ -766,15 +768,36 @@ enum MathWorkerRequest {
     /// [`Self::PeekVideoFrame`]'s reason: the two answers have different shapes,
     /// different sizes and different lives. A still is one raster in a
     /// byte-budgeted LRU shared with every other picture in the window; an
-    /// animation is a list of rasters held whole, bounded by its own ceiling,
-    /// and drawn down the video lane. Folding them together would put a
-    /// hundred-frame allocation behind every `.png` hover.
+    /// animation is a ring of rasters over a file of any length, bounded by its
+    /// own ceiling, and drawn down the video lane. Folding them together would
+    /// put a ring's allocation behind every `.png` hover.
     ///
     /// **Asked once per file and not once per surface**, because the answer is
     /// keyed by path: three surfaces over one `loading.gif` are three drawings
     /// of one animation at one phase, which is what makes them agree without any
     /// of them being told about the others.
     PeekAnimation { leaf: ShellAddress, path: PathBuf },
+    /// **Decode the next frames of an animation already playing** (user report
+    /// 2026-09-10).
+    ///
+    /// The other half of the streaming ring: [`Self::PeekAnimation`] opens a
+    /// file and this keeps it going. The decoder itself travels — out in this
+    /// request, home in [`DecorationWorkerCompletion::AnimationFill`] — which is
+    /// what makes the design cost no thread, no session table on the worker and
+    /// no lock: **the window cannot decode while the cursor is away, and the
+    /// worker cannot draw while it is here.** Being away is also this window's
+    /// whole record that a fill is in flight, so a second request for the same
+    /// animation cannot be posted.
+    ///
+    /// `want` is what the ring has room for, in frames, and it is decided by the
+    /// animation ([`animation::Animation::take_cursor`]) rather than here: the
+    /// worker fills the order it is given.
+    AnimationFill {
+        leaf: ShellAddress,
+        path: PathBuf,
+        cursor: Box<animation::AnimationCursor>,
+        want: usize,
+    },
     /// **Raster one page of a PDF the glance card is over** (user rulings 2026-08-25 and
     /// 2026-08-26; `docs/DESIGN.md` §7.10 ⑥, §7.7 ⑮).
     ///
@@ -995,11 +1018,22 @@ enum DecorationWorkerCompletion {
         path: PathBuf,
         glance: VideoGlance,
     },
-    /// Every frame of one animated picture, or the reason there are none — see
-    /// [`animation::decode`].
+    /// The head of one animated picture's frames, or the reason there are none —
+    /// see [`animation::decode`].
     PeekAnimation {
         path: PathBuf,
         frames: std::result::Result<animation::Animation, animation::AnimationRefusal>,
+    },
+    /// **The next frames of one animation, and its decoder coming home** — see
+    /// [`MathWorkerRequest::AnimationFill`].
+    ///
+    /// The cursor travels back whether or not it decoded anything: an animation
+    /// whose cursor was dropped is one that stands on its last frame for as long
+    /// as the window is open.
+    AnimationFill {
+        path: PathBuf,
+        cursor: Box<animation::AnimationCursor>,
+        frames: Vec<animation::AnimationFrame>,
     },
     /// One page of one glance card's column, or the news that it did not need drawing again.
     PeekPage {
@@ -1309,6 +1343,26 @@ impl MathWorker {
                             (
                                 leaf,
                                 DecorationWorkerCompletion::PeekAnimation { path, frames },
+                            )
+                        }
+                        // **This is the thread `AnimationCursor::next_frames`
+                        // exists for.** Composing a frame is the whole logical
+                        // screen, and the window has one thread that must not
+                        // spend that.
+                        MathWorkerRequest::AnimationFill {
+                            leaf,
+                            path,
+                            mut cursor,
+                            want,
+                        } => {
+                            let frames = cursor.next_frames(want);
+                            (
+                                leaf,
+                                DecorationWorkerCompletion::AnimationFill {
+                                    path,
+                                    cursor,
+                                    frames,
+                                },
                             )
                         }
                         MathWorkerRequest::PeekPage {
@@ -24490,22 +24544,50 @@ enum AnimationEntry {
     /// Boxed for the reason every large payload in this file is: the map's
     /// entries are moved when it grows, and an animation is its frames.
     Ready(Box<animation::Animation>),
-    /// The reason is not carried, and that is the whole of what this window does
-    /// differently for each of them: **nothing**. A `.gif` with one frame, one
-    /// too large to hold, and one that will not decode are all drawn the same
-    /// way — as the still picture the picture channel already has — so a variant
-    /// per reason would be four states with one behaviour between them. The
-    /// reason is printed once, where a reason belongs.
-    Refused,
+    /// **And the reason, because two of the four are owed a sentence** (user
+    /// report 2026-09-10).
+    ///
+    /// It used to be carried nowhere. Every refusal drew the same picture — the
+    /// still the picture channel already has — so the variant held nothing and
+    /// the reason went to `stderr`, which is a place no reader of this window
+    /// has ever looked. A `.gif` that would not play looked exactly like a `.gif`
+    /// that had nothing to play, and the difference between those two is the
+    /// difference between this window declining and this window appearing not to
+    /// work. The picture is still the same picture; what the reason buys is the
+    /// line in the foot of the pane — see [`Runtime::preview_foot_notice`] and
+    /// [`animation::AnimationRefusal::is_worth_saying`].
+    Refused(animation::AnimationRefusal),
 }
 
 impl bt_term::Weighed for AnimationEntry {
     fn bytes_held(&self) -> u64 {
         match self {
-            Self::Pending | Self::Refused => 0,
+            Self::Pending | Self::Refused(_) => 0,
             Self::Ready(animation) => animation.bytes_held(),
         }
     }
+}
+
+/// **The sentence one refused animation earns in the foot of the pane**, or
+/// `None` for the two refusals that are not news (user report 2026-09-10).
+///
+/// A free function and not a method, because the whole of the decision is the
+/// refusal: which surface asked, what the file is called and where the pane is
+/// have nothing to do with it, and taking a `&self` for it would be a rule that
+/// can only be tested by building a window.
+///
+/// See [`Runtime::animation_refusal_notice`] for what asks, and
+/// [`animation::AnimationRefusal::is_worth_saying`] for why two of the four say
+/// nothing: a `.gif` that is one still picture looks exactly like a still
+/// picture, which is what it is.
+fn animation_refusal_notice(refusal: animation::AnimationRefusal) -> Option<&'static str> {
+    if !refusal.is_worth_saying() {
+        return None;
+    }
+    Some(match refusal {
+        animation::AnimationRefusal::TooLarge => i18n::Text::PreviewAnimationTooLarge.text(),
+        _ => i18n::Text::PreviewAnimationBroken.text(),
+    })
 }
 
 /// **What this window's animations live in** — see [`MAX_ANIMATION_CACHE_BYTES`].
@@ -24514,18 +24596,20 @@ type AnimationCache = bt_term::BoundedCache<String, AnimationEntry>;
 /// **How many bytes of decoded frames one window may hold, over every animation
 /// in it** (review row R1-8, adversarial review 2026-09-08).
 ///
-/// It is [`animation::MAX_ANIMATION_RGBA_BYTES`], and stating the same number
-/// twice is the point: what *one* animation was allowed to hold is now what all
-/// of them together may hold. The per-animation ceiling stands — §7.44 ⑤ argued
-/// it against a real shape, a thousand-frame screen capture, and nothing about
-/// that argument has changed — but the map it went into had no ceiling at all,
-/// so a folder of spinners hovered one after another kept every one of them
-/// decoded until the window closed.
+/// Six times [`animation::MAX_ANIMATION_HELD_BYTES`], which is what one
+/// animation costs with its ring full and its file in hand. Counted as a
+/// multiple of that rather than as a number of its own, because the two answer
+/// different questions and only one of them is this map's: how much *one* file
+/// may hold is §7.44 ⑤'s and the streaming ring's (user report 2026-09-10), and
+/// how many of them may be held at once is this one's. Six is more animated
+/// files than a glass has surfaces to show them on, and the map it replaced had
+/// no ceiling at all — so a folder of spinners hovered one after another kept
+/// every one of them decoded until the window closed.
 ///
 /// A playing animation is read on every frame it advances, so it is never the
 /// least recently used one: what this evicts is a `loading.gif` nobody has
 /// looked at since, and the cost of being wrong about that is one worker decode.
-const MAX_ANIMATION_CACHE_BYTES: u64 = animation::MAX_ANIMATION_RGBA_BYTES;
+const MAX_ANIMATION_CACHE_BYTES: u64 = 6 * animation::MAX_ANIMATION_HELD_BYTES;
 
 /// **Where a playing video is drawn on one surface** — see
 /// [`Runtime::video_shape_of`].
@@ -56056,12 +56140,37 @@ impl Runtime<'_> {
     /// The two can never both be owed: a read-only buffer has no save to
     /// report.
     fn preview_foot_notice(&self, surface: PreviewSurface, now: Instant) -> Option<&str> {
-        self.preview_buffer_on(surface)
-            .and_then(preview::PreviewBuffer::read_only_notice)
+        self.animation_refusal_notice(surface)
+            .or_else(|| {
+                self.preview_buffer_on(surface)
+                    .and_then(preview::PreviewBuffer::read_only_notice)
+            })
             .or_else(|| {
                 self.preview_save_notice(surface, now)
                     .filter(|notice| *notice != preview::preview_saved_notice())
             })
+    }
+
+    /// **Why the picture on this surface is standing still**, when it is a
+    /// `.gif` this window would not play (user report 2026-09-10).
+    ///
+    /// A standing fact, which is what earns a place on this strip: it is true of
+    /// the file for as long as you are looking at it, and it does not expire.
+    ///
+    /// It is first among the three because it is the only one of them about what
+    /// is *on the glass*: the other two are about a text body, and a surface
+    /// showing a picture has no body to be read-only about. Two of the four
+    /// refusals say nothing at all — see
+    /// [`animation::AnimationRefusal::is_worth_saying`] — because a `.gif` that
+    /// is one still picture looks exactly like a still picture, which is what it
+    /// is.
+    fn animation_refusal_notice(&self, surface: PreviewSurface) -> Option<&'static str> {
+        let path = self.animation_path_of(surface)?;
+        let key = normalized_local_image_path_key(&path);
+        let AnimationEntry::Refused(refusal) = self.window.animations.get(&key)? else {
+            return None;
+        };
+        animation_refusal_notice(*refusal)
     }
 
     /// How many lines this surface's edit surface can show — what a page is.
@@ -59019,13 +59128,23 @@ impl Runtime<'_> {
         animation::path_names_an_animation(&path).then_some(path)
     }
 
-    /// **Ask the worker for the frames of every animation on the glass that
-    /// this window has not looked inside yet** (§7.44 ⑤).
+    /// **Ask the worker for the frames of every animation on the glass** —
+    /// the first of them for a file this window has not looked inside yet, and
+    /// the next ones for a file it is playing (§7.44 ⑤; user report
+    /// 2026-09-10).
     ///
-    /// Once per file and never again: the answer is filed under the file's key
-    /// whether it decoded or not, so a `.gif` that is one still frame — or one
-    /// over the ceiling — costs exactly one walk of one container for as long as
-    /// this window is open, and a still after that.
+    /// **Opened once per file and never again**: the answer is filed under the
+    /// file's key whether it decoded or not, so a `.gif` that is one still frame
+    /// — or one whose frames are too large to stream — costs exactly one walk of
+    /// one container for as long as this window is open, and a still after that.
+    ///
+    /// **Refilled as often as the ring has room**, which is the streaming half:
+    /// a file is longer than the memory a hover is worth, so what is held is a
+    /// second or so of frames and the rest is fetched as the play head eats it.
+    /// The request is posted from here — the pass that already runs every frame
+    /// there is an animation in the window — rather than from the animation
+    /// tick, because this is the side that knows which files are on the glass:
+    /// an animation nobody is looking at is one this window stops decoding.
     fn request_animations(&mut self) {
         if !self.app.math_worker_running {
             return;
@@ -59036,6 +59155,7 @@ impl Runtime<'_> {
             };
             let key = normalized_local_image_path_key(&path);
             if self.window.animations.contains_key(&key) {
+                self.request_animation_fill(&key, &path);
                 continue;
             }
             let leaf = self.focused_shell_address();
@@ -59052,6 +59172,57 @@ impl Runtime<'_> {
                 self.window.animations.insert(key, AnimationEntry::Pending);
             }
         }
+    }
+
+    /// **Send one playing animation's decoder to the worker for as many frames
+    /// as its ring has room for** (user report 2026-09-10).
+    ///
+    /// Nothing happens for an animation that wants nothing, which is the great
+    /// majority of calls: a ring holding its second of play is a ring that asks
+    /// for another frame only when the play head has eaten one.
+    ///
+    /// The entry is taken out of the map and put back rather than reached into,
+    /// for the reason `bt_term::BoundedCache` states in its own note — an entry
+    /// is weighed when it goes in, and a ring that shrank under the map would
+    /// leave the ceiling counting pixels that had been dropped.
+    fn request_animation_fill(&mut self, key: &str, path: &std::path::Path) {
+        let wants = matches!(
+            self.window.animations.get(key),
+            Some(AnimationEntry::Ready(animation)) if animation.frames_wanted() > 0
+        );
+        if !wants {
+            return;
+        }
+        let Some(AnimationEntry::Ready(mut animation)) = self.window.animations.remove(key) else {
+            return;
+        };
+        if let Some((cursor, want)) = animation.take_cursor() {
+            let leaf = self.focused_shell_address();
+            let sent = self
+                .app
+                .math_worker
+                .tasks
+                .send(MathWorkerRequest::AnimationFill {
+                    leaf,
+                    path: path.to_owned(),
+                    cursor,
+                    want,
+                });
+            // **A request that could not be posted brings the cursor home.** The
+            // lane is gone, so no completion is coming, and an animation whose
+            // decoder went with the request would stand on its last frame for as
+            // long as this window is open.
+            if let Err(std::sync::mpsc::SendError(MathWorkerRequest::AnimationFill {
+                cursor,
+                ..
+            })) = sent
+            {
+                animation.park_cursor(cursor, Vec::new());
+            }
+        }
+        self.window
+            .animations
+            .insert(key.to_owned(), AnimationEntry::Ready(animation));
     }
 
     /// **Where one surface's video is drawn, and in which stack** — the geometry
@@ -75862,22 +76033,45 @@ impl Runtime<'_> {
                         key,
                         match frames {
                             Ok(animation) => AnimationEntry::Ready(Box::new(animation)),
-                            Err(refusal) => {
-                                // **Said once and not swallowed** (§7.44 ⑤).
-                                // `TooLarge` is the interesting one: it is the
-                                // ruling's own 「只播首帧」 arriving, and a reader
-                                // whose enormous capture sits still deserves a
-                                // line somewhere that says why.
-                                eprintln!(
-                                    "BT_GIF {refusal:?} {} (drawn as its first frame)",
-                                    path.display()
-                                );
-                                AnimationEntry::Refused
-                            }
+                            // **Said where a reader is standing**, and not only
+                            // to a console nobody has open: the refusal is filed
+                            // with its reason and the foot of the pane prints
+                            // the two that are worth printing — see
+                            // [`AnimationEntry::Refused`].
+                            Err(refusal) => AnimationEntry::Refused(refusal),
                         },
                     );
                     self.refresh_video_layers();
                     self.present_chrome_change()?;
+                    false
+                }
+                // **An animation's next frames, and its decoder** (user report
+                // 2026-09-10).
+                //
+                // Taken out and put back rather than reached into, for the one
+                // reason `BoundedCache` states in its own note: an entry is
+                // weighed when it goes in, so a ring that grew under the map
+                // would be pixels the ceiling never counted. Going through the
+                // door recounts them.
+                //
+                // **An animation the map has since let go of is let go of
+                // again.** A fill that arrives for a key that is no longer there
+                // is frames of a file no surface is showing, and re-inserting it
+                // would be an eviction undone by its own answer.
+                DecorationWorkerCompletion::AnimationFill {
+                    path,
+                    cursor,
+                    frames,
+                } => {
+                    let key = normalized_local_image_path_key(&path);
+                    if let Some(AnimationEntry::Ready(mut animation)) =
+                        self.window.animations.remove(&key)
+                    {
+                        animation.park_cursor(cursor, frames);
+                        self.window
+                            .animations
+                            .insert(key, AnimationEntry::Ready(animation));
+                    }
                     false
                 }
                 // **A video's frame**, on exactly the terms above: it lands in the same cache, is
@@ -117273,10 +117467,10 @@ mod tests {
     /// [`WindowRuntime::animations`] was inserted into at two doors and removed
     /// from at none, so a folder of spinners hovered one after another kept every
     /// one of them decoded until the window closed. The per-animation ceiling
-    /// [`animation::MAX_ANIMATION_RGBA_BYTES`] never applied to the map.
+    /// [`animation::MAX_ANIMATION_HELD_BYTES`] never applied to the map.
     ///
     /// A small budget rather than the window's own, because the rule is the
-    /// cache's and the window's number is 256 MiB of frames: what this pins is
+    /// cache's and the window's number is six rings of frames: what this pins is
     /// that an `AnimationEntry` is weighed by the frames it holds, which is the
     /// half that lives in this file.
     ///
@@ -117321,8 +117515,75 @@ mod tests {
         assert!(!cache.contains_key(r"d:\spinners\0.gif"));
         // A refusal weighs nothing but is still remembered, which is what stops a
         // `.gif` this window will not animate being asked about on every frame.
-        cache.insert(r"d:\spinners\still.gif".to_owned(), AnimationEntry::Refused);
+        cache.insert(
+            r"d:\spinners\still.gif".to_owned(),
+            AnimationEntry::Refused(animation::AnimationRefusal::OneFrame),
+        );
         assert!(cache.contains_key(r"d:\spinners\still.gif"));
+    }
+
+    /// RED — **a `.gif` this window will not play says so where the reader is
+    /// standing** (user report 2026-09-10).
+    ///
+    /// RED EVIDENCE (2026-09-10), the second defect in the same report — the
+    /// reason went to a console:
+    ///
+    /// ```text
+    /// eprintln!("BT_GIF {refusal:?} {} (drawn as its first frame)", path.display());
+    /// ```
+    ///
+    /// `AnimationEntry::Refused` carried no payload, because all four refusals
+    /// drew the same picture and the variant had nothing to choose between. That
+    /// reasoning was right about the picture and wrong about the reader: a
+    /// window built as a desktop application writes to a `stderr` nobody has
+    /// open, so a capture that would not play and a spinner with one frame in it
+    /// were the same silence.
+    ///
+    /// What is pinned here is the mapping, which is the whole of the rule: the
+    /// two refusals that leave a reader looking at a picture that ought to be
+    /// moving get a sentence, and the two that do not are quiet. The strip it
+    /// lands on is `Runtime::preview_foot_notice`, whose other two sentences are
+    /// [`preview::PreviewBuffer::read_only_notice`]'s.
+    ///
+    /// MUTATION: answer `Some` for `OneFrame` and every still `.gif` in a folder
+    /// wears a notice about not moving.
+    #[test]
+    fn an_animation_this_window_will_not_play_says_why_in_the_pane_s_foot() {
+        use animation::AnimationRefusal;
+        assert_eq!(
+            animation_refusal_notice(AnimationRefusal::TooLarge),
+            Some(i18n::Text::PreviewAnimationTooLarge.text()),
+        );
+        assert_eq!(
+            animation_refusal_notice(AnimationRefusal::Undecodable),
+            Some(i18n::Text::PreviewAnimationBroken.text()),
+        );
+        // A `.gif` with one frame is a still picture and is drawn as one; a file
+        // that is not an animation at all was never this lane's. Neither is news.
+        assert_eq!(animation_refusal_notice(AnimationRefusal::OneFrame), None);
+        assert_eq!(
+            animation_refusal_notice(AnimationRefusal::NotAnAnimation),
+            None
+        );
+        // The two sentences are two sentences, and both are in the shape this
+        // strip already speaks in — the state, then the reason.
+        let too_large = i18n::Text::PreviewAnimationTooLarge.text();
+        let broken = i18n::Text::PreviewAnimationBroken.text();
+        assert_ne!(too_large, broken);
+        for notice in [too_large, broken] {
+            assert!(
+                notice.contains('·'),
+                "{notice:?} names a state and a reason"
+            );
+        }
+        // And the reason is carried by the entry the foot reads it out of, which
+        // is the half of this that used to be missing: an `AnimationEntry` with
+        // no payload could not have answered any of the four calls above.
+        let entry = AnimationEntry::Refused(AnimationRefusal::TooLarge);
+        let AnimationEntry::Refused(carried) = entry else {
+            panic!("a refusal is filed with its reason");
+        };
+        assert_eq!(animation_refusal_notice(carried), Some(too_large));
     }
 
     /// RED — **a recording follows the pane it is drawn in** (user report on
@@ -138715,6 +138976,7 @@ mod tests {
                 | MathWorkerRequest::PeekImage { leaf, .. }
                 | MathWorkerRequest::PeekVideoFrame { leaf, .. }
                 | MathWorkerRequest::PeekAnimation { leaf, .. }
+                | MathWorkerRequest::AnimationFill { leaf, .. }
                 | MathWorkerRequest::PeekPage { leaf, .. }
                 | MathWorkerRequest::PreviewMath { leaf, .. }
                 | MathWorkerRequest::VerifyPath { leaf, .. } => leaf,
