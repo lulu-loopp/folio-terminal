@@ -475,6 +475,20 @@ jobs:
   core-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # **The static C runtime is a Windows shipping rule and this job ships
+    # nothing.** `.cargo/config.toml` puts `-C target-feature=+crt-static` on
+    # every build so that `folio.exe` carries its own CRT rather than asking a
+    # clean machine for the Visual C++ redistributable, and it says `[build]`
+    # rather than a target table on purpose — the flag has to reach build
+    # scripts and proc macros there too. macOS ignores the feature. Linux does
+    # not: glibc honours it, and a statically linked host cannot load a dynamic
+    # library, so the first proc macro in the graph stops the compile with
+    # "cannot produce proc-macro for `bytecheck_derive` as the target
+    # x86_64-unknown-linux-gnu does not support these crate types". `RUSTFLAGS`
+    # outranks the config file, and it says the opposite here rather than
+    # nothing, so that a reader sees a decision instead of an omission.
+    env:
+      RUSTFLAGS: -C target-feature=-crt-static
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The same composite action every other job comes through, and off Windows
