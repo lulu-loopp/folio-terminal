@@ -374,11 +374,21 @@ mod tests {
         );
     }
 
+    /// A `PATH` in Windows' grammar, and Windows-only for the same reason every test that calls
+    /// it is: `env::join_paths` refuses `C:\PATHDIR` where `:` is the separator rather than a
+    /// drive letter, and `Path::join` does not spell a Windows path off Windows either. These are
+    /// tests about *Windows* shell resolution — `pwsh.exe` under `%ProgramFiles%`, the Store's
+    /// `WindowsApps` alias, `powershell.exe` when neither is there. The Unix rule
+    /// `resolve_default_shell` is to grow (`$SHELL`, the password database, `/bin/sh`) is remote
+    /// T2, and it brings its own fixtures; until then `core-linux` runs the two tests below that
+    /// name no path at all.
+    #[cfg(windows)]
     fn path_var(directories: &[&str]) -> OsString {
         env::join_paths(directories.iter().map(PathBuf::from))
             .expect("test PATH directories must join cleanly")
     }
 
+    #[cfg(windows)]
     #[test]
     fn bt_shell_override_wins_even_when_pwsh_is_also_installed() {
         let pwsh = PathBuf::from(r"C:\PATHDIR\pwsh.exe");
@@ -406,6 +416,7 @@ mod tests {
         assert_eq!(resolved.choice, ShellChoice::WindowsPowerShell);
     }
 
+    #[cfg(windows)]
     #[test]
     fn pwsh_found_on_path_is_preferred_over_windows_powershell() {
         let pwsh = PathBuf::from(r"C:\PATHDIR\pwsh.exe");
@@ -417,6 +428,7 @@ mod tests {
         assert_eq!(resolved.program, pwsh.into_os_string());
     }
 
+    #[cfg(windows)]
     #[test]
     fn pwsh_found_under_program_files_seven_is_used_when_absent_from_path() {
         let candidate = PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe");
@@ -429,6 +441,7 @@ mod tests {
         assert_eq!(resolved.program, candidate.into_os_string());
     }
 
+    #[cfg(windows)]
     #[test]
     fn pwsh_found_under_the_windows_apps_alias_is_used_as_the_last_probe() {
         let candidate =
@@ -443,6 +456,7 @@ mod tests {
         assert_eq!(resolved.program, candidate.into_os_string());
     }
 
+    #[cfg(windows)]
     #[test]
     fn windows_powershell_is_the_default_when_pwsh_is_nowhere_to_be_found() {
         let environment = FakeShellEnvironment::new()
@@ -454,6 +468,7 @@ mod tests {
         assert_eq!(resolved.program, OsStr::new("powershell.exe"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn missing_path_variable_does_not_panic_and_still_probes_well_known_locations() {
         let candidate = PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe");
