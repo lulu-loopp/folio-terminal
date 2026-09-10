@@ -2563,6 +2563,10 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    /// Windows: the child is `powershell.exe` running `cmd.exe /D /C set`, which is how the
+    /// declared environment is read back out of a real spawn. `core-linux` runs the rest of this
+    /// suite and cannot run this one; the `conpty` job is where it lives.
+    #[cfg(windows)]
     #[test]
     fn real_conpty_child_receives_color_environment_even_under_inherited_no_color() {
         // The terminal strips an inherited NO_COLOR, so this holds regardless of the host's own
@@ -2819,6 +2823,8 @@ mod tests {
         );
     }
 
+    /// Windows: `cmd.exe` is the child whose output the ring is measured against.
+    #[cfg(windows)]
     #[test]
     fn real_conpty_delivers_command_output_without_exceeding_ring() {
         let command = PtyCommand::new("cmd.exe")
@@ -2861,6 +2867,7 @@ mod tests {
     /// that a dead shell is alive, so a single-pane tab — which the pane sweep deliberately never
     /// closes, because an empty tab is not a state — is never closed by anybody, and the last tab
     /// in the window exiting never ends the process.
+    #[cfg(windows)]
     #[test]
     fn a_child_that_exited_answers_the_second_asker_too() {
         let command = PtyCommand::new("cmd.exe").arg("/D").arg("/C").arg("exit 7");
@@ -2891,6 +2898,9 @@ mod tests {
         assert_eq!(third.exit_code(), first.exit_code());
     }
 
+    /// Windows: the child that has to still be running when the resize lands is a
+    /// `powershell.exe` sleeping for thirty seconds.
+    #[cfg(windows)]
     #[test]
     fn resize_reaches_the_real_conpty_and_shutdown_reaps_child() {
         let command = PtyCommand::new("powershell.exe")
@@ -2909,6 +2919,7 @@ mod tests {
 
     /// A path that is guaranteed not to exist on the test host, so a spawn attempt against it
     /// deterministically fails regardless of what shells happen to be installed.
+    #[cfg(windows)]
     fn nonexistent_program(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "bt-pty-missing-{label}-{}-{}.exe",
@@ -3220,6 +3231,10 @@ mod tests {
         );
     }
 
+    /// Windows, and the next two with it: `spawn_default` resolves a *PowerShell*, and its
+    /// fallback is `powershell.exe`. Off Windows this crate has no default shell to resolve —
+    /// remote T2 is where it gets one — so there is nothing here for a Linux runner to assert.
+    #[cfg(windows)]
     #[test]
     fn spawn_default_honors_bt_shell_override_when_it_resolves() {
         // `BT_SHELL` set to a real, spawnable shell: the resolved-shell path runs and no fallback
@@ -3233,6 +3248,7 @@ mod tests {
         session.shutdown().unwrap();
     }
 
+    #[cfg(windows)]
     #[test]
     fn spawn_default_falls_back_to_windows_powershell_when_bt_shell_cannot_start() {
         let missing = nonexistent_program("bt-shell");
@@ -3252,6 +3268,7 @@ mod tests {
         session.shutdown().unwrap();
     }
 
+    #[cfg(windows)]
     #[test]
     fn spawn_default_falls_back_to_windows_powershell_when_resolved_pwsh_cannot_start() {
         // No `BT_SHELL`; the fake probe reports a `pwsh.exe` inside a real, existing directory

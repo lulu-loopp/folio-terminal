@@ -77,10 +77,11 @@ jobs:
           }
           exit 0
 
-      # The portable core is thirteen crates that must go on compiling on a
-      # platform this workflow has exactly one job on. `scripts/check-portable-core.ps1`
-      # is the cheap half of that guard and `core-macos` is the compiling half;
-      # this proves the cheap half is not decoration.
+      # The portable core is thirteen crates that must go on compiling on the two
+      # platforms this workflow has one job each on.
+      # `scripts/check-portable-core.ps1` is the cheap half of that guard and
+      # `core-macos` and `core-linux` are the compiling half; this proves the
+      # cheap half is not decoration.
       - name: the portable-core gate can actually fail
         shell: pwsh
         run: |
@@ -390,9 +391,12 @@ jobs:
   # business. `bt-pty` and `bt-render` are checked but not tested — one starts
   # real child processes through a ConPTY that does not exist off Windows and the
   # other asks for a real adapter, exactly as the `conpty` and `gpu` jobs above
-  # say. `bt-term` and `bt-corpus` are checked but not tested because the spike
-  # never got far enough to measure their suites there; they join the test line
-  # the day somebody does.
+  # say. `core-linux` below does test `bt-pty`, and the difference is not the
+  # operating system's ancestry: that crate's Windows-only tests carry a gate now,
+  # and what is left of the suite would run here too. Nobody has run it on a Mac,
+  # so this line does not claim it passes there. `bt-term` and `bt-corpus` are
+  # checked but not tested because the spike never got far enough to measure
+  # their suites there; they join the test line the day somebody does.
   core-macos:
     runs-on: macos-latest
     timeout-minutes: 45
@@ -427,3 +431,104 @@ jobs:
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p alacritty_terminal
+
+  # ── the platform the remote work runs on ──────────────────────────────────
+  #
+  # `docs/plans/remote/research-2026-09-10.md` §1 puts 0.4 on a Unix box: the
+  # Folio that owns the shells lives there and the local one drives it, and what
+  # that server takes from this workspace is the portable core plus `bt-pty` —
+  # "everything — spawn, write, resize, read, wait, the output ring" (§1's
+  # table). `core-macos` above proves the core still compiles somewhere that is
+  # not Windows; this proves it where the next milestone's code will actually
+  # run, and it does so before that code exists rather than after.
+  #
+  # The label floats, as it does on the mac job and unlike `windows-2025`. The
+  # rule at the top of this file is about a *Windows version*, because that is
+  # what a terminal emulator's behaviour is a statement about; this job's claim
+  # is "a Linux userland compiles and runs this", which no Ubuntu release number
+  # narrows usefully.
+  #
+  # **The one thing this job does that `core-macos` does not is test `bt-pty`,
+  # and Linux is why it can.** The reason that crate is off the mac test line —
+  # and off the `logic` job's — is that its suite "starts real child processes
+  # through a ConPTY that does not exist off Windows". That is two claims wearing
+  # one coat, and Linux takes them apart: it has no ConPTY either, but it has a
+  # *real pty*, and `vendor/conpty/portable-pty` still carries the `#[cfg(unix)]`
+  # `UnixPtySystem` over `libc::openpty` that `bt-pty` reaches through
+  # `native_pty_system()` (research §2). So the crate's portable half runs here
+  # for the first time: the output ring and its backpressure, the input ring and
+  # the writer thread that is the only thing allowed to meet the pipe, the reader
+  # that drains a closed ring so a shutdown cannot deadlock, the bounded reap,
+  # the recorder and its chunk sidecar, and the interpreter grammar.
+  #
+  # What does **not** run here is the half that needs a Windows child —
+  # `cmd.exe`, `powershell.exe`, and the shell resolution whose whole answer is
+  # `pwsh.exe` or `powershell.exe`. Those tests carry `#[cfg(windows)]` and the
+  # `conpty` job above is where they run; a fixture in them is a Windows path and
+  # a `PATH` a Unix `join_paths` refuses, so they were never platform-neutral
+  # tests that happened to be run in one place. **This line is therefore honest
+  # rather than finished**: nothing here spawns a child yet, because off Windows
+  # this crate has no default shell to spawn. Remote T2 gives
+  # `resolve_default_shell` a Unix rule — `BT_SHELL`, `$SHELL`, the password
+  # database, `/bin/sh` — and the real-pty test that arrives with it is what
+  # makes this job start a process.
+  core-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # **The static C runtime is a Windows shipping rule and this job ships
+    # nothing.** `.cargo/config.toml` puts `-C target-feature=+crt-static` on
+    # every build so that `folio.exe` carries its own CRT rather than asking a
+    # clean machine for the Visual C++ redistributable, and it says `[build]`
+    # rather than a target table on purpose — the flag has to reach build
+    # scripts and proc macros there too. macOS ignores the feature. Linux does
+    # not: glibc honours it, and a statically linked host cannot load a dynamic
+    # library, so the first proc macro in the graph stops the compile with
+    # "cannot produce proc-macro for `bytecheck_derive` as the target
+    # x86_64-unknown-linux-gnu does not support these crate types". `RUSTFLAGS`
+    # outranks the config file, and it says the opposite here rather than
+    # nothing, so that a reader sees a decision instead of an omission.
+    env:
+      RUSTFLAGS: -C target-feature=-crt-static
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # The same composite action every other job comes through, and off Windows
+      # it installs the pinned *version* against this runner's own host triple.
+      - uses: ./.github/actions/toolchain
+
+      # The same fourteen crates `core-macos` checks and in the same order,
+      # because they are the same promise: `scripts/check-portable-core.ps1`'s
+      # thirteen, plus the vendored terminal they are all downstream of. Two
+      # lists that mean one thing drift; a diff that changes one and not the
+      # other is meant to be read as the mistake it is.
+      - name: check the portable crates
+        run: >
+          cargo check --locked --all-targets
+          -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
+          -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
+          -p bt-render -p bt-term -p bt-pty -p bt-corpus
+          -p alacritty_terminal
+
+      # `core-macos`'s ten, plus `bt-pty` for the reason above and minus
+      # `bt-math` for one of the same shape. `bt-render` is still checked and not
+      # tested: it asks for a real adapter, and a runner without one is a
+      # different failure wearing the same red. `bt-term` and `bt-corpus` stay
+      # off for the reason the mac job gives — nobody has measured their suites
+      # on a second platform, and a list of what we have measured is worth more
+      # than a list of what we hope.
+      #
+      # **`bt-math` asks the machine for fonts, and this one has none worth the
+      # name.** Three of its tests are deliberately about real installed faces
+      # rather than a fixture: one rasterizes `<text font-family="Arial,
+      # sans-serif">` and two ask for CJK coverage. A GitHub Linux runner ships
+      # neither a CJK face nor anything called `Arial` — and `fontdb` resolves a
+      # family by name, so fontconfig's metric aliases do not stand in for one.
+      # Installing a CJK package would answer two of the three and leave the
+      # third failing for a font whose licence keeps it off this image. Windows
+      # and macOS both have those faces, both run this suite, and neither is
+      # weakened by a Linux runner that cannot.
+      - name: test the portable crates
+        run: >
+          cargo test --locked
+          -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
+          -p bt-winres -p bt-transcript -p bt-viewport
+          -p bt-pty -p alacritty_terminal

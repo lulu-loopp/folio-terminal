@@ -11,11 +11,12 @@
 # being true is not a decision anybody takes, it is a `windows::` import that
 # nobody notices because every machine in CI is a Windows machine.
 #
-# The `core-macos` job in `.github/workflows/ci.yml` is the other guard on the
-# same drift and it is the stronger one: it compiles. This gate exists beside it
-# because a compile failure names a symbol and a line, while a rule names the
-# rule — and because a `#[cfg(windows)]` block that is *correct* still hides the
-# decision to write one, which is a thing a reviewer should see in a diff.
+# The `core-macos` and `core-linux` jobs in `.github/workflows/ci.yml` are the
+# other guard on the same drift and they are the stronger one: they compile.
+# This gate exists beside them because a compile failure names a symbol and a
+# line, while a rule names the rule — and because a `#[cfg(windows)]` block that
+# is *correct* still hides the decision to write one, which is a thing a
+# reviewer should see in a diff.
 #
 # WHAT IS REFUSED: a reference to `windows::`, `windows_sys::`, `winapi`,
 # `webview2` or `std::os::windows` in one of the crates listed below, unless the
