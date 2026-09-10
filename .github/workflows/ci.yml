@@ -508,15 +508,27 @@ jobs:
           -p bt-render -p bt-term -p bt-pty -p bt-corpus
           -p alacritty_terminal
 
-      # `core-macos`'s ten, plus `bt-pty` for the reason above. `bt-render` is
-      # still checked and not tested: it asks for a real adapter, and a runner
-      # without one is a different failure wearing the same red. `bt-term` and
-      # `bt-corpus` stay off for the reason the mac job gives — nobody has
-      # measured their suites on a second platform, and a list of what we have
-      # measured is worth more than a list of what we hope.
+      # `core-macos`'s ten, plus `bt-pty` for the reason above and minus
+      # `bt-math` for one of the same shape. `bt-render` is still checked and not
+      # tested: it asks for a real adapter, and a runner without one is a
+      # different failure wearing the same red. `bt-term` and `bt-corpus` stay
+      # off for the reason the mac job gives — nobody has measured their suites
+      # on a second platform, and a list of what we have measured is worth more
+      # than a list of what we hope.
+      #
+      # **`bt-math` asks the machine for fonts, and this one has none worth the
+      # name.** Three of its tests are deliberately about real installed faces
+      # rather than a fixture: one rasterizes `<text font-family="Arial,
+      # sans-serif">` and two ask for CJK coverage. A GitHub Linux runner ships
+      # neither a CJK face nor anything called `Arial` — and `fontdb` resolves a
+      # family by name, so fontconfig's metric aliases do not stand in for one.
+      # Installing a CJK package would answer two of the three and leave the
+      # third failing for a font whose licence keeps it off this image. Windows
+      # and macOS both have those faces, both run this suite, and neither is
+      # weakened by a Linux runner that cannot.
       - name: test the portable crates
         run: >
-          cargo test --locked
+          cargo test --locked --no-fail-fast
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
-          -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
+          -p bt-winres -p bt-transcript -p bt-viewport
           -p bt-pty -p alacritty_terminal
