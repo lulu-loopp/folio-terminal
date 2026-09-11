@@ -1923,6 +1923,20 @@ struct DocumentMath {
     /// around it.
     inline: SizedMath,
     display: SizedMath,
+    /// **The ink every picture in here was set in**, and the one part of a
+    /// formula's identity the three levels above do not carry.
+    ///
+    /// It is here because this document is a **standing answer** (§7.1.3u ③):
+    /// the pass that resolves a page's formulas is handed the answers the page
+    /// already has, and reads them instead of asking the engine for what it has
+    /// already been told. Mode, size and source are matched by the maps
+    /// themselves; the ink is a fact about the whole document — every formula on
+    /// a page is set in that page's prose colour — so it is written down once,
+    /// here, and a page resolved under a new theme keeps none of it.
+    ///
+    /// `None` on a document with no formulas in it, which is a document with
+    /// nothing to keep.
+    ink: Option<[u8; 3]>,
 }
 
 /// One mode's pictures: size in device thousandths, then LaTeX.
@@ -1934,6 +1948,20 @@ impl DocumentMath {
         self.of(mode).get(&math_em_milli(em_px))?.get(source)
     }
 
+    /// **The answer this document was already given for one formula**, if it was
+    /// given one — see [`Self::ink`] and [`answer_one_formula`].
+    ///
+    /// The whole key and not three quarters of it: a document set in one ink
+    /// answers nothing about a page being set in another.
+    fn answer(&self, key: &PreviewMathKey) -> Option<&PreviewMathPicture> {
+        if self.ink != Some(key.foreground_rgb) {
+            return None;
+        }
+        self.of(key.mode)
+            .get(&key.em_milli_px)?
+            .get(key.source.as_str())
+    }
+
     fn of(&self, mode: MathMode) -> &SizedMath {
         match mode {
             MathMode::Display => &self.display,
@@ -1942,6 +1970,9 @@ impl DocumentMath {
     }
 
     fn insert(&mut self, key: &PreviewMathKey, picture: PreviewMathPicture) {
+        // Written here rather than by the resolve, so that the ink a document
+        // says it was set in cannot come apart from the pictures in it.
+        self.ink = Some(key.foreground_rgb);
         let map = match key.mode {
             MathMode::Display => &mut self.display,
             MathMode::Inline => &mut self.inline,
@@ -2059,11 +2090,64 @@ impl PreviewMathCache {
             let (_, key, bytes) = held.remove(0);
             self.entries.remove(&key);
             self.resident_bytes = self.resident_bytes.saturating_sub(bytes);
-            // An eviction changes a page's heights exactly as an arrival does,
-            // in the other direction: the block goes back to standing on its
-            // source text until the engine has been asked again.
-            self.generation = self.generation.saturating_add(1);
+            // **And nothing is told about it** (§7.1.3u ③). An eviction here
+            // used to tick the generation, on the reading that the block goes
+            // back to standing on its source text until the engine has been
+            // asked again — which was true while a page's only copy of a formula
+            // was this cache's. It is not true now: a page carries the pictures
+            // it was handed ([`DocumentMath`]), so what it draws it holds, and a
+            // page that still holds the answer is not a page that has changed.
+            //
+            // Ticking it anyway was the loop: land → generation++ → every page
+            // re-keyed → the rebuild misses on the key just evicted → asks →
+            // lands → evicts the next. A working set of formulas over the budget
+            // could not settle, which is §7.1.3u's own report one cache along.
         }
+    }
+}
+
+/// **What one of a page's formulas draws, and whether the engine still has to be
+/// asked for it** (§7.1.3u ③).
+///
+/// [`answer_one_picture`]'s twin, and the same sentence about the same mistake:
+/// *a miss reads as never asked*. [`PreviewMathCache`] is bounded in bytes and
+/// evicts by last use, while a page asks for every formula on it — so a document
+/// whose distinct rasters are worth more than the budget evicts one the page is
+/// still drawing on every arrival, and the rebuild that arrival causes asks for
+/// it again.
+///
+/// So the answer a page was already given is part of the question. A page that
+/// has been told what `$E = mc^2$` looks like at this size in this ink keeps
+/// that picture when the cache lets the pixels go, and asks for nothing: the
+/// picture is an `Arc`, so what it draws it holds and nothing is copied.
+///
+/// Out here as a free function for [`answer_one_picture`]'s reason: a `Runtime`
+/// needs a device layer and a window to exist, and what a test has to be able to
+/// put in front of this is the real cache.
+fn answer_one_formula(
+    cache: &mut PreviewMathCache,
+    standing: &DocumentMath,
+    key: &PreviewMathKey,
+    needs_typesetting: &mut bool,
+) -> Option<PreviewMathPicture> {
+    // Cloned out before the arms run: the artifact is a handle to shared pixels,
+    // and holding a borrow of the cache across a call that may add to it is the
+    // one thing this map cannot do.
+    match cache.get(key).cloned() {
+        Some(PreviewMathArtifact::Ready(picture)) => Some(picture),
+        // The engine could not set it, and that is an answer: the source stands.
+        Some(PreviewMathArtifact::Refused) => None,
+        // A question is already out — this page's or another's. What this page
+        // has, it goes on drawing meanwhile.
+        Some(PreviewMathArtifact::Pending) => standing.answer(key).cloned(),
+        None => match standing.answer(key) {
+            // Answered once, and the cache has since let the pixels go.
+            Some(picture) => Some(picture.clone()),
+            None => {
+                *needs_typesetting = true;
+                None
+            }
+        },
     }
 }
 
@@ -2139,23 +2223,48 @@ struct DocumentPictures {
     /// (§7.1.3k ④), and a decode landing, which asks whether any page in this
     /// window cares before it re-keys every document in it.
     files: BTreeSet<PathBuf>,
-    /// **The ones this page has nothing to draw for yet** — a subset of
-    /// [`Self::files`], and the answer to a different question.
+    /// **What this page is still waiting to see, and what for** — a subset of
+    /// [`Self::files`], and the answer to a different question (§7.1.3u ②, and
+    /// its third report).
     ///
     /// `files` is "does this page stand on that file", which is what a *watch*
-    /// wants. This is "would this page come out differently if that file's
-    /// pixels arrived", which is what a **decode landing** wants, and the two
-    /// stop agreeing the moment §7.1.3u's rule takes effect: a page keeps the
-    /// answer it was given, so a decode arriving for a picture it is already
-    /// drawing changes nothing on the glass and owes it no re-flow. Re-flowing
-    /// on `files` re-shaped every paragraph of the page for pixels nobody would
+    /// wants. This is "what would arrive for this page if that file's pixels
+    /// landed", which is what a **decode landing** wants, and the two stop
+    /// agreeing the moment §7.1.3u's rule takes effect: a page keeps the answer
+    /// it was given, so a decode arriving for a picture it is already drawing
+    /// changes nothing on the glass and owes it no re-flow. Re-flowing on
+    /// `files` re-shaped every paragraph of the page for pixels nobody would
     /// look at.
-    loading: BTreeSet<PathBuf>,
+    ///
+    /// **One ledger and two answers**, because a page waits for two different
+    /// things and they are owed different work — see [`PictureWaitFor`]. It was
+    /// two ledgers for a while and one is better: a file cannot be in both, and
+    /// the question every reader asks is the same one.
+    waiting: std::collections::BTreeMap<PathBuf, PictureWaitFor>,
 }
 
 impl DocumentPictures {
     fn get(&self, source: &str) -> Option<&MarkdownPicture> {
         self.by_source.get(source)
+    }
+
+    /// **The files this page has nothing to draw for yet** — the ones whose
+    /// arrival changes the page's shape, and therefore the ones a landing ticks
+    /// the picture generation for. See [`Runtime::markdown_pictures_awaited`].
+    fn awaited(&self) -> impl Iterator<Item = &PathBuf> {
+        self.waiting
+            .iter()
+            .filter(|(_, wait)| matches!(wait, PictureWaitFor::Pixels))
+            .map(|(file, _)| file)
+    }
+
+    /// **Every file this page is waiting on only to make a sharper raster of**,
+    /// beside the raster it wants made — see [`owe_sharpened_rasters`].
+    fn sharpening(&self) -> impl Iterator<Item = (&PathBuf, &MarkdownRasterKey)> {
+        self.waiting.iter().filter_map(|(file, wait)| match wait {
+            PictureWaitFor::Sharpening(key) => Some((file, key)),
+            PictureWaitFor::Pixels => None,
+        })
     }
 }
 
@@ -2275,7 +2384,7 @@ fn resolve_document_pictures(
     theme: bt_render::Theme,
     reach: PictureReach,
     standing: &DocumentPictures,
-    ask: &mut dyn FnMut(&Path, bool, Option<&MarkdownPicture>) -> MarkdownPicture,
+    ask: &mut dyn FnMut(&Path, bool, Option<&MarkdownPicture>) -> PagePicture,
 ) -> DocumentPictures {
     // **Which sources are near enough to be worth a disk** (review row R1-8,
     // adversarial review 2026-09-08). A source is asked for when *any* of the
@@ -2322,13 +2431,13 @@ fn resolve_document_pictures(
             // (user report 2026-09-10) — see [`answer_one_picture`], which is
             // what reads it.
             preview::LinkAction::Preview(path) if wanted.contains(source) => {
-                let picture = ask(&path, image.fill, standing.get(source));
-                // **And whether this page is still waiting to see it**, which is
-                // the set a decode landing re-flows on — see
-                // [`DocumentPictures::loading`]. Written here because this is
+                let PagePicture { picture, waiting } = ask(&path, image.fill, standing.get(source));
+                // **And what this page is still waiting to see from that file**,
+                // which is what a decode landing is delivered against — see
+                // [`DocumentPictures::waiting`]. Written here because this is
                 // where the file and the answer about it are both in hand.
-                if matches!(picture, MarkdownPicture::Loading) {
-                    pictures.loading.insert(path.clone());
+                if let Some(wait) = waiting {
+                    pictures.waiting.insert(path.clone(), wait);
                 }
                 pictures.files.insert(path);
                 picture
@@ -2391,8 +2500,13 @@ fn answer_one_picture(
     measure_px: f32,
     now: Instant,
     needs_pixels: &mut bool,
-) -> MarkdownPicture {
+) -> PagePicture {
     let cache_key = bt_term::normalized_local_image_path_key(path);
+    // Whether a read for this file is already out. It decides nothing about what
+    // the page *draws* — that is the answer below — and everything about whether
+    // this pass is the one that must ask: the store's own `Pending` is the latch
+    // that keeps one read from becoming one read per frame.
+    let read_is_out = matches!(peek_cache.get(&cache_key), Some(PeekCacheEntry::Pending));
     // What this window is holding, and what it has merely been told. The decode
     // cache is the first; the answer the page is standing on is the second, and
     // it outlives the pixels.
@@ -2403,16 +2517,13 @@ fn answer_one_picture(
             width_px,
             height_px,
         }) => Some((key.clone(), Some(Arc::clone(rgba)), [*width_px, *height_px])),
-        Some(PeekCacheEntry::Failed) => return MarkdownPicture::Failed,
-        // A read is out. The page keeps drawing what it was drawing rather than
-        // going blank while the answer travels.
-        Some(PeekCacheEntry::Pending) => {
-            return match standing {
-                Some(picture @ MarkdownPicture::Ready { .. }) => picture.clone(),
-                _ => MarkdownPicture::Loading,
-            };
-        }
-        None => match standing {
+        Some(PeekCacheEntry::Failed) => return PagePicture::drawn(MarkdownPicture::Failed),
+        // **A read is out, or the store has let the pixels go** — and the page's
+        // answer to both is the same one, which is why they are one arm. It
+        // keeps drawing what it was drawing rather than going blank, and it goes
+        // on down this function either way, because what it is drawing may still
+        // be the soft raster the decode is wanted to sharpen.
+        Some(PeekCacheEntry::Pending) | None => match standing {
             // Answered once, and the cache has since let the pixels go. The
             // decode's own size and its content key are the whole of what the
             // passes below need; `rgba` is the decode's own pixels only while
@@ -2434,19 +2545,28 @@ fn answer_one_picture(
                 (raster == native).then(|| Arc::clone(rgba)),
                 *native,
             )),
-            Some(MarkdownPicture::Failed) => return MarkdownPicture::Failed,
+            // Answered "this file will not decode", and nobody is answering it
+            // again. While a read *is* out the alt text stands instead, because
+            // the thing that is about to be true is not known yet.
+            Some(MarkdownPicture::Failed) if !read_is_out => {
+                return PagePicture::drawn(MarkdownPicture::Failed);
+            }
             _ => None,
         },
     };
     let Some((content, native_rgba, native)) = known else {
-        // Never answered. The caller's door is the very one the image pane and
-        // the glance card ask through, so a picture already decoded for one of
-        // them is already decoded for this page.
-        *needs_pixels = true;
-        return MarkdownPicture::Loading;
+        // Never answered, or answered and asked for again. The caller's door is
+        // the very one the image pane and the glance card ask through, so a
+        // picture already decoded for one of them is already decoded for this
+        // page.
+        *needs_pixels = !read_is_out;
+        return PagePicture {
+            picture: MarkdownPicture::Loading,
+            waiting: Some(PictureWaitFor::Pixels),
+        };
     };
     if native[0] == 0 || native[1] == 0 {
-        return MarkdownPicture::Failed;
+        return PagePicture::drawn(MarkdownPicture::Failed);
     }
     let [drawn_width, drawn_height] = markdown_image_extent(native, measure_px, fill);
     // **The CPU never upsamples** — `preview_image_extent`'s `.min(1.0)`
@@ -2460,7 +2580,7 @@ fn answer_one_picture(
         native[0],
         native[1],
     ) else {
-        return MarkdownPicture::Failed;
+        return PagePicture::drawn(MarkdownPicture::Failed);
     };
     // **What the page is already drawing, at the size it is already drawing it.**
     // The exact-size rasters are a cache like the decode store beside them —
@@ -2479,6 +2599,7 @@ fn answer_one_picture(
         width_px: raster_width,
         height_px: raster_height,
     };
+    let mut waiting = None;
     match markdown_pictures.raster(&key) {
         Some(MarkdownRaster::Ready {
             key,
@@ -2486,13 +2607,13 @@ fn answer_one_picture(
             width_px,
             height_px,
         }) => {
-            return MarkdownPicture::Ready {
+            return PagePicture::drawn(MarkdownPicture::Ready {
                 key: key.clone(),
                 content,
                 rgba: Arc::clone(rgba),
                 raster: [*width_px, *height_px],
                 native,
-            };
+            });
         }
         Some(MarkdownRaster::Pending) => {}
         None => match &native_rgba {
@@ -2506,14 +2627,24 @@ fn answer_one_picture(
             ),
             // The resample is made from the decode's own pixels and this window
             // has let them go. Ask once — the page keeps drawing meanwhile, and
-            // the `Pending` the caller files is what stops it asking twice. A
-            // page standing on the finished raster asks for nothing at all: the
-            // pass it would buy is the pass it is already holding.
-            None if !held_exactly => *needs_pixels = true,
+            // the store's own `Pending` is what stops it asking twice. A page
+            // standing on the finished raster asks for nothing at all: the pass
+            // it would buy is the pass it is already holding.
+            //
+            // **And the ask is written down as a dependency** (§7.1.3u ③), which
+            // is the half that was missing: a read this page made for itself but
+            // was not recorded as waiting for is a decode that lands in the store
+            // with nobody owed anything, and the picture stays soft until the
+            // reader happens to touch something. See
+            // [`DocumentPictures::sharpening`].
+            None if !held_exactly => {
+                *needs_pixels = !read_is_out;
+                waiting = Some(PictureWaitFor::Sharpening(key));
+            }
             _ => {}
         },
     }
-    match native_rgba {
+    let picture = match native_rgba {
         Some(rgba) if !held_exactly => MarkdownPicture::Ready {
             key: content.clone(),
             content,
@@ -2522,7 +2653,101 @@ fn answer_one_picture(
             native,
         },
         _ => standing.cloned().unwrap_or(MarkdownPicture::Loading),
+    };
+    PagePicture { picture, waiting }
+}
+
+/// **What one of a page's pictures draws, and what the page is still waiting to
+/// see about it** (§7.1.3u ③).
+///
+/// Two answers and not one, because a page waits for two different things and
+/// they are owed different work — see [`PictureWaitFor`].
+#[derive(Clone, Debug)]
+struct PagePicture {
+    picture: MarkdownPicture,
+    waiting: Option<PictureWaitFor>,
+}
+
+impl PagePicture {
+    /// An answer this page is waiting for nothing about: what it draws is what it
+    /// has.
+    fn drawn(picture: MarkdownPicture) -> Self {
+        Self {
+            picture,
+            waiting: None,
+        }
     }
+}
+
+/// **What a page is still waiting to see from one of its picture files**
+/// (§7.1.3u ③).
+///
+/// The distinction is what a decode landing owes the page. A page waiting for
+/// the **pixels** has nothing to draw and does not know how tall the block is,
+/// so their arrival changes the document's shape: that is a re-flow. A page
+/// waiting for a **sharpening** is already drawing the picture at its own
+/// intrinsic size, and the decode it asked for is an input to the exact-size
+/// resample and nothing else: its arrival owes that pass
+/// ([`owe_sharpened_rasters`]) and not a re-shape of every paragraph on the page.
+#[derive(Clone, Debug)]
+enum PictureWaitFor {
+    Pixels,
+    /// The exact-size raster the page wants, which is what the arriving decode
+    /// is to be resampled into.
+    Sharpening(MarkdownRasterKey),
+}
+
+/// **A decode has landed: owe the exact-size pass to every page that was holding
+/// the picture and waiting for these pixels to sharpen it** (§7.1.3u ③).
+///
+/// The delivery half of [`DocumentPictures::sharpening`], and the reason that set
+/// is a dependency rather than a note about a request. A page whose standing
+/// answer is a soft raster asks for the file again because the resample has to be
+/// made from the decode's own pixels; the decode then landed in the store and
+/// nothing was owed anything, because the page was in neither of the sets a
+/// completion is delivered against. It sharpened on the next rebuild the page
+/// happened to have for some other reason — a scroll, a keystroke, a theme
+/// change — which is "the picture stays soft until you touch something".
+///
+/// **And it owes the resample without owing a re-flow.** The page already knows
+/// how large this picture is: its intrinsic dimensions have not changed, no block
+/// is a different height, and nothing about the document's shape is different
+/// from what is already on the glass. What changes is how sharp one picture is,
+/// and that is the scale lane's errand alone — see
+/// [`WindowRuntime::send_owed_markdown_rasters`], which the settle deadline
+/// filed here wakes.
+///
+/// A page that wanted this raster for a *different* content key is skipped: the
+/// file on the disk is not the file it was answered about, and that is
+/// [`WindowRuntime::forget_the_picture_in`]'s errand rather than this one's.
+fn owe_sharpened_rasters<'a>(
+    markdown_pictures: &mut MarkdownPictures,
+    pages: impl Iterator<Item = &'a DocumentPictures>,
+    cache_key: &str,
+    content: &str,
+    rgba: &Arc<[u8]>,
+    native: [u32; 2],
+    now: Instant,
+) -> bool {
+    let mut owed = false;
+    for page in pages {
+        for (file, key) in page.sharpening() {
+            if bt_term::normalized_local_image_path_key(file) != cache_key || key.content != content
+            {
+                continue;
+            }
+            markdown_pictures.owe(
+                MarkdownRasterRequest {
+                    key: key.clone(),
+                    rgba: Arc::clone(rgba),
+                    native,
+                },
+                now,
+            );
+            owed = true;
+        }
+    }
+    owed
 }
 
 /// **Everything that decides what one exact-size markdown raster looks like**:
@@ -19651,6 +19876,27 @@ impl PreviewImageState {
         }
     }
 
+    /// **The file under this picture has moved: let go of everything this
+    /// surface was answered about it** (§7.1.3u ③).
+    ///
+    /// The standing answer a picture pane keeps — the raster it is drawing, the
+    /// content key that raster was made from, the decode's own dimensions and
+    /// whatever pass is in flight — is read in front of the decode store
+    /// ([`surface_pixels`]), so it outlives the pixels exactly as a page's does.
+    /// That is what must not survive the bytes changing: kept, it would go on
+    /// drawing the old picture of a file that has been replaced, and would ask
+    /// for nothing because what it holds is what it wants.
+    ///
+    /// The **path stays**: which file this surface is showing has not changed.
+    /// So does the failure line, which the next answer replaces or clears.
+    fn forget_its_pixels(&mut self) {
+        self.raster = None;
+        self.pending = None;
+        self.native = None;
+        self.stated_size = None;
+        self.drawn = None;
+    }
+
     fn file_name(&self) -> String {
         self.path
             .file_name()
@@ -20598,6 +20844,145 @@ fn image_zoom_key(
         "0" => Some(ImageZoom::FIT),
         "1" => Some(ImageZoom::scaled(1.0)),
         _ => None,
+    }
+}
+
+/// **What a picture surface has to draw with**, once the decode store and the
+/// answer the surface is already standing on have both been asked (§7.1.3u ③).
+///
+/// [`answer_one_picture`]'s `known`, said about the other consumer of the same
+/// store. A picture pane is not a markdown page, but it holds a picture in
+/// exactly the same way: a raster it is drawing, made from a decode that a
+/// byte-bounded cache is free to let go of at any moment.
+#[derive(Clone, Debug)]
+enum SurfacePixels {
+    /// The decode is in hand: what the file's bytes are called, those bytes, and
+    /// how large they are.
+    Decoded {
+        content: String,
+        rgba: Arc<[u8]>,
+        native: [u32; 2],
+    },
+    /// The store has let the decode go and this surface is still drawing the
+    /// answer it was given. There is nothing here to resample *from*, which is
+    /// the whole difference between this and [`Self::Decoded`].
+    Standing {
+        content: String,
+        native: [u32; 2],
+        /// Whether a read for these pixels is already out.
+        read_is_out: bool,
+    },
+    /// Nothing to draw at all.
+    Nothing {
+        /// Whether somebody has already asked for it.
+        asked: bool,
+    },
+    /// This file will not decode.
+    Failed,
+}
+
+/// **What this surface has to draw with** — the decode if the store still holds
+/// it, the standing answer if it does not (§7.1.3u ③).
+///
+/// `refit_preview_picture`'s cache half, out here where a test can put a real
+/// [`PeekCache`] in front of it — [`answer_one_picture`]'s arrangement and for
+/// its reason.
+///
+/// **A miss is not "never asked".** The pane consulted the decode store and
+/// nothing else, so with a visible working set over [`MAX_PEEK_CACHE_BYTES`]
+/// every decode that landed evicted a picture another host was drawing, the
+/// refit that arrival triggered found that miss, asked again, and the cycle ran
+/// on its own with no input — §7.1.3u's report in the consumer that fix did not
+/// touch. The answer a surface was already given is a `PeekThumbnail`: it names
+/// the decode it was resampled from ([`PeekThumbnail::content_key`]), and the
+/// decode's own dimensions are beside it on the picture. That is everything the
+/// arithmetic below it needs.
+fn surface_pixels(
+    peek_cache: &mut PeekCache,
+    standing: Option<&str>,
+    native: Option<(u32, u32)>,
+    cache_key: &str,
+) -> SurfacePixels {
+    // What the surface holds, which outlives the pixels it was made from: the
+    // content key of the raster on the glass ([`PeekThumbnail::content_key`]) and
+    // the decode's own dimensions, which is the whole of what the arithmetic
+    // downstream asks of a decode.
+    let held = standing
+        .zip(native)
+        .map(|(content, native)| (content.to_owned(), [native.0, native.1]));
+    match peek_cache.get(cache_key) {
+        Some(PeekCacheEntry::Ready {
+            key,
+            rgba,
+            width_px,
+            height_px,
+        }) => SurfacePixels::Decoded {
+            content: key.clone(),
+            rgba: Arc::clone(rgba),
+            native: [*width_px, *height_px],
+        },
+        Some(PeekCacheEntry::Failed) => SurfacePixels::Failed,
+        // A read is out. What this surface is holding stays on the glass while
+        // the answer travels, rather than the picture vanishing and coming back.
+        Some(PeekCacheEntry::Pending) => match held {
+            Some((content, native)) => SurfacePixels::Standing {
+                content,
+                native,
+                read_is_out: true,
+            },
+            None => SurfacePixels::Nothing { asked: true },
+        },
+        None => match held {
+            Some((content, native)) => SurfacePixels::Standing {
+                content,
+                native,
+                read_is_out: false,
+            },
+            None => SurfacePixels::Nothing { asked: false },
+        },
+    }
+}
+
+/// **What one picture surface must do about its pixels this frame** — see
+/// [`picture_errand`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PictureErrand {
+    /// Draw, and ask nobody anything.
+    Nothing,
+    /// One exact-size pass, from the decode in hand.
+    Resample,
+    /// One read: the pixels this pass would be made from are not in this window.
+    Read,
+    /// Somebody is already answering.
+    Wait,
+}
+
+/// **What this surface must do about its pixels, once the geometry has said what
+/// size it wants** (§7.1.3u ③).
+///
+/// The sentence the loop turned on, in one place: *residency in a bounded cache
+/// is not the same question as whether an answer exists*. A surface holding the
+/// very raster this frame wants has nothing to ask anybody, whatever either
+/// store happens to hold this instant — and that is the first line here rather
+/// than the last, because it is the line that ends the cycle.
+fn picture_errand(pixels: &SurfacePixels, held_exactly: bool) -> PictureErrand {
+    if held_exactly {
+        return PictureErrand::Nothing;
+    }
+    match pixels {
+        SurfacePixels::Decoded { .. } => PictureErrand::Resample,
+        // The resample is made from the decode's own pixels and this window has
+        // let them go. Ask once — the surface keeps drawing meanwhile, and the
+        // store's own `Pending` is what stops it asking twice.
+        SurfacePixels::Standing {
+            read_is_out: false, ..
+        }
+        | SurfacePixels::Nothing { asked: false } => PictureErrand::Read,
+        SurfacePixels::Standing {
+            read_is_out: true, ..
+        }
+        | SurfacePixels::Nothing { asked: true }
+        | SurfacePixels::Failed => PictureErrand::Wait,
     }
 }
 
@@ -34150,6 +34535,104 @@ fn forget_a_picture(
     peek_cache.remove(&key);
     video_facts.remove(&key);
     pictures.forget(path);
+}
+
+/// **Every surface holding a document, from the two fields that hold them** —
+/// [`Runtime::documents_held`]'s body, out here for two reasons.
+///
+/// The first is [`files_a_tab_stands_on`]'s: what a window holds is answerable
+/// from what a window holds, and a free function is the only shape of that
+/// answer a test can put real panes in front of without a GPU. The second is the
+/// borrow checker's, and it is why the walk is spelled over the two fields
+/// rather than over the window: a decode landing writes one ledger of the window
+/// while reading these, and only a caller naming the fields separately can do
+/// both at once.
+fn documents_held_in<'a>(
+    tabs: &'a [TabState],
+    peek_pane: &'a PreviewPane,
+) -> impl Iterator<Item = &'a PreviewPane> {
+    tabs.iter()
+        .flat_map(|tab| tab.preview_panes.iter().map(|(_, pane)| pane))
+        .chain(std::iter::once(peek_pane))
+}
+
+/// The same, mutably.
+fn documents_held_mut_in<'a>(
+    tabs: &'a mut [TabState],
+    peek_pane: &'a mut PreviewPane,
+) -> impl Iterator<Item = &'a mut PreviewPane> {
+    tabs.iter_mut()
+        .flat_map(|tab| tab.preview_panes.iter_mut().map(|(_, pane)| pane))
+        .chain(std::iter::once(peek_pane))
+}
+
+/// **The markdown pictures every one of these surfaces is holding** — the one
+/// walk the three sets below are built from (§7.1.3u ③).
+///
+/// A surface showing anything but a markdown page contributes nothing, which is
+/// why this is a filter and not a fold: the question every caller is asking is
+/// about pages, and there is exactly one place that decides which surfaces are
+/// pages.
+fn documents_pictures<'a>(
+    holders: impl Iterator<Item = &'a PreviewPane>,
+) -> impl Iterator<Item = &'a DocumentPictures> {
+    holders.filter_map(|pane| match &pane.doc {
+        PreviewDocument::Markdown { pictures, .. } => Some(pictures),
+        _ => None,
+    })
+}
+
+/// **Which pictures the documents on these surfaces are still waiting to see**
+/// — [`Runtime::markdown_pictures_awaited`]'s body, out here for
+/// [`files_a_tab_stands_on`]'s reason.
+fn pictures_awaited_by<'a>(holders: impl Iterator<Item = &'a PreviewPane>) -> BTreeSet<PathBuf> {
+    documents_pictures(holders)
+        .flat_map(|pictures| pictures.awaited().cloned())
+        .collect()
+}
+
+/// **Every picture file the documents on these surfaces are showing** —
+/// [`Runtime::markdown_picture_files`]'s body, out here for the same reason.
+fn picture_files_of<'a>(holders: impl Iterator<Item = &'a PreviewPane>) -> BTreeSet<PathBuf> {
+    documents_pictures(holders)
+        .flat_map(|pictures| pictures.files.iter().cloned())
+        .collect()
+}
+
+/// **One file moved: every surface holding an answer about it drops that
+/// answer** (§7.1.3u, and its third report).
+///
+/// [`Runtime::forget_the_picture_in`]'s fourth ledger, and the one the three
+/// caches in [`forget_a_picture`] cannot speak for. Since §7.1.3u an answer
+/// outlives the pixels — which is what stops a bounded cache sending this window
+/// round the same nine decodes for ever — and this is the one case where the
+/// answer is *wrong*: the bytes behind the path are not the bytes it was given.
+///
+/// **Both kinds of holder, because there are two.** A markdown page holds its
+/// answers in [`DocumentPictures`]; a picture *pane* holds its own in
+/// [`PreviewImageState`] — the content key of the raster it is drawing and the
+/// decode's own dimensions — and since that answer is now read in front of the
+/// decode store ([`surface_pixels`]), a pane that kept it would go on drawing the
+/// old picture of a file that has been replaced under it, and would never ask for
+/// the new one. What it does not touch is the pane's own `path`: which file this
+/// surface is showing has not changed, only what is in it.
+fn forget_standing_answers<'a>(holders: impl Iterator<Item = &'a mut PreviewPane>, path: &Path) {
+    let key = bt_term::normalized_local_image_path_key(path);
+    for pane in holders {
+        if let PreviewDocument::Markdown { pictures, .. } = &mut pane.doc
+            && pictures
+                .files
+                .iter()
+                .any(|file| bt_term::normalized_local_image_path_key(file) == key)
+        {
+            *pictures = DocumentPictures::default();
+        }
+        if let Some(picture) = pane.image.as_mut()
+            && bt_term::normalized_local_image_path_key(&picture.path) == key
+        {
+            picture.forget_its_pixels();
+        }
+    }
 }
 
 impl Runtime<'_> {
@@ -48245,15 +48728,40 @@ impl Runtime<'_> {
     /// the reader opened, the picture is part of how it reads, and 「图片文件改了
     /// 重画」 is the ruling of 2026-08-28.
     fn markdown_picture_files(&self) -> BTreeSet<PathBuf> {
-        let mut files = BTreeSet::new();
-        for tab in &self.window.tabs {
-            for (_, pane) in tab.preview_panes.iter() {
-                if let PreviewDocument::Markdown { pictures, .. } = &pane.doc {
-                    files.extend(pictures.files.iter().cloned());
-                }
-            }
-        }
-        files
+        picture_files_of(self.documents_held())
+    }
+
+    /// **Every surface in this window that is holding a document** — the docked
+    /// panes and the floats of every tab, and the glance card (§7.1.3u ③).
+    ///
+    /// One helper because there are exactly three holders and one of them was
+    /// being left out of every walk that mattered. A walk over `tab.preview_panes`
+    /// finds the seats and the floats, because a float's view is in its tab's own
+    /// map; it cannot find [`PreviewSurface::Peek`], whose view is the *window's*
+    /// — one pointer, one card — and lives on [`WindowRuntime::peek_pane`]. The
+    /// card really does build a markdown document (`rebuild_preview_document`
+    /// through [`Self::refresh_overlay`]), so it really does have pictures it is
+    /// waiting for, files it stands on and standing answers that a moved file
+    /// must end; it was in none of the three sets that say so, and a hover over a
+    /// markdown file with an uncached picture in it stayed on placeholders until
+    /// something unrelated happened to bump the picture generation.
+    ///
+    /// [`Self::animated_surfaces`]' argument said about documents instead of
+    /// about frames: the card is added by hand for the reason `preview_surfaces`
+    /// leaves it out — it is window-scoped rather than tab-scoped, and not
+    /// focusable, hit-testable or scrollable — and it is added because it draws,
+    /// which is what these walks are about.
+    ///
+    /// **Across tabs, not only the tab on screen**, for
+    /// [`Self::watched_preview_files`]' reason: a page in a background tab is
+    /// still a page holding an answer about a file that can move.
+    fn documents_held(&self) -> impl Iterator<Item = &PreviewPane> {
+        documents_held_in(&self.window.tabs, &self.window.peek_pane)
+    }
+
+    /// The same, mutably — what ends a standing answer walks it.
+    fn documents_held_mut(&mut self) -> impl Iterator<Item = &mut PreviewPane> {
+        documents_held_mut_in(&mut self.window.tabs, &mut self.window.peek_pane)
     }
 
     /// **Which pictures a page in this window is still waiting to see**
@@ -48271,15 +48779,7 @@ impl Runtime<'_> {
     ///
     /// See [`DocumentPictures::loading`] for what a page writes down here.
     fn markdown_pictures_awaited(&self) -> BTreeSet<PathBuf> {
-        let mut files = BTreeSet::new();
-        for tab in &self.window.tabs {
-            for (_, pane) in tab.preview_panes.iter() {
-                if let PreviewDocument::Markdown { pictures, .. } = &pane.doc {
-                    files.extend(pictures.loading.iter().cloned());
-                }
-            }
-        }
-        files
+        pictures_awaited_by(self.documents_held())
     }
 
     /// **Which tabs hold a pane standing on the picture in this file** (user
@@ -48347,26 +48847,16 @@ impl Runtime<'_> {
             &mut self.window.markdown_pictures,
             path,
         );
-        // **And the answer the pages themselves are standing on.** Since
+        // **And the answers the surfaces themselves are standing on.** Since
         // [`answer_one_picture`] a page keeps what it was told when the decode
-        // cache lets the pixels go, which is what stops a bounded cache from
-        // sending this window round the same nine decodes forever — and it is
-        // exactly what must *not* survive a file moving under it. This is the
-        // one place the three ledgers are ended together, so it is the one place
-        // the fourth is ended too.
-        let key = bt_term::normalized_local_image_path_key(path);
-        for tab in &mut self.window.tabs {
-            for (_, pane) in tab.preview_panes.iter_mut() {
-                if let PreviewDocument::Markdown { pictures, .. } = &mut pane.doc
-                    && pictures
-                        .files
-                        .iter()
-                        .any(|file| bt_term::normalized_local_image_path_key(file) == key)
-                {
-                    *pictures = DocumentPictures::default();
-                }
-            }
-        }
+        // cache lets the pixels go, and since §7.1.3u ③ a picture pane does the
+        // same — which is what stops a bounded cache from sending this window
+        // round the same nine decodes forever, and is exactly what must *not*
+        // survive a file moving under it. This is the one place the three
+        // ledgers are ended together, so it is the one place the fourth is ended
+        // too, and it is ended for **every** holder: the card's document is one
+        // ([`Self::documents_held`]).
+        forget_standing_answers(self.documents_held_mut(), path);
     }
 
     /// **One watched file moved: tell whatever is showing it** (W2 slice 5).
@@ -57760,15 +58250,18 @@ impl Runtime<'_> {
         if key == self.preview_pane_mut(surface).doc_key {
             return;
         }
-        // **What this page has already been told about its pictures**, taken
-        // before the document it is written in is replaced. It is the ledger
-        // that makes an answer an answer when the byte-bounded decode cache has
-        // let the pixels go — see [`answer_one_picture`]. Read after the key's
+        // **What this page has already been told about its art**, taken before
+        // the document it is written in is replaced. It is the ledger that makes
+        // an answer an answer when a bounded cache has let the pixels go — see
+        // [`answer_one_picture`] for the pictures and [`answer_one_formula`] for
+        // the formulas, which are one rule about two lanes. Read after the key's
         // own early return, so a window that is not rebuilding pays nothing.
-        let standing_pictures = self
+        let (standing_pictures, standing_math) = self
             .preview_pane(surface)
             .and_then(|pane| match &pane.doc {
-                PreviewDocument::Markdown { pictures, .. } => Some(pictures.clone()),
+                PreviewDocument::Markdown { pictures, math, .. } => {
+                    Some((pictures.clone(), math.clone()))
+                }
                 _ => None,
             })
             .unwrap_or_default();
@@ -57828,7 +58321,12 @@ impl Runtime<'_> {
             // becomes it — so the block the last layout was drawn against is
             // exactly what must not be reused.
             let source = self.markdown_source_block(surface, standing_source.as_ref(), scale);
-            let math = self.resolve_document_math(&blocks, metrics, &bt_render::chrome_palette());
+            let math = self.resolve_document_math(
+                &blocks,
+                metrics,
+                &bt_render::chrome_palette(),
+                &standing_math,
+            );
             let pictures = self.resolve_document_pictures(
                 &blocks,
                 document.as_deref(),
@@ -57997,8 +58495,12 @@ impl Runtime<'_> {
                     })
                     .and_then(|index| Some((index, ranges.get(index)?.clone())));
                 let source = self.markdown_source_block(surface, parsed_source.as_ref(), scale);
-                let math =
-                    self.resolve_document_math(&blocks, metrics, &bt_render::chrome_palette());
+                let math = self.resolve_document_math(
+                    &blocks,
+                    metrics,
+                    &bt_render::chrome_palette(),
+                    &standing_math,
+                );
                 let pictures = self.resolve_document_pictures(
                     &blocks,
                     document.as_deref(),
@@ -58210,11 +58712,18 @@ impl Runtime<'_> {
     /// Asking is idempotent: a gap becomes [`PreviewMathArtifact::Pending`] the
     /// moment it is sent, so the second page showing the same formula finds it
     /// already in flight and the hundredth frame does not send it again.
+    ///
+    /// **And the answers this page already has are part of the question**
+    /// (§7.1.3u ③) — see [`answer_one_formula`], which is what reads them.
+    /// [`Self::resolve_document_pictures`]' own sentence, said one lane over:
+    /// the cache is bounded and the page's appetite is not, so whether the cache
+    /// still holds a picture must not decide whether the engine is asked for one.
     fn resolve_document_math(
         &mut self,
         blocks: &[preview::MarkdownBlock],
         metrics: seats::PreviewMarkdownMetrics,
         palette: &bt_render::ChromePalette,
+        standing: &DocumentMath,
     ) -> DocumentMath {
         // **The prose's own ink, which on this page is `files_row_text` and not
         // `preview_body_text`** — the second is the heavier ink a heading and a
@@ -58230,13 +58739,21 @@ impl Runtime<'_> {
                 em_milli_px: math_em_milli(em_px),
                 foreground_rgb,
             };
-            // Cloned out before the arm runs: the artifact is a handle to shared
-            // pixels, and holding a borrow of the cache across a call that may
-            // add to it is the one thing this map cannot do.
-            match self.window.preview_math.get(&key).cloned() {
-                Some(PreviewMathArtifact::Ready(picture)) => document.insert(&key, picture),
-                Some(PreviewMathArtifact::Pending | PreviewMathArtifact::Refused) => {}
-                None => self.request_preview_math(key),
+            let mut needs_typesetting = false;
+            let answer = answer_one_formula(
+                &mut self.window.preview_math,
+                standing,
+                &key,
+                &mut needs_typesetting,
+            );
+            if let Some(picture) = answer {
+                document.insert(&key, picture);
+            }
+            // Spent the moment the borrow above ends: the door wants the whole
+            // runtime and that wants one of its caches — [`answer_one_picture`]'s
+            // arrangement, for its reason.
+            if needs_typesetting {
+                self.request_preview_math(key);
             }
         }
         document
@@ -58300,7 +58817,7 @@ impl Runtime<'_> {
         let now = Instant::now();
         self.window.markdown_pictures.tick = self.window.markdown_pictures.tick.saturating_add(1);
         let mut ask =
-            |path: &Path, fill: bool, standing: Option<&MarkdownPicture>| -> MarkdownPicture {
+            |path: &Path, fill: bool, standing: Option<&MarkdownPicture>| -> PagePicture {
                 // The two caches are borrowed for exactly as long as the answer
                 // takes; the door below wants the whole runtime, so it is spent
                 // after those borrows have ended — see [`answer_one_picture`].
@@ -58328,10 +58845,11 @@ impl Runtime<'_> {
                 }
                 // A file this window will not open draws what a picture it cannot
                 // read draws — unless the page already has something true to show,
-                // which a refused *resample* leaves standing.
-                match answer {
-                    MarkdownPicture::Loading => MarkdownPicture::Failed,
-                    answer => answer,
+                // which a refused *resample* leaves standing. Either way it is
+                // waiting for nothing: nobody was asked, so nothing is coming.
+                match answer.picture {
+                    MarkdownPicture::Loading => PagePicture::drawn(MarkdownPicture::Failed),
+                    picture => PagePicture::drawn(picture),
                 }
             };
         resolve_document_pictures(blocks, document, theme, reach, standing, &mut ask)
@@ -60526,18 +61044,45 @@ impl Runtime<'_> {
             return None;
         };
         let cache_key = normalized_local_image_path_key(&path);
-        let decoded = match self.window.peek_cache.get(&cache_key) {
-            Some(PeekCacheEntry::Ready {
-                key,
+        // **The store, and then the answer this surface is already standing on**
+        // (§7.1.3u ③). A miss here used to read as *never asked*, and with more
+        // pictures on the glass than [`MAX_PEEK_CACHE_BYTES`] holds that is a
+        // loop with no input in it: each arrival evicts a decode another host is
+        // drawing, the refit that arrival triggers finds the miss, asks again,
+        // and the answer evicts the next.
+        let (standing_content, standing_native) =
+            self.preview_picture(surface)
+                .map_or((None, None), |picture| {
+                    (
+                        picture
+                            .raster
+                            .as_ref()
+                            .map(|raster| raster.content_key.clone()),
+                        picture.native,
+                    )
+                });
+        let pixels = surface_pixels(
+            &mut self.window.peek_cache,
+            standing_content.as_deref(),
+            standing_native,
+            &cache_key,
+        );
+        let (content_key, native_rgba, native_width, native_height) = match pixels.clone() {
+            SurfacePixels::Decoded {
+                content,
                 rgba,
-                width_px,
-                height_px,
-            }) => Some((key.clone(), Arc::clone(rgba), *width_px, *height_px)),
-            Some(PeekCacheEntry::Pending) => {
-                self.hide_preview_picture(surface);
-                return None;
-            }
-            Some(PeekCacheEntry::Failed) => {
+                native,
+            } => (content, Some(rgba), native[0], native[1]),
+            // **What it was told, when the store no longer holds what it was told
+            // it from.** The raster on the glass stays there and the arithmetic
+            // below runs on the decode's own dimensions exactly as it did when
+            // the decode was in hand; what is missing is only the pixels a
+            // sharper pass would be made from, and that is the errand at the foot
+            // of this function.
+            SurfacePixels::Standing {
+                content, native, ..
+            } => (content, None, native[0], native[1]),
+            SurfacePixels::Failed => {
                 // **A video that would not decode is not a failure of this pane** (user ruling
                 // 2026-08-27; §7.23). A file called `.png` that no decoder can read is something
                 // the reader should be told about, because there is nothing else to say about it;
@@ -60556,7 +61101,27 @@ impl Runtime<'_> {
                 self.hide_preview_picture(surface);
                 return None;
             }
-            None => None,
+            SurfacePixels::Nothing { asked } => {
+                self.hide_preview_picture(surface);
+                if !self.app.math_worker_running {
+                    if let Some(picture) = self.preview_picture_mut(surface) {
+                        picture.failure =
+                            Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
+                    }
+                    return None;
+                }
+                if asked {
+                    return None;
+                }
+                if self.request_peek_pixels(&path) {
+                    self.window
+                        .peek_cache
+                        .insert(cache_key, PeekCacheEntry::Pending);
+                } else if let Some(picture) = self.preview_picture_mut(surface) {
+                    picture.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
+                }
+                return None;
+            }
         };
         // **What the recording is, when the pixels are only a frame of it** — see
         // [`PreviewImageState::stated_size`]. Read before the borrow below because it is a
@@ -60564,29 +61129,10 @@ impl Runtime<'_> {
         let stated = preview::path_names_a_video(&path)
             .then(|| self.video_facts_of(&path).native)
             .flatten();
-        if let (Some(picture), Some((_, _, native_width, native_height))) =
-            (self.preview_picture_mut(surface), decoded.as_ref())
-        {
-            picture.native = Some((*native_width, *native_height));
+        if let Some(picture) = self.preview_picture_mut(surface) {
+            picture.native = Some((native_width, native_height));
             picture.stated_size = stated;
         }
-        let Some((content_key, rgba, native_width, native_height)) = decoded else {
-            self.hide_preview_picture(surface);
-            if !self.app.math_worker_running {
-                if let Some(picture) = self.preview_picture_mut(surface) {
-                    picture.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
-                }
-                return None;
-            }
-            if self.request_peek_pixels(&path) {
-                self.window
-                    .peek_cache
-                    .insert(cache_key, PeekCacheEntry::Pending);
-            } else if let Some(picture) = self.preview_picture_mut(surface) {
-                picture.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
-            }
-            return None;
-        };
         // `.pv-image svg { max-width: 86%; max-height: 70% }` (mock-up 606).
         //
         // **The 30% of height the picture gives up is not slack** — it is where
@@ -60726,7 +61272,12 @@ impl Runtime<'_> {
         if let Some(picture) = self.preview_picture_mut(surface) {
             picture.drawn = Some(drawn);
         }
-        if exact_raster {
+        // **And what this surface must do about its pixels** (§7.1.3u ③). The
+        // first answer is the one that ends the loop: a surface holding the very
+        // raster this frame wants asks nobody anything, whatever either store
+        // happens to hold this instant.
+        let errand = picture_errand(&pixels, exact_raster);
+        if matches!(errand, PictureErrand::Nothing | PictureErrand::Wait) {
             return produced;
         }
         if self.preview_picture(surface).is_some_and(|picture| {
@@ -60735,6 +61286,20 @@ impl Runtime<'_> {
         {
             return produced;
         }
+        let Some(rgba) = native_rgba else {
+            // **The pixels this pass would be made from are not in this window**
+            // — the store let the decode go while this surface went on drawing
+            // the raster it was resampled into. One read, and the picture stays
+            // on the glass while it travels; the store's own `Pending` is what
+            // keeps it to one. This is [`answer_one_picture`]'s own arm, said for
+            // a pane instead of for a page.
+            if self.request_peek_pixels(&path) {
+                self.window
+                    .peek_cache
+                    .insert(cache_key, PeekCacheEntry::Pending);
+            }
+            return produced;
+        };
         // **Every exact-size question this surface puts to the resample lane.**
         // One line per Lanczos3 pass asked for, with the size asked and the size
         // the last answer came back at, so a gesture's appetite can be counted
@@ -80023,6 +80588,33 @@ impl Runtime<'_> {
         let preview_matches = !waiting.is_empty();
         match result {
             Ok(decoded) => {
+                // **And the pages that asked for these pixels to sharpen a
+                // picture they are already drawing** (§7.1.3u ③). Owed here,
+                // before the pixels go into the store, because this is the one
+                // moment they are in hand and named: the page cannot make the
+                // exact-size pass itself, which is why it asked for the file at
+                // all. See [`owe_sharpened_rasters`] — and note what is *not*
+                // done, which is ticking the picture generation: nothing about
+                // the document's shape has changed, so no paragraph is re-shaped
+                // for a picture that is already the right size on the glass.
+                owe_sharpened_rasters(
+                    &mut self.window.markdown_pictures,
+                    // The one walk ([`documents_held_in`]), spelled with the two
+                    // fields it reads rather than through `Self::documents_held`:
+                    // the ledger being written is a third field of the same
+                    // window, and borrowing it mutably while the holders are read
+                    // is only possible when the compiler can see the three are
+                    // different fields.
+                    documents_pictures(documents_held_in(
+                        &self.window.tabs,
+                        &self.window.peek_pane,
+                    )),
+                    &cache_key,
+                    &decoded.key,
+                    &decoded.rgba,
+                    [decoded.width_px, decoded.height_px],
+                    Instant::now(),
+                );
                 self.window.peek_cache.insert(
                     cache_key.clone(),
                     PeekCacheEntry::Ready {
@@ -132727,7 +133319,8 @@ mod tests {
                     800.0,
                     Instant::now(),
                     &mut needs_pixels,
-                );
+                )
+                .picture;
                 if needs_pixels {
                     asked += 1;
                     inbox.push(index);
@@ -132838,7 +133431,8 @@ mod tests {
                     MEASURE,
                     Instant::now(),
                     &mut needs_pixels,
-                );
+                )
+                .picture;
                 if needs_pixels {
                     *asked += 1;
                     inbox.push(index);
@@ -132976,15 +133570,19 @@ mod tests {
             bt_render::Theme::Dark,
             PictureReach::from_the_top(),
             &DocumentPictures::default(),
-            &mut |_, _, _| MarkdownPicture::Loading,
+            &mut |_, _, _| PagePicture {
+                picture: MarkdownPicture::Loading,
+                waiting: Some(PictureWaitFor::Pixels),
+            },
         );
         assert_eq!(
-            waiting.loading.len(),
+            waiting.awaited().count(),
             1,
             "a page with nothing to draw is waiting for the file it asked for"
         );
         assert_eq!(
-            waiting.files, waiting.loading,
+            waiting.files,
+            waiting.awaited().cloned().collect::<BTreeSet<_>>(),
             "and while it is waiting the two sets are the same one"
         );
 
@@ -132995,9 +133593,11 @@ mod tests {
             PictureReach::from_the_top(),
             &one_image("shots/one.png", [1024, 768]),
             &mut |_, _, standing| {
-                standing
-                    .cloned()
-                    .expect("the answer this page was already given")
+                PagePicture::drawn(
+                    standing
+                        .cloned()
+                        .expect("the answer this page was already given"),
+                )
             },
         );
         assert_eq!(
@@ -133005,11 +133605,745 @@ mod tests {
             1,
             "the page still stands on that file, so the watch still follows it"
         );
-        assert!(
-            holding.loading.is_empty(),
+        assert_eq!(
+            holding.awaited().count(),
+            0,
             "but it is waiting for nothing, so a decode landing owes it no \
              re-flow: {:?}",
-            holding.loading
+            holding.waiting,
+        );
+    }
+
+    /// One decode, in the shape the store holds it.
+    fn a_decode(content: &str, native: (u32, u32), bytes: usize) -> PeekCacheEntry {
+        PeekCacheEntry::Ready {
+            key: content.to_owned(),
+            rgba: Arc::from(vec![0_u8; bytes].into_boxed_slice()),
+            width_px: native.0,
+            height_px: native.1,
+        }
+    }
+
+    /// One exact-size raster, in the shape a picture surface holds it.
+    fn a_held_raster(content: &str, (width_px, height_px): (u32, u32)) -> PeekThumbnail {
+        PeekThumbnail {
+            content_key: content.to_owned(),
+            key: bt_term::display_texture_key(content, width_px, height_px),
+            rgba: Arc::from(
+                vec![0_u8; (width_px as usize) * (height_px as usize) * 4].into_boxed_slice(),
+            ),
+            width_px,
+            height_px,
+        }
+    }
+
+    /// One surface holding a markdown page whose pictures are these.
+    fn a_page_holding(pictures: DocumentPictures) -> PreviewPane {
+        PreviewPane {
+            doc: PreviewDocument::Markdown {
+                blocks: Vec::new(),
+                ranges: Vec::new(),
+                maps: Vec::new(),
+                source: None,
+                intrinsic: Vec::new(),
+                layout: Vec::new(),
+                math: DocumentMath::default(),
+                pictures,
+            },
+            ..PreviewPane::default()
+        }
+    }
+
+    /// RED — **a picture pane that has been answered does not ask again when the
+    /// decode store lets its pixels go** (adversarial review 2026-09-11, row
+    /// RB-1; `docs/DESIGN.md` §7.1.3u ③).
+    ///
+    /// RED EVIDENCE. §7.1.3u taught a markdown *page* that a miss in a bounded
+    /// cache is not "never asked". The standalone picture pane was the consumer
+    /// that fix did not touch: `refit_preview_picture` consulted
+    /// [`PeekCache`] and nothing else, and a miss fell straight through to
+    /// hiding the picture, asking for the file and filing a `Pending` — even
+    /// though the pane was standing on a `PeekThumbnail` of its own, made from
+    /// that very decode, and drawing it. With a visible working set over
+    /// [`MAX_PEEK_CACHE_BYTES`] each arrival evicts a picture another host is
+    /// drawing, the refit that arrival triggers finds the miss, asks again, and
+    /// the cycle sustains itself with no input at all.
+    ///
+    /// MUTATION: make [`surface_pixels`] read a miss as
+    /// [`SurfacePixels::Nothing`] again — ignore the `standing` argument — and
+    /// the errand at the size the pane is already holding becomes
+    /// [`PictureErrand::Read`], which is the first turn of the loop.
+    #[test]
+    fn a_pane_whose_picture_was_evicted_does_not_ask_again() {
+        const PIXELS: usize = 3 * 1024 * 1024;
+        const BUDGET: u64 = 4 * 1024 * 1024;
+        const NATIVE: (u32, u32) = (1024, 768);
+        let paths = [
+            PathBuf::from(r"D:\shots\a.png"),
+            PathBuf::from(r"D:\shots\b.png"),
+        ];
+        let keys = paths
+            .iter()
+            .map(|path| bt_term::normalized_local_image_path_key(path))
+            .collect::<Vec<_>>();
+        let mut peek = PeekCache::with_budget(BUDGET);
+        peek.insert(keys[0].clone(), a_decode("content-a", NATIVE, PIXELS));
+        // The pane resampled that decode to the box it stands in, and holds the
+        // answer: this is what is on the glass.
+        let held = a_held_raster("content-a", (500, 375));
+        let target: PeekThumbnailTarget = ("content-a".to_owned(), 500, 375);
+
+        // A neighbouring surface's decode lands, and this one's is what the
+        // bounded store lets go of to make room.
+        peek.insert(keys[1].clone(), a_decode("content-b", NATIVE, PIXELS));
+        assert!(
+            peek.get(&keys[0]).is_none(),
+            "the fixture is a store that cannot hold both decodes at once"
+        );
+
+        let pixels = surface_pixels(
+            &mut peek,
+            Some(held.content_key.as_str()),
+            Some(NATIVE),
+            &keys[0],
+        );
+        assert!(
+            matches!(pixels, SurfacePixels::Standing { .. }),
+            "the pane was answered once and is still drawing that answer: {pixels:?}"
+        );
+        assert_eq!(
+            picture_errand(&pixels, held.matches(&target)),
+            PictureErrand::Nothing,
+            "a surface holding the very raster this frame wants has nothing to \
+             ask anybody — a miss in a bounded cache is not 'never asked'",
+        );
+
+        // And the one case that *is* a question: the pane is made wider, so the
+        // raster it holds is not the raster it wants, and the pixels a sharper
+        // pass would be made from are not in this window.
+        let wider: PeekThumbnailTarget = ("content-a".to_owned(), 700, 525);
+        assert_eq!(
+            picture_errand(&pixels, held.matches(&wider)),
+            PictureErrand::Read,
+            "a size it does not hold, with nothing to resample from, is one read"
+        );
+        peek.insert(keys[0].clone(), PeekCacheEntry::Pending);
+        let asked = surface_pixels(
+            &mut peek,
+            Some(held.content_key.as_str()),
+            Some(NATIVE),
+            &keys[0],
+        );
+        assert_eq!(
+            picture_errand(&asked, held.matches(&wider)),
+            PictureErrand::Wait,
+            "and the store's own `Pending` is what keeps it to one read"
+        );
+    }
+
+    /// RED — **more pictures on the glass than the decode store can hold still
+    /// settles** (adversarial review 2026-09-11, row RB-1).
+    ///
+    /// RED EVIDENCE. The loop above is only visible at more than one surface: a
+    /// decode landing for pane A evicts pane B's, the refit that the arrival
+    /// triggers walks **every** picture host ([`Runtime::refresh_preview_for_layout`]),
+    /// B finds its miss and asks, and B's answer evicts C's. Four 4000×4000 PNGs
+    /// are 256 MiB against a 192 MiB store, which is four screenshots opened at
+    /// once.
+    ///
+    /// The fixture is that story at the size a test can hold: four surfaces,
+    /// each on its own file, a store that can carry one decode, and one decode
+    /// landing per round the way `complete_peek_image` lands them. The claim is
+    /// the count — **one read per surface, for ever**.
+    ///
+    /// MUTATION: the same one. Read a miss as "never asked" and the count climbs
+    /// by one per surface per round, which is the report.
+    #[test]
+    fn a_visible_working_set_over_the_cache_settles() {
+        const PIXELS: usize = 3 * 1024 * 1024;
+        const BUDGET: u64 = 4 * 1024 * 1024;
+        const NATIVE: (u32, u32) = (1024, 768);
+        const DRAWN: (u32, u32) = (500, 375);
+        const ROUNDS: usize = 12;
+        let paths: Vec<PathBuf> = (0..4)
+            .map(|index| PathBuf::from(format!(r"D:\shots\{index}.png")))
+            .collect();
+        let keys: Vec<String> = paths
+            .iter()
+            .map(|path| bt_term::normalized_local_image_path_key(path))
+            .collect();
+        let content = |index: usize| format!("content-{index}");
+        let mut peek = PeekCache::with_budget(BUDGET);
+        // What each surface is holding, and what it wants: the box is the same
+        // every round, so the size it wants is the same every round.
+        let mut held: Vec<Option<PeekThumbnail>> = paths.iter().map(|_| None).collect();
+        let mut native: Vec<Option<(u32, u32)>> = vec![None; paths.len()];
+        let mut asked = 0_usize;
+        let mut inbox: Vec<usize> = Vec::new();
+
+        for _ in 0..ROUNDS {
+            if !inbox.is_empty() {
+                let index = inbox.remove(0);
+                peek.insert(
+                    keys[index].clone(),
+                    a_decode(&content(index), NATIVE, PIXELS),
+                );
+            }
+            for index in 0..paths.len() {
+                let pixels = surface_pixels(
+                    &mut peek,
+                    held[index]
+                        .as_ref()
+                        .map(|raster| raster.content_key.as_str()),
+                    native[index],
+                    &keys[index],
+                );
+                // `refit_preview_picture`'s own order: a surface with nothing to
+                // draw at all never reaches the errand — it hides the picture,
+                // asks, and is done for this frame.
+                if let SurfacePixels::Nothing { asked: already } = pixels {
+                    if !already {
+                        asked += 1;
+                        inbox.push(index);
+                        peek.insert(keys[index].clone(), PeekCacheEntry::Pending);
+                    }
+                    continue;
+                }
+                let target: PeekThumbnailTarget = (content(index), DRAWN.0, DRAWN.1);
+                let exact = held[index]
+                    .as_ref()
+                    .is_some_and(|raster| raster.matches(&target));
+                match picture_errand(&pixels, exact) {
+                    PictureErrand::Nothing | PictureErrand::Wait => {}
+                    PictureErrand::Read => {
+                        asked += 1;
+                        inbox.push(index);
+                        peek.insert(keys[index].clone(), PeekCacheEntry::Pending);
+                    }
+                    // The scale lane answers, the way it answers on the window:
+                    // the surface is handed the raster and holds it.
+                    PictureErrand::Resample => {
+                        held[index] = Some(a_held_raster(&content(index), DRAWN));
+                        native[index] = Some(NATIVE);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            asked,
+            paths.len(),
+            "{asked} reads for {} pictures over {ROUNDS} rounds: the store let \
+             one go and the surface drawing it took that for never having asked",
+            paths.len(),
+        );
+        for (index, raster) in held.iter().enumerate() {
+            assert!(
+                raster.is_some(),
+                "picture {index} went blank when the store let its pixels go"
+            );
+        }
+    }
+
+    /// RED — **a page keeps the formulas it was handed when the formula cache
+    /// lets them go** (adversarial review 2026-09-11, row RB-2; §7.1.3u ③).
+    ///
+    /// RED EVIDENCE. [`PreviewMathCache`] is bounded in bytes and evicts by last
+    /// use; `resolve_document_math` had no standing-answer parameter, unlike its
+    /// twin for pictures, so it asked the engine for every key the cache had no
+    /// entry for. A page whose distinct rasters are worth more than
+    /// [`PREVIEW_MATH_CACHE_BUDGET_BYTES`] therefore evicted one it was drawing
+    /// on every arrival and typeset it again — §7.1.3u's own report, one lane
+    /// over. It is reachable because the cache is window-wide and the size is
+    /// part of the key, so each preview zoom step mints a fresh set of every
+    /// formula on the page.
+    ///
+    /// MUTATION: drop the standing arm from [`answer_one_formula`]'s `None`
+    /// branch and the evicted formula is asked for again, which is the first
+    /// turn of the loop.
+    #[test]
+    fn a_page_keeps_its_formula_answers_across_an_eviction() {
+        /// Three of these do not fit under the budget; two do.
+        const BYTES: usize = 20 * 1024 * 1024;
+        let ink = [17_u8, 18, 19];
+        let key = |source: &str| PreviewMathKey {
+            source: source.to_owned(),
+            mode: MathMode::Display,
+            em_milli_px: math_em_milli(13.0),
+            foreground_rgb: ink,
+        };
+        let mut cache = PreviewMathCache::default();
+        let mut page = DocumentMath::default();
+        let sources = ["a", "b", "c"];
+        for source in sources {
+            let picture = PreviewMathPicture {
+                key: format!("preview-math:{source}"),
+                rgba: Arc::from(vec![0_u8; BYTES].into_boxed_slice()),
+                width_px: 100,
+                height_px: 50,
+                baseline_px: 10.0,
+            };
+            cache.land(key(source), PreviewMathArtifact::Ready(picture.clone()));
+            // What the page was handed, which is what it is drawing.
+            page.insert(&key(source), picture);
+        }
+        assert_eq!(
+            cache.entries.len(),
+            2,
+            "the fixture is a cache that cannot hold the page: {} bytes resident",
+            cache.resident_bytes,
+        );
+        let gone = sources
+            .iter()
+            .find(|source| !cache.entries.contains_key(&key(source)))
+            .expect("the budget let one of them go");
+
+        let mut needs_typesetting = false;
+        let answer = answer_one_formula(&mut cache, &page, &key(gone), &mut needs_typesetting);
+        assert!(
+            answer.is_some(),
+            "the page was told what `{gone}` looks like and is still drawing it"
+        );
+        assert!(
+            !needs_typesetting,
+            "but it asked the engine to set `{gone}` again, because the cache \
+             no longer holds the pixels it was given"
+        );
+
+        // And the one thing a standing answer may not survive: the page being
+        // set in another ink, which is a different picture of the same formula.
+        let mut in_another_theme = key(gone);
+        in_another_theme.foreground_rgb = [200, 200, 200];
+        let mut needs_typesetting = false;
+        let answer =
+            answer_one_formula(&mut cache, &page, &in_another_theme, &mut needs_typesetting);
+        assert!(
+            answer.is_none() && needs_typesetting,
+            "a formula set in a new ink is a new picture"
+        );
+    }
+
+    /// RED — **an eviction is not an invalidation of the documents that still
+    /// hold the answer** (adversarial review 2026-09-11, row RB-2).
+    ///
+    /// RED EVIDENCE. `PreviewMathCache::evict_to_budget` bumped `generation`,
+    /// which is part of [`PageArtKey`] and therefore re-keys every page in the
+    /// window — a full re-flow each. That was right while the cache was a page's
+    /// only copy of a formula: the block went back to standing on its source
+    /// text. It is exactly wrong once a page carries what it was handed, and it
+    /// is the engine of the loop: land → generation++ → rebuild → miss on the
+    /// key just evicted → ask → land → evict the next.
+    ///
+    /// MUTATION: tick the generation in `evict_to_budget` again and the count
+    /// below is one higher per eviction, which is one whole-document re-flow per
+    /// eviction for a page that has not changed.
+    #[test]
+    fn an_eviction_does_not_invalidate_a_document_that_still_holds_the_answer() {
+        const BYTES: usize = 20 * 1024 * 1024;
+        let mut cache = PreviewMathCache::default();
+        for source in ["a", "b", "c"] {
+            cache.land(
+                PreviewMathKey {
+                    source: source.to_owned(),
+                    mode: MathMode::Display,
+                    em_milli_px: math_em_milli(13.0),
+                    foreground_rgb: [0, 0, 0],
+                },
+                PreviewMathArtifact::Ready(PreviewMathPicture {
+                    key: format!("preview-math:{source}"),
+                    rgba: Arc::from(vec![0_u8; BYTES].into_boxed_slice()),
+                    width_px: 100,
+                    height_px: 50,
+                    baseline_px: 10.0,
+                }),
+            );
+        }
+        assert_eq!(
+            cache.entries.len(),
+            2,
+            "the fixture is a cache that had to let one go"
+        );
+        assert_eq!(
+            cache.generation, 3,
+            "one tick per formula that arrived, and none at all for the \
+             eviction: a page still holding the answer has not changed, and \
+             re-keying it is a re-shape of every paragraph on it for nothing",
+        );
+    }
+
+    /// The page in the sharpening fixture: one screenshot, drawn in a column
+    /// 800 physical pixels wide.
+    const SHARPEN_SOURCE: &str = "![a shot](shots/one.png)\n";
+    const SHARPEN_DOCUMENT: &str = r"D:\proj\README.md";
+    const SHARPEN_CONTENT: &str = "content-a";
+    const SHARPEN_MEASURE: f32 = 800.0;
+    const SHARPEN_NATIVE: [u32; 2] = [1024, 768];
+    /// The raster the page is standing on: sharpened to some earlier, narrower
+    /// column.
+    const SOFT: [u32; 2] = [240, 180];
+    /// And the one this column wants — [`markdown_image_extent`]'s answer for
+    /// that native size in that measure, which is what the page asks the lane
+    /// for.
+    const SHARP: [u32; 2] = [800, 600];
+
+    /// One rebuild of that page, resolved the way the window resolves it: the
+    /// real [`answer_one_picture`] in front of two real stores, and every read
+    /// it asks for latched by the decode store's own `Pending`.
+    fn resolve_sharpening_page(
+        peek: &mut PeekCache,
+        rasters: &mut MarkdownPictures,
+        standing: &DocumentPictures,
+        reads: &mut usize,
+    ) -> DocumentPictures {
+        let blocks = preview::parse_markdown(SHARPEN_SOURCE);
+        resolve_document_pictures(
+            &blocks,
+            Some(Path::new(SHARPEN_DOCUMENT)),
+            bt_render::Theme::Dark,
+            PictureReach::from_the_top(),
+            standing,
+            &mut |path, fill, standing| {
+                let mut needs_pixels = false;
+                let answer = answer_one_picture(
+                    peek,
+                    rasters,
+                    standing,
+                    path,
+                    fill,
+                    SHARPEN_MEASURE,
+                    Instant::now(),
+                    &mut needs_pixels,
+                );
+                if needs_pixels {
+                    *reads += 1;
+                    peek.insert(
+                        bt_term::normalized_local_image_path_key(path),
+                        PeekCacheEntry::Pending,
+                    );
+                }
+                answer
+            },
+        )
+    }
+
+    /// **A page drawing a soft raster whose decode the store has let go of**, one
+    /// rebuild in — the fixture both halves of the sharpening rule are asked of.
+    struct Sharpening {
+        page: DocumentPictures,
+        peek: PeekCache,
+        rasters: MarkdownPictures,
+        file: PathBuf,
+        reads: usize,
+    }
+
+    fn a_page_that_wants_a_sharper_picture() -> Sharpening {
+        let file = PathBuf::from(r"D:\proj\shots/one.png");
+        let mut standing = DocumentPictures::default();
+        standing.by_source.insert(
+            "shots/one.png".to_owned(),
+            MarkdownPicture::Ready {
+                key: bt_term::display_texture_key(SHARPEN_CONTENT, SOFT[0], SOFT[1]),
+                content: SHARPEN_CONTENT.to_owned(),
+                rgba: Arc::from(
+                    vec![0_u8; (SOFT[0] as usize) * (SOFT[1] as usize) * 4].into_boxed_slice(),
+                ),
+                raster: SOFT,
+                native: SHARPEN_NATIVE,
+            },
+        );
+        standing.files.insert(file.clone());
+        let mut peek = PeekCache::with_budget(4 * 1024 * 1024);
+        let mut rasters = MarkdownPictures::default();
+        let mut reads = 0_usize;
+        let page = resolve_sharpening_page(&mut peek, &mut rasters, &standing, &mut reads);
+        Sharpening {
+            page,
+            peek,
+            rasters,
+            file,
+            reads,
+        }
+    }
+
+    /// RED — **a decode asked for to sharpen a picture is awaited, and its
+    /// arrival sharpens it** (adversarial review 2026-09-11, row RB-6;
+    /// §7.1.3u ③).
+    ///
+    /// RED EVIDENCE. A page holding a soft raster whose decode the store has let
+    /// go asks for the file again — it cannot make the exact-size pass without
+    /// the pixels it would be resampled from. That ask set `needs_pixels` and
+    /// nothing else: `DocumentPictures::loading` was written only when the
+    /// answer was [`MarkdownPicture::Loading`], and the awaited set is built from
+    /// `loading`, so the page was in neither set a completion is delivered
+    /// against. The decode landed in the store, nobody was owed anything, and
+    /// the picture stayed soft until the reader happened to touch something.
+    ///
+    /// MUTATION: drop [`PictureWaitFor::Sharpening`] from `answer_one_picture`'s
+    /// `None if !held_exactly` arm and the page names no file: the store fills,
+    /// the resample is never owed, and the page is still drawing its 240×180
+    /// raster in a 800-pixel column.
+    #[test]
+    fn a_sharpening_decode_is_awaited_and_its_completion_sharpens_the_picture() {
+        let mut fixture = a_page_that_wants_a_sharper_picture();
+        assert_eq!(
+            fixture.reads, 1,
+            "the page asked for the pixels it cannot resample from"
+        );
+        assert_eq!(
+            fixture.page.awaited().count(),
+            0,
+            "it is not waiting to see the picture — it is drawing it: {:?}",
+            fixture.page.waiting,
+        );
+        let (_, wanted) = fixture
+            .page
+            .sharpening()
+            .find(|(file, _)| *file == &fixture.file)
+            .expect("and it wrote down what that read is for");
+        assert_eq!(
+            (wanted.width_px, wanted.height_px),
+            (SHARP[0], SHARP[1]),
+            "the exact-size raster the column wants"
+        );
+
+        // The decode lands. Nothing on the glass changes, and the page is owed
+        // one Lanczos3 pass.
+        let native_rgba: Arc<[u8]> = Arc::from(
+            vec![0_u8; (SHARPEN_NATIVE[0] as usize) * (SHARPEN_NATIVE[1] as usize) * 4]
+                .into_boxed_slice(),
+        );
+        assert!(
+            owe_sharpened_rasters(
+                &mut fixture.rasters,
+                std::iter::once(&fixture.page),
+                &bt_term::normalized_local_image_path_key(&fixture.file),
+                SHARPEN_CONTENT,
+                &native_rgba,
+                SHARPEN_NATIVE,
+                Instant::now(),
+            ),
+            "the completion is delivered to the page that was waiting for it"
+        );
+        let owed = fixture
+            .rasters
+            .owed
+            .values()
+            .next()
+            .expect("one exact-size pass, at the size the page wrote down")
+            .clone();
+        assert_eq!(
+            (owed.key.width_px, owed.key.height_px),
+            (SHARP[0], SHARP[1]),
+            "and it is the pass the page asked for"
+        );
+
+        // The lane answers. The page is holding a sharp picture, and the decode
+        // store never had to be asked a second time.
+        fixture.rasters.land(
+            owed.key.clone(),
+            MarkdownRaster::Ready {
+                key: bt_term::display_texture_key(&owed.key.content, SHARP[0], SHARP[1]),
+                rgba: Arc::from(
+                    vec![0_u8; (SHARP[0] as usize) * (SHARP[1] as usize) * 4].into_boxed_slice(),
+                ),
+                width_px: SHARP[0],
+                height_px: SHARP[1],
+            },
+        );
+        let held = fixture.page.clone();
+        let sharpened = resolve_sharpening_page(
+            &mut fixture.peek,
+            &mut fixture.rasters,
+            &held,
+            &mut fixture.reads,
+        );
+        assert_eq!(fixture.reads, 1, "and no second read went out for it");
+        assert!(
+            matches!(
+                sharpened.get("shots/one.png"),
+                Some(MarkdownPicture::Ready { raster, .. }) if *raster == SHARP
+            ),
+            "the picture is drawn at the size the column gives it: {:?}",
+            sharpened.get("shots/one.png"),
+        );
+    }
+
+    /// RED — **a decode that changes no intrinsic re-flows nothing** (adversarial
+    /// review 2026-09-11, row RB-6).
+    ///
+    /// RED EVIDENCE. The other half of the ticket above, and the reason the
+    /// dependency is a set of its own rather than another entry in `loading`.
+    /// The generation every page is re-keyed by is ticked off
+    /// [`Runtime::markdown_pictures_awaited`], which reads `loading`; a page that
+    /// is only waiting for a picture to get *sharper* already knows how tall the
+    /// block is, so the decode's arrival moves nothing on the page and owes it no
+    /// re-flow. Laying a page of prose out again is a re-shape of every paragraph
+    /// in it through the fallback stack, which is the expensive half of the 82
+    /// seconds §7.1.3u ② measured.
+    ///
+    /// MUTATION: write the sharpening file into `loading` as well and the page is
+    /// named to the completion as one that must be laid out again — a whole
+    /// document re-flow for a picture that is already on the glass at the size it
+    /// is drawn.
+    #[test]
+    fn a_completion_that_changes_no_intrinsic_does_not_reflow_the_document() {
+        let fixture = a_page_that_wants_a_sharper_picture();
+        let holder = a_page_holding(fixture.page.clone());
+        assert!(
+            fixture
+                .page
+                .sharpening()
+                .any(|(file, _)| file == &fixture.file),
+            "the page is waiting on that decode — it asked for it itself"
+        );
+        assert!(
+            picture_files_of(std::iter::once(&holder)).contains(&fixture.file),
+            "and it stands on the file, so the watch follows it"
+        );
+        assert!(
+            !pictures_awaited_by(std::iter::once(&holder)).contains(&fixture.file),
+            "but it is not waiting to *see* it, so the decode landing owes it no \
+             re-flow: what it is waiting for is one exact-size pass",
+        );
+    }
+
+    /// RED — **the glance card's document is in the awaited set** (adversarial
+    /// review 2026-09-11, row RB-5; §7.1.3u ③).
+    ///
+    /// RED EVIDENCE. Three walks that decide what a page is owed —
+    /// [`Runtime::markdown_pictures_awaited`], [`Runtime::markdown_picture_files`]
+    /// and the standing-answer clearing in [`Runtime::forget_the_picture_in`] —
+    /// walked `tab.preview_panes`, and [`PreviewSurface::Peek`] is the one
+    /// surface not in any tab's map: the card is the *window's*, one pointer and
+    /// one card, so its view lives on [`WindowRuntime::peek_pane`]. The card
+    /// really does build a markdown document, so a hover over a `.md` file with
+    /// an uncached picture in it stayed on placeholders — nothing ticked the
+    /// generation for the decode it was waiting for — and its standing answers
+    /// survived the file moving under them.
+    ///
+    /// Two claims, because the defect has two faces: that the walk finds the
+    /// card, and that the three places are built from that one walk rather than
+    /// each spelling it again. The second is asserted as text for
+    /// [`one_door_decides_which_decoder_a_hover_and_a_pane_ask`]'s reason: what
+    /// is being pinned is *which walk a set is built from*, and no value any
+    /// assertion can read says that.
+    ///
+    /// MUTATION: leave `peek_pane` out of [`documents_held_in`] and the first
+    /// assertion goes red; spell a `tab.preview_panes` walk into any of the three
+    /// again and the second does.
+    #[test]
+    fn the_glance_cards_document_is_in_the_awaited_set() {
+        let file = PathBuf::from(r"D:\proj\shots/one.png");
+        let mut pictures = DocumentPictures::default();
+        pictures.files.insert(file.clone());
+        pictures
+            .waiting
+            .insert(file.clone(), PictureWaitFor::Pixels);
+        let card = a_page_holding(pictures);
+        // No tabs at all: what is being asked is whether the card is a holder,
+        // and a window with a card and nothing else is the plainest way to ask.
+        assert!(
+            pictures_awaited_by(documents_held_in(&[], &card)).contains(&file),
+            "the card is waiting for that picture, and nothing said so"
+        );
+        assert!(
+            picture_files_of(documents_held_in(&[], &card)).contains(&file),
+            "and it stands on the file, so the watch follows it"
+        );
+
+        const SOURCE: &str = include_str!("main.rs");
+        /// One method's text, from its signature to the next method's.
+        fn body(signature: &str) -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        }
+        // Built at run time so that this test's own text is not one of the sites
+        // it is counting.
+        let walk = format!("tab{}.preview_panes", ".");
+        for door in [
+            "fn markdown_pictures_awaited(",
+            "fn markdown_picture_files(",
+            "fn forget_the_picture_in(",
+        ] {
+            let text = body(door);
+            assert!(
+                !text.contains(walk.as_str()),
+                "{door} walks the tabs' panes for itself, so the card is not in \
+                 it:\n{text}"
+            );
+            assert!(
+                text.contains("documents_held"),
+                "{door} must be built from the one walk over every holder:\n{text}"
+            );
+        }
+        assert!(
+            body("fn documents_held(").contains("peek_pane"),
+            "and the one walk is the one that names the card"
+        );
+    }
+
+    /// RED — **a watched file moving clears the glance card's standing answers**
+    /// (adversarial review 2026-09-11, row RB-5; §7.1.3u).
+    ///
+    /// RED EVIDENCE. An answer outlives the pixels, which is what stops a bounded
+    /// cache sending this window round the same decodes for ever — and it is
+    /// exactly what must not survive the bytes changing under it.
+    /// `forget_the_picture_in` is the one door where the ledgers about one file
+    /// are ended together, and its clearing loop walked `tab.preview_panes`: the
+    /// card's document was not in it, so a card hovering a page kept drawing the
+    /// picture that used to be in that file.
+    ///
+    /// The picture *pane*'s own standing answer is ended in the same breath and
+    /// for the same reason: since §7.1.3u ③ it is read in front of the decode
+    /// store, so a pane that kept it would draw the old picture of a replaced
+    /// file and ask for nothing, because what it holds is what it wants.
+    ///
+    /// MUTATION: leave `peek_pane` out of [`documents_held_mut_in`] and the card
+    /// keeps its answer; drop the `pane.image` arm from
+    /// [`forget_standing_answers`] and the pane keeps its raster.
+    #[test]
+    fn a_watched_file_moving_clears_the_glance_cards_standing_answer() {
+        let file = PathBuf::from(r"D:\proj\shots\one.png");
+        let mut pictures = DocumentPictures::default();
+        pictures.files.insert(file.clone());
+        pictures
+            .by_source
+            .insert("shots/one.png".to_owned(), MarkdownPicture::Loading);
+        let mut card = a_page_holding(pictures);
+        // And a picture pane in a tab, standing on the same file.
+        let mut pane = PreviewPane {
+            image: Some(PreviewImageState::new(file.clone())),
+            ..PreviewPane::default()
+        };
+        if let Some(picture) = pane.image.as_mut() {
+            picture.raster = Some(a_held_raster("content-a", (500, 375)));
+            picture.native = Some((1024, 768));
+        }
+        let mut tabs = Vec::new();
+
+        forget_standing_answers(
+            documents_held_mut_in(&mut tabs, &mut card).chain(std::iter::once(&mut pane)),
+            &file,
+        );
+
+        let PreviewDocument::Markdown { pictures, .. } = &card.doc else {
+            panic!("the card is still holding a page");
+        };
+        assert!(
+            pictures.files.is_empty() && pictures.by_source.is_empty(),
+            "the card kept what it was told about a file that has moved: {pictures:?}"
+        );
+        let picture = pane.image.as_ref().expect("the pane still shows the file");
+        assert!(
+            picture.raster.is_none() && picture.native.is_none(),
+            "and so did the pane, which would go on drawing the old picture and \
+             ask for nothing, because what it holds is what it wants"
+        );
+        assert_eq!(
+            picture.path, file,
+            "which file the pane is showing has not changed — only what is in it"
         );
     }
 
@@ -133050,7 +134384,7 @@ mod tests {
             &DocumentPictures::default(),
             &mut |path, _, _| {
                 asked.push(path.to_path_buf());
-                MarkdownPicture::Loading
+                PagePicture::drawn(MarkdownPicture::Loading)
             },
         );
         assert_eq!(
@@ -133102,7 +134436,7 @@ mod tests {
             &DocumentPictures::default(),
             &mut |path, _, _| {
                 asked.push(path.to_path_buf());
-                MarkdownPicture::Loading
+                PagePicture::drawn(MarkdownPicture::Loading)
             },
         );
         assert_eq!(
@@ -133254,7 +134588,7 @@ mod tests {
             &DocumentPictures::default(),
             &mut |path, _, _| {
                 asked.push(path.to_path_buf());
-                MarkdownPicture::Loading
+                PagePicture::drawn(MarkdownPicture::Loading)
             },
         );
         assert!(
@@ -133305,7 +134639,7 @@ mod tests {
             &DocumentPictures::default(),
             &mut |_, _, _| {
                 doors += 1;
-                MarkdownPicture::Failed
+                PagePicture::drawn(MarkdownPicture::Failed)
             },
         );
         assert_eq!(doors, 0, "nothing asked the disk, or anything else");
