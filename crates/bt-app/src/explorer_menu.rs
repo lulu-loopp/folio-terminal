@@ -375,7 +375,14 @@ pub fn serve() -> i32 {
             // this process has no console, and a child Windows had to find a
             // console for is a Windows Terminal window opening in front of the
             // window somebody actually asked for.
+            //
+            // **And `--from-explorer` beside it** (§7.59, user ruling 2026-09-11): this launch
+            // means "a terminal standing in that folder", which is a different sentence from
+            // "Folio", and the Folio that is already running answers it with a tab whatever
+            // `Settings ▸ General ▸ Opening Folio again` says. The word carries *who asked* and
+            // not what to do about it — see `crate::cli::LaunchOrigin`.
             let _ = bt_platform::quiet_command(&exe)
+                .arg(crate::cli::EXPLORER_ORIGIN_FLAG)
                 .arg("--cwd")
                 .arg(folder)
                 .spawn();

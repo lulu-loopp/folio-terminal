@@ -66,16 +66,28 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
-- **Opening Folio while it is already running opens a tab in the window you used
-  last, instead of a second window.** From Explorer's menu, from
-  `folio-here.cmd`, from a pinned icon or a shortcut: the folder you asked for
-  arrives as a new tab in the window you were last in, and that window comes to
-  the front. `--new-window` still opens a window — one belonging to the Folio
-  that is already running, rather than a second copy of the program. A second
-  copy now starts only when there is no Folio running to answer, which is also
-  what happens if the one that is running has stopped responding: after two
-  seconds the new one opens a window of its own rather than leaving you with
-  nothing.
+- **Folio is one program now: starting it again opens another window of the one
+  that is running, instead of a second copy.** One Folio, one set of settings,
+  one place your tabs are remembered — whether you start it from the taskbar,
+  the Start menu, a shortcut or `folio.exe`. What you get is a new window, which
+  is what starting a program again gets you everywhere else. If you would rather
+  it opened a tab in the window you used last, **Settings > General > Opening
+  Folio again** has both answers, and `folio.exe --new-window` and
+  `folio.exe --tab` ask for one or the other whatever that row says.
+- **Explorer's "Open in Folio" and `folio-here.cmd` open a tab in the window you
+  used last, and bring that window forward.** Those two mean "give me a terminal
+  in this folder" rather than "give me another Folio", so they answer the same
+  way whichever way the row above is set. That is also what VS Code's external
+  terminal runs, so a terminal opened from there arrives as a tab.
+- A second copy of Folio starts only when there is no Folio running to answer.
+  If the one that is running has stopped responding, is in the middle of
+  quitting, or already has a queue of launches waiting, the one you just started
+  opens a window of its own rather than leaving you with nothing — which
+  includes the case you most want it to: starting Folio again while a window is
+  frozen now gets you a window.
+- **`folio .` and `folio --cwd ..\somewhere` open where you meant.** A folder
+  named relative to wherever you typed the command used to work when no Folio
+  was running and answer "There is no ." when one was.
 - **A text or Markdown file larger than the preview's first look can be
   edited.** The pane reads the first 64 KB of a file to show it to you, which is
   what keeps opening a huge file as quick as opening a small one, and until now

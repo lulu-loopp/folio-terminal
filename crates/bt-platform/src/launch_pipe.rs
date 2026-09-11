@@ -22,22 +22,33 @@
 //! to know whether the running Folio took the request — because if it did not, this process has to
 //! open a window itself rather than leave the person with nothing.
 //!
-//! # The conversation, in four steps, and the order is the whole of the safety
+//! # The conversation, in five steps, and the order is the whole of the safety
 //!
-//! 1. The client connects and writes **one** request frame.
-//! 2. The server reads it, decides, and writes **one** reply frame carrying its own process id.
-//! 3. The client reads the reply, grants that process id the foreground
-//!    ([`crate::hotkey::allow_foreground_for`]), and closes the pipe.
-//! 4. The server sees the close — or gives up waiting for it — and **only then** hands the request
-//!    on to the window thread.
+//! 1. The client connects and **asks the kernel who answered** — see [`server_process_id`]. A
+//!    server that is not another copy of this program is not written to at all.
+//! 2. The client writes **one** request frame.
+//! 3. The server reads it, decides, and writes **one** reply frame.
+//! 4. The client reads the reply, grants the server the foreground
+//!    ([`crate::hotkey::allow_foreground_for`], with the pid the *kernel* named and never one the
+//!    peer chose), writes **one** [`CONFIRM`] frame, and closes the pipe.
+//! 5. The server reads the confirmation — and **only then** hands the request on to the window
+//!    thread.
 //!
-//! Step 4 after step 3 is not tidiness. `SetForegroundWindow` is refused unless the process that
-//! owns the foreground has said otherwise first, and the process that owns the foreground is the
-//! one the user just started; a request acted on before its acknowledgement had reached that
-//! process would open a tab in a window that could not come to the front. It also makes the reply
-//! the **commit point**: a client that gave up and closed the pipe before the reply was written
-//! leaves no request behind, which is what keeps [`HANDOVER_BUDGET`] from producing a window *and*
-//! a tab.
+//! Step 5 after step 4 is not tidiness, and it is two rules rather than one.
+//!
+//! **The foreground grant has to be inside the conversation.** `SetForegroundWindow` is refused
+//! unless the process that owns the foreground has said otherwise first, and the process that owns
+//! the foreground is the one the user just started; a request acted on before its acknowledgement
+//! had reached that process would open a tab in a window that could not come to the front.
+//!
+//! **The confirmation, and not the reply, is the commit point** (review C-4, 2026-09-11). It used
+//! to be the reply: the server wrote it, waited [`STEP_DEADLINE_MS`] for the client to close, and
+//! committed either way. But the client is allowed [`HANDOVER_BUDGET`] — eight times as long — to
+//! collect that reply, so a client descheduled for 300 ms between its write and its read found the
+//! connection already disconnected, gave up, and opened a window **while the server opened a tab**.
+//! One launch, two places. A commit point the client has to reach cannot do that: the confirmation
+//! only exists because the client read the reply, and a client that never got one opens its own
+//! window against a server that parked nothing.
 //!
 //! # What is promised
 //!
@@ -69,8 +80,8 @@ use windows::Win32::{
     System::{
         IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
         Pipes::{
-            ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
-            PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
+            ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId,
+            PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
         },
         Threading::{CreateEventW, INFINITE, ResetEvent, SetEvent, WaitForMultipleObjects},
     },
@@ -102,11 +113,24 @@ pub const HANDOVER_BUDGET: Duration = Duration::from_secs(2);
 /// How long the server holds one connection open waiting for a step of the conversation.
 ///
 /// [`crate::attention_pipe`]'s own read deadline, for its reason: a client that connects and says
-/// nothing holds the only listening instance, and this endpoint serves one caller at a time. It is
-/// also what step 4 waits out — a client that neither closes nor speaks — and the request is still
-/// committed then, because by that point the reply has been delivered and the person is owed the
-/// window they asked for.
+/// nothing holds the only listening instance, and this endpoint serves one caller at a time.
+///
+/// **It is also how long step 5 waits for the confirmation, and a client that does not send one
+/// inside it is a client whose launch is not committed** (review C-4). That is the change of 2026-
+/// 09-11: this deadline used to be spent waiting for a close that was going to be treated as a
+/// success whether it arrived or not, which made the shorter of two disagreeing budgets into the
+/// silent one. A client that read the reply confirms in microseconds — the write is the next
+/// statement after the read — so this number is again three orders of magnitude of slack over the
+/// step it bounds, and the case it now cuts is the case it always should have.
 const STEP_DEADLINE_MS: u32 = 250;
+
+/// **The client's one word back**, and the whole of step 4's second half.
+///
+/// A fixed token rather than an echo or a length, because there is exactly one thing it can mean:
+/// *I read your reply and I am not going to open a window*. Anything else on that read — a close, a
+/// timeout, a frame that is not this — leaves the launch uncommitted, which is the safe direction:
+/// the client opens its own window and nothing else happens.
+pub const CONFIRM: &str = "ok";
 
 /// **The endpoint's full name.**
 ///
@@ -147,6 +171,20 @@ pub fn endpoint_for(directory: &Path) -> Option<String> {
     ))
 }
 
+/// **What the server decided about one request, in one value.**
+///
+/// The reply that goes back on the wire, and — when the launch was admitted — the thing the window
+/// thread is to be given once the client has confirmed. `admitted` is `None` for every reply that
+/// is a refusal: a refused launch has nothing to carry forward, and the shape says so rather than
+/// leaving a second predicate to be kept in step with the first.
+pub struct Decision<T> {
+    /// The one line written back to the client.
+    pub reply: String,
+    /// The launch itself, if this decision admitted one. Dropped, un-committed, on every path where
+    /// the client does not confirm — which is what makes a reservation held inside it safe.
+    pub admitted: Option<T>,
+}
+
 /// **The endpoint.** Live from the moment [`LaunchPipe::start`] returns, closed when this is
 /// dropped.
 pub struct LaunchPipe {
@@ -170,23 +208,32 @@ impl LaunchPipe {
     /// and this waits for that word — or hands back the refusal instead of a thread that dies in
     /// private.
     ///
-    /// The two closures are the two halves of step 2 and step 4, and they are separate because the
+    /// The two closures are the two halves of step 3 and step 5, and they are separate because the
     /// order between them is the contract this module exists to keep:
     ///
     /// * `decide` is called **on the listener thread** with the request line exactly as it arrived.
-    ///   It answers the reply line to write back, or `None` for a line that is not a request at all
-    ///   — which is dropped without a word and without effect, because there is nobody on the other
-    ///   end who would understand one.
-    /// * `commit` is called **after** that reply has reached the client and the client has let go.
-    ///   It is expected to do nothing but park the request and nudge the loop that will act on it.
+    ///   It answers a [`Decision`] — the reply line to write back, and the admitted launch to carry
+    ///   forward — or `None` for a line that is not a request at all, which is dropped without a
+    ///   word and without effect, because there is nobody on the other end who would understand
+    ///   one.
+    /// * `commit` is called with **that same admitted value**, after the reply has reached the
+    ///   client and the client has confirmed it. It is expected to do nothing but park the launch
+    ///   and nudge the loop that will act on it.
+    ///
+    /// **The decision travels; it is never taken twice** (review C-5, 2026-09-11). `decide` used to
+    /// answer a string and `commit` used to be handed the *line* again, so both ends re-parsed it
+    /// and both ends re-asked the filesystem about it — and a folder deleted in the 250 ms between
+    /// them turned a launch the client had been told about into nothing at all, silently. One value,
+    /// decided once, owned from admission to the window thread, cannot disagree with itself.
     ///
     /// The listener is not given the request's grammar, its bounds or its meaning — this module
     /// knows nothing about what crosses it, which is what keeps a message-format change out of the
-    /// unsafe boundary.
-    pub fn start<D, C>(directory: &Path, decide: D, commit: C) -> io::Result<Self>
+    /// unsafe boundary. `T` is opaque here for exactly that reason.
+    pub fn start<T, D, C>(directory: &Path, decide: D, commit: C) -> io::Result<Self>
     where
-        D: Fn(&str) -> Option<String> + Send + 'static,
-        C: Fn(&str) + Send + 'static,
+        T: Send + 'static,
+        D: Fn(&str) -> Option<Decision<T>> + Send + 'static,
+        C: Fn(T) + Send + 'static,
     {
         let Some(logon) = logon_sid() else {
             return Err(io::Error::new(
@@ -282,13 +329,13 @@ impl Drop for LaunchPipe {
 /// another is being served finds the instance busy and waits for it — [`hand_over`] retries until
 /// its budget is spent — and being served takes microseconds, because nothing in the transaction
 /// touches the window thread.
-fn listen(
+fn listen<T>(
     name: &str,
     descriptor: SecurityDescriptor,
     stop: SendHandle,
     armed: &mpsc::Sender<io::Result<()>>,
-    decide: &(impl Fn(&str) -> Option<String> + ?Sized),
-    commit: &(impl Fn(&str) + ?Sized),
+    decide: &(impl Fn(&str) -> Option<Decision<T>> + ?Sized),
+    commit: &(impl Fn(T) + ?Sized),
 ) {
     let attributes = descriptor.attributes();
     let wide_name = wide(name);
@@ -314,15 +361,15 @@ fn listen(
     }
 }
 
-/// **One whole conversation**, steps 1 to 4, and every one of them bounded.
+/// **One whole conversation**, steps 2 to 5, and every one of them bounded.
 ///
 /// Nothing here reports a failure anywhere: there is no log a launch would look in and no reader to
-/// tell. A step that does not complete ends the connection, and the client's own fallback — a
-/// window of its own — is the report.
-fn serve(
+/// tell. A step that does not complete ends the connection, the decision is dropped un-committed,
+/// and the client's own fallback — a window of its own — is the report.
+fn serve<T>(
     instance: &mut Instance,
-    decide: &(impl Fn(&str) -> Option<String> + ?Sized),
-    commit: &(impl Fn(&str) + ?Sized),
+    decide: &(impl Fn(&str) -> Option<Decision<T>> + ?Sized),
+    commit: &(impl Fn(T) + ?Sized),
 ) {
     let Ok(read) = instance.read_one() else {
         return;
@@ -331,20 +378,29 @@ fn serve(
     // **A line this build does not understand is dropped without a word** — the attention wire's
     // founding rule at the second door. There is no reply that would help: a caller speaking a
     // grammar this build has not got is not a launch that arrived slightly wrong.
-    let Some(reply) = decide(&line) else {
+    let Some(decision) = decide(&line) else {
         return;
     };
-    if write_bounded(instance.pipe.0, reply.as_bytes()).is_err() {
-        // **The reply is the commit point.** A write that did not land is a client that has already
-        // given up and gone, and a request committed for it would be the tab that arrives beside
-        // the window the client opened instead.
+    if write_bounded(instance.pipe.0, decision.reply.as_bytes()).is_err() {
+        // A write that did not land is a client that has already given up and gone. Returning here
+        // drops `decision` — and with it whatever reservation the decision was holding.
         return;
     }
-    // Step 3 happening on the other side: the client grants this process the foreground and lets
-    // go. The read is expected to fail — that failure *is* the client closing — and its deadline is
-    // what keeps a client that does neither from holding the door.
-    let _ = instance.read_one();
-    commit(&line);
+    // Step 4 happening on the other side: the client grants this process the foreground and says
+    // one word back. **That word is the commit point** — see this module's header. A close, a
+    // timeout or anything that is not [`CONFIRM`] leaves the launch un-committed, because in every
+    // one of those cases the client is about to open a window of its own.
+    let Ok(read) = instance.read_one() else {
+        return;
+    };
+    if String::from_utf8_lossy(&instance.buffer[..read]).trim() != CONFIRM {
+        return;
+    }
+    let Some(admitted) = decision.admitted else {
+        // A refusal the client acknowledged. There was never anything to park.
+        return;
+    };
+    commit(admitted);
 }
 
 /// One instance of the endpoint: a handle, one event, one operation at a time.
@@ -510,7 +566,13 @@ impl Instance {
             )
         };
         self.outstanding = false;
-        if timed_out {
+        // **A read that completed is a read that completed, whatever the clock said** (review
+        // C-4(b), 2026-09-11). The wait expiring and the cancellation landing are two events with a
+        // race between them, and `GetOverlappedResult` above is what settles it: a frame that
+        // arrived inside that race is sitting in the buffer, and reporting `TimedOut` over the top
+        // of it threw away a request somebody was waiting on. So the clock only decides when the
+        // operation really did not finish.
+        if timed_out && !matches!(done, Ok(()) if read > 0) {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "the caller held the launch endpoint without finishing its turn",
@@ -583,13 +645,29 @@ impl Instance {
 ///
 /// **`on_reply` runs while the pipe is still open**, and that is the whole reason it is a callback
 /// rather than a return value. What the caller does with the answer is grant the running process
-/// the foreground, and the running process does not act on the request until it has seen this end
-/// let go — so the grant has to be made *inside* the conversation, not after it.
+/// the foreground, and the running process does not act on the request until this end has confirmed
+/// — so the grant has to be made *inside* the conversation, not after it.
+///
+/// **Its first argument is the server's process id as the kernel reports it** (review C-7,
+/// 2026-09-11), and it is that rather than a number out of the reply because of what the caller
+/// does with it: `AllowSetForegroundWindow` takes a pid, and `(DWORD)-1` is `ASFW_ANY` — *every
+/// process on this machine may take the foreground*. A peer-chosen pid meant a process that had
+/// answered on this name could ask a freshly started `folio.exe`, which does own the foreground, to
+/// spend that ownership on anything it liked. The kernel is asked instead, and it is asked
+/// **before the request is written**: a server whose image is not this program's is not told what
+/// the user typed either.
 ///
 /// The errors are the caller's fallback and not a report to anyone: `NotFound` is nobody listening
-/// on that name, `TimedOut` is the budget spent, and either way the answer is the same — this
-/// process opens the window itself, exactly as every Folio did before this channel existed.
-pub fn hand_over(endpoint: &str, request: &str, on_reply: impl FnOnce(&str)) -> io::Result<()> {
+/// on that name, `TimedOut` is the budget spent, `PermissionDenied` is somebody else holding the
+/// name, and in every case the answer is the same — this process opens the window itself, exactly
+/// as every Folio did before this channel existed. **A failure after the request was written is
+/// safe by construction**: the server commits on this end's [`CONFIRM`], which a failing handover
+/// never sends.
+pub fn hand_over(
+    endpoint: &str,
+    request: &str,
+    on_reply: impl FnOnce(u32, &str),
+) -> io::Result<()> {
     if request.len() > MAX_MESSAGE_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -619,16 +697,64 @@ pub fn hand_over(endpoint: &str, request: &str, on_reply: impl FnOnce(&str)) -> 
             Err(error) => return Err(error),
         }
     };
+    // **Step 1: who answered?** Before a byte of the command line is written — the request names a
+    // folder somebody is standing in, and a process that is not this program has no business being
+    // told it.
+    let server = vetted_server(handle.0)?;
     write_bounded(handle.0, request.as_bytes())?;
     let mut buffer = vec![0u8; MAX_MESSAGE_BYTES];
     let left = HANDOVER_BUDGET.saturating_sub(began.elapsed());
     let read = read_reply(handle.0, &mut buffer, left)?;
-    on_reply(&String::from_utf8_lossy(&buffer[..read]));
-    // The close is step 3's second half and is what the server is waiting for. Written out rather
-    // than left to the end of the function so that the order of the last two statements is the
-    // order of the protocol.
+    on_reply(server, &String::from_utf8_lossy(&buffer[..read]));
+    // **Step 4's second half, and the server's commit point.** Written out rather than left
+    // implicit so that the order of the last statements is the order of the protocol: the
+    // foreground has been granted above, and only now is the server told it may act. A failure
+    // here is a handover that did not happen — the server parks nothing — so it is reported, and
+    // the caller opens its own window.
+    write_bounded(handle.0, CONFIRM.as_bytes())?;
     drop(handle);
     Ok(())
+}
+
+/// **The process at the other end of this pipe, if it is this program.**
+///
+/// Three refusals, and each is a different way of not being a Folio (review C-7):
+///
+/// * `0` and `u32::MAX` — never real process ids here, and the second is `ASFW_ANY`, the wildcard
+///   that would lift the foreground lock for the whole machine.
+/// * an image this process cannot read, which is a server it has no way to vouch for.
+/// * an image whose file name is not this executable's. **The file name and not the whole path**:
+///   the Folio that is running may be a different build in a different folder — upgrading while a
+///   window is open is the ordinary way that happens, and the wire's own version check is what
+///   answers *that* difference. What this rules out is a program that is not this program.
+fn vetted_server(pipe: HANDLE) -> io::Result<u32> {
+    let pid = server_process_id(pipe)?;
+    if pid == 0 || pid == u32::MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the launch endpoint named a process id that is not a process",
+        ));
+    }
+    let mine = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.file_name().map(std::ffi::OsStr::to_ascii_lowercase));
+    let theirs = crate::process_image_path(pid)
+        .and_then(|exe| exe.file_name().map(std::ffi::OsStr::to_ascii_lowercase));
+    match (mine, theirs) {
+        (Some(mine), Some(theirs)) if mine == theirs => Ok(pid),
+        _ => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the launch endpoint is held by a process that is not this program",
+        )),
+    }
+}
+
+/// The process id of the server end of a connected pipe, straight from the kernel.
+fn server_process_id(pipe: HANDLE) -> io::Result<u32> {
+    let mut pid = 0u32;
+    // SAFETY: `pipe` is this call's connected client handle and `pid` is a live local.
+    unsafe { GetNamedPipeServerProcessId(pipe, &raw mut pid) }.map_err(win32_io_error)?;
+    Ok(pid)
 }
 
 /// **One reply off the wire, under whatever is left of the budget.**
@@ -676,7 +802,11 @@ fn read_reply(pipe: HANDLE, buffer: &mut [u8], budget: Duration) -> io::Result<u
     // SAFETY: the handle and the structure are both still this call's, and `bWait` is what makes
     // the buffer the caller's again on the way out.
     let done = unsafe { GetOverlappedResult(pipe, &raw const *overlapped, &raw mut read, true) };
-    if timed_out {
+    // The same rule as `Instance::read_one`'s, at the other end of the same race and for the same
+    // reason (review C-4(b)): a reply that landed while the budget was expiring is a reply, and a
+    // launch that opened its own window over the top of it is the duplicate this whole slice is
+    // trying not to produce.
+    if timed_out && !matches!(done, Ok(()) if read > 0) {
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
             "the running Folio did not answer inside the launch's allowance",
@@ -777,14 +907,24 @@ mod tests {
         let (sender, committed) = mpsc::channel();
         let pipe = LaunchPipe::start(
             &directory,
-            |line| Some(format!("answer to {line}")),
-            move |line| {
-                let _ = sender.send(line.to_owned());
+            |line| {
+                Some(Decision {
+                    reply: format!("answer to {line}"),
+                    admitted: Some(line.to_owned()),
+                })
+            },
+            move |admitted: String| {
+                let _ = sender.send(admitted);
             },
         )
         .expect("open the launch endpoint");
         let (heard, replies) = mpsc::channel();
-        hand_over(pipe.name(), "one request", |reply| {
+        hand_over(pipe.name(), "one request", |server, reply| {
+            assert_eq!(
+                server,
+                std::process::id(),
+                "the server this client vetted is the process it is actually talking to, and the                  pid it grants the foreground to comes from the kernel and not from the reply"
+            );
             let _ = heard.send(reply.to_owned());
         })
         .expect("hand the request over");
@@ -814,18 +954,73 @@ mod tests {
         let (sender, committed) = mpsc::channel();
         let pipe = LaunchPipe::start(
             &directory,
-            |line| (line == "good").then(|| "ok".to_owned()),
-            move |line| {
-                let _ = sender.send(line.to_owned());
+            |line| {
+                (line == "good").then(|| Decision {
+                    reply: "ok".to_owned(),
+                    admitted: Some(line.to_owned()),
+                })
+            },
+            move |admitted: String| {
+                let _ = sender.send(admitted);
             },
         )
         .expect("open the launch endpoint");
         let mut answered = false;
-        let _ = hand_over(pipe.name(), "rubbish", |_| answered = true);
+        let _ = hand_over(pipe.name(), "rubbish", |_, _| answered = true);
         assert!(!answered, "a refused line is answered with silence");
         assert!(
             committed.recv_timeout(Duration::from_millis(500)).is_err(),
             "and it never reaches the window thread"
+        );
+    }
+
+    /// **RED (review C-4, 2026-09-11) — a client that read the reply and then went away leaves
+    /// nothing behind.**
+    ///
+    /// The duplicate this closes: the server used to commit on its own write, wait
+    /// [`STEP_DEADLINE_MS`] for a close it treated as optional, and hand the launch to the window
+    /// thread either way — while the client, which is allowed [`HANDOVER_BUDGET`], could be
+    /// descheduled past that and end up opening a window of its own. One launch, a window **and** a
+    /// tab.
+    ///
+    /// The client here is written by hand rather than through [`hand_over`], because what is being
+    /// pinned is precisely the step `hand_over` always takes: it reads the reply and then stops.
+    ///
+    /// MUTATION: commit on the write, or on any read that comes back, and the launch below reaches
+    /// the window thread with nobody on the other end who knows it did.
+    #[test]
+    fn a_client_that_never_confirms_commits_nothing() {
+        let directory = scratch(line!());
+        let (sender, committed) = mpsc::channel();
+        let pipe = LaunchPipe::start(
+            &directory,
+            |line| {
+                Some(Decision {
+                    reply: format!("answer to {line}"),
+                    admitted: Some(line.to_owned()),
+                })
+            },
+            move |admitted: String| {
+                let _ = sender.send(admitted);
+            },
+        )
+        .expect("open the launch endpoint");
+        {
+            let handle = open_client(&wide(pipe.name()), GENERIC_READ.0 | GENERIC_WRITE.0)
+                .expect("connect to the endpoint");
+            write_bounded(handle.0, b"one request").expect("write the request");
+            let mut buffer = vec![0u8; MAX_MESSAGE_BYTES];
+            let read = read_reply(handle.0, &mut buffer, HANDOVER_BUDGET).expect("read the reply");
+            assert_eq!(&buffer[..read], b"answer to one request");
+            // And now this client goes away without a word, which is every client that lost the
+            // reply, crashed, or was killed between the two statements above.
+        }
+        assert!(
+            committed
+                .recv_timeout(HANDOVER_BUDGET + Duration::from_millis(500))
+                .is_err(),
+            "the launch was handed to the window thread on the strength of a reply the client \
+             never acted on"
         );
     }
 
@@ -836,7 +1031,7 @@ mod tests {
     #[test]
     fn a_request_past_the_frame_bound_is_refused_before_it_is_written() {
         let oversized = "x".repeat(MAX_MESSAGE_BYTES + 1);
-        let refused = hand_over(r"\\.\pipe\folio-launch-nobody", &oversized, |_| {
+        let refused = hand_over(r"\\.\pipe\folio-launch-nobody", &oversized, |_, _| {
             panic!("an oversized request must not reach a pipe at all");
         })
         .expect_err("an oversized request is refused");
@@ -858,13 +1053,16 @@ mod tests {
             &directory,
             |_| {
                 std::thread::sleep(HANDOVER_BUDGET * 3);
-                Some("far too late".to_owned())
+                Some(Decision {
+                    reply: "far too late".to_owned(),
+                    admitted: None::<()>,
+                })
             },
-            |_| {},
+            |()| {},
         )
         .expect("open the launch endpoint");
         let began = Instant::now();
-        let refused = hand_over(pipe.name(), "one request", |_| {
+        let refused = hand_over(pipe.name(), "one request", |_, _| {
             panic!("a hung Folio has not answered");
         })
         .expect_err("a Folio that never answers cannot be handed anything");
@@ -896,7 +1094,7 @@ mod tests {
         let refused = hand_over(
             &endpoint_name("0123456789abcdef", "fedcba9876543210"),
             "one request",
-            |_| panic!("there is nobody to answer"),
+            |_, _| panic!("there is nobody to answer"),
         )
         .expect_err("a name with nobody behind it cannot be handed anything");
         assert!(

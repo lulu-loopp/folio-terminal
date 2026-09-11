@@ -86,6 +86,25 @@ pub struct CliRequest {
     /// particular place, and a launch that read it as a place would give the
     /// reader a fresh tab instead of the session they left.
     pub new_window: bool,
+    /// `--tab` — **a tab in the window you were last in, not a window of its
+    /// own** (`docs/DESIGN.md` §7.59, user ruling 2026-09-11).
+    ///
+    /// [`Self::new_window`]'s opposite and its twin in every other respect: it
+    /// says *how* this launch should land and not what to open, it is answered
+    /// by the Folio that is already running, and on a machine with no Folio
+    /// running it does nothing at all — a cold launch has no window to put a tab
+    /// in, and one process is what it gets either way.
+    ///
+    /// **Both flags are opt-outs of the same row**, which since the ruling is
+    /// `Settings ▸ General ▸ Opening Folio again`. Neither reads the row: the
+    /// running Folio does, and only where neither flag was given.
+    pub tab: bool,
+    /// **Why this launch happened**, as the thing that started it said so.
+    ///
+    /// Not a decision and deliberately not one — see [`LaunchOrigin`]. The
+    /// command line says who is asking; what that means for where the launch
+    /// lands is the running Folio's to decide, out of the row and this.
+    pub origin: LaunchOrigin,
     /// `-Embedding`, accepted and inert.
     ///
     /// Reserved by `spike-win-landing.md` §8 as part of this slice, and reserved
@@ -97,6 +116,31 @@ pub struct CliRequest {
     /// notification ever clicked on a cold machine would have been answered with
     /// one.
     pub embedding: bool,
+}
+
+/// **Who started this launch** — `docs/DESIGN.md` §7.59.
+///
+/// **The wire carries this and never the decision it implies.** A launch from Explorer's menu means
+/// "a shell in this folder" and a launch from the taskbar means "Folio"; those are different
+/// sentences, and which window each of them lands in is one rule, held in one place, in the process
+/// that has the settings open. A launcher that spelled the *landing* would be a second copy of that
+/// rule, out in the registry and in a `.cmd` file, going stale the day the rule changes — which is
+/// exactly what happened to the registered command line the first time round.
+///
+/// [`Self::Plain`] is what a command line says by saying nothing, so a shortcut, a pinned icon, a
+/// double-click and `folio.exe` typed into another shell all arrive as themselves without anybody
+/// having to remember to mark them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LaunchOrigin {
+    /// A person started Folio: the taskbar, the Start menu, a shortcut, a double-click, or
+    /// `folio.exe` with or without `--cwd`.
+    #[default]
+    Plain,
+    /// Explorer's `Open in Folio` / `Open Folio here` — [`EXPLORER_ORIGIN_FLAG`].
+    Explorer,
+    /// `folio-here.cmd`, which is also what VS Code's external-terminal setting runs —
+    /// [`HERE_ORIGIN_FLAG`].
+    Here,
 }
 
 impl CliRequest {
@@ -221,6 +265,24 @@ const PROFILE_FLAG: &str = "--profile";
 /// that could not be handed over, and two spellings of a flag is how a message
 /// comes to name one that does not exist.
 pub const NEW_WINDOW_FLAG: &str = "--new-window";
+/// `--tab`, spelled once — see [`CWD_FLAG`]. Public for [`NEW_WINDOW_FLAG`]'s
+/// reason: it is named in the usage block and in `crate::launch_wire`.
+pub const TAB_FLAG: &str = "--tab";
+
+/// **The marker Explorer's two entries pass**, spelled once.
+///
+/// Written by [`bt_platform::context_menu_shape`] into the classic verb's
+/// `command` value and by `crate::explorer_menu::serve` onto the child the
+/// first-page verb spawns. Deliberately **not** in the usage block: that block
+/// lists what a person types, and this is a word one program says to another —
+/// `-Embedding` and [`EXPLORER_COMMAND_FLAG`] are already there on that footing.
+/// Typing it is harmless and honest; it says of a launch exactly what it says.
+pub const EXPLORER_ORIGIN_FLAG: &str = "--from-explorer";
+
+/// **The marker `packaging/folio-here.cmd` passes** — [`EXPLORER_ORIGIN_FLAG`]'s
+/// twin, on the one line of that file and therefore on whatever runs it, which
+/// today is a shell and VS Code's `terminal.external.windowsExec`.
+pub const HERE_ORIGIN_FLAG: &str = "--from-here";
 
 /// Turn a command line into a request, or into the fault that ends the launch.
 ///
@@ -231,9 +293,13 @@ pub const NEW_WINDOW_FLAG: &str = "--new-window";
 /// # The grammar
 ///
 /// ```text
-/// folio [--cwd <folder>] [--profile <id>] [--] [<path>]
+/// folio [--cwd <folder>] [--profile <id>] [--new-window | --tab] [--] [<path>]
 /// folio --help | --version
 /// ```
+///
+/// Plus the two words one program says to another rather than a person typing:
+/// `--from-explorer` and `--from-here`, which say where a launch came from (see
+/// [`LaunchOrigin`]), and `-Embedding`, which COM appends.
 ///
 /// * `--flag value` and `--flag=value` both work. The second form is not
 ///   decoration: it is the only way to give a value that begins with `-`, which
@@ -287,6 +353,39 @@ where
                     return Err(CliFault::Repeated(NEW_WINDOW_FLAG));
                 }
                 request.new_window = true;
+            }
+            // [`NEW_WINDOW_FLAG`]'s arm word for word, including the reason it
+            // is exact rather than through [`is_flag`]: `--tab=1` is a caller
+            // who believes this takes a value.
+            Some(flag) if flag == TAB_FLAG => {
+                if request.tab {
+                    return Err(CliFault::Repeated(TAB_FLAG));
+                }
+                request.tab = true;
+            }
+            // **The two origin markers, and one rule for a line that carries
+            // both.** They are written by two different programs and a launch
+            // has one origin, so `--from-explorer --from-here` is a line no
+            // launcher this build ships can produce. It is still answered rather
+            // than refused, and answered the way the landing rule answers its
+            // own overlap: the first word wins, because both of these say the
+            // same thing about where the launch lands and the difference between
+            // them is only *who* is asking.
+            Some(flag) if flag == EXPLORER_ORIGIN_FLAG => {
+                if request.origin == LaunchOrigin::Explorer {
+                    return Err(CliFault::Repeated(EXPLORER_ORIGIN_FLAG));
+                }
+                if request.origin == LaunchOrigin::Plain {
+                    request.origin = LaunchOrigin::Explorer;
+                }
+            }
+            Some(flag) if flag == HERE_ORIGIN_FLAG => {
+                if request.origin == LaunchOrigin::Here {
+                    return Err(CliFault::Repeated(HERE_ORIGIN_FLAG));
+                }
+                if request.origin == LaunchOrigin::Plain {
+                    request.origin = LaunchOrigin::Here;
+                }
             }
             Some(flag) if is_flag(flag, CWD_FLAG) => {
                 if request.cwd.is_some() {
@@ -379,6 +478,61 @@ pub enum PathKind {
     /// Nothing at that name, or something that is neither — a device, a broken
     /// link, a name this process may not look at.
     Absent,
+}
+
+/// **A folder somebody named, written the way a command line writes places** — absolute, and with
+/// `.` and `..` spent rather than carried.
+///
+/// The one place in this program that turns a relative path a person typed into an absolute one,
+/// and it is a pure function of two paths so that the rule can be read and tested without a disk.
+/// `here` is the working directory of the process that was *started*, handed in rather than read,
+/// because [`parse`] and everything reachable from it is pure over its inputs — and because a
+/// caller that had nothing to resolve against must be able to say so.
+///
+/// **Lexical and never `canonicalize`.** `std::fs::canonicalize` answers a `\\?\` verbatim path,
+/// which is exactly the spelling `bt_transcript::paths::is_local_absolute_path` refuses and which
+/// no shell would ever print; what a person means by `..\sibling` is what `cmd` and PowerShell
+/// would show them, which is the lexical answer. A path with nothing to resolve — already
+/// absolute, or a `here` this process could not read — comes back unchanged, which leaves it to be
+/// judged by the same door it would have met anyway.
+#[must_use]
+pub fn absolute_from(here: Option<&Path>, folder: &Path) -> PathBuf {
+    use std::path::Component;
+
+    if folder.is_absolute() {
+        return folder.to_path_buf();
+    }
+    let Some(here) = here else {
+        return folder.to_path_buf();
+    };
+    let mut out = PathBuf::new();
+    for component in here.join(folder).components() {
+        match component {
+            // A prefix or a root restarts the answer: `C:\a` joined onto `D:\b` is `C:\a`, which is
+            // what `join` already decided and what this loop must not undo.
+            Component::Prefix(_) | Component::RootDir => {
+                if matches!(component, Component::Prefix(_)) {
+                    out = PathBuf::new();
+                }
+                out.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            // **Only a real name is walked back over.** `..` above a root is nothing — every shell
+            // agrees — and popping a prefix or a root would turn an absolute path into a relative
+            // one halfway through.
+            Component::ParentDir => {
+                if out
+                    .components()
+                    .next_back()
+                    .is_some_and(|last| matches!(last, Component::Normal(_)))
+                {
+                    out.pop();
+                }
+            }
+            Component::Normal(name) => out.push(name),
+        }
+    }
+    out
 }
 
 /// [`PathKind`] as this machine answers it. The one impure input [`resolve`]
@@ -859,7 +1013,54 @@ mod tests {
                 path: Some(PathBuf::from(r"D:\a\b.rs")),
                 embedding: false,
                 new_window: false,
+                tab: false,
+                origin: LaunchOrigin::Plain,
             }
+        );
+    }
+
+    /// **RED (review C-6, 2026-09-11) — a folder somebody named is made absolute the way a shell
+    /// would print it, and nothing else is touched.**
+    ///
+    /// The pure half of the fix for `folio .`: it opened a shell in the right folder on a cold
+    /// machine and was refused on a warm one, because the wire's gate wants a drive-rooted path and
+    /// nothing had ever turned the one the person typed into one.
+    ///
+    /// MUTATIONS: keep the `.` components and the answer stops being a path any gate recognises;
+    /// let `..` walk over a root and an absolute path comes back relative; drop the prefix arm and
+    /// a drive-qualified path joined onto another drive keeps the wrong drive.
+    #[test]
+    fn a_named_folder_is_made_absolute_lexically_and_nothing_else_is() {
+        let here = Path::new(r"D:\Developer\Ledger");
+        let asked = |folder: &str| absolute_from(Some(here), Path::new(folder));
+        assert_eq!(asked("."), PathBuf::from(r"D:\Developer\Ledger"));
+        assert_eq!(
+            asked("crates"),
+            PathBuf::from(r"D:\Developer\Ledger\crates")
+        );
+        assert_eq!(
+            asked(r"crates\bt-app"),
+            PathBuf::from(r"D:\Developer\Ledger\crates\bt-app")
+        );
+        assert_eq!(asked(".."), PathBuf::from(r"D:\Developer"));
+        assert_eq!(
+            asked(r"..\bt-wt\launch-window"),
+            PathBuf::from(r"D:\Developer\bt-wt\launch-window")
+        );
+        assert_eq!(
+            asked(r"..\..\..\..\..\.."),
+            PathBuf::from(r"D:\"),
+            "a walk above the root stops at the root, which is what every shell does"
+        );
+        assert_eq!(
+            asked(r"D:\Other"),
+            PathBuf::from(r"D:\Other"),
+            "a folder that was already absolute is left exactly as it was written"
+        );
+        assert_eq!(
+            absolute_from(None, Path::new(".")),
+            PathBuf::from("."),
+            "a caller with no working directory to resolve against resolves nothing"
         );
     }
 

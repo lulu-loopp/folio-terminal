@@ -1,1 +1,1 @@
-@"%~dp0folio.exe" --cwd "%CD%"
+@"%~dp0folio.exe" --from-here --cwd "%CD%"

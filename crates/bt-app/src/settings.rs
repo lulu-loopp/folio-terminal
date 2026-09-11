@@ -34,7 +34,8 @@
 //! solver, and is never persisted (a dialog does not survive a restart).
 
 use bt_persist::{
-    BackgroundFitV1, LanguageV1, MinimumContrastV1, SearchEngineV1, SplitDirectionV1, ThemeModeV1,
+    BackgroundFitV1, LanguageV1, LaunchOpensV1, MinimumContrastV1, SearchEngineV1,
+    SplitDirectionV1, ThemeModeV1,
 };
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, CursorStyle, FLOAT_WINDOW_BORDER_LOGICAL_PX,
@@ -1621,6 +1622,21 @@ fn sidebar_label(mode: RailMode) -> &'static str {
 /// not a name of anything — every other item here names a direction, and the one
 /// that names a *rule* has to say which rule or it names nothing. `Right` and
 /// `Down` are bare for exactly the reason the ruling gives.
+/// The two answers to "what does a second start of Folio open" (user ruling
+/// 2026-09-11, `docs/DESIGN.md` §7.59), with the default first — which is both
+/// the shipped answer and the one every other terminal on this machine gives,
+/// so the first item is what a reader already expects to be true.
+pub const LAUNCH_OPENS_OPTIONS: [LaunchOpensV1; 2] =
+    [LaunchOpensV1::NewWindow, LaunchOpensV1::TabInLastWindow];
+
+/// Their words, in the order above.
+fn launch_opens_label(opens: LaunchOpensV1) -> &'static str {
+    match opens {
+        LaunchOpensV1::NewWindow => Text::OptionLaunchNewWindow.text(),
+        LaunchOpensV1::TabInLastWindow => Text::OptionLaunchTabInLastWindow.text(),
+    }
+}
+
 fn split_direction_label(direction: SplitDirectionV1) -> &'static str {
     match direction {
         SplitDirectionV1::Auto => Text::OptionSplitAuto.text(),
@@ -2400,6 +2416,31 @@ pub enum SettingsRow {
     /// states are always honourable and the machine decides only how much `On`
     /// buys.
     ///
+    /// **What a second start of Folio opens** (§7.59, user ruling 2026-09-11) —
+    /// a picker with two items.
+    ///
+    /// A picker and not a switch, on [`SettingsControl`]'s own division and on
+    /// one more of this row's own: neither answer is the absence of the other.
+    /// A switch called `Open in the existing window` would put the reader's
+    /// answer on one side and the product's habit on the other, and the shipped
+    /// answer would read as *off*.
+    ///
+    /// **On `General`, directly under `Default profile`.** The row above says
+    /// what a new terminal starts as; this one says what starting Folio again
+    /// gives you. Both are about the moment something new appears, and both are
+    /// read before anything is on the screen — which is why they sit above the
+    /// two rows that reach out of this window.
+    ///
+    /// **The row is read by the Folio that is already running and never by the
+    /// one that has just been started** — see `crate::launch_wire::landing`. A
+    /// second `folio.exe` holds no claim on the data directory, so it has no
+    /// business opening the document this row lives in.
+    ///
+    /// **Neither answer is put to a launch from Explorer's entry or from
+    /// `folio-here.cmd`**, which always open a tab, and the row's own line says
+    /// so: those two mean "a terminal standing here", which is a different
+    /// sentence from "Folio".
+    LaunchOpens,
     /// On `General` and not on `Appearance`: what it changes is not this window
     /// at all, it is another program's menu. `General` is where the rows about
     /// what this product *is on this machine* already are.
@@ -2898,6 +2939,7 @@ impl SettingsRow {
             | Self::Language
             | Self::KeyHints
             | Self::SearchEngine
+            | Self::LaunchOpens
             | Self::ContextMenu
             // And the row that is about what this product does off this machine
             // rather than on it — see the variant.
@@ -2987,6 +3029,7 @@ impl SettingsRow {
             Self::Sidebar => Text::RowSidebar.text(),
             Self::SplitDirection => Text::RowSplitDirection.text(),
             Self::SearchEngine => Text::RowSearchEngine.text(),
+            Self::LaunchOpens => Text::RowLaunchOpens.text(),
             Self::MinimumContrast => Text::RowMinimumContrast.text(),
             // Mock-up 2467.
             Self::DefaultProfile => Text::RowDefaultProfile.text(),
@@ -3178,6 +3221,7 @@ impl SettingsRow {
             // conclude the switch was broken.
             Self::SplitDirection => Text::DescSplitDirection.text(),
             Self::SearchEngine => Text::DescSearchEngine.text(),
+            Self::LaunchOpens => Text::DescLaunchOpens.text(),
             Self::MinimumContrast => Text::DescMinimumContrast.text(),
             // Mock-up 2468, word for word. It is also the *scope* of the setting
             // and the reason `profiles::index_of_id` does not read it: a tab and
@@ -3403,6 +3447,11 @@ impl SettingsRow {
             // and lands somewhere is entitled to know where, without opening a
             // disclosure to find out.
             | Self::SearchEngine
+            // And an everyday row for the plainest reason there is: what it
+            // decides is the first thing that happens every time somebody starts
+            // this program, and a reader who wants the other answer has no way
+            // of guessing that the question is behind a triangle.
+            | Self::LaunchOpens
             | Self::TabLayout
             | Self::FocusMode
             | Self::FocusCardHeight
@@ -3582,6 +3631,7 @@ impl SettingsRow {
             Self::Sidebar => SIDEBAR_OPTIONS.len(),
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS.len(),
             Self::SearchEngine => SEARCH_ENGINE_OPTIONS.len(),
+            Self::LaunchOpens => LAUNCH_OPENS_OPTIONS.len(),
             Self::MinimumContrast => MINIMUM_CONTRAST_OPTIONS.len(),
             Self::Language => LANGUAGE_OPTIONS.len(),
             // The picker is built from the same list the `˅` menu is built from
@@ -3692,6 +3742,10 @@ impl SettingsRow {
                 .map(split_direction_label),
             // Proper nouns, untranslated, on the Language row's own ruling.
             Self::SearchEngine => SEARCH_ENGINE_LABELS.get(index).copied(),
+            Self::LaunchOpens => LAUNCH_OPENS_OPTIONS
+                .get(index)
+                .copied()
+                .map(launch_opens_label),
             // `BlockMaxHeight`'s shape: the word through the table, the three
             // ratios out of the parallel array. See [`MINIMUM_CONTRAST_LABELS`].
             Self::MinimumContrast => MINIMUM_CONTRAST_OPTIONS.get(index).map(|floor| {
@@ -4083,6 +4137,9 @@ impl SettingsRow {
             Self::SearchEngine => SEARCH_ENGINE_OPTIONS
                 .iter()
                 .position(|it| *it == values.search_engine),
+            Self::LaunchOpens => LAUNCH_OPENS_OPTIONS
+                .iter()
+                .position(|it| *it == values.launch_opens),
             Self::MinimumContrast => MINIMUM_CONTRAST_OPTIONS
                 .iter()
                 .position(|it| *it == values.minimum_contrast),
@@ -4278,6 +4335,12 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // this machine, before the table of things it can start.
     rows.push(SettingsRow::SearchEngine);
     rows.push(SettingsRow::DefaultProfile);
+    // **Directly under `Default profile`** (§7.59, user ruling 2026-09-11): the
+    // row above says what a new terminal starts as, this one says what starting
+    // Folio again gives you, and both are answered before anything is on the
+    // screen. Above the two rows that reach out of this window, which is where
+    // the page's own order already puts everything about Folio itself.
+    rows.push(SettingsRow::LaunchOpens);
     // Second from last on its page, because it is the only row here that changes
     // something **outside this window**: the three above it say how Folio
     // behaves, and this one says what another program's menu contains.
@@ -4766,6 +4829,8 @@ pub struct SettingsValues {
     pub split_direction: SplitDirectionV1,
     /// Where a web preview's address field sends a non-address.
     pub search_engine: SearchEngineV1,
+    /// What a second start of Folio opens when one is already running (§7.59).
+    pub launch_opens: LaunchOpensV1,
     /// The floor a cell's ink is held to against its own paper (DESIGN §2.6).
     pub minimum_contrast: MinimumContrastV1,
     /// Which language the window writes in — **the stored mode**, not the
@@ -4954,6 +5019,7 @@ impl SettingsValues {
             update_check: true,
             split_direction: SplitDirectionV1::Auto,
             search_engine: SearchEngineV1::DuckDuckGo,
+            launch_opens: LaunchOpensV1::NewWindow,
             minimum_contrast: MinimumContrastV1::Off,
             language: LanguageV1::System,
             default_profile: profiles::fallback_profile(),
@@ -8066,6 +8132,17 @@ pub fn search_engine_requested(target: SettingsTarget) -> Option<SearchEngineV1>
     match target {
         SettingsTarget::Choice(SettingsRow::SearchEngine, index) => {
             SEARCH_ENGINE_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// What a second start of Folio should open, if a press asks at all (§7.59).
+#[must_use]
+pub fn launch_opens_requested(target: SettingsTarget) -> Option<LaunchOpensV1> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::LaunchOpens, index) => {
+            LAUNCH_OPENS_OPTIONS.get(index).copied()
         }
         _ => None,
     }
@@ -17653,6 +17730,11 @@ mod tests {
             ellipsised,
             vec![
                 SettingsRow::DefaultProfile,
+                // And the launch row's second answer (§7.59): `A tab in the
+                // window you used last` is a sentence rather than a word,
+                // because what it names is a window the reader has to be able to
+                // picture. The row's own line underneath carries the rest.
+                SettingsRow::LaunchOpens,
                 // Two of the summoned terminal's own (§7.54e ⑤): its first
                 // profile item is the sentence "whatever the default profile
                 // is", and the third rung of `What comes back` names two things
@@ -17664,8 +17746,8 @@ mod tests {
                 SettingsRow::QuakeRestore,
                 SettingsRow::SplitDirection,
             ],
-            "the long profile title, the summoned terminal's two and `Auto \
-             (longer edge)` are the two \
+            "the long profile title, the launch row's second answer, the \
+             summoned terminal's two and `Auto (longer edge)` are the \
              values this build's own tables can produce that cannot fit the \
              118px button, and every other row's option is one short word that \
              must be left alone"
@@ -21387,7 +21469,11 @@ mod tests {
                 .position(|row| *row == SettingsRow::ContextMenu)
                 .expect("the Explorer row is on every machine's list");
             assert_eq!(rows[at + 1], SettingsRow::UpdateCheck);
-            assert_eq!(rows[at - 1], SettingsRow::DefaultProfile);
+            // `Opening Folio again` stands between them since 2026-09-11
+            // (§7.59): the last row about Folio itself, above the two that
+            // reach out of this window.
+            assert_eq!(rows[at - 1], SettingsRow::LaunchOpens);
+            assert_eq!(rows[at - 2], SettingsRow::DefaultProfile);
             assert_eq!(
                 SettingsRow::ContextMenu.category(),
                 SettingsCategory::General
@@ -21716,6 +21802,8 @@ mod tests {
                 SettingsRow::GitPanel,
                 SettingsRow::SearchEngine,
                 SettingsRow::DefaultProfile,
+                // What a second start of Folio opens, since 2026-09-11 (§7.59).
+                SettingsRow::LaunchOpens,
                 // One row about Explorer's menu since 2026-09-07, with three
                 // answers where two switches stood (§7.4b).
                 SettingsRow::ContextMenu,
@@ -21773,6 +21861,8 @@ mod tests {
                 SettingsRow::GitPanel,
                 SettingsRow::SearchEngine,
                 SettingsRow::DefaultProfile,
+                // What a second start of Folio opens, since 2026-09-11 (§7.59).
+                SettingsRow::LaunchOpens,
                 // One row about Explorer's menu since 2026-09-07, with three
                 // answers where two switches stood (§7.4b).
                 SettingsRow::ContextMenu,
@@ -22833,10 +22923,12 @@ mod tests {
         // is why this walk is four presses shorter than it was; a second Explorer
         // row arrived the same day and gave one of them back, and 2026-09-07
         // folded it into the row above it and took that press away again (§7.4b).
-        // The assertion below is what keeps the presses honest — a page reordered
-        // under this test lands the ring somewhere else and says so.
+        // `Opening Folio again` arrived between them on 2026-09-11 (§7.59) and
+        // put one back. The assertion below is what keeps the presses honest — a
+        // page reordered under this test lands the ring somewhere else and says
+        // so.
         panel.key(SettingsKey::End, content(&flat, &lines), &lacking);
-        for _ in 0..2 {
+        for _ in 0..3 {
             panel.key(SettingsKey::Up, content(&flat, &lines), &lacking);
         }
         assert_eq!(
