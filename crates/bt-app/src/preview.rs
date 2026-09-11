@@ -8670,6 +8670,47 @@ mod tests {
         assert!(!is_editable("cases.csv", PreviewFtype::Table, true));
     }
 
+    /// **A file of no bytes is a file you can write** (user report, 2026-09-11:
+    /// `New file…` made `happy.md` and nothing could be typed into it).
+    ///
+    /// Read from the disk rather than assembled by hand, because every gate an
+    /// empty body could fail is on that path: a head of nothing is not
+    /// truncated, nothing was decoded so nothing was invented, and the name is
+    /// what says it is Markdown — the sniff that would have to have an opinion
+    /// about zero bytes is only asked of a name no table lists.
+    #[test]
+    fn a_file_with_nothing_in_it_is_editable() {
+        let dir = scratch("empty-markdown");
+        let path = dir.join("happy.md");
+        std::fs::write(&path, b"").unwrap();
+        let mut buffer = PreviewBuffer::new(
+            PreviewSource::file(path.to_string_lossy().as_ref()),
+            "happy.md".to_owned(),
+        );
+        buffer.accept(read_head(&path));
+        assert_eq!(
+            buffer.content.as_deref(),
+            Some(""),
+            "a body, and it is empty"
+        );
+        assert_eq!(buffer.load, PreviewLoad::Ready);
+        assert!(!buffer.truncated, "nothing was cut short");
+        assert!(!buffer.lossy, "and nothing was invented");
+        assert!(
+            buffer.is_editable(false),
+            "so the rendered page takes a caret",
+        );
+        assert!(
+            buffer.is_editable(true),
+            "and so does the source face behind it",
+        );
+        assert!(
+            !buffer.ask_for_the_whole_file(false),
+            "and there is no rest of the file to buy",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// ⑤ A NUL in the head is a binary file, whatever its name claims.
     ///
     /// Mutation: delete the `head.contains(&0)` guard in [`read_head`].

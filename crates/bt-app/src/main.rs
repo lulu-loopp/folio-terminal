@@ -4516,6 +4516,7 @@ fn mono_paragraph(
     font_size_px: f32,
     line_height_px: f32,
     color: [u8; 3],
+    cell_advance: Option<f32>,
 ) -> bt_render::PreviewParagraph {
     bt_render::PreviewParagraph {
         runs: vec![bt_render::PreviewRun {
@@ -4534,6 +4535,7 @@ fn mono_paragraph(
         letter_spacing_em: 0.0,
         align_right: false,
         align_center: false,
+        cell_advance,
     }
 }
 
@@ -4823,6 +4825,12 @@ fn build_preview_text_body(
                 letter_spacing_em: 0.0,
                 align_right: false,
                 align_center: false,
+                // **The cells this whole function counts in**
+                // ([`bt_render::PreviewParagraph::cell_advance`]). The bands and
+                // the caret above are drawn at `column × advance`; the letters
+                // are drawn on the same cells, so a line of Chinese cannot walk
+                // out from under the caret that is editing it.
+                cell_advance: Some(advance),
             };
             // **A composition displaces the text it is being typed into.**
             //
@@ -4858,6 +4866,11 @@ fn build_preview_text_body(
             geometry.font_size,
             geometry.line_height,
             palette.preview_body_text,
+            // On the grid like the line it is being typed into: the space opened
+            // for the composition above is `preedit.columns` cells wide, and
+            // letters that drew narrower than that would leave the caret inside
+            // them standing past their end.
+            Some(advance),
         ));
     }
     bt_render::PreviewBody {
@@ -4904,6 +4917,10 @@ fn build_preview_diff_body(
                 preview::DiffLineKind::Hunk => palette.preview_diff_hunk,
                 _ => palette.preview_body_text,
             },
+            // A patch is read and not edited: it carries no caret, no click that
+            // seats one and no cell arithmetic to agree with, so its lines are
+            // shaped as the shaper likes.
+            None,
         ));
     }
     bt_render::PreviewBody {
@@ -5007,6 +5024,7 @@ fn build_preview_table_body(
                 letter_spacing_em: 0.0,
                 align_right: false,
                 align_center: false,
+                cell_advance: None,
             });
         }
     }
@@ -5324,6 +5342,7 @@ fn build_preview_markdown_body(
                     letter_spacing_em: 0.0,
                     align_right: false,
                     align_center: false,
+                    cell_advance: None,
                 });
             }
             preview::MarkdownBlock::Paragraph(spans) => {
@@ -5352,6 +5371,7 @@ fn build_preview_markdown_body(
                     letter_spacing_em: 0.0,
                     align_right: false,
                     align_center: false,
+                    cell_advance: None,
                 });
             }
             preview::MarkdownBlock::List { ordered, items } => {
@@ -5413,6 +5433,7 @@ fn build_preview_markdown_body(
                         letter_spacing_em: 0.0,
                         align_right: false,
                         align_center: false,
+                        cell_advance: None,
                     });
                     item_top += item_height;
                 }
@@ -5483,6 +5504,7 @@ fn build_preview_markdown_body(
                         letter_spacing_em: 0.0,
                         align_right: false,
                         align_center: false,
+                        cell_advance: None,
                     });
                     line_top += line_height;
                 }
@@ -5568,6 +5590,7 @@ fn build_preview_markdown_body(
                         letter_spacing_em: 0.0,
                         align_right: false,
                         align_center: false,
+                        cell_advance: None,
                     });
                     line_top += metrics.code_line_height;
                 }
@@ -5595,6 +5618,7 @@ fn build_preview_markdown_body(
                         letter_spacing_em: seats::PREVIEW_MD_LANG_TRACKING_EM,
                         align_right: true,
                         align_center: false,
+                        cell_advance: None,
                     });
                 }
             }
@@ -5679,6 +5703,7 @@ fn build_preview_markdown_body(
                                 letter_spacing_em: 0.0,
                                 align_right: false,
                                 align_center: true,
+                                cell_advance: None,
                             });
                             line_top += metrics.line_height;
                         }
@@ -5788,6 +5813,7 @@ fn build_preview_markdown_body(
                             letter_spacing_em: 0.0,
                             align_right: false,
                             align_center: false,
+                            cell_advance: None,
                         });
                         line_top += said_height;
                         if !card.note.is_empty() {
@@ -5817,6 +5843,7 @@ fn build_preview_markdown_body(
                                 letter_spacing_em: 0.0,
                                 align_right: false,
                                 align_center: false,
+                                cell_advance: None,
                             });
                         }
                     }
@@ -5949,10 +5976,9 @@ fn push_markdown_source_block(
         {
             let (row, column) = preview_caret_row(&wrap, line, column);
             if rows.contains(&row) {
-                let box_of_row = row_rect(row);
-                let x = box_of_row[0] + source.advance * column as f32;
+                let cell = markdown_source_cell(source, box_of_block, row, column);
                 quads.push(bt_render::PreviewQuad {
-                    rect: [x, box_of_row[1], x + caret.caret_width, box_of_row[3]],
+                    rect: [cell[0], cell[1], cell[0] + caret.caret_width, cell[3]],
                     color: palette.preview_caret,
                 });
             }
@@ -5988,8 +6014,76 @@ fn push_markdown_source_block(
             letter_spacing_em: 0.0,
             align_right: false,
             align_center: false,
+            // **The block's own cells** (user report, 2026-09-11: the caret in
+            // an edited Chinese paragraph stood to the right of the character it
+            // was editing). Every other number in this function — the selection
+            // band, the caret, the fold, the click that seats it — is
+            // `column × source.advance`, and the letters are placed on the same
+            // cells rather than wherever the fallback face's own advances lead.
+            cell_advance: Some(source.advance),
         });
     }
+}
+
+/// **One cell of the source block's grid, in whole-surface pixels** — row and
+/// column in, the rectangle the character at that column is drawn in out.
+///
+/// **The block's one horizontal arithmetic.** The caret is struck at this
+/// rectangle's left edge, the IME hangs its candidate list from it
+/// ([`Runtime::live_markdown_ime_cursor_area`]), a press is read back through
+/// its inverse ([`markdown_source_offset_at`]), and the letters themselves are
+/// placed on the very same cells by the shaper
+/// ([`bt_render::PreviewParagraph::cell_advance`]). A second derivation of any
+/// of those four is a caret standing somewhere the character it is editing is
+/// not — which is exactly what a page of Chinese reported on 2026-09-11, when
+/// the letters were left to the fallback face's own advances and the caret was
+/// counted in cells.
+fn markdown_source_cell(
+    source: &MarkdownSourceBlock,
+    box_of_block: [f32; 4],
+    row: usize,
+    column: usize,
+) -> [f32; 4] {
+    let left = box_of_block[0] + source.advance * column as f32;
+    let top = box_of_block[1] + source.line_height * row as f32;
+    [left, top, left + source.advance, top + source.line_height]
+}
+
+/// **Where a press on a page with nothing on it lands** (user report,
+/// 2026-09-11: a file just made by `New file…` could not be typed into).
+///
+/// A document that parsed into no blocks — which is what a file of no bytes is —
+/// has no block to press on, no [`PreviewTextSite`] to land in and no provenance
+/// to ask, so every press in its body used to name nothing and be read as a
+/// press on the page's empty ground, which *leaves* a page instead of entering
+/// it. A file with no bytes has exactly one place a caret can be, and this is
+/// it: **byte zero, from anywhere in the body**, standing on the empty line the
+/// page already draws there ([`preview_live`]'s gap with no block in front of
+/// it). Typing then makes the first block and the ordinary rule takes over on
+/// the very next parse.
+///
+/// Asked of the *document* and not of the buffer's bytes, because the page is
+/// what the press is landing on: a buffer whose file has been emptied under it
+/// still has the last parse on the glass until the next one lands, and a press
+/// on those words belongs to them.
+///
+/// The body rectangle and not the whole surface: the head, the foot and the bars
+/// stand over the document and are answered above this in the press ladder, and
+/// a rule that claimed them would put a caret in a page from a press on its
+/// furniture.
+fn markdown_empty_page_offset(
+    doc: &PreviewDocument,
+    body: [f32; 4],
+    x: f32,
+    y: f32,
+) -> Option<usize> {
+    let PreviewDocument::Markdown { blocks, .. } = doc else {
+        return None;
+    };
+    if !blocks.is_empty() {
+        return None;
+    }
+    (x >= body[0] && x < body[2] && y >= body[1] && y < body[3]).then_some(0)
 }
 
 /// **A point inside the source block, as a byte of the file** (T5 ①,
@@ -6022,20 +6116,21 @@ fn markdown_source_offset_at(
         0
     };
     let row = row.min(wrap.rows().saturating_sub(1));
-    // The *nearest* cell boundary and not the one the pointer is inside, which
-    // is the source face's own rule: a click on the right half of a character
-    // puts the caret after it.
-    let column = if source.advance > 0.0 {
-        ((x - left) / source.advance).round().max(0.0) as usize
+    // The *nearest seam* and not the cell the pointer is inside, which is the
+    // source face's own rule: a click on the right half of a character puts the
+    // caret after it. In cells and not in a cell, because half of a character
+    // two cells wide is a cell — see [`preview_edit::byte_at_x`].
+    let columns = if source.advance > 0.0 {
+        ((x - left) / source.advance).max(0.0)
     } else {
-        0
+        0.0
     };
     preview_live::BlockRows {
         text: &source.text,
         start: source.range.start,
         wrap: &wrap,
     }
-    .offset_at(row, column)
+    .offset_at_x(row, columns)
 }
 
 /// **Every piece of a built document, boxed where it was drawn.**
@@ -6927,6 +7022,7 @@ pub(crate) fn push_markdown_table(
                         alignments.get(column),
                         Some(bt_detect::table::ColumnAlignment::Center)
                     ),
+                    cell_advance: None,
                 });
             }
             cell_left += outer;
@@ -54926,6 +55022,15 @@ impl Runtime<'_> {
     /// Everything else goes through the rendered page's own hit test and then
     /// through T6's provenance (§7.1.3r), which is what makes a click land on
     /// the word it was aimed at rather than at the top of its paragraph.
+    ///
+    /// **An empty document is the one page with no piece to land on** (user
+    /// report, 2026-09-11: a file just made by `New file…` could not be typed
+    /// into). Nothing was parsed, so there is no block, no box and no
+    /// provenance to ask — and a press that named nothing was read as a press on
+    /// the page's empty ground, which leaves the page rather than entering it.
+    /// A file with no bytes has exactly one place a caret can be, so a press
+    /// anywhere in its body is that place: the empty line the page already draws
+    /// the caret on ([`preview_live`]'s gap with no block in front of it).
     fn preview_md_file_offset_at(
         &mut self,
         surface: PreviewSurface,
@@ -54938,6 +55043,12 @@ impl Runtime<'_> {
             && y < box_of_block[3]
         {
             return Some(markdown_source_offset_at(source, box_of_block, x, y));
+        }
+        if let Some(body) = self.preview_surface_body_rect(surface, scale)
+            && let Some(pane) = self.preview_pane(surface)
+            && let Some(offset) = markdown_empty_page_offset(&pane.doc, body, x, y)
+        {
+            return Some(offset);
         }
         let place = self.preview_place_at(surface, position)?;
         let PreviewDocument::Markdown {
@@ -55217,10 +55328,11 @@ impl Runtime<'_> {
         surface: PreviewSurface,
         offset: usize,
     ) -> Option<std::ops::Range<usize>> {
+        let content = self.preview_buffer_on(surface)?.content.as_deref()?;
         let PreviewDocument::Markdown { ranges, .. } = &self.preview_pane(surface)?.doc else {
             return None;
         };
-        let index = preview_live::caret_seat(ranges, offset).block()?;
+        let index = preview_live::caret_seat(content, ranges, offset).block()?;
         ranges.get(index).cloned()
     }
 
@@ -56369,13 +56481,18 @@ impl Runtime<'_> {
             wrap: &wrap,
         }
         .row_of(caret.caret)?;
-        let x = (box_of_block[0] + source.advance * column as f32).clamp(body[0], body[2]);
-        let y = (box_of_block[1] + source.line_height * row as f32).clamp(body[1], body[3]);
+        // The painter's own cell ([`markdown_source_cell`]): a candidate list
+        // placed from a second derivation is a list standing beside the caret it
+        // claims to follow, and on a line of Chinese the two derivations used to
+        // differ by a character's width every character.
+        let cell = markdown_source_cell(source, box_of_block, row, column);
+        let x = cell[0].clamp(body[0], body[2]);
+        let y = cell[1].clamp(body[1], body[3]);
         Some(ImeCursorArea {
             x: x.round() as i32,
             y: y.round() as i32,
-            width: source.advance.round().max(1.0) as u32,
-            height: source.line_height.round().max(1.0) as u32,
+            width: (cell[2] - cell[0]).round().max(1.0) as u32,
+            height: (cell[3] - cell[1]).round().max(1.0) as u32,
         })
     }
 
@@ -57140,7 +57257,10 @@ impl Runtime<'_> {
         let x = position.x as f32 - body[0] - metrics.padding_x + pane.scroll[0];
         let y = position.y as f32 - body[1] - metrics.padding_y + pane.scroll[1];
         let row = (y / metrics.line_height).floor().max(0.0) as usize;
-        let column = (x / advance).round().max(0.0) as usize;
+        // Cells and not a cell, for [`preview_edit::byte_at_x`]'s reason: which
+        // side of a two-cell character a press belongs to is a question a
+        // rounded column has already thrown the answer to away.
+        let columns = (x / advance).max(0.0);
         // **The painter's arithmetic read backwards, through the same wrap.** A
         // click names a *drawn* row; which line that is and how far into it the
         // row starts is exactly what the layout knows, and asking it here is
@@ -57149,11 +57269,9 @@ impl Runtime<'_> {
             .preview_wrap(surface)
             .and_then(|wrap| wrap.row_span(row))
             .map_or((row, 0, usize::MAX), |span| span);
-        Some(preview_edit::offset_at(
-            content,
-            line,
-            from + column.min(to.saturating_sub(from)),
-        ))
+        #[allow(clippy::cast_precision_loss)]
+        let columns = (from as f32 + columns).min(to as f32);
+        Some(preview_edit::offset_at_x(content, line, columns))
     }
 
     /// How this surface's text is currently wrapped, if it is showing text.
@@ -57523,7 +57641,9 @@ impl Runtime<'_> {
                 // where the document says `Some` would re-lay-out the whole page
                 // on the very next frame.
                 parsed_source = live_caret
-                    .and_then(|caret| preview_live::caret_seat(&ranges, caret.caret).block())
+                    .and_then(|caret| {
+                        preview_live::caret_seat(&content, &ranges, caret.caret).block()
+                    })
                     .and_then(|index| Some((index, ranges.get(index)?.clone())));
                 let source = self.markdown_source_block(surface, parsed_source.as_ref(), scale);
                 let math =
@@ -57680,10 +57800,11 @@ impl Runtime<'_> {
         caret: Option<preview_edit::EditCaret>,
     ) -> Option<(usize, std::ops::Range<usize>)> {
         let caret = caret?;
+        let content = self.preview_buffer_on(surface)?.content.as_deref()?;
         let PreviewDocument::Markdown { ranges, .. } = &self.preview_pane(surface)?.doc else {
             return None;
         };
-        let index = preview_live::caret_seat(ranges, caret.caret).block()?;
+        let index = preview_live::caret_seat(content, ranges, caret.caret).block()?;
         Some((index, ranges.get(index)?.clone()))
     }
 
@@ -58855,7 +58976,7 @@ impl Runtime<'_> {
         else {
             return None;
         };
-        let seat = match preview_live::caret_seat(ranges, caret.caret) {
+        let seat = match preview_live::caret_seat(content, ranges, caret.caret) {
             preview_live::CaretSeat::Block(index) => {
                 if source.as_ref().map(|source| source.index) != Some(index) {
                     return None;
@@ -59099,6 +59220,7 @@ impl Runtime<'_> {
                 letter_spacing_em: 0.0,
                 align_right: false,
                 align_center: true,
+                cell_advance: None,
             }],
         }
     }
@@ -133285,6 +133407,299 @@ mod tests {
         assert_eq!(at(100.0, 0.0), 8, "as above it is its first");
     }
 
+    /// **A press on a Chinese character lands on that character** (user report,
+    /// 2026-09-11) — the drawn grid read backwards, cluster by cluster.
+    ///
+    /// An ideograph owns two cells and a caret may not stand between them, so
+    /// the seam that decides which side of it a press belongs to is the
+    /// character's own middle. Rounding the pointer to a whole cell first, which
+    /// is what this did, threw that away: the left half of a character rounds
+    /// into its *second* cell, and the second cell of a wide cluster rounds
+    /// forward out of it — so a press aimed at an ideograph seated the caret
+    /// after it, one whole character from where the pointer was.
+    ///
+    /// MUTATION: round the pointer to a cell before asking, and every press on
+    /// the left half of an ideograph lands after it.
+    #[test]
+    fn a_press_on_a_wide_character_lands_on_the_character_it_is_over() {
+        // Eight pixels to the cell, so an ideograph is drawn sixteen wide.
+        let source = source_block(0, 0, "中文 ab");
+        let box_of_block = [100.0, 40.0, 500.0, 60.0];
+        let at = |x: f32| markdown_source_offset_at(&source, box_of_block, x, 44.0);
+        // 「中」 stands in columns 0 and 1 — pixels 100 to 116 — and 「文」 in 2
+        // and 3, which is 116 to 132.
+        assert_eq!(at(100.0), 0, "its left edge is the seam in front of it");
+        assert_eq!(at(104.0), 0, "a quarter in is still in front of it");
+        assert_eq!(
+            at(108.0),
+            0,
+            "and its middle is the character the pointer is on, not the next one",
+        );
+        assert_eq!(at(112.0), 3, "past the middle is the seam behind it");
+        assert_eq!(at(116.0), 3, "which is where the next character begins");
+        assert_eq!(at(124.0), 3, "the middle of 「文」 is 「文」's own byte");
+        assert_eq!(at(128.0), 6, "and past its middle is the space after it");
+        // A one-cell letter keeps the rule it always had: its own middle.
+        assert_eq!(
+            at(136.0),
+            6,
+            "the space's own middle belongs to the seam in front of it",
+        );
+        assert_eq!(at(140.0), 7, "`a` begins at column 5");
+        assert_eq!(at(146.0), 8, "and past its middle is between `a` and `b`");
+        // And every seam the caret can be at is a seam a press can reach.
+        for (byte, column) in [(0usize, 0usize), (3, 2), (6, 4), (7, 5), (8, 6), (9, 7)] {
+            assert_eq!(
+                preview_edit::column_of(&source.text, byte),
+                column,
+                "the fixture's own columns",
+            );
+            assert_eq!(
+                at(100.0 + column as f32 * 8.0),
+                byte,
+                "a press on the seam at column {column} names byte {byte}",
+            );
+        }
+    }
+
+    /// **The caret the painter strikes, the cell the IME hangs from and the
+    /// column the editor counts are one number** (user report, 2026-09-11).
+    ///
+    /// The report was a caret standing a gap to the right of the character it
+    /// was editing on a line of Chinese, and the gap grew with every ideograph
+    /// before it: the letters were shaped by a fallback face whose advances are
+    /// its own, while the caret was counted in cells. The letters are placed on
+    /// the cells now ([`bt_render::PreviewParagraph::cell_advance`]) and this
+    /// holds the other three readings to the same arithmetic.
+    ///
+    /// MUTATION: derive the IME's rectangle from anything but
+    /// [`markdown_source_cell`] and a candidate list stands beside the caret it
+    /// claims to follow.
+    #[test]
+    fn the_caret_the_ime_and_the_column_are_one_arithmetic_on_a_chinese_line() {
+        let line = "网页预览需要 WebView2。";
+        let source = source_block(0, 0, line);
+        let box_of_block = [100.0, 40.0, 500.0, 60.0];
+        let palette = bt_render::chrome_palette();
+        let paint = |caret: usize| {
+            let column = preview_edit::column_of(line, caret);
+            let mut quads = Vec::new();
+            let mut paragraphs = Vec::new();
+            push_markdown_source_block(
+                (&mut quads, &mut paragraphs),
+                &source,
+                Some(&MarkdownCaretPaint {
+                    seat: MarkdownCaretSeat::Source(0, column),
+                    lit: true,
+                    selection: 0..0,
+                    caret_width: 2.0,
+                }),
+                &highlight::Highlighting::plain(),
+                box_of_block,
+                [0.0, 0.0, 1000.0, 1000.0],
+                &palette,
+            );
+            let [quad] = quads.as_slice() else {
+                panic!("one caret: {quads:#?}");
+            };
+            (column, quad.rect[0])
+        };
+        // Every seam of the line, in the file's own bytes: before each cluster
+        // and after the last one.
+        let mut byte = 0usize;
+        for cluster in bt_unicode::graphemes(line) {
+            let (column, drawn) = paint(byte);
+            assert!(
+                (drawn - (box_of_block[0] + 8.0 * column as f32)).abs() < f32::EPSILON,
+                "the caret in front of {cluster:?} is struck at {drawn}, not on its \
+                 column {column}",
+            );
+            assert!(
+                (markdown_source_cell(&source, box_of_block, 0, column)[0] - drawn).abs()
+                    < f32::EPSILON,
+                "and the cell the IME hangs its candidates from is the same one",
+            );
+            // The press that would put the caret there agrees as well, which is
+            // the third reading of the one grid.
+            assert_eq!(
+                markdown_source_offset_at(&source, box_of_block, drawn, 44.0),
+                byte,
+                "a press on the caret's own x names the byte the caret is at",
+            );
+            byte += cluster.len();
+        }
+        let (column, _) = paint(line.len());
+        assert_eq!(
+            column,
+            bt_unicode::text_width(line),
+            "the last seam is the whole line's width in cells, ideographs counted \
+             as the two they draw as",
+        );
+    }
+
+    /// **A Chinese line folds where the wrap says it folds** (user report,
+    /// 2026-09-11).
+    ///
+    /// Chinese has no spaces, so every character is a break opportunity and a
+    /// fold lands *between two ideographs* — which is only safe if the rows the
+    /// painter draws are cut at the columns the fold was computed in, and if the
+    /// letters then stand on those very cells
+    /// ([`bt_render::PreviewParagraph::cell_advance`]).
+    #[test]
+    fn a_chinese_line_folds_at_the_columns_the_wrap_names() {
+        let line = "这一段完全没有空格";
+        let source = source_block(0, 0, line);
+        // A ten-cell-wide block: five ideographs a row.
+        let box_of_block = [100.0, 40.0, 180.0, 100.0];
+        let wrap = source.wrap(box_of_block[2] - box_of_block[0]);
+        assert_eq!(wrap.rows(), 2, "nine ideographs are eighteen cells");
+        assert_eq!(
+            wrap.row_span(0),
+            Some((0, 0, 10)),
+            "the first row is the ten cells that fit",
+        );
+        assert_eq!(
+            wrap.row_span(1),
+            Some((0, 10, 19)),
+            "and the rest is the second, whose far end runs one column past the \n             line to stand the break in",
+        );
+        let palette = bt_render::chrome_palette();
+        let mut quads = Vec::new();
+        let mut paragraphs = Vec::new();
+        push_markdown_source_block(
+            (&mut quads, &mut paragraphs),
+            &source,
+            None,
+            &highlight::Highlighting::plain(),
+            box_of_block,
+            [0.0, 0.0, 1000.0, 1000.0],
+            &palette,
+        );
+        let [first, second] = paragraphs.as_slice() else {
+            panic!("one paragraph a row: {paragraphs:#?}");
+        };
+        let text = |paragraph: &bt_render::PreviewParagraph| {
+            paragraph
+                .runs
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>()
+        };
+        assert_eq!(
+            text(first),
+            "这一段完全",
+            "five ideographs on the first row"
+        );
+        assert_eq!(text(second), "没有空格", "and four on the second");
+        for paragraph in [first, second] {
+            assert_eq!(
+                paragraph.cell_advance,
+                Some(8.0),
+                "each row is drawn on the very cells it was folded in",
+            );
+        }
+        assert!(
+            bt_unicode::text_width(&text(first)) <= 10,
+            "and no row is wider than the block it folded inside",
+        );
+    }
+
+    /// **A file with nothing in it can be typed into** (user report,
+    /// 2026-09-11: `New file…` made `happy.md`, and clicking in it did nothing
+    /// at all).
+    ///
+    /// A page with no blocks has no piece of a parse to press on: there is no
+    /// box, no provenance and no source block, so every press named nothing and
+    /// was read as a press on the page's empty ground — which *leaves* a page
+    /// rather than entering it, and leaves the keyboard somewhere else. A file
+    /// with no bytes has exactly one place a caret can be.
+    ///
+    /// MUTATION: answer for a page that has blocks and a press on the margin
+    /// beside a paragraph stops rendering the page again, which is the ruling
+    /// the empty-ground arm exists for.
+    #[test]
+    fn a_press_anywhere_in_an_empty_page_names_its_only_byte() {
+        let body = [100.0, 40.0, 500.0, 400.0];
+        let page = |content: &str| {
+            let (blocks, ranges, maps) = preview::parse_markdown_mapped(content);
+            PreviewDocument::Markdown {
+                blocks,
+                ranges,
+                maps,
+                source: None,
+                intrinsic: Vec::new(),
+                layout: Vec::new(),
+                math: DocumentMath::default(),
+                pictures: DocumentPictures::default(),
+            }
+        };
+        let empty = page("");
+        assert_eq!(
+            markdown_empty_page_offset(&empty, body, 100.0, 40.0),
+            Some(0),
+            "the body's own corner",
+        );
+        assert_eq!(
+            markdown_empty_page_offset(&empty, body, 400.0, 300.0),
+            Some(0),
+            "and the middle of the ground under it, which is where a reader \
+             actually presses",
+        );
+        assert_eq!(
+            markdown_empty_page_offset(&empty, body, 99.0, 300.0),
+            None,
+            "outside the body is the furniture's, and the furniture is answered \
+             above this in the press ladder",
+        );
+        assert_eq!(
+            markdown_empty_page_offset(&empty, body, 400.0, 39.0),
+            None,
+            "the head stands over the document and is not it",
+        );
+        assert_eq!(
+            markdown_empty_page_offset(&page("words\n"), body, 400.0, 300.0),
+            None,
+            "a page with words on it answers through its pieces, and a press on \
+             its ground is still a press on its ground",
+        );
+    }
+
+    /// **Typing into an empty file makes its first block** (user report,
+    /// 2026-09-11), through the ordinary re-parse and nothing else.
+    ///
+    /// The second half is the end of a file that has no last break (audit A6):
+    /// the caret after the only character typed is at `content.len()`, which is
+    /// the last block's own `range.end` — read as a gap, the paragraph would
+    /// never be drawn as source and the bar would stand on a line below it that
+    /// does not exist.
+    #[test]
+    fn typing_into_an_empty_file_makes_the_first_block() {
+        let mut content = String::new();
+        let (_, ranges) = preview::parse_markdown_ranged(&content);
+        assert!(ranges.is_empty(), "nothing was parsed out of nothing");
+        let mut caret = preview_edit::EditCaret::default();
+        assert_eq!(
+            preview_live::caret_seat(&content, &ranges, caret.caret),
+            preview_live::CaretSeat::Gap { after: None },
+            "which is one empty source line at the top of the page",
+        );
+        assert!(preview_edit::insert(&mut content, &mut caret, "h"));
+        assert_eq!(content, "h");
+        assert_eq!(caret.caret, 1, "the caret is after what was typed");
+        let (blocks, ranges) = preview::parse_markdown_ranged(&content);
+        assert_eq!(blocks.len(), 1, "one paragraph, made by the parse");
+        assert_eq!(
+            preview_live::caret_seat(&content, &ranges, caret.caret),
+            preview_live::CaretSeat::Block(0),
+            "and the caret is inside it, so it is drawn as source",
+        );
+        assert_eq!(
+            preview_live::place_in_block(&content, &ranges, 0, caret.caret),
+            Some((0, 1)),
+            "on its first line, one column in, which is where the bar is drawn",
+        );
+    }
+
     /// **A press on rendered text lands on the file byte that letter was copied
     /// from** (T5 ①), which is the whole of what T6 was built for: a heading is
     /// drawn without its hashes and a click on its first letter must not land on
@@ -133369,14 +133784,14 @@ mod tests {
             desired_column: None,
         };
         assert_eq!(
-            preview_live::caret_seat(&ranges, caret.caret),
+            preview_live::caret_seat(&content, &ranges, caret.caret),
             preview_live::CaretSeat::Block(1),
         );
         assert!(preview_edit::insert(&mut content, &mut caret, "!"));
         assert_eq!(content, "# head\n\nbody!\n");
         let (_, ranges) = preview::parse_markdown_ranged(&content);
         assert_eq!(
-            preview_live::caret_seat(&ranges, caret.caret),
+            preview_live::caret_seat(&content, &ranges, caret.caret),
             preview_live::CaretSeat::Block(1),
             "still the paragraph, one byte longer",
         );
@@ -133405,7 +133820,7 @@ mod tests {
         let (_, ranges) = preview::parse_markdown_ranged(&content);
         assert_eq!(ranges.len(), 2, "one paragraph has become two");
         assert_eq!(
-            preview_live::caret_seat(&ranges, caret.caret),
+            preview_live::caret_seat(&content, &ranges, caret.caret),
             preview_live::CaretSeat::Block(1),
             "and the caret is in the new one, which is therefore the source block",
         );
@@ -133606,6 +134021,7 @@ mod tests {
                 letter_spacing_em: 0.0,
                 align_right: false,
                 align_center: false,
+                cell_advance: None,
             }),
         }
     }
@@ -134666,7 +135082,7 @@ mod tests {
         let (_, ranges) = preview::parse_markdown_ranged(source);
         let key = |caret: Option<usize>| {
             let seat = caret.and_then(|caret| {
-                let index = preview_live::caret_seat(&ranges, caret).block()?;
+                let index = preview_live::caret_seat(source, &ranges, caret).block()?;
                 Some((index, ranges[index].clone()))
             });
             preview_document_key(

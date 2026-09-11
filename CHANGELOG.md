@@ -104,6 +104,27 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **The caret in an edited paragraph sits on the character it edits, on Chinese
+  text too.** On a line of Chinese the bar stood to the right of the character it
+  was in front of, further out with every character on the line, so typing landed
+  somewhere other than where the bar was. A file's text is drawn in evenly spaced
+  character cells, and Folio counts everything about editing it in those cells —
+  where the caret is, where a click lands, where a line folds — but the Chinese
+  characters themselves were being drawn a little narrower than the two cells
+  they take up, so the words crept leftwards away from where the caret was put.
+  Each character now fills the cells it takes up, and clicking a Chinese
+  character puts the caret on that character rather than after it.
+- **A new empty file can be typed into.** A file just made with `New file…`
+  opened as a blank page, and clicking anywhere in it did nothing at all: there
+  was no text on the page for the click to land on, so nothing took the caret and
+  nothing took what was typed. A page with nothing on it now takes the caret from
+  a click anywhere in the body, and the first thing typed becomes its first
+  paragraph.
+- **The caret at the end of a file that does not end in a blank line stands at
+  the end of the text.** In a file whose last line has no line break after it,
+  pressing End on that line — or typing at the end of the document — drew the
+  caret at the left margin of a line below the text that is not there, and left
+  the paragraph rendered rather than showing the source being typed into.
 - **A Markdown page full of large screenshots no longer freezes the window.**
   Opening this project's own README on a large screen could pin a processor core
   and leave the window standing on whatever it had drawn last — still answering

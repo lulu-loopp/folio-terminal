@@ -118,6 +118,39 @@ pub fn byte_at_column(line: &str, column: usize) -> usize {
     line.len()
 }
 
+/// **The byte a press `columns` cells into a line names** — the caret seam
+/// nearest the pointer.
+///
+/// Fractional, because a press is: rounding the pointer to a whole cell and
+/// asking [`byte_at_column`] afterwards asks about a *cell* when what is wanted
+/// is a *character*, and a character two cells wide has a seam on either side of
+/// it and none down its middle. A press on the left half of an ideograph landed
+/// after it that way (user report, 2026-09-11), because the first of its two
+/// cells rounds forward out of the cluster it is inside.
+///
+/// So the seams themselves are walked — one per cluster boundary — and the
+/// nearest wins, which is the rule a one-cell letter has always obeyed (its own
+/// middle) said in a way a two-cell ideograph obeys too. A press exactly on a
+/// character's middle belongs to the seam in front of it, which is the one place
+/// this differs from rounding: a middle is the far edge of the half the pointer
+/// is in, and the caret a reader aiming at a character wants is the one *before*
+/// it.
+pub fn byte_at_x(line: &str, columns: f32) -> usize {
+    let mut at = 0usize;
+    let mut drawn = 0usize;
+    for cluster in bt_unicode::graphemes(line) {
+        let cells = cluster_columns(cluster, drawn);
+        #[allow(clippy::cast_precision_loss)]
+        let middle = drawn as f32 + cells as f32 / 2.0;
+        if columns <= middle {
+            return at;
+        }
+        drawn += cells;
+        at += cluster.len();
+    }
+    line.len()
+}
+
 /// How wide one cluster draws, standing at `column`.
 fn cluster_columns(cluster: &str, column: usize) -> usize {
     if cluster == "\t" {
@@ -722,12 +755,21 @@ fn finish_move(
     caret.desired_column = desired;
 }
 
-/// The offset a row and a drawn column name — the click's own question.
+/// The offset a row and a drawn column name.
 pub fn offset_at(content: &str, line: usize, column: usize) -> usize {
     let starts = line_starts(content);
     let line = line.min(starts.len() - 1);
     let (start, _) = line_bounds(content, &starts, line);
     start + byte_at_column(line_text(content, &starts, line), column)
+}
+
+/// The offset a row and a **pointer** name — [`offset_at`] asked in the
+/// coordinate a press actually arrives in. See [`byte_at_x`].
+pub fn offset_at_x(content: &str, line: usize, columns: f32) -> usize {
+    let starts = line_starts(content);
+    let line = line.min(starts.len() - 1);
+    let (start, _) = line_bounds(content, &starts, line);
+    start + byte_at_x(line_text(content, &starts, line), columns)
 }
 
 /// Which columns of one line a selection covers, if any.

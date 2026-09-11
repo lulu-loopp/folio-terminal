@@ -1441,6 +1441,33 @@ pub struct PreviewParagraph {
     /// `.pv-image` is a centred column (mock-up 605) and the sentence under the
     /// picture is the second item in it, which is the one caller today.
     pub align_center: bool,
+    /// **This paragraph is set on a cell grid, this many pixels to the cell.**
+    ///
+    /// The source faces, and nothing else. A file's own bytes are drawn on a
+    /// grid and *edited* on one: the caret's column, the click that seats it,
+    /// the band under a selection and the soft wrap are all counted in cells,
+    /// and every one of them turns a column into an x by multiplying by this
+    /// number. A shaper left to its own devices does not agree with that
+    /// arithmetic for one line: the monospace family carries no CJK, and the
+    /// fallback face's ideograph advances by its own em rather than by two of
+    /// these cells — 32.0px against 35.19px at the user's size, so a line of
+    /// Chinese walks 3.19px left of the grid per character and the caret stands
+    /// in the gap that opens (user report, 2026-09-11).
+    ///
+    /// So the grid is imposed rather than hoped for: **every cluster advances
+    /// exactly the cells [`bt_unicode::cluster_width`] gives it**, which puts
+    /// its neighbour at `column × cell_advance` and makes the drawn x and the
+    /// caret's x one number. Exactly what the terminal grid does, and for the
+    /// same reason.
+    ///
+    /// `None` for prose, which is every other paragraph: a markdown page is
+    /// proportional and has no cells to stand in.
+    ///
+    /// **Tabs are the caller's** — a grid paragraph arrives with its tabs
+    /// already the spaces they stand in for ([`bt_unicode`] has no tab stop and
+    /// this has no line to count one from), which is what
+    /// `preview_edit::display_lines` hands every source face.
+    pub cell_advance: Option<f32>,
 }
 
 /// Where one of a paragraph's runs actually came to rest, once shaped.
@@ -10495,15 +10522,208 @@ fn shape_preview_paragraph(font_system: &mut FontSystem, paragraph: &PreviewPara
         buffer.set_wrap(Wrap::None);
         buffer.set_size(None, Some(paragraph.line_height_px));
     }
-    set_preview_runs(
-        font_system,
+    let Some(advance) = paragraph.cell_advance.filter(|advance| *advance > 0.0) else {
+        set_preview_runs(
+            font_system,
+            &mut buffer,
+            &paragraph.runs,
+            paragraph.letter_spacing_em,
+            metrics,
+        );
+        buffer.shape_until_scroll(font_system, false);
+        return buffer;
+    };
+    // **A grid paragraph is shaped, measured, and shaped again** (see
+    // [`PreviewParagraph::cell_advance`]). The first pass is the one every other
+    // paragraph gets and is what the second pass is measured against: a cluster
+    // is *asked* for its cells by the tracking that closes the gap between what
+    // it advances naturally and what the grid gives it, and the gap cannot be
+    // known without shaping it. Nothing but the tracking changes between the two
+    // — cosmic-text splits its shaping runs where attributes are *incompatible*
+    // (family, style, weight, stretch) and letter spacing is none of those — so
+    // the second pass is glyph for glyph the first one with the advances the
+    // grid asked for.
+    //
+    // A line whose every cluster already sits in its cells is shaped once, which
+    // is every line of Latin a source file is mostly made of: the mono face's
+    // own advance *is* the cell.
+    let cells = preview_grid_cells(&paragraph.runs, advance);
+    let resting = vec![0.0_f32; cells.len()];
+    set_preview_grid_cells(
         &mut buffer,
         &paragraph.runs,
+        &cells,
+        &resting,
         paragraph.letter_spacing_em,
         metrics,
     );
     buffer.shape_until_scroll(font_system, false);
+    let tracking = preview_grid_tracking(&buffer, &paragraph.runs, &cells, metrics);
+    if tracking
+        .iter()
+        .any(|tracking| tracking.abs() > f32::EPSILON)
+    {
+        set_preview_grid_cells(
+            &mut buffer,
+            &paragraph.runs,
+            &cells,
+            &tracking,
+            paragraph.letter_spacing_em,
+            metrics,
+        );
+        buffer.shape_until_scroll(font_system, false);
+    }
     buffer
+}
+
+/// One cell-run of a grid paragraph: a cluster, and the pixels it must advance.
+///
+/// The unit the grid is imposed in, because it is the unit the editor counts in
+/// — `preview_edit::column_of` walks the same clusters through the same
+/// [`bt_unicode::cluster_width`] to answer where the caret is.
+#[derive(Clone, Debug, PartialEq)]
+struct PreviewGridCell {
+    /// Which run of the paragraph it was cut from.
+    run: usize,
+    /// Its bytes inside that run's own text.
+    text: Range<usize>,
+    /// Its bytes inside the concatenated paragraph text — the coordinate the
+    /// shaper reports a glyph's cluster in ([`preview_paragraph_text`]).
+    line: Range<usize>,
+    /// What it advances once the grid has been imposed: its cells, in pixels.
+    target_px: f32,
+}
+
+/// Cut a grid paragraph's runs into the cells they are set in.
+///
+/// An inline box is one cell-run of its own carrying its requested width rather
+/// than a column count: it is a picture standing in prose and has no business in
+/// a source face, but a run that arrived here would otherwise be measured as the
+/// one placeholder character it is made of and drawn a formula's width short.
+fn preview_grid_cells(runs: &[PreviewRun], advance: f32) -> Vec<PreviewGridCell> {
+    let mut cells = Vec::new();
+    let mut line = 0usize;
+    for (index, run) in runs.iter().enumerate() {
+        let text = preview_run_text(run);
+        if let Some(width) = run.inline_box_px {
+            cells.push(PreviewGridCell {
+                run: index,
+                text: 0..text.len(),
+                line: line..line + text.len(),
+                target_px: width,
+            });
+            line += text.len();
+            continue;
+        }
+        let mut at = 0usize;
+        for cluster in bt_unicode::graphemes(text) {
+            #[allow(clippy::cast_precision_loss)]
+            let target_px = bt_unicode::cluster_width(cluster) as f32 * advance;
+            cells.push(PreviewGridCell {
+                run: index,
+                text: at..at + cluster.len(),
+                line: line..line + cluster.len(),
+                target_px,
+            });
+            at += cluster.len();
+            line += cluster.len();
+        }
+    }
+    cells
+}
+
+/// Fill a buffer with a grid paragraph's cells, one attribute span each.
+///
+/// The same attributes [`set_preview_runs`] gives the run a cell came from, plus
+/// the tracking that lands it on its cells. One span per cell rather than per
+/// run because the tracking is per cell — and the shaping is unchanged by that,
+/// for the reason [`shape_preview_paragraph`] states.
+fn set_preview_grid_cells(
+    buffer: &mut Buffer,
+    runs: &[PreviewRun],
+    cells: &[PreviewGridCell],
+    tracking_em: &[f32],
+    letter_spacing_em: f32,
+    metrics: Metrics,
+) {
+    let default = preview_run_attrs(false, false, false, letter_spacing_em);
+    buffer.set_rich_text(
+        cells.iter().enumerate().map(|(index, cell)| {
+            let run = &runs[cell.run];
+            let [r, g, b] = run.color;
+            let tracking = tracking_em.get(index).copied().unwrap_or(0.0);
+            let mut attrs =
+                preview_run_attrs(run.mono, run.bold, run.italic, letter_spacing_em + tracking)
+                    .color(Color::rgba(r, g, b, 255));
+            // [`set_preview_runs`]'s own rule, said again over the cells one run
+            // was cut into: the size is the run's, the leading is the
+            // paragraph's, and a box carries neither.
+            if run.font_scale != 1.0 && run.inline_box_px.is_none() {
+                attrs = attrs.metrics(Metrics::new(
+                    (metrics.font_size * run.font_scale).max(1.0),
+                    metrics.line_height,
+                ));
+            }
+            (&preview_run_text(run)[cell.text.clone()], attrs)
+        }),
+        &default,
+        Shaping::Advanced,
+        None,
+    );
+}
+
+/// **What each cell of a shaped grid paragraph must be tracked by to advance
+/// its cells**, in em.
+///
+/// The gap between what a cluster advanced naturally and what the grid gives it,
+/// shared out over the glyphs the cluster was shaped into — the shaper adds
+/// letter spacing once per glyph, so a cluster of three glyphs asked for the
+/// whole gap three times would be tracked three times too far.
+///
+/// Zero for a cell that came back with no glyphs at all: there is nothing there
+/// to move, and a tracking with nothing to apply it to would be a second shaping
+/// pass bought for no change.
+fn preview_grid_tracking(
+    buffer: &Buffer,
+    runs: &[PreviewRun],
+    cells: &[PreviewGridCell],
+    metrics: Metrics,
+) -> Vec<f32> {
+    let mut natural_px = vec![0.0_f32; cells.len()];
+    let mut glyphs = vec![0usize; cells.len()];
+    for line in buffer.layout_runs() {
+        for glyph in line.glyphs {
+            // The cells partition the paragraph's bytes in order, so the cell a
+            // glyph belongs to is the last one that starts at or before it.
+            let index = cells.partition_point(|cell| cell.line.start <= glyph.start);
+            let Some(index) = index.checked_sub(1) else {
+                continue;
+            };
+            if glyph.start >= cells[index].line.end {
+                continue;
+            }
+            natural_px[index] += glyph.w;
+            glyphs[index] += 1;
+        }
+    }
+    cells
+        .iter()
+        .enumerate()
+        .map(|(index, cell)| {
+            if glyphs[index] == 0 {
+                return 0.0;
+            }
+            let run = &runs[cell.run];
+            let font_size = if run.font_scale != 1.0 && run.inline_box_px.is_none() {
+                (metrics.font_size * run.font_scale).max(1.0)
+            } else {
+                metrics.font_size
+            };
+            #[allow(clippy::cast_precision_loss)]
+            let glyphs = glyphs[index] as f32;
+            (cell.target_px - natural_px[index]) / font_size.max(1.0) / glyphs
+        })
+        .collect()
 }
 
 /// Every byte of a paragraph the shaper is given — the string
@@ -19115,6 +19335,7 @@ mod tests {
                     letter_spacing_em: 0.0,
                     align_right: false,
                     align_center: false,
+                    cell_advance: None,
                 });
             }
         }
@@ -19520,6 +19741,7 @@ mod tests {
                 letter_spacing_em: 0.0,
                 align_right: false,
                 align_center: false,
+                cell_advance: None,
             });
             top += line;
             index += 1;
@@ -19688,6 +19910,7 @@ mod tests {
                 letter_spacing_em: 0.0,
                 align_right: false,
                 align_center: false,
+                cell_advance: None,
             }],
             blocks: Vec::new(),
             rasters: Vec::new(),
@@ -20166,6 +20389,7 @@ mod tests {
                     letter_spacing_em: 0.0,
                     align_right: false,
                     align_center: false,
+                    cell_advance: None,
                 });
                 top += line;
             }
@@ -20445,6 +20669,7 @@ mod tests {
                     letter_spacing_em: 0.0,
                     align_right: false,
                     align_center: false,
+                    cell_advance: None,
                 });
                 top += line;
                 rung += 1;
@@ -20617,6 +20842,7 @@ mod tests {
                     letter_spacing_em: 0.0,
                     align_right: false,
                     align_center: false,
+                    cell_advance: None,
                 }],
                 blocks: Vec::new(),
                 rasters: Vec::new(),
@@ -22220,6 +22446,133 @@ mod tests {
         );
     }
 
+    /// **Every cluster of a grid paragraph is drawn at the column the editor
+    /// counts it at** (user report, 2026-09-11: the caret in an edited Chinese
+    /// paragraph stood a gap to the right of the character it was editing).
+    ///
+    /// The source faces measure everything in cells — the caret's x, the band
+    /// under a selection, the click that seats the caret, the soft wrap — and
+    /// every one of them is `column × advance`. The letters were not: the
+    /// monospace family carries no CJK, and the fallback face's ideograph
+    /// advances by its own em. This asks the **real draw path** — the one buffer
+    /// [`shape_preview_paragraph`] builds and [`shape_preview_body`] hands
+    /// glyphon — where each cluster's glyphs actually landed, and requires it to
+    /// be the grid's own answer to the last fraction of a pixel.
+    ///
+    /// The control half is the bug itself, measured: the same line without
+    /// [`PreviewParagraph::cell_advance`] comes out *short* of the grid, which
+    /// is the gap the caret used to stand in.
+    ///
+    /// MUTATIONS: divide the tracking between the glyphs of a cluster and a line
+    /// of Chinese is drawn twice as loose as its cells; skip the second shaping
+    /// pass and the drift comes straight back.
+    #[test]
+    fn every_cluster_of_a_grid_paragraph_stands_on_its_own_column() {
+        let mut font_system = terminal_font_system();
+        // The user's own face and scale: 16px Consolas on a 2× monitor.
+        const FONT_PX: f32 = 32.0;
+        const LINE_PX: f32 = 48.0;
+        let advance = {
+            const CELLS: usize = 32;
+            let sample = "M".repeat(CELLS);
+            let mut buffer = Buffer::new(&mut font_system, Metrics::new(FONT_PX, LINE_PX));
+            buffer.set_wrap(Wrap::None);
+            buffer.set_size(None, Some(LINE_PX));
+            buffer.set_text(
+                &sample,
+                &Attrs::new().family(Family::Monospace),
+                Shaping::Advanced,
+                None,
+            );
+            buffer.shape_until_scroll(&mut font_system, false);
+            buffer
+                .layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0_f32, f32::max)
+                / CELLS as f32
+        };
+        let paragraph = |text: &str, cell_advance: Option<f32>| PreviewParagraph {
+            runs: vec![PreviewRun {
+                text: text.to_owned(),
+                color: [0, 0, 0],
+                mono: true,
+                bold: false,
+                italic: false,
+                font_scale: 1.0,
+                inline_box_px: None,
+            }],
+            rect: [0.0, 0.0, 4000.0, LINE_PX],
+            font_size_px: FONT_PX,
+            line_height_px: LINE_PX,
+            wrap: false,
+            letter_spacing_em: 0.0,
+            align_right: false,
+            align_center: false,
+            cell_advance,
+        };
+        // The paragraph of the report, and two shapes around it: a line that is
+        // nothing but ideographs, and one that changes script twice.
+        for text in [
+            "网页预览需要 **WebView2 Runtime**。",
+            "缺少时预览窗格提示。",
+            "abc 中文 def 汉字",
+        ] {
+            let on_the_grid = paragraph(text, Some(advance));
+            let buffer = shape_preview_paragraph(&mut font_system, &on_the_grid);
+            let glyphs: Vec<_> = buffer
+                .layout_runs()
+                .flat_map(|run| run.glyphs.iter())
+                .collect();
+            let mut byte = 0usize;
+            let mut column = 0usize;
+            for cluster in bt_unicode::graphemes(text) {
+                let at = glyphs
+                    .iter()
+                    .find(|glyph| glyph.start == byte)
+                    .unwrap_or_else(|| panic!("{text:?} draws a glyph for the cluster at {byte}"));
+                #[allow(clippy::cast_precision_loss)]
+                let want = column as f32 * advance;
+                assert!(
+                    (at.x - want).abs() < 0.01,
+                    "{text:?}: the cluster {cluster:?} at byte {byte} is drawn at {} and the \
+                     caret at column {column} is drawn at {want}",
+                    at.x,
+                );
+                byte += cluster.len();
+                column += bt_unicode::cluster_width(cluster);
+            }
+            // And the line as a whole is exactly as wide as its cells, which is
+            // what the soft wrap folds against.
+            #[allow(clippy::cast_precision_loss)]
+            let cells = column as f32 * advance;
+            let drawn = buffer
+                .layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0_f32, f32::max);
+            assert!(
+                (drawn - cells).abs() < 0.01,
+                "{text:?}: {column} cells is {cells}px and the line drew {drawn}px",
+            );
+            // The control: without the grid the same line is short of it, by a
+            // fraction of a cell for every wide cluster on it.
+            let wide = bt_unicode::graphemes(text)
+                .filter(|cluster| bt_unicode::cluster_width(cluster) == 2)
+                .count();
+            let loose = shape_preview_paragraph(&mut font_system, &paragraph(text, None));
+            let shaped = loose
+                .layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0_f32, f32::max);
+            #[allow(clippy::cast_precision_loss)]
+            let drift = (cells - shaped) / wide as f32;
+            assert!(
+                drift > 1.0,
+                "{text:?}: the shaper left to itself draws {shaped}px against the grid's \
+                 {cells}px — {drift}px a wide cluster, which is the gap the caret stood in",
+            );
+        }
+    }
+
     /// **A pointer put on a paragraph names the byte it is standing on, and a
     /// pointer put off one names an end** (user report 2026-08-28: 「渲染后的 md
     /// 文字无法选中」).
@@ -22255,6 +22608,7 @@ mod tests {
             letter_spacing_em: 0.0,
             align_right: false,
             align_center: false,
+            cell_advance: None,
         };
         assert_eq!(
             preview_paragraph_text(&paragraph),
@@ -22335,6 +22689,7 @@ mod tests {
             letter_spacing_em: 0.0,
             align_right: false,
             align_center: false,
+            cell_advance: None,
         };
         assert!(
             preview_highlight(&mut font_system, &paragraph, 5..5).is_empty(),

@@ -95,7 +95,18 @@ impl CaretSeat {
 /// and not in the last block, which is right: that is the empty line the editor's
 /// own line model insists a body ending in a break has ([`preview_edit::line_starts`]),
 /// and a caret may stand on it.
-pub fn caret_seat(ranges: &[Range<usize>], caret: usize) -> CaretSeat {
+///
+/// **A file that does *not* end in a break is the exception, and it is not one**
+/// (user report, 2026-09-11; audit A6). There is no empty line after `abc`: the
+/// last line of that file is `abc` itself, and the end of it is where `End`, a
+/// press past the last letter and every keystroke typed at the end of the
+/// document put the caret. The block's range ends there too — it has no ending
+/// to cover — so the rule above would read that one position as a gap and draw
+/// the caret on a line that does not exist, under a paragraph that never became
+/// source. So **the end of an unterminated last block belongs to that block**.
+/// It is exactly one position, told apart from the genuine trailing blank line
+/// by the file's own last byte, which is the only thing that distinguishes them.
+pub fn caret_seat(content: &str, ranges: &[Range<usize>], caret: usize) -> CaretSeat {
     // The ranges are ordered and non-overlapping, so the first one that has not
     // already ended is the only one that can hold this byte. `partition_point`
     // rather than a scan because a megabyte of markdown is thousands of blocks
@@ -103,8 +114,16 @@ pub fn caret_seat(ranges: &[Range<usize>], caret: usize) -> CaretSeat {
     let next = ranges.partition_point(|range| range.end <= caret);
     match ranges.get(next) {
         Some(range) if range.start <= caret => CaretSeat::Block(next),
-        _ => CaretSeat::Gap {
-            after: next.checked_sub(1),
+        _ => match next.checked_sub(1) {
+            Some(last)
+                if last + 1 == ranges.len()
+                    && ranges[last].end == caret
+                    && caret == content.len()
+                    && !content.ends_with('\n') =>
+            {
+                CaretSeat::Block(last)
+            }
+            after => CaretSeat::Gap { after },
         },
     }
 }
@@ -155,10 +174,17 @@ pub fn place_in_block(
 ) -> Option<(usize, usize)> {
     let range = ranges.get(block)?;
     let offset = preview_edit::normalize(content, offset);
-    if offset < range.start || offset >= range.end {
+    let text = block_source(content, range);
+    // **The end of the block's last line is the block's**, which is the same
+    // rule said in bytes rather than in ranges: a block that ends in a break has
+    // that break past this bound (and `range.end` past *that*), while the last
+    // block of a file with no trailing break ends exactly here — the position
+    // `End` puts the caret at, which used to be refused as though it were the
+    // next block's ([`caret_seat`], audit A6).
+    let last = range.start + text.len();
+    if offset < range.start || offset > last {
         return None;
     }
-    let text = block_source(content, range);
     let local = offset - range.start;
     // An offset inside the block's own trailing break — there is exactly one
     // byte of it a normalised caret can be at, the `\n` of a bare LF — is the
@@ -247,6 +273,29 @@ impl BlockRows<'_> {
             (from + column.min(to.saturating_sub(from))).min(preview_edit::line_columns(text));
         let (line_start, _) = preview_edit::line_bounds(self.text, &starts, line);
         self.start + line_start + preview_edit::byte_at_column(text, column)
+    }
+
+    /// **The file byte a press inside a drawn row names** — [`Self::offset_at`]
+    /// asked in the coordinate a pointer arrives in, and the same clamps.
+    ///
+    /// Cells rather than a cell: a press lands somewhere *inside* a character,
+    /// and which side of a two-cell ideograph it belongs to is a question a
+    /// whole-cell column has already thrown the answer to away. See
+    /// [`preview_edit::byte_at_x`].
+    #[must_use]
+    pub fn offset_at_x(&self, row: usize, columns: f32) -> usize {
+        let Some((line, from, to)) = self.wrap.row_span(row) else {
+            return self.start + self.text.len();
+        };
+        let starts = preview_edit::line_starts(self.text);
+        let text = preview_edit::line_text(self.text, &starts, line);
+        // The row's own span, exactly as [`Self::offset_at`] cuts it: a press
+        // past the end of a folded row is the end of that row and not a reach
+        // into the row under it.
+        #[allow(clippy::cast_precision_loss)]
+        let columns = (from as f32 + columns.max(0.0)).min(to as f32);
+        let (line_start, _) = preview_edit::line_bounds(self.text, &starts, line);
+        self.start + line_start + preview_edit::byte_at_x(text, columns)
     }
 }
 
@@ -367,22 +416,31 @@ mod tests {
     #[test]
     fn the_block_that_owns_a_caret_is_the_one_whose_range_holds_it() {
         // "one\n\ntwo\n" — two paragraphs with a blank line between them.
+        let text = "one\n\ntwo\n";
         let spans = ranges(&[(0, 4), (5, 9)]);
-        assert_eq!(caret_seat(&spans, 0), CaretSeat::Block(0), "at the start");
-        assert_eq!(caret_seat(&spans, 2), CaretSeat::Block(0), "inside");
         assert_eq!(
-            caret_seat(&spans, 3),
+            caret_seat(text, &spans, 0),
+            CaretSeat::Block(0),
+            "at the start"
+        );
+        assert_eq!(caret_seat(text, &spans, 2), CaretSeat::Block(0), "inside");
+        assert_eq!(
+            caret_seat(text, &spans, 3),
             CaretSeat::Block(0),
             "the last byte of its own text is still its own",
         );
         assert_eq!(
-            caret_seat(&spans, 4),
+            caret_seat(text, &spans, 4),
             CaretSeat::Gap { after: Some(0) },
             "one past the range is the blank line, and the blank line is nobody's",
         );
-        assert_eq!(caret_seat(&spans, 5), CaretSeat::Block(1), "the next block");
         assert_eq!(
-            caret_seat(&spans, 9),
+            caret_seat(text, &spans, 5),
+            CaretSeat::Block(1),
+            "the next block"
+        );
+        assert_eq!(
+            caret_seat(text, &spans, 9),
             CaretSeat::Gap { after: Some(1) },
             "and the empty line a file ending in a break has is a gap, which is \
              exactly where a caret at the end of a document stands",
@@ -397,21 +455,21 @@ mod tests {
     /// corner.
     #[test]
     fn adjacent_blocks_hand_the_caret_straight_over() {
-        // "# head\ntext\n"
+        let text = "# head\ntext\n";
         let spans = ranges(&[(0, 7), (7, 12)]);
-        assert_eq!(caret_seat(&spans, 6), CaretSeat::Block(0));
+        assert_eq!(caret_seat(text, &spans, 6), CaretSeat::Block(0));
         assert_eq!(
-            caret_seat(&spans, 7),
+            caret_seat(text, &spans, 7),
             CaretSeat::Block(1),
             "no gap to fall into: the next block starts on this very byte",
         );
         assert_eq!(
-            caret_seat(&[], 0),
+            caret_seat("", &[], 0),
             CaretSeat::Gap { after: None },
             "an empty document is one gap, and the caret is in front of nothing",
         );
         assert_eq!(
-            caret_seat(&spans, 0),
+            caret_seat(text, &spans, 0),
             CaretSeat::Block(0),
             "and a caret in front of the first block of a document that has one \
              is in that block, because the block starts at the first byte",
@@ -425,10 +483,79 @@ mod tests {
     /// is drawn at the top of the page.
     #[test]
     fn a_caret_in_front_of_every_block_is_a_gap_under_nothing() {
+        let text = "\n\n\n\ntext\n";
         let spans = ranges(&[(4, 8)]);
-        assert_eq!(caret_seat(&spans, 0), CaretSeat::Gap { after: None });
-        assert_eq!(caret_seat(&spans, 3), CaretSeat::Gap { after: None });
-        assert_eq!(caret_seat(&spans, 4), CaretSeat::Block(0));
+        assert_eq!(caret_seat(text, &spans, 0), CaretSeat::Gap { after: None });
+        assert_eq!(caret_seat(text, &spans, 3), CaretSeat::Gap { after: None });
+        assert_eq!(caret_seat(text, &spans, 4), CaretSeat::Block(0));
+    }
+
+    /// **The end of a file that does not end in a break belongs to its last
+    /// block** (user report, 2026-09-11; audit A6).
+    ///
+    /// A block's range covers its own line ending, so the byte past the range is
+    /// the blank line after it and is nobody's. A file written without a last
+    /// break has no such line: the range ends where the text does, and that one
+    /// position — where `End` stands, where every character typed at the end of
+    /// the document goes — was read as a gap. The paragraph was never drawn as
+    /// source and the caret was struck at the left margin of a line below it
+    /// that does not exist.
+    ///
+    /// MUTATION: drop the `!content.ends_with('\n')` clause and the genuine
+    /// trailing blank line is swallowed by the last block, so pressing Enter at
+    /// the end of a document leaves the old block drawn as source with the caret
+    /// nowhere in it.
+    #[test]
+    fn the_end_of_an_unterminated_last_block_is_that_blocks_own() {
+        let content = "abc";
+        let spans = ranges(&[(0, 3)]);
+        assert_eq!(
+            caret_seat(content, &spans, 3),
+            CaretSeat::Block(0),
+            "End on the only line of the file is inside the block it is the end of",
+        );
+        assert_eq!(
+            place_in_block(content, &spans, 0, 3),
+            Some((0, 3)),
+            "on its first line, three columns in — after the `c`",
+        );
+        // The same file with the break it was missing: that byte is the empty
+        // last line the editor's own line model insists on, and it is a gap.
+        let ended = "abc\n";
+        let spans = ranges(&[(0, 4)]);
+        assert_eq!(
+            caret_seat(ended, &spans, 4),
+            CaretSeat::Gap { after: Some(0) },
+            "a file that does end in a break still has its empty last line",
+        );
+        assert_eq!(
+            caret_seat(ended, &spans, 3),
+            CaretSeat::Block(0),
+            "and the end of its text is still the block's",
+        );
+        assert_eq!(place_in_block(ended, &spans, 0, 3), Some((0, 3)));
+        // Two blocks, the last of them unterminated: only the very end of the
+        // file is affected, and the gap between them is untouched.
+        let two = "one\n\ntwo";
+        let spans = ranges(&[(0, 4), (5, 8)]);
+        assert_eq!(
+            caret_seat(two, &spans, 4),
+            CaretSeat::Gap { after: Some(0) },
+            "the blank line between two paragraphs is nobody's, as it ever was",
+        );
+        assert_eq!(caret_seat(two, &spans, 8), CaretSeat::Block(1));
+        assert_eq!(place_in_block(two, &spans, 1, 8), Some((0, 3)));
+        // CRLF, where the ending is two bytes and a caret may stand at neither
+        // of the positions inside it.
+        let crlf = "one\r\n\r\ntwo";
+        let spans = ranges(&[(0, 5), (7, 10)]);
+        assert_eq!(caret_seat(crlf, &spans, 10), CaretSeat::Block(1));
+        assert_eq!(place_in_block(crlf, &spans, 1, 10), Some((0, 3)));
+        assert_eq!(
+            place_in_block(crlf, &spans, 0, 3),
+            Some((0, 3)),
+            "and the end of a CRLF line is still the end of its text",
+        );
     }
 
     /// **Row and column inside a block, on both line endings** (§7.1.3o's own
@@ -617,7 +744,7 @@ mod tests {
         ));
         assert_eq!(caret.caret, 4, "the blank line between the two paragraphs");
         assert_eq!(
-            caret_seat(&spans, caret.caret),
+            caret_seat(content, &spans, caret.caret),
             CaretSeat::Gap { after: Some(0) },
             "which is a gap, and a gap is drawn as one empty source line",
         );
@@ -630,7 +757,10 @@ mod tests {
             10
         ));
         assert_eq!(caret.caret, 6, "one column into the second paragraph");
-        assert_eq!(caret_seat(&spans, caret.caret), CaretSeat::Block(1));
+        assert_eq!(
+            caret_seat(content, &spans, caret.caret),
+            CaretSeat::Block(1)
+        );
     }
 
     /// **Up off the top row lands in the block above**, and the desired column
