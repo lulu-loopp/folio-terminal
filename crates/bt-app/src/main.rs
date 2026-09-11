@@ -10721,6 +10721,23 @@ struct WindowRuntime {
     taskbar_auto_hidden: bool,
     ime_system_caret: bt_platform::ImeSystemCaret,
     pointer_position: Option<PhysicalPosition<f64>>,
+    /// **Where the pointer was last seen, kept after it has gone.**
+    ///
+    /// [`Self::pointer_position`] is "where the hand is", and every hover and
+    /// every press is answered from it precisely so that a window the pointer
+    /// has left answers nothing. A **button coming up** is the one event that
+    /// must be heard anyway: it is what ends the gestures this window is
+    /// holding — a carried picture, a dragged divider, a selection being drawn —
+    /// and those are held *because* the hand may travel outside the window while
+    /// it works, which is the case they were written for. A release dropped for
+    /// want of a pointer leaves the hand closed for ever: the picture goes on
+    /// following the pointer with the button up, and no later gesture can put it
+    /// down again.
+    ///
+    /// So this remembers the last position across a `CursorLeft` and is read by
+    /// exactly one caller, the release. It is never a substitute for the live
+    /// answer: a hover asked of a hand that has gone is a hover that lies.
+    pointer_last_seen: Option<PhysicalPosition<f64>>,
     mouse_route: Option<MouseRoute>,
     click_tracker: ClickTracker,
     line_wheel_remainder: f64,
@@ -16469,6 +16486,33 @@ fn release_due_leaf_resize(
     leaf.grid = pending.grid;
     leaf.conpty_grid = pending.grid;
     Ok((Some(commit), wake))
+}
+
+/// **Where a button event is answered from** (user report, 2026-09-10).
+///
+/// `live` is [`WindowRuntime::pointer_position`] — where the hand *is* — and it
+/// is `None` the moment winit says `CursorLeft`. `last_seen` is
+/// [`WindowRuntime::pointer_last_seen`], the same value kept after the hand has
+/// gone.
+///
+/// **A button coming up is answered from the remembered place when the live one
+/// has gone; a button going down is not.** Every gesture this window holds is
+/// ended inside `chrome_mouse_input`, and every one of them is held on purpose
+/// while the hand works *outside* its own box — a picture panned past its pane,
+/// a divider dragged past the window's edge, a selection drawn off the end of a
+/// document. A release that cannot reach that router ends nothing, so the hand
+/// stays closed and the next gesture starts from the one that never finished. A
+/// press has no such thing to finish, and a window the pointer has left has no
+/// honest answer to "what is under it", so a press asks only the live pointer.
+fn button_router_position(
+    state: ElementState,
+    live: Option<PhysicalPosition<f64>>,
+    last_seen: Option<PhysicalPosition<f64>>,
+) -> Option<PhysicalPosition<f64>> {
+    match state {
+        ElementState::Released => live.or(last_seen),
+        ElementState::Pressed => live,
+    }
 }
 
 /// Who owns the pointer between a press and its release.
@@ -33126,6 +33170,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         taskbar_auto_hidden: false,
         ime_system_caret,
         pointer_position: None,
+        pointer_last_seen: None,
         mouse_route: None,
         click_tracker: ClickTracker::default(),
         line_wheel_remainder: 0.0,
@@ -79700,6 +79745,7 @@ impl Runtime<'_> {
 
     fn pointer_moved(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
         self.window.pointer_position = Some(position);
+        self.window.pointer_last_seen = Some(position);
         // **The hosted page, before anything returns**, for the reason the two
         // chevron clocks below are told: a page's own hover ends when the
         // pointer is somewhere else, and every branch under this one consumes
@@ -85426,7 +85472,17 @@ impl Runtime<'_> {
         {
             return Ok(());
         }
-        if let Some(position) = self.window.pointer_position
+        // **A button coming up is heard even after the pointer has left this
+        // window**, and a button going down is not — the whole of that rule is
+        // [`button_router_position`], which is where its reasons are written. A
+        // hover is not given the grace either, for the same reason a press is
+        // not: it asks where the hand *is*.
+        let router_position = button_router_position(
+            state,
+            self.window.pointer_position,
+            self.window.pointer_last_seen,
+        );
+        if let Some(position) = router_position
             && self.chrome_mouse_input(state, button, position)?
         {
             return Ok(());
@@ -93857,6 +93913,30 @@ mod key_hint_spend_tests {
                 "{signature} spends the hold before the first surface can take the gesture home"
             );
         }
+    }
+
+    /// **The button router is reached from the live pointer, and a release from
+    /// the remembered one too** — the source half of
+    /// [`a_release_reaches_the_router_after_the_pointer_has_left`], which holds
+    /// the rule itself. A pin, because this door takes the whole window: what a
+    /// machine can hold here is that the one function that knows the rule is the
+    /// one this door asks.
+    ///
+    /// RED GATE: read `self.window.pointer_position` straight into the `if let`
+    /// below, as this door did until 2026-09-10, and it goes red.
+    #[test]
+    fn the_button_router_is_reached_through_the_one_function_that_knows_the_rule() {
+        let text = body(
+            "fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
+        );
+        assert!(
+            text.contains("let router_position = button_router_position("),
+            "the door asks `button_router_position` where to answer from:\n{text}"
+        );
+        assert!(
+            text.contains("if let Some(position) = router_position"),
+            "and routes from that answer and from nothing else:\n{text}"
+        );
     }
 }
 
@@ -119051,6 +119131,147 @@ mod tests {
         assert_eq!(
             rect_size(image_destination(ZOOM_BODY, image, ImageZoom::scaled(0.0))),
             (400.0 * IMAGE_ZOOM_MIN, 300.0 * IMAGE_ZOOM_MIN)
+        );
+    }
+
+    /// **A picture bigger than its body on both axes is still somewhere on
+    /// it** — the invariant the 2026-09-10 report was read against.
+    ///
+    /// A 2720×3000 picture at 123% in a body a third its size overruns the body
+    /// on every side, and that is the *ordinary* look of a zoomed picture, not
+    /// an edge case: the rectangle is real, it covers the body outright, and the
+    /// pan has room on both axes. The report's blank pane was not this
+    /// arithmetic — it was the shared texture cache dropping the raster between
+    /// the frame resolving it and the pass issuing it (`bt-render`'s
+    /// `CachedMathTexture`) — and this stands so that a future clamp cannot
+    /// quietly answer the same report by shrinking the rectangle instead.
+    #[test]
+    fn a_picture_larger_than_its_body_on_both_axes_still_covers_it() {
+        // The reader's own file and the reader's own pane, in physical pixels.
+        let image = [2720_u32, 3000];
+        let body = [200.0_f32, 300.0, 1475.0, 2028.0];
+        let zoom = ImageZoom::scaled(1.23);
+        let rect = image_destination(body, image, zoom);
+        let (width, height) = rect_size(rect);
+        assert!(
+            width > body[2] - body[0] && height > body[3] - body[1],
+            "the drawn picture really is larger than the body on both axes"
+        );
+        assert!(
+            rect[0] < body[2] && rect[2] > body[0] && rect[1] < body[3] && rect[3] > body[1],
+            "and it is drawn across the body rather than anywhere else"
+        );
+        assert!(
+            rect[0] <= body[0] && rect[1] <= body[1] && rect[2] >= body[2] && rect[3] >= body[3],
+            "a picture this size leaves no ground showing on any side"
+        );
+    }
+
+    /// **A picture taller than its body is carried up and down, on the same
+    /// terms it is carried left and right** (user report, 2026-09-10).
+    ///
+    /// One rule per axis and the same rule — [`clamp_image_pan`] is handed the
+    /// body's own extent on the axis it is asked about, not the fraction
+    /// [`image_fit_scale`] reserves for the meta line — so the travel each axis
+    /// gets is half its own overflow and nothing else. Written down because the
+    /// report said the vertical half did not move, and the only way to keep that
+    /// true is to state what "moves" means.
+    #[test]
+    fn a_picture_taller_than_its_body_is_carried_up_and_down() {
+        let image = [2720_u32, 3000];
+        let body = [200.0_f32, 300.0, 1475.0, 2028.0];
+        let zoom = ImageZoom::scaled(1.23);
+        let rested = image_destination(body, image, zoom);
+        let (width, height) = rect_size(rested);
+        let (across, down) = (
+            (width - (body[2] - body[0])) / 2.0,
+            (height - (body[3] - body[1])) / 2.0,
+        );
+        assert!(across > 0.0 && down > 0.0, "there is road on both axes");
+
+        let carried = |pan: [f32; 2]| image_destination(body, image, ImageZoom { pan, ..zoom });
+        assert_close(
+            carried([0.0, -300.0])[1],
+            rested[1] - 300.0,
+            "three hundred pixels up is three hundred pixels up",
+        );
+        assert_close(
+            carried([-300.0, 0.0])[0],
+            rested[0] - 300.0,
+            "and the same hand across gets the same distance",
+        );
+        // And each axis stops at its own end of the road, never at the other's:
+        // the edge that comes to rest is the one the hand was travelling
+        // towards, and no ground is opened behind it.
+        assert_close(
+            carried([0.0, -down * 4.0])[3],
+            body[3],
+            "carried up past the end, the picture's bottom edge rests on the body's",
+        );
+        assert_close(
+            carried([0.0, down * 4.0])[1],
+            body[1],
+            "and carried down past the end, its top edge rests on the body's top",
+        );
+        assert_close(
+            carried([across * 4.0, 0.0])[0],
+            body[0],
+            "the same sentence sideways: carried right past the end, its left \
+             edge rests on the body's left",
+        );
+    }
+
+    /// RED — **a button coming up is answered even after the pointer has left
+    /// the window** (user report, 2026-09-10: "a zoomed picture pans left and
+    /// right but not up and down").
+    ///
+    /// A pan is put down inside `chrome_mouse_input`, and so is every other
+    /// gesture this window holds; all of them are held on purpose while the hand
+    /// works outside their own box. [`Runtime::mouse_input`] reached that router
+    /// only through the live pointer, which winit clears on `CursorLeft` — so a
+    /// release that arrived after the hand had left the window ended nothing,
+    /// the picture stayed in the hand, and the reader's next deliberate drag
+    /// began from a gesture that had never finished.
+    ///
+    /// **Why it read as one axis and not as both.** A preview pane fills the
+    /// window's height, so a pan upwards or downwards leaves the window through
+    /// the top or bottom edge within a stroke or two, while a pan sideways
+    /// travels into the terminal pane beside it and never leaves at all. Up and
+    /// down was therefore the axis whose releases went missing. The arithmetic
+    /// is the same on both axes and always was —
+    /// [`a_picture_taller_than_its_body_is_carried_up_and_down`] is that half.
+    ///
+    /// MUTATION: answer `live` for both arms and the first case fails.
+    #[test]
+    fn a_release_reaches_the_router_after_the_pointer_has_left() {
+        let gone = None;
+        let seen = Some(PhysicalPosition::new(1040.0, 620.0));
+        let here = Some(PhysicalPosition::new(880.0, 410.0));
+        assert_eq!(
+            button_router_position(ElementState::Released, gone, seen),
+            seen,
+            "a release the hand has already carried out of the window is \
+             answered from where the hand was last seen, so the gesture it \
+             ends is ended"
+        );
+        assert_eq!(
+            button_router_position(ElementState::Pressed, gone, seen),
+            None,
+            "a press is not: it asks where the hand is, and a window the \
+             pointer has left has no answer"
+        );
+        for state in [ElementState::Pressed, ElementState::Released] {
+            assert_eq!(
+                button_router_position(state, here, seen),
+                here,
+                "and while the hand is in the window both answer from it, so \
+                 the memory is a fallback and never a second opinion"
+            );
+        }
+        assert_eq!(
+            button_router_position(ElementState::Released, gone, None),
+            None,
+            "a window the pointer has never been in answers nothing at all"
         );
     }
 

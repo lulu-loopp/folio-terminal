@@ -34,10 +34,25 @@
 #   is faster than any camera in a second process. `menu` therefore re-posts the
 #   move every 30ms, which is what a hand resting on a menu does anyway.
 #
+# Two more, learned by measuring a pan with `drag` on 2026-09-10:
+#
+# * **A drag is a run of moves and never one jump.** `-Steps 1` posts a single
+#   move to the far end, and what came out was a fraction of the distance asked
+#   for; eight to fifteen steps came out exact, four times running, on both
+#   axes. So measure a gesture with the steps a hand would have made.
+# * **Park the real cursor outside the target window.** Windows keeps sending
+#   that window real `WM_MOUSEMOVE` messages while the pointer rests over it,
+#   and they interleave with the posted ones — a pan then measures its delta
+#   against wherever the hand actually is and the result is noise. `place` the
+#   window somewhere the cursor is not before driving it.
+#
 #   .\post-probe.ps1 list  -ProcId <pid>                       → the process's windows, in z-order
 #   .\post-probe.ps1 place -ProcId <pid> [-W 1200] [-H 1000]   → side by side and raised, without activating
 #   .\post-probe.ps1 left  -ProcId <pid> -X .. -Y .. [-Window 0]
 #   .\post-probe.ps1 right -ProcId <pid> -X .. -Y ..           → the press that raises a context menu
+#   .\post-probe.ps1 drag  -ProcId <pid> -X .. -Y .. -ToX .. -ToY .. [-Steps 8]
+#                                                              → press, travel, release: the gesture a
+#                                                                click cannot stand in for
 #   .\post-probe.ps1 menu  -ProcId <pid> -X .. -Y .. -HoverX .. -HoverY ..
 #                          [-PressX .. -PressY ..] [-Out shot.png]
 #                                                              → open a menu, hold it open, photograph
@@ -48,7 +63,7 @@
 # coordinate read off a `ui-probe capture` is a coordinate this script can press.
 param(
   [Parameter(Position = 0, Mandatory = $true)]
-  [ValidateSet("list", "place", "left", "right", "menu", "type", "key", "shot", "wheel", "chord")]
+  [ValidateSet("list", "place", "left", "right", "drag", "menu", "type", "key", "shot", "wheel", "chord")]
   [string]$Cmd,
   [Parameter(Mandatory = $true)][int]$ProcId,
   [int]$Window = 0,
@@ -58,6 +73,9 @@ param(
   [int]$HoverY = 0,
   [int]$PressX = -1,
   [int]$PressY = -1,
+  # drag: where the hand lets go, the press being at -X/-Y.
+  [int]$ToX = 0,
+  [int]$ToY = 0,
   [int]$PumpMs = 1500,
   [int]$ShotAtMs = 500,
   [int]$W = 1200,
@@ -126,6 +144,23 @@ public class PostProbe {
     Move(h, x, y);
     PostMessage(h, right ? 0x0204u : 0x0201u, right ? (IntPtr)2 : (IntPtr)1, LP(x,y));
     PostMessage(h, right ? 0x0205u : 0x0202u, (IntPtr)0, LP(x,y));
+  }
+  /* A press, a hand travelling, and a release — the one gesture `Press` cannot
+     stand in for, because a pan is measured from move to move and a click that
+     goes down and up on one pixel travels nowhere. `MK_LBUTTON` rides in the
+     wParam of every move between the two, which is what a real drag carries and
+     what tells the app the button is still down. */
+  public static void Drag(IntPtr h, int x, int y, int toX, int toY, int steps) {
+    Move(h, x, y);
+    PostMessage(h, 0x0201, (IntPtr)1, LP(x,y));
+    if (steps < 1) steps = 1;
+    for (int i = 1; i <= steps; i++) {
+      int mx = x + (toX - x) * i / steps;
+      int my = y + (toY - y) * i / steps;
+      PostMessage(h, 0x0200, (IntPtr)1, LP(mx,my));
+      System.Threading.Thread.Sleep(30);
+    }
+    PostMessage(h, 0x0202, (IntPtr)0, LP(toX,toY));
   }
   [DllImport("user32.dll")] public static extern short VkKeyScanW(char c);
   [DllImport("user32.dll")] public static extern uint MapVirtualKeyW(uint code, uint type);
@@ -264,6 +299,10 @@ switch ($Cmd) {
   }
   "left"  { [PostProbe]::Press((Get-Target), $false, $X, $Y); "posted left at ($X,$Y) to window $Window" }
   "right" { [PostProbe]::Press((Get-Target), $true,  $X, $Y); "posted right at ($X,$Y) to window $Window" }
+  "drag" {
+    [PostProbe]::Drag((Get-Target), $X, $Y, $ToX, $ToY, $Steps)
+    "posted drag ($X,$Y) -> ($ToX,$ToY) in $Steps steps to window $Window"
+  }
   "menu" {
     # `$hwnd` again, and here it would have been `-H`: see Show-Windows' note.
     $hwnd = Get-Target
