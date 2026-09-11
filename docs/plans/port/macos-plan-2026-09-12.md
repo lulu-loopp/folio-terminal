@@ -1,236 +1,281 @@
 # Folio on macOS — the 0.4 implementation plan
 
-2026-09-12. Written against `main`, and against the measurements in
-`docs/plans/port/macos-spike-2026-09-07.md`, which this plan does not redo. The
-spike answered *how much of Folio is already a macOS program*; this answers
-*what order the rest is written in, by whom, on which machine, and what the
-owner has to check with his own eyes*.
+2026-09-12, revised the same day after a read-only Codex review (see the Review
+record at the end). Written against `main` at `9ff64ed` and against the
+measurements in `docs/plans/port/macos-spike-2026-09-07.md`, which this plan does
+not redo. The spike answered *how much of Folio is already a macOS program*; this
+answers *what order the rest is written in, on which machine, and what the owner
+has to see with their own eyes at each stop*.
 
-Everything here is a proposal. Nothing is dispatched until the owner has read it
-and a Codex read-only review has been taken on it.
+Everything here is a proposal. Nothing is dispatched until the owner has read it.
+
+---
+
+## 0. The ruling this plan is written under, and what it supersedes
+
+**The owner's ruling, 2026-09-11: after 0.3 ships, 0.4 is the macOS graphical
+version and 0.5 is remote. The first milestone is "opens a window and you can
+type in a shell". The Apple Developer account is in place. The plan goes to a
+Codex read-only review before any ticket is dispatched.**
+
+That ruling supersedes two dated statements still standing in the tree, and this
+section is the only place they are reconciled:
+
+- `docs/plans/port/macos-spike-2026-09-07.md:11` records an earlier ruling to
+  "take the class-B days now, **ship 0.4 on Windows**, and make the port its own
+  milestone after it". The class-B half happened; the sequencing half is
+  superseded.
+- `docs/plans/remote/research-2026-09-10.md:9` says "The order is ruled — **0.4 =
+  remote**, **0.5 = the macOS GUI port**." That is reversed.
+
+**The entry condition is the 0.3 release.** No ticket in this plan is dispatched
+before 0.3 is tagged and published. The one piece of shared work — a Unix rule
+for `resolve_default_shell`, which is also remote T2 — is dispatched from this
+plan and carries the remote requirement with it (M1-6).
 
 ---
 
 ## 1. Goal and non-goals
 
-**0.4 ships a signed and notarized macOS preview of Folio that a stranger can
-download, drag to `/Applications`, and open with no Gatekeeper dialog — with the
-reading surfaces at parity: a shell in a pane, the files column, the preview pane
-with Markdown (including in-place editing, which is 0.3's work and arrives on
-macOS for free), images, video and typeset math, multiple windows that come back
-where they were, and the attention channel that tells you a background agent
-finished.** Explicitly out of 0.4: Linux (the spike's §7 costs it separately at
-+35–45 agent-days and it reuses none of the expensive half); the 0.5 remote split
-(this plan is constrained not to make it harder — §4.6 — and otherwise leaves it
-alone); the games; anything shaped like an MSIX equivalent, because macOS has no
-first-page context menu to register into; a universal (`x86_64` + `arm64`)
-binary; a Homebrew cask; in-place self-update; and a macOS twin of
-`scripts/dev/ui-probe.ps1`, which the spike's §5 excludes from its numbers and
-which this plan excludes too, with the same warning that it is the likeliest
-thing here to be underestimated later.
+**0.4 ships a signed and notarized macOS preview that a stranger can download,
+open with the ordinary identified-developer confirmation, and use: a native shell
+in a pane, the files column, the preview pane with Markdown (including 0.3's
+in-place editing), images, video and typeset math, several windows that come back
+where they were, and the attention channel that says a background agent
+finished.** Out of 0.4: Linux (the spike's §7 costs it separately at +35–45
+agent-days); the 0.5 remote split, beyond the rule in §4.6 that keeps it
+possible; the games; any MSIX equivalent, because macOS has no first-page context
+menu to register into; a universal binary; a Homebrew cask; in-place
+self-update; and a macOS twin of `scripts/dev/ui-probe.ps1`, which the spike's §5
+excludes from its numbers and which this plan excludes too, with the same warning
+that it is the likeliest thing here to be underestimated later.
+
+**On the locked dependencies.** `Cargo.lock` pins **winit 0.30.13**, **wgpu
+30.0.0** and **wgpu-hal 30.0.0**. Their sources contain the AppKit backend, IME
+facilities, `OptionAsAlt`, custom-delegate guidance and the Metal surface
+backend. That establishes that **support exists; it does not establish
+correctness on macOS 26.6.** Nothing in this plan claims that this combination
+has passed Folio's IME, composition or lifecycle acceptance on that OS, and the
+probe phase in §3 exists precisely to find out.
 
 ---
 
-## 2. Milestones
+## 2. Preflight and milestones
 
-Each acceptance line is something the owner can check on the Mac mini's own
-screen, in one sitting, without reading a log.
+Preflight is administrative and is **not** a product milestone. The first product
+milestone is the owner's.
 
-### M0 — the toolchain, the empty backend, and the CI lane
+### P — preflight (administrative)
 
-Xcode selected and licensed; a Developer ID Application certificate in the
-login keychain; a notarization credential that works over a non-interactive ssh
-session; `crates/bt-platform/src/macos/` in the tree with **every** public item of
-the platform interface present and answering "not on this platform"; `bt-app`
-compiling and linking on macOS; `core-macos` in `.github/workflows/ci.yml` grown
-to check `bt-platform` and `bt-app` as well as the thirteen portable crates.
-The `.app` bundle layout arrives here too, unsigned — see §4.5 for why it cannot
-wait for M5.
+Xcode selected and licensed; a Developer ID Application certificate usable by
+`codesign` in the execution context releases will actually run in; the bundle
+identifier, signing team, and minimum supported macOS version fixed. §5 says what
+of this only the owner can do.
 
-> **Acceptance.** On the Mac mini: `security find-identity -v -p codesigning`
-> prints one `Developer ID Application` identity (it prints `0 valid identities
-> found` today), and `open ~/folio-port/wt/m0/target/debug/Folio.app` puts a
-> Folio icon in the Dock for a second and quits with a message saying the window
-> backend is not written yet.
+> **Gate (not an acceptance line).** On the Mac mini, `codesign` signs a
+> throwaway bundle with the real Developer ID identity from the same kind of
+> session a release will use, and `codesign -dv --verbose=4` reads the identity
+> back. This is P-3, and it is here rather than in M5 because every permission
+> Folio asks for is granted against a signing identity (§3, X-5).
 
-### M1 — "opens a window and you can type in a shell"
+### M1 — a fresh, Finder-launched Folio opens a window and a native shell
 
-The owner's named first gate, and the spike's own honest waypoint. A winit
-window on macOS; wgpu presenting through Metal on a `CAMetalLayer`; a zsh in a
-pane over the POSIX pty; the keyboard including the Cmd dialect; IME good enough
-to type Chinese; clipboard; the window's own geometry, backing scale, and dark
-mode.
+The owner's named first gate, stated the way they stated it. A winit window; wgpu
+presenting through Metal; **the whole existing startup path**, which today
+requires an `HWND`, a custom frame, a compositor and four Win32 bridges before it
+reaches a frame; a native shipped profile that resolves to a real shell; the
+keyboard with its Command/Control routing settled; IME good enough to type
+Chinese; clipboard.
 
-> **Acceptance.** On the Mac mini's screen: double-click `Folio.app`, a window
-> opens with a prompt in it; type `ls` and Enter and the directory lists; switch
-> to the system Pinyin input source, type `nihao`, pick 你好 from the candidate
-> window, and 你好 appears in the pane; `Cmd+C` / `Cmd+V` copy and paste;
-> `Cmd+T` opens a second tab and `Cmd+W` closes it.
+> **Acceptance.** With `~/Library/Application Support/Folio` deleted first, and
+> launched from Finder (not from a terminal): a window opens with a `zsh` prompt
+> in it — `echo $0` answers `zsh` and `pwd` answers the home directory. Type
+> `ls`, Enter, the directory lists. Select the word `Documents` in that output
+> with the mouse, `Cmd+C`, then `Cmd+V` into the same pane and it arrives as
+> text. Run `sleep 30` and `Ctrl+C` interrupts it — Command copies, Control still
+> reaches the child. Switch to the system Pinyin source, type `nihao`, pick 你好
+> from the candidate window, and 你好 appears in the pane. `Cmd+T` opens a second
+> tab, `Cmd+W` closes it.
 
 ### M2 — the reading surfaces
 
-The files column and its directory watcher; the preview pane over the same
-`read_head` worker it uses on Windows; Markdown including 0.3's in-place editing;
-images; typeset math; hover cards; the font and contrast policy checked against
-CoreText output rather than assumed from DirectWrite's.
+The files column and all three of its watch contracts; the preview pane over the
+same `read_head` worker it uses on Windows; Markdown including 0.3's editing;
+images; typeset math; the glyph output measured rather than assumed.
 
-> **Acceptance.** On the Mac mini's screen: open a folder in the files column,
-> click a `.md` file with a table and a CJK paragraph in it and the preview
-> renders it; edit a heading in place and `cat` the file in a pane to see the
-> change; click a `.png` and it shows; open a file with `$$\int_0^1 x\,dx$$` in it
-> and the integral is typeset, not printed as source.
+> **Acceptance.** With a clean data directory: open a folder in the files column;
+> click a `.md` file with a table and a CJK paragraph and the preview renders it;
+> change a heading in place, press the save chord, and `md5 <file>` in a pane
+> shows bytes that changed; then replace that file from a pane with
+> `printf '# other\n' > new && mv new <file>` and the preview updates without a
+> click; create a file in a *subdirectory* of the open folder from a pane and the
+> tree shows it; click a `.png` and it shows; open a file containing
+> `$$\int_0^1 x\,dx$$` and the integral is typeset, not printed as source.
 
-### M3 — chrome, several windows, and persistence
+### M3 — chrome, the application lifecycle, several windows, persistence
 
-The custom window frame against macOS's traffic lights; the application menu bar
-and the Cmd dialect of the whole shortcut table; multi-window restore; the
-storage directory; single instance over a Unix socket.
+The custom window frame against macOS's traffic lights; the application menu bar;
+**the AppKit application delegate** — Finder and Dock reopen, Services delivery,
+termination, last window closed — which is a different thing from the launch
+socket and is not covered by it; multi-window restore; the storage directory;
+one data directory, one writer.
 
-> **Acceptance.** On the Mac mini's screen: open two windows with different tabs
-> in each, quit with `Cmd+Q`, reopen — both windows come back with their tabs and
-> on the same screen; the menu bar has File / Edit / View / Window / Help and
-> every item in it works; `ls ~/Library/Application\ Support/Folio` lists
-> `session.json` and `settings.json`; launching Folio a second time from Finder
-> opens a window in the process that is already running rather than a second
-> Dock icon.
+> **Acceptance.** Open two windows with different tabs, move one, change a
+> setting, `Cmd+Q`, relaunch from Finder: both windows return with their tabs,
+> their geometry and the changed setting. Close every window and the app stays in
+> the Dock; click the Dock icon and a window appears. With Folio running, launch
+> it again from Finder — a window opens in the running process and no second Dock
+> icon appears. Start a second copy from a terminal with a *different*
+> `--data-dir`-equivalent and it runs independently; start one with the same data
+> directory and it hands over rather than writing. `ls ~/Library/Application\
+> Support/Folio` lists `session.json` and `settings.json`.
 
 ### M4 — the platform features that need rewriting
 
-Notifications via `UNUserNotificationCenter` and the Dock tile; the web preview
-via `WKWebView`; video first frame and playback via AVFoundation; the global
-hotkey and the Accessibility permission flow; "Open in Folio" from Finder via
-`NSServices`; the attention channel over a Unix domain socket; hang reports;
-the update check. **In 0.4:** all of the above. **Deferred out of 0.4:** a Finder
-Sync extension (a second signed bundle inside the app, for a submenu that is
-still not the first page — §8, Q3); the sparse-MSIX equivalent, which does not
-exist; in-place self-update, which becomes "open the release page"; `wsl.rs`,
-`psreadline.rs`, `msix.rs` and `explorer_command.rs`, which are Windows facts and
-are simply absent.
+Notifications; the web preview; video first frame and playback with sound; the
+global hotkey and its authorization; Services; the attention socket; crash
+reporting; the update check.
 
-> **Acceptance.** On the Mac mini's screen: start a long command in a background
-> tab, switch away, and when it finishes a Folio notification arrives in
-> Notification Center and clicking it raises that tab; a `.html` file in the
-> files column previews as a page; hovering a `.mp4` shows its first frame and
-> opening it plays with sound; the summon chord pulls a terminal down over
-> whatever is frontmost and puts the foreground back when it retracts;
-> right-clicking a folder in Finder offers *Services ▸ Open in Folio*.
+**In 0.4:** all of the above. **Deferred out of 0.4:** a Finder Sync extension
+(§8, Q3); the sparse-MSIX equivalent, which does not exist; in-place
+self-update, which becomes "open the release page"; `wsl.rs`, `psreadline.rs`,
+`msix.rs` and `explorer_command.rs`, which are Windows facts and are absent.
+
+> **Acceptance.** Each feature has its own procedure, because "a long command"
+> is not one. ① In a background tab with shell integration active, run
+> `sleep 5; printf '\a'` and switch away: a Folio notification arrives, and
+> clicking it raises that tab. With the tab in view and the window focused, the
+> same command produces no notification. ② Open `tests/assets/folio-pdf-test.html`
+> from the files column: it renders; the X-2 fixture set is re-run against it and
+> every row matches its recorded verdict. ③ Hover `folio-video-test.mp4`: the
+> first frame appears. Open it: it plays **with audible sound**, pauses, seeks,
+> and ends without a stuck frame. ④ With the shortcut disabled, the settings row
+> reads *not authorized*; use the in-app *Enable global shortcut* action, grant
+> Accessibility, and the chord then pulls a terminal down over a frontmost
+> TextEdit and returns the foreground to TextEdit on retract. ⑤ Right-click a
+> folder in Finder: *Services ▸ Open in Folio* opens a tab in that folder,
+> including for a folder whose name contains a space and a CJK character. ⑥ Kill
+> Folio with `kill -ABRT`; the next launch finds the system crash report and
+> names it in `diagnostics.log`. ⑦ The update check reports the current release
+> from a pane-visible settings row.
 
 ### M5 — signing, notarization, the DMG, and the release lane
 
-`codesign` with the hardened runtime and an entitlements file; `notarytool
-submit --wait`; `stapler staple`; a `.dmg` with the bundle and an `/Applications`
-alias; a `release.yml` lane that produces them.
+> **Acceptance.** In order, on the Mac mini: `codesign --verify --deep
+> --strict --verbose=2 Folio.app` passes; `spctl -a -vvv Folio.app` says
+> `accepted` with `source=Notarized Developer ID`; `spctl -a -vvv -t open
+> --context context:primary-signature Folio.dmg` says `accepted`; `xcrun stapler
+> validate` passes on **both** `Folio.app` and `Folio.dmg`. The notarization log
+> for each submission is retained beside the artifact.
 
-> **Acceptance.** On the Mac mini: `spctl -a -vvv -t install Folio.dmg` says
-> `accepted` and `source=Notarized Developer ID`, and `xcrun stapler validate
-> Folio.app` says `The validate action worked!`.
+### M6 — clean-user acceptance
 
-### M6 — acceptance on a machine that has never seen this build
+A second macOS account, the DMG fetched over the network rather than copied.
+**This is clean-*user* acceptance, not clean-machine**: a second account shares
+the OS, machine-wide installations and the system's trust history, so it cannot
+establish that a defect masked by a development install is absent.
 
-A second macOS account (or a fresh VM), the DMG fetched over the network rather
-than copied, and the six things a first run does.
-
-> **Acceptance.** Logged into a second account on the Mac mini: download the
-> DMG from the release page in Safari, open it, drag Folio to Applications,
-> launch it — no Gatekeeper dialog, no "damaged and can't be opened", no crash —
-> and the M1 and M2 acceptance lines above pass again from that account, with
-> the only permission prompts being the ones we intend (Notifications at first
-> toast, Accessibility at first summon).
+> **Acceptance.** Logged into a second account: download the DMG in Safari, open
+> it, drag Folio to Applications, launch it. The ordinary identified-developer
+> confirmation is **expected and acceptable**; what must not appear is an
+> unidentified-developer warning, a notarization failure, or "damaged and can't
+> be opened". Then re-run the M1, M2, M3 and M4 acceptance lines from that
+> account against the downloaded build, including the refusal paths: deny
+> Notifications and confirm the settings row says so rather than silently doing
+> nothing; deny Accessibility and confirm the shortcut row says *not authorized*.
+> Disconnect the network and launch once to confirm the stapled ticket is used.
 
 ---
 
-## 3. The tickets
+## 3. The high-risk contracts, probed before they are implemented
 
-Sizes are the spike's own unit: an agent-day is one focused delegated session
-plus the owner's review of it. **S** ≈ 1, **M** ≈ 2–3, **L** ≈ 4–6.
+The review's central point, and it is correct: *a mostly portable Rust
+implementation does not imply a mostly interchangeable native GUI contract.* Six
+probe tickets run between preflight and M1. Each has a pass/fail an agent can
+report without judgement, and each retires a design decision that would otherwise
+be discovered in M4.
 
-The "where" column matters more than usual, because there is one Mac and the
-isolation rules make it a serial resource. `check` means a Windows agent can do
-the whole ticket with `cargo check -p <crate> --target aarch64-apple-darwin`;
-**Mac** means it must run on the Mac mini, in its own worktree under
-`~/folio-port/wt/<ticket>`, never touching anything else in the owner's home,
-**one cargo at a time**.
+**X-1 — Metal alpha and composition, against the locked wgpu.**
+The blocker. `bt-render`'s `required_alpha_mode` (`crates/bt-render/src/lib.rs`)
+demands `Opaque` for `WindowTargetKind::Hwnd` and **`PreMultiplied`** for
+`CompositionVisual`, and `choose_alpha_mode` refuses a surface that is not
+offered what it requires. The cached **wgpu-hal 30.0.0 Metal backend advertises
+only `Opaque` and `PostMultiplied`** (`src/metal/adapter.rs:468`) and sets the
+layer non-opaque only for `PostMultiplied` (`src/metal/surface.rs:231`).
+**`PreMultiplied` does not exist on Metal in this version.** So the Windows
+composition contract cannot be carried over, and the plan's earlier "premultiplied
+holes" sentence was wrong.
+*Probe:* build Folio's own renderer against a `CAMetalLayer` configured
+`PostMultiplied`, draw the real frame with a hole where a web pane would be, put
+a real `WKWebView` behind it, and check the hole, the partially transparent
+edges, a resize, and a device-loss reconstruction.
+*Pass:* the page is visible through the hole with correct edge alpha through all
+four. *Fail:* anything else — and then alpha representation and surface ownership
+become explicit design work before M1-4 is scoped.
 
-### M0
+**X-2 — WKWebView policy enforcement.**
+`webview.rs` enforces the navigation policy through `WebResourceRequested` with a
+filter over every context (`crates/bt-platform/src/webview.rs:1831`), which is
+broader than top-level navigation. WKWebView's `WKURLSchemeHandler` applies only
+to schemes WebKit does not already handle and is not an equivalent hook for
+arbitrary HTTP(S) interception. `webnav.rs`'s decision function is pure and
+portable, but reusing it proves nothing about where it can be *called*.
+*Probe:* a requirement-to-public-API matrix and an adversarial fixture set —
+subresources, frames, redirects, local files, downloads, popups — run against a
+real `WKWebView`.
+*Pass:* every requirement maps to a public API, or is listed as an unsupported
+guarantee the owner has seen (§8, Q5). *Fail:* an unmapped requirement nobody has
+decided about.
 
-| ID | Title | Size | Crates | Depends on | Where |
-|---|---|---|---|---|---|
-| MAC-01 | Select and license Xcode; verify the signing identity and the notarization credential; record the exact commands in `docs/BUILDING.md` | S | — | owner's §5 work | Mac |
-| MAC-02 | Prove the Windows cross-check lane: `rustup target add aarch64-apple-darwin`, then `cargo check -p bt-platform --target aarch64-apple-darwin` from a Windows worktree; if it fails, every "check" row below becomes a "Mac" row | S | — | — | check |
-| MAC-03 | **Re-measure the platform surface.** The spike's *79 missing items* was taken at `05bf018`; `bt-app` names `bt_platform::` at 519 sites across 36 files today, 249 of them in `main.rs`, and three modules have been added since (`launch_pipe`, `instance`, `handoff`). Produce the current list and check it in as `docs/plans/port/platform-surface.md` | M | — | MAC-02 | check |
-| MAC-04 | **The empty macOS backend.** `crates/bt-platform/src/macos/` with every item on MAC-03's list present and refusing; every `#[cfg(windows)] pub mod` that `bt-app` names becomes a portable module name with a Windows body, a macOS body and a nothing body (§4.3) | L | bt-platform | MAC-03 | check |
-| MAC-05 | `bt-app` links on macOS: the five `std::os::windows` uses in `{files,cli,palette_index,main,git_panel}.rs`, the one `winit::platform::windows::EventLoopBuilderExtWindows`, and `bt-winres`'s build script | M | bt-app, bt-winres | MAC-04 | Mac |
-| MAC-06 | The unsigned `.app` bundle: `packaging/macos/Info.plist.in`, a bundle identifier, and `scripts/release/mac-bundle.sh` that lays out `Folio.app` from `target/<profile>/folio` | M | bt-winres | MAC-05 | Mac |
-| MAC-07 | CI: `core-macos` grows `-p bt-platform -p bt-app`; `scripts/check-portable-core.ps1` grows the macOS spellings (§4.2); a new `scripts/check-app-platform-cfgs.ps1` holds the named list of `bt-app` files allowed a `#[cfg(target_os)]` | M | — | MAC-05 | check |
+**X-3 — Command, Option and IME routing.**
+Clipboard is not in `BINDINGS`: `is_copy_shortcut` and `is_paste_shortcut` are
+independent Control predicates in `crates/bt-app/src/input.rs`. `WebChord`
+(`bt-platform/src/webview.rs:107`) carries `virtual_key, ctrl, shift, alt` and
+**no Command field**, and `webhost.rs:556` copies only those three — so a Command
+shortcut over a focused page degrades to an unmodified key. winit 0.30.13 exposes
+`OptionAsAlt` including left/right.
+*Probe:* a matrix over shell, Markdown editor, palette and web focus: Command
+shortcuts, Control to the child, Option as Alt versus Option as text, dead keys,
+a non-US layout, preedit position at backing scale 2, preedit cancellation, and
+no duplicate commits. `set_ime_allowed(true)` is already called at both window
+constructors and stays.
+*Pass:* a written routing rule that covers every cell. *Fail:* a cell with two
+plausible answers — which is a product decision (§8, Q9), not a bug.
 
-### M1
+**X-4 — the AppKit application delegate.**
+A second Finder launch of an already-running app does not start a second
+executable; it delivers an application **reopen** event. winit 0.30.13's own
+macOS documentation says this is not directly exposed and recommends a custom
+delegate. So the Unix launch socket can be perfect and Finder will still only
+activate the running app and never open the requested window.
+*Probe:* a delegate bridge in `bt-platform` handling reopen, Services delivery,
+termination, last-window-closed, and hidden/minimized windows, exercised from
+Finder and the Dock.
+*Pass:* each event reaches a named application action with an explicit origin.
+*Fail:* an event that cannot be routed on the main thread without blocking.
 
-| ID | Title | Size | Crates | Depends on | Where |
-|---|---|---|---|---|---|
-| MAC-10 | Window and screen: `NSWindow` / `NSScreen` for `get_window_rect`, `set_window_outer_rect`, `get_work_area`, `work_area_at`, `virtual_screen_rect`, `monitor_id_at`, `dpi_at`, `get_dpi_for_window`, `window_is_exposed`, `is_window_minimized`, `set_window_topmost`, `request_window_close`, `stand_window_at` | L | bt-platform | MAC-04 | Mac |
-| MAC-11 | The Metal surface: a `CAMetalLayer` under the window's content layer, reached through `WindowTarget::Hwnd(SurfaceTarget)` — the portable door `bt-render` already documents at `lib.rs:3352`. **The `Compositor` / `CALayer` tree is not in M1**; it exists for the web panes and belongs with MAC-40 | M | bt-render, bt-platform | MAC-10 | Mac |
-| MAC-12 | `resolve_default_shell` learns Unix: `BT_SHELL`, `$SHELL`, the password database, `/bin/sh`, and a real-pty test. **This is also remote T2** — one ticket, two milestones; coordinate before dispatching | M | bt-pty | MAC-04 | Mac |
-| MAC-13 | Keyboard: modifiers, `virtual_key_for_character`, `wheel_scroll_amount`, `take_keyboard_focus`, `thread_mouse_capture`, `pointer_position`, `top_level_window_at`, and the Cmd dialect of `BINDINGS` as a third column of the one table (§4.7) | L | bt-app, bt-platform | MAC-10 | Mac |
-| MAC-14 | IME: winit's `Ime::Preedit` / `Ime::Commit` and `set_ime_cursor_area` on macOS; `ImeSystemCaret` becomes a no-op type, because the caret rectangle is winit's whole story there and `ImmGetCompositionWindow` has no counterpart | M | bt-platform, bt-app | MAC-13, R1 | Mac |
-| MAC-15 | Clipboard: `NSPasteboard`. **Drop the `hwnd` parameter from `clipboard_text`** — it exists only because Win32 clipboard access is window-scoped, which the spike's §4.8 correctly calls Windows leaking into the interface | S | bt-platform, bt-app | MAC-10 | check |
-| MAC-16 | Dark mode, backdrop and the window skirt: `NSVisualEffectView`, `system_uses_light_apps`, `set_window_dark_mode`, `set_system_backdrop`, `system_backdrop_available`, `client_area_animation_enabled`, `install_window_class_background` | M | bt-platform | MAC-10 | Mac |
-| MAC-17 | `storage_dir()` learns macOS: `~/Library/Application Support/Folio`, with the cache halves (`WebView2`, `player`) going to `~/Library/Caches/Folio` | S | bt-app | MAC-04 | check |
+**X-5 — a stable signed identity before anything touches TCC.**
+Accessibility and Notifications are granted against a code signature's designated
+requirement. An agent iterating on the hotkey re-signs on every build; if each
+build is a new grant, the loop is unusable and every acceptance result is
+suspect.
+*Probe:* sign the same bundle twice with the real Developer ID and confirm the
+grant survives; then confirm an ad-hoc signature does not.
+*Pass:* stable identity retains the grant. *Fail:* it does not, and MAC-hotkey
+work needs a different development procedure. Depends on P-3.
 
-### M2
-
-| ID | Title | Size | Crates | Depends on | Where |
-|---|---|---|---|---|---|
-| MAC-20 | `DirWatch` / `DirChange` over FSEvents, keeping `ReadDirectoryChangesW`'s non-recursive contract and the `watch_clock` debounce the five `*_watch.rs` consumers already expect | M | bt-platform | MAC-04 | Mac |
-| MAC-21 | The process door on macOS: `handoff.rs` gets `open_local_file`, `open_local_path`, `reveal_in_explorer`, `shell_execute`, `open_system_fonts_page` over `NSWorkspace`, and `recycle` over `NSFileManager trashItem`. `quiet_command` becomes a portable `Command` builder that sets no flag off Windows — the `no_command_is_built_outside_the_quiet_door` gate (§7.40 ①) keeps its meaning | M | bt-platform | MAC-04 | Mac |
-| MAC-22 | Pickers: `FolderPicker`, `ImagePicker`, `FilePickKind` over `NSOpenPanel`; `message_box` over `NSAlert` | M | bt-platform | MAC-10 | Mac |
-| MAC-23 | `monospace_font_families()` over `CTFontCollection` — the one place the spike found DirectWrite, and the one piece of the font policy that class B could not take because it lives in `bt-platform` | S | bt-platform | MAC-04 | Mac |
-| MAC-24 | Contrast and stem darkening measured against CoreText: `bt-render/src/contrast.rs` was tuned against DirectWrite output and its constants are a reading of one rasterizer | M | bt-render | MAC-11 | Mac |
-| MAC-25 | Reading-surface acceptance sweep: files column, preview pane, Markdown editing, images, math, hover cards — almost all of it class A, so this ticket is a walk with screenshots and a list of what is wrong, not a rewrite | M | — | MAC-20…24 | Mac |
-
-### M3
-
-| ID | Title | Size | Crates | Depends on | Where |
-|---|---|---|---|---|---|
-| MAC-30 | The application menu bar: File / Edit / View / Window / Help, wired to the same verbs the palette and the chrome already call | L | bt-app, bt-platform | MAC-13 | Mac |
-| MAC-31 | `CustomWindowFrame` against the traffic lights: the hit-testing policy in `bt-platform`'s portable half is already pure and already passes off Windows; what is new is where the three buttons sit and that the title bar is the system's | M | bt-platform, bt-app | MAC-16 | Mac |
-| MAC-32 | Multi-window restore on macOS: `windows[]` in `session.json` is portable, the screen arithmetic under it is not; `hide_every_window_of_this_process`, `flash_window`, `is_window_cloaked`, `Taskbar` (Dock tile) | M | bt-platform, bt-app | MAC-10 | Mac |
-| MAC-33 | Single instance over a Unix domain socket: `instance::claim_data_directory` over an `flock`'d file in the data directory (it already returns `None` off Windows at `instance.rs:158`), and `launch_pipe` over a socket at the same address-by-digest scheme, keeping §7.59b's `Decision` / `Admission` / `Refusal::NotServing` and the client-`CONFIRM`-is-the-commit-point rule verbatim. **`AllowSetForegroundWindow` has no counterpart** — macOS activation is `NSApp.activate()` and needs no permission from the other side, so step ③ of §7.59's four-step dance collapses | M | bt-platform, bt-app | MAC-21 | Mac |
-| MAC-34 | The first-run card on macOS: §7.56 ③ already says a row only appears when it can be honoured, so the four Windows rows are absent rather than special-cased, and two macOS rows (Notifications, Accessibility) take their place | M | bt-app | MAC-30 | Mac |
-| MAC-35 | Console and standard streams: `adopt_parent_console`, `detach_console`, `write_to_console`, `redirect_std_streams_to_file`, `silence_std_streams`, `install_console_ctrl_handler`, `leave_process`. On macOS a GUI app launched from a terminal already has that terminal's stdio, so most of these become the empty answer — which is a decision worth writing down, not a gap | S | bt-platform | MAC-04 | check |
-
-### M4
-
-| ID | Title | Size | Crates | Depends on | Where |
-|---|---|---|---|---|---|
-| MAC-40 | The `CALayer` compositor: `Compositor::{attach,detach,place,web}_visual` and `commit` over a layer tree, with the `CAMetalLayer` non-opaque so the holes `set_web_holes` punches show what is underneath | M | bt-platform, bt-render | MAC-11 | Mac |
-| MAC-41 | The `WKWebView` host: `WebHost`, `WebEvent`, `WebChord`, `WebMouseEvent`, `WebNavigationVerdict`, `RehostOutcome`, `RehostSide`, `web_mouse_buttons`, `forget_web_environment`. `webnav.rs`'s policy is pure and portable and is not touched; what is rewritten is the conversation, and `bt-app`'s 2,427 lines of it in `{webhost,webnav,web_thumb,web_trace}.rs` follow | L | bt-platform, bt-app | MAC-40 | Mac |
-| MAC-42 | Video first frame over `AVAssetImageGenerator`, replacing `IMFSourceReader` | M | bt-platform | MAC-11 | Mac |
-| MAC-43 | Video playback over `AVPlayerItemVideoOutput` + `copyPixelBufferForItemTime`, keeping route B's shape exactly: decode off the render thread, read back on the platform side, hand `bt-render/src/video.rs` a buffer. The reason that shape exists — `bt-render` may not hold `unsafe` — is a workspace rule, not a Media Foundation detail, so it survives the port unchanged | M | bt-platform, bt-render | MAC-42 | Mac |
-| MAC-44 | Notifications: `Notifier` over `UNUserNotificationCenter`, and the Dock tile for `flash_window`. **Needs a bundle identifier and a bundle**, which is why MAC-06 is in M0 | M | bt-platform | MAC-06, MAC-32 | Mac |
-| MAC-45 | `AttentionPipe` over a Unix domain socket in the data directory, with the same 4096-byte frame cap, the same declared-fields-only rule, and file-mode `0600` in place of the logon-SID DACL | M | bt-platform, bt-app | MAC-33 | Mac |
-| MAC-46 | The global hotkey: `GlobalHotkey`, `Hotkey`, `HotkeyFault` over a `CGEventTap`, the Accessibility permission asked for at first summon rather than first run, and `give_foreground_to` over `NSRunningApplication.activate` | M | bt-platform, bt-app | MAC-32, R10 | Mac |
-| MAC-47 | "Open in Folio" as an `NSServices` entry in `Info.plist`, taking a folder and spawning `folio --cwd <dir> --from-explorer` — which §7.59a's table already routes to a tab rather than a window, and that routing is correct here for the same reason | S | bt-app | MAC-33 | Mac |
-| MAC-48 | The update check over `NSURLSession`, replacing `http.rs`'s WinHTTP wrapper, and keeping its argument: the machine's proxy configuration and certificate store are the machine's answers. The in-place swap in `update.rs` becomes "open the release page" | M | bt-platform, bt-app | MAC-21 | Mac |
-| MAC-49 | Hang and crash reports: `backtrace` plus `NSSetUncaughtExceptionHandler` in place of `RtlCaptureStackBackTrace` / `SetUnhandledExceptionFilter`. The suspend-and-sample trick in `hang.rs` has no safe macOS counterpart; recommend the watchdog keeps its liveness half (§1.5a) and loses its stack half there, stated rather than faked | M | bt-platform, bt-app | MAC-32 | Mac |
-
-### M5 and M6
-
-| ID | Title | Size | Crates | Depends on | Where |
-|---|---|---|---|---|---|
-| MAC-50 | `packaging/macos/Folio.entitlements`, the hardened runtime, and `scripts/release/mac-sign.sh` | M | — | MAC-06 | Mac |
-| MAC-51 | Notarization and stapling: `scripts/release/mac-notarize.sh` over an App Store Connect API key (§5, R6), and `docs/RELEASING.md` grows a macOS section beside the Windows one | M | — | MAC-50 | Mac |
-| MAC-52 | The DMG: `scripts/release/mac-dmg.sh`, a background image, an `/Applications` alias | M | — | MAC-51 | Mac |
-| MAC-53 | `release.yml` grows a `macos-latest` lane that builds, bundles, signs on the runner or hands the artefact back for signing on the Mac, and attaches the DMG and its SHA-256 to the release | M | — | MAC-52 | check |
-| MAC-54 | Docs: `README.md` and `README.zh-CN.md` get a macOS download and first-run section in lockstep; `docs/shortcuts.md` regenerates with the Cmd column; `docs/BUILDING.md` grows the macOS build; new fixtures get `PROVENANCE.md` entries | M | bt-app | MAC-30, MAC-53 | check |
-| MAC-60 | Clean-account acceptance: the M6 line, run from a second macOS account, with screenshots | M | — | MAC-53 | Mac |
-
-**Count: 38 tickets — 9 S, 22 M, 7 L.** Nine can run on Windows agents
-(`check`), twenty-nine need the Mac.
-
-**Dispatch order.** MAC-02 first and alone, because every `check` row below it is
-a claim that it works. Then MAC-03 and MAC-04 together — the empty backend is the
-single largest unblocker in the plan and it is pure `#[cfg]` work that a Windows
-agent can do. Then the Mac becomes the bottleneck and stays the bottleneck.
+**X-6 — what a Windows agent can actually check.**
+`cargo check -p bt-platform --target aarch64-apple-darwin` passing today proves
+almost nothing: `bt-platform` has **no** non-Windows dependencies
+(`crates/bt-platform/Cargo.toml:9` opens the Windows-only table), so the check
+compiles an empty crate. The planned backend adds objc2 and its neighbours, and
+the app adds winit, Metal and the rest.
+*Probe:* a scratch crate with the representative objc2 dependency graph, plus
+`cargo check --target aarch64-apple-darwin --all-targets` of a real app target,
+from Windows, with `.cargo/config.toml`'s `+crt-static` in force.
+*Pass:* both check. *Fail:* record the actual error before blaming `crt-static`;
+either way, **`check` is an authoring and compile venue, never acceptance** —
+clipboard, stdio, linking and every native behaviour are accepted on the Mac.
 
 ---
 
@@ -239,417 +284,532 @@ agent can do. Then the Mac becomes the bottleneck and stays the bottleneck.
 ### 4.1 The standing rule does not change
 
 **Platform code lives behind `bt-platform`'s interface; no crate below `bt-app`
-calls the platform directly.** `docs/DESIGN.md` §13.1 states it, and it is not a
-portability rule by origin — the workspace's `unsafe_code = "deny"` exempts
-exactly one crate, and every Win32 call is `unsafe`, so the front door was built
-for a different reason and turns out to be the port. The same sentence now binds
-`objc2`: every message send lives in `bt-platform` or it does not exist.
+calls the platform directly** (`docs/DESIGN.md` §13.1). The workspace's
+`unsafe_code = "deny"` exempts `bt-platform`, which is why every Win32 call was
+already behind that door, and the same sentence now binds `objc2`.
+
+One correction the review is right about: **`bt-render` already has a narrow,
+documented `unsafe` exception** for surface creation
+(`crates/bt-render/src/lib.rs`, "The one `unsafe` in this crate, and why it is
+here rather than in `bt-platform`"). The rule is "one exception, written down",
+not "none". Native video FFI still belongs in `bt-platform`, and that is a
+placement decision rather than a consequence of the lint.
 
 ### 4.2 The gate learns a second platform
 
-`scripts/check-portable-core.ps1` refuses `windows::`, `windows_sys::`, `winapi`,
-`webview2` and `std::os::windows` in the thirteen portable crates outside a
-`#[cfg(windows)]`. MAC-07 adds `objc2`, `objc2_*`, `core_foundation`,
-`core_graphics` and `core_text` to `$forbidden`, gated on
+`scripts/check-portable-core.ps1` refuses Win32 spellings in the thirteen
+portable crates outside a `#[cfg(windows)]`. It grows `objc2`, `objc2_*`,
+`core_foundation`, `core_graphics` and `core_text`, gated on
 `#[cfg(target_os = "macos")]` by the same brace-depth walk. `std::os::unix` is
-deliberately **not** added: `bt-pty` is a unix crate by construction and the
-vendored `portable-pty` under it is more so.
+deliberately not added: `bt-pty` is a unix crate by construction.
 
-### 4.3 `bt-app` gains no new `#[cfg(target_os)]`
+### 4.3 `bt-app`'s platform gates are a named list, and the list is wrong today
 
-Today `bt-app` carries a platform `cfg` in exactly eleven files —
-`psreadline.rs`, `attention_copilot.rs`, `files.rs`, `explorer_menu.rs`,
-`wsl.rs`, `update.rs`, `shell_integration.rs`, `settings.rs`,
-`palette_index.rs`, `git_panel.rs`, `main.rs` — and calls `bt_platform::` at 519
-sites across 36 files with no gate at all. **That ratio is the whole design and
-the port must not spoil it.** The named list above is the permitted set; MAC-07
-writes `scripts/check-app-platform-cfgs.ps1` to hold it, and a ticket that wants a
-twelfth file has to argue for it in review.
+`bt-app` carries a platform `cfg` in eleven files — `psreadline.rs`,
+`attention_copilot.rs`, `files.rs`, `explorer_menu.rs`, `wsl.rs`, `update.rs`,
+`shell_integration.rs`, `settings.rs`, `palette_index.rs`, `git_panel.rs`,
+`main.rs` — and names `bt_platform::` at **519 occurrences across 36 files**, 249
+of them in `main.rs`, with no gate at all. That ratio is the design.
 
-The consequence is that the modules `bt-app` names must exist on every platform.
-`#[cfg(windows)] pub mod webview` and its five siblings (`video`,
-`attention_pipe`, `launch_pipe`, `explorer_command`, `http`) become plain
-`pub mod` declarations whose bodies are `#[cfg(windows)] mod win`,
-`#[cfg(target_os = "macos")] mod mac`, and `#[cfg(not(any(windows, target_os = "macos")))] mod none`,
-re-exporting one set of names. One interface, three bodies.
+**`cli.rs` is not on that list and has two ungated `std::os::windows` uses** —
+one in production at `cli.rs:445` and one in a test at `cli.rs:1240` — which
+`check-portable-core.ps1` never sees, because it scans the thirteen crates and
+`bt-app` is not one of them. M1-10 either admits `cli.rs` to the list or gives
+`value_for` a portable implementation; the recommendation is the second, because
+what that function does is read a non-UTF-8 argument, and a lossy-preserving
+`OsString` route exists on both platforms.
 
-### 4.4 Stub at runtime, not at compile time — with one exception
+The modules `bt-app` names must exist everywhere. `#[cfg(windows)] pub mod
+webview` and its siblings (`video`, `attention_pipe`, `launch_pipe`,
+`explorer_command`, `http`) become plain `pub mod` declarations whose bodies are
+`#[cfg(windows)] mod win`, `#[cfg(target_os = "macos")] mod mac` and a
+`not(any(...))` third body, re-exporting one set of names.
 
-**Recommendation: a Windows-only feature is present on macOS and refuses at
-runtime.** The item exists, keeps its signature, and answers `false`, `None`,
-`Err(PROGRAM_REFUSED)` or the empty list. This is not invented here; it is
-already the repository's practice in four places —
-`bt_platform::set_current_thread_priority`'s portable arm answering `false`,
-`instance::claim_data_directory` returning `None` at `instance.rs:158`, three
-`#[cfg(not(windows))]` arms in `hang.rs`, and one at `hotkey.rs:623`. It is the
-right default because it keeps `bt-app` free of gates (§4.3), because a refusal
-can carry a reason to a toast and an absence cannot, and because §7.56 ③ already
-gives the product a rule for a row that cannot be honoured: the row does not
-appear.
+### 4.4 Refuse at runtime — with named exceptions, and they are type-level
 
-The exception is a module that is *wholly* one platform's SDK conversation and
-has a genuinely different macOS body — `webview`, `video`. There the `#[cfg]`
-stays inside the module (§4.3) and the refusing arm is the third body, `none`,
-used by neither shipped platform.
+**Recommendation: an item is present on every platform and refuses when
+invoked.** Precedent exists: `set_current_thread_priority`'s portable arm
+answering `false`, **four** `#[cfg(not(windows))]` arms in `hang.rs` and **two**
+in `hotkey.rs`. It keeps `bt-app` free of gates and lets a refusal carry a reason
+to a toast, which an absence cannot.
 
-Three things are absent rather than refusing, because they name a Windows fact
-that has no macOS referent at all: `wsl.rs`, `psreadline.rs`, and `msix.rs` +
-`explorer_command.rs`. Their `bt-app` call sites are already inside the eleven
-permitted files.
+The rule is not mechanical, and M1-2 exists to say where it breaks. Four kinds of
+exception, each verified in the tree:
 
-### 4.5 Paths, directories, and the bundle
+1. **Compile-time absence, correctly, today.** `msix::explorer_command_clsid()`
+   returns `windows::core::GUID` behind a Windows gate; `DataDirectoryClaim`
+   holds a Windows `HANDLE` in its gated definition and is a unit struct in its
+   non-Windows one. **Lifting these mechanically would create the leak the gate
+   exists to stop.** SDK types stay inside backend definitions.
+2. **Signatures that encode Windows without naming it.** `WebChord` has a Win32
+   virtual key and no Command modifier; `RehostSide` carries an `hwnd:
+   NonZeroIsize`. These have to change shape, not gain an arm.
+3. **Return types with no empty answer.** `leave_process(code: i32) -> !` cannot
+   refuse; it must really terminate. `redirect_std_streams_to_file` and
+   `silence_std_streams` are load-bearing for resident diagnostics
+   (`crates/bt-app/src/diagnostics.rs`) and cannot be no-ops either.
+4. **A refusing arm that is wrong.** `instance::claim_data_directory` off Windows
+   returns **`Some(DataDirectoryClaim)`** — it always succeeds, with the comment
+   "a machine with no kernel to ask always answers 'you are the one writer'".
+   So **the single-writer guarantee is absent by construction off Windows**, and
+   M3-5 must supply it rather than preserve it. (The first draft of this plan and
+   the review both said this arm returns `None`. It does not; both were wrong,
+   and the consequence runs the other way.)
 
-`bt_app::persist::storage_dir()` (`persist.rs:1168`) resolves `%APPDATA%\Folio\`
-with a `OnceLock` and a one-time relocation from the old name. MAC-17 gives it a
-macOS arm — `~/Library/Application Support/Folio` — and moves the two cache
-halves (`%LOCALAPPDATA%\Folio\WebView2`, `…\player`) to `~/Library/Caches/Folio`.
-**The key names inside those files do not change.** `settings.json` has one
-schema on both platforms, one migration chain, and no `_mac` suffixes; a setting
-that only one platform can honour is still present in the file, because a
-profile carried between machines that silently lost fields would be worse than
-one carrying a field nobody reads.
+`wsl.rs`, `psreadline.rs`, `msix.rs` and `explorer_command.rs` are absent rather
+than refusing, and §4.3's eleven files already contain their call sites. The
+first draft said `explorer_command` was both portable and absent; absent is the
+answer.
 
-The bundle lives at `packaging/macos/`, beside `packaging/msix/`:
-`Info.plist.in`, `Folio.entitlements`, and the DMG's staging. **The bundle layout
-is pulled forward into M0 (MAC-06), not left to M5**, and the reason is a
-dependency the ticket order would otherwise hide:
-`UNUserNotificationCenter` refuses to register for a process with no bundle
-identifier, `WKWebView`'s data store is keyed on one, and `NSServices` is read
-out of `Info.plist`. Three M4 tickets therefore depend on the bundle existing,
-and only *signing* depends on M5. M5 signs, notarizes, packages and ships what
-M0 already built.
+### 4.5 Paths, the bundle, and the version gate
 
-`bt-winres`'s `a_release_is_one_version_in_four_places` becomes five places, and
-the fifth is `Info.plist`'s `CFBundleShortVersionString` and `CFBundleVersion`.
-MAC-06 grows the crate a plist emitter as the sibling of its `VERSIONINFO`
-emitter, which is exactly the analogy the spike's §5 drew.
+`bt_app::persist::storage_dir()` (`persist.rs:1168`) gets a macOS arm —
+`~/Library/Application Support/Folio`. **The `player` cache is not migrated**:
+`main.rs` documents that nothing writes `%LOCALAPPDATA%\Folio\player` and an
+adjacent test refuses the resurrection of `player.rs`. WKWebView persistence is
+`WKWebsiteDataStore`'s own question and is specified in M4-2, not by moving a
+directory. Key names inside `settings.json` do not change; one schema, one
+migration chain, no `_mac` suffixes.
 
-### 4.6 Nothing here makes the 0.5 remote server harder
+The bundle lives at `packaging/macos/`: `Info.plist.in`, `Folio.entitlements`,
+the DMG staging. **The bundle is built from M1, not M5**, because
+`UNUserNotificationCenter` refuses a process with no bundle identifier,
+`WKWebsiteDataStore` keys on one, and `NSServices` is read out of `Info.plist`.
+M5 signs and ships what M1 already lays out.
 
-`docs/plans/remote/research-2026-09-10.md` §1 puts the remote server on a Unix
-box taking the portable core plus `bt-pty` — "everything: spawn, write, resize,
-read, wait, the output ring" — and taking `bt-platform` as an *empty shell*, which
-works today only because that crate has no dependencies off Windows. MAC-04 ends
-that: the macOS body brings `objc2` and its neighbours. **The rule the tickets
-inherit is that those dependencies go under
-`[target.'cfg(target_os = "macos")'.dependencies]`, never under a bare
-`[dependencies]`**, so a Linux server still links a crate with no dependencies at
-all. MAC-12 is the point where the two milestones actually meet, and it is a gift
-rather than a cost: a Unix `resolve_default_shell` is remote T2, and doing it
-once for both is the whole reason to name it here.
+The version gate is **`bt-app/src/version.rs:96`,
+`the_version_is_the_manifests_and_nothing_elses`** — not a `bt-winres` test, and
+not named "four places". M5-5 extends that gate to the generated plist's
+`CFBundleShortVersionString` *and* `CFBundleVersion`.
+
+### 4.6 What this plan actually guarantees the remote server
+
+Putting objc2 under `[target.'cfg(target_os = "macos")'.dependencies]` keeps a
+**Linux** server free of them. It does **not** keep a *macOS* headless server
+free of a GUI backend, and the remote research contemplates macOS servers. So the
+rule is stated at its real strength, plus one more:
+
+- **Unconditional:** the server never depends on `bt-app` or `bt-render`.
+- **Target-scoped:** macOS GUI dependencies are declared only for macOS targets,
+  so Linux links a `bt-platform` with no dependencies at all.
+- **New:** if a macOS headless server must also be an empty shell, the GUI
+  backend goes behind a cargo feature, and CI grows a headless dependency check
+  for both Unix targets. Scheduling primitives must not require AppKit
+  initialization. §8 does not ask about this; it is a rule, and 0.5 may relax it.
 
 ### 4.7 The documents get twins, not forks
 
-`docs/shortcuts.md` is generated — `scripts/generate-shortcuts-table.ps1` runs
+`docs/shortcuts.md` is generated by
 `bt_app::shortcuts::tests::docs_shortcuts_md_is_the_bindings_table`, which walks
-`BINDINGS` and asks each row for its name, chord and scope *in both languages*.
-MAC-13 adds a third dimension to that walk, not a second file: the table grows a
-Cmd column, `scripts/check-shortcuts-table.ps1` stays one gate, and a row whose
-macOS chord differs is a fact the source table states rather than a document
-somebody remembers to edit.
-
-`README.md` and `README.zh-CN.md` grow a macOS download and first-run section in
-lockstep, by the rule already recorded for them: the same fact in both, no new
-section on one side only. The Chinese copy is written by the project's usual
-route and not translated inline by the ticket. `docs/design/PROVENANCE.md` and
-`tests/assets/PROVENANCE.md` are unchanged in kind; any new fixture the port adds
-(a `.mov`, a Retina screenshot) arrives with its generating command, as every
-fixture there already does.
+`BINDINGS` in both languages. M1-7 adds a platform dialect to that walk. **It is
+not sufficient on its own**: the clipboard predicates in `input.rs` and the web
+chord conversion in `webhost.rs` are outside `BINDINGS` and are part of the same
+ticket. `README.md` and `README.zh-CN.md` grow a macOS section in lockstep;
+`docs/RELEASING.md` and `docs/BUILDING.md` grow macOS sections; new fixtures
+arrive with `PROVENANCE.md` entries.
 
 ---
 
 ## 5. What the owner must do personally
 
-Five of these cannot be delegated, because they need an Apple ID, a `sudo`
-password, or a hand on the machine's own keyboard. Each is followed by the exact
-command the agent will run to confirm it is done — all of them read-only, all of
-them safe over `ssh -o BatchMode=yes mac-mini`.
-
-**① Point the developer tools at Xcode.** Xcode 26.6 is already installed at
-`/Applications/Xcode.app` (measured today), but `xcode-select -p` still answers
-`/Library/Developer/CommandLineTools`, so `xcodebuild` refuses to run.
-
-```
-sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-sudo xcodebuild -license accept
-```
-*Verify:* `xcode-select -p` prints the Xcode path, and `xcodebuild -version`
-prints `Xcode 26.6` instead of today's `requires Xcode` error.
+**① Point the developer tools at Xcode.** Xcode 26.6 is installed at
+`/Applications/Xcode.app` (measured), but `xcode-select -p` answers
+`/Library/Developer/CommandLineTools`, so `xcodebuild` refuses.
+`sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` and
+`sudo xcodebuild -license accept`.
+*Verify:* `xcode-select -p` prints the Xcode path; `xcodebuild -version` prints
+`Xcode 26.6`.
 
 **② Create the Developer ID Application certificate.** Xcode ▸ Settings ▸
-Accounts, sign in with the Apple ID that holds the Developer Program membership,
-select the team, Manage Certificates ▸ **+** ▸ Developer ID Application.
-*Verify:* `security find-identity -v -p codesigning` names a
-`Developer ID Application: … (TEAMID)` line and ends `1 valid identities found`.
-It says `0 valid identities found` today.
+Accounts, sign in, select the team, Manage Certificates ▸ **+** ▸ Developer ID
+Application.
+*Verify:* `security find-identity -v -p codesigning` names a `Developer ID
+Application: … (TEAMID)` line and ends `1 valid identities found`. It says
+`0 valid identities found` today.
 
-**③ Put a notarization credential where a headless session can reach it.**
-**Recommendation: an App Store Connect API key, not an app-specific password and
-not a `notarytool store-credentials` keychain profile.** This is not a
-preference. Measured today: `xcrun notarytool history --keychain-profile folio`
-over a non-interactive ssh session answered
-`Error: keychainLocked(keychainName: "default")` — the login keychain is not
-unlocked in an ssh session, so a keychain profile makes notarization impossible
-to automate without the owner typing a password every release. An API key is a
-file. Create it at App Store Connect ▸ Users and Access ▸ Integrations ▸ Keys,
-with the **Developer** role, download the `.p8` once, and place it at
-`~/.appstoreconnect/private_keys/AuthKey_<KEYID>.p8` with mode `600`; put the key
-id and issuer id in `~/.appstoreconnect/folio.env`, also `600`.
-*Verify:*
+**③ Decide where releases are signed, and how the private key is reached.**
+This is a decision, not a command, and the first draft of this plan got it
+wrong. **An App Store Connect API key authenticates notarization; it does not
+sign.** `codesign` needs the private key in a keychain it can open, and measured
+today, `xcrun notarytool history --keychain-profile folio` over a
+non-interactive ssh session answered
+`Error: keychainLocked(keychainName: "default")` — an ssh session does not have
+the login keychain open, and the same is true for `codesign`'s access to the
+key. Three routes, and §8 Q7 asks the owner to pick one:
+a dedicated non-login signing keychain unlocked for the duration of a release by
+a password the owner supplies interactively; the owner running the signing step
+at the machine; or a CI runner with the identity installed. Whichever is chosen,
+the notarization credential should still be an API key file
+(`~/.appstoreconnect/private_keys/AuthKey_<KEYID>.p8`, mode `600`, with the key
+and issuer ids beside it), because that half genuinely works headlessly.
+*Verify, both halves:*
 
 ```
-xcrun notarytool history \
-  --key ~/.appstoreconnect/private_keys/AuthKey_<KEYID>.p8 \
+codesign -s "Developer ID Application: … (TEAMID)" -o runtime --timestamp /tmp/Probe.app
+codesign -dv --verbose=4 /tmp/Probe.app
+xcrun notarytool history --key ~/.appstoreconnect/private_keys/AuthKey_<KEYID>.p8 \
   --key-id <KEYID> --issuer <ISSUER-UUID>
 ```
-returns a history — an empty one is a pass. **Nothing about this goes in the
-repository**, and `scripts/check-machine-paths.ps1` would not catch a leaked key,
-so `packaging/macos/` gets a `.gitignore` for `*.p8` on the way past.
+Notarization history returning an empty list is a pass for that half and **is
+not a release rehearsal**; M5-2 is. Nothing of this goes in the repository, and
+`packaging/macos/` gets a `.gitignore` for `*.p8` on the way past —
+`scripts/check-machine-paths.ps1` would not catch a leaked key.
 
-**④ Grant the two permissions from the machine's own screen, when asked.**
-Notifications at the first toast (M4), Accessibility at the first summon (M4).
-Neither can be granted over ssh. *Verify:* the agent does not — MAC-44 and
-MAC-46's acceptance lines are the owner watching them work.
+**④ Grant the two permissions at the machine, when asked.** Notifications at the
+first toast, Accessibility through the in-app *Enable global shortcut* action.
+Neither can be granted over ssh.
 
-**⑤ Decide the disk.** `/` has **48 GiB free** and `~/folio-port` already holds
-**13 GiB** from the September spike. A release `target/` for this workspace was
-5.0 GiB on that machine; several worktrees will not fit. Recommend the spike
-checkout is reset to a clean clone of `main` at MAC-01 and every worktree shares
-one `CARGO_TARGET_DIR` under `~/folio-port/target`, with a `cargo clean` between
-milestones.
-*Verify:* `df -h /` and `du -sh ~/folio-port`.
+**⑤ Decide the disk and the build budget.** `/` has **48 GiB free** and
+`~/folio-port` already holds **13 GiB**. A release `target/` was 5.0 GiB on that
+machine. Recommend resetting the spike checkout at P-1 and sharing one
+`CARGO_TARGET_DIR` under `~/folio-port/target`. "One cargo at a time" is not a
+complete resource budget: the Mac mini also runs the alpha production daemon, so
+every launcher carries `nice`, a job count that leaves the machine a fifth of
+itself, and a check that the daemon is untouched.
 
-One more, optional and worth a minute of the owner's time: **a second display,
-or a scaled mode on the one there is.** The Mac mini drives a single
-DELL S2725QS at 3840×2160 presenting as 1920×1080 — a backing scale of exactly
-2.0, everywhere, always. The cross-scale transition the spike names in §5 cannot
-be exercised on that configuration at all (R7).
-
----
-
-## 6. Risks, and the probe that retires each one
-
-**R1 — winit IME on macOS with Chinese input.** Folio's IME story has broken
-once already on Windows, in a way that took a §7.34 ① investigation to explain,
-and the macOS path is winit's `Ime` events plus `set_ime_cursor_area` with no
-`ImeSystemCaret` under it. *Probe, before MAC-14 is written:* a forty-line
-winit-only example on the Mac that logs `Ime::Preedit` and `Ime::Commit` and
-moves the cursor area, driven by the built-in Pinyin input source. If winit does
-not report preedit from a third-party IME the way it does from Apple's, that is
-the same class of finding the Windows spike recorded about one vendor, and the
-plan wants it before the ticket, not inside it.
-
-**R2 — Metal and the layering the floats need.** The web panes are composed
-*under* the terminal's picture on Windows: the WebView2 visual is the bottom child
-of the DirectComposition tree and wgpu punches premultiplied-transparent holes
-through its own frame. *Probe, before MAC-40:* a standalone Mac program with a
-non-opaque `CAMetalLayer` over a plain `NSView` in one window, the layer clearing
-a rectangle to `(0,0,0,0)`, and a screenshot showing the view through the hole.
-If the hole is black rather than transparent the compositor design changes, and
-MAC-41 changes with it.
-
-**R3 — ConPTY versus a POSIX pty.** Low, and the spike says why: `bt-pty` calls
-`native_pty_system()`, its ConPTY-specific entry points already carry
-`#[cfg(not(windows))]` arms, and `core-linux` runs 21 of its tests on a real pty
-today. The residual risk is one function: off Windows, `resolve_default_shell`
-still answers `powershell.exe`, and its `empty_bt_shell` test passes only because
-`find_pwsh` fails to find it. *Probe:* MAC-12's own real-pty test — a ticket
-rather than a spike, because only the writing is left.
-
-**R4 — CJK font fallback and the rasterizer.** Half retired already: class B
-landed a macOS arm in `terminal_font_system()` with PingFang SC/TC/HK, Hiragino
-Sans, Apple SD Gothic Neo and Hiragino Sans GB in the chain, asking `fontdb`'s
-system loader for the inventory and checking each family name against the
-database. What is unmeasured is how it *looks*: CoreText stems and hints
-differently from DirectWrite and `bt-render/src/contrast.rs` was tuned against
-the latter. *Probe:* MAC-24 opens a mixed Latin/CJK document at three font sizes
-and the owner looks at it beside a Windows screenshot of the same file.
-
-**R5 — `.cargo/config.toml`'s `+crt-static`.** That flag is set under `[build]`,
-for all targets, and it is what broke `core-linux` until that job overrode it with
-`RUSTFLAGS: -C target-feature=-crt-static`; the `ci.yml` comment records that
-macOS ignores the feature. What is *not* recorded anywhere is whether
-`cargo check --target aarch64-apple-darwin` from a Windows host survives it, and
-nine tickets in §3 assume it does. *Probe:* MAC-02, which is the first ticket
-dispatched and exists for no other reason. If it fails, the fix is a
-`[target.x86_64-pc-windows-msvc]` table rather than `[build]` — which the config
-file's own comment warns would be shipping an untested configuration, so the
-honest alternative is that those nine rows move to the Mac and the critical path
-grows by about a week.
-
-**R6 — the locked keychain.** Measured, not predicted: `notarytool` over a
-non-interactive ssh session refused with `keychainLocked`. Retired by §5 ③'s
-API-key route, and the reason it is in this list at all is that discovering it
-during M5 would have looked like a broken release lane.
-
-**R7 — one display, one scale.** Measured: a single 4K panel at a backing scale
-of 2.0. The spike's §5 warns that what is untested on macOS is the *transition*
-between a 2.0 display and a 1.0 one, and on this machine that transition cannot
-happen. *Probe:* a second display, or a scaled resolution set by hand for one M3
-session. Otherwise MAC-32 ships with the cross-scale path stated as untested —
-worse than it sounds, because §7.50 records exactly that class of bug, a window
-that could not cross the seam between two screens, reaching a user on Windows.
-
-**R8 — the 79 is stale.** The spike measured 321 errors naming 79 missing items
-at `05bf018`, five days and three subsystems ago. `bt-app` names `bt_platform::`
-at 519 sites today, 249 of them in `main.rs`, against the spike's 238 — and
-`launch_pipe`, `instance` and the single-instance work all landed in between.
-*Probe:* MAC-03 re-measures before MAC-04 is scoped, and the plan's effort
-numbers in §7 carry a widened band because of it.
-
-**R9 — Accessibility is revoked on re-signing.** The spike says it, and it
-matters more than it reads: an agent iterating on MAC-46 re-signs the bundle on
-every build, and if each build is a new grant the loop is unusable. *Probe:*
-sign the same bundle twice with the same Developer ID identity and see whether
-the grant survives. TCC keys on the designated requirement, so a stable Developer
-ID should survive and an ad-hoc signature should not — if that holds, MAC-46 must
-be developed against a signed bundle from its first build.
-
-**R10 — the hang reporter has no macOS half.** `hang.rs` suspends the window
-thread and reads its stack with `GetThreadContext` and `ReadProcessMemory`; its
-own module comment calls it the only part of the crate that can deadlock the
-process, and there is no macOS equivalent that is safe from inside the same
-process. *Probe:* none — this is a decision. MAC-49 keeps the liveness half
-(§1.5a's "did it wake, does it answer") and drops the stack half rather than
-approximating it.
-
-**R11 — `unsafe_code = "deny"` shapes the backend before a line is written.**
-Not a risk to retire but a constraint to obey: every `objc2` message send is
-inside `bt-platform` and nowhere else, exactly as every Win32 call is. Listed
-here so MAC-04's reviewer checks it as a property of the module layout rather
-than discovering it in MAC-41.
-
-**R12 — the toolchain pin off Windows.** `rust-toolchain.toml` names
-`1.94.1-x86_64-pc-windows-msvc`, which rustup rejects as a channel off Windows —
-already solved in CI by `.github/actions/toolchain`. On the Mac mini it is a
-launcher rule: every command exports
-`RUSTUP_TOOLCHAIN=1.94.1-aarch64-apple-darwin`, which is installed there
-(measured, beside a default `stable` of 1.98.1), and the toml file is untouched.
+Optional but worth a minute: **a second display**. The Mac mini drives a single
+DELL S2725QS at 3840×2160 presenting as 1920×1080 — backing scale exactly 2.0,
+everywhere. A scaled resolution is **not** proof of a different backing scale;
+the mixed-display transition cannot be exercised here at all (§8, Q11).
 
 ---
 
-## 7. Effort, and the critical path
+## 6. Risks, and what retires each
 
-The spike costed the whole port at **59–72 agent-days** to a signed and
-notarized preview, of which class B's **4 days are already taken** (2026-09-07),
-leaving **55–68**. Its waypoint — "a window that runs" — was **20–25 days**
-including those 4.
+The four largest are now probe tickets (§3, X-1 to X-4) rather than list entries,
+because a risk with an owner and a pass/fail is a ticket. What remains:
 
-| Milestone | Agent-days | Where it comes from in the spike |
-|---|---|---|
-| M0 toolchain, empty backend, CI, bundle | 5–7 | new: the spike costed no stub layer, and it is the largest single thing this plan adds |
-| M1 opens a window and types | 13–17 | the 3,449-line core's window/input/clipboard half (10–14) plus the surface, less class B |
-| M2 the reading surfaces | 8–10 | the rest of the 3,449-line core: dir watch, pickers, process door, font picker |
-| M3 chrome, windows, persistence | 9–12 | menu bar and the Cmd dialect (4–5) + first-run/paths/shell probe (3) + restore |
-| M4 the rewritten features | 18–23 | WKWebView (8–10) + video (3) + hotkey (2) + notifications/IME/socket/hang/http (8), less the Finder Sync extension |
-| M5 sign, notarize, DMG, CI | 6–8 | bundle+version (2) + signing (3–4) + DMG (2–3) + CI lane (1–2), less the bundle pulled into M0 |
-| M6 clean-account acceptance | 2–3 | new |
-| **Total** | **61–80** | spike's remaining 55–68 |
+**R1 — `cargo check --target` from Windows may prove nothing, or may not run.**
+Retired by X-6. The failure mode to avoid is attributing a failure to
+`.cargo/config.toml`'s `+crt-static` before reading the actual error.
 
-**The band is wider and the midpoint higher than the spike's, and three things
-account for it.** The empty backend is work the spike did not name, because it
-was measuring a gap rather than planning a fill; the platform surface has grown
-since `05bf018`, and R8 says how little we know about by how much; and M6 is a
-milestone the spike folded into "a signed preview". Everything else maps row for
-row, and the spike's exclusion of macOS UI-acceptance tooling is kept along with
-its warning about it.
+**R2 — the surface inventory is stale and always will be.** The spike's *79
+missing items* and its 3,449 / 2,427 / 8,900 line counts are **historical
+measurements taken at `05bf018`**, not current sizes, and this plan labels them
+that way wherever it quotes them. M1-2 re-measures before M1-1 is scoped.
 
-**The critical path is MAC-02 → MAC-03 → MAC-04 → MAC-05 → MAC-10 → MAC-13 →
-MAC-30 → MAC-50 → MAC-51 → MAC-52 → MAC-60.** Everything else hangs off it.
-Two observations about the path that the ticket table does not show:
+**R3 — real Unix child I/O has never run.** The first draft said `core-linux`
+tests `bt-pty` "on a real pty". The job's own comment says the opposite:
+"**nothing here spawns a child yet**, because off Windows this crate has no
+default shell to spawn" (`.github/workflows/ci.yml`). So spawn, resize, exit and
+reap over a real Unix pty are **new validation**, not inherited coverage. M1-6
+owns it and it is the ticket that makes that CI line start a process.
 
-*The Mac is the constraint, not the work.* Twenty-nine of thirty-eight tickets
-need it and the isolation rule allows one cargo at a time. The nine `check`
-tickets sit in M0, M1's edges and M5's tail, which is the best placement
-available: M0 is where the path is widest and M5 is where it is thinnest.
+**R4 — the glyph question is not CoreText versus DirectWrite.**
+`crates/bt-render/src/contrast.rs` is a **colour-contrast policy** module —
+minimum ratios against the paper — and has nothing to do with rasterization.
+Folio rasterizes through Swash via glyphon on both platforms, so the rasterizer
+does not change at all; what changes is the Metal presentation path around it.
+M2-5 measures the actual output rather than assuming a substitution that does
+not happen.
 
-*The three long poles are MAC-04, MAC-13 and MAC-41.* MAC-04 gates everything;
-MAC-13 gates the menu bar, which gates the release; MAC-41 gates nothing and
-costs the most, which makes it the one place the schedule can be cut by a
-decision rather than by work (§8, Q5).
+**R5 — `directory_tag` folds identity the Windows way.**
+`instance::directory_tag` lowercases a lossy path string, which is correct on
+NTFS and wrong on a case-sensitive APFS volume, and says nothing about symlinks.
+Combined with §4.4 ④ — the claim always succeeds off Windows — M3-5 has to
+supply canonical directory identity, a private runtime directory, peer
+verification (DESIGN §7.59b already requires the client to verify the server's
+image before sending its command line), socket-path length limits, stale-endpoint
+cleanup under the ownership lock, and crash recovery. The `Decision` /
+`Admission` / client-`CONFIRM`-is-the-commit-point semantics are preserved; the
+security model differences are documented rather than hidden.
+
+**R6 — the attention endpoint's boundary changes meaning.**
+`attention_pipe`'s DACL names the **logon session**, deliberately, "so a second
+session of the same user (a service, another desktop) is outside it". Unix owner
+permissions identify a **user**, not a session. M4-7 states that difference as a
+decision rather than substituting `0600` and calling it equivalent.
+
+**R7 — the crash ticket cannot replace APIs that are not there.**
+`hang.rs` says in its own header that `RtlCaptureStackBackTrace` "is not
+available here" and does not use it, and **`SetUnhandledExceptionFilter` appears
+nowhere in the tree**. `bt-app` already installs a Rust panic hook
+(`main.rs:107020`). `NSSetUncaughtExceptionHandler` catches Objective-C
+exceptions and is not a general crash mechanism. M4-11 therefore preserves the
+panic hook, implements a real event-loop liveness handshake for the hang half,
+and collects and symbolicates the system's own crash reports — it does not
+"replace" two functions.
+
+**R8 — Accessibility grants and re-signing.** Retired by X-5, which is
+positioned before any TCC-dependent ticket rather than beside it.
+
+**R9 — the toolchain pin off Windows.** `rust-toolchain.toml` names
+`1.94.1-x86_64-pc-windows-msvc`, which rustup rejects as a channel off Windows.
+Solved in CI by `.github/actions/toolchain`; on the Mac mini every launcher
+exports `RUSTUP_TOOLCHAIN=1.94.1-aarch64-apple-darwin`, which is installed there
+(measured, beside a default `stable` of 1.98.1), and the toml is untouched.
+
+---
+
+## 7. The tickets, the graph, and the effort
+
+### 7.1 The inventory
+
+**52 tickets — 10 S, 33 M, 9 L.** `check` means a Windows agent can author and
+compile it; **Mac** means the Mac mini, in a worktree under
+`~/folio-port/wt/<ticket>`, one cargo at a time. Per X-6, `check` is never
+acceptance.
+
+| ID | Title | Size | Where | Depends on |
+|---|---|---|---|---|
+| **P-1** | Xcode select + license; reset the spike checkout; shared target dir | S | Mac | owner §5 ① |
+| **P-2** | Bundle identifier, team, minimum macOS version, deployment target, `packaging/macos/` skeleton | S | check | §8 Q4, Q6 |
+| **P-3** | A minimal real signing script, exercised in the execution context releases will use | M | Mac | owner §5 ②③ |
+| **X-1** | Metal alpha + composition against locked wgpu and a real WKWebView | M | Mac | P-1 |
+| **X-2** | WKWebView policy matrix + adversarial fixtures | M | Mac | P-1 |
+| **X-3** | Command / Option-as-Alt / IME routing matrix across four focus surfaces | M | Mac | P-1 |
+| **X-4** | AppKit application delegate bridge: reopen, Services, termination, last window | M | Mac | P-1 |
+| **X-5** | Stable signed identity and TCC grant retention | S | Mac | P-3 |
+| **X-6** | What a Windows agent can check: objc2 graph + an app target, `--all-targets` | S | check | P-2 |
+| **M1-1** | Native handle abstraction; both window constructors; device-loss reconstruction; deferred-service construction made harmless | L | Mac | M1-2, X-1 |
+| **M1-2** | The backend inventory: signatures, fields, ownership/thread, caller failure, and the five classifications of §4.4 | M | check | X-6 |
+| **M1-3** | Window and screen backend: geometry, work area, backing scale, exposure, topmost, dark mode | L | Mac | M1-2 |
+| **M1-4** | The Metal surface and a `WindowTargetKind` arm with its own alpha policy | M | Mac | X-1, M1-1 |
+| **M1-5** | Native shipped profiles, automatic selection, fallback, home/cwd, Finder-launch environment, zsh integration | L | Mac | M1-6 |
+| **M1-6** | `resolve_default_shell` Unix rule; PowerShell arguments made Windows-specific; real Unix child spawn/resize/exit/reap tests — **also remote T2** | M | Mac | M1-2 |
+| **M1-7** | Keyboard routing per X-3: application-command vs terminal-control, Option-as-Alt, the `input.rs` predicates, `WebChord` gaining Command, the `BINDINGS` dialect | L | Mac | X-3, M1-3 |
+| **M1-8** | IME: preedit, cursor area at scale 2, cancellation, focus changes, no duplicate commits | M | Mac | M1-7 |
+| **M1-9** | Clipboard over `NSPasteboard`; drop `clipboard_text`'s `hwnd` parameter | S | check | M1-2 |
+| **M1-10** | `--all-targets` on macOS; the Windows-assuming runtime tests; the `cli.rs` gap; `core-macos` grows `bt-platform` and `bt-app`; the `bt-app` cfg allowlist gate | M | check | M1-1 |
+| **M2-1** | `DirWatch` over FSEvents preserving **all three** contracts — `Tree`, `HereOnly`, named `HereOnly` — with overflow/rescan, rename, root replacement, readiness, cancellation | L | Mac | M1-1 |
+| **M2-2** | Process door over `NSWorkspace`; trash over `NSFileManager`. `quiet_command` is **already portable** and is only re-verified | M | Mac | M1-2 |
+| **M2-3** | Pickers over `NSOpenPanel`; `message_box` over `NSAlert` | M | Mac | M1-3 |
+| **M2-4** | `monospace_font_families()` over `CTFontCollection` | S | Mac | M1-2 |
+| **M2-5** | Glyph output measured on the Metal path at scale 2 | M | Mac | M1-4 |
+| **M2-6** | `storage_dir()` on macOS; `WKWebsiteDataStore` persistence specified | S | check | M1-2 |
+| **M2-7** | Reading-surface acceptance sweep to M2's line | M | Mac | M2-1…M2-6 |
+| **M3-1** | The application delegate productionized from X-4 | L | Mac | X-4, M1-1 |
+| **M3-2** | The application menu bar | M | Mac | M1-7 |
+| **M3-3** | `CustomWindowFrame` against the traffic lights | M | Mac | M1-3 |
+| **M3-4** | Multi-window restore and monitor identity | M | Mac | M2-6, M3-3 |
+| **M3-5** | One data directory one writer, **built rather than preserved** (§4.4 ④): canonical identity, runtime dir, peer verification, stale cleanup, crash recovery, launch socket | L | Mac | M3-1, M2-6 |
+| **M3-6** | First-run card: capability-driven row visibility; the portable update row stays | M | Mac | M3-2 |
+| **M3-7** | stdio for terminal and Finder launches; real redirect/silence; `leave_process` really terminates | M | Mac | M1-2 |
+| **M4-1** | The `CALayer` composition implementation from X-1 | M | Mac | X-1, M1-4 |
+| **M4-2** | The `WKWebView` host and `bt-app`'s conversation with it; `WKWebsiteDataStore` lifecycle | L | Mac | M4-1, X-2 |
+| **M4-3** | Web policy enforced to X-2's matrix; unsupported guarantees stated in the product | M | Mac | M4-2 |
+| **M4-4** | Video first frame over `AVAssetImageGenerator` | M | Mac | M1-4 |
+| **M4-5** | Video playback: `AVPlayer` ownership, **audio**, timing, seek, pause/end/error, frame format, stride and colour conversion | L | Mac | M4-4 |
+| **M4-6** | Notifications over `UNUserNotificationCenter`; Dock tile | M | Mac | M3-1 |
+| **M4-7** | Attention endpoint over a Unix socket, with the session-vs-user boundary stated | M | Mac | M3-5 |
+| **M4-8** | Global hotkey over `CGEventTap`; in-app authorization action; denied/revoked state; foreground restoration tested | M | Mac | X-5, M3-1 |
+| **M4-9** | Services provider object, callback and main-thread bridge; folder URL validation, multi-selection, spaces and non-ASCII, cold and warm delivery | M | Mac | M3-1, M3-5 |
+| **M4-10** | Update check over `NSURLSession`; the in-place swap becomes "open the release page" | S | Mac | M2-2 |
+| **M4-11** | Event-loop liveness handshake; panic hook preserved; system crash reports collected and symbolicated | M | Mac | M3-7 |
+| **M5-1** | Minimal entitlements, hardened runtime, secure timestamps, nested-code signing order, signature verification | M | Mac | P-3, M4 complete |
+| **M5-2** | Notarize and staple the app; retain submission logs | M | Mac | M5-1 |
+| **M5-3** | Build, sign, notarize and staple the DMG | M | Mac | M5-2 |
+| **M5-4** | `release.yml` macOS lane | M | check | M5-3 |
+| **M5-5** | `the_version_is_the_manifests_and_nothing_elses` grows the plist's two version fields | S | check | P-2 |
+| **M5-6** | `README` ×2, `docs/shortcuts.md`, `BUILDING`, `RELEASING`, `PROVENANCE` | M | check | M5-4, M3-2 |
+| **M6-1** | Clean-user acceptance of the downloaded artifact, including refusal paths and the offline ticket | M | Mac | M5-4 |
+| **M6-2** | Clean-machine coverage: a VM or snapshot, or the gap written down and accepted | S | Mac | M6-1, §8 Q11 |
+
+### 7.2 The graph
+
+Three kinds of edge the first draft did not have, and the review was right that
+without them the graph permits shipping an incomplete product:
+
+- **Milestone-completion joins.** `M2-7` joins all of M2; `M5-1` joins all of M4;
+  `M6-1` joins all of M5. An acceptance ticket that re-checks an earlier
+  milestone depends on that milestone's join, not on nothing.
+- **Release-readiness edges.** **M4-2 gates the release**, because the web
+  preview is in 0.4 scope; so does M4-5, M4-8 and M4-9. They are not optional
+  leaves.
+- **Probe-before-implementation edges.** X-1 gates M1-4 and M4-1; X-2 gates
+  M4-3; X-3 gates M1-7; X-4 gates M3-1; **X-5 gates M4-8**.
+
+**The dependency critical path** is
+P-1 → P-3 → X-5 → X-1 → M1-2 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M3-1 →
+M3-2 → M4-2 → M5-1 → M5-2 → M5-3 → M6-1, which sums to **44–65 agent-days**.
+
+**The single-Mac schedule is a different number.** Forty-three of the fifty-two
+tickets need the Mac and they cannot overlap. The nine `check` tickets can run on
+Windows agents in parallel with Mac work, which shortens elapsed time but removes
+no agent-days. The elapsed schedule is therefore bounded below by the Mac
+tickets' own sum, not by the critical path.
+
+### 7.3 Effort, bottom-up, and reconciled with the spike
+
+| Phase | Tickets | Agent-days |
+|---|---:|---:|
+| P preflight | 3 | 4–5 |
+| X probes | 6 | 10–14 |
+| M1 window and shell | 10 | 27–40 |
+| M2 reading surfaces | 7 | 14–20 |
+| M3 chrome, lifecycle, persistence | 7 | 18–27 |
+| M4 rewritten features | 11 | 25–37 |
+| M5 sign, notarize, ship | 6 | 11–16 |
+| M6 clean-user acceptance | 2 | 3–4 |
+| **Total** | **52** | **112–163** |
+
+**This is roughly twice the spike's remaining 55–68, and the difference is not a
+disagreement about the code.** Four things account for it, each checkable:
+
+- **The spike costed the platform backend, not the application integration.** Its
+  §3.2 lists `bt-app`'s ≈8,900 platform-facing lines and says they "would follow"
+  the backend; it does not cost them separately. M1-1, M1-5, M1-7, M4-2's app
+  half and M3-1 are that work, and they are the largest block here.
+- **The spike had no probe phase**, and no ticket for an inventory. Ten to
+  fourteen days buy back the M4 redesign the review identifies as the dominant
+  schedule risk.
+- **Two spike rows need restating rather than re-estimating.** Its whole-core
+  10–14 covered *all* of `windows_impl` — window, screen, DPI, clipboard, dark
+  mode, pickers, dir watch, process, console — which this plan spreads across
+  M1-3, M1-9, M2-1, M2-2, M2-3, M2-4 and M3-7 for **16–25**; the increase is
+  FSEvents' three contracts and real stdio, both of which the spike's one-line
+  row did not see. Its compositor 3–4 plus WKWebView 8–10 is **11–14**; the first
+  draft's Q5 compressed those to 6–9 without demonstrating a saving, and this
+  draft restores them as X-1 + M4-1 + M4-2 + M4-3 = **12–18**, the excess being
+  the policy-enforcement matrix the spike did not know it needed.
+- **Video was costed at 3 days for the first frame only.** Playback with audio,
+  seeking and colour conversion (M4-5) is new against that row.
+
+Both numbers are honest readings of different things: the spike read the code,
+this reads the work.
 
 ---
 
 ## 8. Open questions for the owner
 
-**Q1 — Where do settings live?**
-*Recommendation: `~/Library/Application Support/Folio`.* Folio is a window before
-it is a command, it will be an `.app` with a bundle identifier, and everything
-else about it on that machine — the cache, the notification registration, the web
-data store — follows Apple's layout already. `~/.config/folio` would make the
-settings the only part of the app that disagreed with the rest. No migration
-question: there is nothing on macOS to migrate from.
+Twelve, recommendation first.
 
-**Q2 — Is the quake terminal in 0.4, and with which mechanism?**
-*Recommendation: yes, in 0.4, over a `CGEventTap`, with Accessibility asked for
-at the first summon rather than at first run.* The `NSEvent` global monitor is the
-tempting answer because it needs no permission, but it cannot swallow the key, so
-the chord also reaches the frontmost app — a terminal that pastes your summon
-chord into somebody else's editor is not the feature. Asking at first summon
-rather than first run means a reader who never presses the key is never asked,
-which is the same judgement §7.56 ② already applies to the first-run card.
+**Q1 — Where do settings live?** *Recommendation: `~/Library/Application Support/
+Folio`.* Folio is a window before it is a command, it will be an `.app` with a
+bundle identifier, and the cache, notification registration and web data store
+all follow Apple's layout already. Nothing on macOS to migrate from.
 
-**Q3 — Does "Open Folio here" survive, and in what form?**
-*Recommendation: `NSServices` only, in 0.4; no Finder Sync extension, ever, and
-no pretence that either is the first page.* A Services entry is one dictionary in
-`Info.plist`, it appears under *Services* on a folder's context menu, and it costs
-MAC-47's single day. A Finder Sync extension is a second bundle with its own
-signing and its own lifecycle, for a submenu that is still not the first page —
-the spike calls both "weaker than what Windows 11 gives", and paying four days
-for the weaker of two weak things is the wrong trade.
+**Q2 — The global shortcut: which mechanism, and when is it authorized?**
+*Recommendation: `CGEventTap`, authorized through an in-app "Enable global
+shortcut" action.* The first draft said an `NSEvent` global monitor "needs no
+permission". **That is wrong** — Apple requires Accessibility trust for it too,
+and it still cannot suppress the event, so the chord would also reach the
+frontmost app. And "ask at first summon" has a bootstrap problem: without
+authorization there is no first summon to notice. An explicit action, with a
+visible *not authorized* state, is the only shape that works.
 
-**Q4 — What is the bundle identifier, and which team signs?**
-*Recommendation: a reverse-DNS identifier under a name the project controls —
-`com.folioterminal.folio` if the domain is registered, otherwise the repository's
-own namespace.* This needs the owner because it is permanent: the identifier is
-what TCC keys permissions on, what `UNUserNotificationCenter` registers, and what
-a user's granted Accessibility permission is attached to. Changing it after
-release re-asks every reader for every permission.
+**Q3 — Does "Open Folio here" survive, and how?** *Recommendation: `NSServices`
+only; no Finder Sync extension.* One correction: a Service is **not** one
+dictionary. It needs a registered provider object and a method that receives
+pasteboard data, which is why M4-9 is a `bt-platform` ticket rather than a plist
+edit. A Finder Sync extension is a second signed bundle for a submenu that is
+still not the first page.
 
-**Q5 — Is the web preview in 0.4 or deferred?**
-*Recommendation: in.* It is the most expensive item in the plan (MAC-40 +
-MAC-41, 6–9 days) and the one place the schedule could be cut, so the question is
-real — but §7.9 makes a page a *preview buffer* rather than an extra feature, the
-files column offers `.html` files like any other, and a preview pane that
-silently refuses one file type is a hole a reader finds on the first afternoon.
-If a shorter 0.4 is wanted, this is the lever; the recommendation is to let M4
-finish late rather than ship a preview pane with a gap in it.
+**Q4 — Bundle identifier, signing team, and minimum macOS version.**
+*Recommendation: a reverse-DNS identifier under a name the project controls, the
+owner's existing team, and a deployment target of macOS 14.* The identifier is
+permanent — TCC keys every granted permission on it. The deployment target must
+be stated rather than inherited from whatever `macos-latest` happens to be, or
+compatibility is decided by accident.
 
-**Q6 — arm64 only, or a universal binary?**
-*Recommendation: `aarch64-apple-darwin` only for the 0.4 preview.* A universal
-binary doubles every compile on the one Mac that is already the critical path,
-for a population — Intel Macs, five years out of production — that a preview does
-not need to reach. `lipo` is a day's work whenever it is wanted.
+**Q5 — Is a reduced WKWebView capability set acceptable?** *Recommendation: yes,
+if X-2 names exactly what is reduced and the product says so where a reader can
+see it.* WebView2's `WebResourceRequested` filter covers more than WKWebView's
+public hooks reach. The alternative — dropping the web preview from 0.4 — saves
+12–18 days and is the only real schedule lever, but §7.9 makes a page a preview
+buffer rather than an extra, and a preview pane that refuses one file type is a
+hole a reader finds on the first afternoon.
 
-**Q7 — Homebrew cask in 0.4?**
-*Recommendation: no.* The formula is cheap; what it implies is not — a cadence,
-and a promise that the URL keeps working. The winget PR is still waiting on a
-human reviewer, and adding a second package ecosystem before the first has
-completed one round buys two obligations with one release.
+**Q6 — arm64 only?** *Recommendation: yes for the preview.* A universal binary
+doubles every compile on the one Mac that is already the constraint.
 
-**Q8 — Is a macOS UI-acceptance harness in scope?**
-*Recommendation: no, and say so out loud.* The spike excluded it from its numbers
-and this plan excludes it from its tickets. The consequence is that every
-acceptance line in §2 is the owner in front of the Mac mini rather than a script
-— which is why the milestones are six rather than twenty — and that this
-project's autonomous screenshot-and-keys loop does not exist there for 0.4, so a
-defect comes back as a screenshot and a sentence, exactly as the Windows ones did
-before `ui-probe` worked. Revisit in 0.5.
+**Q7 — Where are releases signed, and how is the private key reached?**
+*Recommendation: a dedicated non-login signing keychain on the Mac mini, unlocked
+by the owner for the duration of a release.* An API key does not sign (§5 ③).
+The alternatives are the owner signing at the machine, or a CI runner holding the
+identity. This has to be settled before M4, because X-5 and every TCC feature
+depend on a stable identity being reachable.
+
+**Q8 — What is the default shell, and is it a login shell?**
+*Recommendation: the user's `$SHELL`, started as an interactive non-login shell,
+with the shipped profiles offering zsh, bash and `/bin/sh`.* This matters more
+than it reads: a Finder-launched app inherits almost no environment, so a
+non-login shell will not see a `PATH` set in `.zprofile`. If the owner wants
+Terminal.app's behaviour, the answer is a login shell and the cost is slower
+startup.
+
+**Q9 — Option as Alt, or Option as text?** *Recommendation: Option as text by
+default, with a setting, matching Terminal.app and iTerm's defaults.* Option-as-
+Alt breaks every accented character a reader types; the terminal users who want
+`Alt+f` know to turn it on. winit 0.30.13 offers left/right granularity if the
+owner wants the split.
+
+**Q10 — What happens when the last window closes?** *Recommendation: the app
+stays in the Dock, and a Dock or Finder click opens a new window.* That is the
+macOS convention and it is what the quake terminal already needs — §7.54e's
+"companion" model maps onto it exactly. The Windows behaviour (last window
+leaving is the process leaving) is asserted by a test in `main.rs` and would need
+a platform arm.
+
+**Q11 — Which coverage gaps may ship?** *Recommendation: ship with the
+clean-machine gap and the mixed-scale gap both written down, and close neither.*
+A second account is not a pristine machine; a scaled resolution is not a
+different backing scale. Closing the first needs a VM, the second a display.
+§7.50 records that a window that could not cross the seam between two screens
+reached a user on Windows, so the second gap is the one with history.
+
+**Q12 — A macOS UI-acceptance harness in 0.4?** *Recommendation: no, and say so
+out loud.* Every acceptance line in §2 is the owner in front of the Mac mini
+rather than a script, which is why the milestones are six rather than twenty, and
+a defect there comes back as a screenshot and a sentence. Revisit in 0.5.
 
 ---
 
-## Appendix — what was measured on the Mac mini for this plan
+## Appendix — what was measured on the Mac mini
 
-Read-only, over `ssh -o BatchMode=yes mac-mini`, 2026-09-11. Nothing was
-installed, built, started or changed.
+Read-only over `ssh -o BatchMode=yes mac-mini`, 2026-09-11. Nothing installed,
+built, started or changed.
 
 | Question | Answer |
 |---|---|
 | Machine | Apple M4, 10 GPU cores, Metal 4; macOS 26.6.2 (build 25G83), arm64 |
 | Developer tools | `/Applications/Xcode.app` **is installed**, version 26.6; `xcode-select -p` still answers `/Library/Developer/CommandLineTools`, so `xcodebuild` refuses to run |
-| Rust | `rustc 1.98.1` as the default `stable-aarch64-apple-darwin`; `1.94.1-aarch64-apple-darwin` also installed — the pinned version is there |
+| Rust | `rustc 1.98.1` as default `stable-aarch64-apple-darwin`; `1.94.1-aarch64-apple-darwin` also installed |
 | Signing | `security find-identity -v -p codesigning` → `0 valid identities found` |
-| Notarization | `xcrun --find notarytool` → present in the Command Line Tools; `xcrun notarytool history --keychain-profile folio` → `Error: keychainLocked(keychainName: "default")` over a non-interactive session |
+| Notarization | `xcrun --find notarytool` present; `xcrun notarytool history --keychain-profile folio` → `Error: keychainLocked(keychainName: "default")` over a non-interactive session |
 | Display | one DELL S2725QS, 3840×2160 presenting as 1920×1080 — backing scale 2.0, and no second scale available |
 | Disk | 228 GiB volume, 48 GiB free; `~/folio-port` holds 13 GiB |
-| The spike checkout | `~/folio-port/repo`, detached at `ffdd444`, working tree clean, origin is the project's GitHub remote |
+| The spike checkout | `~/folio-port/repo`, detached at `ffdd444`, working tree clean |
+
+---
+
+## Review record
+
+**Codex, read-only, 2026-09-12.** 25 findings — 3 blockers, 22 major — against
+the plan's first draft. Every citation was re-verified against the tree before
+this revision; line numbers in the review are from a slightly different reading
+of `main.rs` and shift by a few hundred lines, but no cited fact was wrong about
+its subject.
+
+**Accepted, and the revision acts on all of them:** the three blockers (the
+startup path that requires an `HWND`, a custom frame and a compositor before a
+first frame; native shipped profiles rather than one resolver function; and
+wgpu-hal 30's Metal offering only `Opaque` and `PostMultiplied`, which makes the
+carried-over `PreMultiplied` contract impossible) and the twenty-two major
+findings, including the superseded milestone rulings now recorded in §0; the
+type-level exceptions to the stub rule; `cli.rs`'s ungated uses; the three
+`DirWatch` contracts; clipboard predicates and `WebChord`'s missing Command;
+Finder reopen being an application event rather than a second process; the
+Unix socket's identity and trust differences; `NSEvent` global monitors also
+needing Accessibility; a Service needing a provider object; App Store Connect
+keys not signing; the notarization and Gatekeeper artifact order; clean-user
+versus clean-machine; §4.6 proving only a Linux property; the stale "already
+true" claims (`quiet_command` already portable, `core-linux` spawning no child,
+`contrast.rs` being colour policy rather than rasterization, the `player` cache
+nobody writes, the first-run card's real rows, the real version gate's name and
+location, the hang and hotkey arm counts); and the seven missing owner questions,
+now Q4, Q5, Q7, Q8, Q9, Q10 and Q11.
+
+**One finding corrected in the other direction.** Finding 5 says
+`instance::claim_data_directory`'s non-Windows arm "returns `None`". It returns
+**`Some(DataDirectoryClaim)`** — always succeeding, with a comment saying so.
+The first draft of this plan made the same mistake. The consequence is worse than
+either statement: the single-writer guarantee is absent off Windows by
+construction, so M3-5 builds it rather than preserving it (§4.4 ④).
+
+**Nothing else was rejected.** Two findings were narrowed rather than refused:
+the review's §4.1 correction is accepted but restated — `bt-render` has one
+documented `unsafe` exception rather than none, and keeping native video FFI in
+`bt-platform` stays a placement decision; and the ticket arithmetic was not
+adopted as a number but rebuilt from a different inventory, which is why §7.3
+reads 112–163 against the review's 89–130 rather than adopting it.
