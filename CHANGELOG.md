@@ -104,6 +104,19 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A Markdown page full of large screenshots no longer freezes the window.**
+  Opening this project's own README on a large screen could pin a processor core
+  and leave the window standing on whatever it had drawn last — still answering
+  the mouse and the keyboard as far as Windows was concerned, but painting
+  nothing, for as long as the page stayed open. The page was asking for its
+  pictures over and over: Folio keeps a fixed amount of memory for the pictures
+  it has read from disk, nine screenshots of that size do not all fit in it, and
+  every one that arrived pushed out another that the page was still showing —
+  which the page read as a picture it had never asked for, so it asked again.
+  A page now keeps the answer it was given: it holds the picture it is drawing,
+  it asks for each one once, and running out of room to remember them changes
+  nothing about what it shows.
+
 - **A long animated GIF now plays in the preview instead of showing its first
   frame.** Folio used to read every frame of an animation into memory before
   drawing any of it, and a file whose frames did not all fit was drawn as its

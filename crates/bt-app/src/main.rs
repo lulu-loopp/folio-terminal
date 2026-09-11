@@ -2232,7 +2232,8 @@ fn resolve_document_pictures(
     document: Option<&Path>,
     theme: bt_render::Theme,
     reach: PictureReach,
-    ask: &mut dyn FnMut(&Path, bool) -> MarkdownPicture,
+    standing: &DocumentPictures,
+    ask: &mut dyn FnMut(&Path, bool, Option<&MarkdownPicture>) -> MarkdownPicture,
 ) -> DocumentPictures {
     // **Which sources are near enough to be worth a disk** (review row R1-8,
     // adversarial review 2026-09-08). A source is asked for when *any* of the
@@ -2275,8 +2276,11 @@ fn resolve_document_pictures(
             // fetched over SMB with no click anywhere. It draws what a picture this window cannot
             // read draws, because that is what it is: the file is not this window's to open.
             preview::LinkAction::Refused(_) => MarkdownPicture::Failed,
+            // **The answer this page already has is part of the question**
+            // (user report 2026-09-10) — see [`answer_one_picture`], which is
+            // what reads it.
             preview::LinkAction::Preview(path) if wanted.contains(source) => {
-                let picture = ask(&path, image.fill);
+                let picture = ask(&path, image.fill, standing.get(source));
                 pictures.files.insert(path);
                 picture
             }
@@ -2290,6 +2294,163 @@ fn resolve_document_pictures(
         pictures.by_source.insert(source.to_owned(), picture);
     }
     pictures
+}
+
+/// **What one of a page's pictures draws, and whether this window still has to
+/// ask the disk for it.**
+///
+/// The body of [`Runtime::resolve_document_pictures`]'s closure, out here where
+/// three real caches can be put in front of it — [`forget_a_picture`]'s shape
+/// and for its reason: a `Runtime` needs a device layer and a window to exist,
+/// and what a test has to be able to hold is the caches.
+///
+/// # An answer is an answer (user report 2026-09-10, `docs/DESIGN.md` §7.1.3u)
+///
+/// The decode store is a **cache**: bounded in bytes ([`MAX_PEEK_CACHE_BYTES`])
+/// and letting go of its least recently used entry whenever a decode arrives.
+/// The reach a page asks for is bounded in *pictures*
+/// ([`MARKDOWN_PICTURE_MARGIN`]), not in bytes — so a README whose screenshots
+/// are 3200×2000 wants nine decodes of 24 MiB against a 192 MiB ceiling, and
+/// every decode that lands throws out one the page is still drawing.
+///
+/// Before this, a miss read as *never asked*. The page asked again, the answer
+/// evicted the next one, and the window spent the rest of its life decoding the
+/// same nine files: 1922 decodes in 45 seconds, measured, each one taking a full
+/// document re-flow and a full chrome rebuild with it. The window thread never
+/// reached a redraw, so the picture on the glass stopped moving while the
+/// process went on answering messages — a frozen window that Windows calls
+/// responsive and the hang watchdog, which times one turn, never sees.
+///
+/// So the answer this page was already given is part of the question. A page
+/// that has been told what a file's pixels are keeps that answer when the cache
+/// lets the pixels go, and **asks for nothing**: what it draws, it holds. Only a
+/// picture it can neither draw nor resample from what it has in hand is asked
+/// for again — and that ask is latched by the cache's own `Pending`.
+///
+/// `needs_pixels` is set rather than the door being called from in here, because
+/// the door is `Runtime::request_peek_pixels` and there is exactly one of it
+/// (routes A and E of the untrusted-path audit): it wants the whole runtime, and
+/// this wants two of its caches. The caller spends the flag the moment these
+/// borrows end.
+#[allow(clippy::too_many_arguments)]
+fn answer_one_picture(
+    peek_cache: &mut PeekCache,
+    markdown_pictures: &mut MarkdownPictures,
+    standing: Option<&MarkdownPicture>,
+    path: &Path,
+    fill: bool,
+    measure_px: f32,
+    now: Instant,
+    needs_pixels: &mut bool,
+) -> MarkdownPicture {
+    let cache_key = bt_term::normalized_local_image_path_key(path);
+    // What this window is holding, and what it has merely been told. The decode
+    // cache is the first; the answer the page is standing on is the second, and
+    // it outlives the pixels.
+    let known = match peek_cache.get(&cache_key) {
+        Some(PeekCacheEntry::Ready {
+            key,
+            rgba,
+            width_px,
+            height_px,
+        }) => Some((key.clone(), Some(Arc::clone(rgba)), [*width_px, *height_px])),
+        Some(PeekCacheEntry::Failed) => return MarkdownPicture::Failed,
+        // A read is out. The page keeps drawing what it was drawing rather than
+        // going blank while the answer travels.
+        Some(PeekCacheEntry::Pending) => {
+            return match standing {
+                Some(picture @ MarkdownPicture::Ready { .. }) => picture.clone(),
+                _ => MarkdownPicture::Loading,
+            };
+        }
+        None => match standing {
+            // Answered once, and the cache has since let the pixels go. The
+            // decode's own size and its content key are the whole of what the
+            // passes below need; `rgba` is the decode's own pixels only while
+            // the exact-size resample has not landed — which is exactly when
+            // those pixels are still wanted.
+            Some(MarkdownPicture::Ready {
+                key,
+                rgba,
+                raster,
+                native,
+            }) => Some((
+                key.clone(),
+                (raster == native).then(|| Arc::clone(rgba)),
+                *native,
+            )),
+            Some(MarkdownPicture::Failed) => return MarkdownPicture::Failed,
+            _ => None,
+        },
+    };
+    let Some((content, native_rgba, native)) = known else {
+        // Never answered. The caller's door is the very one the image pane and
+        // the glance card ask through, so a picture already decoded for one of
+        // them is already decoded for this page.
+        *needs_pixels = true;
+        return MarkdownPicture::Loading;
+    };
+    if native[0] == 0 || native[1] == 0 {
+        return MarkdownPicture::Failed;
+    }
+    let [drawn_width, drawn_height] = markdown_image_extent(native, measure_px, fill);
+    // **The CPU never upsamples** — `preview_image_extent`'s `.min(1.0)`
+    // is that cap, and it is asked here for the same reason the image
+    // pane asks it: above 100% the extra pixels do not exist, and the
+    // magnification is the sampler's to carry.
+    let (cap_width, cap_height) = image_raster_cap(native);
+    let Some((raster_width, raster_height)) = bt_render::preview_image_extent(
+        (drawn_width.round().max(1.0) as u32).min(cap_width),
+        (drawn_height.round().max(1.0) as u32).min(cap_height),
+        native[0],
+        native[1],
+    ) else {
+        return MarkdownPicture::Failed;
+    };
+    let key = MarkdownRasterKey {
+        content: content.clone(),
+        width_px: raster_width,
+        height_px: raster_height,
+    };
+    match markdown_pictures.raster(&key) {
+        Some(MarkdownRaster::Ready {
+            key,
+            rgba,
+            width_px,
+            height_px,
+        }) => {
+            return MarkdownPicture::Ready {
+                key: key.clone(),
+                rgba: Arc::clone(rgba),
+                raster: [*width_px, *height_px],
+                native,
+            };
+        }
+        Some(MarkdownRaster::Pending) => {}
+        None => match &native_rgba {
+            Some(rgba) => markdown_pictures.owe(
+                MarkdownRasterRequest {
+                    key,
+                    rgba: Arc::clone(rgba),
+                    native,
+                },
+                now,
+            ),
+            // The resample is made from the decode's own pixels and this window
+            // has let them go. Ask once — the page keeps drawing meanwhile, and
+            // the `Pending` the caller files is what stops it asking twice.
+            None => *needs_pixels = true,
+        },
+    }
+    match native_rgba {
+        Some(rgba) => MarkdownPicture::Ready {
+            key: content,
+            rgba,
+            raster: native,
+            native,
+        },
+        None => standing.cloned().unwrap_or(MarkdownPicture::Loading),
+    }
 }
 
 /// **Everything that decides what one exact-size markdown raster looks like**:
@@ -47657,6 +47818,26 @@ impl Runtime<'_> {
             &mut self.window.markdown_pictures,
             path,
         );
+        // **And the answer the pages themselves are standing on.** Since
+        // [`answer_one_picture`] a page keeps what it was told when the decode
+        // cache lets the pixels go, which is what stops a bounded cache from
+        // sending this window round the same nine decodes forever — and it is
+        // exactly what must *not* survive a file moving under it. This is the
+        // one place the three ledgers are ended together, so it is the one place
+        // the fourth is ended too.
+        let key = bt_term::normalized_local_image_path_key(path);
+        for tab in &mut self.window.tabs {
+            for (_, pane) in tab.preview_panes.iter_mut() {
+                if let PreviewDocument::Markdown { pictures, .. } = &mut pane.doc
+                    && pictures
+                        .files
+                        .iter()
+                        .any(|file| bt_term::normalized_local_image_path_key(file) == key)
+                {
+                    *pictures = DocumentPictures::default();
+                }
+            }
+        }
     }
 
     /// **One watched file moved: tell whatever is showing it** (W2 slice 5).
@@ -57021,6 +57202,18 @@ impl Runtime<'_> {
         if key == self.preview_pane_mut(surface).doc_key {
             return;
         }
+        // **What this page has already been told about its pictures**, taken
+        // before the document it is written in is replaced. It is the ledger
+        // that makes an answer an answer when the byte-bounded decode cache has
+        // let the pixels go — see [`answer_one_picture`]. Read after the key's
+        // own early return, so a window that is not rebuilding pays nothing.
+        let standing_pictures = self
+            .preview_pane(surface)
+            .and_then(|pane| match &pane.doc {
+                PreviewDocument::Markdown { pictures, .. } => Some(pictures.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
         // **A resize re-flows; it does not re-parse** (user report, 2026-08-13).
         // The parse and every measurement that does not depend on the pane's
         // width are keyed on the content alone, so dragging a window edge pays
@@ -57078,8 +57271,13 @@ impl Runtime<'_> {
             // exactly what must not be reused.
             let source = self.markdown_source_block(surface, standing_source.as_ref(), scale);
             let math = self.resolve_document_math(&blocks, metrics, &bt_render::chrome_palette());
-            let pictures =
-                self.resolve_document_pictures(&blocks, document.as_deref(), width, picture_reach);
+            let pictures = self.resolve_document_pictures(
+                &blocks,
+                document.as_deref(),
+                width,
+                picture_reach,
+                &standing_pictures,
+            );
             let intrinsic = if math_changed {
                 let content = self
                     .preview_buffer_on(surface)
@@ -57246,6 +57444,7 @@ impl Runtime<'_> {
                     document.as_deref(),
                     width,
                     picture_reach,
+                    &standing_pictures,
                 );
                 let clock = clock.map(|_| Instant::now());
                 let intrinsic = self.measure_markdown_intrinsics(
@@ -57534,89 +57733,46 @@ impl Runtime<'_> {
         document: Option<&Path>,
         measure_px: f32,
         reach: PictureReach,
+        standing: &DocumentPictures,
     ) -> DocumentPictures {
         let theme = bt_render::current_theme();
         let now = Instant::now();
         self.window.markdown_pictures.tick = self.window.markdown_pictures.tick.saturating_add(1);
-        let mut ask = |path: &Path, fill: bool| -> MarkdownPicture {
-            let cache_key = bt_term::normalized_local_image_path_key(path);
-            let decoded = match self.window.peek_cache.get(&cache_key) {
-                Some(PeekCacheEntry::Ready {
-                    key,
-                    rgba,
-                    width_px,
-                    height_px,
-                }) => (key.clone(), Arc::clone(rgba), [*width_px, *height_px]),
-                Some(PeekCacheEntry::Pending) => return MarkdownPicture::Loading,
-                Some(PeekCacheEntry::Failed) => return MarkdownPicture::Failed,
-                None => {
-                    // The very door the image pane and the glance card ask
-                    // through, so a picture already decoded for one of them is
-                    // already decoded for this page.
-                    if self.request_peek_pixels(path) {
-                        self.window
-                            .peek_cache
-                            .insert(cache_key, PeekCacheEntry::Pending);
-                        return MarkdownPicture::Loading;
-                    }
-                    return MarkdownPicture::Failed;
-                }
-            };
-            let (content, rgba, native) = decoded;
-            if native[0] == 0 || native[1] == 0 {
-                return MarkdownPicture::Failed;
-            }
-            let [drawn_width, drawn_height] = markdown_image_extent(native, measure_px, fill);
-            // **The CPU never upsamples** — `preview_image_extent`'s `.min(1.0)`
-            // is that cap, and it is asked here for the same reason the image
-            // pane asks it: above 100% the extra pixels do not exist, and the
-            // magnification is the sampler's to carry.
-            let (cap_width, cap_height) = image_raster_cap(native);
-            let Some((raster_width, raster_height)) = bt_render::preview_image_extent(
-                (drawn_width.round().max(1.0) as u32).min(cap_width),
-                (drawn_height.round().max(1.0) as u32).min(cap_height),
-                native[0],
-                native[1],
-            ) else {
-                return MarkdownPicture::Failed;
-            };
-            let key = MarkdownRasterKey {
-                content: content.clone(),
-                width_px: raster_width,
-                height_px: raster_height,
-            };
-            match self.window.markdown_pictures.raster(&key) {
-                Some(MarkdownRaster::Ready {
-                    key,
-                    rgba,
-                    width_px,
-                    height_px,
-                }) => {
-                    return MarkdownPicture::Ready {
-                        key: key.clone(),
-                        rgba: Arc::clone(rgba),
-                        raster: [*width_px, *height_px],
-                        native,
-                    };
-                }
-                Some(MarkdownRaster::Pending) => {}
-                None => self.window.markdown_pictures.owe(
-                    MarkdownRasterRequest {
-                        key,
-                        rgba: Arc::clone(&rgba),
-                        native,
-                    },
+        let mut ask =
+            |path: &Path, fill: bool, standing: Option<&MarkdownPicture>| -> MarkdownPicture {
+                // The two caches are borrowed for exactly as long as the answer
+                // takes; the door below wants the whole runtime, so it is spent
+                // after those borrows have ended — see [`answer_one_picture`].
+                let mut needs_pixels = false;
+                let answer = answer_one_picture(
+                    &mut self.window.peek_cache,
+                    &mut self.window.markdown_pictures,
+                    standing,
+                    path,
+                    fill,
+                    measure_px,
                     now,
-                ),
-            }
-            MarkdownPicture::Ready {
-                key: content,
-                rgba,
-                raster: native,
-                native,
-            }
-        };
-        resolve_document_pictures(blocks, document, theme, reach, &mut ask)
+                    &mut needs_pixels,
+                );
+                if !needs_pixels {
+                    return answer;
+                }
+                if self.request_peek_pixels(path) {
+                    self.window.peek_cache.insert(
+                        bt_term::normalized_local_image_path_key(path),
+                        PeekCacheEntry::Pending,
+                    );
+                    return answer;
+                }
+                // A file this window will not open draws what a picture it cannot
+                // read draws — unless the page already has something true to show,
+                // which a refused *resample* leaves standing.
+                match answer {
+                    MarkdownPicture::Loading => MarkdownPicture::Failed,
+                    answer => answer,
+                }
+            };
+        resolve_document_pictures(blocks, document, theme, reach, standing, &mut ask)
     }
 
     /// Send every exact-size pass the quiet has released.
@@ -131225,6 +131381,107 @@ mod tests {
         );
     }
 
+    /// RED — **a page asks for each of its pictures once, however small the
+    /// decode cache is** (user report 2026-09-10, `docs/DESIGN.md` §7.1.3u).
+    ///
+    /// RED EVIDENCE. The reach a page asks for is counted in *pictures*
+    /// ([`MARKDOWN_PICTURE_MARGIN`]); the store the decodes land in is bounded
+    /// in *bytes* ([`MAX_PEEK_CACHE_BYTES`]). Nothing reconciled the two, so a
+    /// README whose screenshots are 3200×2000 — nine of them, 24 MiB each,
+    /// against a 192 MiB ceiling — put this window in a livelock: every decode
+    /// that landed evicted one the page was still drawing, the miss read as
+    /// *never asked*, and the page asked again. Measured on this machine, with
+    /// that very page in a 1920×1200 window at scale 2: **1922 decodes in 45
+    /// seconds**, one core pinned, 460 document re-flows a second, and not one
+    /// redraw — a window frozen on its last picture while the process went on
+    /// answering messages.
+    ///
+    /// The fixture is that story at the size a test can hold: two pictures, a
+    /// cache that can carry one of them, and twelve rounds of the loop the
+    /// runtime runs — a decode lands, every picture on the page is resolved
+    /// again, the requests that came out of it go to the worker. What is
+    /// asserted is the count: **two pictures, two reads, for ever**.
+    ///
+    /// MUTATION: drop the `standing` arm from [`answer_one_picture`]'s `None`
+    /// branch — read a miss as "never asked" again — and the count climbs by one
+    /// per round, which is the report.
+    #[test]
+    fn a_page_asks_for_each_picture_once_however_small_the_decode_cache_is() {
+        /// Each decode, in bytes. Two of them do not fit under the budget
+        /// below, which is the whole fixture.
+        const PIXELS: usize = 3 * 1024 * 1024;
+        const BUDGET: u64 = 4 * 1024 * 1024;
+        const ROUNDS: usize = 12;
+        let paths = [
+            PathBuf::from(r"D:\proj\shots\a.png"),
+            PathBuf::from(r"D:\proj\shots\b.png"),
+        ];
+        let mut peek = PeekCache::with_budget(BUDGET);
+        let mut rasters = MarkdownPictures::default();
+        let mut standing = [MarkdownPicture::Loading, MarkdownPicture::Loading];
+        let mut asked = 0usize;
+        // What the worker owes this window: one decode lands per round, which is
+        // what the runtime does — `complete_peek_image` files one answer and
+        // rebuilds the page before the next lands.
+        let mut inbox: Vec<usize> = Vec::new();
+        for _ in 0..ROUNDS {
+            if !inbox.is_empty() {
+                let index = inbox.remove(0);
+                peek.insert(
+                    bt_term::normalized_local_image_path_key(&paths[index]),
+                    PeekCacheEntry::Ready {
+                        key: format!("content-{index}"),
+                        rgba: Arc::from(vec![0u8; PIXELS].into_boxed_slice()),
+                        width_px: 1024,
+                        height_px: 768,
+                    },
+                );
+            }
+            for index in 0..paths.len() {
+                let mut needs_pixels = false;
+                standing[index] = answer_one_picture(
+                    &mut peek,
+                    &mut rasters,
+                    Some(&standing[index]),
+                    &paths[index],
+                    false,
+                    800.0,
+                    Instant::now(),
+                    &mut needs_pixels,
+                );
+                if needs_pixels {
+                    asked += 1;
+                    inbox.push(index);
+                    // The `Pending` the runtime files behind a posted request.
+                    peek.insert(
+                        bt_term::normalized_local_image_path_key(&paths[index]),
+                        PeekCacheEntry::Pending,
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            asked,
+            paths.len(),
+            "a page that has been answered asked again: {asked} reads for \
+             {} pictures over {ROUNDS} rounds — the decode cache let one go and \
+             the page took that for never having asked",
+            paths.len(),
+        );
+        // And it is still drawing both: the answer outlives the pixels.
+        for (index, picture) in standing.iter().enumerate() {
+            assert!(
+                matches!(picture, MarkdownPicture::Ready { .. }),
+                "picture {index} went blank when the cache let its pixels go: {picture:?}"
+            );
+        }
+        assert!(
+            peek.bytes_held() <= BUDGET,
+            "and the cache is still inside its budget: {} bytes",
+            peek.bytes_held()
+        );
+    }
+
     /// RED — **a document's own text does not send this window to a share** (route E of the
     /// untrusted-path audit, 2026-09-08).
     ///
@@ -131259,7 +131516,8 @@ mod tests {
             Some(Path::new(r"D:\proj\README.md")),
             bt_render::Theme::Dark,
             PictureReach::from_the_top(),
-            &mut |path, _| {
+            &DocumentPictures::default(),
+            &mut |path, _, _| {
                 asked.push(path.to_path_buf());
                 MarkdownPicture::Loading
             },
@@ -131310,7 +131568,8 @@ mod tests {
             Some(Path::new(r"D:\proj\README.md")),
             bt_render::Theme::Dark,
             PictureReach::from_the_top(),
-            &mut |path, _| {
+            &DocumentPictures::default(),
+            &mut |path, _, _| {
                 asked.push(path.to_path_buf());
                 MarkdownPicture::Loading
             },
@@ -131461,7 +131720,8 @@ mod tests {
             Some(Path::new(r"D:\proj\README.md")),
             bt_render::Theme::Dark,
             reach,
-            &mut |path, _| {
+            &DocumentPictures::default(),
+            &mut |path, _, _| {
                 asked.push(path.to_path_buf());
                 MarkdownPicture::Loading
             },
@@ -131511,7 +131771,8 @@ mod tests {
             Some(Path::new(r"D:\proj\README.md")),
             bt_render::Theme::Dark,
             PictureReach::from_the_top(),
-            &mut |_, _| {
+            &DocumentPictures::default(),
+            &mut |_, _, _| {
                 doors += 1;
                 MarkdownPicture::Failed
             },
