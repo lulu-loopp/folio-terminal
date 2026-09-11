@@ -2065,7 +2065,27 @@ enum MarkdownPicture {
     /// Pixels in hand.
     Ready {
         /// The identity the shared GPU cache knows these pixels by.
+        ///
+        /// **Not the file's identity**, and the difference is the whole of
+        /// §7.1.3u's second half: once the exact-size resample has landed this
+        /// is `<content>@<width>x<height>`
+        /// ([`bt_term::display_texture_key`]), because the size a raster was
+        /// made for is part of which texture it is. Ask it what file these
+        /// pixels came from and it answers a string no cache in this window is
+        /// keyed on — which is what [`Self::content`] is for.
         key: String,
+        /// **What the file's own bytes are**, which is what both caches behind
+        /// a picture are keyed on: the decode store
+        /// ([`WindowRuntime::peek_cache`], by way of the decoder's content key)
+        /// and the exact-size rasters ([`MarkdownRasterKey::content`]).
+        ///
+        /// Carried on the answer because the answer outlives the pixels
+        /// (§7.1.3u): a page that has let go of the decode still has to be able
+        /// to name the picture it is drawing, and naming it with
+        /// [`Self::key`] — which is what this window did until the edit path's
+        /// own freeze report — asks the raster cache a question about a file
+        /// that does not exist, misses, and reads the miss as *never asked*.
+        content: String,
         rgba: Arc<[u8]>,
         /// How large `rgba` is: the exact-size resample once it has landed, and
         /// the decode's own size until then. The sampler stretches the second
@@ -2109,6 +2129,18 @@ struct DocumentPictures {
     /// (§7.1.3k ④), and a decode landing, which asks whether any page in this
     /// window cares before it re-keys every document in it.
     files: BTreeSet<PathBuf>,
+    /// **The ones this page has nothing to draw for yet** — a subset of
+    /// [`Self::files`], and the answer to a different question.
+    ///
+    /// `files` is "does this page stand on that file", which is what a *watch*
+    /// wants. This is "would this page come out differently if that file's
+    /// pixels arrived", which is what a **decode landing** wants, and the two
+    /// stop agreeing the moment §7.1.3u's rule takes effect: a page keeps the
+    /// answer it was given, so a decode arriving for a picture it is already
+    /// drawing changes nothing on the glass and owes it no re-flow. Re-flowing
+    /// on `files` re-shaped every paragraph of the page for pixels nobody would
+    /// look at.
+    loading: BTreeSet<PathBuf>,
 }
 
 impl DocumentPictures {
@@ -2281,6 +2313,13 @@ fn resolve_document_pictures(
             // what reads it.
             preview::LinkAction::Preview(path) if wanted.contains(source) => {
                 let picture = ask(&path, image.fill, standing.get(source));
+                // **And whether this page is still waiting to see it**, which is
+                // the set a decode landing re-flows on — see
+                // [`DocumentPictures::loading`]. Written here because this is
+                // where the file and the answer about it are both in hand.
+                if matches!(picture, MarkdownPicture::Loading) {
+                    pictures.loading.insert(path.clone());
+                }
                 pictures.files.insert(path);
                 picture
             }
@@ -2369,13 +2408,19 @@ fn answer_one_picture(
             // passes below need; `rgba` is the decode's own pixels only while
             // the exact-size resample has not landed — which is exactly when
             // those pixels are still wanted.
+            //
+            // **The content key and not the texture key**
+            // ([`MarkdownPicture::content`]): the two are the same string until
+            // the resample lands and different for ever after, and reading the
+            // second here is the edit path's own freeze.
             Some(MarkdownPicture::Ready {
-                key,
+                content,
                 rgba,
                 raster,
                 native,
+                ..
             }) => Some((
-                key.clone(),
+                content.clone(),
                 (raster == native).then(|| Arc::clone(rgba)),
                 *native,
             )),
@@ -2407,6 +2452,18 @@ fn answer_one_picture(
     ) else {
         return MarkdownPicture::Failed;
     };
+    // **What the page is already drawing, at the size it is already drawing it.**
+    // The exact-size rasters are a cache like the decode store beside them —
+    // bounded and evicting — so the same law applies to them: whether the store
+    // still holds a picture must not decide whether this page asks the disk for
+    // one. A page holding the very pixels this pass would produce has nothing to
+    // ask anybody. All three parts are the question: these bytes (`content`), at
+    // this size, in hand.
+    let held_exactly = matches!(
+        standing,
+        Some(MarkdownPicture::Ready { content: held, raster, .. })
+            if *held == content && *raster == [raster_width, raster_height]
+    );
     let key = MarkdownRasterKey {
         content: content.clone(),
         width_px: raster_width,
@@ -2421,6 +2478,7 @@ fn answer_one_picture(
         }) => {
             return MarkdownPicture::Ready {
                 key: key.clone(),
+                content,
                 rgba: Arc::clone(rgba),
                 raster: [*width_px, *height_px],
                 native,
@@ -2428,7 +2486,7 @@ fn answer_one_picture(
         }
         Some(MarkdownRaster::Pending) => {}
         None => match &native_rgba {
-            Some(rgba) => markdown_pictures.owe(
+            Some(rgba) if !held_exactly => markdown_pictures.owe(
                 MarkdownRasterRequest {
                     key,
                     rgba: Arc::clone(rgba),
@@ -2438,18 +2496,22 @@ fn answer_one_picture(
             ),
             // The resample is made from the decode's own pixels and this window
             // has let them go. Ask once — the page keeps drawing meanwhile, and
-            // the `Pending` the caller files is what stops it asking twice.
-            None => *needs_pixels = true,
+            // the `Pending` the caller files is what stops it asking twice. A
+            // page standing on the finished raster asks for nothing at all: the
+            // pass it would buy is the pass it is already holding.
+            None if !held_exactly => *needs_pixels = true,
+            _ => {}
         },
     }
     match native_rgba {
-        Some(rgba) => MarkdownPicture::Ready {
-            key: content,
+        Some(rgba) if !held_exactly => MarkdownPicture::Ready {
+            key: content.clone(),
+            content,
             rgba,
             raster: native,
             native,
         },
-        None => standing.cloned().unwrap_or(MarkdownPicture::Loading),
+        _ => standing.cloned().unwrap_or(MarkdownPicture::Loading),
     }
 }
 
@@ -5640,6 +5702,7 @@ fn build_preview_markdown_body(
                         rgba,
                         raster,
                         native,
+                        ..
                     }) => {
                         let [drawn_width, drawn_height] =
                             markdown_image_extent(*native, right - left, image.fill);
@@ -47753,6 +47816,32 @@ impl Runtime<'_> {
         files
     }
 
+    /// **Which pictures a page in this window is still waiting to see**
+    /// (§7.1.3u, second report).
+    ///
+    /// [`Self::markdown_picture_files`]'s narrower sibling, and the narrowing is
+    /// the point: that one is every file a page's pictures came from, which is
+    /// the right set to *watch* and the wrong set to **re-flow** on. A decode
+    /// landing owes a page a new layout only if the page would come out
+    /// differently for it, and a page that is already drawing that picture — at
+    /// whatever size it has — would not. Re-flowing it anyway is a full re-shape
+    /// of every paragraph on the page for pixels nothing will use, which is the
+    /// other half of what pinned a core while a reader typed into a README full
+    /// of screenshots.
+    ///
+    /// See [`DocumentPictures::loading`] for what a page writes down here.
+    fn markdown_pictures_awaited(&self) -> BTreeSet<PathBuf> {
+        let mut files = BTreeSet::new();
+        for tab in &self.window.tabs {
+            for (_, pane) in tab.preview_panes.iter() {
+                if let PreviewDocument::Markdown { pictures, .. } = &pane.doc {
+                    files.extend(pictures.loading.iter().cloned());
+                }
+            }
+        }
+        files
+    }
+
     /// **Which tabs hold a pane standing on the picture in this file** (user
     /// report 2026-08-31).
     ///
@@ -57758,6 +57847,7 @@ impl Runtime<'_> {
                     return answer;
                 }
                 if self.request_peek_pixels(path) {
+                    preview_trace::picture_read(preview_trace::global(), path);
                     self.window.peek_cache.insert(
                         bt_term::normalized_local_image_path_key(path),
                         PeekCacheEntry::Pending,
@@ -79228,12 +79318,20 @@ impl Runtime<'_> {
                 }
             }
         }
-        // **And every markdown page standing on this file** (§7.1.3k). A block
-        // that was as tall as its alt text is now as tall as a screenshot, which
-        // is a re-flow and not a repaint — so the generation ticks, exactly as a
-        // formula's arrival ticks its own.
+        // **And every markdown page that was waiting to see this file**
+        // (§7.1.3k; §7.1.3u's second report). A block that was as tall as its alt
+        // text is now as tall as a screenshot, which is a re-flow and not a
+        // repaint — so the generation ticks, exactly as a formula's arrival ticks
+        // its own.
+        //
+        // **Waiting, and not merely standing on it.** A page keeps the answer it
+        // was given (§7.1.3u), so a decode arriving for a picture the page is
+        // already drawing tells it nothing it does not know — and a re-flow is a
+        // re-shape of every paragraph on the page. Asked of
+        // [`Self::markdown_pictures_awaited`] rather than of every file a page's
+        // pictures came from.
         let in_a_page = self
-            .markdown_picture_files()
+            .markdown_pictures_awaited()
             .iter()
             .any(|file| normalized_local_image_path_key(file) == cache_key);
         if in_a_page {
@@ -131239,6 +131337,7 @@ mod tests {
             source.to_owned(),
             MarkdownPicture::Ready {
                 key: format!("test:{source}"),
+                content: format!("test:{source}"),
                 rgba: Arc::from(
                     vec![0_u8; (native[0] * native[1] * 4) as usize].into_boxed_slice(),
                 ),
@@ -131479,6 +131578,258 @@ mod tests {
             peek.bytes_held() <= BUDGET,
             "and the cache is still inside its budget: {} bytes",
             peek.bytes_held()
+        );
+    }
+
+    /// RED — **typing into a page asks for none of its pictures again** (user
+    /// report 2026-09-11, `docs/DESIGN.md` §7.1.3u).
+    ///
+    /// RED EVIDENCE. §7.1.3u stopped a page re-asking for a decode the byte-
+    /// bounded cache had let go of, and *opening* the reported README stopped
+    /// freezing. Clicking into one of its paragraphs still did: 82 seconds of
+    /// processor in about 90, the window thread walking
+    /// `complete_peek_image` → a full re-flow → the shaper, for ever.
+    ///
+    /// The reason is one string. A picture's answer carries the identity the
+    /// **GPU** knows its pixels by, and the moment the exact-size resample lands
+    /// that identity stops being the file's content key and becomes
+    /// `<content>@<width>x<height>` ([`bt_term::display_texture_key`]). The page
+    /// then held an answer that could no longer name its own file: with the
+    /// decode evicted, [`answer_one_picture`] read that texture key *as* the
+    /// content key, asked [`MarkdownPictures`] a question about a file that does
+    /// not exist, missed, and read the miss as **never asked**. So the page was
+    /// answered, and settled, and the first rebuild after it settled — which is
+    /// exactly what a press seating a caret is (§7.1.3q keys the caret's block
+    /// beside the width, so entering an edit is a re-flow) — sent every one of
+    /// those reads out again, and each decode landing evicted the next page's
+    /// and rebuilt the document.
+    ///
+    /// The fixture is that arc: two pictures, a decode cache that can hold one
+    /// of them, the resamples landing the way the worker lands them, and then
+    /// ten keystrokes' worth of rebuilds. The claim is the count — **two
+    /// pictures, two reads, and typing adds none**.
+    ///
+    /// MUTATIONS, both measured 2026-09-11. Read [`MarkdownPicture::key`]
+    /// instead of [`MarkdownPicture::content`] in `answer_one_picture`'s
+    /// standing arm and the count goes to three: `editing sent 1 reads out again
+    /// for pictures the page was already drawing — 2 before the first keystroke,
+    /// 3 after ten`. **One and not ten is the fixture and not the defect** —
+    /// there are two pictures here and the `Pending` the extra read files stays
+    /// in a cache nothing else is inserting into, so the ask cannot come round
+    /// again; on the real page, where a landing decode evicts the next picture's,
+    /// that one read is the first turn of a rotation that never finishes. Drop
+    /// the `held_exactly` arm instead and it is the picture whose decode the
+    /// cache let go of that asks, on the same keystroke, for the same reason one
+    /// cache down.
+    #[test]
+    fn ten_keystrokes_ask_for_no_picture_the_page_is_already_drawing() {
+        /// Each decode. Two do not fit under the budget below, which is what
+        /// puts the page in the state the report is about.
+        const PIXELS: usize = 3 * 1024 * 1024;
+        const BUDGET: u64 = 4 * 1024 * 1024;
+        const NATIVE: [u32; 2] = [1024, 768];
+        const MEASURE: f32 = 800.0;
+        const KEYSTROKES: usize = 10;
+        let paths = [
+            PathBuf::from(r"D:\proj\shots\a.png"),
+            PathBuf::from(r"D:\proj\shots\b.png"),
+        ];
+        let mut peek = PeekCache::with_budget(BUDGET);
+        let mut rasters = MarkdownPictures::default();
+        let mut standing = [MarkdownPicture::Loading, MarkdownPicture::Loading];
+        let mut asked = 0usize;
+        let mut inbox: Vec<usize> = Vec::new();
+
+        // One rebuild of the page: every picture resolved, every read that came
+        // out of it posted, the way `rebuild_preview_document` does it.
+        let rebuild = |peek: &mut PeekCache,
+                       rasters: &mut MarkdownPictures,
+                       standing: &mut [MarkdownPicture; 2],
+                       asked: &mut usize,
+                       inbox: &mut Vec<usize>| {
+            for index in 0..paths.len() {
+                let mut needs_pixels = false;
+                standing[index] = answer_one_picture(
+                    peek,
+                    rasters,
+                    Some(&standing[index]),
+                    &paths[index],
+                    true,
+                    MEASURE,
+                    Instant::now(),
+                    &mut needs_pixels,
+                );
+                if needs_pixels {
+                    *asked += 1;
+                    inbox.push(index);
+                    peek.insert(
+                        bt_term::normalized_local_image_path_key(&paths[index]),
+                        PeekCacheEntry::Pending,
+                    );
+                }
+            }
+        };
+
+        // ① The page opens: the reads go out, the decodes land one at a time,
+        // and the second one evicts the first.
+        for _ in 0..6 {
+            if !inbox.is_empty() {
+                let index = inbox.remove(0);
+                peek.insert(
+                    bt_term::normalized_local_image_path_key(&paths[index]),
+                    PeekCacheEntry::Ready {
+                        key: format!("content-{index}"),
+                        rgba: Arc::from(vec![0u8; PIXELS].into_boxed_slice()),
+                        width_px: NATIVE[0],
+                        height_px: NATIVE[1],
+                    },
+                );
+            }
+            rebuild(
+                &mut peek,
+                &mut rasters,
+                &mut standing,
+                &mut asked,
+                &mut inbox,
+            );
+        }
+        assert_eq!(asked, paths.len(), "§7.1.3u's own count, before the edit");
+
+        // ② The exact-size resamples land, the way the scale worker lands them
+        // — under the content key, carrying the *texture* key. This is the step
+        // that used to poison the answer.
+        let owed: Vec<MarkdownRasterRequest> =
+            rasters.owed.drain().map(|(_, request)| request).collect();
+        assert!(
+            !owed.is_empty(),
+            "the page owed the lane its exact-size passes"
+        );
+        for request in owed {
+            let key = request.key.clone();
+            rasters.land(
+                key.clone(),
+                MarkdownRaster::Ready {
+                    key: bt_term::display_texture_key(&key.content, key.width_px, key.height_px),
+                    rgba: Arc::from(
+                        vec![0u8; (key.width_px as usize) * (key.height_px as usize) * 4]
+                            .into_boxed_slice(),
+                    ),
+                    width_px: key.width_px,
+                    height_px: key.height_px,
+                },
+            );
+        }
+        rebuild(
+            &mut peek,
+            &mut rasters,
+            &mut standing,
+            &mut asked,
+            &mut inbox,
+        );
+        let settled = asked;
+
+        // ③ And the raster store lets go of everything, which is the other
+        // bounded cache in this story saying the same word the decode store
+        // said. The page is holding those pixels itself.
+        rasters = MarkdownPictures::default();
+
+        // ④ And now the reader clicks into a paragraph and types. Every
+        // keystroke is a rebuild; the page has been answered; nothing is owed
+        // anybody.
+        for _ in 0..KEYSTROKES {
+            rebuild(
+                &mut peek,
+                &mut rasters,
+                &mut standing,
+                &mut asked,
+                &mut inbox,
+            );
+        }
+        assert_eq!(
+            asked,
+            settled,
+            "editing sent {} reads out again for pictures the page was already \
+             drawing — {settled} before the first keystroke, {asked} after ten",
+            asked - settled,
+        );
+        assert_eq!(
+            asked,
+            paths.len(),
+            "and the whole life of the page is one read per picture"
+        );
+        for (index, picture) in standing.iter().enumerate() {
+            assert!(
+                matches!(picture, MarkdownPicture::Ready { .. }),
+                "picture {index} went blank while the reader typed: {picture:?}"
+            );
+        }
+    }
+
+    /// RED — **a decode landing for a picture the page already draws re-flows
+    /// nothing** (user report 2026-09-11, `docs/DESIGN.md` §7.1.3u).
+    ///
+    /// RED EVIDENCE. The other half of the same freeze. `complete_peek_image`
+    /// ticked [`MarkdownPictures::generation`] for any file **a page's pictures
+    /// came from** — which since §7.1.3u is a much larger set than the files a
+    /// page is still *waiting* for, because a page now keeps the answer it was
+    /// given. So a decode arriving for a screenshot already on the glass re-laid
+    /// the whole document out, and laying a page of Chinese prose out is a
+    /// re-shape of every paragraph in it through the fallback stack — the
+    /// expensive half of each of the 82 seconds the report measured.
+    ///
+    /// The seam is [`DocumentPictures::loading`], which is what
+    /// [`Runtime::markdown_pictures_awaited`] reads and what the generation is
+    /// ticked off. Here it is asked of the resolve itself: the first pass over
+    /// the page has nothing to draw and says so; the second, holding the answer,
+    /// asks for nothing and **waits for nothing**.
+    ///
+    /// MUTATION: write `files` where `loading` is written and the second pass
+    /// names the file again — every completion re-flows the page, which is the
+    /// report.
+    #[test]
+    fn a_decode_that_lands_for_a_picture_the_page_holds_owes_it_no_reflow() {
+        let blocks = preview::parse_markdown("![a shot](shots/one.png)\n");
+        let document = Path::new(r"D:\proj\README.md");
+        let waiting = resolve_document_pictures(
+            &blocks,
+            Some(document),
+            bt_render::Theme::Dark,
+            PictureReach::from_the_top(),
+            &DocumentPictures::default(),
+            &mut |_, _, _| MarkdownPicture::Loading,
+        );
+        assert_eq!(
+            waiting.loading.len(),
+            1,
+            "a page with nothing to draw is waiting for the file it asked for"
+        );
+        assert_eq!(
+            waiting.files, waiting.loading,
+            "and while it is waiting the two sets are the same one"
+        );
+
+        let holding = resolve_document_pictures(
+            &blocks,
+            Some(document),
+            bt_render::Theme::Dark,
+            PictureReach::from_the_top(),
+            &one_image("shots/one.png", [1024, 768]),
+            &mut |_, _, standing| {
+                standing
+                    .cloned()
+                    .expect("the answer this page was already given")
+            },
+        );
+        assert_eq!(
+            holding.files.len(),
+            1,
+            "the page still stands on that file, so the watch still follows it"
+        );
+        assert!(
+            holding.loading.is_empty(),
+            "but it is waiting for nothing, so a decode landing owes it no \
+             re-flow: {:?}",
+            holding.loading
         );
     }
 

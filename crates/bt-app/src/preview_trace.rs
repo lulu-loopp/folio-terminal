@@ -157,6 +157,24 @@ pub fn frame(trace: Option<&Trace>, echo: &mut FrameEcho, frame: bt_render::Prev
     });
 }
 
+/// `picture read=<file>` — **one line per decode this window asks the disk for
+/// on behalf of a page** (`docs/DESIGN.md` §7.1.3u).
+///
+/// The station the two picture freezes were diagnosed and closed with, and it
+/// is here rather than in a scratch counter because the pair of numbers it
+/// completes is the pair this whole class of report needs: `document` above says
+/// how many times a page was built, and this says how many reads that building
+/// sent out. A page that has settled writes neither line; a page in the livelock
+/// writes hundreds of both a second, which is what says the two apart from the
+/// outside.
+///
+/// Written at the door ([`crate::Runtime::request_peek_pixels`]'s caller) rather
+/// than where the need is noticed, so what it counts is what actually went to
+/// the worker.
+pub fn picture_read(trace: Option<&Trace>, file: &std::path::Path) {
+    emit(trace, || format!("picture read={}", file.display()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
