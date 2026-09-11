@@ -119,6 +119,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A picture pane, a formula and a hover card keep the picture they were
+  given.** Opening several large pictures at once, or a page with more formulas
+  than Folio keeps in memory, no longer sends the window into a loop of decoding
+  and re-drawing that nobody asked for: what is already on the glass stays there.
+  A picture that was fetched to sharpen now arrives by itself, and a card
+  hovering a Markdown file shows its pictures instead of their placeholders.
 - **Saving a file you are editing no longer throws away what you can undo.**
   Folio now recognises its own write instead of reading it as somebody else's, so
   Ctrl+S leaves the history, the caret and the selection where they were — and a
