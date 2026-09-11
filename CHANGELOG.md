@@ -116,6 +116,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Switching between animated pictures shows the right one at once.** Opening a
+  second `.gif` on a pane or a card that was already playing one could leave the
+  first file's picture on the glass, under the second file's name, for as long as
+  a quarter of an hour. Each picture that moves is now its own picture, so the
+  new one's first frame is the one you see.
+- **An animation starts from its beginning when you open it.** A `.gif` opened
+  from the files column, or handed to a pane showing something else, begins at
+  its first frame rather than wherever it had got to. A picture in a tab you are
+  not looking at holds still instead of playing to itself, so coming back to the
+  tab finds it where you left it and moving again straight away.
 - **Saving a file you are editing no longer throws away what you can undo.**
   Folio now recognises its own write instead of reading it as somebody else's, so
   Ctrl+S leaves the history, the caret and the selection where they were — and a

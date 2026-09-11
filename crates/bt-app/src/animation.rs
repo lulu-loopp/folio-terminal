@@ -151,14 +151,28 @@ pub const MAX_ANIMATION_RING_LEAD: Duration = Duration::from_secs(1);
 /// pixels for one hover than every other picture in the window together.
 pub const MAX_ANIMATION_FRAME_BYTES: u64 = MAX_ANIMATION_RING_BYTES / 2;
 
-/// **What one animation costs this window at its fullest** — the ring, plus the
-/// file's own bytes, which the cursor keeps because they are the only way back
-/// to frame zero when the loop comes round.
+/// **What one animation costs this window at its fullest**, all four
+/// allocations of it (adversarial review 2026-09-11, B9).
 ///
-/// This is what `MAX_ANIMATION_CACHE_BYTES` is counted in: the window's ceiling
-/// over every animation at once is a multiple of this rather than a number of
-/// its own.
-pub const MAX_ANIMATION_HELD_BYTES: u64 = MAX_ANIMATION_RING_BYTES + MAX_ANIMATION_FILE_BYTES;
+/// It used to be two — the ring, and the file's own bytes, which the cursor
+/// keeps because they are the only way back to frame zero when the loop comes
+/// round — and the other two were real memory that no counter in this window
+/// had ever heard of:
+///
+/// * the **canvas** ([`AnimationCursor::over`]), one whole logical screen that
+///   every frame is composed onto and that lives for as long as the cursor
+///   does, which at 2048 square is another sixteen megabytes; and
+/// * the **fill in flight**, up to a whole ring's worth of frames being
+///   composed on the worker ([`frames_wanted`]) — outside the window's map from
+///   the moment the cursor leaves until it is parked again.
+///
+/// So the honest worst case is `32 + 8 + 16 + 32` and the two that were counted
+/// were slightly under half of it: a ceiling built on the old number was a
+/// ceiling a window could stand at while holding twice it.
+pub const MAX_ANIMATION_HELD_BYTES: u64 = MAX_ANIMATION_RING_BYTES
+    + MAX_ANIMATION_FILE_BYTES
+    + MAX_ANIMATION_FRAME_BYTES
+    + MAX_ANIMATION_RING_BYTES;
 
 /// **How many bytes of a file this window will read looking for frames**
 /// (review row R1-7, adversarial review 2026-09-08).
@@ -297,7 +311,27 @@ pub struct Animation {
     /// Strictly increasing, and what the renderer's upload gate reads. It counts
     /// *changes of frame* and not redraws, which is the whole of why a still
     /// window showing a paused spinner costs no bus at all.
+    ///
+    /// **It says nothing about *which* animation this is**, and the layer key
+    /// the renderer compares it under has to (adversarial review 2026-09-11,
+    /// B3): every animation starts this at one, so a surface handed a second
+    /// file whose counter is behind the first's has its frames rejected until it
+    /// catches up. The identity is the window's to mint — see
+    /// `AnimationEntry::Ready` — and this counter only ever answers "is this the
+    /// picture you already hold" *within* one playback.
     generation: u64,
+    /// **The cursor's canvas**, counted whether the cursor is parked here or
+    /// away on a worker (adversarial review 2026-09-11, B9): the allocation
+    /// belongs to this animation either way, and a count that forgot it while it
+    /// was away would be a ceiling that rose every time a fill was posted.
+    canvas_bytes: u64,
+    /// **What the fill now in flight will bring back**, reserved when the cursor
+    /// leaves and released when it is parked again (B9).
+    ///
+    /// Frames being composed on the worker are bytes this process is holding and
+    /// nothing had charged them: a window at its ceiling could have a whole
+    /// second ring's worth of pixels in the air behind it.
+    in_flight_bytes: u64,
 }
 
 /// **Whether a name is one this window will look inside for frames.**
@@ -525,6 +559,13 @@ impl AnimationCursor {
         self.frames_in_file
     }
 
+    /// **What the composition canvas costs** — one whole logical screen, alive
+    /// for as long as this cursor is (adversarial review 2026-09-11, B9).
+    #[must_use]
+    pub fn canvas_bytes(&self) -> u64 {
+        self.canvas.len() as u64
+    }
+
     /// **Decode the next `want` frames, starting the file again when it ends.**
     ///
     /// # Where it may be called from
@@ -682,11 +723,18 @@ impl Animation {
     /// **How many bytes this animation is holding** — what the window's own
     /// ceiling over every animation at once is counted against.
     ///
-    /// The ring and the file, and the file is counted once: the cursor's copy of
-    /// it is the same allocation.
+    /// Four allocations and not two (adversarial review 2026-09-11, B9). The
+    /// ring and the file are the obvious pair, and the file is counted once
+    /// because the cursor's copy of it is the same allocation. The other two are
+    /// the ones the count used to walk past: the **canvas** every frame is
+    /// composed onto, which is a whole logical screen and outlives any one
+    /// frame, and the **fill in flight**, which is pixels this process is
+    /// holding on a worker thread. Leaving either out did not make the memory
+    /// smaller; it made the ceiling a number that was reached at roughly twice
+    /// the footprint it named.
     #[must_use]
     pub fn bytes_held(&self) -> u64 {
-        self.ring_bytes() + self.bytes.len() as u64
+        self.ring_bytes() + self.bytes.len() as u64 + self.canvas_bytes + self.in_flight_bytes
     }
 
     /// What the ring alone is holding.
@@ -739,6 +787,7 @@ impl Animation {
         let first = ring
             .front()
             .map_or(DEFAULT_FRAME_DELAY, |frame| frame.delay);
+        let canvas_bytes = cursor.canvas_bytes();
         Self {
             ring,
             width_px,
@@ -746,8 +795,17 @@ impl Animation {
             bytes,
             cursor: Some(cursor),
             standing_seq: 0,
+            // **A guess, and it is replaced the moment a reader can see it.**
+            // This is stamped on the *worker* thread, one whole trip home before
+            // the first frame is presented, and a completion that lands in a
+            // busy turn used to have the first tick walk the ring to "catch up"
+            // — a GIF that opened several frames in (adversarial review
+            // 2026-09-11, B8). [`Self::present`] is what the window calls when
+            // the picture is actually on the glass.
             due_at: started + first,
             generation: 1,
+            canvas_bytes,
+            in_flight_bytes: 0,
         }
     }
 
@@ -780,6 +838,8 @@ impl Animation {
             standing_seq: 0,
             due_at: started + first,
             generation: 1,
+            canvas_bytes: 0,
+            in_flight_bytes: 0,
         }
     }
 
@@ -821,7 +881,7 @@ impl Animation {
         if self.cursor.is_none() {
             return 0;
         }
-        let frame_bytes = u64::from(self.width_px) * u64::from(self.height_px) * 4;
+        let frame_bytes = self.frame_bytes();
         // The lead is what stands *behind* the frame on the glass: the standing
         // frame's own remaining time is not a buffer, it is the picture.
         let lead: Duration = self.ring.iter().skip(1).map(|frame| frame.delay).sum();
@@ -843,7 +903,22 @@ impl Animation {
         if want == 0 {
             return None;
         }
-        Some((self.cursor.take()?, want))
+        let cursor = self.cursor.take()?;
+        // **Reserved before the request is posted, not charged when it lands**
+        // (adversarial review 2026-09-11, B9). The bytes exist from the instant
+        // the worker starts composing, so a ceiling that waited for them to
+        // arrive was a ceiling with a ring's worth of pixels standing outside
+        // it. The count is what the worker was *ordered* — the cursor may bring
+        // fewer at the end of a truncated file, and [`Self::park_cursor`]
+        // replaces the reservation with what actually came.
+        self.in_flight_bytes = want as u64 * self.frame_bytes();
+        Some((cursor, want))
+    }
+
+    /// What one composed frame of this animation costs.
+    #[must_use]
+    fn frame_bytes(&self) -> u64 {
+        u64::from(self.width_px) * u64::from(self.height_px) * 4
     }
 
     /// **Take the cursor back, with what it decoded.**
@@ -853,7 +928,38 @@ impl Animation {
     /// on its last frame for as long as the window is open.
     pub fn park_cursor(&mut self, cursor: Box<AnimationCursor>, frames: Vec<AnimationFrame>) {
         self.ring.extend(frames);
+        self.canvas_bytes = cursor.canvas_bytes();
         self.cursor = Some(cursor);
+        // The reservation ends where the frames it stood for begin: they are in
+        // the ring now and `ring_bytes` counts them (B9).
+        self.in_flight_bytes = 0;
+    }
+
+    /// **This animation's first frame is on the glass — start its clock here**
+    /// (adversarial review 2026-09-11, B8).
+    ///
+    /// The clock used to start where the frames were *decoded*: on the worker
+    /// thread, inside [`open`], one hand-off before any reader could see them.
+    /// A completion that landed in a busy turn therefore arrived already late
+    /// and [`Self::advance`] walked the ring to catch up, so a `.gif` opened
+    /// several frames in — which is one half of "a GIF does not start from its
+    /// first frame".
+    ///
+    /// It is the same sentence for the other half. An animation nobody is
+    /// drawing does not advance, so its `due_at` is a moment in the past by the
+    /// time a reader comes back to it; rebasing it here means a revealed
+    /// animation stands its frame out from *now* instead of fast-forwarding
+    /// through the time it spent hidden.
+    ///
+    /// Called by the window on the frame an animation goes from not-presented to
+    /// presented, and on no other frame: an animation that is drawn every frame
+    /// keeps the clock its own delays built.
+    pub fn present(&mut self, now: Instant) {
+        self.due_at = now
+            + self
+                .ring
+                .front()
+                .map_or(DEFAULT_FRAME_DELAY, |frame| frame.delay);
     }
 
     /// The standing frame, as the renderer's upload.
@@ -1459,7 +1565,10 @@ mod tests {
         // a comparison.
         assert_eq!(MAX_ANIMATION_RING_BYTES, 32 * 1024 * 1024);
         assert_eq!(MAX_ANIMATION_FRAME_BYTES, 16 * 1024 * 1024);
-        assert_eq!(MAX_ANIMATION_HELD_BYTES, 40 * 1024 * 1024);
+        // 88 and not 40: the ring and the file were two of an animation's four
+        // allocations, and the canvas and the fill in flight were the other two
+        // (adversarial review 2026-09-11, B9).
+        assert_eq!(MAX_ANIMATION_HELD_BYTES, 88 * 1024 * 1024);
         assert_eq!(MAX_ANIMATION_SIDE_PX, 8192);
         assert_eq!(MAX_ANIMATION_FILE_BYTES, 8 * 1024 * 1024);
     }
@@ -1520,6 +1629,142 @@ mod tests {
         assert_eq!(turn, MIN_FRAME_DELAY + DEFAULT_FRAME_DELAY);
         assert_eq!(DEFAULT_FRAME_DELAY, Duration::from_millis(100));
         assert_eq!(MIN_FRAME_DELAY, Duration::from_millis(20));
+    }
+
+    /// RED — **an animation's clock starts when a reader can see it**, not when
+    /// a worker finished decoding it (adversarial review 2026-09-11, B8).
+    ///
+    /// RED EVIDENCE, and it is the first half of this test rather than a
+    /// quotation: [`open`] stamps `due_at` from `Instant::now()` on the
+    /// **decoration worker**, a whole hand-off before the frames reach the
+    /// glass. [`Animation::advance`] then walks the ring to catch up on the
+    /// first tick, so a completion that landed during a busy turn opened the
+    /// file several frames in — which is the user's "a GIF does not start from
+    /// its first frame", said by the half of the defect that is in this module.
+    ///
+    /// The same sentence covers the other half. An animation nobody draws does
+    /// not advance (the window's `advance_drawn_animations`), so by the time a
+    /// reader comes back to it its due time is a moment in the past; without a
+    /// rebase the first tick after a tab switch would fast-forward through
+    /// however long the tab was away.
+    ///
+    /// MUTATION: make `present` a no-op and the second block reads 2 instead of
+    /// 0, which is the defect exactly.
+    #[test]
+    fn an_animations_clock_starts_when_its_first_frame_is_presented() {
+        // ① the mechanism, unpresented: half a second between the decode and
+        // the tick, and the ring is walked through it.
+        let mut late = decode_bytes(fixture()).expect("four frames");
+        pump(&mut late);
+        late.advance(Instant::now() + Duration::from_millis(500));
+        assert_eq!(
+            late.frame_index(),
+            2,
+            "a clock stamped on the worker is already behind when the frames arrive",
+        );
+
+        // ② and presented, which is what the window does the frame the picture
+        // is actually handed to the renderer.
+        let mut animation = decode_bytes(fixture()).expect("four frames");
+        pump(&mut animation);
+        let presented = Instant::now() + Duration::from_millis(500);
+        animation.present(presented);
+        assert_eq!(animation.frame_index(), 0, "it starts where the file does");
+        animation.advance(presented + Duration::from_millis(99));
+        assert_eq!(
+            animation.frame_index(),
+            0,
+            "the first frame stands its own hundred milliseconds, from here",
+        );
+        animation.advance(presented + Duration::from_millis(100));
+        assert_eq!(animation.frame_index(), 1);
+
+        // ③ and being presented again — a pane revealed after ten seconds
+        // behind another tab — rebases rather than fast-forwards.
+        let revealed = presented + Duration::from_secs(10);
+        animation.present(revealed);
+        animation.advance(revealed + Duration::from_millis(199));
+        assert_eq!(
+            animation.frame_index(),
+            1,
+            "the frame it was hidden on stands its own two hundred milliseconds",
+        );
+        animation.advance(revealed + Duration::from_millis(200));
+        assert_eq!(animation.frame_index(), 2);
+    }
+
+    /// RED — **an animation is weighed by all four of its allocations**
+    /// (adversarial review 2026-09-11, B9).
+    ///
+    /// RED EVIDENCE (2026-09-11), the count before this ticket:
+    ///
+    /// ```text
+    /// bytes_held() = ring_bytes() + bytes.len()
+    /// ```
+    ///
+    /// Two of four. The **canvas** every frame is composed onto is a whole
+    /// logical screen that lives as long as the cursor does — sixteen megabytes
+    /// at 2048 square — and the **fill in flight** is up to a whole ring's worth
+    /// of frames being composed on a worker. Neither was counted anywhere, so a
+    /// window standing exactly at `MAX_ANIMATION_CACHE_BYTES` was a process
+    /// holding about twice it.
+    ///
+    /// MUTATION: drop either term from `bytes_held` and the first or the second
+    /// block fails by exactly that allocation.
+    #[test]
+    fn an_animation_is_weighed_by_its_canvas_and_by_the_fill_in_flight() {
+        const SIDE: u16 = 256;
+        let frame_bytes = u64::from(SIDE) * u64::from(SIDE) * 4;
+        let mut animation = decode_bytes(a_gif_of(240, SIDE, 5)).expect("a long small capture");
+        let file_bytes = animation.bytes.len() as u64;
+        assert!(file_bytes > 0, "the file is kept, and it is counted once");
+
+        // ① the canvas, which is one whole logical screen and outlives any one
+        // frame.
+        assert_eq!(
+            animation.bytes_held(),
+            animation.ring_bytes() + file_bytes + frame_bytes,
+            "the composition canvas is held whether or not a frame is due",
+        );
+
+        // ② the fill, reserved before the request is posted rather than charged
+        // when it lands.
+        let parked = animation.bytes_held();
+        let (mut cursor, want) = animation.take_cursor().expect("a ring with room in it");
+        assert!(want > 0);
+        assert_eq!(
+            animation.bytes_held(),
+            parked + want as u64 * frame_bytes,
+            "frames being composed on the worker are this process's frames",
+        );
+        assert_eq!(
+            animation.bytes_held(),
+            animation.ring_bytes() + file_bytes + frame_bytes + want as u64 * frame_bytes,
+        );
+        // ③ and the peak — cursor away, ring as full as it will be — is under
+        // the number the window's own ceiling is a multiple of.
+        assert!(
+            animation.bytes_held() <= MAX_ANIMATION_HELD_BYTES,
+            "at its peak one animation is holding {} of {MAX_ANIMATION_HELD_BYTES}",
+            animation.bytes_held(),
+        );
+
+        // ④ and the reservation ends where the frames it stood for begin.
+        let frames = cursor.next_frames(want);
+        animation.park_cursor(cursor, frames);
+        assert_eq!(animation.in_flight_bytes, 0);
+        assert_eq!(
+            animation.bytes_held(),
+            animation.ring_bytes() + file_bytes + frame_bytes,
+        );
+        assert!(animation.bytes_held() <= MAX_ANIMATION_HELD_BYTES);
+
+        // ⑤ the ceiling itself: every one of the four, and the two that were
+        // missing are the larger half of it.
+        assert_eq!(
+            MAX_ANIMATION_HELD_BYTES,
+            MAX_ANIMATION_RING_BYTES * 2 + MAX_ANIMATION_FILE_BYTES + MAX_ANIMATION_FRAME_BYTES,
+        );
     }
 
     /// PIN — **the ring is asked for what it can hold and what it can use**,
