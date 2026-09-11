@@ -8136,6 +8136,37 @@ fn files_row_menu_subject(kind: files::RowKind) -> Option<profiles::FileMenuSubj
     }
 }
 
+/// **What the host behind a file menu can carry out** (adversarial review
+/// 2026-09-11, row D7) — [`files_row_menu_subject`]'s other half.
+///
+/// The subject says what the menu is about and this says who would have to do
+/// it, and [`profiles::file_menu`] needs both: a floating tree draws the same
+/// rows a docked column draws, but [`Runtime::open_files_row_rename`],
+/// [`Runtime::open_files_row_new`] and [`Runtime::delete_files_row`] all answer
+/// only [`RowHost::Column`] — an inline editor is measured into a column's own
+/// box and a refusal is reported on that column, and a float has neither.
+///
+/// **Derived from the row rather than stored beside it.** The host that would
+/// act is already written down once, in [`FileMenuTarget::row`], and
+/// [`Runtime::run_file_menu_row`] dispatches on that same field — so reading the
+/// powers out of it is what makes "the rows this menu shows" and "the host that
+/// will be handed them" one fact rather than two that can drift.
+///
+/// A menu with no row behind it — a preview's breadcrumb, the `…` chip — has no
+/// host to ask about and gets the powerless set, which is right in both
+/// directions: neither of those faces has a row that writes.
+fn file_menu_powers(row: Option<&FileMenuTreeRow>) -> profiles::FileMenuPowers {
+    profiles::FileMenuPowers {
+        writes_rows: matches!(
+            row,
+            Some(FileMenuTreeRow {
+                host: RowHost::Column(_),
+                ..
+            })
+        ),
+    }
+}
+
 /// Where a row's name **leads**, which is [`files_row_activation`]'s sentence
 /// said about the other kind of node (user ruling, 2026-08-19).
 ///
@@ -47401,6 +47432,14 @@ impl Runtime<'_> {
     /// * the call failed — a handle another program is holding, a folder this
     ///   account may not write. That is a fact about the machine that no row can
     ///   show, so it is the one refusal here that speaks.
+    ///
+    /// **The key is resolved against the live tree first** (adversarial review
+    /// 2026-09-11, note N2), which is [`Self::open_files_row_rename`]'s own
+    /// guard and it is owed here twice over: the menu can stand open while a
+    /// directory lands underneath it, and a key that no longer names a row names
+    /// nothing to recycle. The two verbs that act on a row now ask the same
+    /// question before they act, so neither can be the one that resolves a stale
+    /// key against a root that has since changed.
     fn delete_files_row(&mut self, host: RowHost, key: &str) -> Result<()> {
         let RowHost::Column(seat) = host else {
             return Ok(());
@@ -47408,6 +47447,13 @@ impl Runtime<'_> {
         let active = self.window.active_tab;
         let root = self.window.tabs[active].files_state(seat).root;
         if root.is_empty() || key.is_empty() {
+            return Ok(());
+        }
+        if !self
+            .files_trees(Instant::now())
+            .get(&seat)
+            .is_some_and(|tree| tree.rows.iter().any(|row| row.key == key))
+        {
             return Ok(());
         }
         let path = files::full_path(&root, key);
@@ -67331,7 +67377,8 @@ impl Runtime<'_> {
         let menu = self.window.file_menu.as_ref()?;
         let point = menu.point;
         let crumbs: Vec<String> = menu.crumbs.iter().map(|level| level.name.clone()).collect();
-        let look = self.file_menu_look(menu.subject, &crumbs);
+        let (subject, powers) = (menu.subject, file_menu_powers(menu.row.as_ref()));
+        let look = self.file_menu_look(subject, powers, &crumbs);
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
@@ -67363,10 +67410,12 @@ impl Runtime<'_> {
     fn file_menu_look<'a>(
         &self,
         subject: profiles::FileMenuSubject,
+        powers: profiles::FileMenuPowers,
         crumbs: &'a [String],
     ) -> profiles::FileMenuLook<'a> {
         profiles::FileMenuLook {
             subject,
+            powers,
             crumbs,
             terminal: profiles::mark(self.default_profile()).in_line(),
         }
@@ -67398,7 +67447,10 @@ impl Runtime<'_> {
         // drawing an empty frame is also what lets `profiles::file_menu_step`
         // index its own list: the keyboard cannot be handed a menu with nothing
         // in it.
-        if profiles::file_menu(target.subject).rows.is_empty() {
+        if profiles::file_menu(target.subject, file_menu_powers(target.row.as_ref()))
+            .rows
+            .is_empty()
+        {
             return Ok(());
         }
         // E61: the opener closes the others. Not the float — that is a place, not
@@ -67484,8 +67536,33 @@ impl Runtime<'_> {
     /// order the whole hit-test chain reads in: a row is a rectangle inside the
     /// body, and a fallback that answered before it would put the folder's menu
     /// on every file in the tree.
+    ///
+    /// **A float's claim is terminal** (adversarial review 2026-09-11, row D1),
+    /// which is [`Self::preview_open_pill_at`]'s rule said about this door. A
+    /// float is opaque: when the topmost window answers the point at all, the
+    /// answer is that window's own applicable target or nothing, and never the
+    /// docked chrome behind it. It used to be terminal for one part only —
+    /// [`float::FloatPart::Row`] — and every other part fell through to
+    /// [`Self::chrome_target_at`], which does not consider floats at all. So a
+    /// right press on a preview float's text, or on the empty space below a
+    /// floating tree's last row, raised the menu of the *covered* row: a face of
+    /// verbs with no file name on it, drawn on top of the float, with `Delete`
+    /// among them. The float is deliberately left standing when this menu opens
+    /// ([`Self::open_file_menu`]'s `close_popups_except`), so there was nothing
+    /// on screen that could have said which file it meant.
     fn file_row_under(&mut self, position: PhysicalPosition<f64>) -> Option<FileMenuTarget> {
-        if let Some((id, float::FloatPart::Row(index))) = self.float_hit_at(position) {
+        // Asked only when there is a window to ask about, on
+        // [`Self::preview_open_pill_at`]'s note: `float_hit_at` measures two
+        // captions before it looks at anything.
+        if self.window.float.hit_order().next().is_some()
+            && let Some((id, part)) = self.float_hit_at(position)
+        {
+            // Every other part of a float — its head, its foot, its rail, its
+            // body, and a body its tenant declined — is this window's own and
+            // raises no file menu. Silence, and not the chrome underneath.
+            let float::FloatPart::Row(index) = part else {
+                return None;
+            };
             let files = self.window.float.live(id)?.files()?;
             let rows = files::tree_view(&files.files, &files.cache).rows;
             let row = rows.get(index)?;
@@ -67559,11 +67636,21 @@ impl Runtime<'_> {
     /// **A column and never a float.** The verbs this face offers are the
     /// column's — `open_files_row_new` answers only [`RowHost::Column`], and a
     /// peek is a look at a folder rather than a place to make things in — so a
-    /// float's own ground stays what it was: the window, and no menu.
+    /// float's own ground stays what it was: the window, and no menu. Since the
+    /// review of 2026-09-11 that is enforced *above* this function rather than
+    /// hoped for inside it: [`Runtime::file_row_under`] consumes a float's claim
+    /// and never reaches here with a point that is inside one.
     ///
     /// A column with no root hands back [`RowActivation::Nowhere`] and
     /// [`Runtime::open_file_menu`] refuses it there, which is the same refusal a
     /// row of a rootless column already gets and is why there is no guard here.
+    ///
+    /// **An empty folder answers** (review row D3). The ground is resolved
+    /// against the column's body rather than against its row geometry, so a
+    /// column whose whole tree is the sentence *this folder is empty* is still
+    /// standing on a folder and still raises its menu — which is the one case
+    /// `New file…` was invented for and the one case it could not be reached in.
+    /// Which sentences still decline is [`seats::files_ground_at`]'s answer.
     fn files_ground_under(&self, position: PhysicalPosition<f64>) -> Option<FileMenuTarget> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let seat = seats::files_ground_at(
@@ -67675,8 +67762,9 @@ impl Runtime<'_> {
             return MenuPaint::none();
         };
         let (subject, hover) = (menu.subject, menu.hover);
+        let powers = file_menu_powers(menu.row.as_ref());
         let crumbs: Vec<String> = menu.crumbs.iter().map(|level| level.name.clone()).collect();
-        let look = self.file_menu_look(subject, &crumbs);
+        let look = self.file_menu_look(subject, powers, &crumbs);
         let travel = layout.travel();
         MenuPaint::plain(profiles::file_menu_build(&layout, &look, hover), travel)
     }
@@ -89801,7 +89889,13 @@ impl Runtime<'_> {
                     // than over the subject's own list would offer a row nobody
                     // drew.
                     if let Some(menu) = self.window.file_menu.as_mut() {
-                        menu.hover = profiles::file_menu_step(menu.subject, menu.hover, forwards);
+                        // **And over the rows this menu's *host* can carry out**
+                        // (review row D7): the keyboard walks the same list the
+                        // paint drew, which is what stops an arrow key landing
+                        // on a `Delete` a floating tree never offered.
+                        let powers = file_menu_powers(menu.row.as_ref());
+                        menu.hover =
+                            profiles::file_menu_step(menu.subject, powers, menu.hover, forwards);
                     }
                     if self.refresh_overlay() {
                         self.present_chrome_change()?;
@@ -138093,6 +138187,10 @@ mod tests {
         assert_eq!(
             profiles::FileMenuRow::Open.text(&profiles::FileMenuLook {
                 subject: profiles::FileMenuSubject::File,
+                powers: file_menu_powers(Some(&FileMenuTreeRow {
+                    host: RowHost::Column(SeatId(1)),
+                    key: String::new(),
+                })),
                 crumbs: &[],
                 terminal: marks::ChromeMark::ProfilePowerShell,
             }),
@@ -138242,6 +138340,293 @@ mod tests {
         assert!(
             SOURCE.contains(anchored.as_str()),
             "hung at the pointer, which is where a menu raised by a press belongs"
+        );
+    }
+
+    /// The body of one function of this file, for the three tests below.
+    ///
+    /// The same reader `a_right_press_on_the_columns_ground_raises_the_roots_
+    /// menu` uses, and here for its stated reason: what these guard against is a
+    /// *second* door being opened next to the one that was closed, and a second
+    /// door that agrees today cannot be driven into disagreeing by any state
+    /// machine. `Runtime::file_row_under` takes `&mut self` and answers out of a
+    /// live window, so there is no other way to ask it a question in a unit
+    /// test.
+    fn runtime_fn_body(signature: &str) -> &'static str {
+        const SOURCE: &str = include_str!("main.rs");
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        // The **next** item's doc comment is not this function's body, and a
+        // slice that ran to the next `fn` would swallow it — which is how a
+        // paragraph *about* floats standing above the next function becomes a
+        // float in the body of this one.
+        let end = [rest.find("\n    /// "), rest.find("\n    fn ")]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// RED (adversarial review 2026-09-11, row D1) — **a right press inside a
+    /// floating window never names a row of the column underneath it.**
+    ///
+    /// `float_hit_at` claims every point inside a float's frame, but
+    /// `file_row_under` consumed the claim for one part only — a tree row — and
+    /// let a head, a foot, a rail, a body and a body the tenant declined fall
+    /// through to `chrome_target_at`, which does not consider floats at all. So
+    /// a right press on a preview float's text, at a y that happened to land on
+    /// a docked row, produced that row's menu: a face of verbs with no file name
+    /// on it, drawn on top of the float that was hiding the row it was about,
+    /// with `Delete` among them since `4031215`.
+    ///
+    /// Red gate: put the part back in the pattern —
+    /// `if let Some((id, float::FloatPart::Row(index))) = self.float_hit_at(…)`
+    /// — and the second assertion fails by name; drop the `return None` and the
+    /// third does.
+    #[test]
+    fn a_press_inside_a_float_never_names_a_docked_row() {
+        let body = runtime_fn_body("    fn file_row_under(");
+        let claim = body
+            .find("self.float_hit_at(position)")
+            .expect("the float is asked first, because a float is drawn over the columns");
+        let docked = body
+            .find("self.chrome_target_at(position)")
+            .expect("the docked chrome is asked second");
+        assert!(
+            claim < docked,
+            "the topmost window answers before the panes behind it"
+        );
+        assert!(
+            !body.contains("float::FloatPart::Row(index))) = self.float_hit_at"),
+            "the float is asked about the *point*, not about one part of it: a \
+             pattern that matched only `Row` let every other part of an opaque \
+             window fall through to the chrome behind it"
+        );
+        assert!(
+            body[claim..docked].contains("return None;"),
+            "and a part this door has no answer for ends the question, rather \
+             than passing it to the row hidden under the window"
+        );
+    }
+
+    /// RED (review row D1, the ground half) — **a press on a float's body raises
+    /// no root menu for the column it is covering.**
+    ///
+    /// The same hole, one fall-through further down: a point that named no
+    /// docked row went on to `files_ground_under`, so a right press on the empty
+    /// space below a floating tree's last row raised the *covered* column's Root
+    /// face, whose `New file…` opens an inline box in a tree the float is
+    /// standing on. A float's ground is the window's, which
+    /// `files_ground_under`'s own doc already said it intended.
+    ///
+    /// Red gate: move the ground fallback above the float branch, or drop the
+    /// branch's `return None`, and the ordering assertion fails.
+    #[test]
+    fn a_press_on_a_floats_body_over_a_column_raises_no_root_menu() {
+        let body = runtime_fn_body("    fn file_row_under(");
+        let claim = body
+            .find("self.float_hit_at(position)")
+            .expect("the float is asked first");
+        let declined = body[claim..]
+            .find("return None;")
+            .map(|at| claim + at)
+            .expect("a float part with no row behind it ends the question");
+        let ground = body
+            .find("return self.files_ground_under(position);")
+            .expect("a press that is on no row still falls through to the column's ground");
+        assert!(
+            declined < ground,
+            "the float's claim is answered before the ground is asked, so a \
+             point inside a window never reaches the folder behind it"
+        );
+        let ground_body = runtime_fn_body("    fn files_ground_under(");
+        assert!(
+            !ground_body.contains("float"),
+            "and the ground path itself knows nothing about floats — the rule \
+             is stated once, above it"
+        );
+    }
+
+    /// RED (review row D1, the premise) — **a float that declines a point still
+    /// consumes it.**
+    ///
+    /// This is why the fall-through was a defect rather than a nicety.
+    /// `float_hit` is total inside the frame: a body its tenant has no answer
+    /// for comes back `FloatPart::Body`, and anything the named rectangles miss
+    /// comes back `FloatPart::Head`. There is no `None` for the caller to read
+    /// as "the pointer went through". So the *caller* is where the rule has to
+    /// live, and it now lives there.
+    ///
+    /// Red gate: make `float_hit`'s body arm answer `None` when the tenant
+    /// declines and the first assertion fails; then `file_row_under`'s rule
+    /// would be unnecessary — and the window would be transparent to the
+    /// pointer, which is the bug this window was built not to have.
+    #[test]
+    fn a_float_that_declines_a_point_still_consumes_it() {
+        let geometry = float::float_geometry(
+            [100.0, 100.0, 364.0, 500.0],
+            float::FloatMode::Peek,
+            1.0,
+            30.0,
+            float::FloatHeadTools::default(),
+        );
+        let middle = |rect: [f32; 4]| ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
+        let (x, y) = middle(geometry.body);
+        assert_eq!(
+            float::float_hit(&geometry, x, y, None, |_, _| None),
+            Some(float::FloatPart::Body),
+            "a tenant with no row under the pointer — a preview's text, the \
+             space below a tree's last row — still hands the point to the window"
+        );
+        assert_eq!(
+            float::float_hit(&geometry, x, y, None, |_, _| Some(float::FloatPart::Row(2))),
+            Some(float::FloatPart::Row(2)),
+            "and a tenant that does have one answers with it"
+        );
+        assert_eq!(
+            float::float_hit(&geometry, geometry.frame[0] - 1.0, y, None, |_, _| None),
+            None,
+            "outside the frame, and only outside it, the pointer goes past"
+        );
+        // The one part that is not a tree row and not silence either: whatever
+        // the named rectangles leave over is the head, which is what makes a
+        // press anywhere inside this window a drag of it.
+        let body = runtime_fn_body("    fn file_row_under(");
+        assert!(
+            body.contains("let float::FloatPart::Row(index) = part else {"),
+            "so the door that raises a file menu names the one part it can \
+             answer for and returns nothing for the rest"
+        );
+    }
+
+    /// RED (review row D7) — **a menu's rows are the rows its host can carry
+    /// out.**
+    ///
+    /// A floating tree got the docked column's whole face — `Rename`, `Delete`
+    /// and, on a folder, `New file…` and `New folder…` — while
+    /// `open_files_row_rename`, `open_files_row_new` and `delete_files_row` each
+    /// answer only `RowHost::Column`. Four rows of a six-row menu did nothing at
+    /// all, with no field, no card and no explanation. The refusals are right; it
+    /// was the menu that was not told.
+    ///
+    /// Red gate: hand `profiles::file_menu` the subject alone and every
+    /// assertion in the first loop fails by name.
+    #[test]
+    fn a_menus_rows_are_the_rows_its_host_can_perform() {
+        use profiles::FileMenuRow as Row;
+        let on = |host| {
+            file_menu_powers(Some(&FileMenuTreeRow {
+                host,
+                key: "/notes.md".to_owned(),
+            }))
+        };
+        let column = on(RowHost::Column(SeatId(1)));
+        let float = on(RowHost::Float(7));
+        assert!(column.writes_rows, "a docked column owns the rows it draws");
+        assert!(
+            !float.writes_rows,
+            "a float has no box to measure an editor into and no column to \
+             report a refusal on"
+        );
+        let writes = |row: &Row| {
+            matches!(
+                row,
+                Row::Rename | Row::Delete | Row::NewFile | Row::NewFolder
+            )
+        };
+        for subject in [
+            profiles::FileMenuSubject::File,
+            profiles::FileMenuSubject::Folder { expanded: false },
+            profiles::FileMenuSubject::Folder { expanded: true },
+            profiles::FileMenuSubject::Root,
+        ] {
+            let docked = profiles::file_menu(subject, column).rows;
+            let floating = profiles::file_menu(subject, float).rows;
+            assert!(
+                docked.iter().any(writes),
+                "{subject:?} on a column offers verbs that write"
+            );
+            assert!(
+                !floating.iter().any(writes),
+                "{subject:?} on a float offers none of them"
+            );
+            // And nothing *else* is taken away: the two faces differ by exactly
+            // the rows the float cannot perform, so a floating tree still opens,
+            // folds, starts a shell and hands out its path.
+            assert_eq!(
+                floating,
+                docked
+                    .iter()
+                    .copied()
+                    .filter(|row| !writes(row))
+                    .collect::<Vec<_>>(),
+                "{subject:?}"
+            );
+        }
+        // The gap `Delete` stands in goes with it rather than being left behind
+        // as a rule with nothing above it.
+        assert_eq!(
+            profiles::file_menu(profiles::FileMenuSubject::File, float).lone_separator_after,
+            None,
+            "no lone row, no lone rule"
+        );
+        // A face with no tree row behind it has no host to ask about, and its
+        // list is the same either way — neither carries a row that writes.
+        for subject in [
+            profiles::FileMenuSubject::Document,
+            profiles::FileMenuSubject::FoldedPath { levels: 3 },
+        ] {
+            assert_eq!(
+                profiles::file_menu(subject, column).rows,
+                profiles::file_menu(subject, float).rows,
+                "{subject:?}"
+            );
+        }
+        assert!(
+            !file_menu_powers(None).writes_rows,
+            "and a menu with no row behind it is handed the powerless set"
+        );
+    }
+
+    /// RED (verifier note N2, carried by the D1 ticket) — **`Delete` resolves
+    /// its key against the live tree, the way `Rename` already does.**
+    ///
+    /// `open_files_row_rename` looks the key up in `files_trees` before it acts,
+    /// with the argument that the menu can stand open while a directory lands
+    /// underneath it and a key that no longer names a row renames nothing.
+    /// `delete_files_row` went straight to `files::full_path(&root, key)`. The
+    /// asymmetry is what would turn a re-root under an open menu into a delete
+    /// of the wrong path, and the two verbs that act on a row should be asking
+    /// the same question.
+    ///
+    /// Red gate: drop the look-up and the first assertion fails; move it below
+    /// the `recycle` call and the ordering one does.
+    #[test]
+    fn delete_resolves_its_key_against_the_live_tree() {
+        let delete = runtime_fn_body("    fn delete_files_row(");
+        let looked_up = delete
+            .find(".files_trees(")
+            .expect("Delete asks the live tree whether this key still names a row");
+        assert!(
+            delete[looked_up..].contains("row.key == key"),
+            "by the row's key, which is what the menu is carrying"
+        );
+        let recycled = delete
+            .find("bt_platform::recycle(")
+            .expect("and then, and only then, sends it to the bin");
+        assert!(
+            looked_up < recycled,
+            "the question is asked before the path is built, not after it has \
+             been recycled"
+        );
+        // The same question, asked the same way, by the other verb that acts on
+        // one row — so neither can be the one that drifts.
+        assert!(
+            runtime_fn_body("    fn open_files_row_rename(").contains("row.key == key"),
+            "which is Rename's own guard, and the reason this one exists"
         );
     }
 

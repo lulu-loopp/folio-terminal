@@ -4664,9 +4664,12 @@ mod tests {
             "and the window answers a press on it"
         );
         assert!(
-            crate::profiles::file_menu(crate::profiles::FileMenuSubject::Document)
-                .rows
-                .contains(&crate::profiles::FileMenuRow::Reveal),
+            crate::profiles::file_menu(
+                crate::profiles::FileMenuSubject::Document,
+                crate::profiles::FileMenuPowers::default(),
+            )
+            .rows
+            .contains(&crate::profiles::FileMenuRow::Reveal),
             "and that press raises a list with the retired button's verb on it"
         );
     }

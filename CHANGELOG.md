@@ -9,11 +9,14 @@ All notable changes to Folio are recorded here. The format follows
 ### Added
 
 - **Right-clicking the empty space in a files column opens the folder the column
-  is standing in.** The menu offers `New terminal here`, `New file…` and
-  `New folder…`, then `Copy path`, `Insert path into terminal` and
-  `Reveal in Explorer` — the same verbs a folder row offers, about the folder at
-  the top of the column. It cannot be renamed or deleted from there, because
-  that folder is the column itself rather than a row in it.
+  is standing in — including when that folder is empty.** The menu offers
+  `New terminal here`, `New file…` and `New folder…`, then `Copy path`,
+  `Insert path into terminal` and `Reveal in Explorer` — the same verbs a folder
+  row offers, about the folder at the top of the column. A column standing in a
+  folder with nothing in it has no rows at all, and the whole of its body is that
+  folder's, so that is where the first file in it gets made. It cannot be renamed
+  or deleted from there, because that folder is the column itself rather than a
+  row in it.
 - **A Markdown file can be edited where it is shown.** Click into the text and
   the paragraph, list, table or formula under the caret turns into its own
   source, while everything else on the page stays as it reads; type, and it is
@@ -121,6 +124,12 @@ All notable changes to Folio are recorded here. The format follows
   Ctrl+S leaves the history, the caret and the selection where they were — and a
   file that really did change under you still says so. A read that arrives while
   you are typing no longer replaces what you typed.
+- **A menu opened over a floating window is about that window, not about what it
+  is covering.** Right-clicking a float used to raise the menu of the row hidden
+  underneath it — `Delete` included, with nothing on screen naming the file. A
+  floating tree also no longer offers verbs it cannot carry out, and a column
+  standing in an empty folder can finally open the menu that makes its first
+  file.
 - **The caret in an edited paragraph sits on the character it edits, on Chinese
   text too.** On a line of Chinese the bar stood to the right of the character it
   was in front of, further out with every character on the line, so typing landed

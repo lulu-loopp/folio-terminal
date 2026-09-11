@@ -6469,6 +6469,42 @@ pub enum FileMenuSubject {
     FoldedPath { levels: usize },
 }
 
+/// **What the surface this menu was raised on can actually carry out**
+/// (adversarial review 2026-09-11, rows D7 and D3).
+///
+/// The subject says *what the menu is about*; this says *who would have to do
+/// it*. They are two different questions and the menu needs both, because the
+/// same file row is drawn by two hosts — a docked files column and a floating
+/// tree — and only one of them can write. A floating tree used to get the
+/// column's whole face and then refuse four of its six rows in silence
+/// (`Runtime::open_files_row_rename`, `Runtime::open_files_row_new` and
+/// `Runtime::delete_files_row` each answer only [`crate::RowHost::Column`]),
+/// which is a menu advertising verbs nobody would carry out.
+///
+/// **One decision in one place.** Deriving the rows from this rather than
+/// guarding each handler a second time is what keeps "which rows exist" and
+/// "which host can perform them" from drifting apart again: a host that gains
+/// or loses a power says so here, and the face, the keyboard walk, the layout
+/// and the paint all follow from the one answer.
+///
+/// [`Default`] is the powerless set, which is the safe direction: a caller that
+/// has no host to ask about — a preview's breadcrumb, the `…` chip — gets a
+/// face with nothing on it that writes, and neither of those faces has such a
+/// row to begin with.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FileMenuPowers {
+    /// Whether this host can **write to the tree it is drawing**: put a name
+    /// box on one of its rows (`Rename`), place a new entry in one of its
+    /// folders (`New file…` / `New folder…`), or send a row to the Recycle Bin
+    /// (`Delete`).
+    ///
+    /// The four verbs travel together because they are refused together and for
+    /// one reason: three of them open the inline editor, which is measured into
+    /// a docked column's own box, and the fourth reports its refusal on that
+    /// column. A float has neither.
+    pub writes_rows: bool,
+}
+
 /// One row of the menu a tree row raises under the pointer, or a preview's
 /// breadcrumb under its `Open ⌄`.
 ///
@@ -6604,6 +6640,12 @@ pub enum FileMenuRow {
 #[derive(Clone, Copy, Debug)]
 pub struct FileMenuLook<'a> {
     pub subject: FileMenuSubject,
+    /// **What the host behind this menu can carry out** — see
+    /// [`FileMenuPowers`]. It rides in the look rather than beside it for this
+    /// struct's own reason: the layout, the paint and the keyboard walk all
+    /// have to be looking at the same list of rows, and a second argument they
+    /// each pass separately is a second chance for one of them to get it wrong.
+    pub powers: FileMenuPowers,
     /// The names of the folded levels, **deepest first** — the rows of
     /// [`FileMenuSubject::FoldedPath`]. Empty for every other face.
     pub crumbs: &'a [String],
@@ -6888,28 +6930,43 @@ pub struct FileMenu {
 ///   first, and no rule, because there is nothing here to divide *what this is*
 ///   from *what its path is* — every row is a place.
 ///
-/// **Nothing outside the subject changes the length of a list any more** (user
-/// ruling 2026-08-25). The editor row was the one thing that did, and it is
-/// retired; what is left is the property the original three-row menu had and
-/// briefly lost — every reader of this table gets the same table for the same
-/// subject, so no reader can index it with a number another reader computed.
+/// **Nothing outside the subject and the host's powers changes the length of a
+/// list** (user ruling 2026-08-25, amended by the adversarial review of
+/// 2026-09-11). The editor row was the one thing that did, and it is retired;
+/// what came in its place is not a flag on this table but the other half of the
+/// question it was always answering — *who would carry this out*. Every reader
+/// of this table gets the same table for the same `(subject, powers)` pair, so
+/// no reader can index it with a number another reader computed; and because
+/// both halves travel together in [`FileMenuLook`], no reader can be holding a
+/// different pair from the one the rows were drawn for.
+///
+/// **The write verbs are the host's and not the subject's** (review row D7).
+/// `Rename`, `Delete`, `New file…` and `New folder…` are on a face only when
+/// [`FileMenuPowers::writes_rows`] says the surface behind it can carry them
+/// out. A floating tree cannot — it has no box to measure an inline editor into
+/// and no column to report a refusal on — so its rows are the ones it can
+/// actually do, rather than the column's list with four silent refusals in it.
 #[must_use]
-pub fn file_menu(subject: FileMenuSubject) -> FileMenu {
+pub fn file_menu(subject: FileMenuSubject, powers: FileMenuPowers) -> FileMenu {
     let mut rows = Vec::with_capacity(10);
     match subject {
         FileMenuSubject::File => {
             rows.push(FileMenuRow::Open);
             rows.push(FileMenuRow::OpenWith);
-            rows.push(FileMenuRow::Rename);
-            rows.push(FileMenuRow::Delete);
+            if powers.writes_rows {
+                rows.push(FileMenuRow::Rename);
+                rows.push(FileMenuRow::Delete);
+            }
         }
         FileMenuSubject::Folder { .. } => {
             rows.push(FileMenuRow::Fold);
             rows.push(FileMenuRow::NewTerminal);
-            rows.push(FileMenuRow::NewFile);
-            rows.push(FileMenuRow::NewFolder);
-            rows.push(FileMenuRow::Rename);
-            rows.push(FileMenuRow::Delete);
+            if powers.writes_rows {
+                rows.push(FileMenuRow::NewFile);
+                rows.push(FileMenuRow::NewFolder);
+                rows.push(FileMenuRow::Rename);
+                rows.push(FileMenuRow::Delete);
+            }
         }
         // The folder face's three *making* verbs and neither of its two verbs
         // that act on a row, and no fold on something that has no triangle —
@@ -6918,8 +6975,10 @@ pub fn file_menu(subject: FileMenuSubject) -> FileMenu {
         // path like any other folder.
         FileMenuSubject::Root => {
             rows.push(FileMenuRow::NewTerminal);
-            rows.push(FileMenuRow::NewFile);
-            rows.push(FileMenuRow::NewFolder);
+            if powers.writes_rows {
+                rows.push(FileMenuRow::NewFile);
+                rows.push(FileMenuRow::NewFolder);
+            }
         }
         // **`Reveal in Explorer` and not `Show in files column`** (user ruling
         // 2026-08-25). Two rulings of the same day met on this row. The
@@ -6993,9 +7052,11 @@ pub fn file_menu(subject: FileMenuSubject) -> FileMenu {
 /// spoken then, which is the same answer the double click gives.
 ///
 /// **The walk is over the rows this menu is actually showing**, which is what
-/// taking a subject rather than the enum's whole vocabulary buys: a keyboard
-/// that stepped over every variant would offer a fold on a file and a folded
-/// level on a menu that has no fold behind it.
+/// taking a subject *and the host's powers* rather than the enum's whole
+/// vocabulary buys: a keyboard that stepped over every variant would offer a
+/// fold on a file, a folded level on a menu that has no fold behind it, and —
+/// since the review of 2026-09-11 — a `Delete` on a floating tree that cannot
+/// carry one out.
 ///
 /// `None` for a subject with no rows, which is the one thing that can happen
 /// without a bug: `FoldedPath { levels: 0 }`. `Runtime::open_file_menu` refuses
@@ -7005,10 +7066,11 @@ pub fn file_menu(subject: FileMenuSubject) -> FileMenu {
 #[must_use]
 pub fn file_menu_step(
     subject: FileMenuSubject,
+    powers: FileMenuPowers,
     current: Option<FileMenuRow>,
     forwards: bool,
 ) -> Option<FileMenuRow> {
-    let rows = file_menu(subject).rows;
+    let rows = file_menu(subject, powers).rows;
     let last = rows.len().checked_sub(1)?;
     let Some(current) = current else {
         return Some(if forwards { rows[0] } else { rows[last] });
@@ -7118,7 +7180,7 @@ pub fn file_menu_layout(
     let separator_margin = px(SEPARATOR_MARGIN_Y_LOGICAL_PX).round();
     let separator_block = 2.0 * separator_margin + separator_thickness;
 
-    let menu = file_menu(look.subject);
+    let menu = file_menu(look.subject, look.powers);
     let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
     let row_width = |text: &str, measure: &mut dyn FnMut(&str, f32) -> f32| {
         px(ITEM_ICON_COLUMN_LOGICAL_PX)
@@ -12748,12 +12810,23 @@ mod tests {
         text.chars().count() as f32 * font_px * 0.6
     }
 
+    /// **A docked files column's powers**: it owns the rows it draws, so every
+    /// verb that writes to them is on its face. The set every test written
+    /// before the adversarial review of 2026-09-11 was written against, which is
+    /// why it is the one `plain_look` hands out.
+    const COLUMN_POWERS: FileMenuPowers = FileMenuPowers { writes_rows: true };
+
+    /// **A floating tree's**: the same rows, drawn in a window with no box to
+    /// measure an inline editor into and no column to report a refusal on.
+    const FLOAT_POWERS: FileMenuPowers = FileMenuPowers { writes_rows: false };
+
     /// A file menu's look for a face with nothing runtime in it, with a named
     /// terminal mark so that a test which does not care about the shell still
     /// says which one it was handed.
     fn plain_look(subject: FileMenuSubject) -> FileMenuLook<'static> {
         FileMenuLook {
             subject,
+            powers: COLUMN_POWERS,
             crumbs: &[],
             terminal: ChromeMark::ProfilePowerShell,
         }
@@ -17201,12 +17274,13 @@ mod tests {
             ] {
                 let look = FileMenuLook {
                     subject,
+                    powers: COLUMN_POWERS,
                     crumbs: &["alpha".to_owned(), "bravo".to_owned(), "charlie".to_owned()],
                     // What `Runtime::file_menu_look` hands in, spelled here so
                     // the pin is about the whole trip and not about one call.
                     terminal: mark.in_line(),
                 };
-                for row in file_menu(subject).rows {
+                for row in file_menu(subject, COLUMN_POWERS).rows {
                     assert!(
                         row.mark(&look).takes_current_color(),
                         "the {row:?} row draws {:?}, which carries its own \
@@ -17271,28 +17345,50 @@ mod tests {
     /// `file_menu`'s `File` and `Document` arms, this cannot even be written —
     /// `file_menu` took a second argument, which is the finding.
     ///
-    /// MUTATIONS: re-introduce any row conditional on anything but the subject.
+    /// MUTATIONS: re-introduce any row conditional on anything but the subject
+    /// and the host.
+    ///
+    /// **RENAMED 2026-09-11** (adversarial review, row D7), because the fact
+    /// gained a second half. The property this pin was minted for is intact and
+    /// is not what changed: [`FileMenuPowers`] is not a fact about the *machine*
+    /// — it is a fact about which surface the menu was raised on, and it travels
+    /// inside [`FileMenuLook`] beside the subject, so every reader still gets the
+    /// same list for the same menu and no reader can index it with a number
+    /// another reader computed. What changed is that the sentence now has two
+    /// halves, so the table below is walked for both hosts.
     #[test]
-    fn a_menus_length_is_a_fact_about_its_subject_and_nothing_else() {
-        for (subject, rows) in [
-            (FileMenuSubject::File, 7),
-            (FileMenuSubject::Folder { expanded: false }, 9),
-            (FileMenuSubject::Folder { expanded: true }, 9),
-            (FileMenuSubject::Root, 6),
-            (FileMenuSubject::Document, 4),
-            (FileMenuSubject::FoldedPath { levels: 3 }, 3),
+    fn a_menus_length_is_a_fact_about_its_subject_and_its_host_and_nothing_else() {
+        for (subject, docked, floating) in [
+            (FileMenuSubject::File, 7, 5),
+            (FileMenuSubject::Folder { expanded: false }, 9, 5),
+            (FileMenuSubject::Folder { expanded: true }, 9, 5),
+            // The root face is a column's by construction — a float's ground is
+            // the window's — and the table is about the function, which answers
+            // whatever it is asked.
+            (FileMenuSubject::Root, 6, 4),
+            (FileMenuSubject::Document, 4, 4),
+            (FileMenuSubject::FoldedPath { levels: 3 }, 3, 3),
         ] {
             assert_eq!(
-                file_menu(subject).rows.len(),
-                rows,
-                "{subject:?} draws one list, and it is this long"
+                file_menu(subject, COLUMN_POWERS).rows.len(),
+                docked,
+                "{subject:?} on a column draws one list, and it is this long"
+            );
+            assert_eq!(
+                file_menu(subject, FLOAT_POWERS).rows.len(),
+                floating,
+                "{subject:?} on a float draws one list, and it is this long"
             );
         }
         assert!(
-            !file_menu(FileMenuSubject::File)
+            !file_menu(FileMenuSubject::File, COLUMN_POWERS)
                 .rows
                 .iter()
-                .chain(file_menu(FileMenuSubject::Document).rows.iter())
+                .chain(
+                    file_menu(FileMenuSubject::Document, COLUMN_POWERS)
+                        .rows
+                        .iter()
+                )
                 .any(|row| matches!(row, FileMenuRow::Crumb(_))),
             "a folded level is a row of the chip's list and of nothing else"
         );
@@ -17327,7 +17423,9 @@ mod tests {
             FileMenuSubject::Folder { expanded: true },
         ] {
             assert!(
-                file_menu(subject).rows.contains(&FileMenuRow::Rename),
+                file_menu(subject, COLUMN_POWERS)
+                    .rows
+                    .contains(&FileMenuRow::Rename),
                 "{subject:?} names something on the disk, so it may rename it"
             );
         }
@@ -17337,7 +17435,9 @@ mod tests {
             FileMenuSubject::FoldedPath { levels: 3 },
         ] {
             assert!(
-                !file_menu(subject).rows.contains(&FileMenuRow::Rename),
+                !file_menu(subject, COLUMN_POWERS)
+                    .rows
+                    .contains(&FileMenuRow::Rename),
                 "{subject:?} has no row of its own to rename"
             );
         }
@@ -17370,7 +17470,7 @@ mod tests {
     /// names it; write the making verbs out in a different order and it says so.
     #[test]
     fn the_columns_ground_can_make_things_in_the_root_and_cannot_rename_or_delete_it() {
-        let ground = file_menu(FileMenuSubject::Root);
+        let ground = file_menu(FileMenuSubject::Root, COLUMN_POWERS);
         assert_eq!(
             ground.rows,
             vec![
@@ -17394,7 +17494,7 @@ mod tests {
                 "{refused:?} is a row's verb and the root is not a row"
             );
         }
-        let folder = file_menu(FileMenuSubject::Folder { expanded: true }).rows;
+        let folder = file_menu(FileMenuSubject::Folder { expanded: true }, COLUMN_POWERS).rows;
         assert!(
             ground.rows.iter().all(|row| folder.contains(row)),
             "the ground is the folder face with rows taken away, not a fifth list"
@@ -17466,14 +17566,14 @@ mod tests {
                 insert_path_text(),
             ],
         );
-        let rows = file_menu(subject).rows;
+        let rows = file_menu(subject, COLUMN_POWERS).rows;
         assert!(
             !rows.contains(&FileMenuRow::Open) && !rows.contains(&FileMenuRow::Fold),
             "no preview door and no fold on the face that is the preview"
         );
         // And the two verbs about the path are the same two the tree's rows
         // offer, in the same order, so a rename in one menu cannot drift.
-        let tree_rows = file_menu(FileMenuSubject::File).rows;
+        let tree_rows = file_menu(FileMenuSubject::File, COLUMN_POWERS).rows;
         assert_eq!(rows[rows.len() - 2..], tree_rows[4..6]);
         // The rule falls under Explorer here and over it on a tree row: two
         // rows above the line on this face, one on that one.
@@ -17545,7 +17645,7 @@ mod tests {
             FileMenuSubject::Folder { expanded: false },
             FileMenuSubject::Folder { expanded: true },
         ] {
-            let menu = file_menu(subject);
+            let menu = file_menu(subject, COLUMN_POWERS);
             let at = menu
                 .rows
                 .iter()
@@ -17609,11 +17709,13 @@ mod tests {
             FileMenuSubject::FoldedPath { levels: 3 },
         ] {
             assert!(
-                !file_menu(subject).rows.contains(&FileMenuRow::Delete),
+                !file_menu(subject, COLUMN_POWERS)
+                    .rows
+                    .contains(&FileMenuRow::Delete),
                 "{subject:?} is not a thing on the disk with a name of its own"
             );
             assert_eq!(
-                file_menu(subject).lone_separator_after,
+                file_menu(subject, COLUMN_POWERS).lone_separator_after,
                 None,
                 "{subject:?}: no lone row, so no gap to hold in front of one"
             );
@@ -17645,7 +17747,7 @@ mod tests {
     fn the_two_new_rows_are_the_folders_own_and_ask_for_a_name() {
         for expanded in [false, true] {
             let subject = FileMenuSubject::Folder { expanded };
-            let rows = file_menu(subject).rows;
+            let rows = file_menu(subject, COLUMN_POWERS).rows;
             let shell = rows
                 .iter()
                 .position(|row| *row == FileMenuRow::NewTerminal)
@@ -17667,7 +17769,7 @@ mod tests {
             FileMenuSubject::Document,
             FileMenuSubject::FoldedPath { levels: 2 },
         ] {
-            let rows = file_menu(subject).rows;
+            let rows = file_menu(subject, COLUMN_POWERS).rows;
             assert!(
                 !rows.contains(&FileMenuRow::NewFile) && !rows.contains(&FileMenuRow::NewFolder),
                 "{subject:?} is not a folder to make anything in"
@@ -17725,6 +17827,7 @@ mod tests {
         };
         let look = FileMenuLook {
             subject,
+            powers: COLUMN_POWERS,
             crumbs: &crumbs,
             terminal: ChromeMark::ProfilePowerShell,
         };
@@ -17786,7 +17889,7 @@ mod tests {
     #[test]
     fn the_chips_menu_offers_no_verbs_about_one_hidden_folder() {
         let subject = FileMenuSubject::FoldedPath { levels: 4 };
-        let rows = file_menu(subject).rows;
+        let rows = file_menu(subject, COLUMN_POWERS).rows;
         assert!(
             rows.iter().all(|row| matches!(row, FileMenuRow::Crumb(_))),
             "the chip's list is places and nothing else"
@@ -17845,7 +17948,7 @@ mod tests {
              a shell, the two things it can be asked to make, its own name, and \
              the bin"
         );
-        let rows = file_menu(subject).rows;
+        let rows = file_menu(subject, COLUMN_POWERS).rows;
         let doors = rows
             .iter()
             .filter(|row| !row.hands_out_the_path(subject))
@@ -17862,7 +17965,7 @@ mod tests {
         // above it, which is `Rename` then the bin on both faces.
         assert_eq!(
             rows[rows.len() - 5..],
-            file_menu(FileMenuSubject::File).rows[2..],
+            file_menu(FileMenuSubject::File, COLUMN_POWERS).rows[2..],
         );
     }
 
@@ -17900,7 +18003,7 @@ mod tests {
                 &mut fake_measure,
             );
             let layer = one_layer(file_menu_build(&layout, &look, None));
-            let at = file_menu(look.subject)
+            let at = file_menu(look.subject, look.powers)
                 .rows
                 .iter()
                 .position(|row| *row == FileMenuRow::NewTerminal)
@@ -18614,11 +18717,11 @@ mod tests {
     /// still paid for in pixels.
     ///
     /// **The pin next door is not in tension with this.**
-    /// `a_menus_length_is_a_fact_about_its_subject_and_nothing_else` is about
-    /// the *file* menu, whose subject is a row on the disk; this menu's subject
-    /// is a pane, and "is there a second window to move it into" is a fact about
-    /// the session the pane is in rather than a question about the machine. The
-    /// two lists never meet.
+    /// `a_menus_length_is_a_fact_about_its_subject_and_its_host_and_nothing_else`
+    /// is about the *file* menu, whose subject is a row on the disk; this menu's
+    /// subject is a pane, and "is there a second window to move it into" is a
+    /// fact about the session the pane is in rather than a question about the
+    /// machine. The two lists never meet.
     ///
     /// RED EVIDENCE (2026-08-25): before the change, `pane_menu_layout` walked
     /// `PaneMenuRow::ALL` and the row was minted whatever `windows` held —
@@ -20547,7 +20650,7 @@ mod tests {
                 &mut fake_measure,
             );
             let layer = one_layer(file_menu_build(&layout, &look, None));
-            assert_eq!(file_menu(subject).rows[0], first);
+            assert_eq!(file_menu(subject, COLUMN_POWERS).rows[0], first);
             assert_eq!(
                 layer.labels.first().map(|label| label.text.as_str()),
                 Some(says)
@@ -20601,6 +20704,7 @@ mod tests {
                 subject: FileMenuSubject::FoldedPath {
                     levels: crumbs.len(),
                 },
+                powers: COLUMN_POWERS,
                 crumbs: &crumbs,
                 terminal: ChromeMark::ProfilePowerShell,
             },
@@ -20618,7 +20722,10 @@ mod tests {
                     f64::from((rect[1] + rect[3]) / 2.0),
                 )
             };
-            assert_eq!(layout.items.len(), file_menu(look.subject).rows.len());
+            assert_eq!(
+                layout.items.len(),
+                file_menu(look.subject, look.powers).rows.len()
+            );
             for item in &layout.items {
                 let (x, y) = middle(item.rect);
                 assert_eq!(file_menu_hit(&layout, x, y), Some(Some(item.row)));
@@ -20657,7 +20764,7 @@ mod tests {
     fn the_file_menus_keyboard_walk_clamps_at_both_ends_of_the_list_it_is_on() {
         let file = FileMenuSubject::File;
         let step = |subject, current, forwards| {
-            file_menu_step(subject, current, forwards).expect("this menu has rows")
+            file_menu_step(subject, COLUMN_POWERS, current, forwards).expect("this menu has rows")
         };
         assert_eq!(step(file, None, true), FileMenuRow::Open);
         assert_eq!(step(file, None, false), FileMenuRow::Reveal);
@@ -20746,7 +20853,12 @@ mod tests {
             FileMenuRow::Crumb(2)
         );
         assert_eq!(
-            file_menu_step(FileMenuSubject::FoldedPath { levels: 0 }, None, true),
+            file_menu_step(
+                FileMenuSubject::FoldedPath { levels: 0 },
+                COLUMN_POWERS,
+                None,
+                true
+            ),
             None,
             "a menu with no rows has no row to step to — and does not panic"
         );
