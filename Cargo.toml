@@ -208,6 +208,29 @@ codegen-units = 1
 # §12.6) both run *inside* the unwinding path. A preview whose crashes are
 # silent is worse than a preview that is slightly larger.
 panic = "unwind"
+# **The hang report has to be readable, and without this it is not.**
+# `hang_watch` samples the stalled window thread and writes a stack of
+# `folio.exe+<offset>` into `%APPDATA%\Folio\hang-reports\`. Resolving those
+# offsets needs debug information, and the release default is `debug = false` —
+# so the 2026-09-10 report came back with every `folio` frame landing on the
+# nearest *public* symbol, displacements of more than a megabyte, and no
+# function name anywhere. A report nobody can read is a report that costs a day.
+#
+# `line-tables-only` is the cheapest setting that buys it: function names and
+# source lines, no types, no locals. Measured on this target, 2026-09-11, by
+# building the same commit both ways:
+#
+# * `folio.pdb` 9.94 MB → 139.09 MB. It is **not in the archive** — see the
+#   `strip` note above, which is the same fact from the other side — so this is
+#   disk in `target\`, not bytes anybody downloads.
+# * `folio.exe` 74 924 544 B → 74 830 336 B. **It does change the executable**,
+#   by 94 208 bytes, and it came out *smaller*: emitting line tables changes what
+#   fat LTO does, and the two images differ far past the PDB signature the
+#   linker stamps into every link. Written down because the obvious assumption —
+#   "MSVC keeps debug information in the side file, so this is free" — is the one
+#   the measurement refuses, and a release that copied that sentence out of here
+#   would be shipping an image nobody had weighed.
+debug = "line-tables-only"
 
 [patch.crates-io]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }

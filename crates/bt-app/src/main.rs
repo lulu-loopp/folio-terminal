@@ -509,6 +509,55 @@ enum AppEvent {
     FilesDirChanged,
 }
 
+impl AppEvent {
+    /// **Which station this event's handler is charged to** (2026-09-11).
+    ///
+    /// The whole of `user_event` used to run under [`hang_watch::Station::Woken`],
+    /// which meant a 90-second stall on the turn a document landed could say
+    /// nothing better than `woken 85613 ms` — a number with no handler's name
+    /// beside it, on a line whose entire purpose is to name one. The lanes are
+    /// already separate variants because their *answers* are separate; this makes
+    /// them separate in the ledger too, so the next stall is read rather than
+    /// re-derived.
+    ///
+    /// **The arms that answer `Woken` are the ones that genuinely do nothing.**
+    /// `PtyOutput`, `GitChanged`, `PreviewFileChanged`, `FilesDirChanged`,
+    /// `QuakeSummoned` and `LaunchAsked` each park a fact and let
+    /// `about_to_wait` spend it on the very next statement — see their own
+    /// documentation for why — so charging them a station of their own would put
+    /// a name on an arm that is three lines long and hand the reader a station
+    /// that can never be the answer. They keep the label that says "a wake
+    /// nobody named", which is exactly what they are.
+    fn station(&self) -> hang_watch::Station {
+        use hang_watch::Station;
+        match self {
+            Self::PreviewReady => Station::Preview,
+            Self::MathReady => Station::Math,
+            Self::FilesReady => Station::Files,
+            Self::GitReady => Station::Git,
+            Self::AttentionSpoke => Station::Attention,
+            Self::BackgroundPictureReady => Station::Picture,
+            Self::FileIndexReady => Station::FileIndex,
+            Self::WebPageSpoke => Station::WebSpoke,
+            Self::PsReadLineProbed
+            | Self::PowerShellProfileProbed
+            | Self::CopilotProbed
+            | Self::UpdateChecked
+            | Self::ExplorerPackageChanged
+            | Self::SchemesChanged
+            | Self::StorageChanged
+            | Self::SystemPreferencesChanged
+            | Self::NotificationClicked => Station::Chrome,
+            Self::PtyOutput
+            | Self::GitChanged
+            | Self::PreviewFileChanged
+            | Self::FilesDirChanged
+            | Self::QuakeSummoned
+            | Self::LaunchAsked => Station::Woken,
+        }
+    }
+}
+
 /// One answer from the picture worker (§7.1.6c-4d).
 ///
 /// The file's own name travels with the answer rather than being read back off
@@ -100439,6 +100488,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
+        // **The lane this wake belongs to, named before it is spent** — see
+        // [`AppEvent::station`]. Paired with the `at` below rather than left
+        // standing, on [`hang_watch::enter`]'s own rule: the station a handler
+        // opens is the handler's, and the rest of the turn is not.
+        let leaving_station = hang_watch::enter(event.station());
         // **Every window, because a worker's answer carries its own address.**
         // The four lanes are the application's (§2.4 rule 1) and their results
         // are filed under the key of whichever pane asked; a window with nothing
@@ -100699,6 +100753,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // columns showing that folder are told to ask for it again.
             AppEvent::FilesDirChanged => Ok(()),
         };
+        hang_watch::at(leaving_station);
         if let Err(error) = applied {
             self.fail(event_loop, error);
         }

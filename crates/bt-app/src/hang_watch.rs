@@ -241,7 +241,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 15;
+const STATION_COUNT: usize = 24;
 
 /// How many reports are kept. The oldest beyond this are deleted.
 ///
@@ -326,7 +326,56 @@ pub enum Station {
     /// The platform delivered a wake and the loop has not reached a named call
     /// yet. The honest label for a thread that has left [`Self::Parked`] and
     /// has not arrived anywhere else.
+    ///
+    /// **Since 2026-09-11 this is a much narrower claim than it was.** A wake
+    /// carrying a worker's answer used to spend the whole of `user_event` here,
+    /// so `woken 85613 ms` was the most this ledger could say about a stall that
+    /// had a perfectly good name — see the eight stations below, and
+    /// [`crate::AppEvent::station`], which is where each of them is chosen. What
+    /// is left against this label is a wake that named no lane: the arms that do
+    /// nothing because `about_to_wait` is about to do it, and any untagged code
+    /// on the way in.
     Woken = 11,
+    /// `Runtime::apply_preview_results` — a preview read landing: the head of a
+    /// file, the whole of one a reader asked to edit, a picture's pixels, an
+    /// animation's next frames. **The heavy arm is the document that follows**:
+    /// a body that arrives is parsed, measured and laid out before this returns.
+    Preview = 15,
+    /// `Runtime::apply_math_results` — one batch of rendered formulas, and the
+    /// re-measure of every block that was waiting for a picture's size.
+    Math = 16,
+    /// `Runtime::apply_files_results` — a directory listing landing in the files
+    /// column, with the sort and the row build that follow it.
+    Files = 17,
+    /// `Runtime::apply_git_results` — one repository's status or graph.
+    Git = 18,
+    /// `Runtime::raise_attention` — what the listener heard, read into the tabs
+    /// that were waiting to be told.
+    Attention = 19,
+    /// `Runtime::adopt_background_picture` — the window ground a decoded picture
+    /// is put in force around.
+    Picture = 20,
+    /// `Runtime::apply_file_index_results` — the palette's index of a folder.
+    FileIndex = 21,
+    /// The probe and settings family — `PsReadLineProbed`,
+    /// `PowerShellProfileProbed`, `CopilotProbed`, `UpdateChecked`,
+    /// `ExplorerPackageChanged`, `SchemesChanged`, `StorageChanged`,
+    /// `SystemPreferencesChanged`, `NotificationClicked`.
+    ///
+    /// **One station for nine arms**, because what they have in common is what a
+    /// reader of this line needs: every one of them ends in `refresh_chrome` over
+    /// every window, and none of them is on a clock a reader can feel. A stall
+    /// here says "something a probe answered", which is as far as this ledger can
+    /// usefully divide a family that costs nothing — and further splitting is a
+    /// line to add on the day one of them is the answer.
+    Chrome = 22,
+    /// `Runtime::drive_web_page` — the turn a hosted page's callbacks are read
+    /// on. Its own station rather than [`Self::WebPage`]'s, which is
+    /// `advance_web_page` and is reached from `about_to_wait` on a different
+    /// clock; what this one does *not* cover is the arms inside it that name
+    /// themselves ([`Self::WebOutcomes`], [`Self::WebRetire`]), so what is left
+    /// against it is the drive itself and the chrome read that follows.
+    WebSpoke = 23,
 }
 
 impl Station {
@@ -349,6 +398,15 @@ impl Station {
             Self::WebPlace => "sync_web_page",
             Self::WebRetire => "CoreWebView2Controller::Close",
             Self::WebOutcomes => "apply_web_outcomes",
+            Self::Preview => "apply_preview_results",
+            Self::Math => "apply_math_results",
+            Self::Files => "apply_files_results",
+            Self::Git => "apply_git_results",
+            Self::Attention => "raise_attention",
+            Self::Picture => "adopt_background_picture",
+            Self::FileIndex => "apply_file_index_results",
+            Self::Chrome => "refresh_chrome",
+            Self::WebSpoke => "drive_web_page",
         }
     }
 
@@ -384,6 +442,15 @@ impl Station {
             12 => Self::WebPlace,
             13 => Self::WebRetire,
             14 => Self::WebOutcomes,
+            15 => Self::Preview,
+            16 => Self::Math,
+            17 => Self::Files,
+            18 => Self::Git,
+            19 => Self::Attention,
+            20 => Self::Picture,
+            21 => Self::FileIndex,
+            22 => Self::Chrome,
+            23 => Self::WebSpoke,
             _ => Self::Starting,
         }
     }
@@ -2511,6 +2578,71 @@ mod tests {
             "Folio: the window thread held control for 1900 ms on turn 0 — \
              advance_web_page 1880 ms, window_event 10 ms, woken 10 ms",
         );
+    }
+
+    /// **A wake carrying a worker's answer names the handler, not `woken`**
+    /// (2026-09-11).
+    ///
+    /// Red gate: this is the report of 2026-09-10, whose whole account of a
+    /// ninety-second stall was `woken 85613 ms` — a line that named the loop
+    /// having been woken and nothing about what it then did. `user_event` now
+    /// opens the station its own event chooses ([`crate::AppEvent::station`]),
+    /// so the same stall says `apply_preview_results`, and the reader knows
+    /// which lane to look down before reading a single line of code.
+    ///
+    /// MUTATION: drop the `enter`/`at` pair from `user_event` and the preview's
+    /// eighty seconds go back to `woken`, which is this assertion inverted.
+    #[test]
+    fn a_hold_spent_on_a_workers_answer_names_the_lane_that_landed() {
+        let heart = Heartbeat::new();
+        heart.woke_at(1_000);
+        // Ten milliseconds of untagged wake, then a preview body landing, then
+        // the turn that draws it.
+        heart.at_station(Station::Preview, 1_010);
+        heart.at_station(Station::Woken, 2_010);
+        heart.beat_at(2_020);
+        heart.park_at(Park::Indefinite, 2_030);
+        let (holds, dropped) = heart.take_slow_holds();
+        assert_eq!(dropped, 0);
+        let [hold] = holds.as_slice() else {
+            panic!("one hold, and it ran long")
+        };
+        assert_eq!(hold.spent_ms[Station::Preview.slot()], 1_000);
+        assert_eq!(hold.spent_ms[Station::Woken.slot()], 20);
+        assert_eq!(
+            hold.line(),
+            "Folio: the window thread held control for 1030 ms on turn 1 — \
+             apply_preview_results 1000 ms, woken 20 ms, about_to_wait 10 ms",
+            "the handler is named, and named first",
+        );
+    }
+
+    /// **Every lane a worker answers on has a station of its own**, so that no
+    /// arm of `user_event` can go back to being charged to nobody.
+    ///
+    /// The labels are the function names a reader greps for, which is the whole
+    /// value of the line: a station called `preview` would send them looking for
+    /// a module, and `apply_preview_results` sends them to the door.
+    #[test]
+    fn every_worker_lane_is_labelled_with_the_function_it_names() {
+        for (station, label) in [
+            (Station::Preview, "apply_preview_results"),
+            (Station::Math, "apply_math_results"),
+            (Station::Files, "apply_files_results"),
+            (Station::Git, "apply_git_results"),
+            (Station::Attention, "raise_attention"),
+            (Station::Picture, "adopt_background_picture"),
+            (Station::FileIndex, "apply_file_index_results"),
+            (Station::Chrome, "refresh_chrome"),
+            (Station::WebSpoke, "drive_web_page"),
+        ] {
+            assert_eq!(station.label(), label);
+            assert_eq!(
+                Station::from_byte(u8::try_from(station.slot()).expect("one byte")),
+                station,
+                "{label} does not come back out of the ledger it goes into",
+            );
+        }
     }
 
     /// **The ledger is emptied between holds**, or the next slow line would be
