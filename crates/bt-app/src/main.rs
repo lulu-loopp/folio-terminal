@@ -35921,7 +35921,14 @@ impl Runtime<'_> {
             return;
         };
         let id = tab.id;
-        let wants: Vec<(preview::PreviewSource, preview::PreviewWant)> = tab
+        // A picture's question is named here because it is the pane's — the
+        // decode lane owns a picture's arrival and there is no buffer ledger to
+        // ask. A document's is *not*: which of the two reads it is owed, and the
+        // state it is owed for, are the buffer's own answer, and since ticket
+        // T-EDIT-DISK the one door that says both is the door that files the
+        // question ([`preview::PreviewBuffer::claim_head_read`]). So this walk
+        // names the files and the loop below asks.
+        let wants: Vec<(preview::PreviewSource, Option<preview::PreviewWant>)> = tab
             .preview_panes
             .iter()
             .filter_map(|(_, pane)| {
@@ -35929,19 +35936,14 @@ impl Runtime<'_> {
                     // The one field of the meta line no decoder can answer.
                     return Some((
                         preview::PreviewSource::file(image.path.clone()),
-                        preview::PreviewWant::Size,
+                        Some(preview::PreviewWant::Size),
                     ));
                 }
                 let source = pane.buffer.as_ref()?;
                 tab.preview_pool
                     .get(source)
                     .filter(|buffer| buffer.wants_head_read())
-                    // Which of the two reads this buffer is owed is the
-                    // buffer's own answer since T2 — a document somebody is
-                    // editing must not be revived as the first 64KB of itself.
-                    // The size question below is a picture's and has no such
-                    // choice to make.
-                    .map(|buffer| (source.clone(), buffer.read_want()))
+                    .map(|_| (source.clone(), None))
             })
             .collect();
         // **A revived tab's pictures are opened, not remembered** (user report
@@ -35960,22 +35962,26 @@ impl Runtime<'_> {
         for path in pictures {
             self.forget_the_picture_in(&path);
         }
-        for (source, want) in wants {
+        for (source, asked) in wants {
             // The head lane's one door, for [`Self::arm_card_reads`]'s reason: a
             // buffer whose read is already out with the worker is not asked
             // again. A size is a question about a picture and has no such
             // ledger — the decode lane is what owns a picture's arrival.
-            if want != preview::PreviewWant::Size
-                && self
-                    .window
-                    .tabs
-                    .get_mut(index)
-                    .and_then(|tab| tab.preview_pool.get_mut(&source))
-                    .and_then(preview::PreviewBuffer::claim_head_read)
-                    .is_none()
-            {
-                continue;
-            }
+            let want = match asked {
+                Some(want) => want,
+                None => {
+                    let Some(want) = self
+                        .window
+                        .tabs
+                        .get_mut(index)
+                        .and_then(|tab| tab.preview_pool.get_mut(&source))
+                        .and_then(preview::PreviewBuffer::claim_head_read)
+                    else {
+                        continue;
+                    };
+                    want
+                }
+            };
             if !self.app.preview_worker.request(preview::PreviewRequest {
                 window: self.window_id(),
                 tab: id,
@@ -48118,7 +48124,7 @@ impl Runtime<'_> {
             let Some(buffer) = tab.preview_pool.get_mut(&source) else {
                 continue;
             };
-            match buffer.note_disk_moved(news.present) {
+            match buffer.note_disk_moved(news.present, news.modified) {
                 preview::DiskVerdict::Nothing => {}
                 preview::DiskVerdict::ReadAgain => read_again.push(index),
                 preview::DiskVerdict::Say => said = true,
@@ -61173,6 +61179,9 @@ impl Runtime<'_> {
         lane_gone: bool,
     ) -> Result<()> {
         let mut changed = lane_gone;
+        // Whether a read landing raised the "this file changed on disk" strip
+        // over a document somebody had typed in — see [`preview::ReadLanded`].
+        let mut said_disk_news = false;
         for response in answers_for(batch, |response| self.owns(response.owner())) {
             let Some(index) = self
                 .window
@@ -61193,37 +61202,60 @@ impl Runtime<'_> {
             // rather than re-derived here.
             let carded = self.window.focus_thumbs.seats(response.tab).is_some();
             match response.answer {
-                preview::PreviewAnswer::Head(outcome) => {
+                preview::PreviewAnswer::Head { outcome, base } => {
                     // **Where this document lives, and there are two places.**
                     // The tab's one pool; or — for a hover, which is not an open
                     // file and never enters the pool (P145) — the glance's own
                     // off-pool slot. Matched by source in both, so a pointer that
                     // has moved on to another row is the cancellation §7.1.3 asks
                     // for, arriving as a dropped result.
+                    //
+                    // **Through `land_read` and not through `accept`** (ticket
+                    // T-EDIT-DISK): a read is answered against the body it was
+                    // issued for, and a reader who typed while it was in flight
+                    // keeps what they typed. The base travelled out with the
+                    // question and came back with the answer, so what decides is
+                    // the buffer's own state and not this frame's guess at it.
                     let landed = if let Some(buffer) = self.window.tabs[index]
                         .preview_pool
                         .get_mut(&response.source)
                     {
-                        buffer.accept(outcome);
-                        Some(buffer.content.clone())
+                        let landed = buffer.land_read(outcome, base);
+                        Some((landed, buffer.content.clone()))
                     } else if let Some(peek) = self
                         .window
                         .peek_buffer
                         .as_mut()
                         .filter(|peek| peek.source == response.source)
                     {
-                        peek.accept(outcome);
-                        Some(peek.content.clone())
+                        let landed = peek.land_read(outcome, base);
+                        Some((landed, peek.content.clone()))
                     } else {
                         None
                     };
                     // Evicted, never opened, and no card standing on it: nobody
                     // to file it against.
-                    let Some(content) = landed else {
+                    let Some((landed, content)) = landed else {
                         continue;
                     };
-                    // **And out by the one door**, whichever slot it landed in.
-                    changed |= self.settle_landed_head(index, &response.source, content, carded);
+                    match landed {
+                        // **And out by the one door**, whichever slot it landed
+                        // in.
+                        preview::ReadLanded::Took => {
+                            changed |=
+                                self.settle_landed_head(index, &response.source, content, carded);
+                        }
+                        // Nothing about the body moved, so nothing derived from
+                        // it is owed a pass — and the caret is emphatically not
+                        // healed against a body that was never installed. What
+                        // may be owed is the strip that has just appeared over
+                        // the document to say the file and this body have
+                        // parted, and it goes through the same door the
+                        // watcher's own news puts it up by: a strip is a row of
+                        // somebody's document, so the seats are re-solved and
+                        // not merely repainted.
+                        preview::ReadLanded::Kept { said } => said_disk_news |= said,
+                    }
                 }
                 // A picture's byte count, for the meta line under it.
                 // Filed against the image state rather than the pool,
@@ -61285,6 +61317,13 @@ impl Runtime<'_> {
             // genuinely may not have changed — the head already said the name
             // one frame ago — while the body has changed completely.
             self.present_chrome_change()?;
+        }
+        // **The strip a refused read raised**, through the door a strip is put
+        // up by — [`Self::refresh_preview_file`]'s own line, for the same reason
+        // it is written there: the band takes a row of the document under it, so
+        // the seats are re-solved when the set of panes wearing one moves.
+        if said_disk_news {
+            self.settle_preview_disk_notices()?;
         }
         Ok(())
     }
@@ -139002,7 +139041,7 @@ mod tests {
             .get_mut(&source)
             .expect("the pool is holding it");
         assert_eq!(
-            buffer.note_disk_moved(true),
+            buffer.note_disk_moved(true, preview::file_mtime(&elsewhere)),
             preview::DiskVerdict::ReadAgain,
             "a clean body behind its file is a head read, and nothing is said out loud"
         );
@@ -139069,7 +139108,7 @@ mod tests {
         std::fs::write(&path, "# two\n").expect("rewrite");
         move_the_disk_forward(&path);
         assert_eq!(
-            buffer.note_disk_moved(true),
+            buffer.note_disk_moved(true, preview::file_mtime(&path)),
             preview::DiskVerdict::Say,
             "a strip, not a read"
         );
@@ -139086,7 +139125,7 @@ mod tests {
             "and the words that were typed are still there"
         );
         assert_eq!(
-            buffer.note_disk_moved(true),
+            buffer.note_disk_moved(true, preview::file_mtime(&path)),
             preview::DiskVerdict::Nothing,
             "a second notification about the same disagreement is not a second frame"
         );
@@ -139117,7 +139156,10 @@ mod tests {
         );
 
         // ③ Reload: the one door that discards, and it really does read again.
-        assert_eq!(buffer.note_disk_moved(true), preview::DiskVerdict::Say);
+        assert_eq!(
+            buffer.note_disk_moved(true, preview::file_mtime(&path)),
+            preview::DiskVerdict::Say
+        );
         assert!(buffer.take_the_disks_copy(), "a head read is now owed");
         assert!(!buffer.dirty);
         assert_eq!(buffer.disk, preview::DiskNews::Level);
@@ -139151,7 +139193,10 @@ mod tests {
         let mut buffer = buffer_read_from(&path);
         std::fs::remove_file(&path).expect("delete");
 
-        assert_eq!(buffer.note_disk_moved(false), preview::DiskVerdict::Say);
+        assert_eq!(
+            buffer.note_disk_moved(false, None),
+            preview::DiskVerdict::Say
+        );
         assert_eq!(buffer.disk, preview::DiskNews::Deleted);
         assert!(
             !buffer.is_behind_the_disk(),
@@ -139166,8 +139211,14 @@ mod tests {
 
         // And a file that comes back is the ordinary case again.
         std::fs::write(&path, "# back\n").expect("recreate");
+        // A file recreated inside one of NTFS's ticks carries the very mtime
+        // this buffer is already holding, and a window that cannot tell those
+        // apart is the resolution the save path has always lived with (ticket
+        // T-EDIT-DISK). The disk is moved by hand so the test reads the rule
+        // and not the clock.
+        move_the_disk_forward(&path);
         assert_eq!(
-            buffer.note_disk_moved(true),
+            buffer.note_disk_moved(true, preview::file_mtime(&path)),
             preview::DiskVerdict::ReadAgain,
             "the sentence comes down and the bytes are asked for, in one move"
         );
@@ -139445,14 +139496,15 @@ mod tests {
 
     /// RED — **the wiring the headless tests above cannot stand in front of.**
     ///
-    /// Four sentences about a `Runtime`, which needs a device layer and a window
-    /// to exist, held against the source itself the way this file's other
+    /// Sentences about a `Runtime`, which needs a device layer and a window to
+    /// exist, held against the source itself the way this file's other
     /// structural promises are. Each of them is one half of a mechanism whose
-    /// other half is pinned by a real test above.
+    /// other half is pinned by a real test above — the last two by
+    /// `preview::tests`' own read-landing cases (ticket T-EDIT-DISK).
     ///
-    /// RED GATE: delete any one of the four lines named and its assertion goes
-    /// red; on a real machine each is one of the two roads or one of the two
-    /// moments going quiet.
+    /// RED GATE: delete any one of the lines named and its assertion goes red;
+    /// on a real machine each is one of the two roads, one of the two moments,
+    /// or the answer coming back, going quiet.
     #[test]
     fn the_disk_news_reaches_the_glass_by_both_roads() {
         const SOURCE: &str = include_str!("main.rs");
@@ -139474,7 +139526,7 @@ mod tests {
             "(&mut self, news: &preview_watch::FileNews) -> Result<()> {"
         ));
         assert!(
-            refresh.contains("note_disk_moved(news.present)"),
+            refresh.contains("note_disk_moved(news.present, news.modified)"),
             "and the watcher's news goes through the one door that knows the three cases apart"
         );
         assert!(
@@ -139493,6 +139545,21 @@ mod tests {
         assert!(
             refresh.contains("want: preview::PreviewWant::Size"),
             "and the meta line's byte count is asked again with it"
+        );
+        // **And the road back** (ticket T-EDIT-DISK). A re-read is issued while
+        // the body is the file's and lands whenever the disk gets round to it,
+        // so the answer is reconciled with the body the buffer is holding *now*
+        // — the rule itself is pinned on the buffer in `preview.rs`, and this is
+        // the one line that puts this window's answers through it.
+        let landing = fn_body("fn apply_preview_results(");
+        assert!(
+            landing.contains("land_read(outcome, base)"),
+            "a read answers the body it was issued for, and a reader who typed \
+             while it was in flight keeps what they typed"
+        );
+        assert!(
+            landing.contains("settle_preview_disk_notices()"),
+            "and a refused read's strip goes up the way every other strip does"
         );
         // The other two doors a picture arrives by. Both are gestures, and both
         // are moments this window is about to draw a file it has not looked at.
