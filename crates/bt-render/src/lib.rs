@@ -1078,8 +1078,20 @@ struct MathTextureTile {
     height_px: u32,
 }
 
+/// **The tiles are shared, and that is what keeps a prepared frame drawable.**
+///
+/// A frame resolves its tiles lane by lane and issues them all afterwards, in
+/// one pass. The shared cache these come out of is a byte-budgeted LRU, so a
+/// lane prepared *later* — the chrome marks, a document's own pictures — can
+/// evict what an earlier lane already promised to draw, and a draw whose
+/// texture went away between the promise and the pass is a picture that
+/// silently is not there (user report 2026-09-10: a zoomed preview vanished
+/// while its head and its meta line stood). Handing the draw an `Arc` of the
+/// tile rather than the key to look it up again is what makes that impossible:
+/// the eviction takes the entry out of the cache, and the frame that already
+/// holds the tile still draws it.
 struct CachedMathTexture {
-    tiles: Vec<MathTextureTile>,
+    tiles: Vec<Arc<MathTextureTile>>,
 }
 
 /// **One playing video's texture**, kept across frames and written over.
@@ -1140,8 +1152,9 @@ struct VideoDraw {
 }
 
 struct MathDraw {
-    key: String,
-    tile_index: usize,
+    /// The tile this draw binds — the resource itself and not a key to look it
+    /// up by, for [`CachedMathTexture`]'s reason.
+    tile: Arc<MathTextureTile>,
     first_vertex: u32,
 }
 
@@ -5619,13 +5632,13 @@ impl GpuContext {
                         },
                     ],
                 });
-                tiles.push(MathTextureTile {
+                tiles.push(Arc::new(MathTextureTile {
                     bind_group,
                     x_px: x,
                     y_px: y,
                     width_px: width,
                     height_px: height,
-                });
+                }));
             }
         }
         Some(CachedMathTexture { tiles })
@@ -6262,6 +6275,12 @@ impl WindowRenderer {
                 && current.height_px == next.height_px
                 && current.display_width_px == next.display_width_px
                 && current.display_height_px == next.display_height_px
+                // **And where it stands.** A carried picture changes nothing
+                // else — same pixels, same size, same seat — so a comparison
+                // that left the pan out answered "nothing to draw differently"
+                // for the whole of a pan, which is the one gesture whose entire
+                // effect is where the picture is drawn.
+                && current.pan_px == next.pan_px
         };
         let changed = self.preview_images.len() != images.len()
             || self
@@ -8016,12 +8035,8 @@ impl WindowRenderer {
                     pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                     for draw in &seat.math_draws {
-                        if let Some(texture) = gpu.math_textures.get(&draw.key)
-                            && let Some(tile) = texture.tiles.get(draw.tile_index)
-                        {
-                            pass.set_bind_group(0, &tile.bind_group, &[]);
-                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
-                        }
+                        pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                        pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
                 }
                 if seat.text_prepared {
@@ -8090,12 +8105,8 @@ impl WindowRenderer {
                     pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, buffer.slice(..));
                     for draw in &chrome_icon_draws {
-                        if let Some(texture) = gpu.math_textures.get(&draw.key)
-                            && let Some(tile) = texture.tiles.get(draw.tile_index)
-                        {
-                            pass.set_bind_group(0, &tile.bind_group, &[]);
-                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
-                        }
+                        pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                        pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
                 }
                 if chrome_prepared {
@@ -8112,12 +8123,8 @@ impl WindowRenderer {
                     pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, buffer.slice(..));
                     for draw in &chrome_over_draws {
-                        if let Some(texture) = gpu.math_textures.get(&draw.key)
-                            && let Some(tile) = texture.tiles.get(draw.tile_index)
-                        {
-                            pass.set_bind_group(0, &tile.bind_group, &[]);
-                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
-                        }
+                        pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                        pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
                 }
             }
@@ -8151,12 +8158,8 @@ impl WindowRenderer {
                         pass.set_pipeline(&gpu.math_pipeline);
                         pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                         for draw in &stage.draws {
-                            if let Some(texture) = gpu.math_textures.get(&draw.key)
-                                && let Some(tile) = texture.tiles.get(draw.tile_index)
-                            {
-                                pass.set_bind_group(0, &tile.bind_group, &[]);
-                                pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
-                            }
+                            pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                         }
                     }
                 }
@@ -8228,12 +8231,8 @@ impl WindowRenderer {
                     pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, buffer.slice(..));
                     for draw in &preview_raster_draws {
-                        if let Some(texture) = gpu.math_textures.get(&draw.key)
-                            && let Some(tile) = texture.tiles.get(draw.tile_index)
-                        {
-                            pass.set_bind_group(0, &tile.bind_group, &[]);
-                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
-                        }
+                        pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                        pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
                 }
             }
@@ -8291,12 +8290,8 @@ impl WindowRenderer {
                     pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                     for draw in &peek_draws {
-                        if let Some(texture) = gpu.math_textures.get(&draw.key)
-                            && let Some(tile) = texture.tiles.get(draw.tile_index)
-                        {
-                            pass.set_bind_group(0, &tile.bind_group, &[]);
-                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
-                        }
+                        pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                        pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
                 }
             }
@@ -8380,12 +8375,8 @@ impl WindowRenderer {
                         pass.set_pipeline(&gpu.math_pipeline);
                         pass.set_vertex_buffer(0, buffer.slice(..));
                         for draw in &layer.icon_draws {
-                            if let Some(texture) = gpu.math_textures.get(&draw.key)
-                                && let Some(tile) = texture.tiles.get(draw.tile_index)
-                            {
-                                pass.set_bind_group(0, &tile.bind_group, &[]);
-                                pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
-                            }
+                            pass.set_bind_group(0, &draw.tile.bind_group, &[]);
+                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                         }
                     }
                     if layer.text_prepared {
@@ -8526,13 +8517,11 @@ impl WindowRenderer {
                     self.note_math_texture_refusal(key, placement.artifact.rgba.len());
                 }
             }
-            let Some(tile_geometry) = gpu.math_textures.get(key).map(|texture| {
-                texture
-                    .tiles
-                    .iter()
-                    .map(|tile| (tile.x_px, tile.y_px, tile.width_px, tile.height_px))
-                    .collect::<Vec<_>>()
-            }) else {
+            let Some(tile_geometry) = gpu
+                .math_textures
+                .get(key)
+                .map(|texture| texture.tiles.iter().map(Arc::clone).collect::<Vec<_>>())
+            else {
                 // A placed band with no texture. Silence here is what painted a bare grey
                 // rectangle: the band's own pixels never drew while everything around them did.
                 self.note_textureless_block(gpu, key, placement.artifact.rgba.len());
@@ -8556,9 +8545,9 @@ impl WindowRenderer {
                         as f32
                         / SUBPIXELS_PER_PX as f32
             };
-            for (tile_index, (tile_x, tile_y, tile_width, tile_height)) in
-                tile_geometry.into_iter().enumerate()
-            {
+            for tile in tile_geometry {
+                let (tile_x, tile_y, tile_width, tile_height) =
+                    (tile.x_px, tile.y_px, tile.width_px, tile.height_px);
                 let left = math_block_left_px(
                     self.metrics,
                     placement.left_subpixels,
@@ -8593,11 +8582,7 @@ impl WindowRenderer {
                     self.seat.height,
                     1.0,
                 ));
-                draws.push(MathDraw {
-                    key: key.clone(),
-                    tile_index,
-                    first_vertex,
-                });
+                draws.push(MathDraw { tile, first_vertex });
             }
         }
         MathDrawBatch {
@@ -8670,22 +8655,20 @@ impl WindowRenderer {
                 self.note_math_texture_refusal(&overlay.key, overlay.rgba.len());
             }
         }
-        let Some(tile_geometry) = gpu.math_textures.get(&overlay.key).map(|texture| {
-            texture
-                .tiles
-                .iter()
-                .map(|tile| (tile.x_px, tile.y_px, tile.width_px, tile.height_px))
-                .collect::<Vec<_>>()
-        }) else {
+        let Some(tile_geometry) = gpu
+            .math_textures
+            .get(&overlay.key)
+            .map(|texture| texture.tiles.iter().map(Arc::clone).collect::<Vec<_>>())
+        else {
             return (Vec::new(), Vec::new(), Vec::new());
         };
         let rects = self.peek_box_rects(&layout);
         let fit = (layout.image[2] - layout.image[0]) / overlay.width_px as f32;
         let mut draws = Vec::new();
         let mut vertices = Vec::new();
-        for (tile_index, (tile_x, tile_y, tile_width, tile_height)) in
-            tile_geometry.into_iter().enumerate()
-        {
+        for tile in tile_geometry {
+            let (tile_x, tile_y, tile_width, tile_height) =
+                (tile.x_px, tile.y_px, tile.width_px, tile.height_px);
             let left = layout.image[0] + tile_x as f32 * fit;
             let top = layout.image[1] + tile_y as f32 * fit;
             let right = left + tile_width as f32 * fit;
@@ -8704,11 +8687,7 @@ impl WindowRenderer {
                 self.config.height,
                 1.0,
             ));
-            draws.push(MathDraw {
-                key: overlay.key.clone(),
-                tile_index,
-                first_vertex,
-            });
+            draws.push(MathDraw { tile, first_vertex });
         }
         (rects, draws, vertices)
     }
@@ -8778,29 +8757,27 @@ impl WindowRenderer {
                     self.note_math_texture_refusal(&icon.key, icon.rgba.len());
                 }
             }
-            let Some(tile_geometry) = gpu.math_textures.get(&icon.key).map(|texture| {
-                texture
-                    .tiles
-                    .iter()
-                    .map(|tile| (tile.x_px, tile.y_px, tile.width_px, tile.height_px))
-                    .collect::<Vec<_>>()
-            }) else {
+            let Some(tile_geometry) = gpu
+                .math_textures
+                .get(&icon.key)
+                .map(|texture| texture.tiles.iter().map(Arc::clone).collect::<Vec<_>>())
+            else {
                 continue;
             };
             let scale_x = (icon.rect[2] - icon.rect[0]) / icon.width_px.max(1) as f32;
             let scale_y = (icon.rect[3] - icon.rect[1]) / icon.height_px.max(1) as f32;
-            for (tile_index, (tile_x, tile_y, tile_width, tile_height)) in
-                tile_geometry.into_iter().enumerate()
-            {
+            for tile in tile_geometry {
+                let (tile_x, tile_y, tile_width, tile_height) =
+                    (tile.x_px, tile.y_px, tile.width_px, tile.height_px);
                 let left = icon.rect[0] + tile_x as f32 * scale_x;
                 let top = icon.rect[1] + tile_y as f32 * scale_y;
-                let tile = [
+                let tile_rect = [
                     left,
                     top,
                     left + tile_width as f32 * scale_x,
                     top + tile_height as f32 * scale_y,
                 ];
-                let Some((quad, uv)) = cropped_icon_quad(tile, icon.clip) else {
+                let Some((quad, uv)) = cropped_icon_quad(tile_rect, icon.clip) else {
                     continue;
                 };
                 let first_vertex = vertices.len() as u32;
@@ -8817,11 +8794,7 @@ impl WindowRenderer {
                     surface_height,
                     icon.opacity,
                 ));
-                draws.push(MathDraw {
-                    key: icon.key.clone(),
-                    tile_index,
-                    first_vertex,
-                });
+                draws.push(MathDraw { tile, first_vertex });
             }
         }
         (draws, vertices)
@@ -8858,13 +8831,11 @@ impl WindowRenderer {
                     self.note_math_texture_refusal(&image.key, image.rgba.len());
                 }
             }
-            let Some(tile_geometry) = gpu.math_textures.get(&image.key).map(|texture| {
-                texture
-                    .tiles
-                    .iter()
-                    .map(|tile| (tile.x_px, tile.y_px, tile.width_px, tile.height_px))
-                    .collect::<Vec<_>>()
-            }) else {
+            let Some(tile_geometry) = gpu
+                .math_textures
+                .get(&image.key)
+                .map(|texture| texture.tiles.iter().map(Arc::clone).collect::<Vec<_>>())
+            else {
                 stages.push(PreviewImageStage {
                     seat: image.seat,
                     clip: image.clip,
@@ -8886,9 +8857,9 @@ impl WindowRenderer {
             let scale_x = image.display_width_px as f32 / image.width_px as f32;
             let scale_y = image.display_height_px as f32 / image.height_px as f32;
             let mut draws = Vec::new();
-            for (tile_index, (tile_x, tile_y, tile_width, tile_height)) in
-                tile_geometry.into_iter().enumerate()
-            {
+            for tile in tile_geometry {
+                let (tile_x, tile_y, tile_width, tile_height) =
+                    (tile.x_px, tile.y_px, tile.width_px, tile.height_px);
                 let left = left_inset + tile_x as f32 * scale_x;
                 let top = top_inset + tile_y as f32 * scale_y;
                 let first_vertex = vertices.len() as u32;
@@ -8905,11 +8876,7 @@ impl WindowRenderer {
                     image.seat.height,
                     1.0,
                 ));
-                draws.push(MathDraw {
-                    key: image.key.clone(),
-                    tile_index,
-                    first_vertex,
-                });
+                draws.push(MathDraw { tile, first_vertex });
             }
             stages.push(PreviewImageStage {
                 seat: image.seat,
@@ -22726,6 +22693,51 @@ mod tests {
                 "and an owner no picture answers to moves nothing"
             );
         }
+
+        /// RED — **a picture carried to a new place is a frame that draws
+        /// differently.**
+        ///
+        /// [`WindowRenderer::set_preview_images`] answers "did anything a frame
+        /// would draw differently change", and a *pan* changes nothing else: the
+        /// same pixels, at the same size, in the same seat, standing somewhere
+        /// else. A comparison that left [`PreviewImage::pan_px`] out therefore
+        /// said "nothing changed" for the whole of the one gesture whose entire
+        /// effect is where the picture is drawn — so any caller that trusts the
+        /// answer to decide whether to present would drop every frame of a drag.
+        ///
+        /// A real adapter for this module's reason, though nothing is drawn:
+        /// what is under test is the door's own arithmetic.
+        ///
+        /// MUTATION: drop `pan_px` from `drawn_the_same` and the second
+        /// assertion fails.
+        #[test]
+        fn a_picture_carried_somewhere_else_is_a_frame_that_draws_differently() {
+            let seat = SeatViewport::whole(320, 200);
+            let at = |pan: [f32; 2]| PreviewImage {
+                owner: 1,
+                seat,
+                clip: seat,
+                key: "one picture, one size".to_owned(),
+                rgba: a_square_of([255, 0, 0]),
+                width_px: 8,
+                height_px: 8,
+                display_width_px: 800,
+                display_height_px: 600,
+                pan_px: pan,
+            };
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let mut window = WindowRenderer::offscreen(&mut gpu, 320, 200, 1.0, FORMAT)
+                .expect("a window on this machine's adapter");
+            window.set_preview_images(vec![at([0.0, 0.0])]);
+            assert!(
+                !window.set_preview_images(vec![at([0.0, 0.0])]),
+                "the same picture in the same place is nothing to redraw"
+            );
+            assert!(
+                window.set_preview_images(vec![at([0.0, -40.0])]),
+                "and a picture carried forty pixels up is a frame that differs"
+            );
+        }
     }
 
     /// §7.1.6c-4f's second half: **a background is a background wherever it was
@@ -24386,6 +24398,97 @@ mod tests {
                 before,
                 "the same picture, uploaded again from the same bytes, with nobody \
                  outside this crate having been told anything happened"
+            );
+        }
+
+        /// RED — **a picture a frame has already resolved is drawn, whatever a
+        /// later lane asks the shared cache for** (user report 2026-09-10: a
+        /// 2720×3000 picture zoomed past the pane went blank while its head and
+        /// its meta line stood).
+        ///
+        /// A frame is prepared lane by lane and issued in one pass at the end.
+        /// The preview pictures are prepared at `prepare_preview_draws`; the
+        /// chrome marks and a document's own pictures are prepared *after* them,
+        /// out of the same byte-budgeted LRU. So a big enough picture followed by
+        /// a big enough mark is an eviction of the thing the frame has already
+        /// promised to draw — and the promise was a *key*, so the pass looked the
+        /// texture up again, found nothing, and drew nothing, in silence.
+        ///
+        /// The two rasters here are each well inside the budget on their own and
+        /// over it together, which is the whole of the arrangement: nothing is
+        /// refused, one thing is evicted, and the evicted one is whichever was
+        /// prepared first — the picture.
+        ///
+        /// MUTATION: put `key`/`tile_index` back on `MathDraw` and look the tile
+        /// up in `gpu.math_textures` at draw time, and the read-back is empty.
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn a_picture_survives_a_later_lane_filling_the_texture_budget() {
+            const WIDTH: u32 = 200;
+            const HEIGHT: u32 = 120;
+            // Five eighths of the shared budget each: either one is admitted
+            // alone, and the second one in cannot be without evicting the first.
+            let side = (((MATH_TEXTURE_CACHE_BUDGET_BYTES * 5 / 8 / 4) as f64).sqrt()) as u32;
+            let pixels = |colour: [u8; 4]| -> Arc<[u8]> {
+                Arc::from(
+                    std::iter::repeat_n(colour, side as usize * side as usize)
+                        .flatten()
+                        .collect::<Vec<u8>>()
+                        .into_boxed_slice(),
+                )
+            };
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
+            let seat = SeatViewport::whole(WIDTH, HEIGHT);
+            window.set_preview_images(vec![PreviewImage {
+                owner: 0,
+                seat,
+                clip: seat,
+                key: "the picture the reader is looking at".to_owned(),
+                rgba: pixels([255, 0, 0, 255]),
+                width_px: side,
+                height_px: side,
+                // Zoomed well past the pane, which is the case the report is
+                // about: the drawn picture is larger than its body on both axes.
+                display_width_px: WIDTH * 4,
+                display_height_px: HEIGHT * 4,
+                pan_px: [0.0, 0.0],
+            }]);
+            // A mark the size of a picture, prepared after the picture and
+            // cropped to nothing so that only its *upload* is in play.
+            window.set_chrome(
+                Vec::new(),
+                Vec::new(),
+                vec![ChromeIcon {
+                    key: "the mark prepared after it".to_owned(),
+                    rect: [0.0, 0.0, side as f32, side as f32],
+                    rgba: pixels([0, 255, 0, 255]),
+                    width_px: side,
+                    height_px: side,
+                    opacity: 1.0,
+                    clip: Some([0.0, 0.0, 0.0, 0.0]),
+                    above_text: false,
+                }],
+            );
+            let frame = single_cell_cursor_frame(window.metrics());
+
+            one_frame(&mut window, &mut gpu, &frame).expect("the frame");
+            assert!(
+                ink_pixels(&window.read_back(&gpu).expect("it reads back")) > 0,
+                "the picture the reader is looking at is on the glass, and a mark \
+                 uploaded after it does not take it off"
+            );
+            // And the fixture really is the arrangement it claims to be: the
+            // mark's upload did evict the picture's entry, and the picture drew
+            // anyway. Without this a budget raised one day would leave the test
+            // green while testing nothing.
+            assert!(
+                gpu.math_textures
+                    .get(&"the picture the reader is looking at".to_owned())
+                    .is_none(),
+                "the shared cache really did drop it under the mark's weight — \
+                 which is the moment the old draw path had nothing left to bind"
             );
         }
 

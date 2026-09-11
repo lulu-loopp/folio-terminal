@@ -40,6 +40,26 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A large picture zoomed past the edge of its pane no longer disappears.**
+  Enlarge a big photograph or screenshot far enough and the preview went blank
+  where the picture had been, while the file's name above it and the line of
+  facts below it stayed exactly where they were. The pixels were never lost:
+  everything drawn at one instant shares a single store of graphics memory, and
+  a picture large enough to fill most of that store could be pushed out of it
+  after Folio had settled on drawing it and before it was drawn — which left
+  nothing to draw from and nothing to say about it. Folio now holds on to a
+  picture from the moment it settles on drawing it until it is drawn, so
+  nothing prepared afterwards can take it away.
+- **A zoomed picture can be dragged up and down as well as sideways.** Dragging
+  one that stands taller than the pane moved it left and right and then stopped
+  answering vertically. Letting go of the button while the pointer was outside
+  the window was not heard at all, so the picture was still being carried when
+  you thought you had put it down, and the next drag started from where the last
+  one had left off. Because a preview pane fills the window's height, up and
+  down is the direction that runs out of window almost at once, while sideways
+  travels across the pane next door and never leaves — which is why one
+  direction worked and the other did not. Letting go now ends the gesture
+  wherever the pointer has reached, inside the window or out of it.
 - **A file that says what it is keeps saying it after you save.** Some files
   begin with a few bytes that name their own encoding — the ones Windows
   PowerShell writes are the common case here — and Folio read those bytes,
