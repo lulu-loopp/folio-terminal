@@ -695,6 +695,8 @@ pasteboard data, which is why M4-9 is a `bt-platform` ticket rather than a plist
 edit. A Finder Sync extension is a second signed bundle for a submenu that is
 still not the first page.
 
+> **Ruled 2026-09-12: `NSServices` only.** The owner asked how other terminals do it: Terminal.app ("New Terminal at Folder"), iTerm2 and Ghostty all ship Services entries; Warp, kitty and Alacritty ship nothing and leave it to the user. Services is the convention, not a compromise.
+
 **Q4 — Bundle identifier, signing team, and minimum macOS version.**
 *Recommendation: a reverse-DNS identifier under a name the project controls, the
 owner's existing team, and a deployment target of macOS 14.* The identifier is
@@ -748,10 +750,14 @@ different backing scale. Closing the first needs a VM, the second a display.
 §7.50 records that a window that could not cross the seam between two screens
 reached a user on Windows, so the second gap is the one with history.
 
+> **Ruled 2026-09-12: the mixed-scale gap closes — the owner has a second display and will attach it for M3 (it must run at a different backing scale from the 4K panel, or it proves nothing). The clean-machine gap closes at M5/M6 with a macOS guest (Tart or UTM on the external SSD; the internal volume's 48 GiB is not enough), restored to a clean snapshot before each acceptance; nothing is needed before then.**
+
 **Q12 — A macOS UI-acceptance harness in 0.4?** *Recommendation: no, and say so
 out loud.* Every acceptance line in §2 is the owner in front of the Mac mini
 rather than a script, which is why the milestones are six rather than twenty, and
 a defect there comes back as a screenshot and a sentence. Revisit in 0.5.
+
+> **Ruled 2026-09-12: build it.** A macOS `ui-probe` is a ticket after M1 (screenshots via `screencapture` / `CGWindowListCreateImage`, input via `CGEvent` posting, the pixel comparison shared with the Windows script). Injection needs Accessibility, the same grant the global shortcut needs (Q2), so the two land together. 5–8 agent-days; §7.3 rises by that much, and from M2 on the acceptance lines are run by an agent and read by the owner.
 
 ---
 
