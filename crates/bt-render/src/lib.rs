@@ -1111,6 +1111,28 @@ struct VideoTexture {
     generation: u64,
 }
 
+/// **Which window's picture this is, and which of that window's layers**
+/// (adversarial review 2026-09-11, B3).
+///
+/// The window is the first half and it is not decoration. [`GpuContext`] is
+/// shared by every window in the process while
+/// [`WindowRenderer::prepare_video_draws`] retains against **one** window's
+/// layer list, so a map keyed by the layer's name alone gave two windows one
+/// entry per name: two cards each glancing a `.gif` met on the literal string
+/// `gif:Peek` and alternately evicted and mis-bound each other's pixels, and
+/// two panes each playing a recording met on `video:1` for the same reason —
+/// [`VideoSeats`](crate)'s serial is minted per window, so every window has a
+/// first one.
+///
+/// With the window in the key each window's textures are its own: a name can be
+/// spelled the same in two windows and mean two pictures, which is what it
+/// always meant, and one window's frame can neither read nor release another's.
+type VideoTextureKey = (VideoWindowSerial, String);
+
+/// **Which window a [`VideoTextureKey`] belongs to** — a number
+/// [`GpuContext::mint_video_window_serial`] never gives out twice.
+type VideoWindowSerial = u64;
+
 /// One corner of a video layer's quad. Everything after the UV describes the
 /// quad rather than the corner, and rides on the vertex for
 /// [`MathVertex::opacity`]'s reason: these are drawn from one buffer in one
@@ -1139,7 +1161,7 @@ struct VideoDraw {
     /// samples nothing and is bound to [`GpuContext::video_blank`], because a
     /// pipeline with a texture in its layout must have one bound whether the
     /// fragment reads it or not.
-    key: Option<String>,
+    key: Option<VideoTextureKey>,
     first_vertex: u32,
     /// The scissor for this quad. It travels per draw rather than per pass
     /// because two panes may be playing two videos in one frame, and one pass
@@ -3285,10 +3307,19 @@ pub struct GpuContext {
     /// Deliberately not in `math_textures`, and the module note on
     /// [`crate::video`] is the whole argument: a raster that changes sixty times
     /// a second is not content to be cached by content. Keyed by
-    /// [`VideoLayer::key`], and an entry whose key stops appearing in a frame's
-    /// layers is dropped at the end of it — which is how a pane that stopped
-    /// playing gives its megabytes back without anybody having to say so.
-    video_textures: HashMap<String, VideoTexture>,
+    /// [`VideoTextureKey`] — the window and then [`VideoLayer::key`] — and an
+    /// entry of *that window's* whose key stops appearing in a frame's layers is
+    /// dropped at the end of it, which is how a pane that stopped playing gives
+    /// its megabytes back without anybody having to say so.
+    video_textures: HashMap<VideoTextureKey, VideoTexture>,
+    /// **The next window identity**, never reused for the life of the process —
+    /// see [`VideoTextureKey`] and [`Self::mint_video_window_serial`].
+    ///
+    /// On the context and not on the window for the reason the key exists: the
+    /// number is only worth anything if no two windows on this device can hold
+    /// the same one, and a counter each window kept for itself would hand every
+    /// window a one.
+    video_window_serials: VideoWindowSerial,
     /// The window's ground picture, uploaded once and keyed by its content.
     ///
     /// **One slot and not an entry in `math_textures`**, for two reasons that
@@ -3703,6 +3734,9 @@ pub struct WindowRenderer {
     preview_images: Vec<PreviewImage>,
     /// This frame's playing videos. See [`WindowRenderer::set_video_layers`].
     video_layers: Vec<VideoLayer>,
+    /// **Which window this is among the video textures on the shared device** —
+    /// see [`VideoTextureKey`]. Minted once, at [`Self::assemble`].
+    video_window: VideoWindowSerial,
     preview_bodies: Vec<PreviewBody>,
     /// **What the last frame did with the preview documents it was handed** —
     /// see [`PreviewTextFrame`]. Written on every present, read by whoever is
@@ -5214,6 +5248,7 @@ impl GpuContext {
             video_sampler,
             video_blank,
             video_textures: HashMap::new(),
+            video_window_serials: 0,
             background_texture: None,
             math_textures: ByteLru::new(MATH_TEXTURE_CACHE_BUDGET_BYTES),
             math_texture_evictions: 0,
@@ -5326,6 +5361,17 @@ impl GpuContext {
     /// grew from one to two.
     fn mint_text_viewport(&self) -> Viewport {
         Viewport::new(&self.device, &self.glyphon_cache)
+    }
+
+    /// **One window's identity among the video textures on this device** — see
+    /// [`VideoTextureKey`].
+    ///
+    /// Called once per [`WindowRenderer`] and never reused, including by a
+    /// window that has adopted a new device: the number says *which window*, and
+    /// a window that changed devices is the same window.
+    fn mint_video_window_serial(&mut self) -> VideoWindowSerial {
+        self.video_window_serials = self.video_window_serials.saturating_add(1);
+        self.video_window_serials
     }
 
     /// **What the driver said when it took this device away**, or `None` while
@@ -5696,7 +5742,7 @@ impl GpuContext {
     /// never draws an uninitialised sample, and the way to have that be true by
     /// construction rather than by arithmetic elsewhere is to ask whether the
     /// texture has ever been written rather than only which generation it holds.
-    fn hold_video_texture(&mut self, key: &str, frame: &VideoFrameUpload) -> bool {
+    fn hold_video_texture(&mut self, key: &VideoTextureKey, frame: &VideoFrameUpload) -> bool {
         let limit = self.max_texture_dimension_2d;
         let expected = frame.width_px as usize * frame.height_px as usize * 4;
         if frame.width_px == 0
@@ -5745,7 +5791,7 @@ impl GpuContext {
                 ],
             });
             self.video_textures.insert(
-                key.to_owned(),
+                key.clone(),
                 VideoTexture {
                     texture,
                     bind_group,
@@ -6035,6 +6081,7 @@ impl WindowRenderer {
         let metrics = CellMetrics::measure(&mut gpu.font_system, scale_factor)?;
         let font_metrics_time = phase_started.elapsed();
         let text_viewport = gpu.mint_text_viewport();
+        let video_window = gpu.mint_video_window_serial();
         let device = &gpu.device;
         // Slot 0: the seat a lone terminal leaf draws into on every frame it
         // ever draws. Built here rather than on demand so that shape never pays
@@ -6116,6 +6163,7 @@ impl WindowRenderer {
             peek_overlay: None,
             preview_images: Vec::new(),
             video_layers: Vec::new(),
+            video_window,
             preview_bodies: Vec::new(),
             preview_text_frame: PreviewTextFrame::default(),
             table_blocks: HashMap::new(),
@@ -8928,8 +8976,15 @@ impl WindowRenderer {
     /// video the window has played since it opened. A key that is not in this
     /// frame's layers is a video that is not playing, so its texture goes now.
     fn prepare_video_draws(&mut self, gpu: &mut GpuContext) -> (Vec<VideoDraw>, Vec<VideoVertex>) {
-        gpu.video_textures
-            .retain(|key, _| self.video_layers.iter().any(|layer| &layer.key == key));
+        // **This window's own textures, judged against this window's own
+        // layers** (adversarial review 2026-09-11, B3). The map is the device's
+        // and the list is the window's, so an entry another window minted is
+        // none of this frame's business: releasing it here is how two windows
+        // each showing a moving picture spent every frame tearing down and
+        // re-uploading the other's texture.
+        gpu.video_textures.retain(|(window, key), _| {
+            *window != self.video_window || self.video_layers.iter().any(|layer| &layer.key == key)
+        });
         let (surface_width, surface_height) = (self.config.width, self.config.height);
         let mut draws = Vec::new();
         let mut vertices = Vec::new();
@@ -8971,7 +9026,8 @@ impl WindowRenderer {
             let Some(frame) = layer.frame.as_ref() else {
                 continue;
             };
-            if !gpu.hold_video_texture(&layer.key, frame) {
+            let key = (self.video_window, layer.key.clone());
+            if !gpu.hold_video_texture(&key, frame) {
                 continue;
             }
             let Some(picture) = video_frame_rect(layer.box_, frame.width_px, frame.height_px)
@@ -8992,7 +9048,7 @@ impl WindowRenderer {
                 surface_height,
             ));
             draws.push(VideoDraw {
-                key: Some(layer.key.clone()),
+                key: Some(key),
                 first_vertex,
                 clip,
                 stage: layer.stage,
@@ -24287,6 +24343,211 @@ mod tests {
                  to the texture it was bound to: {:?}",
                 written[(HEIGHT / 2 * WIDTH + WIDTH / 2) as usize]
             );
+        }
+
+        /// RED — **a second playback is a second texture, however its frames
+        /// are numbered** (adversarial review 2026-09-11, B3).
+        ///
+        /// RED EVIDENCE (2026-09-11), the two lines that met:
+        ///
+        /// ```text
+        /// bt-app:    key: format!("gif:{surface:?}")
+        /// bt-render: if !resized && held.generation >= frame.generation { return true; }
+        /// ```
+        ///
+        /// The skip is right and it is what makes a still window showing a
+        /// paused spinner cost no bus at all — but it can only ever mean "newer
+        /// than" **within one producer**, and the key it was compared under
+        /// named a *box on the glass*. Every animation numbers its frames from
+        /// one, so a box handed a second file went on holding the first file's
+        /// picture and rejecting the second's uploads until the second's counter
+        /// climbed past the first's: thousands of frames, the wrong picture
+        /// under the right name.
+        ///
+        /// Both halves are pinned here, on real pixels. Under **one** name a
+        /// lower generation is refused, which is the optimisation working. Under
+        /// **two** names it is not, which is the identity working — and the two
+        /// names are what `bt_app`'s `animation_layer_key` now mints.
+        ///
+        /// MUTATION: put the two frames under one key and the second assertion
+        /// reads the first frame's red, which is the defect exactly.
+        #[test]
+        fn a_second_playback_is_a_second_texture_however_its_frames_are_numbered() {
+            const WIDTH: u32 = 64;
+            const HEIGHT: u32 = 48;
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
+            let seat = SeatViewport::whole(WIDTH, HEIGHT);
+            let frame = single_cell_cursor_frame(window.metrics());
+            let present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
+                window
+                    .present_frame(
+                        gpu,
+                        &[SeatFrame {
+                            seat,
+                            clip: seat,
+                            frame: &frame,
+                            focused: true,
+                        }],
+                        FrameTrigger {
+                            occurred_at: Instant::now(),
+                            source: FrameSource::Expose,
+                        },
+                    )
+                    .expect("one frame");
+                window.read_back(gpu).expect("the frame reads back")
+            };
+            // One pixel of colour, stretched over the whole box — the two files
+            // are the same size, which is what makes `resized` false and the
+            // generation the only thing left deciding.
+            let played = |key: &str, bgr: [u8; 3], generation: u64| VideoLayer {
+                stage: VideoStage::Seat,
+                key: key.to_owned(),
+                box_: seat,
+                clip: seat,
+                frame: Some(VideoFrameUpload {
+                    bgra: Arc::from(vec![bgr[0], bgr[1], bgr[2], 255].into_boxed_slice()),
+                    width_px: 1,
+                    height_px: 1,
+                    generation,
+                }),
+                ground: None,
+                radius_px: 0.0,
+                opacity: 1.0,
+            };
+            let middle = (HEIGHT / 2 * WIDTH + WIDTH / 2) as usize;
+
+            // A long capture that has run ten thousand frames, in red.
+            window.set_video_layers(vec![played("gif:Peek:1", [0, 0, 255], 10_000)]);
+            let first = present(&mut window, &mut gpu);
+            let [blue, green, red, _] = first[middle];
+            assert!(
+                red > 200 && green < 60 && blue < 60,
+                "the first playback is on the glass: {:?}",
+                first[middle]
+            );
+
+            // The spinner switched in behind it, in green, on frame three of its
+            // own life. Under the *same* name the renderer is entitled to refuse
+            // it — that is the optimisation, and the reason the name has to say
+            // which playback it is.
+            window.set_video_layers(vec![played("gif:Peek:1", [0, 255, 0], 3)]);
+            let refused = present(&mut window, &mut gpu);
+            assert_eq!(
+                refused[middle], first[middle],
+                "a lower generation under one name is not a new picture",
+            );
+
+            // And under the name this window now mints for it — the surface and
+            // the playback — the very first frame lands.
+            window.set_video_layers(vec![played("gif:Peek:2", [0, 255, 0], 3)]);
+            let switched = present(&mut window, &mut gpu);
+            let [blue, green, red, _] = switched[middle];
+            assert!(
+                green > 200 && red < 60 && blue < 60,
+                "the second file's first frame was rejected by the first \
+                 file's generation: {:?}",
+                switched[middle]
+            );
+        }
+
+        /// RED — **one window's frame neither reads nor releases another
+        /// window's textures** (adversarial review 2026-09-11, B3, the second
+        /// case).
+        ///
+        /// RED EVIDENCE (2026-09-11): [`GpuContext::video_textures`] is shared by
+        /// every window in the process, while `prepare_video_draws` retains
+        /// against **one** window's layer list, and both producers of a key mint
+        /// it per window — `gif:{surface:?}` names a surface every window has,
+        /// and `VideoSeats`'s serial starts at one in every window. So two
+        /// windows each showing a moving picture met on one literal string: the
+        /// second window's frame found the first's texture already holding a
+        /// picture of the same size at the same generation, skipped the write,
+        /// and drew the other window's pixels — and each present released the
+        /// other's entry on the way out.
+        ///
+        /// MUTATION: key the map by the layer name alone again and this reads
+        /// one texture and the wrong colour in the second window.
+        #[test]
+        fn one_windows_textures_are_not_another_windows() {
+            const WIDTH: u32 = 64;
+            const HEIGHT: u32 = 48;
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut first =
+                WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
+            let mut second = WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT)
+                .expect("and a second one");
+            let seat = SeatViewport::whole(WIDTH, HEIGHT);
+            let frame = single_cell_cursor_frame(first.metrics());
+            let present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
+                window
+                    .present_frame(
+                        gpu,
+                        &[SeatFrame {
+                            seat,
+                            clip: seat,
+                            frame: &frame,
+                            focused: true,
+                        }],
+                        FrameTrigger {
+                            occurred_at: Instant::now(),
+                            source: FrameSource::Expose,
+                        },
+                    )
+                    .expect("one frame");
+                window.read_back(gpu).expect("the frame reads back")
+            };
+            // The same name in both windows, which is exactly what the two
+            // producers mint: a card is `Peek` wherever it is, and a first
+            // recording is serial one wherever it is.
+            let played = |bgr: [u8; 3]| VideoLayer {
+                stage: VideoStage::Seat,
+                key: "gif:Peek:1".to_owned(),
+                box_: seat,
+                clip: seat,
+                frame: Some(VideoFrameUpload {
+                    bgra: Arc::from(vec![bgr[0], bgr[1], bgr[2], 255].into_boxed_slice()),
+                    width_px: 1,
+                    height_px: 1,
+                    generation: 1,
+                }),
+                ground: None,
+                radius_px: 0.0,
+                opacity: 1.0,
+            };
+            let middle = (HEIGHT / 2 * WIDTH + WIDTH / 2) as usize;
+
+            first.set_video_layers(vec![played([0, 0, 255])]);
+            present(&mut first, &mut gpu);
+            second.set_video_layers(vec![played([0, 255, 0])]);
+            let theirs = present(&mut second, &mut gpu);
+            let [blue, green, red, _] = theirs[middle];
+            assert!(
+                green > 200 && red < 60 && blue < 60,
+                "the second window drew the first window's picture: {:?}",
+                theirs[middle]
+            );
+            assert_eq!(
+                gpu.video_textures.len(),
+                2,
+                "one name in two windows is two pictures",
+            );
+
+            // And the first window still has its own, unwritten over and
+            // unreleased.
+            let ours = present(&mut first, &mut gpu);
+            let [blue, green, red, _] = ours[middle];
+            assert!(
+                red > 200 && green < 60 && blue < 60,
+                "the first window's picture did not survive the second's frame: {:?}",
+                ours[middle]
+            );
+            assert_eq!(gpu.video_textures.len(), 2);
         }
     }
 
