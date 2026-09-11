@@ -1293,6 +1293,7 @@ pub fn build(
                 letter_spacing_em: 0.0,
                 align_right: false,
                 align_center: false,
+                cell_advance: None,
             })
             .collect();
         return vec![OverlayLayer {
