@@ -2036,6 +2036,7 @@ pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Comm
 /// `QueryFullProcessImageNameW` and not `GetModuleFileNameEx`: it does not need the module list of
 /// the process it is asking about, so it works on a process that is still starting and on one of a
 /// different bitness.
+#[cfg(windows)]
 #[must_use]
 pub fn process_image_path(pid: u32) -> Option<std::path::PathBuf> {
     use std::os::windows::ffi::OsStringExt;
