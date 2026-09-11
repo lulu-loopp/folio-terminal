@@ -38,6 +38,44 @@ All notable changes to Folio are recorded here. The format follows
   composition drawn where it is being typed instead of appearing a syllable at a
   time.
 
+
+- **Undo and redo while editing a file in a preview, on Ctrl+Z and Ctrl+Y.** The
+  little editor a text or Markdown file opens in had no way back: a line deleted
+  by accident was gone, and the only thing that could restore it was closing the
+  file without saving and losing everything else with it. Ctrl+Z now takes back
+  the last change and Ctrl+Y puts it again. A run of typing comes back in one
+  press rather than one letter at a time — the run ends where you moved the
+  caret, pressed Enter, changed from typing to deleting, or saved — and a paste
+  comes back in one press however much it brought. Both keys work only while a
+  preview holds the keyboard, so Ctrl+Z still suspends a job in every terminal.
+  The history belongs to the file, so the same file open in two panes has one
+  history and either pane can walk it.
+- **The unsaved dot goes out when you undo back to your last save.** It used to
+  stay lit until the file was written, because there was no history to compare
+  against; now there is, so returning to the words the file was saved with is
+  being saved again as far as the dot is concerned, and one more change lights
+  it back up.
+
+### Changed
+
+- **Opening Folio while it is already running opens a tab in the window you used
+  last, instead of a second window.** From Explorer's menu, from
+  `folio-here.cmd`, from a pinned icon or a shortcut: the folder you asked for
+  arrives as a new tab in the window you were last in, and that window comes to
+  the front. `--new-window` still opens a window — one belonging to the Folio
+  that is already running, rather than a second copy of the program. A second
+  copy now starts only when there is no Folio running to answer, which is also
+  what happens if the one that is running has stopped responding: after two
+  seconds the new one opens a window of its own rather than leaving you with
+  nothing.
+- **A text or Markdown file larger than the preview's first look can be
+  edited.** The pane reads the first 64 KB of a file to show it to you, which is
+  what keeps opening a huge file as quick as opening a small one, and until now
+  that was also as much of it as there was: anything longer stayed read-only.
+  Turning a Markdown file to its source, or clicking into the text of a file
+  that has a caret, now reads the rest of it, once, and the file becomes
+  editable — up to 8 MB, past which it stays read-only and says so.
+
 ### Fixed
 
 - **A long animated GIF now plays in the preview instead of showing its first
@@ -89,44 +127,6 @@ All notable changes to Folio are recorded here. The format follows
   so the rest of the file can still be looked at — but saving would have put
   that stand-in character on the disk in place of whatever was really there.
   Such a file is now read-only, and the foot of the pane says why.
-
-### Changed
-
-- **Opening Folio while it is already running opens a tab in the window you used
-  last, instead of a second window.** From Explorer's menu, from
-  `folio-here.cmd`, from a pinned icon or a shortcut: the folder you asked for
-  arrives as a new tab in the window you were last in, and that window comes to
-  the front. `--new-window` still opens a window — one belonging to the Folio
-  that is already running, rather than a second copy of the program. A second
-  copy now starts only when there is no Folio running to answer, which is also
-  what happens if the one that is running has stopped responding: after two
-  seconds the new one opens a window of its own rather than leaving you with
-  nothing.
-- **A text or Markdown file larger than the preview's first look can be
-  edited.** The pane reads the first 64 KB of a file to show it to you, which is
-  what keeps opening a huge file as quick as opening a small one, and until now
-  that was also as much of it as there was: anything longer stayed read-only.
-  Turning a Markdown file to its source, or clicking into the text of a file
-  that has a caret, now reads the rest of it, once, and the file becomes
-  editable — up to 8 MB, past which it stays read-only and says so.
-### Added
-
-- **Undo and redo while editing a file in a preview, on Ctrl+Z and Ctrl+Y.** The
-  little editor a text or Markdown file opens in had no way back: a line deleted
-  by accident was gone, and the only thing that could restore it was closing the
-  file without saving and losing everything else with it. Ctrl+Z now takes back
-  the last change and Ctrl+Y puts it again. A run of typing comes back in one
-  press rather than one letter at a time — the run ends where you moved the
-  caret, pressed Enter, changed from typing to deleting, or saved — and a paste
-  comes back in one press however much it brought. Both keys work only while a
-  preview holds the keyboard, so Ctrl+Z still suspends a job in every terminal.
-  The history belongs to the file, so the same file open in two panes has one
-  history and either pane can walk it.
-- **The unsaved dot goes out when you undo back to your last save.** It used to
-  stay lit until the file was written, because there was no history to compare
-  against; now there is, so returning to the words the file was saved with is
-  being saved again as far as the dot is concerned, and one more change lights
-  it back up.
 
 ## 0.2.5-preview — 2026-09-09
 
