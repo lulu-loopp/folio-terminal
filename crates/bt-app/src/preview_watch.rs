@@ -108,6 +108,24 @@ pub struct Stamp {
 }
 
 impl Stamp {
+    /// **When the file says it was last written.**
+    ///
+    /// The half of the stamp a *buffer* can compare itself against: a document
+    /// keeps the modified time of the read or the write it is holding
+    /// (`preview::PreviewBuffer::disk_mtime`), and the question "is this the
+    /// disk state I already have" is asked of that one number — the same number
+    /// a save refuses to write over a disagreement with.
+    ///
+    /// The length stays this module's own business. It is here because a
+    /// modified time alone misses a write inside the filesystem's resolution,
+    /// which is a question about *whether to look*; the buffer's question is
+    /// about what it is already holding, and for that the file's own timestamp
+    /// is the identity every door in this window uses.
+    #[must_use]
+    pub fn modified(self) -> Option<SystemTime> {
+        self.modified
+    }
+
     /// Ask the disk. `None` is a real answer — the file is not there — and it
     /// compares unequal to every `Some`, which is how a delete is a change.
     #[must_use]
@@ -143,6 +161,15 @@ pub struct FileNews {
     pub path: PathBuf,
     /// `false` when the disk says the file is not there any more.
     pub present: bool,
+    /// **What the file was stamped with at that moment** — [`Stamp::modified`]
+    /// of the very stamp this news was derived from (ticket T-EDIT-DISK).
+    ///
+    /// Carried for `present`'s own reason, one field along: the comparison
+    /// already had the number in its hand, and a reader that went back to the
+    /// disk for it would be asking about a file that may have moved again since.
+    /// It is what lets a document tell a write it is already holding — this
+    /// window's own save, most of all — from somebody else's.
+    pub modified: Option<SystemTime>,
 }
 
 /// **Every file this window's preview seats are watching.**
@@ -349,6 +376,7 @@ impl PreviewWatch {
             moved.push(FileNews {
                 path: path.clone(),
                 present: fresh.is_some(),
+                modified: fresh.and_then(Stamp::modified),
             });
         }
         moved
@@ -411,6 +439,7 @@ impl PreviewWatch {
             moved.push(FileNews {
                 path: path.clone(),
                 present: fresh.is_some(),
+                modified: fresh.and_then(Stamp::modified),
             });
         }
         moved
@@ -659,6 +688,8 @@ mod tests {
         FileNews {
             path: path.to_path_buf(),
             present: true,
+            // The fixtures' stamps carry no modified time — see `stamp`.
+            modified: None,
         }
     }
 
@@ -856,6 +887,7 @@ mod tests {
             vec![FileNews {
                 path: watched.clone(),
                 present: false,
+                modified: None,
             }],
             "a file that is not there any more is news, and it says which kind"
         );
@@ -941,6 +973,7 @@ mod tests {
             vec![FileNews {
                 path: share,
                 present: false,
+                modified: None,
             }]
         );
     }

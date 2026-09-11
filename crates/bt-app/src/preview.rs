@@ -4677,6 +4677,22 @@ pub struct PreviewBuffer {
     /// swapping one letter for another left the cache convinced it was still
     /// looking at the old text.
     pub revision: u64,
+    /// **Which buffer this is**, told apart from every other buffer this process
+    /// has ever made (ticket T-EDIT-DISK, 2026-09-11).
+    ///
+    /// [`Self::revision`] says which body a buffer is holding and this says
+    /// *whose* body it is, and a read is answered against the two of them
+    /// together ([`PreviewBase`]). The second half is needed because a revision
+    /// starts again at zero: a buffer evicted from the pool while its read was
+    /// out, and the same file opened again a moment later, would otherwise be
+    /// handed the first buffer's answer as though it had asked for it — the
+    /// bytes of a file as they were before the eviction, landing on a body
+    /// somebody may since have typed into.
+    ///
+    /// A *clone* keeps it, because a clone is the same buffer: the one place
+    /// buffers are copied is a pane being duplicated onto a second surface, and
+    /// two panes on one file are one document with one history.
+    incarnation: u64,
     /// **Whether the body this revision names was typed here** (ticket T4;
     /// `docs/DESIGN.md` §7.1.3q).
     ///
@@ -4811,6 +4827,19 @@ pub struct PreviewBuffer {
     /// stands, the buffer stays read-only, and no further read is owed. It is a
     /// fact about the file rather than about the reading, so like
     /// [`Self::lossy`] it is answered by [`Self::read_only_notice`].
+    ///
+    /// **It is a state of the buffer and not only a sentence in the foot**
+    /// (ticket T-EDIT-DISK, finding A10). [`Self::is_editable`] refuses it: the
+    /// body the reader can see is the last one that was read, and the file has
+    /// grown past it, so there is no body here for a keystroke to be about.
+    ///
+    /// **And a later read clears it**, which is the other half of the same
+    /// finding. A file can shrink — a log truncated, a generated document
+    /// rewritten — and a bit that only ever went one way meant the document
+    /// could never be edited again for the life of the buffer, whatever the file
+    /// did afterwards. The watcher marks the buffer stale, the re-read goes down
+    /// the same lane, and an answer that brings bytes back says by arriving that
+    /// the ceiling is no longer the answer.
     too_large_to_edit: bool,
     /// **What this body has been through** — the undo log (ticket T3,
     /// 2026-09-10; [`crate::preview_undo`]).
@@ -4939,6 +4968,7 @@ impl PreviewBuffer {
             truncated: false,
             dirty: false,
             revision: 0,
+            incarnation: next_incarnation(),
             edited_here: false,
             disk_mtime: None,
             load,
@@ -5153,21 +5183,33 @@ impl PreviewBuffer {
         self.reads_whole && self.truncated
     }
 
-    /// **Which of the two reads this buffer is owed** (T2 ③, 2026-09-10).
+    /// **Which of the two reads this buffer is owed, stamped with the body it is
+    /// owed for** (T2 ③, 2026-09-10; the stamp is ticket T-EDIT-DISK).
     ///
-    /// [`Self::claim_head_read`]'s answer, asked without taking the read — for
-    /// the one caller that has to name the question before it can file it, the
-    /// revived tab's walk over its own panes. A buffer that has bought the whole
-    /// file is owed the whole file every time afterwards, including the read
-    /// that brings a restored tab back: reviving a document somebody is editing
-    /// as the first 64KB of itself would take the caret away and the ceiling
-    /// back.
-    #[must_use]
-    pub fn read_want(&self) -> PreviewWant {
+    /// A buffer that has bought the whole file is owed the whole file every time
+    /// afterwards, including the read that brings a restored tab back: reviving
+    /// a document somebody is editing as the first 64KB of itself would take the
+    /// caret away and the ceiling back.
+    ///
+    /// **Private since the stamp**, and that is the stamp's own rule rather than
+    /// tidiness: a [`PreviewBase`] minted by anything but the door that files
+    /// the question would be a question claiming to have been asked against a
+    /// body nobody asked against. [`Self::claim_head_read`] is that door, and it
+    /// is the only caller.
+    fn read_want(&self) -> PreviewWant {
         if self.reads_whole {
-            PreviewWant::Whole
+            PreviewWant::Whole(self.base())
         } else {
-            PreviewWant::Head
+            PreviewWant::Head(self.base())
+        }
+    }
+
+    /// **The state a read issued now would be answered against** — see
+    /// [`PreviewBase`].
+    fn base(&self) -> PreviewBase {
+        PreviewBase {
+            incarnation: self.incarnation,
+            revision: self.revision,
         }
     }
 
@@ -5278,6 +5320,25 @@ impl PreviewBuffer {
     /// file deleted and recreated between the two calls would give a second
     /// answer that does not describe the notification being answered.
     ///
+    /// **`modified` is what the disk says the file was last written**, from the
+    /// same stamp the comparison was made on, and it is what makes this window's
+    /// own writes ordinary again (ticket T-EDIT-DISK, finding A4). A save writes
+    /// the file and records what the filesystem stamped it with
+    /// ([`Self::disk_mtime`]) — and then the watcher, which keeps its own stamp
+    /// and cannot know who wrote, reports the file as moved. Before the ticket
+    /// that news went to `mark_stale`, the re-read it asked for landed in
+    /// [`Self::accept`], and every `Ctrl+S` of a watched file emptied the undo
+    /// log; if the reader had typed since, the buffer was dirty by then and the
+    /// window put up a "the file changed on disk" strip about the reader's own
+    /// save, whose `Reload` discards their work by design.
+    ///
+    /// So the buffer asks the one question it can answer for itself: **is this
+    /// the disk state I am already holding?** The identity is the modified time,
+    /// which is the same identity [`Self::save`] refuses to write over a
+    /// disagreement with — one notion of "this is the file I read", used by both
+    /// doors, rather than two that can disagree. A genuinely different state
+    /// takes every case below exactly as it did.
+    ///
     /// The ruling's three cases, in the order they are decided:
     ///
     /// 1. **The file is gone.** The buffer is *kept* — the reader's document
@@ -5294,7 +5355,7 @@ impl PreviewBuffer {
     ///    before — there is no disagreement to report, only a document that is
     ///    now behind its file.
     #[must_use]
-    pub fn note_disk_moved(&mut self, present: bool) -> DiskVerdict {
+    pub fn note_disk_moved(&mut self, present: bool, modified: Option<SystemTime>) -> DiskVerdict {
         if self.source.file_path().is_none() {
             return DiskVerdict::Nothing;
         }
@@ -5306,6 +5367,15 @@ impl PreviewBuffer {
         }
         if !present {
             return DiskVerdict::from_said(self.say(DiskNews::Deleted));
+        }
+        // **The file is standing where this body left it.** Our own save is the
+        // ordinary way to arrive here, and it is not news; neither is a second
+        // notification about a write this buffer has already read. `None` on
+        // either side is not an agreement — a stat that would not answer says
+        // nothing about what the file is — so it falls through to the cases
+        // below and the disagreement is reported as it always was.
+        if modified.is_some() && modified == self.disk_mtime {
+            return DiskVerdict::Nothing;
         }
         if self.dirty {
             return DiskVerdict::from_said(self.say(DiskNews::Changed));
@@ -5389,12 +5459,23 @@ impl PreviewBuffer {
     /// the clause below stops refusing on its own. What it never stops refusing
     /// is a file past [`PREVIEW_EDIT_BYTES`], where the head is all there will
     /// ever be.
+    /// **And one fact only the last read knows** (ticket T-EDIT-DISK, finding
+    /// A10): a file that answered [`HeadOutcome::TooLargeToEdit`] left this
+    /// buffer holding a body the file has grown past. It is kept on the glass —
+    /// it is the last reading there is — but it is a *retained* body and not a
+    /// current one, and typing into it would be typing into a document whose
+    /// file is elsewhere. The foot has said so since T2
+    /// ([`Self::read_only_notice`]); until this ticket the caret did not, so the
+    /// refusal was a sentence with nothing behind it and the save that followed
+    /// answered [`SaveOutcome::Conflict`] on an mtime, which is a refusal nobody
+    /// can act on.
     pub fn is_editable(&self, md_source: bool) -> bool {
         self.source.file_path().is_some()
             && self.load == PreviewLoad::Ready
             && self.content.is_some()
             && !self.truncated
             && !self.lossy
+            && !self.too_large_to_edit
             && is_editable(&self.name, self.ftype, md_source)
     }
 
@@ -5740,32 +5821,82 @@ impl PreviewBuffer {
         self.load = PreviewLoad::Unavailable(words);
     }
 
-    /// File the worker's answer.
+    /// **The worker's answer, reconciled with the body this buffer is holding**
+    /// (ticket T-EDIT-DISK, findings A1 and A10).
+    ///
+    /// The one door every read of a *file* lands by. A read is issued while the
+    /// body on the glass is the file's and lands whenever the disk gets round to
+    /// it, and the two are not the same moment: on a document of any size a
+    /// reader can type a sentence in between. `base` is the state the read was
+    /// issued against ([`PreviewBase`]), and if the buffer has moved on since,
+    /// **the answer is not this buffer's to take**:
+    ///
+    /// * the body, the undo log, the caret and the selection stay exactly as the
+    ///   reader left them — the bytes they typed are the newest reading of that
+    ///   document and the disk's is an older one;
+    /// * the read is closed, so the ledger is free for the next one, and the
+    ///   staleness with it — nothing is owed to a worker for a body nobody is
+    ///   going to replace;
+    /// * and the disagreement is *said*, through the same strip a watcher's news
+    ///   raises, because the file and this body have genuinely parted and the
+    ///   two verbs on it are the two answers a person can give that.
+    ///
+    /// The same comparison expires an authorised `Reload from disk`
+    /// ([`Self::take_the_disks_copy`]) the moment the reader types: the reload
+    /// asks for the read, the keystroke moves the revision, and the answer is
+    /// refused here rather than landing on top of the keystroke that overtook
+    /// it.
+    ///
+    /// **The composed lane does not come through here**, and that is the whole
+    /// of why [`Self::accept`] stays a door of its own: a git diff is not an
+    /// answer to a question about a file's bytes, so there is no state for it to
+    /// be out of date with.
+    pub fn land_read(&mut self, outcome: HeadOutcome, base: PreviewBase) -> ReadLanded {
+        if base != self.base() {
+            self.head_asked = false;
+            self.stale = false;
+            // **A buffer with nothing on the glass has nothing to disagree
+            // about.** The only way to get here holding no body is an answer
+            // addressed to an incarnation that is gone — a buffer evicted while
+            // its read was out and the same file opened again — and a strip
+            // saying the file has changed, over a pane that is still saying
+            // "Loading …", would be this window reporting a disagreement
+            // between a file and nothing.
+            let said = self.content.is_some() && self.say(DiskNews::Changed);
+            return ReadLanded::Kept { said };
+        }
+        self.accept(outcome);
+        ReadLanded::Took
+    }
+
+    /// File an answer about this buffer's body.
+    ///
+    /// **Every arm files the same three things about the question** — it is
+    /// closed, nothing further is owed for it, and what the answer said is now
+    /// what this window knows — and then each arm files what it did to the
+    /// *body*, which is not the same thing and since ticket T-EDIT-DISK is not
+    /// written as though it were. The preamble that used to stand here bumped
+    /// the revision, cleared the mark, **emptied the undo log** and took down the
+    /// disk's sentence before the match had decided anything: an answer that
+    /// replaced no bytes at all ([`HeadOutcome::TooLargeToEdit`]) destroyed the
+    /// history of the body it left standing.
+    ///
+    /// A read from the worker arrives through [`Self::land_read`], which
+    /// reconciles it with the body this buffer is holding first. This door is
+    /// what that one calls, and what the two lanes with no disk behind them use
+    /// directly: a composed document's text, and a refusal this window minted
+    /// itself.
     pub fn accept(&mut self, outcome: HeadOutcome) {
-        self.revision += 1;
-        // **These bytes are the file's, not the reader's** — see
-        // [`Self::edited_here`]. The same sentence the line below writes about
-        // the undo log, about the other thing that cannot survive a body being
-        // replaced: what a reader had marked is a claim about the text that is
-        // going away.
-        self.edited_here = false;
-        // **A body arriving from a disk is a different body**, so the history of
-        // the one it replaces goes with it (ticket T3). This is the door
-        // [`Self::take_the_disks_copy`]'s own line ends at — the reload asks for
-        // the read and the read lands here — and it is also every other way a new
-        // body can arrive: a first read, a re-read after the file moved, a buffer
-        // evicted and fetched again. Every offset in the log names a place in the
-        // body that is being thrown away.
-        self.undo.forget();
         // The question is closed by its answer — and the load it lands in
         // (`Ready`, `Refused`) is already not one this lane asks about, so
         // clearing the bit re-opens nothing. It keeps the bit meaning exactly
         // "a read is out", which is what a reader of it has to be able to
         // believe.
         self.head_asked = false;
-        // And so is the watcher's: the body on the glass is the disk's again.
+        // And so is the watcher's: this answer is what the disk had to say, and
+        // a buffer left behind its file would ask again on the next frame and
+        // for ever.
         self.stale = false;
-        self.disk = DiskNews::Level;
         match outcome {
             HeadOutcome::Read {
                 text,
@@ -5775,6 +5906,12 @@ impl PreviewBuffer {
                 encoding,
                 lossy,
             } => {
+                self.the_body_is_the_files();
+                // **And whatever the last read said about the file's size is not
+                // what this one says** (ticket T-EDIT-DISK, finding A10): bytes
+                // came back, so the file is inside the editing cap again and the
+                // refusal that ceiling filed is spent.
+                self.too_large_to_edit = false;
                 self.content_says_text = content_says_text;
                 // **The sniff, and the one place it is read** (user ruling
                 // 2026-08-27; §7.32). A name in a table has already been
@@ -5812,6 +5949,9 @@ impl PreviewBuffer {
                 self.load = PreviewLoad::Ready;
             }
             HeadOutcome::Refused(refusal) => {
+                // A refusal takes the body away, which is a replacement like any
+                // other: there is nowhere left for an offset in the log to name.
+                self.the_body_is_the_files();
                 // **A name that claimed nothing cannot be contradicted** (user
                 // ruling 2026-08-27; §7.32). [`PreviewRefusal::Binary`]'s own
                 // words are "the head held a NUL, *whatever the name claimed*" —
@@ -5850,11 +5990,63 @@ impl PreviewBuffer {
             // arms above close it, which is what keeps
             // [`Self::wants_head_read`]'s third clause from asking again for
             // ever.
+            //
+            // **And nothing else is touched** (ticket T-EDIT-DISK, finding
+            // A10). This arm used to fall through a preamble that moved the
+            // revision, cleared the mark and emptied the undo log for a body it
+            // had not replaced — so a document somebody had typed in, whose file
+            // then grew past the cap, answered by throwing their history away
+            // and leaving the bytes. What the body has been through is still
+            // what it has been through; what changed is that the file is out of
+            // this window's reach, which [`Self::is_editable`] refuses and
+            // [`Self::read_only_notice`] says.
             HeadOutcome::TooLargeToEdit => {
                 self.too_large_to_edit = true;
             }
         }
     }
+
+    /// **A body arriving from a disk is a different body** — everything the
+    /// replacement ends (ticket T3; gathered here by T-EDIT-DISK).
+    ///
+    /// The two arms of [`Self::accept`] that put a body where the old one was
+    /// call it, and the arm that replaces nothing does not. Five facts, and
+    /// every one of them is about the body and not about the question:
+    ///
+    /// * the revision moves, because every cache in this window is keyed on it;
+    /// * the mark goes — what a reader had selected is a claim about text that
+    ///   is going away (see [`Self::edited_here`]);
+    /// * **the history goes**, because every offset in it names a place in the
+    ///   body being thrown away;
+    /// * the dirty bit is *stated* rather than left standing: the body is the
+    ///   file's, so it is exactly where the disk last saw it, and a bit inherited
+    ///   from the body before it left the buffer claiming unsaved work over an
+    ///   empty log — which [`Self::mark_stale`] then refuses for ever, so that
+    ///   buffer never re-read again;
+    /// * and the disk's sentence comes down, because the two are level again.
+    fn the_body_is_the_files(&mut self) {
+        self.revision += 1;
+        self.edited_here = false;
+        self.undo.forget();
+        self.dirty = self.undo.is_dirty();
+        self.disk = DiskNews::Level;
+    }
+}
+
+/// **What became of a read that landed** — [`PreviewBuffer::land_read`]'s answer
+/// (ticket T-EDIT-DISK).
+///
+/// Two outcomes and not a `bool`, because the caller does different work with
+/// each: a body that landed owes the panes showing it a healed caret and a
+/// rebuilt page, while a body that was refused owes at most a repaint of the
+/// strip that has just appeared over it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadLanded {
+    /// The answer is this buffer's body now.
+    Took,
+    /// The buffer had moved on, so it kept what it was holding. `said` is
+    /// whether the strip's sentence changed — see [`PreviewBuffer::say`].
+    Kept { said: bool },
 }
 
 /// One tab's shared pool of live buffers.
@@ -6091,16 +6283,61 @@ impl PreviewPool {
     }
 }
 
+/// **The state a read was issued against** (ticket T-EDIT-DISK, 2026-09-11).
+///
+/// A buffer and the body it was holding at the moment it asked a disk for
+/// bytes: [`PreviewBuffer::incarnation`] and [`PreviewBuffer::revision`],
+/// carried out with the question and back with the answer.
+///
+/// **Why a read carries one at all.** A read is issued while the body on the
+/// glass is the file's, and it lands whenever the disk gets round to it — which
+/// on an 8MB document is long enough for somebody to type a sentence. The
+/// answer describes the body that was there when the question was asked, and a
+/// body that has moved on since is not a body it may replace: a buffer that
+/// accepted it would throw away bytes a reader typed and the history that could
+/// have brought them back. So the question is stamped, and the stamp is what
+/// [`PreviewBuffer::land_read`] compares.
+///
+/// Minted in exactly one place — [`PreviewBuffer::claim_head_read`], the door
+/// every read is filed through — so a base is always a base something actually
+/// asked against.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreviewBase {
+    /// Which buffer asked — see [`PreviewBuffer::incarnation`].
+    incarnation: u64,
+    /// And which body it was holding when it did.
+    revision: u64,
+}
+
+/// The counter behind [`PreviewBuffer::incarnation`].
+///
+/// Process-wide and not per window, because the thing it has to keep apart is
+/// two buffers over one file, and a pool is a tab's while the worker is the
+/// application's. Wrapping at `u64` is not a case: a window that made one
+/// buffer a nanosecond for six hundred years would reach it.
+static PREVIEW_INCARNATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_incarnation() -> u64 {
+    PREVIEW_INCARNATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// What is being asked about a file.
 ///
 /// Two questions on one lane rather than two lanes, because they are the same
 /// kind of question about the same file and neither is worth a second thread:
 /// what separates them is only that one is answered by bytes and the other by a
 /// directory entry.
+///
+/// **The two that bring bytes back carry the state they were asked against**
+/// (ticket T-EDIT-DISK). A body is a thing a buffer can be holding instead of
+/// another one, so an answer that brings a body has to say which body it is an
+/// answer *about*; a size and a page count are facts about a file and there is
+/// nothing about them to be out of date with. Carried in the want rather than
+/// beside it so that a read filed without one cannot be spelled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreviewWant {
     /// At most [`PREVIEW_HEAD_BYTES`] of the body.
-    Head,
+    Head(PreviewBase),
     /// **The whole file, up to [`PREVIEW_EDIT_BYTES`]** — what asking to edit
     /// buys (T2 ③, research §10 Q2, owner's ruling 2026-09-10).
     ///
@@ -6110,7 +6347,7 @@ pub enum PreviewWant {
     /// thread. What separates the two is only how much of the file comes back,
     /// and [`PreviewBuffer::claim_head_read`] is the one place that decides
     /// which of them a buffer is owed.
-    Whole,
+    Whole(PreviewBase),
     /// How large the whole file is — the third field of a picture's meta line
     /// (mock-up 4955), which is the only thing on that line the decoder cannot
     /// answer for itself.
@@ -6169,6 +6406,14 @@ impl PreviewRequest {
     /// supersede the head read of the same picture and the body would never
     /// arrive, which is coalescing turned into cancellation.
     ///
+    /// **Which question it is, and not what it was asked against** (ticket
+    /// T-EDIT-DISK). Since a body read carries a [`PreviewBase`], two head reads
+    /// of one file by one tab differ in their payload — and they are still the
+    /// same question, whose newest asking is the one worth answering. Comparing
+    /// the payload would leave the superseded read in the queue to be performed
+    /// and then refused on arrival, which is a trip to a disk for an answer
+    /// nothing can use.
+    ///
     /// **And the window is part of it**: two windows asking the same thing about
     /// the same file of their own `TabId(1)` are two questions, and one answer
     /// standing in for both leaves one of them waiting for ever.
@@ -6176,7 +6421,7 @@ impl PreviewRequest {
         self.window == other.window
             && self.tab == other.tab
             && self.source == other.source
-            && self.want == other.want
+            && std::mem::discriminant(&self.want) == std::mem::discriminant(&other.want)
     }
 }
 
@@ -6205,7 +6450,14 @@ impl PreviewResponse {
 /// One answer to one [`PreviewWant`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PreviewAnswer {
-    Head(HeadOutcome),
+    /// A body, **and the state of the buffer it was read for** — see
+    /// [`PreviewBase`]. Echoed from the question rather than asked again here:
+    /// the worker is a disk and knows nothing about buffers, and the whole point
+    /// of the stamp is that it describes the moment the question was filed.
+    Head {
+        outcome: HeadOutcome,
+        base: PreviewBase,
+    },
     /// `None` when the file could not be stat'ed, which the meta line simply
     /// leaves out rather than turning into an error of its own.
     Size(Option<u64>),
@@ -6845,10 +7097,16 @@ impl PreviewWorker {
                         return;
                     };
                     let answer = match request.want {
-                        PreviewWant::Head => PreviewAnswer::Head(read_head(path)),
+                        PreviewWant::Head(base) => PreviewAnswer::Head {
+                            outcome: read_head(path),
+                            base,
+                        },
                         // The same lane and the same answer shape — see
                         // [`PreviewWant::Whole`].
-                        PreviewWant::Whole => PreviewAnswer::Head(read_whole(path)),
+                        PreviewWant::Whole(base) => PreviewAnswer::Head {
+                            outcome: read_whole(path),
+                            base,
+                        },
                         PreviewWant::Size => PreviewAnswer::Size(read_size(path)),
                         // Straight off the file's structure: the wrapper that
                         // used to stat the file beside this call is gone with
@@ -7473,6 +7731,16 @@ mod tests {
     fn buffer<'pool>(pool: &'pool PreviewPool, path: &str) -> &'pool PreviewBuffer {
         pool.get(&PreviewSource::file(path))
             .expect("the pool holds this path")
+    }
+
+    /// A stamp for a question no buffer asked — for the cases that are about
+    /// the worker's queue, where what a read was issued against is not the
+    /// subject and any two questions' stamps only have to be alike.
+    fn a_base() -> PreviewBase {
+        PreviewBase {
+            incarnation: 0,
+            revision: 0,
+        }
     }
 
     /// A worker answer for a body that never came off a disk.
@@ -10114,14 +10382,14 @@ mod tests {
             source: PreviewSource::file("a.png"),
             want,
         };
-        sender.send(ask(PreviewWant::Head)).unwrap();
+        sender.send(ask(PreviewWant::Head(a_base()))).unwrap();
         sender.send(ask(PreviewWant::Size)).unwrap();
         drop(sender);
         let mut asked = Vec::new();
         run_preview_worker(receiver, |request| asked.push(request.want));
         assert_eq!(
             asked,
-            vec![PreviewWant::Head, PreviewWant::Size],
+            vec![PreviewWant::Head(a_base()), PreviewWant::Size],
             "neither supersedes the other"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -10144,7 +10412,7 @@ mod tests {
             window: winit::window::WindowId::from(window),
             tab: crate::TabId(1),
             source: PreviewSource::file("plan.md"),
-            want: PreviewWant::Head,
+            want: PreviewWant::Head(a_base()),
         };
         sender.send(ask(1)).unwrap();
         sender.send(ask(2)).unwrap();
@@ -10557,7 +10825,10 @@ mod tests {
 
         let mut buffer =
             PreviewBuffer::new(PreviewSource::file(path.clone()), "long.md".to_owned());
-        assert_eq!(buffer.claim_head_read(), Some(PreviewWant::Head));
+        assert!(matches!(
+            buffer.claim_head_read(),
+            Some(PreviewWant::Head(_))
+        ));
         buffer.accept(read_head(&path));
         assert!(buffer.truncated, "the glance took the head and said so");
         assert!(!buffer.is_editable(true));
@@ -10579,7 +10850,10 @@ mod tests {
         // The head is still on the glass while the rest is on its way: nothing
         // was unloaded, so the page does not flash.
         assert!(buffer.content.is_some() && buffer.load == PreviewLoad::Ready);
-        assert_eq!(buffer.claim_head_read(), Some(PreviewWant::Whole));
+        assert!(matches!(
+            buffer.claim_head_read(),
+            Some(PreviewWant::Whole(_))
+        ));
         buffer.accept(read_whole(&path));
 
         assert!(!buffer.truncated, "the whole file is here");
@@ -10592,7 +10866,10 @@ mod tests {
         // back as a head would put the reader on the first 64KB of the document
         // they are editing, with the ceiling back.
         assert!(buffer.mark_stale());
-        assert_eq!(buffer.claim_head_read(), Some(PreviewWant::Whole));
+        assert!(matches!(
+            buffer.claim_head_read(),
+            Some(PreviewWant::Whole(_))
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -10621,7 +10898,10 @@ mod tests {
 
         let mut buffer =
             PreviewBuffer::new(PreviewSource::file(path.clone()), "enormous.txt".to_owned());
-        assert_eq!(buffer.claim_head_read(), Some(PreviewWant::Head));
+        assert!(matches!(
+            buffer.claim_head_read(),
+            Some(PreviewWant::Head(_))
+        ));
         buffer.accept(read_head(&path));
         let head = buffer.content.clone().expect("the glance landed");
 
@@ -10629,7 +10909,10 @@ mod tests {
             buffer.ask_for_the_whole_file(false),
             "a text file's face edits"
         );
-        assert_eq!(buffer.claim_head_read(), Some(PreviewWant::Whole));
+        assert!(matches!(
+            buffer.claim_head_read(),
+            Some(PreviewWant::Whole(_))
+        ));
         assert_eq!(read_whole(&path), HeadOutcome::TooLargeToEdit);
         buffer.accept(HeadOutcome::TooLargeToEdit);
 
@@ -10649,6 +10932,385 @@ mod tests {
             "including the next time somebody presses in the body"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── T-EDIT-DISK: a buffer knows which disk state it is holding ─────────
+
+    /// Type one run into a buffer through the keyboard's own door.
+    fn type_into(
+        buffer: &mut PreviewBuffer,
+        caret: &mut crate::preview_edit::EditCaret,
+        at: usize,
+    ) {
+        let body = buffer
+            .content
+            .clone()
+            .expect("there is a body to type into");
+        caret.place(&body, at, false);
+        assert!(
+            buffer.edit_by_caret(caret, |content, caret| {
+                crate::preview_edit::insert(content, caret, "typed by hand")
+            }),
+            "the keystroke landed"
+        );
+    }
+
+    /// RED (ticket T-EDIT-DISK, finding A1) — **a read issued before a keystroke
+    /// does not replace what was typed.**
+    ///
+    /// The window a watcher's re-read opens, in the smallest form that is the
+    /// real one: the buffer is clean, so the read is allowed to go out; the read
+    /// is with the disk for as long as the disk takes; and nothing before this
+    /// ticket re-asked, when the answer landed, whether the body it was an
+    /// answer *about* was still the body on the glass. It was not — the reader
+    /// typed — and the bytes they typed were replaced by an older reading of the
+    /// file.
+    ///
+    /// RED GATE: let [`PreviewBuffer::land_read`] call `accept` without
+    /// comparing the base, which is the code as it shipped, and the first
+    /// assertion fails with the file's text where the reader's is.
+    #[test]
+    fn a_read_issued_before_a_keystroke_does_not_replace_the_edited_body() {
+        let mut caret = crate::preview_edit::EditCaret::default();
+        let mut buffer =
+            PreviewBuffer::new(PreviewSource::file(r"C:\w\notes.md"), "notes.md".to_owned());
+        buffer.accept(read("as it was read\n", false));
+
+        // Something outside this window wrote the file, so a re-read goes out
+        // while the body is still the disk's.
+        assert!(buffer.mark_stale());
+        let Some(PreviewWant::Head(base)) = buffer.claim_head_read() else {
+            panic!("the read is owed and it is a head read");
+        };
+
+        // And the reader types while it is in flight.
+        type_into(&mut buffer, &mut caret, 14);
+        assert_eq!(
+            buffer.content.as_deref(),
+            Some("as it was readtyped by hand\n")
+        );
+
+        assert_eq!(
+            buffer.land_read(read("somebody else's second version\n", false), base),
+            ReadLanded::Kept { said: true },
+            "the answer describes a body this buffer is no longer holding"
+        );
+        assert_eq!(
+            buffer.content.as_deref(),
+            Some("as it was readtyped by hand\n"),
+            "so what the reader typed is what the reader has"
+        );
+        assert_eq!(
+            buffer.disk,
+            DiskNews::Changed,
+            "and the disagreement is said rather than swallowed"
+        );
+        assert!(
+            !buffer.awaiting_head_read() && !buffer.is_behind_the_disk(),
+            "the question is closed by its answer, refused or not — a buffer \
+             still owing a read would ask again on the next frame and for ever"
+        );
+    }
+
+    /// RED (ticket T-EDIT-DISK, finding A1) — **a refused read leaves the
+    /// history and the caret it refused to overwrite.**
+    ///
+    /// The other half of the loss, and the worse half: the body could be typed
+    /// again, but `undo.forget()` left nothing to press `Ctrl+Z` against. The
+    /// log is the buffer's ([`crate::preview_undo`]) and the caret comes back
+    /// out of it, so this asserts both at once — the road back to the body the
+    /// file holds, and the place the hand was standing when it left it.
+    ///
+    /// RED GATE: empty the log in the refusing arm of `land_read`, or call
+    /// `accept` unconditionally as the code did before this ticket, and the undo
+    /// answers `None`.
+    #[test]
+    fn a_rejected_read_keeps_the_undo_log_and_the_caret() {
+        let mut caret = crate::preview_edit::EditCaret::default();
+        let mut buffer =
+            PreviewBuffer::new(PreviewSource::file(r"C:\w\notes.md"), "notes.md".to_owned());
+        buffer.accept(read("one\n", false));
+        assert!(buffer.mark_stale());
+        let Some(PreviewWant::Head(base)) = buffer.claim_head_read() else {
+            panic!("a head read is owed");
+        };
+        type_into(&mut buffer, &mut caret, 4);
+
+        buffer.land_read(read("one\ntwo\n", false), base);
+
+        let back = buffer.undo_edit().expect("the history is still here");
+        assert_eq!(
+            buffer.content.as_deref(),
+            Some("one\n"),
+            "and it reaches the body the keystroke was made against"
+        );
+        assert_eq!(back.caret, 4, "with the caret the run started from");
+        assert!(
+            buffer
+                .redo_edit()
+                .is_some_and(|forward| forward.caret == 17),
+            "and the road forward is still there too"
+        );
+    }
+
+    /// RED (ticket T-EDIT-DISK, findings A1 and A10) — **the history is
+    /// forgotten in the arm that replaces the bytes, and in no other.**
+    ///
+    /// `accept` used to bump the revision, clear the mark and empty the log in a
+    /// preamble every outcome passed through, before the match had decided
+    /// whether a body was being replaced at all. [`HeadOutcome::TooLargeToEdit`]
+    /// replaces nothing — it is the file saying it has grown out of this
+    /// window's reach — and it took the reader's history with it.
+    ///
+    /// RED GATE: move `undo.forget()` back above the `match` and the first undo
+    /// answers `None`.
+    #[test]
+    fn accept_forgets_the_history_only_in_the_arm_that_replaces_bytes() {
+        let mut caret = crate::preview_edit::EditCaret::default();
+        let mut buffer = PreviewBuffer::new(
+            PreviewSource::file(r"C:\w\notes.txt"),
+            "notes.txt".to_owned(),
+        );
+        buffer.accept(read("one\n", false));
+        type_into(&mut buffer, &mut caret, 4);
+        let typed = buffer.content.clone().expect("a body");
+
+        buffer.accept(HeadOutcome::TooLargeToEdit);
+        assert_eq!(
+            buffer.content,
+            Some(typed),
+            "an answer that replaced no bytes left the bytes alone"
+        );
+        assert!(
+            buffer.undo_edit().is_some(),
+            "and left the history of them alone"
+        );
+
+        // And the arm that does replace the body does take it, which is the rule
+        // this one is the exception to rather than a repeal of it.
+        buffer.accept(read("the file's own text\n", false));
+        assert_eq!(
+            buffer.undo_edit(),
+            None,
+            "every offset in it named the old body"
+        );
+    }
+
+    /// RED (ticket T-EDIT-DISK, finding A1) — **a buffer that took a body is not
+    /// left claiming unsaved work over an empty log.**
+    ///
+    /// `accept` wrote the body, the revision and the mark and never touched
+    /// `dirty`, so a body landing on a buffer that was dirty left the dot on and
+    /// the history empty — a state no gesture can get out of, because
+    /// [`PreviewBuffer::mark_stale`] refuses a dirty buffer and that buffer
+    /// therefore never re-read again for the life of the session.
+    ///
+    /// RED GATE: drop the `dirty` line from `the_body_is_the_files` and the
+    /// second block fails — the buffer says it has unsaved work and the log it
+    /// would be in is empty.
+    #[test]
+    fn a_buffer_that_accepted_a_body_is_not_left_dirty_with_an_empty_log() {
+        let mut caret = crate::preview_edit::EditCaret::default();
+        let mut buffer =
+            PreviewBuffer::new(PreviewSource::file(r"C:\w\notes.md"), "notes.md".to_owned());
+        buffer.accept(read("one\n", false));
+        type_into(&mut buffer, &mut caret, 4);
+        assert!(
+            buffer.dirty,
+            "there is unsaved work, and there is a log of it"
+        );
+
+        buffer.accept(read("the file's own text\n", false));
+        assert!(
+            !buffer.dirty,
+            "a body straight off the disk is exactly where the disk last saw it"
+        );
+        assert_eq!(buffer.undo_edit(), None, "and the log agrees with the dot");
+        assert!(
+            buffer.mark_stale(),
+            "so the next thing the watcher says can still be acted on"
+        );
+    }
+
+    /// RED (ticket T-EDIT-DISK, finding A4) — **this window's own save is not
+    /// news from the disk.**
+    ///
+    /// The commonest gesture there is, and before this ticket every one of them
+    /// emptied the undo log of a watched file: the save writes, the watcher —
+    /// which keeps its own stamp and cannot know who wrote — reports the file as
+    /// moved, the clean buffer is marked stale, the re-read lands and the
+    /// history goes. `Ctrl+S`, a pause, and `Ctrl+Z` does nothing.
+    ///
+    /// The identity is the modified time the save itself recorded, so nothing
+    /// here races a clock: the file is stamped by the filesystem and read back
+    /// by [`PreviewBuffer::save`] in the same breath.
+    ///
+    /// RED GATE: drop the `modified == self.disk_mtime` line from
+    /// `note_disk_moved` and the verdict is `ReadAgain` — the read goes out and
+    /// the undo at the end of this test has nothing to take back.
+    #[test]
+    fn our_own_save_is_not_news_from_the_disk() {
+        let dir = scratch("own-save");
+        let mut caret = crate::preview_edit::EditCaret::default();
+        let mut buffer = opened(&dir, "notes.md", "one\n");
+        type_into(&mut buffer, &mut caret, 4);
+        assert_eq!(buffer.save(), SaveOutcome::Saved);
+        let path = on_disk(&buffer).to_path_buf();
+
+        assert_eq!(
+            buffer.note_disk_moved(true, file_mtime(&path)),
+            DiskVerdict::Nothing,
+            "the file is standing exactly where this buffer's own write left it"
+        );
+        assert!(
+            !buffer.is_behind_the_disk(),
+            "so nothing is asked of a disk that has nothing new to say"
+        );
+        assert!(
+            buffer.undo_edit().is_some(),
+            "and the history a save is supposed to leave alone is still there"
+        );
+        // Walked back to where the file stands, so the last block asks about a
+        // clean body — which is the case the quiet re-read is for.
+        assert!(buffer.redo_edit().is_some());
+        assert!(!buffer.dirty);
+
+        // A file that really did change still says so, on the same door.
+        std::fs::write(&path, "somebody else\n").expect("rewrite");
+        move_the_disk_forward(&path);
+        assert_eq!(
+            buffer.note_disk_moved(true, file_mtime(&path)),
+            DiskVerdict::ReadAgain,
+            "a genuinely different disk state takes the path it always took"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED (ticket T-EDIT-DISK, finding A4) — **a save while the reader is still
+    /// typing does not put up a "changed on disk" strip about their own save.**
+    ///
+    /// The half of A4 the reader sees. The news about our own write arrives a
+    /// beat late (`WATCH_QUIET`), and if the reader has typed in the meantime the
+    /// buffer is dirty by then — so the old code took the `DiskNews::Changed`
+    /// arm and offered them a `Reload from disk` that would discard the very
+    /// work it was reporting.
+    ///
+    /// RED GATE: the same line as the test above; without it the strip goes up
+    /// and `buffer.disk` is `Changed`.
+    #[test]
+    fn a_save_while_typing_does_not_raise_a_changed_on_disk_strip() {
+        let dir = scratch("save-typing");
+        let mut caret = crate::preview_edit::EditCaret::default();
+        let mut buffer = opened(&dir, "notes.md", "one\n");
+        type_into(&mut buffer, &mut caret, 4);
+        assert_eq!(buffer.save(), SaveOutcome::Saved);
+        let path = on_disk(&buffer).to_path_buf();
+        // The reader carries on typing while the watcher's clock is still quiet.
+        type_into(&mut buffer, &mut caret, 4);
+        assert!(buffer.dirty);
+
+        assert_eq!(
+            buffer.note_disk_moved(true, file_mtime(&path)),
+            DiskVerdict::Nothing
+        );
+        assert_eq!(
+            buffer.disk,
+            DiskNews::Level,
+            "there is nothing to tell the reader about their own save"
+        );
+        assert!(
+            buffer
+                .content
+                .as_deref()
+                .is_some_and(|body| body.matches("typed by hand").count() == 2),
+            "and every character of what they typed is still here"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED (ticket T-EDIT-DISK, finding A10) — **an over-cap answer leaves the
+    /// buffer read-only, and leaves its body exactly as it was.**
+    ///
+    /// `too_large_to_edit` was a sentence in the foot and nothing else:
+    /// [`PreviewBuffer::is_editable`] never mentioned it, so the reader went on
+    /// typing into a body the file had grown past, and the save that followed
+    /// answered [`SaveOutcome::Conflict`] on an mtime — a refusal with nothing
+    /// in it a person can act on.
+    ///
+    /// RED GATE: drop `!self.too_large_to_edit` from `is_editable` and the
+    /// second assertion fails.
+    #[test]
+    fn an_over_cap_answer_leaves_the_buffer_read_only_and_its_body_untouched() {
+        let mut buffer =
+            PreviewBuffer::new(PreviewSource::file(r"C:\w\log.txt"), "log.txt".to_owned());
+        buffer.accept(read("the whole file, as it was\n", false));
+        assert!(buffer.is_editable(false), "a complete text body edits");
+
+        buffer.accept(HeadOutcome::TooLargeToEdit);
+        assert_eq!(
+            buffer.content.as_deref(),
+            Some("the whole file, as it was\n"),
+            "what the reader is looking at is the last reading there is"
+        );
+        assert!(
+            !buffer.is_editable(false),
+            "and it is a retained body, not a body a keystroke can be about"
+        );
+        assert_eq!(buffer.read_only_notice(), Some(preview_too_large_notice()));
+    }
+
+    /// RED (ticket T-EDIT-DISK, finding A10) — **a file that shrinks back under
+    /// the cap can be edited again.**
+    ///
+    /// Nothing ever cleared the bit, and both doors onto a further read were
+    /// gated on it, so a document that grew past 8MB for one minute of its life
+    /// was read-only for the rest of the session however small it became. A
+    /// watcher's news is what re-opens it, and the answer that brings bytes back
+    /// is what says the ceiling is no longer the answer.
+    ///
+    /// RED GATE: drop `too_large_to_edit = false` from `accept`'s `Read` arm and
+    /// the last assertion fails with a complete, current body nobody may type
+    /// into.
+    #[test]
+    fn a_file_that_shrinks_under_the_cap_can_be_edited_again() {
+        let mut buffer =
+            PreviewBuffer::new(PreviewSource::file(r"C:\w\log.txt"), "log.txt".to_owned());
+        buffer.accept(read("the whole file, as it was\n", false));
+        buffer.accept(HeadOutcome::TooLargeToEdit);
+        assert!(!buffer.is_editable(false));
+
+        // The file is rewritten, small this time, and the watcher says so.
+        assert!(
+            buffer.mark_stale(),
+            "a buffer past the ceiling is still a buffer the watcher can reach"
+        );
+        let Some(PreviewWant::Head(base)) = buffer.claim_head_read() else {
+            panic!("the re-read is owed");
+        };
+        assert_eq!(
+            buffer.land_read(read("a much shorter file\n", false), base),
+            ReadLanded::Took
+        );
+        assert!(
+            buffer.is_editable(false),
+            "the file came back inside the cap, so the document is editable again"
+        );
+        assert_eq!(buffer.read_only_notice(), None);
+    }
+
+    /// NTFS records the last-write time on a coarse tick, so two writes inside
+    /// one tick carry the same mtime and a rule about identity never fires. The
+    /// disk is moved forward by hand so the tests above read the rule and not
+    /// the clock — `main`'s disk-watch fixtures say the same thing at their own
+    /// door.
+    fn move_the_disk_forward(path: &Path) {
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open for touch")
+            .set_modified(later)
+            .expect("set mtime");
     }
 
     /// PIN — **the editing ceiling's phrase names the real ceiling.**
@@ -10923,7 +11585,7 @@ mod tests {
             window: winit::window::WindowId::from(1_u64),
             tab: crate::TabId(1),
             source: PreviewSource::file(path),
-            want: PreviewWant::Head,
+            want: PreviewWant::Head(a_base()),
         };
         sender.send(ask("a.rs")).unwrap();
         sender.send(ask("b.rs")).unwrap();

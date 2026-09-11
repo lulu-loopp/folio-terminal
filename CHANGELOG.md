@@ -116,6 +116,11 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Saving a file you are editing no longer throws away what you can undo.**
+  Folio now recognises its own write instead of reading it as somebody else's, so
+  Ctrl+S leaves the history, the caret and the selection where they were — and a
+  file that really did change under you still says so. A read that arrives while
+  you are typing no longer replaces what you typed.
 - **The caret in an edited paragraph sits on the character it edits, on Chinese
   text too.** On a line of Chinese the bar stood to the right of the character it
   was in front of, further out with every character on the line, so typing landed
