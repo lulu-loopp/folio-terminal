@@ -54672,12 +54672,35 @@ impl Runtime<'_> {
                 self.preview_pane_mut(surface).md_caret_wanted = Some(offset);
             }
         } else {
+            // **A press on the page's empty ground renders it again** (owner's
+            // ruling 2026-09-10). The margin beside a block, the ground under
+            // the last one: a press there names no byte of the file, so there is
+            // no caret to place and — until this ruling — nothing happened at
+            // all, which left the reader with one paragraph still wearing its
+            // markup and no gesture but `Esc` to put it back. It is the second
+            // of [`Self::leave_preview_page`]'s three, and the caret is kept:
+            // pressing the ground does not move it, it only stops drawing the
+            // block it stands in as source.
+            //
+            // **A press on a link is not empty ground**, which is why this asks
+            // `caret_at` and not `placing`: the link's own press leaves
+            // `placing` empty while standing on letters the file spells.
+            let left = live && caret_at.is_none();
+            if left {
+                self.leave_preview_page(surface);
+            }
             // **The piece selection, for a page with no caret in it** (research
             // §10 Q3): a document this window will not edit — truncated, lossy,
             // over the cap, a diff — is still a page to read and to copy out of,
             // and this is the model that reads it.
             let Some(place) = self.preview_place_at(surface, position) else {
-                return Ok(caret_at.is_some());
+                if left {
+                    // The page has changed shape under the press even though the
+                    // press named nothing, so it is drawn again here rather than
+                    // at the foot of this function, which this leaves by.
+                    self.repaint_preview()?;
+                }
+                return Ok(caret_at.is_some() || left);
             };
             let selection = match standing {
                 Some(was) => preview_select::Selection { head: place, ..was },
@@ -54862,6 +54885,33 @@ impl Runtime<'_> {
         self.preview_edit_focus = Some(surface);
         self.reveal_preview_caret(surface);
         true
+    }
+
+    /// **Take the caret out of the rendered page** — the whole of leaving, and
+    /// the mirror of [`Self::seat_preview_caret`] (T5 ③, §7.1.3t; owner's
+    /// ruling 2026-09-10).
+    ///
+    /// The page renders again and the keyboard goes back. **The caret itself is
+    /// kept**: it is a byte offset into the buffer, so the next press back into
+    /// the page — and the flip to the source face, and the arrow key that
+    /// follows — finds it exactly where this left it.
+    ///
+    /// **Three gestures reach it, and they are one sentence**: `Esc`, a press on
+    /// the page's empty ground, and this surface losing the keyboard to a press
+    /// somewhere else. The earlier ruling had only the first of the three — a
+    /// page that re-flowed itself every time a hand left it would move while
+    /// nobody was looking at it — and the owner reversed it on the report that
+    /// followed: a document left with one paragraph still wearing its markup
+    /// does not read as a document, and a reader who has clicked away has
+    /// finished with it as plainly as one who pressed `Esc`. The two halves that
+    /// argument turns on are both kept: what the page *draws* goes back to
+    /// prose, and where the caret *is* does not move.
+    fn leave_preview_page(&mut self, surface: PreviewSurface) {
+        self.preview_pane_mut(surface).md_caret = false;
+        self.preview_pane_mut(surface).md_caret_wanted = None;
+        if self.preview_edit_focus == Some(surface) {
+            self.preview_edit_focus = None;
+        }
     }
 
     /// The pointer travelling with the button down, drawing across a page.
@@ -55674,18 +55724,12 @@ impl Runtime<'_> {
             // which is exactly what §7.1.5's layering says: Esc reaches the child
             // only when the owner is the terminal.
             preview_edit::EditCommand::Release => {
-                self.preview_edit_focus = None;
                 // **And on a rendered page it renders the block again** (T5 ③,
-                // §7.1.3t). `Esc` is the one gesture that means "I have finished
-                // editing this", so it is the one that puts the source block
-                // back into prose — losing the keyboard to a click somewhere
-                // else deliberately does not, because a page that re-flowed
-                // itself every time a hand left it would move while nobody was
-                // looking at it (§7.1.3q). The caret itself is kept: it is a
-                // byte offset into the buffer, the flip to the source face finds
-                // it exactly where this left it, and so does the next press back
-                // into the page.
-                self.preview_pane_mut(surface).md_caret = false;
+                // §7.1.3t). `Esc` is the plainest of the three gestures that
+                // mean "I have finished with this" — see
+                // [`Self::leave_preview_page`] for the other two and for what
+                // leaving keeps.
+                self.leave_preview_page(surface);
                 self.repaint_preview()?;
             }
             preview_edit::EditCommand::Ignore => {}
@@ -84084,7 +84128,11 @@ impl Runtime<'_> {
         if let Some(focused) = self.preview_edit_focus()
             && self.preview_edit_body(position).map(|(surface, _)| surface) != Some(focused)
         {
-            self.preview_edit_focus = None;
+            // **And the page it was standing in renders again** (owner's ruling
+            // 2026-09-10, reversing T5 ③'s "leaving is `Esc` and nothing else").
+            // See [`Self::leave_preview_page`]: this is the third of its three
+            // gestures, and the caret stays where it was.
+            self.leave_preview_page(focused);
             self.repaint_preview()?;
         }
         let Some(target) = target else {
@@ -133955,76 +134003,6 @@ mod tests {
     /// not a percentage.
     #[test]
     fn a_one_character_edit_rebuilds_a_document_inside_the_frame_budget() {
-        let metrics = seats::preview_markdown_metrics(1.0);
-        let palette = bt_render::chrome_palette();
-        let math = DocumentMath::default();
-        let art = PageArt {
-            math: &math,
-            pictures: &DocumentPictures::default(),
-            theme: bt_render::Theme::Dark,
-        };
-        let pass = IntrinsicPass {
-            metrics,
-            math: &math,
-            palette: &palette,
-            scale_ppm: scale_ppm(1.0),
-            math_generation: 0,
-        };
-        let calls = std::cell::Cell::new(0usize);
-        let mut width_of = |runs: &[bt_render::PreviewRun], _: f32, _: f32| {
-            runs.iter()
-                .map(|run| run.text.chars().count())
-                .sum::<usize>() as f32
-                * 8.0
-        };
-        let mut shaper = |runs: &[bt_render::PreviewRun], width: f32, _: f32, line: f32| {
-            calls.set(calls.get() + 1);
-            line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
-        };
-
-        // The keystroke, from the bytes to a page ready to draw. The cache is
-        // warm, because that is what a keystroke meets: the document was on the
-        // glass a frame ago.
-        let mut rebuild = |content: &str, cache: &mut MarkdownIntrinsicCache| {
-            let clock = Instant::now();
-            let (blocks, ranges) = preview::parse_markdown_ranged(content);
-            let parse = clock.elapsed();
-            let clock = Instant::now();
-            let intrinsic = measure_markdown_intrinsics(
-                &blocks,
-                MarkdownSourceBytes {
-                    content,
-                    ranges: &ranges,
-                },
-                pass,
-                cache,
-                &mut width_of,
-            );
-            let intrinsics = clock.elapsed();
-            let clock = Instant::now();
-            let source = MarkdownSourceBlock {
-                index: 0,
-                range: ranges[0].clone(),
-                text: preview_live::block_source(content, &ranges[0]).to_owned(),
-                lines: preview_edit::display_lines(preview_live::block_source(content, &ranges[0])),
-                font_size: 14.0,
-                line_height: 20.0,
-                advance: 8.0,
-            };
-            let layout = lay_markdown_out(
-                &blocks,
-                &intrinsic,
-                Some(&source),
-                1000.0,
-                metrics,
-                art,
-                &mut shaper,
-            );
-            let laid = clock.elapsed();
-            assert_eq!(layout.len(), blocks.len());
-            (blocks.len(), parse, intrinsics, laid)
-        };
-
         let one = include_str!("../../../docs/UI-UX.md");
         let cut = one[..64 * 1024].rfind('\n').unwrap_or(one.len());
         let sixty_four = &one[..cut];
@@ -134036,12 +134014,12 @@ mod tests {
 
         for (name, document) in [("64 KiB", sixty_four.to_owned()), ("1 MiB", mega)] {
             let mut cache = MarkdownIntrinsicCache::default();
-            rebuild(&document, &mut cache);
+            rebuild_cost(&document, &mut cache);
             let mut typed = document.clone();
             let at = typed.len() / 2;
             let at = typed[..at].rfind('\n').map_or(0, |line| line + 1);
             typed.insert(at, 'x');
-            let (blocks, parse, intrinsics, laid) = rebuild(&typed, &mut cache);
+            let (blocks, parse, intrinsics, laid) = rebuild_cost(&typed, &mut cache);
             let total = parse + intrinsics + laid;
             println!(
                 "{name}: {} bytes, {blocks} blocks — parse {:?}, intrinsics {:?}, \
@@ -134060,6 +134038,174 @@ mod tests {
                      {intrinsics:?}, layout {laid:?})",
                 );
             }
+        }
+    }
+
+    /// **One rebuild of a whole document, in three clocks** — the harness both
+    /// budget tests measure with, so that the two are measuring one thing.
+    ///
+    /// **What is in the clock and what is not.** The parse is real — and since
+    /// ticket T7 that is the *mapped* parse, because
+    /// [`preview::parse_markdown_ranged`] is [`preview::parse_markdown_mapped`]
+    /// with its maps dropped and the window builds the maps on every parse. The
+    /// fence highlighting is real (syntect, the half the research expected to
+    /// dominate), and the layout arithmetic is real; the *shaper* is the stub
+    /// below, because a real one needs a GPU and a window. So this is the cost of
+    /// everything a rebuild re-derives except the proportional shaping.
+    ///
+    /// The three constructions above the clocks are outside all of them, which is
+    /// where they belong: a palette and an empty picture map are a test's setup
+    /// and not a document's cost.
+    fn rebuild_cost(
+        content: &str,
+        cache: &mut MarkdownIntrinsicCache,
+    ) -> (
+        usize,
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+    ) {
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let palette = bt_render::chrome_palette();
+        let math = DocumentMath::default();
+        let pictures = DocumentPictures::default();
+        let art = PageArt {
+            math: &math,
+            pictures: &pictures,
+            theme: bt_render::Theme::Dark,
+        };
+        let pass = IntrinsicPass {
+            metrics,
+            math: &math,
+            palette: &palette,
+            scale_ppm: scale_ppm(1.0),
+            math_generation: 0,
+        };
+        let mut width_of = |runs: &[bt_render::PreviewRun], _: f32, _: f32| {
+            runs.iter()
+                .map(|run| run.text.chars().count())
+                .sum::<usize>() as f32
+                * 8.0
+        };
+        let mut shaper = |runs: &[bt_render::PreviewRun], width: f32, _: f32, line: f32| {
+            line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
+        };
+
+        let clock = Instant::now();
+        let (blocks, ranges) = preview::parse_markdown_ranged(content);
+        let parse = clock.elapsed();
+        let clock = Instant::now();
+        let intrinsic = measure_markdown_intrinsics(
+            &blocks,
+            MarkdownSourceBytes {
+                content,
+                ranges: &ranges,
+            },
+            pass,
+            cache,
+            &mut width_of,
+        );
+        let intrinsics = clock.elapsed();
+        let clock = Instant::now();
+        let source = MarkdownSourceBlock {
+            index: 0,
+            range: ranges[0].clone(),
+            text: preview_live::block_source(content, &ranges[0]).to_owned(),
+            lines: preview_edit::display_lines(preview_live::block_source(content, &ranges[0])),
+            font_size: 14.0,
+            line_height: 20.0,
+            advance: 8.0,
+        };
+        let layout = lay_markdown_out(
+            &blocks,
+            &intrinsic,
+            Some(&source),
+            1000.0,
+            metrics,
+            art,
+            &mut shaper,
+        );
+        let laid = clock.elapsed();
+        assert_eq!(layout.len(), blocks.len());
+        (blocks.len(), parse, intrinsics, laid)
+    }
+
+    /// **A page written in Chinese costs what a page written in English costs**
+    /// (user report, 2026-09-10: opening `README.zh-CN.md` froze the window).
+    ///
+    /// The report's own hypothesis was that the parse or the provenance mapping
+    /// walks a document by *byte* where it means *character*, or searches from
+    /// the start of a block for every piece — either of which is quadratic, and
+    /// Chinese triples the byte count of the same page. This is the measurement
+    /// that would say so: the same harness the English budget above uses, over
+    /// 64 KiB of this repository's Chinese front page and 64 KiB of a page
+    /// written in both scripts, against the same one-frame budget.
+    ///
+    /// **Mixed text is here beside pure Chinese because it is not the same
+    /// document** to this parser. A run of ideographs never reaches the flanking
+    /// rule, the link scanner or the code-span scanner at all; `**中文**english`
+    /// and `` `代码`中文 `` put a marker hard against a three-byte character on
+    /// both sides, which is where a walk that steps by bytes and a walk that
+    /// steps by characters first disagree. See
+    /// [`preview::MIXED_SCRIPT_PAGE`].
+    ///
+    /// **What it said** (2026-09-10, the machine the report came from, beside
+    /// the English line above on the same run): 64 KiB of Chinese / 37 897
+    /// characters / 293 blocks — parse 0.99 ms, intrinsics 4 µs, layout 0.12 ms,
+    /// **total 1.12 ms**; 64 KiB of both scripts / 42 382 characters / 561
+    /// blocks — parse 1.27 ms, intrinsics 12 µs, layout 0.12 ms, **total 1.41
+    /// ms**; against English's 64 KiB / 200 blocks at **1.48 ms**. So a page of
+    /// Chinese costs *less* than the same weight of English and not more — the
+    /// parser walks bytes and Chinese spends three of them on a character, so
+    /// the same 64 KiB is fewer words, fewer spans and fewer delimiter runs. The
+    /// report's hypothesis is disproved by this line, and the line is here so
+    /// that it stays disproved.
+    ///
+    /// The budget is one frame, on the English test's own terms and for its
+    /// reason: what it catches is a change of *shape* — a walk that became
+    /// quadratic on multi-byte text — and not a percentage on whatever machine
+    /// happens to run it. The numbers are printed as well as asserted, because a
+    /// ratio against the English line above is the reading that matters and a
+    /// number nobody can read is not a measurement.
+    ///
+    /// MUTATION: give [`preview::TextOrigin`]'s `run_at` a scan from the start of
+    /// the file rather than of its own runs, or count a paragraph's characters to
+    /// find a byte, and this goes red while the English one stays green.
+    #[test]
+    fn a_page_written_in_chinese_rebuilds_inside_the_frame_budget() {
+        for (name, one) in [
+            ("Chinese", preview::CHINESE_PAGE),
+            ("Chinese and English", preview::MIXED_SCRIPT_PAGE),
+        ] {
+            let mut document = String::new();
+            while document.len() < 64 * 1024 {
+                document.push_str(one);
+                document.push_str("\n\n");
+            }
+            let mut cache = MarkdownIntrinsicCache::default();
+            rebuild_cost(&document, &mut cache);
+            let mut typed = document.clone();
+            let at = typed.len() / 2;
+            let at = typed[..at].rfind('\n').map_or(0, |line| line + 1);
+            typed.insert(at, 'x');
+            let (blocks, parse, intrinsics, laid) = rebuild_cost(&typed, &mut cache);
+            let total = parse + intrinsics + laid;
+            println!(
+                "{name}: {} bytes, {} characters, {blocks} blocks — parse {:?}, \
+                 intrinsics {:?}, layout {:?}, total {:?}",
+                typed.len(),
+                typed.chars().count(),
+                parse,
+                intrinsics,
+                laid,
+                total,
+            );
+            assert!(
+                total < std::time::Duration::from_millis(16),
+                "{name}: a keystroke in a 64 KiB document has to fit in a frame \
+                 whatever script it is written in, and this one took {total:?} \
+                 (parse {parse:?}, intrinsics {intrinsics:?}, layout {laid:?})",
+            );
         }
     }
 
@@ -147771,33 +147917,60 @@ mod live_markdown_edit_tests {
         );
     }
 
-    /// **Leaving is `Esc` and nothing else** (T5 ③).
+    /// **Leaving is one door and three gestures reach it** (T5 ③ as the owner
+    /// reversed it, 2026-09-10).
     ///
-    /// The block renders again only for the gesture that means "I have finished
-    /// with this". Losing the keyboard deliberately does not (§7.1.3q: a page
-    /// that re-flowed itself every time a hand left it would move while nobody
-    /// was looking at it), which is why `md_caret` is cleared in the `Release`
-    /// arm and in the door that hands a pane a different file, and nowhere else.
+    /// `Esc`, a press on the page's empty ground, and this surface losing the
+    /// keyboard to a press somewhere else: all three put the source block back
+    /// into prose, and all three keep the caret. The earlier ruling had only the
+    /// first — a page that re-flowed itself every time a hand left it would move
+    /// while nobody was looking at it — and it left a reader who had clicked
+    /// away looking at one paragraph still wearing its markup.
     ///
-    /// MUTATION: clear it beside `preview_edit_focus = None` in the blur check
-    /// and clicking into the terminal beside the pane re-flows the document.
+    /// **Counted rather than described**, for the entrance's own reason: one
+    /// door means `md_caret = false` is written in
+    /// [`Runtime::leave_preview_page`] and in the door that hands a pane a
+    /// different file, and nowhere else. A fourth spelling of it is a ruling and
+    /// not an edit.
+    ///
+    /// MUTATION ①: drop the `leave_preview_page` call from the blur check and
+    /// clicking into the terminal beside the pane leaves the block as source.
+    /// MUTATION ②: key the empty-ground arm on `placing` instead of `caret_at`
+    /// and a press on a link renders the page it is standing in.
     #[test]
-    fn leaving_is_escape_and_the_pane_changing_file() {
+    fn leaving_is_one_door_that_escape_the_ground_and_a_blur_all_reach() {
+        for (door, what) in [
+            ("    fn preview_key(", "`Esc`"),
+            (
+                "    fn press_preview_text(",
+                "a press on the page's empty ground",
+            ),
+            (
+                "    fn chrome_mouse_input(",
+                "losing the keyboard to a press elsewhere",
+            ),
+        ] {
+            assert!(
+                body(door).contains("leave_preview_page("),
+                "{what} no longer renders the page again",
+            );
+        }
         assert!(
-            body("    fn preview_key(").contains("md_caret = false"),
-            "`Esc` renders the block again",
+            body("    fn press_preview_text(").contains("live && caret_at.is_none()"),
+            "empty ground is a press that named no byte of the file — asked of \
+             `caret_at`, because a press on a link names one and is the link's",
         );
         assert!(
             body("    fn leave_preview_buffer_in(").contains("pane.md_caret = false"),
-            "and so does handing this surface a different file",
+            "and handing this surface a different file still leaves the page",
         );
         assert_eq!(
             window().matches("md_caret = false").count(),
             2,
-            "two, and the blur is not one of them",
+            "one door and the file swap, counted here on purpose",
         );
         assert!(
-            !body("    fn preview_key(").contains("pane.caret ="),
+            !body("    fn leave_preview_page(").contains("pane.caret ="),
             "and leaving keeps the caret: it is a byte offset, and the flip to \
              the source face finds it where this left it",
         );

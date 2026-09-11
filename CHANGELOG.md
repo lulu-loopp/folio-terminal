@@ -14,9 +14,12 @@ All notable changes to Folio are recorded here. The format follows
   back to its rendered form as soon as you leave it. The caret moves between
   blocks the way it moves between lines, so there is nothing to enter and
   nothing to leave — arrows, Home and End, Enter and Backspace all do what they
-  do anywhere else. Escape leaves the page, Ctrl+S saves, Ctrl+Z undoes. What
-  you select is what you copy, and copying out of a document you are editing
-  brings the marks with it, so what you paste back is what was there. A file
+  do anywhere else. Escape leaves the page, and so does clicking the empty
+  ground beside the text or clicking away from the pane altogether: the page
+  goes back to reading as a page, and the caret stays where you left it. Ctrl+S
+  saves, Ctrl+Z undoes. What you select is what you copy, and copying out of a
+  document you are editing brings the marks with it, so what you paste back is
+  what was there. A file
   that cannot be edited — one Folio could not fully read, one past the size
   limit, a table or a patch — still opens, reads and copies exactly as before,
   and the foot of the pane says why it is read-only.

@@ -7372,6 +7372,62 @@ pub fn scroll_dragged_to(bar: &ScrollBar, along: f32, grab: f32) -> f32 {
     (travelled * bar.overflow).clamp(0.0, bar.overflow)
 }
 
+/// **A page written in Chinese** — this repository's own front page, in the
+/// language a reader of it reads (2026-09-10).
+///
+/// Every markdown fixture this crate had was written in English, and English is
+/// the one shape a markdown parser is least likely to be wrong about: one byte
+/// per character, a space between every word, a break opportunity wherever the
+/// prose allows one. Chinese is three bytes a character and has no spaces at
+/// all, so a walk that counts bytes where it meant characters, or that looks for
+/// a word boundary to cut at, comes apart on it and on nothing else. It is held
+/// by the provenance round trip and by the frame budget, which are the two tests
+/// that ask a whole document a question rather than a phrase.
+#[cfg(test)]
+pub const CHINESE_PAGE: &str = include_str!("../../../README.zh-CN.md");
+
+/// **A page written in both**, which is the shape the product's own Chinese
+/// actually takes and is not covered by either language alone.
+///
+/// A Chinese sentence in this window carries English inside it — a product name,
+/// a path, a flag, a file name — so every boundary the parser can meet meets it
+/// here: a word of each beside the other with a space and without one, a marker
+/// pressed against an ideograph on both sides (`**中文**english`, `` `代码`中文 ``),
+/// emphasis whose delimiters are flanked by characters whose class the flanking
+/// rule has to read, both scripts in one list item and in one table cell, and a
+/// line long enough that it must fold somewhere no space stands.
+#[cfg(test)]
+pub const MIXED_SCRIPT_PAGE: &str = concat!(
+    "# Folio 终端 — a mixed page\n",
+    "\n",
+    "Folio 是一个 Windows 终端，支持 LaTeX 公式, and the sentence carries on in\n",
+    "English before it turns 回到中文 again, so that a fold can land between two\n",
+    "汉字 rather than at a space.\n",
+    "\n",
+    "**中文**english and english**中文**, `代码`中文 and 中文`code`, *斜体*汉字,\n",
+    "一个 `--flag` 夹在中间, and a bare path D:\\folio\\README.zh-CN.md 之后还有字。\n",
+    "\n",
+    "- 第一项 with an ASCII tail\n",
+    "- a list item that opens in English 然后转成中文并且一直写到这一行长得必须在汉字中间折行为止没有一个空格可以给折行用\n",
+    "- `代码`与中文相邻, and [一个链接](docs/shortcuts.md) 就在旁边\n",
+    "\n",
+    "| 列 one | 第二列 |\n",
+    "|:---|---:|\n",
+    "| 中文 cell | `code`中文 |\n",
+    "| ASCII | **汉字**与 ASCII 混排 |\n",
+    "\n",
+    "> 引用块里的中文 quoted beside English，over two lines\n",
+    "> 而第二行以中文开头。\n",
+    "\n",
+    "```powershell\n",
+    "Remove-Item -Recurse -Force \"$env:APPDATA\\Folio\"  # 删除设置\n",
+    "```\n",
+    "\n",
+    "行内公式 $E = mc^2$ 紧贴中文，before ![图注 alt](one.png) after 图后还有字。\n",
+    "\n",
+    "这一段完全没有空格也没有任何标记只是一长串汉字用来把折行逼到字与字之间而不是词与词之间因为中文本来就不用空格分词所以每一个字的后面都是一个可以折行的位置。\n",
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

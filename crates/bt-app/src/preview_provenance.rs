@@ -537,6 +537,19 @@ mod tests {
                 "this repository's front page",
                 include_str!("../../../README.md").to_owned(),
             ),
+            // **The two this set was missing** (2026-09-10). Every document
+            // above is written in English, which is the one script whose bytes
+            // and whose characters are the same count and whose words are spaced
+            // — so a map that had confused the two would have come back right
+            // from all of them. See [`crate::preview::CHINESE_PAGE`].
+            (
+                "this repository's front page in Chinese",
+                crate::preview::CHINESE_PAGE.to_owned(),
+            ),
+            (
+                "Chinese and English in one page",
+                crate::preview::MIXED_SCRIPT_PAGE.to_owned(),
+            ),
             (
                 "this file's own source",
                 include_str!("preview.rs").to_owned(),
