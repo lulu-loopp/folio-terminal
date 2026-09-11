@@ -6790,6 +6790,16 @@ Folio: the window thread held control for 660 ms on turn 323 — advance_web_pag
 
 **没修的。** 用户那一次的成因**没有查实**——它发生在 next22(`f70676d`)、发生在一台已经跑了一会儿的机器上、而且自愈了,而 §7.35 的教训逐字适用:**一个能自圆其说的成因不等于这一台机器上的成因**。本片交出的是那条能在**用户自己机器上**指名的仪表,和一份按可疑程度排过的名单(都在窗线程上,都同步):`sync_web_page` 每一个有页面在动的帧发出的 `SetBounds`/`SetIsVisible`/`SetRasterizationScale`;每一次指针移过页面的 `SendMouseInput`(而竖栏那一段现在已经不再发了——见上半篇);`WebHost::rehost` 一次拖拽里 9–16 个连续的同步调用;`Close()`;controller 的配置突发。下一次它再卡,`diagnostics.log` 里会有一行写着是哪一个。
 
+**下一次到了,那一行指的是入口。** 2026-09-10,用户打开 `README.zh-CN.md`,窗线程持有了 89 700 ms。日志里确实有那一行:`woken 85613 ms`。`woken` 挂在「醒来但没有进入任何带站牌的调用」上——而 `user_event` 恰好是**每一个**后台工作线程的答案着陆的入口,所有带站牌的调用的前厅。一件造来指名的仪表,最终指出的是前厅而不是房间。
+
+**修法:把前厅拆成房间。** `AppEvent::station()` 为每条臂分配站牌,`user_event` 用 `hang_watch::enter` / `at` 打开它——和 `sync_web_page`、`CoreWebView2Controller::Close` 已经在用的同一对动词。九个新站牌:`apply_preview_results`、`apply_math_results`、`apply_files_results`、`apply_git_results`、`raise_attention`、`adopt_background_picture`、`apply_file_index_results`、`refresh_chrome`(探针和设置面板的九条臂共用此站——它们最终都走到 `refresh_chrome`,且没有一条自身的耗时能被人感知)、`drive_web_page`。`woken` 留给那些本身不做事的臂——`about_to_wait` 一条语句之后替它们做完:`PtyOutput`、`GitChanged`、`PreviewFileChanged`、`FilesDirChanged`、`QuakeSummoned`、`LaunchAsked`。于是 `woken` 从「醒来但不知道在做什么」收窄为「一次无人认领的唤醒」——窄得多,也有用得多。`STATION_COUNT` 15 → 24;已有的红门「每一个站牌在账本里都有一格」是加宽这个数的强制条件。新加两道红门:一道断言花在后台答案上的持有打出 `apply_preview_results 1000 ms` 而不是 `woken`;另一道断言每条路的标签就是读者会拿去 grep 的函数名——一个叫 `preview` 的站牌把人引到模块面前,`apply_preview_results` 把人引到门口。
+
+**同一次修理的另一半。** `[profile.release]` 加上 `debug = "line-tables-only"`,因为 2026-09-10 那份报告里 `folio.exe+0x...` 的偏移量完全无法解析——release 默认 `debug = false`,每一帧落在最近的公开符号上,位移超过一兆字节。显而易见的假设——MSVC 把调试信息放在旁文件里,所以可执行文件不受影响——恰好是被测量否掉的那一条。两个构建逐字节比过:`folio.pdb` 9.94 MB → 139.09 MB(不进压缩包,只占 `target\` 的盘);`folio.exe` 74 924 544 B → 74 830 336 B——差 94 208 字节,而且是**变小**了,两个映像的差别远超链接器每次都盖的那个 PDB 签名,是发射行表改变了 fat LTO 的结果。一份把「免费」抄过去的发布,就是在发一个没人称过重的映像。
+
+**89 700 ms 的成因没有查实。** 交出的是那件下一次能指名的仪表。
+
+**按用户的形状复现过,没有复现出来。** 2026-09-11,release 构建、窗口 1920×1200 物理(scale 2,与用户 `BT_DPI` 行里的 `swapchain_size` 一致)、文件栏开在 `D:\Developer\BetterTerminal` 上、旁边一个终端窗格、在文件栏里点开 `README.zh-CN.md`。结果:`document bytes=16980 blocks=73 source=none parse_us=274 intrinsic_us=39847 layout_us=6711 total_us=46833`——**46.8 ms**,那一转根本没有进慢占用的名单(整个运行只有开机那一转 `turn 1 — woken 865 ms, publish_frame_inner 295 ms, flush_wheel 146 ms` 越过 500ms)。`intrinsic` 那 39.8 ms 是 syntect 语法表第一次加载,英文 README 一样付。上一片已经量过 parse 在中文上是线性的(64 KiB 中文 1.12 ms,对英文 1.48 ms),排版与整形也都是线性的;现在整条开文件的路在真机、真几何、真构建下也只有 46.8 ms。89 700 ms 还是没有解释,而下一次它再来,那一行会写着是哪条 lane。
+
 ### 7.50 一扇窗过不了两块屏之间那条缝:系统建议的矩形就是这扇窗要站的矩形(跨 DPI 节;next22 用户实机「拖过去 DPI 一直来回跳、窗过不去」,已落地;`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/main.rs`)
 
 **现象与铁证。** 4K@200% 与一块竖过来的 2.8K@150% 并排,把窗从一块拖到另一块——窗**过不去**,DPI 在 1.5 与 2 之间连续来回十余次。`%APPDATA%\Folio\diagnostics.log`(next22,`f70676d`)第 682–724 行原文,节选四个来回:

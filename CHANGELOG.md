@@ -83,6 +83,15 @@ All notable changes to Folio are recorded here. The format follows
   Turning a Markdown file to its source, or clicking into the text of a file
   that has a caret, now reads the rest of it, once, and the file becomes
   editable — up to 8 MB, past which it stays read-only and says so.
+- **When the window stops answering, Folio's own log now names what it was
+  doing.** The line it writes afterwards used to say only that the window had
+  been woken, which was true of every pause it ever recorded and told nobody
+  anything: a file arriving, a folder being listed, a formula being drawn and a
+  repository being read all looked the same from outside. Each of those now has
+  its own name in that line, so a pause you report carries the answer with it.
+  The report Folio writes beside it, in `hang-reports`, can also be read back to
+  the exact function that was running: the build that ships now carries the
+  table that makes that possible, which it did not before.
 
 - **The preview's `Open` menu opens when the pointer rests on it, as the other
   menus do.** Resting on the `Open` control at the right of a preview's
