@@ -261,7 +261,20 @@ use serde::{Deserialize, Serialize};
 ///
 /// One bump for two keys, on v27's own argument: they arrive together as one ruling, and one of
 /// them exists only because the other does.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 32;
+///
+/// **v33 carries `launch_opens`** (user ruling, 2026-09-11, `docs/DESIGN.md` §7.59): what a second
+/// start of Folio opens when one is already running — see [`LaunchOpensV1`].
+///
+/// **It lands the v13-v16 way and not the v28 way, and that is the whole of the step.** The value
+/// written into every document this rung walks is [`LaunchOpensV1::NewWindow`], which is the
+/// shipped default and **not** the behaviour those documents were written under: every build
+/// between 0.2.4 and this one opened a tab, unconditionally, with no row to say otherwise. Carrying
+/// that forward would look like the kind thing to do and would be the v28 mistake in reverse — it
+/// would preserve a behaviour **nobody chose**, on a question nobody was ever asked, and it would
+/// leave the one group who did have an opinion (there were none; there was no row) indistinguishable
+/// from everybody else. The ruling is that the tab was the wrong default, so the migration writes
+/// the right one and the reader who wants the old behaviour has a row that says so in its own words.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 33;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -1135,6 +1148,17 @@ pub struct SettingsV1 {
     /// nobody who never saw the card ever recorded an intent.
     #[serde(default)]
     pub powershell_install_pending: bool,
+    /// **What a second start of Folio opens when one is already running** (v33,
+    /// `docs/DESIGN.md` §7.59) — see [`LaunchOpensV1`].
+    ///
+    /// `#[serde(default)]` because [`LaunchOpensV1::NewWindow`] is both the shipped answer and the
+    /// honest reading of a missing key: a file written before this key existed was written by a
+    /// build whose second launch opened a tab, and the migration is what carries that fact — see
+    /// [`SETTINGS_SCHEMA_VERSION`]'s v33 note. A hand-written file that omits the key is a file
+    /// whose owner has said nothing, and what this product does when nobody has said anything is
+    /// what every other Windows terminal does.
+    #[serde(default)]
+    pub launch_opens: LaunchOpensV1,
 }
 
 /// How much of a summoned terminal a new run puts back — `docs/DESIGN.md` §7.54e.
@@ -1367,8 +1391,33 @@ impl Default for SettingsV1 {
             first_run_card: FirstRunCardV1::NotShown,
             // Nobody has recorded an intent about a file nobody has named.
             powershell_install_pending: false,
+            // Starting a program again opens that program — see `LaunchOpensV1`.
+            launch_opens: LaunchOpensV1::NewWindow,
         }
     }
+}
+
+/// **What a second start of Folio opens** — `docs/DESIGN.md` §7.59.
+///
+/// Two answers, and the default is the first because it is the one a person arrives holding.
+/// Windows Terminal's `windowingBehavior` ships `useNew` and offers `useExisting`; VS Code is the
+/// other model, and a reader who wanted that model would have to be able to say so. So this row is
+/// Windows Terminal's question in Folio's words, with Windows Terminal's default.
+///
+/// **Neither value governs how many processes there are.** A Folio is one process holding one data
+/// directory whatever this says; what the two answers choose between is a window of that process
+/// and a tab in one of its windows.
+///
+/// **Neither value is asked about a launch that means "a shell in this folder"** — Explorer's
+/// entry and `folio-here.cmd` — which always opens a tab. That is not an exception to this row; it
+/// is the difference between asking for Folio and asking for a terminal standing somewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum LaunchOpensV1 {
+    /// A window of its own, in the running process.
+    #[default]
+    NewWindow,
+    /// A tab in the window the reader was last in.
+    TabInLastWindow,
 }
 
 /// How a background picture meets a window that is not its shape —

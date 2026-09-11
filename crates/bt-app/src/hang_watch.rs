@@ -163,7 +163,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1398,6 +1398,57 @@ pub fn start(reports: PathBuf) {
     }
 }
 
+/// **Whether the watchdog currently believes the window thread has stopped.**
+///
+/// Written by the watchdog thread and read by anybody, which is the point: it is the one fact in
+/// this module that another thread needs and cannot work out for itself. The launch endpoint reads
+/// it before it tells a second `folio.exe` that its request has been taken — see
+/// [`window_thread_can_serve`].
+static WINDOW_THREAD_HUNG: AtomicBool = AtomicBool::new(false);
+
+/// **Whether the window thread can be expected to come round and do something** (review C-2,
+/// 2026-09-11).
+///
+/// Asked from **another thread**, which is why it is here rather than derived at the call site:
+/// the two facts it rests on are the ones this module already stamps, and a second opinion about
+/// liveness kept somewhere else would be a second answer to drift.
+///
+/// `allowance` is how long the asker is prepared to wait. Passing it in rather than fixing a number
+/// is what keeps this honest: the launch endpoint's caller waits two seconds and then opens its own
+/// window, so "can it come round" means "within two seconds" **for that caller** and would mean
+/// something else for another.
+#[must_use]
+pub fn window_thread_can_serve(allowance: Duration) -> bool {
+    let heart = heartbeat();
+    !WINDOW_THREAD_HUNG.load(Ordering::Relaxed)
+        && can_come_round(
+            heart.now_ms(),
+            heart.sample(),
+            u64::try_from(allowance.as_millis()).unwrap_or(u64::MAX),
+        )
+}
+
+/// The arithmetic half of [`window_thread_can_serve`], held where it can be put a table.
+///
+/// The three parks, and each answers a different question:
+///
+/// * **Indefinite** — nothing is owed and nothing is late. This is an idle window, and a nudge
+///   wakes it; there is no length of silence here that says otherwise, which is [`Park`]'s own
+///   founding note. What catches a thread that wedged *out of* an indefinite park is the flag the
+///   watchdog sets, not this.
+/// * **Running** — the loop holds control and owes itself a turn, so silence past the allowance is
+///   a loop that will not come round inside it.
+/// * **Until** — the platform owes a wake at a deadline, so the clock runs from the deadline and
+///   not from the last turn. A thread that is asleep until tomorrow is not late today.
+#[must_use]
+pub fn can_come_round(now_ms: u64, pulse: Pulse, allowance_ms: u64) -> bool {
+    match pulse.park {
+        Park::Indefinite => true,
+        Park::Running => now_ms.saturating_sub(pulse.at_ms) < allowance_ms,
+        Park::Until(deadline) => now_ms.saturating_sub(deadline) < allowance_ms,
+    }
+}
+
 /// The watchdog thread's whole life.
 fn watch_forever(reports: PathBuf, ui_thread_id: u32) {
     let mut watch = HangWatch::new(HANG_THRESHOLD, STARTUP_THRESHOLD);
@@ -1428,7 +1479,16 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32) {
             // `Excused` says nothing out loud on purpose: a window that is being
             // dragged answers this every two seconds, and a diagnostic that
             // narrated it would be a log full of a program working.
-            Verdict::Quiet | Verdict::Excused { .. } | Verdict::StillHung { .. } => {}
+            // **The flag other threads read, kept in step with the verdict and nowhere else**
+            // (review C-2). `Quiet` and `Excused` are the arithmetic finding nothing wrong, which
+            // is the only thing that clears it besides a healing; `StillHung` is the stall going
+            // on, so it stays.
+            Verdict::Quiet | Verdict::Excused { .. } => {
+                WINDOW_THREAD_HUNG.store(false, Ordering::Relaxed);
+            }
+            Verdict::StillHung { .. } => {
+                WINDOW_THREAD_HUNG.store(true, Ordering::Relaxed);
+            }
             Verdict::Hung {
                 silent_ms,
                 threshold_ms,
@@ -1437,6 +1497,7 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32) {
                 station,
                 turn,
             } => {
+                WINDOW_THREAD_HUNG.store(true, Ordering::Relaxed);
                 open_report = write_report(
                     &reports,
                     ui_thread_id,
@@ -1452,6 +1513,7 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32) {
                 );
             }
             Verdict::Healed { hung_ms, station } => {
+                WINDOW_THREAD_HUNG.store(false, Ordering::Relaxed);
                 if let Some(path) = open_report.take() {
                     append_healed(&path, hung_ms, station);
                 }
@@ -1612,7 +1674,7 @@ mod tests {
 
     use super::{
         Answer, HangWatch, Heartbeat, Park, Pulse, ReportFacts, STATION_COUNT, SlowHold, Station,
-        Verdict, prune_reports, render_healed, render_report, report_filename,
+        Verdict, can_come_round, prune_reports, render_healed, render_report, report_filename,
         slow_hold_threshold_ms, utc_timestamp,
     };
 
@@ -1636,6 +1698,45 @@ mod tests {
             station: Station::Parked,
             park: Park::Indefinite,
         }
+    }
+
+    /// **RED (review C-2, 2026-09-11) — whether the loop can be expected to come round inside
+    /// somebody else's allowance, asked from another thread.**
+    ///
+    /// The launch endpoint's question, and the reason it is asked at all: before this, the listener
+    /// thread told a second `folio.exe` its request had been taken on nothing but the grammar of
+    /// the line — so a Folio whose window thread had stopped answered `yes` in microseconds and the
+    /// person who started Folio again got exit code 0 and no window.
+    ///
+    /// MUTATIONS: answer `false` for an indefinite park and every idle Folio starts refusing
+    /// launches, which is the fault this whole enum exists to prevent ([`Park::Indefinite`]);
+    /// measure a deadlined park from its last turn instead of from its deadline, and a window
+    /// asleep until tomorrow is called dead today.
+    #[test]
+    fn a_loop_that_cannot_come_round_inside_the_allowance_says_so() {
+        const ALLOWANCE: u64 = 2_000;
+        assert!(
+            can_come_round(9_000_000, idle(1, 1), ALLOWANCE),
+            "an idle window is owed nothing and is woken by the nudge, however long it has been \
+             quiet"
+        );
+        assert!(can_come_round(
+            2_500,
+            pulse(1_000, 1, Station::Drain),
+            ALLOWANCE
+        ));
+        assert!(
+            !can_come_round(3_100, pulse(1_000, 1, Station::Drain), ALLOWANCE),
+            "a loop holding control and silent past the allowance will not come round inside it"
+        );
+        assert!(
+            can_come_round(60_000, parked_until(1_000, 1, 59_000), ALLOWANCE),
+            "a wake is owed a second from now, which is inside the allowance"
+        );
+        assert!(
+            !can_come_round(60_000, parked_until(1_000, 1, 50_000), ALLOWANCE),
+            "the platform owed a wake ten seconds ago and it has not arrived"
+        );
     }
 
     /// A thread parked until `deadline`, on the heartbeat's own clock.

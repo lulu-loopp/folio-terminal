@@ -35334,6 +35334,8 @@ impl Runtime<'_> {
                 path: None,
                 embedding: false,
                 new_window: request.new_window,
+                tab: request.tab,
+                origin: request.origin,
             },
             self.default_profile(),
             cli::machine_path_kind,
@@ -41180,6 +41182,7 @@ impl Runtime<'_> {
             copilot_readiness: self.app.copilot_readiness,
             split_direction: self.app.settings_store.loaded().split_direction,
             search_engine: self.app.settings_store.loaded().search_engine,
+            launch_opens: self.app.settings_store.loaded().launch_opens,
             minimum_contrast: self.app.settings_store.loaded().minimum_contrast,
             language: self.app.settings_store.loaded().language,
             default_profile: self.default_profile(),
@@ -43592,6 +43595,9 @@ impl Runtime<'_> {
         if let Some(engine) = settings::search_engine_requested(target) {
             self.apply_search_engine(engine)?;
         }
+        if let Some(opens) = settings::launch_opens_requested(target) {
+            self.apply_launch_opens(opens)?;
+        }
         if let Some(direction) = settings::split_direction_requested(target) {
             self.apply_split_direction(direction)?;
         }
@@ -43861,7 +43867,8 @@ impl Runtime<'_> {
             }
             // Not in any group, and therefore never handed here — see
             // `SettingsContent::advanced_rows`, which is what this loop walks.
-            Row::Theme
+            Row::LaunchOpens
+            | Row::Theme
             | Row::LightScheme
             | Row::DarkScheme
             | Row::TerminalFont
@@ -45825,6 +45832,18 @@ impl Runtime<'_> {
     fn apply_search_engine(&mut self, engine: bt_persist::SearchEngineV1) -> Result<bool> {
         let mut settings = self.app.settings_store.loaded().clone();
         settings.search_engine = engine;
+        Ok(self.app.settings_store.store(settings))
+    }
+
+    /// **What a second start of Folio opens** (§7.59, user ruling 2026-09-11).
+    ///
+    /// One write and nothing else, which is [`Self::apply_search_engine`]'s shape and for its
+    /// reason: the row is read at the moment a launch lands (`launch_wire::landing`), so there is
+    /// no cached copy to push it into and nothing on the glass changes until somebody starts Folio
+    /// again.
+    fn apply_launch_opens(&mut self, opens: bt_persist::LaunchOpensV1) -> Result<bool> {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.launch_opens = opens;
         Ok(self.app.settings_store.store(settings))
     }
 
@@ -94388,9 +94407,20 @@ mod launch_landing_tests {
     #[test]
     fn a_window_asked_for_by_a_second_start_is_opened_by_this_process() {
         let settle = body(concat!("    fn ", "settle_launch_requests("));
+        // **Since 2026-09-11 the flag is read through the table and not here**
+        // (§7.59): `--new-window` is one row of `launch_wire::landing`, whose
+        // other rows are `--tab`, the two launcher origins and the reader's own
+        // setting — and the whole point of that function is that this door asks
+        // one question instead of growing a condition per row.
         assert!(
-            settle.contains("request.new_window"),
-            "the opt-out is never read:\n{settle}"
+            settle.contains("launch_wire::landing(&request, opens)"),
+            "the landing is decided somewhere other than the table that holds \
+             the rule:\n{settle}"
+        );
+        assert!(
+            settle.contains("settings_store.loaded().launch_opens"),
+            "the reader's own row is never read, so the table is asked with a \
+             setting nobody chose:\n{settle}"
         );
         assert!(
             settle.contains("self.open_a_window_for_a_launch(event_loop, target, &request)"),
@@ -99488,8 +99518,16 @@ impl FolioApp {
     ///   `New terminal in folder…` already goes through, so a folder the chosen
     ///   profile cannot name is inherited-from rather than opened at — one rule,
     ///   stated once, and this door does not get a second.
-    /// * **A window**, when the request asked for one, or when this run has no
-    ///   window that is not the summoned terminal.
+    /// * **A window**, when [`launch_wire::landing`] says so, or when this run
+    ///   has no window that is not the summoned terminal.
+    ///
+    /// **Which of the two is [`launch_wire::landing`]'s to say and not this
+    /// function's** (user ruling 2026-09-11): the rule is a table over who
+    /// asked, what flag they passed and what `Settings ▸ General ▸ Opening
+    /// Folio again` holds, and it is held where it can be read as a table. What
+    /// is left here is the half that needs a window: the row is read off the
+    /// store this process owns, which is why the deciding happens on this side
+    /// of the pipe at all.
     ///
     /// **And then the window comes to the front**, which is the half a person
     /// actually sees. It can only work because the process that made the request
@@ -99509,8 +99547,15 @@ impl FolioApp {
                     app.quake.window(),
                 )
             });
+            // **The row is read here, once per request, off the store this
+            // process owns.** The second `folio.exe` never opened it: it holds
+            // no claim on the data directory, and a build that let it read one
+            // anyway would be reading a document somebody else is writing.
+            let opens = self.app.as_ref().map_or_else(Default::default, |app| {
+                app.settings_store.loaded().launch_opens
+            });
             let landed = match target {
-                Some(id) if !request.new_window => {
+                Some(id) if launch_wire::landing(&request, opens) == launch_wire::Landing::Tab => {
                     self.open_a_tab_for_a_launch(id, &request)?;
                     Some(id)
                 }
@@ -100550,6 +100595,15 @@ impl FolioApp {
         if self.app.is_none() {
             return;
         }
+        // **Whether a second launch may still be promised anything** (§7.59, review C-2
+        // 2026-09-11), mirrored into the listener thread's own flag once a turn and **above the
+        // retirement arm's early return**, which is the whole reason it is here: that arm is the
+        // one that stops draining the inbox, so a launch admitted after it has begun is a launch
+        // nothing will ever open. A quit that is still only *asking* is one the reader can cancel,
+        // so it goes on admitting; a quit that has been answered is not, and neither is one that
+        // has already hidden the windows.
+        let quit = self.app.as_ref().and_then(|app| app.quit.as_ref());
+        launch_wire::set_admitting(quit.is_none_or(quit::Quit::is_asking));
         // **The retirement's own turn, and nothing else's** (multiwindow slice
         // E2 phase ④). Past this point every window is hidden, its shells are
         // shut and its picture is on the disk; the only thing the loop is still

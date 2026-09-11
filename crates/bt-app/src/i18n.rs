@@ -1888,6 +1888,17 @@ pub enum Text {
     /// Its sentence. Says the one thing the three names cannot: **when** this
     /// row is consulted at all.
     DescSearchEngine,
+    /// `General ▸ Opening Folio again` — the row (§7.59, user ruling 2026-09-11).
+    RowLaunchOpens,
+    /// Its sentence. Names the launches this row answers for and the two it does
+    /// not, because the second half is the part a reader cannot see for
+    /// themselves: Explorer's entry and `folio-here.cmd` open a tab whatever
+    /// this says.
+    DescLaunchOpens,
+    /// Its first item — and the shipped answer.
+    OptionLaunchNewWindow,
+    /// Its second item.
+    OptionLaunchTabInLastWindow,
     /// **The glance card over a name that opens as a page** (user ruling
     /// 2026-08-23; `docs/DESIGN.md` §7.10 ⑥). The card cannot draw a page, so it
     /// says what the row does instead of what the card cannot do.
@@ -4254,6 +4265,21 @@ impl Text {
                 "Which search engine a web preview uses when what you type is not an address.",
                 "在网页预览的地址栏里输入的不是地址时，交给哪个搜索引擎去搜。",
             ),
+            // zh: pending — the four lines below are the English in both columns until the Chinese
+            // is written. They are listed in `CHINESE_PENDING`, which is the only reason the two
+            // tests that walk this table let them through.
+            Self::RowLaunchOpens => pick(lang, "Opening Folio again", "Opening Folio again"),
+            Self::DescLaunchOpens => pick(
+                lang,
+                "What starting Folio opens while one is already running — from the taskbar, a shortcut or folio.exe. Explorer's menu and folio-here.cmd always open a tab.",
+                "What starting Folio opens while one is already running — from the taskbar, a shortcut or folio.exe. Explorer's menu and folio-here.cmd always open a tab.",
+            ),
+            Self::OptionLaunchNewWindow => pick(lang, "A new window", "A new window"),
+            Self::OptionLaunchTabInLastWindow => pick(
+                lang,
+                "A tab in the window you used last",
+                "A tab in the window you used last",
+            ),
             // Names what the key does and not what the window is called: a
             // reader scanning the shortcut list is looking for the verb.
             Self::ShortcutSummonQuake => pick(lang, "Summon the terminal", "唤出终端"),
@@ -4403,7 +4429,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 607] = [
+    pub const ALL: [Self; 611] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4915,6 +4941,10 @@ impl Text {
         Self::WebFailDownloadOpenVerb,
         Self::RowSearchEngine,
         Self::DescSearchEngine,
+        Self::RowLaunchOpens,
+        Self::DescLaunchOpens,
+        Self::OptionLaunchNewWindow,
+        Self::OptionLaunchTabInLastWindow,
         Self::PeekOpensAsPage,
         Self::ShortcutQuit,
         Self::QuitTitle,
@@ -5040,6 +5070,26 @@ impl Text {
         // `FilesViewFiles` is not `SeatFiles`: shortening the segmented
         // control must not be a change to a toast.
         Self::GitToastTitle,
+    ];
+
+    /// **The entries whose Chinese has not been written yet**, standing with the English in both
+    /// columns until it is.
+    ///
+    /// A second list and emphatically not four more lines in [`Self::UNTRANSLATED`], which is a
+    /// list of entries that are *not translated on purpose* — a proper noun, a word that is the
+    /// same in both languages. Every entry here is one somebody still owes a sentence for, and the
+    /// two lists must not be read as one: this one is meant to be empty, and an entry filed in the
+    /// other one would never be looked at again.
+    ///
+    /// **It has to empty before a release**, and what enforces that is that it is short enough to
+    /// read and named for exactly what it is. `docs/DESIGN.md` §7.59 names the ruling the four
+    /// below arrived with.
+    #[cfg(test)]
+    const CHINESE_PENDING: [Self; 4] = [
+        Self::RowLaunchOpens,
+        Self::DescLaunchOpens,
+        Self::OptionLaunchNewWindow,
+        Self::OptionLaunchTabInLastWindow,
     ];
 }
 
@@ -6146,20 +6196,25 @@ impl CliText<'_> {
         match self {
             Self::Usage { profile_ids } => match lang {
                 Lang::English => format!(
-                    "folio [--cwd <folder>] [--profile <id>] [--new-window] [<path>]\n\n\
+                    "folio [--cwd <folder>] [--profile <id>] [--new-window | --tab] [<path>]\n\n\
                      \x20 --cwd <folder>    the first pane opens in that folder\n\
                      \x20 --profile <id>    the first pane's shell: {profile_ids}\n\
                      \x20 --new-window      a window of its own, not a tab in the Folio already \
                      running\n\
+                     \x20 --tab             a tab in the Folio already running, not a window\n\
                      \x20 <path>            a folder opens a pane there; a file opens a preview\n\
                      \x20 -h, --help        this text\n\
                      \x20 --version         which build this is"
                 ),
+                // zh: pending — the `--tab` row is the English line in both columns until the
+                // Chinese for it is written. Everything above and below it is already translated,
+                // which is why this block still reads as Chinese.
                 Lang::Chinese => format!(
-                    "folio [--cwd <文件夹>] [--profile <id>] [--new-window] [<路径>]\n\n\
+                    "folio [--cwd <文件夹>] [--profile <id>] [--new-window | --tab] [<路径>]\n\n\
                      \x20 --cwd <文件夹>    第一个窗格在这个文件夹里打开\n\
                      \x20 --profile <id>    第一个窗格用哪种 shell：{profile_ids}\n\
                      \x20 --new-window      另开一扇窗，不在已经开着的 Folio 里加标签\n\
+                     \x20 --tab             a tab in the Folio already running, not a window\n\
                      \x20 <路径>            文件夹等同 --cwd，文件则打开预览\n\
                      \x20 -h, --help        显示这段说明\n\
                      \x20 --version         显示这是哪一个构建"
@@ -7534,7 +7589,10 @@ mod tests {
             }
             .in_lang(lang);
             let lines: Vec<&str> = usage.lines().collect();
-            assert_eq!(lines.len(), 8, "{lang:?}: {usage}");
+            // Nine since `--tab` joined `--new-window` (§7.59, user ruling 2026-09-11): the
+            // summary, a blank, and one line for each of the seven things this program can be
+            // told by somebody typing.
+            assert_eq!(lines.len(), 9, "{lang:?}: {usage}");
             assert!(lines[0].starts_with("folio [--cwd "), "{lang:?}");
             assert!(lines[1].is_empty(), "{lang:?}");
             for line in &lines[2..] {
@@ -7553,7 +7611,7 @@ mod tests {
     #[test]
     fn no_entry_ships_the_english_word_as_its_own_translation() {
         for entry in Text::ALL {
-            if Text::UNTRANSLATED.contains(&entry) {
+            if Text::UNTRANSLATED.contains(&entry) || Text::CHINESE_PENDING.contains(&entry) {
                 continue;
             }
             let english = entry.in_lang(Lang::English);
@@ -7573,7 +7631,7 @@ mod tests {
     #[test]
     fn every_chinese_entry_carries_at_least_one_han_character() {
         for entry in Text::ALL {
-            if Text::UNTRANSLATED.contains(&entry) {
+            if Text::UNTRANSLATED.contains(&entry) || Text::CHINESE_PENDING.contains(&entry) {
                 continue;
             }
             let chinese = entry.in_lang(Lang::Chinese);

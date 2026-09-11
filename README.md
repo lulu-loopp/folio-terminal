@@ -314,7 +314,10 @@ One box answers five questions at once, and `Enter` goes straight there.
   entries when it starts, so if "Open in Folio" is not there yet, sign out and
   back in. `docs/PRIVACY.md` lists what is written. If Folio is already running,
   the entry opens the folder as a new tab in the window you used last and brings
-  that window forward; `folio.exe --new-window` opens a window instead.
+  that window forward — it asks for a terminal in a folder, not for another
+  Folio, so it does that whatever **Settings > General > Opening Folio again**
+  says. Starting Folio any other way opens a window, unless that row says
+  otherwise.
 - Windows PowerShell 5.1 ships PSReadLine 2.0.0, which misplaces the input line
   after the window is resized. Folio carries a patched 2.4.6 and installs it into
   your module path on request. On a machine whose execution policy is still the
@@ -326,7 +329,7 @@ One box answers five questions at once, and `Enter` goes straight there.
 `folio-here.cmd` ships in the archive, beside `folio.exe`, and is one line:
 
 ```bat
-@"%~dp0folio.exe" --cwd "%CD%"
+@"%~dp0folio.exe" --from-here --cwd "%CD%"
 ```
 
 Point VS Code's external terminal at it — Settings, or `settings.json`:
@@ -337,7 +340,10 @@ Point VS Code's external terminal at it — Settings, or `settings.json`:
 
 **Terminal > Open in External Terminal** (`Ctrl+Shift+C`) then opens Folio on the
 folder the editor is standing in. The `.cmd` exists because that setting runs a
-command with no arguments, and `--cwd` is how Folio is told where to start.
+command with no arguments, and `--cwd` is how Folio is told where to start;
+`--from-here` says that this is a terminal in a folder rather than another
+Folio, so it arrives as a tab in the window you used last whatever
+**Settings > General > Opening Folio again** says.
 
 ---
 

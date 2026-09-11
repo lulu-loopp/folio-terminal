@@ -433,11 +433,15 @@ mod windows_hotkey {
     /// user just started it, and it spends them here — on the Folio that is
     /// already running — before it exits.
     ///
-    /// **Not `ASFW_ANY`**, which is the same call with `-1` and grants the right
-    /// to whatever asks next. A launch knows exactly which process it is handing
-    /// its command line to, because that process wrote its own id into the reply
-    /// ([`crate::launch_pipe`]), so naming it is free and a wildcard would be
-    /// this program lifting the foreground lock for the machine.
+    /// **Not `ASFW_ANY`, and the refusal is in the code and not only in this
+    /// sentence** (review C-7, 2026-09-11). `ASFW_ANY` is the same call with
+    /// `(DWORD)-1` and grants the right to whatever asks next — this program
+    /// lifting the foreground lock for the whole machine. The paragraph above
+    /// used to be the only thing standing between that value and this call, and
+    /// the pid came off a wire, out of a field a peer filled in. It now comes
+    /// from the kernel ([`crate::launch_pipe::hand_over`]) **and** `u32::MAX` and
+    /// `0` are refused here, because a rule stated at one door is a rule until
+    /// somebody opens a second one.
     ///
     /// The answer is read back and handed to the caller for [`give_foreground_to`]'s
     /// reason: it fails by answering `false` rather than by raising, and a caller
@@ -446,6 +450,11 @@ mod windows_hotkey {
     /// foreground lock, and the worst it costs is a window that opens behind
     /// another one.
     pub fn allow_foreground_for(process: u32) -> bool {
+        // `u32::MAX` is `ASFW_ANY` and `0` is `ASFW_NONE` — the two values that
+        // are not a process, and the two this call must never be asked with.
+        if process == 0 || process == u32::MAX {
+            return false;
+        }
         // SAFETY: a call taking one integer; it names a process id and
         // dereferences nothing. A process id that has gone is a legal argument
         // and answers `false`.

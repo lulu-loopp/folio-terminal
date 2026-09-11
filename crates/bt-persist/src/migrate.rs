@@ -68,6 +68,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (29, migrate_settings_v29_to_v30),
     (30, migrate_settings_v30_to_v31),
     (31, migrate_settings_v31_to_v32),
+    (32, migrate_settings_v32_to_v33),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -751,6 +752,36 @@ fn migrate_settings_v31_to_v32(mut value: Value) -> Value {
                 .unwrap_or_else(|_| Value::from("Shown")),
         );
         object.insert("powershell_install_pending".to_owned(), Value::from(false));
+    }
+    value
+}
+
+/// v32 -> v33: `launch_opens`, the row that says what a second start of Folio opens (user ruling,
+/// 2026-09-11, `docs/DESIGN.md` §7.59).
+///
+/// **The v13-v16 shape: a default for a thing that did not exist.** The value written is
+/// [`crate::LaunchOpensV1::NewWindow`], which is the shipped default, and writing the shipped
+/// default into an old document is the whole of the step.
+///
+/// **It is deliberately not the behaviour these documents were written under.** Every build from
+/// 0.2.4 to this one opened a tab on a second launch, unconditionally; there was no key, so there
+/// was nothing anybody could have said about it. A step that carried the tab forward would be
+/// preserving a behaviour nobody chose — the v28 argument exactly, and it points the same way here:
+/// where the file records no opinion, what it should be given is the answer this build would give a
+/// new machine. The ruling is that the tab was the wrong default; a reader who wants it back has a
+/// row that says so in its own words.
+///
+/// The key could equally have been left absent, since `#[serde(default)]` reads absent as
+/// `NewWindow`. It is written because this ladder's steps are read as the road from an old document
+/// to this one, and a rung that walks past its own key says nothing about a version it is named for.
+fn migrate_settings_v32_to_v33(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(33));
+        object.insert(
+            "launch_opens".to_owned(),
+            serde_json::to_value(crate::LaunchOpensV1::NewWindow)
+                .unwrap_or_else(|_| Value::from("NewWindow")),
+        );
     }
     value
 }
@@ -2551,6 +2582,77 @@ mod tests {
             crate::FirstRunCardV1::NotShown,
             "the default has to be the one a migrated file cannot land on by accident"
         );
+    }
+
+    /// RED (§7.59, user ruling 2026-09-11) — **the step from 32 gives an existing reader the
+    /// shipped answer to a question they were never asked, and touches nothing else.**
+    ///
+    /// A document at v32 was written by a build whose second launch always opened a tab, and it
+    /// records no opinion about that because there was no key to record one in. So what this rung
+    /// writes is what this build would give a new machine, and the reader who wants the tab back
+    /// has a row.
+    ///
+    /// MUTATIONS:
+    /// ① write `TabInLastWindow` and every upgrading reader keeps a default the ruling retired,
+    ///    with a row that now disagrees with the shipped one;
+    /// ② forget the `schema_version` line and the ladder never leaves this rung, so the step runs
+    ///    again on every read;
+    /// ③ overwrite a neighbouring key and a preference somebody really did express is lost.
+    #[test]
+    fn real_settings_v32_to_v33_migration_gives_an_existing_reader_a_window() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 32,
+                "update_check": false,
+                "first_run_card": "Shown"
+            }),
+            32,
+            33,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(33));
+        assert_eq!(
+            migrated["launch_opens"],
+            json!("NewWindow"),
+            "a reader upgrading into this ruling keeps the behaviour the ruling retired"
+        );
+        assert_eq!(migrated["update_check"], json!(false));
+        assert_eq!(migrated["first_run_card"], json!("Shown"));
+    }
+
+    /// RED — **a file that has never been asked opens a window, and so does a file that has never
+    /// heard of the key.**
+    ///
+    /// The pair to the test above: that one is the road from an old document, this one is the
+    /// document a new machine writes and the hand-written one that omits the line. All three have
+    /// to land on the same answer, because a reader who has said nothing has said nothing however
+    /// their file came to be.
+    ///
+    /// MUTATION: make [`crate::LaunchOpensV1::TabInLastWindow`] the `#[default]` and a fresh
+    /// install ships the behaviour Windows Terminal's `useExisting` has to be asked for.
+    #[test]
+    fn a_settings_file_that_never_named_a_landing_opens_a_window() {
+        assert_eq!(
+            crate::SettingsV1::default().launch_opens,
+            crate::LaunchOpensV1::NewWindow
+        );
+        assert_eq!(
+            crate::LaunchOpensV1::default(),
+            crate::LaunchOpensV1::NewWindow
+        );
+        let mut written = serde_json::to_value(crate::SettingsV1 {
+            launch_opens: crate::LaunchOpensV1::TabInLastWindow,
+            ..crate::SettingsV1::default()
+        })
+        .expect("a settings document serialises");
+        written
+            .as_object_mut()
+            .expect("a settings document is an object")
+            .remove("launch_opens");
+        let absent: crate::SettingsV1 =
+            serde_json::from_value(written).expect("this key has a default");
+        assert_eq!(absent.launch_opens, crate::LaunchOpensV1::NewWindow);
     }
 
     #[test]

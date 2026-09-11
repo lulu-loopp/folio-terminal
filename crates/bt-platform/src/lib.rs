@@ -1562,7 +1562,7 @@ pub fn context_menu_shape(exe: &std::path::Path, label: &str) -> ContextMenuShap
         // Explorer already draws for `folio.exe` is by construction the right
         // one.
         icon: format!("{exe},0"),
-        command: format!("\"{exe}\" --cwd \"%V\""),
+        command: format!("\"{exe}\" --from-explorer --cwd \"%V\""),
     }
 }
 
@@ -2019,6 +2019,57 @@ pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Comm
         command.creation_flags(CREATE_NO_WINDOW);
     }
     command
+}
+
+/// **Which executable a process id is running**, or `None` when this process may not ask.
+///
+/// One question, asked with the smallest right there is: `PROCESS_QUERY_LIMITED_INFORMATION` is
+/// the access that exists precisely so that a program can ask *what is this* without being able to
+/// read, write or wait on the process — and it is granted across integrity levels where
+/// `PROCESS_QUERY_INFORMATION` is not.
+///
+/// **`None` is "this process cannot say", never "it is not that program".** A pid that has gone, a
+/// process this token may not open and a path that does not fit are all the same answer here, and
+/// the one caller — `launch_pipe::vetted_server` (review C-7) — reads it as a refusal rather than
+/// as a pass, which is the only safe direction for an identity check.
+///
+/// `QueryFullProcessImageNameW` and not `GetModuleFileNameEx`: it does not need the module list of
+/// the process it is asking about, so it works on a process that is still starting and on one of a
+/// different bitness.
+#[must_use]
+pub fn process_image_path(pid: u32) -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+    use windows::core::PWSTR;
+
+    // SAFETY: a call taking two flags and an integer; it dereferences nothing and answers an error
+    // for a process id that has gone or that this token may not open.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut buffer = [0u16; 32768];
+    let mut length = u32::try_from(buffer.len()).ok()?;
+    // SAFETY: `process` is a live handle owned by this call, and the buffer and the length both
+    // outlive it; the call writes at most `length` code units and stores the count back.
+    let asked = unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(buffer.as_mut_ptr()),
+            &raw mut length,
+        )
+    };
+    // SAFETY: the handle was opened by this call and is used nowhere else.
+    unsafe {
+        let _ = CloseHandle(process);
+    }
+    asked.ok()?;
+    let length = usize::try_from(length).ok()?;
+    Some(std::path::PathBuf::from(std::ffi::OsString::from_wide(
+        buffer.get(..length)?,
+    )))
 }
 
 /// **The same door, for a program named rather than located** (§7.40 ①, R1-17).
@@ -10472,14 +10523,21 @@ mod context_menu_tests {
     /// ② drop the quotes round `%V` and every folder with a space in its name
     ///    opens the wrong place, which is the failure that reports success;
     /// ③ write `%1` instead of `%V` and the folder tree still works while the
-    ///    background tree silently stops substituting anything at all.
+    ///    background tree silently stops substituting anything at all;
+    /// ④ drop `--from-explorer` and this entry becomes an ordinary launch, so a
+    ///    right-click opens a whole window instead of a tab in the folder the
+    ///    reader is looking at (`docs/DESIGN.md` §7.59, user ruling
+    ///    2026-09-11). The word says **who is asking** and never what to do
+    ///    about it: what a launch from here lands as is decided by the Folio
+    ///    that is already running, so a ruling that changes it does not have to
+    ///    reach into everybody's registry.
     #[test]
     fn the_verb_runs_the_exe_with_the_clicked_folder_quoted() {
         let shape = desired();
         assert_eq!(shape.label, "Open Folio here");
         assert_eq!(
             shape.command,
-            r#""C:\Program Files\Folio\folio.exe" --cwd "%V""#
+            r#""C:\Program Files\Folio\folio.exe" --from-explorer --cwd "%V""#
         );
         assert_eq!(shape.icon, r"C:\Program Files\Folio\folio.exe,0");
     }
