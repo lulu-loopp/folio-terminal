@@ -17206,9 +17206,17 @@ pub fn hit_files_tree(
 /// **A column on its Git page is not asked**, which is what `pages` is for: that
 /// column has no files tree on the glass, so its ground is not a folder's. The
 /// map is [`hit_git_panel`]'s own, so the two questions cannot come to disagree
-/// about which page a column is on. A column whose tree is a single sentence
-/// about itself answers nothing either — [`files_tree_geometry_of`] refuses it,
-/// and a sentence is not a folder's body.
+/// about which page a column is on.
+///
+/// **The body, not the row geometry** (adversarial review 2026-09-11, row D3).
+/// This used to go through [`files_tree_geometry_of`], which answers `None` for
+/// a column whose whole tree is one sentence about itself — so a column standing
+/// in an **empty** folder had no ground at all, and the one face that can make
+/// that folder's first entry was unreachable in the very case that wants it.
+/// The ground is the body rectangle the painter lays the rows into, asked
+/// whether or not there are rows to lay; which of those sentences still declines
+/// is [`tree_stands_on_a_read_folder`]'s answer, and the rest is the caller's
+/// existing `RowActivation::Nowhere` guard.
 #[must_use]
 pub fn files_ground_at(
     layout: &SeatLayout,
@@ -17224,15 +17232,58 @@ pub fn files_ground_at(
         if placement.kind != SeatKind::Files || pages.contains_key(&placement.id) {
             continue;
         }
-        let Some(geometry) = files_tree_geometry_of(layout, trees, scale, segmented, placement.id)
-        else {
+        // [`files_tree_geometry_of`]'s own first guard, which has to be kept
+        // when the rows are not what is being asked for: a column folded down to
+        // a strip is drawing no body for anything to be the ground of.
+        if !matches!(placement.presentation, Presentation::Full) {
+            continue;
+        }
+        let Some(tree) = trees.get(&placement.id) else {
             continue;
         };
-        if contains(geometry.viewport, x, y) && geometry.row_at(x, y).is_none() {
-            return Some(placement.id);
+        let Some(body) = files_body_rect(layout, placement.id, scale, segmented) else {
+            continue;
+        };
+        if !contains(body, x, y) {
+            continue;
         }
+        if !tree_stands_on_a_read_folder(&tree.rows) {
+            continue;
+        }
+        // A row is the smaller target and wins inside its own rectangle — the
+        // order this module's whole hit-test chain reads in. A column with no
+        // row geometry has no row to lose to.
+        if files_tree_geometry_of(layout, trees, scale, segmented, placement.id)
+            .is_some_and(|geometry| geometry.row_at(x, y).is_some())
+        {
+            continue;
+        }
+        return Some(placement.id);
     }
     None
+}
+
+/// Whether this column is showing **a folder it has actually read**, which is
+/// what makes the body under its rows that folder's own ground (review row D3).
+///
+/// A tree with rows in it has one by construction: the walk answered, and every
+/// row it produced hangs off a directory it listed. The four sentences a column
+/// says *about itself* ([`whole_tree_notice`]) divide on this line and not on
+/// how they look:
+///
+/// - `Empty` is a completed read of a real folder that had nothing in it. The
+///   body below that sentence is the folder, and it is the case the `New file…`
+///   verb exists for.
+/// - `Unrooted` is a column that was never pointed anywhere, `Loading` is a read
+///   that has not come back, and a `Fault` is one that came back refused. None
+///   of the three is standing on a folder this window has seen, so none of them
+///   has a ground to offer.
+fn tree_stands_on_a_read_folder(rows: &[crate::files::TreeRow]) -> bool {
+    use crate::files::{RowKind, RowNotice};
+    if whole_tree_notice(rows).is_none() {
+        return true;
+    }
+    matches!(rows, [only] if matches!(only.kind, RowKind::Notice(RowNotice::Empty)))
 }
 
 /// Where one docked column's rows are, or nothing when that column has none to
@@ -27309,6 +27360,143 @@ mod tests {",
             None,
             "the ground of a page of commits is not the root folder's"
         );
+    }
+
+    /// One column whose whole tree is a single sentence about itself.
+    ///
+    /// Built from [`three_row_tree`] rather than beside it so that everything
+    /// but the rows — the scroll, the badges, the foot — is the same column the
+    /// pin above is asked about, and the only difference between the two tests
+    /// is the thing they are about.
+    fn whole_tree_notice_column(notice: crate::files::RowNotice) -> FilesTreeContent {
+        FilesTreeContent {
+            rows: vec![tree_row(
+                "",
+                "one sentence about this column",
+                0,
+                crate::files::RowKind::Notice(notice),
+            )],
+            ..three_row_tree()
+        }
+    }
+
+    /// RED (adversarial review 2026-09-11, row D3) — **a column standing in an
+    /// empty folder answers its own ground.**
+    ///
+    /// `New file…` and `New folder…` are reached from a folder, and the folder a
+    /// column is standing in has exactly one door: the ground below its rows.
+    /// An empty folder has no rows — it is one `Empty` sentence — and the ground
+    /// used to be resolved through `files_tree_geometry_of`, which refuses a
+    /// column whose whole tree is a sentence. So the batch's headline verb was
+    /// unreachable in the one case that wants it most, and the CHANGELOG said
+    /// otherwise.
+    ///
+    /// Red gate: resolve the ground through `files_tree_geometry_of` again —
+    /// the shape this shipped in — and every assertion here fails, because that
+    /// function answers `None` for this column.
+    #[test]
+    fn an_empty_root_column_answers_its_ground() {
+        let content = whole_tree_notice_column(crate::files::RowNotice::Empty);
+        let (_, layout, column, _) = files_chrome(content.clone(), None);
+        let mut trees = BTreeMap::new();
+        trees.insert(column, content);
+        let pages: BTreeMap<SeatId, crate::git_panel::GitPanelContent> = BTreeMap::new();
+        assert_eq!(
+            files_tree_geometry_of(&layout, &trees, 1.0, false, column),
+            None,
+            "an empty folder has no rows to place — which is exactly why the \
+             ground cannot be asked through the rows"
+        );
+        // The body the painter lays the sentence into, which is what the ground
+        // is now asked against.
+        let body = files_body_rect(&layout, column, 1.0, false).expect("the column has a body");
+        let middle = f64::from((body[0] + body[2]) / 2.0);
+        for (where_, y) in [
+            ("the top of the body", f64::from(body[1] + 2.0)),
+            (
+                "the middle of the body",
+                f64::from((body[1] + body[3]) / 2.0),
+            ),
+            ("the floor of the body", f64::from(body[3] - 2.0)),
+        ] {
+            assert_eq!(
+                files_ground_at(&layout, &trees, &pages, 1.0, false, middle, y),
+                Some(column),
+                "{where_} of an empty folder is that folder's ground"
+            );
+        }
+        // And it is still only this column's body: outside it, nothing.
+        assert_eq!(
+            files_ground_at(
+                &layout,
+                &trees,
+                &pages,
+                1.0,
+                false,
+                f64::from(body[0] - 8.0),
+                f64::from((body[1] + body[3]) / 2.0),
+            ),
+            None,
+            "a point beside the column is not its ground"
+        );
+        // The Git-page guard is not spent by any of this.
+        let mut on_git = BTreeMap::new();
+        on_git.insert(column, crate::git_panel::GitPanelContent::default());
+        assert_eq!(
+            files_ground_at(
+                &layout,
+                &trees,
+                &on_git,
+                1.0,
+                true,
+                middle,
+                f64::from((body[1] + body[3]) / 2.0),
+            ),
+            None,
+            "a column showing commits has no folder under the pointer"
+        );
+    }
+
+    /// RED (review row D3, the other half) — **a column that is not showing a
+    /// folder's contents still declines its ground.**
+    ///
+    /// The body is now asked whether or not there are rows in it, so the thing
+    /// that decides is what the single sentence *says*. `Empty` is a completed
+    /// read of a real folder; `Unrooted` is a column that was never pointed
+    /// anywhere, `Loading` is a read that has not come back, and a `Fault` is
+    /// one that came back refused. None of those three is standing on a folder
+    /// this window has seen.
+    ///
+    /// Red gate: answer the ground for any whole-tree notice rather than for the
+    /// one that means *a folder with nothing in it*, and all three fail.
+    #[test]
+    fn an_unrooted_or_loading_column_still_declines_its_ground() {
+        use crate::files::{DirFault, RowNotice};
+        for notice in [
+            RowNotice::Unrooted,
+            RowNotice::Loading,
+            RowNotice::Fault(DirFault::PermissionDenied),
+        ] {
+            let content = whole_tree_notice_column(notice);
+            let (_, layout, column, _) = files_chrome(content.clone(), None);
+            let mut trees = BTreeMap::new();
+            trees.insert(column, content);
+            let pages: BTreeMap<SeatId, crate::git_panel::GitPanelContent> = BTreeMap::new();
+            let body = files_body_rect(&layout, column, 1.0, false).expect("the column has a body");
+            assert_eq!(
+                files_ground_at(
+                    &layout,
+                    &trees,
+                    &pages,
+                    1.0,
+                    false,
+                    f64::from((body[0] + body[2]) / 2.0),
+                    f64::from((body[1] + body[3]) / 2.0),
+                ),
+                None,
+                "{notice:?} is a sentence about the column, not a folder's body"
+            );
+        }
     }
 
     /// PIN — a wheel cannot scroll a list that fits, and cannot scroll one that
