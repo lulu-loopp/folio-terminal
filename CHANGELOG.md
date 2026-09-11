@@ -8,6 +8,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
+- **Right-clicking the empty space in a files column opens the folder the column
+  is standing in.** The menu offers `New terminal here`, `New file…` and
+  `New folder…`, then `Copy path`, `Insert path into terminal` and
+  `Reveal in Explorer` — the same verbs a folder row offers, about the folder at
+  the top of the column. It cannot be renamed or deleted from there, because
+  that folder is the column itself rather than a row in it.
 - **A Markdown file can be edited where it is shown.** Click into the text and
   the paragraph, list, table or formula under the caret turns into its own
   source, while everything else on the page stays as it reads; type, and it is

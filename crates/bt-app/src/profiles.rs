@@ -6407,6 +6407,35 @@ pub enum FileMenuSubject {
     File,
     /// A folder row, with the fold it was standing in when the menu came up.
     Folder { expanded: bool },
+    /// **A files column's own ground** (user ruling 2026-09-10) — the empty
+    /// space below the last row, which is the root folder's body and nothing
+    /// else's.
+    ///
+    /// The fifth face, and the second that is not a tree row. A right press
+    /// below the last row used to raise nothing at all, which left the three
+    /// verbs that are about *a folder* reachable only by first finding a folder
+    /// row to raise them from — and a column standing in a folder of files has
+    /// no such row to find. The ground under the rows is the folder the column
+    /// is standing in, so the ground raises that folder's menu.
+    ///
+    /// **What it offers.** `New terminal here`, `New file…` and `New folder…`,
+    /// which mean on the root exactly what they mean on a folder row — this one
+    /// is simply the folder the column was pointed at — and then the three path
+    /// questions every face with a path has: `Copy path`, `Insert path into
+    /// terminal`, `Reveal in Explorer`.
+    ///
+    /// **What it is refused, and why each.** No `Expand`/`Collapse`: the root is
+    /// not folded into anything, it has no triangle, and a row that folded the
+    /// column's whole contents away would be a verb with no visible way back.
+    /// No `Rename` and no `Delete`, for one reason said twice — *the root is the
+    /// column, not a row in it*, which is [`crate::files::key_under_root`]'s own
+    /// sentence about the same fact. Renaming it would rename the folder the
+    /// reader is standing in from the one surface that is then left pointed at a
+    /// name that no longer exists; and a `Delete` on the ground of a column is
+    /// one stray right press away from sending the whole folder being worked in
+    /// to the Recycle Bin, which is the row's [`FileMenuRow::stands_alone`] gap
+    /// argument carried to the point where the gap is not enough.
+    Root,
     /// **A path a preview's breadcrumb row names** (user ruling 2026-08-24) —
     /// the `Open ⌄` pill's document.
     ///
@@ -6833,6 +6862,11 @@ pub struct FileMenu {
 ///   two things this folder can be asked to make — then `Rename`, the same rule,
 ///   the same `Delete`, and the same three path questions. A folder has no
 ///   preview seat.
+/// - **[`FileMenuSubject::Root`]** — the column's ground, below the last row
+///   (user ruling 2026-09-10). The folder face with its fold and its two
+///   row verbs taken away: `New terminal here / New file… / New folder…`, the
+///   rule, and the same three path questions. Each refusal is argued at the
+///   variant.
 ///
 /// **`New file…` and `New folder…` are the folder's and only the folder's**
 /// (0.3). They are verbs about the folder the press landed on, so they stand
@@ -6876,6 +6910,16 @@ pub fn file_menu(subject: FileMenuSubject) -> FileMenu {
             rows.push(FileMenuRow::NewFolder);
             rows.push(FileMenuRow::Rename);
             rows.push(FileMenuRow::Delete);
+        }
+        // The folder face's three *making* verbs and neither of its two verbs
+        // that act on a row, and no fold on something that has no triangle —
+        // [`FileMenuSubject::Root`] carries the argument for each refusal. The
+        // three path questions below the rule follow, because the root has a
+        // path like any other folder.
+        FileMenuSubject::Root => {
+            rows.push(FileMenuRow::NewTerminal);
+            rows.push(FileMenuRow::NewFile);
+            rows.push(FileMenuRow::NewFolder);
         }
         // **`Reveal in Explorer` and not `Show in files column`** (user ruling
         // 2026-08-25). Two rulings of the same day met on this row. The
@@ -17151,6 +17195,7 @@ mod tests {
                 FileMenuSubject::File,
                 FileMenuSubject::Folder { expanded: false },
                 FileMenuSubject::Folder { expanded: true },
+                FileMenuSubject::Root,
                 FileMenuSubject::Document,
                 FileMenuSubject::FoldedPath { levels: 3 },
             ] {
@@ -17233,6 +17278,7 @@ mod tests {
             (FileMenuSubject::File, 7),
             (FileMenuSubject::Folder { expanded: false }, 9),
             (FileMenuSubject::Folder { expanded: true }, 9),
+            (FileMenuSubject::Root, 6),
             (FileMenuSubject::Document, 4),
             (FileMenuSubject::FoldedPath { levels: 3 }, 3),
         ] {
@@ -17257,19 +17303,22 @@ mod tests {
     ///
     /// A file row and a folder row each *are* something on the disk, and renaming
     /// one is the ordinary verb every file manager puts on that menu. The other
-    /// two faces are not: the `Document` face is the preview's own pill, and the
+    /// faces are not: the `Document` face is the preview's own pill, and the
     /// document it names is renamed by double-clicking the last crumb — the same
     /// editor, one surface over, which is why a row here would be a second door
     /// onto a gesture already within reach; the `FoldedPath` face carries *no*
     /// verbs about any one of the folders it hides, which is a ruling of the day
-    /// before this one and is not reopened by this one.
+    /// before this one and is not reopened by this one; and `Root` **is** a
+    /// folder on the disk but is not a row — it is the column (user ruling
+    /// 2026-09-10), and the surface that renamed it would be the surface then
+    /// left pointed at a name that is gone.
     ///
     /// It sits with the doors rather than with the path verbs, because
     /// [`FileMenuRow::hands_out_the_path`] is about handing the *text* of a path
     /// somewhere and this changes the thing the path points at.
     ///
-    /// Red gate: put the row on `Document` or `FoldedPath` and the second half
-    /// names the face that took it.
+    /// Red gate: put the row on `Root`, `Document` or `FoldedPath` and the
+    /// second half names the face that took it.
     #[test]
     fn the_two_faces_that_are_a_name_on_disk_can_rename_it() {
         for subject in [
@@ -17283,6 +17332,7 @@ mod tests {
             );
         }
         for subject in [
+            FileMenuSubject::Root,
             FileMenuSubject::Document,
             FileMenuSubject::FoldedPath { levels: 3 },
         ] {
@@ -17294,6 +17344,69 @@ mod tests {
         assert!(
             !FileMenuRow::Rename.hands_out_the_path(FileMenuSubject::File),
             "it changes the thing a path points at rather than handing the path out"
+        );
+    }
+
+    /// PIN (user ruling 2026-09-10) — **the column's ground offers the folder's
+    /// making verbs and neither of the two that act on a row.**
+    ///
+    /// A right press below the last row used to raise nothing, so the three
+    /// verbs about *this folder* could only be reached from a folder row — and a
+    /// column standing in a folder of files has none. The ground is that folder,
+    /// so it raises that folder's menu; but the root is the column and not a row
+    /// in it, and the two verbs that act on a row go with the row.
+    ///
+    /// Written as an equality against the whole list rather than as a bag of
+    /// `contains`, because the order is half of what a menu is and the rule's
+    /// placement falls out of it: the gap lands where the path questions begin,
+    /// and there is no second gap because there is no `Delete` to protect the
+    /// approach to.
+    ///
+    /// The second block is the claim that this is the folder face with rows
+    /// taken away rather than a fifth list written out: every row the ground
+    /// offers is a row a folder offers.
+    ///
+    /// Red gate: push `Fold`, `Rename` or `Delete` into the arm and the equality
+    /// names it; write the making verbs out in a different order and it says so.
+    #[test]
+    fn the_columns_ground_can_make_things_in_the_root_and_cannot_rename_or_delete_it() {
+        let ground = file_menu(FileMenuSubject::Root);
+        assert_eq!(
+            ground.rows,
+            vec![
+                FileMenuRow::NewTerminal,
+                FileMenuRow::NewFile,
+                FileMenuRow::NewFolder,
+                FileMenuRow::CopyPath,
+                FileMenuRow::InsertPath,
+                FileMenuRow::Reveal,
+            ],
+            "three things to make in this folder, then what its path is"
+        );
+        for refused in [
+            FileMenuRow::Fold,
+            FileMenuRow::Rename,
+            FileMenuRow::Delete,
+            FileMenuRow::Open,
+        ] {
+            assert!(
+                !ground.rows.contains(&refused),
+                "{refused:?} is a row's verb and the root is not a row"
+            );
+        }
+        let folder = file_menu(FileMenuSubject::Folder { expanded: true }).rows;
+        assert!(
+            ground.rows.iter().all(|row| folder.contains(row)),
+            "the ground is the folder face with rows taken away, not a fifth list"
+        );
+        assert_eq!(
+            ground.separator_after,
+            Some(2),
+            "the rule falls where the path questions begin"
+        );
+        assert_eq!(
+            ground.lone_separator_after, None,
+            "and there is no second gap, because there is no bin to keep a hand off"
         );
     }
 

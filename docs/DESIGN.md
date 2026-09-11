@@ -3857,6 +3857,8 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 **⑧ 挂账。** ⓐ **浮窗里的文件夹行现在也有 `New terminal here`**，开出来的 tab 落在浮窗所属的那扇窗上——这是 tab 容器的自然结论，但「浮窗的动词该落在哪扇窗」这个更大的问题（§7.5 里「浮窗不是列」那条）没有被本片重新打开。ⓑ **`Open with default app` 对一个可执行文件会被门拒绝并出那张 `files_program_refused_notice` 卡**，与双击同一条路；「树永不跑程序」这条规矩没有被本片放宽一寸。ⓒ 用户开单写的 `Show in Explorer` 与落地的 `Reveal in Explorer` 见 ④。
 
+**⑨ 改判（用户裁 2026-09-10）：files 列的空白地面右键弹第五张脸 `FileMenuSubject::Root`**——`Runtime::file_row_under` 从前只回答「行」，于是一个站在全是文件的文件夹里的列根本没有文件夹行可点，「关于这个文件夹」的三个动词一直没有入口，现在它们与那三行路径动词一起摆在地面上（`New terminal here` / `New file…` / `New folder…` ─── `Copy path` / `Insert path into terminal` / `Reveal in Explorer`），而 `Rename` 与 `Delete` 被拒在外，因为**根是这一列本身而不是列里的一行**（`files::key_under_root` 早就是这么写的）：改名会让唯一还指着它的那个面指向一个已经不存在的名字，在地面上放一行删除则等于让一次手滑把正在干活的整个文件夹送进回收站；这也不是第二扇开菜单的门——`file_row_under` 在「不是任何一行」时回落到地面（`seats::files_ground_at` 按**画行用的那份几何**判定，行先答、地面答行剩下的，站在 Git 页上的列不答），右键那条 opener 一个字没改，菜单仍吊在指针处。
+
 ### 7.16 视频进不了页道，而页类从此只写一遍（视频进页道单，2026-08-25，**否决半片 + 落地半片**；`crates/bt-app/src/{preview,main}.rs`）
 
 **一句话：单子的前提在实机上不成立——引擎有播放器，但它不肯把一段视频当作一张页来托管；所以视频留在「无法预览」卡上，而本片真正落地的是把页类合并成一张表，让将来那个决定变成一行。**

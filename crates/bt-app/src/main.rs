@@ -66953,13 +66953,18 @@ impl Runtime<'_> {
     }
 
     /// The tree row under a point, in either host, resolved to everything the
-    /// menu about it needs — or nothing, when the point is not on a row that has
-    /// a menu.
+    /// menu about it needs — or, since the user ruling of 2026-09-10, **the
+    /// column's own ground**, and nothing when the point is neither.
     ///
     /// The float is asked first because the float is drawn over the columns, so
     /// a row of a peek standing across a docked column is the row the pointer is
     /// really on. Both hosts re-derive their rows from the state rather than
     /// remembering the painted list, on [`Runtime::press_files_row`]'s reasoning.
+    ///
+    /// **The ground is asked last**, which is the same smallest-target-first
+    /// order the whole hit-test chain reads in: a row is a rectangle inside the
+    /// body, and a fallback that answered before it would put the folder's menu
+    /// on every file in the tree.
     fn file_row_under(&mut self, position: PhysicalPosition<f64>) -> Option<FileMenuTarget> {
         if let Some((id, float::FloatPart::Row(index))) = self.float_hit_at(position) {
             let files = self.window.float.live(id)?.files()?;
@@ -66979,7 +66984,7 @@ impl Runtime<'_> {
         }
         let Some(seats::ChromeTarget::FilesRow { seat, index }) = self.chrome_target_at(position)
         else {
-            return None;
+            return self.files_ground_under(position);
         };
         let now = Instant::now();
         let trees = self.files_trees(now);
@@ -67017,6 +67022,50 @@ impl Runtime<'_> {
                 key,
             }),
             subject,
+            crumbs: Vec::new(),
+            rail: None,
+        })
+    }
+
+    /// **The column's ground, resolved to the root folder's menu** (user ruling
+    /// 2026-09-10).
+    ///
+    /// The root is addressed the way every other node of this tree is — by its
+    /// key, and the root's key is the empty string. That is not a convention
+    /// invented here: [`files::full_path`] already returns the root itself for
+    /// it, and [`Runtime::open_files_row_new`] already reads an empty parent as
+    /// "at the top level", which is why `New file…` and `New folder…` need no
+    /// new door to place their box on the ground.
+    ///
+    /// **A column and never a float.** The verbs this face offers are the
+    /// column's — `open_files_row_new` answers only [`RowHost::Column`], and a
+    /// peek is a look at a folder rather than a place to make things in — so a
+    /// float's own ground stays what it was: the window, and no menu.
+    ///
+    /// A column with no root hands back [`RowActivation::Nowhere`] and
+    /// [`Runtime::open_file_menu`] refuses it there, which is the same refusal a
+    /// row of a rootless column already gets and is why there is no guard here.
+    fn files_ground_under(&self, position: PhysicalPosition<f64>) -> Option<FileMenuTarget> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let seat = seats::files_ground_at(
+            &self.seat_layout,
+            &self.files_tree_contents(),
+            &self.window.git_pages_shown,
+            scale,
+            self.git_panel_on(),
+            position.x,
+            position.y,
+        )?;
+        let root = self.window.tabs[self.window.active_tab]
+            .files_state(seat)
+            .root;
+        Some(FileMenuTarget {
+            row: Some(FileMenuTreeRow {
+                host: RowHost::Column(seat),
+                key: String::new(),
+            }),
+            activation: files_row_activation(&root, ""),
+            subject: profiles::FileMenuSubject::Root,
             crumbs: Vec::new(),
             rail: None,
         })
@@ -136775,6 +136824,102 @@ mod tests {
             files_row_menu_subject(files::RowKind::Notice(files::RowNotice::Empty)),
             None,
             "and a notice names no file at all"
+        );
+        // **And no row is ever the column's ground** (user ruling 2026-09-10).
+        // That face is raised by a press that landed on *no* row, so a row
+        // answering it would be the ground's menu — `Rename` and `Delete` taken
+        // away, `Fold` taken away — coming up on a file.
+        for kind in [
+            files::RowKind::File,
+            files::RowKind::Directory { open: false },
+            files::RowKind::Directory { open: true },
+            files::RowKind::Cycle,
+            files::RowKind::Notice(files::RowNotice::Empty),
+        ] {
+            assert_ne!(
+                files_row_menu_subject(kind),
+                Some(profiles::FileMenuSubject::Root),
+                "{kind:?} is a row, and the root is the column"
+            );
+        }
+    }
+
+    /// PIN (user ruling 2026-09-10) — **a right press on a files column's empty
+    /// ground raises the root folder's menu, through the one door a row's press
+    /// goes through.**
+    ///
+    /// `file_row_under` answered rows and only rows, so a press below the last
+    /// row — which in a column standing in a folder of files is most of the
+    /// column — raised nothing at all, and the three verbs about *this folder*
+    /// had no way in. The fallback is on that function rather than beside it,
+    /// which is what keeps the ruling one sentence: the right-press opener is
+    /// unchanged, still asks one question, and still hangs the menu at the
+    /// pointer.
+    ///
+    /// The geometry half of this — that the ground is the body below the rows
+    /// and that a row is never it — is `seats`'s
+    /// `the_ground_below_the_last_row_is_the_columns_own`. What is left here is
+    /// the wiring, read as **text** for `both_pointer_doors_tell_the_chevron_
+    /// clocks_where_the_hand_is`' reason: what it guards against is a second
+    /// opener, and a second opener that agrees today cannot be driven into
+    /// disagreeing by any state machine.
+    ///
+    /// Red gate: return `None` from the row branch's `else` and the first
+    /// assertion fails by name; give the ground its own opener beside the row's
+    /// and the last one does.
+    #[test]
+    fn a_right_press_on_the_columns_ground_raises_the_roots_menu() {
+        const SOURCE: &str = include_str!("main.rs");
+        let body = |signature: &str| -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        };
+        assert!(
+            body("    fn file_row_under(").contains("return self.files_ground_under(position);"),
+            "a press that is on no row falls through to the column's ground \
+             rather than to silence"
+        );
+        let ground = body("    fn files_ground_under(");
+        assert!(
+            ground.contains("seats::files_ground_at("),
+            "and the ground is resolved against the geometry the rows were \
+             placed by, not against the pane's whole rectangle"
+        );
+        assert!(
+            ground.contains("subject: profiles::FileMenuSubject::Root,"),
+            "the face it raises is the root's own"
+        );
+        assert!(
+            ground.contains("key: String::new(),")
+                && ground.contains("files_row_activation(&root, \"\")"),
+            "addressed by the root's key, which is the empty one — so `New \
+             file…` places its box at the top level and the path verbs get the \
+             root itself"
+        );
+        // One opener, and it still hangs the menu where the press landed.
+        //
+        // The two needles are **assembled** rather than written out, for the
+        // reason this whole family of tests has to watch for: a literal spelled
+        // in full here is itself a line of `main.rs`, so `SOURCE.contains` would
+        // be asking whether this test exists. Split across a `concat`, the
+        // phrase appears in the file exactly where the code is.
+        let opener = ["self.file_row_under", "(position)"].concat();
+        assert_eq!(
+            SOURCE.matches(opener.as_str()).count(),
+            1,
+            "the ground and the rows go through one right-press opener"
+        );
+        let anchored = [
+            "self.open_file_menu(target, ",
+            "[position.x as f32, position.y as f32])?;",
+        ]
+        .concat();
+        assert!(
+            SOURCE.contains(anchored.as_str()),
+            "hung at the pointer, which is where a menu raised by a press belongs"
         );
     }
 

@@ -17189,6 +17189,52 @@ pub fn hit_files_tree(
     None
 }
 
+/// **Which files column's own ground the pointer is standing on** (user ruling
+/// 2026-09-10) — inside one column's tree body, and on none of its rows.
+///
+/// [`hit_files_tree`]'s complement rather than a branch of it, because it
+/// answers a different question and every caller of that one wants a row: this
+/// is the question a right press asks, and the answer is the *column*, because
+/// the space below the last row is the root folder's body and nothing else's.
+///
+/// A [`SeatId`] and not a [`ChromeTarget`], deliberately. Nothing is drawn here,
+/// nothing lights under the pointer and nothing is pressed with the left button
+/// — the ground stays what it has always been — so minting a target for it would
+/// put a name into the window's hover vocabulary that no painter reads and every
+/// `match` over it has to answer.
+///
+/// **A column on its Git page is not asked**, which is what `pages` is for: that
+/// column has no files tree on the glass, so its ground is not a folder's. The
+/// map is [`hit_git_panel`]'s own, so the two questions cannot come to disagree
+/// about which page a column is on. A column whose tree is a single sentence
+/// about itself answers nothing either — [`files_tree_geometry_of`] refuses it,
+/// and a sentence is not a folder's body.
+#[must_use]
+pub fn files_ground_at(
+    layout: &SeatLayout,
+    trees: &BTreeMap<SeatId, FilesTreeContent>,
+    pages: &BTreeMap<SeatId, crate::git_panel::GitPanelContent>,
+    scale: f32,
+    segmented: bool,
+    x: f64,
+    y: f64,
+) -> Option<SeatId> {
+    let (x, y) = (x as f32, y as f32);
+    for placement in &layout.rects {
+        if placement.kind != SeatKind::Files || pages.contains_key(&placement.id) {
+            continue;
+        }
+        let Some(geometry) = files_tree_geometry_of(layout, trees, scale, segmented, placement.id)
+        else {
+            continue;
+        };
+        if contains(geometry.viewport, x, y) && geometry.row_at(x, y).is_none() {
+            return Some(placement.id);
+        }
+    }
+    None
+}
+
 /// Where one docked column's rows are, or nothing when that column has none to
 /// place.
 ///
@@ -27180,6 +27226,88 @@ mod tests {",
             ),
             None,
             "the floor of a three-row tree is not the third row"
+        );
+    }
+
+    /// PIN (user ruling 2026-09-10) — **the ground below the last row belongs to
+    /// the column, and every row in it does not.**
+    ///
+    /// The other half of the pin above. That one says no *row* is under a point
+    /// below the list; this one says the point is not therefore nowhere — it is
+    /// the column's own body, which is the root folder's, which is what a right
+    /// press there now raises a menu about. The two are written next to each
+    /// other because together they are the whole of the rule: the rows answer
+    /// first and the ground answers for what they leave over.
+    ///
+    /// Red gate: answer `Some` on a row's centre and the second block fails by
+    /// name — that is the version of this that puts the folder's menu on every
+    /// file in the tree. Drop the Git-page guard and the last block fails: a
+    /// column showing commits has no files tree on the glass, so its ground is
+    /// not a folder's.
+    #[test]
+    fn the_ground_below_the_last_row_is_the_columns_own() {
+        let content = three_row_tree();
+        let (_, layout, column, _) = files_chrome(content.clone(), None);
+        let mut trees = BTreeMap::new();
+        trees.insert(column, content.clone());
+        let pages: BTreeMap<SeatId, crate::git_panel::GitPanelContent> = BTreeMap::new();
+        // The geometry the paint used, and not a second derivation of it: the
+        // ground is defined by where the rows ended, so a test that guessed
+        // would be testing its own arithmetic.
+        let geometry = files_tree_geometry_of(&layout, &trees, 1.0, false, column)
+            .expect("a three-row column places its rows");
+        let last = geometry.row_rect(content.rows.len() - 1);
+        let middle = f64::from((geometry.viewport[0] + geometry.viewport[2]) / 2.0);
+        let ground = f64::from((last[3] + geometry.viewport[3]) / 2.0);
+        assert_eq!(
+            files_ground_at(&layout, &trees, &pages, 1.0, false, middle, ground),
+            Some(column),
+            "the body below the last row is the column's"
+        );
+
+        // And a row is a row. Asked at each one's own centre, through the same
+        // geometry, so the two answers cannot both be yes anywhere.
+        for index in 0..content.rows.len() {
+            let row = geometry.row_rect(index);
+            let centre = f64::from((row[1] + row[3]) / 2.0);
+            assert_eq!(
+                files_ground_at(&layout, &trees, &pages, 1.0, false, middle, centre),
+                None,
+                "row {index} is a row and not the ground"
+            );
+            assert_eq!(
+                hit_files_tree(&layout, &trees, 1.0, false, middle, centre),
+                Some(ChromeTarget::FilesRow {
+                    seat: column,
+                    index
+                }),
+                "and it still answers as one"
+            );
+        }
+
+        // Outside the column entirely — the terminal beside it — is neither.
+        assert_eq!(
+            files_ground_at(
+                &layout,
+                &trees,
+                &pages,
+                1.0,
+                false,
+                f64::from(geometry.viewport[0] - 8.0),
+                ground,
+            ),
+            None,
+            "a point outside the body is not this column's ground"
+        );
+
+        // A column standing on its Git page has no files tree on the glass, so
+        // the same point is not a folder's body.
+        let mut on_git = BTreeMap::new();
+        on_git.insert(column, crate::git_panel::GitPanelContent::default());
+        assert_eq!(
+            files_ground_at(&layout, &trees, &on_git, 1.0, true, middle, ground),
+            None,
+            "the ground of a page of commits is not the root folder's"
         );
     }
 
