@@ -115,7 +115,13 @@ All notable changes to Folio are recorded here. The format follows
   which the page read as a picture it had never asked for, so it asked again.
   A page now keeps the answer it was given: it holds the picture it is drawing,
   it asks for each one once, and running out of room to remember them changes
-  nothing about what it shows.
+  nothing about what it shows. Clicking into one of its paragraphs to edit it no
+  longer freezes the window either: once a screenshot had been sharpened to the
+  width it is drawn at, the page could no longer tell which file it had come
+  from, so the first thing the reader did to the page sent every one of those
+  reads out again. A picture the page is already showing is now never read from
+  disk a second time, and a picture arriving for something already on the screen
+  no longer re-lays the whole document out.
 
 - **A long animated GIF now plays in the preview instead of showing its first
   frame.** Folio used to read every frame of an animation into memory before
