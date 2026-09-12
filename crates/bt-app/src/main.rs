@@ -93509,12 +93509,21 @@ impl Runtime<'_> {
     }
 
     fn apply_scale_factor(&mut self, scale_factor: f64) -> Result<()> {
+        // **The scale the panel's two lists were last measured against**, read
+        // before the renderer forgets it — see [`Self::restate_panel_scroll`].
+        let measured_at = self.window.renderer.metrics().scale_factor;
         let metrics = self
             .window
             .renderer
             .update_scale_factor(&mut self.app.gpu, scale_factor)
             .context("remeasure terminal font at new DPI")?;
         ensure_metrics_match_authoritative_scale(metrics.scale_factor, scale_factor)?;
+        // **And the one number in the panel that is a measurement rather than a
+        // solve** (user report 2026-09-12). Every rectangle the rail and the card
+        // column stand on is worked out from the window's current scale on the
+        // frame it is drawn — and this one is not: it is physical pixels, kept
+        // from the display the list was last scrolled on.
+        self.restate_panel_scroll(measured_at, scale_factor);
         // Every shell in every tab: a DPI change is a fact about the display, so
         // no screen anywhere in the window is exempt from it.
         for tab in &mut self.window.tabs {
@@ -93542,6 +93551,35 @@ impl Runtime<'_> {
             }
         }
         Ok(())
+    }
+
+    /// **How far the panel's list is scrolled, said again in the new display's
+    /// pixels** (user report 2026-09-12, §7.1.6b′).
+    ///
+    /// [`WindowRuntime::rail_scroll`] and [`WindowRuntime::tab_scroll`] are the
+    /// only numbers the tab panel keeps between frames that are *physical
+    /// pixels*. Everything else it stands on — a card's box, its head, its mini
+    /// seats, the sticky `+`, the clip box, the hit test — is solved from
+    /// `metrics().scale_factor` on the frame it is drawn, so a window carried to
+    /// a display of another scale re-derives all of it and needs no help. These
+    /// two do not: they were measured against the display the list was last
+    /// scrolled on, and left alone they say a different distance there.
+    ///
+    /// The distance is the fact, and the pixels are how it was written down, so
+    /// the restatement is the ratio between the two scales — the same similarity
+    /// transform §7.50 already applies to every rectangle on this path ("the
+    /// same tree solved again on a new rectangle"). A column standing at its end
+    /// on a 200% display stands at its end on a 150% one; a column halfway down
+    /// stays halfway down.
+    ///
+    /// **Both offsets, because the panel has two lists and one of them is not
+    /// the cards.** The vertical rail and the card column share `rail_scroll`
+    /// and the horizontal strip has `tab_scroll`; all three are read by geometry
+    /// that multiplies by the current scale, so all three are stale in exactly
+    /// the same way. Restating one and not the others is the next report.
+    fn restate_panel_scroll(&mut self, measured_at: f64, now_at: f64) {
+        self.window.rail_scroll = restated_scroll(self.window.rail_scroll, measured_at, now_at);
+        self.window.tab_scroll = restated_scroll(self.window.tab_scroll, measured_at, now_at);
     }
 
     /// Retire shells that have exited, and the panes and tabs they emptied.
@@ -108695,6 +108733,18 @@ fn resize_worth_solving(minimized: bool, physical: PhysicalSize<u32>) -> bool {
     !minimized && physical.width > 0 && physical.height > 0
 }
 
+/// One scroll offset, measured at one scale, said again in another's pixels —
+/// see [`Runtime::restate_panel_scroll`] for what it is for and why it is a
+/// ratio.
+///
+/// Its own function so the property can be tested against the very arithmetic
+/// the window runs: what a column looks like after a display change is a fact
+/// about this number and the geometry it is handed to, and a test that
+/// multiplied by its own ratio would be a test of itself.
+fn restated_scroll(scroll: f32, measured_at: f64, now_at: f64) -> f32 {
+    scroll * (now_at / measured_at) as f32
+}
+
 /// A saved size, or the product's opening size when the saved one is not a size
 /// a window could have been left at.
 ///
@@ -117049,6 +117099,174 @@ mod tests {
             body("    fn turn(&mut self, now: Instant, application_clocks: bool)")
                 .contains("self.settle_deferred_dpi()?;"),
             "a deferred DPI change is spent on the first turn after the hand lets go"
+        );
+    }
+
+    /// The same window, in logical pixels, on a 200% display and on a 150% one —
+    /// which is what a drag across that seam leaves behind (§7.50: the system's
+    /// suggested rectangle is a similarity of the one the window had).
+    const CARDS_AT_200: (f32, f32) = (1000.0, 2.0);
+    const CARDS_AT_150: (f32, f32) = (750.0, 1.5);
+
+    /// The card column of a window holding `tabs` tabs, scrolled `scroll`
+    /// physical pixels, on a display of a stated height and scale.
+    fn cards_column(
+        (height, scale): (f32, f32),
+        tabs: usize,
+        scroll: f32,
+    ) -> seats::FocusRailGeometry {
+        seats::focus_rail_geometry(
+            height,
+            scale,
+            tabs,
+            0,
+            scroll,
+            seats::RailState {
+                focus: true,
+                ..seats::RailState::default()
+            },
+        )
+        .expect("focus mode puts a column on screen")
+    }
+
+    /// **RED — a column scrolled on one display stands in the same place on the
+    /// next** (user report 2026-09-12, §7.1.6b′).
+    ///
+    /// Every box the column draws is solved from the window's current scale on
+    /// the frame it is drawn, so a card on a 150% display is exactly three
+    /// quarters of the card it was on a 200% one — *except* that the solver is
+    /// handed a scroll offset in physical pixels, and nothing was restating it.
+    /// A list standing at its end then stood a third of a card past its end: the
+    /// top card lost its head off the clip box, and the sticky `+` came away
+    /// from the panel's foot and left a blank strip under the last card.
+    ///
+    /// The assertion is the whole rule in one line — every card is where it was,
+    /// times the ratio.
+    #[test]
+    fn a_column_scrolled_at_one_scale_stands_in_the_same_place_at_another() {
+        let (_, was) = CARDS_AT_200;
+        let (_, now) = CARDS_AT_150;
+        let ratio = now / was;
+
+        let there = cards_column(CARDS_AT_200, 3, 0.0);
+        // At its end, which is where a reader who has run the list down stands
+        // and the one place the defect is impossible to miss.
+        let there = cards_column(CARDS_AT_200, 3, there.max_scroll);
+        let here = cards_column(
+            CARDS_AT_150,
+            3,
+            restated_scroll(there.max_scroll, f64::from(was), f64::from(now)),
+        );
+
+        for (index, (was_card, now_card)) in there.cards.iter().zip(&here.cards).enumerate() {
+            let expected = was_card.body[1] * ratio;
+            assert!(
+                (now_card.body[1] - expected).abs() <= 1.0,
+                "card {index} stands at {} and the same place at 150% is {expected}",
+                now_card.body[1]
+            );
+        }
+        assert!(
+            here.max_scroll >= restated_scroll(there.max_scroll, f64::from(was), f64::from(now)),
+            "a list at its end on one display is not past its end on the next"
+        );
+        assert!(
+            (here.new_tab[1] - there.new_tab[1] * ratio).abs() <= 1.0,
+            "and the `+` is still on the panel's foot rather than floating over a blank"
+        );
+    }
+
+    /// **RED — the seat `Alt`+wheel aims is the seat under the pointer, on
+    /// whichever display the window is on** (§7.21, `cardhint`).
+    ///
+    /// `aim_focus_card_window` walks this very geometry, in this order: the clip
+    /// box, then the card whose body holds the pointer, then that card's mini
+    /// seats. The pointer arrives in the *current* display's physical pixels, so
+    /// the point that was over a card's terminal seat is, after a scale change,
+    /// that same point times the ratio.
+    ///
+    /// **Aimed at the foot of the last card**, which is where the report is: a
+    /// column run down to its end has its last card against the foot of the clip
+    /// box on either display, and an unrestated offset slid that card a third of
+    /// a card's height up the panel. The pixel a hand had been turning the wheel
+    /// on was then blank — no card holds it, the walk stops at the first step,
+    /// and the notch is declined without a word.
+    #[test]
+    fn alt_wheel_finds_the_seat_under_the_pointer_after_a_scale_change() {
+        let (_, was) = CARDS_AT_200;
+        let (_, now) = CARDS_AT_150;
+        let ratio = now / was;
+        let tree = LayoutNode::seat(bt_layout::Seat::new(SeatId(1), SeatKind::Terminal));
+
+        let there = cards_column(CARDS_AT_200, 3, 0.0);
+        let there = cards_column(CARDS_AT_200, 3, there.max_scroll);
+        let aimed = there.cards[2].mini;
+        let point = [(aimed[0] + aimed[2]) / 2.0, aimed[3] - 8.0 * was];
+        assert!(
+            seats::focus_mini_seats(&tree, aimed, was)
+                .into_iter()
+                .any(|seat| seats::rect_holds(seat.rect, point[0], point[1])),
+            "the fixture aims at the seat it means to"
+        );
+
+        let here = cards_column(
+            CARDS_AT_150,
+            3,
+            restated_scroll(there.max_scroll, f64::from(was), f64::from(now)),
+        );
+        let point = [point[0] * ratio, point[1] * ratio];
+        let [list_top, list_bottom] = here.viewport;
+        assert!(
+            point[1] >= list_top && point[1] < list_bottom,
+            "the pointer is still inside the list's clip box"
+        );
+        let card = here
+            .cards
+            .iter()
+            .position(|card| seats::rect_holds(card.body, point[0], point[1]))
+            .expect("the pointer is still over a card");
+        assert_eq!(card, 2, "and over the same card it was over");
+        assert!(
+            seats::focus_mini_seats(&tree, here.cards[card].mini, now)
+                .into_iter()
+                .any(|seat| seats::rect_holds(seat.rect, point[0], point[1])),
+            "and over that card's terminal seat, which is what the notch aims"
+        );
+    }
+
+    /// **RED (shape) — the scale change's own arm says the panel's scroll out
+    /// loud** (the pin the fix asks for).
+    ///
+    /// The restatement needs the scale the offsets were measured at, and that
+    /// number lives in exactly one place for exactly as long as it takes
+    /// `update_scale_factor` to overwrite it. A reading taken after the
+    /// remeasure is the new scale twice over and the ratio is 1 — a fix that
+    /// silently does nothing. So the order is held against the source, the way
+    /// this file's other structural promises are.
+    #[test]
+    fn the_scale_change_arm_restates_the_cards_columns_scroll() {
+        const SOURCE: &str = include_str!("main.rs");
+
+        let start = SOURCE
+            .find("    fn apply_scale_factor(&mut self, scale_factor: f64)")
+            .expect("the method is declared in this file");
+        let rest = &SOURCE[start..];
+        let body = &rest[..rest
+            .find("\n    /// **How far the panel's list")
+            .unwrap_or(rest.len())];
+
+        let read = body
+            .find("let measured_at = self.window.renderer.metrics().scale_factor;")
+            .expect("the scale the panel's lists were measured at is read");
+        let remeasured = body
+            .find(".update_scale_factor(&mut self.app.gpu, scale_factor)")
+            .expect("the renderer is remeasured at the new scale");
+        let restated = body
+            .find("self.restate_panel_scroll(measured_at, scale_factor);")
+            .expect("the panel's scroll offsets are restated in the new scale's pixels");
+        assert!(
+            read < remeasured && remeasured < restated,
+            "the old scale is read before it is overwritten, and spent after"
         );
     }
 

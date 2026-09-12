@@ -131,6 +131,17 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **The tab cards look right, and Alt+wheel scrolls them, on a second display of
+  a different scale.** A window carried from a 200% display to a 150% one took
+  the card column's scroll position with it in the first display's pixels, which
+  is a third of the way further down the list on the second: the card at the top
+  lost its head off the edge of the column, the `New tab` row came away from the
+  foot of the panel and left a blank strip under the last card, and Alt+wheel
+  over that blank aimed at nothing. Where the column stands is now said again in
+  the new display's pixels, along with everything else a display change
+  re-measures — a list at its end is at its end on both, a list halfway down is
+  halfway down on both, and carrying the window back and forth leaves it where
+  it was.
 - **Moving the pointer over a floating window no longer highlights, or pops the
   preview card of, the row hidden underneath it.** A preview window standing
   over a files column was solid to look at and see-through to the mouse: resting
