@@ -223,8 +223,16 @@ fn holds(rect: WindowRect, x: i32, y: i32) -> bool {
 /// How far outside a rectangle a point is, squared — the ordering
 /// `MONITOR_DEFAULTTONEAREST` is defined by.
 fn distance_outside(rect: WindowRect, x: i32, y: i32) -> i64 {
-    let dx = i64::from((rect.left - x).max(x - rect.right + 1).max(0));
-    let dy = i64::from((rect.top - y).max(y - rect.bottom + 1).max(0));
+    // In `i64` throughout: the coordinates are `i32` and a hand-edited session
+    // file may hold any of them, so the difference of two of them is not an
+    // `i32` quantity.
+    let (x, y) = (i64::from(x), i64::from(y));
+    let dx = (i64::from(rect.left) - x)
+        .max(x - i64::from(rect.right) + 1)
+        .max(0);
+    let dy = (i64::from(rect.top) - y)
+        .max(y - i64::from(rect.bottom) + 1)
+        .max(0);
     dx * dx + dy * dy
 }
 
@@ -378,8 +386,12 @@ pub fn get_work_area(window: NativeWindow) -> Result<WindowRect, String> {
         Some(screen) => (screen.visibleFrame(), screen.backingScaleFactor()),
         None => {
             let standing = physical_rect(ns_window.frame(), flip, ns_window.backingScaleFactor());
-            let centre_x = standing.left + (standing.right - standing.left) / 2;
-            let centre_y = standing.top + (standing.bottom - standing.top) / 2;
+            let centre_x = standing
+                .left
+                .saturating_add(standing.right.saturating_sub(standing.left) / 2);
+            let centre_y = standing
+                .top
+                .saturating_add(standing.bottom.saturating_sub(standing.top) / 2);
             let (screen, scale, _) =
                 screen_at(mtm, centre_x, centre_y).ok_or_else(|| nothing_to_ask(what))?;
             (screen.visibleFrame(), scale)
@@ -572,12 +584,15 @@ fn scale_of_screen_holding(mtm: MainThreadMarker, point: NSPoint) -> f64 {
 /// another process's window and a [`NativeWindow`] on this platform is an
 /// `NSView` pointer, which cannot.
 ///
-/// The two readers take that differently and both are safe:
-/// `exposed_from_probe` asks `probe(x, y) == Some(own)` and gets the right
-/// answer either way, and `bt_app::pointer_is_on_our_own_glass` reads `None` as
-/// "the gesture is the ordinary one in the window that is holding it", which is
-/// the conservative half it already documents for a window it cannot ask about.
-/// Naming another application's window is M2-5's if a reader ever wants it.
+/// **The one reader on this platform takes that safely.**
+/// `bt_app::pointer_is_on_our_own_glass` asks whether the window under the
+/// pointer is its own and reads `None` as "yes, carry on here" — the
+/// conservative half it already documents for a window it cannot ask about. (The
+/// other reader the Windows arm has, `exposed_from_probe`, has no macOS caller:
+/// [`window_is_exposed`] asks the window server directly here instead of hit
+/// testing.) So what a foreign window in front of a Folio window costs today is
+/// that a torn-out tab dropped on it lands in the window it came from. Naming
+/// another application's window is M2-5's if a reader ever wants it.
 #[must_use]
 pub fn top_level_window_at(x: i32, y: i32) -> Option<NativeWindow> {
     let mtm = window_thread("asking which window is under a point").ok()?;
