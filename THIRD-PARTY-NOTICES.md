@@ -3519,7 +3519,7 @@ of what has to be said about a modified copy.
 
 | Licence | Packages |
 |---|---:|
-| MIT License | 469 |
+| MIT License | 471 |
 | Apache License 2.0 | 36 |
 | Unicode License v3 | 26 |
 | BSD 2-Clause "Simplified" License | 6 |
@@ -9478,7 +9478,7 @@ SOFTWARE.
 
 ### MIT License
 
-Used by 82 package(s):
+Used by 84 package(s):
 
 - **block2 0.5.1** — <https://github.com/madsmtm/objc2>
 - **block2 0.6.2** — <https://github.com/madsmtm/objc2>
@@ -9502,8 +9502,10 @@ Used by 82 package(s):
 - **objc-sys 0.3.5** — <https://github.com/madsmtm/objc2>
 - **objc2-app-kit 0.2.2** — <https://github.com/madsmtm/objc2>
 - **objc2-app-kit 0.3.2** — <https://github.com/madsmtm/objc2>
+- **objc2-av-foundation 0.3.2** — <https://github.com/madsmtm/objc2>
 - **objc2-core-foundation 0.3.2** — <https://github.com/madsmtm/objc2>
 - **objc2-core-graphics 0.3.2** — <https://github.com/madsmtm/objc2>
+- **objc2-core-media 0.3.2** — <https://github.com/madsmtm/objc2>
 - **objc2-core-text 0.3.2** — <https://github.com/madsmtm/objc2>
 - **objc2-encode 4.1.0** — <https://github.com/madsmtm/objc2>
 - **objc2-foundation 0.2.2** — <https://github.com/madsmtm/objc2>
@@ -11801,9 +11803,9 @@ the following restrictions:
 
 ## In the lock file, not in any resolved build
 
-`Cargo.lock` pins 566 packages from crates.io. 531 of them are in the
+`Cargo.lock` pins 571 packages from crates.io. 533 of them are in the
 dependency graph this workspace resolves, and are attributed above with their
-licence texts. The 35 below are optional or platform-specific entries
+licence texts. The 38 below are optional or platform-specific entries
 that no feature resolution here reaches: nothing links them, so nothing
 distributes them. They are listed with the terms they declare, so that the two
 counts a reader might compare are reconciled here rather than left as a gap.
@@ -11820,9 +11822,12 @@ counts a reader might compare are reconciled here rather than left as a gap.
 | `leb128fmt 0.1.0` | MIT OR Apache-2.0 |
 | `objc2-cloud-kit 0.2.2` | MIT |
 | `objc2-contacts 0.2.2` | MIT |
+| `objc2-core-audio 0.3.2` | Zlib OR Apache-2.0 OR MIT |
+| `objc2-core-audio-types 0.3.2` | Zlib OR Apache-2.0 OR MIT |
 | `objc2-core-data 0.2.2` | MIT |
 | `objc2-core-image 0.2.2` | MIT |
 | `objc2-core-location 0.2.2` | MIT |
+| `objc2-core-video 0.3.2` | Zlib OR Apache-2.0 OR MIT |
 | `objc2-io-surface 0.3.2` | Zlib OR Apache-2.0 OR MIT |
 | `objc2-link-presentation 0.2.2` | MIT |
 | `objc2-metal 0.2.2` | MIT |
