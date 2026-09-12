@@ -67,7 +67,11 @@ use std::path::Path;
 #[cfg(not(any(windows, target_os = "macos")))]
 use std::path::PathBuf;
 
-use crate::{ContextMenuShape, ContextMenuTree, NativeWindow, PageVisual, TaskbarProgress};
+use crate::{ContextMenuShape, ContextMenuTree, NativeWindow, TaskbarProgress};
+// The one type only the composition names, which on macOS is `macos_compose`'s
+// and not this module's (M4-1).
+#[cfg(not(target_os = "macos"))]
+use crate::PageVisual;
 // The two types only the window and screen group names, which on macOS is
 // `macos_impl`'s group and not this module's (M1-3).
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -111,6 +115,12 @@ fn not_here(what: &str) -> String {
 /// refuse**, because a page cannot be opened here at all — `WebHost::new`
 /// refuses first — so an `attach_web_visual` reaching this arm is a defect
 /// worth hearing about.
+///
+/// **Not compiled on macOS.** M4-1 wrote that arm — `macos_compose::Compositor`
+/// — and a second definition of the same name would be two `Compositor`s in one
+/// crate root. The same split M1-3 made for the window group and M2-1 for the
+/// watches.
+#[cfg(not(target_os = "macos"))]
 pub struct Compositor {
     /// The window this tree would hang on. Held rather than used: M1-4 needs it
     /// the moment there is a layer to put on the view, and a `Compositor` that
@@ -123,6 +133,7 @@ pub struct Compositor {
     window: NativeWindow,
 }
 
+#[cfg(not(target_os = "macos"))]
 impl Compositor {
     /// Build the tree. **Never fails**, which is the point: this call is step
     /// 13 of the sixteen-step startup path and it is one of the seven that
@@ -216,8 +227,10 @@ impl Compositor {
 /// On a third platform there is no title bar to take over, and every accessor
 /// answers what a frame that is not there would answer.
 pub struct CustomWindowFrame {
-    /// As [`Compositor::window`]: the drag door reaches the `NSWindow` through
-    /// it, and holding it keeps one shape.
+    /// As the composition's own window field: the drag door reaches the
+    /// `NSWindow` through it, and holding it keeps one shape. Not an intra-doc
+    /// link, because on macOS the `Compositor` that field belongs to is
+    /// `macos_compose`'s and this one is not compiled.
     #[cfg_attr(
         not(target_os = "macos"),
         expect(
@@ -1489,6 +1502,7 @@ mod refusal_tests {
     /// RED — **the startup path's constructors are harmless.**
     #[test]
     fn every_startup_constructor_builds_rather_than_refusing() {
+        #[cfg(not(target_os = "macos"))]
         assert!(Compositor::new(window()).is_ok(), "the visual tree");
         assert!(
             CustomWindowFrame::install(
@@ -1563,22 +1577,29 @@ mod refusal_tests {
             );
         }
 
-        let compositor = Compositor::new(window()).expect("built above");
-        let page = PageVisual { tab: 1, seat: 1 };
-        assert!(
-            compositor.attach_web_visual(page).is_err(),
-            "there is no visual tree to put a page in"
-        );
-        // And the frame's own calls are the no-ops a frame makes, not refusals:
-        // one line of stderr per present is not a diagnostic, it is a fault.
-        assert!(
-            compositor.commit().is_ok(),
-            "committing nothing costs nothing"
-        );
-        assert!(
-            compositor.set_window_size(800, 600).is_ok(),
-            "a resize tells the tree nothing and succeeds at it"
-        );
+        // The composition is only this module's where no backend has one:
+        // M4-1 wrote the macOS arm, and what holds the same doors there is
+        // `macos_compose`'s own suite and its `.app` proof.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let compositor = Compositor::new(window()).expect("built above");
+            let page = PageVisual { tab: 1, seat: 1 };
+            assert!(
+                compositor.attach_web_visual(page).is_err(),
+                "there is no visual tree to put a page in"
+            );
+            // And the frame's own calls are the no-ops a frame makes, not
+            // refusals: one line of stderr per present is not a diagnostic, it
+            // is a fault.
+            assert!(
+                compositor.commit().is_ok(),
+                "committing nothing costs nothing"
+            );
+            assert!(
+                compositor.set_window_size(800, 600).is_ok(),
+                "a resize tells the tree nothing and succeeds at it"
+            );
+        }
     }
 
     /// PIN — **the window doors refuse rather than pretending.**
