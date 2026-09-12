@@ -368,6 +368,7 @@ dependencies = [
  "objc2-core-media",
  "objc2-core-text",
  "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
  "objc2-uniform-type-identifiers 0.3.2",
  "webview2-com",
  "windows",

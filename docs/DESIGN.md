@@ -8971,6 +8971,229 @@ rather than to the descriptor, so the first draft of the behavioural case failed
 on the Mac with an empty file and both of its lines sitting in the harness's
 capture. A case written with the macros would have passed against a completely
 empty implementation of the door.
+### 13.24 M4-1: CALayer 合成——页面槽在 Metal 层下面,洞里露出来 (`crates/bt-platform/src/macos_compose.rs`、`crates/bt-platform/src/{macos_impl,portable_impl,lib}.rs`、`crates/bt-platform/tests/macos_compose.rs`)
+
+**① The tree is not a tree, and that is the whole shape.** On Windows a window
+presents through a DirectComposition tree: a target bound to the `HWND`, a root,
+the visual the swapchain hangs off, and one visual per hosted page underneath it.
+X-1 measured that macOS needs none of it. The arrangement is **two sibling
+subviews in one window** — a plain `NSView` for the page, added *below* the view
+wgpu hangs its `CAMetalLayer` on — and a transparent pixel in Folio's frame is
+then a pixel of the page. So `macos_compose::Compositor` owns a **page slot** per
+seat and nothing else: no target, no root, no ground surface, no second
+swapchain.
+
+`Compositor::new` reaches the surface view through `macos_impl`'s one door, which
+M1-4 already had and which this ticket split in two: `folios_surface_view` makes
+it (or finds it again, by class) and `surface_view` is that function with the
+pointer taken out of it. **One creator and two callers**, because the composition
+has to order every slot under the *same* object `bt-app`'s
+`window_surface_target` hands to wgpu, and a second walk of the hierarchy would
+be a second answer to "which view is Folio's" on the day the two disagreed.
+`gpu_visual_ptr` therefore costs nothing and cannot fail: the view was made in
+the constructor, which is why that signature has room for no refusal — exactly as
+the Windows one does not.
+
+**② `VisualLayer` travels and its `bool` does not.** The enum's two variants say
+which end of the stack is meant and they survive the crossing; the number
+`insert_above_with_null_reference` produces does not. It is `AddVisual`'s
+`insertAbove` and its value is a fact about DirectComposition's child list, which
+is painted front to back — so `TRUE` with a NULL reference asks for the
+*beginning*, which is the bottom. `NSView.subviews` runs the other way, back to
+front, and `addSubview:positioned:relativeTo:` takes an ordering mode rather than
+a boolean: with a nil reference `NSWindowBelow` is behind every sibling and
+`NSWindowAbove` is in front of every one. A reader who carried the `true` across
+would be spelling `NSWindowAbove`, whose value is `1` — Folio's page on top of
+Folio's frame, which is the failure the W0' probe photographed on Windows
+arriving on the other platform through a constant that happens to be the same
+shape. `ordering_for` is the one place the translation is made,
+`the_macos_arm_orders_by_the_enum_and_never_by_the_boolean` refuses the boolean
+anywhere in that file, and the slot goes to the bottom in exactly one call.
+
+**③ The floor is a layer's background colour, and the colour is un-multiplied on
+the way there.** §7.14's floor exists because a pane's hole is cut on the pane's
+clock and the page paints on the browser's; between the two, anything that is not
+a floor is the desktop. Windows spends two visuals and a 1×1 premultiplied
+surface on it. A slot is a view and a view has a layer, so here the floor *is*
+that layer's `backgroundColor` — which means the floor and the page cannot be
+placed apart, because they are one object.
+
+`set_page_ground_color` keeps its signature and its contract: four numbers,
+**premultiplied and sRGB-encoded**, because that is what the swapchain leaves in
+its own bytes and the two have to match to the byte. A `CGColor` is the opposite
+representation — its components are straight by definition and CoreAnimation
+multiplies them by the alpha itself when it composites — so `straight_srgb`
+divides them back out, once. A floor that passed the numbers through would land
+at `a²`: a 60 % ground reading at 36 %, the same silent translucency defect
+§7.1.6c-4b names and one nobody sees in a screenshot without already knowing the
+number. And the colour is made **in sRGB by name**, `CGColorCreateSRGB`, because
+X-1 measured that CoreAnimation blends on the encoded bytes rather than in linear
+light: the numbers `bt-render` computed have to arrive in the space they were
+computed in, and a generic or device space would be a second encoding of the same
+colour. That is also where a reader looking for "where is the alpha of an
+anti-aliased edge judged" should start — the edge arithmetic itself is M2-5's.
+
+**④ The skirt keeps its two clocks and places nothing.** On Windows the two bands
+are the part of the window the *swapchain* does not cover: a swapchain visual is
+exactly the size of its buffer, a resize grows the window several milliseconds
+before the buffer follows, and a tree bound `topmost = true` over a
+per-pixel-alpha `HWND` shows the desktop in the difference. A `CAMetalLayer` is
+not sized to its drawable — `raw-window-metal` keeps it on the **view**, which
+autoresizes with the window — so there is no moment at which the layer is smaller
+than the window, and CoreAnimation stretches the last drawable across it instead.
+Measured twice already: X-1 resized 1800×1200 → 1360×1500 with every sample
+unchanged, and M1-4 dragged a real window's corner with the frame unchanged
+(§13.14 ⑤). A band placed over a region that *is* being painted would be the
+doubled translucency §7.1.6c-4b forbids, arriving on the platform that did not
+have the defect.
+
+So `set_window_size`, `set_covered_size` and `skirt_covers_anything` are the same
+three sentences as on Windows, the lag in the middle one included, and what they
+drive is nothing. `skirt_covers_anything` still buys the present that settles a
+resize, which is the half of its contract that is about the caller's loop rather
+than about a band.
+
+**⑤ The handle travels the other way, so there is one door Windows has no twin
+for.** WebView2 composes into a visual **the host makes**: `windows_impl` builds
+the page's visual and `Compositor::web_visual` hands it to
+`ICoreWebView2CompositionController` as its root visual target. WebKit makes its
+**own** view; a `WKWebView` is an `NSView` and the only thing left to decide is
+where in the hierarchy it stands. `attach_page_view(page, NativeWindow)` is that
+decision and it is the one public name the two arms do not share —
+`the_two_compositors_answer_the_same_doors` holds the difference at exactly one,
+because `bt-app` names `Compositor` in thirty-odd places and none of them is
+inside a platform gate. The handle is a `NativeWindow` for the reason that type
+exists: on this platform it already *is* an `NSView` pointer, and a second opaque
+wrapper for the same pointer would be a second thing a caller can get wrong.
+
+`attach_web_visual` keeps the portable signature and mints the slot; the page's
+own view is a separate call because the two arrive on two clocks and neither is
+allowed to decide whether the other is possible. That is the same split
+`ensure_page_ground` made on Windows and for the same measured reason.
+
+**⑥ A slot is a place for a page to stand and never a place a click lands.** The
+slot lies over Folio's surface in the pane's rectangle and AppKit routes a press
+to the frontmost view whose `hitTest:` claims the point, so a slot left alone
+would swallow every click in a pane whose page had not loaded — a defect no
+picture of the pixels can see. `FolioPageSlotView` answers **its subviews'
+answer, and nil for its own**: a point inside the page goes to the page, and a
+point the page does not want falls through to winit's view, which is the view
+this program has always answered presses from. It is `FolioSurfaceView`'s rule
+one level down (§13.14 ③). What is deliberately *not* settled here is the rest of
+the routing — a press over Folio's own chrome where that chrome overlaps a page
+is M4-2's, and the slot's frame being the pane's rectangle is the only part of it
+M4-1 owns.
+
+**⑦ Nothing animates, and that is a transaction rather than a habit.** Every
+animatable property of a layer-backed view has a default CoreAnimation *action*:
+a pane whose rectangle moved would slide there over a quarter of a second, on
+every frame that moved one, while the picture Folio drew for it was already in
+place. `setDisableActions:` is the switch and a `CATransaction` is its only
+scope, so the two are written together in `without_animation` and nowhere else;
+`nothing_in_the_macos_composition_animates` reads the file and refuses a mutation
+outside one.
+
+`commit` keeps its door and has an empty body, which is a different thing from
+having no door. DirectComposition's tree is only on the glass once somebody calls
+`Commit` and wgpu's dx12 backend deliberately does not, so on Windows that call
+is the whole of whether the picture ever moves again. CoreAnimation has no such
+handle: every change made on the main thread joins the implicit transaction the
+run loop opens for that turn, and every change this type makes is additionally
+inside an explicit one that is committed in the call that opened it.
+
+**⑧ A rebuild cannot reach a slot, and that is structural.** A dropped
+`wgpu::Surface` leaves its `CAMetalLayer` on the view, so `clear_surface_layers`
+empties that view's layer before every reconstruction — and *empties* is the
+word, `setSublayers:nil` takes everything. If a slot lived under that layer a
+device loss would take every open page out of the window and nothing would put it
+back. It cannot: a slot is a **subview of the content view**, one level up and on
+the other side of the hierarchy from the surface view's own layer. Nothing had to
+be added to pin it and nothing has to be remembered; what a pin can do is refuse
+the arrangement that would break it, which is
+`a_surface_rebuild_cannot_reach_a_page_slot`, and what a measurement can do is
+clear a real window and look.
+
+**⑨ The coordinate rule, and why it is a question rather than an assumption.**
+Everything `bt-layout` produces is in physical pixels from the top-left of the
+client area; AppKit's default origin is the bottom-left. winit's content view
+answers `isFlipped` **true** — its own comment says "winit uses the upper-left
+corner as the origin" — so for the window this product opens the conversion is a
+division by the backing scale and nothing else. `in_content` reads `isFlipped`
+anyway, because a rule about *who made the window* is not a rule about what the
+window is, and the flipped branch is what any content view this crate is handed
+from somewhere else would need. Both branches are measured: the capture proof
+runs on a flipped content view, which is the one `bt-app` has, and
+`the_unflipped_branch_of_the_placement_is_a_flip` places a pane on AppKit's own
+`NSView` and checks the frame that came out.
+
+**⑩ Measured on the Mac** (Apple M4, macOS 26.6.2, a borderless 600×400 point
+window on the display whose backing scale is 2, read back with
+`CGWindowListCreateImage` over the process's own window —
+`crates/bt-platform/tests/macos_compose.rs`, five captures). The capture came
+back **1200×800** for a 600×400 point window, so every number below is a
+physical pixel and the readback is pixel for pixel with the glass.
+
+The window was asked for four colours: its own ground `rgb(60,60,60)`, a frame
+of `rgb(0,0,255)`, a floor of `rgb(255,255,0)` and a page of `rgb(0,255,0)`. The
+window's backing store carries the display's profile, so what arrives is
+`(53,53,53)`, `(52,0,250)`, `(249,255,47)` and `(33,252,36)` — and the page's
+`#00ff00` arriving as **`(33,252,36)`** is X-1's own number, to the byte, from a
+`CALayer` this time rather than from a `WKWebView`.
+
+| Sample, in physical pixels | no page yet | page attached | resized | rebuilt |
+|---|---|---|---|---|
+| frame, left band | 52,0,250 | 52,0,250 | 52,0,250 | 52,0,250 |
+| frame, right band | 52,0,250 | 52,0,250 | 52,0,250 | 52,0,250 |
+| **the gap, over the pane** | **249,255,47** | **33,252,36** | **33,252,36** | **33,252,36** |
+| the gap, above the pane | 53,53,53 | 53,53,53 | 53,53,53 | 53,53,53 |
+| the gap, below the pane | 53,53,53 | 53,53,53 | 53,53,53 | 53,53,53 |
+| half alpha, over the pane | 151,128,149 | 42,126,143 | 42,126,143 | 42,126,143 |
+| half alpha, over the window | 52,27,152 | 52,27,152 | 52,27,152 | 52,27,152 |
+
+In words: a field of frame colour with a gap cut in it, the pane showing through
+the gap and **only where the pane stands** — the two samples above and below it
+are the window's own ground and not the pane's — and the floor standing in the
+pane's rectangle for as long as the page's own view has not arrived.
+
+**The half-alpha panel is premultiplied arithmetic on encoded sRGB bytes**, and
+the prediction is made from this run's own endpoints so that the display's
+profile cancels: `0.5·(52,0,250) + 0.5·(33,252,36) = (43,126,143)` against a
+measured `(42,126,143)`, worst channel **1**; over the window's ground,
+`0.5·(52,0,250) + 0.5·(53,53,53) = (53,27,152)` against `(52,27,152)`, worst
+channel **1**. Straight alpha would have answered the frame's colour
+unattenuated — X-1's rectangle A — which is nowhere near either number.
+
+**The resize**: 600×400 → 700×500 points, the pane re-placed at
+`x 200..800, y 260..760` physical, capture back at **1400×1000**, every sample
+unchanged.
+
+**The rebuild**: `clear_surface_layers` answered **`cleared=1`** — one stale
+layer, the number the product's own log line carries — and the capture taken
+with nothing over the surface view read the pane's `(33,252,36)` where the pane
+stands. The slot was the **same object** afterwards, not a new one, and the
+frame rebuilt on the emptied view read identically to the frame before it, every
+sample. Taking the page out of the window left the content view holding one
+subview: Folio's own.
+
+**The other branch**, without a capture: a pane at `(300,120)` physical, 600×440
+physical, on an `NSView` with AppKit's own bottom-left origin at backing scale 2,
+landed at origin `(150,120)` points, size `300×220` — which is
+`400 − 60 − 220 = 120`, the flip, exactly.
+
+**⑪ What the proof is not.** The frame the capture composites over the slot is a
+`CALayer` and not wgpu's. `bt-platform` has no wgpu dependency and must not gain
+one — a dev-dependency on the renderer would put three hundred crates into
+`cargo check -p bt-platform --target aarch64-apple-darwin --all-targets`, a gate
+every later ticket would pay for — so the stand-in is a layer added **exactly
+where wgpu adds its `CAMetalLayer`**, as a sublayer of Folio's own surface view's
+layer, carrying opaque bands with a gap between them and one half-alpha panel
+across the gap. What that measures is CoreAnimation's composition of a non-opaque
+layer on that view over the slot beneath it, which is M4-1's claim. What it does
+not re-measure is that wgpu's layer is such a layer: X-1 measured that with real
+wgpu on this machine, and M1-4 measured it again in the product (§13.14 ④).
+
+*(本节英文,待中文文案改写。)*
+
 ### 13.25 M4-4: 视频首帧走 AVAssetImageGenerator,像素布局和 Windows 臂一个字不差(`crates/bt-platform/src/macos_video.rs`(新)、`crates/bt-platform/src/{video_portable,lib}.rs`、`crates/bt-platform/tests/video_first_frame.rs`(新)、`crates/bt-platform/Cargo.toml`)
 
 **① The ticket is not "decode a video", it is "hand over the same bytes".**
@@ -9314,5 +9537,3 @@ certificate store, the proxy configuration and the ATS policy are all only
 exercised by a real request. The cost is stated rather than hidden: `cargo test
 -p bt-platform` on a macOS machine with no network has three red cases, and they
 are red for the reason a reader would guess.
-
-*(本节英文,待中文文案改写。)*

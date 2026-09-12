@@ -896,13 +896,35 @@ define_class!(
 /// `window_surface_target` builds the target out of it and hands it straight to
 /// `bt_render::create_surface` — which is the same contract the visual has.
 pub fn surface_view(window: NativeWindow) -> Result<*mut c_void, String> {
-    let what = "the view Folio's frames are drawn into";
+    let (_mtm, _content, view) =
+        folios_surface_view(window, "the view Folio's frames are drawn into")?;
+    Ok(NonNull::from(&*view).as_ptr().cast())
+}
+
+/// **The one door that makes Folio's own view**, as the objects rather than as
+/// a pointer (M1-4, and M4-1's second caller).
+///
+/// [`surface_view`] is this function with the pointer taken out of it, and
+/// `macos_compose::Compositor::new` is the other caller: the page slot has to be
+/// added to the same content view and ordered *under* the same surface view, so
+/// the compositor needs both objects and not a number. Splitting it this way
+/// rather than letting the second caller walk the hierarchy again is what keeps
+/// "Folio's own view" one question with one answer — both doors reach
+/// [`folios_own_view`], and neither can decide it differently on a bad day.
+///
+/// The three values are the window's thread, the content view and the surface
+/// view, in that order, because a caller that has the surface view almost always
+/// needs the other two in the same breath.
+pub(crate) fn folios_surface_view(
+    window: NativeWindow,
+    what: &str,
+) -> Result<(MainThreadMarker, Retained<NSView>, Retained<NSView>), String> {
     let (mtm, ns_window) = window_for(window, what)?;
     let content = ns_window
         .contentView()
         .ok_or_else(|| format!("{what}: this window has no content view"))?;
     if let Some(existing) = folios_own_view(&content) {
-        return Ok(NonNull::from(&*existing).as_ptr().cast());
+        return Ok((mtm, content, existing));
     }
     let view: Retained<SurfaceView> =
         unsafe { msg_send![SurfaceView::alloc(mtm), initWithFrame: content.bounds()] };
@@ -913,7 +935,8 @@ pub fn surface_view(window: NativeWindow) -> Result<*mut c_void, String> {
     // for as long as the window is — which is longer than the surface, because
     // the surface is dropped by the renderer the window owns.
     content.addSubview(&view);
-    Ok(NonNull::from(&*view).as_ptr().cast())
+    let view: Retained<NSView> = Retained::into_super(view);
+    Ok((mtm, content, view))
 }
 
 /// Folio's own surface view under a content view, if it has been made yet.
