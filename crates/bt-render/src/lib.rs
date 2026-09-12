@@ -3389,7 +3389,7 @@ pub struct GpuContext {
 
 /// What a window's swapchain is built upon.
 ///
-/// # Two doors, and the alpha they are offered is the difference
+/// # Three doors, and the alpha they are offered is the difference
 ///
 /// wgpu's dx12 backend answers a window-handle target with exactly one
 /// composite alpha mode — `vec![Opaque]`,
@@ -3398,6 +3398,19 @@ pub struct GpuContext {
 /// That single line is why this enum exists: a surface that will one day have a
 /// hole cut in it for a web preview to show through has to be `PreMultiplied`,
 /// and no amount of configuring an HWND swapchain will make it so.
+///
+/// **The third door is the Metal one, and it exists because the second
+/// sentence's word is not available on that backend** (M1-4). wgpu-hal 30's
+/// Metal backend advertises `[Opaque, PostMultiplied]` and nothing else
+/// (`wgpu-hal-30.0.0/src/metal/adapter.rs:468`), so the mode a composition
+/// visual asks for cannot be asked for there at all. X-1 measured what the two
+/// it does offer actually mean: `PostMultiplied` only sets the layer
+/// non-opaque (`metal/surface.rs:231`), and CoreAnimation then composites the
+/// pixels **premultiplied** whatever the mode is called
+/// (`docs/plans/port/probe-x1-metal-alpha-2026-09-12.md`). So this door is not
+/// a third spelling of an existing contract: it is the one place where the
+/// mode declared to wgpu and the representation Folio writes are different
+/// words, and [`alpha_representation`] is where that is said once.
 ///
 /// Both arms produce the same picture today. Nothing above this layer knows
 /// which door it came through except [`SurfaceAlphaReport`], which records the
@@ -3428,14 +3441,48 @@ pub enum WindowTarget {
     /// would own that layer rather than here.
     #[cfg(windows)]
     CompositionVisual(*mut std::ffi::c_void),
+    /// **A `CAMetalLayer` on a view Folio owns**, named by that view's
+    /// `NSView*` (M1-4).
+    ///
+    /// The layer is not passed in and not made here: wgpu makes it, as a
+    /// sublayer of the view's own layer
+    /// (`raw-window-metal-1.1.0/src/lib.rs`, "Reasoning behind creating a
+    /// sublayer"), and tracks the view's bounds and backing scale with its own
+    /// observers. What this variant names is therefore the **view**, and the
+    /// view is the thing that is owned: `bt_platform::surface_view` puts a
+    /// plain `NSView` of Folio's own under the window's content view, and
+    /// `bt_platform::clear_surface_layers` empties that view's layer before
+    /// any surface is built on it.
+    ///
+    /// **Why a view of our own rather than winit's.** Two reasons, and both are
+    /// X-1's measurements. A `WKWebView` has to be able to sit *beneath* the
+    /// frame for the web preview's hole to show a page (M4-1, M4-2), and on
+    /// macOS that is two sibling subviews in one window rather than a visual
+    /// tree — later subviews are in front. And a dropped `wgpu::Surface` does
+    /// **not** take its `CAMetalLayer` off the view it was attached to, so the
+    /// program that rebuilds a surface has to be the program that owns the
+    /// view it rebuilds on, or the second layer stacks on the first and the
+    /// frame composites twice.
+    ///
+    /// macOS only, for the reason [`Self::CompositionVisual`] is Windows only:
+    /// there is no `NSView` to name anywhere else.
+    #[cfg(target_os = "macos")]
+    MetalLayerOnOwnedView(*mut std::ffi::c_void),
 }
 
-/// Which of [`WindowTarget`]'s two doors a window came through, kept after the
-/// target itself has been consumed into a surface.
+/// Which of [`WindowTarget`]'s three doors a window came through, kept after
+/// the target itself has been consumed into a surface.
+///
+/// **Not gated by platform, unlike the variants it names.** The alpha policy
+/// below is a decision, and a decision that only compiles on the machine it is
+/// about is a decision no gate on any other machine can hold: every arm's
+/// required mode and representation is therefore checkable from a Windows
+/// workstation and from CI's Linux runner as well as from the Mac.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowTargetKind {
     Hwnd,
     CompositionVisual,
+    MetalLayerOnOwnedView,
 }
 
 impl WindowTarget {
@@ -3445,6 +3492,8 @@ impl WindowTarget {
             Self::Hwnd(_) => WindowTargetKind::Hwnd,
             #[cfg(windows)]
             Self::CompositionVisual(_) => WindowTargetKind::CompositionVisual,
+            #[cfg(target_os = "macos")]
+            Self::MetalLayerOnOwnedView(_) => WindowTargetKind::MetalLayerOnOwnedView,
         }
     }
 }
@@ -3470,9 +3519,73 @@ impl SurfaceAlphaReport {
     /// page — the same boundary `Theme` keeps against `ThemeModeV1`. It is also
     /// the one place the equivalence "premultiplied ⇒ the ground may be
     /// translucent" is written down.
+    ///
+    /// **It reads the door and not the mode** (M1-4). Until the Metal arm the
+    /// two were the same question: the mode a target requires was also the name
+    /// of the representation Folio writes into it. On Metal they part —
+    /// `PostMultiplied` is the only non-opaque mode offered there and the
+    /// pixels under it are read premultiplied all the same — so the question a
+    /// settings row is really asking is *"does this surface composite the alpha
+    /// I write"*, which is [`alpha_representation`]'s question and not
+    /// `chosen`'s. The Windows answers are unchanged in both arms: `Hwnd` is
+    /// opaque, `CompositionVisual` is premultiplied.
     #[must_use]
     pub fn is_premultiplied(&self) -> bool {
-        self.chosen == wgpu::CompositeAlphaMode::PreMultiplied
+        alpha_representation(self.target) == SurfaceAlphaRepresentation::Premultiplied
+    }
+}
+
+/// **What Folio's own pixels mean in the surface it writes them to**, which is
+/// not always what the wgpu mode is called (M1-4, X-1).
+///
+/// A separate word from [`wgpu::CompositeAlphaMode`] because X-1 measured them
+/// coming apart: `PostMultiplied` on Metal names a non-opaque layer, not a
+/// compositing rule, and the compositor behind it reads premultiplied pixels.
+/// Keeping one enum for both would make "what the backend was told" and "what
+/// the shader wrote" the same field, and the day they differ is the day that
+/// field is wrong about one of them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SurfaceAlphaRepresentation {
+    /// Every pixel is fully covering. The ground's alpha is 1 and nothing
+    /// behind the window is ever part of the picture.
+    Opaque,
+    /// Colour channels already carry their own alpha. This is what
+    /// `ground::premultiplied_clear` produces for the clear colour and what
+    /// `premultiplied_by_ground` produces for every rectangle instance —
+    /// **the CPU side, on values, with no shader in it** — so a door that
+    /// writes premultiplied pixels is a door that changes no pipeline.
+    Premultiplied,
+}
+
+/// How Folio writes alpha into a surface that came through each door.
+///
+/// **The Metal arm goes through exactly the path `CompositionVisual` goes
+/// through, and that is the claim this function makes.** The premultiply in
+/// this crate happens in two places, both on the CPU and both before anything
+/// reaches a pipeline: [`ground::premultiplied_clear`], which is the clear
+/// colour a frame begins with, and [`premultiplied_by_ground`], which every
+/// rectangle instance whose colour has to sit flush with that ground passes
+/// through ([`premultiplied_surface_pixel_rect`] is that with a rectangle
+/// around it). Neither reads the target. So there is no shader change here and
+/// there is nothing for one to change: the two arms differ in the mode declared
+/// to wgpu and in nothing else.
+///
+/// **The caveat X-1 leaves behind, recorded rather than acted on here.** Both
+/// premultiplies above are done **in linear light** and then encoded by the
+/// sRGB surface format, which is what DirectComposition blends in. X-1
+/// measured CoreAnimation blending the **encoded bytes** instead, so a
+/// partially transparent pixel composites on macOS with a per-channel
+/// difference from the same pixel on Windows. That is a question about how an
+/// anti-aliased edge looks, it is measured where edges are judged — M2-5,
+/// glyph output on the Metal path at scale 2 — and a change made here before
+/// that measurement would be a correction nobody has looked at.
+#[must_use]
+fn alpha_representation(target: WindowTargetKind) -> SurfaceAlphaRepresentation {
+    match target {
+        WindowTargetKind::Hwnd => SurfaceAlphaRepresentation::Opaque,
+        WindowTargetKind::CompositionVisual | WindowTargetKind::MetalLayerOnOwnedView => {
+            SurfaceAlphaRepresentation::Premultiplied
+        }
     }
 }
 
@@ -3484,11 +3597,21 @@ impl SurfaceAlphaReport {
 /// only thing dx12 offers it; a visual target is `PreMultiplied` because that
 /// is the whole reason for going through a visual at all, and configuring one
 /// `Opaque` would build the ground for the web slice and then pave over it.
+///
+/// **A Metal target is `PostMultiplied`, and that is not this function
+/// changing its mind about premultiplied pixels** ([`alpha_representation`]
+/// still says `Premultiplied` for it). It is the only non-opaque mode
+/// wgpu-hal 30's Metal backend offers, all it does is `setOpaque(false)` on the
+/// layer, and the compositor behind it reads the pixels premultiplied — so the
+/// mode that would be refused here for a composition visual is the mode that is
+/// *required* here for a `CAMetalLayer`, and asking for `PreMultiplied` on
+/// Metal would refuse every window this program can open on that platform.
 #[must_use]
 fn required_alpha_mode(target: WindowTargetKind) -> wgpu::CompositeAlphaMode {
     match target {
         WindowTargetKind::Hwnd => wgpu::CompositeAlphaMode::Opaque,
         WindowTargetKind::CompositionVisual => wgpu::CompositeAlphaMode::PreMultiplied,
+        WindowTargetKind::MetalLayerOnOwnedView => wgpu::CompositeAlphaMode::PostMultiplied,
     }
 }
 
@@ -3514,7 +3637,7 @@ fn choose_alpha_mode(
     }
 }
 
-/// Build the surface one of [`WindowTarget`]'s two doors names.
+/// Build the surface one of [`WindowTarget`]'s three doors names.
 ///
 /// # The one `unsafe` in this crate, and why it is here rather than in `bt-platform`
 ///
@@ -3526,13 +3649,17 @@ fn choose_alpha_mode(
 /// entire point is being small enough to audit. The COM half of the arrangement
 /// *is* in `bt-platform`: `Compositor` makes the visual, owns it and commits it.
 /// What crosses the boundary is a raw pointer, and this is the one line that
-/// dereferences it.
+/// dereferences it. **M1-4 adds a second platform to the same arrangement and
+/// no second exception**: the AppKit half is in `bt-platform` too —
+/// `surface_view` makes the view, the window's own hierarchy owns it, and
+/// `clear_surface_layers` empties it — and what crosses is again a raw pointer
+/// this function hands straight to wgpu.
 ///
 /// # SAFETY
 ///
-/// wgpu asks for a live `IDCompositionVisual` at the moment of the call and
-/// nothing more: it takes its own reference on the visual and holds it for the
-/// surface's whole life
+/// **The composition visual.** wgpu asks for a live `IDCompositionVisual` at
+/// the moment of the call and nothing more: it takes its own reference on the
+/// visual and holds it for the surface's whole life
 /// (`wgpu-hal-30.0.0/src/dx12/mod.rs:551`, `from_raw_borrowed(..).to_owned()`).
 /// The pointer arrives from `bt_platform::Compositor::gpu_visual_ptr`, which
 /// returns the raw pointer of a visual that `Compositor` owns; the caller holds
@@ -3540,6 +3667,22 @@ fn choose_alpha_mode(
 /// not reachable from any caller in this program, and no caller outside it can
 /// construct a `WindowTarget::CompositionVisual` without reading the safety
 /// note on the variant.
+///
+/// **The Metal view.** wgpu's Metal backend takes the `AppKit` window handle,
+/// makes the view layer-backed and creates (or finds) its `CAMetalLayer`
+/// sublayer inside the call, retaining that layer for the surface's whole life
+/// (`wgpu-hal-30.0.0/src/metal/mod.rs:160` into
+/// `raw_window_metal::Layer::from_ns_view`) — so here too the pointer has to be
+/// a live object at the instant of the call and no longer. It arrives from
+/// `bt_platform::surface_view`, which returns a view it has just added to the
+/// window's content view; the window outlives the surface, because the surface
+/// is dropped by the `WindowRenderer` the window owns. The display handle is
+/// stated rather than left to the instance's: the instance is built
+/// `new_without_display_handle`, and the Metal backend matches on the *pair*
+/// and answers "not a Metal-compatible handle" for anything but `AppKit` beside
+/// `AppKit`. The call is also main-thread-only — `from_ns_view` asserts it —
+/// and every caller of this function is on the window thread, which is the same
+/// thread `bt_platform::surface_view` proved it was on to make the view at all.
 #[allow(unsafe_code)]
 fn create_surface(
     instance: &wgpu::Instance,
@@ -3551,6 +3694,24 @@ fn create_surface(
         WindowTarget::CompositionVisual(visual) => unsafe {
             instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CompositionVisual(visual))
         },
+        #[cfg(target_os = "macos")]
+        WindowTarget::MetalLayerOnOwnedView(view) => {
+            let Some(view) = std::ptr::NonNull::new(view) else {
+                return Err(RenderError::Wgpu(
+                    "the view Folio draws into is a null pointer".to_owned(),
+                ));
+            };
+            unsafe {
+                instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                    raw_display_handle: Some(wgpu::rwh::RawDisplayHandle::AppKit(
+                        wgpu::rwh::AppKitDisplayHandle::new(),
+                    )),
+                    raw_window_handle: wgpu::rwh::RawWindowHandle::AppKit(
+                        wgpu::rwh::AppKitWindowHandle::new(view),
+                    ),
+                })
+            }
+        }
     }
     .map_err(|error| RenderError::Wgpu(error.to_string()))
 }
@@ -4813,8 +4974,8 @@ impl DeviceResources {
 /// across a session would be this crate quietly holding a reference it has no
 /// way to know is still live.
 pub enum RebuiltWindow<'a> {
-    /// A window on screen: its surface is built again from the visual or HWND
-    /// named here.
+    /// A window on screen: its surface is built again from the visual, the
+    /// view or the HWND named here.
     OnScreen(&'a mut WindowRenderer, WindowTarget),
     /// A window drawing into a texture — the replay probe's shape. It needs no
     /// target: its size and format are already on its own configuration, and the
@@ -23370,7 +23531,138 @@ mod tests {
                     wgpu::CompositeAlphaMode::PostMultiplied,
                     wgpu::CompositeAlphaMode::PreMultiplied,
                 ],
+                WindowTargetKind::MetalLayerOnOwnedView => unreachable!(
+                    "dx12 never answers a Metal target; that backend's list is `metal_offers`"
+                ),
             }
+        }
+
+        /// The one list, verbatim from `wgpu-hal-30.0.0/src/metal/adapter.rs:468`
+        /// and measured coming back out of a real `Apple M4` adapter by X-1
+        /// (`docs/plans/port/probe-x1-metal-alpha-2026-09-12.md`).
+        ///
+        /// **`PreMultiplied` is not in it, and that is the whole ticket.** Every
+        /// number here is two words long on purpose: a reader who thinks the
+        /// Metal arm could have asked for what the visual arm asks for is
+        /// looking at the list that says otherwise.
+        fn metal_offers() -> Vec<wgpu::CompositeAlphaMode> {
+            vec![
+                wgpu::CompositeAlphaMode::Opaque,
+                wgpu::CompositeAlphaMode::PostMultiplied,
+            ]
+        }
+
+        /// RED (M1-4, on X-1's measurements) — **the Metal arm declares
+        /// `PostMultiplied` to wgpu and writes premultiplied pixels**, and those
+        /// are two different statements about one surface.
+        ///
+        /// X-1 put a straight-alpha edge and a hand-premultiplied edge in one
+        /// frame on a `PostMultiplied` `CAMetalLayer` and read the composited
+        /// window back: the straight one came back as premultiplied arithmetic
+        /// over the backdrop (too bright by the backdrop's own contribution) and
+        /// the premultiplied one came back correct to the byte. So the mode is
+        /// what the backend is *told* — it is all `setOpaque(false)` means there
+        /// — and the representation is what the shader's inputs already are.
+        ///
+        /// MUTATIONS:
+        /// ① ask for `PreMultiplied` on the Metal arm and `choose_alpha_mode`
+        ///    refuses every window macOS can open, against the real offered
+        ///    list;
+        /// ② answer `Opaque` for it in `alpha_representation` and a translucent
+        ///    ground is silently unavailable on that platform while the surface
+        ///    that could carry one is configured non-opaque anyway;
+        /// ③ let `is_premultiplied` go back to reading `chosen` and the Metal
+        ///    arm reports a surface that cannot carry a translucent ground while
+        ///    writing pixels for one.
+        #[test]
+        fn the_metal_arm_declares_postmultiplied_and_writes_premultiplied() {
+            assert_eq!(
+                choose_alpha_mode(WindowTargetKind::MetalLayerOnOwnedView, &metal_offers())
+                    .expect("Metal offers PostMultiplied to a layer target"),
+                wgpu::CompositeAlphaMode::PostMultiplied,
+                "`PreMultiplied` is not on Metal's list, so the arm that asked for it \
+                 would refuse every window this program can open there"
+            );
+            assert_eq!(
+                alpha_representation(WindowTargetKind::MetalLayerOnOwnedView),
+                SurfaceAlphaRepresentation::Premultiplied,
+                "the pixels are the same pixels DirectComposition is given"
+            );
+            // And the two words are read by the two readers that care: the
+            // surface configuration takes the mode, the settings row takes the
+            // representation.
+            let report = SurfaceAlphaReport {
+                target: WindowTargetKind::MetalLayerOnOwnedView,
+                offered: metal_offers(),
+                chosen: wgpu::CompositeAlphaMode::PostMultiplied,
+            };
+            assert!(
+                report.is_premultiplied(),
+                "a Metal surface can carry a translucent ground, whatever its mode is called"
+            );
+        }
+
+        /// RED (M1-4) — **the two Windows arms answer exactly what they
+        /// answered before the third one existed.**
+        ///
+        /// The Metal arm arrives by adding a variant to an enum two pure
+        /// functions match on, and the failure mode of that edit is a
+        /// rearrangement that moves one of the other two: an `Hwnd` surface
+        /// quietly non-opaque, or a composition visual that stops asking for
+        /// the one mode it exists to ask for. Both are invisible in a
+        /// screenshot — §7.1.6c-4b's slider would simply stop doing anything —
+        /// so the guard is arithmetic and not a picture.
+        ///
+        /// MUTATIONS: give `Hwnd` any non-opaque mode, or fold the
+        /// `CompositionVisual` arm into the Metal one because both write
+        /// premultiplied pixels, and this goes red on the mode rather than on
+        /// the representation.
+        #[test]
+        fn the_windows_arms_are_unchanged() {
+            assert_eq!(
+                required_alpha_mode(WindowTargetKind::Hwnd),
+                wgpu::CompositeAlphaMode::Opaque
+            );
+            assert_eq!(
+                alpha_representation(WindowTargetKind::Hwnd),
+                SurfaceAlphaRepresentation::Opaque
+            );
+            assert_eq!(
+                required_alpha_mode(WindowTargetKind::CompositionVisual),
+                wgpu::CompositeAlphaMode::PreMultiplied
+            );
+            assert_eq!(
+                alpha_representation(WindowTargetKind::CompositionVisual),
+                SurfaceAlphaRepresentation::Premultiplied
+            );
+            // Against the lists the backends really answer, so the claim is
+            // about what gets configured and not only about what is asked for.
+            assert_eq!(
+                choose_alpha_mode(WindowTargetKind::Hwnd, &dx12_offers(WindowTargetKind::Hwnd))
+                    .expect("dx12 offers Opaque to a window-handle target"),
+                wgpu::CompositeAlphaMode::Opaque
+            );
+            assert_eq!(
+                choose_alpha_mode(
+                    WindowTargetKind::CompositionVisual,
+                    &dx12_offers(WindowTargetKind::CompositionVisual)
+                )
+                .expect("dx12 offers PreMultiplied to a visual target"),
+                wgpu::CompositeAlphaMode::PreMultiplied
+            );
+            // An HWND surface on Metal's list is still `Opaque`: the portable
+            // door did not become the Metal door, it is still there beside it.
+            assert_eq!(
+                choose_alpha_mode(WindowTargetKind::Hwnd, &metal_offers())
+                    .expect("Metal offers Opaque to a window-handle target too"),
+                wgpu::CompositeAlphaMode::Opaque
+            );
+            // And the mode the visual arm requires is the one Metal does not
+            // have, which is why there is a third arm at all.
+            assert!(matches!(
+                choose_alpha_mode(WindowTargetKind::CompositionVisual, &metal_offers()),
+                Err(RenderError::AlphaModeUnavailable { .. })
+            ));
         }
 
         /// PIN (WebView2 spike, Q1) — **a visual target is `PreMultiplied` and
@@ -23491,6 +23783,31 @@ mod tests {
                 wgpu::CompositeAlphaMode::Opaque
             );
             assert_ne!(WindowTargetKind::Hwnd, WindowTargetKind::CompositionVisual);
+        }
+
+        /// The Metal door, named and told apart, where it is the one that
+        /// exists (M1-4).
+        ///
+        /// The macOS twin of [`both_window_targets_can_be_named_and_told_apart`]
+        /// and the same compile-shaped claim: the variant is reachable, it
+        /// carries a view pointer, and `kind` reads its discriminant without
+        /// touching what that pointer names — which is what lets this run on a
+        /// machine with no window at all.
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn the_metal_door_is_named_by_a_view() {
+            // Never handed to wgpu: `create_surface` refuses a null view before
+            // it reaches the backend, and nothing here goes that far anyway.
+            let metal = WindowTarget::MetalLayerOnOwnedView(std::ptr::null_mut());
+            assert_eq!(metal.kind(), WindowTargetKind::MetalLayerOnOwnedView);
+            assert_eq!(
+                required_alpha_mode(metal.kind()),
+                wgpu::CompositeAlphaMode::PostMultiplied
+            );
+            assert_ne!(
+                WindowTargetKind::Hwnd,
+                WindowTargetKind::MetalLayerOnOwnedView
+            );
         }
 
         /// An offscreen window has no alpha mode to report, and says so rather

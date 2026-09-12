@@ -8163,3 +8163,53 @@ spike 量到的是「这个 workspace 今天已经有约 90% 能在 macOS 上编
 **⑥ `WebChord::command` 现在是从行上读出来的,而填它的那一侧属于 M4-2。** 转换只有一行:行的和弦已经是本次构建跑的那个方言(`Shortcuts::defaults_for`),所以第四个修饰键和上面三个一样直接读。Windows 上那一列除了被上游滤掉的 quake 行之外没有一行戴 SUPER,所以这一行**字面上就是它替换掉的那个 `false`**。宿主那侧没有 accelerator 回调可填它,也不需要:`WKWebView` 是响应链里的一个 `NSView`,窗口在宿主 view 的 `performKeyEquivalent:` 上把和弦拿回来——**每一个 Command 和弦,且仅此**——W0′ 的隐患在那边是一条保证。
 
 **⑦ 设置行的形状,和它为什么在 General。** `Option key sends Alt`,开关,默认关(§8 Q9 的裁决),schema v34 一个 key。放 General 不放 Terminal:这一页的行问的是「我手底下这个东西是什么」(`Language`、`Key hints`),而 Terminal 那一页的行问的是一个 shell 的事。**只在有这个键的机器上列出来**——`visible_rows` 问 `host_platform()`,和这一页每一条与机器有关的行同一扇门——但 **key 写进每一份文件**,因为 `settings.json` 记的是读者的回答而不是机器的形状,一份从 Mac 拷到 Windows 再拷回来的文件必须还是同一句话。行本身的英文是 `⌥a types å` 与 `⌥a sends ESC a` 两句,因为来找这一行的读者是刚刚被一次按键打了个措手不及的人,他要找的是带着自己那一下按键的那句话;中文按 2026-09-07 的文案裁决挂在 `CHINESE_PENDING` 上。
+### 13.14 M1-4: Metal surface 与第三种 alpha 策略、layer 所有权、重建自测(`crates/bt-render/src/lib.rs`、`crates/bt-platform/src/macos_impl.rs`、`crates/bt-app/src/main.rs`)
+
+**① 第三个 arm 存在,因为第二个 arm 要求的那个词不在 Metal 的清单上。** `bt-render` 的 `WindowTarget` 过去有两扇门:`Hwnd`(可移植的那扇)和 `CompositionVisual`(只在 Windows 上)。M1-4 加了 `MetalLayerOnOwnedView(*mut c_void)`,只在 macOS 上,指名一个 `NSView`。它不能是合成契约的第三种拼法,原因在 wgpu-hal 30.0.0 的 Metal 后端:那里宣告的 alpha 清单恰好是 `[Opaque, PostMultiplied]`(`src/metal/adapter.rs:468`),`PostMultiplied` 做的唯一一件事是 `render_layer.setOpaque(false)`(`src/metal/surface.rs:231`),而 `PreMultiplied` — `CompositionVisual` 的那份契约要它、`choose_alpha_mode` 没找到它就拒绝整块 surface — 在这个后端根本不存在。X-1 随后量出了那个 mode 的真实含义:CoreAnimation 合成 layer 的像素时**一律按预乘算术**,不管 mode 叫什么名字(一条 straight-alpha 边沿读回来带预乘算术的痕迹;一条手动预乘过的边沿读回来逐字节精确)。
+
+所以这个 arm 向 wgpu 声明 `PostMultiplied`(`required_alpha_mode`),同时往 surface 里写预乘像素。这是关于同一块 surface 的两句不同的话,M1-4 给第二句它自己的词:一个新枚举 `SurfaceAlphaRepresentation { Opaque, Premultiplied }` 和一个纯函数 `alpha_representation(WindowTargetKind)`。`SurfaceAlphaReport::is_premultiplied` — 整个工作区里唯一一处写下「预乘 => 底色可以是半透明的」(§7.1.6c-4b 的 translucent-ground 设定)的地方 — 现在读的是 representation 而不是 `chosen`。在这张票之前这两个问题是同一个问题;在 Metal 上它们分开了。
+
+两个 Windows arm 的答案精确不变:`Hwnd` 是 `Opaque`/`Opaque`,`CompositionVisual` 是 `PreMultiplied`/`Premultiplied`。一条测试 `the_windows_arms_are_unchanged` 把这对答案按在两个后端各自真实的 offered list 上,因为给一个枚举加变体之后两个纯函数的失败模式是一次重排把另外两个中的一个挪了位 — 而这两种错误在截图里都是隐形的(透明度滑块会静默失效)。`WindowTargetKind` 本身**刻意不按平台 gate**,尽管它的变体各属各的平台:一条只在它所描述的那台机器上才编得过的决策,是其他任何机器上的任何门都管不住的决策,于是 alpha 策略在 Windows 工作站上和 CI 的 Linux runner 上照样可检。
+
+**② 着色器一行没动,也没有什么可动的。** `bt-render` 里的预乘发生在两处,都在 CPU 上,都在任何 pipeline 之前:`ground::premultiplied_clear`(每帧开头的 clear colour)和 `premultiplied_by_ground`(每个必须与底色齐平的矩形实例的颜色;`premultiplied_surface_pixel_rect` 是带矩形的那个)。两处都不读 target。所以 Metal arm 走的路和 `CompositionVisual` 走的完全一样,两个 arm 的区别仅在向 wgpu 声明的 mode,别的什么都没有。
+
+**在 Mac 上量过的**(Apple M4,macOS 26.6.2,窗口自身 buffer 由 `screencapture -o -l<window>` 在 backing scale 2 下回读,十二个采样点分布在终端主体上):
+
+- 底色不透明时:每个点 `(255,255,255)` alpha `255`;
+- `background_opacity` 60 时:每个点 `(153,153,153)` alpha `153` — `153 = round(0.60 x 255)`,颜色等于 alpha 乘以不透明时的颜色;
+- `background_opacity` 30 时:每个点 `(77,77,77)` alpha `77` — `77 = round(0.30 x 255)`。
+
+straight-alpha 的帧会读出 `(255,255,255)` alpha `153`。并且这里的乘法是在**编码后的 sRGB 字节**上做的,不在线性光里:0.60 在线性光下存的是 203 而不是 153。
+
+**③ layer 归平台管,view 是 Folio 自己的。** `bt-platform` 的 macOS arm(`macos_impl.rs`)新开两扇门,只导出给 macOS,因为别的平台没有任何对象让一个拒绝方去拒绝:
+
+- `surface_view(NativeWindow) -> Result<*mut c_void, String>` 在窗口的 content view 下面造出 — 或者再次调用时找到 — 一个 `FolioSurfaceView`(`NSView` 的子类),大小对齐 content view 的 bounds,带宽度和高度的 autoresizing mask。返回指针而不是 `NativeWindow`,理由和 Windows 上 `Compositor::gpu_visual_ptr` 返回指针一样:它的唯一调用方必须把它交给一个接受 raw handle 的图形 API。
+- `clear_surface_layers(NativeWindow) -> Result<usize, String>` 清空那个 view 的 **layer** 的 sublayer,回答清掉了几个。
+
+这个安排里有三件事是决策而不是细节。
+
+**为什么是 Folio 自己的 view 而不是 winit 的。** X-1 量过两半。`WKWebView` 必须能坐在 frame 的**下面**,让 web 预览那个洞里透出页面(M4-1、M4-2),在 macOS 上这个排列是同一扇窗里的两个同级子 view — 后加的 subview 在前面 — 而不是一棵 visual tree;Windows 的 `Compositor` 在这里没有对应物,也不需要。而被 drop 的 `wgpu::Surface` **不会**把它的 `CAMetalLayer` 从它所附着的 view 上摘走,因此谁重建 surface 谁就必须拥有它被重建在上面的那个 view。
+
+**为什么这个 view 拒绝每一次按压。** `FolioSurfaceView` 覆写 `hitTest:` 并回答 `nil`。它铺在整个 content view 上面,AppKit 把按压路由到最前面那个认领坐标的 view,所以任其不管会让 Folio 变成点不动的 — 一个像素测试看不出来的缺陷。回答 `nil` 把它从搜索里摘掉,坐标落穿到 winit 的 view 上,而那正是这个程序历来处理按压的那个 view,也是 `press_title_bar`(§13.11)需要抵达的那个 view。
+
+**被清空的是 layer 而不是 subview。** `raw-window-metal` 把宿主 view 设为 layer-backed 并把 `CAMetalLayer` 作为 sublayer 插在 view 自己的 layer 下面;一扇删除 subview 的门什么也删不掉,却报成功。
+
+**两扇门住在哪里。** 在 `bt-app` 的 `window_surface_target` 里面 — 选择平台 surface 门的唯一函数,有三个调用方:两个窗口构造器和设备丢失重建(§13.8 ③)。清空不能只住在两个构造器里,因为重建才是它真正为之存在的那个调用方;也不能只住在重建里,因为那样构造器和重建就在对同一个 view 读两条不同的规矩。任何一扇门的拒绝是**报告而不是传播**(§13.8 ②):两扇门拒绝的理由只有一个 — 线程不是窗口的那条,或者 view 不在窗口里 — 而退路是可移植门,也就是这张票之前这个函数给出的那扇窗(不透明,不提供半透明底色,stderr 上一行)。
+
+**④ 重建,以及让它可量的那个开关。** 设备丢失不是谁能主动要求的事件:那个 latch 由 wgpu 的 device-lost 回调置位,也就是驱动重置。因此 M1-4 加了 `BT_SURFACE_SELFTEST=<秒数>`,形状仿照 `BT_PANIC_SELFTEST`(解析逻辑相同,release 构建里同样编掉,理由也相同),它调的是真正的 `TheDeviceAndItsWindows::rebuild` — 和真实丢失调用的是同一个函数、经过同一个 `window_surface_target` — 一次,然后记下和真实恢复记下的同一笔重绘债。它不假装设备丢失了:latch 始终归 wgpu,重试策略不在测试范围内。
+
+**在 Mac 上量过的。** 日志里读到 `BT_SURFACE cleared=1` — 恰好一层陈旧 layer,在唯一存在陈旧 layer 的那个时刻 — 重建之后窗口自身 buffer 在全部十二个点上与重建之前逐字节一致:`(153,153,153)` alpha `153`。X-1 的算术说清了两层叠出来会读到什么:`153 + 0.4 x 153 = 214`。所以 `153` 就是只有一层的证据。
+
+**⑤ 缩放,以及启动行。** 把窗口的一角从 960x600 拖到 1100x690 点(backing scale 2);layer 经由 `raw-window-metal` 自己的 observer 跟着 view 走,frame 不变。M1-1 的启动追踪在 Mac 上现在读到的是:
+
+```
+BT_STARTUP alpha target=MetalLayerOnOwnedView
+BT_STARTUP alpha offered=[Opaque, PostMultiplied]
+BT_STARTUP alpha chosen=PostMultiplied
+```
+
+**⑥ 量不到的事,直说。** **屏幕**合成之后的精确字节。两个原因,都是量出来的而不是假设的。`screencapture -R` 在这里不能当仪器用:同一句 `-R 516,167,960,600`,桌面上没有 Folio 时回来 1920x1200,有一扇 Folio 时回来 2808x1826,因为那个矩形是相对主显示器解析的,而 Folio 激活时主显示器会移动。而全屏幕截图带的是显示器自己的色彩配置文件,窗口自身截图带的是 layer 的,所以 `C = F + (1-a)*B` 在两者之间无法逐字节校验。
+
+关于合成**已经建立的事实**:桌面透过来了 — 一扇站在 Folio 后面的 Finder 窗口,透过半透明的 frame,在截图中清晰可读 — 并且在 30 % 时比 60 % 时透得更多:同一个底色像素 `(96,180,231)` 的红通道,在 30 % 时读到 `210`,在 60 % 时读到 `238`。CoreAnimation 是在编码字节上混合还是在线性光里混合 — X-1 提出过这个问题,本票刻意不在这里回答(`premultiplied_clear` 里的预乘在线性光下做,rect 路径里的在编码字节上做) — 属于 **M2-5**,那里 Metal 路径上的字形输出在 scale 2 下被审视,一条抗锯齿边沿的算术才是有人看的东西。
+
+**还有一件事,本票先量到了但不在这里修。** `cargo test -p bt-render` 此前从未在 Mac 上跑过。结果是 221 passed、1 failed,那一条是已有的缺口而不是本票造成的:`every_cluster_of_a_grid_paragraph_stands_on_its_own_column` 把一个中文 cluster 画在 `NaN` 上,因为 CJK 回退字体族列表(`CJK_FALLBACK_FAMILIES`、`CJK_FALLBACK_FONT_FILES`)写的全是 Windows 的字体文件名,在 macOS 上是死代码,没有任何东西能在那里解析出一个中文字形。那是字体的票,不是 surface 的票。
