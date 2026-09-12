@@ -210,6 +210,16 @@ pub struct BarLayout {
     pub volume_rail: Option<[f32; 4]>,
     pub volume_grab: Option<[f32; 4]>,
     pub rate: Option<[f32; 4]>,
+    /// **What the recording is** — `MP4 · 38 MB`, at the bar's right end beside
+    /// the speed (owner's ruling 2026-09-12; §7.44).
+    ///
+    /// It stood under the picture until that ruling put the bar flush on the
+    /// bottom edge of the stage: a line under a frame whose bar is drawn *on*
+    /// the frame is either behind the bar or is the band the ruling retired. It
+    /// is not a control — nothing presses it — and it is first of all of these
+    /// to give way, because it is the only one that is a fact rather than a
+    /// verb.
+    pub meta: Option<[f32; 4]>,
 }
 
 impl BarLayout {
@@ -274,6 +284,31 @@ fn fraction_along(track: [f32; 4], x: f32) -> f64 {
     f64::from(((x - track[0]) / width).clamp(0.0, 1.0))
 }
 
+/// **What a recording's bar says about its file, and how wide it is drawn**
+/// (owner's ruling 2026-09-12; §7.44 ⑮).
+///
+/// A pair rather than two arguments because they are one fact measured twice
+/// over — the sentence and the room it needs — and because only something
+/// holding a font can produce the second, so the two always travel together
+/// from the one pass that measures them (`Runtime::measure_video_meta`).
+///
+/// [`Self::none`] is a recording whose facts this frame has not measured yet,
+/// and it reserves nothing: the bar is laid out exactly as it was before the
+/// ruling until the sentence arrives.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BarMeta<'a> {
+    pub text: &'a str,
+    pub width: f32,
+}
+
+impl BarMeta<'_> {
+    /// Nothing measured, nothing reserved.
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+}
+
 /// **The bar, laid out in a body** — or `None` where there is no room for one.
 ///
 /// # What gives way, and in what order
@@ -296,7 +331,12 @@ fn fraction_along(track: [f32; 4], x: f32) -> f64 {
 /// `None` when even play plus a minimum scrubber will not fit, which is a box
 /// too small to be a player and is drawn as a picture with no bar.
 #[must_use]
-pub fn bar_layout(body: [f32; 4], scale: f32, clock_figures: usize) -> Option<BarLayout> {
+pub fn bar_layout(
+    body: [f32; 4],
+    scale: f32,
+    clock_figures: usize,
+    meta_px: f32,
+) -> Option<BarLayout> {
     let px = |logical: f32| logical * scale;
     let height = px(VIDEO_BAR_HEIGHT_LOGICAL_PX).round().max(1.0);
     let body_width = body[2] - body[0];
@@ -325,9 +365,10 @@ pub fn bar_layout(body: [f32; 4], scale: f32, clock_figures: usize) -> Option<Ba
     let mut wants_mute = true;
     let mut wants_volume = true;
     let mut wants_rate = true;
+    let mut wants_meta = meta_px > 0.0;
     // Widths of everything that is not the scrubber, plus one gap for each of
     // them, plus the two paddings, plus the scrubber's floor.
-    let needed = |at: bool, duration: bool, mute: bool, volume: bool, rate: bool| {
+    let needed = |at: bool, duration: bool, mute: bool, volume: bool, rate: bool, meta: bool| {
         let mut width = 2.0 * padding + button + gap + min_seek;
         for (present, extent) in [
             (at, clock),
@@ -335,6 +376,7 @@ pub fn bar_layout(body: [f32; 4], scale: f32, clock_figures: usize) -> Option<Ba
             (mute, button),
             (volume, volume_width),
             (rate, rate_width),
+            (meta, meta_px),
         ] {
             if present {
                 width += extent + gap;
@@ -345,23 +387,28 @@ pub fn bar_layout(body: [f32; 4], scale: f32, clock_figures: usize) -> Option<Ba
     // Drop from the right until it fits. Written as a loop over the five flags
     // rather than five `if`s so that adding a control is adding a line here and
     // nowhere else.
-    for dropped in 0..=5 {
+    for dropped in 0..=6 {
         if needed(
             wants_at,
             wants_duration,
             wants_mute,
             wants_volume,
             wants_rate,
+            wants_meta,
         ) <= body_width
         {
             break;
         }
         match dropped {
-            0 => wants_rate = false,
-            1 => wants_volume = false,
-            2 => wants_mute = false,
-            3 => wants_duration = false,
-            4 => wants_at = false,
+            // **The facts go first** (owner's ruling 2026-09-12): every other
+            // thing on this bar is a control, and this one is a sentence about
+            // the file that the path row can still be asked for.
+            0 => wants_meta = false,
+            1 => wants_rate = false,
+            2 => wants_volume = false,
+            3 => wants_mute = false,
+            4 => wants_duration = false,
+            5 => wants_at = false,
             // Everything optional is gone and it still does not fit: this box is
             // not a player.
             _ => return None,
@@ -373,6 +420,7 @@ pub fn bar_layout(body: [f32; 4], scale: f32, clock_figures: usize) -> Option<Ba
         wants_mute,
         wants_volume,
         wants_rate,
+        wants_meta,
     ) > body_width
     {
         return None;
@@ -411,6 +459,13 @@ pub fn bar_layout(body: [f32; 4], scale: f32, clock_figures: usize) -> Option<Ba
     });
     // From the right, so that the scrubber gets what is left over.
     let mut right = bar[2] - padding;
+    // **Outermost, beside the speed** — the mock's own arrangement: the controls
+    // run in from the edge and the fact stands at the end of them.
+    let meta = wants_meta.then(|| {
+        let rect = box_of(right - meta_px, meta_px, button);
+        right = rect[0] - gap;
+        rect
+    });
     let rate = wants_rate.then(|| {
         let rect = box_of(right - rate_width, rate_width, button);
         right = rect[0] - gap;
@@ -449,6 +504,7 @@ pub fn bar_layout(body: [f32; 4], scale: f32, clock_figures: usize) -> Option<Ba
         volume_grab: volume.map(grab_of),
         volume,
         rate,
+        meta,
     })
 }
 
@@ -457,6 +513,14 @@ pub fn bar_layout(body: [f32; 4], scale: f32, clock_figures: usize) -> Option<Ba
 /// carried across the boundary that no longer exists.
 const fn font_logical_px() -> f32 {
     bt_render::SEAT_TITLE_FONT_LOGICAL_PX
+}
+
+/// The same face, for the one caller outside this module that has to measure a
+/// word before it can be laid out here (owner's ruling 2026-09-12): a width
+/// measured against a different face is a box the text does not fit.
+#[must_use]
+pub const fn bar_font_logical_px() -> f32 {
+    font_logical_px()
 }
 
 // ── whether the bar is up ─────────────────────────────────────────────────
@@ -1021,6 +1085,7 @@ impl VideoSeat {
         now: Instant,
         motion: crate::Motion,
         palette: &ChromePalette,
+        meta: BarMeta<'_>,
     ) -> OverlayLayer {
         let presence = self.presence(now, motion);
         if presence.opacity <= 0.0 {
@@ -1030,7 +1095,7 @@ impl VideoSeat {
         let elapsed = clock_text(state.position_secs);
         let whole = clock_text(state.duration_secs.unwrap_or(0.0));
         let figures = clock_figures(state.position_secs, state.duration_secs);
-        let Some(layout) = bar_layout(body, scale, figures) else {
+        let Some(layout) = bar_layout(body, scale, figures, meta.width) else {
             return OverlayLayer::default();
         };
         let alpha = presence.opacity;
@@ -1109,6 +1174,26 @@ impl VideoSeat {
         }
         if let Some(rect) = layout.rate {
             labels.push(clock_label(rate_text(state.rate), rect, true));
+        }
+        // **What the file is, at the end of the row** (owner's ruling
+        // 2026-09-12). Quieter than the controls beside it, because it is the
+        // one thing here that is not one: `--ink2` against their body ink, which
+        // is the same step the path row's own facts take away from its
+        // breadcrumbs.
+        if let Some(rect) = layout.meta {
+            labels.push(ChromeLabel {
+                text: meta.text.to_owned(),
+                rect,
+                clip: Some(rect),
+                font_size_px: font_px,
+                color: palette.files_row_muted,
+                align_right: true,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                mono: false,
+            });
         }
 
         // The two tracks: a rail of the bar's own hairline, a fill of the
@@ -1485,6 +1570,70 @@ mod tests {
         );
     }
 
+    /// RED — **the video bar is flush with the stage's bottom edge, and leaves
+    /// nothing behind it when it hides** (owner's ruling 2026-09-12; §7.1.3x ④;
+    /// §7.44 ⑮; mock §一).
+    ///
+    /// The owner photographed an empty band under a video's controls. The bar
+    /// itself was always drawn on the picture; what stood under it was the
+    /// preview's foot, and that is what the ruling retired. The bar's own half
+    /// of the ruling is the two facts below: it sits on the bottom edge of the
+    /// box it is laid out in and spans it, so when it fades there is picture
+    /// underneath and nothing else; and the recording's own facts — `MP4 ·
+    /// 38 MB`, which used to stand on a line under the frame — are at its right
+    /// end beside the speed.
+    ///
+    /// RED GATE ①: lay the bar anywhere but on the box's floor and the first
+    /// block fails. RED GATE ②: put the facts inboard of the speed, or drop the
+    /// speed before them as the box narrows, and the rest does.
+    #[test]
+    fn the_video_bar_is_flush_with_the_stage_bottom_and_leaves_nothing_when_hidden() {
+        let scale = 1.0;
+        let body = a_body();
+        let layout = bar_layout(body, scale, 4, 90.0).expect("a pane fits the whole bar");
+        // ① Flush on the bottom edge, spanning it: there is no rectangle here
+        // that is neither picture nor bar, so a bar that has faded leaves the
+        // picture running to the floor.
+        assert_eq!(
+            layout.bar[3], body[3],
+            "the bar floats above the stage's floor"
+        );
+        assert_eq!([layout.bar[0], layout.bar[2]], [body[0], body[2]]);
+        assert_eq!(
+            layout.bar[3] - layout.bar[1],
+            (VIDEO_BAR_HEIGHT_LOGICAL_PX * scale).round(),
+            "the bar is not its own height"
+        );
+        // ② The facts at the right end, beside the speed.
+        let meta = layout.meta.expect("a recording says what it is");
+        let rate = layout.rate.expect("and how fast it is running");
+        assert!(
+            rate[2] <= meta[0],
+            "the facts stand inboard of the speed: {meta:?} {rate:?}"
+        );
+        assert!(
+            meta[2] <= layout.bar[2],
+            "the facts run off the end of the bar"
+        );
+        assert!(
+            meta[2] - meta[0] >= 90.0,
+            "and they are cut to less than they measured"
+        );
+        // ③ They are the first thing to give way, because they are the one thing
+        // on this row that is a fact rather than a verb.
+        let mut narrow = body;
+        narrow[2] = body[0] + 320.0;
+        let squeezed = bar_layout(narrow, scale, 4, 90.0).expect("a narrow pane is still a player");
+        assert_eq!(
+            squeezed.meta, None,
+            "the speed was dropped before the facts were"
+        );
+        assert!(squeezed.rate.is_some(), "and the speed went with them");
+        // A recording whose facts have not been measured yet reserves nothing
+        // for them, which is the honest answer on the first frame.
+        assert_eq!(bar_layout(body, scale, 4, 0.0).expect("a bar").meta, None);
+    }
+
     /// RED — **the bar keeps play and the scrubber and gives up the rest from
     /// the right** (user ruling 2026-08-28; §7.44 ②).
     ///
@@ -1499,7 +1648,7 @@ mod tests {
     #[test]
     fn the_bar_sheds_its_controls_from_the_right_and_never_its_player() {
         let scale = 1.0;
-        let wide = bar_layout(a_body(), scale, 4).expect("a pane fits the whole bar");
+        let wide = bar_layout(a_body(), scale, 4, 0.0).expect("a pane fits the whole bar");
         assert!(wide.at.is_some() && wide.duration.is_some());
         assert!(wide.mute.is_some() && wide.volume.is_some() && wide.rate.is_some());
         // The scrubber took the leftover, and every box is inside the bar.
@@ -1515,7 +1664,7 @@ mod tests {
         while width > 1.0 {
             width -= 4.0;
             let body = [100.0, 40.0, 100.0 + width, 640.0];
-            let Some(layout) = bar_layout(body, scale, 4) else {
+            let Some(layout) = bar_layout(body, scale, 4, 0.0) else {
                 break;
             };
             for (name, was, now) in [
@@ -1542,8 +1691,8 @@ mod tests {
 
         // A box with no room for a bar has none, rather than a bar drawn off its
         // own edge.
-        assert!(bar_layout([0.0, 0.0, 40.0, 400.0], scale, 4).is_none());
-        assert!(bar_layout([0.0, 0.0, 900.0, 4.0], scale, 4).is_none());
+        assert!(bar_layout([0.0, 0.0, 40.0, 400.0], scale, 4, 0.0).is_none());
+        assert!(bar_layout([0.0, 0.0, 900.0, 4.0], scale, 4, 0.0).is_none());
     }
 
     /// RED — **a bar that has just been asked for is not forgotten on the tick
@@ -1620,7 +1769,7 @@ mod tests {
     /// control and at one point that is on the bar and on nothing.
     #[test]
     fn every_control_answers_where_it_is_drawn() {
-        let layout = bar_layout(a_body(), 1.0, 4).expect("a bar");
+        let layout = bar_layout(a_body(), 1.0, 4, 0.0).expect("a bar");
         let centre = |rect: [f32; 4]| [(rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0];
         assert_eq!(
             layout.slot_at(centre(layout.play)),

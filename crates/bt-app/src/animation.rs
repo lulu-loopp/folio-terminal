@@ -130,7 +130,7 @@
 //!   stream needs — the one on the glass and the one after it — always fit.
 //!
 //! An animation over any of them is drawn as its **first frame, still**, and the
-//! foot of the pane says so: `Runtime::preview_foot_notice` carries the reason
+//! foot of the pane says so: `Runtime::preview_standing_fact` carries the reason
 //! to the reader, which is the difference between this window declining and this
 //! window appearing not to work. The two are two sentences and not one
 //! ([`AnimationRefusal::FrameTooLarge`] and [`AnimationRefusal::FileTooLong`]),
@@ -677,7 +677,7 @@ impl AnimationRefusal {
     /// does draw it, and a one-frame `.gif` is a still picture that looks
     /// exactly like a still picture. The other three leave a reader looking at a
     /// picture that ought to be moving, which is a thing this window has to
-    /// account for — see `Runtime::preview_foot_notice`.
+    /// account for — see `Runtime::preview_standing_fact`.
     #[must_use]
     pub fn is_worth_saying(self) -> bool {
         match self {

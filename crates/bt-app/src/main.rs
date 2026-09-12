@@ -4269,10 +4269,10 @@ fn preview_document_key(
 // window (`build_preview_diff_body` in particular, which is P108's whole
 // argument in one rectangle).
 
-/// `.pv-meta { font-size: 11.5px }` (mock-up 607).
-const PREVIEW_META_FONT_LOGICAL_PX: f32 = 11.5;
-/// `.pv-image { gap: 10px }` (mock-up 605).
-const PREVIEW_IMAGE_GAP_LOGICAL_PX: f32 = 10.0;
+// `.pv-meta` and the gap above it (mock-up 605-607) are gone with the line they
+// measured: a picture's sentence is at the right end of the path row since the
+// owner's ruling of 2026-09-12 (`Runtime::preview_meta_sentence`), in that row's
+// own face, and a recording's is at the right end of its bar.
 /// `.pv-image svg { max-width: 86%; max-height: 70% }` (mock-up 606).
 ///
 /// **The 30% of height the picture does not take is not slack** — it is the
@@ -8721,6 +8721,7 @@ fn preview_rail_tip_text(
     segments: &[(String, PathBuf)],
     folded: &[usize],
     flip_to_source: bool,
+    lock: &str,
 ) -> String {
     match tip {
         // **The way back is named by what is on the other side of it**, and the
@@ -8744,6 +8745,12 @@ fn preview_rail_tip_text(
             seats::PreviewRailKind::Crumbs => i18n::Text::FileMenuCopyPath.text().to_owned(),
         },
         seats::PreviewRailTip::Open => i18n::Text::PreviewRailOpenTip.text().to_owned(),
+        // **The padlock says the reason and nothing else** (owner's ruling
+        // 2026-09-12). It is the sentence the band used to print — `Read-only ·
+        // over 8 MB`, `This GIF's frames are too large to play` — handed in by
+        // the caller, because only the window holding the buffer knows which of
+        // them this file is owed.
+        seats::PreviewRailTip::Lock => lock.to_owned(),
         seats::PreviewRailTip::Fold => folded
             .iter()
             .filter_map(|depth| segments.get(*depth).map(|(name, _)| name.as_str()))
@@ -12364,6 +12371,32 @@ struct WindowRuntime {
     /// and for a float it lives nowhere, because a window's body is derived from
     /// its frame every frame and has no solve to be told about.
     notice_states: std::collections::BTreeMap<NoticeHost, notice::Notice>,
+    /// **Who has just tried to edit a page that will not take it, and when**
+    /// (owner's ruling 2026-09-12).
+    ///
+    /// The lock in the path row is the standing answer and its tip is the
+    /// sentence; this is the *asked* one. A press that would have seated a caret
+    /// and a key that would have inserted are the two gestures that mean "I want
+    /// to change this", and a reader who makes one of them is owed the reason in
+    /// words, where they are looking, without having to find a mark and hover it.
+    ///
+    /// One, because there is one reader: a second refusal on a second surface
+    /// replaces the first, which is the same rule the pointer's own hover
+    /// follows. The instant is the *latest* attempt and not the first — every
+    /// further press or key inside the two seconds restarts the clock, so a
+    /// reader typing a sentence into a read-only file watches one pill rather
+    /// than a flicker.
+    preview_refusal: Option<(PreviewSurface, Instant)>,
+    /// **What each playing surface's bar says about its file, and how wide it is
+    /// drawn** (owner's ruling 2026-09-12; §7.44).
+    ///
+    /// Beside [`Self::preview_rail_measures`] and for its reason exactly: only
+    /// something holding a font can say how wide `MP4 · 38 MB` is, the bar's
+    /// layout is what the hit test is resolved against, and a width measured a
+    /// second time is a second answer to where the speed button is. Written once
+    /// a frame by [`Runtime::measure_video_meta`] and read by everything that
+    /// lays a bar out.
+    video_meta: std::collections::BTreeMap<PreviewSurface, (String, f32)>,
     /// What the last scan was of, so the next one can skip the part that has not
     /// moved. See [`SearchScanCache`].
     search_scan: Option<SearchScanCache>,
@@ -14556,59 +14589,57 @@ struct {name} {{
         );
     }
 
-    /// PIN (user ruling 2026-08-25) — **the retired strip's two phrases go to
-    /// the two places that already hold them, and neither is invented here.**
+    /// PIN (user ruling 2026-08-25, reshaped by the owner's ruling 2026-09-12) —
+    /// **the retired strip's two phrases go to the two places that already hold
+    /// them, and neither is invented here.**
     ///
-    /// 「去掉整条脚」 leaves a torn-off window with a standing fact and a flashed
-    /// confirmation and nowhere they used to be printed. The ruling names where
-    /// each goes and both are places this window already draws:
+    /// 「去掉整条脚」 left a torn-off window with a standing fact and a flashed
+    /// confirmation and nowhere they used to be printed. The 2026-08-25 ruling
+    /// named a place for each — the rail's right hand and a corner bubble — and
+    /// the ruling of 2026-09-12 changed the *shape* of both while keeping the
+    /// argument that put them there:
     ///
-    /// * the **standing fact** — `Read-only · 64 KB`, a refused save — onto the
-    ///   rail's right hand, which is exactly where a *docked* pane's went when
-    ///   its own strip retired the day before (see `chrome_layers`' lift). A
-    ///   fact that stays true until something changes it belongs in chrome.
-    /// * the **confirmation** — `Saved`, `Revealed…` — into the corner tag a
-    ///   page's hover line already floats in (`seats::push_corner_tag`). It is
-    ///   not chrome: it is true for two seconds, and a band that exists for two
-    ///   seconds in a window's whole life is the band this ruling deleted.
+    /// * the **standing fact** — `Read-only · 64 KB`, a refused save, a `.gif`
+    ///   that will not play — is the padlock at the right end of the rail
+    ///   (§7.1.3x ③). A fact that stays true until something changes it belongs
+    ///   in chrome, and a state is a mark rather than a sentence.
+    /// * the **confirmation** — `Saved`, `Revealed…` — is the news pill over the
+    ///   bottom edge of the body (§7.1.3x ②), which is the corner bubble's own
+    ///   argument arriving at the one shape every preview's news now takes: it
+    ///   occupies no rows, so the document does not move when a word arrives and
+    ///   does not move back when it expires.
     ///
-    /// Both are taken off the **one dressing this frame already made**
-    /// (`seats::dress_foot`), which is what stops one window saying two things
-    /// about one file — and `dress_foot`'s own rule is that a flash owns both
-    /// halves, so the two are never on screen at once.
+    /// Neither is invented in the paint. The padlock is reserved from the one
+    /// standing fact this window derives (`preview_standing_fact`, through
+    /// `dress_preview_rail`, which both hosts go through); the pill is laid out
+    /// by the one pass that lays out every host's news. That is what stops one
+    /// window saying two things about one file.
     ///
     /// A source pin because the claim is *wiring*: the geometry has its own pin
-    /// (`float::tests::a_window_that_wears_a_rail_wears_no_foot`) and the bubble
-    /// has its own (`seats::tests`), and what neither can see is which of them
-    /// this function hands the words to.
+    /// (`float::tests::no_preview_kind_reserves_a_foot`) and the row has its own
+    /// (`seats::tests::a_read_only_page_wears_a_lock_in_the_path_row_and_no_band`),
+    /// and what neither can see is which of them this function hands the words to.
     ///
-    /// MUTATION: drop the `footless` guard on the tag and an ordinary window
-    /// prints `Saved` twice, once in its own foot; drop the lift and a torn-off
-    /// read-only file stops saying it is read-only.
+    /// MUTATION: draw a confirmation in this window's own corner as well and it
+    /// is the same word twice — once in the pill and once beside it.
     #[test]
     fn a_footless_window_prints_its_standing_fact_on_the_rail_and_flashes_in_a_tag() {
         let layer = fn_body("preview_float_layer");
         assert!(
             layer.contains("let footless = !geometry.wears_a_foot();"),
-            "the chassis is asked whether there is a strip, rather than a second \
-             reader working it out from the rail"
+            "the chassis is asked whether there is a strip, rather than a second              reader working it out from the rail"
         );
         assert!(
-            layer.contains("frame.notice.clone_from(&foot.notice);")
-                && layer.contains("frame.measure.notice_width ="),
-            "the standing fact is lifted onto the rail, measured, and the \
-             measurement stored where the hit test reads it"
+            layer.contains("let rail = self.dress_preview_rail(surface, scale);"),
+            "the window's row is dressed somewhere other than the one dressing both              hosts go through, so a pane and the window torn off it can say two              things about one file"
         );
         assert!(
-            layer.contains("if footless && foot.flashing && !foot.lead.is_empty()")
-                && layer.contains("seats::push_corner_tag("),
-            "and the confirmation goes to the bubble, only on a window that has \
-             no strip left to print it in"
+            !layer.contains("seats::push_corner_tag("),
+            "the window flashes its confirmation in a corner of its own as well as in              the pill, which is the same word twice"
         );
         assert!(
             layer.contains("seats::dress_foot("),
-            "both come off one dressing, so no window says two things about one \
-             file"
+            "the words a window with a foot still prints are not dressed at all"
         );
     }
 
@@ -16904,6 +16935,16 @@ fn foot_revealed_label() -> &'static str {
 /// mock-up's own `setTimeout(…, 1300)` in `revealFolderFeedback`, which is one
 /// function serving the flyout's foot and the pane's alike.
 const FOOT_REVEAL_FEEDBACK: Duration = Duration::from_millis(1300);
+/// **How long the reason for a refused edit floats** (owner's ruling
+/// 2026-09-12: 「两秒」).
+///
+/// Longer than the acknowledgements above it because it is not an
+/// acknowledgement: those confirm something the reader just did and can watch
+/// happen, and this one explains why nothing did. A sentence a reader has to
+/// read is owed the time to read it, and two seconds is the same rest the video
+/// bar takes before it goes ([`video_seat::VIDEO_BAR_IDLE_REST`]) — one number
+/// in this window for "long enough to have been read".
+const PREVIEW_REFUSAL_HOLD: Duration = Duration::from_secs(2);
 /// `.pv-unknown button` at rest (mock-up 4987).
 fn preview_open_externally_label() -> &'static str {
     i18n::Text::PreviewOpenExternally.text()
@@ -17021,10 +17062,14 @@ struct PreviewRailFrame {
     /// called `D:` are three different things a re-parse would have to guess
     /// between, and the walk that produced the names already knew the answer.
     targets: Vec<PathBuf>,
-    /// The standing fact hung on the row's right hand, or the word it is
-    /// flashing instead.
-    notice: String,
-    notice_flashing: bool,
+    /// **What the picture is**, drawn dim at the row's right hand (owner's
+    /// ruling 2026-09-12) — `PNG · 670 KB`. Empty on every surface not showing
+    /// one.
+    ///
+    /// The standing sentence that used to hang here is a padlock now
+    /// (`measure.lock`) and the flashed word is a pill over the body, so this is
+    /// the only phrase left on this row that is not the path itself.
+    meta: String,
     /// The open address editor's own drawn state, when this rail is holding it.
     edit: Option<seats::TabEdit>,
     /// **The open address will not be navigated to** (§7.7 ④), so the draft is
@@ -26472,7 +26517,7 @@ enum AnimationEntry {
     /// that had nothing to play, and the difference between those two is the
     /// difference between this window declining and this window appearing not to
     /// work. The picture is still the same picture; what the reason buys is the
-    /// line in the foot of the pane — see [`Runtime::preview_foot_notice`] and
+    /// line in the foot of the pane — see [`Runtime::preview_standing_fact`] and
     /// [`animation::AnimationRefusal::is_worth_saying`].
     Refused(animation::AnimationRefusal),
 }
@@ -35355,6 +35400,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         notice_layouts: std::collections::BTreeMap::new(),
         notice_hover: None,
         notice_states: std::collections::BTreeMap::new(),
+        preview_refusal: None,
+        video_meta: std::collections::BTreeMap::new(),
         search_hover: None,
         search_scan: None,
         search_revision: 0,
@@ -38809,7 +38856,7 @@ impl Runtime<'_> {
         // The row under each head (user ruling 2026-08-24), dressed the same way
         // and for the same reason: one per seat, each naming the content its own
         // body is showing.
-        let mut preview_rail_frames: Vec<(SeatId, PreviewRailFrame)> = self
+        let preview_rail_frames: Vec<(SeatId, PreviewRailFrame)> = self
             .seats
             .preview_seats()
             .into_iter()
@@ -38820,37 +38867,16 @@ impl Runtime<'_> {
                 ))
             })
             .collect();
-        // **The foot's surviving phrase, hung on the row that replaced it.** A
-        // breadcrumb retires the strip along the bottom, and the ruling is
-        // explicit that the foot's *other* duties are kept — so the standing
-        // fact and the flashed confirmation are taken off the foot this frame
-        // already dressed rather than derived a second time. One derivation, two
-        // rows, and no window in which the two could say different things about
-        // one file.
-        for (seat, frame) in &mut preview_rail_frames {
-            if frame.measure.kind != seats::PreviewRailKind::Crumbs {
-                continue;
-            }
-            let Some((_, words)) = preview_feet.iter().find(|(at, _)| at == seat) else {
-                continue;
-            };
-            let (phrase, flashing) = if words.flashing {
-                (words.lead.clone(), true)
-            } else {
-                (words.notice.clone(), false)
-            };
-            frame.notice = phrase;
-            frame.notice_flashing = flashing;
-            frame.measure.notice_width = self.window.renderer.measure_chrome_text(
-                &mut self.app.gpu,
-                &frame.notice,
-                seats::FILES_FOOT_FONT_LOGICAL_PX * scale,
-            );
-            let here = self.preview_here(*seat);
-            self.window
-                .preview_rail_measures
-                .insert(here, frame.measure.clone());
-        }
+        // **The foot no longer lends this row a phrase** (owner's ruling
+        // 2026-09-12). It used to: the standing fact and the flashed
+        // confirmation were taken off the foot this frame had already dressed
+        // and hung on the rail's right hand, because the breadcrumb had retired
+        // the strip along the bottom and the 2026-08-24 ruling kept the foot's
+        // other duties. The two have gone their separate ways since — the fact
+        // is a padlock this row's own dressing decides
+        // (`dress_preview_rail`), and the confirmation is a pill over the
+        // document — so there is nothing left to copy across and no second place
+        // for one file's facts to be derived.
         // **Each card's own verb, measured** (§7.7 ④). The five failure cards
         // do not share a caption with `Open in default app`, so a single stored
         // width would size every button to whichever card was drawn last — and
@@ -39013,8 +39039,7 @@ impl Runtime<'_> {
                         address: &frame.address,
                         segments: &frame.segments,
                         open: i18n::Text::PreviewRailOpen.text(),
-                        notice: &frame.notice,
-                        notice_flashing: frame.notice_flashing,
+                        meta: &frame.meta,
                         flip_to_source: frame.flip_to_source,
                         web: frame.web,
                         edit: frame.edit.as_ref().map(|edit| seats::PreviewNameEdit {
@@ -41662,11 +41687,18 @@ impl Runtime<'_> {
         // facts come from a *pool* rather than from `sessions`, and a preview
         // seat can never be a terminal seat, so the two passes cannot disagree
         // about one seat.
+        //
+        // **No `presence` entry since 2026-09-12** (owner's ruling). A preview
+        // pane's news is a pill floating over the bottom edge of its document
+        // (`seats::news_pill_box`) and takes no row from the layout at all, so
+        // the set that makes a body one bar shorter is the shells' alone. That
+        // is the whole of "no reserved foot" in this pass: nothing here can make
+        // a preview seat wear a band, so `Seats::seat_wears_notice` is false for
+        // every one of them and `preview_body_viewport` subtracts nothing.
         for seat in self.seats.preview_seats() {
             let Some(state) = self.preview_disk_notice_on(self.preview_here(seat)) else {
                 continue;
             };
-            presence.insert(seat);
             states.insert(NoticeHost::Seat(seat), state);
         }
         // **And the windows torn off them, on exactly the same terms** (B1,
@@ -41799,36 +41831,70 @@ impl Runtime<'_> {
         // 2026-08-29 ruling, and every preview float, because a window torn off
         // a preview wears it too. `notice_on` is what tells them apart, and a
         // host that wears none answers `None` and costs one lookup.
-        let wearers: Vec<NoticeHost> = self
+        let now = Instant::now();
+        // **Two kinds of wearer and two shapes** (owner's ruling 2026-09-12). A
+        // shell's offer is a *band* across the top of its pane's body, because a
+        // terminal is a column of rows with nothing to float over. Everything a
+        // preview has to say is a *pill* over the bottom edge of its document,
+        // because a document is a surface — and because the band it used to be
+        // stood there empty for every hour it had nothing in it, which is the
+        // report this ruling answers.
+        let wearers: Vec<(NoticeHost, bool)> = self
             .seats
             .terminals()
             .into_iter()
-            .chain(self.seats.preview_seats())
-            .map(NoticeHost::Seat)
-            .chain(self.preview_float_ids().into_iter().map(NoticeHost::Float))
+            .map(|seat| (NoticeHost::Seat(seat), false))
+            .chain(
+                self.seats
+                    .preview_seats()
+                    .into_iter()
+                    .map(|seat| (NoticeHost::Seat(seat), true)),
+            )
+            .chain(
+                self.preview_float_ids()
+                    .into_iter()
+                    .map(|id| (NoticeHost::Float(id), true)),
+            )
             .collect();
         let mut layouts = std::collections::BTreeMap::new();
         let mut layers = Vec::new();
-        for host in wearers {
-            let Some(showing) = self.notice_on(host) else {
-                continue;
+        for (host, floats) in wearers {
+            // The words first, because a pill's are not always a `Notice`: a
+            // confirmation has no verbs and a refusal's sentence comes off the
+            // buffer (see [`Self::preview_pill_say`]).
+            let floating = floats
+                .then(|| self.preview_pill_say(self.notice_surface(host), now))
+                .flatten();
+            let standing = (!floats).then(|| self.notice_on(host)).flatten();
+            let saying = match (&floating, standing) {
+                (Some((words, verbs)), _) => notice::NoticeSay::pill(words, verbs),
+                (None, Some(state)) => notice::NoticeSay::band(state),
+                (None, None) => continue,
             };
-            // Each host's own complement of the subtraction that made room for
-            // it: the pane's out of the solved seat, the window's out of the
-            // chassis it is laid out with.
-            let strip = match host {
-                NoticeHost::Seat(seat) => {
-                    seats::pane_notice_strip(&self.seats, &self.seat_layout, seat, scale)
+            let verbs = saying.verbs;
+            // Each host's own rectangle: a terminal's is the complement of the
+            // subtraction that made room for it, and a preview's is cut out of
+            // the body it floats over and takes nothing from it.
+            let strip = if floats {
+                self.preview_surface_body_rect(self.notice_surface(host), scale)
+                    .and_then(|body| seats::news_pill_box(body, scale))
+            } else {
+                match host {
+                    NoticeHost::Seat(seat) => {
+                        seats::pane_notice_strip(&self.seats, &self.seat_layout, seat, scale)
+                    }
+                    // A float is never a terminal, so a window never wears the
+                    // band: the one notice a torn-off preview can carry is its
+                    // own document's, and that is a pill.
+                    NoticeHost::Float(_) => None,
                 }
-                NoticeHost::Float(id) => self.float_notice_strip(id, scale),
             };
             let Some(strip) = strip else {
                 continue;
             };
             // Measured against the font that will draw them, which is what keeps
             // a Chinese verb from being given an English word's box.
-            let widths: Vec<f32> = showing
-                .verbs()
+            let widths: Vec<f32> = verbs
                 .iter()
                 .map(|verb| {
                     self.window
@@ -41836,7 +41902,7 @@ impl Runtime<'_> {
                         .measure_chrome_text(&mut self.app.gpu, verb.text(), font)
                 })
                 .collect();
-            let bar = notice::lay_out(strip, showing, &widths, scale);
+            let bar = notice::lay_out(strip, saying, &widths, scale);
             // **And the sentence, cut to the row it was left** (§7.43). The
             // words keep their whole boxes and the prose is what gives way, so
             // what is drawn is the longest prefix of it that fits with a `…` —
@@ -41844,7 +41910,7 @@ impl Runtime<'_> {
             // "how much of this fits", and not a second count of characters.
             let say = {
                 let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-                notice::sentence(showing, &bar, font, &mut |text, size| {
+                notice::sentence(saying, &bar, font, &mut |text, size| {
                     renderer.measure_chrome_text(gpu, text, size)
                 })
             };
@@ -41900,9 +41966,18 @@ impl Runtime<'_> {
     /// [`Self::drive_search_hover`]'s reason: a pointer standing on the strip is
     /// not standing on a cell, and the pane must not be told about it.
     fn drive_notice_hover(&mut self, position: Option<PhysicalPosition<f64>>) -> Result<bool> {
+        // **A pill with nothing to press is not hovered** (owner's ruling
+        // 2026-09-12), on `press_notice`'s own reason one gesture along: a
+        // confirmation floating over a document must not take the pointer away
+        // from the words under it.
         let hover = position.and_then(|at| {
             self.window.notice_layouts.iter().find_map(|(host, strip)| {
-                notice::hit(&strip.bar, at.x as f32, at.y as f32).map(|element| (*host, element))
+                (!strip.bar.verbs.is_empty() || strip.bar.close.is_some())
+                    .then(|| {
+                        notice::hit(&strip.bar, at.x as f32, at.y as f32)
+                            .map(|element| (*host, element))
+                    })
+                    .flatten()
             })
         });
         if self.window.notice_hover != hover {
@@ -41922,9 +41997,15 @@ impl Runtime<'_> {
     /// the two document verbs are asked of the *surface*, which both hosts have.
     fn press_notice(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
         let hit = self.window.notice_layouts.iter().find_map(|(host, strip)| {
-            notice::hit(&strip.bar, position.x as f32, position.y as f32).map(|it| (*host, it))
+            notice::hit(&strip.bar, position.x as f32, position.y as f32).map(|it| {
+                (
+                    *host,
+                    it,
+                    strip.bar.verbs.is_empty() && strip.bar.close.is_none(),
+                )
+            })
         });
-        let Some((host, element)) = hit else {
+        let Some((host, element, verbless)) = hit else {
             return Ok(false);
         };
         // Which seat, when the host is one. `None` is a float, and every arm
@@ -41958,10 +42039,28 @@ impl Runtime<'_> {
             notice::NoticeElement::Verb(notice::NoticeVerb::KeepMyEdits) => {
                 self.close_pane_notice(host)?;
             }
+            // **The one way out of a page this window will not edit** (owner's
+            // ruling 2026-09-12) — the refused card's own verb, on the pill
+            // that answers a reader who has just tried to type into it.
+            notice::NoticeElement::Verb(notice::NoticeVerb::OpenExternally) => {
+                self.open_preview_externally_on(self.notice_surface(host))?;
+            }
             // The strip's own width. It takes the press and answers nothing — a
             // bar with a hole in it lets a click through onto a cell that is
             // nowhere near the pointer.
-            notice::NoticeElement::Body => {}
+            //
+            // **A pill with no verb in it does not take the press at all**
+            // (owner's ruling 2026-09-12). A band is chrome a reader did not ask
+            // for and stands in its own row, so swallowing a stray click is the
+            // honest thing; a confirmation floating over a document is *the
+            // document's* surface for the second it is up, and a `Saved` that
+            // ate a click into the paragraph under it would be this window
+            // charging the reader for having been told.
+            notice::NoticeElement::Body => {
+                if verbless {
+                    return Ok(false);
+                }
+            }
         }
         Ok(true)
     }
@@ -43351,6 +43450,9 @@ impl Runtime<'_> {
         // frame's own reading of which seats exist, and a cache for a seat that
         // left the tree is a cache nobody may be handed.
         self.sweep_command_rails();
+        // And before any bar is laid out: what a recording's bar says about its
+        // file is text, and only the face can say how wide it is drawn.
+        self.measure_video_meta();
         // The two lowest things the overlay carries, in their own order: P177's
         // veil under the dock drawing's `z-index` 24 and 25, both under a menu's
         // 30. Neither is a surface floating over the window — one is a drawing on
@@ -54392,8 +54494,7 @@ impl Runtime<'_> {
             address: String::new(),
             segments: Vec::new(),
             targets: Vec::new(),
-            notice: String::new(),
-            notice_flashing: false,
+            meta: String::new(),
             edit: None,
             refused: false,
             flip_to_source: false,
@@ -54478,6 +54579,31 @@ impl Runtime<'_> {
                     i18n::Text::PreviewRailOpen.text(),
                     font,
                 );
+                // **The standing fact, worn as a padlock** (owner's ruling
+                // 2026-09-12). One question — is this surface owed a fact that
+                // is true for as long as you are looking at it — asked once here
+                // for both hosts, so a pane and the window torn off it cannot
+                // come to say two different things about one file. The sentence
+                // itself is never laid out on this row: it is the lock's tip,
+                // and it is said in words only on the pill that answers a
+                // refused edit.
+                frame.measure.lock = self
+                    .preview_standing_fact(surface, Instant::now())
+                    .is_some();
+                // **And what the picture is, dim, inboard of it** — the line
+                // that used to stand under the photograph (mock-up 4955).
+                frame.meta = self
+                    .preview_meta_sentence(surface, scale)
+                    .unwrap_or_default();
+                frame.measure.meta_width = if frame.meta.is_empty() {
+                    0.0
+                } else {
+                    self.window.renderer.measure_chrome_text(
+                        &mut self.app.gpu,
+                        &frame.meta,
+                        seats::FILES_FOOT_FONT_LOGICAL_PX * scale,
+                    )
+                };
             }
         }
         let (tools, edit) =
@@ -54567,6 +54693,13 @@ impl Runtime<'_> {
             // read back: the button turns the pane to whichever face it is not
             // showing.
             let to_source = !self.preview_md_source(surface);
+            // **What the padlock says** — the very sentence the band used to
+            // print, which is what makes the mark an honest replacement for it
+            // rather than a mark nobody can read (owner's ruling 2026-09-12).
+            let lock = self
+                .preview_standing_fact(surface, Instant::now())
+                .unwrap_or_default()
+                .to_owned();
             for (tip, box_) in seats::preview_rail_tip_boxes(&geometry) {
                 let text = preview_rail_tip_text(
                     tip,
@@ -54574,6 +54707,7 @@ impl Runtime<'_> {
                     &segments,
                     &geometry.folded,
                     to_source,
+                    &lock,
                 );
                 anchors.push(
                     tooltip::TooltipAnchorId::PreviewRail(surface, tip),
@@ -54680,6 +54814,7 @@ impl Runtime<'_> {
                 &[],
                 &[],
                 !self.preview_md_source(self.preview_here(seat)),
+                "",
             ),
             // **The second of that sign's two sentences.** The first is the
             // rail's stop-loading; this square is over a video.
@@ -54741,7 +54876,7 @@ impl Runtime<'_> {
             let sourced = self.page_source_shown_on(surface).is_some();
             let lead = if sourced {
                 self.preview_save_notice(surface, now)
-                    .or_else(|| self.preview_foot_notice(surface, now))
+                    .or_else(|| self.preview_standing_fact(surface, now))
                     .unwrap_or_default()
                     .to_owned()
             } else {
@@ -54782,13 +54917,7 @@ impl Runtime<'_> {
             // the room the thing that is drawn actually has, and a bubble
             // floating inside the body has a little less of it than a strip
             // spanning the pane did.
-            let body = seats::preview_pane_geometry(
-                rect,
-                scale,
-                self.seats.seat_rail(seat),
-                self.seats.seat_wears_notice(seat),
-            )
-            .body;
+            let body = seats::preview_pane_geometry(rect, scale, self.seats.seat_rail(seat)).body;
             let margin = (seats::PAGE_HOVER_TAG_MARGIN_LOGICAL_PX * scale).round();
             let pad = (seats::PAGE_HOVER_TAG_PAD_X_LOGICAL_PX * scale).round();
             let run = [
@@ -54865,7 +54994,7 @@ impl Runtime<'_> {
         };
         let (flash, dissolved) = self.foot_saying(FootSaying::Preview(surface), wanted, now);
         let notice = self
-            .preview_foot_notice(surface, now)
+            .preview_standing_fact(surface, now)
             .unwrap_or_default()
             .to_owned();
         let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
@@ -55686,9 +55815,19 @@ impl Runtime<'_> {
         body: [f32; 4],
         scale: f32,
     ) -> [Option<preview::ScrollBar>; 2] {
+        // **A float's rule is cut from the inset box and the document is not**
+        // (§7.39's report of 2026-08-28, kept through the ruling of
+        // 2026-09-12). The body reaches the window's floor now, where the two
+        // corners curve and the grip sits; text drawn there is clipped by the
+        // face around it and reads correctly, and a scrollbar drawn there is a
+        // straight rule laid out over a curve.
+        let track = match surface {
+            PreviewSurface::Float(id) => self.float_inset_body_rect(id, scale).unwrap_or(body),
+            PreviewSurface::Seat(_) | PreviewSurface::Peek => body,
+        };
         [
-            self.preview_surface_bar(surface, preview::ScrollAxis::Horizontal, body, scale),
-            self.preview_surface_bar(surface, preview::ScrollAxis::Vertical, body, scale),
+            self.preview_surface_bar(surface, preview::ScrollAxis::Horizontal, track, scale),
+            self.preview_surface_bar(surface, preview::ScrollAxis::Vertical, track, scale),
         ]
     }
 
@@ -55787,7 +55926,12 @@ impl Runtime<'_> {
         let shape = self.video_shape_of(surface, scale, now)?;
         let state = seat.state();
         let figures = video_seat::clock_figures(state.position_secs, state.duration_secs);
-        video_seat::bar_layout(shape.rect(), scale, figures)
+        video_seat::bar_layout(
+            shape.rect(),
+            scale,
+            figures,
+            self.video_meta_of(surface).width,
+        )
     }
 
     /// **The play button over a surface showing a recording it is not playing.**
@@ -56105,8 +56249,52 @@ impl Runtime<'_> {
             now,
             self.app.motion,
             &bt_render::chrome_palette(),
+            self.video_meta_of(surface),
         );
         (!layer.quads.is_empty()).then_some(layer)
+    }
+
+    /// **Measure what every playing surface's bar says about its file** — once a
+    /// frame, beside the font (owner's ruling 2026-09-12).
+    ///
+    /// The sentence is the same one the card says about the same recording
+    /// ([`Self::video_meta_sentence`]); what this pass adds is the width it is
+    /// drawn at, which decides where the speed button stands and is therefore
+    /// what the hit test has to be resolved against.
+    fn measure_video_meta(&mut self) {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let font = video_seat::bar_font_logical_px() * scale;
+        let surfaces: Vec<PreviewSurface> = self
+            .window
+            .video
+            .iter()
+            .map(|(surface, _)| surface)
+            .collect();
+        let mut measured = std::collections::BTreeMap::new();
+        for surface in surfaces {
+            let Some(sentence) = self.video_meta_sentence(surface) else {
+                continue;
+            };
+            let width =
+                self.window
+                    .renderer
+                    .measure_chrome_text(&mut self.app.gpu, &sentence, font);
+            measured.insert(surface, (sentence, width));
+        }
+        self.window.video_meta = measured;
+    }
+
+    /// What this frame measured for one surface — and nothing at all for a
+    /// surface the pass has not reached yet, which is the honest answer for the
+    /// first frame of a recording that has only just started playing.
+    fn video_meta_of(&self, surface: PreviewSurface) -> video_seat::BarMeta<'_> {
+        self.window.video_meta.get(&surface).map_or_else(
+            video_seat::BarMeta::none,
+            |(text, width)| video_seat::BarMeta {
+                text: text.as_str(),
+                width: *width,
+            },
+        )
     }
 
     fn preview_float_bar_layers(&self, id: float::FloatId) -> Vec<marks::OverlayLayer> {
@@ -58310,7 +58498,34 @@ impl Runtime<'_> {
             // scroll, which is `clamped_preview_scroll`'s whole rule.
             Key::Named(NamedKey::Home) => [0.0, f32::MIN],
             Key::Named(NamedKey::End) => [0.0, f32::MAX],
-            _ => return Ok(true),
+            // **A key that would have inserted, on a page that will not take
+            // one** (owner's ruling 2026-09-12). This surface has no caret —
+            // that is what put the key here rather than in
+            // [`Self::preview_key`] — so a letter, a `Tab`, an `Enter` or a
+            // `Backspace` arriving on it is a reader trying to type into
+            // something this window is refusing to edit, and the reason floats
+            // for two seconds.
+            //
+            // **Asked after the reading keys and not before them.** `Space` and
+            // the arrows would insert on a page with a caret and page a document
+            // without one, and the one they mean here is the reading: a reader
+            // who cannot edit a file is still reading it, and a pill raised by
+            // the page-down key would be this window answering a question nobody
+            // asked. So the check is the last arm rather than the first, and
+            // everything the reading claimed keeps it.
+            key => {
+                if matches!(
+                    preview_edit::command(key, self.window.modifiers),
+                    preview_edit::EditCommand::Insert(_)
+                        | preview_edit::EditCommand::Newline
+                        | preview_edit::EditCommand::Tab
+                        | preview_edit::EditCommand::Backspace
+                        | preview_edit::EditCommand::Delete
+                ) {
+                    self.refuse_preview_edit(surface);
+                }
+                return Ok(true);
+            }
         };
         let scroll = self.preview_pane_mut(surface).scroll;
         let wanted = [scroll[0] + step[0], scroll[1] + step[1]];
@@ -58693,6 +58908,109 @@ impl Runtime<'_> {
         self.repaint_preview()
     }
 
+    /// **Somebody has just tried to change a page that will not take it** —
+    /// float the reason for two seconds (owner's ruling 2026-09-12).
+    ///
+    /// The two gestures are the two that mean it, and they are the two the
+    /// refusal is invisible at: a press that would have seated a caret
+    /// ([`Self::press_preview_body`], where the editability gate turns it away)
+    /// and a key that would have inserted ([`Self::preview_browse_key`], where
+    /// one lands on a surface with no caret to put it in). Before this ruling
+    /// both were simply nothing happening, with the reason standing in a band at
+    /// the bottom of the pane that the reader had no cause to be looking at.
+    ///
+    /// **Every further attempt restarts the clock** rather than being ignored or
+    /// stacking a second pill: a reader typing a word into a read-only file is
+    /// making one gesture, not six, and the answer should still be on the glass
+    /// when they stop.
+    ///
+    /// Raised only where there is a reason to give — a picture, a diff and a
+    /// commit graph are not *refusing* anything, they simply have no text in
+    /// them, and a pill that said so on every keystroke would be this window
+    /// explaining what a `.png` is.
+    fn refuse_preview_edit(&mut self, surface: PreviewSurface) -> bool {
+        let now = Instant::now();
+        if self.preview_standing_fact(surface, now).is_none() {
+            return false;
+        }
+        self.window.preview_refusal = Some((surface, now));
+        let _ = self.refresh_overlay();
+        let _ = self.present_chrome_change();
+        true
+    }
+
+    /// The reason this surface is floating, while it still is.
+    fn preview_refusal_reason(&self, surface: PreviewSurface, now: Instant) -> Option<&str> {
+        let (refused, at) = self.window.preview_refusal?;
+        (refused == surface && now.saturating_duration_since(at) < PREVIEW_REFUSAL_HOLD)
+            .then(|| self.preview_standing_fact(surface, now))
+            .flatten()
+    }
+
+    /// When the refusal now on the glass is due to go away, so the loop can be
+    /// up for it — the acknowledgements' own wake-up, one surface along.
+    fn preview_refusal_deadline(&self) -> Option<Instant> {
+        let (_, at) = self.window.preview_refusal?;
+        Some(at + PREVIEW_REFUSAL_HOLD)
+    }
+
+    /// **What this surface's news pill is saying this frame**, and what it
+    /// offers (owner's ruling 2026-09-12).
+    ///
+    /// Three kinds of news and one slot, in the order a reader can act on them:
+    ///
+    /// 1. **the reason an edit was refused**, because it is an answer to a
+    ///    gesture made a heartbeat ago and the reader is waiting for it;
+    /// 2. **a decision they owe** — a file rewritten or deleted under unsaved
+    ///    edits — which stays until it is answered (the 2026-08-15 ruling,
+    ///    unchanged) and is therefore what a pill is showing most of the time it
+    ///    is up at all;
+    /// 3. **a confirmation**, which expires by itself.
+    ///
+    /// The standing facts are not here and that is the ruling's other half: a
+    /// read-only body and a `.gif` that will not move are *states*, they are
+    /// worn as the padlock in the row above, and a sentence that stood on the
+    /// glass for as long as the file was open would be the band this ruling
+    /// retired wearing a new shape.
+    fn preview_pill_say(
+        &self,
+        surface: PreviewSurface,
+        now: Instant,
+    ) -> Option<(String, &'static [notice::NoticeVerb])> {
+        if let Some(reason) = self.preview_refusal_reason(surface, now) {
+            // **One way out, and it is the one the refused page already offers**
+            // (§7.7 ④″, `3af60fa`): this window will not edit the file, and the
+            // machine has something that will.
+            return Some((
+                reason.to_owned(),
+                &[notice::NoticeVerb::OpenExternally] as &'static [notice::NoticeVerb],
+            ));
+        }
+        if let Some(state) = self.preview_disk_notice_on(surface) {
+            return Some((state.text().to_owned(), state.verbs()));
+        }
+        // Which key the reveal was written under is the host's, exactly as it is
+        // where the two surfaces dress themselves: a pane's confirmation belongs
+        // to its seat and a window's to the window.
+        let revealed = match surface {
+            PreviewSurface::Seat(leaf) => RevealedFoot::Preview(leaf.seat),
+            PreviewSurface::Float(id) => RevealedFoot::Float(id),
+            PreviewSurface::Peek => return None,
+        };
+        let flashed = if self.foot_reveal_is_fresh(revealed, now) {
+            Some(foot_revealed_label().to_owned())
+        } else {
+            // **The confirmation and not the refusal.** A save that was turned
+            // away does not expire — it is a standing fact and wears the
+            // padlock — so the one thing this slot takes from the save ledger is
+            // the word that *is* news.
+            self.preview_save_notice(surface, now)
+                .filter(|notice| *notice == preview::preview_saved_notice())
+                .map(str::to_owned)
+        };
+        flashed.map(|word| (word, &[] as &'static [notice::NoticeVerb]))
+    }
+
     /// **The standing fact this surface's foot hangs on its right hand**, if it
     /// is owed one (user ruling, 2026-08-15).
     ///
@@ -58714,7 +59032,7 @@ impl Runtime<'_> {
     ///
     /// The two can never both be owed: a read-only buffer has no save to
     /// report.
-    fn preview_foot_notice(&self, surface: PreviewSurface, now: Instant) -> Option<&str> {
+    fn preview_standing_fact(&self, surface: PreviewSurface, now: Instant) -> Option<&str> {
         self.animation_refusal_notice(surface)
             .or_else(|| {
                 self.preview_buffer_on(surface)
@@ -59088,6 +59406,29 @@ impl Runtime<'_> {
         self.repaint_preview()
     }
 
+    /// **Take a refused edit's reason down when its two seconds are up** (owner's
+    /// ruling 2026-09-12).
+    ///
+    /// The acknowledgements' own sweep, one surface along and for its reason:
+    /// the deadline above wakes the loop at the instant the pill is due to go,
+    /// and a wake with nothing to do repaints nothing — so a pill whose clock had
+    /// run out stayed on the glass until something else happened to redraw the
+    /// window. Forgotten rather than merely hidden, so that the frame after this
+    /// one has no expired state left to ask about.
+    fn advance_preview_refusal(&mut self, now: Instant) -> Result<()> {
+        let Some((surface, _)) = self.window.preview_refusal else {
+            return Ok(());
+        };
+        if self.preview_refusal_reason(surface, now).is_some() {
+            return Ok(());
+        }
+        self.window.preview_refusal = None;
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     /// A press inside the edit surface: take the keyboard, put the caret where
     /// the pointer is, and arm the drag that selects.
     ///
@@ -59108,6 +59449,19 @@ impl Runtime<'_> {
             self.ask_to_edit_preview_on(surface);
         }
         let Some((surface, body)) = self.preview_edit_body(position) else {
+            // **A press that would have seated a caret and could not is a
+            // question, and it is owed the answer** (owner's ruling
+            // 2026-09-12). The gate one line up is what a read-only body fails,
+            // so this is the exact moment a reader learns nothing happened —
+            // and before the ruling the reason was standing in a band at the
+            // bottom of the pane that they had no cause to be looking at.
+            //
+            // The press is **not** claimed: it is refused exactly as it was, and
+            // the rungs below this one (a rendered page's own press, a link, a
+            // selection) go on answering it. All that is added is the sentence.
+            if let Some((surface, _)) = self.preview_surface_at(position) {
+                self.refuse_preview_edit(surface);
+            }
             return Ok(false);
         };
         // **A rendered Markdown page is not this door's surface** (T5,
@@ -59761,10 +60115,10 @@ impl Runtime<'_> {
             // through the hole punched in it (DESIGN.md 7.8 (2)), so anything put
             // here would be put over a browser.
             // A video is the image's arrangement exactly: a frame on the picture
-            // channel, and the two fact lines under it written by the same
-            // `preview_image_meta` that writes a picture's — which is a
-            // `PreviewBody` built beside this one and not a document parsed into
-            // it.
+            // channel, with its facts at the right end of its own bar
+            // (`video_meta_sentence`) since the ruling of 2026-09-12, where a
+            // picture's are at the right end of the path row
+            // (`preview_meta_sentence`). Neither is a document parsed into this.
             preview::PreviewView::Image
             | preview::PreviewView::Video
             | preview::PreviewView::Graph
@@ -60728,7 +61082,12 @@ impl Runtime<'_> {
             preview_trace::emit(preview_trace::global(), || {
                 format!("built {surface:?} leave=picture")
             });
-            let mut built = self.preview_image_meta(surface, body, scale);
+            // **And nothing under it since 2026-09-12** (owner's ruling): the
+            // sentence that used to stand here is at the right end of the path
+            // row for a picture (`preview_meta_sentence`) and at the right end
+            // of the bar for a recording (`video_meta_sentence`). What is left
+            // for this lane is the play button.
+            let mut built: Option<bt_render::PreviewBody> = None;
             // **The play button rides here and not with the seat's own chrome**
             // (user ruling 2026-08-27; §7.23 ⑩), and the reason was measured on
             // the machine that afternoon: the seats' sprite pass is issued
@@ -61394,56 +61753,29 @@ impl Runtime<'_> {
         )
     }
 
-    /// `.pv-meta` — "1280 × 800 · PNG · 214 KB" under the picture (mock-up 4955).
+    /// **What the picture on this surface is** — `PNG · 670 KB`,
+    /// `6000 × 4000 · shown at 41%` — in the row above it (owner's ruling
+    /// 2026-09-12).
+    ///
+    /// It was `.pv-meta`, a line under the picture (mock-up 4955), until the
+    /// ruling moved it: it is a standing fact about the file, it belongs with
+    /// the other one — the padlock — at the right end of the path row, and a
+    /// sentence pinned under a photograph was the last thing between it and the
+    /// bottom of the pane.
     ///
     /// Everything it can say and nothing it cannot: a field the window does not
     /// know yet is left out rather than printed as a placeholder, so the line
     /// grows as the decoder and the worker answer instead of flickering through
     /// three shapes.
-    fn preview_image_meta(
-        &self,
-        surface: PreviewSurface,
-        body: [f32; 4],
-        scale: f32,
-    ) -> Option<bt_render::PreviewBody> {
-        let zoom = self.preview_image_zoom(surface);
-        // **A video says the two lines its card says, and says them here** (user ruling
-        // 2026-08-27; §7.23). It is the same file read the same way — how long it runs, how large
-        // its picture is, how large the file is — so the sentence is built by the same function,
-        // and the two surfaces cannot come to disagree about one recording.
-        //
-        // **Joined into one line rather than stacked into two**, and that is not a compromise:
-        // this strip *is* the pane's fact line, it has always joined its fields with a middle dot,
-        // and the card stacks only because a card is 280 pixels wide. The facts are the same
-        // facts in the same order.
-        //
-        // The zoom is not among them, and it is not among them because there is no zoom: a
-        // video's frame stands at Fit and the wheel over it moves nothing
-        // ([`Self::picture_takes_zoom`], where the whole argument is written). A sentence that
-        // said `Fit` under a picture that cannot be anything else would be a field with no
-        // question behind it.
-        let path = self.preview_pane(surface)?.image.as_ref()?.path.clone();
-        if preview::path_names_a_video(&path) {
-            let facts = self.video_facts_of(&path);
-            let extension = path.extension().and_then(std::ffi::OsStr::to_str);
-            let sentence = preview::video_fact_lines(extension, facts)
-                .into_iter()
-                .flatten()
-                .collect::<Vec<String>>()
-                .join(" \u{b7} ");
-            if sentence.is_empty() {
-                return None;
-            }
-            // **The drawn frame's extent and not the recording's**, which is the one place these
-            // two sizes must not be confused: the sentence stands under the picture on screen,
-            // and the picture on screen is the frame this window decoded — see
-            // [`VIDEO_FRAME_FIT_PX`], which is why the two differ at all.
-            let drawn = self
-                .preview_picture(surface)
-                .and_then(|picture| picture.native);
-            return Some(self.preview_meta_body(body, scale, sentence, drawn, zoom));
-        }
+    ///
+    /// **A recording's sentence is not here** — see [`Self::video_meta_sentence`],
+    /// which puts it at the right end of the player's own bar, because that is
+    /// where a recording's facts belong once the bar is drawn on the picture.
+    fn preview_meta_sentence(&self, surface: PreviewSurface, scale: f32) -> Option<String> {
         let image = self.preview_pane(surface)?.image.as_ref()?;
+        if preview::path_names_a_video(&image.path) {
+            return None;
+        }
         let extension = image
             .path
             .extension()
@@ -61452,6 +61784,8 @@ impl Runtime<'_> {
         // The zoom is said only once the decode has answered: a percentage is a
         // multiple of native pixels, and there is no such thing to be a multiple
         // of until somebody has opened the file.
+        let body = self.preview_surface_body_rect(surface, scale)?;
+        let zoom = self.preview_image_zoom(surface);
         let caption = image
             .native
             .map(|(width, height)| image_zoom_caption(body, [width, height], zoom));
@@ -61464,89 +61798,54 @@ impl Runtime<'_> {
             Some(size) => (Some(size), image.native.filter(|native| *native != size)),
             None => (image.native, None),
         };
-        let sentence = image_meta_sentence(
+        image_meta_sentence(
             stated,
             shown,
             extension.as_deref(),
             image.bytes,
             caption.as_deref(),
-        )?;
-        let native = image.native;
-        Some(self.preview_meta_body(body, scale, sentence, native, zoom))
+        )
     }
 
-    /// **One sentence under whatever picture this surface is drawing** — where it stands, and in
-    /// what ink.
+    /// **What the recording on this surface is** — `MP4 · 38 MB`, at the right
+    /// end of its own bar (owner's ruling 2026-09-12; §7.44).
     ///
-    /// Lifted out of [`Self::preview_image_meta`] when a video's frame arrived beside a picture
-    /// (user ruling 2026-08-27; §7.23): the two differ entirely in *what* they say and not at all
-    /// in where it goes, and a second copy of this placement is a second thing to get wrong the
-    /// next time a zoom changes what "under" means.
+    /// The same facts the card says about the same file, built by the same
+    /// function so the two surfaces cannot come to disagree about one recording
+    /// (user ruling 2026-08-27; §7.23) — and **joined into one line rather than
+    /// stacked into two**, which is not a compromise: the card stacks only
+    /// because a card is 280 pixels wide.
     ///
-    /// `drawn` is the size of the pixels actually on screen — a picture's decode or a video's
-    /// frame — and `None` for a surface still waiting on them, which falls back to the fit
-    /// fraction the empty body reserves.
-    fn preview_meta_body(
-        &self,
-        body: [f32; 4],
-        scale: f32,
-        sentence: String,
-        drawn: Option<(u32, u32)>,
-        zoom: ImageZoom,
-    ) -> bt_render::PreviewBody {
-        let palette = bt_render::chrome_palette();
-        let font_size = PREVIEW_META_FONT_LOGICAL_PX * scale;
-        let line_height = (font_size * 1.4).round().max(1.0);
-        let gap = (PREVIEW_IMAGE_GAP_LOGICAL_PX * scale).round();
-        // Under the picture that is actually on screen, not under the box it was
-        // fitted into. A small picture does not fill its fit, and a sentence
-        // pinned to the fit would float half a pane below the thing it is about;
-        // `.pv-image` is a centred *column* of two items, so the gap belongs
-        // between them and not between one of them and a margin.
-        //
-        // **The rectangle, not the raster** (ticket #60). Those were the same
-        // number while the only mode was Fit; once a picture can be magnified
-        // they part company — above 100% the texture stops at the decode's own
-        // pixels and the drawn height is the one that grew — and it is the drawn
-        // one this sentence stands under, because that is the thing on screen.
-        //
-        // Clamped to stay inside the body, because a picture zoomed past the
-        // pane's height has no "under" left: the line then rests on the body's
-        // last row, over the picture, which is what every viewer with an info
-        // bar does and the only alternative to it being nowhere at all.
-        let drawn_height = match drawn {
-            Some((width, height)) if width > 0 && height > 0 => {
-                let rect = image_destination(body, [width, height], zoom);
-                rect[3] - rect[1]
-            }
-            _ => (body[3] - body[1]) * PREVIEW_IMAGE_FIT_HEIGHT_FRACTION,
+    /// The zoom is not among them because there is no zoom: a video's frame
+    /// stands at Fit and the wheel over it moves nothing
+    /// ([`Self::picture_takes_zoom`], where the whole argument is written).
+    ///
+    /// It stands on the bar and no longer under the picture, which is the
+    /// ruling's own sentence about this surface: the bar is flush with the
+    /// bottom of the stage now, so a line under the frame would either be behind
+    /// the bar or be the band the ruling retired.
+    fn video_meta_sentence(&self, surface: PreviewSurface) -> Option<String> {
+        // **The recording this surface is playing, and only then the still it is
+        // showing.** A pane that has started playing has no `image` left — the
+        // decoded first frame comes off the glass the moment the engine has one
+        // (`refit_preview_picture`) — so a sentence asked of the still alone
+        // would be a bar that says what the file is until you press play and
+        // then stops.
+        let path = match self.video_playing_on(surface) {
+            Some(path) => path.to_path_buf(),
+            None => self.preview_pane(surface)?.image.as_ref()?.path.clone(),
         };
-        let top = ((body[1] + body[3] + drawn_height) / 2.0 + gap).min(body[3] - line_height);
-        bt_render::PreviewBody {
-            clip: body,
-            quads: Vec::new(),
-            blocks: Vec::new(),
-            rasters: Vec::new(),
-            paragraphs: vec![bt_render::PreviewParagraph {
-                runs: vec![bt_render::PreviewRun {
-                    text: sentence,
-                    color: palette.files_row_muted,
-                    mono: false,
-                    bold: false,
-                    italic: false,
-                    font_scale: 1.0,
-                    inline_box_px: None,
-                }],
-                rect: [body[0], top, body[2], top + line_height],
-                font_size_px: font_size,
-                line_height_px: line_height,
-                wrap: false,
-                letter_spacing_em: 0.0,
-                align_right: false,
-                align_center: true,
-                cell_advance: None,
-            }],
+        if !preview::path_names_a_video(&path) {
+            return None;
         }
+        let facts = self.video_facts_of(&path);
+        let extension = path.extension().and_then(std::ffi::OsStr::to_str);
+        let sentence = preview::video_fact_lines(extension, facts)
+            .into_iter()
+            .flatten()
+            .collect::<Vec<String>>()
+            .join(" \u{b7} ");
+        (!sentence.is_empty()).then_some(sentence)
     }
 
     /// How one surface is looking at its picture (ticket #60).
@@ -62551,7 +62850,7 @@ impl Runtime<'_> {
                     // a `.webm` in a codec this machine has not got is an ordinary file, and the pane
                     // still has its length, its size and its name to state. So the sentence is
                     // withheld and the two fact lines carry the surface — see
-                    // [`Self::preview_image_meta`], whose degraded form exists for exactly this
+                    // [`Self::video_meta_sentence`], whose degraded form exists for exactly this
                     // frame.
                     if !preview::path_names_a_video(&path)
                         && let Some(picture) = self.preview_picture_mut(surface)
@@ -68128,7 +68427,7 @@ impl Runtime<'_> {
         // The card is never saved into and never reveals a folder, so it has no
         // flash — its left hand is the fixed sentence, always.
         let notice = self
-            .preview_foot_notice(PreviewSurface::Peek, Instant::now())
+            .preview_standing_fact(PreviewSurface::Peek, Instant::now())
             .unwrap_or_default()
             .to_owned();
         let foot = {
@@ -75602,17 +75901,14 @@ impl Runtime<'_> {
             float::FloatPart::Foot => self.reveal_float_root(id)?,
             float::FloatPart::Save => self.save_preview_on(PreviewSurface::Float(id))?,
             float::FloatPart::Flip => self.flip_preview_source_on(PreviewSurface::Float(id))?,
-            // **The disk notice's band, pressed through the pane's own door**
-            // (B1, 2026-09-01, §7.39's 总则). `press_notice` resolves which word
-            // out of `notice_layouts`, which is the very row this band was drawn
-            // from — one hit test for one strip, so `Reload` in a window and
-            // `Reload` in a pane are the same press of the same button and not
-            // two implementations that agree by hand. A press on the band's own
-            // padding is claimed and does nothing, which is the strip's rule on
-            // both hosts: a bar with a hole in it lets a click through.
-            float::FloatPart::Notice => {
-                self.press_notice(position)?;
-            }
+            // **The news pill is not a part of this chassis** (owner's ruling
+            // 2026-09-12). It floats inside the body rather than standing in a
+            // row of its own, so there is nothing for `float_hit` to name — and
+            // a press on `Reload` still reaches `press_notice` first, because
+            // that door is asked above the chrome router entirely
+            // (`mouse_input`) off the very rectangle the pill was drawn in. One
+            // hit test for one piece of furniture, so `Reload` in a window and
+            // `Reload` in a pane are the same press of the same button.
             // **The one way out of a file this window cannot show** (§7.39), the
             // docked card's own verb (`ChromeTarget::PreviewOpenButton`) one
             // surface over. It breaks a click chain for `.files-foot`'s reason: a
@@ -76542,14 +76838,11 @@ impl Runtime<'_> {
         // the wrong thing.
         let rail = self.preview_rail_kind(surface);
         float::FloatHeadTools {
-            // **And the disk notice's band, asked with the docked seat's own
-            // predicate** (B1, 2026-09-01). `Seats::set_notices` is what makes a
-            // pane one bar shorter; this is the same decision spent the other
-            // way — a window has no solve to be told about, so the answer is
-            // read here, every frame, out of the same buffer.
-            notice: self
-                .preview_disk_notice_on(PreviewSurface::Float(id))
-                .is_some(),
+            // **And no band for the disk notice since 2026-09-12** (owner's
+            // ruling). The chassis reserves nothing for it: a window's news is a
+            // pill floating over the bottom edge of its body, laid out by
+            // `notice_layers` off `seats::news_pill_box` and costing this
+            // geometry no rows at all.
             dirty: true,
             save: self.preview_is_editable(surface),
             // **And the flip goes down to that row when there is one**, which is
@@ -76688,11 +76981,33 @@ impl Runtime<'_> {
     /// frame every frame, so the engine's bounds and the scrollbar both follow
     /// the drag with nothing else asked ([`float::FloatGeometry::content_body`]).
     fn float_body_rect(&self, id: float::FloatId, scale: f32) -> Option<[f32; 4]> {
+        Some(self.float_chassis(id, scale)?.body)
+    }
+
+    /// **The rectangle a float's content is inset into for the two tenants that
+    /// cannot be drawn over the window's floor** — its engine and its scrollbar
+    /// ([`float::FloatGeometry::content_body`], §7.39, user report 2026-08-28).
+    ///
+    /// The body itself reaches the window's own floor since the ruling of
+    /// 2026-09-12 — that is what "no reserved foot" means on this chassis, and
+    /// it is why a document, a picture and a recording all now run to the bottom
+    /// edge with the resize grip drawn over them. Two things still may not:
+    ///
+    /// * **a page**, which is a composition-hosted WebView2 — one opaque
+    ///   rectangle that paints its own square corners, that no click can pass
+    ///   through, and that would bury the grip;
+    /// * **a document's scrollbar**, whose rule rides the body's right edge down
+    ///   to its floor and was photographed drawn out over the rounded corner.
+    ///
+    /// Neither is a *band* and neither costs the document a pixel of height:
+    /// this is one inset, on two tenants that are drawn inside the same body
+    /// everything else fills.
+    fn float_inset_body_rect(&self, id: float::FloatId, scale: f32) -> Option<[f32; 4]> {
         Some(self.float_chassis(id, scale)?.content_body(scale))
     }
 
     /// **This float's chassis, asked without a font** — the derivation
-    /// [`Self::float_body_rect`] and [`Self::float_notice_strip`] both read.
+    /// [`Self::float_body_rect`] and [`Self::float_inset_body_rect`] both read.
     ///
     /// One derivation and not two, for `seats::pane_notice_strip`'s own stated
     /// reason one host over: the band and the body it was taken out of are the
@@ -76714,15 +77029,6 @@ impl Runtime<'_> {
             0.0,
             self.float_head_tools(id),
         ))
-    }
-
-    /// **The row this window's notice strip stands in**, or `None` when it wears
-    /// none (B1, 2026-09-01).
-    ///
-    /// `seats::pane_notice_strip`'s answer on the second host, out of the same
-    /// chassis its body comes out of.
-    fn float_notice_strip(&self, id: float::FloatId, scale: f32) -> Option<[f32; 4]> {
-        self.float_chassis(id, scale)?.notice
     }
 
     /// **Every preview float this window is drawing**, bottom to top.
@@ -77416,7 +77722,7 @@ impl Runtime<'_> {
         };
         let (flash, foot_dissolved) = self.foot_saying(FootSaying::FloatPreview(id), wanted, now);
         let notice = self
-            .preview_foot_notice(surface, now)
+            .preview_standing_fact(surface, now)
             .unwrap_or_default()
             .to_owned();
         let head_font = float::FLOAT_HEAD_FONT_LOGICAL_PX * scale;
@@ -77482,33 +77788,14 @@ impl Runtime<'_> {
         // 欠账, 2026-08-25) — one `dress_preview_rail`, one measurement, one
         // record in `preview_rail_measures`, so the tip, the menu and the press
         // all read what this frame drew.
-        let mut rail = self.dress_preview_rail(surface, scale);
-        // **The retired strip's standing phrase, hung on the row that replaced
-        // it** (user ruling 2026-08-25) — the docked pane's own move, made here
-        // for the second host. `Read-only · 64 KB` and a refused save are facts
-        // about the buffer, and a fact that is true until something changes it
-        // belongs in chrome; the *flash* is not, and goes to the bubble below.
-        //
-        // Taken off the dressing this frame already made rather than derived a
-        // second time, so no window can say two different things about one file.
-        // The measurement goes back into `preview_rail_measures` because the hit
-        // test and the tips read the number the picture was built from.
-        if let Some(frame) = rail.as_mut()
-            && footless
-            && !foot.notice.is_empty()
-        {
-            frame.notice.clone_from(&foot.notice);
-            frame.notice_flashing = false;
-            frame.measure.notice_width = self.window.renderer.measure_chrome_text(
-                &mut self.app.gpu,
-                &frame.notice,
-                seats::FILES_FOOT_FONT_LOGICAL_PX * scale,
-            );
-            self.window
-                .preview_rail_measures
-                .insert(surface, frame.measure.clone());
-        }
-        let rail = rail;
+        // **And nothing is copied onto it from the foot since 2026-09-12**
+        // (owner's ruling). The standing phrase used to be lifted off the foot
+        // this frame had already dressed and hung on this row's right hand;
+        // `dress_preview_rail` decides the padlock itself now, out of the same
+        // buffer, so there is still exactly one derivation and no window in
+        // which a pane and the window torn off it could say two different things
+        // about one file.
+        let rail = self.dress_preview_rail(surface, scale);
         let palette = bt_render::chrome_palette();
         // **What fills the body, decided by what is in it** (user report,
         // 2026-08-20).
@@ -77627,36 +77914,15 @@ impl Runtime<'_> {
             &palette,
             fade,
         );
-        // **The confirmation, in the corner of the body** (user ruling
-        // 2026-08-25) — `Saved` and `Revealed…`, in the bubble a docked page's
-        // hover line already stands in ([`seats::push_corner_tag`]).
-        //
-        // A bubble and not a strip, which is the whole of why the foot could go:
-        // it occupies no rows, so the document under it does not move when a word
-        // arrives and does not move back when the word expires. A band that
-        // exists only for the two seconds after a press is a band that is empty
-        // for every other second of the window's life, which is precisely the
-        // picture the ruling was handed.
-        //
-        // Only while there is something to say — an idle window draws nothing —
-        // and only on a window whose strip has retired: one that still has a foot
-        // has somewhere to print this already, and two of them would be the same
-        // word twice.
-        if footless && foot.flashing && !foot.lead.is_empty() {
-            let width = self.window.renderer.measure_chrome_text(
-                &mut self.app.gpu,
-                &foot.lead,
-                seats::PAGE_HOVER_TAG_FONT_LOGICAL_PX * scale,
-            );
-            seats::push_corner_tag(
-                geometry.body,
-                &foot.lead,
-                width,
-                scale,
-                &palette,
-                (&mut layer.sprites, &mut layer.labels),
-            );
-        }
+        // **The confirmation is the news pill's now** (owner's ruling
+        // 2026-09-12; §7.1.3x ②). It was a bubble in this corner from the
+        // 2026-08-25 ruling that retired the foot — `Saved` and `Revealed…` in
+        // the shape a docked page's hover line stands in — and that argument was
+        // the right one said of the wrong surface: news of every kind belongs in
+        // one place on every preview, and it is the pill over the bottom edge
+        // that `notice_layers` lays out for both hosts. Drawing one here as well
+        // would be the same word twice, which is the very thing the bubble was
+        // guarded against when it was the only place there was.
         // **And drawn, on the window's own layer.** The chassis reserved the
         // band ([`float::FloatGeometry::rail`]) and the tenant fills it, which is
         // the division of labour this whole module is built on — the body's own
@@ -77670,8 +77936,7 @@ impl Runtime<'_> {
                     address: &frame.address,
                     segments: &frame.segments,
                     open: i18n::Text::PreviewRailOpen.text(),
-                    notice: &frame.notice,
-                    notice_flashing: frame.notice_flashing,
+                    meta: &frame.meta,
                     flip_to_source: frame.flip_to_source,
                     web: frame.web,
                     edit: frame.edit.as_ref().map(|edit| seats::PreviewNameEdit {
@@ -94204,7 +94469,7 @@ impl Runtime<'_> {
                 // rectangle would otherwise cover; `float_body_rect` is the body
                 // raised clear of both, and it is the bounds, the hole and the
                 // pointer region all at once.
-                Some(id) => self.float_body_rect(id, scale),
+                Some(id) => self.float_inset_body_rect(id, scale),
                 None => {
                     preview_image_placement(&tab.seats, &tab.seat_layout, seat, scale, transform)
                         .map(|placement| {
@@ -96783,6 +97048,7 @@ impl Runtime<'_> {
         self.advance_page_foot_clocks(now)?;
         // And the preview's own acknowledgement, on the same 1300ms clock.
         self.advance_preview_notice(now)?;
+        self.advance_preview_refusal(now)?;
         // Service the PTY gate after every other due task that can mutate session state, then carry
         // the deadline derived from that exact sample into the control-flow decision below.
         let pty_resize_deadline = self.flush_pending_pty_resize(now)?;
@@ -96939,6 +97205,11 @@ impl Runtime<'_> {
             // The preview's "Saved", on the same clock and owing the same single
             // wake-up: the instant it is due to go away.
             self.preview_notice_deadline(),
+            // And the reason a refused edit is floating, on its own two seconds
+            // (owner's ruling 2026-09-12). One entry because there is one
+            // reader: the pill names one surface, and a second attempt anywhere
+            // replaces it and sets this clock again.
+            self.preview_refusal_deadline(),
             // The two chevrons' 250/150, and nothing at all while the pointer is
             // not on one and no menu one opened is up (2026-08-16).
             self.window.chevrons.deadline(),
@@ -98001,6 +98272,197 @@ mod files_locate_door_tests {
         &rest[..end]
     }
 
+    /// RED — **trying to edit a read-only page floats the reason for two
+    /// seconds, with a way out** (owner's ruling 2026-09-12; §7.1.3x ③).
+    ///
+    /// The padlock in the path row is the standing answer and its tip is the
+    /// sentence. This is the *asked* one: a press that would have seated a caret
+    /// and a key that would have inserted are the two gestures that mean "I want
+    /// to change this", and until the ruling both were simply nothing happening
+    /// with the reason standing in a band the reader had no cause to look at.
+    ///
+    /// Four joints, each with the arm whose removal is the shipped build:
+    ///
+    /// ① the press raises it where the editability gate turns it away — and does
+    ///    not claim the press, so every rung under it goes on answering;
+    /// ② the key raises it where a key lands on a surface with no caret, and
+    ///    only for a key that would have *inserted* — the reading keys are
+    ///    claimed above it, so `Space` still pages a file too large to edit;
+    /// ③ the clock is two seconds and every attempt **restarts** it, which is
+    ///    what `preview_refusal` being written whole on each refusal says;
+    /// ④ the pill it raises offers the one way out the refused page has offered
+    ///    since `3af60fa`, and offers it before anything else the pill can say.
+    #[test]
+    fn trying_to_edit_a_read_only_page_floats_the_reason_for_two_seconds_with_a_way_out() {
+        // ① The press. The gate is `preview_edit_body`, and the refusal is
+        // raised in the arm that gate sends a read-only body down.
+        let press = body("    fn press_preview_body(");
+        assert!(
+            press.contains("self.refuse_preview_edit(surface)"),
+            "a press that cannot seat a caret says nothing about why:\n{press}"
+        );
+        assert!(
+            press.contains("return Ok(false);"),
+            "the refusal swallowed the press, so the rungs under it stopped answering"
+        );
+        // ② The key, and only a key that would have inserted.
+        let key = body("    fn preview_browse_key(");
+        assert!(
+            key.contains("self.refuse_preview_edit(surface)")
+                && key.contains("preview_edit::EditCommand::Insert(_)")
+                && key.contains("preview_edit::EditCommand::Newline")
+                && key.contains("preview_edit::EditCommand::Backspace"),
+            "a key typed at a read-only page says nothing about why:\n{key}"
+        );
+        assert!(
+            key.find("Key::Named(NamedKey::PageDown)")
+                .unwrap_or(usize::MAX)
+                < key.find("self.refuse_preview_edit(surface)").unwrap_or(0),
+            "the refusal is asked before the reading keys, so paging a file too large to \
+             edit explains itself instead of scrolling"
+        );
+        // ③ Two seconds, restarted by every attempt.
+        assert_eq!(
+            super::PREVIEW_REFUSAL_HOLD,
+            std::time::Duration::from_secs(2)
+        );
+        let raise = body("    fn refuse_preview_edit(");
+        assert!(
+            raise.contains("self.window.preview_refusal = Some((surface, now));"),
+            "an attempt inside the two seconds does not restart the clock:\n{raise}"
+        );
+        assert!(
+            raise.contains("self.preview_standing_fact(surface, now).is_none()"),
+            "a surface with no reason to give raises a pill anyway — a picture explaining \
+             that it is a picture:\n{raise}"
+        );
+        // And the loop is up for the instant it is due to go away, the way every
+        // other acknowledgement in this window is.
+        assert!(
+            body("    fn turn(&mut self, now: Instant, application_clocks: bool)")
+                .contains("self.preview_refusal_deadline(),"),
+            "nothing wakes the window when the reason is due to go, so the pill stands until              something else happens to repaint"
+        );
+        // ④ The way out, first among what the pill can say.
+        let say = body("    fn preview_pill_say(");
+        let refusal = say
+            .find("preview_refusal_reason")
+            .expect("the pill asks whether an edit was just refused");
+        let disk = say
+            .find("preview_disk_notice_on")
+            .expect("and what the disk did");
+        assert!(
+            refusal < disk,
+            "the refusal is ranked below the disk's news, so the answer to the reader's own \
+             gesture waits behind a question they have not answered"
+        );
+        assert!(
+            say.contains("notice::NoticeVerb::OpenExternally"),
+            "the reason floats with no way out of it:\n{say}"
+        );
+        assert!(
+            body("    fn press_notice(")
+                .contains("self.open_preview_externally_on(self.notice_surface(host))?"),
+            "pressing that way out does not hand the file to the machine"
+        );
+    }
+
+    /// RED — **an animation refusal is a lock with its reason** (owner's ruling
+    /// 2026-09-12; §7.1.3x ③; user report 2026-09-10, which is where the
+    /// sentence came from).
+    ///
+    /// A `.gif` this window will not play is standing still for a reason, and
+    /// that reason is a standing fact about the file exactly as a read-only
+    /// body's is. So it is the same padlock, with the same tip, off the same one
+    /// derivation — and there is exactly one, because a pane and the window torn
+    /// off it saying two different things about one file is the failure §7.7 ⑩
+    /// opened its debt over.
+    #[test]
+    fn an_animation_refusal_is_a_lock_with_its_reason() {
+        let fact = body("    fn preview_standing_fact(");
+        assert!(
+            fact.contains("self.animation_refusal_notice(surface)"),
+            "a still `.gif` is not among the facts this surface can be owed:\n{fact}"
+        );
+        assert!(
+            fact.contains("read_only_notice"),
+            "and neither is a read-only body:\n{fact}"
+        );
+        // One derivation: the padlock is reserved from it, and the tip says it.
+        let rail = body("    fn dress_preview_rail(");
+        assert!(
+            rail.contains("frame.measure.lock = self")
+                && rail.contains("preview_standing_fact(surface, Instant::now())"),
+            "the row reserves its padlock from something other than the one standing \
+             fact:\n{rail}"
+        );
+        let tips = body("    fn preview_rail_tip_anchors(");
+        assert!(
+            tips.contains("preview_standing_fact(surface, Instant::now())"),
+            "the padlock's tip is derived a second time, so a mark and its own reason can \
+             come to disagree:\n{tips}"
+        );
+        assert!(
+            body("fn preview_rail_tip_text(")
+                .contains("seats::PreviewRailTip::Lock => lock.to_owned()"),
+            "the padlock's tip says something other than the reason"
+        );
+    }
+
+    /// RED — **the disk-change pill stays until it is acted on, and a save
+    /// confirmation expires** (the 2026-08-15 ruling, unchanged; reshaped by the
+    /// owner's ruling 2026-09-12, §7.1.3x ②).
+    ///
+    /// The two halves of the old strip answered two different questions and they
+    /// still do — what changed is the shape, not the clocks. A decision the
+    /// reader owes has no clock at all and is taken down by being answered; a
+    /// confirmation is on the window's own 1300 ms and takes itself down.
+    ///
+    /// RED GATE: filter the disk's news through a freshness clock and a file
+    /// replaced under unsaved edits stops asking after a second; hand the pill
+    /// the save *refusal* as well and a warning the reader is entitled to have
+    /// missed starts fading.
+    #[test]
+    fn the_disk_change_pill_stays_until_acted_on_and_a_save_confirmation_expires() {
+        let say = body("    fn preview_pill_say(");
+        assert!(
+            say.contains("if let Some(state) = self.preview_disk_notice_on(surface) {")
+                && say.contains("return Some((state.text().to_owned(), state.verbs()));"),
+            "the disk's news is not offered whole, with the two verbs the strip had:\n{say}"
+        );
+        assert!(
+            !say.contains("preview_disk_notice_on(surface).filter"),
+            "the decision the reader owes was put on a clock"
+        );
+        assert!(
+            say.contains("self.preview_save_notice(surface, now)")
+                && say.contains("preview::preview_saved_notice()"),
+            "the confirmation is not read off the clock that expires it:\n{say}"
+        );
+        // And it is taken down by being answered, through the one door both
+        // hosts spend.
+        for signature in [
+            "    fn close_pane_notice(",
+            "    fn reload_preview_from_disk(",
+        ] {
+            assert!(
+                body(signature).contains("self.notice_surface(host)"),
+                "{signature} resolves its buffer from a seat, so a window's own verb finds \
+                 nothing to spend"
+            );
+        }
+        // The standing facts are not on the pill unasked: what the reader is owed
+        // without having asked for it is the padlock's, and the only way a
+        // standing fact reaches this slot is through the refusal above — a
+        // gesture the reader has just made.
+        let code = say.split("\n    ///").next().unwrap_or(say);
+        assert!(
+            !code.contains("read_only_notice") && !code.contains("animation_refusal_notice"),
+            "a standing fact is being floated as news unasked, which is the band this ruling \
+             retired wearing a new shape"
+        );
+    }
+
     /// PIN — **one predicate says whether a glance card has a window to become,
     /// and the shape and the gesture both read it** (user ruling 2026-08-27,
     /// §7.29; page arm opened 2026-08-28, §7.39).
@@ -98226,21 +98688,27 @@ mod files_locate_door_tests {
             "the settle asks the tree and not the float host, so a torn-off document \
              owes a sentence nobody writes down:\n{settle}"
         );
-        // ② The chassis makes room, asked with the docked seat's own predicate.
-        let tools = body("    fn float_head_tools(");
-        assert!(
-            tools.contains("notice: self")
-                && tools.contains("preview_disk_notice_on(PreviewSurface::Float(id))"),
-            "the window's chassis reserves no row for the strip, so the row would stand \
-             on the document:\n{tools}"
-        );
-        // ③ One measurement, two lanes. The float's layer is *built* from the row
-        // the settle wrote — the box you can press is the box you can see.
+        // ② The window's sentence is cut out of its own body and takes
+        // nothing from it — the owner's ruling of 2026-09-12, which retired the
+        // band on every preview surface. The claim is the one it always was, one
+        // shape along: there is a rectangle for the window's own news, derived
+        // from the window's own content, so the sentence is never drawn over a
+        // row that does not exist.
         let layers = body("    fn notice_layers(");
         assert!(
-            layers.contains("NoticeHost::Float(id) => self.float_notice_strip(id, scale)"),
-            "the pass that lays the band out does not lay out the window's:\n{layers}"
+            layers.contains("seats::news_pill_box(body, scale)"),
+            "the pass that lays the news out does not cut a pill out of the body it floats over, so a torn-off document has nowhere to say what the disk did:\n{layers}"
         );
+        // And the chassis reserves nothing for it, which is that ruling's other
+        // half: a band standing in the layout would move the document every time
+        // the news arrived and left.
+        let tools = body("    fn float_head_tools(");
+        assert!(
+            !tools.contains("notice:"),
+            "the window's chassis is still reserving a row for the strip:\n{tools}"
+        );
+        // ③ One measurement, two lanes. The float's layer is *built* from the
+        // rectangle the settle wrote — the box you can press is the box you can see.
         let float_layer = body("    fn float_notice_layer(");
         assert!(
             float_layer.contains("self.window.notice_layouts.get(&host)"),
@@ -98256,13 +98724,16 @@ mod files_locate_door_tests {
             "the window's band is not drawn in the float's own lane, so it lands under \
              the window it belongs to:\n{lane}"
         );
-        // ④ The press. `float_hit` answers `Head` for anything it cannot name, so
-        // without this arm a press on `Reload` takes hold of the window.
-        let press = body("    fn press_float(");
+        // ④ The press. The pill floats *inside* the body, so `float_hit` has no
+        // row to name and would answer `Body` — a press on `Reload` would land
+        // in the document. What keeps it honest is that the strip's own door is
+        // asked above the chrome router entirely, off the very rectangle the
+        // pill was drawn in; remove that rung and the words stop answering on
+        // both hosts at once.
+        let router = body("    fn mouse_input(");
         assert!(
-            press.contains("float::FloatPart::Notice") && press.contains("self.press_notice("),
-            "the float's press does not reach the strip's own door, so the words on it \
-             drag the window instead of answering it:\n{press}"
+            router.contains("self.press_notice(position)?"),
+            "the press router does not reach the strip's own door before the chrome, so the words on a window's pill land in the document instead of answering it"
         );
         // ⑤ One verb, one buffer, whichever host was pressed.
         for signature in [
@@ -107298,20 +107769,29 @@ mod floated_page_tests {
              every hole is punched under the whole stack again:\n{sync}"
         );
         // **And the floated page's rectangle is the float's content box, inset
-        // off the corners and the grip** (§7.39). The controller bounds, the hole
-        // and the pointer region all come from `float_body_rect`, which is inset
-        // in one place ([`float::FloatGeometry::content_body`]); a page that read
-        // the raw body would square the window's rounded corners and bury the
-        // grip again.
+        // off the corners and the grip** (§7.39, user report 2026-08-28). The
+        // controller bounds, the hole and the pointer region all come from one
+        // inset rectangle ([`float::FloatGeometry::content_body`]); a page that
+        // read the raw body would square the window's rounded corners and bury
+        // the grip again.
+        //
+        // **The raw body is what every other tenant gets** since the owner's
+        // ruling of 2026-09-12 (§7.1.3x): a document, a picture and a recording
+        // run to the window's own floor with the grip drawn over them. So the
+        // inset has a door of its own — the pin follows it rather than
+        // loosening, because what it is holding is that the *engine* is the one
+        // that keeps it.
         assert!(
-            sync.contains("Some(id) => self.float_body_rect(id, scale)"),
-            "a floated page's engine does not read the float's body:\n{sync}"
+            sync.contains("Some(id) => self.float_inset_body_rect(id, scale)"),
+            "a floated page's engine does not read the float's inset body:\n{sync}"
         );
         assert!(
-            fn_body("    fn float_body_rect(").contains(".content_body(scale)"),
-            "float_body_rect hands back the raw body, so the page's engine, a \
-             document's scrollbar and every corner they touch reach the window's \
-             rounded floor"
+            fn_body("    fn float_inset_body_rect(").contains(".content_body(scale)"),
+            "the engine's rectangle is not the inset one, so the page and a document's scrollbar reach the window's rounded floor"
+        );
+        assert!(
+            fn_body("    fn float_body_rect(").contains("?.body"),
+            "a float's body is still inset for every tenant, so the ruling's foot-less document does not reach the bottom edge"
         );
     }
 
@@ -122760,7 +123240,7 @@ mod tests {
     /// What is pinned here is the mapping, which is the whole of the rule: the
     /// two refusals that leave a reader looking at a picture that ought to be
     /// moving get a sentence, and the two that do not are quiet. The strip it
-    /// lands on is `Runtime::preview_foot_notice`, whose other two sentences are
+    /// lands on is `Runtime::preview_standing_fact`, whose other two sentences are
     /// [`preview::PreviewBuffer::read_only_notice`]'s.
     ///
     /// MUTATION: answer `Some` for `OneFrame` and every still `.gif` in a folder
@@ -144556,8 +145036,16 @@ mod tests {
         let path = PathBuf::from(r"D:\Developer\folio-terminal\test-assets\huge.txt");
         let segments = crumb_segments(&path);
         let folded = [1, 2, 3];
-        let tip =
-            |tip, kind, to_source| preview_rail_tip_text(tip, kind, &segments, &folded, to_source);
+        let tip = |tip, kind, to_source| {
+            preview_rail_tip_text(
+                tip,
+                kind,
+                &segments,
+                &folded,
+                to_source,
+                "Read-only over 8 MB",
+            )
+        };
         assert_eq!(
             tip(
                 seats::PreviewRailTip::Crumb(2),
@@ -146362,24 +146850,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// RED — **the strip a preview wears takes a row of that preview's body, and
-    /// the two derivations of where the body starts agree** (user ruling
-    /// 2026-08-29).
+    /// RED — **a preview wears no strip at all, and the two derivations of where
+    /// its body stands agree about that** (user ruling 2026-08-29, reversed for
+    /// previews by the owner's ruling 2026-09-12; §7.1.3x ①②).
     ///
-    /// The band was written for a terminal and no seat had ever worn it and a
-    /// rail at once, so the order of the two subtractions was a tie-break nobody
-    /// could see. A document wears both. `seats::preview_body_viewport` and
-    /// `seats::preview_pane_geometry` are two derivations of one number — the
-    /// note on the second says so — and a pair that disagreed by the height of a
-    /// band would fit a picture over the sentence and put every click one row
-    /// away from what it looks like it is on.
+    /// The band was written for a terminal and widened to previews, and a
+    /// document then wore both it and a rail — so the order of the two
+    /// subtractions, which had been a tie-break nobody could see, became visible.
+    /// The owner's ruling takes the band off the preview outright: news floats
+    /// over the document as a pill and costs the layout nothing, so a preview's
+    /// body is its pane less its head and its rail, and nothing else.
     ///
-    /// RED GATE: drop the `notice` argument's effect from
-    /// `seats::preview_pane_geometry` — which is that function as it shipped —
-    /// and the first assertion fails by exactly the strip's thirty logical
-    /// pixels. RED GATE ②: place the strip without the rail's offset in
-    /// `seats::pane_notice_strip` and the last block fails: the row is drawn
-    /// across the breadcrumbs.
+    /// What the original claim was really holding is kept whole and is what this
+    /// still tests: `seats::preview_body_viewport` and
+    /// `seats::preview_pane_geometry` are two derivations of one number, and a
+    /// pair that disagreed by the height of a band would fit a picture over
+    /// somebody's sentence and put every click one row away from what it looks
+    /// like it is on.
+    ///
+    /// RED GATE: make a preview wear a notice again — from `settle_pane_notices`
+    /// or by hand, as here — and the body moves under it while the pill that
+    /// carries the news is drawn somewhere else entirely. RED GATE ②: reserve a
+    /// band in `preview_pane_geometry` and the two derivations part company.
     #[test]
     fn a_preview_wearing_a_strip_gives_it_a_row_of_its_own_body() {
         let mut seats = seats::Seats::lone_terminal();
@@ -146391,36 +146883,29 @@ mod tests {
         let scale = 1.0;
         let rect = seats::full_pane_rect(&layout, seat).expect("a full pane");
 
-        let without = seats::preview_body_viewport(&seats, &layout, seat, scale)
-            .expect("a body")
-            .y;
-        assert!(seats.set_notices(BTreeSet::from([seat])));
-        let with = seats::preview_body_viewport(&seats, &layout, seat, scale)
-            .expect("a body")
-            .y;
-        let band = (notice::BAR_HEIGHT_LOGICAL_PX * scale).round() as u32;
+        let body = seats::preview_body_viewport(&seats, &layout, seat, scale).expect("a body");
+        let geometry = seats::preview_pane_geometry(rect, scale, seats.seat_rail(seat));
         assert_eq!(
-            with - without,
-            band,
-            "the strip is a row of the document and the document yields it"
+            geometry.body[1] as u32, body.y,
+            "the rectangle derivation and the viewport one do not say the same number"
         );
-
-        let geometry = seats::preview_pane_geometry(rect, scale, seats.seat_rail(seat), true);
         assert_eq!(
-            geometry.body[1] as u32, with,
-            "and the rectangle derivation and the viewport one say the same number"
+            geometry.body[3], rect[3],
+            "a preview's document stops short of the pane's own floor"
         );
-
-        let strip = seats::pane_notice_strip(&seats, &layout, seat, scale).expect("a strip");
         assert_eq!(
-            strip[3], geometry.body[1],
-            "the strip's foot is the body's head — no seam and no overlap"
+            geometry.body[1],
+            seats::preview_rail_band(rect, scale)[3],
+            "something other than the path row is being taken off the top of the document"
         );
-        let rail = seats::preview_rail_band(rect, scale);
+        // And the news it may owe is cut out of that body rather than off it.
+        let pill = seats::news_pill_box(geometry.body, scale).expect("a pane this size holds one");
+        assert!(pill[1] > geometry.body[1] && pill[3] < geometry.body[3]);
+        // The band is the terminal's alone now: a preview seat that somehow wore
+        // one would be a row standing on a document whose news is elsewhere.
         assert!(
-            strip[1] >= rail[3],
-            "and it stands under the breadcrumbs rather than across them: \
-             name, then where it lives, then what is wrong with it, then the document"
+            !seats.seat_wears_notice(seat),
+            "a preview seat wears a band"
         );
     }
 

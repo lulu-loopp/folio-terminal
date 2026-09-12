@@ -8,6 +8,21 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- **The preview's bottom line appears only when it has something to say.** Every
+  preview — a document, a Markdown page, a picture, a PDF, a recording, in a pane
+  or in a window you have torn off — used to keep a strip along its bottom edge
+  whether or not there was anything in it, and most of the time there was not.
+  The page now runs all the way to the bottom of what is showing it. When there
+  is news — `Saved`, `Revealed`, or a file that changed on disk under your edits
+  — it floats over the bottom of the page for as long as it has something to say,
+  and moves nothing while it comes and goes; `Changed on disk` still waits there
+  with `Reload` and `Keep my edits` until you answer it. A file you cannot edit
+  shows a small padlock at the end of the path row instead, which says why when
+  you point at it — and says it out loud, for two seconds, the moment you click
+  into the page or type at it, with `Open in default app` beside it. What a
+  picture is — `PNG · 670 KB`, `6000 × 4000 · shown at 41%` — has moved up to
+  that same row, and the video controls sit on the bottom edge of the picture
+  with the recording's format and size at their right end.
 - **A file the preview cannot show offers to open it in the default app, like an
   executable does.** A picture Folio declines — one with too many pixels, a file
   too large to read, a picture that would not load — used to say so in the middle

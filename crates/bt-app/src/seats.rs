@@ -9566,7 +9566,6 @@ pub fn build_chrome_for_tabs(
                         head_box,
                         scale,
                         preview_rail.map(|rail| rail.measure.kind),
-                        seats.seat_wears_notice(placement.id),
                     )),
                     SeatKind::Files => Some(match files_view {
                         Some(_) => files_pane_geometry(head_box, scale, true),
@@ -15222,21 +15221,34 @@ pub struct PreviewRailMeasure {
     pub flip: bool,
     /// The `Open` caption's drawn width.
     pub open_width: f32,
-    /// **The standing fact that used to hang on the foot's right hand** — "Read-
-    /// only · 64 KB", "Not saved · changed on disk · edits kept" — measured
-    /// beside the renderer (user ruling 2026-08-15, moved here 2026-08-24).
+    /// **A standing fact is owed and this row wears the lock that carries it**
+    /// (owner's ruling 2026-09-12).
     ///
-    /// It moved because the row it hung on did: the breadcrumb retires a file's
-    /// foot, and the 2026-08-24 ruling is explicit that the foot's *other*
-    /// duties are kept rather than dropped. So it hangs on this row's right hand
-    /// instead, and the path is what yields to it — which is
-    /// [`foot_notice_split`]'s own judgement, unchanged, one row higher: the
-    /// path was always going to be cut, and shortening a complete standing fact
-    /// to buy a few characters of something already abbreviated is the trade
-    /// that ruling refused.
+    /// The phrase itself is gone from the row. It used to be printed here —
+    /// "Read-only · 64 KB", "Not saved · changed on disk · edits kept", measured
+    /// beside the renderer and given the width the path yielded (user ruling
+    /// 2026-08-15, moved to this row 2026-08-24). What the ruling changes is the
+    /// *shape* and not the duty: a fact that is true of the file for as long as
+    /// you are looking at it is a state, and a state is a mark you can ask,
+    /// which is why the row now carries a padlock with the sentence on its tip.
     ///
-    /// Zero on the address row, always: a page has no ledger to speak from.
-    pub notice_width: f32,
+    /// The sentence is still said in words at the one moment it is an answer to
+    /// something — a reader who has just tried to type into the page — and it is
+    /// said there as a news pill ([`news_pill_box`]) and not on this row.
+    ///
+    /// `false` on the address row, always: a page has no ledger to speak from.
+    pub lock: bool,
+    /// **What the picture on this surface is**, drawn dim at the right end of
+    /// this row — `PNG · 670 KB`, `6000 × 4000 · shown at 41%` (owner's ruling
+    /// 2026-09-12).
+    ///
+    /// A standing fact about the file exactly as the lock beside it is, which is
+    /// the whole of why it stands here: it used to be a line under the picture,
+    /// where it was the last thing between a photograph and the bottom of the
+    /// pane. Zero when there is no picture, and zero while the decoder has not
+    /// answered yet — a sentence that grows as the facts arrive is
+    /// `image_meta_sentence`'s own rule and nothing here changes it.
+    pub meta_width: f32,
 }
 
 /// One drawn breadcrumb.
@@ -15283,8 +15295,13 @@ pub struct PreviewRailGeometry {
     pub flip: Option<[f32; 4]>,
     /// The `Open ⌄` pill.
     pub open: Option<[f32; 4]>,
-    /// Where the standing fact hangs, between the crumbs and the verbs.
-    pub notice: Option<[f32; 4]>,
+    /// **The padlock a standing fact is worn as**, between the meta sentence and
+    /// the verbs (owner's ruling 2026-09-12). Its tip is the reason.
+    pub lock: Option<[f32; 4]>,
+    /// **Where the picture's own sentence stands** — dim, inboard of the lock,
+    /// and the first thing on this row to give way when the path needs the room
+    /// back (owner's ruling 2026-09-12).
+    pub meta: Option<[f32; 4]>,
 }
 
 /// The row itself: the band directly under one preview seat's head.
@@ -15426,25 +15443,26 @@ pub fn preview_rail_geometry_in(
                 .round()
                 .max(1.0);
             let open_width = (measure.open_width + open_pad * 2.0 + open_gap + chevron).round();
-            let mut take_right = |width: f32, height: f32| -> Option<[f32; 4]> {
-                (right - width >= left).then(|| {
+            // `floor` is room this control must leave *behind* it — nothing for
+            // the verbs, which are the row's own furniture, and the shortest
+            // honest path for the sentence that stands inboard of them (below).
+            let mut take_right = |width: f32, height: f32, floor: f32| -> Option<[f32; 4]> {
+                (right - width >= left + floor).then(|| {
                     let box_ = boxed(right - width, width, height);
                     right -= width + gap;
                     box_
                 })
             };
-            geometry.open = take_right(open_width, pill);
-            geometry.copy = take_right(box_, box_);
-            geometry.flip = measure.flip.then(|| take_right(box_, box_)).flatten();
+            geometry.open = take_right(open_width, pill, 0.0);
+            geometry.copy = take_right(box_, box_, 0.0);
+            geometry.flip = measure.flip.then(|| take_right(box_, box_, 0.0)).flatten();
             // The standing fact, inside the verbs rather than outside them: it
-            // is a sentence about the file and they are buttons, and a phrase
-            // that stood at the row's edge with the buttons inboard of it would
-            // read as their label.
-            if measure.notice_width > 0.0 {
-                let notice = (measure.notice_width + gap).round();
-                geometry.notice = take_right(notice, pill);
-            }
-            let room = (right - left).max(0.0);
+            // is a fact about the file and they are buttons, and a mark that
+            // stood at the row's edge with the buttons inboard of it would read
+            // as their label. **A padlock and not a phrase since 2026-09-12** —
+            // the sentence is on its tip, and in words only at the moment it is
+            // an answer (`news_pill_box`).
+            geometry.lock = measure.lock.then(|| take_right(box_, box_, 0.0)).flatten();
             let crumb_pad = (PREVIEW_CRUMB_PAD_X_LOGICAL_PX * scale).round();
             let crumb_height = (PREVIEW_CRUMB_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
             let separator = (PREVIEW_CRUMB_SEPARATOR_CELL_LOGICAL_PX * scale)
@@ -15455,6 +15473,28 @@ pub fn preview_rail_geometry_in(
                 .max(1.0);
             let width_of =
                 |depth: usize| (measure.segments[depth] + crumb_pad * 2.0).round().max(1.0);
+            // **And the picture's own sentence inboard of the lock**, dim, in
+            // what the path can spare (owner's ruling 2026-09-12).
+            //
+            // The order of yielding is the ruling's — 「if the path row's width
+            // cannot hold it, the path's middle ellipsis gives way first」 — and
+            // it stops where the breadcrumb's own law begins: the fold takes the
+            // middle, one segment at a time, and then the root, but **the file's
+            // own name never goes**. So what is reserved before this sentence is
+            // laid is the shortest honest path there is — `… › name.png` — and a
+            // row that cannot hold both draws the path and drops the sentence.
+            // A row whose subject had been folded away to make room for a fact
+            // about it would be a row about nothing.
+            if measure.meta_width > 0.0 {
+                let shortest = measure
+                    .segments
+                    .len()
+                    .checked_sub(1)
+                    .map_or(0.0, |tail| width_of(tail) + fold_cell + separator);
+                let meta = (measure.meta_width + gap).round();
+                geometry.meta = take_right(meta, pill, shortest);
+            }
+            let room = (right - left).max(0.0);
             let run_width = |shown: &[usize], folded: bool| -> f32 {
                 let boxes: f32 = shown.iter().map(|depth| width_of(*depth)).sum();
                 let seams = separator * (shown.len().saturating_sub(1)) as f32;
@@ -15553,6 +15593,10 @@ pub enum PreviewRailTip {
     Copy,
     /// The `Open ⌄` pill.
     Open,
+    /// **The padlock** — and this one is the case a tip exists for twice over:
+    /// it is a mark with no word beside it, and the word it has not got is the
+    /// whole reason the page will not take an edit (owner's ruling 2026-09-12).
+    Lock,
     /// The `…` a folded middle is drawn as.
     Fold,
     /// One drawn segment of the path.
@@ -15581,6 +15625,9 @@ pub fn preview_rail_tip_boxes(geometry: &PreviewRailGeometry) -> Vec<(PreviewRai
     }
     if let Some(box_) = geometry.open {
         boxes.push((PreviewRailTip::Open, box_));
+    }
+    if let Some(box_) = geometry.lock {
+        boxes.push((PreviewRailTip::Lock, box_));
     }
     if let Some(box_) = geometry.fold {
         boxes.push((PreviewRailTip::Fold, box_));
@@ -16394,32 +16441,23 @@ pub fn pane_foot_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> FilesPa
 /// viewport is the whole of the difference: two derivations of one number are
 /// two numbers that drift, and this pair would drift by a hairline the day the
 /// bar's height stops being a whole number of physical pixels.
+/// **No band of any kind is subtracted here since 2026-09-12** (owner's ruling).
+/// A preview pane's document reaches the pane's own floor, and everything this
+/// surface has to say is drawn over it: news as a pill that floats
+/// ([`news_pill_box`]), a standing fact as the padlock in the row above
+/// ([`PreviewRailGeometry::lock`]). The strip this used to take off the top of
+/// the body — the 2026-08-29 ruling's, for a file rewritten under unsaved edits
+/// — is the pill's now, and it is the terminal's alone that still stands in a
+/// layout ([`pane_notice_strip`]): a shell's offer is a row in a column of rows
+/// and has no document to float over.
 #[must_use]
 pub fn preview_pane_geometry(
     rect: [f32; 4],
     scale: f32,
     rail: Option<PreviewRailKind>,
-    notice: bool,
 ) -> FilesPaneGeometry {
     let mut geometry = pane_foot_geometry(rect, SeatKind::Preview, scale);
-    // **And the strip, since the 2026-08-29 ruling.** The note above is why this
-    // has to be here rather than left to the one caller who would notice: this
-    // function and [`preview_body_viewport`] are two derivations of one number,
-    // and a pair that disagreed by the height of a band would fit a picture over
-    // somebody's sentence and put a click one row away from what it looks like
-    // it is on.
-    //
-    // Measured against the room **below the head**, which is the same input
-    // `pane_body_viewport` gives [`notice_consumed`], so the two clamps cannot
-    // part company in a pane too short for both bands.
-    let strip = if notice {
-        let below_head = (rect[3] - geometry.body[1]).max(0.0) as u32;
-        notice_consumed(below_head, scale) as f32
-    } else {
-        0.0
-    };
     if rail.is_none() {
-        geometry.body[1] = (geometry.body[1] + strip).min(geometry.body[3]);
         return geometry;
     }
     let band = preview_rail_band(rect, scale);
@@ -16443,12 +16481,67 @@ pub fn preview_pane_geometry(
     geometry.foot_mark = geometry.foot;
     geometry.foot_path = geometry.foot;
     geometry.body[3] = rect[3];
-    // The strip is drawn under the rail and subtracted after it, which is the
-    // same total either way round — see [`pane_notice_strip`], where the two
-    // orders are reconciled once.
-    geometry.body[1] = (geometry.body[1] + strip).min(geometry.body[3]);
     geometry.body[3] = geometry.body[3].max(geometry.body[1]);
     geometry
+}
+
+// ── the news pill (owner's ruling 2026-09-12, mock §一) ──────────────────────
+//
+// **A preview's bottom line exists only while it has something to say.** Until
+// this ruling every preview surface kept a row at the foot of it for two
+// different duties: news that expires — `Saved`, `Revealed…`, and the strip that
+// asks what to do about a file rewritten under your edits — and standing facts
+// about the buffer. The reader's report was the band under a video's controls
+// and under a README window: a row of nothing, all the time, for the seconds a
+// year it has a word in it.
+//
+// The two duties are split by what they *are*. A standing fact is a state and
+// wears a padlock in the path row ([`PreviewRailGeometry::lock`]). News floats:
+// it is drawn as a pill over the bottom edge of the body, it never changes the
+// body's height, and when it goes there is nothing left behind it.
+
+/// `.notice { left: 12px; right: 12px }` — how far the pill stands off each side
+/// of the body it floats over.
+pub const NEWS_PILL_INSET_X_LOGICAL_PX: f32 = 12.0;
+/// `.notice { bottom: 10px }` — how far it floats off the body's own floor.
+pub const NEWS_PILL_LIFT_LOGICAL_PX: f32 = 10.0;
+/// `.notice { padding: 6px 10px; font-size: 12px }` — one line and its padding.
+pub const NEWS_PILL_HEIGHT_LOGICAL_PX: f32 = 28.0;
+/// `.notice { border-radius: 6px }`.
+pub const NEWS_PILL_RADIUS_LOGICAL_PX: f32 = 6.0;
+/// `.notice { padding: 0 10px }` — the inset its sentence and its verbs keep.
+pub const NEWS_PILL_PAD_X_LOGICAL_PX: f32 = 10.0;
+/// `background: rgba(--menu-surface, .92)` — the raised colour of this window's
+/// own floating surfaces, let down so that the document underneath shows through
+/// and the pill reads as standing over the page rather than cut out of it. Over
+/// a blur where the renderer has one; opaque enough to read where it has not.
+pub const NEWS_PILL_GROUND_ALPHA: f32 = 0.92;
+
+/// **Where one surface's news pill stands** — over the bottom edge of the body,
+/// inside it (owner's ruling 2026-09-12).
+///
+/// [`page_hover_tag_box`]'s neighbour and deliberately its shape: a bubble that
+/// costs the layout nothing, so that a message arriving and leaving moves no
+/// pixel of the document under it. It differs in spanning the body's width
+/// rather than hugging its words, because this one carries verbs at its right
+/// hand and a pill that grew and shrank around a sentence would move the button
+/// under the pointer.
+///
+/// `None` when the body has no room for it — half a pill is worse than none,
+/// which is the rule every control in a head follows.
+#[must_use]
+pub fn news_pill_box(body: [f32; 4], scale: f32) -> Option<[f32; 4]> {
+    let inset = (NEWS_PILL_INSET_X_LOGICAL_PX * scale).round();
+    let lift = (NEWS_PILL_LIFT_LOGICAL_PX * scale).round();
+    let height = (NEWS_PILL_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
+    let pad = (NEWS_PILL_PAD_X_LOGICAL_PX * scale).round();
+    let left = body[0] + inset;
+    let right = body[2] - inset;
+    let bottom = body[3] - lift;
+    if right - left <= pad * 2.0 || bottom - height < body[1] {
+        return None;
+    }
+    Some(pixel_snapped([left, bottom - height, right, bottom]))
 }
 
 /// `.page-hover-tag { height: 20px }` — the floating status bubble a page raises
@@ -16826,13 +16919,7 @@ pub fn hit_files_foot(
         };
         let foot = match placement.kind {
             SeatKind::Preview => {
-                preview_pane_geometry(
-                    rect,
-                    scale,
-                    seats.seat_rail(placement.id),
-                    seats.seat_wears_notice(placement.id),
-                )
-                .foot
+                preview_pane_geometry(rect, scale, seats.seat_rail(placement.id)).foot
             }
             _ => pane_foot_geometry(rect, placement.kind, scale).foot,
         };
@@ -18028,17 +18115,16 @@ pub struct PreviewRailContent<'a> {
     pub segments: &'a [String],
     /// The `Open` pill's caption, in the window's language.
     pub open: &'a str,
-    /// The standing fact hung on the right hand, or the word the row is flashing
-    /// instead — "Saved", "Revealed…". Empty when there is neither.
-    pub notice: &'a str,
-    /// Whether that phrase is a confirmation rather than a fact, which takes the
-    /// ink as well as the words.
+    /// **What the picture is** — `PNG · 670 KB`, `6000 × 4000 · shown at 41%` —
+    /// drawn dim at the right end of the row (owner's ruling 2026-09-12). Empty
+    /// on every surface that is not showing one.
     ///
-    /// **One slot and one line at a time**, which is the foot's own arrangement
-    /// arriving here with the duty: a flash lasts a second and a standing fact
-    /// does not, so the transient one takes the slot while it is fresh rather
-    /// than the row growing a second phrase nobody has room to read.
-    pub notice_flashing: bool,
+    /// The standing *sentence* that used to hang here is gone: a read-only body
+    /// and a still `.gif` are states, and they are worn as the padlock
+    /// [`PreviewRailGeometry::lock`] reserves. The flashed word that used to
+    /// take this slot is gone too — news floats now, over the body's bottom edge
+    /// (`news_pill_box`), and costs this row nothing.
+    pub meta: &'a str,
     /// Whether the flip would take you to the source rather than back to the
     /// render — the glyph names the *destination*, which is the head's own rule
     /// travelling down with the button.
@@ -18052,6 +18138,41 @@ pub struct PreviewRailContent<'a> {
 
 /// Draw one preview rail.
 ///
+/// **Where one mark stands inside one of this row's boxes.**
+///
+/// Its own function because the row draws two kinds of thing into these boxes
+/// now: the resident buttons, and the padlock a standing fact is worn as, which
+/// is not a button at all. `run_px` is the run's box for a **house** mark, in
+/// logical pixels; what a mark actually gets is derived from it the way a slot
+/// derives one — the edge-to-edge family takes the ink ratio of it, and a
+/// drawing that is not square keeps its own aspect. Derived here rather than at
+/// the call sites for the reason the compact head's own run has it: a `10×6`
+/// arrow handed a square box is scaled by its *width*, and that is the half of
+/// the pane head's 1.95× no pen explains.
+fn rail_glyph_box(box_: [f32; 4], mark: ChromeMark, run_px: f32, scale: f32) -> [f32; 4] {
+    let across = if mark.draws_edge_to_edge() {
+        run_px * crate::marks::HOUSE_INK_RATIO
+    } else {
+        run_px
+    };
+    let (glyph_w, glyph_h) = match mark.view_box_units() {
+        Some([view_w, view_h]) => {
+            let fitted = across * scale / view_w.max(view_h);
+            (
+                (view_w * fitted).round().max(1.0),
+                (view_h * fitted).round().max(1.0),
+            )
+        }
+        None => {
+            let square = (across * scale).round().max(1.0);
+            (square, square)
+        }
+    };
+    let left = ((box_[0] + box_[2] - glyph_w) / 2.0).round();
+    let top = ((box_[1] + box_[3] - glyph_h) / 2.0).round();
+    [left, top, left + glyph_w, top + glyph_h]
+}
+
 /// **Everything here is resident**, which is the one place this row departs from
 /// the head above it — see the section note: a row whose whole subject is "where
 /// is this" is furniture, and furniture that appears when you approach it cannot
@@ -18120,29 +18241,9 @@ pub(crate) fn push_preview_rail(
                 palette.pane_close_pill,
             ));
         }
-        let across = if mark.draws_edge_to_edge() {
-            run_px * crate::marks::HOUSE_INK_RATIO
-        } else {
-            run_px
-        };
-        let (glyph_w, glyph_h) = match mark.view_box_units() {
-            Some([view_w, view_h]) => {
-                let fitted = across * scale / view_w.max(view_h);
-                (
-                    (view_w * fitted).round().max(1.0),
-                    (view_h * fitted).round().max(1.0),
-                )
-            }
-            None => {
-                let square = (across * scale).round().max(1.0);
-                (square, square)
-            }
-        };
-        let left = ((box_[0] + box_[2] - glyph_w) / 2.0).round();
-        let top = ((box_[1] + box_[3] - glyph_h) / 2.0).round();
         let mut sprite = ChromeSprite::new(
             mark,
-            [left, top, left + glyph_w, top + glyph_h],
+            rail_glyph_box(box_, mark, run_px, scale),
             if lit {
                 palette.pane_close_glyph_on_pill
             } else {
@@ -18476,22 +18577,18 @@ pub(crate) fn push_preview_rail(
                     clip: Some(crumb.rect),
                 });
             }
-            if let (Some(box_), false) = (geometry.notice, content.notice.is_empty()) {
+            // **What the picture is**, dim, at the right end of the row
+            // (owner's ruling 2026-09-12). The paler of the row's two inks,
+            // which is the ink the standing fact was drawn in before it became a
+            // mark: it is not part of any button's label and not the thing you
+            // came to this row to read.
+            if let (Some(box_), false) = (geometry.meta, content.meta.is_empty()) {
                 labels.push(ChromeLabel {
                     mono: false,
-                    text: content.notice.to_owned(),
+                    text: content.meta.to_owned(),
                     rect: box_,
                     font_size_px: FILES_FOOT_FONT_LOGICAL_PX * scale,
-                    // The foot's own two inks, kept: the accent for a
-                    // confirmation, because a tick-coloured phrase beside an
-                    // unchanged path would read as a property of the file rather
-                    // than as an answer to a press; and the paler of the row's
-                    // inks for a fact, which is not part of any button's label.
-                    color: if content.notice_flashing {
-                        palette.accent
-                    } else {
-                        palette.files_row_muted
-                    },
+                    color: palette.files_row_muted,
                     align_right: true,
                     align_center: false,
                     letter_spacing_em: 0.0,
@@ -18499,6 +18596,25 @@ pub(crate) fn push_preview_rail(
                     tabular_numerals: false,
                     clip: Some(box_),
                 });
+            }
+            // **The padlock a standing fact is worn as** (owner's ruling
+            // 2026-09-12). Drawn and not `button`ed: it is a *state*, there is
+            // nothing to press, and a mark that lit under the pointer would be
+            // promising a verb it has not got. What it does have is a tip, and
+            // the tip is the whole sentence — see [`PreviewRailTip::Lock`].
+            //
+            // Filled and shut, which is the fill axis this window already spends
+            // on the pane's own padlock: regular and open is the action, filled
+            // and shut is the state, and this one is never anything but a state.
+            if let Some(box_) = geometry.lock {
+                let mark = crate::icons::ActionIcon::LockPreview.engaged(true);
+                let mut sprite = ChromeSprite::new(
+                    mark,
+                    rail_glyph_box(box_, mark, PREVIEW_RAIL_GLYPH_LOGICAL_PX, scale),
+                    palette.pane_close_glyph,
+                );
+                sprite.opacity = PREVIEW_NAV_REST;
+                sprites.push(sprite);
             }
             button(
                 sprites,
@@ -23652,7 +23768,7 @@ mod tests {
                 segments: vec![24.0, 70.0, 64.0, 58.0, 96.0],
                 flip: true,
                 open_width: 34.0,
-                notice_width: 62.0,
+                lock: true,
                 ..PreviewRailMeasure::default()
             },
         ] {
@@ -23801,6 +23917,213 @@ mod tests {
             preview_rail_target(PreviewRailPart::Copy, seat, PreviewRailKind::Address),
             preview_rail_target(PreviewRailPart::Copy, seat, PreviewRailKind::Crumbs),
             "one glyph, two verbs, and the row's kind is what tells them apart"
+        );
+    }
+
+    /// RED — **no preview kind reserves a foot** (owner's ruling 2026-09-12;
+    /// §7.1.3x; mock §一).
+    ///
+    /// The owner photographed an empty band under a video's controls and under a
+    /// README window and ruled the whole arrangement out: a row that stands in
+    /// the layout must be a row that is always worth its pixels, and this one
+    /// was empty almost all of the time. Every file-backed kind — text,
+    /// Markdown, a picture, a GIF, a PDF's pages, a recording, a diff — wears a
+    /// path row, so every one of them arrives here as a rail; and a pane with a
+    /// rail must hand its document the pane's own floor.
+    ///
+    /// RED GATE: give `preview_pane_geometry` a band to subtract again — a
+    /// notice strip off the top of the body, a foot off the bottom — and the
+    /// body stops reaching `rect[3]` while the strip it was taken for is empty.
+    #[test]
+    fn no_preview_kind_reserves_a_foot() {
+        let rect = [100.0, 60.0, 900.0, 700.0];
+        for kind in [PreviewRailKind::Crumbs, PreviewRailKind::Address] {
+            let geometry = preview_pane_geometry(rect, 1.0, Some(kind));
+            assert_eq!(
+                geometry.body[3], rect[3],
+                "a {kind:?} pane's document stops short of the pane's own floor"
+            );
+            assert_eq!(
+                geometry.foot[3], geometry.foot[1],
+                "and a strip is still standing under it"
+            );
+            assert_eq!(
+                geometry.foot_path[3], geometry.foot_path[1],
+                "the retired strip still has room for a path in it"
+            );
+            // The rail is the one thing that is still taken, and it is taken off
+            // the *top*: a row that says where this file is, above the document.
+            assert_eq!(geometry.body[1], preview_rail_band(rect, 1.0)[3]);
+        }
+    }
+
+    /// RED — **news floats over the bottom edge of the body and moves nothing**
+    /// (owner's ruling 2026-09-12; §7.1.3x ②; mock §一).
+    ///
+    /// The pill is cut *out of* the body rather than taken off it, which is the
+    /// whole of "it never changes the body's height": there is no arithmetic
+    /// here that a message arriving could change, because the rectangle it is
+    /// drawn in is a pure function of the rectangle it is drawn over.
+    ///
+    /// The numbers are the mock's own — 12 px each side, 10 px up, one 28 px
+    /// line.
+    ///
+    /// RED GATE: take the pill's height off the body before cutting it, or float
+    /// it below the body's floor, and the containment assertions go red.
+    #[test]
+    fn news_floats_over_the_bottom_edge_and_does_not_move_the_body() {
+        let rect = [100.0, 60.0, 900.0, 700.0];
+        let body = preview_pane_geometry(rect, 1.0, Some(PreviewRailKind::Crumbs)).body;
+        let pill = news_pill_box(body, 1.0).expect("a pane this size holds a pill");
+        assert_eq!(pill[0], body[0] + 12.0, "12px off the left edge");
+        assert_eq!(pill[2], body[2] - 12.0, "and 12px off the right");
+        assert_eq!(
+            pill[3],
+            body[3] - 10.0,
+            "floating 10px off the body's floor"
+        );
+        assert_eq!(pill[3] - pill[1], 28.0, "one line and its padding");
+        assert!(
+            pill[1] > body[1] && pill[3] < body[3],
+            "the pill stands inside the body it floats over: {pill:?} in {body:?}"
+        );
+        // A body with no room for one says so rather than drawing half a pill,
+        // which is the rule every control in a head follows.
+        assert_eq!(news_pill_box([0.0, 0.0, 400.0, 20.0], 1.0), None);
+        assert_eq!(news_pill_box([0.0, 0.0, 8.0, 400.0], 1.0), None);
+    }
+
+    /// RED — **a read-only page wears a lock in the path row and no band**
+    /// (owner's ruling 2026-09-12; §7.1.3x ③; mock §一).
+    ///
+    /// The sentence that used to hang on this row's right hand — `Read-only ·
+    /// over 8 MB` — is a *state*, so it is worn as a state: a padlock inboard of
+    /// the row's three verbs, with the reason on its tip. What it must not do is
+    /// cost the document anything, which is the second half of this test: the
+    /// pane's body is the same rectangle whether the lock is there or not.
+    ///
+    /// RED GATE: lay the lock outboard of `Open ⌄`, or take its width off the
+    /// body instead of off the path's room, and one of these goes red.
+    #[test]
+    fn a_read_only_page_wears_a_lock_in_the_path_row_and_no_band() {
+        let rect = [100.0, 60.0, 900.0, 700.0];
+        let measure = PreviewRailMeasure {
+            kind: PreviewRailKind::Crumbs,
+            segments: vec![26.0, 70.0, 120.0],
+            flip: true,
+            open_width: 32.0,
+            lock: true,
+            ..PreviewRailMeasure::default()
+        };
+        let geometry = preview_rail_geometry(rect, 1.0, &measure);
+        let lock = geometry.lock.expect("a read-only body wears one");
+        let flip = geometry.flip.expect("a flip box");
+        let copy = geometry.copy.expect("a copy box");
+        let open = geometry.open.expect("an Open pill");
+        assert!(
+            lock[2] <= flip[0] && flip[2] <= copy[0] && copy[2] <= open[0],
+            "the lock reads as the verbs' label instead of standing inboard of them: {lock:?} {flip:?} {copy:?} {open:?}"
+        );
+        assert!(
+            geometry.crumbs.last().expect("a tail").rect[2] <= lock[0],
+            "the path runs under the lock"
+        );
+        // It is tippable, because a mark with no word beside it is exactly what
+        // a tip exists for — and the tip is the whole reason.
+        assert!(
+            preview_rail_tip_boxes(&geometry)
+                .into_iter()
+                .any(|(tip, box_)| tip == PreviewRailTip::Lock && box_ == lock),
+            "the lock carries no tip, so the reason is nowhere at all"
+        );
+        // And it costs the document nothing: no band, on either surface.
+        let quiet = PreviewRailMeasure {
+            lock: false,
+            ..measure.clone()
+        };
+        assert_eq!(
+            preview_rail_geometry(rect, 1.0, &quiet).band,
+            geometry.band,
+            "wearing a lock changed the row's own height"
+        );
+        assert_eq!(
+            preview_pane_geometry(rect, 1.0, Some(PreviewRailKind::Crumbs)).body[3],
+            rect[3],
+            "a read-only pane's document stops short of the floor"
+        );
+    }
+
+    /// RED — **the picture's meta sentence lives in the path row** (owner's
+    /// ruling 2026-09-12; §7.1.3x ④; mock §一).
+    ///
+    /// `PNG · 670 KB` is a standing fact about the file, so it stands where the
+    /// other one does: dim, at the right end of the path row, inboard of the
+    /// padlock. And the ruling names the order things give way in — 「if the path
+    /// row's width cannot hold it, the path's middle ellipsis gives way first」 —
+    /// so a long path folds while the sentence keeps its box.
+    ///
+    /// RED GATE: lay the sentence outboard of the lock, or let the crumbs run
+    /// under it, and this goes red.
+    #[test]
+    fn the_picture_meta_sentence_lives_in_the_path_row() {
+        let rect = [100.0, 60.0, 900.0, 700.0];
+        let measure = PreviewRailMeasure {
+            kind: PreviewRailKind::Crumbs,
+            segments: vec![26.0, 70.0, 120.0],
+            flip: false,
+            open_width: 32.0,
+            lock: true,
+            meta_width: 110.0,
+            ..PreviewRailMeasure::default()
+        };
+        let geometry = preview_rail_geometry(rect, 1.0, &measure);
+        let meta = geometry.meta.expect("a picture says what it is");
+        let lock = geometry.lock.expect("and this one is read-only too");
+        assert!(
+            meta[2] <= lock[0],
+            "the sentence stands outboard of the lock: {meta:?} {lock:?}"
+        );
+        assert!(
+            meta[2] - meta[0] >= 110.0,
+            "the sentence is cut to less than it measured"
+        );
+        assert!(
+            geometry.crumbs.last().expect("a tail").rect[2] <= meta[0],
+            "the path runs under the sentence"
+        );
+        // The path is what yields: a row too narrow for both folds its middle
+        // and the sentence keeps its box.
+        let long = PreviewRailMeasure {
+            segments: vec![26.0, 300.0, 300.0, 300.0, 120.0],
+            ..measure
+        };
+        let folded = preview_rail_geometry(rect, 1.0, &long);
+        assert!(
+            folded.fold.is_some(),
+            "the path did not fold to make room for the sentence"
+        );
+        assert!(
+            folded.meta.is_some(),
+            "the sentence was dropped instead of the path's middle"
+        );
+        // **And the yielding stops where the breadcrumb's own law begins.** The
+        // fold takes the middle and then the root, but the file's own name never
+        // goes — so a row that cannot hold the shortest honest path *and* the
+        // sentence draws the path and drops the sentence. A row whose subject had
+        // been folded away to make room for a fact about it is a row about
+        // nothing. (Found on a real 545px pane, 2026-09-12.)
+        let narrow = [0.0, 0.0, 380.0, 30.0];
+        let squeezed = preview_rail_geometry(narrow, 1.0, &long);
+        assert_eq!(
+            squeezed.meta, None,
+            "the sentence kept its box while the file's own name was folded away"
+        );
+        assert!(
+            squeezed
+                .crumbs
+                .last()
+                .is_some_and(|crumb| crumb.tail && crumb.rect[2] > crumb.rect[0]),
+            "and the name it was standing for is not drawn at all: {squeezed:?}"
         );
     }
 
@@ -44550,8 +44873,7 @@ mod tests {",
                 address: "http://127.0.0.1:5173/",
                 segments: &[],
                 open: "Open",
-                notice: "",
-                notice_flashing: false,
+                meta: "",
                 flip_to_source: false,
                 web,
                 edit: None,
