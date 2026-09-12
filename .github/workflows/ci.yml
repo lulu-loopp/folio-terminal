@@ -393,10 +393,14 @@ jobs:
   # other asks for a real adapter, exactly as the `conpty` and `gpu` jobs above
   # say. `core-linux` below does test `bt-pty`, and the difference is not the
   # operating system's ancestry: that crate's Windows-only tests carry a gate now,
-  # and what is left of the suite would run here too. Nobody has run it on a Mac,
-  # so this line does not claim it passes there. `bt-term` and `bt-corpus` are
-  # checked but not tested because the spike never got far enough to measure
-  # their suites there; they join the test line the day somebody does.
+  # and what is left of the suite would run here too. **M1-6 has since run that
+  # suite on the owner's Mac mini and it is green there, real Unix children and
+  # all**, so the reason this line still stops at `check` is no longer that
+  # nobody knows — it is that moving it is M1-10's job, together with the
+  # `-D warnings` line and the dead-code that platform still carries.
+  # `bt-term` and `bt-corpus` are checked but not tested because the spike never
+  # got far enough to measure their suites there; they join the test line the day
+  # somebody does.
   core-macos:
     runs-on: macos-latest
     timeout-minutes: 45
@@ -466,12 +470,25 @@ jobs:
   # `pwsh.exe` or `powershell.exe`. Those tests carry `#[cfg(windows)]` and the
   # `conpty` job above is where they run; a fixture in them is a Windows path and
   # a `PATH` a Unix `join_paths` refuses, so they were never platform-neutral
-  # tests that happened to be run in one place. **This line is therefore honest
-  # rather than finished**: nothing here spawns a child yet, because off Windows
-  # this crate has no default shell to spawn. Remote T2 gives
-  # `resolve_default_shell` a Unix rule — `BT_SHELL`, `$SHELL`, the password
-  # database, `/bin/sh` — and the real-pty test that arrives with it is what
-  # makes this job start a process.
+  # tests that happened to be run in one place.
+  #
+  # **This job starts processes now** (M1-6, which is also remote T2).
+  # `resolve_default_shell` has the Unix rule the remote server needs — `$SHELL`
+  # when it names a program this machine can start, then the system shells this
+  # platform is probed for, then `/bin/sh`, interactive and non-login — and the
+  # PowerShell arguments and the PowerShell retry are `#[cfg(windows)]` and
+  # unreachable from here. So the `#[cfg(unix)]` half of `bt-pty`'s suite spawns
+  # `/bin/sh` over a real pty and asks this runner's own kernel the five
+  # questions nobody had asked it: that a child's output reaches the output ring,
+  # that its chosen exit code survives the trip and the process is reaped rather
+  # than left a zombie (read back out of `ps`, not out of our own bookkeeping),
+  # that a resize is a real `TIOCSWINSZ` the child sees in its own `stty size`,
+  # that a child which has trapped `SIGHUP` away and carried that disposition
+  # through an `exec` is ended anyway when its session goes, and that shutting a
+  # session down hands the child a newline before any of that — which is the
+  # vendored backend's `UnixMasterWriter::drop`, has no Windows counterpart, and
+  # was found by this ticket rather than known. Ubuntu has `/bin/sh`,
+  # `/bin/bash`, `sleep`, `stty` and `ps`, which is the whole of what they need.
   core-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 45
