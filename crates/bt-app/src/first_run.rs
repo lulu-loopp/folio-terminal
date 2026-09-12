@@ -29,6 +29,7 @@
 use std::path::PathBuf;
 
 use bt_persist::FirstRunCardV1;
+use bt_platform::HostPlatform;
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_RADIUS_LOGICAL_PX,
     FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad, chrome_palette, rounded_overlay_fill,
@@ -75,6 +76,111 @@ pub enum RowKind {
     Claude,
     Codex,
     Copilot,
+}
+
+impl RowKind {
+    /// **What this row needs of the operating system before it is a question at
+    /// all** (macOS plan M3-6).
+    #[must_use]
+    pub const fn needs(self) -> Capability {
+        match self {
+            Self::Update => Capability::UpdateCheck,
+            Self::Explorer => Capability::ExplorerMenu,
+            Self::PowerShell => Capability::PowerShellProfile,
+            Self::Claude | Self::Codex | Self::Copilot => Capability::AgentDiscovery,
+        }
+    }
+
+    /// Whether a platform can be asked this question.
+    #[must_use]
+    pub const fn offered_on(self, platform: HostPlatform) -> bool {
+        self.needs().on(platform)
+    }
+}
+
+/// **What a row needs of the platform**, which is a different question from what
+/// it needs of the machine.
+///
+/// [`Machine`] answers "is the thing this row installs already here, and is the
+/// program it is about on this path" — a fact about one computer, read off the
+/// registry and off the agents' own files. This answers the question one layer
+/// above it: whether the *mechanism* the row is about exists on this operating
+/// system at all. The two failures look nothing alike. A row the machine cannot
+/// honour is a row Folio could offer and would then have to refuse; a row the
+/// platform has not got is not a question anybody could have asked, and the
+/// honest card is the one that never mentions it.
+///
+/// **Why the card is not branched instead.** §13.7 left this open as "the card
+/// grows a platform branch, or macOS gets a card of its own", and it is neither:
+/// a branch would restate the row list once per platform and a second card would
+/// restate everything around it — the greeting, the two verbs, the faint line,
+/// the geometry — for the sake of one table. The rows are the only thing that
+/// differs, so a per-row declaration is the whole of the difference, and
+/// [`rows_for`] stays one function that every platform reads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Capability {
+    /// Folio asking a release feed whether there is a newer Folio.
+    ///
+    /// **Every platform, and that is the point of it being in this table**: the
+    /// check is HTTP and a version comparison, the answer is a line in
+    /// `settings.json` under Folio's own roof, and what a reader does with the
+    /// answer — the in-place swap on Windows, the release page elsewhere
+    /// (macOS plan M4-10) — is a fact about the *doing* rather than about the
+    /// asking. A build that dropped this row off Windows would be a build that
+    /// never tells anybody a new one exists.
+    UpdateCheck,
+    /// Registering a verb in the shell's folder menu.
+    ///
+    /// Windows only, and for the plainest of the four reasons: the thing being
+    /// registered is a Windows shell extension. Finder has no counterpart on the
+    /// first page — its nearest relatives are a Finder Sync extension and
+    /// `NSServices`, which are different mechanisms with different consent, and
+    /// deciding between them is its own ticket rather than a row this card can
+    /// silently mean instead.
+    ExplorerMenu,
+    /// Appending a line to the shell startup file that belongs to the reader.
+    ///
+    /// Windows only **because that is where the shell with no other door is**.
+    /// `pwsh` has one startup file at one well-known path and no argument that
+    /// would source a second one after it, so the only automatic install
+    /// available is editing `$PROFILE` — somebody else's file, which is exactly
+    /// what this card exists to ask about. Every shell a Mac ships has a door
+    /// that needs no such edit; see [`rows_for`] for why that means no row
+    /// rather than a different row.
+    PowerShellProfile,
+    /// Finding Claude Code, Codex and Copilot CLI on this machine at all.
+    ///
+    /// Windows only **today**, and the boundary is discovery rather than the
+    /// hooks: the installers write a JSON or TOML file whose path is the same
+    /// idea everywhere, but the card only offers a row for an agent it has
+    /// found, and the finding is `profiles`' Windows install routes —
+    /// `%AppData%\npm`, a `.cmd` shim, `%LocalAppData%\hermes\bin`. M1-5 kept
+    /// the seven agent rows off the Unix profile table for that reason and
+    /// wrote it down as a decision rather than an omission; this is the same
+    /// decision one surface along. A macOS answer needs a real discovery rule
+    /// and is its own ticket — until then the card would be asking about tools
+    /// it cannot see.
+    AgentDiscovery,
+}
+
+impl Capability {
+    /// Whether this platform has it.
+    ///
+    /// **A total function of a value**, so a test on any machine can ask what a
+    /// card on any other offers — the same reason `profiles::SeedPlatform` is a
+    /// value and not three `#[cfg]` bodies (M1-5). The claim "a Mac is asked one
+    /// question" was not checkable while it was a compile-time branch, and an
+    /// unchecked claim about another platform's first screen is exactly the
+    /// claim M1-1 found false by opening the window.
+    #[must_use]
+    pub const fn on(self, platform: HostPlatform) -> bool {
+        match self {
+            Self::UpdateCheck => true,
+            Self::ExplorerMenu | Self::PowerShellProfile | Self::AgentDiscovery => {
+                matches!(platform, HostPlatform::Windows)
+            }
+        }
+    }
 }
 
 /// What the Explorer switch can mean on this machine.
@@ -225,7 +331,8 @@ pub struct Row {
     pub on: bool,
 }
 
-/// The rows this machine is offered, in the order they are drawn.
+/// The rows this machine is offered, in the order they are drawn: of **the rows
+/// this platform has the capability for**, the ones this machine can honour.
 ///
 /// **Row order is deliberate.** The one row that is already on opens the card,
 /// so the reader is first told what Folio *does* and only then asked what it
@@ -238,21 +345,58 @@ pub struct Row {
 /// card never says that it looked and found nothing.
 #[must_use]
 pub fn rows(machine: &Machine) -> Vec<Row> {
-    let mut rows = vec![Row {
-        kind: RowKind::Update,
-        group_break_above: false,
-        line: Text::FirstRunRowUpdate,
-        tip: Tip::Fixed(Text::FirstRunTipUpdate),
-        on: true,
-    }];
-    rows.push(Row {
-        kind: RowKind::Explorer,
-        group_break_above: false,
-        line: explorer_shape(machine).line(),
-        tip: Tip::Fixed(Text::FirstRunTipExplorer),
-        on: false,
-    });
-    if !machine.powershell_integration_installed {
+    rows_for(bt_platform::host_platform(), machine)
+}
+
+/// [`rows`] with the platform handed in.
+///
+/// **Every row declares what it needs and the platform answers** ([`Capability`],
+/// macOS plan M3-6). What that leaves on a Mac today is one row — the update
+/// check — and the card is a card of one row rather than a shorter version of
+/// the Windows one: the greeting, the faint line and the two verbs are all
+/// still true of it, and the one thing being asked is the one thing there is to
+/// ask. A card with *nothing* to ask is not a card at all, and that is
+/// [`Card::open`]'s rule rather than this function's, because it is about
+/// whether a modal goes up and not about what is in it.
+///
+/// **There is no macOS shell-integration row, and that is the mechanism's
+/// answer rather than a gap.** The Windows card offers the PowerShell row
+/// because `pwsh` has no way in but the reader's own `$PROFILE` — one file, no
+/// `--init-file`, so the install is an edit to somebody else's file and this
+/// card exists to ask before making one. Every shell M1-5 resolves on a Mac has
+/// a door that touches nothing on disk: bash and its family take
+/// `--init-file <script>`, and zsh — which is what `/bin/zsh` and a `chsh`'d
+/// Homebrew zsh both are, and what `resolve_default_shell` answers for almost
+/// every macOS account — takes `ZDOTDIR` pointed at a directory of Folio's own
+/// under Folio's own data root, whose `.zshrc` hands `ZDOTDIR` straight back
+/// (`shell_integration`'s table). Both are arguments to one child process. So
+/// the integration is **already on** for the first pane a Mac ever opens,
+/// nothing outside Folio's directory is written, and there is nothing to
+/// consent to. A row saying otherwise would be this card asking permission for
+/// a write it does not make.
+#[must_use]
+pub fn rows_for(platform: HostPlatform, machine: &Machine) -> Vec<Row> {
+    let offered = |kind: RowKind| kind.offered_on(platform);
+    let mut rows = Vec::new();
+    if offered(RowKind::Update) {
+        rows.push(Row {
+            kind: RowKind::Update,
+            group_break_above: false,
+            line: Text::FirstRunRowUpdate,
+            tip: Tip::Fixed(Text::FirstRunTipUpdate),
+            on: true,
+        });
+    }
+    if offered(RowKind::Explorer) {
+        rows.push(Row {
+            kind: RowKind::Explorer,
+            group_break_above: false,
+            line: explorer_shape(machine).line(),
+            tip: Tip::Fixed(Text::FirstRunTipExplorer),
+            on: false,
+        });
+    }
+    if offered(RowKind::PowerShell) && !machine.powershell_integration_installed {
         rows.push(Row {
             kind: RowKind::PowerShell,
             group_break_above: false,
@@ -282,8 +426,8 @@ pub fn rows(machine: &Machine) -> Vec<Row> {
         ),
     ];
     let mut opened = false;
-    for (kind, offered, line, tip) in agents {
-        if !offered {
+    for (kind, found, line, tip) in agents {
+        if !offered(kind) || !found {
             continue;
         }
         rows.push(Row {
@@ -422,19 +566,36 @@ pub struct Card {
 }
 
 impl Card {
-    /// Put it up, with the rows this machine can honour.
+    /// Put it up, with the rows this machine can honour. **Answers whether it
+    /// went up.**
+    ///
+    /// **A card with no row is not shown** (macOS plan M3-6). One row is a
+    /// card: the greeting is still a greeting and the one question is still
+    /// worth asking, which is what a Mac gets today. No rows is not a shorter
+    /// card, it is a modal that interrupts a reader's first launch to tell them
+    /// nothing and take a press to dismiss — and the two verbs under it would
+    /// be `Not now` and `Done` about nothing at all. The rule lives here rather
+    /// than at the one call site because "the card is up" is this type's own
+    /// fact, and a caller that has to remember to check first is a caller that
+    /// will one day forget; the answer is what the caller reads instead, since
+    /// a card that never went up must not be written down as `Shown`.
     ///
     /// **Focus opens on the first switch**, and the ring is not yet visible: a
     /// card that arrived with a ring already drawn would be claiming a keyboard
     /// nobody has used on it.
-    pub fn open(&mut self, rows: Vec<Row>, shape: ExplorerShape) {
+    #[must_use]
+    pub fn open(&mut self, rows: Vec<Row>, shape: ExplorerShape) -> bool {
+        if rows.is_empty() {
+            return false;
+        }
         self.open = true;
         self.hover = None;
-        self.focus = (!rows.is_empty()).then_some(Focus::Switch(0));
+        self.focus = Some(Focus::Switch(0));
         self.focus_visible = false;
         self.scroll = 0.0;
         self.rows = rows;
         self.shape = shape;
+        true
     }
 
     pub fn close(&mut self) {
@@ -1760,6 +1921,19 @@ mod tests {
         }
     }
 
+    /// **The Windows card**, which is what every drawing pin in this module is
+    /// about and what every one of them meant before the rows were declared by
+    /// capability (M3-6).
+    ///
+    /// Named here rather than left as `super::rows` so that these tests say
+    /// which card they are measuring, and so that they measure the same one on
+    /// a Mac runner: `rows` answers for the platform the test binary was built
+    /// for, and a geometry pin that quietly became a one-row card on one of the
+    /// three CI platforms would be a pin that stopped pinning there.
+    fn rows(machine: &Machine) -> Vec<Row> {
+        rows_for(HostPlatform::Windows, machine)
+    }
+
     fn kinds(rows: &[Row]) -> Vec<RowKind> {
         rows.iter().map(|row| row.kind).collect()
     }
@@ -1890,6 +2064,197 @@ mod tests {
                 .iter()
                 .all(|row| !row.group_break_above),
             "a group gap is being opened inside Folio's own three rows"
+        );
+    }
+
+    /// RED (macOS plan M3-6) — **a Mac is offered no row that names a Windows
+    /// facility.**
+    ///
+    /// The machine handed in is the richest one there is: Windows 11 with the
+    /// package beside the executable, all three agents on the path and none of
+    /// them configured. Every one of those facts is a fact about a *machine*,
+    /// and not one of them can put a row on a card whose *platform* has not got
+    /// the mechanism. What is left is the update check, which every platform
+    /// has — so the Mac card is one row, and the other Unixes get the same one
+    /// for the same reason.
+    ///
+    /// MUTATIONS: answer `true` from any of [`Capability`]'s three Windows arms
+    /// and this names the row that appeared; drop the capability test out of
+    /// [`rows_for`] and it names five.
+    #[test]
+    fn the_mac_card_offers_no_windows_row() {
+        for platform in [HostPlatform::MacOs, HostPlatform::OtherUnix] {
+            let offered = rows_for(platform, &every_row());
+            assert_eq!(
+                kinds(&offered),
+                [RowKind::Update],
+                "{platform:?} is being asked a question about a facility it has not got"
+            );
+            assert!(
+                offered.iter().all(|row| !row.group_break_above),
+                "{platform:?} opens the agent group's gap with no agent row under it"
+            );
+            for kind in [
+                RowKind::Explorer,
+                RowKind::PowerShell,
+                RowKind::Claude,
+                RowKind::Codex,
+                RowKind::Copilot,
+            ] {
+                assert!(
+                    !kind.offered_on(platform),
+                    "{kind:?} claims {platform:?} can honour it"
+                );
+            }
+        }
+    }
+
+    /// RED (macOS plan M3-6) — **the update row is on every platform, and it is
+    /// still the row that arrives on.**
+    ///
+    /// The one row this card writes into Folio's own settings rather than into
+    /// somebody's machine, and the one thing the portable build must not quietly
+    /// lose: what a reader does with the answer differs by platform — the
+    /// in-place swap here, the release page on a Mac (M4-10) — but whether Folio
+    /// is allowed to *look* is the same question everywhere, and a build that
+    /// stopped asking it would be a build that never tells anybody a newer one
+    /// exists.
+    ///
+    /// MUTATION: make `Capability::UpdateCheck` answer `platform ==
+    /// HostPlatform::Windows` and the Mac card has nothing on it at all — which
+    /// `a_card_with_no_row_is_not_shown` then turns into no card.
+    #[test]
+    fn the_update_row_is_on_every_platform() {
+        for platform in [
+            HostPlatform::Windows,
+            HostPlatform::MacOs,
+            HostPlatform::OtherUnix,
+        ] {
+            assert!(Capability::UpdateCheck.on(platform), "{platform:?}");
+            let offered = rows_for(platform, &every_row());
+            assert_eq!(offered[0].kind, RowKind::Update, "{platform:?}");
+            assert!(
+                offered[0].on,
+                "{platform:?} is offered the update check switched off"
+            );
+        }
+    }
+
+    /// RED (macOS plan M3-6) — **a card with one row is a card; a card with no
+    /// row is not shown.**
+    ///
+    /// One row is what a Mac gets today and it is a whole card: a greeting, one
+    /// question, and the two verbs that answer it. None is a modal that
+    /// interrupts a first launch to say nothing and then asks to be dismissed,
+    /// and `Done` on it would spend nothing — so it does not go up, and the
+    /// caller learns that from the answer rather than by checking the rows
+    /// itself.
+    ///
+    /// MUTATION: let `open` take an empty list and a platform with no capability
+    /// at all shows an empty rectangle with `Not now` and `Done` under it — and
+    /// `main.rs` writes `Shown` for it, spending this machine's one first run on
+    /// a card nobody saw.
+    #[test]
+    fn a_card_with_no_row_is_not_shown() {
+        let mut card = Card::default();
+        assert!(
+            !card.open(Vec::new(), ExplorerShape::ClassicOnly),
+            "a card with nothing to ask reported that it went up"
+        );
+        assert!(!card.is_open());
+        assert!(card.rows().is_empty());
+        assert_eq!(card.focus(), None);
+
+        let one = rows_for(HostPlatform::MacOs, &every_row());
+        assert_eq!(one.len(), 1);
+        assert!(card.open(one, ExplorerShape::ClassicOnly));
+        assert!(card.is_open());
+        assert_eq!(card.focus(), Some(Focus::Switch(0)));
+        assert_eq!(
+            card.done(),
+            [Application::UpdateCheck(true)],
+            "the one row on a Mac card still spends its answer"
+        );
+    }
+
+    /// RED (macOS plan M3-6) — **the platform is a value, so this Windows
+    /// runner can build the Mac card**, and the build's own card is that value
+    /// read off `bt_platform`'s one door.
+    ///
+    /// Three `#[cfg]` bodies would have made "a Mac is asked one question" a
+    /// claim only a Mac could check, which is the shape of claim M1-1 found
+    /// false by opening the window and finding the first pane empty.
+    /// `profiles::SeedPlatform` is the same decision one table along.
+    ///
+    /// MUTATIONS: ask `cfg!` here instead of `host_platform()` and two of these
+    /// three lists become the one this runner is; take [`rows`] off the door and
+    /// the last assertion names the disagreement.
+    #[test]
+    fn the_card_is_built_from_the_platform_as_a_value() {
+        let machine = every_row();
+        assert_eq!(
+            kinds(&rows_for(HostPlatform::Windows, &machine)),
+            [
+                RowKind::Update,
+                RowKind::Explorer,
+                RowKind::PowerShell,
+                RowKind::Claude,
+                RowKind::Codex,
+                RowKind::Copilot
+            ]
+        );
+        assert_eq!(
+            kinds(&rows_for(HostPlatform::MacOs, &machine)),
+            [RowKind::Update]
+        );
+        assert_eq!(
+            kinds(&rows_for(HostPlatform::OtherUnix, &machine)),
+            [RowKind::Update]
+        );
+        assert_eq!(
+            super::rows(&machine),
+            rows_for(bt_platform::host_platform(), &machine),
+            "the card this build raises is not the card its own platform declares"
+        );
+    }
+
+    /// PIN (macOS plan §4.3, M1-10, M3-6) — **this card asks `bt_platform` what
+    /// machine this is, and never asks the compiler.**
+    ///
+    /// `main.rs`'s `only_the_named_files_decide_what_platform_this_is` keeps the
+    /// whole crate to thirteen files and `first_run.rs` is not one of them, so
+    /// this says nothing that gate does not — except *here*, next to the table
+    /// it is about, at the moment somebody reaches for the shortcut. The
+    /// shortcut is a real temptation on this file: every row but one is a
+    /// Windows row, and `#[cfg(windows)]` around five pushes would compile, pass
+    /// every other test on this runner, and make the Mac card a thing only a Mac
+    /// could look at.
+    ///
+    /// MUTATION: gate any row of [`rows_for`] on `cfg!` and this goes red, with
+    /// the line.
+    #[test]
+    fn the_card_names_no_platform_of_its_own() {
+        const SOURCE: &str = include_str!("first_run.rs");
+        // Split so that neither of these two lines is itself a line that opens
+        // the question *and* names a platform — this file is walked by the
+        // crate-wide gate too, and a needle that tripped it would be a test
+        // that forbids itself.
+        const OPENERS: [&str; 3] = ["cfg(", "cfg!(", "cfg_attr("];
+        const PLATFORMS: [&str; 5] = ["windows", "unix", "macos", "target_os", "target_family"];
+        let code = crate::source_pin::code_of(SOURCE);
+        let asking: Vec<(usize, &str)> = code
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| {
+                OPENERS.iter().any(|opener| line.contains(opener))
+                    && PLATFORMS.iter().any(|word| line.contains(word))
+            })
+            .map(|(index, line)| (index + 1, line.trim()))
+            .collect();
+        assert!(
+            asking.is_empty(),
+            "the first-run card decides what platform it is on instead of asking \
+             bt_platform::host_platform(): {asking:#?}"
         );
     }
 
@@ -2264,7 +2629,7 @@ mod tests {
     #[test]
     fn the_card_opens_on_its_first_switch_with_the_ring_put_away() {
         let mut card = Card::default();
-        card.open(rows(&every_row()), ExplorerShape::FirstPageAndClassic);
+        assert!(card.open(rows(&every_row()), ExplorerShape::FirstPageAndClassic));
         assert!(card.is_open());
         assert_eq!(card.focus(), Some(Focus::Switch(0)));
         assert_eq!(
@@ -2302,7 +2667,7 @@ mod tests {
     #[test]
     fn a_switch_changes_the_card_and_nothing_else_until_done() {
         let mut card = Card::default();
-        card.open(rows(&every_row()), ExplorerShape::ClassicOnly);
+        assert!(card.open(rows(&every_row()), ExplorerShape::ClassicOnly));
         assert_eq!(
             card.done(),
             [
@@ -2658,7 +3023,7 @@ mod tests {
             0.0,
         );
         let mut card = Card::default();
-        card.open(rows(&every_row()), ExplorerShape::ClassicOnly);
+        assert!(card.open(rows(&every_row()), ExplorerShape::ClassicOnly));
         assert_eq!(
             card.focus(),
             Some(Focus::Switch(0)),
