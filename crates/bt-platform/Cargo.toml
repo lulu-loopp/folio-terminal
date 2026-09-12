@@ -39,8 +39,48 @@ publish.workspace = true
 # in **CoreServices**, which has no binding in this family and no crate in the
 # lock file; its seven entry points are declared in that module, which is what
 # this crate is for.
+#
+# **M2-3 adds one package, and it is the only one this port has added since
+# M1-9.** The two choosers, the alert and the formula menu are four more AppKit
+# classes and cost nothing — `NSOpenPanel` (with the two superclasses its own
+# binding names, `NSSavePanel` and `NSPanel`), `NSAlert`, `NSMenu` and
+# `NSMenuItem` are features of a crate already here. `block2` 0.6.2 is already
+# in `Cargo.lock` too (winit carries it, and `objc2-app-kit` turns its own
+# `block2` feature on for the one method that takes a completion handler), so
+# naming it directly moves nothing either. The package is
+# **`objc2-uniform-type-identifiers` 0.3.2**: `-[NSSavePanel
+# setAllowedContentTypes:]` is typed in `UTType`, which is the modern spelling
+# of the filter and the only one that is not deprecated, and 0.2.2 of the same
+# crate — which is in the lock file already, through `objc2-ui-kit` — is built
+# against `objc2` 0.5 and cannot hand a type to a panel bound against 0.6. The
+# alternative was `-[NSSavePanel setAllowedFileTypes:]`, deprecated since macOS
+# 12 and the one call in this file that would be written for a system older
+# than the one Q4 fixed as the deployment target.
+# **The one target in this workspace that owns the process's main thread**
+# (M2-3). Everything AppKit is the main thread's, and libtest does not hand a
+# case that thread: measured on this workspace's toolchain, a `#[test]` run with
+# `--test-threads=1` still executes on a thread libtest spawned, where
+# `MainThreadMarker::new()` is `None`. `harness = false` makes this file's own
+# `main` the test, and that one really is the main thread. It costs an ordinary
+# run nothing: without `BT_MAC_GUI` it prints one line and exits, and off macOS
+# it has no body at all.
+[[test]]
+name = "macos_sheet"
+path = "tests/macos_sheet.rs"
+harness = false
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+# The one completion handler this crate passes to AppKit:
+# `-[NSSavePanel beginSheetModalForWindow:completionHandler:]`, which is how a
+# panel is a sheet on a window rather than a nested modal loop inside a winit
+# callback.
+block2 = "0.6"
+objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = [
+    # `UTType` itself, and `+[UTType typeWithFilenameExtension:]` — the only
+    # two names this crate reads out of the framework.
+    "UTType",
+] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
     # The array of paths a stream is created over — one path, but the API takes
     # an array — and the strings in it.
@@ -53,6 +93,28 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "std",
 ] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
+    # M2-3: the last-resort fault report, when there is a running application to
+    # raise it on and no window to draw it in (`message_box`).
+    "NSAlert",
+    # M2-3: the formula menu — one item, popped over the window at the pointer,
+    # and the `bool` it answers is `TrackPopupMenu`'s returned command.
+    "NSMenu",
+    "NSMenuItem",
+    # M2-3: the folder and file choosers. `NSOpenPanel` names `NSSavePanel` and
+    # `NSPanel` as its superclasses, so its binding asks for their features too;
+    # `NSWindow` and `NSResponder`, the other two, are already on above.
+    "NSOpenPanel",
+    "NSPanel",
+    "NSSavePanel",
+    # M2-3: `-[NSSavePanel beginSheetModalForWindow:completionHandler:]` is the
+    # one AppKit method in this crate that takes a block, and the feature is
+    # what generates it. **Not a package** — `block2` 0.6.2 is already in
+    # `Cargo.lock`.
+    "block2",
+    # M2-3: `-[NSSavePanel setAllowedContentTypes:]`, which is what restricts
+    # the picture chooser to the formats the decoder honours. **This one is a
+    # package** — see the note above the table.
+    "objc2-uniform-type-identifiers",
     # The appearance a window and the application wear — light or dark, read
     # for the theme and stated for the chrome (`set_window_dark_mode`,
     # `system_uses_light_apps`).
@@ -109,6 +171,13 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     # `objc2-app-kit`'s own use of it, because this crate's code is what calls
     # it and a feature that arrives by union is a feature nobody declared.
     "NSEnumerator",
+    # M2-3: `-[NSObject performSelector:withObject:afterDelay:]` — the twin of
+    # the Windows arm's `PostMessageW`, and the reason the formula menu's nested
+    # tracking loop never starts inside a winit callback. It lives in
+    # `NSRunLoop`'s category on `NSObject` and is typed in `NSTimeInterval`,
+    # which is `NSDate`'s.
+    "NSDate",
+    "NSRunLoop",
     # The appearance is observed rather than polled.
     "NSKeyValueObserving",
     # `NSLocale.preferredLanguages` — the language the system is read in.
@@ -116,6 +185,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     # The notification an accessibility-display change arrives as.
     "NSNotification",
     "NSString",
+    # M2-3: what a panel answers with. `-[NSSavePanel URL]` is an `NSURL`, and
+    # the path a chooser hands back is `-[NSURL path]` — asked of a URL that has
+    # already said it is a file URL, which is `FOS_FORCEFILESYSTEM`'s twin.
+    "NSURL",
     # `NSNumber`, which is what `NSScreenNumber` comes back as.
     "NSValue",
     # M3-3: `AppleActionOnDoubleClick`, the one preference a title bar's own

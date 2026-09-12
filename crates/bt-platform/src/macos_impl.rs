@@ -8,8 +8,14 @@
 //! (`portable_impl.rs`). This is that ticket. Twenty-two of those doors now
 //! answer for a real window on a real desktop, and the ones that remain in the
 //! portable module on this platform are the ones whose subject is not a window:
-//! the composition tree (M1-4, M4-1), the watches (M2-1), the pickers and the
-//! alert (M2-3), notifications and the Dock tile (M4-6), stdio (M3-7). Every
+//! the composition tree (M1-4, M4-1), notifications and the Dock tile (M4-6),
+//! stdio (M3-7). The watches went to [`macos_watch`](super::macos_watch) in
+//! M2-1, and the two choosers, the formula menu and the last-resort alert went
+//! to [`macos_dialogs`](super::macos_dialogs) in M2-3 — a file of its own for
+//! the reason that one is: everything here answers in the turn it was asked in,
+//! and everything there puts something in front of the reader and waits. It
+//! reaches AppKit through this module's own [`window_thread`] and
+//! [`window_for`], which is why those two are `pub(crate)`. Every
 //! door that is here is `#[cfg(not(any(windows, target_os = "macos")))]` over
 //! there, which is what makes the two lists one list —
 //! `a_window_or_screen_door_has_one_arm_per_platform` walks both and says so.
@@ -113,12 +119,12 @@ use crate::{NativeWindow, WheelScrollAmount, WindowRect};
 /// Its own sentence rather than the platform's, because the two are different
 /// facts about different mistakes: *not on this platform* is something the
 /// reader's machine cannot do, and this is something this program did wrong.
-fn off_the_window_thread(what: &str) -> String {
+pub(crate) fn off_the_window_thread(what: &str) -> String {
     format!("{what} was asked from a thread that is not the window's")
 }
 
 /// A door given a handle whose window is gone, or a desktop with no displays.
-fn nothing_to_ask(what: &str) -> String {
+pub(crate) fn nothing_to_ask(what: &str) -> String {
     format!("{what}: this handle names no window on the screen")
 }
 
@@ -128,7 +134,7 @@ fn nothing_to_ask(what: &str) -> String {
 /// in the type system: every AppKit class this module touches takes one, so a
 /// door that has this value has proved its thread to the compiler rather than to
 /// a comment.
-fn window_thread(what: &str) -> Result<MainThreadMarker, String> {
+pub(crate) fn window_thread(what: &str) -> Result<MainThreadMarker, String> {
     MainThreadMarker::new().ok_or_else(|| off_the_window_thread(what))
 }
 
@@ -146,7 +152,10 @@ fn window_thread(what: &str) -> Result<MainThreadMarker, String> {
 /// The caller must be on the window's thread — the `MainThreadMarker` is the
 /// proof — and the handle must be one `bt-app` got from a live winit window, which
 /// is the same contract `windows_impl`'s `as_hwnd` relies on.
-fn window_of(window: NativeWindow, _mtm: MainThreadMarker) -> Option<Retained<NSWindow>> {
+pub(crate) fn window_of(
+    window: NativeWindow,
+    _mtm: MainThreadMarker,
+) -> Option<Retained<NSWindow>> {
     // SAFETY: the handle is winit's live `ns_view` pointer, held for as long as
     // the `Window` it came from is alive, and this is the window's own thread.
     let view: &NSView = unsafe { window.as_ns_view().as_ref() };
@@ -154,7 +163,7 @@ fn window_of(window: NativeWindow, _mtm: MainThreadMarker) -> Option<Retained<NS
 }
 
 /// [`window_of`], with the refusal already written.
-fn window_for(
+pub(crate) fn window_for(
     window: NativeWindow,
     what: &str,
 ) -> Result<(MainThreadMarker, Retained<NSWindow>), String> {
