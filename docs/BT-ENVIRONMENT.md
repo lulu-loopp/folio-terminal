@@ -73,6 +73,15 @@ build is required to have **no** controlled way to panic, which
 `scripts/release/cleanvm/in-guest.ps1` checks by requiring
 `folio.exe --panic-selftest` to be refused as an unknown argument.
 
+`BT_SURFACE_SELFTEST` (the same shape again: an integer number of seconds,
+once) throws away this process's GPU device and builds every window's swapchain
+again, through the same path a device the driver took away goes through. It is
+here because the event it stands in for cannot be asked for: the device-loss
+latch is set by a driver reset, and what a rebuild has to be watched doing —
+on macOS, land its new `CAMetalLayer` on a view the old one was cleared off
+(`docs/DESIGN.md` §13.13) — is invisible in every other run of the program.
+Compiled out of release builds.
+
 ## 2. Read only when the tests are compiled
 
 Never present in a release binary. `BT_PSREADLINE_MODULE_PATH`, `BT_BURST_EMIT`,
