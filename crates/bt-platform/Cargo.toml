@@ -86,7 +86,12 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "CFNumber",
     # The watcher thread's own run loop: what the stream is scheduled on, the
     # source the owner signals to stop it, and the default mode both are
-    # attached in.
+    # attached in. M2-2's own test spins the same default mode, because
+    # `NSWorkspace`'s list of running applications is kept current by a
+    # notification and a notification needs a run loop — `CFDate` is what
+    # `CFRunLoopRunInMode`'s timeout is typed in, and it is a feature of a crate
+    # already here rather than a package.
+    "CFDate",
     "CFRunLoop",
     "std",
 ] }

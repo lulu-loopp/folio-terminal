@@ -840,6 +840,7 @@ mod macos_handoff {
 
         use objc2::rc::Retained;
         use objc2_app_kit::NSRunningApplication;
+        use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
 
         use super::*;
 
@@ -1042,11 +1043,26 @@ mod macos_handoff {
                 let _ = std::fs::remove_dir_all(&root);
                 return;
             };
+            // **The wait is a run loop, not a sleep, and that is the finding
+            // this case cost.** `-[NSWorkspace runningApplications]` is a
+            // *cached* array: the workspace keeps it current by observing
+            // `NSWorkspaceDidLaunchApplicationNotification`, and a notification
+            // is delivered by a run loop. A test binary has none running, so a
+            // version of this loop built out of `thread::sleep` watched the same
+            // sixty-nine applications for ten seconds while the seventieth —
+            // the one it had just launched — stood on the desk unseen. Spinning
+            // the default mode for the same tenth of a second lets the
+            // observation through, and it is the same rule any later macOS case
+            // that waits on AppKit state will meet.
+            let spin = || {
+                // SAFETY: a Core Foundation constant, read for the call.
+                CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.1, false);
+            };
             let mut ended: Option<Retained<NSRunningApplication>> = None;
             let mut seen = false;
             let mut visible = 0usize;
             for _ in 0..100 {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                spin();
                 let running = workspace.runningApplications().to_vec();
                 visible = running.len();
                 let opened = running.into_iter().find(|running| {
@@ -1075,7 +1091,7 @@ mod macos_handoff {
                     if ended.isTerminated() {
                         break;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    spin();
                 }
             }
             // For a reader running `-- --nocapture`: what was opened, and
