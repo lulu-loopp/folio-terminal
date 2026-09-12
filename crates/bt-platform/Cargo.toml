@@ -86,12 +86,7 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "CFNumber",
     # The watcher thread's own run loop: what the stream is scheduled on, the
     # source the owner signals to stop it, and the default mode both are
-    # attached in. M2-2's own test spins the same default mode, because
-    # `NSWorkspace`'s list of running applications is kept current by a
-    # notification and a notification needs a run loop — `CFDate` is what
-    # `CFRunLoopRunInMode`'s timeout is typed in, and it is a feature of a crate
-    # already here rather than a package.
-    "CFDate",
+    # attached in.
     "CFRunLoop",
     "std",
 ] }
@@ -128,10 +123,13 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     # `activateFileViewerSelectingURLs:` and
     # `URLForApplicationWithBundleIdentifier:`.
     "NSWorkspace",
-    # M2-2, and only its test: `runningApplications`, so that the case which
-    # really opens a document can end the application it started and nothing
-    # else. Apple's own note on `processIdentifier` says to compare instances
-    # with `isEqual:` rather than with a pid, which is what that case does.
+    # M2-2, and only its test: `runningApplicationsWithBundleIdentifier:`, so
+    # that the case which really opens a document can end the application it
+    # started and nothing else. A LaunchServices query rather than
+    # `-[NSWorkspace runningApplications]`, whose cache Apple documents as
+    # updating on the **main** run loop — which a `#[test]` body is not on.
+    # Apple's own note on `processIdentifier` says to compare instances with
+    # `isEqual:` rather than with a pid, which is what that case does.
     "NSRunningApplication",
     # A screen's device description, which is where its `CGDirectDisplayID` is.
     "NSGraphics",
@@ -165,7 +163,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     # M2-2: the trash (`NSFileManager.trashItemAtURL:resultingItemURL:error:`),
     # the object every path crosses as, and the reason a refusal carries.
     # Already on through `objc2-app-kit`'s `NSWorkspace`; named here because
-    # this crate's own code writes all three.
+    # this crate's own code writes all three. `NSBundle` is the test's alone —
+    # the identifier of the application LaunchServices named, which is the only
+    # thing that case will act on.
+    "NSBundle",
     "NSError",
     "NSFileManager",
     "NSURL",

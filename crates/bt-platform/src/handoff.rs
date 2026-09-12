@@ -840,7 +840,7 @@ mod macos_handoff {
 
         use objc2::rc::Retained;
         use objc2_app_kit::NSRunningApplication;
-        use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
+        use objc2_foundation::NSBundle;
 
         use super::*;
 
@@ -1010,11 +1010,23 @@ mod macos_handoff {
             let file = root.join("folio-m2-2.txt");
             std::fs::write(&file, b"M2-2 opened this.\n").expect("a document");
 
+            // **Which application, asked before the door is called.**
+            // `URLForApplicationToOpenURL:` is LaunchServices' own answer to
+            // "who opens this", and its bundle identifier is the only thing
+            // this case will ever act on.
             let workspace = NSWorkspace::sharedWorkspace();
             let url = file_url(&file, false).expect("a file URL");
-            let handler = workspace.URLForApplicationToOpenURL(&url);
-            let before: Vec<Retained<NSRunningApplication>> =
-                workspace.runningApplications().to_vec();
+            let handler = workspace
+                .URLForApplicationToOpenURL(&url)
+                .and_then(|bundle| NSBundle::bundleWithURL(&bundle))
+                .and_then(|bundle| bundle.bundleIdentifier());
+            // **Every instance of it that is already running.** Asked through
+            // the same fresh query used afterwards, so the two lists are the
+            // same kind of answer and the difference between them is real.
+            let standing = |identifier: &NSString| -> Vec<Retained<NSRunningApplication>> {
+                NSRunningApplication::runningApplicationsWithBundleIdentifier(identifier).to_vec()
+            };
+            let before = handler.as_deref().map(standing).unwrap_or_default();
 
             assert_eq!(
                 open_local_path(window, &file),
@@ -1022,89 +1034,64 @@ mod macos_handoff {
                 "the workspace took the document"
             );
 
-            // LaunchServices answers before the application has finished
-            // launching, so the new process is waited for rather than assumed.
             let Some(handler) = handler else {
-                // No registered handler to identify, so nothing may be ended.
+                // No registered handler to name, so there is nothing this case
+                // may end. The claim above stands either way.
                 let _ = std::fs::remove_dir_all(&root);
                 return;
             };
-            // Both URLs come from LaunchServices, but one names a bundle and
-            // the other a directory, so a trailing slash is not a difference
-            // about which application it is.
-            let bundle_path = |url: &NSURL| {
-                url.path()
-                    .map(|path| path.to_string().trim_end_matches('/').to_owned())
-            };
-            let Some(wanted) = bundle_path(&handler) else {
-                // An application this process cannot name is one it must not
-                // end. Nothing here asserts on the quit, so there is nothing
-                // to report.
-                let _ = std::fs::remove_dir_all(&root);
-                return;
-            };
-            // **The wait is a run loop, not a sleep, and that is the finding
-            // this case cost.** `-[NSWorkspace runningApplications]` is a
-            // *cached* array: the workspace keeps it current by observing
-            // `NSWorkspaceDidLaunchApplicationNotification`, and a notification
-            // is delivered by a run loop. A test binary has none running, so a
-            // version of this loop built out of `thread::sleep` watched the same
+            // **The fresh query, not `-[NSWorkspace runningApplications]`, and
+            // that is the finding this case cost.** The workspace's array is a
+            // *cache* kept current by `NSWorkspaceDidLaunchApplicationNotification`,
+            // and Apple documents it as updating when the **main** run loop is
+            // spun. A `#[test]` body runs on a thread the harness made, so a
+            // version of this loop built on that array watched the same
             // sixty-nine applications for ten seconds while the seventieth —
-            // the one it had just launched — stood on the desk unseen. Spinning
-            // the default mode for the same tenth of a second lets the
-            // observation through, and it is the same rule any later macOS case
-            // that waits on AppKit state will meet.
-            let spin = || {
-                // SAFETY: a Core Foundation constant, read for the call.
-                CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.1, false);
-            };
+            // the one it had just launched — stood on the desk unseen, and the
+            // TextEdit it meant to end stayed open.
+            // `+[NSRunningApplication runningApplicationsWithBundleIdentifier:]`
+            // asks LaunchServices instead of reading a cache, which is an answer
+            // any thread can have. It is the rule for every later macOS case
+            // that waits on another application's state.
             let mut ended: Option<Retained<NSRunningApplication>> = None;
-            let mut seen = false;
-            let mut visible = 0usize;
             for _ in 0..100 {
-                spin();
-                let running = workspace.runningApplications().to_vec();
-                visible = running.len();
-                let opened = running.into_iter().find(|running| {
-                    running.bundleURL().and_then(|url| bundle_path(&url)) == Some(wanted.clone())
-                        && !before.iter().any(|known| **known == **running)
-                });
-                if let Some(opened) = opened {
-                    seen = true;
-                    if opened.isFinishedLaunching() {
-                        opened.terminate();
-                        ended = Some(opened);
-                        break;
-                    }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let opened = standing(&handler)
+                    .into_iter()
+                    .find(|running| !before.iter().any(|known| **known == **running));
+                if let Some(opened) = opened
+                    && opened.isFinishedLaunching()
+                {
+                    opened.terminate();
+                    ended = Some(opened);
+                    break;
                 }
             }
 
             // **The document outlives the quit, and that ordering is the whole
-            // of it.** The first version of this case removed the directory as
-            // soon as it had asked, and the application it had just handed a
-            // file to then found that file gone — which is a *modal* question
-            // on this platform ("the document's file has been deleted"), and a
-            // modal question is one no quit request gets past. So the wait is
-            // here, before the file goes.
+            // of it.** An earlier version removed the directory as soon as it
+            // had asked, and the application it had just handed a file to then
+            // found that file gone — which is a *modal* question on this
+            // platform, and a modal question is one no quit request gets past.
+            // So the wait is here, before the file goes.
             if let Some(ended) = &ended {
                 for _ in 0..50 {
                     if ended.isTerminated() {
                         break;
                     }
-                    spin();
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
-            // For a reader running `-- --nocapture`: what was opened, and
-            // whether it went again. Neither is asserted — the claim is the
-            // door's answer — but a case that leaves an application standing on
-            // somebody's desk should say so rather than let them find it.
+            // For a reader running `-- --nocapture`. Neither half is asserted —
+            // the claim is the door's answer — but a case that can leave an
+            // application standing on somebody's desk should say so rather than
+            // let them find it.
             println!(
-                "opened {wanted}; this process can see {visible} running applications; \
-                 a new one matching it {}; ended: {}",
-                if seen { "appeared" } else { "never appeared" },
+                "handed the document to {handler}; {} were running before; ended: {}",
+                before.len(),
                 match &ended {
                     Some(app) => format!("{}", app.isTerminated()),
-                    None => "not asked".to_owned(),
+                    None => "nothing new appeared to end".to_owned(),
                 }
             );
             let _ = std::fs::remove_dir_all(&root);
