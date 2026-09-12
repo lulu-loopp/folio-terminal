@@ -18,14 +18,66 @@ publish.workspace = true
 # are the ones that probe resolved. `objc2` 0.6.4 and `objc2-foundation` 0.3.2
 # were already in `Cargo.lock` through winit and wgpu, so the whole of what this
 # edge adds to it is one package: `objc2-app-kit` 0.3.2.
+#
+# **M1-3 adds no package at all, only classes**: the window and screen backend
+# (`src/macos_impl.rs`) names nine more AppKit classes and one more Foundation
+# one, each turned on by its own feature. A feature is not a dependency — the
+# crate is already in `Cargo.lock` and in `THIRD-PARTY-NOTICES.md` — and what it
+# costs is the generated bindings for that class and nothing else. The
+# `objc2-foundation` features a class needs come with it (`NSWindow` asks for
+# `NSGeometry`, `NSDictionary` and the rest itself); the ones listed below are
+# the ones this crate's own code *names*.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
+    # The appearance a window and the application wear — light or dark, read
+    # for the theme and stated for the chrome (`set_window_dark_mode`,
+    # `system_uses_light_apps`).
+    "NSAppearance",
+    # `NSApp` itself: the application's effective appearance, and the window a
+    # window number belongs to.
+    "NSApplication",
+    # The window's backing colour, which is the class brush's twin.
+    "NSColor",
+    # `+[NSEvent mouseLocation]` — where the pointer is, for the summon.
+    "NSEvent",
     "NSPasteboard",
+    # `NSResponder`, because a window is one and `makeFirstResponder:` takes
+    # one; `NSView`, because that is what a `NativeWindow` holds.
+    "NSResponder",
+    # The displays: their frames, their work areas, their backing scales and
+    # their identities.
+    "NSScreen",
+    "NSView",
+    # The window itself — the whole of the geometry group.
+    "NSWindow",
+    # Reduce Motion, and the notification that says it moved.
+    "NSAccessibility",
+    "NSWorkspace",
+    # A screen's device description, which is where its `CGDirectDisplayID` is.
+    "NSGraphics",
+    # `CGFloat` — the type every backing scale and every rectangle in AppKit is
+    # written in. **Not a package**: `objc2-core-foundation` 0.3.2 is already in
+    # `Cargo.lock`, pulled in by `objc2-foundation`'s own `NSGeometry`, and this
+    # feature only turns on the AppKit methods that are typed in terms of it.
+    "objc2-core-foundation",
     "std",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
+    # The array of screens and the array of preferred languages.
+    "NSArray",
+    # The change dictionary a KVO callback is handed, and a screen's device
+    # description.
+    "NSDictionary",
+    # The appearance is observed rather than polled.
+    "NSKeyValueObserving",
+    # `NSLocale.preferredLanguages` — the language the system is read in.
+    "NSLocale",
+    # The notification an accessibility-display change arrives as.
+    "NSNotification",
     "NSString",
+    # `NSNumber`, which is what `NSScreenNumber` comes back as.
+    "NSValue",
     "std",
 ] }
 

@@ -102072,6 +102072,30 @@ impl FolioApp {
     /// with no deadline to start it again — the second of those never recovering
     /// on its own. `reset` on both is the whole of the fix, and it also asks for
     /// the frame that draws the answer.
+    /// **And the other preference on that page: which canvas the desktop is
+    /// set to** (M1-3).
+    ///
+    /// The same event, because it is the same reader in the same place: on
+    /// Windows the broadcast that carries the animation switch is
+    /// `WM_SETTINGCHANGE`, and `is_system_preference_message` already answers
+    /// `WM_THEMECHANGED` with it for exactly this reason — "a person turning one
+    /// off often turns the other with it". On macOS the two are two
+    /// subscriptions and one wake, and this is the half that would otherwise
+    /// have nobody to tell: **winit stops posting `ThemeChanged` for a window
+    /// whose own appearance this program has stated**, which it does the moment
+    /// a theme is applied (`bt_platform::set_window_dark_mode`, and winit's
+    /// `observe_value` returns early for a customized window). So the desktop's
+    /// canvas reaches the loop through the settings watch instead.
+    ///
+    /// Idempotent by construction and therefore harmless as a second reading on
+    /// a platform that also has the winit event: [`Runtime::os_theme_changed`]
+    /// asks [`system_os_theme`] and applies nothing when the answer is the one
+    /// already in force. A window whose theme mode is not `System` answers the
+    /// same way for a second reason.
+    fn adopt_system_canvas(&mut self) -> Result<()> {
+        self.for_each_window(|runtime| runtime.os_theme_changed().map(|_| ()))
+    }
+
     fn adopt_motion_preference(&mut self) -> Result<()> {
         let fresh = read_motion_preference();
         let Some(app) = self.app.as_mut() else {
@@ -104240,7 +104264,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // two carets, which have a live deadline that has to be dropped or
             // re-armed on the frame the answer changes rather than the next time
             // somebody types.
-            AppEvent::SystemPreferencesChanged => self.adopt_motion_preference(),
+            AppEvent::SystemPreferencesChanged => self
+                .adopt_motion_preference()
+                .and_then(|()| self.adopt_system_canvas()),
             AppEvent::NotificationClicked => self.route_clicked_notifications(),
             // Every window, on this family's standing reason: an answer carries
             // its own address and a window with no page finds nothing to read.
@@ -108229,6 +108255,48 @@ fn resolved_theme_change(mode: ThemeModeV1, os_theme: OsTheme) -> Option<Theme> 
     match mode {
         ThemeModeV1::System => Some(resolve_theme_mode(mode, Some(os_theme))),
         ThemeModeV1::Light | ThemeModeV1::Dark => None,
+    }
+}
+
+/// **The desktop's canvas reaches this loop on the system-preference event, and
+/// not only on winit's own** (ticket M1-3).
+///
+/// A source pin, because the claim is about *wiring* and the thing at the other
+/// end of it is an operating system: there is no fixture that can make macOS
+/// switch to dark. What a machine can hold is that the event has the second
+/// reader at all — and it is exactly the reader that goes missing by accident,
+/// because on Windows the theme also arrives as `WindowEvent::ThemeChanged` and
+/// nothing would look wrong here without it.
+///
+/// The other half of the rope is
+/// `bt_platform::macos_window_backend_tests::dark_mode_changes_arrive_on_the_window_thread_through_winit`:
+/// the watch's callback does nothing but nudge this loop.
+#[cfg(test)]
+mod system_preference_wiring_tests {
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// RED GATE — mutation: drop `adopt_system_canvas` from the arm and this
+    /// names it; a reader on macOS who switches the desktop to dark then keeps
+    /// the canvas their window was opened in until they restart.
+    #[test]
+    fn the_system_preference_event_re_reads_the_desktops_canvas() {
+        let arm = SOURCE
+            .find("AppEvent::SystemPreferencesChanged =>")
+            .map(|at| &SOURCE[at..at + 200])
+            .expect("the event has an arm in the loop's own match");
+        assert!(
+            arm.contains("adopt_motion_preference"),
+            "the animation preference is no longer re-read on the event that says it moved:\n{arm}"
+        );
+        assert!(
+            arm.contains("adopt_system_canvas"),
+            "the desktop's canvas is no longer re-read on the event that says it moved, and on \
+             macOS that event is the only thing that says so:\n{arm}"
+        );
+        assert!(
+            SOURCE.contains("fn adopt_system_canvas(&mut self) -> Result<()> {"),
+            "and the reader it names is this window's own"
+        );
     }
 }
 
