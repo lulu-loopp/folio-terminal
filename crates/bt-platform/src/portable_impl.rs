@@ -60,7 +60,12 @@
 
 #[cfg(not(any(windows, target_os = "macos")))]
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+// `PathBuf` is a chooser's answer and nothing else in this module's, so on macOS
+// — where M2-3 took the two choosers next door — there is nothing left here that
+// names one.
+#[cfg(not(any(windows, target_os = "macos")))]
+use std::path::PathBuf;
 
 use crate::{ContextMenuShape, ContextMenuTree, NativeWindow, PageVisual, TaskbarProgress};
 // The two types only the window and screen group names, which on macOS is
@@ -447,17 +452,24 @@ pub enum ShellPickKind {
 /// break it.
 pub type FilePickKind = ShellPickKind;
 
-/// **The formula context menu, before there is an `NSMenu` to pop** (M2-3, and
-/// the menu itself is §7.20's).
+/// **The formula context menu, on a platform with no menu to pop** (M2-3 wrote
+/// the macOS arm; the menu itself is §7.20's).
 ///
 /// Step 7 of the startup path and one of the seven fatal `?`. Constructed
 /// harmlessly; [`Self::request`] is where the refusal lives, and its caller
 /// already turns a refusal into a toast rather than into a dead window.
+///
+/// **This is the Linux-only arm now.** macOS pops a real `NSMenu`
+/// (`macos_dialogs::MathContextMenu`), so on that platform this type is not
+/// compiled at all; what is left here is the refusal a target with neither Win32
+/// nor AppKit gets, which §4.6 of the plan requires to keep building.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub struct MathContextMenu {
     #[expect(dead_code, reason = "M2-3 pops the menu over this window")]
     window: NativeWindow,
 }
 
+#[cfg(not(any(windows, target_os = "macos")))]
 impl MathContextMenu {
     /// Install the deferred menu. Never fails.
     pub fn new(window: NativeWindow) -> Result<Self, String> {
@@ -476,20 +488,24 @@ impl MathContextMenu {
     }
 }
 
-/// **The folder chooser, before `NSOpenPanel`** (M2-3).
+/// **The folder chooser, on a platform with no panel to put up** (M2-3 wrote
+/// the macOS arm).
 ///
 /// Step 8 of the startup path. As [`MathContextMenu`]: constructed harmlessly,
-/// refuses when asked.
+/// refuses when asked, and **Linux-only** — macOS sheets a real `NSOpenPanel`
+/// onto the window (`macos_dialogs::FolderPicker`).
 ///
-/// X-4 leaves M2-3 a warning worth repeating here, because it is the reason
-/// this is not a two-line port: AppKit's modal loops — `NSOpenPanel` and
-/// `NSAlert` both — do not drain the main dispatch queue, so a panel run from
-/// the wrong place stops the event loop that would answer it.
+/// X-4's warning to M2-3 is what shaped that arm and is recorded where it acts:
+/// AppKit's modal loops do not drain the main dispatch queue, so a panel run
+/// from the wrong place stops the event loop that would answer it. The answer
+/// there was a sheet, which is not a modal loop at all.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub struct FolderPicker {
     #[expect(dead_code, reason = "M2-3 sheets the panel onto this window")]
     window: NativeWindow,
 }
 
+#[cfg(not(any(windows, target_os = "macos")))]
 impl FolderPicker {
     /// Install the deferred chooser. Never fails.
     pub fn new(window: NativeWindow) -> Result<Self, String> {
@@ -509,14 +525,20 @@ impl FolderPicker {
     }
 }
 
-/// **The picture and program chooser, before `NSOpenPanel`** (M2-3).
+/// **The picture and program chooser, on a platform with no panel to put up**
+/// (M2-3 wrote the macOS arm).
 ///
-/// Step 9 of the startup path. As [`FolderPicker`].
+/// Step 9 of the startup path. As [`FolderPicker`], including being Linux-only:
+/// macOS has `macos_dialogs::ImagePicker`, which restricts the picture row to
+/// [`crate::IMAGE_FILE_EXTENSIONS`] through `allowedContentTypes` and leaves the
+/// program row unfiltered.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub struct ImagePicker {
     #[expect(dead_code, reason = "M2-3 sheets the panel onto this window")]
     window: NativeWindow,
 }
 
+#[cfg(not(any(windows, target_os = "macos")))]
 impl ImagePicker {
     /// Install the deferred chooser. Never fails.
     pub fn new(window: NativeWindow) -> Result<Self, String> {
@@ -1155,12 +1177,19 @@ pub fn leave_process(code: i32) -> ! {
     std::process::exit(code)
 }
 
-/// **The last-resort fault report** (M2-3 gives it `NSAlert`).
+/// **The last-resort fault report, where there is nothing to raise a box with**
+/// (M2-3 gave macOS `NSAlert`).
 ///
 /// Really done, to stderr, and not deferred — this is what a process says when
 /// it has already failed to open a window, and a refusal here would mean the
-/// one message that matters is the one nobody sees. The two lines it writes are
-/// the two `NSAlert` would show.
+/// one message that matters is the one nobody sees.
+///
+/// **Linux-only now**, and the two lines it writes are the two the macOS arm
+/// falls back to itself: `macos_dialogs::message_box` raises an `NSAlert` when
+/// it is on the main thread and an application exists, and says exactly this
+/// when it is not, because a panic hook runs on whichever thread panicked and a
+/// refused launch runs before there is any application at all.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn message_box(title: &str, text: &str) {
     eprintln!("{title}");
     eprintln!("{text}");
@@ -1201,9 +1230,17 @@ mod refusal_tests {
             .is_ok(),
             "the self-drawn frame"
         );
-        assert!(MathContextMenu::new(window()).is_ok(), "the formula menu");
-        assert!(FolderPicker::new(window()).is_ok(), "the folder chooser");
-        assert!(ImagePicker::new(window()).is_ok(), "the picture chooser");
+        // The three dialog services are only this module's where no backend
+        // has them: M2-3 wrote the macOS arm, and the constructors that have to
+        // be harmless there are `macos_dialogs`' own — held by
+        // `a_dialog_door_asked_off_the_window_thread_refuses`, which builds all
+        // three before it asks any of them for anything.
+        #[cfg(not(any(windows, target_os = "macos")))]
+        {
+            assert!(MathContextMenu::new(window()).is_ok(), "the formula menu");
+            assert!(FolderPicker::new(window()).is_ok(), "the folder chooser");
+            assert!(ImagePicker::new(window()).is_ok(), "the picture chooser");
+        }
         // The settings watch is only this module's where no backend has one:
         // on macOS it is `macos_impl`'s, and the constructor that has to be
         // harmless there is that one (`a_window_door_asked_off_the_window_thread_refuses`
@@ -1223,27 +1260,37 @@ mod refusal_tests {
     }
 
     /// RED — **and asking them to do the thing refuses, with the reason.**
+    ///
+    /// **Not the three dialogs on macOS**, where none of them is this module's
+    /// any more: what the same three doors answer there is not "not on this
+    /// platform" but a real panel, and the refusal that replaces this claim is
+    /// `macos_dialogs`' `a_dialog_door_asked_off_the_window_thread_refuses` —
+    /// the same shape about the same doors, with the thread as the thing that is
+    /// wrong instead of the platform.
     #[test]
     fn a_deferred_service_that_is_not_on_this_platform_refuses_when_invoked_not_at_startup() {
-        let menu = MathContextMenu::new(window()).expect("built above");
-        let refusal = menu.request().expect_err("there is no menu to pop");
-        assert!(
-            refusal.contains("not on this platform"),
-            "a refusal says which platform it is about: {refusal}"
-        );
-        assert!(
-            menu.take_result().is_none(),
-            "a request that refused leaves no answer to collect"
-        );
+        #[cfg(not(any(windows, target_os = "macos")))]
+        {
+            let menu = MathContextMenu::new(window()).expect("built above");
+            let refusal = menu.request().expect_err("there is no menu to pop");
+            assert!(
+                refusal.contains("not on this platform"),
+                "a refusal says which platform it is about: {refusal}"
+            );
+            assert!(
+                menu.take_result().is_none(),
+                "a request that refused leaves no answer to collect"
+            );
 
-        let folder = FolderPicker::new(window()).expect("built above");
-        assert!(folder.request(None).is_err(), "there is no panel to sheet");
+            let folder = FolderPicker::new(window()).expect("built above");
+            assert!(folder.request(None).is_err(), "there is no panel to sheet");
 
-        let picture = ImagePicker::new(window()).expect("built above");
-        assert!(
-            picture.request(ShellPickKind::Image, None).is_err(),
-            "there is no panel to sheet"
-        );
+            let picture = ImagePicker::new(window()).expect("built above");
+            assert!(
+                picture.request(ShellPickKind::Image, None).is_err(),
+                "there is no panel to sheet"
+            );
+        }
 
         let compositor = Compositor::new(window()).expect("built above");
         let page = PageVisual { tab: 1, seat: 1 };

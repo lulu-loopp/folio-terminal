@@ -9652,15 +9652,27 @@ mod portable_impl;
 
 #[cfg(not(windows))]
 pub use portable_impl::{
-    Compositor, CustomWindowFrame, FilePickKind, FolderPicker, ImagePicker, ImeSystemCaret,
-    MathContextMenu, Notifier, ShellPickKind, Taskbar, adopt_parent_console,
-    announce_explorer_menu_change, detach_console, directory_folds_case, flash_window,
-    hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
-    is_window_cloaked, leave_process, message_box, read_context_menu, recycle,
+    Compositor, CustomWindowFrame, FilePickKind, ImeSystemCaret, Notifier, ShellPickKind, Taskbar,
+    adopt_parent_console, announce_explorer_menu_change, detach_console, directory_folds_case,
+    flash_window, hide_every_window_of_this_process, install_console_ctrl_handler,
+    install_context_menu, is_window_cloaked, leave_process, read_context_menu, recycle,
     redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
     set_system_backdrop, silence_std_streams, system_backdrop_available, taskbar_is_auto_hidden,
     thread_mouse_capture, virtual_key_for_character, write_to_console,
 };
+
+/// **The two choosers, the formula menu and the alert, on a platform that has
+/// no panel to put up** — the four names [`macos_dialogs`] answers for a Mac and
+/// this module still refuses for anything else off Windows (M2-3).
+///
+/// The same split M1-3 made for the window group, one file further on, and
+/// `a_dialog_door_has_one_arm_per_platform` walks both arms the same way.
+/// [`ShellPickKind`] and [`FilePickKind`] are deliberately **not** in this
+/// list: an enum naming a folder, a picture and a program is a fact about the
+/// product rather than about a dialog, the macOS arm reads the portable
+/// module's copy, and a second definition would be two spellings of one choice.
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub use portable_impl::{FolderPicker, ImagePicker, MathContextMenu, message_box};
 
 /// **The watch doors, on a platform whose filesystem does not speak** (M2-1).
 ///
@@ -9734,6 +9746,28 @@ pub use macos_impl::{
 /// type.
 #[cfg(target_os = "macos")]
 pub use macos_impl::{clear_surface_layers, surface_view};
+
+/// **The two choosers, the formula menu and the last-resort alert, over
+/// AppKit** (M2-3).
+///
+/// A module of its own rather than a section of [`macos_impl`], for the reason
+/// [`macos_watch`] is one: the two files answer different questions about the
+/// same platform. Everything in `macos_impl` is a reading or a statement about a
+/// window that already exists and returns in the turn it was asked in;
+/// everything here puts something in front of the reader and waits — which is
+/// the shape X-4's warning is about, and the shape the whole of that module's
+/// header is spent on.
+///
+/// It is the ninth unsafe boundary in this crate and it is against the same
+/// thing the third is: **AppKit, which is the main thread's or it is undefined
+/// behaviour**. The gate is `macos_impl`'s own, reached through the same
+/// `MainThreadMarker`, which is why the two files share three functions rather
+/// than each writing the refusal twice.
+#[cfg(target_os = "macos")]
+mod macos_dialogs;
+
+#[cfg(target_os = "macos")]
+pub use macos_dialogs::{FolderPicker, ImagePicker, MathContextMenu, message_box};
 
 /// **The directory watch, over FSEvents** (M2-1).
 ///
@@ -11211,6 +11245,279 @@ mod macos_window_backend_tests {
         assert!(
             MACOS.contains("addObserver_forKeyPath_options_context("),
             "nothing is observed, so nothing can arrive"
+        );
+    }
+}
+
+/// **The two choosers, the alert and the formula menu have exactly one arm per
+/// platform, and the macOS one never blocks the loop** (ticket M2-3).
+///
+/// Source pins, for `macos_window_backend_tests`' reason: the module they are
+/// about is the one this workstation does **not** compile, and what is claimed
+/// is a fact about the text rather than about a call. The behavioural twins run
+/// on the Mac — `macos_dialogs::tests` for the four doors, and the
+/// `macos_sheet` target, which owns the process's main thread because AppKit
+/// needs it and libtest will not hand it over, for the sheet itself.
+///
+/// What they guard is narrower and sharper than the window group's, because the
+/// hazard here is not "the door is missing" but **"the door blocks"**: a panel
+/// put up with `runModal` instead of `beginSheetModalForWindow:` compiles,
+/// looks right in a screenshot, and stops this process's event loop for as long
+/// as the reader leaves the dialog open — E55 on the other platform, and the
+/// defect the whole macOS arm is shaped around.
+#[cfg(test)]
+mod macos_dialog_backend_tests {
+    use crate::IMAGE_FILE_EXTENSIONS;
+
+    /// The two arms' own text.
+    const PORTABLE: &str = include_str!("portable_impl.rs");
+    const MACOS: &str = include_str!("macos_dialogs.rs");
+
+    /// The gate the portable arm's four now stand behind.
+    const NEITHER: &str = "#[cfg(not(any(windows, target_os = \"macos\")))]";
+
+    /// The text of the item `needle` opens, to the line that closes it at the
+    /// indentation `needle` itself is written at.
+    ///
+    /// Crude on purpose, as `deferred_service_tests`' own reader is: what is
+    /// being read is whether a body names a call, and a parser here would be a
+    /// second thing to be wrong. The indentation is taken from the needle rather
+    /// than guessed, because a body with a `let … else { … };` in it closes an
+    /// inner block at the outer block's column and a reader that stopped at the
+    /// first candidate would read half a function.
+    fn item(source: &str, needle: &str) -> String {
+        let indent: String = needle
+            .trim_start_matches('\n')
+            .chars()
+            .take_while(|character| *character == ' ')
+            .collect();
+        let closer = format!("\n{indent}}}\n");
+        let at = source
+            .find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` is in this arm"));
+        let rest = &source[at..];
+        let end = rest
+            .find(&closer)
+            .unwrap_or_else(|| panic!("`{needle}` opens an item that is never closed"));
+        rest[..end].to_owned()
+    }
+
+    /// The attributes between a definition and the doc comment above it.
+    fn attributes_above(source: &str, needle: &str) -> String {
+        let at = source
+            .find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` is defined in this arm"));
+        let before = &source[..at];
+        let doc_ends = before
+            .rfind("///")
+            .expect("every item here carries a doc comment");
+        let line_end = before[doc_ends..]
+            .find('\n')
+            .expect("a doc comment ends in a newline");
+        before[doc_ends + line_end..].to_owned()
+    }
+
+    /// RED — **each of the four is the portable arm's for Linux only, and the
+    /// macOS arm's for a Mac.**
+    ///
+    /// MUTATION: drop the `cfg` from any of the four and a macOS build defines
+    /// it twice; delete one from `macos_dialogs.rs` and a Mac loses the door.
+    #[test]
+    fn a_dialog_door_has_one_arm_per_platform() {
+        for definition in [
+            "\npub struct MathContextMenu {",
+            "\npub struct FolderPicker {",
+            "\npub struct ImagePicker {",
+            "\npub fn message_box(",
+        ] {
+            let attributes = attributes_above(PORTABLE, definition);
+            assert!(
+                attributes.contains(NEITHER),
+                "`{definition}` is still the portable arm's on macOS, where `macos_dialogs` also \
+                 defines it:\n{attributes}"
+            );
+            assert!(
+                MACOS.contains(definition),
+                "`{definition}` left the portable arm without arriving in the macOS one, which is \
+                 a platform with no such door at all"
+            );
+        }
+        assert!(
+            PORTABLE.contains("pub enum ShellPickKind {")
+                && !MACOS.contains("pub enum ShellPickKind {"),
+            "the three cases a chooser is opened for are the product's and stay in one place; a \
+             second definition on macOS would be two spellings of one choice"
+        );
+    }
+
+    /// RED — **nothing in the macOS arm runs a modal loop where the event loop
+    /// would be waiting on it.**
+    ///
+    /// Three claims, and each is a different way to write the freeze:
+    ///
+    /// ① the panels go up with `beginSheetModalForWindow:completionHandler:`,
+    ///    which returns before the reader has decided anything;
+    /// ② the only `runModal` in the file is the alert's, which is the one door
+    ///    here that is *allowed* to block — it is the last-resort fault report,
+    ///    and by then there is nothing left to be late for;
+    /// ③ the menu, which really does run a tracking loop, is reached through
+    ///    `performSelector:withObject:afterDelay:` from `request` rather than
+    ///    popped inside it.
+    ///
+    /// MUTATION: swap `beginSheetModalForWindow_completionHandler` for
+    /// `runModal` in either chooser and ① and ② both go red; pop the menu
+    /// directly in `request` and ③ does.
+    #[test]
+    fn the_macos_dialogs_never_block_the_event_loop() {
+        for door in [
+            "\n    pub fn request(&self, start:",
+            "\n    pub fn request(&self, kind:",
+        ] {
+            let body = item(MACOS, door);
+            assert!(
+                !body.contains("runModal"),
+                "a chooser that runs a modal loop stops this process for as long as the reader \
+                 leaves it open:\n{body}"
+            );
+            assert!(
+                body.contains("sheet("),
+                "and what it does instead is attach the panel to the window:\n{body}"
+            );
+        }
+        let putting_up = item(MACOS, "\nfn sheet(");
+        assert!(
+            putting_up.contains("beginSheetModalForWindow_completionHandler("),
+            "the one place a panel is shown shows it as a sheet:\n{putting_up}"
+        );
+        let alert = item(MACOS, "\npub fn message_box(");
+        assert!(
+            alert.contains("alert.runModal();"),
+            "the alert is the one door here that may block, and it is the one that does"
+        );
+        assert_eq!(
+            MACOS.matches(".runModal()").count(),
+            1,
+            "and it is the only `runModal` in the file"
+        );
+        let menu = item(
+            MACOS,
+            "\n    pub fn request(&self) -> Result<bool, String> {",
+        );
+        assert!(
+            menu.contains("performSelector_withObject_afterDelay(")
+                && !menu.contains("popUpMenuPositioningItem"),
+            "the menu's tracking loop must not start inside the callback that asked for it — \
+             this is E55 under the other platform's name for it:\n{menu}"
+        );
+    }
+
+    /// RED — **the answer wakes the loop that is going to collect it.**
+    ///
+    /// The one thing about this arm that has no Windows twin. There, the answer
+    /// lands inside `DispatchMessageW` and `about_to_wait` follows on its own;
+    /// here the completion block is run by the run loop with no winit callback
+    /// on the stack, so the block asks the window for a frame and winit turns
+    /// that into an event. A block that only parked the answer would leave it
+    /// sitting there until the reader happened to move the mouse.
+    ///
+    /// MUTATION: delete the `ask_for_a_frame` call from either the sheet's block
+    /// or the menu's pop and this names it.
+    #[test]
+    fn a_parked_answer_asks_the_window_for_a_frame() {
+        let waking = item(MACOS, "\nfn ask_for_a_frame(");
+        assert!(
+            waking.contains("setNeedsDisplay(true)"),
+            "the wake is a redraw on winit's own view, which is what the handle holds:\n{waking}"
+        );
+        for (landing, what) in [
+            ("\nfn sheet(", "a sheet's completion"),
+            ("\n        fn pop(&self) {", "the menu's pop"),
+        ] {
+            let body = item(MACOS, landing);
+            let parked = body
+                .find("state.complete(")
+                .or_else(|| body.find("ivars.state.complete("))
+                .unwrap_or_else(|| panic!("{what} parks its answer"));
+            let woke = body
+                .find("ask_for_a_frame(")
+                .unwrap_or_else(|| panic!("{what} parks an answer nothing will collect"));
+            assert!(
+                parked < woke,
+                "{what} wakes the loop before the answer is there for it:\n{body}"
+            );
+        }
+    }
+
+    /// RED — **the last-resort report asks both of its questions before it
+    /// reaches AppKit, and reads `NSApp` rather than asking for it.**
+    ///
+    /// `+[NSApplication sharedApplication]` *creates* the application. A
+    /// `folio --help` that could not write to its console would then acquire an
+    /// AppKit application on its way out of the door, and the modal it ran would
+    /// have nothing behind it.
+    ///
+    /// MUTATION: call `NSApplication::sharedApplication` here and the third
+    /// assertion names it; move either guard below the modal and the first does.
+    #[test]
+    fn the_last_resort_report_asks_its_thread_and_its_application_first() {
+        let body = item(MACOS, "\npub fn message_box(");
+        let runs_at = body.find("alert.runModal();").expect("it raises the alert");
+        for guard in ["MainThreadMarker::new()", "NSApp }.is_null()"] {
+            let at = body
+                .find(guard)
+                .unwrap_or_else(|| panic!("`{guard}` is one of the two questions"));
+            assert!(
+                at < runs_at,
+                "`{guard}` is asked after the modal is already running:\n{body}"
+            );
+        }
+        assert!(
+            !body.contains("sharedApplication"),
+            "asking for the shared application creates one, which is the whole reason the global \
+             is read instead:\n{body}"
+        );
+        assert_eq!(
+            body.matches("say_to_stderr(title, text)").count(),
+            2,
+            "both refusals write the two lines the portable arm writes"
+        );
+    }
+
+    /// RED — **the picture chooser's types are built from the decoder's own
+    /// list, and the program chooser is filtered by nothing.**
+    ///
+    /// The inventory says this row in one line: `image_file_filter_spec` is a
+    /// `*.png;*.jpg` string and `NSOpenPanel` takes types, so the macOS arm
+    /// reads the const instead. A list written out there would be a chooser that
+    /// offers a format the decoder refuses, or hides one it honours, and neither
+    /// is visible until somebody's wallpaper will not load.
+    ///
+    /// MUTATION: write the six extensions out in `image_content_types` and the
+    /// first two assertions go red; give the program row a content type and the
+    /// third does.
+    #[test]
+    fn the_picture_chooser_is_built_from_the_decoders_own_list() {
+        let types = item(MACOS, "\nfn image_content_types()");
+        assert!(
+            types.contains("IMAGE_FILE_EXTENSIONS"),
+            "the chooser's filter is the decoder's list, read rather than restated:\n{types}"
+        );
+        for extension in IMAGE_FILE_EXTENSIONS {
+            assert!(
+                !types.contains(&format!("\"{extension}\"")),
+                "`{extension}` is written out in the macOS arm, so the two lists can drift"
+            );
+        }
+        let dressing = item(MACOS, "\nfn dress(");
+        assert_eq!(
+            dressing.matches("setAllowedContentTypes(").count(),
+            1,
+            "exactly one of the three rows is filtered, and it is the picture one"
+        );
+        assert!(
+            dressing.contains("setTreatsFilePackagesAsDirectories(false)"),
+            "a program row that descended into a `.app` would write something inside the bundle \
+             into `profiles.json` rather than the bundle:\n{dressing}"
         );
     }
 }

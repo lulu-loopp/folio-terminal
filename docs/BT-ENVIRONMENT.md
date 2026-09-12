@@ -117,6 +117,16 @@ probes read a further set of `BT_PROBE_*`, `BT_ZOOM_PERF_*` and `BT_CONPTY_*`
 names. Those binaries are not part of a release archive and are not covered by the
 check above; their switches are documented where they are read.
 
+The macOS sheet probe (`crates/bt-platform/tests/macos_sheet.rs`) is outside the
+check for the same reason — the walk excludes `tests/` — and reads two of its
+own. `BT_MAC_GUI=1` is consent: without it that target prints one line and exits
+rather than opening real windows on somebody's desk. `BT_MAC_GUI_SHOT=<dir>`
+names a directory, and when it is set the probe writes each sheet's window number
+into it and then holds that sheet up for two and a half seconds, so that the
+session which started the probe can photograph it — the grant that lets a
+process photograph a window belongs to that session and not to a throwaway
+bundle. Neither name is read by `folio` itself.
+
 ## Files Folio writes without being asked
 
 For completeness beside the list above, and because none of these needs a variable
