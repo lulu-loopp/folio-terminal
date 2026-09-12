@@ -1,0 +1,45 @@
+# X-6 probe A: the objc2 dependency graph the macOS backend will need, checked
+# for aarch64-apple-darwin from a Windows host. Its own `[workspace]` table so
+# it does not try to join the repository's.
+[workspace]
+
+[package]
+name = "objc-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Target-scoped exactly as §4.6 requires: a Linux or Windows target sees a crate
+# with no dependencies at all.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString"] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSWindow",
+    "NSView",
+    "NSPasteboard",
+    "NSAlert",
+    "NSOpenPanel",
+    "NSWorkspace",
+    "NSScreen",
+    "NSMenu",
+] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer"] }
+objc2-web-kit = { version = "0.3", features = [
+    "WKWebView",
+    "WKWebViewConfiguration",
+    "WKNavigationDelegate",
+    "WKURLSchemeHandler",
+] }
+objc2-user-notifications = { version = "0.3", features = [
+    "UNUserNotificationCenter",
+    "UNNotificationRequest",
+] }
+objc2-core-graphics = { version = "0.3", features = [
+    "CGEvent",
+    "CGEventTypes",
+    "CGEventSource",
+] }
+core-graphics = "0.24"
