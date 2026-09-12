@@ -131,6 +131,23 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Typing with an input method into a Markdown page shows the letters being
+  composed.** Typing Chinese into a `.md` file put the candidate list under the
+  caret and drew nothing at all between them: the reading you were part-way
+  through was invisible until the moment it committed. The letters now stand at
+  the caret in the typeface of the paragraph, heading, list, quote, code block
+  or table they are being typed into, with a line under them and the input
+  method's own caret inside them, and the rest of the line moves along in front
+  of them instead of being drawn over. The candidate list follows that caret
+  rather than the one in front of the letters. Nothing is written into the file
+  until it commits, so Escape still leaves the document exactly as it was.
+- **A composition left over from the command palette or a name box no longer
+  floats over the window.** Typing Chinese into the palette and then picking a
+  row left the candidate list on screen, over whatever the row had opened, with
+  nothing to receive what you typed next and no way to dismiss it. A composition
+  now belongs to the box it was started in: when that box goes away the letters
+  in progress are thrown away with it, and they are never delivered to whatever
+  has the keyboard next.
 - **Switching between animated pictures shows the right one at once.** Opening a
   second `.gif` on a pane or a card that was already playing one could leave the
   first file's picture on the glass, under the second file's name, for as long as

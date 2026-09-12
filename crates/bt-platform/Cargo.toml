@@ -148,6 +148,13 @@ windows = { version = "0.62.2", features = [
     # first-page context menu at all (`src/msix.rs`).
     "Wdk_System_SystemServices",
     "Win32_UI_HiDpi",
+    # `ImmGetContext` / `ImmNotifyIME` / `ImmReleaseContext`: the one call that
+    # ends a composition the field it was typed into no longer exists for
+    # (`cancel_composition`, DESIGN §7.1.5a″). A **feature**, not a package —
+    # `windows` is already in the lock file, so turning the namespace on adds
+    # not one line to it or to `THIRD-PARTY-NOTICES.md`, which is
+    # `docs/DESIGN.md` §8's bar.
+    "Win32_UI_Input_Ime",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     # `COMDLG_FILTERSPEC` and therefore `IFileDialog::SetFileTypes`, which is
