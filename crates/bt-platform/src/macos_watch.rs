@@ -976,14 +976,27 @@ mod tests {
     /// the stream's own latency by a wide margin.
     const SILENCE_FOR: Duration = Duration::from_millis(1_200);
 
-    /// A temporary directory **under this worktree's own target directory**, so
-    /// that a Mac ticket writes nothing outside the corner of the machine it was
-    /// given (`docs/plans/port/mac-mini-venue.md`).
+    /// A scratch directory **beside the test binary**, which is to say inside
+    /// this build's own target directory.
+    ///
+    /// Not `std::env::temp_dir()`, which is where the Windows arm's twin puts
+    /// its own: a Mac ticket of the port is given one corner of somebody's
+    /// personal machine and writes nothing outside it
+    /// (`docs/plans/port/mac-mini-venue.md`), and the target directory is the
+    /// one path this crate can derive rather than be told. `current_exe` is
+    /// `<target>/<profile>/deps/<binary>`, so its grandparent is the profile
+    /// directory `cargo clean` already owns.
     struct Scratch(PathBuf);
 
     impl Scratch {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
+            let here = std::env::current_exe().expect("a test binary knows where it is");
+            let profile = here
+                .parent()
+                .and_then(Path::parent)
+                .expect("a test binary lives in <target>/<profile>/deps")
+                .to_path_buf();
+            let dir = profile.join(format!(
                 "bt-dir-watch-{}-{name}-{:?}",
                 std::process::id(),
                 std::thread::current().id()
