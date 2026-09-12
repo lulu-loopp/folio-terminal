@@ -1,0 +1,75 @@
+# X-2's scratch probe: deliberately outside the workspace (the empty
+# `[workspace]` table below), so that a crate naming WebKit never enters
+# Folio's own dependency graph. winit and objc2 are the versions `Cargo.lock`
+# already pins, as X-1's and X-4's probes used them.
+[package]
+name = "probe-x2"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
+raw-window-handle = "0.6.2"
+objc2 = { version = "0.6", features = ["exception"] }
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSURL",
+    "NSURLRequest",
+    "NSURLResponse",
+    "NSURLAuthenticationChallenge",
+    "NSURLCredential",
+    "NSURLSession",
+    "NSArray",
+    "NSDictionary",
+    "NSValue",
+    "NSObject",
+    "NSError",
+    "NSData",
+    "NSGeometry",
+    "NSThread",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+    "NSScreen",
+    "NSEvent",
+] }
+objc2-web-kit = { version = "0.3", features = [
+    "block2",
+    "objc2-app-kit",
+    "WKWebView",
+    "WKWebViewConfiguration",
+    "WKWebpagePreferences",
+    "WKNavigation",
+    "WKNavigationDelegate",
+    "WKNavigationAction",
+    "WKNavigationResponse",
+    "WKUIDelegate",
+    "WKFrameInfo",
+    "WKWindowFeatures",
+    "WKContentRuleList",
+    "WKContentRuleListStore",
+    "WKUserContentController",
+    "WKWebsiteDataStore",
+    "WKDownload",
+    "WKDownloadDelegate",
+    "WKPreferences",
+    "WKSecurityOrigin",
+    "WKURLSchemeHandler",
+    "WKBackForwardListItem",
+] }
+
+[profile.dev]
+opt-level = 1
+# objc2 verifies every selector against the class when debug assertions are on,
+# and WebKit hands the authentication challenge over as `WKNSURLAuthenticationChallenge`,
+# a forwarding proxy whose `protectionSpace` is not a real method on the class.
+# The send works; only the verification refuses it. Turning the verification off
+# is the probe saying "ask the object, not the class".
+debug-assertions = false
