@@ -2293,6 +2293,29 @@ pub enum HostPlatform {
     OtherUnix,
 }
 
+impl HostPlatform {
+    /// **Whether an application here outlives the last window a person can
+    /// see** (plan §8 Q10, ruled 2026-09-12; M3-1).
+    ///
+    /// On Windows and on a Linux desktop it does not: a process in the task list
+    /// with nothing on any screen and no taskbar button is not a program anybody
+    /// can get back to, which is `bt-app`'s own §7.54e ① written from the other
+    /// side. **On macOS it does, and that is not a preference**: an application
+    /// is in the Dock whether or not it has a window, clicking it there is the
+    /// way back in, and `applicationShouldTerminateAfterLastWindowClosed:` exists
+    /// precisely because AppKit expects to be told. Folio answers NO there
+    /// ([`AppDelegate`]) and this is the same sentence said to `bt-app`, so that
+    /// the door AppKit asks and the rule the application keeps cannot come to
+    /// disagree.
+    ///
+    /// A value and not a `cfg` in `bt-app`, for the reason [`host_platform`]
+    /// itself is one: a test on a Windows workstation can ask what a Mac ships.
+    #[must_use]
+    pub const fn an_application_outlives_its_last_window(self) -> bool {
+        matches!(self, Self::MacOs)
+    }
+}
+
 /// The platform this executable was built for.
 #[must_use]
 pub const fn host_platform() -> HostPlatform {
@@ -9860,6 +9883,49 @@ mod macos_fonts;
 
 #[cfg(target_os = "macos")]
 pub use macos_fonts::monospace_font_families;
+
+/// **The application's own lifecycle**, on every platform (M3-1).
+///
+/// The odd one out of the macOS group above, and deliberately: there is **one**
+/// definition of this door rather than three, because the split here is not
+/// between platforms but between *the product's rule* and *the machine's hook*.
+/// The buffer that holds a cold delivery until the application is up, the rule
+/// that one termination request gets one answer, and the decoding of a `file:`
+/// URL are Folio's, are the same on every machine, and are where a defect would
+/// live; only [`macos_app`] changes shape, and off macOS there is nothing for it
+/// to change into — Windows has no application delegate, and neither has a Linux
+/// desktop. So the portable arm is [`AppDelegate::install`] itself, which opens
+/// a door that stays quiet, and `bt-app` names no platform to call it.
+///
+/// `ShellPickKind` is the precedent for the direction (§13.17 ⑦): a fact about
+/// the product is written once and read by whichever backend needs it.
+mod app_delegate;
+
+pub use app_delegate::{
+    AppDelegate, AppDelegateEvent, AppDelegateEventKind, AppDelegateOrigin, TerminationAnswer,
+    TerminationDecision, path_from_file_url,
+};
+
+/// **The four selectors added to winit's own application delegate** (M3-1).
+///
+/// The tenth unsafe boundary in this crate and the first against the
+/// Objective-C **runtime** rather than against a framework written in it:
+/// `class_addMethod` on a class this program does not own. See the module's own
+/// header for why that is the route — winit 0.30.13 documents that it registers
+/// no delegate and it does register one, and its own observers panic on any
+/// other object in `NSApp.delegate`.
+#[cfg(target_os = "macos")]
+mod macos_app;
+
+/// **Whether AppKit's delegate answers all four** (M3-1).
+///
+/// A macOS-only name, on `clear_surface_layers`' footing: there is nothing for a
+/// portable arm to refuse, because the sentence it would refuse is not true of
+/// anything off this platform. It is `respondsToSelector:` asked of the object
+/// AppKit itself consults, which is the one reading that is about the runtime
+/// rather than about this crate's bookkeeping.
+#[cfg(target_os = "macos")]
+pub use macos_app::delegate_answers_the_four_selectors;
 
 /// **The tail of a command-line argument, split at an ASCII offset, in the
 /// operating system's own encoding** (M1-1, for M1-10).

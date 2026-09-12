@@ -366,6 +366,7 @@ dependencies = [
  "webview2-com",
  "windows",
  "windows-core",
+ "winit",
 ]
 
 [[package]]

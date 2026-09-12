@@ -36,6 +36,7 @@ use std::{
 };
 
 mod animation;
+mod app_delegate_wire;
 mod arrival;
 mod attention;
 mod attention_codex;
@@ -511,6 +512,21 @@ enum AppEvent {
     /// carries nothing — it is the loop being nudged to look at a clock, and the
     /// clock may well decide the news is not ripe yet.
     FilesDirChanged,
+    /// **The application delegate said something** (M3-1, `app_delegate_wire`).
+    ///
+    /// The twelfth of the family and owed a wake for [`Self::LaunchAsked`]'s
+    /// reason in its most literal form yet: a Finder reopen, a document dropped
+    /// on the Dock tile or a Dock *Quit* reaches this process through AppKit
+    /// rather than through any window of it, and the window it will change may
+    /// have been sitting untouched for an hour — or, after the last window has
+    /// closed, may not exist at all.
+    ///
+    /// Carries nothing, on that variant's own footing: the events are parked in
+    /// `app_delegate_wire`'s inbox by the sender `bt_platform::AppDelegate` calls
+    /// **on AppKit's stack**, and this says only that there are some. A payload
+    /// here would be a second copy travelling a second way — and `AppEvent` is
+    /// `Copy`, which a list of paths is not.
+    AppDelegateSpoke,
 }
 
 impl AppEvent {
@@ -557,7 +573,8 @@ impl AppEvent {
             | Self::PreviewFileChanged
             | Self::FilesDirChanged
             | Self::QuakeSummoned
-            | Self::LaunchAsked => Station::Woken,
+            | Self::LaunchAsked
+            | Self::AppDelegateSpoke => Station::Woken,
         }
     }
 }
@@ -11223,8 +11240,24 @@ static SUMMON_PROXY: std::sync::OnceLock<EventLoopProxy<AppEvent>> = std::sync::
 /// `SettingsV1::quake_restore` says it should — see `FolioApp::retire_the_summon_with_the_run`,
 /// which is the door it goes through, and `FolioApp::windows_left_after`, which is why it was
 /// never counted as a window in the first place.
+///
+/// **And it is not every platform's fact** (M3-1, plan §8 Q10, ruled
+/// 2026-09-12). Everything above is about a program a person cannot get back to,
+/// and on macOS they can: an application is in the Dock whether or not it has a
+/// window, the Dock icon is the way back in, and AppKit asks whether to end the
+/// process with `applicationShouldTerminateAfterLastWindowClosed:` precisely
+/// because it expects to be told. Folio answers NO there, so this has to answer
+/// the same thing — the door and the rule saying different things would be a
+/// process that kept its `session.lock` and then exited anyway, or one AppKit
+/// was told to keep and that took itself away.
+///
+/// Asked of `bt_platform::host_platform()`, which is a **value**: §4.3's whole
+/// design is that the application reads values and the platform crate reads the
+/// machine, and `only_the_named_files_decide_what_platform_this_is` is what
+/// keeps a `cfg!` out of this page. It also means the Mac's answer is a claim a
+/// Windows runner can check, which is what the case below does.
 const fn a_run_ends_with_its_last_visible_window(visible_windows: usize) -> bool {
-    visible_windows == 0
+    visible_windows == 0 && !bt_platform::host_platform().an_application_outlives_its_last_window()
 }
 
 /// **One row of `Move to window ▸`**, before it is words (B9).
@@ -98081,16 +98114,28 @@ mod launch_landing_tests {
             tab.contains("runtime.launch_profile(request)"),
             "the profile is decided somewhere other than `cli::resolve`:\n{tab}"
         );
+        // **`land_one_launch_request` and not `settle_launch_requests`**
+        // (M3-1). The body this used to read was split in two when a Finder
+        // launch on a Mac started arriving through a door of its own: the loop
+        // over the wire stayed above, and *where one request lands* — which is
+        // the whole of what this case is about — moved down one function so
+        // that both doors reach the same rule rather than each keeping a copy.
         let settle = body(concat!("    fn ", "settle_launch_requests("));
         assert!(
-            settle.contains("most_recently_active_window("),
+            settle.contains("launch_wire::take()")
+                && settle.contains("self.land_one_launch_request(event_loop, &request)?"),
+            "the wire is drained by something other than the one landing door:\n{settle}"
+        );
+        let landing = body(concat!("    fn ", "land_one_launch_request("));
+        assert!(
+            landing.contains("most_recently_active_window("),
             "the window is chosen by some rule other than the one that is \
-             tested:\n{settle}"
+             tested:\n{landing}"
         );
         assert!(
-            settle.contains("self.raise_for_a_launch(id)"),
+            landing.contains("self.raise_for_a_launch(id)"),
             "a tab opens and the window it opened in stays behind whatever the \
-             reader was looking at:\n{settle}"
+             reader was looking at:\n{landing}"
         );
         let raise = body(concat!("    fn ", "raise_for_a_launch("));
         let restore = raise.find("set_minimized(false)").unwrap_or(usize::MAX);
@@ -98118,14 +98163,15 @@ mod launch_landing_tests {
     /// asked for.
     #[test]
     fn a_window_asked_for_by_a_second_start_is_opened_by_this_process() {
-        let settle = body(concat!("    fn ", "settle_launch_requests("));
+        // One function down since M3-1 — see the case above for why.
+        let settle = body(concat!("    fn ", "land_one_launch_request("));
         // **Since 2026-09-11 the flag is read through the table and not here**
         // (§7.59): `--new-window` is one row of `launch_wire::landing`, whose
         // other rows are `--tab`, the two launcher origins and the reader's own
         // setting — and the whole point of that function is that this door asks
         // one question instead of growing a condition per row.
         assert!(
-            settle.contains("launch_wire::landing(&request, opens)"),
+            settle.contains("launch_wire::landing(request, opens)"),
             "the landing is decided somewhere other than the table that holds \
              the rule:\n{settle}"
         );
@@ -98135,7 +98181,7 @@ mod launch_landing_tests {
              setting nobody chose:\n{settle}"
         );
         assert!(
-            settle.contains("self.open_a_window_for_a_launch(event_loop, target, &request)"),
+            settle.contains("self.open_a_window_for_a_launch(event_loop, target, request)"),
             "a request that asked for a window has no door to it:\n{settle}"
         );
         let door = body(concat!("    fn ", "open_a_window_for_a_launch("));
@@ -102325,6 +102371,25 @@ struct FolioApp {
     /// it in. Parsed in `main` and resolved in [`Runtime::create`], because
     /// resolving it needs the default profile, which needs `settings.json`.
     cli: cli::CliRequest,
+    /// **The application delegate**, from `main` (M3-1).
+    ///
+    /// Held for the life of the process because it cannot be given back: the
+    /// four selectors it adds to winit's own delegate class are added for as
+    /// long as the runtime lives, so a dropped door would be AppKit posting
+    /// into a channel nobody reads. `None` on a machine that refused it, which
+    /// is a launch that goes on without a Finder reopen rather than a launch
+    /// that fails.
+    delegate: Option<bt_platform::AppDelegate>,
+    /// **AppKit, waiting on a quit it asked for** (M3-1).
+    ///
+    /// Parked between `applicationShouldTerminate:` and the end of Folio's own
+    /// quit transaction, which spans turns: the answer is given in
+    /// [`Self::settle_quit`], `NSTerminateNow` where the session has been
+    /// written and `session.lock` released, `NSTerminateCancel` where the reader
+    /// cancelled the card. `None` for the `⌘Q` Folio answers itself, which never
+    /// reaches AppKit at all — `with_default_menu(false)` is what makes that
+    /// chord Folio's.
+    termination: Option<bt_platform::TerminationAnswer>,
 }
 
 /// **The process's one device and every window standing on it**, handed to the
@@ -102373,13 +102438,19 @@ impl LostDevice for TheDeviceAndItsWindows<'_> {
 }
 
 impl FolioApp {
-    fn new(proxy: EventLoopProxy<AppEvent>, cli: cli::CliRequest) -> Self {
+    fn new(
+        proxy: EventLoopProxy<AppEvent>,
+        cli: cli::CliRequest,
+        delegate: Option<bt_platform::AppDelegate>,
+    ) -> Self {
         Self {
             app: None,
             windows: Windows::new(),
             proxy,
             startup_started: Instant::now(),
             cli,
+            delegate,
+            termination: None,
         }
     }
 
@@ -103493,47 +103564,256 @@ impl FolioApp {
     /// `bt_platform::launch_pipe`'s four steps — and it is asked for through the
     /// recipe §7.54 already uses rather than a second one.
     fn settle_launch_requests(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
-        let requests = launch_wire::take();
-        for request in requests {
-            let target = self.app.as_ref().and_then(|app| {
-                most_recently_active_window(
-                    &app.activated,
-                    &app.windows_open
-                        .iter()
-                        .map(|open| open.id)
-                        .collect::<Vec<_>>(),
-                    app.quake.window(),
-                )
-            });
-            // **The row is read here, once per request, off the store this
-            // process owns.** The second `folio.exe` never opened it: it holds
-            // no claim on the data directory, and a build that let it read one
-            // anyway would be reading a document somebody else is writing.
-            let opens = self.app.as_ref().map_or_else(Default::default, |app| {
-                app.settings_store.loaded().launch_opens
-            });
-            let landed = match target {
-                Some(id) if launch_wire::landing(&request, opens) == launch_wire::Landing::Tab => {
-                    self.open_a_tab_for_a_launch(id, &request)?;
-                    Some(id)
-                }
-                _ => self.open_a_window_for_a_launch(event_loop, target, &request)?,
-            };
-            let Some(id) = landed else {
-                continue;
-            };
-            // **The window a request landed in is the window the reader is in
-            // now**, written here as well as on the focus transition: a second
-            // request arriving in the same turn must not be sent back to the
-            // window the first one has just left behind, and the focus event
-            // that would have said so has not been delivered yet.
-            if let Some(app) = self.app.as_mut() {
-                app.activated.retain(|visited| *visited != id);
-                app.activated.push(id);
-            }
-            self.raise_for_a_launch(id);
+        for request in launch_wire::take() {
+            self.land_one_launch_request(event_loop, &request)?;
         }
         Ok(())
+    }
+
+    /// **One request, landed**, and the window it landed in.
+    ///
+    /// Split out of [`Self::settle_launch_requests`] by M3-1 rather than copied,
+    /// because a Finder launch on a Mac is the same sentence arriving through a
+    /// different door: LaunchServices starts no second executable, so there is no
+    /// command line to hand over — but *where a request lands* is one rule, and a
+    /// second copy of it is a second rule waiting to disagree with the first. The
+    /// delegate's route is [`Self::settle_app_delegate_events`] and it comes
+    /// through here.
+    fn land_one_launch_request(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        request: &launch_wire::LaunchRequest,
+    ) -> Result<Option<WindowId>> {
+        let target = self.app.as_ref().and_then(|app| {
+            most_recently_active_window(
+                &app.activated,
+                &app.windows_open
+                    .iter()
+                    .map(|open| open.id)
+                    .collect::<Vec<_>>(),
+                app.quake.window(),
+            )
+        });
+        // **The row is read here, once per request, off the store this
+        // process owns.** The second `folio.exe` never opened it: it holds
+        // no claim on the data directory, and a build that let it read one
+        // anyway would be reading a document somebody else is writing.
+        let opens = self.app.as_ref().map_or_else(Default::default, |app| {
+            app.settings_store.loaded().launch_opens
+        });
+        let landed = match target {
+            Some(id) if launch_wire::landing(request, opens) == launch_wire::Landing::Tab => {
+                self.open_a_tab_for_a_launch(id, request)?;
+                Some(id)
+            }
+            _ => self.open_a_window_for_a_launch(event_loop, target, request)?,
+        };
+        let Some(id) = landed else {
+            return Ok(None);
+        };
+        // **The window a request landed in is the window the reader is in
+        // now**, written here as well as on the focus transition: a second
+        // request arriving in the same turn must not be sent back to the
+        // window the first one has just left behind, and the focus event
+        // that would have said so has not been delivered yet.
+        if let Some(app) = self.app.as_mut() {
+            app.activated.retain(|visited| *visited != id);
+            app.activated.push(id);
+        }
+        self.raise_for_a_launch(id);
+        Ok(Some(id))
+    }
+
+    /// **Everything the application delegate said, on the turn after it said
+    /// it** (M3-1).
+    ///
+    /// The four gestures macOS asks an application about rather than a window,
+    /// each landing in a verb this program already had:
+    ///
+    /// * a **reopen** — a second Finder launch, `open -a Folio`, a Dock click —
+    ///   raises the window the reader was last in, or opens one when this run has
+    ///   none. On this platform a run with no windows is an ordinary state (see
+    ///   [`a_run_ends_with_its_last_visible_window`]), so "none" is not a
+    ///   shutting-down process, it is an application sitting in the Dock;
+    /// * **paths to open** land one per path, through the same door a `--tab`
+    ///   launch takes: a folder is a place and opens a tab standing in it, a file
+    ///   is a document and opens on a preview pane. That split is
+    ///   [`cli::resolve`]'s, read here through the same
+    ///   [`cli::machine_path_kind`] so that the two cannot come to disagree about
+    ///   what a name is;
+    /// * a **termination request** opens Folio's own quit and parks AppKit's
+    ///   handle until it ends — see [`Self::begin_the_systems_quit`];
+    /// * the **last window closing** is already answered, by the door, with "the
+    ///   application stays". Nothing is left to do and the arm says so.
+    ///
+    /// **Nothing here is reachable from inside the delegate method.** What the
+    /// delegate called was `app_delegate_wire::park`, which pushes and returns;
+    /// this runs a turn later with AppKit's stack unwound, which is the whole of
+    /// X-4's first rule.
+    fn settle_app_delegate_events(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        for event in app_delegate_wire::take() {
+            match event.kind {
+                bt_platform::AppDelegateEventKind::Reopen { .. } => {
+                    // **The flag AppKit sent is deliberately not read.** X-4
+                    // measured that `hasVisibleWindows` is YES for a minimised
+                    // window and YES for one hidden with `-[NSApplication
+                    // hide:]`, so it does not answer the question it looks like
+                    // it answers. The list that does is this one.
+                    if let Some(id) = self.a_window_for_the_delegate(event_loop)? {
+                        self.raise_for_a_launch(id);
+                    }
+                }
+                bt_platform::AppDelegateEventKind::OpenPaths(paths) => {
+                    for path in paths {
+                        self.open_one_path_for_the_delegate(event_loop, path)?;
+                    }
+                }
+                bt_platform::AppDelegateEventKind::TerminationRequested(answer) => {
+                    self.begin_the_systems_quit(answer);
+                }
+                bt_platform::AppDelegateEventKind::LastWindowClosed => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// The window a delegate event lands in: the one the reader was last in, or
+    /// a fresh one when this run has none left.
+    ///
+    /// `None` only where a window could not be opened at all, which is the same
+    /// answer [`Self::open_a_window_for_a_launch`] gives and for the same reason.
+    fn a_window_for_the_delegate(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+    ) -> Result<Option<WindowId>> {
+        let standing = self.app.as_ref().and_then(|app| {
+            most_recently_active_window(
+                &app.activated,
+                &app.windows_open
+                    .iter()
+                    .map(|open| open.id)
+                    .collect::<Vec<_>>(),
+                app.quake.window(),
+            )
+        });
+        let id = match standing {
+            Some(id) => id,
+            // A request that names no place: the window opens holding the
+            // default profile's one tab and nothing is retired behind it, which
+            // is what "a fresh window" means at every other door in this file.
+            None => {
+                let opened = self.open_a_window_for_a_launch(
+                    event_loop,
+                    None,
+                    &launch_wire::LaunchRequest::default(),
+                )?;
+                let Some(opened) = opened else {
+                    return Ok(None);
+                };
+                opened
+            }
+        };
+        if let Some(app) = self.app.as_mut() {
+            app.activated.retain(|visited| *visited != id);
+            app.activated.push(id);
+        }
+        Ok(Some(id))
+    }
+
+    /// One path Finder, the Dock or (M4-9) a Service handed over.
+    fn open_one_path_for_the_delegate(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        path: PathBuf,
+    ) -> Result<()> {
+        match cli::machine_path_kind(&path) {
+            // A place: the same request a `--tab <folder>` launch crosses the
+            // pipe as, landed through the same function. `tab` is set rather
+            // than left to `Settings ▸ General ▸ Opening Folio again`, because
+            // this is not somebody starting Folio — it is somebody handing Folio
+            // a folder, which is `LaunchOrigin::Explorer`'s own reading of the
+            // same distinction one platform over.
+            cli::PathKind::Directory => {
+                let request = launch_wire::LaunchRequest {
+                    cwd: Some(path),
+                    tab: true,
+                    ..launch_wire::LaunchRequest::default()
+                };
+                self.land_one_launch_request(event_loop, &request)?;
+                Ok(())
+            }
+            // A document: the door `folio <file>` already takes, one layer up
+            // from `honour_command_line`, which is where a cold launch spends
+            // the same answer. No terminal tab is opened for it — a preview pane
+            // is the tab a document gets.
+            cli::PathKind::File => {
+                let Some(id) = self.a_window_for_the_delegate(event_loop)? else {
+                    return Ok(());
+                };
+                if let Some(mut runtime) = self.runtime(id) {
+                    runtime.open_preview(path)?;
+                }
+                self.raise_for_a_launch(id);
+                Ok(())
+            }
+            // Said out loud, and nothing opened. A path that has gone between
+            // the gesture and this turn is the disk's news rather than a defect,
+            // and the window the reader is looking at is not made to carry a
+            // card about a file they may not have chosen.
+            cli::PathKind::Absent => {
+                eprintln!(
+                    "{APP_NAME} was handed {} to open and there is nothing there",
+                    path.display()
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// **The system asked this application to quit, and it is waiting** (M3-1).
+    ///
+    /// Folio's own quit is what runs: the card about unsaved names, the save,
+    /// the photograph of every window, the session write, the pane teardown and
+    /// the release of `session.lock`. None of that can happen on the stack the
+    /// question arrived on, so the handle is parked and the answer is given at
+    /// the end of the transaction ([`Self::answer_the_systems_quit`]).
+    ///
+    /// A second request while one is outstanding is **refused rather than left
+    /// standing**: AppKit asks once and spins a nested run loop on the reply, so
+    /// a newcomer with no reply of its own would be an application that had
+    /// stopped answering. It cannot arrive from AppKit, and it is one line
+    /// against a hang at a boundary this program does not own.
+    fn begin_the_systems_quit(&mut self, answer: bt_platform::TerminationAnswer) {
+        if self.termination.is_some() {
+            if let Err(reason) = answer.answer(bt_platform::TerminationDecision::Cancel) {
+                eprintln!("{APP_NAME} could not refuse a second quit request: {reason}");
+            }
+            return;
+        }
+        self.termination = Some(answer);
+        if let Some(app) = self.app.as_mut() {
+            app.quit_requested = true;
+        }
+    }
+
+    /// **Answer the quit the system asked for**, once, at the end of the
+    /// transaction it started (M3-1).
+    ///
+    /// Called from [`Self::settle_quit`] and from nowhere else, which is what
+    /// makes X-4's second rule kept: this runs inside winit's own handler, which
+    /// AppKit's deferred-termination loop **does** drive — the main dispatch
+    /// queue, which it does not drive, was measured as an application that hung
+    /// with the answer sitting in it.
+    ///
+    /// Nothing to answer is the ordinary case: a `⌘Q` is Folio's own row and
+    /// never reaches AppKit at all.
+    fn answer_the_systems_quit(&mut self, decision: bt_platform::TerminationDecision) {
+        let Some(answer) = self.termination.take() else {
+            return;
+        };
+        if let Err(reason) = answer.answer(decision) {
+            eprintln!("{APP_NAME} could not answer the quit the system asked for: {reason}");
+        }
     }
 
     /// One launch's tab, in a window that is already standing.
@@ -104370,6 +104650,12 @@ impl FolioApp {
                         app.finish();
                     }
                     self.windows.clear();
+                    // **And AppKit, if it was AppKit that asked** (M3-1).
+                    // `NSTerminateNow`, said here rather than a line earlier:
+                    // answering it lets `-[NSApplication terminate:]` go on to
+                    // end the process, so everything this run owes the disk has
+                    // to be on it first — which, one statement up, it is.
+                    self.answer_the_systems_quit(bt_platform::TerminationDecision::Now);
                     event_loop.exit();
                     return Ok(());
                 }
@@ -104377,6 +104663,11 @@ impl FolioApp {
                     if let Some(app) = self.app.as_mut() {
                         app.quit = None;
                     }
+                    // **`NSTerminateCancel`** (M3-1): the reader answered the
+                    // card with *Cancel*, or the session could not be written.
+                    // Either way this application is not going, and AppKit is
+                    // still waiting to be told so.
+                    self.answer_the_systems_quit(bt_platform::TerminationDecision::Cancel);
                     // The card has gone and the windows are exactly as they were.
                     return self.for_each_window(|runtime| {
                         if runtime.refresh_overlay() {
@@ -104666,6 +104957,14 @@ impl FolioApp {
             // handover's plan alongside it and then read the wrong window back as
             // the one that had just opened.
             .and_then(|()| self.settle_launch_requests(event_loop))
+            // **Beside the launch requests and after them** (M3-1). A Finder
+            // reopen and an opened document land in the same two places through
+            // the same two doors, and this comes second for the reason they come
+            // after the window door: it can queue a window plan and spends it on
+            // the very next statement of its own, so a turn that settled it first
+            // would spend a plan the launch above was about to read back as the
+            // window that had just opened.
+            .and_then(|()| self.settle_app_delegate_events(event_loop))
             // **After the window door**, because a press with no window yet has
             // to open one - and it spends the plan it queues on the very next
             // line, exactly as the drag handover above does, so that the press,
@@ -104702,6 +105001,16 @@ impl FolioApp {
             }
         }
         if self.windows.is_empty() {
+            // **An application with no windows waits, and waits properly**
+            // (M3-1). Until this ticket an empty registry was a loop that had
+            // already been told to exit, so what the control flow said next was
+            // nobody's business; on a Mac it is an ordinary resting state — the
+            // application is in the Dock — and leaving the last window's
+            // `WaitUntil` standing would be a deadline already in the past, i.e.
+            // a process at 100% CPU with nothing on any screen. There is nothing
+            // left to be woken *for* except the delegate and the launch socket,
+            // and both of those wake the loop themselves.
+            event_loop.set_control_flow(ControlFlow::Wait);
             return;
         }
         // **Every window's own turn, and the earliest wake-up any of them asked
@@ -104991,6 +105300,19 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     self.fail(event_loop, error);
                     return;
                 }
+                // **And now the application delegate may speak** (M3-1).
+                //
+                // Here and not in `main`, because what this line says is not
+                // "the door is installed" but "there is somewhere for what it
+                // says to go". A document opened from Finder on a **cold**
+                // launch reaches AppKit before `resumed` — probe X-4 timed the
+                // delivery at 222 ms against a `resumed` at 247 ms, with no
+                // window in existence — and routing it then would ask for a tab
+                // in a window the restore above had not yet decided to open.
+                // Everything held is released in arrival order on the next turn.
+                if let Some(door) = self.delegate.as_ref() {
+                    door.ready();
+                }
                 event_loop.set_control_flow(ControlFlow::WaitUntil(
                     Instant::now() + STARTUP_PTY_POLL_INTERVAL,
                 ));
@@ -105047,6 +105369,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // be doing the work one statement early and outside the order every
             // other window verb is settled in.
             AppEvent::LaunchAsked => Ok(()),
+            // **Nothing here either, and for the line above's reason** (M3-1).
+            // The events are parked in `app_delegate_wire`'s inbox by the sender
+            // AppKit called, and what is owed is the turn that reads them:
+            // `settle_app_delegate_events` is on `about_to_wait`'s chain, beside
+            // the launch requests it shares its whole shape with, and it needs
+            // the `ActiveEventLoop` and every window at once.
+            AppEvent::AppDelegateSpoke => Ok(()),
             AppEvent::MathReady => {
                 let (mut batch, gone) = self.drain_math_answers();
                 self.for_each_window(|runtime| runtime.apply_math_results(&mut batch, gone))
@@ -108627,10 +108956,52 @@ mod floated_page_tests {
     /// Recent as though it were an ordinary window going. Drop it from `reap_leaving_windows` and
     /// the exit depends on which road emptied the registry. Have `close` ask
     /// a count that does not take the closing window out and a run never ends at all.
+    /// RED (M3-1, plan §8 Q10 ruled 2026-09-12) — **on a Mac the last window
+    /// closing is not the process ending, and the rule and the delegate say the
+    /// same thing.**
+    ///
+    /// The claim a Windows workstation can make about a machine it is not on,
+    /// which is the whole reason `bt_platform::host_platform()` is a value:
+    /// `applicationShouldTerminateAfterLastWindowClosed:` answers NO there, and
+    /// a `a_run_ends_with_its_last_visible_window` that still answered `true`
+    /// would be this process tearing down a run AppKit had just been told to
+    /// keep — the reader clicks the Dock icon and there is nothing behind it.
+    ///
+    /// MUTATION: drop the platform term from the rule and the macOS half fails;
+    /// make `an_application_outlives_its_last_window` answer for Windows too and
+    /// the Windows half does.
+    #[test]
+    fn only_a_mac_keeps_an_application_standing_with_no_window_left() {
+        use bt_platform::HostPlatform;
+        assert!(
+            HostPlatform::MacOs.an_application_outlives_its_last_window(),
+            "a Mac keeps an application in the Dock with no window open, and Folio's delegate \
+             answers `applicationShouldTerminateAfterLastWindowClosed:` NO to say so"
+        );
+        for elsewhere in [HostPlatform::Windows, HostPlatform::OtherUnix] {
+            assert!(
+                !elsewhere.an_application_outlives_its_last_window(),
+                "{elsewhere:?} has no Dock to get back in through, so a process with nothing on \
+                 any screen is one nobody can reach"
+            );
+        }
+        // And the rule this page keeps is that value and not a second reading of
+        // the same question.
+        let rule = fn_body(concat!("fn ", "a_run_ends_with_its_last_visible_window("));
+        assert!(
+            rule.contains("an_application_outlives_its_last_window()"),
+            "the rule decides for itself whether a run outlives its windows:\n{rule}"
+        );
+    }
+
     #[test]
     fn a_run_ends_with_its_last_visible_window_even_with_a_summon_hidden_behind_it() {
-        assert!(
+        // **On this platform**, which M3-1 is what made a qualification rather
+        // than a redundancy: a Mac answers the other way and the case below is
+        // the one that says so.
+        assert_eq!(
             a_run_ends_with_its_last_visible_window(0),
+            !bt_platform::host_platform().an_application_outlives_its_last_window(),
             "the last window a person can see has gone and the process is still in the task list, \
              reachable only by a chord the reader may have bound weeks ago"
         );
@@ -111031,7 +111402,40 @@ fn main() -> Result<()> {
     }
     let event_loop = builder.build().context("create winit event loop")?;
     let _ = SUMMON_PROXY.set(event_loop.create_proxy());
-    let mut application = FolioApp::new(event_loop.create_proxy(), request);
+    // **The application delegate, and it has to be here** (M3-1, X-4).
+    //
+    // After `build` and not before it: what `EventLoop::new` does on the machine
+    // this matters on is register the delegate class the door adds its selectors
+    // to, and before that there is no class to find. No `cfg` — the door exists
+    // on every platform and is quiet where the platform has no such thing to
+    // hook, which is §4.4's rule and is why `only_the_named_files_decide_what_
+    // platform_this_is` has nothing new to say about this file.
+    //
+    // **The closure runs on AppKit's stack**, inside the delegate method, with
+    // AppKit waiting on the answer when the gesture was a quit. So it parks and
+    // wakes, and nothing else — `attention_wire`'s two statements at a channel
+    // where a third would be the re-entrance X-4 measured as a live process at
+    // 100% CPU.
+    //
+    // **A refusal is not a failed launch.** A door that could not be opened is a
+    // Finder reopen that does nothing, which is a smaller thing than a window
+    // that never appears; it is said on the diagnostic channel and the run goes
+    // on. That is `portable_impl`'s own rule about construction-time refusals,
+    // read from the caller's side.
+    let delegate = {
+        let proxy = event_loop.create_proxy();
+        match bt_platform::AppDelegate::install(move |event| {
+            app_delegate_wire::park(event);
+            let _ = proxy.send_event(AppEvent::AppDelegateSpoke);
+        }) {
+            Ok(door) => Some(door),
+            Err(reason) => {
+                eprintln!("{APP_NAME} has no application delegate: {reason}");
+                None
+            }
+        }
+    };
+    let mut application = FolioApp::new(event_loop.create_proxy(), request, delegate);
     let outcome = event_loop
         .run_app(&mut application)
         .map_err(|error| anyhow!(error));
