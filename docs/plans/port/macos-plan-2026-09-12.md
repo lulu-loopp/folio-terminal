@@ -256,6 +256,8 @@ Finder and the Dock.
 *Pass:* each event reaches a named application action with an explicit origin.
 *Fail:* an event that cannot be routed on the main thread without blocking.
 
+> **Result 2026-09-12 (`probe-x4-app-delegate-2026-09-12.md`): PASS on five of six cells; the Dock click with hidden windows is NOT-CHECKABLE by an agent (Accessibility) and is covered by reopen.** winit 0.30.13's own note ("winit registers no delegate, register your own") is wrong: it installs a private `WinitApplicationDelegate` and panics if `NSApp.delegate` is anything else. The route: look that class up by name after `EventLoop::new` and `class_addMethod` the four selectors winit lacks (`applicationShouldHandleReopen:hasVisibleWindows:`, `applicationShouldTerminate:`, `applicationShouldTerminateAfterLastWindowClosed:`, `application:openURLs:`); Services through `setServicesProvider:`. **Bridge shape for M3-3/M3-5/M4-9:** `AppEvent { origin, kind }` on winit's user-event channel plus a synchronous `TerminationAnswer`. **Two rules:** never call `-[NSApplication terminate:]` from inside an `ApplicationHandler` callback; answer deferred termination (`replyToApplicationShouldTerminate:`) from winit's handler, because AppKit's termination loop does not drain the main dispatch queue (the same warning applies to `NSAlert`/`NSOpenPanel`, M2-3). `hasVisibleWindows` is YES for minimised and hidden windows, so the bridge consults its own window list; a cold Service arrives before `resumed` and must be buffered.
+
 **X-5 — a stable signed identity before anything touches TCC.**
 Accessibility and Notifications are granted against a code signature's designated
 requirement. An agent iterating on the hotkey re-signs on every build; if each
