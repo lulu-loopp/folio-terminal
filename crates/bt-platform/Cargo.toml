@@ -79,6 +79,12 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSView",
     # The window itself — the whole of the geometry group.
     "NSWindow",
+    # M1-8, and no package either: ending a composition is two calls, one to
+    # the input method (`NSTextInputContext`'s `discardMarkedText`) and one to
+    # the view it is composing into (`NSTextInputClient`'s `unmarkText`), which
+    # is winit's own view reached through `-[NSTextInputContext client]`.
+    "NSTextInputClient",
+    "NSTextInputContext",
     # Reduce Motion, and the notification that says it moved.
     "NSAccessibility",
     "NSWorkspace",
