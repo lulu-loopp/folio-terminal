@@ -131,6 +131,29 @@ impl NativeWindow {
     }
 }
 
+/// The AppKit reading of a [`NativeWindow`], for this crate's macOS backend and
+/// for nothing above it (M1-3).
+#[cfg(target_os = "macos")]
+impl NativeWindow {
+    /// The handle, as AppKit wants it: the `NSView` winit owns.
+    ///
+    /// `pub(crate)` for [`NativeWindow::as_hwnd`]'s reason, and the same shape —
+    /// the value on this side of the door is a `NativeWindow` and the value on
+    /// the far side is an Objective-C object pointer. The window is reached from
+    /// the view (`-[NSView window]`) rather than stored, because that is what
+    /// `RawWindowHandle::AppKit` carries and a view can be in no window at all.
+    ///
+    /// The pointer is not null — the type's field cannot hold zero — and
+    /// dereferencing it is the backend's own `unsafe`, under the contract every
+    /// door here states: the handle came from a live winit window and the caller
+    /// is on that window's thread.
+    pub(crate) fn as_ns_view(self) -> std::ptr::NonNull<objc2_app_kit::NSView> {
+        let address = self.handle.get() as *mut objc2_app_kit::NSView;
+        // A `NonZeroIsize` is not the null address.
+        std::ptr::NonNull::new(address).expect("a NativeWindow holds no null pointer")
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WindowRect {
     pub left: i32,
@@ -9561,18 +9584,56 @@ mod portable_impl;
 #[cfg(not(windows))]
 pub use portable_impl::{
     Compositor, CustomWindowFrame, DirChange, DirWatch, FilePickKind, FolderPicker, ImagePicker,
-    ImeSystemCaret, MathContextMenu, Notifier, ShellPickKind, SystemSettingsWatch, Taskbar,
-    adopt_parent_console, announce_explorer_menu_change, client_area_animation_enabled,
-    detach_console, directory_folds_case, dpi_at, flash_window, get_dpi_for_window,
-    get_window_rect, get_work_area, hide_every_window_of_this_process,
-    install_console_ctrl_handler, install_context_menu, install_window_class_background,
-    is_window_cloaked, is_window_minimized, leave_process, message_box, monitor_id_at,
-    os_ui_language, pointer_position, read_context_menu, recycle, redirect_std_streams_to_file,
-    register_clipboard_owner, remove_context_menu, request_window_close, set_system_backdrop,
-    set_window_dark_mode, set_window_outer_rect, set_window_topmost, silence_std_streams,
-    stand_window_at, system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
-    taskbar_is_auto_hidden, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
-    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_to_console,
+    ImeSystemCaret, MathContextMenu, Notifier, ShellPickKind, Taskbar, adopt_parent_console,
+    announce_explorer_menu_change, detach_console, directory_folds_case, flash_window,
+    hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
+    is_window_cloaked, leave_process, message_box, read_context_menu, recycle,
+    redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
+    set_system_backdrop, silence_std_streams, system_backdrop_available, taskbar_is_auto_hidden,
+    thread_mouse_capture, virtual_key_for_character, write_to_console,
+};
+
+/// **The window and the screen doors, on a platform that has neither** — the
+/// twenty-two names [`macos_impl`] answers for a Mac and this module still
+/// refuses for anything else off Windows (M1-3).
+///
+/// The split is the whole of what M1-3 changed about the portable module: every
+/// door in it whose subject is a window or a display now carries
+/// `#[cfg(not(any(windows, target_os = "macos")))]`, and the same names arrive
+/// from the macOS backend instead. `a_window_or_screen_door_has_one_arm_per_platform`
+/// walks both files and holds the two lists to each other.
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub use portable_impl::{
+    SystemSettingsWatch, client_area_animation_enabled, dpi_at, get_dpi_for_window,
+    get_window_rect, get_work_area, install_window_class_background, is_window_minimized,
+    monitor_id_at, os_ui_language, pointer_position, request_window_close, set_window_dark_mode,
+    set_window_outer_rect, set_window_topmost, stand_window_at, system_uses_light_apps,
+    take_keyboard_focus, top_level_window_at, virtual_screen_rect, wheel_scroll_amount,
+    window_is_exposed, work_area_at,
+};
+
+/// **The window and the screen, over AppKit** (M1-3).
+///
+/// The macOS twin of the window and screen half of [`windows_impl`], and the
+/// seventh unsafe boundary in this crate against a seventh thing: `windows_impl`
+/// is Win32 for the window's sake, [`webview`] is WebView2, [`hang`] is Win32
+/// turned on this process, [`attention_pipe`] is a channel strangers speak into,
+/// [`hotkey`] is the keyboard while another program has it,
+/// [`explorer_command`] is another program calling us — and this is **AppKit,
+/// which is the main thread's or it is undefined behaviour**. See the module's
+/// own header for the coordinate rule every rectangle here obeys and for the
+/// gate every door passes through.
+#[cfg(target_os = "macos")]
+mod macos_impl;
+
+#[cfg(target_os = "macos")]
+pub use macos_impl::{
+    SystemSettingsWatch, client_area_animation_enabled, dpi_at, get_dpi_for_window,
+    get_window_rect, get_work_area, install_window_class_background, is_window_minimized,
+    monitor_id_at, os_ui_language, pointer_position, request_window_close, set_window_dark_mode,
+    set_window_outer_rect, set_window_topmost, stand_window_at, system_uses_light_apps,
+    take_keyboard_focus, top_level_window_at, virtual_screen_rect, wheel_scroll_amount,
+    window_is_exposed, work_area_at,
 };
 
 /// **The tail of a command-line argument, split at an ASCII offset, in the
@@ -10454,6 +10515,223 @@ mod deferred_service_tests {
             PORTABLE.contains("fn not_here(what: &str) -> String {"),
             "the refusals are spelled one way, so that a reader who meets one in a toast and one \
              in diagnostics.log recognises the same sentence"
+        );
+    }
+}
+
+/// **The window and screen backend has exactly one arm per platform** (ticket
+/// M1-3).
+///
+/// Source pins, for `deferred_service_tests`' reason turned round: the module
+/// they are about is the one this workstation does **not** compile, and the
+/// claim is about which doors live in which file — which is a fact about the
+/// text rather than about a call. The behavioural twin runs on the Mac
+/// (`macos_impl::tests`).
+///
+/// What they are guarding is the failure this split can have and no compiler
+/// would catch on Windows: a door that gains an AppKit arm and keeps its
+/// portable one is a duplicate definition on macOS (caught there, late), and a
+/// door that loses its portable arm without gaining an AppKit one is a **Linux**
+/// build that stops compiling — which nothing in this workspace builds today and
+/// §4.6 of the plan says must stay possible.
+#[cfg(test)]
+mod macos_window_backend_tests {
+    /// The two arms' own text.
+    const PORTABLE: &str = include_str!("portable_impl.rs");
+    const MACOS: &str = include_str!("macos_impl.rs");
+
+    /// The gate every door in the portable arm now stands behind.
+    const NEITHER: &str = "#[cfg(not(any(windows, target_os = \"macos\")))]";
+
+    /// **The window and screen group**, named once for both pins — the doors
+    /// M1-3 moved, in the order the re-export lists spell them.
+    const DOORS: [&str; 22] = [
+        "client_area_animation_enabled",
+        "dpi_at",
+        "get_dpi_for_window",
+        "get_window_rect",
+        "get_work_area",
+        "install_window_class_background",
+        "is_window_minimized",
+        "monitor_id_at",
+        "os_ui_language",
+        "pointer_position",
+        "request_window_close",
+        "set_window_dark_mode",
+        "set_window_outer_rect",
+        "set_window_topmost",
+        "stand_window_at",
+        "system_uses_light_apps",
+        "take_keyboard_focus",
+        "top_level_window_at",
+        "virtual_screen_rect",
+        "wheel_scroll_amount",
+        "window_is_exposed",
+        "work_area_at",
+    ];
+
+    /// The text from the start of the line `pub fn NAME(` back to the end of
+    /// the doc comment above it — the attributes, and nothing else.
+    fn attributes_above(source: &str, name: &str) -> String {
+        let needle = format!("\npub fn {name}(");
+        let at = source
+            .find(&needle)
+            .unwrap_or_else(|| panic!("`{name}` is defined in this arm"));
+        let before = &source[..at];
+        let doc_ends = before
+            .rfind("///")
+            .expect("every door carries a doc comment");
+        let line_end = before[doc_ends..]
+            .find('\n')
+            .expect("a doc comment ends in a newline");
+        before[doc_ends + line_end..].to_owned()
+    }
+
+    /// RED — **every window and screen door in the portable arm is off on
+    /// macOS.**
+    ///
+    /// MUTATION: drop the `cfg` from any one of the twenty-two and this names
+    /// it; a macOS build would then define the door twice.
+    #[test]
+    fn a_window_or_screen_door_has_one_arm_per_platform() {
+        for door in DOORS {
+            let attributes = attributes_above(PORTABLE, door);
+            assert!(
+                attributes.contains(NEITHER),
+                "`{door}` is still the portable arm's on macOS, where `macos_impl` also defines \
+                 it:\n{attributes}"
+            );
+            assert!(
+                MACOS.contains(&format!("\npub fn {door}(")),
+                "`{door}` left the portable arm without arriving in the macOS one, which is a \
+                 platform with no such door at all"
+            );
+        }
+        assert!(
+            PORTABLE.contains(&format!("{NEITHER}\npub struct SystemSettingsWatch")),
+            "the settings watch is the group's one type and it moves with the doors"
+        );
+        assert!(
+            MACOS.contains("pub struct SystemSettingsWatch {"),
+            "and the macOS arm is the one that really subscribes"
+        );
+    }
+
+    /// RED — **every door in the macOS arm asks its thread first.**
+    ///
+    /// AppKit from any thread but the main one is undefined behaviour, not a
+    /// wrong answer, so the gate is not something a door may reasonably skip:
+    /// the marker is what every AppKit class in that file demands, and a door
+    /// that has one has proved its thread rather than assumed it.
+    ///
+    /// **Two named exceptions, and both are doors that call no AppKit at all** —
+    /// so the pin checks that instead, which is the claim it was making about
+    /// the other twenty anyway. `wheel_scroll_amount` answers a constant,
+    /// because macOS has no lines-per-notch preference to ask about (see its own
+    /// note), and `stand_window_at` is two of the gated doors in a loop. A gate
+    /// in front of no call would be a thread check that proves nothing.
+    ///
+    /// MUTATION: take `window_thread`/`window_for` out of any other door and
+    /// this names it; make either exception touch AppKit directly and it names
+    /// that.
+    #[test]
+    fn every_macos_window_door_proves_its_thread_before_it_calls_appkit() {
+        for door in DOORS {
+            let needle = format!("\npub fn {door}(");
+            let at = MACOS.find(&needle).expect("named in the pin above");
+            let rest = &MACOS[at + 1..];
+            let end = rest.find("\n}\n").expect("a door is closed at column zero");
+            let body = &rest[..end];
+            if matches!(door, "wheel_scroll_amount" | "stand_window_at") {
+                assert!(
+                    !body.contains("NS"),
+                    "`{door}` is exempt from the gate because it reaches no AppKit of its own, \
+                     and it now does:\n{body}"
+                );
+                continue;
+            }
+            assert!(
+                body.contains("window_thread(") || body.contains("window_for("),
+                "`{door}` reaches AppKit without asking whether it is on the window's \
+                 thread:\n{body}"
+            );
+        }
+    }
+
+    /// RED — **closing the last window leaves the application running.**
+    ///
+    /// Not a claim about Folio's own rule, which still ends the process when its
+    /// last window closes (M3-1 and M3-3 own that, with X-4's
+    /// `applicationShouldTerminateAfterLastWindowClosed:`). It is the claim this
+    /// ticket is able to make and had to: **this door does not close or
+    /// terminate anything itself.** `performClose:` asks the delegate, winit's
+    /// delegate answers `NO` and queues `CloseRequested`, and what happens next
+    /// is the application's decision on the window thread — exactly as
+    /// `PostMessageW(WM_CLOSE)` leaves it on the other platform.
+    ///
+    /// MUTATION: replace `performClose` with `close` and this names it; the
+    /// window would then be gone before `bt-app` had heard of it, and a page
+    /// still hosting a browser process would be gone with it.
+    #[test]
+    fn closing_the_last_window_leaves_the_application_running() {
+        let needle = "\npub fn request_window_close(";
+        let at = MACOS.find(needle).expect("the close door");
+        let rest = &MACOS[at + 1..];
+        let end = rest.find("\n}\n").expect("a door is closed at column zero");
+        let body = &rest[..end];
+        assert!(
+            body.contains("performClose(None)"),
+            "the close door does not go through `performClose:`:\n{body}"
+        );
+        assert!(
+            body.contains("windowShouldClose"),
+            "a window with no close button is not asked through winit's own delegate:\n{body}"
+        );
+        for forbidden in ["terminate(", ".close()", "orderOut("] {
+            assert!(
+                !body.contains(forbidden),
+                "the close door calls `{forbidden}` itself, which takes the decision away from \
+                 the application:\n{body}"
+            );
+        }
+    }
+
+    /// RED — **a dark-mode change arrives on the window thread, through
+    /// winit.**
+    ///
+    /// The rule X-4 wrote down for every AppKit callback in this port: never do
+    /// the work inside the handler, hand it to the loop. The watch's two
+    /// callbacks therefore call the wake and nothing else, and the wake
+    /// `bt-app` hands in is one `EventLoopProxy::send_event` — winit's user
+    /// event channel, delivered on the thread that owns the window. The other
+    /// half of the rope is in `bt-app`, where that event re-reads the
+    /// appearance (`the_system_preference_event_re_reads_the_desktops_canvas`).
+    ///
+    /// MUTATION: read the appearance inside `observe_value` and this names it.
+    #[test]
+    fn dark_mode_changes_arrive_on_the_window_thread_through_winit() {
+        let at = MACOS
+            .find("fn observe_value(")
+            .expect("the appearance observer");
+        let rest = &MACOS[at..];
+        let end = rest
+            .find("\n        }")
+            .expect("a method body is closed at eight spaces");
+        let body = &rest[..end];
+        assert!(
+            body.contains("(self.ivars().0)();"),
+            "the observer does something other than nudge the loop:\n{body}"
+        );
+        for forbidden in ["effectiveAppearance()", "appearance_is_light", "NSScreen"] {
+            assert!(
+                !body.contains(forbidden),
+                "the observer reads `{forbidden}` inside AppKit's own delivery instead of on the \
+                 loop's next turn:\n{body}"
+            );
+        }
+        assert!(
+            MACOS.contains("addObserver_forKeyPath_options_context("),
+            "nothing is observed, so nothing can arrive"
         );
     }
 }

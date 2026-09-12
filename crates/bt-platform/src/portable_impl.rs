@@ -61,10 +61,11 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use crate::{
-    ContextMenuShape, ContextMenuTree, NativeWindow, PageVisual, TaskbarProgress,
-    WheelScrollAmount, WindowRect,
-};
+use crate::{ContextMenuShape, ContextMenuTree, NativeWindow, PageVisual, TaskbarProgress};
+// The two types only the window and screen group names, which on macOS is
+// `macos_impl`'s group and not this module's (M1-3).
+#[cfg(not(any(windows, target_os = "macos")))]
+use crate::{WheelScrollAmount, WindowRect};
 
 /// The sentence a refusal says, with the thing that was asked for in front of
 /// it.
@@ -284,9 +285,12 @@ impl Taskbar {
 /// constructible and silent rather than refusing, because a refusal would print
 /// a line for every window opened about a subscription nobody has missed yet.
 ///
-/// What is lost until M1-3: the reader switching the system between light and
-/// dark while Folio is open is not noticed. The theme is still read once at
-/// startup.
+/// What is lost where this arm still stands: the reader switching the system
+/// between light and dark while Folio is open is not noticed. The theme is still
+/// read once at startup. **On macOS it no longer stands** — `macos_impl` is the
+/// arm there, and it observes the application's appearance and the
+/// accessibility display options.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub struct SystemSettingsWatch {
     /// The callback, held so that its lifetime is the watch's exactly as on
     /// Windows — a wake that could fire after the watch was dropped is the one
@@ -299,6 +303,7 @@ pub struct SystemSettingsWatch {
     wake: Box<dyn Fn()>,
 }
 
+#[cfg(not(any(windows, target_os = "macos")))]
 impl SystemSettingsWatch {
     /// Install the watch. Constructs, subscribes to nothing, and never wakes.
     pub fn install(window: NativeWindow, wake: Box<dyn Fn()>) -> Result<Self, String> {
@@ -566,30 +571,35 @@ fn unwatched() -> std::io::Error {
 // ticket so that the three it used to propagate with `?` no longer do.
 
 /// The window's outer rectangle. `NSWindow.frame`, flipped; M1-3.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn get_window_rect(window: NativeWindow) -> Result<WindowRect, String> {
     let _ = window;
     Err(not_here("reading a window's rectangle"))
 }
 
 /// Place the window's outer rectangle. `setFrame:display:`; M1-3.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn set_window_outer_rect(window: NativeWindow, rect: WindowRect) -> Result<(), String> {
     let _ = (window, rect);
     Err(not_here("placing a window"))
 }
 
 /// The quake drop — place the window and read it back until it agrees. M1-3.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn stand_window_at(window: NativeWindow, rect: WindowRect) -> Result<(), String> {
     let _ = (window, rect);
     Err(not_here("standing a window at a rectangle"))
 }
 
 /// The work area of the display this window is on. `NSScreen.visibleFrame`; M1-3.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn get_work_area(window: NativeWindow) -> Result<WindowRect, String> {
     let _ = window;
     Err(not_here("reading a display's work area"))
 }
 
 /// The work area of the display under a point. M1-3.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn work_area_at(x: i32, y: i32) -> Result<WindowRect, String> {
     let _ = (x, y);
     Err(not_here("reading a display's work area"))
@@ -603,6 +613,7 @@ pub fn work_area_at(x: i32, y: i32) -> Result<WindowRect, String> {
 /// size. The one thing it must not be is a made-up screen: a window clamped to
 /// an invented rectangle is a window in the wrong place, which is §7.50's own
 /// history.
+#[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn virtual_screen_rect() -> WindowRect {
     WindowRect {
@@ -618,6 +629,7 @@ pub fn virtual_screen_rect() -> WindowRect {
 /// `96` is the identity, not a guess: every caller divides by 96 to get a scale
 /// factor, so this answers *scale 1.0* — "nothing here says otherwise" — and
 /// the arithmetic downstream is unchanged rather than skewed.
+#[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn dpi_at(x: i32, y: i32) -> u32 {
     let _ = (x, y);
@@ -633,6 +645,7 @@ pub fn dpi_at(x: i32, y: i32) -> u32 {
 /// disagree with. Answering `96` would be this crate inventing a scale of 1.0
 /// for a Retina window; refusing is the truth, and the caller falls back to
 /// winit's number.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn get_dpi_for_window(window: NativeWindow) -> Result<u32, String> {
     let _ = window;
     Err(not_here("a second opinion about a window's backing scale"))
@@ -640,6 +653,7 @@ pub fn get_dpi_for_window(window: NativeWindow) -> Result<u32, String> {
 
 /// Which display a point is on, as a stable name. M1-3, and R5's case-folding
 /// question is M3-4's.
+#[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn monitor_id_at(x: i32, y: i32) -> Option<String> {
     let _ = (x, y);
@@ -648,12 +662,14 @@ pub fn monitor_id_at(x: i32, y: i32) -> Option<String> {
 
 /// Where the pointer is, in screen coordinates. `NSEvent.mouseLocation`,
 /// flipped; M1-3.
+#[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn pointer_position() -> Option<(i32, i32)> {
     None
 }
 
 /// Which top-level window the window manager puts under a screen point. M1-3.
+#[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn top_level_window_at(x: i32, y: i32) -> Option<NativeWindow> {
     let _ = (x, y);
@@ -677,6 +693,7 @@ pub fn thread_mouse_capture() -> Option<NativeWindow> {
 /// direction matters: a window wrongly called minimised has its geometry
 /// thrown away, and a window wrongly called normal has its geometry saved. One
 /// of those two is recoverable.
+#[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn is_window_minimized(window: NativeWindow) -> bool {
     let _ = window;
@@ -704,6 +721,7 @@ pub fn is_window_cloaked(window: NativeWindow) -> bool {
 /// as exposed: of the two wrong answers, one leaves the marks inside a window
 /// the reader is looking at and the other puts a notification on a desktop they
 /// can see.
+#[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn window_is_exposed(window: NativeWindow) -> bool {
     let _ = window;
@@ -712,24 +730,28 @@ pub fn window_is_exposed(window: NativeWindow) -> bool {
 
 /// Put this window in front and give it the keyboard. `makeKeyAndOrderFront:`;
 /// M1-3.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn take_keyboard_focus(window: NativeWindow) -> Result<(), String> {
     let _ = window;
     Err(not_here("taking the keyboard focus"))
 }
 
 /// Ask the window to close. `performClose:`; M1-3.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn request_window_close(window: NativeWindow) -> Result<(), String> {
     let _ = window;
     Err(not_here("asking a window to close"))
 }
 
 /// Keep this window above the others. `NSWindow.level`; M1-3.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn set_window_topmost(window: NativeWindow, topmost: bool) -> Result<(), String> {
     let _ = (window, topmost);
     Err(not_here("keeping a window above the others"))
 }
 
 /// Ask the system to draw this window's chrome dark. `NSAppearance`; M1-3.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn set_window_dark_mode(window: NativeWindow, dark: bool) -> Result<(), String> {
     let _ = (window, dark);
     Err(not_here("the window's system appearance"))
@@ -756,6 +778,7 @@ pub fn system_backdrop_available(window: NativeWindow) -> bool {
 /// The window's backing colour before the first present. On Windows this is a
 /// class brush and it is step 2 of the startup path; on macOS it is
 /// `contentView.layer.backgroundColor`, which is M1-3's.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn install_window_class_background(
     window: NativeWindow,
     rgb: Option<[u8; 3]>,
@@ -819,11 +842,13 @@ pub fn virtual_key_for_character(character: char) -> Option<u16> {
 ///
 /// The caller's own fallback is three lines plus one line of stderr, so
 /// refusing here is a line per run rather than per notch.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn wheel_scroll_amount() -> Result<WheelScrollAmount, String> {
     Err(not_here("the wheel's scroll preference"))
 }
 
 /// Whether the reader has asked for animation. *Reduce Motion*; M1-3.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn client_area_animation_enabled() -> Result<bool, String> {
     Err(not_here("the reduce-motion preference"))
 }
@@ -832,6 +857,7 @@ pub fn client_area_animation_enabled() -> Result<bool, String> {
 ///
 /// `None` is "the system has no opinion", which the theme resolver already
 /// handles: a `System` theme with no system answer takes the product's default.
+#[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn system_uses_light_apps() -> Option<bool> {
     None
@@ -845,6 +871,7 @@ pub fn system_uses_light_apps() -> Option<bool> {
 /// system has not been asked", and the product's own default is what the reader
 /// sees. `settings.json`'s `language` still overrides it, so a reader who wants
 /// Chinese on macOS today has a row to set.
+#[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn os_ui_language() -> String {
     "en".to_owned()
@@ -1092,6 +1119,11 @@ mod refusal_tests {
         assert!(MathContextMenu::new(window()).is_ok(), "the formula menu");
         assert!(FolderPicker::new(window()).is_ok(), "the folder chooser");
         assert!(ImagePicker::new(window()).is_ok(), "the picture chooser");
+        // The settings watch is only this module's where no backend has one:
+        // on macOS it is `macos_impl`'s, and the constructor that has to be
+        // harmless there is that one (`a_window_door_asked_off_the_window_thread_refuses`
+        // is where it is held).
+        #[cfg(not(any(windows, target_os = "macos")))]
         assert!(
             SystemSettingsWatch::install(window(), Box::new(|| {})).is_ok(),
             "the system settings watch"
@@ -1151,6 +1183,11 @@ mod refusal_tests {
     /// The reads and writes M1-3 owns. Each one is a place where answering
     /// `Ok(())` would leave `bt-app` believing a window had been placed,
     /// focused or closed.
+    ///
+    /// **Not compiled on macOS**, where none of these names is this module's any
+    /// more: M1-3 wrote the arm, and what holds the same six doors there is
+    /// `macos_impl`'s own suite.
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn the_window_backend_refuses_rather_than_pretending() {
         let rect = WindowRect {
