@@ -3797,7 +3797,7 @@ const WINDOWS_SHIPPED_ORDER: [&str; 12] = [
 /// one — see [`default_profile_in`].
 fn automatic_profile_in(
     table: &ProfileTable,
-    order: &[String],
+    order: &[&str],
     available: impl Fn(usize) -> bool,
 ) -> usize {
     order
@@ -3809,16 +3809,16 @@ fn automatic_profile_in(
 
 /// The shipped order this build's automatic default walks.
 ///
-/// **Two spellings of one rule, because one platform can write its list down and
-/// the other cannot.** On Windows it is [`WINDOWS_SHIPPED_ORDER`], a list of its
-/// own, pinned against the seed by
-/// [`the_automatic_default_walks_the_shipped_order`]. Off Windows one row is
-/// named by `$SHELL` — see [`unix_shipped`] — so the order is read off the seed,
-/// which *is* the shipped order rather than a copy of it.
+/// A written list on every platform, for [`WINDOWS_SHIPPED_ORDER`]'s reason —
+/// and it stays a written list off Windows even though one of the rows is named
+/// by the machine, because an id naming no row is simply stepped over by the
+/// walk. So `usershell` is on the macOS list whether or not this account's
+/// `$SHELL` produced that row, and the list reads no environment and touches no
+/// filesystem: this is asked twice a frame while the Profiles page is open.
 ///
-/// Either way it is the **seed** and never [`table`]: a drag on the Profiles
-/// page, or a profile of the reader's own parked at the top, must not decide
-/// which shell a machine that was never asked opens with.
+/// It is the **seed's** order and never [`table`]'s: a drag on the Profiles page,
+/// or a profile of the reader's own parked at the top, must not decide which
+/// shell a machine that was never asked opens with.
 ///
 /// # Why this is the same order `bt_pty::resolve_default_shell` walks
 ///
@@ -3828,25 +3828,16 @@ fn automatic_profile_in(
 /// `$SHELL` this machine can start is first — as its own row, or as the system
 /// row of that name pointing at it — then `/bin/zsh` on macOS, then `/bin/bash`,
 /// then `/bin/sh`, which is the floor under both.
-fn shipped_order() -> Vec<String> {
-    shipped_order_for(
-        SeedPlatform::of_this_build(),
-        &bt_pty::SystemShellEnvironment,
-    )
+fn shipped_order() -> &'static [&'static str] {
+    shipped_order_for(SeedPlatform::of_this_build())
 }
 
-/// [`shipped_order`] with the platform and the machine handed in — see
-/// [`shipped_for`].
-fn shipped_order_for(platform: SeedPlatform, environment: &dyn ShellEnvironment) -> Vec<String> {
+/// [`shipped_order`] with the platform handed in — see [`shipped_for`].
+fn shipped_order_for(platform: SeedPlatform) -> &'static [&'static str] {
     match platform {
-        SeedPlatform::Windows => WINDOWS_SHIPPED_ORDER
-            .iter()
-            .map(|id| (*id).to_owned())
-            .collect(),
-        SeedPlatform::MacOs | SeedPlatform::OtherUnix => shipped_for(platform, environment)
-            .into_iter()
-            .map(|profile| profile.id)
-            .collect(),
+        SeedPlatform::Windows => &WINDOWS_SHIPPED_ORDER,
+        SeedPlatform::MacOs => &[USER_SHELL_ID, "zsh", "bash", BOURNE_SHELL_ID],
+        SeedPlatform::OtherUnix => &[USER_SHELL_ID, "bash", BOURNE_SHELL_ID],
     }
 }
 
@@ -3926,7 +3917,7 @@ fn default_profile_in(
     available: impl Fn(usize) -> bool,
 ) -> usize {
     chosen_profile_in(table, stored, &available)
-        .unwrap_or_else(|| automatic_profile_in(table, &shipped_order(), &available))
+        .unwrap_or_else(|| automatic_profile_in(table, shipped_order(), &available))
 }
 
 /// Which profile a seed's `profile_id` names, or [`fallback_profile()`] when the
@@ -15756,7 +15747,7 @@ mod tests {
             profiles: shipped_for(platform, machine),
         };
         let programs = ProfilePrograms::probe_rows(&table.profiles, machine);
-        let index = automatic_profile_in(&table, &shipped_order_for(platform, machine), |index| {
+        let index = automatic_profile_in(&table, shipped_order_for(platform), |index| {
             programs.is_available(index)
         });
         table
@@ -16042,7 +16033,7 @@ mod tests {
                     "{platform:?}: and it is a row this table ships, or it is not a floor"
                 );
                 assert!(
-                    shipped_order_for(platform, machine).contains(&floor.to_owned()),
+                    shipped_order_for(platform).contains(&floor),
                     "{platform:?}: and the walk ends on it"
                 );
             }
@@ -16162,11 +16153,13 @@ mod tests {
     /// here would silently drop out of the walk, and the machine's answer would
     /// quietly skip it.
     ///
-    /// **Off Windows there is no second list and there cannot be** (M1-5): one
-    /// row is named by `$SHELL`, so the order is read off the seed itself. The
-    /// guarantee that survives is the one that mattered — the walk is over what
-    /// this build *ships*, never over the table the reader can drag — and the
-    /// second half of this case is what holds it.
+    /// **Off Windows one row of the seed is named by the machine, and the list
+    /// is still written down** (M1-5): `usershell` is on it whether or not this
+    /// account produced that row, because the walk steps over an id that names
+    /// none. That is what keeps this list free of the environment and of the
+    /// filesystem, which matters because the Profiles page asks it twice a
+    /// frame — and the guarantee is the same one on every platform: the walk is
+    /// over what this build *ships*, never over the table the reader can drag.
     #[test]
     fn the_automatic_default_walks_the_shipped_order() {
         let machine = FakeMachine::default();
@@ -16178,15 +16171,23 @@ mod tests {
             "every shipped row is in the walk, in the order it is shipped in"
         );
         for platform in [SeedPlatform::MacOs, SeedPlatform::OtherUnix] {
-            let seeded: Vec<String> = shipped_for(platform, &machine)
-                .into_iter()
-                .map(|profile| profile.id)
-                .collect();
-            assert_eq!(
-                shipped_order_for(platform, &machine),
-                seeded,
-                "{platform:?}: the walk is the seed's own order and not a list beside it"
-            );
+            // Every row this platform can seed is on the list, in the order the
+            // seed writes them — a subsequence rather than the same list,
+            // because `usershell` is on it for the accounts that do not produce
+            // that row either.
+            for machine in [bare_macos(), FakeMachine::default()] {
+                let seeded: Vec<String> = shipped_for(platform, &machine)
+                    .into_iter()
+                    .map(|profile| profile.id)
+                    .collect();
+                let mut walked = shipped_order_for(platform).iter();
+                for id in &seeded {
+                    assert!(
+                        walked.any(|listed| listed == id),
+                        "{platform:?}: {id} is not on the walk, or not in the seed's own order"
+                    );
+                }
+            }
         }
         // And the walk itself: the first *available* one, not the first one.
         let table = ProfileTable {
@@ -16195,12 +16196,12 @@ mod tests {
         let order = shipped_order();
         let last = table.profiles.len() - 1;
         assert_eq!(
-            automatic_profile_in(&table, &order, |index| index == last),
+            automatic_profile_in(&table, order, |index| index == last),
             last,
             "every row but the last greyed and the last is the answer, wherever it sits"
         );
         assert_eq!(
-            automatic_profile_in(&table, &order, |_| false),
+            automatic_profile_in(&table, order, |_| false),
             fallback_profile_in(&table),
             "and a machine that can start none of them still opens a window"
         );
@@ -23132,7 +23133,7 @@ mod tests {
         );
         assert_eq!(
             default_profile_in(&after, "claude-7f3a", |_| true),
-            automatic_profile_in(&after, &shipped_order(), |_| true),
+            automatic_profile_in(&after, shipped_order(), |_| true),
             "the default falls to what a machine with no choice on it answers, \
              rather than to nothing"
         );
