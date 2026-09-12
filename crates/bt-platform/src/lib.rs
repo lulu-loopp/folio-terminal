@@ -2703,7 +2703,9 @@ pub mod hotkey;
 #[cfg(windows)]
 pub mod video;
 
-/// The same eleven names, before AVFoundation (M4-4, M4-5).
+/// The same eleven names off Windows, three of which are now real: M4-4 put the
+/// first frame on `AVAssetImageGenerator` for a Mac — see `src/macos_video.rs` — and
+/// playback is still M4-5's.
 #[cfg(not(windows))]
 #[path = "video_portable.rs"]
 pub mod video;
@@ -11993,7 +11995,7 @@ mod macos_process_door_tests {
     /// `MonospaceFamily`, because the paths that are in scope are not the same
     /// paths. Everything else — the parameter names, the order, the return
     /// type — is compared exactly, which is the whole point.
-    fn signature(source: &str, name: &str) -> String {
+    pub(super) fn signature(source: &str, name: &str) -> String {
         let needle = format!("pub fn {name}(");
         let at = source
             .find(&needle)
@@ -14800,5 +14802,161 @@ mod macos_stdio_tests {
             "the buffers are flushed after the process has been told to stop, \
              which is to say never:\n{body}"
         );
+    }
+}
+
+/// **The two video arms, compared on the one machine where only one of them
+/// compiles** (M4-4).
+///
+/// `bt-app` names `first_frame`, `VideoFrame` and `SEEK_FRACTION` with no `cfg`
+/// at all, and `crates/bt-platform/tests/video_first_frame.rs` runs the same
+/// assertions against whichever arm the machine built. Neither of those can
+/// catch the failure this module exists for: an arm that took an extra argument,
+/// widened a return type, renamed a field or drifted a constant would compile on
+/// its own machine, break on the other, and break in `bt-app` rather than in the
+/// crate that changed. The Windows workstation is where both files exist as
+/// *text* even though only one of them exists as code, so the comparison is made
+/// there, on the text.
+///
+/// It is the same instrument `macos_process_door_tests` uses for the five
+/// process doors, and it borrows that module's `signature` rather than writing a
+/// second one.
+#[cfg(test)]
+mod macos_video_signature_tests {
+    use super::macos_process_door_tests::signature;
+
+    /// Media Foundation's arm, AVFoundation's arm, and the file that holds
+    /// everything off Windows which is neither.
+    const WINDOWS_ARM: &str = include_str!("video/mod.rs");
+    const MACOS_ARM: &str = include_str!("macos_video.rs");
+    const OFF_WINDOWS: &str = include_str!("video_portable.rs");
+
+    /// The fields of a struct, with its documentation and its blank lines taken
+    /// out — what a caller can actually name.
+    fn fields(source: &str, item: &str) -> Vec<String> {
+        let at = source
+            .find(item)
+            .unwrap_or_else(|| panic!("`{item}` is defined in this arm"));
+        let body = &source[at + item.len()..];
+        let end = body.find("\n}").expect("a struct is closed at column zero");
+        body[..end]
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// RED — **each of the three first-frame doors has the same signature on
+    /// every machine.**
+    ///
+    /// Three doors and three arms: Media Foundation's, AVFoundation's, and the
+    /// refusal a third platform still meets. `bt-app` names the first of the
+    /// three without a `cfg`, and the other two are what `cargo test -p
+    /// bt-platform` runs on both machines.
+    ///
+    /// MUTATION: drop the `fit_height` from the macOS arm, or give it a
+    /// `Result` where the others have an `Option`, and this names the door.
+    #[test]
+    fn every_first_frame_door_keeps_its_signature_on_every_machine() {
+        for door in [
+            "first_frame",
+            "decode_first_frame",
+            "decode_first_frame_measured",
+        ] {
+            let windows = signature(WINDOWS_ARM, door);
+            let macos = signature(MACOS_ARM, door);
+            let neither = signature(OFF_WINDOWS, door);
+            assert_eq!(windows, macos, "`{door}` is two different doors");
+            assert_eq!(
+                windows, neither,
+                "`{door}` refuses with a different shape than it answers with"
+            );
+        }
+    }
+
+    /// RED — **the frame and its cost are the same type on both machines, field
+    /// for field.**
+    ///
+    /// This is the claim M4-4's title makes — that the pixel layout is the
+    /// Windows arm's with not one word different — reduced to the part a text
+    /// comparison can hold: the same fields in the same order with the same
+    /// types, and the same derives on them, so that a `VideoFrame` crossing into
+    /// `bt-app` is the same value whichever decoder filled it.
+    ///
+    /// The *bytes* in `rgba` are the other half and no source pin can state
+    /// them; `tests/video_first_frame.rs` measures those out of two real files
+    /// on both machines.
+    ///
+    /// MUTATION: reorder `width` and `height` in either arm, or make
+    /// `duration_ms` a `u64` in one of them, and this names it; drop `Eq` from
+    /// one derive and the refusal cases in `video_first_frame.rs` stop
+    /// compiling on that machine alone.
+    #[test]
+    fn the_frame_and_its_cost_are_the_same_type_on_both_machines() {
+        assert_eq!(
+            fields(WINDOWS_ARM, "pub struct VideoFrame {"),
+            fields(OFF_WINDOWS, "pub struct VideoFrame {"),
+            "the frame has drifted between the two arms"
+        );
+        assert_eq!(
+            fields(WINDOWS_ARM, "pub struct FirstFrameCost {"),
+            fields(OFF_WINDOWS, "pub struct FirstFrameCost {"),
+            "the cost breakdown has drifted between the two arms"
+        );
+        for (arm, source) in [("Windows", WINDOWS_ARM), ("off Windows", OFF_WINDOWS)] {
+            assert!(
+                source.contains("#[derive(Clone, Debug, Eq, PartialEq)]\npub struct VideoFrame {"),
+                "the {arm} frame no longer derives what a caller compares it with"
+            );
+            assert!(
+                source.contains(
+                    "#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]\n\
+                     pub struct FirstFrameCost {"
+                ),
+                "the {arm} cost breakdown no longer derives what a caller compares it with"
+            );
+            assert!(
+                source.contains(
+                    "self.session + self.open + self.output_type + self.seek + self.read_sample \
+                     + self.copy"
+                ),
+                "the {arm} total is no longer the six spans added up"
+            );
+        }
+    }
+
+    /// RED — **both arms take the same tenth, wait the same three seconds, and
+    /// write a real opaque alpha over the byte their decoder left behind.**
+    ///
+    /// Three facts that are policy rather than platform, and each one is a
+    /// different picture on a card if the two machines disagree about it: a
+    /// frame from a different moment, a hover that gives up at a different time,
+    /// and — the one that is invisible until it is catastrophic — a frame drawn
+    /// fully transparent because the fourth byte of a `BGRX` or a `RGBX` pixel
+    /// happened to be zero and was copied through.
+    ///
+    /// MUTATION: change either constant in one file and this names it; copy the
+    /// source pixel's fourth byte instead of writing `255` and it names that
+    /// arm.
+    #[test]
+    fn both_arms_take_the_same_tenth_the_same_budget_and_the_same_opaque_alpha() {
+        for (arm, source) in [("Windows", WINDOWS_ARM), ("off Windows", OFF_WINDOWS)] {
+            assert!(
+                source.contains("pub const SEEK_FRACTION: f64 = 0.10;"),
+                "the {arm} arm takes its frame from somewhere else now"
+            );
+            assert!(
+                source.contains("pub const FIRST_FRAME_BUDGET: Duration = Duration::from_secs(3);"),
+                "the {arm} arm gives up at a different time now"
+            );
+        }
+        for (arm, source) in [("Windows", WINDOWS_ARM), ("macOS", MACOS_ARM)] {
+            assert!(
+                source.contains("out[3] = 255;"),
+                "the {arm} arm no longer writes a real opaque alpha over the byte its decoder \
+                 left undefined"
+            );
+        }
     }
 }

@@ -1,12 +1,25 @@
-//! **Video, on a platform whose decoder has not been written yet** (M4-4 for
-//! the first frame, M4-5 for playback).
+//! **Video off Windows: a real first frame on a Mac, and nothing anywhere that
+//! can play one yet** (M4-4 landed here; M4-5 is still ahead).
 //!
 //! `bt-app` names eleven things from `video` and `video::engine`, and every one
-//! of them is here. What is behind them is nothing: `first_frame` answers
-//! `None`, which the hover card already reads as *no picture for this file*,
-//! and `Engine::open` answers `EngineError::Unsupported`, which the video pane
-//! already reads as *this machine cannot play this*, prints under a black
+//! of them is here. Three of them now do something: [`first_frame`],
+//! [`decode_first_frame`] and [`decode_first_frame_measured`] reach
+//! `AVAssetImageGenerator` on macOS through `src/macos_video.rs`, and answer
+//! `None` on a third platform exactly as they did before. The rest is still
+//! nothing: `Engine::open` answers `EngineError::Unsupported`, which the video
+//! pane reads as *this machine cannot play this*, prints under a black
 //! rectangle, and goes on.
+//!
+//! # Two platforms, one file, and where the cut is
+//!
+//! What is in *this* file is everything that is not a decoder — the frame's
+//! shape, the two timing constants, the cost breakdown, the fit, the giving-up,
+//! and the engine's refusal — because none of that is AVFoundation and all of it
+//! is the same sentence on a Mac and on a machine with neither backend. What is
+//! in `macos_video.rs` is the AVFoundation conversation and nothing else. The
+//! split follows `handoff.rs`, where `macos_handoff` sits beside
+//! `portable_handoff` and `lib.rs` picks one: a body per platform, one set of
+//! names, and a `cfg` on the arms rather than on the call sites.
 //!
 //! # The one duplication in this ticket, and why it is here
 //!
@@ -23,11 +36,19 @@
 //! (`AVAssetImageGenerator`, then `AVPlayer` with audio, seeking and colour
 //! conversion), and the right moment to have one definition of a frame is when
 //! there are two real implementations to share it, not when there is one
-//! implementation and a refusal. Until then the duplication is four structs
-//! with no behaviour, and the cost of getting one of them wrong is a compile
-//! error in `bt-app` rather than a silent divergence.
+//! implementation and a refusal.
+//!
+//! **M4-4 is half of that moment and does not take it**, deliberately. There
+//! are now two real implementations of the *first frame* and still only one of
+//! the engine, so gathering [`VideoFrame`] into a shared file today would move
+//! it out from beside `Frame`, `EngineError` and `EngineState`, which would
+//! still be written twice — one definition shared and three copied is a worse
+//! shape to read than four copied. What holds the two [`VideoFrame`]s to each
+//! other in the meantime is not a convention: `tests/video_first_frame.rs` runs
+//! the same assertions against whichever arm the machine compiled, and
+//! `lib.rs`'s `macos_video_signature_tests` compares the two arms' text on the
+//! Windows machine, where only one of them can be built.
 
-use std::path::Path;
 use std::time::Duration;
 
 /// How far into a video the first frame is taken from — the same tenth the
@@ -40,6 +61,15 @@ pub const FIRST_FRAME_BUDGET: Duration = Duration::from_secs(3);
 
 /// One decoded picture, fitted for a card. See the module note on why this is
 /// written twice.
+///
+/// **`rgba` is straight (non-premultiplied) RGBA8, row-major, packed at
+/// `width * 4` bytes a row, and fully opaque** — the same sentence the Windows
+/// arm's own `VideoFrame` opens with, and it
+/// is the whole contract between a decoder and the picture channel this frame
+/// joins. `width`/`height` are the raster's; `native_width`/`native_height` are
+/// the video's own, which is what the fact line prints and would be quietly
+/// wrong if it were read off the pixels.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VideoFrame {
     pub rgba: Vec<u8>,
     pub width: u32,
@@ -51,17 +81,151 @@ pub struct VideoFrame {
     pub native_height: u32,
 }
 
-/// **The first frame of a video, for the hover card and the preview pane**
-/// (M4-4: `AVAssetImageGenerator`).
+/// **Where one question's time went**, segment by segment — the twin of the
+/// Windows arm's `FirstFrameCost`, with the same six fields for the same six
+/// reasons.
+///
+/// The fields are named after Media Foundation's shape because that is the arm
+/// that measured the problem first and because a caller that matched on one name
+/// here and another there would be two callers. What each one *means* on
+/// AVFoundation is written on it, and one of the six is always zero: there is no
+/// media platform to start on a Mac, which is the same fact `prewarm` is a no-op
+/// for.
+///
+/// A segment a refusal never reached stays zero. Nothing in this module reads
+/// these back or decides anything by them.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FirstFrameCost {
+    /// Starting the media platform. **Always zero here**: AVFoundation has no
+    /// `MFStartup` and no apartment to join, so the cold question costs what the
+    /// warm one costs.
+    pub session: Duration,
+    /// Building the `AVURLAsset` and its `AVAssetImageGenerator`.
+    pub open: Duration,
+    /// Settling what is being asked for: the video track, its natural size and
+    /// its preferred transform, and the generator's cap and tolerances.
+    pub output_type: Duration,
+    /// Reading the declared duration and turning it into the time
+    /// [`SEEK_FRACTION`] names.
+    pub seek: Duration,
+    /// `copyCGImageAtTime:actualTime:error:` — the decode itself.
+    pub read_sample: Duration,
+    /// Drawing the `CGImage` into a bitmap context and taking the rows out of
+    /// it.
+    pub copy: Duration,
+}
+
+impl FirstFrameCost {
+    /// The six spans added up — the length of the whole question.
+    #[must_use]
+    pub fn total(self) -> Duration {
+        self.session + self.open + self.output_type + self.seek + self.read_sample + self.copy
+    }
+}
+
+/// **The AVFoundation arm** — everything M4-4 wrote, and nothing that is not
+/// AVFoundation. See its own header.
+#[cfg(target_os = "macos")]
+#[path = "macos_video.rs"]
+mod macos_video;
+
+/// **The three first-frame doors, on a Mac.**
+#[cfg(target_os = "macos")]
+pub use macos_video::{decode_first_frame, decode_first_frame_measured, first_frame};
+
+/// **The three first-frame doors, on a platform with neither Media Foundation
+/// nor AVFoundation** — still the one silence.
+#[cfg(not(target_os = "macos"))]
+pub use no_decoder::{decode_first_frame, decode_first_frame_measured, first_frame};
+
+/// **A third platform, where there is no decoder to ask** — Linux today, and
+/// the 0.5 remote server's host tomorrow.
 ///
 /// `None` is the refusal, and it is the same `None` the Windows arm answers for
 /// a container it has no decoder for: the card shows the file's name and no
 /// picture. Nothing above this treats it as an error, which is why this is the
 /// one shape a refusal can take here.
-#[must_use]
-pub fn first_frame(path: &Path, fit_width: u32, fit_height: u32) -> Option<VideoFrame> {
-    let _ = (path, fit_width, fit_height);
-    None
+#[cfg(not(target_os = "macos"))]
+mod no_decoder {
+    use std::path::Path;
+
+    use super::{FirstFrameCost, VideoFrame};
+
+    /// **The first frame of a video, for the hover card and the preview pane.**
+    #[must_use]
+    pub fn first_frame(path: &Path, fit_width: u32, fit_height: u32) -> Option<VideoFrame> {
+        let _ = (path, fit_width, fit_height);
+        None
+    }
+
+    /// The same answer with no clock over it.
+    #[must_use]
+    pub fn decode_first_frame(path: &Path, fit_width: u32, fit_height: u32) -> Option<VideoFrame> {
+        decode_first_frame_measured(path, fit_width, fit_height).0
+    }
+
+    /// The same answer, and where its milliseconds went — which here is
+    /// nowhere, because nothing was asked of anything.
+    #[must_use]
+    pub fn decode_first_frame_measured(
+        path: &Path,
+        fit_width: u32,
+        fit_height: u32,
+    ) -> (Option<VideoFrame>, FirstFrameCost) {
+        (
+            first_frame(path, fit_width, fit_height),
+            FirstFrameCost::default(),
+        )
+    }
+}
+
+/// `size` fitted inside `fit` with its proportions kept, and **never enlarged**.
+///
+/// The Windows arm's `contain`, word for word, and it is written twice for the
+/// reason [`VideoFrame`] is: the two files share no code today. `contain` rather
+/// than `cover`, which is the same bargain every other picture in this window is
+/// fitted by — a wide frame and a tall one are both themselves, and the host
+/// centres what is left over. The clamp against `size` is what keeps a small clip
+/// from being asked for at a size whose pixels do not exist.
+#[cfg(target_os = "macos")]
+fn contain(size: (u32, u32), fit: (u32, u32)) -> (u32, u32) {
+    let scale = (f64::from(fit.0) / f64::from(size.0)).min(f64::from(fit.1) / f64::from(size.1));
+    if scale >= 1.0 {
+        return size;
+    }
+    (
+        ((f64::from(size.0) * scale).round() as u32).clamp(1, size.0),
+        ((f64::from(size.1) * scale).round() as u32).clamp(1, size.1),
+    )
+}
+
+/// **Run `work` on a thread of its own and stop waiting for it after `budget`.**
+///
+/// The Windows arm's `within_budget`, and the same two endings a caller cannot
+/// tell apart and does not need to: the work answered `None`, or it had not
+/// answered at all when the budget ran out.
+///
+/// The thread that overran is **not** cancelled. `AVAssetImageGenerator` does
+/// have a `cancelAllCGImageGeneration`, and it is not used here, because it
+/// cancels the *asynchronous* requests a generator is holding and there is no
+/// supported way to interrupt `copyCGImageAtTime:` from outside — the same
+/// sentence Media Foundation's `ReadSample` gets. The thread is left to finish
+/// into a receiver nobody is holding, which drops its answer exactly where the
+/// caller would have dropped it, and then to unwind. That is why the work it is
+/// given holds no lock and writes to nothing but its own channel.
+#[cfg(target_os = "macos")]
+fn within_budget<T: Send + 'static>(
+    budget: Duration,
+    work: impl FnOnce() -> Option<T> + Send + 'static,
+) -> Option<T> {
+    let (answer, wait) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("folio-video-frame".to_owned())
+        .spawn(move || {
+            let _ = answer.send(work());
+        })
+        .ok()?;
+    wait.recv_timeout(budget).ok().flatten()
 }
 
 /// Warm the media platform up before the first card asks for a frame.

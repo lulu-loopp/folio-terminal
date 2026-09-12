@@ -8971,5 +8971,178 @@ rather than to the descriptor, so the first draft of the behavioural case failed
 on the Mac with an empty file and both of its lines sitting in the harness's
 capture. A case written with the macros would have passed against a completely
 empty implementation of the door.
+### 13.25 M4-4: 视频首帧走 AVAssetImageGenerator,像素布局和 Windows 臂一个字不差(`crates/bt-platform/src/macos_video.rs`(新)、`crates/bt-platform/src/{video_portable,lib}.rs`、`crates/bt-platform/tests/video_first_frame.rs`(新)、`crates/bt-platform/Cargo.toml`)
+
+**① The ticket is not "decode a video", it is "hand over the same bytes".**
+`first_frame` had no body off Windows, so a hover over a recording in the files
+column showed the file's name and no picture — §7.23's refusal reached by absence
+rather than by failure. What replaces it is eight calls to AVFoundation and Core
+Graphics, and every decision in them is settled by a sentence §7.23 already wrote
+about Media Foundation rather than by what AVFoundation happens to make easy.
+**Straight — not premultiplied — RGBA8, row-major from the top row down, packed
+at `width * 4` bytes a row, every alpha byte `255`, in sRGB.** That is the
+contract the hover card, the preview seat and `bt-render`'s picture channel
+already read, and the point of this ticket is that none of the three learns which
+machine it is on.
+
+Three of those five are things Core Graphics settles the same way Media
+Foundation does, once it is asked properly. A 32-bit RGB bitmap context has **no
+straight-alpha form at all** — the supported layouts are premultiplied or
+skipped — so the context is asked for `kCGImageAlphaNoneSkipLast` with a
+big-endian 32-bit order, which is R, G, B and one byte the drawing leaves alone,
+and the copy writes `255` over that byte. That is exactly what the Windows arm
+does with Media Foundation's BGR**X**, and
+`both_arms_take_the_same_tenth_the_same_budget_and_the_same_opaque_alpha` pins
+the `out[3] = 255;` in both files — a frame that copied the decoder's undefined
+fourth byte through is drawn fully transparent on the day that byte happens to be
+zero, and correct on every day before it.
+
+A `CGBitmapContext`'s backing store runs from the top row down and
+`CGContextDrawImage` with the identity transform puts the image's top row in it,
+so **nothing is flipped**: the Windows arm's negative-pitch branch, which exists
+because RGB-32 is bottom-up in that platform's DIB heritage, has no twin here.
+The row width is still **read back** rather than assumed, for the reason the
+other arm reads its media type back — a stride that is not the one that was asked
+for shears every row after the first.
+
+**② The frame is not frame zero, and that was decided in August about content
+rather than about an API.** `SEEK_FRACTION` is a tenth because a great many
+videos open on black, and a thumbnail lane that took frame zero answers a hover
+over half a folder of screen captures with half a folder of identical black
+rectangles. The macOS arm inherits the constant rather than choosing one, because
+a card that showed a different picture depending on the machine would be two
+products.
+
+**The ask is exact, and then it is not.** Both `requestedTimeToleranceBefore` and
+`requestedTimeToleranceAfter` are zero, which makes the generator decode forward
+from the key frame before the target rather than hand back the key frame itself.
+When that exact ask fails — a container with an edit list, whose media timeline
+and presentation timeline are not the same line; a sample table with nothing at
+that instant — the tolerances are opened to infinity and **the same time** is
+asked for again. That is not a fallback to a different picture: it is the same
+request at the precision the file could meet, and it is the behaviour
+`IMFSourceReader::SetCurrentPosition` has by default, which is why the Windows
+arm never had to ask for it. Two attempts, like `request_rgb32`'s two.
+
+**③ What the two machines actually produced, out of the same two files**
+(2026-09-12; `tests/assets/PROVENANCE.md` records what is in them: 160×120, a
+fifth of a second of black and then one solid colour). The mean is over every
+pixel of the returned frame, and the whole frame is that one colour.
+
+| fixture | authored | Media Foundation (Windows) | AVFoundation (Mac mini, macOS 26.6.2) |
+|---|---|---|---|
+| `folio-video-test.mp4` | `E0 7A 2F` = (224,122,47) | **(224,122,48)** | **(223,136,53)** |
+| `folio-video-test.mov` | `2F 7A E0` = (47,122,224) | **(48,122,225)** | **(67,135,228)** |
+
+Both arms return a 160×120 raster, both report a native size of 160×120, and both
+read the declared length back exactly — 5000 ms and 3000 ms.
+
+**The two arms are not bit-identical, and the reason is stated rather than
+averaged away.** Media Foundation's video processor converts YUV to RGB with the
+stream's own matrix and hands the result over **untagged**, which the renderer
+then treats as sRGB; it lands within **1** of the colour ffmpeg was given. Core
+Graphics is handed a frame that carries a colour space and **colour-matches it
+into the sRGB the context declares**, which for an SD clip whose primaries are
+not sRGB's is a real conversion; it lands within **20**, the largest single
+channel being the `.mov`'s red at +20. Neither is a defect: the Windows number is
+the raw round trip and the macOS number is the colorimetric one, and at this
+magnitude the card shows the same picture. **Naming the space is the honest
+spelling of the assumption the other arm makes silently**, and the alternative —
+a bitmap context with no colour management — is not a thing Core Graphics offers.
+
+`video_first_frame.rs`'s `TOLERANCE` is **32**: that measured 20, with room for a
+macOS release whose matching moves a little, and still nowhere near the defects
+the assertion exists for. A red and blue swapped on the way out is ~180 off; a
+frame taken at time zero rather than a tenth in is the whole distance to black.
+
+**④ The cap is a cap, and the two platforms really do answer it differently.**
+Both arms compute the fitted size themselves — `contain`, which keeps the shape
+and **never enlarges** — and hand it down as a request. Asked for 80×80 with this
+160×120 clip, `AVAssetImageGenerator` returns **80×60** and Media Foundation
+returns **160×120**: its video processor refused the smaller output type for this
+file, and `request_rgb32`'s second attempt settled for RGB-32 at native size,
+which is the case that function's own header says it exists for. Neither is
+visible, because the window's sampler fits whichever it is given into the same
+box, so `a_frame_asked_for_smaller_keeps_its_proportions` asserts the two things
+that are true either way: nothing comes back larger than the file, and whatever
+comes back has the file's shape.
+
+**⑤ Where the file is cut, and why the portable file kept its name.** §4.3 of the
+port plan says a `#[cfg(windows)] pub mod` becomes a plain `pub mod` with
+`win`/`mac`/`neither` bodies. This ticket takes the half of that which is M4-4's:
+`video/mod.rs` and `video/engine.rs` are untouched Media Foundation, and
+`video_portable.rs` — the whole of `video` off Windows — grows a macOS body in
+`macos_video.rs` and a `no_decoder` one beside it, with a `cfg` on the arms and
+none on the call sites. It is `handoff.rs`'s shape exactly, where `macos_handoff`
+sits beside `portable_handoff`.
+
+What stayed in the shared file is everything that is **not** a decoder: the
+frame's shape, the two timing constants, the cost breakdown, `contain` and
+`within_budget`. What did not move is `VideoFrame` itself, and that is a refusal
+rather than an oversight. There are now two real implementations of the *first
+frame* and still only one of the engine, so gathering `VideoFrame` into a shared
+file today would take it out from beside `Frame`, `EngineError` and
+`EngineState`, which would still be written twice — **one definition shared and
+three copied reads worse than four copied.** M4-5 is when that moment arrives.
+
+**⑥ No main thread, and therefore no second `harness = false` target.** Nothing
+in this file touches AppKit, so there is no `window_thread()` at the top of any
+door the way `macos_impl.rs` opens every one of its own. The citation is the one
+§13.18 already gave for `NSWorkspace`: Apple's *Thread Safety Summary* lists the
+classes that are the main thread's — `NSView`, `NSWindow` and `NSApplication`
+each say so in their own reference — and says of everything it does not list,
+"In most cases, you can use these classes from any thread as long as you use them
+from only one thread at a time." `AVAsset`, `AVAssetImageGenerator` and
+`CGBitmapContext` are on neither list, and none of their references states a
+thread requirement.
+
+There is stronger evidence than an absence, in two places.
+`AVAssetImageGenerator`'s own asynchronous form documents that it calls its
+handler back on a queue **AVFoundation owns** rather than on the main queue, and
+a class that required the main thread could not offer that. And this repository
+produces its own: every case in `tests/video_first_frame.rs` runs on a thread
+libtest spawned — §13.17 measured that `MainThreadMarker::new()` is `None` there
+even under `--test-threads=1`, which is why the sheet cases needed a target of
+their own — and those cases are green on the Mac. **A green run of that file is
+the statement.** §13.17's pattern is for code that must own the process's first
+thread; this is not that code.
+
+What `first_frame` does need is to be off the thread that *draws*, and it takes
+the Windows arm's answer: a thread of its own with `FIRST_FRAME_BUDGET` over it.
+Apple's own note on `copyCGImageAtTime:` says the generator "may have to block
+the calling thread", and a file nothing can decode would otherwise be three
+seconds of frozen window.
+
+**⑦ Two deprecated calls, on purpose.** `copyCGImageAtTime:actualTime:error:` and
+`tracksWithMediaType:` are both marked deprecated since macOS 13 in favour of
+forms that take a completion handler. Those forms exist because the synchronous
+ones block, and **blocking is what this lane is built to do**: it already owns a
+thread and a budget, so the asynchronous shape would buy a `block2` closure, a
+channel, and an answer arriving after the budget had given up — the bargain
+§13.18 refused for `openURL:`. Neither call is removed and neither is unavailable
+at this product's deployment target.
+
+**⑧ Two packages compiled, five lines in the lock file, and both numbers are in
+`Cargo.toml`.** `objc2-av-foundation` 0.3.2 and `objc2-core-media` 0.3.2 are
+linked; `objc2-core-graphics` 0.3.2 was already in the lock file through wgpu's
+Metal backend and is only named now. `objc2-core-audio`, `objc2-core-audio-types`
+and `objc2-core-video` resolve into `Cargo.lock` and into nothing else — CoreMedia
+declares all three optional and no feature here turns any of them on — so they
+appear under *In the lock file, not in any resolved build* in
+`THIRD-PARTY-NOTICES.md`, the section that exists so the two counts a reader might
+compare are reconciled. All five are the same repository and the same release as
+the objc2 crates this crate already carries. The alternative was hand-declaring
+three selectors and a struct layout against classes this crate does not own.
+
+**⑨ Three instruments, because no one of them can hold the claim.**
+`tests/video_first_frame.rs` runs one set of assertions against whichever decoder
+the machine has and is the only place the *bytes* are checked; it is green on
+both machines and it is what ③ and ④ are measured with.
+`macos_video_signature_tests` in `lib.rs` compares the two arms as **text** on the
+Windows workstation, where only one of them compiles: the three doors'
+signatures, `VideoFrame`'s and `FirstFrameCost`'s fields and derives, the two
+constants, and the opaque alpha. And `cargo check -p bt-platform --target
+aarch64-apple-darwin --all-targets` on the Windows machine is what says the macOS
+arm compiles before it is ever pushed.
 
 *(本节英文,待中文文案改写。)*
