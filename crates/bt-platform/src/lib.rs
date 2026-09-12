@@ -9714,6 +9714,27 @@ pub use macos_impl::{
     window_is_exposed, work_area_at,
 };
 
+/// **The two doors that own the surface's view, on macOS** (M1-4).
+///
+/// A list of their own rather than two more names above, because the split is a
+/// different one again: the window and screen doors moved *platform* in M1-3
+/// and left `portable_impl` refusing the same names for everything else, while
+/// these two names exist on **no other platform at all**. There is nothing for
+/// a portable arm to refuse: `bt-app` names them inside the one
+/// `#[cfg(target_os = "macos")]` arm of `window_surface_target`, which is the
+/// only place in that crate a surface door is chosen, and every other platform
+/// takes the branch beside it. A refusing twin would be a door nobody can
+/// reach, on a platform where the sentence it refuses with is not true of
+/// anything.
+///
+/// Windows' half of the same job is `Compositor`, which owns the visual the
+/// swapchain hangs off; these own the view the `CAMetalLayer` hangs off. The
+/// asymmetry is the platforms': one is a tree with a lifetime, the other is a
+/// layer on a view, and `docs/DESIGN.md` §13.13 says why that cannot be one
+/// type.
+#[cfg(target_os = "macos")]
+pub use macos_impl::{clear_surface_layers, surface_view};
+
 /// **The directory watch, over FSEvents** (M2-1).
 ///
 /// The macOS twin of `windows_impl`'s `DirWatch`, and the eighth unsafe boundary
@@ -10685,6 +10706,15 @@ mod macos_window_backend_tests {
     /// its thread.
     const CHROME_DOORS: [&str; 2] = ["adopt_window_chrome", "press_title_bar"];
 
+    /// **The two doors M1-4 added to the macOS arm**, and they are not in the
+    /// group above for a stronger reason than the chrome pair's: those two have
+    /// no portable twin *yet*, these two have no portable twin **ever**. A
+    /// `CAMetalLayer` on an `NSView` is not a shape any other platform has a
+    /// refusal to make about — Windows' answer to the same job is `Compositor`,
+    /// a whole type with a visual tree in it — so `bt-app` names them inside
+    /// its one `#[cfg(target_os = "macos")]` arm and nothing else ever asks.
+    const SURFACE_DOORS: [&str; 2] = ["clear_surface_layers", "surface_view"];
+
     /// The text from the start of the line `pub fn NAME(` back to the end of
     /// the doc comment above it — the attributes, and nothing else.
     fn attributes_above(source: &str, name: &str) -> String {
@@ -10751,7 +10781,7 @@ mod macos_window_backend_tests {
     /// that.
     #[test]
     fn every_macos_window_door_proves_its_thread_before_it_calls_appkit() {
-        for door in DOORS.into_iter().chain(CHROME_DOORS) {
+        for door in DOORS.into_iter().chain(CHROME_DOORS).chain(SURFACE_DOORS) {
             let needle = format!("\npub fn {door}(");
             let at = MACOS.find(&needle).expect("named in the pin above");
             let rest = &MACOS[at + 1..];
@@ -10771,6 +10801,91 @@ mod macos_window_backend_tests {
                  thread:\n{body}"
             );
         }
+    }
+
+    /// RED (M1-4, on X-1's shape) — **the view wgpu draws into is a subview
+    /// Folio made, under the window's content view, and it does not take the
+    /// content view's place.**
+    ///
+    /// Four claims, and each is a different way the arrangement can be wrong
+    /// while every pixel still looks right on the day it is written:
+    ///
+    /// ① **A class of our own.** It is how the door finds the view again on a
+    ///    rebuild, and the alternative — first subview, or an index — is a
+    ///    rule that quietly starts naming the `WKWebView` the moment M4-2 puts
+    ///    one in the same content view.
+    /// ② **`addSubview:`, not `setContentView:`.** Replacing the content view
+    ///    would take winit's view out of the window, and with it every event
+    ///    this program answers. It is also the whole of what makes a page able
+    ///    to sit *beneath* the frame later: siblings compose in order, and
+    ///    there is no order with one view in it.
+    /// ③ **`hitTest:` answers nil.** A view lying over the whole content view
+    ///    is in front of winit's for the purposes of every press, and one that
+    ///    claimed the point would make Folio unclickable — a defect no test of
+    ///    the frame's *pixels* can see.
+    /// ④ **Sized and autoresizing.** The `CAMetalLayer`'s bounds and
+    ///    `contentsScale` are tracked off this view by `raw-window-metal`'s
+    ///    observers, so a view that did not follow the window would leave the
+    ///    layer at the size the window had when it opened.
+    ///
+    /// And the clearing door reaches the view's **layer's** sublayers, because
+    /// that is where the stale `CAMetalLayer` is: `raw-window-metal` makes the
+    /// view layer-backed and inserts its layer under the view's own. A door
+    /// that removed *subviews* would remove nothing and report success.
+    ///
+    /// MUTATIONS: use `setContentView:` and ②'s assertion names it; drop the
+    /// `hitTest:` override and ③ does; look the view up by position and ① does.
+    #[test]
+    fn the_surface_view_is_folios_own_subview() {
+        assert!(
+            MACOS.contains("#[unsafe(super(NSView))]\n    #[name = \"FolioSurfaceView\"]"),
+            "the surface view is a class of Folio's own, subclassing NSView — that class is how \
+             a rebuild finds the same view again"
+        );
+        let body = {
+            let needle = "\npub fn surface_view(";
+            let at = MACOS.find(needle).expect("the door exists");
+            let rest = &MACOS[at + 1..];
+            let end = rest.find("\n}\n").expect("a door is closed at column zero");
+            rest[..end].to_owned()
+        };
+        assert!(
+            body.contains("content.addSubview(&view);") && !body.contains("setContentView"),
+            "the view is added under the window's content view and does not replace it; \
+             replacing it takes winit's view — and every event — out of the window:\n{body}"
+        );
+        assert!(
+            body.contains("folios_own_view(&content)")
+                && MACOS.contains("isKindOfClass(SurfaceView::class())"),
+            "called again for the same window the door must answer the same view, found by its \
+             class rather than by its position among subviews:\n{body}"
+        );
+        assert!(
+            body.contains("initWithFrame: content.bounds()")
+                && body.contains("NSAutoresizingMaskOptions::ViewWidthSizable")
+                && body.contains("NSAutoresizingMaskOptions::ViewHeightSizable"),
+            "the view is the content view's size and follows it, which is what keeps the \
+             CAMetalLayer's bounds and contentsScale right through a resize:\n{body}"
+        );
+        assert!(
+            MACOS.contains("#[unsafe(method(hitTest:))]")
+                && MACOS.contains("fn hit_test(&self, _point: NSPoint) -> *mut NSView {\n            std::ptr::null_mut()"),
+            "the surface view declines every press, or it is a sheet of glass over a terminal \
+             nobody can click"
+        );
+        let clearing = {
+            let needle = "\npub fn clear_surface_layers(";
+            let at = MACOS.find(needle).expect("the door exists");
+            let rest = &MACOS[at + 1..];
+            let end = rest.find("\n}\n").expect("a door is closed at column zero");
+            rest[..end].to_owned()
+        };
+        assert!(
+            clearing.contains("view.layer()") && clearing.contains("layer.setSublayers(None)"),
+            "the stale CAMetalLayer is a sublayer of the view's own layer, so that is what is \
+             emptied — a door that removed subviews would remove nothing and say it \
+             worked:\n{clearing}"
+        );
     }
 
     /// RED — **closing the last window leaves the application running.**

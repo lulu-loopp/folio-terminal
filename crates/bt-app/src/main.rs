@@ -101737,10 +101737,13 @@ impl LostDevice for TheDeviceAndItsWindows<'_> {
             .map(|window| {
                 // **Built before the renderer is borrowed**, out of a
                 // `Compositor` and a `Window` this entry goes on owning, and
-                // never stored — see [`window_surface_target`], which is the one
-                // place either platform's door is named, and
-                // `bt_render::WindowTarget::CompositionVisual`, whose contract
-                // is that the visual is live at the instant the surface is made.
+                // never stored — see [`window_surface_target`], which is the
+                // one place any platform's door is named. Its contract is what
+                // makes that the only sound arrangement: on Windows the visual
+                // has to be live at the instant the surface is made, and on
+                // macOS the view has to have been emptied of the layer the old
+                // surface left on it. Both happen in there, for all three
+                // callers, and this one is the caller they happen *for*.
                 let target = window_surface_target(&window.window, &window.compositor);
                 RebuiltWindow::OnScreen(&mut window.renderer, target)
             })
@@ -103906,6 +103909,51 @@ impl FolioApp {
         }
     }
 
+    /// **Rebuild every window's swapchain on purpose, once, if a debug build
+    /// was asked to** (M1-4). See [`SURFACE_SELFTEST_AFTER`].
+    ///
+    /// It calls [`TheDeviceAndItsWindows::rebuild`] — the same function a real
+    /// device loss calls, through the same [`window_surface_target`] — and then
+    /// files the same debt [`Self::recovered_from_a_lost_device`] files after
+    /// `Flight::Rebuilt`: every swapchain in this process is new and blank, and
+    /// nothing else is going to ask for those frames. What it does **not** do is
+    /// pretend the device was lost: the latch is wgpu's and stays wgpu's, and
+    /// the pilot's retry policy is not what is under test here. What is under
+    /// test is the surface, which on macOS is a layer on a view Folio owns, and
+    /// whether the second one lands on a view the first one was cleared off
+    /// (`docs/plans/port/probe-x1-metal-alpha-2026-09-12.md`).
+    #[cfg(debug_assertions)]
+    fn surface_selftest_if_due(&mut self) {
+        let Some(after) = *SURFACE_SELFTEST_AFTER else {
+            return;
+        };
+        let armed = *SURFACE_SELFTEST_ARMED.get_or_init(Instant::now);
+        if armed.elapsed() < after || SURFACE_SELFTEST_SPENT.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Some(app) = self.app.as_mut() else {
+            return;
+        };
+        let mut machine = TheDeviceAndItsWindows {
+            gpu: &mut app.gpu,
+            windows: &mut self.windows,
+        };
+        match machine.rebuild() {
+            Ok(()) => {
+                eprintln!("BT_SURFACE selftest: every swapchain was built again");
+                for window in self.windows.in_order_mut() {
+                    window.chrome_present_pending = true;
+                    window.window.request_redraw();
+                }
+            }
+            Err(error) => eprintln!("BT_SURFACE selftest: {error}"),
+        }
+    }
+
+    /// Release builds do not read `BT_SURFACE_SELFTEST`. See the debug half.
+    #[cfg(not(debug_assertions))]
+    fn surface_selftest_if_due(&mut self) {}
+
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: anyhow::Error) {
         if self.recovered_from_a_lost_device() {
             return;
@@ -104932,6 +104980,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         hang_watch::beat();
         hang_watch::run_selftest_if_due();
         panic_selftest_if_due();
+        self.surface_selftest_if_due();
         self.about_to_wait_inner(event_loop);
         hang_watch::park(parking(event_loop.control_flow(), hang_watch::heartbeat()));
     }
@@ -108399,28 +108448,39 @@ fn install_page_ground_color(compositor: &bt_platform::Compositor) {
 /// (`bt_render::WindowTarget`'s own note). That is the whole reason the enum
 /// has two arms.
 ///
-/// **On macOS neither half of that sentence holds yet, and X-1 measured why.**
+/// **On macOS neither half of that sentence holds, and X-1 measured why.**
 /// wgpu-hal 30's Metal backend offers only `Opaque` and `PostMultiplied` —
 /// `PreMultiplied` does not exist there — so the Windows composition contract
 /// cannot be carried over at all, and the probe's answer is that Folio keeps
 /// writing premultiplied pixels and declares `PostMultiplied` to wgpu, with the
-/// platform arm owning the `CAMetalLayer` and clearing the view's sublayers
-/// before every reconstruction
-/// (`docs/plans/port/probe-x1-metal-alpha-2026-09-12.md`).
+/// platform arm owning the view and clearing its sublayers before every
+/// reconstruction (`docs/plans/port/probe-x1-metal-alpha-2026-09-12.md`).
 ///
-/// **None of that is here.** What is here is the portable door: wgpu builds a
-/// `SurfaceTarget` from the window winit handed out — an `NSView`'s handle on
-/// macOS — and its own Metal backend decides what to attach to it, which
-/// `required_alpha_mode` asks for as `Opaque` and Metal offers. The window
-/// presents, the frame is opaque, and no page can be opened to want a hole
-/// (`WebHost::request_environment` refuses first).
+/// **M1-4 is that answer, and it is three statements in this one function.**
+/// `bt_platform::surface_view` makes — or finds again — a plain `NSView` of
+/// Folio's own under the window's content view, sized to it and autoresizing;
+/// `bt_platform::clear_surface_layers` empties that view's layer, because a
+/// dropped `wgpu::Surface` leaves its `CAMetalLayer` behind and a rebuild would
+/// otherwise stack a second one and composite the frame twice; and
+/// `bt_render::WindowTarget::MetalLayerOnOwnedView` names the view for wgpu,
+/// which makes the layer inside `create_surface`. The clearing is here, in the
+/// one function all three callers go through, precisely because the third
+/// caller is the rebuild: a clear written at the two constructors would be a
+/// clear that never runs when it matters.
 ///
-/// **The seam M1-4 replaces is exactly this function.** It gains a third
-/// spelling — a `WindowTargetKind` arm with its own alpha policy, built from a
-/// layer the `Compositor`'s macOS arm owns — and every caller keeps calling
-/// this and nothing else. There are three: the two window constructors and the
-/// device-loss rebuild, and the third is why the choice is a function rather
-/// than a line in each of them.
+/// **A refusal from either door is reported and not propagated** (§4.4, and
+/// M1-1 ② next door). Both doors refuse for one reason only — a thread that is
+/// not the window's, or a view that is in no window — and neither is something
+/// a reader's machine can be; but a `?` here would mean a program defect
+/// closing the window instead of saying so. What the fallback opens is the
+/// window this function opened before this ticket: the portable door, wgpu's
+/// own layer on winit's own view, `Opaque`, no translucent ground offered and
+/// no hole possible. That is a window a reader can work in, with one line on
+/// stderr saying what it is missing.
+///
+/// There are three callers: the two window constructors and the device-loss
+/// rebuild, and the third is why the choice is a function rather than a line in
+/// each of them.
 fn window_surface_target(
     window: &Arc<Window>,
     compositor: &bt_platform::Compositor,
@@ -108434,11 +108494,47 @@ fn window_surface_target(
         // `Compositor` the caller holds is what makes it so.
         bt_render::WindowTarget::CompositionVisual(compositor.gpu_visual_ptr())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = compositor;
+        match folios_own_metal_view(window) {
+            Ok(view) => bt_render::WindowTarget::MetalLayerOnOwnedView(view),
+            Err(error) => {
+                eprintln!("BT_SURFACE Folio's own view: {error:#}");
+                bt_render::WindowTarget::Hwnd(Arc::clone(window).into())
+            }
+        }
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = compositor;
         bt_render::WindowTarget::Hwnd(Arc::clone(window).into())
     }
+}
+
+/// The view Folio draws into on macOS, emptied of any layer a surface before
+/// this one left on it (M1-4).
+///
+/// Split out of [`window_surface_target`] so that the three-line sequence has
+/// one `?` shape rather than three nested matches, and so that the arm above
+/// reads as the one decision it is: this platform's door, or the portable one
+/// with a reason printed.
+///
+/// **The count is printed only when it is not zero**, which makes the line mean
+/// something: a window's first surface clears nothing and says nothing, and
+/// every line that does appear is a reconstruction that found exactly the stale
+/// layer X-1 measured. A line saying anything but `cleared=1` there is the
+/// defect this ticket exists to make impossible, stated in the log rather than
+/// left to a screenshot.
+#[cfg(target_os = "macos")]
+fn folios_own_metal_view(window: &Window) -> Result<*mut std::ffi::c_void> {
+    let native = native_window(window)?;
+    let view = bt_platform::surface_view(native).map_err(|error| anyhow!(error))?;
+    let cleared = bt_platform::clear_surface_layers(native).map_err(|error| anyhow!(error))?;
+    if cleared > 0 {
+        eprintln!("BT_SURFACE cleared={cleared}");
+    }
+    Ok(view)
 }
 
 /// **Restate the window's outer rectangle, and report rather than propagate if
@@ -109945,6 +110041,47 @@ fn panic_selftest_if_due() {
 /// Release builds do not read `BT_PANIC_SELFTEST`. See the debug half.
 #[cfg(not(debug_assertions))]
 fn panic_selftest_if_due() {}
+
+/// **`BT_SURFACE_SELFTEST=<seconds>` — rebuild every window's swapchain on
+/// purpose, once, so that the reconstruction path can be measured on a real
+/// machine** (M1-4).
+///
+/// Shaped after [`PANIC_SELFTEST_AFTER`] down to the parse, and for its
+/// reasons: the same one-shot latch, the same "a number of seconds or nothing",
+/// the same `LazyLock` so that a turn of the loop costs no environment read,
+/// and the same **debug builds only**, because a release build that will
+/// throw away its device on request is a release build with a switch in it that
+/// nothing ships needs.
+///
+/// **Why a switch at all, when a device loss is a real event.** Because it is
+/// not one anybody can cause: the latch is set by wgpu's device-lost callback,
+/// which on this machine means a driver reset, and the thing M1-4 has to show
+/// on a Mac — that a second surface lands on a view the first one was cleared
+/// off — is invisible in every other run of the program. X-1 reached it through
+/// a key press in a probe of its own; this reaches it through the real
+/// `TheDeviceAndItsWindows::rebuild`, in the real application, which is the
+/// stronger of the two.
+#[cfg(debug_assertions)]
+static SURFACE_SELFTEST_AFTER: std::sync::LazyLock<Option<Duration>> =
+    std::sync::LazyLock::new(|| {
+        let seconds: u64 = std::env::var("BT_SURFACE_SELFTEST")
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+        (seconds > 0).then(|| Duration::from_secs(seconds))
+    });
+
+/// When the window came up, so the rebuild lands on a window that has really
+/// presented a frame — which is the whole point of measuring it.
+#[cfg(debug_assertions)]
+static SURFACE_SELFTEST_ARMED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Once, and then never again: unlike the panic selftest, this one's subject
+/// survives it, so the loop would otherwise rebuild every swapchain on every
+/// turn from the deadline onwards.
+#[cfg(debug_assertions)]
+static SURFACE_SELFTEST_SPENT: AtomicBool = AtomicBool::new(false);
 
 /// **One crash, one alert.**
 ///
@@ -155464,6 +155601,94 @@ mod cross_window_drag_tests {
             right,
             bottom,
         }
+    }
+
+    /// RED (M1-4, on X-1's measurement) — **a window's surface is rebuilt on a
+    /// view that has been emptied first, and the emptying is inside the one
+    /// function every caller goes through.**
+    ///
+    /// X-1 dropped a `wgpu::Surface` and made another on the same view: the
+    /// view came back carrying **two** `CAMetalLayer`s and the frame composited
+    /// twice — a half-alpha edge read back as `(200,63,9)` where the first
+    /// frame read `(144,126,18)`, which is `128 + 0.5·144.5` to the byte. One
+    /// `setSublayers(nil)` before the rebuild restored the first frame's
+    /// numbers exactly.
+    ///
+    /// **The ordering claim is the whole test, and it is about where the call
+    /// sits rather than about what it does.** The clearing cannot live at the
+    /// two window constructors, because the reconstruction is the third caller
+    /// and the only one it matters for; it cannot live in the rebuild either,
+    /// because then the two constructors and the rebuild would be reading two
+    /// different rules about the same view. It lives in
+    /// [`window_surface_target`], which is the one place a platform's surface
+    /// door is chosen (§13.8 ③) — so every caller that gets a target has had
+    /// the view emptied, and no caller had to know.
+    ///
+    /// MUTATIONS: ① move `clear_surface_layers` into either constructor and
+    /// the rebuild stacks a second layer; ② have the rebuild build its own
+    /// target instead of calling `window_surface_target` and it stacks one
+    /// too; ③ clear *after* `surface_view` has been handed to wgpu — that is,
+    /// order the two calls the other way round in `folios_own_metal_view` —
+    /// and the layer being removed is the live one.
+    #[test]
+    fn a_rebuild_clears_the_old_layer_first() {
+        /// The body of a free function declared at column zero.
+        fn free_fn_body(name: &str) -> &'static str {
+            let head = format!("\nfn {name}(");
+            let start = SOURCE
+                .find(&head)
+                .unwrap_or_else(|| panic!("`fn {name}` is declared at column zero"))
+                + head.len();
+            let end = start
+                + SOURCE[start..]
+                    .find("\n}\n")
+                    .expect("a free function is closed by a `}` at column zero");
+            &SOURCE[start..end]
+        }
+
+        let rebuild = fn_body("rebuild");
+        assert!(
+            rebuild.contains("window_surface_target(&window.window, &window.compositor)"),
+            "the device-loss rebuild names a surface door of its own instead of the one \
+             function that chooses it, so whatever that function does before handing the \
+             target over does not happen here:\n{rebuild}"
+        );
+        assert!(
+            !rebuild.contains("WindowTarget::"),
+            "the rebuild builds a target itself, which is the same defect from the other \
+             side:\n{rebuild}"
+        );
+
+        let chooser = free_fn_body("window_surface_target");
+        assert!(
+            !chooser.contains("clear_surface_layers"),
+            "the clearing belongs one level down, in `folios_own_metal_view`, so that the \
+             arm here stays the single decision it is:\n{chooser}"
+        );
+        assert!(
+            chooser.contains("folios_own_metal_view(window)"),
+            "the macOS arm reaches its view through the door that empties it:\n{chooser}"
+        );
+
+        let view = free_fn_body("folios_own_metal_view");
+        let makes = view
+            .find("bt_platform::surface_view(")
+            .expect("the view is made, or found again, here");
+        let clears = view
+            .find("bt_platform::clear_surface_layers(")
+            .expect("and emptied of the layer a surface before this one left on it");
+        assert!(
+            makes < clears,
+            "the view has to exist before it can be emptied; emptying first and making second \
+             clears a window that has no surface view yet and leaves the stale layer on the one \
+             that does:\n{view}"
+        );
+        let handed_over = view.rfind("Ok(view)").expect("and then handed to wgpu");
+        assert!(
+            clears < handed_over,
+            "the view is handed to wgpu before it has been emptied, so the layer wgpu adds goes \
+             on top of the one X-1 measured rather than in its place:\n{view}"
+        );
     }
 
     /// **The sixteen-step startup path, and which of its platform calls may still

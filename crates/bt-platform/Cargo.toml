@@ -89,6 +89,13 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     # `Cargo.lock`, pulled in by `objc2-foundation`'s own `NSGeometry`, and this
     # feature only turns on the AppKit methods that are typed in terms of it.
     "objc2-core-foundation",
+    # M1-4: `-[NSView layer]`, and through it `CALayer`'s `sublayers` and
+    # `setSublayers:` — the two calls `clear_surface_layers` is. **Not a package
+    # either**: `objc2-quartz-core` 0.3.2 is already in `Cargo.lock` (wgpu's own
+    # Metal backend and `raw-window-metal` both carry it), and this feature
+    # turns on the AppKit accessor plus the `CALayer` binding it answers with,
+    # which is the same shape `objc2-core-foundation` above came through.
+    "objc2-quartz-core",
     "std",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
@@ -97,6 +104,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     # The change dictionary a KVO callback is handed, and a screen's device
     # description.
     "NSDictionary",
+    # M1-4: `NSArray::iter`, which is how `folios_own_view` walks a content
+    # view's subviews looking for Folio's own. Named here rather than left to
+    # `objc2-app-kit`'s own use of it, because this crate's code is what calls
+    # it and a feature that arrives by union is a feature nobody declared.
+    "NSEnumerator",
     # The appearance is observed rather than polled.
     "NSKeyValueObserving",
     # `NSLocale.preferredLanguages` — the language the system is read in.

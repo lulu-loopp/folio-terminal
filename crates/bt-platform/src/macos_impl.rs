@@ -87,12 +87,15 @@ use std::ptr::NonNull;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
-use objc2::{AnyThread, DefinedClass, MainThreadMarker, define_class, msg_send, sel};
+use objc2::{
+    AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+    sel,
+};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-    NSApplication, NSColor, NSEvent, NSEventType, NSFloatingWindowLevel, NSNormalWindowLevel,
-    NSScreen, NSView, NSWindow, NSWindowButton, NSWindowDelegate, NSWindowOcclusionState,
-    NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
+    NSApplication, NSAutoresizingMaskOptions, NSColor, NSEvent, NSEventType, NSFloatingWindowLevel,
+    NSNormalWindowLevel, NSScreen, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
+    NSWindowOcclusionState, NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
 };
 use objc2_foundation::{
@@ -798,6 +801,167 @@ pub fn install_window_class_background(
         }
     }
     Ok(())
+}
+
+// ── the view Folio's frames are drawn into (M1-4) ──────────────────────────
+
+define_class!(
+    // SAFETY:
+    // - `NSView` has no subclassing requirements beyond being used on the main
+    //   thread, which it declares itself (`#[thread_kind = MainThreadOnly]`)
+    //   and which this subclass inherits.
+    // - This class does not implement `Drop` and has no ivars.
+    #[unsafe(super(NSView))]
+    #[name = "FolioSurfaceView"]
+    struct SurfaceView;
+
+    impl SurfaceView {
+        /// **This view is a surface and not a place a click can land.**
+        ///
+        /// It lies over the whole of winit's content view, and AppKit routes a
+        /// press to the frontmost view whose `hitTest:` claims the point — so
+        /// left alone, every click, drag, scroll and cursor update in Folio
+        /// would stop at a view that has no `mouseDown:` and end there.
+        /// Answering `nil` takes this view out of the search entirely and the
+        /// point falls through to the view underneath, which is winit's, which
+        /// is the one this program has always been answering presses from.
+        ///
+        /// It is the same answer the drag rule needs: `press_title_bar`'s note
+        /// records that AppKit asks a *view* whether a press may move the
+        /// window, and the view it must reach is winit's.
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> *mut NSView {
+            std::ptr::null_mut()
+        }
+    }
+);
+
+/// **The view Folio's frames are drawn into, made once per window and found
+/// again afterwards** (M1-4, on X-1's measurements).
+///
+/// # Why a view of Folio's own, rather than winit's
+///
+/// Two reasons, and X-1 measured both.
+///
+/// **The web preview.** On Windows a page composes *under* the swapchain
+/// because the swapchain hangs off a visual in a tree `Compositor` owns. macOS
+/// has no such tree to build: the arrangement that puts a `WKWebView` behind
+/// Folio's frame is **two sibling subviews in one window**, later subviews in
+/// front, and a transparent pixel in the frame is then a pixel of the page.
+/// That is what M4-1 and M4-2 will attach the page to, and it needs the frame
+/// to be in a subview rather than in the content view itself.
+///
+/// **The rebuild.** A dropped `wgpu::Surface` does not take its `CAMetalLayer`
+/// off the view it was attached to. X-1 dropped one and made another: the host
+/// view came back with *two* layers and the frame composited twice, to the byte
+/// — a half-alpha edge over a half-alpha edge. Whoever rebuilds the surface
+/// therefore has to own the view it is rebuilt on, which is what
+/// [`clear_surface_layers`] is for.
+///
+/// # What it does, and what it deliberately does not
+///
+/// The view is sized to the content view's bounds and given the width and
+/// height autoresizing masks, so it tracks the window through every resize
+/// without this crate hearing about one — and `raw-window-metal`'s own
+/// observers then track *it*, keeping the `CAMetalLayer`'s bounds and
+/// `contentsScale` on the view (X-1 measured a 1800×1200 → 1360×1500 resize
+/// with `contentsScale` 2 throughout and every sample unchanged). Nothing here
+/// makes the layer: wgpu does, inside `create_surface`, because the layer is
+/// the surface's and this crate does not depend on wgpu.
+///
+/// **Called again for the same window, it answers the same view.** The rebuild
+/// path goes through the same door as the two constructors — `bt-app`'s
+/// `window_surface_target` — so this has to be idempotent or a device loss
+/// would leave a stack of dead views behind the live one. The view is found by
+/// its class, which is what makes "Folio's own" a question the runtime can
+/// answer rather than a position in a list.
+/// **What comes back is a pointer and not a [`NativeWindow`]**, for the reason
+/// `Compositor::gpu_visual_ptr` returns one on the other platform: its one
+/// caller has to hand it to a graphics API that takes a raw handle, and a
+/// handle type whose whole contract is that a caller may do nothing with it but
+/// give it back would have to grow a reader to be of any use here. The pointer
+/// is read at the moment of use and never stored — `bt-app`'s
+/// `window_surface_target` builds the target out of it and hands it straight to
+/// `bt_render::create_surface` — which is the same contract the visual has.
+pub fn surface_view(window: NativeWindow) -> Result<*mut c_void, String> {
+    let what = "the view Folio's frames are drawn into";
+    let (mtm, ns_window) = window_for(window, what)?;
+    let content = ns_window
+        .contentView()
+        .ok_or_else(|| format!("{what}: this window has no content view"))?;
+    if let Some(existing) = folios_own_view(&content) {
+        return Ok(NonNull::from(&*existing).as_ptr().cast());
+    }
+    let view: Retained<SurfaceView> =
+        unsafe { msg_send![SurfaceView::alloc(mtm), initWithFrame: content.bounds()] };
+    view.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+    // `addSubview:` retains it, and the view hierarchy is what keeps it alive
+    // for as long as the window is — which is longer than the surface, because
+    // the surface is dropped by the renderer the window owns.
+    content.addSubview(&view);
+    Ok(NonNull::from(&*view).as_ptr().cast())
+}
+
+/// Folio's own surface view under a content view, if it has been made yet.
+///
+/// **By class, and that is the point.** The rebuild has to find the same view
+/// the first surface was built on, and every other way of naming it is a rule
+/// about position — first subview, last subview, index — that starts naming the
+/// `WKWebView` the moment M4-2 puts one into the same content view.
+fn folios_own_view(content: &NSView) -> Option<Retained<NSView>> {
+    content
+        .subviews()
+        .iter()
+        .find(|view| view.isKindOfClass(SurfaceView::class()))
+}
+
+/// **Empty the surface view's layer before a surface is built on it** (M1-4,
+/// X-1's finding).
+///
+/// The thing being removed is not a view and not a subview: `raw-window-metal`
+/// makes the view layer-backed and inserts the `CAMetalLayer` as a **sublayer
+/// of the view's own layer** (its own "Reasoning behind creating a sublayer"),
+/// so what a stale surface leaves behind is one sublayer there. Dropping the
+/// `wgpu::Surface` releases the crate's reference to it and nothing else; the
+/// superlayer still holds it, it still has the last frame in it, and the next
+/// surface's layer goes in *above* it.
+///
+/// The count comes back rather than being swallowed, and it is the whole
+/// evidence this door leaves: **0 at a window's first surface and 1 at every
+/// rebuild** is the shape of a program that owns its layer, and any other
+/// number is the shape of one that does not.
+///
+/// A view that is not layer-backed yet has nothing to clear and answers 0 —
+/// which is exactly the state [`surface_view`] hands over, since it is wgpu
+/// that makes the view layer-backed and it has not been called yet. A window
+/// that has no surface view at all answers 0 for the same reason and is not an
+/// error: that is a window on its way to its first surface.
+///
+/// **It takes the window and finds the view itself**, rather than taking the
+/// pointer [`surface_view`] just returned. The caller then holds no pointer
+/// across two calls, and the two doors cannot disagree about which view is
+/// Folio's — they ask [`folios_own_view`] the same question.
+pub fn clear_surface_layers(window: NativeWindow) -> Result<usize, String> {
+    let what = "clearing the surface view's old layers";
+    let (_mtm, ns_window) = window_for(window, what)?;
+    let Some(content) = ns_window.contentView() else {
+        return Ok(0);
+    };
+    let Some(view) = folios_own_view(&content) else {
+        return Ok(0);
+    };
+    let Some(layer) = view.layer() else {
+        return Ok(0);
+    };
+    // SAFETY: `sublayers` and `setSublayers:` are `CALayer`'s own accessors for
+    // its own array; the objc2 bindings mark them unsafe because a `CALayer`
+    // may be any subclass with any invariants, and this one is the plain layer
+    // AppKit made for the view above.
+    let removed = unsafe { layer.sublayers() }.map_or(0, |layers| layers.len());
+    unsafe { layer.setSublayers(None) };
+    Ok(removed)
 }
 
 // ── the title bar, taken over (M3-3) ───────────────────────────────────────
