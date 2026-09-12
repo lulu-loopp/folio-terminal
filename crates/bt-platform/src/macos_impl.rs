@@ -94,20 +94,23 @@ use std::ptr::NonNull;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{
-    AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
-    sel,
+    AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class,
+    msg_send, sel,
 };
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
     NSApplication, NSAutoresizingMaskOptions, NSColor, NSEvent, NSEventType, NSFloatingWindowLevel,
     NSNormalWindowLevel, NSScreen, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
-    NSWindowOcclusionState, NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
+    NSWindowDidBecomeKeyNotification, NSWindowDidEnterFullScreenNotification,
+    NSWindowDidExitFullScreenNotification, NSWindowDidResignKeyNotification,
+    NSWindowDidResizeNotification, NSWindowOcclusionState, NSWindowStyleMask,
+    NSWindowTitleVisibility, NSWorkspace,
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
 };
 use objc2_foundation::{
-    NSArray, NSDictionary, NSKeyValueObservingOptions, NSLocale, NSNotification, NSNumber,
-    NSObjectNSKeyValueObserverRegistration, NSPoint, NSRect, NSSize, NSString, NSUserDefaults,
-    ns_string,
+    NSArray, NSDictionary, NSKeyValueObservingOptions, NSLocale, NSNotification,
+    NSNotificationCenter, NSNumber, NSObjectNSKeyValueObserverRegistration, NSPoint, NSRect,
+    NSSize, NSString, NSUserDefaults, ns_string,
 };
 
 use crate::{NativeWindow, WheelScrollAmount, WindowRect};
@@ -1009,7 +1012,16 @@ pub fn clear_surface_layers(window: NativeWindow) -> Result<usize, String> {
 /// view now fills that rectangle instead of stopping below a title bar, which
 /// is the same client-equals-outer contract `WM_NCCALCSIZE` produces on the
 /// other platform.
-pub fn adopt_window_chrome(window: NativeWindow) -> Result<crate::PlatformChrome, String> {
+///
+/// **The lights move onto the strip's axis, and the watch is what keeps them
+/// there** (T-MAC-PILL). `bar_logical_px` is the height of the bar Folio draws
+/// in that band — the one number this module cannot know, because it is a fact
+/// about the design and not about the window. The watch comes back with the
+/// measurement and is dropped with the frame; see [`WindowButtonsWatch`].
+pub fn adopt_window_chrome(
+    window: NativeWindow,
+    bar_logical_px: f64,
+) -> Result<(crate::PlatformChrome, Option<WindowButtonsWatch>), String> {
     let what = "taking over a window's title bar";
     let (_, ns_window) = window_for(window, what)?;
     ns_window.setStyleMask(ns_window.styleMask() | NSWindowStyleMask::FullSizeContentView);
@@ -1039,14 +1051,183 @@ pub fn adopt_window_chrome(window: NativeWindow) -> Result<crate::PlatformChrome
         Some(best.map_or(edge, |best| best.max(edge)))
     });
     let Some(inset) = inset else {
-        return Ok(crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR);
+        return Ok((crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR, None));
     };
-    Ok(crate::PlatformChrome {
-        // Up and not to nearest: the strip may begin one pixel clear of the
-        // buttons, never one pixel into them.
-        strip_left_px: (inset * scale).ceil() as i32,
-        buttons_are_the_platforms: true,
-    })
+    // **The inset is measured before the lights are moved, and that is not an
+    // ordering accident**: only `y` changes below, and `strip_left_px` is an
+    // `x`. Measuring first also keeps the one number `bt-app` reads independent
+    // of whether the placement holds — a window whose buttons AppKit puts back
+    // is still a window whose strip must begin to their right.
+    centre_window_buttons(&ns_window, bar_logical_px);
+    let watch = WindowButtonsWatch::install(&ns_window, bar_logical_px);
+    Ok((
+        crate::PlatformChrome {
+            // Up and not to nearest: the strip may begin one pixel clear of the
+            // buttons, never one pixel into them.
+            strip_left_px: (inset * scale).ceil() as i32,
+            buttons_are_the_platforms: true,
+        },
+        Some(watch),
+    ))
+}
+
+/// **Put the three traffic lights on the axis of Folio's own strip** (T-MAC-PILL,
+/// owner ruling 2026-09-12).
+///
+/// macOS sizes its window buttons for a 32-point title bar: a 14-point button
+/// with nine points of air above and below it, centred at y 16. Folio's strip is
+/// **40** points tall, and the tabs on it are pills centred at y 20. Three
+/// buttons sitting four points high of everything beside them is the one thing
+/// the reader would see before anything else in that bar, so the buttons move to
+/// the strip's axis — top at 13, centre at 20 — and nothing else about them
+/// changes.
+///
+/// **Only `y` moves.** The x positions are macOS's own (9, 32, 55 on this
+/// release) and are not restated here: a window's buttons standing at a
+/// different horizontal rhythm from every other window's is a different bug from
+/// the one this fixes, and `strip_left_px` is measured off wherever they
+/// actually are.
+///
+/// **Measured against the view they are in, and the view decides its own axis.**
+/// A button's frame is in its superview's coordinates — `NSTitlebarView`, whose
+/// top edge is the window's top edge — and AppKit's default is an unflipped
+/// view, where `origin.y` grows upward from the bottom. `isFlipped` is asked
+/// rather than assumed, because the whole of what this computes is a distance
+/// from the *top* and a view that answers `true` measures it directly.
+///
+/// At the standard metrics the button lands 13..27 inside a 32-point bar, so it
+/// is moved four points down and still stands wholly inside the view it is in —
+/// which is why this is a move rather than `NSTitlebarContainerView`-resizing
+/// surgery.
+fn centre_window_buttons(ns_window: &NSWindow, bar_logical_px: f64) {
+    for which in [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ] {
+        let Some(button) = ns_window.standardWindowButton(which) else {
+            continue;
+        };
+        // SAFETY: a view's own superview, asked on the window's thread — the
+        // marker every door in this file passes through. The call is `unsafe`
+        // in these bindings because `NSView` is main-thread-only, which is the
+        // condition this module has already proved.
+        let Some(host) = (unsafe { button.superview() }) else {
+            continue;
+        };
+        let frame = button.frame();
+        // The air above the button when the button is centred on the strip:
+        // (40 - 14) / 2 = 13 at the standard metrics. Rounded, so a bar of odd
+        // height puts the button on a whole point rather than half of one.
+        let above = ((bar_logical_px - frame.size.height) / 2.0).round();
+        let y = if host.isFlipped() {
+            above
+        } else {
+            host.bounds().size.height - above - frame.size.height
+        };
+        button.setFrameOrigin(NSPoint::new(frame.origin.x, y));
+    }
+}
+
+/// **The re-application, because AppKit puts them back** (T-MAC-PILL).
+///
+/// A frame set on a standard window button is not a setting AppKit remembers: it
+/// lays the title bar out again on its own schedule and the buttons return to
+/// the 32-point bar's axis. So the placement is re-stated on every event that is
+/// known to re-lay it — a resize, leaving full screen (where the buttons are
+/// taken away and given back), and the key/resign pair, which is where AppKit
+/// swaps the buttons' own appearance.
+///
+/// **Notifications and not a timer.** A timer would be a guess about when AppKit
+/// is done, restated sixty times a second for the life of the window; these five
+/// are the events AppKit posts *after* it has finished, on the thread that did
+/// it, and a placement that still will not hold against them is a fact about
+/// this platform worth reporting rather than papering over.
+///
+/// The registration is scoped to this window (`object:`), so a second window's
+/// resize does not wake this one's observer.
+pub struct WindowButtonsWatch {
+    observer: Retained<WindowButtonsObserver>,
+}
+
+impl WindowButtonsWatch {
+    fn install(ns_window: &NSWindow, bar_logical_px: f64) -> Self {
+        let observer = WindowButtonsObserver::new(WindowButtonsPlacement {
+            window: ns_window.retain(),
+            bar_logical_px,
+        });
+        let centre = NSNotificationCenter::defaultCenter();
+        // SAFETY: AppKit's own notification names, read the way the other
+        // subscription in this file reads `NSWorkspace`'s — constants in the
+        // framework this process is linked against, never written by anybody.
+        let names = unsafe {
+            [
+                NSWindowDidResizeNotification,
+                NSWindowDidExitFullScreenNotification,
+                NSWindowDidEnterFullScreenNotification,
+                NSWindowDidBecomeKeyNotification,
+                NSWindowDidResignKeyNotification,
+            ]
+        };
+        for name in names {
+            // SAFETY: the observer outlives every registration — `Drop` below
+            // removes it first — and it answers the selector named here.
+            unsafe {
+                centre.addObserver_selector_name_object(
+                    &observer,
+                    sel!(folioWindowButtonsNeedCentring:),
+                    Some(name),
+                    Some(ns_window),
+                );
+            }
+        }
+        Self { observer }
+    }
+}
+
+impl Drop for WindowButtonsWatch {
+    fn drop(&mut self) {
+        // SAFETY: dropped on the thread that installed it (the value is not
+        // `Send`), and the registrations are the ones made above.
+        unsafe { NSNotificationCenter::defaultCenter().removeObserver(&self.observer) };
+    }
+}
+
+/// What the subscriptions carry: the window whose buttons are being placed, and
+/// the bar they are being placed on.
+struct WindowButtonsPlacement {
+    window: Retained<NSWindow>,
+    bar_logical_px: f64,
+}
+
+define_class!(
+    // SAFETY:
+    // - `NSObject` has no subclassing requirements.
+    // - This class does not implement `Drop`; its ivars do, and the macro's
+    //   generated `dealloc` runs them.
+    #[unsafe(super(NSObject))]
+    #[ivars = WindowButtonsPlacement]
+    struct WindowButtonsObserver;
+
+    impl WindowButtonsObserver {
+        /// AppKit has just laid this window's title bar out again.
+        #[unsafe(method(folioWindowButtonsNeedCentring:))]
+        fn buttons_need_centring(&self, _notification: Option<&NSNotification>) {
+            let placement = self.ivars();
+            centre_window_buttons(&placement.window, placement.bar_logical_px);
+        }
+    }
+
+    unsafe impl NSObjectProtocol for WindowButtonsObserver {}
+);
+
+impl WindowButtonsObserver {
+    fn new(placement: WindowButtonsPlacement) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(placement);
+        // SAFETY: `NSObject`'s designated initializer, called on a fresh
+        // allocation whose ivars are set.
+        unsafe { msg_send![super(this), init] }
+    }
 }
 
 /// **Answer a press on the empty part of the window's own title bar** —

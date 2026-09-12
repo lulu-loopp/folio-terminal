@@ -80,15 +80,17 @@ use bt_render::{
     WINDOW_TAB_BADGE_FONT_LOGICAL_PX, WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX,
     WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX, WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX,
     WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX, WINDOW_TAB_CLOSE_BOX_LOGICAL_PX,
-    WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX, WINDOW_TAB_FONT_LOGICAL_PX,
-    WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX, WINDOW_TAB_HEIGHT_LOGICAL_PX,
-    WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX, WINDOW_TAB_MIN_WIDTH_LOGICAL_PX,
-    WINDOW_TAB_PADDING_LEFT_LOGICAL_PX, WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX,
-    WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_RING_STROKE_LOGICAL_PX,
-    WINDOW_TAB_SQUEEZED_LOGICAL_PX, WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX,
-    WINDOW_TAB_STATUS_DOT_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX,
-    WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX, WINDOW_TAB_TIGHT_LOGICAL_PX,
-    WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, chrome_palette,
+    WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX, WINDOW_TAB_FLOAT_EDGE_LOGICAL_PX,
+    WINDOW_TAB_FLOAT_HEIGHT_LOGICAL_PX, WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX,
+    WINDOW_TAB_FONT_LOGICAL_PX, WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX,
+    WINDOW_TAB_HEIGHT_LOGICAL_PX, WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX,
+    WINDOW_TAB_MIN_WIDTH_LOGICAL_PX, WINDOW_TAB_PADDING_LEFT_LOGICAL_PX,
+    WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX, WINDOW_TAB_RADIUS_LOGICAL_PX,
+    WINDOW_TAB_RING_STROKE_LOGICAL_PX, WINDOW_TAB_SQUEEZED_LOGICAL_PX,
+    WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_LOGICAL_PX,
+    WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX,
+    WINDOW_TAB_TIGHT_LOGICAL_PX, WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX,
+    WINDOW_TITLE_BAR_LOGICAL_PX, chrome_palette,
 };
 
 use crate::focus_thumb::MiniMetrics;
@@ -3170,6 +3172,21 @@ pub struct TabStripGeometry {
     /// The furthest this strip may be scrolled, and therefore also the test for
     /// whether it scrolls at all: `0.0` exactly when everything fits.
     pub max_scroll: f32,
+    /// **Whether these tabs float** (owner ruling 2026-09-12 「就药丸」, T-MAC-PILL).
+    ///
+    /// `true` on a window whose title bar is the platform's: the tabs are 30pt
+    /// pills centred on the 40px strip, the strip's floor runs unbroken under
+    /// them, and there is no skirt flaring into the pane. `false` on a window
+    /// that draws its own whole bar, where a tab is 34 tall, stands on the
+    /// bar's foot, and *is* the pane's surface carried up into the strip.
+    ///
+    /// It is carried here rather than read a second time from
+    /// [`PlatformChrome`] because the geometry is the source of truth for this
+    /// shape: every box above is already measured for whichever tab this is,
+    /// and the paint has to draw the silhouette that matches them. One read,
+    /// one answer, and `the_caption_run_is_decided_by_one_capability_read`
+    /// holds the count.
+    pub floating: bool,
 }
 
 /// Equal-share horizontal tab geometry, scrolled by `scroll` physical pixels.
@@ -3233,13 +3250,32 @@ pub fn tab_strip_geometry(
     // run first and the run begins to scroll only once the tabs are on their
     // floor.
     let strip_left = (chrome.strip_left_px as f32).clamp(0.0, strip_right);
+    // **Whether the tabs float** (owner ruling 2026-09-12 「就药丸」, T-MAC-PILL).
+    // The second of this module's two branches on the capability, the other
+    // being [`caption_targets`]: a window whose title bar is the platform's wears
+    // pills, and a window that draws its own whole bar wears the attached tab
+    // it always has. It is decided here and carried out on
+    // [`TabStripGeometry::floating`], so the paint draws the silhouette these
+    // boxes were measured for instead of asking a second time.
+    let floating = chrome.buttons_are_the_platforms;
+    // **The lead-in** — how far the first tab's own box stands from the head of
+    // the run. On the attached tab it is `--tabr`, and it is not air:
+    // `.tabs-inline { padding-left: var(--tabr) }` is there so the first tab's
+    // outward skirt has somewhere to land, which is what puts the silhouette on
+    // the window's own edge. A pill has no skirt, so its lead-in is air and is
+    // struck as air (`--after-lights`, 12).
+    let lead_in = if floating {
+        WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX * scale
+    } else {
+        radius
+    };
     let gap = WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX * scale;
     let new_box = WINDOW_NEW_TAB_BOX_LOGICAL_PX * scale;
     let new_margin = WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX * scale;
     // Two buttons now stand at the end of the run, and both of them have to fit
     // before a tab may claim the rest — the `˅` is `margin-left: 0`, so the pair
     // costs one margin and two boxes.
-    let available = (strip_right - strip_left - radius - new_margin - 2.0 * new_box).max(0.0);
+    let available = (strip_right - strip_left - lead_in - new_margin - 2.0 * new_box).max(0.0);
     let total_gaps = gap * tab_count.saturating_sub(1) as f32;
     let tab_width = if tab_count == 0 {
         0.0
@@ -3257,12 +3293,30 @@ pub fn tab_strip_geometry(
     // now that they stop at 46px it is allowed to exceed it, and the excess is
     // exactly how far the strip may be scrolled.
     let content = tab_count as f32 * tab_width + total_gaps + new_margin + 2.0 * new_box;
-    let max_scroll = (strip_left + radius + content - strip_right).max(0.0);
+    let max_scroll = (strip_left + lead_in + content - strip_right).max(0.0);
     let scroll = scroll.clamp(0.0, max_scroll);
-    let origin = strip_left + radius - scroll;
+    let origin = strip_left + lead_in - scroll;
     let tier = tab_width_tier(tab_width, scale);
-    let tab_height = (WINDOW_TAB_HEIGHT_LOGICAL_PX * scale).round();
-    let tab_top = title - tab_height;
+    // **The pill is centred on the strip; the attached tab stands on its floor.**
+    // Five points of air above and five below at scale 1 (top 5, bottom 35 in a
+    // 40 bar), against the attached tab's six above and none below — which is
+    // the whole of what "floating" means here, and the reason the strip's floor
+    // runs unbroken under a pill.
+    let tab_height = (if floating {
+        WINDOW_TAB_FLOAT_HEIGHT_LOGICAL_PX
+    } else {
+        WINDOW_TAB_HEIGHT_LOGICAL_PX
+    } * scale)
+        .round();
+    let tab_top = if floating {
+        ((title - tab_height) / 2.0).round()
+    } else {
+        title - tab_height
+    };
+    // Every box inside a tab is measured against the tab's own foot from here
+    // on, and never against the bar's: on the attached tab the two are the same
+    // number, and on a pill they are not.
+    let tab_bottom = tab_top + tab_height;
     let close_box = (WINDOW_TAB_CLOSE_BOX_LOGICAL_PX * scale).round();
     let close_pad = WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX * scale;
     let pin_box = (WINDOW_TAB_PIN_BOX_LOGICAL_PX * scale).round();
@@ -3365,7 +3419,7 @@ pub fn tab_strip_geometry(
             // width is its box times the reveal, and `.tab-files + .pin`'s margin
             // runs from -8px to -4px, so the pair closes up by 4px as it opens.
             let files_box = (PANE_HEAD_TRIGGER_BOX_LOGICAL_PX * scale).round().max(1.0);
-            let files_top = (tab_top + (title - tab_top - files_box) / 2.0).round();
+            let files_top = (tab_top + (tab_bottom - tab_top - files_box) / 2.0).round();
             let files = match tier {
                 // H106, and it takes the trigger away for the pin's own reason —
                 // the two are named in one declaration.
@@ -3422,7 +3476,7 @@ pub fn tab_strip_geometry(
                 }
             };
             TabGeometry {
-                body: [left, tab_top, right, title],
+                body: [left, tab_top, right, tab_bottom],
                 close: close.filter(|rect| rect[2] > rect[0]),
                 pin: pin.filter(|rect| rect[2] > rect[0]),
                 files: files.filter(|rect| rect[2] > rect[0]),
@@ -3457,6 +3511,7 @@ pub fn tab_strip_geometry(
         ],
         viewport: [strip_left, strip_right],
         max_scroll,
+        floating,
     }
 }
 
@@ -10943,6 +10998,35 @@ fn window_tab_strip(
     let trailers = tabs.iter().map(|tab| tab.trailer).collect::<Vec<_>>();
     let geometry = tab_strip_geometry(width, scale, chrome, &trailers, active_tab, tab_scroll);
     let viewport = geometry.viewport;
+    // **Which silhouette this strip's tabs wear**, read off the geometry that
+    // measured their boxes rather than off the capability a second time
+    // (T-MAC-PILL). An attached tab is round on top and flares outward into the
+    // content plane at its foot; a pill is round on all four corners and closed.
+    // Every fill the strip lays on a tab — the hover ground, the active
+    // silhouette, the landing wash and its ring, the shadow under a tab in
+    // flight — has to be the same shape, or a tab in one of those states would
+    // be wearing the other window's outline for as long as the state lasts.
+    let floating = geometry.floating;
+    let body_fill = |radius_px: u32| {
+        if floating {
+            ChromeMark::ControlPill { radius_px }
+        } else {
+            ChromeMark::TabBody { radius_px }
+        }
+    };
+    let body_ring = |radius_px: u32, stroke_px: u32| {
+        if floating {
+            ChromeMark::ControlPillRing {
+                radius_px,
+                stroke_px,
+            }
+        } else {
+            ChromeMark::TabBodyRing {
+                radius_px,
+                stroke_px,
+            }
+        }
+    };
     // `.tabs-inline` crops its content, and a label is the one chrome primitive
     // that can be cropped exactly: `ChromeLabel`'s rect is also its clip box, and
     // the text renderer clips it per glyph and per pixel. **Both edges**, since
@@ -11059,10 +11143,7 @@ fn window_tab_strip(
             if flying && within_strip(viewport, tab.body) {
                 let spread = (FLIGHT_SHADOW_SPREAD_LOGICAL_PX * scale).round().max(1.0);
                 let mut shadow = ChromeSprite::new(
-                    ChromeMark::TabBodyRing {
-                        radius_px: (radius + spread) as u32,
-                        stroke_px: spread as u32,
-                    },
+                    body_ring((radius + spread) as u32, spread as u32),
                     [
                         tab.body[0] - spread,
                         tab.body[1] - spread,
@@ -11094,27 +11175,64 @@ fn window_tab_strip(
                 // them. It is the same sentence with the clock moved on, so it
                 // is the same branch and not a second one.
                 sprites.push(ChromeSprite::new(
-                    ChromeMark::TabBody {
-                        radius_px: radius as u32,
-                    },
+                    body_fill(radius as u32),
                     tab.body,
                     palette.caption_hover,
                 ));
             }
+            // **The active tab's own shape, and the ruling is which one**
+            // (owner 2026-09-12 「就药丸」). Attached: the skirted silhouette,
+            // two `--tabr` corners on top and two concave ones flaring outward
+            // into the content plane, filled with the pane's own surface so the
+            // two are one plane. Floating: a closed pill on the tab's own box,
+            // round on all four corners, standing on a strip whose floor runs
+            // unbroken under it — plus the hairline that is the only thing
+            // separating `#FFFFFF` from the `#F7F7F5` it floats on.
+            let outline = if floating { tab.body } else { skirted };
             if activation > 0.0
                 && tab_right - tab_left >= 2.0 * radius
-                && within_strip(viewport, skirted)
+                && within_strip(viewport, outline)
             {
                 sprites.push(
                     ChromeSprite::new(
-                        ChromeMark::ActiveTab {
-                            radius_px: radius as u32,
+                        if floating {
+                            ChromeMark::ControlPill {
+                                radius_px: radius as u32,
+                            }
+                        } else {
+                            ChromeMark::ActiveTab {
+                                radius_px: radius as u32,
+                            }
                         },
-                        skirted,
+                        outline,
                         palette.active_tab,
                     )
                     .with_opacity(activation),
                 );
+                if floating {
+                    // `box-shadow: 0 0 0 .5px var(--pill-edge)`, drawn *inside*
+                    // the pill's own edge rather than spread outside it: the
+                    // ruling gives the pill 30 points and a top at 5, and an
+                    // outset ring would make the ink 31 tall and start it at
+                    // 4.5. Half a logical pixel is one device pixel at the
+                    // backing scale this window is drawn at, so the line the
+                    // reader sees is the line the design asks for either way,
+                    // and the box stays the box.
+                    let mut edge = ChromeSprite::new(
+                        ChromeMark::ControlPillRing {
+                            radius_px: radius as u32,
+                            stroke_px: (WINDOW_TAB_FLOAT_EDGE_LOGICAL_PX * scale).round().max(1.0)
+                                as u32,
+                        },
+                        tab.body,
+                        palette.tab_pill_edge,
+                    );
+                    // It fades in with the fill it edges: a hairline at full
+                    // strength around a silhouette that is half there is an
+                    // outline of a tab that is not yet the active one.
+                    edge.opacity = f32::from(palette.tab_pill_edge_alpha) / 255.0 * activation;
+                    sprites.push(edge);
+                }
             }
             // `@keyframes tab-land` — the wash and the ring the landing tab
             // arrives wearing, on their way to nothing. Both are the accent at a
@@ -11137,20 +11255,15 @@ fn window_tab_strip(
                 content.landing
             };
             if landing > 0.0 && within_strip(viewport, tab.body) {
-                let mut wash = ChromeSprite::new(
-                    ChromeMark::TabBody {
-                        radius_px: radius as u32,
-                    },
-                    tab.body,
-                    palette.accent,
-                );
+                let mut wash =
+                    ChromeSprite::new(body_fill(radius as u32), tab.body, palette.accent);
                 wash.opacity = TAB_LAND_WASH_ALPHA * landing;
                 sprites.push(wash);
                 let mut ring = ChromeSprite::new(
-                    ChromeMark::TabBodyRing {
-                        radius_px: radius as u32,
-                        stroke_px: (TAB_LAND_RING_LOGICAL_PX * scale).round().max(1.0) as u32,
-                    },
+                    body_ring(
+                        radius as u32,
+                        (TAB_LAND_RING_LOGICAL_PX * scale).round().max(1.0) as u32,
+                    ),
                     tab.body,
                     palette.accent,
                 );
@@ -26256,6 +26369,403 @@ mod tests {",
         }
     }
 
+    /// RED — **on a window whose title bar is the platform's, a tab is a 30pt
+    /// pill floating on the strip** (owner ruling 2026-09-12 「就药丸」;
+    /// `mock-mac-strict.html` section 1 variant B).
+    ///
+    /// Three claims, and every one of them is about the *silhouette and where
+    /// it stands* rather than about what a tab is made of: the pill is 30 tall
+    /// and centred on the 40px strip, so the strip's own floor runs unbroken
+    /// under it; the run leads in 12 points after the band the platform's
+    /// buttons occupy; and the padding, the mark, the `×`, the folder trigger
+    /// and the title's own box are the same numbers the attached tab draws,
+    /// each measured against the tab it belongs to.
+    ///
+    /// The last one is why the two geometries are asserted side by side. A pill
+    /// that also moved its mark or shrank its `×` would be a second tab design
+    /// rather than the same tab on a different bar, and the ruling is
+    /// explicitly the latter.
+    ///
+    /// MUTATION: stand the pill on the bar's foot (`tab_top = title - height`)
+    /// and the centring assertion names it; leave the lead-in at `--tabr` and
+    /// the 81 does; measure the folder trigger against the *bar's* foot rather
+    /// than the tab's and its own centring does.
+    #[test]
+    fn the_mac_tab_is_a_thirty_point_pill_centred_on_the_strip() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let width = 1200.0 * scale;
+            let mac = mac_bar(scale);
+            let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+            let height = (WINDOW_TAB_FLOAT_HEIGHT_LOGICAL_PX * scale).round();
+            let top = ((title - height) / 2.0).round();
+            // Revealed, because the folder trigger and the pin are *widths*
+            // that run from nothing to their box as the pointer arrives: at
+            // rest they are zero-width and dropped, and a zero-width box has no
+            // axis to be off.
+            let trailers = vec![
+                TabTrailer {
+                    files: true,
+                    reveal: 1.0,
+                    ..TabTrailer::default()
+                };
+                3
+            ];
+
+            let pill = tab_strip_geometry(width, scale, mac, &trailers, 0, 0.0);
+            let flat = tab_strip_geometry(width, scale, FOLIO_BAR, &trailers, 0, 0.0);
+            assert!(
+                pill.floating,
+                "a window whose platform draws its own buttons floats its tabs"
+            );
+            assert!(
+                !flat.floating,
+                "and a window that draws its whole bar does not"
+            );
+
+            for (index, tab) in pill.tabs.iter().enumerate() {
+                assert_eq!(
+                    [tab.body[1], tab.body[3]],
+                    [top, top + height],
+                    "pill {index} is not 30 centred on the strip at scale {scale}"
+                );
+                assert!(
+                    tab.body[3] < title,
+                    "pill {index} reaches the bar's foot at scale {scale}, so the strip's \
+                     floor is broken under it"
+                );
+                // Centred, which at a fractional scale means centred to the
+                // half pixel the round can cost it and not to a whole one.
+                assert!(
+                    (title - tab.body[3] - tab.body[1]).abs() <= 1.0,
+                    "pill {index} has {} of strip above it and {} below at scale {scale}",
+                    tab.body[1],
+                    title - tab.body[3]
+                );
+            }
+            // The attached tab is where it always was: on the bar's foot.
+            for (index, tab) in flat.tabs.iter().enumerate() {
+                assert_eq!(
+                    [tab.body[1], tab.body[3]],
+                    [
+                        title - (WINDOW_TAB_HEIGHT_LOGICAL_PX * scale).round(),
+                        title
+                    ],
+                    "attached tab {index} moved at scale {scale}"
+                );
+            }
+
+            // **The lead-in**: 12 points after the band, which is the mock's 81
+            // at scale 1.
+            assert_eq!(
+                pill.tabs[0].body[0],
+                mac.strip_left_px as f32 + WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX * scale,
+                "the first pill does not begin 12 points after the lights at scale {scale}"
+            );
+            assert_eq!(
+                flat.tabs[0].body[0],
+                (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0),
+                "and the attached run still leads in by its own skirt at scale {scale}"
+            );
+
+            // **And nothing a tab is made of moved.** Each box is measured
+            // against the tab it belongs to, so the two answers are the same
+            // number on both windows even though the tabs are different heights.
+            let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
+            let close = (WINDOW_TAB_CLOSE_BOX_LOGICAL_PX * scale).round();
+            for (name, geometry) in [("pill", &pill), ("attached", &flat)] {
+                let tab = &geometry.tabs[0];
+                assert_eq!(tab.tier, TabWidthTier::Full, "{name} is squeezed");
+                let axis = (tab.body[1] + tab.body[3]) / 2.0;
+                let mark_box = tab_mark_box(tab, scale);
+                assert_eq!(
+                    mark_box[0] - tab.body[0],
+                    (WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round(),
+                    "{name}: the leading padding is not 12 at scale {scale}"
+                );
+                assert_eq!(
+                    [mark_box[2] - mark_box[0], mark_box[3] - mark_box[1]],
+                    [mark, mark],
+                    "{name}: the mark is not 15 at scale {scale}"
+                );
+                assert!(
+                    (((mark_box[1] + mark_box[3]) / 2.0) - axis).abs() <= 0.5,
+                    "{name}: the mark is off its own tab's axis at scale {scale}"
+                );
+                let cross = tab.close.expect("a full unpinned tab keeps its ×");
+                assert_eq!(
+                    [cross[2] - cross[0], cross[3] - cross[1]],
+                    [close, close],
+                    "{name}: the × is not 17 at scale {scale}"
+                );
+                assert!(
+                    (((cross[1] + cross[3]) / 2.0) - axis).abs() <= 0.5,
+                    "{name}: the × is off its own tab's axis at scale {scale}"
+                );
+                let files = tab.files.expect("this trailer carries a folder");
+                assert!(
+                    (((files[1] + files[3]) / 2.0) - axis).abs() <= 0.5,
+                    "{name}: the folder trigger is off its own tab's axis at scale {scale}"
+                );
+                // The editor is the title (mock-up 376-378, "same box, same
+                // metrics"), so the box it measures against is the tab's own.
+                let title_box =
+                    tab_title_box(tab, 1, 0.0, scale).expect("a full tab has a title box");
+                assert_eq!(
+                    [title_box[1], title_box[3]],
+                    [tab.body[1], tab.body[3]],
+                    "{name}: the title box is not the tab's own band at scale {scale}"
+                );
+            }
+        }
+    }
+
+    /// RED — **the active pill wears a hairline and no skirt; the attached tab
+    /// wears a skirt and no hairline** (owner ruling 2026-09-12).
+    ///
+    /// The fill is the easy half. The hard half is that *every* ground a tab
+    /// can wear has to be the same silhouette — the hover fill included —
+    /// because a tab in one of those states would otherwise be wearing the
+    /// other window's outline for exactly as long as the state lasts, which is
+    /// the shape of the bug §7.1.6b″ records against paint order.
+    ///
+    /// MUTATION: keep `ChromeMark::ActiveTab` on the floating arm and the first
+    /// assertion names it; drop the hairline and the second does; leave the
+    /// hover fill on `TabBody` and the last does.
+    #[test]
+    fn the_active_pill_is_closed_and_hairlined_and_the_attached_tab_is_not() {
+        let palette = chrome_palette();
+        for scale in [1.0_f32, 2.0] {
+            let titles = strip_titles(3);
+            let mac = mac_bar(scale);
+            let width = 960.0 * scale;
+            let geometry = tab_strip_geometry(width, scale, mac, &resting(3), 0, 0.0);
+            let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
+            let body = geometry.tabs[0].body;
+
+            let (_, _, sprites) = strip_chrome_on(mac, scale, &titles, 0, None);
+            assert!(
+                !sprites
+                    .iter()
+                    .any(|sprite| matches!(sprite.mark, ChromeMark::ActiveTab { .. })),
+                "a floating tab is drawn with the skirted silhouette at scale {scale}"
+            );
+            let fills = sprites
+                .iter()
+                .filter(|sprite| {
+                    sprite.mark == ChromeMark::ControlPill { radius_px: radius }
+                        && sprite.color == palette.active_tab
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                fills.len(),
+                1,
+                "exactly one pill is filled with the active tab's surface at scale {scale}"
+            );
+            assert_eq!(
+                fills[0].rect, body,
+                "the pill is not drawn on the box the geometry measured at scale {scale}"
+            );
+
+            let edges = sprites
+                .iter()
+                .filter(|sprite| {
+                    matches!(sprite.mark, ChromeMark::ControlPillRing { .. })
+                        && sprite.color == palette.tab_pill_edge
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                edges.len(),
+                1,
+                "the hairline is on the active pill and on nothing else at scale {scale}"
+            );
+            assert_eq!(
+                edges[0].mark,
+                ChromeMark::ControlPillRing {
+                    radius_px: radius,
+                    stroke_px: (WINDOW_TAB_FLOAT_EDGE_LOGICAL_PX * scale).round().max(1.0) as u32,
+                },
+                "the hairline is not half a point on the pill's own round at scale {scale}"
+            );
+            assert_eq!(edges[0].rect, body, "the hairline is not on the pill's box");
+            assert!(
+                (edges[0].opacity - f32::from(palette.tab_pill_edge_alpha) / 255.0).abs() < 1e-3,
+                "the hairline is not drawn at its own alpha at scale {scale}: {}",
+                edges[0].opacity
+            );
+
+            // The other window, untouched: the skirted silhouette, one radius
+            // wider than the tab on each side, and no hairline anywhere.
+            let (_, _, attached) = strip_chrome(scale, &titles, 0, None, false);
+            let flat = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(3), 0, 0.0);
+            let skirt = attached
+                .iter()
+                .find(|sprite| matches!(sprite.mark, ChromeMark::ActiveTab { .. }))
+                .expect("the attached tab keeps its silhouette");
+            assert_eq!(
+                skirt.rect,
+                [
+                    flat.tabs[0].body[0] - radius as f32,
+                    flat.tabs[0].body[1],
+                    flat.tabs[0].body[2] + radius as f32,
+                    flat.tabs[0].body[3],
+                ],
+                "the attached silhouette moved at scale {scale}"
+            );
+            assert!(
+                !attached.iter().any(|sprite| matches!(
+                    sprite.mark,
+                    ChromeMark::ControlPillRing { .. }
+                ) && sprite.color == palette.tab_pill_edge),
+                "the attached tab grew a hairline at scale {scale}"
+            );
+            assert!(
+                !attached.iter().any(|sprite| matches!(
+                    sprite.mark,
+                    ChromeMark::ControlPill { .. }
+                ) && sprite.color == palette.active_tab),
+                "the attached tab grew a pill at scale {scale}"
+            );
+
+            // A resting pill has no ground at all, and a hovered one takes the
+            // same `--hover` the attached tab takes — in the pill's shape.
+            let (_, _, hovered) =
+                strip_chrome_on(mac, scale, &titles, 0, Some(ChromeTarget::Tab(1)));
+            let grounds = hovered
+                .iter()
+                .filter(|sprite| {
+                    matches!(
+                        sprite.mark,
+                        ChromeMark::ControlPill { .. } | ChromeMark::TabBody { .. }
+                    ) && sprite.color == palette.caption_hover
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                grounds.len(),
+                1,
+                "one tab is hovered, so one tab has a hover ground at scale {scale}"
+            );
+            assert_eq!(
+                grounds[0].mark,
+                ChromeMark::ControlPill { radius_px: radius },
+                "the hover ground is not the pill's own shape at scale {scale}"
+            );
+            assert_eq!(
+                grounds[0].rect, geometry.tabs[1].body,
+                "the hover ground is not on the hovered pill at scale {scale}"
+            );
+        }
+    }
+
+    /// RED — **a press lands on the pill and nowhere else** (owner ruling
+    /// 2026-09-12).
+    ///
+    /// The geometry is the source of truth for the shape, so the hit test moves
+    /// with it and is not restated: a press inside the pill answers that tab,
+    /// and the five points of strip above and below it are not the tab — which
+    /// is what "floating" means when you reach for one. The drag begins from
+    /// the same answer (`ChromeTarget::Tab`), and a tab already in hand keeps
+    /// its band, because [`TabGeometry::shifted`] moves a tab along the strip
+    /// and never off it.
+    ///
+    /// MUTATION: hit-test the pill against the bar's height instead of its own
+    /// body and the band above it stops answering `None`.
+    #[test]
+    fn a_press_lands_on_the_pill_and_not_on_the_strip_around_it() {
+        for scale in [1.0_f32, 2.0] {
+            let width = 960.0 * scale;
+            let mac = mac_bar(scale);
+            let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+            let geometry = tab_strip_geometry(width, scale, mac, &resting(3), 0, 0.0);
+            let at = |x: f32, y: f32| {
+                hit_tab_chrome(
+                    width,
+                    scale,
+                    mac,
+                    &resting(3),
+                    0,
+                    0.0,
+                    f64::from(x),
+                    f64::from(y),
+                )
+            };
+            for (index, tab) in geometry.tabs.iter().enumerate() {
+                let x = tab.body[0] + 2.0;
+                assert_eq!(
+                    at(x, (tab.body[1] + tab.body[3]) / 2.0),
+                    Some(ChromeTarget::Tab(index)),
+                    "the middle of pill {index} is not pill {index} at scale {scale}"
+                );
+                assert_eq!(
+                    at(x, tab.body[1]),
+                    Some(ChromeTarget::Tab(index)),
+                    "the pill's own top edge is the pill at scale {scale}"
+                );
+                assert_eq!(
+                    at(x, tab.body[1] - 1.0),
+                    None,
+                    "the strip above pill {index} answers the pill at scale {scale}"
+                );
+                assert_eq!(
+                    at(x, tab.body[3]),
+                    None,
+                    "the strip below pill {index} answers the pill at scale {scale}"
+                );
+                assert!(
+                    tab.body[1] > 0.0 && tab.body[3] < title,
+                    "there is strip on both sides of pill {index} at scale {scale}"
+                );
+            }
+            // A tab in hand travels along the strip and never off it.
+            let flying = geometry.tabs[2].shifted(-40.0 * scale);
+            assert_eq!(
+                [flying.body[1], flying.body[3]],
+                [geometry.tabs[2].body[1], geometry.tabs[2].body[3]],
+                "a dragged pill left its own band at scale {scale}"
+            );
+        }
+    }
+
+    /// RED — **the window that draws its own whole bar is byte-for-byte what it
+    /// was** (owner ruling 2026-09-12: the pill is the *other* window's tab).
+    ///
+    /// Struck numbers rather than a relation, which is the one place in this
+    /// file that is the right way round: everything else here derives from a
+    /// capability so that a Windows machine can ask what a Mac does, and this
+    /// one pins the answer the reader at the keyboard is actually looking at.
+    ///
+    /// MUTATION: give the attached tab the pill's height, its centring or its
+    /// lead-in and each has its own line here.
+    #[test]
+    fn the_windows_tab_strip_is_unchanged_by_the_pill() {
+        let geometry = tab_strip_geometry(960.0, 1.0, FOLIO_BAR, &resting(3), 0, 0.0);
+        assert!(!geometry.floating);
+        assert_eq!(geometry.tabs[0].body[0], 7.0, "the lead-in is --tabr");
+        for (index, tab) in geometry.tabs.iter().enumerate() {
+            assert_eq!(
+                [tab.body[1], tab.body[3]],
+                [6.0, 40.0],
+                "tab {index} is 34 tall on the foot of a 40 bar"
+            );
+        }
+        assert_eq!(
+            geometry.tabs[0].close.expect("the × is there"),
+            [
+                geometry.tabs[0].body[2] - 6.0 - 17.0,
+                6.0 + (34.0 - 17.0) / 2.0,
+                geometry.tabs[0].body[2] - 6.0,
+                6.0 + (34.0 - 17.0) / 2.0 + 17.0,
+            ],
+            "the × moved"
+        );
+        assert_eq!(
+            tab_mark_box(&geometry.tabs[0], 1.0),
+            // 7 + 12 across; 6 + (34 - 15) / 2 = 15.5 down, rounded to a whole
+            // pixel the way the mark box has always rounded it.
+            [19.0, 16.0, 34.0, 31.0],
+            "the mark moved"
+        );
+    }
+
     /// RED — **Folio draws no button where the platform draws its own** (M3-3,
     /// owner ruling 2026-09-12: the window must not carry two sets of window
     /// controls).
@@ -26899,6 +27409,7 @@ mod tests {",
         profile_menu_open: bool,
     ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
         strip_chrome_of_turn(
+            FOLIO_BAR,
             scale,
             tabs,
             active_tab,
@@ -26909,8 +27420,38 @@ mod tests {",
         )
     }
 
+    /// [`strip_chrome`] on a window whose title bar is the platform's — the
+    /// other arm of the one capability, so a Windows machine can ask what a Mac
+    /// draws.
+    fn strip_chrome_on(
+        chrome: PlatformChrome,
+        scale: f32,
+        titles: &[String],
+        active_tab: usize,
+        hover: Option<ChromeTarget>,
+    ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
+        let tabs = titles
+            .iter()
+            .map(|title| TabContent {
+                flight: 0.0,
+                mark_kind: ChromeMark::ProfilePowerShell,
+                title: title.clone(),
+                pane_count: 1,
+                badge_text_width: 0.0,
+                mark: TabMarkState::default(),
+                trailer: TabTrailer::default(),
+                offset: 0.0,
+                landing: 0.0,
+                edit: None,
+            })
+            .collect::<Vec<_>>();
+        strip_chrome_of_turn(chrome, scale, &tabs, active_tab, 0.0, hover, false, 0.0)
+    }
+
     /// The same, with the arrow caught partway through its turn.
+    #[allow(clippy::too_many_arguments)]
     fn strip_chrome_of_turn(
+        chrome: PlatformChrome,
         scale: f32,
         tabs: &[TabContent],
         active_tab: usize,
@@ -26940,7 +27481,7 @@ mod tests {",
             ChromeContent {
                 update_mark: false,
                 summoned: false,
-                chrome: FOLIO_BAR,
+                chrome,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -28924,7 +29465,8 @@ mod tests {",
             ..TabContent::default()
         }];
         let chevron_of = |turn: f32, open: bool| {
-            let (_, _, sprites) = strip_chrome_of_turn(1.0, &tabs, 0, 0.0, None, open, turn);
+            let (_, _, sprites) =
+                strip_chrome_of_turn(FOLIO_BAR, 1.0, &tabs, 0, 0.0, None, open, turn);
             *sprites
                 .iter()
                 .find(|sprite| matches!(sprite.mark, ChromeMark::Chevron { .. }))

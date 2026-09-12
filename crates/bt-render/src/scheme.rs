@@ -115,6 +115,19 @@ struct Canvas {
     /// `--border` and `--border-soft`, in thousandths of [`Self::shade`].
     border: i32,
     border_soft: i32,
+    /// `--pill-edge`, in thousandths of [`Self::shade`] — the hairline around a
+    /// floating tab pill.
+    ///
+    /// **Paper's is struck and night's is derived from it.** The owner set
+    /// `rgba(0,0,0,.14)` on the light canvas and said nothing about the dark
+    /// one, so night takes the same multiple of *its own* hairline alpha that
+    /// paper's does of its: `94 × 140 / 88 = 149.5`. That is the relation the
+    /// two canvases already carry on both of the hairlines above — night is the
+    /// larger on `border` (94 against 88) and on `border_soft` (60 against 55),
+    /// because a white line laid on night covers less ground per unit of alpha
+    /// than a black one laid on paper, which is [`Self::thumb`]'s own sentence
+    /// about a different mark.
+    pill_edge: i32,
     /// What a hairline is struck in — white on night, black on paper. Not the
     /// ink: `:root` writes `--border: rgba(0,0,0,.088)` while `--hover` on the
     /// same canvas is `rgba(55,53,47,.055)`, and the two are different colours.
@@ -169,6 +182,7 @@ const NIGHT: Canvas = Canvas {
     menu: [15, 15, 15],
     border: 94,
     border_soft: 60,
+    pill_edge: 150,
     shade: [0xff, 0xff, 0xff],
     thumb: 220,
     thumb_hover: 400,
@@ -204,6 +218,7 @@ const PAPER: Canvas = Canvas {
     menu: [0, 0, 0],
     border: 88,
     border_soft: 55,
+    pill_edge: 140,
     shade: [0x00, 0x00, 0x00],
     thumb: 240,
     thumb_hover: 420,
@@ -455,6 +470,11 @@ impl ChromePalette {
             caption_close_hover: [0xe5, 0x48, 0x4d],
             caption_close_text: [0xff, 0xff, 0xff],
             active_tab: termbg,
+            // The pill's hairline, derived exactly as `menu_border` below is:
+            // the canvas's own hairline shade at the canvas's own alpha for
+            // this mark. Not pre-composited, for the reason the field gives.
+            tab_pill_edge: canvas.shade,
+            tab_pill_edge_alpha: ((255 * canvas.pill_edge + 500) / 1000) as u8,
             pane_head: termbg,
             pane_close_glyph: ink3(termbg),
             pane_close_pill: row_selected,
@@ -887,6 +907,8 @@ mod tests {
             caption_close_hover,
             caption_close_text,
             active_tab,
+            tab_pill_edge,
+            tab_pill_edge_alpha,
             pane_head,
             pane_close_glyph,
             pane_close_pill,

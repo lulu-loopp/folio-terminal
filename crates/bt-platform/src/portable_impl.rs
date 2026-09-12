@@ -230,6 +230,21 @@ pub struct CustomWindowFrame {
     /// install, because it is a fact about *this* window and not about the
     /// host.
     chrome: crate::PlatformChrome,
+    /// **What keeps the platform's own buttons on the axis of Folio's strip**
+    /// (T-MAC-PILL): the subscriptions that re-state their placement every time
+    /// AppKit lays the title bar out again. Held here and nowhere else, so it
+    /// is removed when the frame is — a window's observer outliving its window
+    /// is the bug this shape makes unwritable.
+    ///
+    /// `None` on a window whose title bar is not the platform's, which is every
+    /// window on every other host and any window this crate could not measure.
+    #[cfg(target_os = "macos")]
+    #[expect(
+        dead_code,
+        reason = "held for its `Drop` and read by nobody: the subscriptions exist exactly as \
+                  long as the frame does, which is the whole of what this field is for"
+    )]
+    buttons: Option<crate::macos_impl::WindowButtonsWatch>,
 }
 
 impl CustomWindowFrame {
@@ -238,9 +253,22 @@ impl CustomWindowFrame {
         window: NativeWindow,
         geometry: crate::CustomFrameGeometry,
     ) -> Result<Self, String> {
-        let _ = geometry;
-        let chrome = adopt_platform_chrome(window);
-        Ok(Self { window, chrome })
+        // **`geometry` is read now, and the field it is read for is the bar's
+        // own height** (T-MAC-PILL). It was taken and dropped while this arm had
+        // nothing in that band to agree with; the traffic lights are centred on
+        // the strip Folio draws, and the height of that strip is the caller's
+        // fact rather than AppKit's.
+        let adopted = adopt_platform_chrome(window, f64::from(geometry.title_bar_logical_px));
+        #[cfg(target_os = "macos")]
+        let (chrome, buttons) = adopted;
+        #[cfg(not(target_os = "macos"))]
+        let chrome = adopted;
+        Ok(Self {
+            window,
+            chrome,
+            #[cfg(target_os = "macos")]
+            buttons,
+        })
     }
 
     /// **What the platform draws in this window's title bar** — the one read
@@ -305,24 +333,27 @@ impl CustomWindowFrame {
 /// own bar is the run it drew before this ticket. That is a window that looks
 /// wrong and says why on stderr, not a window that has been quietly told the
 /// platform draws buttons it does not.
-fn adopt_platform_chrome(window: NativeWindow) -> crate::PlatformChrome {
-    #[cfg(target_os = "macos")]
-    {
-        match crate::macos_impl::adopt_window_chrome(window) {
-            Ok(chrome) => chrome,
-            Err(reason) => {
-                eprintln!(
-                    "bt-platform: {reason}; the window keeps the title bar the system gave it"
-                );
-                crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR
-            }
+#[cfg(target_os = "macos")]
+fn adopt_platform_chrome(
+    window: NativeWindow,
+    bar_logical_px: f64,
+) -> (
+    crate::PlatformChrome,
+    Option<crate::macos_impl::WindowButtonsWatch>,
+) {
+    match crate::macos_impl::adopt_window_chrome(window, bar_logical_px) {
+        Ok(adopted) => adopted,
+        Err(reason) => {
+            eprintln!("bt-platform: {reason}; the window keeps the title bar the system gave it");
+            (crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR, None)
         }
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = window;
-        crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR
-    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn adopt_platform_chrome(window: NativeWindow, bar_logical_px: f64) -> crate::PlatformChrome {
+    let _ = (window, bar_logical_px);
+    crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR
 }
 
 // ── the Dock tile (M4-6) ───────────────────────────────────────────────────
