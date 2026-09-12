@@ -102072,30 +102072,6 @@ impl FolioApp {
     /// with no deadline to start it again — the second of those never recovering
     /// on its own. `reset` on both is the whole of the fix, and it also asks for
     /// the frame that draws the answer.
-    /// **And the other preference on that page: which canvas the desktop is
-    /// set to** (M1-3).
-    ///
-    /// The same event, because it is the same reader in the same place: on
-    /// Windows the broadcast that carries the animation switch is
-    /// `WM_SETTINGCHANGE`, and `is_system_preference_message` already answers
-    /// `WM_THEMECHANGED` with it for exactly this reason — "a person turning one
-    /// off often turns the other with it". On macOS the two are two
-    /// subscriptions and one wake, and this is the half that would otherwise
-    /// have nobody to tell: **winit stops posting `ThemeChanged` for a window
-    /// whose own appearance this program has stated**, which it does the moment
-    /// a theme is applied (`bt_platform::set_window_dark_mode`, and winit's
-    /// `observe_value` returns early for a customized window). So the desktop's
-    /// canvas reaches the loop through the settings watch instead.
-    ///
-    /// Idempotent by construction and therefore harmless as a second reading on
-    /// a platform that also has the winit event: [`Runtime::os_theme_changed`]
-    /// asks [`system_os_theme`] and applies nothing when the answer is the one
-    /// already in force. A window whose theme mode is not `System` answers the
-    /// same way for a second reason.
-    fn adopt_system_canvas(&mut self) -> Result<()> {
-        self.for_each_window(|runtime| runtime.os_theme_changed().map(|_| ()))
-    }
-
     fn adopt_motion_preference(&mut self) -> Result<()> {
         let fresh = read_motion_preference();
         let Some(app) = self.app.as_mut() else {
@@ -102118,6 +102094,30 @@ impl FolioApp {
             }
             Ok(())
         })
+    }
+
+    /// **And the other preference on that page: which canvas the desktop is set
+    /// to** (M1-3).
+    ///
+    /// The same event as [`Self::adopt_motion_preference`], because it is the
+    /// same reader in the same place: on Windows the broadcast that carries the
+    /// animation switch is `WM_SETTINGCHANGE`, and `is_system_preference_message`
+    /// already answers `WM_THEMECHANGED` with it for exactly that reason — "a
+    /// person turning one off often turns the other with it". On macOS the two
+    /// are two subscriptions and one wake, and this is the half that would
+    /// otherwise have nobody to tell: **winit stops posting `ThemeChanged` for a
+    /// window whose own appearance this program has stated**, which it does the
+    /// moment a theme is applied (`bt_platform::set_window_dark_mode`, and
+    /// winit's `observe_value` returns early for a customized window). So the
+    /// desktop's canvas reaches the loop through the settings watch instead.
+    ///
+    /// Idempotent by construction and therefore harmless as a second reading on
+    /// a platform that also has the winit event: [`Runtime::os_theme_changed`]
+    /// asks [`system_os_theme`] and applies nothing when the answer is the one
+    /// already in force. A window whose theme mode is not `System` answers the
+    /// same way for a second reason.
+    fn adopt_system_canvas(&mut self) -> Result<()> {
+        self.for_each_window(|runtime| runtime.os_theme_changed().map(|_| ()))
     }
 
     /// Take a window off the screen, and the process with it if it was the last.
