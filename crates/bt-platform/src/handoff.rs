@@ -1042,6 +1042,7 @@ mod macos_handoff {
                 let _ = std::fs::remove_dir_all(&root);
                 return;
             };
+            let mut ended: Option<Retained<NSRunningApplication>> = None;
             for _ in 0..100 {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 let opened = workspace
@@ -1057,9 +1058,37 @@ mod macos_handoff {
                     && opened.isFinishedLaunching()
                 {
                     opened.terminate();
+                    ended = Some(opened);
                     break;
                 }
             }
+
+            // **The document outlives the quit, and that ordering is the whole
+            // of it.** The first version of this case removed the directory as
+            // soon as it had asked, and the application it had just handed a
+            // file to then found that file gone — which is a *modal* question
+            // on this platform ("the document's file has been deleted"), and a
+            // modal question is one no quit request gets past. So the wait is
+            // here, before the file goes.
+            if let Some(ended) = &ended {
+                for _ in 0..50 {
+                    if ended.isTerminated() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+            // For a reader running `-- --nocapture`: what was opened, and
+            // whether it went again. Neither is asserted — the claim is the
+            // door's answer — but a case that leaves an application standing on
+            // somebody's desk should say so rather than let them find it.
+            println!(
+                "opened {wanted}; ended: {}",
+                match &ended {
+                    Some(app) => format!("{}", app.isTerminated()),
+                    None => "nothing new appeared to end".to_owned(),
+                }
+            );
             let _ = std::fs::remove_dir_all(&root);
         }
     }
