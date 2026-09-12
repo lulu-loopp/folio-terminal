@@ -1013,15 +1013,20 @@ mod tests {
         }
     }
 
-    /// Every name this receiver has been handed, until `wanted` is among them or
-    /// the budget runs out. An `Unknown` arrives as the empty batch it is.
-    fn heard(rx: &mpsc::Receiver<Vec<String>>, wanted: &str) -> (bool, Vec<String>) {
+    /// Every name this receiver has been handed, until one of `wanted` is among
+    /// them or the budget runs out.
+    ///
+    /// A list rather than one name because of the overflow: a batch that lost
+    /// track carries no names at all, and a test waiting for a sentinel that was
+    /// swallowed by the burst it followed would be waiting for a name the stream
+    /// is entitled never to say.
+    fn heard(rx: &mpsc::Receiver<Vec<String>>, wanted: &[&str]) -> (bool, Vec<String>) {
         let mut seen = Vec::new();
         let deadline = Instant::now() + ARRIVES_WITHIN;
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
             match rx.recv_timeout(left) {
                 Ok(names) => {
-                    let hit = names.iter().any(|name| name == wanted);
+                    let hit = names.iter().any(|name| wanted.contains(&name.as_str()));
                     seen.extend(names);
                     if hit {
                         return (true, seen);
@@ -1112,12 +1117,12 @@ mod tests {
         let (watch, rx) = named_watch(&scratch.0);
 
         std::fs::write(scratch.0.join("watched.md"), b"hello").expect("write beside the root");
-        let (hit, _) = heard(&rx, "watched.md");
+        let (hit, _) = heard(&rx, &["watched.md"]);
         assert!(hit, "a shallow watch still hears its own directory");
 
         std::fs::write(subtree.join("deep.txt"), b"not ours").expect("write into the subtree");
         std::fs::write(scratch.0.join("sentinel.md"), b"and this").expect("write beside it again");
-        let (hit, seen) = heard(&rx, "sentinel.md");
+        let (hit, seen) = heard(&rx, &["sentinel.md"]);
         assert!(hit, "the watch is still delivering after the subtree write");
         assert!(
             !seen.iter().any(|name| name == "deep.txt"),
@@ -1157,7 +1162,7 @@ mod tests {
         std::fs::write(&temporary, b"after").expect("write the temporary");
         std::fs::rename(&temporary, &page).expect("rename it over the target");
 
-        let (hit, seen) = heard(&rx, "page.md");
+        let (hit, seen) = heard(&rx, &["page.md"]);
         assert!(
             hit,
             "an editor's write-temporary-and-rename-over is a change of the file it replaced, \
@@ -1198,8 +1203,8 @@ mod tests {
             }
         }
 
-        // And the same news reaches a caller as `Unknown` rather than as an
-        // empty list, which would read as "nothing changed".
+        // And a real burst beside the table, to say that the stream survives one
+        // — whichever of the two answers the daemon gives under it.
         let _turn = stream_gate::watchers_take_turns();
         let scratch = Scratch::new("overflow");
         let (watch, rx) = named_watch(&scratch.0);
@@ -1207,17 +1212,36 @@ mod tests {
             std::fs::write(scratch.0.join(format!("burst-{index}.txt")), b"x")
                 .expect("write a file of the burst");
         }
+
+        // Let the storm arrive and be counted before the sentinel is written, so
+        // that the sentinel is asked for on a quiet stream rather than from
+        // inside the batch that may have swallowed it.
+        let mut rescans = 0usize;
+        let mut batches = 0usize;
+        let settle = Instant::now() + Duration::from_secs(3);
+        while let Some(left) = settle.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(left.min(Duration::from_millis(800))) {
+                Ok(names) => {
+                    batches += 1;
+                    if names.iter().any(|name| name == "<unknown>") {
+                        rescans += 1;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        // Printed rather than asserted in either direction: whether the daemon
+        // drops under four thousand files is a property of the machine and of
+        // what else it is doing, and the flag path is pinned over the table
+        // above. What a run of this test can say is which it was.
+        println!("a burst of 4000 files arrived as {batches} batches, {rescans} of them rescans");
+
         std::fs::write(scratch.0.join("sentinel.md"), b"done").expect("write the sentinel");
-        let (hit, seen) = heard(&rx, "sentinel.md");
+        let (hit, seen) = heard(&rx, &["sentinel.md", "<unknown>"]);
         assert!(
             hit,
-            "the stream survived a burst of four thousand files and is still delivering"
+            "the stream survived a burst of four thousand files and is still delivering: {seen:?}"
         );
-        let dropped = seen.iter().any(|name| name == "<unknown>");
-        // Not an assertion either way: whether the daemon drops under this burst
-        // is a property of the machine, and the flag path is pinned above. It is
-        // printed so a run can say which it was.
-        println!("burst of 4000 files produced a rescan: {dropped}");
         drop(watch);
     }
 
