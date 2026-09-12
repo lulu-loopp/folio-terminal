@@ -4236,15 +4236,16 @@ mod windows_impl {
             PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR
         }
 
-        /// **Pick the window up by the press in hand.** Refused here, and the
-        /// refusal is the design: this window's title bar answers `HTCAPTION`
-        /// from [`custom_frame_hit_test`] and the OS starts the move itself, so
-        /// a press on the empty strip never reaches the application to be
-        /// forwarded. A caller that reaches this line has lost the hit test.
-        pub fn begin_window_drag(&self) -> Result<(), String> {
+        /// **Answer a press on the empty part of the title bar.** Refused here,
+        /// and the refusal is the design: this window's title bar answers
+        /// `HTCAPTION` from [`custom_frame_hit_test`] and the OS takes the press
+        /// itself, drag and double click alike, so it never reaches the
+        /// application to be forwarded. A caller that reaches this line has lost
+        /// the hit test.
+        pub fn press_title_bar(&self) -> Result<(), String> {
             Err(
-                "picking a window up by its title bar: this window's frame answers the \
-                 system's own hit test, and the move has already begun without us"
+                "a press on the window's own title bar: this window's frame answers the \
+                 system's own hit test, and the press was taken without us"
                     .to_owned(),
             )
         }
@@ -10645,7 +10646,7 @@ mod macos_window_backend_tests {
     /// re-export lists carry — so what is pinned about them here is the one
     /// thing the group's pins are for, that a door touching AppKit has proved
     /// its thread.
-    const CHROME_DOORS: [&str; 2] = ["adopt_window_chrome", "begin_window_drag"];
+    const CHROME_DOORS: [&str; 2] = ["adopt_window_chrome", "press_title_bar"];
 
     /// The text from the start of the line `pub fn NAME(` back to the end of
     /// the doc comment above it — the attributes, and nothing else.
@@ -10824,36 +10825,77 @@ mod macos_window_backend_tests {
         );
     }
 
-    /// RED — **the drag is AppKit's own, and so is the double click.**
+    /// RED — **one press, two answers: AppKit's own drag, and the reader's own
+    /// double click.**
     ///
-    /// `performWindowDragWithEvent:` carries the standard title-bar behaviour
-    /// with it, `AppleActionOnDoubleClick` included. A door that read that
-    /// preference and called `zoom:` or `miniaturize:` itself would be a second
-    /// implementation of a system behaviour, wrong the first time the system
-    /// grows a third choice.
+    /// `performWindowDragWithEvent:` is widely described as carrying the
+    /// standard title-bar behaviour with it, `AppleActionOnDoubleClick`
+    /// included, and this ticket wrote the door that way first. **Measured on
+    /// macOS 26.6, 2026-09-12, with no Folio in the probe at all**: a plain
+    /// `NSWindow` whose own view calls that selector from `mouseDown:` with
+    /// `clickCount == 2` does not move, while a double click on AppKit's own
+    /// title bar zooms the window beside it in the same run. So the action is
+    /// the door's, taken off the one preference that decides it, and both verbs
+    /// are `NSWindow`'s.
     ///
-    /// MUTATION: name the preference or either verb here and this goes red.
+    /// **The preference is read from the standard defaults and not from the
+    /// file.** `defaults read -g AppleActionOnDoubleClick` says the key does not
+    /// exist on a machine nobody has set it on, and the standard defaults answer
+    /// `Maximize` there because AppKit registers that itself — reading the file
+    /// would have turned "the default" into "nothing happens".
+    ///
+    /// MUTATION: drop the click-count arm and the double click goes back to
+    /// doing nothing; read the preference from anywhere but the standard
+    /// defaults and the commonest machine of all stops zooming; invent a verb
+    /// of this program's own for a value Apple has not named and this names it.
     #[test]
-    fn the_window_drag_is_appkits_own_and_carries_its_double_click() {
-        let needle = "\npub fn begin_window_drag(";
-        let at = MACOS.find(needle).expect("M3-3's drag door");
-        let rest = &MACOS[at + 1..];
-        let end = rest.find("\n}\n").expect("a door is closed at column zero");
-        let body = &rest[..end];
+    fn one_title_bar_press_is_appkits_drag_and_the_readers_own_double_click() {
+        let door = {
+            let needle = "\npub fn press_title_bar(";
+            let at = MACOS.find(needle).expect("M3-3's title-bar door");
+            let rest = &MACOS[at + 1..];
+            let end = rest.find("\n}\n").expect("a door is closed at column zero");
+            rest[..end].to_owned()
+        };
         assert!(
-            body.contains("performWindowDragWithEvent("),
-            "the drag is not AppKit's own:\n{body}"
+            door.contains("performWindowDragWithEvent("),
+            "the drag is not AppKit's own:\n{door}"
         );
-        for forbidden in ["AppleActionOnDoubleClick", "zoom(", "miniaturize("] {
+        assert!(
+            door.contains("NSEventType::LeftMouseDown"),
+            "the door answers whatever event happens to be in hand:\n{door}"
+        );
+        assert!(
+            door.contains("clickCount()") && door.contains("act_on_double_click("),
+            "the door does not tell a double click from a press, so the reader's own \
+             `AppleActionOnDoubleClick` is never honoured:\n{door}"
+        );
+
+        let action = {
+            let needle = "\nfn act_on_double_click(";
+            let at = MACOS.find(needle).expect("the door's double-click half");
+            let rest = &MACOS[at + 1..];
+            let end = rest
+                .find("\n}\n")
+                .expect("a function is closed at column zero");
+            rest[..end].to_owned()
+        };
+        assert!(
+            action.contains("standardUserDefaults()")
+                && action.contains("AppleActionOnDoubleClick"),
+            "the action is not the reader's own, read where AppKit registers its \
+             default:\n{action}"
+        );
+        for (value, verb) in [("Maximize", "zoom("), ("Minimize", "miniaturize(")] {
             assert!(
-                !body.contains(forbidden),
-                "the drag door implements `{forbidden}` itself instead of letting AppKit's drag \
-                 carry the reader's own preference:\n{body}"
+                action.contains(value) && action.contains(verb),
+                "`{value}` does not reach `{verb}`, which is the verb macOS gives it:\n{action}"
             );
         }
         assert!(
-            body.contains("NSEventType::LeftMouseDown"),
-            "the door drags from whatever event happens to be in hand:\n{body}"
+            action.contains("Some(\"None\") | None => Ok(())"),
+            "a reader who asked for nothing, and a system that registered nothing, are not \
+             both left alone:\n{action}"
         );
     }
 

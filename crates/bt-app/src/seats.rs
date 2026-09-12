@@ -6121,9 +6121,9 @@ pub fn hit_window_chrome(
 /// (`mouseDownCanMoveWindow`), and the view under this bar is winit's, which
 /// answers no because it takes `mouseDown:` itself. So the application decides
 /// inside the press and says so through
-/// `bt_platform::CustomWindowFrame::begin_window_drag`, which is
-/// `performWindowDragWithEvent:` — AppKit's own drag, carrying AppKit's own
-/// double-click behaviour (`AppleActionOnDoubleClick`) with it.
+/// `bt_platform::CustomWindowFrame::press_title_bar`, which is AppKit's own
+/// drag and, on a double click, whatever the reader has asked a title bar's
+/// double click to do (`AppleActionOnDoubleClick`).
 ///
 /// **It is the Windows rule restated and not a second rule.** Both ends are read
 /// off the same two functions the picture is drawn from:
@@ -25825,16 +25825,20 @@ mod tests {",
         }
     }
 
-    /// **What macOS leaves standing in a title bar Folio has taken over** — the
-    /// shape of the number `bt_platform::adopt_window_chrome` measures, and not
-    /// a claim about any particular macOS.
+    /// **What macOS leaves standing in a title bar Folio has taken over.**
     ///
-    /// The three traffic lights are laid out in points and the inset is their
-    /// rightmost edge times the window's backing scale, so it is one logical
-    /// number read at two scales rather than two numbers. Every test below
-    /// asserts a relation to it; the live figures are in `docs/DESIGN.md`
-    /// §13.11, measured on the Mac.
-    const MAC_TRAFFIC_LIGHTS_LOGICAL_PX: f32 = 74.0;
+    /// Measured on macOS 26.6 on 2026-09-12: the close button's frame is
+    /// `(9, 9, 14, 14)`, miniaturize's begins at 32 and zoom's at 55, so the
+    /// rightmost edge is 69 points. The inset is that edge times the window's
+    /// backing scale, which is why this is one logical number read at two
+    /// scales rather than two numbers — 69 physical pixels on a plain desk, 138
+    /// on a Retina one.
+    ///
+    /// **The number is not what the tests below assert**; every one of them
+    /// asserts a relation to it, so a macOS that moves its own buttons moves
+    /// this constant and nothing else. `bt_platform::adopt_window_chrome` never
+    /// reads it: it asks the window. §13.11 records the measurement.
+    const MAC_TRAFFIC_LIGHTS_LOGICAL_PX: f32 = 69.0;
 
     /// A window whose platform draws its own three buttons, at `scale`.
     fn mac_bar(scale: f32) -> PlatformChrome {

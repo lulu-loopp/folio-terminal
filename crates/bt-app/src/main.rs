@@ -87586,7 +87586,7 @@ impl Runtime<'_> {
                 position.x,
                 position.y,
             ) {
-                if let Err(reason) = self.window.custom_window_frame.begin_window_drag() {
+                if let Err(reason) = self.window.custom_window_frame.press_title_bar() {
                     eprintln!("{reason}");
                 }
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-title-bar-drag state={state:?} button={button:?} target={traced_target:?}"));

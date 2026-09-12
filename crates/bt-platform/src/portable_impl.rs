@@ -244,17 +244,18 @@ impl CustomWindowFrame {
         self.chrome
     }
 
-    /// **Pick the window up by the press in hand.** The macOS `HTCAPTION`: the
-    /// application has decided this press landed on the empty part of its own
-    /// strip, and this is it saying so.
-    pub fn begin_window_drag(&self) -> Result<(), String> {
+    /// **Answer a press on the empty part of the title bar.** The macOS
+    /// `HTCAPTION`: the application has decided this press landed where its own
+    /// chrome is not, and this is it saying so — a drag, or, on a double click,
+    /// whatever the reader has asked a title bar's double click to do.
+    pub fn press_title_bar(&self) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
-            crate::macos_impl::begin_window_drag(self.window)
+            crate::macos_impl::press_title_bar(self.window)
         }
         #[cfg(not(target_os = "macos"))]
         {
-            Err(not_here("dragging a window by its title bar"))
+            Err(not_here("a press on the window's own title bar"))
         }
     }
 
@@ -267,7 +268,7 @@ impl CustomWindowFrame {
 
     /// Where the tab strip ends, for the caption's hit test. There is no native
     /// hit-test message here to answer: the application decides inside the
-    /// press and says so through [`Self::begin_window_drag`].
+    /// press and says so through [`Self::press_title_bar`].
     pub fn set_tab_strip_right_px(&self, tab_strip_right_px: i32) {
         let _ = tab_strip_right_px;
     }

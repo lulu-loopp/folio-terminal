@@ -97,7 +97,8 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     NSArray, NSDictionary, NSKeyValueObservingOptions, NSLocale, NSNotification, NSNumber,
-    NSObjectNSKeyValueObserverRegistration, NSPoint, NSRect, NSSize, NSString, ns_string,
+    NSObjectNSKeyValueObserverRegistration, NSPoint, NSRect, NSSize, NSString, NSUserDefaults,
+    ns_string,
 };
 
 use crate::{NativeWindow, WheelScrollAmount, WindowRect};
@@ -818,7 +819,7 @@ pub fn install_window_class_background(
 /// **`isMovableByWindowBackground` is turned off on purpose.** With it on, a
 /// drag anywhere over Folio's own surface would move the window; the drag
 /// region is the strip's empty part and nothing else, and it is asked for
-/// explicitly through [`begin_window_drag`].
+/// explicitly through [`press_title_bar`].
 ///
 /// **What comes back is a measurement, not a platform name.** The inset is the
 /// right edge of the rightmost standard window button, in this module's own
@@ -875,8 +876,8 @@ pub fn adopt_window_chrome(window: NativeWindow) -> Result<crate::PlatformChrome
     })
 }
 
-/// **Pick the window up by the press that is happening right now** —
-/// `performWindowDragWithEvent:`.
+/// **Answer a press on the empty part of the window's own title bar** —
+/// `performWindowDragWithEvent:`, or the reader's double-click action.
 ///
 /// The macOS counterpart of `HTCAPTION`, and it has to be a call rather than a
 /// hit-test answer because there is no hit test to answer: AppKit asks a
@@ -886,31 +887,74 @@ pub fn adopt_window_chrome(window: NativeWindow) -> Result<crate::PlatformChrome
 /// pixel for pixel, which part of its own strip is empty — and says so here,
 /// inside the press.
 ///
-/// **It is also the double click.** AppKit's own drag implementation carries
-/// the standard title-bar behaviours with it, including the action the reader
-/// has chosen for a double click in System Settings
-/// (`AppleActionOnDoubleClick`: zoom, minimise or nothing). Reading that
-/// preference here and acting on it would be a second implementation of
-/// something the system already does, and one that would go out of date.
+/// **The double click is this door's too, and that is a measurement rather
+/// than a preference.** `performWindowDragWithEvent:` is widely described as
+/// carrying the standard title-bar behaviours with it, the reader's
+/// `AppleActionOnDoubleClick` included, and this ticket wrote it that way
+/// first. Measured on macOS 26.6 on 2026-09-12, in a probe with no Folio in it
+/// at all — a plain `NSWindow` whose own view calls this selector from
+/// `mouseDown:` with `clickCount == 2` — **it does not**: the window stays
+/// where it is, while a double click on AppKit's own title bar in the same run
+/// zooms the window beside it. So the action is performed here, off the one
+/// preference that decides it, and the two verbs are `NSWindow`'s own.
 ///
 /// The event is `NSApp.currentEvent`, which during the press `bt-app` is
 /// answering **is** that press. Refused rather than guessed when it is not a
 /// left mouse-down: a drag started from some other event is a drag the reader
 /// did not begin.
-pub fn begin_window_drag(window: NativeWindow) -> Result<(), String> {
-    let what = "picking a window up by its title bar";
+pub fn press_title_bar(window: NativeWindow) -> Result<(), String> {
+    let what = "a press on the window's own title bar";
     let (mtm, ns_window) = window_for(window, what)?;
     let application = NSApplication::sharedApplication(mtm);
     let event = application
         .currentEvent()
-        .ok_or_else(|| format!("{what}: there is no event in hand to drag from"))?;
+        .ok_or_else(|| format!("{what}: there is no event in hand to answer"))?;
     if event.r#type() != NSEventType::LeftMouseDown {
         return Err(format!(
-            "{what}: the event in hand is not a press, so there is no drag to begin"
+            "{what}: the event in hand is not a press, so there is nothing to answer"
         ));
+    }
+    if event.clickCount() >= 2 {
+        return act_on_double_click(&ns_window);
     }
     ns_window.performWindowDragWithEvent(&event);
     Ok(())
+}
+
+/// **What a double click on a title bar does on this desk** — the reader's
+/// `AppleActionOnDoubleClick`, and nothing of this program's own invention.
+///
+/// Read through the **standard** user defaults rather than off the preferences
+/// file, which is the difference between what the reader chose and what the
+/// system does: `defaults read -g AppleActionOnDoubleClick` says the key does
+/// not exist on a machine nobody has touched it on, and the standard defaults
+/// answer `Maximize` there anyway, because that is the value AppKit registers
+/// for itself. Asking the file would have made "the default" into "nothing
+/// happens".
+///
+/// The three values are Apple's own spelling. Anything else — including a
+/// nothing nobody registered — is left alone rather than guessed at: a title
+/// bar that minimised a window on a setting it did not recognise would be worse
+/// than one that did not move.
+fn act_on_double_click(window: &NSWindow) -> Result<(), String> {
+    let action = NSUserDefaults::standardUserDefaults()
+        .stringForKey(ns_string!("AppleActionOnDoubleClick"))
+        .map(|value| value.to_string());
+    match action.as_deref() {
+        Some("Maximize") => {
+            window.zoom(None);
+            Ok(())
+        }
+        Some("Minimize") => {
+            window.miniaturize(None);
+            Ok(())
+        }
+        Some("None") | None => Ok(()),
+        Some(other) => Err(format!(
+            "a double click on the title bar: this system asks for `{other}`, which this \
+             version does not know how to do"
+        )),
+    }
 }
 
 // ── the system's own preferences (M1-3) ────────────────────────────────────
