@@ -229,6 +229,8 @@ real `WKWebView`.
 guarantee the owner has seen (§8, Q5). *Fail:* an unmapped requirement nobody has
 decided about.
 
+> **Result 2026-09-12 (`probe-x2-wkwebview-policy-2026-09-12.md`): PASS — 20 requirements: 12 mapped, 6 mapped with a difference, 2 unsupported guarantees (`WKURLSchemeHandler` cannot intercept http/https/file — measured; worker-originated requests unmeasured).** Subresources reach the network with no delegate callback at all and are blocked only by a compiled `WKContentRuleList`; iframes, every redirect hop, downloads (`canShowMIMEType=false`), popups (`createWebViewWithConfiguration:` is the one door `window.open` reaches) and HTTP auth each have a delegate. `loadFileURL:allowingReadAccessToURL:` alone holds the local-seat folder rule. **Design for M4-2/M4-3:** one Objective-C class conforming to `WKNavigationDelegate` and `WKUIDelegate` calls `navigation_gate`; `webnav.rs` grows `content_rules(&Mint) -> String` emitting content-blocker JSON from the constants `resource_request` reads, pinned together by a test. What Q5's reduced set gives up: no per-request Rust decision, no host-minted 403 or refusal reason, permissions one capability at a time. Two carry-forwards: objc2's debug selector verification refuses WebKit's forwarding proxy for the auth challenge (turn it off with the reason recorded); a panic inside a delegate callback unwinds into Objective-C and kills the process before stderr exists, so the backend needs its own panic hook.
+
 **X-3 — Command, Option and IME routing.**
 Clipboard is not in `BINDINGS`: `is_copy_shortcut` and `is_paste_shortcut` are
 independent Control predicates in `crates/bt-app/src/input.rs`. `WebChord`
