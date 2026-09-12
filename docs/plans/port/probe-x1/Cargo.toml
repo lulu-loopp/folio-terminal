@@ -1,0 +1,27 @@
+# X-1's scratch probe: deliberately outside the workspace (the empty
+# `[workspace]` table below), so that a crate naming Metal and WebKit never
+# enters Folio's own dependency graph. The versions are the ones `Cargo.lock`
+# already pins, with one deliberate difference: the repository asks wgpu for
+# `dx12`, and a Metal probe has to ask for `metal`.
+[package]
+name = "probe-x1"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+wgpu = { version = "=30.0.0", default-features = false, features = ["std", "metal", "wgsl"] }
+winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
+raw-window-handle = "0.6.2"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSGeometry", "NSArray"] }
+objc2-app-kit = { version = "0.3", features = ["NSView", "NSWindow", "NSScreen", "NSApplication"] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer"] }
+objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKWebViewConfiguration", "WKNavigation"] }
+pollster = "0.4"
+png = "0.18"
+
+[profile.dev]
+opt-level = 1
