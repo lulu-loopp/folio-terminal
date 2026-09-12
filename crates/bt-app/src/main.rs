@@ -35865,6 +35865,14 @@ impl Runtime<'_> {
         install_theme_class_background(&window)?;
         window.set_ime_allowed(true);
         let hwnd = window_hwnd(&window)?;
+        // **The clipboard's owner window, told once here and never carried by a
+        // caller again** (M1-9). `OpenClipboard` wants a window and
+        // `NSPasteboard` does not, so the handle used to be a parameter on a
+        // door that has to have one signature on every platform; the backend
+        // keeps the list of this process's windows instead, and
+        // `bt_platform::clipboard_text`, `set_clipboard_text` and
+        // `cancel_composition` ask it rather than their callers.
+        bt_platform::register_clipboard_owner(hwnd);
         // The frame's two measurements travel with the install, from the crate
         // that paints them (spike Q5 item 2): the title bar the pointer is
         // tested against and the title bar the renderer draws are now literally
@@ -36484,6 +36492,9 @@ impl Runtime<'_> {
         install_theme_class_background(&window)?;
         window.set_ime_allowed(true);
         let hwnd = window_hwnd(&window)?;
+        // A second window is a second owner the clipboard may go through — see
+        // the first constructor's note.
+        bt_platform::register_clipboard_owner(hwnd);
         let custom_window_frame = bt_platform::CustomWindowFrame::install(
             hwnd,
             bt_platform::CustomFrameGeometry {
@@ -45919,12 +45930,7 @@ impl Runtime<'_> {
         let control = self.window.modifiers.control_key();
         let paste = matches!(&event.logical_key, Key::Character(text)
             if control && matches!(text.as_str(), "v" | "V"));
-        let pasted = paste.then(|| {
-            window_hwnd(&self.window.window)
-                .ok()
-                .and_then(|hwnd| bt_platform::clipboard_text(hwnd).ok())
-                .unwrap_or_default()
-        });
+        let pasted = paste.then(|| bt_platform::clipboard_text().unwrap_or_default());
         let Some(field) = self.window.settings.text_field_mut(target) else {
             return Ok(false);
         };
@@ -54775,7 +54781,7 @@ impl Runtime<'_> {
         if url.is_empty() {
             return Ok(());
         }
-        let result = write_terminal_clipboard_text(&self.window.window, &url);
+        let result = write_terminal_clipboard_text(&url);
         recoverable_clipboard_write(result, "copy a page's address");
         Ok(())
     }
@@ -57347,7 +57353,7 @@ impl Runtime<'_> {
         let Some(text) = self.preview_selected_text(surface) else {
             return false;
         };
-        if let Err(error) = write_terminal_clipboard_text(&self.window.window, &text) {
+        if let Err(error) = write_terminal_clipboard_text(&text) {
             // Recoverable, on `recoverable_clipboard_write`'s own terms: the
             // selection stays standing so the reader can try again.
             eprintln!("recoverable preview copy failure: {error:#}");
@@ -58769,7 +58775,7 @@ impl Runtime<'_> {
         else {
             return;
         };
-        if let Err(error) = write_terminal_clipboard_text(&self.window.window, &text) {
+        if let Err(error) = write_terminal_clipboard_text(&text) {
             eprintln!("recoverable preview copy failure: {error:#}");
         }
     }
@@ -58780,8 +58786,7 @@ impl Runtime<'_> {
     /// pasting it verbatim into a file written with bare newlines is how a
     /// one-line paste turns the next diff into a whole-file rewrite.
     fn paste_into_preview(&mut self) -> Result<()> {
-        let hwnd = window_hwnd(&self.window.window)?;
-        let text = match bt_platform::clipboard_text(hwnd) {
+        let text = match bt_platform::clipboard_text() {
             Ok(text) => text,
             Err(error) => {
                 eprintln!("recoverable preview paste failure: {error}");
@@ -64941,11 +64946,9 @@ impl Runtime<'_> {
     /// waiting for: a copy is invisible, and a verb whose whole effect is
     /// somewhere the reader cannot see has to say that it happened.
     fn copy_from_graph(&mut self, surface: PreviewSurface, text: &str, said: &str) -> Result<()> {
-        let result = window_hwnd(&self.window.window).and_then(|hwnd| {
-            bt_platform::set_clipboard_text(hwnd, text)
-                .map_err(|error| anyhow!(error))
-                .context("copy a commit's own words to the clipboard")
-        });
+        let result = bt_platform::set_clipboard_text(text)
+            .map_err(|error| anyhow!(error))
+            .context("copy a commit's own words to the clipboard");
         if !recoverable_clipboard_write(result, "commit copy") {
             return Ok(());
         }
@@ -71041,11 +71044,9 @@ impl Runtime<'_> {
         text: &str,
         said: &str,
     ) -> Result<()> {
-        let result = window_hwnd(&self.window.window).and_then(|hwnd| {
-            bt_platform::set_clipboard_text(hwnd, text)
-                .map_err(|error| anyhow!(error))
-                .context("copy a repository's own words to the clipboard")
-        });
+        let result = bt_platform::set_clipboard_text(text)
+            .map_err(|error| anyhow!(error))
+            .context("copy a repository's own words to the clipboard");
         if !recoverable_clipboard_write(result, "git menu copy") {
             return Ok(());
         }
@@ -74868,7 +74869,7 @@ impl Runtime<'_> {
     /// pasted somewhere this window does not control.
     fn copy_path_to_clipboard(&mut self, path: &Path) -> Result<()> {
         let text = path.to_string_lossy().into_owned();
-        let result = write_terminal_clipboard_text(&self.window.window, &text);
+        let result = write_terminal_clipboard_text(&text);
         recoverable_clipboard_write(result, "copy a files row's path");
         Ok(())
     }
@@ -82617,11 +82618,9 @@ impl Runtime<'_> {
         else {
             return;
         };
-        let result = window_hwnd(&self.window.window).and_then(|hwnd| {
-            bt_platform::set_clipboard_text(hwnd, source)
-                .map_err(|error| anyhow!(error))
-                .context("copy original LaTeX source to clipboard")
-        });
+        let result = bt_platform::set_clipboard_text(source)
+            .map_err(|error| anyhow!(error))
+            .context("copy original LaTeX source to clipboard");
         recoverable_clipboard_write(result, "formula copy");
     }
 
@@ -82827,14 +82826,15 @@ impl Runtime<'_> {
     }
 
     fn copy_selection(&mut self) -> Result<()> {
-        let window = Arc::clone(&self.window.window);
         let active = self.window.active_tab;
         let Some(leaf) = self.window.tabs[active].focused_mut() else {
             return Ok(());
         };
-        if !copy_selection(&mut leaf.session, &mut leaf.projection, |text| {
-            write_terminal_clipboard_text(&window, text)
-        }) {
+        if !copy_selection(
+            &mut leaf.session,
+            &mut leaf.projection,
+            write_terminal_clipboard_text,
+        ) {
             return Ok(());
         }
         self.publish_interaction_frame()
@@ -82846,13 +82846,10 @@ impl Runtime<'_> {
     /// selection just made that the hand means, and there is only one pane it was
     /// ever made in.
     fn copy_selection_on_release(&self, seat: SeatId) {
-        let window = Arc::clone(&self.window.window);
         let Some(leaf) = self.sessions.get(&seat) else {
             return;
         };
-        write_selection_text(&leaf.session, true, |text| {
-            write_terminal_clipboard_text(&window, text)
-        });
+        write_selection_text(&leaf.session, true, write_terminal_clipboard_text);
     }
 
     /// A tab with no shell has no transcript to scroll: `Shift+PageUp` in a
@@ -90625,16 +90622,15 @@ impl Runtime<'_> {
     }
 
     /// **What the clipboard can put into a one-line field**, or nothing when
-    /// there is no window handle or the platform will not hand it over.
+    /// the platform will not hand it over.
     ///
     /// A failure is silent on [`Self::paste_into_preview`]'s own terms: a
     /// clipboard another process is holding open is a condition that clears
     /// itself, and a box that raised a card about it would be interrupting a
     /// reader mid-query to report an event they can simply repeat.
     fn clipboard_line(&self) -> String {
-        window_hwnd(&self.window.window)
+        bt_platform::clipboard_text()
             .ok()
-            .and_then(|hwnd| bt_platform::clipboard_text(hwnd).ok())
             .as_deref()
             .map(text_field::one_line)
             .unwrap_or_default()
@@ -92431,7 +92427,7 @@ impl Runtime<'_> {
                 // row reach the clipboard by one route — and a clipboard another
                 // process is holding open is recoverable here for the reason it
                 // is everywhere else.
-                let result = write_terminal_clipboard_text(&self.window.window, &copied);
+                let result = write_terminal_clipboard_text(&copied);
                 recoverable_clipboard_write(result, "copy from the name editor");
             }
             match verdict {
@@ -93022,7 +93018,6 @@ impl Runtime<'_> {
     /// terminal menu, which is raised by a right press, and a right press does
     /// not move the focus.
     fn paste_from_clipboard_into(&mut self, seat: SeatId) -> Result<()> {
-        let window = Arc::clone(&self.window.window);
         let active = self.window.active_tab;
         // Destructured rather than reached through three derefs: the paste needs
         // the shell's screen, its projection and its pipe held at once, and they
@@ -93040,11 +93035,9 @@ impl Runtime<'_> {
             session,
             projection,
             || {
-                window_hwnd(&window).and_then(|hwnd| {
-                    bt_platform::clipboard_text(hwnd)
-                        .map_err(|error| anyhow!(error))
-                        .context("read clipboard text")
-                })
+                bt_platform::clipboard_text()
+                    .map_err(|error| anyhow!(error))
+                    .context("read clipboard text")
             },
             |bytes| write_pty_input(pty.as_ref(), bytes, "write clipboard paste to PTY"),
         )? {
@@ -93298,9 +93291,7 @@ impl Runtime<'_> {
     /// move and is not: that re-associates the input context for the whole
     /// window and drops the method's state with it.
     fn cancel_composition(&mut self, started_in: ImeOwner) -> Result<()> {
-        if let Ok(hwnd) = window_hwnd(&self.window.window) {
-            bt_platform::cancel_composition(hwnd);
-        }
+        bt_platform::cancel_composition();
         self.window.preedit = None;
         self.window.composing = None;
         self.window.ime_cursor_throttle.reset();
@@ -94907,11 +94898,9 @@ impl Runtime<'_> {
     /// Put one string on the clipboard, through the door every other copy in
     /// this window uses.
     fn copy_text_to_clipboard(&mut self, text: &str) {
-        let result = window_hwnd(&self.window.window).and_then(|hwnd| {
-            bt_platform::set_clipboard_text(hwnd, text)
-                .map_err(|error| anyhow!(error))
-                .context("copy a refused address to the clipboard")
-        });
+        let result = bt_platform::set_clipboard_text(text)
+            .map_err(|error| anyhow!(error))
+            .context("copy a refused address to the clipboard");
         let _ = recoverable_clipboard_write(result, "web address copy");
     }
 
@@ -104768,12 +104757,10 @@ fn write_selection_text(
     true
 }
 
-fn write_terminal_clipboard_text(window: &Window, text: &str) -> Result<()> {
-    window_hwnd(window).and_then(|hwnd| {
-        bt_platform::set_clipboard_text(hwnd, text)
-            .map_err(|error| anyhow!(error))
-            .context("write terminal selection to clipboard")
-    })
+fn write_terminal_clipboard_text(text: &str) -> Result<()> {
+    bt_platform::set_clipboard_text(text)
+        .map_err(|error| anyhow!(error))
+        .context("write terminal selection to clipboard")
 }
 
 fn recoverable_clipboard_write(result: Result<()>, action: &str) -> bool {
@@ -140908,7 +140895,7 @@ mod tests {
         );
         assert!(
             PLATFORM
-                .split("pub fn cancel_composition(hwnd: NonZeroIsize) -> bool {")
+                .split("pub fn cancel_composition() -> bool {")
                 .nth(1)
                 .is_some_and(|body| body
                     .split("\n    }\n")

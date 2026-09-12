@@ -7936,6 +7936,10 @@ C-1(目录校验在监听线程上做无界文件系统调用)与 C-3(端点应�
 
 spike 量出来的数字说的正是这件事。`bt-app` 在 macOS 上停在 **321 条错误,点名 79 个 `bt_platform` 里没有的东西**。321 不是 321 处散落的麻烦,是一个有 79 个入口的接口,而这 79 个每一个都已经有名字、有文档、只从一个地方被调。
 
+**这句话的第二半是 2026-09-12 才写下来的:`bt-platform` 的一个公开项在每个平台上只有一个签名,而那个签名里不出现 Windows 的类型。** 门后面是什么是后端的事,门本身的形状不许陈述它跑在哪台机器上。最容易漏掉的破法不是一个明晃晃的 `HWND`,是一个拼写上「可移植」的 `NonZeroIsize`——它编译得过每一个平台,却逼着每一个平台的每一个调用方先弄到一个窗口句柄;后端清单量出来,**58 个硬泄漏里有 40 个是这一种**。`cancel_composition` 把话说到了头:它 `#[cfg(not(windows))]` 的那一支早就收着一个转手就扔掉的 `hwnd`,泄漏出现在了这个 crate **可移植的那一半**里。
+
+`clipboard_text`、`set_clipboard_text`、`cancel_composition` 三扇门的 `hwnd` 参数因此去掉了,而 **Windows 的那个要求由 Windows 这一支自己答**:窗口构造器调一次 `bt_platform::register_clipboard_owner(hwnd)`(这个项本身是 `#[cfg(windows)]` 的,因为别的平台没有东西可注册),后端取本进程开过的、还活着的最新那一个窗口,没有窗口时老实报错——用空属主打开的剪贴板,`EmptyClipboard` 之后 `SetClipboardData` 会失败。IMM32 那半边压根没提过这个要求:系统给一个线程一个默认输入上下文,并把它关联到该线程建的每一个窗口,所以 `ImmGetContext` 对本线程哪个窗口都答同一个 `HIMC`。macOS 那一支是跟窗口无关的 `NSPasteboard`;其余 Unix 照实答 `Err` 并说明理由,而不是一个只有本进程看得见的私有缓冲区——那种「剪贴板」会为一次别人根本粘不到的复制报成功。规矩由 `the_clipboard_door_has_no_window_in_its_signature` 钉住:它读这个 crate 自己的源码,要求这三个名字的每一处 `pub fn` 声明里都不出现 `NonZeroIsize`、`HWND` 或 `hwnd`,**包括本次构建根本不编译的那些支**——换个名字回来的参数还是同一个泄漏,而在它本来就成立的那个平台上,编译器对此无话可说。
+
 ### 13.2 可移植核:一个 crate 一个 crate 点名
 
 | | |

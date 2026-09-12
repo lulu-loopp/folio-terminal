@@ -2416,6 +2416,22 @@ mod windows_impl {
     /// Until somebody does, "the theme is the application's" is what makes one handle here correct
     /// rather than a simplification, and this static stays where it is.
     static WINDOW_CLASS_BACKGROUND: OnceLock<Mutex<Option<isize>>> = OnceLock::new();
+    /// Every window this process has opened, newest last — the windows the
+    /// clipboard and the input method are allowed to act through.
+    ///
+    /// **Why the backend keeps this instead of asking the caller** (M1-9,
+    /// `docs/plans/port/macos-plan-2026-09-12.md` §4.4 ②). `OpenClipboard`
+    /// wants a window and `NSPasteboard` does not, so a window in the
+    /// signature is a Windows requirement charged to every platform. It is the
+    /// backend's requirement, so the backend answers it: a window constructor
+    /// calls [`register_clipboard_owner`] once and no caller carries a handle
+    /// again.
+    ///
+    /// **A list and not one handle**, because this process opens more than one
+    /// window and closes them in any order; the newest one still standing is
+    /// the answer, and a handle whose window has gone is dropped on the way
+    /// past rather than handed to a call that would fail on it.
+    static CLIPBOARD_OWNERS: OnceLock<Mutex<Vec<NonZeroIsize>>> = OnceLock::new();
     /// The crop a visual that is **not on the glass** wears — see
     /// [`Compositor::hide_web_visual`]. An empty rectangle rather than an
     /// offscreen one, so that nothing about where the page last stood survives
@@ -4720,19 +4736,101 @@ mod windows_impl {
         })
     }
 
+    /// **Tell this backend about a window it may act through.**
+    ///
+    /// Called once by each window constructor. It is the whole of what
+    /// [`clipboard_text`], [`set_clipboard_text`] and [`cancel_composition`]
+    /// used to take as a parameter, and it is `#[cfg(windows)]` because it is
+    /// the answer to a Win32 requirement: `OpenClipboard` associates the open
+    /// clipboard with a window, and `EmptyClipboard` on a clipboard opened with
+    /// none sets the owner to null, after which `SetClipboardData` fails. There
+    /// is nothing for the other platforms to register.
+    ///
+    /// Registering the same window twice makes it the newest rather than
+    /// listing it twice, so a constructor that runs again for a rebuilt window
+    /// leaves no duplicate behind.
+    pub fn register_clipboard_owner(hwnd: NonZeroIsize) {
+        let Ok(mut owners) = CLIPBOARD_OWNERS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+        else {
+            // A poisoned list is a list somebody panicked while holding. The
+            // handles in it are still true, and refusing to register would cost
+            // this process its clipboard for the rest of the run; there is
+            // nothing here to recover *to*.
+            return;
+        };
+        owners.retain(|window| *window != hwnd);
+        owners.push(hwnd);
+    }
+
+    /// The newest registered window that is still one of this thread's, with
+    /// the ones that are not dropped from the list on the way past.
+    ///
+    /// Split out from [`owner_window`] and given the liveness question as a
+    /// closure so that the choice can be stated without a window existing —
+    /// see `the_windows_clipboard_finds_its_owner_itself`.
+    fn newest_live_owner(
+        registered: &mut Vec<NonZeroIsize>,
+        mut still_ours: impl FnMut(NonZeroIsize) -> bool,
+    ) -> Option<NonZeroIsize> {
+        registered.retain(|window| still_ours(*window));
+        registered.last().copied()
+    }
+
+    /// Whether this handle still names a window belonging to the calling
+    /// thread.
+    ///
+    /// One call answers both halves. `GetWindowThreadProcessId` returns 0 for a
+    /// handle that is no longer a window at all, and the thread id it returns
+    /// for one that is settles the other question: `OpenClipboard` wants a
+    /// window of the calling thread, and a recycled handle that now belongs to
+    /// somebody else fails the same test as a closed one.
+    fn window_is_on_this_thread(hwnd: NonZeroIsize) -> bool {
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
+        let hwnd = HWND(hwnd.get() as *mut c_void);
+        // SAFETY: neither call dereferences the handle; an invalid one is
+        // answered with 0 rather than undefined behaviour, and the out
+        // parameter is declined.
+        let thread = unsafe { GetWindowThreadProcessId(hwnd, None) };
+        // SAFETY: takes no arguments and answers for the calling thread.
+        thread != 0 && thread == unsafe { GetCurrentThreadId() }
+    }
+
+    /// The window the clipboard and the input method act through.
+    ///
+    /// **The same window serves both**, and that is a fact about IMM32 rather
+    /// than a convenience: the system gives a *thread* one default input
+    /// context and associates it with every window that thread creates, so
+    /// `ImmGetContext` answers the same `HIMC` for any window of this thread —
+    /// which is why [`cancel_composition`] cancels the composition in flight
+    /// whichever of this process's windows it is handed.
+    fn owner_window() -> Result<HWND, String> {
+        let mut owners = CLIPBOARD_OWNERS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .map_err(|_| "clipboard owner list lock poisoned".to_owned())?;
+        newest_live_owner(&mut owners, window_is_on_this_thread)
+            .map(|hwnd| HWND(hwnd.get() as *mut c_void))
+            .ok_or_else(|| "no window of this thread owns the clipboard".to_owned())
+    }
+
     fn open_clipboard_with_retry(hwnd: HWND) -> Result<(), String> {
         retry_open_clipboard(
             || {
-                // SAFETY: the caller supplies winit's live HWND and all clipboard transactions run
-                // on its event-loop thread. A failed open acquires no resource that needs cleanup.
+                // SAFETY: `hwnd` is a live window of the calling thread — see `owner_window` — and
+                // all clipboard transactions run on the event-loop thread that owns it. A failed
+                // open acquires no resource that needs cleanup.
                 unsafe { OpenClipboard(Some(hwnd)) }.map_err(|error| error.to_string())
             },
             std::thread::sleep,
         )
     }
 
-    pub fn clipboard_text(hwnd: NonZeroIsize) -> Result<String, String> {
-        let hwnd = HWND(hwnd.get() as *mut c_void);
+    pub fn clipboard_text() -> Result<String, String> {
+        let hwnd = owner_window()?;
         // SAFETY: all calls run on winit's event-loop thread. The clipboard remains open while the
         // borrowed global-memory handle is locked, its UTF-16 content is copied, and then both the
         // memory and clipboard are released before returning.
@@ -4775,8 +4873,8 @@ mod windows_impl {
         }
     }
 
-    pub fn set_clipboard_text(hwnd: NonZeroIsize, text: &str) -> Result<(), String> {
-        let hwnd = HWND(hwnd.get() as *mut c_void);
+    pub fn set_clipboard_text(text: &str) -> Result<(), String> {
+        let hwnd = owner_window()?;
         let mut units = text.encode_utf16().collect::<Vec<_>>();
         units.push(0);
         // SAFETY: the event-loop thread owns the clipboard for this transaction. The movable
@@ -5669,13 +5767,16 @@ mod windows_impl {
     /// no composition string to cancel and IMM32 says so; the caller's own state
     /// is cleared either way, because the app's picture of what is being
     /// composed is the app's.
-    pub fn cancel_composition(hwnd: NonZeroIsize) -> bool {
-        let hwnd = HWND(hwnd.get() as *mut c_void);
-        // SAFETY: `hwnd` originates from winit's live Win32WindowHandle and
-        // every call here happens on its event-loop thread, which is the thread
-        // an input context is affine to. The context is released on every path
-        // out, including the one where there is none to release — `ImmGetContext`
-        // answers null and `ImmReleaseContext` is a no-op for it.
+    pub fn cancel_composition() -> bool {
+        let Ok(hwnd) = owner_window() else {
+            return false;
+        };
+        // SAFETY: `hwnd` is a live window of the calling thread — see
+        // `owner_window`, which is also where the one input context this thread
+        // has is explained — and every call here happens on the event-loop
+        // thread an input context is affine to. The context is released on every
+        // path out, including the one where there is none to release —
+        // `ImmGetContext` answers null and `ImmReleaseContext` is a no-op for it.
         unsafe {
             let context = ImmGetContext(hwnd);
             if context.0.is_null() {
@@ -7370,10 +7471,11 @@ mod windows_impl {
     mod tests {
         use super::{
             CLIPBOARD_OPEN_RETRY_DELAYS, FolderPickerState, ImagePickerState, MathMenuState,
-            ShellPickKind, compositor_failure, primary_language_id, retry_open_clipboard,
-            wide_null,
+            ShellPickKind, compositor_failure, newest_live_owner, primary_language_id,
+            retry_open_clipboard, wide_null,
         };
         use crate::handoff::{validate_local_image_path, validate_openable_path};
+        use std::num::NonZeroIsize;
         use std::path::{Path, PathBuf};
 
         /// A DirectComposition refusal has to be readable by the person holding
@@ -7405,6 +7507,49 @@ mod windows_impl {
                     > "IDCompositionDesktopDevice::CreateTargetForHwnd failed:  (0x8007000E)".len(),
                 "with Windows' own sentence in between: {message}"
             );
+        }
+
+        /// **The clipboard finds its own owner window** (M1-9).
+        ///
+        /// `OpenClipboard` wants a window of the calling thread and
+        /// `SetClipboardData` fails outright if the open was made with none, so
+        /// this backend has to produce one — from the windows its own
+        /// constructors registered, and never from a parameter, because there
+        /// is no window on the other platforms this door now opens on.
+        ///
+        /// Three claims: the newest window still standing is the one used, a
+        /// handle that no longer names a window of this thread is dropped
+        /// rather than tried, and a process with none left says so instead of
+        /// opening the clipboard with a null owner.
+        ///
+        /// MUTATION: return the *first* registered handle instead of the last
+        /// and the first assertion goes red; keep the dead handles and the
+        /// second does.
+        #[test]
+        fn the_windows_clipboard_finds_its_owner_itself() {
+            let handle = |value: isize| NonZeroIsize::new(value).expect("a test handle is not 0");
+            let mut registered = vec![handle(11), handle(22), handle(33)];
+
+            assert_eq!(
+                newest_live_owner(&mut registered, |_| true),
+                Some(handle(33)),
+                "the newest window this process opened is the one the clipboard goes through",
+            );
+            assert_eq!(registered, vec![handle(11), handle(22), handle(33)]);
+
+            assert_eq!(
+                newest_live_owner(&mut registered, |window| window != handle(33)),
+                Some(handle(22)),
+                "a window that has closed is forgotten rather than handed to OpenClipboard",
+            );
+            assert_eq!(registered, vec![handle(11), handle(22)]);
+
+            assert_eq!(
+                newest_live_owner(&mut registered, |_| false),
+                None,
+                "and a thread with no window left says so",
+            );
+            assert!(registered.is_empty());
         }
 
         #[test]
@@ -9002,13 +9147,14 @@ pub use windows_impl::{
     hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
     install_window_class_background, is_window_cloaked, is_window_minimized, leave_process,
     message_box, monitor_id_at, monospace_font_families, os_ui_language, pointer_position,
-    read_context_menu, recycle, redirect_std_streams_to_file, remove_context_menu,
-    request_window_close, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
-    set_window_dark_mode, set_window_outer_rect, set_window_topmost, silence_std_streams,
-    spawn_at_priority, stand_window_at, std_error_is_console, system_backdrop_available,
-    system_uses_light_apps, take_keyboard_focus, taskbar_auto_hidden_from_state,
-    taskbar_is_auto_hidden, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
-    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_to_console,
+    read_context_menu, recycle, redirect_std_streams_to_file, register_clipboard_owner,
+    remove_context_menu, request_window_close, set_clipboard_text, set_current_thread_priority,
+    set_system_backdrop, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
+    silence_std_streams, spawn_at_priority, stand_window_at, std_error_is_console,
+    system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
+    taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
+    top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
+    window_is_exposed, work_area_at, write_to_console,
 };
 
 /// **The hand-off, spelled once** — see [`handoff`].
@@ -9103,20 +9249,197 @@ pub use portable_priority::{
 /// not one to take by accident on the way past.
 #[cfg(not(windows))]
 mod portable_ime {
-    use std::num::NonZeroIsize;
-
     /// Whether an input method was told to throw its composition away. Off
     /// Windows none was asked, so `false` — the same answer Win32 gives for a
     /// window that is not composing.
+    ///
+    /// **It used to take a window handle and throw it away**
+    /// (`docs/plans/port/backend-inventory-2026-09-12.md` §6 ③): a
+    /// `NonZeroIsize` that was an `HWND` in everything but its spelling, in the
+    /// portable half of the crate, obliging a platform that has no such handle
+    /// to produce one for a function that ignored it. M1-9 dropped it here at
+    /// the same time as the clipboard's, because it is the same defect and the
+    /// same sentence closes both.
     #[must_use]
-    pub fn cancel_composition(hwnd: NonZeroIsize) -> bool {
-        let _ = hwnd;
+    pub fn cancel_composition() -> bool {
         false
     }
 }
 
 #[cfg(not(windows))]
 pub use portable_ime::cancel_composition;
+
+/// **The clipboard on macOS: `NSPasteboard`, and no window anywhere in it.**
+///
+/// The general pasteboard is a property of the session rather than of a window,
+/// which is the whole reason M1-9 exists: Windows needs an owner window for
+/// `OpenClipboard` and AppKit has nothing to do with one, so the handle every
+/// caller used to carry was Win32's requirement charged to a platform that does
+/// not have it. The Windows arm now finds its own owner
+/// (`windows_impl::register_clipboard_owner`) and this one needs nothing.
+///
+/// **Four calls, and they are the whole implementation.**
+/// `NSPasteboard::generalPasteboard` is the session's pasteboard;
+/// `stringForType(NSPasteboardTypeString)` reads whatever plain-text
+/// representation the current contents can offer, which is `None` for a
+/// pasteboard holding only a picture or a file promise — the same "no Unicode
+/// text" the Windows arm answers when `CF_UNICODETEXT` is absent. Writing is a
+/// pair and must stay a pair: `clearContents` takes ownership of the pasteboard
+/// and starts a new change count, and only then does `setString_forType` have a
+/// pasteboard this process owns to declare a type on. Writing without clearing
+/// first writes to somebody else's, and `setString_forType` answers `false` —
+/// which is the `Err` a caller sees.
+///
+/// **What is deliberately not here.** No `NSPasteboardItem`, no second type
+/// written beside the string, no `prepareForNewContents` — this door carries one
+/// string, exactly as its Windows arm carries one `CF_UNICODETEXT`, and a richer
+/// pasteboard is a product decision nobody has taken. And no line ending is
+/// touched: the Windows arm does not translate either, and `bt-app`'s own paste
+/// path already normalises what it receives.
+///
+/// **Not compiled on this workspace's CI Windows runners**, only checked for
+/// `aarch64-apple-darwin`. Selector existence, the main-thread question and
+/// every real byte moved stay for a Mac ticket
+/// (`docs/plans/port/probe-x6-cross-check-2026-09-12.md`).
+#[cfg(target_os = "macos")]
+mod macos_clipboard {
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+    use objc2_foundation::NSString;
+
+    /// What the general pasteboard holds as plain text, or why it holds none.
+    pub fn clipboard_text() -> Result<String, String> {
+        let pasteboard: Retained<NSPasteboard> = NSPasteboard::generalPasteboard();
+        // SAFETY: a message send to the session's own pasteboard, which AppKit
+        // keeps alive for the process. Nothing is borrowed across the send, and
+        // what comes back is a `Retained` that owns its string for as long as
+        // it is read here.
+        let text = unsafe { pasteboard.stringForType(NSPasteboardTypeString) };
+        text.map(|text| text.to_string())
+            .ok_or_else(|| "pasteboard has no plain text".to_owned())
+    }
+
+    /// Put one string on the general pasteboard, as plain text.
+    pub fn set_clipboard_text(text: &str) -> Result<(), String> {
+        let pasteboard: Retained<NSPasteboard> = NSPasteboard::generalPasteboard();
+        pasteboard.clearContents();
+        let value = NSString::from_str(text);
+        // SAFETY: as above, and the string outlives the send — the pasteboard
+        // copies what it is given. `clearContents` above is what makes this a
+        // legal write: the pasteboard has to be owned and its types declared
+        // before anything can be written into it.
+        if unsafe { pasteboard.setString_forType(&value, NSPasteboardTypeString) } {
+            Ok(())
+        } else {
+            Err("NSPasteboard refused the text".to_owned())
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub use macos_clipboard::{clipboard_text, set_clipboard_text};
+
+/// The clipboard on a platform that has not been asked yet.
+///
+/// The same contract [`portable_priority`] answers and for the same reason: the
+/// door is present everywhere so that `bt-app` carries no gate, and it refuses
+/// with a sentence a caller can put in front of a reader instead of being
+/// absent, which nothing can explain. What it is **not** is a private buffer
+/// this process passes to itself — a clipboard that only this program can see
+/// would report success for a copy nobody else can paste, and that is a worse
+/// answer than "no".
+///
+/// The real arm here is X11's and Wayland's, and those are two different
+/// answers with two different lifetimes (a selection owner that must stay alive
+/// to serve it, versus a data-device offer bound to a seat). Choosing between
+/// them is a Linux backend's decision, which this workspace has not scheduled
+/// (`docs/plans/port/macos-plan-2026-09-12.md` §1 non-goals), and taking it here
+/// on the way past would be answering it by accident.
+#[cfg(not(any(windows, target_os = "macos")))]
+mod portable_clipboard {
+    /// What the clipboard holds. Nobody has been asked, so the honest answer is
+    /// the reason rather than an empty string, which would read as a clipboard
+    /// that really is empty.
+    pub fn clipboard_text() -> Result<String, String> {
+        Err("this platform has no clipboard backend".to_owned())
+    }
+
+    /// Put one string on the clipboard. Refused, and said so — the caller's own
+    /// failure path already turns this into a line a reader sees.
+    pub fn set_clipboard_text(text: &str) -> Result<(), String> {
+        let _ = text;
+        Err("this platform has no clipboard backend".to_owned())
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub use portable_clipboard::{clipboard_text, set_clipboard_text};
+
+/// **A door in this crate has one signature, and no window in it**
+/// (`docs/plans/port/macos-plan-2026-09-12.md` §4.4 ②, ticket M1-9).
+///
+/// The rule is one sentence: a public item of `bt-platform` keeps the same
+/// signature on every platform, and that signature names no Windows type. A
+/// window handle spelled `NonZeroIsize` is the shape the rule is really about
+/// — it passes for portable, it compiles everywhere, and it obliges every
+/// caller on every platform to have an `HWND` to hand. `NSPasteboard` has no
+/// window to be given, so a caller that had to supply one would be supplying it
+/// for nothing; `cancel_composition`'s portable arm was already taking one and
+/// throwing it away
+/// (`docs/plans/port/backend-inventory-2026-09-12.md` §6 ③).
+///
+/// This is a source pin rather than a type assertion because what it guards is
+/// the *text* of the declarations: a parameter that comes back under another
+/// name is still the same leak, and the compiler has nothing to say about it on
+/// the platform where it would be correct.
+///
+/// MUTATION: give any of the three an `hwnd` parameter again and this goes red
+/// on every platform, including the one where that parameter would work.
+#[cfg(test)]
+mod platform_door_tests {
+    /// This file's own text — every arm of every door, including the ones this
+    /// build does not compile.
+    const SOURCE: &str = include_str!("lib.rs");
+
+    /// What each `pub fn NAME(…)` in this file declares: from its open
+    /// parenthesis to the brace that opens its body.
+    ///
+    /// The needle is assembled at run time, so the line that builds it is not
+    /// one of the declarations it goes looking for.
+    fn declarations(name: &str) -> Vec<String> {
+        let needle = format!("pub fn {name}(");
+        SOURCE
+            .match_indices(&needle)
+            .map(|(at, _)| {
+                let rest = &SOURCE[at + needle.len() - 1..];
+                let end = rest
+                    .find(" {")
+                    .expect("a declaration is followed by the body it opens");
+                rest[..end].to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_clipboard_door_has_no_window_in_its_signature() {
+        for name in ["clipboard_text", "set_clipboard_text", "cancel_composition"] {
+            let declared = declarations(name);
+            assert!(
+                declared.len() >= 2,
+                "{name} is declared on both sides of the door, not {} time(s)",
+                declared.len(),
+            );
+            for declaration in declared {
+                for window in ["NonZeroIsize", "HWND", "hwnd"] {
+                    assert!(
+                        !declaration.contains(window),
+                        "{name}{declaration} still names a window ({window})",
+                    );
+                }
+            }
+        }
+    }
+}
 
 /// The band contract, asked where there are no bands.
 ///
