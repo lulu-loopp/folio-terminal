@@ -140,12 +140,26 @@ harness = false
 # `copyCGImageAtTime:actualTime:error:`, `tracksWithMediaType:` and `CMTime`
 # against classes this crate does not own — unchecked selectors and a
 # hand-written struct layout in place of a generated binding.
+#
+# **M4-10 adds no package either, and it is the cheapest edge in the port**: the
+# update check's one `GET` is `NSURLSession`, which is *Foundation* — five more
+# classes of a crate that is already here (`NSURLSession`, `NSURLRequest`,
+# `NSURLResponse`, `NSData`, `NSOperation`) and `objc2-foundation`'s own
+# `block2` feature, for the two completion handlers a session delegate is
+# handed. **No package**, which is `docs/DESIGN.md` §8's bar and the same door
+# `Win32_Networking_WinHttp` came through on the other platform: the one line
+# `Cargo.lock` gains is `block2 0.6.2` appearing in `objc2-foundation`'s
+# dependency list, a crate already in that file and already in
+# `THIRD-PARTY-NOTICES.md`, which therefore does not move at all. A blocking
+# Rust HTTP client is roughly forty packages once its TLS stack and its
+# certificate store are counted.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-# The one completion handler this crate passes to AppKit:
+# The completion handlers this crate passes to AppKit and to Foundation:
 # `-[NSSavePanel beginSheetModalForWindow:completionHandler:]`, which is how a
 # panel is a sheet on a window rather than a nested modal loop inside a winit
-# callback.
+# callback (M2-3); and the two a `NSURLSessionDataDelegate` is handed — the
+# redirect decision and the response disposition (M4-10).
 block2 = "0.6"
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = [
     # `UTType` itself, and `+[UTType typeWithFilenameExtension:]` — the only
@@ -365,6 +379,22 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     # double click obeys. Read through the standard defaults, which is where
     # AppKit registers its own answer for a reader who has never set one.
     "NSUserDefaults",
+    # M4-10: the update check's one `GET` (`src/macos_http.rs`, DESIGN §13.27).
+    # `NSURLSession` itself with its configuration, its data task and its three
+    # delegate protocols; `NSURLRequest` for the request and its cache policy;
+    # `NSURLResponse` for `NSHTTPURLResponse`'s status; `NSData` for the chunks
+    # the delegate is handed; and `NSOperation`, which is only
+    # `+[NSURLSession sessionWithConfiguration:delegate:delegateQueue:]`'s third
+    # parameter — passed `None`, because a session with no queue makes the
+    # serial one every callback in that file is written for.
+    "NSData",
+    "NSOperation",
+    "NSURLRequest",
+    "NSURLResponse",
+    "NSURLSession",
+    # M4-10: the two completion handlers the session delegate is handed. **Not a
+    # package** — `block2` is already a dependency above.
+    "block2",
     "std",
 ] }
 

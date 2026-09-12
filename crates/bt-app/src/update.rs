@@ -32,6 +32,22 @@
 //!   The most this feature can do is put a dot on a gear and a sentence in a
 //!   dialog, and the one press it offers hands an address to the browser.
 //!
+//! # The ruling about in-place self-update, and what it cost here
+//!
+//! `docs/plans/port/macos-plan-2026-09-12.md` §M4 defers in-place self-update
+//! out of 0.4 and says it "becomes *open the release page*" on a Mac. **That
+//! cost this module nothing, because the swap it replaces was never built**:
+//! the bullet above is the feature as it has always shipped, on Windows as much
+//! as anywhere, and [`RELEASES_PAGE`] is the one press the settings row has
+//! offered since §7.51 landed. A reader who comes here looking for the Windows
+//! installer this ticket was going to gate should stop looking — there is no
+//! `cfg` to write, because there is no second behaviour to choose between.
+//!
+//! What M4-10 actually changed is one layer down: `bt-platform`'s
+//! `http::https_get` now has a macOS arm (`NSURLSession`, DESIGN §13.27), so
+//! [`GitHubReleases::latest_tag`] stopped being two arms and this file stopped
+//! naming a platform.
+//!
 //! # Why the stamp advances on failure
 //!
 //! It is the whole of the no-retry-storm rule. A laptop on a train would
@@ -114,7 +130,8 @@ pub const CHECK_INTERVAL_MS: u64 = 24 * 60 * 60 * 1_000;
 /// working", which are the two edges this number has to sit between.
 pub const CLAIM_STALE_MS: u64 = 5 * 60 * 1_000;
 
-/// Each of WinHTTP's four phase timeouts.
+/// The bound on one phase of the exchange — each of WinHTTP's four phase
+/// timeouts, and `NSURLSession`'s `timeoutIntervalForRequest`.
 const PHASE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The whole request's own deadline.
@@ -373,7 +390,15 @@ pub trait Releases {
 pub struct GitHubReleases;
 
 impl Releases for GitHubReleases {
-    #[cfg(windows)]
+    /// **One arm, on every platform** (M4-10).
+    ///
+    /// This used to be two, gated on `cfg(windows)`, because WinHTTP was the
+    /// only stack `bt-platform` had and the other arm's whole body was
+    /// `Err("this build has no HTTP stack")`. It is one again now that
+    /// `NSURLSession` answers the same door with the same signature and the
+    /// same refusals, and the platform question has gone back where it belongs
+    /// — which is why this file is no longer on
+    /// `only_the_named_files_decide_what_platform_this_is`' list.
     fn latest_tag(&self) -> Result<String, String> {
         let body = bt_platform::http::https_get(&bt_platform::http::HttpsGet {
             host: RELEASES_HOST,
@@ -384,11 +409,6 @@ impl Releases for GitHubReleases {
             cap: BODY_CAP_BYTES,
         })?;
         newest_tag(&body).ok_or_else(|| "the answer carries no version".to_owned())
-    }
-
-    #[cfg(not(windows))]
-    fn latest_tag(&self) -> Result<String, String> {
-        Err("this build has no HTTP stack".to_owned())
     }
 }
 
@@ -1258,5 +1278,150 @@ mod tests {
         ] {
             assert_eq!(newest_tag(junk), None, "{junk:?}");
         }
+    }
+
+    /// RED — **one transport, named without a `cfg`** (M4-10).
+    ///
+    /// Until `bt-platform` grew a macOS arm this file had two
+    /// `latest_tag`s — WinHTTP on one side, `Err("this build has no HTTP
+    /// stack")` on the other — and it was on
+    /// `only_the_named_files_decide_what_platform_this_is`' list because of
+    /// them. It is off that list now, and this is the claim that keeps it off
+    /// from this side: the module that knows which stack a machine has is
+    /// `bt-platform`, and this one asks it the same question everywhere.
+    ///
+    /// MUTATION: put either arm back and this names it — and the gate in
+    /// `main.rs` names the file a second time, from the other direction.
+    #[test]
+    fn the_check_asks_one_stack_on_every_platform() {
+        const SOURCE: &str = include_str!("update.rs");
+        // **The module above these pins**, because a pin that searched the
+        // whole file would find its own assertion — the needle below is spelled
+        // out twice in this function.
+        let above = SOURCE
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("these pins are in this file")
+            .0;
+        let code = above
+            .lines()
+            .map(|line| line.find("//").map_or(line, |at| &line[..at]))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for word in ["windows", "macos", "target_os", "target_family"] {
+            for opener in ["cfg(", "cfg!(", "cfg_attr("] {
+                for line in code.lines().filter(|line| line.contains(opener)) {
+                    assert!(
+                        !line.contains(word),
+                        "this file decides what platform it is on again: {line}"
+                    );
+                }
+            }
+        }
+        assert!(
+            code.contains("bt_platform::http::https_get(&bt_platform::http::HttpsGet {"),
+            "the one call to the platform's HTTP stack has moved or gone"
+        );
+    }
+
+    /// RED — **the four states the row can be in, and the one action it offers
+    /// in every one of them, on every machine this build can be** (M4-10, §M4
+    /// acceptance ⑦).
+    ///
+    /// The plan defers in-place self-update out of 0.4 and rules that it
+    /// "becomes *open the release page*" on a Mac. The honest reading of that
+    /// ruling, once the code is in front of you, is that **there is nothing to
+    /// branch on**: the row has offered exactly one press since §7.51 landed,
+    /// that press is [`super::RELEASES_PAGE`], and none of the four states
+    /// changes which press it is. So this walks the state machine end to end
+    /// and then asserts the verb against each of the three platforms this
+    /// build can be — not because the answer could differ, but because "it does
+    /// not differ" is the claim the ruling turns into.
+    ///
+    /// MUTATIONS: make `menu_action` answer `None` for one platform; give the
+    /// row a second verb; let a refusal clear the tag that was already known
+    /// and state ④ stops naming it.
+    #[test]
+    fn the_row_offers_the_release_page_whatever_machine_this_is() {
+        let running = crate::version::VERSION;
+        let newer = "v999.0.0";
+        let root = dir("row-states");
+
+        // ① Not asked yet — there is no file, and nothing to say about a
+        //    version.
+        let fresh = state_of(&root);
+        assert_eq!(fresh.latest_tag, None);
+        assert_eq!(newer_than(fresh.latest_tag.as_deref(), running), None);
+        assert!(!mark_is_lit(&fresh, running));
+
+        // ② Asked, and this build is the newest there is.
+        assert_eq!(
+            run(&root, CHECK_INTERVAL_MS, &Counting::ok(running)),
+            Outcome::Answered(running.to_owned())
+        );
+        let current = state_of(&root);
+        assert_eq!(newer_than(current.latest_tag.as_deref(), running), None);
+        assert!(!mark_is_lit(&current, running));
+
+        // ③ A newer release. This is the only state whose sentence names a
+        //    version, and it names the verb beside it.
+        assert_eq!(
+            run(&root, 2 * CHECK_INTERVAL_MS, &Counting::ok(newer)),
+            Outcome::Answered(newer.to_owned())
+        );
+        let available = state_of(&root);
+        assert_eq!(
+            newer_than(available.latest_tag.as_deref(), running),
+            Some(newer)
+        );
+        assert!(mark_is_lit(&available, running));
+        for lang in crate::i18n::Lang::ALL {
+            let sentence = crate::i18n::update_row_available_in(lang, newer);
+            assert!(sentence.contains(newer), "{lang:?}: {sentence}");
+        }
+
+        // ④ Could not ask. The stamp advances, and the tag this machine already
+        //    knew about stays known — a failed check is a silence, not an
+        //    erasure.
+        assert_eq!(
+            run(&root, 3 * CHECK_INTERVAL_MS, &Counting::refusing()),
+            Outcome::Refused
+        );
+        let refused = state_of(&root);
+        assert_eq!(refused.latest_tag.as_deref(), Some(newer));
+        assert_eq!(refused.checked_at_ms, 3 * CHECK_INTERVAL_MS);
+
+        // And the verb, against each platform in turn.
+        for platform in [
+            bt_platform::HostPlatform::Windows,
+            bt_platform::HostPlatform::MacOs,
+            bt_platform::HostPlatform::OtherUnix,
+        ] {
+            assert_eq!(
+                crate::settings::SettingsRow::UpdateCheck.menu_action(),
+                Some(crate::i18n::Text::OpenReleasesPage.text()),
+                "{platform:?}"
+            );
+            // The mark that says the press leaves this window, rather than the
+            // `+` every other foot verb wears.
+            assert_eq!(
+                crate::settings::SettingsRow::UpdateCheck.menu_action_mark(),
+                "↗",
+                "{platform:?}"
+            );
+            assert!(
+                crate::settings::releases_page_requested(
+                    crate::settings::SettingsTarget::MenuAction(
+                        crate::settings::SettingsRow::UpdateCheck
+                    )
+                ),
+                "{platform:?}"
+            );
+        }
+
+        // And the address that press opens is a page for a person, over TLS.
+        assert!(super::RELEASES_PAGE.starts_with("https://github.com/"));
+        assert!(super::RELEASES_PAGE.ends_with("/releases"));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
