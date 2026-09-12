@@ -376,10 +376,16 @@ impl ProseRow {
 /// held to in a test with no window and no GPU in the room.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProseRows {
-    /// Which block of the document these rows draw.
-    pub index: usize,
+    /// Which block of the document these rows draw — `None` for the empty line
+    /// a gap is drawn as, which is no block of the document and never will be
+    /// (this module's own note, §7.1.3q).
+    pub index: Option<usize>,
     /// Top to bottom, in the order they are drawn.
     pub rows: Vec<ProseRow>,
+    /// The composition standing at the caret, when one is being typed
+    /// ([`ProseComposition`]). `None` whenever no input method is composing into
+    /// this block, which is almost every frame.
+    pub composition: Option<ProseComposition>,
 }
 
 impl ProseRows {
@@ -478,6 +484,179 @@ impl ProseRows {
             bands.push([one.min(two), row.top, one.max(two), row.top + row.height]);
         }
         bands
+    }
+}
+
+/// **A composition spliced into a prose line so that it can be measured, and
+/// for nothing else** (§7.1.3q: a composition is drawn, not typed).
+///
+/// The letters an input method is still composing are not in the file and never
+/// will be until they commit, so they are inserted into the *paragraph* the
+/// shaper is handed and into nothing else. This value is what says where they
+/// went in, which is the whole of what turns the shaper's answer about that
+/// paragraph back into an answer about the file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProseSplice {
+    /// Where in the paragraph's own bytes the composition was inserted.
+    pub at: usize,
+    /// How many bytes of it went in.
+    pub len: usize,
+    /// How far into the composition the input method's own caret sits, in its
+    /// bytes. `len` when the method named none, which is what every Chinese
+    /// method this window has been measured against reports (spike 04).
+    pub caret: usize,
+}
+
+impl ProseSplice {
+    /// One past the composition's last byte, in the paragraph's own bytes.
+    fn end(&self) -> usize {
+        self.at + self.len
+    }
+}
+
+/// **The composition drawn at the caret of a prose block**, as the rows it came
+/// to rest on (§7.1.3q, §7.1.3w).
+///
+/// [`ProseRows`]'s companion and deliberately beside it rather than inside its
+/// seams: what the file's own bytes are worth is one question and where the
+/// letters standing between two of them are is another, and a seam list that
+/// mixed them would answer a press with a byte the file does not have.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProseComposition {
+    /// One rectangle per drawn row the composition covers — its own extent on
+    /// that row, which is what the composition rule is struck under and what the
+    /// letters were given room for.
+    pub rows: Vec<[f32; 4]>,
+    /// **Where the input method's own caret stands inside the composition** —
+    /// the rectangle it is struck in, and the box the candidate list hangs from.
+    pub caret: Option<[f32; 4]>,
+}
+
+impl ProseComposition {
+    /// Whether the composition covers nothing at all, which is what a pre-edit
+    /// of no width comes to.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty() && self.caret.is_none()
+    }
+}
+
+/// One measured row, cut into the file's own seams and the composition's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProseRowCut {
+    /// The row as the *file* is drawn on it — every seam a caret may stand at,
+    /// at the x the composition has displaced it to.
+    pub row: ProseRow,
+    /// The composition's own extent on this row, when any of it is here.
+    pub composition: Option<[f32; 4]>,
+    /// The input method's caret, when it stands on this row.
+    pub caret: Option<[f32; 4]>,
+}
+
+/// **One row the shaper measured, cut into the file's seams and the
+/// composition's** (§7.1.3q) — the one place a paragraph offset becomes a file
+/// offset.
+///
+/// `seams` are the shaper's own, in the paragraph's bytes; `start` is the file
+/// byte the paragraph's first byte is. Without a splice this is that addition
+/// and nothing else. With one, three things follow from it and they are the
+/// whole of this function:
+///
+/// - a seam **before** the composition is the file byte it always was;
+/// - a seam **after** it is that byte less the composition's length, because
+///   the composition is not in the file;
+/// - a seam **inside** it — its two ends included — is no file byte at all, and
+///   belongs to the composition.
+///
+/// The seam at the composition's opening edge is deliberately not also kept as a
+/// file seam: the caret's own byte is the first byte of what follows the
+/// composition, so it is drawn *after* the letters being typed, exactly as the
+/// monospace face and the terminal draw it. A row that is composition from end
+/// to end still carries one file seam, because [`ProseRow`] has to have one and
+/// the honest one is the caret's own byte at the composition's left edge.
+#[must_use]
+pub fn split_prose_row(
+    top: f32,
+    height: f32,
+    seams: &[ProseSeam],
+    start: usize,
+    splice: Option<ProseSplice>,
+) -> ProseRowCut {
+    let file_seam = |seam: &ProseSeam, offset: usize| ProseSeam {
+        offset: start + offset,
+        x: seam.x,
+    };
+    let Some(splice) = splice else {
+        return ProseRowCut {
+            row: ProseRow {
+                top,
+                height,
+                seams: seams
+                    .iter()
+                    .map(|seam| file_seam(seam, seam.offset))
+                    .collect(),
+            },
+            composition: None,
+            caret: None,
+        };
+    };
+    let mut file = Vec::with_capacity(seams.len());
+    let mut composed: Vec<ProseSeam> = Vec::new();
+    for seam in seams {
+        if seam.offset < splice.at {
+            file.push(file_seam(seam, seam.offset));
+        } else if seam.offset >= splice.end() {
+            file.push(file_seam(seam, seam.offset - splice.len));
+        }
+        if (splice.at..=splice.end()).contains(&seam.offset) {
+            composed.push(ProseSeam {
+                offset: seam.offset - splice.at,
+                x: seam.x,
+            });
+        }
+    }
+    let extent = |seams: &[ProseSeam]| {
+        let mut left = f32::MAX;
+        let mut right = f32::MIN;
+        for seam in seams {
+            left = left.min(seam.x);
+            right = right.max(seam.x);
+        }
+        (left, right)
+    };
+    let (left, right) = extent(&composed);
+    if file.is_empty() {
+        // Every byte of this row is composition, so the row still has to say
+        // where the caret's own byte is: at the composition's left edge, which
+        // is the place it will be the moment the letters commit or go away.
+        file.push(ProseSeam {
+            offset: start + splice.at,
+            x: if composed.is_empty() { 0.0 } else { left },
+        });
+    }
+    let spans = composed
+        .iter()
+        .map(|seam| seam.offset)
+        .min()
+        .zip(composed.iter().map(|seam| seam.offset).max())
+        .is_some_and(|(first, last)| (first..=last).contains(&splice.caret));
+    let caret = spans
+        .then(|| {
+            composed
+                .iter()
+                .filter(|seam| seam.offset <= splice.caret)
+                .max_by_key(|seam| seam.offset)
+        })
+        .flatten()
+        .map(|seam| [seam.x, top, seam.x, top + height]);
+    ProseRowCut {
+        row: ProseRow {
+            top,
+            height,
+            seams: file,
+        },
+        composition: (composed.len() > 1).then_some([left, top, right, top + height]),
+        caret,
     }
 }
 
@@ -1076,7 +1255,8 @@ mod tests {
     /// sixteen pixels and a star at eight.
     fn prose_rows(rows: &[(f32, &[(usize, f32)])]) -> ProseRows {
         ProseRows {
-            index: 1,
+            index: Some(1),
+            composition: None,
             rows: rows
                 .iter()
                 .map(|(top, seams)| ProseRow {

@@ -5459,6 +5459,61 @@ struct MarkdownCaretPaint {
     /// block draws the part of itself that is in this one.
     selection: std::ops::Range<usize>,
     caret_width: f32,
+    /// **The letters an input method is still composing**, standing where they
+    /// will land (§7.1.3q) — `None` on every frame nothing is being composed
+    /// into this page, which is almost all of them.
+    preedit: Option<MarkdownPreedit>,
+}
+
+/// **A composition in flight over a rendered Markdown page** (user report,
+/// 2026-09-12; adversarial review 2026-09-11 finding A8).
+///
+/// [`PreviewPreedit`]'s opposite number, one face over, and the difference
+/// between them is the whole of why this type carries bytes rather than columns:
+/// the text face is a monospace lattice and can say where a composition begins
+/// in cells, while this page has two faces and only one of them has cells. So
+/// what travels is the composition itself, and each face does its own
+/// arithmetic on it — the monospace block in the very columns
+/// [`markdown_source_cell`] counts, the prose block through the very seams
+/// [`preview_live::ProseRows`] was measured in.
+///
+/// **Never written into the buffer.** The composition is drawn at the caret and
+/// the file does not have it: an Escape that cancels one has nothing to un-type,
+/// which is the same rule every text field in this window keeps
+/// (`TextField::set_preedit`) and the reason this rides on the paint rather than
+/// on the document.
+#[derive(Clone, Debug, PartialEq)]
+struct MarkdownPreedit {
+    text: String,
+    /// How far into it the input method's own caret sits, in **bytes** of
+    /// [`Self::text`].
+    caret_byte: usize,
+}
+
+impl MarkdownPreedit {
+    /// The composition's width on a monospace face, in that face's own cells —
+    /// [`bt_unicode`]'s answer, which is the one this window counts every grid
+    /// in.
+    fn columns(&self) -> usize {
+        preview_edit::line_columns(&self.text)
+    }
+
+    /// How many cells of it stand in front of the input method's own caret.
+    fn caret_columns(&self) -> usize {
+        preview_edit::column_of(&self.text, self.caret_byte)
+    }
+
+    /// The composition as a splice into the paragraph a prose line is set as.
+    ///
+    /// `at` is where in that paragraph's own bytes the letters went in, which is
+    /// the caret's offset inside the line it is standing on.
+    fn splice(&self, at: usize) -> preview_live::ProseSplice {
+        preview_live::ProseSplice {
+            at,
+            len: self.text.len(),
+            caret: self.caret_byte.min(self.text.len()),
+        }
+    }
 }
 
 /// **Everything the live preview adds to a rendered page** (§7.1.3q): the block
@@ -5671,14 +5726,21 @@ fn build_preview_markdown_body(
             // rendered page's own bands have always been struck, and for the
             // identical reason.
             Some(MarkdownCaretBlock::Prose(prose)) => {
-                for (_, paragraph) in markdown_prose_paragraphs(
+                for line in markdown_prose_paragraphs(
                     prose,
                     [left, top, right, top + height],
                     &placed.rows,
+                    // **The composition's letters are drawn here and its rule
+                    // nowhere near here** (§7.1.3q), on the bar's own division:
+                    // the letters are text and this builder sets text, while the
+                    // rule under them and the input method's caret inside them
+                    // are places on a proportional row, which only the shaper
+                    // can say ([`Runtime::preview_prose_geometry`]).
+                    markdown_prose_composition(live.caret),
                     palette,
                 ) {
-                    if paragraph.rect[3] > body[1] && paragraph.rect[1] < body[3] {
-                        paragraphs.push(paragraph);
+                    if line.paragraph.rect[3] > body[1] && line.paragraph.rect[1] < body[3] {
+                        paragraphs.push(line.paragraph);
                     }
                 }
                 continue;
@@ -6251,10 +6313,26 @@ fn build_preview_markdown_body(
                 .and_then(|index| layout.get(index))
                 .map_or(0.0, |placed| placed.top + placed.height);
         if top + line_height > body[1] && top < body[3] {
-            quads.push(bt_render::PreviewQuad {
-                rect: [left, top, left + caret.caret_width, top + line_height],
-                color: palette.preview_caret,
-            });
+            // **A composition is typed on that empty line too**, and it is the
+            // one place on the page where it displaces nothing: a gap holds no
+            // bytes, so the letters stand at the column a line starts in and the
+            // rest of the page is exactly where it was. The caret inside them is
+            // struck from the shaper's own seams like every other caret on this
+            // face ([`Runtime::preview_prose_geometry`]), which is why this arm
+            // draws a bar only while nothing is being composed.
+            match &caret.preedit {
+                Some(preedit) => paragraphs.push(markdown_gap_paragraph(
+                    preedit,
+                    [left, top, right, top + line_height],
+                    metrics,
+                    line_height,
+                    palette,
+                )),
+                None => quads.push(bt_render::PreviewQuad {
+                    rect: [left, top, left + caret.caret_width, top + line_height],
+                    color: palette.preview_caret,
+                }),
+            }
         }
     }
     // The bars, after the blocks so they stand over their own contents.
@@ -6343,14 +6421,15 @@ fn prose_source_lines(text: &str) -> Vec<std::ops::Range<usize>> {
 fn markdown_prose_runs(
     prose: &MarkdownProseBlock,
     line: usize,
+    splice: Option<(usize, &str)>,
     palette: &bt_render::ChromePalette,
 ) -> Vec<bt_render::PreviewRun> {
-    vec![bt_render::PreviewRun {
-        text: prose.line_text(line).to_owned(),
-        // The page's own two inks: the heavier one a heading and a bold run are
-        // set in, and the prose ink everything else is
-        // ([`Runtime::resolve_document_math`] says the same thing one block kind
-        // over).
+    // The page's own two inks: the heavier one a heading and a bold run are
+    // set in, and the prose ink everything else is
+    // ([`Runtime::resolve_document_math`] says the same thing one block kind
+    // over).
+    let run = |text: &str| bt_render::PreviewRun {
+        text: text.to_owned(),
         color: if prose.heading {
             palette.preview_body_text
         } else {
@@ -6361,7 +6440,91 @@ fn markdown_prose_runs(
         italic: false,
         font_scale: 1.0,
         inline_box_px: None,
-    }]
+    };
+    let text = prose.line_text(line);
+    // **A composition is three runs of one line and not a fourth face**
+    // (§7.1.3q). The letters being composed are set in the block's own face,
+    // beside the letters they were typed among, because that is what they will
+    // be the instant they commit; what marks them apart is the rule struck under
+    // them ([`preview_live::ProseComposition`]), which is a fill and not a font.
+    //
+    // Three runs rather than one paragraph laid beside another, and that is the
+    // whole of why this splices: a paragraph is one shaped line, so a tail set
+    // in a rectangle of its own would fold at its own left edge and put the rest
+    // of the sentence under the composition instead of after it.
+    match splice.filter(|(at, _)| *at <= text.len() && text.is_char_boundary(*at)) {
+        Some((at, composing)) => vec![run(&text[..at]), run(composing), run(&text[at..])],
+        None => vec![run(text)],
+    }
+}
+
+/// **The composition a prose block is carrying**, as the two things splicing it
+/// needs: the file byte it stands at, and the letters.
+///
+/// One reading, called by the painter and by the pass that measures what the
+/// painter drew, so that the letters on the glass and the rule under them cannot
+/// be derived from two different answers. `None` on every seat that is not a
+/// prose block — the monospace face does its own arithmetic in cells
+/// ([`push_markdown_source_block`]) and a gap has no block to splice into
+/// ([`markdown_gap_paragraph`]).
+fn markdown_prose_composition(
+    caret: Option<&MarkdownCaretPaint>,
+) -> Option<(usize, &MarkdownPreedit)> {
+    let caret = caret.filter(|caret| caret.lit)?;
+    match caret.seat {
+        MarkdownCaretSeat::Prose(offset) => Some((offset, caret.preedit.as_ref()?)),
+        MarkdownCaretSeat::Source(..) | MarkdownCaretSeat::Gap { .. } => None,
+    }
+}
+
+/// **The empty line of a gap, with a composition standing on it** (§7.1.3q).
+///
+/// The body face and the page's own line height, because that is what the gap's
+/// caret is a line of (`Runtime::preview_markdown_caret`): a composition set in
+/// the monospace face between two paragraphs would announce a face nothing
+/// around it is set in.
+fn markdown_gap_paragraph(
+    preedit: &MarkdownPreedit,
+    rect: [f32; 4],
+    metrics: seats::PreviewMarkdownMetrics,
+    line_height: f32,
+    palette: &bt_render::ChromePalette,
+) -> bt_render::PreviewParagraph {
+    bt_render::PreviewParagraph {
+        runs: vec![bt_render::PreviewRun {
+            text: preedit.text.clone(),
+            color: palette.files_row_text,
+            mono: false,
+            bold: false,
+            italic: false,
+            font_scale: 1.0,
+            inline_box_px: None,
+        }],
+        rect,
+        font_size_px: metrics.font_size,
+        line_height_px: line_height,
+        wrap: true,
+        letter_spacing_em: 0.0,
+        align_right: false,
+        align_center: false,
+        cell_advance: None,
+    }
+}
+
+/// **One line of the prose block, ready to be shaped** — the paragraph, the file
+/// byte it begins at, and where a composition went into it (§7.1.3w).
+///
+/// A named value rather than a tuple because the third field arrived with the
+/// composition and a tuple of three is a tuple whose next member goes in the
+/// wrong slot: what the measuring pass has to know about a spliced paragraph is
+/// not the same as what the painter has to know, and both read this.
+struct ProseParagraph {
+    /// The **file** offset this paragraph's first byte stands at.
+    start: usize,
+    /// Where the composition went in, when it went into this line — in the
+    /// paragraph's own bytes, which is where the shaper's answers are.
+    splice: Option<preview_live::ProseSplice>,
+    paragraph: bt_render::PreviewParagraph,
 }
 
 /// **The prose block's lines, as the paragraphs the shaper is handed** — the one
@@ -6372,7 +6535,10 @@ fn markdown_prose_runs(
 /// width. Beside each one is the **file** offset its first byte stands at, which
 /// is what turns the shaper's answers about a paragraph into answers about the
 /// file — every byte drawn here is a byte of the file, in order, so that map is
-/// an addition and nothing more.
+/// an addition and nothing more. **Unless a composition is standing in it**, and
+/// then the map is [`preview_live::split_prose_row`]'s: the letters being typed
+/// are in the paragraph and not in the file, so the paragraph's bytes and the
+/// file's part company at the caret and meet again after it.
 ///
 /// **One paragraph per line and not one per block**, and that is not a
 /// preference: a `bt_render` paragraph is one shaped line, so an offset inside a
@@ -6387,15 +6553,32 @@ fn markdown_prose_paragraphs(
     prose: &MarkdownProseBlock,
     box_of_block: [f32; 4],
     rows: &[f32],
+    composing: Option<(usize, &MarkdownPreedit)>,
     palette: &bt_render::ChromePalette,
-) -> Vec<(usize, bt_render::PreviewParagraph)> {
+) -> Vec<ProseParagraph> {
     let [left, top, right, _] = box_of_block;
     let mut line_top = top;
     (0..prose.lines.len())
         .map(|line| {
             let height = rows.get(line).copied().unwrap_or(prose.line_height);
+            let start = prose.line_start(line);
+            // **The composition belongs to the line the caret is standing on**,
+            // and to exactly one line: a line's range stops before its own break
+            // (`prose_source_lines`), so an offset at the end of one line and
+            // one at the start of the next are different bytes of the file and
+            // no two lines can both claim the caret.
+            let splice = composing
+                .filter(|(offset, _)| {
+                    (start..=start + prose.line_text(line).len()).contains(offset)
+                })
+                .map(|(offset, preedit)| (offset - start, preedit));
             let paragraph = bt_render::PreviewParagraph {
-                runs: markdown_prose_runs(prose, line, palette),
+                runs: markdown_prose_runs(
+                    prose,
+                    line,
+                    splice.map(|(at, preedit)| (at, preedit.text.as_str())),
+                    palette,
+                ),
                 rect: [left, line_top, right.max(left), line_top + height],
                 font_size_px: prose.font_size,
                 line_height_px: prose.line_height,
@@ -6408,7 +6591,11 @@ fn markdown_prose_paragraphs(
                 cell_advance: None,
             };
             line_top += height;
-            (prose.line_start(line), paragraph)
+            ProseParagraph {
+                start,
+                splice: splice.map(|(at, preedit)| preedit.splice(at)),
+                paragraph,
+            }
         })
         .collect()
 }
@@ -6462,6 +6649,20 @@ fn push_markdown_source_block(
         let row_top = top + source.line_height * row as f32;
         [left, row_top, right.max(left), row_top + source.line_height]
     };
+    // **Where the composition stands, in this block's own cells** (§7.1.3q) —
+    // the row and the column the caret is at, which is the row and the column
+    // the letters being typed are drawn at. The very fold the caret is seated
+    // through, so a composition cannot land on a row the caret is not on.
+    let composing = caret
+        .filter(|caret| caret.lit)
+        .and_then(|caret| Some((caret.preedit.as_ref()?, caret.seat)))
+        .and_then(|(preedit, seat)| match seat {
+            MarkdownCaretSeat::Source(line, column) => {
+                let (row, column) = preview_caret_row(&wrap, line, column);
+                Some((row, column, preedit))
+            }
+            MarkdownCaretSeat::Prose(_) | MarkdownCaretSeat::Gap { .. } => None,
+        });
     // **The fills first and the letters after**, which is not a preference:
     // [`bt_render::PreviewBody`] draws its quads and then its text, so a band is
     // under the words it is about by construction and a caret is a hairline
@@ -6501,6 +6702,34 @@ fn push_markdown_source_block(
         {
             let (row, column) = preview_caret_row(&wrap, line, column);
             if rows.contains(&row) {
+                // **A composition stands between the caret's column and the
+                // caret** — the text face's own sentence
+                // ([`build_preview_text_body`]), said in this block's cells: the
+                // letters are already where they will land, the rule under them
+                // says they are not in the file yet, and the caret is inside
+                // them where the input method put it.
+                let column = match &caret.preedit {
+                    Some(preedit) => {
+                        let opened = markdown_source_cell(source, box_of_block, row, column);
+                        let closed = markdown_source_cell(
+                            source,
+                            box_of_block,
+                            row,
+                            column + preedit.columns(),
+                        );
+                        quads.push(bt_render::PreviewQuad {
+                            rect: [
+                                opened[0],
+                                opened[3] - caret.caret_width,
+                                closed[0],
+                                opened[3],
+                            ],
+                            color: palette.preview_body_text,
+                        });
+                        column + preedit.caret_columns()
+                    }
+                    None => column,
+                };
                 let cell = markdown_source_cell(source, box_of_block, row, column);
                 quads.push(bt_render::PreviewQuad {
                     rect: [cell[0], cell[1], cell[0] + caret.caret_width, cell[3]],
@@ -6513,7 +6742,7 @@ fn push_markdown_source_block(
         palette,
         body: palette.preview_body_text,
     };
-    for row in rows {
+    for row in rows.clone() {
         let Some((line, from, to)) = wrap.row_span(row) else {
             continue;
         };
@@ -6527,26 +6756,76 @@ fn push_markdown_source_block(
             Some(inner) => (highlight, inner),
             None => (&NO_HIGHLIGHTING, 0),
         };
-        paragraphs.push(bt_render::PreviewParagraph {
-            runs: spans.runs(at, text, (from, to.max(from)), ink),
-            rect: row_rect(row),
-            font_size_px: source.font_size,
-            line_height_px: source.line_height,
-            // A source line is already folded into the rows above it; a shaper
-            // asked to wrap it again would fold what it had been handed and put
-            // the second half of a row under the first.
-            wrap: false,
-            letter_spacing_em: 0.0,
-            align_right: false,
-            align_center: false,
-            // **The block's own cells** (user report, 2026-09-11: the caret in
-            // an edited Chinese paragraph stood to the right of the character it
-            // was editing). Every other number in this function — the selection
-            // band, the caret, the fold, the click that seats it — is
-            // `column × source.advance`, and the letters are placed on the same
-            // cells rather than wherever the fallback face's own advances lead.
-            cell_advance: Some(source.advance),
-        });
+        let box_of_row = row_rect(row);
+        let mono = |runs: Vec<bt_render::PreviewRun>, rect: [f32; 4]| {
+            bt_render::PreviewParagraph {
+                runs,
+                rect,
+                font_size_px: source.font_size,
+                line_height_px: source.line_height,
+                // A source line is already folded into the rows above it; a
+                // shaper asked to wrap it again would fold what it had been
+                // handed and put the second half of a row under the first.
+                wrap: false,
+                letter_spacing_em: 0.0,
+                align_right: false,
+                align_center: false,
+                // **The block's own cells** (user report, 2026-09-11: the caret
+                // in an edited Chinese paragraph stood to the right of the
+                // character it was editing). Every other number in this
+                // function — the selection band, the caret, the fold, the click
+                // that seats it — is `column × source.advance`, and the letters
+                // are placed on the same cells rather than wherever the fallback
+                // face's own advances lead.
+                cell_advance: Some(source.advance),
+            }
+        };
+        // **A composition displaces the text it is being typed into**, and the
+        // row it lands in is drawn as two runs with the composition's own width
+        // of clear space between them — [`build_preview_text_body`]'s sentence
+        // and its reason: letters drawn *over* the rest of the word leave the
+        // two sharing cells and neither can be read.
+        let split = composing
+            .filter(|(composed, ..)| *composed == row)
+            .map(|(_, column, preedit)| (from + column, preedit.columns()))
+            .filter(|(at, _)| (from..=to).contains(at));
+        match split {
+            Some((cut, width)) => {
+                paragraphs.push(mono(
+                    spans.runs(at, text, (from, cut.max(from)), ink),
+                    box_of_row,
+                ));
+                let tail = box_of_row[0] + source.advance * ((cut - from) + width) as f32;
+                paragraphs.push(mono(
+                    spans.runs(at, text, (cut, to.max(cut)), ink),
+                    [tail, box_of_row[1], box_of_row[2].max(tail), box_of_row[3]],
+                ));
+            }
+            None => paragraphs.push(mono(
+                spans.runs(at, text, (from, to.max(from)), ink),
+                box_of_row,
+            )),
+        }
+    }
+    // Last, so the composition's letters stand over nothing at all: the space
+    // they are drawn into was opened for them above, and the rule under them was
+    // pushed with the quads, which are drawn first.
+    if let Some((row, column, preedit)) = composing
+        && rows.contains(&row)
+    {
+        let cell = markdown_source_cell(source, box_of_block, row, column);
+        paragraphs.push(mono_paragraph(
+            preedit.text.clone(),
+            [cell[0], cell[1], right.max(cell[0]), cell[3]],
+            source.font_size,
+            source.line_height,
+            palette.preview_body_text,
+            // On the grid like the line it is being typed into: the space opened
+            // for it above is `preedit.columns()` cells wide, and letters that
+            // drew narrower than that would leave the caret inside them standing
+            // past their end.
+            Some(source.advance),
+        ));
     }
 }
 
@@ -11664,6 +11943,18 @@ struct WindowRuntime {
     /// long as the shell inside it was one that reported.
     cards: focus_thumb::CardClock,
     preedit: Option<Preedit>,
+    /// **Which rung the composition in flight was started in** (user report
+    /// 2026-09-12; `docs/DESIGN.md` §7.1.5a″).
+    ///
+    /// A composition belongs to the field it was typed into, and this is the
+    /// whole of what says which field that was. `None` whenever nothing is being
+    /// composed, which is almost always.
+    ///
+    /// Written on the way past in [`Runtime::ime_input`], above every rung, so
+    /// that the answer is the same one that routed the letters; read by
+    /// [`Runtime::settle_composition_owner`] at the tail of every pass, which is
+    /// the one place that notices the keyboard has moved.
+    composing: Option<ImeOwner>,
     ime_active: bool,
     ime_cursor_throttle: ImeCursorThrottle,
     /// The tab-rename caret's line box in window pixels, as the strip last drew
@@ -16895,6 +17186,30 @@ fn ime_owner(owner: KeyboardOwner) -> ImeOwner {
     } else {
         ImeOwner::Shell
     }
+}
+
+/// **Whether a composition has outlived the field it was typed into** (user
+/// report 2026-09-12; `docs/DESIGN.md` §7.1.5a″).
+///
+/// The ruling in one line: **a composition belongs to the field it started in,
+/// and when that field goes away the composition is cancelled — never committed
+/// into whatever is holding the keyboard next.** The reporter typed `gif` into
+/// the command palette with an input method on, picked the file, and the
+/// palette closed with the candidate list still floating over the picture it had
+/// opened, attached to nothing; clicking the page did not put it away, because
+/// nothing in this window had ever ended a composition and Windows only ends one
+/// on a blur.
+///
+/// A function of the two rungs and of nothing else, so that every site the
+/// keyboard can move at is answered by the same sentence rather than by its own
+/// idea of when a field has gone: what makes a composition stale is not which
+/// gesture moved the keyboard, it is that the keyboard is somewhere else.
+#[must_use]
+fn composition_outlived_its_field(
+    composing: Option<ImeOwner>,
+    holds_the_keyboard: ImeOwner,
+) -> bool {
+    composing.is_some_and(|started_in| started_in != holds_the_keyboard)
 }
 
 /// Whether a shell has the keyboard — `InputOwner == Terminal`.
@@ -34711,6 +35026,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         strip_animation_ticked_at: None,
         cards: focus_thumb::CardClock::default(),
         preedit: None,
+        composing: None,
         ime_active: false,
         ime_cursor_throttle: ImeCursorThrottle::default(),
         rename_caret_line: None,
@@ -57815,7 +58131,15 @@ impl Runtime<'_> {
             .preview_pane(surface)
             .and_then(|pane| pane.md_prose.as_ref())
         {
-            let [x, top, _, bottom] = prose.caret(caret.caret)?;
+            // **The box hangs at the composition's own caret once there is a
+            // composition** (§7.1.3q), and not at the byte it was typed in front
+            // of: a list offering to finish `nikan` that stood where the `n`
+            // went in would sit over the letters it is offering to replace.
+            let [x, top, _, bottom] = prose
+                .composition
+                .as_ref()
+                .and_then(|composition| composition.caret)
+                .or_else(|| prose.caret(caret.caret))?;
             let width = (bt_render::CURSOR_BAR_WIDTH_LOGICAL_PX * scale)
                 .round()
                 .max(1.0);
@@ -57834,6 +58158,17 @@ impl Runtime<'_> {
             wrap: &wrap,
         }
         .row_of(caret.caret)?;
+        // **At the composition's own caret once there is a composition**, which
+        // is the prose face's rule one face over and the same reason: a list
+        // offering to finish `nikan` that stood where the `n` went in would sit
+        // over the letters it is offering to replace.
+        let column = column
+            + self.preview_preedit(surface).map_or(0, |preedit| {
+                preview_edit::column_of(
+                    &preedit.text,
+                    preedit.cursor_byte.unwrap_or(preedit.text.len()),
+                )
+            });
         // The painter's own cell ([`markdown_source_cell`]): a candidate list
         // placed from a second derivation is a list standing beside the caret it
         // claims to follow, and on a line of Chinese the two derivations used to
@@ -59736,7 +60071,14 @@ fn lay_markdown_out(
                     let palette = bt_render::chrome_palette();
                     let rows: Vec<f32> = (0..prose.lines.len())
                         .map(|line| {
-                            let runs = markdown_prose_runs(prose, line, &palette);
+                            // **Without the composition**, deliberately: a
+                            // caret is not a block and must not push the
+                            // document around (§7.1.3q), and letters that are
+                            // not in the file may not decide how tall the one
+                            // holding them is. The composition is drawn into the
+                            // room the block already has, exactly as it is on
+                            // the monospace face and in the terminal.
+                            let runs = markdown_prose_runs(prose, line, None, &palette);
                             measure(&runs, width, prose.font_size, prose.line_height)
                         })
                         .collect();
@@ -60348,7 +60690,7 @@ impl Runtime<'_> {
         // question only the shaper answers, and the builder holds no shaper.
         // Asked once and read five times — by the bar below, by the bands below
         // it, and between frames by the press, the IME and the arrow keys.
-        let prose = self.preview_prose_geometry(surface, scale);
+        let prose = self.preview_prose_geometry(surface, scale, caret_paint.as_ref());
         if let (Some(prose), Some(caret)) = (&prose, &caret_paint) {
             // The selection is the file's and this block is a window onto it,
             // exactly as [`push_markdown_source_block`] cuts the same range
@@ -60363,9 +60705,40 @@ impl Runtime<'_> {
                         color: palette.preview_selection,
                     }),
             );
+            // **A composition stands between the caret's byte and the caret**,
+            // which is the text face's own sentence ([`build_preview_text_body`])
+            // and the monospace block's ([`push_markdown_source_block`]), said
+            // in seams because this face has no cells: the letters were set into
+            // the paragraph above, the rule under them says they are not in the
+            // file yet, and the caret is inside them where the input method put
+            // it rather than at the byte they were typed in front of.
+            let composed = caret.lit.then_some(prose.composition.as_ref()).flatten();
+            if let Some(composition) = composed {
+                built.quads.extend(
+                    composition
+                        .rows
+                        .iter()
+                        .filter_map(|row| {
+                            bt_render::crop_to(
+                                [row[0], row[3] - caret.caret_width, row[2], row[3]],
+                                built.clip,
+                            )
+                        })
+                        .map(|rect| bt_render::PreviewQuad {
+                            rect,
+                            color: palette.preview_body_text,
+                        }),
+                );
+            }
+            let bar = match composed {
+                Some(composition) => composition.caret,
+                None => match caret.seat {
+                    MarkdownCaretSeat::Prose(offset) => prose.caret(offset),
+                    MarkdownCaretSeat::Source(..) | MarkdownCaretSeat::Gap { .. } => None,
+                },
+            };
             if caret.lit
-                && let MarkdownCaretSeat::Prose(offset) = caret.seat
-                && let Some([x, top, _, bottom]) = prose.caret(offset)
+                && let Some([x, top, _, bottom]) = bar
                 && let Some(rect) =
                     bt_render::crop_to([x, top, x + caret.caret_width, bottom], built.clip)
             {
@@ -60476,40 +60849,107 @@ impl Runtime<'_> {
         &mut self,
         surface: PreviewSurface,
         scale: f32,
+        caret: Option<&MarkdownCaretPaint>,
     ) -> Option<preview_live::ProseRows> {
         let palette = bt_render::chrome_palette();
         // The document's borrow ends with this expression, before the shaper's
         // begins.
         let (index, paragraphs) = {
-            let (box_of_block, block, placed) = self.markdown_caret_box(surface, scale)?;
-            let prose = block.prose()?;
-            (
-                prose.index,
-                markdown_prose_paragraphs(prose, box_of_block, &placed.rows, &palette),
-            )
+            match self.markdown_caret_box(surface, scale) {
+                Some((box_of_block, block, placed)) if block.prose().is_some() => {
+                    let prose = block.prose()?;
+                    (
+                        Some(prose.index),
+                        markdown_prose_paragraphs(
+                            prose,
+                            box_of_block,
+                            &placed.rows,
+                            markdown_prose_composition(caret),
+                            &palette,
+                        ),
+                    )
+                }
+                // **The gap's empty line is measured too, and only while
+                // something is being composed on it** (§7.1.3q). It is no block
+                // of the document, so there is nothing to splice into and
+                // nothing to read back: the whole paragraph is the composition,
+                // and what the shaper is being asked is where the input method's
+                // own caret stands inside letters that are not in the file.
+                _ => (None, self.markdown_gap_paragraphs(surface, scale, caret)?),
+            }
         };
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut rows = Vec::new();
-        for (start, paragraph) in &paragraphs {
-            rows.extend(
-                renderer
-                    .measure_preview_rows(gpu, paragraph)
-                    .into_iter()
-                    .map(|row| preview_live::ProseRow {
-                        top: row.top,
-                        height: row.height,
-                        seams: row
-                            .seams
-                            .iter()
-                            .map(|seam| preview_live::ProseSeam {
-                                offset: start + seam.offset,
-                                x: seam.x,
-                            })
-                            .collect(),
-                    }),
-            );
+        let mut composition = preview_live::ProseComposition::default();
+        for line in &paragraphs {
+            for row in renderer.measure_preview_rows(gpu, &line.paragraph) {
+                let cut = preview_live::split_prose_row(
+                    row.top,
+                    row.height,
+                    &row.seams
+                        .iter()
+                        .map(|seam| preview_live::ProseSeam {
+                            offset: seam.offset,
+                            x: seam.x,
+                        })
+                        .collect::<Vec<_>>(),
+                    line.start,
+                    line.splice,
+                );
+                rows.push(cut.row);
+                composition.rows.extend(cut.composition);
+                composition.caret = composition.caret.or(cut.caret);
+            }
         }
-        Some(preview_live::ProseRows { index, rows })
+        Some(preview_live::ProseRows {
+            index,
+            rows,
+            composition: (!composition.is_empty()).then_some(composition),
+        })
+    }
+
+    /// **The gap's own empty line, as the one paragraph a composition on it is**
+    /// (§7.1.3q) — `None` whenever the caret is not in a gap or nothing is being
+    /// composed there.
+    ///
+    /// The very rectangle the painter drew it in
+    /// ([`build_preview_markdown_body`]'s gap arm), because a candidate list
+    /// placed from a second derivation is a list standing beside the caret it
+    /// claims to follow.
+    fn markdown_gap_paragraphs(
+        &self,
+        surface: PreviewSurface,
+        scale: f32,
+        caret: Option<&MarkdownCaretPaint>,
+    ) -> Option<Vec<ProseParagraph>> {
+        let caret = caret.filter(|caret| caret.lit)?;
+        let preedit = caret.preedit.as_ref()?;
+        let MarkdownCaretSeat::Gap { after, line_height } = caret.seat else {
+            return None;
+        };
+        let offset = self.preview_pane(surface)?.caret.caret;
+        let body = self.preview_surface_body_rect(surface, scale)?;
+        let metrics = seats::preview_markdown_metrics(scale);
+        let (left, right) = preview::markdown_measure_box(body, metrics);
+        let pane = self.preview_pane(surface)?;
+        let PreviewDocument::Markdown { layout, .. } = &pane.doc else {
+            return None;
+        };
+        let top = body[1] + metrics.padding_y - pane.scroll[1]
+            + after
+                .and_then(|index| layout.get(index))
+                .map_or(0.0, |placed| placed.top + placed.height);
+        Some(vec![ProseParagraph {
+            start: offset,
+            splice: Some(preedit.splice(0)),
+            paragraph: markdown_gap_paragraph(
+                preedit,
+                [left, top, right.max(left), top + line_height],
+                metrics,
+                line_height,
+                &bt_render::chrome_palette(),
+            ),
+        }])
     }
 
     fn preview_markdown_caret(
@@ -60554,7 +60994,28 @@ impl Runtime<'_> {
             caret_width: (bt_render::CURSOR_BAR_WIDTH_LOGICAL_PX * scale)
                 .round()
                 .max(1.0),
+            preedit: self
+                .preview_preedit(surface)
+                .map(|preedit| MarkdownPreedit {
+                    text: preedit.text.clone(),
+                    caret_byte: preedit.cursor_byte.unwrap_or(preedit.text.len()),
+                }),
         })
+    }
+
+    /// **The composition this page is entitled to draw** —
+    /// [`Self::shell_preedit`]'s twin, and the same single ownership said one
+    /// surface over.
+    ///
+    /// One `preedit` field for the window because there is one composition, so
+    /// the letters belong wherever the keyboard is: a composition made at a
+    /// shell prompt must not also be overlaid on a document behind it, and one
+    /// made in a page must not be drawn on a second page in the other pane.
+    fn preview_preedit(&self, surface: PreviewSurface) -> Option<&Preedit> {
+        (self.preview_edit_focus() == Some(surface)
+            && matches!(ime_owner(self.keyboard_owner()), ImeOwner::Preview))
+        .then_some(self.window.preedit.as_ref())
+        .flatten()
     }
 
     fn preview_edit_paint(
@@ -92306,7 +92767,16 @@ impl Runtime<'_> {
             }
         }
         let composing = matches!(event, Ime::Preedit(..) | Ime::Commit(_));
+        // **Which rung this composition was started in**, written above every
+        // one of them so that the answer is the same one that routes the letters
+        // below (§7.1.5a″). A commit is the end of a composition and an empty
+        // pre-edit is a cancelled one, so both put it out; `Enabled`/`Disabled`
+        // are the window's own bookkeeping and are answered in their own arms.
         if composing {
+            self.window.composing = match &event {
+                Ime::Preedit(text, _) if !text.is_empty() => Some(ime_owner(self.keyboard_owner())),
+                _ => None,
+            };
             match ime_owner(self.keyboard_owner()) {
                 // The name editor, through the same two doors every other field
                 // in this window uses: a pre-edit is **drawn at its caret and is
@@ -92431,6 +92901,7 @@ impl Runtime<'_> {
                 let drawn_in_the_preview =
                     self.window.preedit.is_some() && self.preview_edit_focus().is_some();
                 self.window.preedit = None;
+                self.window.composing = None;
                 self.window.ime_active = false;
                 self.window.ime_cursor_throttle.reset();
                 self.window.ime_system_caret.destroy();
@@ -92449,6 +92920,106 @@ impl Runtime<'_> {
                 })
             }
         }
+    }
+
+    /// **The keyboard has moved; a composition does not follow it** (user report
+    /// 2026-09-12; `docs/DESIGN.md` §7.1.5a″).
+    ///
+    /// Called at the tail of every pass, beside [`Self::offer_ime_caret`] and
+    /// for that function's own stated reason: "every owner change" needs no list
+    /// of the ways the keyboard moves if the question is asked where every one
+    /// of them has already happened. A palette closing, a name box committing, a
+    /// capsule going away, a press landing in another pane, a tab switch and a
+    /// float closing are all one fact by the time this runs — the rung holding
+    /// the keyboard is not the rung the letters were typed into.
+    ///
+    /// Costs a comparison of two enums on the passes where nothing is being
+    /// composed, which is all of them but the ones a reader is typing Chinese
+    /// on.
+    fn settle_composition_owner(&mut self) -> Result<()> {
+        let holds_the_keyboard = ime_owner(self.keyboard_owner());
+        if !composition_outlived_its_field(self.window.composing, holds_the_keyboard) {
+            return Ok(());
+        }
+        let Some(started_in) = self.window.composing.take() else {
+            return Ok(());
+        };
+        self.cancel_composition(started_in)
+    }
+
+    /// **The one door a composition is ended through**, and everything that has
+    /// to stop being true with it (§7.1.5a″).
+    ///
+    /// Two halves, and neither is optional. The input method's own half is
+    /// [`bt_platform::cancel_composition`] — the IMM32 notification that ends a
+    /// composition string, cancelled, which is what takes the list off the screen,
+    /// because that window belongs to the method and not to this process. This
+    /// window's half is everything it was drawing from the composition: the
+    /// letters themselves, the rectangle the list was being hung from, the
+    /// system caret that Microsoft Pinyin follows instead, and the pre-edit the
+    /// old field is still holding in its own text.
+    ///
+    /// **Cancelled and not completed.** Completing would hand the half-typed
+    /// letters to whatever is holding the keyboard now, which is the report this
+    /// exists to close, and the field they were meant for has by then already
+    /// gone. And **not** `set_ime_allowed(false)`, which looks like the same
+    /// move and is not: that re-associates the input context for the whole
+    /// window and drops the method's state with it.
+    fn cancel_composition(&mut self, started_in: ImeOwner) -> Result<()> {
+        if let Ok(hwnd) = window_hwnd(&self.window.window) {
+            bt_platform::cancel_composition(hwnd);
+        }
+        self.window.preedit = None;
+        self.window.composing = None;
+        self.window.ime_cursor_throttle.reset();
+        self.window.ime_system_caret.destroy();
+        // The field the letters were going into, if it is still standing. A
+        // palette that has closed has taken its own text with it and there is
+        // nothing here to clear; a search capsule left open with the keyboard
+        // handed back to the shell behind it is the case this is for.
+        match started_in {
+            ImeOwner::Rename => {
+                if let Some(editor) = self.window.rename.as_mut() {
+                    editor.field.set_preedit("");
+                }
+            }
+            ImeOwner::GraphSearch => {
+                if let Some(surface) = self.preview_keyboard_surface() {
+                    let tab = self.preview_tab_index(surface);
+                    if let Some(view) = self.window.tabs[tab].git_graph_view.get_mut(&surface) {
+                        view.search.set_preedit("");
+                    }
+                }
+            }
+            ImeOwner::GitPrompt => {
+                if let Some(prompt) = self
+                    .window
+                    .git_menu
+                    .as_mut()
+                    .and_then(|menu| menu.prompt.as_mut())
+                {
+                    prompt.field.set_preedit("");
+                }
+            }
+            ImeOwner::Search => self.window.search.field_mut().set_preedit(""),
+            ImeOwner::Palette => {
+                if let Some(state) = self.window.palette.as_mut() {
+                    state.field_mut().set_preedit("");
+                }
+            }
+            // A page draws the window's own `preedit` and holds none of its own,
+            // and the three that swallow compositions never had one.
+            ImeOwner::Preview | ImeOwner::Modal | ImeOwner::FilesTree | ImeOwner::Shell => {}
+        }
+        self.refresh_chrome();
+        self.present_chrome_change()?;
+        // The page paints from the same field on its own pass and would
+        // otherwise keep the letters on the glass until something else moved —
+        // `Ime::Disabled`'s own argument, one door along.
+        if matches!(started_in, ImeOwner::Preview) {
+            self.repaint_preview()?;
+        }
+        Ok(())
     }
 
     /// Whether this window is iconic — Win32's own answer, and the same one
@@ -95543,6 +96114,13 @@ impl Runtime<'_> {
         // rectangle that did not move into no call at all. The terminal's rung
         // says nothing here and everything in `publish_frame_inner`, because its
         // caret is a property of a frame and there is no frame at this point.
+        //
+        // **And before the caret is published, whether there is still a field
+        // for it** (§7.1.5a″): a composition whose field has gone is cancelled
+        // here, on the identical argument — every way the keyboard can move has
+        // already happened by the time this line runs, so nothing has to
+        // enumerate them.
+        self.settle_composition_owner()?;
         self.offer_ime_caret(None);
         self.flush_ime_cursor_area(now);
         self.finish_resize_if_quiescent(now)?;
@@ -137116,6 +137694,7 @@ mod tests {
                     lit: true,
                     selection: 0..0,
                     caret_width: 2.0,
+                    preedit: None,
                 }),
                 &highlight::Highlighting::plain(),
                 box_of_block,
@@ -138703,30 +139282,41 @@ mod tests {
             line_height: 20.0,
         };
         let palette = bt_render::chrome_palette();
-        let paragraphs =
-            markdown_prose_paragraphs(&prose, [10.0, 100.0, 210.0, 140.0], &[20.0, 20.0], &palette);
+        let paragraphs = markdown_prose_paragraphs(
+            &prose,
+            [10.0, 100.0, 210.0, 140.0],
+            &[20.0, 20.0],
+            None,
+            &palette,
+        );
         assert_eq!(paragraphs.len(), 2, "one paragraph per source line");
-        for (start, paragraph) in &paragraphs {
-            let drawn: String = paragraph.runs.iter().map(|run| run.text.as_str()).collect();
+        for line in &paragraphs {
+            let drawn: String = line
+                .paragraph
+                .runs
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect();
             assert_eq!(
-                &file[*start..*start + drawn.len()],
+                &file[line.start..line.start + drawn.len()],
                 drawn,
-                "the line drawn at {start} is the file's own bytes there",
+                "the line drawn at {} is the file's own bytes there",
+                line.start,
             );
         }
         assert!(
-            paragraphs[0].1.runs[0].text.contains('\t'),
+            paragraphs[0].paragraph.runs[0].text.contains('\t'),
             "and a tab is drawn as the character it is, not as the spaces it stands in for",
         );
         // Stacked at the heights the measuring pass wrote down, and both
         // wrapped into the same column.
-        assert!((paragraphs[0].1.rect[1] - 100.0).abs() < f32::EPSILON);
-        assert!((paragraphs[1].1.rect[1] - 120.0).abs() < f32::EPSILON);
+        assert!((paragraphs[0].paragraph.rect[1] - 100.0).abs() < f32::EPSILON);
+        assert!((paragraphs[1].paragraph.rect[1] - 120.0).abs() < f32::EPSILON);
         assert!(
             paragraphs
                 .iter()
-                .all(|(_, p)| (p.rect[0] - 10.0).abs() < f32::EPSILON
-                    && (p.rect[2] - 210.0).abs() < f32::EPSILON)
+                .all(|line| (line.paragraph.rect[0] - 10.0).abs() < f32::EPSILON
+                    && (line.paragraph.rect[2] - 210.0).abs() < f32::EPSILON)
         );
     }
 
@@ -138826,6 +139416,7 @@ mod tests {
             lit: true,
             selection: 0..0,
             caret_width: 2.0,
+            preedit: None,
         };
         let built = build_preview_markdown_body(
             body,
@@ -138924,6 +139515,607 @@ mod tests {
         );
     }
 
+    /// **The letters being composed are drawn where they are being typed, in
+    /// the block's own face** (user report 2026-09-12; adversarial review
+    /// 2026-09-11 finding A8).
+    ///
+    /// The report: a paragraph of Chinese with the caret in it showed
+    /// `我们是天下第一好`, a bare caret, and the candidate list — and nothing at
+    /// all between the caret and the list, because the page drew the file and
+    /// the composition lived in `window.preedit` where only the text face and
+    /// the grid ever looked.
+    ///
+    /// What closes it is the composition spliced into the very paragraph the
+    /// shaper is handed, which is what makes the letters land in the block's own
+    /// face beside the letters they were typed among, with the rest of the
+    /// sentence pushed along in front of them rather than drawn over.
+    ///
+    /// MUTATION ①: drop the splice and the paragraph is the file's own bytes
+    /// again — the first assertion goes red, which is the report.
+    /// MUTATION ②: splice into `prose.text` instead of into the runs and the
+    /// last goes red: the composition would be in the block, an Escape would
+    /// have to un-type it, and the caret's own byte would have moved.
+    #[test]
+    fn a_composition_is_drawn_at_the_caret_in_a_prose_block() {
+        let text = "我们是天下第一好";
+        let prose = MarkdownProseBlock {
+            index: 0,
+            range: 0..text.len() + 1,
+            lines: prose_source_lines(text),
+            text: text.to_owned(),
+            heading: false,
+            font_size: 14.0,
+            line_height: 20.0,
+        };
+        let palette = bt_render::chrome_palette();
+        let at = "我们是".len();
+        // An input method that pre-edits latin, one that pre-edits Han, and the
+        // apostrophe'd reading a Chinese method actually shows mid-word.
+        for composing in ["nikan", "你看", "ni'kan"] {
+            let preedit = MarkdownPreedit {
+                text: composing.to_owned(),
+                caret_byte: composing.len(),
+            };
+            let lines = markdown_prose_paragraphs(
+                &prose,
+                [10.0, 100.0, 210.0, 120.0],
+                &[20.0],
+                Some((at, &preedit)),
+                &palette,
+            );
+            let [line] = lines.as_slice() else {
+                panic!("one source line: {lines:#?}", lines = lines.len());
+            };
+            let drawn: String = line
+                .paragraph
+                .runs
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect();
+            assert_eq!(
+                drawn,
+                format!("我们是{composing}天下第一好"),
+                "the composition stands at the caret, among the letters it is being typed into",
+            );
+            assert_eq!(line.paragraph.runs.len(), 3, "head, composition, tail");
+            assert_eq!(line.paragraph.runs[1].text, composing);
+            let face = &line.paragraph.runs[0];
+            assert!(
+                line.paragraph.runs.iter().all(|run| run.mono == face.mono
+                    && run.bold == face.bold
+                    && run.italic == face.italic
+                    && (run.font_scale - face.font_scale).abs() < f32::EPSILON
+                    && run.color == face.color),
+                "and it is set in the block's own face, not in a fourth one",
+            );
+            assert_eq!(
+                line.splice,
+                Some(preview_live::ProseSplice {
+                    at,
+                    len: composing.len(),
+                    caret: composing.len(),
+                }),
+                "and the measuring pass is told where the letters went in",
+            );
+            assert_eq!(
+                prose.text, text,
+                "and the block's own bytes are exactly what they were",
+            );
+        }
+
+        // **The mixed line, with its marks showing** (§7.1.3w) — a composition
+        // typed between the stars of `**预览**` splices there and nowhere else,
+        // and the marks either side of it are still the characters they are.
+        let marked = "**预览**窗格";
+        let mixed = MarkdownProseBlock {
+            range: 0..marked.len() + 1,
+            lines: prose_source_lines(marked),
+            text: marked.to_owned(),
+            ..prose.clone()
+        };
+        let preedit = MarkdownPreedit {
+            text: "shi".to_owned(),
+            caret_byte: 3,
+        };
+        let lines = markdown_prose_paragraphs(
+            &mixed,
+            [10.0, 100.0, 210.0, 120.0],
+            &[20.0],
+            Some(("**预览**".len(), &preedit)),
+            &palette,
+        );
+        let drawn: String = lines[0]
+            .paragraph
+            .runs
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect();
+        assert_eq!(drawn, "**预览**shi窗格");
+    }
+
+    /// **The same composition, in the face a fence and a table wear** (§7.1.3w)
+    /// — the block's own cells, which is where its caret is counted.
+    ///
+    /// The monospace block needs no shaper for any of it: the letters go on the
+    /// grid, the row they land in is drawn as two runs with the composition's
+    /// own width of clear space between them, and the rule under them is a
+    /// rectangle a whole number of cells wide. That is
+    /// [`build_preview_text_body`]'s machine over one block instead of one
+    /// document.
+    ///
+    /// MUTATION ①: draw the row whole and paint the letters over it — the split
+    /// assertion goes red, and the composition and the rest of the line occupy
+    /// the same cells with neither readable (the 2026-08-13 capture, one face
+    /// over).
+    /// MUTATION ②: leave the caret at the block's own column and the last goes
+    /// red — the bar stands in front of the letters being composed instead of
+    /// inside them.
+    #[test]
+    fn a_composition_is_drawn_at_the_caret_in_a_monospace_block() {
+        let palette = bt_render::chrome_palette();
+        let source = source_block(0, 0, "| 天 | b |");
+        let box_of_block = [10.0, 100.0, 410.0, 120.0];
+        let column = preview_edit::column_of(&source.text, "| 天 ".len());
+        let draw = |preedit: Option<MarkdownPreedit>| {
+            let mut quads = Vec::new();
+            let mut paragraphs = Vec::new();
+            push_markdown_source_block(
+                (&mut quads, &mut paragraphs),
+                &source,
+                Some(&MarkdownCaretPaint {
+                    seat: MarkdownCaretSeat::Source(0, column),
+                    lit: true,
+                    selection: 0..0,
+                    caret_width: 2.0,
+                    preedit,
+                }),
+                &highlight::Highlighting::plain(),
+                box_of_block,
+                [0.0, 0.0, 1000.0, 1000.0],
+                &palette,
+            );
+            (quads, paragraphs)
+        };
+        let (bare, plain) = draw(None);
+        assert_eq!(plain.len(), 1, "one row, drawn whole");
+        assert_eq!(bare.len(), 1, "and one caret");
+
+        let (quads, paragraphs) = draw(Some(MarkdownPreedit {
+            text: "nikan".to_owned(),
+            caret_byte: 2,
+        }));
+        assert_eq!(
+            paragraphs.len(),
+            3,
+            "the row is cut in two and the composition is the third paragraph",
+        );
+        assert_eq!(
+            paragraphs[2].runs[0].text, "nikan",
+            "the letters being composed, set on the block's own cells",
+        );
+        assert_eq!(
+            paragraphs[2].rect[0],
+            markdown_source_cell(&source, box_of_block, 0, column)[0],
+            "at the caret's own cell",
+        );
+        assert_eq!(
+            paragraphs[1].rect[0] - paragraphs[0].rect[0],
+            source.advance * (column + 5) as f32,
+            "and the rest of the line is pushed along by the composition's width \
+             rather than drawn under it",
+        );
+        let [rule, caret] = quads.as_slice() else {
+            panic!("the composition's rule and the caret inside it: {quads:#?}");
+        };
+        assert_eq!(
+            [rule.rect[0], rule.rect[2]],
+            [
+                markdown_source_cell(&source, box_of_block, 0, column)[0],
+                markdown_source_cell(&source, box_of_block, 0, column + 5)[0],
+            ],
+            "the rule spans the composition and says it is not in the file yet",
+        );
+        assert_eq!(
+            caret.rect[0],
+            markdown_source_cell(&source, box_of_block, 0, column + 2)[0],
+            "and the caret stands inside the letters, where the method put it",
+        );
+    }
+
+    /// **A composition is never written into the buffer** (§7.1.3q: a
+    /// composition is drawn, not typed).
+    ///
+    /// The rule every text field in this window already keeps
+    /// (`TextField::set_preedit`), asked of the two faces of a rendered page:
+    /// what the reader can see gains the letters and the block's own bytes do
+    /// not, so an Escape that cancels a composition leaves the document exactly
+    /// as it was with nothing to un-type.
+    ///
+    /// MUTATION: insert the pre-edit through `insert_into_preview` on the
+    /// `Preedit` arm and the source pin goes red — the file would hold text
+    /// nobody typed, and the dirty dot would come on for it.
+    #[test]
+    fn a_composition_is_never_written_into_the_buffer() {
+        let palette = bt_render::chrome_palette();
+        let text = "我们是天下第一好";
+        let prose = MarkdownProseBlock {
+            index: 0,
+            range: 0..text.len() + 1,
+            lines: prose_source_lines(text),
+            text: text.to_owned(),
+            heading: false,
+            font_size: 14.0,
+            line_height: 20.0,
+        };
+        let preedit = MarkdownPreedit {
+            text: "nikan".to_owned(),
+            caret_byte: 5,
+        };
+        let before = prose.clone();
+        let _ = markdown_prose_paragraphs(
+            &prose,
+            [10.0, 100.0, 210.0, 120.0],
+            &[20.0],
+            Some(("我们是".len(), &preedit)),
+            &palette,
+        );
+        assert_eq!(prose, before, "drawing a composition changes no block");
+
+        let source = source_block(0, 0, "| 天 | b |");
+        let kept = source.clone();
+        let (mut quads, mut paragraphs) = (Vec::new(), Vec::new());
+        push_markdown_source_block(
+            (&mut quads, &mut paragraphs),
+            &source,
+            Some(&MarkdownCaretPaint {
+                seat: MarkdownCaretSeat::Source(0, 2),
+                lit: true,
+                selection: 0..0,
+                caret_width: 2.0,
+                preedit: Some(preedit),
+            }),
+            &highlight::Highlighting::plain(),
+            [10.0, 100.0, 410.0, 120.0],
+            [0.0, 0.0, 1000.0, 1000.0],
+            &palette,
+        );
+        assert_eq!(source, kept, "on either face");
+
+        // And the door the letters actually arrive at puts them in the window's
+        // own `preedit` and never through the buffer's edit door.
+        const SOURCE: &str = include_str!("main.rs");
+        const END: &str = "\n    }\n";
+        let door = SOURCE
+            .find("fn preview_ime(&mut self, event: Ime) -> Result<()> {")
+            .map(|at| &SOURCE[at..])
+            .and_then(|rest| rest.find(END).map(|end| &rest[..end]))
+            .expect("the one door a composition reaches a page through");
+        let preedit_arm = door
+            .split("Ime::Commit")
+            .next()
+            .expect("the pre-edit arm stands above the commit");
+        assert!(
+            !preedit_arm.contains("insert_into_preview"),
+            "a pre-edit is drawn and never inserted",
+        );
+    }
+
+    /// **The candidate list hangs at the composition's own caret** (user report
+    /// 2026-09-12).
+    ///
+    /// A list offering to finish `nikan` that stood at the byte the `n` went in
+    /// front of would sit over the letters it is offering to replace, which is
+    /// §7.1.3u's complaint one surface along: the box and the bar are one
+    /// derivation, and while a composition is in flight that derivation is the
+    /// composition's.
+    ///
+    /// MUTATION: hang the box off `prose.caret(caret)` while composing and the
+    /// first assertion goes red — the two x's are a whole pre-edit apart.
+    #[test]
+    fn the_candidate_box_sits_at_the_composition_caret_not_the_block_caret() {
+        // One row of `我nikan看` as a body face lays it out: sixteen pixels an
+        // ideograph, eight a latin letter, and a seam in front of every cluster.
+        let seams: Vec<preview_live::ProseSeam> = [
+            (0, 0.0),
+            (3, 16.0),
+            (4, 24.0),
+            (5, 32.0),
+            (6, 40.0),
+            (7, 48.0),
+            (8, 56.0),
+            (11, 72.0),
+        ]
+        .into_iter()
+        .map(|(offset, x)| preview_live::ProseSeam { offset, x })
+        .collect();
+        let cut = preview_live::split_prose_row(
+            100.0,
+            20.0,
+            &seams,
+            0,
+            Some(preview_live::ProseSplice {
+                at: 3,
+                len: 5,
+                caret: 2,
+            }),
+        );
+        let rows = preview_live::ProseRows {
+            index: Some(0),
+            rows: vec![cut.row.clone()],
+            composition: Some(preview_live::ProseComposition {
+                rows: cut.composition.into_iter().collect(),
+                caret: cut.caret,
+            }),
+        };
+        assert_eq!(
+            cut.caret.map(|rect| rect[0]),
+            Some(32.0),
+            "the box hangs two letters into the composition, where the method put its caret",
+        );
+        assert_eq!(
+            rows.caret(3).map(|rect| rect[0]),
+            Some(56.0),
+            "while the block's own caret is the byte after the letters, a whole \
+             pre-edit away",
+        );
+        assert_eq!(
+            cut.composition,
+            Some([16.0, 100.0, 56.0, 120.0]),
+            "and the rule under the composition spans exactly the letters being typed",
+        );
+        // The file's own seams are the file's: what is in the paragraph and not
+        // in the file is gone from them, and everything after the composition is
+        // back where the file has it.
+        assert_eq!(
+            cut.row
+                .seams
+                .iter()
+                .map(|seam| (seam.offset, seam.x))
+                .collect::<Vec<_>>(),
+            vec![(0, 0.0), (3, 56.0), (6, 72.0)],
+        );
+    }
+
+    /// **A gap and a page with nothing on it draw a composition too** (§7.1.3q).
+    ///
+    /// The gap is the one place on the page where a composition displaces
+    /// nothing: it holds no bytes, so the letters stand at the column a line
+    /// starts in and the document does not move. An empty page is the same
+    /// place with no block in front of it.
+    ///
+    /// MUTATION: draw the bare caret bar as well as the letters and the second
+    /// assertion goes red — two carets on one empty line, one of them at the
+    /// margin and one inside the composition.
+    #[test]
+    fn a_gap_and_the_empty_page_draw_a_composition_too() {
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let palette = bt_render::chrome_palette();
+        let body = [0.0, 0.0, 400.0, 400.0];
+        let (left, _) = preview::markdown_measure_box(body, metrics);
+        let blocks = prose(&["first", "second"]);
+        let intrinsic = vec![MarkdownBlockIntrinsic::default(); blocks.len()];
+        let art = PageArt {
+            math: &DocumentMath::default(),
+            pictures: &DocumentPictures::default(),
+            theme: bt_render::Theme::Dark,
+        };
+        let mut shaper = |runs: &[bt_render::PreviewRun], width: f32, _: f32, line: f32| {
+            line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
+        };
+        let layout = lay_markdown_out(&blocks, &intrinsic, None, 400.0, metrics, art, &mut shaper);
+        let page = |caret: &MarkdownCaretPaint| {
+            build_preview_markdown_body(
+                body,
+                metrics,
+                [0.0, 0.0],
+                rested_bars(&[]),
+                MarkdownPage {
+                    blocks: &blocks,
+                    intrinsic: &intrinsic,
+                    layout: &layout,
+                    live: MarkdownLive {
+                        source: None,
+                        caret: Some(caret),
+                    },
+                },
+                &palette,
+                art,
+            )
+        };
+        let composing = MarkdownCaretPaint {
+            seat: MarkdownCaretSeat::Gap {
+                after: Some(0),
+                line_height: 20.0,
+            },
+            lit: true,
+            selection: 0..0,
+            caret_width: 2.0,
+            preedit: Some(MarkdownPreedit {
+                text: "nikan".to_owned(),
+                caret_byte: 5,
+            }),
+        };
+        let built = page(&composing);
+        let composed = built
+            .body
+            .paragraphs
+            .iter()
+            .find(|paragraph| paragraph.runs.iter().any(|run| run.text == "nikan"))
+            .expect("the letters being composed are on the empty line");
+        assert_eq!(
+            [composed.rect[0], composed.rect[1]],
+            [left, metrics.padding_y + layout[0].top + layout[0].height],
+            "at the column a line starts in, directly under the block the caret \
+             has just left",
+        );
+        assert!(
+            built.body.quads.is_empty(),
+            "and the bar is the composition's, struck from the shaper's own \
+             seams rather than twice: {:#?}",
+            built.body.quads,
+        );
+        let laid_again =
+            lay_markdown_out(&blocks, &intrinsic, None, 400.0, metrics, art, &mut shaper);
+        assert_eq!(layout, laid_again, "and the page did not move to make room");
+
+        // A page with nothing on it is the same gap with no block in front of
+        // it: the caret is byte zero and the letters stand at the top.
+        let ahead = MarkdownCaretPaint {
+            seat: MarkdownCaretSeat::Gap {
+                after: None,
+                line_height: 20.0,
+            },
+            ..composing
+        };
+        let built = page(&ahead);
+        let composed = built
+            .body
+            .paragraphs
+            .iter()
+            .find(|paragraph| paragraph.runs.iter().any(|run| run.text == "nikan"))
+            .expect("a page in front of every block composes at the top of it");
+        assert_eq!(composed.rect[1], metrics.padding_y);
+    }
+
+    /// **A composition belongs to the field it was typed into** (user report
+    /// 2026-09-12; `docs/DESIGN.md` §7.1.5a″).
+    ///
+    /// The report: `gif` typed into the command palette with an input method on,
+    /// the row picked, the palette gone — and the candidate list still floating
+    /// over the picture it had opened, attached to nothing. Nothing in this
+    /// window had ever ended a composition, and Windows only ends one on a blur.
+    ///
+    /// MUTATION: answer `false` when the two rungs differ and both assertions go
+    /// red — which is the window as the reporter found it.
+    #[test]
+    fn closing_the_palette_cancels_a_composition_typed_into_it() {
+        let typing = KeyboardOwner {
+            palette: true,
+            menu_or_dialog: true,
+            ..KeyboardOwner::default()
+        };
+        assert_eq!(ime_owner(typing), ImeOwner::Palette);
+        assert!(
+            !composition_outlived_its_field(Some(ImeOwner::Palette), ime_owner(typing)),
+            "while the box is up the letters are its own",
+        );
+        // The palette is closed: `menu_or_dialog` and `palette` go down
+        // together, and the keyboard is back where it was.
+        let closed = KeyboardOwner::default();
+        assert_eq!(ime_owner(closed), ImeOwner::Shell);
+        assert!(
+            composition_outlived_its_field(Some(ImeOwner::Palette), ime_owner(closed)),
+            "and the moment the box is gone the composition has no field",
+        );
+    }
+
+    /// **The composition does not follow the keyboard to another owner**
+    /// (§7.1.5a″) — whichever pair of rungs it is.
+    ///
+    /// Said over every rung rather than over the reported one, because what
+    /// makes a composition stale is not which gesture moved the keyboard: it is
+    /// that the keyboard is somewhere else. The shell is in the walk on purpose
+    /// — the destination the report's letters would otherwise have reached.
+    ///
+    /// MUTATION: compare against `ImeOwner::Shell` instead of against the rung
+    /// now holding the keyboard and every pair that does not involve a shell
+    /// goes red.
+    #[test]
+    fn a_composition_does_not_follow_the_keyboard_to_another_owner() {
+        for started_in in ImeOwner::ALL {
+            assert!(
+                !composition_outlived_its_field(Some(started_in), started_in),
+                "{started_in:?} keeps its own composition while it keeps the keyboard",
+            );
+            for now in ImeOwner::ALL.into_iter().filter(|rung| *rung != started_in) {
+                assert!(
+                    composition_outlived_its_field(Some(started_in), now),
+                    "a composition begun in {started_in:?} may not arrive at {now:?}",
+                );
+            }
+        }
+        assert!(
+            !composition_outlived_its_field(None, ImeOwner::Shell),
+            "and a window composing nothing has nothing to cancel",
+        );
+    }
+
+    /// **Cancelling a composition goes through one door** (§7.1.5a″).
+    ///
+    /// Two claims, and the pins are what keep them true: the Win32 notification
+    /// is named in exactly one place in this workspace, and this window reaches
+    /// it through exactly one function of its own — which is also the function
+    /// that clears everything this window was drawing from the composition. A
+    /// second spelling of either is a candidate list left on the glass with its
+    /// letters gone, or letters cleared with the list still up.
+    ///
+    /// MUTATION: clear `window.preedit` at a second site without the platform
+    /// call and the last assertion goes red.
+    #[test]
+    fn cancelling_a_composition_goes_through_one_door() {
+        const SOURCE: &str = include_str!("main.rs");
+        const PLATFORM: &str = include_str!("../../bt-platform/src/lib.rs");
+        assert_eq!(
+            PLATFORM.matches("NI_COMPOSITIONSTR").count(),
+            2,
+            "named where it is imported and where it is called, and nowhere else",
+        );
+        assert!(
+            PLATFORM
+                .split("pub fn cancel_composition(hwnd: NonZeroIsize) -> bool {")
+                .nth(1)
+                .is_some_and(|body| body
+                    .split("\n    }\n")
+                    .next()
+                    .is_some_and(|body| body.contains("NI_COMPOSITIONSTR"))),
+            "and the place it is called is the door",
+        );
+        // Spelled in two pieces so that this line is not itself one of the
+        // matches it is counting — the needle is one string at compile time and
+        // two in the file.
+        assert_eq!(
+            SOURCE
+                .matches(concat!("bt_platform::", "cancel_composition("))
+                .count(),
+            1,
+            "and it is reached from exactly one place in this window",
+        );
+        const END: &str = "\n    }\n";
+        let body = |signature: &str| {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find(END).unwrap_or(rest.len())]
+        };
+        let door = body("fn cancel_composition(&mut self, started_in: ImeOwner) -> Result<()> {");
+        for (cleared, what) in [
+            ("bt_platform::cancel_composition", "the method's own state"),
+            ("self.window.preedit = None", "the letters"),
+            (
+                "ime_cursor_throttle.reset()",
+                "the rectangle the list hung from",
+            ),
+            ("ime_system_caret.destroy()", "the caret Pinyin follows"),
+            ("set_preedit(\"\")", "the field's own copy of them"),
+        ] {
+            assert!(door.contains(cleared), "the one door lets go of {what}");
+        }
+        assert!(
+            !door.contains("set_ime_allowed"),
+            "and it does not re-associate the window's input context to do it",
+        );
+        // The one place that notices is the tail of the pass, which is where
+        // every way of moving the keyboard has already happened.
+        assert_eq!(
+            SOURCE
+                .matches(concat!("self.settle_", "composition_owner()"))
+                .count(),
+            1,
+            "one watcher, and no list of the ways a field can go away",
+        );
+    }
+
     /// **The caret's block is drawn as the file's own bytes, and a fence keeps
     /// its highlighting while it is** (§7.1.3q, ticket T4).
     ///
@@ -138975,6 +140167,7 @@ mod tests {
             lit: true,
             selection: 0..0,
             caret_width: 2.0,
+            preedit: None,
         };
         let built = build_preview_markdown_body(
             body,
@@ -139157,6 +140350,7 @@ mod tests {
             lit: true,
             selection: 0..0,
             caret_width: 2.0,
+            preedit: None,
         };
         let built = page(&between);
         assert_eq!(

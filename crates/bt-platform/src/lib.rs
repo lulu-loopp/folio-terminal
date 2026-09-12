@@ -2361,7 +2361,13 @@ mod windows_impl {
         },
         UI::{
             HiDpi::{GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI},
-            Input::KeyboardAndMouse::{GetCapture, GetKeyboardLayout, SetFocus, VkKeyScanW},
+            Input::{
+                // IMM32, for exactly one call — see [`cancel_composition`].
+                Ime::{
+                    CPS_CANCEL, ImmGetContext, ImmNotifyIME, ImmReleaseContext, NI_COMPOSITIONSTR,
+                },
+                KeyboardAndMouse::{GetCapture, GetKeyboardLayout, SetFocus, VkKeyScanW},
+            },
             Shell::{
                 ABM_GETSTATE, ABS_AUTOHIDE, APPBARDATA, Common::COMDLG_FILTERSPEC, DefSubclassProc,
                 FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
@@ -5634,6 +5640,50 @@ mod windows_impl {
     impl Drop for ImeSystemCaret {
         fn drop(&mut self) {
             self.destroy();
+        }
+    }
+
+    /// **End the composition this window is holding, throwing its letters
+    /// away** (user report 2026-09-12; `docs/DESIGN.md` §7.1.5a″).
+    ///
+    /// The one door, and it is one door because the rule it serves is one
+    /// sentence: a composition belongs to the field it was started in, so when
+    /// that field goes away the composition is cancelled — never committed into
+    /// whatever is holding the keyboard next. `CPS_CANCEL` and deliberately not
+    /// `CPS_COMPLETE`: completing would hand the half-typed letters to a
+    /// destination that never asked for them, which is the very bug this exists
+    /// to close, and the field they were meant for is by then already gone.
+    ///
+    /// **Not `set_ime_allowed(false)`**, which is the other way this looks like
+    /// it could be done and is not the same thing: that re-associates the input
+    /// context for the whole window and drops the method's own state with it, so
+    /// the next composition starts in a window the method has been told is not
+    /// taking text.
+    ///
+    /// The candidate window is the method's, and it goes with the composition:
+    /// the notification below is the one a method answers by ending the
+    /// composition it is displaying, which is what takes the list off the
+    /// screen.
+    ///
+    /// **`false` is not a failure.** A window with no composition in flight has
+    /// no composition string to cancel and IMM32 says so; the caller's own state
+    /// is cleared either way, because the app's picture of what is being
+    /// composed is the app's.
+    pub fn cancel_composition(hwnd: NonZeroIsize) -> bool {
+        let hwnd = HWND(hwnd.get() as *mut c_void);
+        // SAFETY: `hwnd` originates from winit's live Win32WindowHandle and
+        // every call here happens on its event-loop thread, which is the thread
+        // an input context is affine to. The context is released on every path
+        // out, including the one where there is none to release — `ImmGetContext`
+        // answers null and `ImmReleaseContext` is a no-op for it.
+        unsafe {
+            let context = ImmGetContext(hwnd);
+            if context.0.is_null() {
+                return false;
+            }
+            let told = ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0).as_bool();
+            let _ = ImmReleaseContext(hwnd, context);
+            told
         }
     }
 
@@ -8944,21 +8994,21 @@ impl TaskbarProgress {
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirChange, DirWatch, FilePickKind, FolderPicker, ImagePicker,
     ImeSystemCaret, MathContextMenu, Notifier, SystemSettingsWatch, Taskbar, adopt_parent_console,
-    announce_explorer_menu_change, apartments_left, client_area_animation_enabled, clipboard_text,
-    cloaked_from_attribute, current_thread_priority, current_user_registry_string,
-    current_user_registry_subkeys, detach_console, directory_folds_case, documents_directory,
-    dpi_at, exposed_from_probe, exposure_probe_points, file_product_version, flash_window,
-    get_dpi_for_window, get_window_rect, get_work_area, hide_every_window_of_this_process,
-    install_console_ctrl_handler, install_context_menu, install_window_class_background,
-    is_window_cloaked, is_window_minimized, leave_process, message_box, monitor_id_at,
-    monospace_font_families, os_ui_language, pointer_position, read_context_menu, recycle,
-    redirect_std_streams_to_file, remove_context_menu, request_window_close, set_clipboard_text,
-    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
-    set_window_topmost, silence_std_streams, spawn_at_priority, stand_window_at,
-    std_error_is_console, system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
-    taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
-    top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
-    window_is_exposed, work_area_at, write_to_console,
+    announce_explorer_menu_change, apartments_left, cancel_composition,
+    client_area_animation_enabled, clipboard_text, cloaked_from_attribute, current_thread_priority,
+    current_user_registry_string, current_user_registry_subkeys, detach_console,
+    directory_folds_case, documents_directory, dpi_at, exposed_from_probe, exposure_probe_points,
+    file_product_version, flash_window, get_dpi_for_window, get_window_rect, get_work_area,
+    hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
+    install_window_class_background, is_window_cloaked, is_window_minimized, leave_process,
+    message_box, monitor_id_at, monospace_font_families, os_ui_language, pointer_position,
+    read_context_menu, recycle, redirect_std_streams_to_file, remove_context_menu,
+    request_window_close, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
+    set_window_dark_mode, set_window_outer_rect, set_window_topmost, silence_std_streams,
+    spawn_at_priority, stand_window_at, std_error_is_console, system_backdrop_available,
+    system_uses_light_apps, take_keyboard_focus, taskbar_auto_hidden_from_state,
+    taskbar_is_auto_hidden, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
+    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_to_console,
 };
 
 /// **The hand-off, spelled once** — see [`handoff`].
@@ -9040,6 +9090,33 @@ mod portable_priority {
 pub use portable_priority::{
     current_thread_priority, set_current_thread_priority, spawn_at_priority,
 };
+
+/// Ending a composition, on a platform whose input methods have not been asked
+/// yet.
+///
+/// The same contract [`portable_priority`] answers and for the same reason: the
+/// caller reads the `bool`, clears its own picture of the composition either
+/// way, and goes on. What a macOS or an X11 arm would call here is a different
+/// call with a different lifetime — `NSTextInputClient`'s
+/// `discardMarkedText`, an IBus context reset — and choosing between them is a
+/// backend's decision (`docs/plans/port/macos-spike-2026-09-07.md` class C),
+/// not one to take by accident on the way past.
+#[cfg(not(windows))]
+mod portable_ime {
+    use std::num::NonZeroIsize;
+
+    /// Whether an input method was told to throw its composition away. Off
+    /// Windows none was asked, so `false` — the same answer Win32 gives for a
+    /// window that is not composing.
+    #[must_use]
+    pub fn cancel_composition(hwnd: NonZeroIsize) -> bool {
+        let _ = hwnd;
+        false
+    }
+}
+
+#[cfg(not(windows))]
+pub use portable_ime::cancel_composition;
 
 /// The band contract, asked where there are no bands.
 ///
