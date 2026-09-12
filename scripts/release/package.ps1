@@ -498,6 +498,9 @@ $lines = @(
             '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
         }
 )
-Set-Content -LiteralPath $sums -Value $lines -Encoding ascii
+# Written with LF and a final newline by hand: `Set-Content` on Windows ends every
+# line with CRLF, and `sha256sum -c` on Linux and in WSL then looks for a file
+# whose name ends in a carriage return and finds none (0.2.5 and 0.3.0 shipped so).
+[System.IO.File]::WriteAllText($sums, (($lines -join "`n") + "`n"), [System.Text.Encoding]::ASCII)
 Write-Host ''
 $lines | Write-Host
