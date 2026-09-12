@@ -9860,6 +9860,152 @@ mod native_window_door_tests {
         );
     }
 
+    /// RED — **the stand-in window is named by tests and by nothing else.**
+    ///
+    /// [`NativeWindow::stand_in`] exists because `bt-app`'s quake and web-host
+    /// suites decide things *about* handles — which window the keyboard goes
+    /// back to, which seat a page is addressed at — and none of them touches
+    /// the machine. It is `#[doc(hidden)]`, it names no window, and the moment
+    /// product code writes one it becomes what this type was built to remove: a
+    /// window-shaped value invented by the caller.
+    ///
+    /// The walk is a brace count rather than a regex, because what is being
+    /// asked is *whether this occurrence is inside a `#[cfg(test)]` module* and
+    /// a line-based reading cannot answer that. The definition itself is the
+    /// one occurrence outside such a module, and it is named.
+    ///
+    /// MUTATION: call `stand_in` from any shipped path and this fails naming
+    /// the file and the line.
+    #[test]
+    fn a_stand_in_window_is_only_named_by_tests() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .canonicalize()
+            .expect("the crates directory, one above this crate");
+        let mut found = Vec::new();
+        walk(&root, &mut found);
+        found.sort();
+        found.retain(|path| {
+            path.components()
+                .any(|component| component.as_os_str() == "src")
+        });
+        assert!(
+            found.len() > 20,
+            "the walk found {} files, which is not this workspace's crates",
+            found.len()
+        );
+
+        let mut outside = Vec::new();
+        for file in found {
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            let spans = test_module_spans(&text);
+            for (at, _) in text.match_indices("stand_in(") {
+                // **On a word boundary**, for the quiet door's reason one file
+                // over: `bt-app`'s tab strip has a `strip_stand_in` and a
+                // `retire_the_stand_in` about a placeholder tab, which is a
+                // different subject that happens to share an English word.
+                if text[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|before| before.is_alphanumeric() || before == '_')
+                {
+                    continue;
+                }
+                // The definition, which is where the spelling comes from.
+                if text[..at].ends_with("pub const fn ") {
+                    continue;
+                }
+                if spans.iter().any(|(from, to)| at > *from && at < *to) {
+                    continue;
+                }
+                // Prose about the door is not a use of it.
+                let line_start = text[..at].rfind('\n').map_or(0, |newline| newline + 1);
+                if text[line_start..at].trim_start().starts_with("//") {
+                    continue;
+                }
+                let line = text[..at].lines().count();
+                outside.push(format!(
+                    "{}:{line}",
+                    file.strip_prefix(&root).unwrap_or(&file).display()
+                ));
+            }
+        }
+        assert!(
+            outside.is_empty(),
+            "`NativeWindow::stand_in` names no window, so a shipped path that reaches for one is \
+             inventing a handle — which is the defect `NativeWindow` exists to remove: {outside:#?}"
+        );
+    }
+
+    /// The byte ranges of every `#[cfg(test)]` or `#[cfg(all(test…` module in
+    /// `text`, from the brace that opens the module to the one that closes it.
+    ///
+    /// Braces inside string and character literals and inside comments would
+    /// throw the count off, so both are skipped. It is a small parser and it is
+    /// the only honest way to ask the question this gate asks.
+    fn test_module_spans(text: &str) -> Vec<(usize, usize)> {
+        let bytes = text.as_bytes();
+        let mut spans = Vec::new();
+        for gate in ["#[cfg(test)]", "#[cfg(all(test"] {
+            for (at, _) in text.match_indices(gate) {
+                let Some(open) = text[at..].find('{').map(|offset| at + offset) else {
+                    continue;
+                };
+                let mut depth = 0_i32;
+                let mut index = open;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'"' => index = skip_string(bytes, index),
+                        b'\'' => index = skip_char(bytes, index),
+                        b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                            index += text[index..].find('\n').unwrap_or(bytes.len() - index);
+                        }
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                spans.push((open, index));
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+            }
+        }
+        spans
+    }
+
+    /// Past the string literal that starts at `at`.
+    fn skip_string(bytes: &[u8], at: usize) -> usize {
+        let mut index = at + 1;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' => index += 1,
+                b'"' => return index,
+                _ => {}
+            }
+            index += 1;
+        }
+        bytes.len()
+    }
+
+    /// Past the character literal that starts at `at`, or `at` itself when the
+    /// quote is a lifetime rather than a literal.
+    fn skip_char(bytes: &[u8], at: usize) -> usize {
+        match (bytes.get(at + 1), bytes.get(at + 2)) {
+            (Some(b'\\'), _) => bytes[at + 2..]
+                .iter()
+                .position(|byte| *byte == b'\'')
+                .map_or(bytes.len(), |offset| at + 2 + offset),
+            (Some(_), Some(b'\'')) => at + 2,
+            _ => at,
+        }
+    }
+
     /// RED — **the handle is spelled twice, and each spelling is gated.**
     ///
     /// The other half of the rule: it is not enough that no door names an
