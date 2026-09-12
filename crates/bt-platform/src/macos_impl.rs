@@ -104,7 +104,8 @@ use objc2_app_kit::{
     NSNormalWindowLevel, NSScreen, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
     NSWindowDidBecomeKeyNotification, NSWindowDidEnterFullScreenNotification,
     NSWindowDidExitFullScreenNotification, NSWindowDidResignKeyNotification,
-    NSWindowDidResizeNotification, NSWindowOcclusionState, NSWindowStyleMask,
+    NSWindowDidResizeNotification, NSWindowDidUpdateNotification, NSWindowOcclusionState,
+    NSWindowStyleMask,
     NSWindowTitleVisibility, NSWorkspace,
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
 };
@@ -1184,7 +1185,16 @@ fn centre_window_buttons(ns_window: &NSWindow, bar_logical_px: f64) {
         } else {
             host.bounds().size.height - above - frame.size.height
         };
-        button.setFrameOrigin(NSPoint::new(frame.origin.x, y));
+        // **Written only when it is not already there** (measured 2026-09-12,
+        // at the merge with T-MAC-LIGHTS). This runs from `NSWindowDidUpdate`
+        // as well now, and a frame *set* inside an update is a reason for
+        // another layout and another update: the window would chase itself for
+        // as long as it was on screen. Comparing first makes the common case —
+        // the buttons are already where this puts them — cost three reads and
+        // write nothing, which is what ends the chase.
+        if (frame.origin.y - y).abs() > 0.01 {
+            button.setFrameOrigin(NSPoint::new(frame.origin.x, y));
+        }
     }
 }
 
@@ -1198,10 +1208,23 @@ fn centre_window_buttons(ns_window: &NSWindow, bar_logical_px: f64) {
 /// swaps the buttons' own appearance.
 ///
 /// **Notifications and not a timer.** A timer would be a guess about when AppKit
-/// is done, restated sixty times a second for the life of the window; these five
-/// are the events AppKit posts *after* it has finished, on the thread that did
-/// it, and a placement that still will not hold against them is a fact about
-/// this platform worth reporting rather than papering over.
+/// is done, restated sixty times a second for the life of the window; these are
+/// the events AppKit posts *after* it has finished, on the thread that did it,
+/// and a placement that still will not hold against them is a fact about this
+/// platform worth reporting rather than papering over.
+///
+/// **And the sixth is `NSWindowDidUpdate`, because those five are not all of
+/// them** — measured on the Mac on 2026-09-12, at the merge with T-MAC-LIGHTS.
+/// The five hold the placement through a resize and a full-screen round trip,
+/// and they did not hold it through a launch: the trace shows the frames set to
+/// the strip's axis, read back from AppKit at 9 again a moment later, set once
+/// more when the window became key — and the window that was then photographed
+/// still had them at 9. Something in the display pass lays the title bar out
+/// again and posts none of the five. `NSWindowDidUpdate` is posted at the end of
+/// every pass in which this window was updated, which is *after* whatever did
+/// it, so it is the one subscription that cannot be outrun. It is affordable for
+/// the reason [`centre_window_buttons`] is written the way it is: a placement
+/// that is already right writes nothing.
 ///
 /// The registration is scoped to this window (`object:`), so a second window's
 /// resize does not wake this one's observer.
@@ -1233,6 +1256,7 @@ impl WindowButtonsWatch {
                 NSWindowDidEnterFullScreenNotification,
                 NSWindowDidBecomeKeyNotification,
                 NSWindowDidResignKeyNotification,
+                NSWindowDidUpdateNotification,
             ]
         };
         for name in names {
