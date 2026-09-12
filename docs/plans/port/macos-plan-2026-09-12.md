@@ -125,6 +125,8 @@ images; typeset math; the glyph output measured rather than assumed.
 
 ### M3 — chrome, the application lifecycle, several windows, persistence
 
+> **Ruled 2026-09-12 (owner, from the first window on the Mac):** the window must not carry two sets of window controls. On macOS the native title bar is kept but made part of Folio's chrome: `titlebarAppearsTransparent`, `fullSizeContentView`, the title text hidden (`titleVisibility = .hidden`, Folio draws the tab title itself), the traffic lights left where macOS puts them and Folio's tab strip starting to their right; Folio's own minimise/maximise/close buttons are not drawn on macOS (they are the Windows custom frame's), the settings gear stays, and the strip's drag region is the empty part of the title-bar height (`isMovableByWindowBackground` off; the strip is the drag region). Double-clicking the strip follows the macOS "AppleActionOnDoubleClick" preference (zoom or minimise). This is M3-1's first item.
+
 The custom window frame against macOS's traffic lights; the application menu bar;
 **the AppKit application delegate** — Finder and Dock reopen, Services delivery,
 termination, last window closed — which is a different thing from the launch
