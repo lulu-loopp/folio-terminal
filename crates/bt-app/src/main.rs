@@ -50996,8 +50996,15 @@ impl Runtime<'_> {
         };
         let rows = first_run::rows(&machine);
         let shape = first_run::explorer_shape(&machine);
+        // **Written down only if it went up** (macOS plan M3-6). The rows are
+        // what this platform has the capability for, and a platform with none
+        // of them is shown no card — `Card::open` is where that rule lives, and
+        // recording `Shown` for a card nobody saw would spend the one first run
+        // this machine has on nothing.
+        if !self.window.first_run.open(rows, shape) {
+            return Ok(());
+        }
         self.record_first_run_card(bt_persist::FirstRunCardV1::Shown);
-        self.window.first_run.open(rows, shape);
         self.rebuild_first_run_tip_anchors();
         if self.refresh_overlay() {
             self.present_chrome_change()?;
