@@ -9943,6 +9943,17 @@ mod native_window_door_tests {
     /// Braces inside string and character literals and inside comments would
     /// throw the count off, so both are skipped. It is a small parser and it is
     /// the only honest way to ask the question this gate asks.
+    ///
+    /// **Raw strings are their own arm, and M1-10 is why.** A `r"\\?\"` — a
+    /// Windows verbatim prefix, of which this crate's tests are full — ends with
+    /// a backslash immediately before its closing quote. Read as an ordinary
+    /// string that backslash escapes the quote, the scan runs on into the next
+    /// literal, and from there the brace count is somebody else's. The effect
+    /// was silent and it was total: this walk never closed `handoff.rs`'s test
+    /// module at all, so the gate below covered none of it, and the first line
+    /// in that module to name `stand_in` was reported as a shipped path. A gate
+    /// that answers about a file it cannot parse is worse than one that says it
+    /// cannot, which is why this is a fix rather than an exception.
     fn test_module_spans(text: &str) -> Vec<(usize, usize)> {
         let bytes = text.as_bytes();
         let mut spans = Vec::new();
@@ -9955,6 +9966,9 @@ mod native_window_door_tests {
                 let mut index = open;
                 while index < bytes.len() {
                     match bytes[index] {
+                        b'r' if raw_string_opens_at(bytes, index) => {
+                            index = skip_raw_string(bytes, index);
+                        }
                         b'"' => index = skip_string(bytes, index),
                         b'\'' => index = skip_char(bytes, index),
                         b'/' if bytes.get(index + 1) == Some(&b'/') => {
@@ -9975,6 +9989,58 @@ mod native_window_door_tests {
             }
         }
         spans
+    }
+
+    /// Whether the `r` at `at` opens a raw string rather than sitting inside a
+    /// word.
+    ///
+    /// Two readings and both are cheap: the byte before it may not be part of an
+    /// identifier — `for` must not open one — except that it may be the `b` of
+    /// `br"…"`, which is the byte-string spelling of the same literal. What
+    /// follows has to be `#`* `"`, and [`skip_raw_string`] answers that by
+    /// declining to move, so this predicate is allowed to be the loose half.
+    fn raw_string_opens_at(bytes: &[u8], at: usize) -> bool {
+        let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+        let before = match at.checked_sub(1).map(|before| bytes[before]) {
+            Some(b'b') => at.checked_sub(2).map(|before| bytes[before]),
+            other => other,
+        };
+        if before.is_some_and(is_word) {
+            return false;
+        }
+        let mut index = at + 1;
+        while bytes.get(index) == Some(&b'#') {
+            index += 1;
+        }
+        bytes.get(index) == Some(&b'"')
+    }
+
+    /// Past the raw string that starts at the `r` at `at` — the closing quote
+    /// and its hashes — or `at` itself when that is not what is there.
+    ///
+    /// A raw string has no escapes at all: it ends at the first `"` followed by
+    /// as many `#` as opened it, and a backslash before that quote is one more
+    /// character of the path.
+    fn skip_raw_string(bytes: &[u8], at: usize) -> usize {
+        let mut hashes = 0_usize;
+        let mut index = at + 1;
+        while bytes.get(index) == Some(&b'#') {
+            hashes += 1;
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b'"') {
+            return at;
+        }
+        index += 1;
+        while index < bytes.len() {
+            if bytes[index] == b'"'
+                && (1..=hashes).all(|offset| bytes.get(index + offset) == Some(&b'#'))
+            {
+                return index + hashes;
+            }
+            index += 1;
+        }
+        bytes.len()
     }
 
     /// Past the string literal that starts at `at`.

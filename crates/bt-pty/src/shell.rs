@@ -478,8 +478,14 @@ mod tests {
     /// scenario under test is precisely a machine where *neither* of those two leads anywhere and
     /// the Store alias is the only PowerShell 7 there is. Naming the variables and leaving the
     /// filesystem real reproduces that machine without touching this process's environment.
+    ///
+    /// Gated where its two readers are (M1-10): both tests that build one are
+    /// `#[cfg(windows)]`, because the machine they reproduce is a Store install
+    /// of PowerShell 7.
+    #[cfg(windows)]
     struct NamedVarsRealFiles(Vec<(&'static str, OsString)>);
 
+    #[cfg(windows)]
     impl ShellEnvironment for NamedVarsRealFiles {
         fn var_os(&self, key: &str) -> Option<OsString> {
             self.0

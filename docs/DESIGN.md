@@ -7964,23 +7964,24 @@ spike 量出来的数字说的正是这件事。`bt-app` 在 macOS 上停在 **3
 |---|---|
 | 承诺能在第二个平台上编过 | `bt-unicode`、`bt-doc`、`bt-detect`、`bt-layout`、`bt-persist`、`bt-winres`、`bt-math`、`bt-transcript`、`bt-viewport`、`bt-render`、`bt-term`、`bt-pty`、`bt-corpus`,加 vendored 的 `alacritty_terminal` |
 | Win32 该待的地方 | `bt-platform` |
-| 不在名单上,今天在 macOS 上就是编不过 | `bt-app` |
+| 每个目标都在 macOS 上 check,包括 bin 的 test 目标和两个 example | `bt-app` |
 
-写成**名单**而不是写成「除 `bt-app` 之外的全部」,差别就是整个主张:`bt-platform` 是 Win32 该待的地方、`bt-app` 是还没移的那一半,这两件都是有人拍下来的事实,不是一个脚本能从目录形状里推出来的东西。一个新 crate 加进这个 workspace,要么是**有意**加进这张名单,要么它不在这份承诺里。
+写成**名单**而不是写成「全部」,差别就是整个主张:`bt-platform` 和 `bt-app` 各自是名单上有意的一行——前者是 Win32 该待的地方,后者是产品本身——这两件都是有人拍下来的事实,不是一个脚本能从目录形状里推出来的东西。一个新 crate 加进这个 workspace,要么是**有意**加进这张名单,要么它不在这份承诺里。
 
-`bt-app` 编不过是预期之内的:那 321 条就是移植本身,而**移植是它自己的一个里程碑,排在 0.4 之后**。这一节不是它。
+M1-1 和 M1-10 之后,「`bt-app` 编不过是预期之内的:那 321 条就是移植本身」这句话退役了。M1-1 给 `bt_platform` 补齐了缺失的公开项,M1-10 修掉了 `--all-targets` 触及的最后三个目标。
 
 ### 13.3 两道守卫,而它们是两种东西
 
 | 守卫 | 它问的问题 |
 |---|---|
-| `.github/workflows/ci.yml` 的 `core-macos`(`macos-latest`) | 上面那十四个 `cargo check --locked --all-targets`;其中十个 `cargo test --locked`(`bt-unicode`、`bt-doc`、`bt-detect`、`bt-layout`、`bt-persist`、`bt-winres`、`bt-math`、`bt-transcript`、`bt-viewport`、`alacritty_terminal`) |
-| `.github/workflows/ci.yml` 的 `core-linux`(`ubuntu-latest`) | 同样十四个 `cargo check --locked --all-targets`;`cargo test --locked` 的名单是 mac 那十个加 `bt-pty`、减 `bt-math`——Linux 有真的 pty 而不是 ConPTY,`bt-pty` 的测试能在这里跑(21 过、18 忽略,忽略的是 PSReadLine 与 ConPTY 探针);`bt-math` 有三个测试点名机器上真装着的字体(Arial 与 CJK 字面),跑器没有。这个 job 用 `RUSTFLAGS: -C target-feature=-crt-static` 压过 `.cargo/config.toml` 的 `+crt-static`——glibc 上静态链接的宿主装不了 proc-macro 的动态库,而这个 job 不发布任何东西 |
+| `.github/workflows/ci.yml` 的 `core-macos`(`macos-latest`) | 十五个 `cargo check --locked --all-targets`(原来的十四个加 `bt-platform`);`bt-app` 单独一步 `cargo check --locked --all-targets -p bt-app`;十二个 `cargo test --locked`(原来的十个加 `bt-platform` 与 `bt-pty`);`cargo clippy --locked --all-targets -p bt-platform -- -D warnings` |
+| `.github/workflows/ci.yml` 的 `core-linux`(`ubuntu-latest`) | 同样十五个 `cargo check --locked --all-targets`;十个 `cargo test --locked`——mac 那十二个减 `bt-math`(跑器没有它点名的字体)减 `bt-platform`。`bt-app` 不进这个 job。`RUSTFLAGS: -C target-feature=-crt-static` 压过 `.cargo/config.toml` 的 `+crt-static`——glibc 上静态链接的宿主装不了 proc-macro 的动态库,而这个 job 不发布任何东西 |
 | `scripts/check-portable-core.ps1` | 那些 crate 的源码里有没有 `windows::`、`windows_sys::`、`winapi`、`webview2`、`std::os::windows`,而所在的项不在 `#[cfg(windows)]` / `#[cfg(target_os = "windows")]` 之下 |
+| `scripts/check-portable-core.ps1` 第二道检查 | `bt-app` 在哪些文件里知道自己在哪个平台上——名单从 `main.rs` 的 `FILES_THAT_MAY_NAME_A_PLATFORM` 里读出来,不另存一份 |
 
-**为什么 check 十四个而两台跑器各 test 不一样多。** 十四个包在两台机器上都 check;能不能 test 取决于跑器上有什么。`bt-render` 两边都只 check:它要真的 adapter。`bt-pty` 在 mac 上只 check——它要 ConPTY,macOS 没有;在 Linux 上进 test——Linux 有真的 pty,21 个测试过、18 个忽略,忽略的是 PSReadLine 与 ConPTY 探针。`bt-math` 反过来:mac 上进 test,Linux 上只 check——它有三个测试点名机器上真装着的字体(Arial 与 CJK 字面),Linux 跑器没有。`bt-term` 与 `bt-corpus` 两边都只 check,理由是**还没有人在那边量过它们的测试**——这是一句关于本仓知道什么的陈述,不是关于那两个 crate 的判断。Linux 那个 job 还多一件事:`.cargo/config.toml` 给所有平台设了 `+crt-static`,glibc 上静态链接的宿主装不了 proc-macro 的动态库,所以 `core-linux` 用 `RUSTFLAGS: -C target-feature=-crt-static` 压过它——只在这个不发布任何东西的 job 里。两个 job 和 `ci.yml` 里其余每一个 job 一样是必过的:那里没有任何一处 `continue-on-error`。
+**为什么 check 十五个而两台跑器各 test 不一样多。** 十五个在两台机器上都 check;能不能 test 取决于跑器上有什么。`bt-render` 两边都只 check:它要真的 adapter。`bt-platform` 在 macOS 上进 test——Windows 之外大半是拒绝,而一条从没被调过的拒绝是一句没人读回来的话;`portable_impl::refusal_tests` 逐扇门去调,加上 M1-10 新写的四份 POSIX 镜像只在这里和 Linux 上跑。`bt-pty` 在 macOS 和 Linux 上都进 test:两台机器都有真的 pty;「`bt-pty` 在 mac 上只 check,它要 ConPTY」这句旧话由 M1-6 退役——那个 crate 的测试从来分两半,ConPTY 一半在 Windows 上跑,Unix 一半在这两台上跑。`bt-math` 反过来:mac 上进 test,Linux 上只 check——它有三个测试点名机器上真装着的字体(Arial 与 CJK 字面),Linux 跑器没有。`bt-term` 与 `bt-corpus` 两边都只 check,理由是**还没有人在那边量过它们的测试**——这是一句关于本仓知道什么的陈述,不是关于那两个 crate 的判断。`bt-app` 在 macOS 上单独一步 `cargo check --locked --all-targets -p bt-app`,check 而不 test 是有意的——它有 3,498 条测试,大多数要窗口、渲染器或 ConPTY,开这扇门是另一张票而不是一条更长的命令。`core-macos` 还在 `bt-platform` 上跑 `cargo clippy --locked --all-targets -- -D warnings`:那是 `logic` 在 Windows 上守的 lint 线,第一次在第二个平台上也有人守;只守这一个 crate,理由在 §13.9 ④。`core-linux` 那边 `bt-platform` 进 check 名单、`bt-app` 不进——这个不对称本身就是主张(§13.9 ④)。Linux 那个 job 用 `RUSTFLAGS: -C target-feature=-crt-static` 压过 `.cargo/config.toml` 的 `+crt-static`——glibc 上静态链接的宿主装不了 proc-macro 的动态库,而这个 job 不发布任何东西。两个 job 和 `ci.yml` 里其余每一个 job 一样是必过的:那里没有任何一处 `continue-on-error`。
 
-**门为什么是词法的。** 它走一遍文件、跟着花括号深度记「哪一层开着一个 windows gate」,不做语法分析。代价是它读不懂某些写法,换来的是**它能在一棵编不过的树上五秒钟跑完**——而一棵编不过的树恰恰是最需要有人告诉你哪条规矩被破了的时候。谓词里的 `not(...)` 在提问之前先被剥掉:一个被 gate 到**另一个**平台上去的项还在点名 Win32,正是这道门要抓的错。门自己也照本仓的规矩证明自己会红:`gates-can-fail` 里种一个违规、要求它红、再把文件放回去。(脚本扫的是 `crates/` 下那十三个;vendored 的 `alacritty_terminal` 由 `core-macos` 编译来管,别人的字节不归这条规矩裁。)
+**门为什么是词法的。** 它走一遍文件、跟着花括号深度记「哪一层开着一个 windows gate」,不做语法分析。代价是它读不懂某些写法,换来的是**它能在一棵编不过的树上五秒钟跑完**——而一棵编不过的树恰恰是最需要有人告诉你哪条规矩被破了的时候。谓词里的 `not(...)` 在提问之前先被剥掉:一个被 gate 到**另一个**平台上去的项还在点名 Win32,正是这道门要抓的错。门自己也照本仓的规矩证明自己会红:`gates-can-fail` 里种一个违规、要求它红、再把文件放回去。(脚本扫的是 `crates/` 下那十三个;vendored 的 `alacritty_terminal` 由 `core-macos` 编译来管,别人的字节不归这条规矩裁。)第二道检查同样是词法的,理由相同——它也要在一棵编不过的树上五秒钟跑完;它的名单从 `main.rs` 的 `FILES_THAT_MAY_NAME_A_PLATFORM` 里读出来,不另存一份。
 
 **为什么两道都要。** 编译失败点的是一个符号和一行;门点的是一条规矩。而且一个**写对了的** `#[cfg(windows)]` 仍然藏着某个人做过的一个决定,那是审 diff 的人应该看见的东西。
 
@@ -8024,3 +8025,43 @@ spike 量到的是「这个 workspace 今天已经有约 90% 能在 macOS 上编
 **② 构造无害。** 后端清单 §6 ⑥ 量到了这件事:从 `main` 到第一帧的十六步里,有七步是一个 `bt-platform` 调用用 `?` 和 `anyhow::Context` 向上传播,**两个窗口构造器都如此**,而每一步都是一座 Win32 桥,在一台没有 Win32 的机器上无事可做。§4.4 的「调用时拒绝」规矩于是有了一种失败形态:一个**在构造时拒绝**的桩不会弹出一条 toast 说「不在这个平台上」,它会让窗口根本不出现,而读者什么都不被告知。分界现在是:七个里的五个仍然传播,因为它们的可移植分支答 `Ok` — 自绘窗框、公式菜单、文件夹选择器、图片选择器、合成器都被无害地构造出来,只在读者真正请求时才拒绝;这正是 `Taskbar` 和 `Notifier` 在这棵树里已有的惰性形状(第一次需要时构建,记住拒绝,代价是一行 stderr 而不是每条消息一行)。另外两个**被报告而非传播**,因为它们做的事在 M1-3 之前根本无法在 Windows 之外完成:窗口的底色(`install_theme_class_background`,现在不返回值,理由和它旁边的 `install_page_ground_color` 已有的一样)和外框矩形的重述(`stand_the_window_at`,把它做不了的事打印出来 — 在 Windows 上这意味着一扇每次重启多长一圈原生窗框边距的窗口,值一条日志而不值一次启动失败)。`dpi_snapshot` 向平台要一次缩放的第二意见,没有时落回 winit 自己的数字:这不是一个桩,因为在 macOS 上 winit 的 `scale_factor()` **就是** `NSWindow.backingScaleFactor` — winit 自己从 AppKit 读出来的,没有什么需要调和的东西,一个平台分支在这里答 96 就是这个程序为一扇 Retina 窗口凭空发明了 1.0 的缩放。它在 Windows 上改变的一件事:一扇读不到 DPI 的窗口现在以 winit 的缩放打开,而不是拒绝打开。两条测试各在一台机器上持守这条规矩:`deferred_service_tests` 是一条源码钉,扫 `portable_impl.rs`,在 Windows 工作站上跑 — 而那个模块在那里根本不被编译;`refusal_tests` 在模块内部调用那些门来做同样的断言,在 Mac 上跑。`the_m1_startup_path_has_no_fatal_platform_call_off_windows` 持守那五个名字的清单:第六个名字出现在那里,就是一次还没人写过平台分支的启动被那个分支否决了。
 
 **③ M1-4 插进来的那道缝。** `main.rs` 里的 `window_surface_target` 是唯一选择平台 surface 门的地方,有三个调用方:两个窗口构造器和设备丢失重建 — 这正是它是一个函数而不是重复三次的一行的原因。在 Windows 上它是 `bt_render::WindowTarget::CompositionVisual(compositor.gpu_visual_ptr())`,在使用时读取且从不存储,因为这个变体的契约是:visual 在 surface 被创建的那一刻必须活着,而调用方持有的 `Compositor` 正是让它活着的东西。非 Windows 一面是可移植门 `WindowTarget::Hwnd`,从 winit 交出的窗口构建;wgpu 自己的 Metal 后端决定把什么挂上去,`required_alpha_mode` 请求 `Opaque`,Metal 给得出。**X-1 已经量出了为什么 Windows 那个契约不能原样搬过来**:wgpu-hal 30 的 Metal 后端只宣告 `Opaque` 和 `PostMultiplied` — `PreMultiplied` 在那里不存在 — 而 `PostMultiplied` 只是把 layer 标为非不透明,合成器读像素时仍然按预乘算术来。所以 M1-4 是一个 `WindowTargetKind` 分支,**带着它自己的 alpha 策略**(Folio 继续写预乘像素,在 Metal 上向 wgpu 声明 `PostMultiplied`),而不是已有契约的第三种拼法;平台分支拥有 `CAMetalLayer` 并在每次重建前清空 view 的子 layer,因为被 drop 的 `wgpu::Surface` 会把它的 layer 留在 view 上,重建会叠出第二层。每个调用方继续只调 `window_surface_target`,不改别的,所以 M1-4 是对一个函数的编辑。
+
+### 13.9 M1-10: `--all-targets` 在 macOS 上成立、四份夹具镜像、cfg 名单门(`crates/bt-app/src/main.rs`、`scripts/check-portable-core.ps1`、`.github/workflows/ci.yml`)
+
+**① `--all-targets` 在 macOS 上对 `bt-app` 成立了,代价是三个目标。** M1-1 之后 `cargo check -p bt-app --all-targets` 在 Mac 上恰好停在三个目标上:
+
+- `examples/container-probe.rs`——`Engine::wait_for_metadata`(Media Foundation 的方法,可移植的 `video` 模块没有,也不该在 M4-4 之前长出来);
+- `examples/video-probe.rs`——`WindowTarget::CompositionVisual`、`Compositor::gpu_visual_ptr`、`NativeWindow::from_win32`、外加四个 `Engine` 方法;
+- bin 的 test 目标——`cli.rs` 里用 `OsString::from_wide` 造一个孤高位代理的测试。
+
+两个 example 的修法是**逐项 `#[cfg(windows)]` 加一个可移植的 `main` 打印一句话**,而不是 `[[example]] required-features`。理由:cargo 的 feature 是整张依赖图解析出来的,**没有一种 feature 写法的意思是「在 Windows 上」**;而且挂 `required-features` 的 example 会被 `--all-targets` **跳过**而不是编译——那样 Mac 上的 check 是靠不看才绿的,而一个没人编译的目标正是这张票要消灭的东西。
+
+**② 四条 Windows 夹具测试各自长出一份 POSIX 镜像**(§13.6 的先例:gate 在**夹具**上,旁边配镜像)。
+
+- `bt_platform::handoff::tests::a_trailing_dot_or_space_does_not_hide_what_a_name_would_run` → 镜像 `a_posix_name_is_its_bytes_and_nothing_is_trimmed`。**镜像里的规矩是「没有这条规矩」**:POSIX 上 `payload.sh.` 是一个自己的名字,不是 `payload.sh` 的另一种拼法;`program_in_directories` 按写下来的字节找文件,而「这是不是一个程序」这个问题在这里根本不由 `PATHEXT` 回答——`program_on_path` 在 Windows 之外诚实拒绝,执行位那条真规矩归 M2-2。
+- `the_reveal_argument_is_one_token_or_it_is_nothing` → 镜像 `the_posix_reveal_hands_over_a_path_and_not_a_command_line`。`open -R <path>` 和 `-[NSWorkspace activateFileViewerSelectingURLs:]` 拿的是 **argv 的一个元素或者一个 `NSURL`**,中间没有人再解析一遍字符串,所以引号不是问题、`/select,` 没有对应物;`reveal_argument_form` 整条主题都是 `ShellExecuteW` 的参数是一条命令行这个 Windows 事实。镜像断言的是另一半:那扇门在 Windows 之外拒绝并带着自己的理由,而那个理由**不是** `PROGRAM_REFUSED`(「这台机器没被问过」和「这扇窗不跑程序」是两句话,文件列匹配的是后一句)。
+- `a_program_is_looked_for_where_an_administrator_put_it` → 镜像 `a_posix_program_is_looked_for_where_an_administrator_put_it`。R1-17 那条规矩不是 Windows 独有的:`/usr/local/bin` 在 `/usr/bin` 前面、绝对路径本身就是答案、带分隔符的相对路径不是程序名、**读者站着的那个文件夹永远不在搜索表里**。同时把不能搬过去的那半也钉住:候选拼法来自 `PATHEXT`,所以一个不带扩展名的 `copilot`——Unix 程序最常见的形状——在这里一个候选都产不出,这正是 `program_on_path` 拒绝而不是调它的原因。
+- `bt_platform::context_menu_tests::the_launch_repairs_a_dead_registration_and_leaves_a_live_one_standing` → 镜像 `the_posix_launch_finds_no_registration_to_repair`。原测试在 Mac 上红的真因:`on_disk` 谓词写的是 `Path::starts_with`,而它走的是**组件**;在 Windows 之外 `D:\installed\folio.exe` 是一个里面带反斜杠的组件,于是那个活着的安装被读成已经没了。镜像是另一条主张:macOS 根本没有注册表,`read_context_menu` 诚实答一个空表 → `context_menu_verdict` 答 `Absent` → `context_menu_reassert_wanted` 答 `false` 且**从不问磁盘**。**要钉的就是这条链:macOS 上的一次启动不许认为自己有修复活要干。**
+
+`cli.rs` 那条测试同样 gate 在夹具上——孤高位代理只有 Windows 的 `OsString` 装得下,POSIX 那半用 `OsStringExt::from_vec` 造一个不是 UTF-8 的 `D\xFF/`;而它的**产品**那半在 M1-1 就已经是 `bt_platform::argument_after_ascii` 了,所以 `cli.rs` 做的事没有一件是平台形状的。
+
+**③ `bt-app` 的 cfg 名单成了一道会红的门,并且名单只有一份。** `main.rs` 里新增 `#[cfg(test)] mod platform_gate_tests`,常量 `FILES_THAT_MAY_NAME_A_PLATFORM` 是那份名单,测试 `only_the_named_files_decide_what_platform_this_is` 走整个 `crates/bt-app/src`、**两个方向**都断言(没有名单外的文件在问平台,也没有名单上的文件已经不问了——单向名单会烂成「曾经问过的文件」,那等于什么都不禁)。`scripts/check-portable-core.ps1` 的第二道检查是它的孪生,**把这个常量从 `main.rs` 里读出来**,不另存一份:一份名单两个读者——脚本五秒钟跑完、在一棵编不过的树上也能跑,测试在 CI 的三个平台上跑并点名文件和行号。`gates-can-fail` 里给它配了自己的金丝雀(往一个不在名单上的 `bt-app` 文件里种一个 `#[cfg(windows)]`,要求门红,再把文件放回去)。
+
+规矩数**两种拼法**:属性(`#[cfg(...)]`/`#![cfg(...)]`/`#[cfg_attr(...)]`)和宏(`cfg!(...)`),因为它们是同一个问题——一个让编译器选一条臂,一个让编译器答一个 `bool`。`test`、`debug_assertions`、`feature = "..."` 不是关于机器的陈述,不算。
+
+**对计划 §4.3 的两处更正,都是量出来的:** 一、§4.3 那十一份名单**漏了 `git.rs`**,它问了三次 `cfg!(windows)`;二、`cli.rs` 加入名单,但只为一条 gate 在夹具上的测试,产品代码里一处平台形状都没有(§4.3 给 M1-10 的两条出路,两条都走到了)。所以名单今天是十三份。
+
+**④ `core-macos` 现在证明什么,`core-linux` 多证明了什么。**
+
+- 十五个 crate 的 `cargo check --locked --all-targets`(原来的十四个加 `bt-platform`),两个 job 名单逐字相同;
+- **`bt-app` 自己一步**:`cargo check --locked --all-targets -p bt-app`。单独一步不是因为命令长,是因为主张不同——上面那行说的是「核心还能在不是 Windows 的地方编过」,这一步说的是「产品能」;而且它的红值得自己被读到,一个埋在十五个 crate 命令里的失败点的是一个 crate 而不是一个里程碑;
+- 十二个测试套(原来的十个加 `bt-platform` 与 `bt-pty`)。这两个为什么最要紧:`bt-platform` 在 Windows 之外大半是拒绝,而**一条从没被调用过的拒绝是一句没人读回来的话**——`portable_impl::refusal_tests` 逐扇门去调,加上这一票新写的四份 POSIX 镜像只在这里和 Linux 上跑;`bt-pty` 在真 pty 上起真 Unix 子进程(spawn/resize/exit/reap),这是这个文件里任何一个 Windows job 都做不到的事,M1-6 在用户的 Mac mini 上量过;
+- `cargo clippy --locked --all-targets -p bt-platform -- -D warnings`。`logic` 在 Windows 上守的那条 lint 线,第一次在第二个平台上也有人守。只守 `bt-platform` 一个 crate,理由:它是这次移植的主题,也是唯一一个「Windows 之外那一半是写出来的而不是继承来的」crate;要不要扩到别的 crate 是一个该有人专门裁的决定,不是一个悄悄长出来的 flag。
+- `core-linux` 那边:`bt-platform` 进 check 名单,`bt-app` 不进,而**这个不对称本身就是主张**——计划 §4.6 的规矩是 macOS 的 GUI 依赖只对 macOS target 声明,所以 Linux 上这个 crate 链接的是**零个依赖**;在 Linux 上 check 它,就是把一份能读的 manifest 变成一台机器答过的话,而这是本文件里唯一回答这个问题的地方。`bt-app` 留在外面:服务端从不依赖它(§4.6 的无条件那条)。
+
+**⑤ 顺手清掉的两条警告,其中一条是一个「期望」自己变成了警告。**
+
+- `bt-transcript/src/paths.rs` 的 `is_distribution_name`:它的两个读者 `distro_path_to_local_path` 和 `wsl_share_root_length` 都是 `#[cfg(windows)]`,于是它跟着 gate 到读者所在的地方。
+- `bt-platform` 的 `NativeWindow::handle` 上,M1-1 为第三个平台挂了一个 `#[cfg_attr(not(any(windows, target_os = "macos")), expect(dead_code, ...))]`。**M1-10 在 Linux 上量到这个期望是落空的**:`cargo check --all-targets -p bt-platform` 在那边报的警告就是这个期望本身——派生出来的那些 impl 读了这个字段,`dead_code` 从来不会响。一个满足不了的期望自己就是一条警告,跟它当初被写下来的目的正好相反,所以它被删掉了。这条在 Windows 上和 macOS 上都看不见(那个 `cfg_attr` 的谓词把两边都排除了),只有 Linux 能看见,而 `core-linux` 今天才第一次编译这个 crate。
+
+**⑥ 一道门对着一个它解析不了的文件给出答案,比它说自己解析不了更坏**(`crates/bt-platform/src/lib.rs`)。门是 `bt_platform::native_window_door_tests::a_stand_in_window_is_only_named_by_tests`:它读 `crates/` 下每个 `.rs`,找 `NativeWindow::stand_in(`,只允许它出现在 `#[cfg(test)]` 模块里——模块的范围由 `test_module_spans` 算出来,一套跟着花括号深度走的小扫描,跳过字符串、字符字面量和 `//` 注释。`skip_string` 不认识**原始字符串**。`r"\\?\"` ——Windows 的 verbatim 前缀,`bt-platform` 自己的测试里到处都是(`handoff.rs` 和 `lib.rs` 都有)——以一个反斜杠紧跟闭合引号结尾;当成普通字符串字面量来读,那个反斜杠转义了引号,扫描跑进下一个字面量,从那里起花括号深度就跟谁都对不上了。**效果不是偏差而是归零**:在这棵树上量,那个扫描根本没有关掉 `handoff.rs` 的 test 模块,于是 `test_module_spans` 对那个文件记录了**零个 span**,门对它一行也没覆盖到。没有人发现,因为 M1-10 之前 `handoff.rs` 里没有任何一行点名 `stand_in`;§13.9 ② 的 POSIX reveal 镜像是第一行,而它被报成了一条产品路径在凭空造句柄。修法:`raw_string_opens_at`(那个 `r` 不在一个词里面——除非前一个字符是 `b`,即 `br"…"`,而后面跟的是零个或多个 `#` 再一个引号)和 `skip_raw_string`(没有转义:字面量在第一个引号后面跟着跟开头一样多的 `#` 的地方结束)。**一道门对着一个它解析不了的文件给出绿色的答案,看起来跟一道对着一个干净的文件给出绿色的答案一模一样**——这正是它是一个修复而不是一个测试里的例外的理由。

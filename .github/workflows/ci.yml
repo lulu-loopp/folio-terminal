@@ -437,7 +437,7 @@ jobs:
   #    point: a `#[cfg(test)]` module and an example are where a platform
   #    assumption hides most cheaply, and the three targets M1-10 fixed were
   #    exactly those;
-  # ③ eleven suites run, `bt-platform`'s and `bt-pty`'s among them — the second
+  # ③ twelve suites run, `bt-platform`'s and `bt-pty`'s among them — the second
   #    starts real Unix children over a real pty, which is a thing no Windows job
   #    in this file can do;
   # ④ `bt-platform` passes clippy with `-D warnings`, which is the lint line
