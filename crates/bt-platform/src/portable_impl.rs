@@ -1167,12 +1167,49 @@ pub fn announce_explorer_menu_change() {}
 /// A no-op, and the plan names this one as the example of its class: a Unix
 /// process is *given* its parent's stdio by the kernel, so there is nothing to
 /// adopt and nothing downstream notices the call did nothing.
+///
+/// **M3-7 measured what that means for the two launches and left the body
+/// empty.** Started from a terminal, this process inherits the tty on all three
+/// descriptors before its first instruction; started by LaunchServices — `open
+/// -a`, a double click in Finder, the Dock — it inherits `/dev/null` on all
+/// three, which is launchd's own answer and not an absence this call could
+/// repair. Either way the streams already point where the launcher put them,
+/// which is exactly the state the Windows arm spends `AttachConsole` and
+/// `SetStdHandle` reaching. The two calls the Windows arm makes have no Unix
+/// counterpart because the thing they build is already built.
+///
+/// So the whole of the ordering in `main` is still right, and for the same
+/// reason it was written: everything above `diagnostics::enter_resident_run`
+/// answers the command somebody just typed — a `--help`, a refused flag, a
+/// trace they asked for by name — on whatever the launcher gave this process,
+/// and everything below it belongs in the log file [`redirect_std_streams_to_file`]
+/// installs. A Finder launch answers the front door into `/dev/null`, which is
+/// correct: nobody typed a command, so there is no answer owed to a screen.
 pub fn adopt_parent_console() {}
 
 /// **Leave that console's process group.**
 ///
 /// The other half of the same fact: there is no console membership here to
-/// leave, so nothing is left. The `bool` says so.
+/// leave, so nothing is left. The `bool` says so, and `false` is the same word
+/// the Windows arm answers when nothing happened — `FreeConsole` on a process
+/// that never attached to one fails, which is the double-click case and is not
+/// a failure there either.
+///
+/// **Nothing reads it**, on any platform: `bt_app::diagnostics` calls this for
+/// its effect and drops the answer. Both halves of that are pinned — this arm by
+/// `macos_stdio_tests::the_two_console_doors_stay_the_no_ops_their_class_says_they_are`
+/// and the caller by `bt_app::diagnostics`' own
+/// `nothing_branches_on_the_two_console_no_ops`. That is the whole of why this
+/// door may be a no-op off Windows while
+/// [`redirect_std_streams_to_file`] beside it may not: the `bool` this one
+/// returns branches nothing, and the `bool` that one returns chooses the
+/// channel the rest of the run talks on.
+///
+/// The Unix half of the fault the Windows arm exists for — a `Ctrl+C` typed at
+/// the parent shell reaching this process, because it is in that shell's
+/// foreground process group — is a *signal*, and its door is
+/// [`install_console_ctrl_handler`]. It is not closed here; see
+/// `docs/DESIGN.md` §13.20 for what that ticket left open and why.
 pub fn detach_console() -> bool {
     false
 }
@@ -1191,47 +1228,200 @@ pub fn write_to_console(text: &str) -> bool {
     out.write_all(text.as_bytes()).is_ok() && out.flush().is_ok()
 }
 
-/// **Send stdout and stderr to a file for the rest of the run** (M3-7).
+/// **Point this process's `stdout` and `stderr` at a file, for good** (M3-7).
 ///
 /// §4.4 ③ calls this load-bearing and it is: `bt_app::diagnostics` picks
 /// `Channel::Log` or `Channel::Nowhere` off this `bool`, so an arm that
 /// answered `true` without redirecting anything would put the run's diagnostics
-/// nowhere at all while claiming a log file that stays empty.
+/// nowhere at all while claiming a log file that stays empty. It is the one
+/// thing a Finder-launched Folio has instead of a screen: launchd gives that
+/// process `/dev/null` on all three descriptors, so until this call lands every
+/// `eprintln!` in the workspace is thrown away by the kernel.
 ///
-/// So it answers `false`, honestly, and the two things that follow are both
-/// right: the channel becomes `Nowhere`, and [`silence_std_streams`] — which is
-/// what `Nowhere` means on Windows — does nothing here, so the streams stay
-/// where the launcher put them. A Folio started from a shell prints to that
-/// shell, which is what M1's acceptance needs; a Folio started from Finder
-/// prints into the system log, which is where a `.app` with no redirect always
-/// printed. M3-7 makes it a real `dup2` and takes the bundle's launch with it.
+/// **`dup2` and not a Rust-side writer**, which is the Windows arm's reason
+/// turned into the Unix spelling: the point is the *channel* and not the call
+/// sites, and several hundred `eprintln!` across this workspace must not each
+/// have to know where diagnostics go. Renumbering descriptor 1 and descriptor 2
+/// moves every one of them at once and for the rest of the run, including the
+/// writes of any library linked into this process and of anything that inherits
+/// these descriptors.
+///
+/// **Append, and `0o600`.** `O_APPEND` is the kernel's own append — every write
+/// goes to the end of the file whichever thread issues it, with no seek of its
+/// own to race, which is the same guarantee `FILE_APPEND_DATA` buys on the other
+/// platform. The mode is this user's alone because a `diagnostics.log` carries
+/// window titles, file paths and shell output, and the directory it is created
+/// in is a home directory on a machine that may have several people on it. A
+/// file that already exists keeps the mode it has; `open` applies this one only
+/// to a file it creates, which is the right half of the promise to make — the
+/// other half would be this call changing the permissions of a file somebody
+/// deliberately opened up.
+///
+/// **The descriptor is never closed, on any path.** On the path that works it
+/// *is* the process's diagnostic stream and lives exactly as long as the
+/// process, which is word for word what the Windows arm says of its handle. On
+/// the path that does not, closing it would be a call that has just refused to
+/// move anything reaching for a descriptor `open` may have been handed *as*
+/// descriptor 1 — the state of a process started with its standard streams
+/// closed — and taking out the stream it was asked to move.
+///
+/// **A refusal leaves both descriptors where they were**, which is what lets the
+/// caller's `else` mean something: the saved duplicate is taken *before*
+/// anything moves, and if the second `dup2` fails the first is put back from it.
+/// `F_DUPFD_CLOEXEC` with a floor of 3 rather than `dup`, for two reasons that
+/// are both about which number comes back: `dup` answers the lowest free
+/// descriptor, which on a process started with its standard error closed is 2 —
+/// the descriptor the next line is about to write — and it does not set
+/// close-on-exec, which would put a spare copy of somebody's terminal into every
+/// shell this window opens.
+#[cfg(unix)]
+pub fn redirect_std_streams_to_file(path: &Path) -> bool {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::IntoRawFd;
+
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+    else {
+        return false;
+    };
+    // Rust opens every file close-on-exec, so the log itself needs no flag of
+    // its own; what a pane's child inherits is descriptors 1 and 2, which is
+    // the `bt-pty` layer's business and is unchanged by this.
+    let log = file.into_raw_fd();
+    // SAFETY: the descriptor is this process's own standard output, named by
+    // the platform's constant. `fcntl` reads it and answers a new descriptor or
+    // `-1`; nothing is borrowed and nothing is freed.
+    let kept = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 3) };
+    if kept == -1 {
+        return false;
+    }
+    // SAFETY: both arguments are descriptors this process holds — `log` from
+    // the open above, the target from the platform's constant — and `dup2`
+    // takes ownership of neither: it renumbers, and the caller keeps both.
+    let moved = unsafe { libc::dup2(log, libc::STDOUT_FILENO) } != -1
+        // SAFETY: as above, for the other stream.
+        && unsafe { libc::dup2(log, libc::STDERR_FILENO) } != -1;
+    if !moved {
+        // SAFETY: `kept` is the duplicate taken above and names what standard
+        // output was before the line that moved it.
+        let _ = unsafe { libc::dup2(kept, libc::STDOUT_FILENO) };
+    }
+    // SAFETY: `kept` is this function's own descriptor, is at least 3 by the
+    // floor above, and is not read again.
+    let _ = unsafe { libc::close(kept) };
+    moved
+}
+
+/// **The same door where there are no descriptors to renumber.**
+///
+/// `false`, honestly, and the caller's `else` is then right: the channel becomes
+/// `Nowhere` and [`silence_std_streams`] beside it does nothing either, so the
+/// streams stay where the launcher put them. No such target is built from this
+/// workspace today — the plan's §4.6 names Windows, macOS and a Linux server —
+/// and this arm is here so that the pair below it is a platform question rather
+/// than a `libc` that has to exist everywhere.
+#[cfg(not(unix))]
 pub fn redirect_std_streams_to_file(path: &Path) -> bool {
     let _ = path;
     false
 }
 
-/// **Send stdout and stderr nowhere** (M3-7).
+/// **Send `stdout` and `stderr` nowhere at all** (M3-7).
 ///
-/// Deliberately nothing — see [`redirect_std_streams_to_file`]. Silencing the
-/// streams of a process that has no log file to write to instead would throw
-/// away the only diagnostics this platform currently has.
+/// The floor under [`redirect_std_streams_to_file`], and the Unix spelling of
+/// the same rule: a run whose log file cannot be opened must not fall back to
+/// the terminal, because the terminal is the one destination that belongs to
+/// somebody else — a Folio started from a shell is very often started from a
+/// pane inside another Folio, which is the report the whole channel came from.
+///
+/// `/dev/null` is that platform's spelling of a descriptor that reports every
+/// byte written and keeps none, which is exactly what a null standard handle
+/// does on Windows: `eprintln!` stays a no-op rather than becoming a panic, and
+/// no call site has to know.
+///
+/// The descriptor is not closed, for [`redirect_std_streams_to_file`]'s reason.
+/// A `/dev/null` that could not be opened leaves the streams alone rather than
+/// closing them: a closed descriptor 2 is the state where the *next* file this
+/// process opens becomes its standard error, which is a worse answer than a
+/// diagnostic somebody can see.
+#[cfg(unix)]
+pub fn silence_std_streams() {
+    use std::os::unix::io::IntoRawFd;
+
+    let Ok(sink) = std::fs::OpenOptions::new().write(true).open("/dev/null") else {
+        return;
+    };
+    let sink = sink.into_raw_fd();
+    for slot in [libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+        // SAFETY: both arguments are descriptors this process holds — `sink`
+        // from the open above, the target from the platform's constant — and
+        // `dup2` renumbers rather than taking ownership of either.
+        let _ = unsafe { libc::dup2(sink, slot) };
+    }
+}
+
+/// **The same door where there is no `/dev/null` to point at.**
+///
+/// Nothing, which is right beside the `false` above: streams that were never
+/// moved are still the launcher's, and silencing them would throw away the only
+/// diagnostics such a platform has.
+#[cfg(not(unix))]
 pub fn silence_std_streams() {}
 
-/// **A handler for the interrupt the console sends** (M3-7).
+/// **A handler for the interrupt the console sends** (M3-7 left this one open).
 ///
-/// `SIGINT` and `SIGTERM` are the Unix shape and M3-7 owns them. `false` says
-/// no handler was installed, which is what the caller records.
+/// `SIGINT` and `SIGTERM` are the Unix shape. `false` says no handler was
+/// installed, which is what the caller records — and it is still the answer
+/// after M3-7, deliberately: what the two signals should *do* is a decision and
+/// not a translation. `SIGINT` is the one the Windows arm refuses, and refusing
+/// it here is the same sentence; `SIGTERM` is not, and on this platform it is
+/// how the system asks an application to go away at logout and at shutdown, so
+/// a handler for it is a path that has to write the session document and leave
+/// through [`leave_process`] — which is M3-1's application delegate and M3-5's
+/// single writer, neither of which exists yet. `docs/DESIGN.md` §13.20 books it
+/// rather than guessing at it.
 pub fn install_console_ctrl_handler() -> bool {
     false
 }
 
-/// **End this process, now.**
+/// **End this process, now** (M3-7).
 ///
 /// Really done, and it cannot be anything else: §4.4 ③ names this as a return
-/// type with no empty answer. `std::process::exit` runs no destructors, which
-/// is the Windows arm's behaviour too — everything that had to be flushed was
-/// flushed by the caller before it got here.
+/// type with no empty answer.
+///
+/// **`std::process::exit` and not the Windows arm's `TerminateProcess`.** That
+/// call is there for one measured reason and the reason is a tenant: a process
+/// that has loaded the Edge WebView2 client DLL cannot walk out through the
+/// loader's `DLL_PROCESS_DETACH`, because Chromium's detach path expects an
+/// apartment that still pumps and threads that are still alive. Nothing on this
+/// platform is that tenant today, so the ordinary exit is the honest door, and
+/// it is also the better one: it runs the `atexit` chain, which is where a
+/// library that registered a handler gets its turn.
+///
+/// **The buffers first, and that line is not redundant.** `std::process::exit`
+/// does flush `stdout` on the way out, through the standard library's own
+/// cleanup — but that is a property of *this* exit primitive, and the one thing
+/// every caller of this function is promised is that the last line it wrote is
+/// on the disk. Writing the flush here makes it a property of `leave_process`
+/// instead, so that an arm which later has to leave by a faster door — `_exit`,
+/// which the backend inventory's own row anticipates for the day a WKWebView is
+/// in this process — cannot take the run's footer with it. It is the same two
+/// lines the Windows arm opens with, for the same sentence.
+///
+/// **Everything else that had to be flushed already was, and none of it by this
+/// platform's accident.** `bt_pty`'s recording writes through an unbuffered
+/// `File` and publishes with `sync_data` on its own thread; the session document
+/// is written and its sentinel removed inside the loop, above every caller of
+/// this function; and the run's footer is an `eprintln!`, which Rust does not
+/// buffer. The order in `bt_app::main` is therefore the order on both platforms.
 pub fn leave_process(code: i32) -> ! {
+    use std::io::Write;
+
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
     std::process::exit(code)
 }
 
@@ -1414,5 +1604,210 @@ mod refusal_tests {
             !directory_folds_case(std::path::Path::new("/")),
             "a path with no cased letter anywhere cannot answer, and says no"
         );
+    }
+}
+
+/// **The stdio door, made to move a real stream and then put it back** (M3-7,
+/// `docs/DESIGN.md` §13.20).
+///
+/// The behavioural twin of `crate::macos_stdio_tests`, which is a source pin and
+/// runs on the Windows workstation where this module is not compiled at all.
+/// This one runs where the module does, which today is the Mac.
+///
+/// **It really renumbers this process's own descriptors**, because there is no
+/// smaller claim that would be worth making: the whole of what
+/// [`redirect_std_streams_to_file`] promises is that a call site which knows
+/// nothing about it — an `eprintln!` in another crate — lands in the file
+/// afterwards, and a test that redirected some *other* descriptor would be
+/// testing a function this product does not call. So both standard descriptors
+/// are duplicated first and put back at the end, which is what makes it safe to
+/// do inside a test binary that has its own output to write.
+#[cfg(all(test, unix))]
+mod stream_tests {
+    use std::io::{Read, Write};
+    use std::os::unix::io::RawFd;
+
+    /// **One line, written the way the descriptor sees it.**
+    ///
+    /// Not `eprintln!`, and the reason is libtest rather than this door:
+    /// `print!` and `eprint!` both go through `std::io::print_to`, which hands
+    /// the bytes to the harness's per-test capture buffer instead of to the
+    /// handle whenever a case is being captured — which is every case that is
+    /// not run with `--nocapture`. A test written with the macros would
+    /// therefore pass with a completely empty implementation of the door, for a
+    /// reason that has nothing to do with the door. `std::io::stdout()` and
+    /// `std::io::stderr()` are the real handles and resolve descriptors 1 and 2,
+    /// which is what every `eprintln!` in a *running* Folio resolves to as well.
+    fn say(to_stdout: bool, line: &str) {
+        if to_stdout {
+            let mut out = std::io::stdout().lock();
+            writeln!(out, "{line}").expect("standard output takes bytes");
+            out.flush().expect("and the line is not left in the buffer");
+        } else {
+            let mut err = std::io::stderr().lock();
+            writeln!(err, "{line}").expect("standard error takes bytes");
+        }
+    }
+
+    /// **This process has one pair of standard descriptors, so these cases take
+    /// turns.**
+    ///
+    /// Not tidiness: libtest runs cases on several threads, and a case that read
+    /// descriptor 1 while the case beside it had it pointed at a file would be
+    /// reading the other case's answer. The lock is held for the whole of each
+    /// body, including the restore, which is the only window that matters.
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A duplicate of descriptors 1 and 2, and the way back.
+    ///
+    /// `F_DUPFD_CLOEXEC` with a floor of 3 for the door's own reason: what comes
+    /// back must not be one of the two numbers about to be written.
+    struct StreamsPutBack {
+        out: RawFd,
+        err: RawFd,
+    }
+
+    impl StreamsPutBack {
+        fn taken() -> Self {
+            // SAFETY: both are this process's own standard descriptors, named
+            // by the platform's constants; `fcntl` reads them and answers a new
+            // descriptor or `-1`.
+            unsafe {
+                Self {
+                    out: libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 3),
+                    err: libc::fcntl(libc::STDERR_FILENO, libc::F_DUPFD_CLOEXEC, 3),
+                }
+            }
+        }
+    }
+
+    impl Drop for StreamsPutBack {
+        /// **In `Drop`, so that a failed assertion does not leave the rest of
+        /// the run writing into a temporary file.** A panic here unwinds through
+        /// a `libtest` that is about to print the failure, and where it prints
+        /// it is what this type is for.
+        fn drop(&mut self) {
+            for (kept, slot) in [
+                (self.out, libc::STDOUT_FILENO),
+                (self.err, libc::STDERR_FILENO),
+            ] {
+                if kept == -1 {
+                    continue;
+                }
+                // SAFETY: `kept` is this type's own descriptor and `slot` is the
+                // standard one it was taken from.
+                unsafe {
+                    libc::dup2(kept, slot);
+                    libc::close(kept);
+                }
+            }
+        }
+    }
+
+    /// RED — **what the workspace writes after the call is in the file, and what
+    /// it writes after the silence is nowhere.**
+    ///
+    /// MUTATIONS: answer `true` without calling `dup2` and the first assertion
+    /// goes red with an empty file — which is the exact failure §4.4 ③ says a
+    /// no-op arm would hide, a run that claims `Channel::Log` and writes
+    /// nothing. Make `silence_std_streams` a no-op and the second goes red,
+    /// because the line meant for nowhere is appended to the log instead.
+    #[test]
+    fn the_streams_move_to_the_file_and_then_to_nowhere() {
+        let _turn = ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
+        let log = std::env::temp_dir().join(format!(
+            "folio-m3-7-{}-{:?}.log",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&log);
+        let put_back = StreamsPutBack::taken();
+        assert!(
+            super::redirect_std_streams_to_file(&log),
+            "the door refused a file it had just been given the directory of"
+        );
+        say(false, "M3-7 this line is the log's");
+        say(true, "M3-7 and so is this one");
+        super::silence_std_streams();
+        say(false, "M3-7 this line is nobody's");
+        drop(put_back);
+
+        let mut written = String::new();
+        std::fs::File::open(&log)
+            .expect("the file the streams were pointed at exists")
+            .read_to_string(&mut written)
+            .expect("and is readable");
+        let _ = std::fs::remove_file(&log);
+        assert!(
+            written.contains("M3-7 this line is the log's"),
+            "a write to standard error after the call did not reach the file:\n{written}"
+        );
+        assert!(
+            written.contains("M3-7 and so is this one"),
+            "a write to standard output after the call did not reach the file — \
+             the door moved one stream and not both:\n{written}"
+        );
+        assert!(
+            !written.contains("M3-7 this line is nobody's"),
+            "a line written after the streams were silenced is in the log, so \
+             the silence is not one:\n{written}"
+        );
+    }
+
+    /// RED — **a refusal leaves the streams where they were.**
+    ///
+    /// The other half of the `bool`, and the half `bt_app::diagnostics` acts on:
+    /// a `false` sends it to `silence_std_streams`, and a door that had already
+    /// half-moved the streams before refusing would have made that decision for
+    /// it. A directory is the refusal that needs no fixture — `open` cannot give
+    /// out an appendable file for one on any Unix.
+    ///
+    /// MUTATION: move the `dup2` calls above the `open` and this goes red — both
+    /// descriptors would then name the file the open was about to fail on.
+    #[test]
+    fn a_refused_redirect_moves_nothing() {
+        let _turn = ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
+        let put_back = StreamsPutBack::taken();
+        let before = (names(libc::STDOUT_FILENO), names(libc::STDERR_FILENO));
+        let refused = super::redirect_std_streams_to_file(&std::env::temp_dir());
+        let after = (names(libc::STDOUT_FILENO), names(libc::STDERR_FILENO));
+        drop(put_back);
+        assert!(
+            !refused,
+            "a directory was accepted as this run's diagnostic stream"
+        );
+        assert_eq!(
+            before, after,
+            "the refusal renumbered a descriptor on its way out, so the caller's \
+             `else` is deciding what to do about streams that have already moved"
+        );
+    }
+
+    /// What a descriptor points at, as the file system's own identity.
+    ///
+    /// Device and inode, which is the same question `same_file` asks of two
+    /// paths and the only one worth asking of a descriptor: the *number* is
+    /// unchanged by a `dup2` and what it names is the whole of what changes.
+    ///
+    /// Written out as text rather than as a pair of integers because `dev_t` is
+    /// signed on one Unix and unsigned on another, and a cast written to make
+    /// the two agree would be a cast this comparison does not need: what is
+    /// compared is whether the same descriptor still names the same object.
+    fn names(slot: RawFd) -> String {
+        // SAFETY: the descriptor is one of this process's own standard two, and
+        // the out-parameter is a local this call fills and does not keep.
+        let stat = unsafe {
+            let mut stat = std::mem::zeroed::<libc::stat>();
+            assert!(
+                libc::fstat(slot, &raw mut stat) == 0,
+                "a standard descriptor this process holds could not be read"
+            );
+            stat
+        };
+        format!("{}:{}", stat.st_dev, stat.st_ino)
     }
 }

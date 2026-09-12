@@ -315,6 +315,88 @@ mod tests {
         list.iter().map(|name| OsString::from(*name)).collect()
     }
 
+    /// RED — **the channel is chosen off the one door that reports whether it
+    /// worked, and nothing is decided by the two that cannot fail** (M3-7,
+    /// `docs/DESIGN.md` §13.20).
+    ///
+    /// The backend's five console doors split two ways off Windows and the split
+    /// is this file's, not the backend's. `redirect_std_streams_to_file` is
+    /// **load-bearing**: its `bool` is the whole of the difference between a run
+    /// that has a log and one that says nothing, so it has a real arm on every
+    /// platform. `adopt_parent_console` and `detach_console` are no-ops there —
+    /// a Unix process is handed its parent's stdio by the kernel and joins no
+    /// console group to leave — and the *reason that is allowed* is the claim
+    /// below: their answers reach no branch, so an arm that does nothing is
+    /// indistinguishable from one that did what there was to do.
+    ///
+    /// A source pin, because what is being held is the shape of two call sites
+    /// rather than a value: `detach_console()` written as a statement, with no
+    /// `if` and no `let` in front of it. The behavioural half is the backend's
+    /// own — `bt_platform`'s `stream_tests` really moves this process's
+    /// descriptors, on the platform where the arm compiles.
+    ///
+    /// MUTATIONS: wrap either call in an `if` and this goes red naming it — the
+    /// launch would then take a different road on a platform whose answer is a
+    /// constant. Drop the `if` in front of the redirect and the last assertion
+    /// goes red: a run would claim `Channel::Log` without anything having asked
+    /// whether the file opened.
+    #[test]
+    fn nothing_branches_on_the_two_console_no_ops() {
+        const DIAGNOSTICS: &str = include_str!("diagnostics.rs");
+        const MAIN: &str = include_str!("main.rs");
+
+        /// The text of the free function `opener` opens, to the `}` in column
+        /// zero that closes it. The caller and nothing else — a whole-file
+        /// search would answer with this crate's own tests, which quote these
+        /// names to pin the order they are called in.
+        fn body(source: &str, opener: &str) -> String {
+            let at = source
+                .find(opener)
+                .unwrap_or_else(|| panic!("`{opener}` is declared once, at column zero"));
+            let rest = &source[at..];
+            let end = rest
+                .find("\n}\n")
+                .expect("a free function is closed by a `}` at column zero");
+            rest[..end].to_owned()
+        }
+
+        for (source, opener, where_it_is, call) in [
+            (
+                MAIN,
+                "\nfn main() -> Result<()> {",
+                "main.rs",
+                "adopt_parent_console",
+            ),
+            (
+                DIAGNOSTICS,
+                "\nfn choose_resident_channel(storage: &Path) -> Channel {",
+                "diagnostics.rs",
+                "detach_console",
+            ),
+        ] {
+            let caller = body(source, opener);
+            let statement = format!("    bt_platform::{call}();\n");
+            assert!(
+                caller.contains(&statement),
+                "`{call}` is not called for its effect alone in {where_it_is}; a \
+                 platform whose answer to it is a constant would be taking a \
+                 branch on that constant:\n{caller}"
+            );
+            assert_eq!(
+                caller.matches(&format!("bt_platform::{call}")).count(),
+                1,
+                "`{call}` is named twice in that function in {where_it_is}, so \
+                 one of the two is reading what it answers:\n{caller}"
+            );
+        }
+        assert!(
+            DIAGNOSTICS.contains("if bt_platform::redirect_std_streams_to_file(&log) {"),
+            "the channel is no longer chosen off the door that reports whether \
+             the log file took the streams, which is the one door here that can \
+             fail on every platform"
+        );
+    }
+
     /// PIN (user report, 2026-08-25: `Folio stopped: read BT_PROBE_INPUT : The
     /// system cannot find the path specified. (os error 3)`) — **an emptied
     /// variable is off, and never a file named the empty string.**

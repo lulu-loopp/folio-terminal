@@ -14561,3 +14561,178 @@ mod quiet_door_tests {
         );
     }
 }
+
+/// **The standard streams have one real arm per platform, and the two console
+/// doors have none because there is nothing for them to do** (ticket M3-7,
+/// `docs/DESIGN.md` §13.20).
+///
+/// Source pins, for `deferred_service_tests`' reason: the module they are about
+/// is the one this workstation does **not** compile, and the claim is about what
+/// the text says rather than about what a call answers. The behavioural twin is
+/// `portable_impl::stream_tests`, which really renumbers this process's own
+/// descriptors and runs on the Mac.
+///
+/// What they guard is the one failure §4.4 ③ names and no compiler would catch
+/// on Windows: `redirect_std_streams_to_file` is **load-bearing** — `bt_app::
+/// diagnostics` picks `Channel::Log` or `Channel::Nowhere` off its `bool` — so
+/// an arm that answered `true` without moving anything would give every run on
+/// that platform a log file that stays empty and a channel that claims it is
+/// full. The pins are therefore about the calls the body makes, not about its
+/// signature, which the compiler already holds.
+#[cfg(test)]
+mod macos_stdio_tests {
+    /// The portable backend's own text — the arm this workstation does not
+    /// compile.
+    const PORTABLE: &str = include_str!("portable_impl.rs");
+
+    /// The text of the item `needle` opens, to the line that closes it at the
+    /// indentation `needle` itself is written at. `macos_dialog_backend_tests`'
+    /// reader, and crude for its reason.
+    fn item(needle: &str) -> String {
+        let indent: String = needle
+            .trim_start_matches('\n')
+            .chars()
+            .take_while(|character| *character == ' ')
+            .collect();
+        let closer = format!("\n{indent}}}\n");
+        let at = PORTABLE
+            .find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` is in the portable arm"));
+        let rest = &PORTABLE[at..];
+        let end = rest
+            .find(&closer)
+            .unwrap_or_else(|| panic!("`{needle}` opens an item that is never closed"));
+        rest[..end].to_owned()
+    }
+
+    /// RED — **the redirect really renumbers, and says how.**
+    ///
+    /// Five claims, and each is a different way to write the empty log file:
+    /// the file is opened for appending, so two runs and two threads do not
+    /// overwrite one another; it is created private, because a `diagnostics.log`
+    /// carries window titles and shell output; **both** descriptors are moved,
+    /// because a `println!` left on the terminal is the fault the channel
+    /// exists to stop; the duplicate that makes a refusal reversible is taken
+    /// with a floor of 3, because `dup` on a process with a closed standard
+    /// error answers 2; and the arm is gated, so the platform with no `libc` at
+    /// all still has a door.
+    ///
+    /// MUTATION: answer `true` with no `dup2` in the body and the third goes
+    /// red — which is exactly the arm §4.4 ③ warns about, and the one the
+    /// compiler is happy with.
+    #[test]
+    fn the_redirect_moves_both_descriptors_onto_an_appended_private_file() {
+        let body = item("\npub fn redirect_std_streams_to_file(path: &Path) -> bool {");
+        assert!(
+            body.contains(".append(true)"),
+            "the log is not opened for appending, so a second run starts by \
+             deleting the first one's evidence:\n{body}"
+        );
+        assert!(
+            body.contains(".mode(0o600)"),
+            "the log is created with whatever the umask says, on a machine that \
+             may have several people on it:\n{body}"
+        );
+        assert!(
+            body.contains("libc::dup2(log, libc::STDOUT_FILENO)")
+                && body.contains("libc::dup2(log, libc::STDERR_FILENO)"),
+            "the door does not renumber both standard descriptors, so it is the \
+             no-op arm with a `true` on the end of it:\n{body}"
+        );
+        assert!(
+            body.contains("libc::F_DUPFD_CLOEXEC, 3"),
+            "the duplicate a refusal is put back from is taken with `dup`, which \
+             answers the lowest free descriptor — 2, on a process whose standard \
+             error is closed:\n{body}"
+        );
+        assert!(
+            PORTABLE.contains(concat!(
+                "#[cfg(unix)]\npub fn redirect_std_",
+                "streams_to_file(path: &Path) -> bool {"
+            )) && PORTABLE.contains(concat!(
+                "#[cfg(not(unix))]\npub fn redirect_std_",
+                "streams_to_file(path: &Path) -> bool {"
+            )),
+            "the two arms are not the pair `same_file` above them is: a platform \
+             with no `libc` either loses the door or gains a second definition of it"
+        );
+    }
+
+    /// RED — **and the silence really silences.**
+    ///
+    /// The other half of the same branch. A `silence_std_streams` that did
+    /// nothing would leave a run whose log could not be opened printing into
+    /// somebody else's terminal — which is the report the whole channel came
+    /// from, arriving through the failure path instead of the ordinary one.
+    #[test]
+    fn the_silence_points_both_descriptors_at_the_null_device() {
+        let body = item("\npub fn silence_std_streams() {");
+        assert!(
+            body.contains("\"/dev/null\""),
+            "nothing is opened to discard the bytes:\n{body}"
+        );
+        assert!(
+            body.contains("libc::dup2(sink, slot)")
+                && body.contains("[libc::STDOUT_FILENO, libc::STDERR_FILENO]"),
+            "the streams are not moved onto it, so `Channel::Nowhere` is a name \
+             for a terminal that is still being written to:\n{body}"
+        );
+    }
+
+    /// RED — **the two console doors are no-ops, and that is allowed only
+    /// because nothing reads them.**
+    ///
+    /// §4.4's class **N** is not a licence to leave a body empty; it is a claim
+    /// about the caller, and this is where the claim is checked on this side.
+    /// The `bool` `detach_console` answers is `false` — the same word the
+    /// Windows arm answers when there was no console to let go — and
+    /// `bt_app::diagnostics` drops it. The other side of the same pin is
+    /// `bt_app::diagnostics::tests::nothing_branches_on_the_two_console_no_ops`,
+    /// which reads the callers.
+    ///
+    /// MUTATION: give either of them a body that does something and this goes
+    /// red, which is the intended reading — a Unix `AttachConsole` would be a
+    /// thing this platform does not have, and a `FreeConsole` would be leaving a
+    /// group nothing joined.
+    #[test]
+    fn the_two_console_doors_stay_the_no_ops_their_class_says_they_are() {
+        assert!(
+            PORTABLE.contains("pub fn adopt_parent_console() {}"),
+            "a Unix process is given its parent's stdio by the kernel, and this \
+             arm has started doing something about it"
+        );
+        let detach = item("\npub fn detach_console() -> bool {");
+        assert!(
+            detach.trim_end().ends_with("false"),
+            "`detach_console` answers something other than the `false` the \
+             Windows arm answers when nothing happened:\n{detach}"
+        );
+    }
+
+    /// RED — **the run's last line is on the disk before the process is told to
+    /// stop.**
+    ///
+    /// `leave_process` is §4.4 ③'s other name — a return type with no empty
+    /// answer — and the flush is the one thing in the exit chain that belongs to
+    /// this program. `std::process::exit` performs it today through the standard
+    /// library's own cleanup; writing it in the body makes it a property of this
+    /// function rather than of which exit primitive the arm happens to call, so
+    /// that the day a WKWebView in the process forces the faster door (the
+    /// backend inventory's own row anticipates `_exit`) the footer does not
+    /// leave with it.
+    #[test]
+    fn the_process_flushes_what_it_wrote_before_it_leaves() {
+        let body = item("\npub fn leave_process(code: i32) -> ! {");
+        let flushed = body.find("std::io::stderr().flush()").unwrap_or_else(|| {
+            panic!("nothing flushes the stream the footer is written on:\n{body}")
+        });
+        let left = body
+            .find("std::process::exit(code)")
+            .unwrap_or_else(|| panic!("`leave_process` does not leave:\n{body}"));
+        assert!(
+            flushed < left,
+            "the buffers are flushed after the process has been told to stop, \
+             which is to say never:\n{body}"
+        );
+    }
+}
