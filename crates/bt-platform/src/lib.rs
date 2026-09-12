@@ -9334,6 +9334,103 @@ pub use portable_impl::{
     virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_to_console,
 };
 
+/// **The tail of a command-line argument, split at an ASCII offset, in the
+/// operating system's own encoding** (M1-1, for M1-10).
+///
+/// `folio --cwd=<path>` carries a path after the sign, and **a path is not
+/// required to be text**: on Windows an argument is UTF-16 that may hold an
+/// unpaired surrogate, on Unix it is bytes that may not be UTF-8, and either
+/// way a round trip through `to_string_lossy` hands back a different file. So
+/// the split is made on the *encoded* argument and the halves are never
+/// decoded.
+///
+/// **It is here rather than in `bt-app` because of one `unsafe`.** Taking an
+/// `OsStr` apart in the platform's own encoding is `as_encoded_bytes`, which is
+/// safe, and putting one back is `from_encoded_bytes_unchecked`, which is not;
+/// the workspace's `unsafe_code = "deny"` exempts this crate and nothing above
+/// it. `cli.rs` used to reach for `std::os::windows::ffi` instead, which is one
+/// of the two ungated Windows uses `scripts/check-portable-core.ps1` never sees
+/// (`docs/plans/port/macos-plan-2026-09-12.md` §4.3), and the plan's own
+/// recommendation was this one: give the function a portable implementation
+/// rather than admit `cli.rs` to the gate list, **because what it does is split
+/// at a known ASCII offset** and both platforms can express that.
+///
+/// `at` must be a byte offset immediately after an ASCII character — for the
+/// one caller it is one past the `=` its flag matcher has already found there.
+/// An offset past the end answers empty, which is the same answer
+/// `--cwd=` gives and which that caller already reads as *no value*.
+///
+/// # Panics
+///
+/// Never. An out-of-range offset is clamped rather than refused, because the
+/// caller's own answer for "nothing after the sign" is already the empty value.
+#[must_use]
+pub fn argument_after_ascii(argument: &std::ffi::OsStr, at: usize) -> std::ffi::OsString {
+    let encoded = argument.as_encoded_bytes();
+    let at = at.min(encoded.len());
+    // SAFETY: `at` is one past an ASCII byte — `=` for the one caller — so the
+    // split is on a character boundary in every encoding an `OsStr` uses, and
+    // the remainder is an unmodified suffix of this `OsStr`'s own bytes. Both
+    // are exactly what `from_encoded_bytes_unchecked` requires.
+    let tail = unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(&encoded[at..]) };
+    tail.to_os_string()
+}
+
+/// **The tail of an argument is the bytes after the sign, whatever they are.**
+///
+/// Three claims, and the third is the one that made this a platform door rather
+/// than a `split_once`: the value is taken whole, an empty tail is empty rather
+/// than absent, and an offset past the end cannot panic.
+///
+/// The non-text half of the claim cannot be made portably in one test — a lone
+/// surrogate is a thing only a Windows `OsString` can hold and an invalid UTF-8
+/// byte is a thing only a Unix one can — so each platform makes it with the
+/// value its own operating system can produce. That is M1-10's second decision
+/// written out here for the door rather than for its caller.
+#[cfg(test)]
+mod argument_split_tests {
+    use super::argument_after_ascii;
+    use std::ffi::OsString;
+
+    #[test]
+    fn the_value_is_everything_after_the_sign() {
+        let argument = OsString::from("--cwd=/a folder/with spaces/and=signs");
+        assert_eq!(
+            argument_after_ascii(&argument, "--cwd".len() + 1),
+            OsString::from("/a folder/with spaces/and=signs"),
+            "the value is taken whole, sign and all — a second `=` belongs to the path"
+        );
+        assert!(argument_after_ascii(&OsString::from("--cwd="), 6).is_empty());
+        assert!(argument_after_ascii(&OsString::from("--cwd"), 6).is_empty());
+    }
+
+    /// The half that is the whole reason the split is on the encoded argument:
+    /// a value the platform can hold and `to_str` cannot read survives it.
+    #[test]
+    fn a_value_that_is_not_text_survives_the_split() {
+        #[cfg(windows)]
+        let (argument, expected) = {
+            use std::os::windows::ffi::OsStringExt;
+            let mut units: Vec<u16> = "--cwd=".encode_utf16().collect();
+            units.extend_from_slice(&[0x0044, 0xD800, 0x005C]);
+            (
+                OsString::from_wide(&units),
+                OsString::from_wide(&[0x0044, 0xD800, 0x005C]),
+            )
+        };
+        #[cfg(not(windows))]
+        let (argument, expected) = {
+            use std::os::unix::ffi::OsStringExt;
+            (
+                OsString::from_vec(b"--cwd=D\xFF/".to_vec()),
+                OsString::from_vec(b"D\xFF/".to_vec()),
+            )
+        };
+        assert!(argument.to_str().is_none(), "the fixture is not text");
+        assert_eq!(argument_after_ascii(&argument, "--cwd".len() + 1), expected);
+    }
+}
+
 /// **The hand-off, spelled once** — see [`handoff`].
 ///
 /// The four verbs that leave this window are re-exported at the crate root

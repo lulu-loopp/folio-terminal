@@ -121,10 +121,18 @@ pub mod engine {
         pub natural_size: Option<(u32, u32)>,
         /// Whether the playhead has reached the end.
         pub ended: bool,
-        /// Whether the source is silent — no audio stream, or muted.
-        pub muted: bool,
-        /// What went wrong, if anything has.
+        /// The one thing that went wrong, if one did. Sticky.
         pub error: Option<EngineError>,
+        pub muted: bool,
+        /// `0.0`–`1.0`, the same scale `HTMLMediaElement.volume` uses.
+        pub volume: f64,
+        /// `1.0` is normal speed.
+        pub rate: f64,
+        /// Whether the metadata has arrived.
+        pub ready: bool,
+        /// Whether this source has a picture at all.
+        pub has_video: bool,
+        pub has_audio: bool,
     }
 
     /// One frame on its way to the renderer. See the module note.
