@@ -1043,23 +1043,23 @@ mod macos_handoff {
                 return;
             };
             let mut ended: Option<Retained<NSRunningApplication>> = None;
+            let mut seen = false;
+            let mut visible = 0usize;
             for _ in 0..100 {
                 std::thread::sleep(std::time::Duration::from_millis(100));
-                let opened = workspace
-                    .runningApplications()
-                    .to_vec()
-                    .into_iter()
-                    .find(|running| {
-                        running.bundleURL().and_then(|url| bundle_path(&url))
-                            == Some(wanted.clone())
-                            && !before.iter().any(|known| **known == **running)
-                    });
-                if let Some(opened) = opened
-                    && opened.isFinishedLaunching()
-                {
-                    opened.terminate();
-                    ended = Some(opened);
-                    break;
+                let running = workspace.runningApplications().to_vec();
+                visible = running.len();
+                let opened = running.into_iter().find(|running| {
+                    running.bundleURL().and_then(|url| bundle_path(&url)) == Some(wanted.clone())
+                        && !before.iter().any(|known| **known == **running)
+                });
+                if let Some(opened) = opened {
+                    seen = true;
+                    if opened.isFinishedLaunching() {
+                        opened.terminate();
+                        ended = Some(opened);
+                        break;
+                    }
                 }
             }
 
@@ -1083,10 +1083,12 @@ mod macos_handoff {
             // door's answer — but a case that leaves an application standing on
             // somebody's desk should say so rather than let them find it.
             println!(
-                "opened {wanted}; ended: {}",
+                "opened {wanted}; this process can see {visible} running applications; \
+                 a new one matching it {}; ended: {}",
+                if seen { "appeared" } else { "never appeared" },
                 match &ended {
                     Some(app) => format!("{}", app.isTerminated()),
-                    None => "nothing new appeared to end".to_owned(),
+                    None => "not asked".to_owned(),
                 }
             );
             let _ = std::fs::remove_dir_all(&root);
