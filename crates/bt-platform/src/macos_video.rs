@@ -378,10 +378,14 @@ fn valid_length(duration: CMTime) -> bool {
 /// is the stored size with its axes swapped — so the raster and the fact line
 /// agree however the file was written.
 fn displayed_size(stored: CGSize, turn: CGAffineTransform) -> Option<(u32, u32)> {
-    let width = (f64::from(stored.width) * f64::from(turn.a)).abs()
-        + (f64::from(stored.height) * f64::from(turn.c)).abs();
-    let height = (f64::from(stored.width) * f64::from(turn.b)).abs()
-        + (f64::from(stored.height) * f64::from(turn.d)).abs();
+    // The components are used as they come. `CGFloat` *is* this arithmetic's
+    // type on every Apple target this crate is built for, so wrapping each one
+    // in `f64::from` converts a value to the type it already has —
+    // `clippy::useless_conversion`, which the `aarch64-apple-darwin` lane
+    // refuses and which was caught there at the T-MAC-LIGHTS merge. The one
+    // conversion below is a real one: `u32::MAX` is not a `CGFloat`.
+    let width = (stored.width * turn.a).abs() + (stored.height * turn.c).abs();
+    let height = (stored.width * turn.b).abs() + (stored.height * turn.d).abs();
     let (width, height) = (width.round(), height.round());
     (width >= 1.0 && height >= 1.0 && width <= f64::from(u32::MAX) && height <= f64::from(u32::MAX))
         .then_some((width as u32, height as u32))
