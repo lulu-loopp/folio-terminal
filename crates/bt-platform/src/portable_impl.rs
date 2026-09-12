@@ -58,6 +58,7 @@
 //! not a plan for them; it is what stands where they will, so that a window
 //! opens today.
 
+#[cfg(not(any(windows, target_os = "macos")))]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -496,13 +497,20 @@ impl ImeSystemCaret {
     pub fn destroy(&mut self) {}
 }
 
-// ── the directory watch (M2-1) ─────────────────────────────────────────────
+// ── the directory watch (M2-1 for everything but macOS) ────────────────────
+//
+// M2-1 gave macOS a real arm over FSEvents (`macos_watch.rs`), so the three
+// doors below are now what a third platform meets and nothing else. They keep
+// the shape rather than the behaviour: the contracts are three constructors and
+// the enum is not part of the interface, which is what a Linux arm will have to
+// preserve when it is written.
 
 /// **What one completion of the watch said changed.**
 ///
 /// The same two answers FSEvents gives — named entries, or *more than I could
 /// write down* — which is why the enum travels unchanged. M2-1 owns all three
 /// of the contracts the three constructors carry.
+#[cfg(not(any(windows, target_os = "macos")))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DirChange<'a> {
     /// The entries the watcher named, relative to the watched directory.
@@ -524,11 +532,13 @@ pub enum DirChange<'a> {
 /// not being watched is a files column that needs refreshing by hand, and a
 /// reader is better served by one line saying so than by a tree that quietly
 /// stops agreeing with the disk.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub struct DirWatch {
     /// Never constructed: every constructor refuses.
     _never: std::convert::Infallible,
 }
 
+#[cfg(not(any(windows, target_os = "macos")))]
 impl DirWatch {
     /// The tree contract. Refused; M2-1.
     pub fn start(path: &Path, wake: impl Fn() + Send + 'static) -> Result<Self, std::io::Error> {
@@ -556,6 +566,7 @@ impl DirWatch {
 }
 
 /// The one error every [`DirWatch`] door answers with.
+#[cfg(not(any(windows, target_os = "macos")))]
 fn unwatched() -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::Unsupported,
