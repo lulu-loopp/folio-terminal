@@ -8111,6 +8111,8 @@ spike 量到的是「这个 workspace 今天已经有约 90% 能在 macOS 上编
 
 **在 Mac 上量到的红绿灯**(macOS 26.6,2026-09-12):关闭按钮 frame `(9, 9, 14, 14)`,最小化从 32 起,缩放从 55 起,最右一条边 **69 点**——也就是缩放 1 时 69 物理像素、缩放 2 时 138。`adopt_window_chrome` 从不写死这个数,它问窗口;测试里那个常数也只被用来断言「关系」,所以哪天 macOS 挪了自己的按钮,挪的是这一个常数。
 
+**标签自己长什么样,这张票一笔没动,而这是用户当天看过这扇窗之后的裁决。** 红绿灯和 Folio 现在这个标签形状并排看着不合,用户正在一份小样上挑新的形态(pill / attached / underline / segmented,外加「一个标签时它就是标题」那一条)。所以 M3-3 只落窗口这一层——透明标题栏、`FullSizeContentView`、隐藏标题、红绿灯那扇门、mac 上不画三个按钮、strip 空处当把手、双击按系统偏好——**strip 的画法原样保留**。macOS 上标签的形态是另一张票,等用户选定。
+
 **④ 拖拽是 AppKit 的,双击是读者的——而这一句是量出来的,不是查出来的。** macOS 上没有 `WM_NCHITTEST` 可答:AppKit 把「这一按能不能移动窗口」问给一个 **view**(`mouseDownCanMoveWindow`),而这条 bar 底下的 view 是 winit 的,它自己实现了 `mouseDown:`,所以答 NO。于是应用在按下**里面**自己判定——它本来就逐像素知道自己那条 strip 哪里是空的——然后调 `press_title_bar`,也就是 `performWindowDragWithEvent:`。
 
 这张票第一版按「这扇门连双击一起带过来」写的,因为那正是这个选择器到处被描述的样子。**探针说不是**:一扇没有 Folio 参与的普通 `NSWindow`,它自己的 view 在 `mouseDown:` 里以 `clickCount == 2` 调这个选择器,窗口一动不动;同一次运行里,旁边那扇窗的 AppKit 自带标题栏被同样一对合成事件双击,缩放了。所以双击这一半是这扇门自己做的:`clickCount >= 2` 时读 `AppleActionOnDoubleClick`,`Maximize` → `zoom:`,`Minimize` → `miniaturize:`,`None` → 什么都不做,别的值拒绝而不是猜。
