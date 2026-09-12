@@ -22,12 +22,39 @@
 //! containers and codecs Windows ships; `.webm` needs the Store's VP9/WebMedia
 //! extensions, and on a machine without them this probe is what shows the
 //! `Unsupported` rather than a guess about it.
+//!
+//! # Why the gate is in the source rather than in the manifest (M1-10)
+//!
+//! Media Foundation is the thing being measured, so off Windows there is
+//! nothing here to run — `Engine::wait_for_metadata` is one of the methods the
+//! portable `video` module does not have and is not meant to grow until M4-4.
+//! The gate is `#[cfg(windows)]` on each item with a portable `main` beside it,
+//! and **not** `required-features` on a `[[example]]` table, because cargo's
+//! features are resolved for the whole graph rather than per target: there is no
+//! feature spelling that means "on Windows". A `required-features` example is
+//! simply *skipped* by `--all-targets`, which would make `cargo check
+//! --all-targets` on the Mac pass by not looking — and a target nobody compiles
+//! is the thing this ticket exists to stop. With the gate here, both platforms
+//! compile this file and each gets the half that is true of it.
 
+#[cfg(windows)]
 use std::path::Path;
+#[cfg(windows)]
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
 use bt_platform::video::engine::Engine;
 
+/// The probe is a Windows measurement and says so rather than pretending.
+#[cfg(not(windows))]
+fn main() {
+    eprintln!(
+        "container-probe is a Windows probe: it measures what Media Foundation opens, and this \
+         platform has no such engine (macOS is M4-4/M4-5)."
+    );
+}
+
+#[cfg(windows)]
 fn main() {
     for argument in std::env::args().skip(1) {
         let path = Path::new(&argument);

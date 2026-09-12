@@ -22,25 +22,54 @@
 //!
 //! It exits by itself. Nothing here waits for a person, takes the foreground
 //! (`with_active(false)`) or writes outside the directory it was given.
+//!
+//! # Why the gate is in the source rather than in the manifest (M1-10)
+//!
+//! This file names three Windows facts at once: `WindowTarget::CompositionVisual`
+//! and `Compositor::gpu_visual_ptr`, which are the DirectComposition contract
+//! X-1 measured cannot be carried to Metal unchanged; `NativeWindow::from_win32`,
+//! which is one of the two spellings of a native handle and is compiled only
+//! where that handle exists; and four `Engine` methods Media Foundation has and
+//! AVFoundation has not been asked for yet (M4-4, M4-5). So off Windows every
+//! item here is gated and `main` is a sentence.
+//!
+//! It is `#[cfg(windows)]` per item rather than `required-features` on a
+//! `[[example]]` table for the reason `container-probe` gives: a feature is not
+//! a target, and an example behind `required-features` is *skipped* by
+//! `--all-targets` rather than compiled — which would let the Mac's check pass
+//! by not looking at the file at all.
 
+#[cfg(windows)]
 use std::path::PathBuf;
+#[cfg(windows)]
 use std::sync::Arc;
+#[cfg(windows)]
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
 use bt_platform::video::engine::Engine;
+#[cfg(windows)]
 use bt_render::{
     FrameSource, FrameTrigger, GpuContext, SeatViewport, VideoFrameUpload, VideoLayer,
     WindowRenderer, WindowTarget,
 };
+#[cfg(windows)]
 use winit::application::ApplicationHandler;
+#[cfg(windows)]
 use winit::dpi::PhysicalSize;
+#[cfg(windows)]
 use winit::event::WindowEvent;
+#[cfg(windows)]
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+#[cfg(windows)]
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+#[cfg(windows)]
 use winit::window::{Window, WindowId};
 
 /// The window, and therefore the picture, is this many physical pixels.
+#[cfg(windows)]
 const WIDTH: u32 = 960;
+#[cfg(windows)]
 const HEIGHT: u32 = 600;
 
 /// When a shot is taken, measured from the moment the file started playing.
@@ -51,17 +80,30 @@ const HEIGHT: u32 = 600;
 /// at four fifths are two visibly different pictures out of one file, and that
 /// is a *playback* rather than a decode. The three after it are a second apart
 /// and carry the clock, which is burned into the frame beside them.
+#[cfg(windows)]
 const SHOTS_AT_SECS: [f64; 4] = [0.15, 0.8, 1.8, 2.8];
 
 /// How long one file is given before the probe moves on, whatever it has
 /// managed. A bound, not a schedule: everything interesting has happened by
 /// three seconds and this only stops a file that never loads from stopping the
 /// run.
+#[cfg(windows)]
 const PER_FILE_BUDGET: Duration = Duration::from_secs(12);
 
 /// How much of the window the caption keeps for itself, above the video's box.
+#[cfg(windows)]
 const CAPTION_STRIP_PX: u32 = 44;
 
+/// The probe is a Windows measurement and says so rather than pretending.
+#[cfg(not(windows))]
+fn main() {
+    eprintln!(
+        "video-probe is a Windows probe: it draws through a DirectComposition visual and plays \
+         through Media Foundation, and this platform has neither (macOS is M1-4, M4-1 and M4-5)."
+    );
+}
+
+#[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args_os().skip(1).map(PathBuf::from);
     let out_dir = arguments
@@ -101,6 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(windows)]
 struct Probe {
     out_dir: PathBuf,
     videos: Vec<PathBuf>,
@@ -123,6 +166,7 @@ struct Probe {
     last_size: Option<(u32, u32)>,
 }
 
+#[cfg(windows)]
 impl ApplicationHandler for Probe {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -215,6 +259,7 @@ impl ApplicationHandler for Probe {
     }
 }
 
+#[cfg(windows)]
 impl Probe {
     /// Open the file at `self.at`, or leave if there are none left.
     fn begin(&mut self, event_loop: &ActiveEventLoop) {
@@ -406,6 +451,7 @@ impl Probe {
 }
 
 /// The window's own `HWND`, which is what a composition visual is built over.
+#[cfg(windows)]
 fn native_window(window: &Window) -> Option<bt_platform::NativeWindow> {
     let handle = window.window_handle().ok()?;
     match handle.as_raw() {
@@ -415,6 +461,7 @@ fn native_window(window: &Window) -> Option<bt_platform::NativeWindow> {
 }
 
 /// `[b, g, r, a]` rows out of the renderer, an ordinary PNG on the disk.
+#[cfg(windows)]
 fn write_png(pixels: Vec<[u8; 4]>, width: u32, height: u32, file: &std::path::Path) {
     let mut rgba = Vec::with_capacity(pixels.len() * 4);
     for [blue, green, red, alpha] in pixels {

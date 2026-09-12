@@ -1254,6 +1254,14 @@ mod tests {
     }
 
     /// PIN — an argument this build cannot read as text is a path, not a flag.
+    ///
+    /// **Gated on its fixture and not on its claim** (`docs/DESIGN.md` §13.6,
+    /// ticket M1-10): a lone high surrogate is a value only a Windows
+    /// `OsString` can hold, so the *fixture* is Windows' even though the rule —
+    /// a name this process cannot decode is still a name — is every platform's.
+    /// The POSIX mirror below makes the same claim with the value its own
+    /// operating system can produce.
+    #[cfg(windows)]
     #[test]
     fn an_argument_that_is_not_text_is_taken_as_the_path() {
         use std::os::windows::ffi::OsStringExt;
@@ -1262,6 +1270,43 @@ mod tests {
         let unreadable = OsString::from_wide(&[0x0044, 0xD800, 0x005C]);
         let request = parse(vec![unreadable.clone()]).expect("a name is not a syntax error");
         assert_eq!(request.path, Some(PathBuf::from(unreadable)));
+    }
+
+    /// PIN — the POSIX mirror of the rule above: the same claim, over the
+    /// non-text value *this* family of operating systems can hand a process.
+    ///
+    /// A Unix argument is bytes, and bytes are not required to be UTF-8.
+    /// `0xFF` is not a lead byte in any UTF-8 sequence, so `D\xFF/` is a name
+    /// the kernel will hand over and `to_str` will refuse — the exact shape the
+    /// surrogate has on the other side.
+    ///
+    /// MUTATION: read arguments through `to_string_lossy` anywhere on the path
+    /// and both halves go red, because the replacement character is a different
+    /// file.
+    ///
+    /// The second half is the joined spelling, and it is here because it is the
+    /// one place `cli.rs` used to name `std::os::windows` in *production*:
+    /// `value_for` splits `--cwd=<path>` off the **encoded** argument through
+    /// [`bt_platform::argument_after_ascii`], so the tail arrives as the
+    /// operating system spelled it. `parse` reaches that split only for an
+    /// argument whose whole text decodes — a flag is ASCII and an argument this
+    /// build cannot read is a positional, which is the assertion above — so the
+    /// non-text tail is asked of the door directly.
+    #[cfg(unix)]
+    #[test]
+    fn an_argument_that_is_not_text_is_taken_as_the_path_on_posix() {
+        use std::os::unix::ffi::OsStringExt;
+        let unreadable = OsString::from_vec(b"D\xFF/".to_vec());
+        assert!(unreadable.to_str().is_none(), "the fixture is not text");
+        let request = parse(vec![unreadable.clone()]).expect("a name is not a syntax error");
+        assert_eq!(request.path, Some(PathBuf::from(unreadable.clone())));
+
+        let joined = OsString::from_vec(b"--cwd=D\xFF/".to_vec());
+        assert_eq!(
+            bt_platform::argument_after_ascii(&joined, CWD_FLAG.len() + 1),
+            unreadable,
+            "the value after the sign is the bytes the kernel handed over"
+        );
     }
 
     /// A filesystem written out as a list, so the rules below touch no disk.

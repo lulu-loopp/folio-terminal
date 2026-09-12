@@ -776,6 +776,13 @@ mod tests {
     ///
     /// MUTATION: read `Path::extension` off the name as it arrived and the
     /// first two spellings open the door the third one shuts.
+    ///
+    /// **Gated on its fixture** (`docs/DESIGN.md` §13.6, ticket M1-10): every
+    /// string below is a Windows path and the rule itself is Win32's own
+    /// normalisation. `a_posix_name_is_its_bytes_and_nothing_is_trimmed` is the
+    /// mirror, and it is a different rule rather than the same one restated —
+    /// which is the point of writing it.
+    #[cfg(windows)]
     #[test]
     fn a_trailing_dot_or_space_does_not_hide_what_a_name_would_run() {
         for program in [
@@ -812,6 +819,60 @@ mod tests {
             normalised_target(Path::new(r"C:\bin\payload.exe. ")),
             Some(PathBuf::from(r"C:\bin\payload.exe"))
         );
+    }
+
+    /// PIN — **the POSIX mirror of the rule above, and the rule is that there
+    /// is none: a name here is its bytes** (M1-10, `docs/DESIGN.md` §13.6).
+    ///
+    /// The Windows test next door exists because Win32 resolves `payload.exe.`
+    /// and `payload.exe` to one file, so a check that read the untrimmed text
+    /// and a call that read the trimmed text were talking about two things. A
+    /// POSIX filesystem has no such rule: `payload.` is a name with a dot at the
+    /// end of it, `payload ` is a name with a space at the end of it, and each
+    /// is a different file from `payload`. Writing the mirror is what makes that
+    /// difference a decision somebody took rather than a gap.
+    ///
+    /// Two claims, both about this module's own functions:
+    ///
+    /// ① [`program_in_directories`] — the portable half of the search — looks
+    ///    for the name exactly as it was written, so `payload.sh.` and
+    ///    `payload.sh` look for two different files.
+    /// ② the question *this* module would otherwise answer with
+    ///    [`names_a_program`] is not answered here at all: off Windows a program
+    ///    is one the execute bit says is a program, `PATHEXT` names nothing, and
+    ///    `program_on_path` refuses rather than guessing (M2-2 writes the real
+    ///    rule). A refusal is the honest answer; a Windows reading of a Unix
+    ///    name would be a wrong one.
+    ///
+    /// MUTATION: build the candidate out of [`effective_final_component`]
+    /// instead of out of the name and the second half goes green, which is the
+    /// search quietly opening a file nobody named.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_posix_name_is_its_bytes_and_nothing_is_trimmed() {
+        let directories = [PathBuf::from("/usr/local/bin")];
+        let only_the_plain_one = |path: &Path| path == Path::new("/usr/local/bin/payload.sh");
+        assert_eq!(
+            program_in_directories(
+                Path::new("payload.sh"),
+                &directories,
+                "",
+                &only_the_plain_one
+            ),
+            Some(PathBuf::from("/usr/local/bin/payload.sh")),
+            "the name as it is written is the file that is looked for"
+        );
+        for trailing in ["payload.sh.", "payload.sh "] {
+            assert_eq!(
+                program_in_directories(Path::new(trailing), &directories, "", &only_the_plain_one),
+                None,
+                "{trailing:?} is a name of its own here and no trim turns it into `payload.sh`"
+            );
+        }
+
+        // And the program question itself is refused rather than answered with
+        // Windows' grammar.
+        assert_eq!(program_on_path(Path::new("payload.sh")), None);
     }
 
     /// PIN — the tree's bridge opens documents and refuses programs, and the
@@ -903,6 +964,12 @@ mod tests {
     ///
     /// MUTATION: wrap whatever arrives in quotes and the first case hands
     /// Explorer two arguments.
+    ///
+    /// **Gated on its fixture** (`docs/DESIGN.md` §13.6, ticket M1-10): the
+    /// paths are Windows paths and the answer is an Explorer command line.
+    /// `the_posix_reveal_hands_over_a_path_and_not_a_command_line` is the
+    /// mirror.
+    #[cfg(windows)]
     #[test]
     fn the_reveal_argument_is_one_token_or_it_is_nothing() {
         assert_eq!(
@@ -934,6 +1001,47 @@ mod tests {
                 .expect("a folder")
                 .to_string_lossy(),
             "\"C:\\bin\""
+        );
+    }
+
+    /// PIN — **the POSIX mirror: there is no command line to be split, so the
+    /// quoting question does not arise and the door says so** (M1-10,
+    /// `docs/DESIGN.md` §13.6).
+    ///
+    /// What `open -R <path>` takes — and what
+    /// `-[NSWorkspace activateFileViewerSelectingURLs:]` takes, which is what
+    /// M2-2 will actually call — is **one element of an `argv` array, or one
+    /// `NSURL`**. Nothing between this process and Finder re-parses a string,
+    /// so a quote in a file name is an ordinary character and `/select,` has no
+    /// counterpart at all: the whole of [`reveal_argument_form`]'s subject is a
+    /// Windows fact about `ShellExecuteW`'s parameter being a command line.
+    ///
+    /// What does carry over is the *other* refusal, and this pins that the door
+    /// keeps it rather than quietly calling `open` on anything: off Windows
+    /// `reveal_in_explorer` answers a refusal with a reason a toast can carry,
+    /// and that reason is not [`PROGRAM_REFUSED`] — "the machine was never
+    /// asked" and "this window will not run programs" are two different
+    /// sentences and the files column matches on the second.
+    ///
+    /// MUTATION: make the portable arm answer `Ok(())` and the first assertion
+    /// goes red, which is a reveal that reports success and shows nothing.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_posix_reveal_hands_over_a_path_and_not_a_command_line() {
+        let window = crate::NativeWindow::stand_in(0);
+        // A name a Windows command line could not carry as one token is an
+        // ordinary name here, and the refusal that comes back is about the
+        // platform rather than about the text.
+        let refusal = reveal_in_explorer(window, Path::new("/Users/a/a\"b .txt"))
+            .expect_err("the file manager has not been asked yet on this platform");
+        assert!(
+            !refusal.is_empty() && refusal != PROGRAM_REFUSED,
+            "a refusal carries its own reason: {refusal:?}"
+        );
+        assert_eq!(
+            reveal_in_explorer(window, Path::new("/Users/a")),
+            Err(refusal),
+            "a folder is the same door and the same answer"
         );
     }
 
@@ -982,6 +1090,13 @@ mod tests {
     ///
     /// MUTATION: put the working directory at the head of `directories` and the
     /// last assertion finds the planted program.
+    ///
+    /// **Gated on its fixture** (`docs/DESIGN.md` §13.6, ticket M1-10): the
+    /// directories are Windows directories, the extension list is a `PATHEXT`
+    /// and `C:\Windows\System32\cmd.exe` is only absolute on a machine with
+    /// drive letters. `a_posix_program_is_looked_for_where_an_administrator_put_it`
+    /// is the mirror and it asks the same question of `/usr/local/bin`.
+    #[cfg(windows)]
     #[test]
     fn a_program_is_looked_for_where_an_administrator_put_it() {
         let directories = [
@@ -1033,5 +1148,83 @@ mod tests {
                 == r"D:\somebody\clone\copilot.cmd"),
             None
         );
+    }
+
+    /// PIN — **the POSIX mirror: the order is the administrator's directories in
+    /// the order `PATH` names them, and the working directory is not one of
+    /// them** (M1-10, `docs/DESIGN.md` §13.6).
+    ///
+    /// The rule R1-17 wrote is not about Windows: `CreateProcess` searching the
+    /// current directory is the Windows spelling of a hazard every shell has a
+    /// name for, and a `copilot` dropped in a cloned repository is the same
+    /// attack on a Mac. So the search order is asserted here with the
+    /// directories a Unix machine actually has — `/usr/local/bin` before
+    /// `/usr/bin`, which is `PATH` order on macOS — and with the cloned
+    /// repository left out of the list rather than trusted.
+    ///
+    /// **And the one thing that does not carry over is pinned too.** The
+    /// candidate spellings this function tries come from `PATHEXT`, which exists
+    /// nowhere but Windows, so an extension-less `copilot` — the ordinary shape
+    /// of a Unix program — produces no candidate at all and is not found. That
+    /// is why [`program_on_path`] refuses off Windows instead of calling this:
+    /// the POSIX question is the execute bit, and M2-2 writes it. A green test
+    /// that quietly resolved a bare name here would be this module claiming a
+    /// rule it has not been given.
+    ///
+    /// MUTATION: put `/home/a/clone` at the head of `directories` and the last
+    /// assertion of the first block finds the planted program, which is the
+    /// defect itself.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_posix_program_is_looked_for_where_an_administrator_put_it() {
+        let directories = [PathBuf::from("/usr/local/bin"), PathBuf::from("/usr/bin")];
+        let there = |path: &Path| {
+            matches!(
+                path.to_string_lossy().as_ref(),
+                "/usr/local/bin/copilot.sh" | "/usr/bin/copilot.sh" | "/home/a/clone/copilot.sh"
+            )
+        };
+        // The first directory that has it wins, which is `PATH` order.
+        assert_eq!(
+            program_in_directories(Path::new("copilot.sh"), &directories, "", &there),
+            Some(PathBuf::from("/usr/local/bin/copilot.sh"))
+        );
+        assert_eq!(
+            program_in_directories(
+                Path::new("copilot.sh"),
+                &directories[1..],
+                "",
+                &|path: &Path| path == Path::new("/usr/bin/copilot.sh")
+            ),
+            Some(PathBuf::from("/usr/bin/copilot.sh"))
+        );
+        // An absolute program is already an answer and is not searched for.
+        assert_eq!(
+            program_in_directories(Path::new("/usr/bin/env"), &[], "", &|_| true),
+            Some(PathBuf::from("/usr/bin/env"))
+        );
+        // A relative path resolves against a working directory this window does
+        // not choose, so it is not a program name at all.
+        assert_eq!(
+            program_in_directories(Path::new("tools/copilot.sh"), &directories, "", &|_| true),
+            None
+        );
+        // And the folder the reader is standing in is never searched, even when
+        // it holds exactly the name that was asked for.
+        assert_eq!(
+            program_in_directories(Path::new("copilot.sh"), &directories, "", &|path: &Path| {
+                path == Path::new("/home/a/clone/copilot.sh")
+            }),
+            None
+        );
+
+        // The half that is Windows' and stays there: with no `PATHEXT` there is
+        // no spelling to try for a name that carries no extension.
+        assert_eq!(
+            program_in_directories(Path::new("copilot"), &directories, "", &|_| true),
+            None,
+            "the extension list is a Windows fact; the execute bit is M2-2's"
+        );
+        assert_eq!(program_on_path(Path::new("copilot")), None);
     }
 }

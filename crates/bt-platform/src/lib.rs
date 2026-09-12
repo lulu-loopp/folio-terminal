@@ -43,19 +43,17 @@ pub struct NativeWindow {
     /// The platform's own handle, as a number. Private, and the reason this
     /// type exists.
     ///
-    /// Read on Windows by `NativeWindow::as_hwnd`. Off Windows nothing reads
-    /// it yet — M1-3 and M1-4 are the tickets that reach the `NSView` behind
-    /// it — and the field is carried so that the type has one shape everywhere
-    /// rather than a different one per platform.
-    #[cfg_attr(
-        not(any(windows, target_os = "macos")),
-        expect(
-            dead_code,
-            reason = "a platform with no window backend has nothing to read it with, and the type \
-                      keeps one shape on all three rather than becoming a different type on the \
-                      third"
-        )
-    )]
+    /// Read on Windows by `NativeWindow::as_hwnd`. Off Windows nothing reaches
+    /// through it yet — M1-3 and M1-4 are the tickets that reach the `NSView`
+    /// behind it — and the field is carried so that the type has one shape
+    /// everywhere rather than a different one per platform.
+    ///
+    /// M1-1 carried an `#[expect(dead_code)]` here for the third platform, and
+    /// **M1-10 measured that it is unfulfilled**: a Linux `cargo check
+    /// --all-targets -p bt-platform` reports the expectation itself as the
+    /// warning, because the derives above read this field and `dead_code` never
+    /// fires. An expectation that cannot be met is a warning of its own, which
+    /// is the opposite of what it was written for.
     handle: NonZeroIsize,
 }
 
@@ -11855,6 +11853,17 @@ mod context_menu_tests {
     /// ③ ask whether *every* tree names a live stranger rather than whether
     ///    *any* does, and the mixed pair goes red — a registration half of which
     ///    still names a running install would be taken anyway.
+    ///
+    /// **Gated on its fixture** (`docs/DESIGN.md` §13.6, ticket M1-10). Every
+    /// path here is a Windows path and the `on_disk` predicate is written with
+    /// `Path::starts_with`, which walks *components*: off Windows
+    /// `D:\installed\folio.exe` is one component with backslashes inside it, so
+    /// the live install reads as gone and the rule is being asked about a
+    /// machine that does not exist.
+    /// `the_posix_launch_finds_no_registration_to_repair` is the mirror, and it
+    /// is a different claim rather than the same one restated — macOS has no
+    /// registration to repair at all.
+    #[cfg(windows)]
     #[test]
     fn the_launch_repairs_a_dead_registration_and_leaves_a_live_one_standing() {
         let desired = desired();
@@ -11931,6 +11940,60 @@ mod context_menu_tests {
             ),
             "and a machine that needs nothing is not written to"
         );
+    }
+
+    /// PIN — **the POSIX mirror: there is nothing registered, so the launch
+    /// reads an absence, repairs nothing, and the two writing doors refuse**
+    /// (M1-10, `docs/DESIGN.md` §13.6).
+    ///
+    /// The Windows test above is the repair rule; this is the same launch on a
+    /// platform where the mechanism does not exist. `NSServices` is declarative
+    /// — the entry is read out of `Info.plist` and there is no store to write,
+    /// nothing to announce and nothing to read back (M4-9) — so the honest
+    /// reading of "what is registered" is an empty list, which
+    /// [`context_menu_verdict`] turns into [`ContextMenuState::Absent`], which
+    /// is not [`ContextMenuState::Stale`], which is why
+    /// [`context_menu_reassert_wanted`] answers `false` without touching the
+    /// disk predicate at all.
+    ///
+    /// That chain is the thing worth pinning: **a launch on macOS must not
+    /// decide it has repair work to do.** The two writing doors refuse with a
+    /// reason beside it, so a settings row that asks for the verb gets a
+    /// sentence rather than silence.
+    ///
+    /// MUTATION: make the portable `read_context_menu` answer a `Broken` tree
+    /// per [`CONTEXT_MENU_TREES`] entry instead of an empty list and the second
+    /// assertion goes red — every launch would then try to write a registry
+    /// that is not there.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_posix_launch_finds_no_registration_to_repair() {
+        let desired = desired();
+        let found = read_context_menu("Software\\Classes");
+        assert!(
+            found.is_empty(),
+            "there is no registration store here, and an empty reading is the honest one"
+        );
+        assert_eq!(
+            context_menu_verdict(&found, &desired),
+            ContextMenuState::Absent
+        );
+        assert!(
+            !context_menu_reassert_wanted(&found, &desired, |_| unreachable!(
+                "nothing is stale, so no path is ever asked about"
+            )),
+            "a launch on a platform with no registry has no registration to repair"
+        );
+
+        for refusal in [
+            install_context_menu("Software\\Classes", &desired),
+            remove_context_menu("Software\\Classes"),
+        ] {
+            let reason = refusal.expect_err("there is no Explorer verb on this platform");
+            assert!(!reason.is_empty(), "a refusal carries its own reason");
+        }
+        // And telling a shell that is not there is a no-op rather than a call.
+        announce_explorer_menu_change();
     }
 
     /// RED (2026-09-07) — **every write to what Explorer's menu holds ends by
