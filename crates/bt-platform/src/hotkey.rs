@@ -619,6 +619,66 @@ pub const fn handover_step(
     }
 }
 
+/// **The global summon key, on a platform whose event tap is M4-8's** (gated
+/// behind X-5, because Accessibility is granted against a code signature and an
+/// agent that re-signs on every build would be granting it again every time).
+///
+/// `CGEventTap` is the mechanism the owner ruled for (§8 Q2), authorized
+/// through an in-app *Enable global shortcut* action rather than at first
+/// summon — a chord that cannot be heard has no first summon to ask at. So the
+/// fault this arm answers with is the one M4-8 turns into that row's
+/// *not authorized* state, and it is `Refused` with a sentence rather than a
+/// new variant, because the variant M4-8 adds is about a permission that has
+/// been asked for and declined, which is a different thing from a mechanism
+/// that has not been written.
+#[cfg(not(windows))]
+#[derive(Debug)]
+pub struct GlobalHotkey {
+    /// Never constructed: [`register`] refuses.
+    _never: std::convert::Infallible,
+}
+
+#[cfg(not(windows))]
+impl GlobalHotkey {
+    /// The id this claim was made under. Unreachable: there is no claim.
+    #[must_use]
+    pub const fn id(&self) -> i32 {
+        match self._never {}
+    }
+}
+
+/// Claim the chord. Refused; M4-8.
+#[cfg(not(windows))]
+pub fn register(id: i32, hotkey: Hotkey) -> Result<GlobalHotkey, HotkeyFault> {
+    let _ = id;
+    // **The product's own refusal first, exactly as the Windows arm orders
+    // them** (R2-14): a chord with no modifier on it is refused for a reason
+    // that is true on every platform, and telling the reader "not on this
+    // platform" about a chord that would be refused anyway sends them to fix
+    // the wrong thing.
+    if !holds_a_summon_modifier(hotkey) {
+        return Err(HotkeyFault::NoModifier);
+    }
+    Err(HotkeyFault::Refused(
+        "the global summon key is not on this platform yet".to_owned(),
+    ))
+}
+
+/// **Let the process we are handing a launch to come to the front.**
+///
+/// A no-op answering `false`, and one of §4.4's class-N items rather than
+/// deferred work: `AllowSetForegroundWindow` exists because Windows has a
+/// foreground *lock* to ask permission from, and macOS has none — the launch
+/// handover simply activates the other application. The `false` says no
+/// permission was granted, which is true, and the caller's own next step is the
+/// activation that needs none.
+#[cfg(not(windows))]
+#[must_use]
+pub fn allow_foreground_for(process: u32) -> bool {
+    let _ = process;
+    false
+}
+
 /// The handover, on a host with no foreground to hand.
 ///
 /// **Not the same statement as "there is no frontmost application"** — macOS

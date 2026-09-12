@@ -30,16 +30,31 @@
 //! because a callback cannot be cancelled and will arrive for a pane that has
 //! already gone.
 
+// **The data half of this file is compiled everywhere and the engine half is
+// not** (M1-1). `bt-app`'s `webhost.rs` names thirteen items from this module
+// and twelve of them are plain data — a chord, an event, a verdict, the two
+// ends of a rehost — which describe what a window wants from a page rather than
+// what WebView2 does about it. Those stay ungated and are the same types on
+// both platforms, exactly as `docs/plans/port/backend-inventory-2026-09-12.md`
+// §6 ② asks: the macOS name set is decided here, before the module is split,
+// rather than after. The thirteenth is `WebHost`, and off Windows it is
+// `webview_portable.rs` at the bottom of this file.
+#[cfg(windows)]
 use std::cell::RefCell;
+#[cfg(windows)]
 use std::collections::VecDeque;
+#[cfg(windows)]
 use std::path::Path;
+#[cfg(windows)]
 use std::rc::Rc;
 
 use crate::NativeWindow;
+#[cfg(windows)]
 use webview2_com::Microsoft::Web::WebView2::Win32::*;
 // Named one by one rather than globbed: `webview2_com` exports a `Result` alias
 // of its own, and a glob here would quietly make every `Result<(), String>` in
 // this file mean something else.
+#[cfg(windows)]
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, BrowserProcessExitedEventHandler,
     CapturePreviewCompletedHandler, CoreWebView2EnvironmentOptions,
@@ -56,11 +71,13 @@ use webview2_com::{
     SourceChangedEventHandler, StatusBarTextChangedEventHandler, WebResourceRequestedEventHandler,
     take_pwstr,
 };
+#[cfg(windows)]
 use windows::Win32::Foundation::{HWND, POINT, RECT};
+#[cfg(windows)]
 use windows::core::{BOOL, HSTRING, IUnknown, Interface as _, PCWSTR, PWSTR};
 
 use super::PageVisual;
-use super::windows_impl::Compositor;
+use crate::Compositor;
 
 // ── Reading out-parameters ─────────────────────────────────────────────────
 //
@@ -69,16 +86,19 @@ use super::windows_impl::Compositor;
 // the ceremony lives here once. A getter that fails yields the type's default,
 // which for every field below reads as "the engine did not say".
 
+#[cfg(windows)]
 fn read<T: Default>(getter: impl FnOnce(*mut T) -> windows::core::Result<()>) -> T {
     let mut value = T::default();
     let _ = getter(&mut value);
     value
 }
 
+#[cfg(windows)]
 fn read_bool(getter: impl FnOnce(*mut BOOL) -> windows::core::Result<()>) -> bool {
     read::<BOOL>(getter).as_bool()
 }
 
+#[cfg(windows)]
 fn read_string(getter: impl FnOnce(*mut PWSTR) -> windows::core::Result<()>) -> String {
     let mut value = PWSTR::null();
     match getter(&mut value) {
@@ -87,6 +107,7 @@ fn read_string(getter: impl FnOnce(*mut PWSTR) -> windows::core::Result<()>) -> 
     }
 }
 
+#[cfg(windows)]
 fn failure(step: &str, error: &windows::core::Error) -> String {
     format!(
         "{step} failed: {} (0x{:08X})",
@@ -582,6 +603,7 @@ pub enum WebMouseEvent {
     HorizontalWheel(i16),
 }
 
+#[cfg(windows)]
 impl WebMouseEvent {
     fn kind(self) -> COREWEBVIEW2_MOUSE_EVENT_KIND {
         match self {
@@ -642,6 +664,7 @@ pub mod web_mouse_buttons {
 
 // ── The process-wide environment ───────────────────────────────────────────
 
+#[cfg(windows)]
 thread_local! {
     /// **One environment per process** (`plan.md` §0). Two environments over one
     /// user data folder with different options is `0x8007139F`, and two with the
@@ -658,6 +681,7 @@ thread_local! {
 /// environment made while the old browser still holds the folder does not fail
 /// loudly — measured — **it simply never calls back**
 /// (`w0p-evidence.md` §3.4).
+#[cfg(windows)]
 pub fn forget_web_environment() {
     ENVIRONMENT.with(|cell| *cell.borrow_mut() = None);
 }
@@ -667,6 +691,7 @@ pub fn forget_web_environment() {
 /// The registry lies and the API does not: gate 7 removed the runtime and the
 /// `HKLM\WOW6432Node` key went on reporting a version that was no longer
 /// installed, while this call failed with `0x80070002` in 0 ms.
+#[cfg(windows)]
 pub fn webview2_runtime_version() -> Result<String, String> {
     let mut version = PWSTR::null();
     let answer =
@@ -1029,6 +1054,7 @@ pub struct RehostSide<'a> {
 /// ones the page actually had, and asking the controller for them after the walk
 /// has started would be asking a half-moved object about a state it is no longer
 /// in.
+#[cfg(windows)]
 struct Restore<'a> {
     source: &'a Compositor,
     target: &'a Compositor,
@@ -1064,6 +1090,7 @@ pub struct WebDpiOwnership {
 /// Everything a callback needs to reach: the queue it pushes onto, the chord
 /// table it consults, the navigation gate it asks, and the nudge that gets the
 /// event loop to come and read what it wrote.
+#[cfg(windows)]
 struct Shared {
     events: RefCell<VecDeque<WebEvent>>,
     chords: RefCell<Vec<WebChord>>,
@@ -1095,6 +1122,7 @@ struct Shared {
     wake: Box<dyn Fn()>,
 }
 
+#[cfg(windows)]
 impl Shared {
     fn push(&self, event: WebEvent) {
         self.events.borrow_mut().push_back(event);
@@ -1107,6 +1135,7 @@ impl Shared {
 /// Owns the controller and, through the process-wide cache, a share of the
 /// environment. Everything it does is a step the caller's state machine told it
 /// to take.
+#[cfg(windows)]
 pub struct WebHost {
     shared: Rc<Shared>,
     controller: Option<ICoreWebView2Controller>,
@@ -1156,6 +1185,7 @@ pub struct WebHost {
     find_attached: std::cell::Cell<bool>,
 }
 
+#[cfg(windows)]
 impl WebHost {
     /// A host that has not started anything yet.
     ///
@@ -2897,6 +2927,7 @@ impl WebHost {
 /// `None` rather than an error string: the one caller is a completion handler,
 /// which has nowhere to report to and one thing to say — there is a picture, or
 /// there is not.
+#[cfg(windows)]
 fn read_stream(stream: &windows::Win32::System::Com::IStream) -> Option<Vec<u8>> {
     use windows::Win32::System::Com::{STREAM_SEEK_END, STREAM_SEEK_SET};
     let mut length = 0u64;
@@ -2922,6 +2953,7 @@ fn read_stream(stream: &windows::Win32::System::Com::IStream) -> Option<Vec<u8>>
 /// `AcceleratorKeyPressed` hands over the key but not the modifier state, so
 /// the host has to read it — and reads it here, once, rather than at the two
 /// places that would eventually disagree.
+#[cfg(windows)]
 fn modifiers_down() -> (bool, bool, bool) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
     let down = |vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY| {
@@ -2936,6 +2968,7 @@ fn modifiers_down() -> (bool, bool, bool) {
 /// A function of four numbers, held apart from the COM call so that the one
 /// thing this repository got wrong about it can be held by a test: the origin.
 /// See [`WebHost::set_bounds`] for what pinning it at zero cost.
+#[cfg(windows)]
 fn bounds_rect(x: i32, y: i32, width: u32, height: u32) -> RECT {
     RECT {
         left: x,
@@ -2946,7 +2979,7 @@ fn bounds_rect(x: i32, y: i32, width: u32, height: u32) -> RECT {
 }
 
 /// **The rectangle the engine is given carries the seat's origin.**
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod bounds_geometry_tests {
     use super::*;
 
@@ -3008,7 +3041,7 @@ mod bounds_geometry_tests {
 /// decision nobody made, and it is not a thing a COM call can be asked about
 /// afterwards. So it is a value here, [`WebHost::configure`] walks it, and this
 /// holds it.
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod engine_settings_tests {
     use super::*;
 
@@ -3186,7 +3219,7 @@ mod engine_settings_tests {
 /// taken; the profile is a temporary folder of this test's own, so nothing of
 /// the user's is read or written; and both windows are destroyed and both
 /// folders removed however the run ends.
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod webview2_runtime_probe {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
@@ -3617,7 +3650,7 @@ mod webview2_runtime_probe {
 /// Both are sets rather than runs of statements, and a set is exactly the thing
 /// a run of statements cannot be asked about afterwards: the four defects this
 /// module's tests were written for are each one row that was not there.
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod install_and_close_contract_tests {
     use super::*;
 
@@ -3831,7 +3864,7 @@ mod install_and_close_contract_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod rehost_contract_tests {
     use super::*;
 
@@ -3946,3 +3979,25 @@ mod rehost_contract_tests {
         }
     }
 }
+
+/// **The page host, on a platform whose engine has not been written yet**
+/// (M4-2, gated on X-2).
+///
+/// X-2 has already settled what replaces it: one Objective-C class conforming
+/// to `WKNavigationDelegate` and `WKUIDelegate` calling the same
+/// `navigation_gate`, plus a `WKContentRuleList` compiled from the same
+/// constants `resource_request` reads, with two guarantees named as
+/// unsupported (`docs/plans/port/probe-x2-wkwebview-policy-2026-09-12.md`).
+/// None of that is M1-1's, and the twelve data types above travel unchanged
+/// into it.
+///
+/// **`WebHost::new` cannot refuse**, because its return type is `Self`: the
+/// window builds one per web seat and holds it. So the refusal lives where a
+/// page is actually asked for — `request_environment` — and everything after
+/// that is unreachable until a seat gets past it, which no seat does.
+#[cfg(not(windows))]
+#[path = "webview_portable.rs"]
+mod portable;
+
+#[cfg(not(windows))]
+pub use portable::{WebHost, forget_web_environment, webview2_runtime_version};

@@ -43,10 +43,10 @@ pub struct NativeWindow {
     /// The platform's own handle, as a number. Private, and the reason this
     /// type exists.
     ///
-    /// Read on Windows by `NativeWindow::as_hwnd` and on macOS by
-    /// `NativeWindow::as_ns_view`; on a platform with neither backend there is
-    /// no constructor and no reader, and the field is carried so that the type
-    /// has one shape everywhere rather than three.
+    /// Read on Windows by `NativeWindow::as_hwnd`. Off Windows nothing reads
+    /// it yet — M1-3 and M1-4 are the tickets that reach the `NSView` behind
+    /// it — and the field is carried so that the type has one shape everywhere
+    /// rather than a different one per platform.
     #[cfg_attr(
         not(any(windows, target_os = "macos")),
         expect(
@@ -130,20 +130,6 @@ impl NativeWindow {
     /// the null handle every failing Win32 call answers with.
     pub(crate) fn from_hwnd(hwnd: windows::Win32::Foundation::HWND) -> Option<Self> {
         NonZeroIsize::new(hwnd.0 as isize).map(Self::from_win32)
-    }
-}
-
-/// The AppKit reading of a [`NativeWindow`], for this crate's macOS backend and
-/// for nothing above it.
-#[cfg(target_os = "macos")]
-impl NativeWindow {
-    /// The `NSView*` winit handed out, as a pointer again.
-    ///
-    /// The caller is on the main thread and the view is winit's, which is the
-    /// whole of what makes dereferencing it legal; every use of this states
-    /// that in its own safety note.
-    pub(crate) fn as_ns_view(self) -> *mut std::ffi::c_void {
-        self.handle.get() as *mut std::ffi::c_void
     }
 }
 
@@ -2333,6 +2319,11 @@ pub mod handoff;
 #[cfg(windows)]
 pub mod attention_pipe;
 
+/// The same endpoint, on a platform whose sockets M4-7 has not written yet.
+#[cfg(not(windows))]
+#[path = "attention_pipe_portable.rs"]
+pub mod attention_pipe;
+
 /// **The second launch's door into the first** — one well-known named pipe per data directory
 /// (`docs/DESIGN.md` §7.59).
 ///
@@ -2342,6 +2333,11 @@ pub mod attention_pipe;
 /// it is the two things a launch needs that a doorbell does not — a name a
 /// stranger can compute, and an answer.
 #[cfg(windows)]
+pub mod launch_pipe;
+
+/// The same door, on a platform whose sockets M3-5 has not written yet.
+#[cfg(not(windows))]
+#[path = "launch_pipe_portable.rs"]
 pub mod launch_pipe;
 
 /// The global summon key, and the foreground it hands back — the quake
@@ -2358,9 +2354,19 @@ pub mod hotkey;
 #[cfg(windows)]
 pub mod video;
 
+/// The same eleven names, before AVFoundation (M4-4, M4-5).
+#[cfg(not(windows))]
+#[path = "video_portable.rs"]
+pub mod video;
+
 /// One `GET`, over the operating system's own HTTP stack — the update check's
 /// only call, and the only socket this program opens (DESIGN §7.51).
 #[cfg(windows)]
+pub mod http;
+
+/// The same one `GET`, before `NSURLSession` (M4-10).
+#[cfg(not(windows))]
+#[path = "http_portable.rs"]
 pub mod http;
 
 /// **Folio's package identity** — the strings `packaging/msix/AppxManifest.xml`
@@ -2384,6 +2390,11 @@ pub mod msix;
 #[cfg(windows)]
 pub mod explorer_command;
 
+/// The verb that will never be served here — see the module's own note.
+#[cfg(not(windows))]
+#[path = "explorer_command_portable.rs"]
+pub mod explorer_command;
+
 /// **One data directory, one writer** — the claim two Folio processes settle
 /// which of them owns `%APPDATA%\Folio\` with (review row R4-5).
 ///
@@ -2392,10 +2403,8 @@ pub mod explorer_command;
 /// testing — which directories claim the same name — is a string function.
 pub mod instance;
 
-#[cfg(windows)]
 mod webview;
 
-#[cfg(windows)]
 pub use webview::{
     INSTALL_SEQUENCE, InstallRollback, InstallStep, REHOST_SEQUENCE, RehostCompensation,
     RehostOutcome, RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord,
@@ -9297,16 +9306,42 @@ pub use windows_impl::{
     window_is_exposed, work_area_at, write_to_console,
 };
 
+/// **The same doors, on a machine with no Win32** (M1-1).
+///
+/// The twin of the list above, and the difference between the two lists is the
+/// whole of what the port still owes: nine names stay on the Windows side
+/// because `bt-app` never writes them, and four more stay there because
+/// `bt-app` writes them only inside one of the eleven `#[cfg(windows)]` arms
+/// §4.3 of the plan lists. Everything `bt-app` names without a gate is here.
+/// See `portable_impl`'s own header for what each item is allowed to do.
+#[cfg(not(windows))]
+mod portable_impl;
+
+#[cfg(not(windows))]
+pub use portable_impl::{
+    Compositor, CustomWindowFrame, DirChange, DirWatch, FilePickKind, FolderPicker, ImagePicker,
+    ImeSystemCaret, MathContextMenu, Notifier, ShellPickKind, SystemSettingsWatch, Taskbar,
+    adopt_parent_console, announce_explorer_menu_change, client_area_animation_enabled,
+    detach_console, directory_folds_case, dpi_at, flash_window, get_dpi_for_window,
+    get_window_rect, get_work_area, hide_every_window_of_this_process,
+    install_console_ctrl_handler, install_context_menu, install_window_class_background,
+    is_window_cloaked, is_window_minimized, leave_process, message_box, monitor_id_at,
+    os_ui_language, pointer_position, read_context_menu, recycle, redirect_std_streams_to_file,
+    register_clipboard_owner, remove_context_menu, request_window_close, set_system_backdrop,
+    set_window_dark_mode, set_window_outer_rect, set_window_topmost, silence_std_streams,
+    stand_window_at, system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
+    taskbar_is_auto_hidden, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
+    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_to_console,
+};
+
 /// **The hand-off, spelled once** — see [`handoff`].
 ///
 /// The four verbs that leave this window are re-exported at the crate root
 /// because that is where every caller has always found them, and moving the
 /// door is not the same as moving its handle.
-pub use handoff::{PROGRAM_REFUSED, program_in_directories, reveal_arguments};
-#[cfg(windows)]
 pub use handoff::{
-    open_local_file, open_local_path, open_system_fonts_page, program_on_path, reveal_in_explorer,
-    shell_execute,
+    PROGRAM_REFUSED, open_local_file, open_local_path, open_system_fonts_page,
+    program_in_directories, program_on_path, reveal_arguments, reveal_in_explorer, shell_execute,
 };
 
 /// The three thread-band calls, off Windows.
@@ -9739,6 +9774,137 @@ mod native_window_door_tests {
                  platform that does not have one"
             );
         }
+    }
+}
+
+/// **A deferred service is built harmlessly and refuses when it is asked**
+/// (`docs/plans/port/macos-plan-2026-09-12.md` §4.4, ticket M1-1).
+///
+/// The rule §4.4 states — *present on every platform, refusing when invoked* —
+/// has a failure mode the inventory found and measured: **seven** of the
+/// sixteen steps between `main` and the first frame are a `bt-platform` call
+/// propagated with `?` and `anyhow::Context`
+/// (`docs/plans/port/backend-inventory-2026-09-12.md` §6 ⑥). A stub that
+/// refuses *at construction* therefore does not answer "not on this platform"
+/// to a reader; it kills the launch, and the reader sees no window at all.
+///
+/// So the rule has two halves and this pins both: every constructor the startup
+/// path calls answers `Ok`, and every door that would do the deferred thing
+/// answers `Err` with a reason a toast can carry.
+///
+/// A source pin over `portable_impl.rs` rather than a call, so that it runs on
+/// the Windows workstation where that module is not compiled at all — which is
+/// where most of this work is authored. Its behavioural twin,
+/// `portable_impl::refusal_tests`, makes the same claim by calling the doors,
+/// and runs on the Mac.
+///
+/// MUTATION: make any named constructor return `Err` and this goes red naming
+/// it; make any named door return `Ok` and it goes red the other way.
+#[cfg(test)]
+mod deferred_service_tests {
+    /// The portable backend's own text — the arm this workstation does not
+    /// compile.
+    const PORTABLE: &str = include_str!("portable_impl.rs");
+
+    /// The text of `impl NAME {`, from its opening brace to the line that
+    /// closes it at column zero.
+    fn impl_block(type_name: &str) -> &'static str {
+        let needle = format!("\nimpl {type_name} {{\n");
+        let at = PORTABLE
+            .find(&needle)
+            .unwrap_or_else(|| panic!("`{type_name}` is one of the portable backend's types"));
+        let rest = &PORTABLE[at + needle.len()..];
+        let end = rest
+            .find("\n}\n")
+            .expect("an impl block is closed at column zero");
+        &rest[..end]
+    }
+
+    /// The body of `fn NAME(` inside `within`, up to the line that closes it at
+    /// four-space indentation.
+    ///
+    /// Crude on purpose: what is being read is whether a body says `Ok` or
+    /// `Err`, and a parser here would be a second thing to be wrong.
+    fn body_of(within: &str, name: &str) -> String {
+        let needle = format!("fn {name}(");
+        let at = within
+            .find(&needle)
+            .unwrap_or_else(|| panic!("`{name}` is one of that type's doors"));
+        let rest = &within[at..];
+        let open = rest
+            .find(" {")
+            .expect("a declaration is followed by the body it opens");
+        let end = rest[open..]
+            .find("\n    }")
+            .expect("a method body is closed at four spaces");
+        rest[open..open + end].to_owned()
+    }
+
+    /// RED — **nothing on the startup path refuses at construction.**
+    ///
+    /// Seven constructors, and each of them is a place a launch would have
+    /// died: five of the sixteen-step path's seven fatal `?` are here, plus the
+    /// best-effort settings watch and the one constructor that cannot fail on
+    /// either platform.
+    #[test]
+    fn a_deferred_service_that_is_not_on_this_platform_refuses_when_invoked_not_at_startup() {
+        for (type_name, constructor, what) in [
+            ("Compositor", "new", "the window's visual tree"),
+            ("CustomWindowFrame", "install", "the self-drawn frame"),
+            ("MathContextMenu", "new", "the formula menu"),
+            ("FolderPicker", "new", "the folder chooser"),
+            ("ImagePicker", "new", "the picture chooser"),
+            (
+                "SystemSettingsWatch",
+                "install",
+                "the system settings watch",
+            ),
+            ("ImeSystemCaret", "new", "the input method's caret"),
+        ] {
+            let body = body_of(impl_block(type_name), constructor);
+            assert!(
+                !body.contains("Err("),
+                "{type_name}::{constructor} refuses at construction, so {what} does not fail on \
+                 this platform — it takes the whole launch with it:\n{body}"
+            );
+        }
+    }
+
+    /// RED — **and the doors that would do the deferred thing say so.**
+    ///
+    /// The other half. A service that is constructed harmlessly and then also
+    /// *succeeds* harmlessly is worse than one that refuses at startup: the
+    /// reader presses the row, nothing happens, and nothing says why.
+    #[test]
+    fn the_deferred_doors_name_the_platform_they_are_not_on() {
+        for (type_name, door) in [
+            ("MathContextMenu", "request"),
+            ("FolderPicker", "request"),
+            ("ImagePicker", "request"),
+            ("Compositor", "attach_web_visual"),
+            ("Compositor", "place_web_visual"),
+        ] {
+            let body = body_of(impl_block(type_name), door);
+            assert!(
+                body.contains("Err("),
+                "{type_name}::{door} does not refuse, so a caller is told nothing happened only \
+                 by nothing happening:\n{body}"
+            );
+        }
+        for door in [
+            "set_window_outer_rect",
+            "take_keyboard_focus",
+            "request_window_close",
+            "recycle",
+        ] {
+            let body = body_of(PORTABLE, door);
+            assert!(body.contains("Err("), "`{door}` does not refuse:\n{body}");
+        }
+        assert!(
+            PORTABLE.contains("fn not_here(what: &str) -> String {"),
+            "the refusals are spelled one way, so that a reader who meets one in a toast and one \
+             in diagnostics.log recognises the same sentence"
+        );
     }
 }
 
