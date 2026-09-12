@@ -455,12 +455,23 @@ pub enum Origin {
 /// profile states how it is told where to start, and the spawn reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StartingDir {
-    /// `%USERPROFILE%` — the Windows home, handed over as a working directory.
+    /// **This account's home directory**, handed over as a working directory —
+    /// `%USERPROFILE%` on Windows, `$HOME` off it (see [`home_variable`]).
     ///
-    /// The variable rather than a composed `C:\Users\<name>`: a roaming or
-    /// redirected profile lives elsewhere and the variable is the only thing that
-    /// knows it.
-    WindowsHome,
+    /// The variable rather than a composed `C:\Users\<name>` or `/Users/<name>`:
+    /// a roaming or redirected profile lives elsewhere, a Unix account's home is
+    /// whatever the password database says, and the variable is the only thing
+    /// that knows either.
+    ///
+    /// **It was called `WindowsHome` until M1-5** and the rename is the whole of
+    /// what changed in the name: the variant always meant "the home this machine
+    /// calls home, as a working directory", which is exactly the thing a
+    /// macOS pane also needs, and a variant called `WindowsHome` resolving
+    /// `$HOME` would be a name contradicting its own body. The word `windows_home`
+    /// on disk is **not** renamed with it — see [`starting_dir_to_file`] — because
+    /// it is already written in every `profiles.json` on every machine, and a
+    /// schema version spent on a spelling buys nothing anybody can use.
+    AccountHome,
     /// The place is named to the *launcher*, as this flag and one argument,
     /// because the shell does not stand where the launcher does.
     ///
@@ -851,8 +862,44 @@ pub fn served_by(profile: &Profile) -> Integration {
 /// feature's audience.
 pub const WINDOWS_POWERSHELL_ID: &str = "winps";
 
-/// The eight profiles this build ships, freshly built — **five shells and three
-/// agents** (user ruling 2026-08-28).
+/// **Which table of shipped rows a build hands out** — the one axis
+/// [`shipped_for`] turns.
+///
+/// Three answers and not two, because macOS and the other Unixes differ over one
+/// row: `/bin/zsh` is where macOS keeps the shell it makes every account's own,
+/// and a Linux userland keeps zsh under `/usr/bin` as often as `/bin` and as
+/// often as nowhere at all. That is `bt_pty::shell`'s own distinction
+/// (`MACOS_SYSTEM_SHELLS` against `OTHER_UNIX_SYSTEM_SHELLS`) read one layer up,
+/// and the two must agree — see [`the_default_profile_is_the_users_shell_when_it_names_an_executable`].
+///
+/// **A value and not a `cfg`**, so that every one of these tables is compiled
+/// into every build and any runner can be asked what a macOS window ships. The
+/// alternative — three `#[cfg]` bodies — would make "the first pane on a Mac
+/// starts zsh" a claim only a Mac could check, which is exactly the claim that
+/// went unchecked until M1-1 found the first pane empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeedPlatform {
+    Windows,
+    MacOs,
+    OtherUnix,
+}
+
+impl SeedPlatform {
+    /// The one this build is.
+    #[must_use]
+    pub fn of_this_build() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else {
+            Self::OtherUnix
+        }
+    }
+}
+
+/// The profiles this build ships, freshly built, for the platform it is built
+/// for — [`windows_shipped`]'s twelve or [`unix_shipped`]'s three or four.
 ///
 /// **The seed, not the table.** It is what a machine with no `profiles.json`
 /// gets, in this order; it is what a built-in's `Restore all defaults` compares
@@ -861,10 +908,35 @@ pub const WINDOWS_POWERSHELL_ID: &str = "winps";
 /// the file.
 ///
 /// A function and no longer a `const`, because the rows own their strings now
-/// (§7.1.6c-6). The cost is eight allocations at each call and the call sites are
-/// startup, a restore and a test — the alternative, a second `&'static` struct
-/// standing beside the owned one, would have made every row of this table exist
-/// twice and put the next person who edits one in front of two places to edit.
+/// (§7.1.6c-6). The cost is a dozen allocations at each call and the call sites
+/// are startup, a restore and a test — the alternative, a second `&'static`
+/// struct standing beside the owned one, would have made every row of this table
+/// exist twice and put the next person who edits one in front of two places to
+/// edit.
+#[must_use]
+pub fn shipped() -> Vec<Profile> {
+    shipped_for(
+        SeedPlatform::of_this_build(),
+        &bt_pty::SystemShellEnvironment,
+    )
+}
+
+/// [`shipped`] with the platform and the machine handed in.
+///
+/// `environment` is read by the Unix tables alone, and only for `$SHELL` — see
+/// [`unix_shipped`]. The Windows table is a constant in everything but its type
+/// and ignores it.
+#[must_use]
+pub fn shipped_for(platform: SeedPlatform, environment: &dyn ShellEnvironment) -> Vec<Profile> {
+    match platform {
+        SeedPlatform::Windows => windows_shipped(),
+        SeedPlatform::MacOs => unix_shipped(SeedPlatform::MacOs, environment),
+        SeedPlatform::OtherUnix => unix_shipped(SeedPlatform::OtherUnix, environment),
+    }
+}
+
+/// The twelve rows a **Windows** build ships — **five shells and seven agents**
+/// (user rulings 2026-08-28 and 2026-08-29).
 ///
 /// # Why an agent is a profile (§7.41)
 ///
@@ -887,8 +959,23 @@ pub const WINDOWS_POWERSHELL_ID: &str = "winps";
 /// it is `winps` (see [`WINDOWS_POWERSHELL_ID`]). What the order is is the
 /// picker's, and a picker that opened on three tools most machines have not got
 /// installed would be a picker whose first screen is greyed.
+///
+/// **The agents are on this table and not on the Unix one, and that is a
+/// decision rather than an omission** (M1-5). Claude Code, Codex and the rest
+/// run perfectly well on a Mac; what does not survive the crossing is the way
+/// this table *finds* them. Every candidate here is a Windows install route —
+/// `%AppData%\npm`, a `.cmd` shim, `%LocalAppData%\hermes\bin` — and the Unix
+/// equivalent is a name on `PATH`, which is precisely the thing a Finder-launched
+/// app has not got: `launchd` hands it `/usr/bin:/bin:/usr/sbin:/sbin` and the
+/// `PATH` these tools install onto is written in the reader's `.zshrc`, one layer
+/// *inside* the pane. So a macOS build that shipped these seven rows would ship
+/// seven rows that are greyed on every machine including the ones where the tool
+/// is installed — the failure §7.27's greying exists to avoid, not an instance of
+/// it. Giving them a real macOS answer is its own ticket and needs a real
+/// discovery rule; inventing directories here would be this table asserting
+/// install routes nobody has checked.
 #[must_use]
-pub fn shipped() -> Vec<Profile> {
+fn windows_shipped() -> Vec<Profile> {
     vec![
         Profile {
             id: "pwsh".to_owned(),
@@ -926,7 +1013,7 @@ pub fn shipped() -> Vec<Profile> {
             // means it rather than by the spawn path every profile goes through.
             args: vec!["-NoLogo".to_owned()],
             env: Vec::new(),
-            starting_dir: StartingDir::WindowsHome,
+            starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
@@ -958,7 +1045,7 @@ pub fn shipped() -> Vec<Profile> {
             }]),
             args: vec!["-NoLogo".to_owned()],
             env: Vec::new(),
-            starting_dir: StartingDir::WindowsHome,
+            starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
@@ -1052,7 +1139,7 @@ pub fn shipped() -> Vec<Profile> {
             // Git for Windows' MSYS layer maps `$HOME` onto `%USERPROFILE%` by
             // default, so the Windows home *is* this shell's home — one directory
             // under two spellings, unlike WSL's two directories.
-            starting_dir: StartingDir::WindowsHome,
+            starting_dir: StartingDir::AccountHome,
             // **Windows, not MSYS.** Git Bash prints `/d/Developer` and its process
             // is standing in `D:\Developer` — one directory, two spellings, and the
             // Win32 one is the true one: it is what `CreateProcess` was handed, what
@@ -1080,7 +1167,7 @@ pub fn shipped() -> Vec<Profile> {
             // (`/c`, `/k`) would end the session rather than start one.
             args: Vec::new(),
             env: Vec::new(),
-            starting_dir: StartingDir::WindowsHome,
+            starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
@@ -1155,7 +1242,7 @@ pub fn shipped() -> Vec<Profile> {
             ]),
             args: Vec::new(),
             env: Vec::new(),
-            starting_dir: StartingDir::WindowsHome,
+            starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
@@ -1190,7 +1277,7 @@ pub fn shipped() -> Vec<Profile> {
             ]),
             args: Vec::new(),
             env: Vec::new(),
-            starting_dir: StartingDir::WindowsHome,
+            starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
@@ -1224,7 +1311,7 @@ pub fn shipped() -> Vec<Profile> {
             ]),
             args: Vec::new(),
             env: Vec::new(),
-            starting_dir: StartingDir::WindowsHome,
+            starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
@@ -1273,7 +1360,7 @@ pub fn shipped() -> Vec<Profile> {
             ]),
             args: Vec::new(),
             env: Vec::new(),
-            starting_dir: StartingDir::WindowsHome,
+            starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
@@ -1313,7 +1400,7 @@ pub fn shipped() -> Vec<Profile> {
             ]),
             args: Vec::new(),
             env: Vec::new(),
-            starting_dir: StartingDir::WindowsHome,
+            starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
@@ -1357,7 +1444,7 @@ pub fn shipped() -> Vec<Profile> {
             ]),
             args: Vec::new(),
             env: Vec::new(),
-            starting_dir: StartingDir::WindowsHome,
+            starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
@@ -1396,7 +1483,7 @@ pub fn shipped() -> Vec<Profile> {
             ]),
             args: Vec::new(),
             env: Vec::new(),
-            starting_dir: StartingDir::WindowsHome,
+            starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
@@ -1405,6 +1492,212 @@ pub fn shipped() -> Vec<Profile> {
             origin: Origin::Builtin,
         },
     ]
+}
+
+/// **The id of the row that starts this account's own shell**, and it exists
+/// only when that shell is not one of the system rows this platform already has
+/// a row for (M1-5, plan §8 Q8).
+///
+/// A fixed id and a title read off the program, which is the way round that
+/// survives somebody changing their shell: `chsh` to `nu` renames the row and
+/// repoints it, and whatever the reader had set on it in `profiles.json` — a
+/// colour, a starting folder, an environment — is still set on *the row that
+/// starts their shell*, which is what they were editing. An id taken from the
+/// program's own name would have made that a different row, silently losing the
+/// override and leaving a dead `fish` entry in the file behind it.
+pub const USER_SHELL_ID: &str = "usershell";
+
+/// `/bin/sh`'s row: the floor off Windows, the Unix twin of
+/// [`WINDOWS_POWERSHELL_ID`], and the one row that is on every table for the
+/// same reason that one is — POSIX requires the program, so the fallback can
+/// never itself be greyed. See [`fallback_profile_id_for`].
+const BOURNE_SHELL_ID: &str = "sh";
+
+/// The system shells a Unix build ships a row for: an id, where the platform
+/// keeps the program, and the colour the row's chassis is filled with.
+///
+/// **macOS has three and another Unix has two**, which is `bt_pty::shell`'s
+/// distinction and not a second opinion: `/bin/zsh` is where macOS puts the shell
+/// it makes every account's own, while a Linux userland keeps zsh under
+/// `/usr/bin` as often as `/bin` and does not install it at all by default, so a
+/// hard `/bin/zsh` row there would be a guess wearing a probe's clothes.
+///
+/// **The mark is [`ChromeMark::ProfileGeneric`] and not a drawing of a shell's
+/// logo**, on that variant's own rule: the design authority struck no mark for
+/// zsh or bash, a crate may not invent one, and what these rows are is exactly
+/// what that chassis says — a shell, told from its neighbours by its colour.
+/// `Slate` is deliberately not among the three: it is a hue away from the ink an
+/// unavailable row is greyed with (the 2026-08-30 `codex` finding), and a row
+/// that is on every machine there is must not read as one that is on none.
+fn unix_system_shells(
+    platform: SeedPlatform,
+) -> &'static [(&'static str, &'static str, MarkColour)] {
+    match platform {
+        SeedPlatform::MacOs => &[
+            ("zsh", "/bin/zsh", MarkColour::Blue),
+            ("bash", "/bin/bash", MarkColour::Green),
+            (BOURNE_SHELL_ID, "/bin/sh", MarkColour::Amber),
+        ],
+        SeedPlatform::OtherUnix => &[
+            ("bash", "/bin/bash", MarkColour::Green),
+            (BOURNE_SHELL_ID, "/bin/sh", MarkColour::Amber),
+        ],
+        // A Windows build ships no Unix shell row, which is [`windows_shipped`]
+        // saying the same thing from the other end.
+        SeedPlatform::Windows => &[],
+    }
+}
+
+/// **The rows a Unix build ships**, in the order the picker draws them and the
+/// order an unchosen default is looked for in — this account's own shell first
+/// when it is not one of the system shells, then [`unix_system_shells`].
+///
+/// # The one rule, and why `$SHELL` reaches both of these rows
+///
+/// `$SHELL` is the account's recorded answer to *which shell do you work in*,
+/// and plan §8 Q8 rules that it is the answer this terminal starts with. It
+/// arrives here twice, in one rule: **the row that starts a shell of a given
+/// name starts the one this account actually runs.** A reader whose `$SHELL` is
+/// `/opt/homebrew/bin/zsh` has the `zsh` row start *their* zsh rather than the
+/// one Apple ships underneath it; a reader whose `$SHELL` is
+/// `/opt/homebrew/bin/fish` has a row of their own, because no row here is named
+/// `fish` and starting `/bin/zsh` for them would be this table overruling their
+/// account.
+///
+/// The comparison is on the program's **file name**, case-insensitively, because
+/// that is the name the shell is known by, because the filesystem under both of
+/// these paths is case-insensitive by default, and because comparing whole paths
+/// would put two rows called `zsh` in one picker.
+///
+/// `$SHELL` is *probed* rather than taken on trust, exactly as
+/// `bt_pty::resolve_default_shell` probes it and for the same reason: it outlives
+/// the shell it names. A `$SHELL` that is not a startable program leaves this
+/// table as though it had been unset, which is the same answer resolution gives
+/// one layer down.
+///
+/// # Arguments: none, and that is the answer rather than an omission
+///
+/// `bt_pty::shell`'s `UNIX_INTERACTIVE_ARGS` is the empty list and says why at
+/// length: a shell whose standard input is a terminal is interactive by its own
+/// rule, `-i` is the flag for the other case, and non-login is spelled by what is
+/// absent twice over — no `-l`, and argv\[0\] left as the program's own path.
+/// Every terminal on this platform starts a shell this way. Two rows do add
+/// something later and neither is an argument this table wrote: the `bash` row is
+/// handed `--init-file` and `-i` by [`crate::shell_integration`], which is the
+/// door that installs OSC 133 into a bash, and the `zsh` row is handed no
+/// argument at all because zsh's door is `ZDOTDIR`, an environment variable.
+///
+/// # `PATH` is the reader's and this table does not repair it
+///
+/// An app launched from Finder inherits `launchd`'s environment, where `PATH` is
+/// `/usr/bin:/bin:/usr/sbin:/sbin` and nothing a package manager installed is on
+/// it. A non-login interactive zsh then reads `.zshrc`, which is where a macOS
+/// reader's `PATH` actually comes from — so the pane gets their path from their
+/// own file, one layer inside the shell, and this terminal never edits it. The
+/// alternative is a login shell, which would re-run `.zprofile` for a session the
+/// reader already logged into, and Q8 ruled it out: the cost is written down
+/// rather than paid silently, and a reader who wants Terminal.app's behaviour
+/// puts `--login` in the row's own arguments.
+fn unix_shipped(platform: SeedPlatform, environment: &dyn ShellEnvironment) -> Vec<Profile> {
+    let system = unix_system_shells(platform);
+    let own = users_shell(environment);
+    let leaf = own
+        .as_deref()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned());
+    let has_a_row_of_its_own = |leaf: &str| {
+        system
+            .iter()
+            .any(|(id, _, _)| leaf.eq_ignore_ascii_case(id))
+    };
+    let mut rows = Vec::with_capacity(system.len() + 1);
+    if let Some(program) = own.clone()
+        && let Some(leaf) = leaf.clone()
+        && !has_a_row_of_its_own(&leaf)
+    {
+        rows.push(unix_shell_row(
+            USER_SHELL_ID.to_owned(),
+            leaf,
+            program,
+            // Teal, and the three system rows have the other three: what tells
+            // one chassis from another is its colour, so no two rows on one
+            // table may wear the same one.
+            MarkColour::Teal,
+        ));
+    }
+    for (id, path, colour) in system {
+        let program = match (&own, &leaf) {
+            (Some(program), Some(leaf)) if leaf.eq_ignore_ascii_case(id) => program.clone(),
+            _ => PathBuf::from(*path),
+        };
+        rows.push(unix_shell_row(
+            (*id).to_owned(),
+            (*id).to_owned(),
+            program,
+            *colour,
+        ));
+    }
+    rows
+}
+
+/// `$SHELL`, when it names a program this machine can start.
+///
+/// The probe is [`ShellEnvironment::is_file`], which off Windows reads the
+/// execute bit as well — so "a file is there" and "this machine can start it" do
+/// not come apart, and a `$SHELL` pointing at a directory or at a shell that was
+/// uninstalled leaves this `None`.
+fn users_shell(environment: &dyn ShellEnvironment) -> Option<PathBuf> {
+    // The variable every Unix has recorded the account's shell in since `login`
+    // first exported it. Spelled here rather than borrowed from `bt_pty::shell`,
+    // whose own constant is private to the Unix half of that module.
+    let shell = environment
+        .var_os("SHELL")
+        .filter(|value| !value.is_empty())?;
+    let path = PathBuf::from(shell);
+    environment.is_file(&path).then_some(path)
+}
+
+/// One row of [`unix_shipped`] — every field the schema wants, and every one of
+/// them the same answer for all four rows except the three that differ.
+fn unix_shell_row(
+    id: String,
+    display_title: String,
+    program: PathBuf,
+    colour: MarkColour,
+) -> Profile {
+    Profile {
+        id,
+        // No script this build ships announces a title for these shells —
+        // `folio.zsh` and `folio.bash` both say in as many words that they emit
+        // no `OSC 0`/`OSC 2`, because a title set by the shell outranks the
+        // working directory — so there is no second string for an announcement
+        // to be compared against.
+        compared_title: None,
+        display_title,
+        mark: ChromeMark::ProfileGeneric { colour },
+        // A path and no search at all, which is what these are: a system shell
+        // lives where the platform puts it, and the account's own shell lives
+        // where `$SHELL` says it does. A candidate list would be a search for a
+        // file whose address is already known.
+        program: ProgramSource::Path(program),
+        args: Vec::new(),
+        env: Vec::new(),
+        starting_dir: StartingDir::AccountHome,
+        start_at: StartAt::Inherit,
+        // The namespace this process itself speaks. `Wsl` is the one foreign
+        // namespace in this enum and it is reachable only from a Windows build,
+        // so a Unix row's paths are its own — see [`PathNamespace`].
+        paths: PathNamespace::Windows,
+        qualifier: Qualifier::None,
+        // Derived from the program, which is how these rows get a door without
+        // naming one: `zsh` resolves to `ZDOTDIR`, `bash` to the init file, and
+        // `sh` — and a `fish` or a `nu` in the row above them — to
+        // `Integration::None`, which is the honest whole answer rather than a
+        // door that would be silently ignored (review row R3-6).
+        integration: IntegrationChoice::Auto,
+        hidden: false,
+        origin: Origin::Builtin,
+    }
 }
 
 /// The built-in rows that start an **agent** rather than a shell.
@@ -1983,7 +2276,7 @@ fn compose(seed: Option<&Profile>, entry: &ProfileEntryV1) -> Option<Profile> {
             program: entry.program.as_ref().map(program_from_file)?,
             args: Vec::new(),
             env: Vec::new(),
-            starting_dir: StartingDir::WindowsHome,
+            starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             // A machine fact, and a profile the user wrote has already pinned
@@ -2133,7 +2426,7 @@ fn program_to_file(program: &ProgramSource) -> ProgramV1 {
 
 fn starting_dir_from_file(starting_dir: &StartingDirV1) -> StartingDir {
     match starting_dir {
-        StartingDirV1::Named(NamedStartingDirV1::WindowsHome) => StartingDir::WindowsHome,
+        StartingDirV1::Named(NamedStartingDirV1::WindowsHome) => StartingDir::AccountHome,
         StartingDirV1::LauncherFlag { flag, home } => StartingDir::LauncherFlag {
             flag: flag.clone(),
             home: home.clone(),
@@ -2141,9 +2434,16 @@ fn starting_dir_from_file(starting_dir: &StartingDirV1) -> StartingDir {
     }
 }
 
+/// **The wire word stays `windows_home` and the meaning is the account's home**
+/// (M1-5). Every `profiles.json` that has ever been written carries that word for
+/// a row whose starting directory is "wherever this account lives", and the file
+/// is read by a build that already knows which platform it is on — so the
+/// spelling is history and not a claim, exactly as [`StartingDir::AccountHome`]'s
+/// own note says. A schema version spent renaming it would migrate every file in
+/// existence to buy a synonym.
 fn starting_dir_to_file(starting_dir: &StartingDir) -> StartingDirV1 {
     match starting_dir {
-        StartingDir::WindowsHome => StartingDirV1::Named(NamedStartingDirV1::WindowsHome),
+        StartingDir::AccountHome => StartingDirV1::Named(NamedStartingDirV1::WindowsHome),
         StartingDir::LauncherFlag { flag, home } => StartingDirV1::LauncherFlag {
             flag: flag.clone(),
             home: home.clone(),
@@ -3404,7 +3704,35 @@ pub fn fallback_profile() -> usize {
 /// question with red gates on it, and a question that cannot be asked of a
 /// private table cannot have one.
 fn fallback_profile_in(table: &ProfileTable) -> usize {
-    table.position_of_id(WINDOWS_POWERSHELL_ID).unwrap_or(0)
+    table.position_of_id(fallback_profile_id()).unwrap_or(0)
+}
+
+/// **Which row is the floor on this platform** — the one a broken choice lands
+/// on, whose whole property is that it cannot itself be missing.
+///
+/// `winps` on Windows because Windows PowerShell 5.1 is *part of Windows*;
+/// [`BOURNE_SHELL_ID`] off it because POSIX requires `/bin/sh` to be there. Those
+/// are the same sentence about two platforms, which is why this is one function
+/// and not two rules — and it is the reason `bt_pty::shell` can state a
+/// last-resort shell at all.
+///
+/// **No arm off Windows may name a PowerShell**, and that is what
+/// [`nothing_off_windows_ever_names_powershell`] is over: a macOS build whose
+/// floor was `winps` would answer every failed spawn with a row for a program
+/// that is not there, which is a floor with a hole in it.
+#[must_use]
+pub fn fallback_profile_id() -> &'static str {
+    fallback_profile_id_for(SeedPlatform::of_this_build())
+}
+
+/// [`fallback_profile_id`] with the platform handed in — see [`shipped_for`] for
+/// why every one of these answers is compiled into every build.
+#[must_use]
+pub fn fallback_profile_id_for(platform: SeedPlatform) -> &'static str {
+    match platform {
+        SeedPlatform::Windows => WINDOWS_POWERSHELL_ID,
+        SeedPlatform::MacOs | SeedPlatform::OtherUnix => BOURNE_SHELL_ID,
+    }
 }
 
 /// The built-in rows in the order [`shipped`] writes them, which is the order
@@ -3425,7 +3753,13 @@ fn fallback_profile_in(table: &ProfileTable) -> usize {
 /// Leaving them out would have been the same sentence said by omission, and the
 /// day somebody wonders whether a first run can open Claude Code the answer
 /// would have to be reconstructed from two lists instead of read off one.
-const SHIPPED_ORDER: [&str; 12] = [
+/// **This is the Windows list.** Off Windows the same order cannot be written
+/// down, because one of the rows is named by the machine rather than by this
+/// build — [`USER_SHELL_ID`]'s row is there or not depending on `$SHELL` — so
+/// [`shipped_order`] reads the ids off the seed itself. That is the same
+/// guarantee by a different route: the *seed* is what this build ships, in the
+/// order it ships them, and it is not the table the reader can drag.
+const WINDOWS_SHIPPED_ORDER: [&str; 12] = [
     "pwsh",
     WINDOWS_POWERSHELL_ID,
     "wsl",
@@ -3461,12 +3795,50 @@ const SHIPPED_ORDER: [&str; 12] = [
 /// **This is not the same as choosing `winps` in the dialog**, which is the
 /// distinction the ruling turns on: a stored id is a decision and outranks this
 /// one — see [`default_profile_in`].
-fn automatic_profile_in(table: &ProfileTable, available: impl Fn(usize) -> bool) -> usize {
-    SHIPPED_ORDER
+fn automatic_profile_in(
+    table: &ProfileTable,
+    order: &[&str],
+    available: impl Fn(usize) -> bool,
+) -> usize {
+    order
         .iter()
         .filter_map(|id| table.position_of_id(id))
         .find(|index| available(*index))
         .unwrap_or_else(|| fallback_profile_in(table))
+}
+
+/// The shipped order this build's automatic default walks.
+///
+/// A written list on every platform, for [`WINDOWS_SHIPPED_ORDER`]'s reason —
+/// and it stays a written list off Windows even though one of the rows is named
+/// by the machine, because an id naming no row is simply stepped over by the
+/// walk. So `usershell` is on the macOS list whether or not this account's
+/// `$SHELL` produced that row, and the list reads no environment and touches no
+/// filesystem: this is asked twice a frame while the Profiles page is open.
+///
+/// It is the **seed's** order and never [`table`]'s: a drag on the Profiles page,
+/// or a profile of the reader's own parked at the top, must not decide which
+/// shell a machine that was never asked opens with.
+///
+/// # Why this is the same order `bt_pty::resolve_default_shell` walks
+///
+/// Off Windows the two are the same sentence read at two altitudes, and they
+/// agree row for row (pinned by
+/// [`the_default_profile_is_the_users_shell_when_it_names_an_executable`]): a
+/// `$SHELL` this machine can start is first — as its own row, or as the system
+/// row of that name pointing at it — then `/bin/zsh` on macOS, then `/bin/bash`,
+/// then `/bin/sh`, which is the floor under both.
+fn shipped_order() -> &'static [&'static str] {
+    shipped_order_for(SeedPlatform::of_this_build())
+}
+
+/// [`shipped_order`] with the platform handed in — see [`shipped_for`].
+fn shipped_order_for(platform: SeedPlatform) -> &'static [&'static str] {
+    match platform {
+        SeedPlatform::Windows => &WINDOWS_SHIPPED_ORDER,
+        SeedPlatform::MacOs => &[USER_SHELL_ID, "zsh", "bash", BOURNE_SHELL_ID],
+        SeedPlatform::OtherUnix => &[USER_SHELL_ID, "bash", BOURNE_SHELL_ID],
+    }
 }
 
 /// Which profile the `+`, `Ctrl+Shift+N` and the opening window start from —
@@ -3545,7 +3917,7 @@ fn default_profile_in(
     available: impl Fn(usize) -> bool,
 ) -> usize {
     chosen_profile_in(table, stored, &available)
-        .unwrap_or_else(|| automatic_profile_in(table, &available))
+        .unwrap_or_else(|| automatic_profile_in(table, shipped_order(), &available))
 }
 
 /// Which profile a seed's `profile_id` names, or [`fallback_profile()`] when the
@@ -3957,10 +4329,30 @@ pub fn revived_cwd(profile: usize, cwd: &Path) -> Option<PathBuf> {
 /// started. A value cached for the life of the process would be trading nothing
 /// for a home directory that cannot then follow a `%USERPROFILE%` the user
 /// changed under us.
-/// `%USERPROFILE%`, the place this machine calls home.
+/// **The variable this platform keeps the account's home directory in.**
+///
+/// `%USERPROFILE%` on Windows and `$HOME` everywhere else, and neither is a
+/// guess: both are set by the thing that starts the session — the Windows logon,
+/// and on macOS `launchd`, which is the one part of a Finder-launched app's
+/// environment anything may be assumed about (plan §8 Q8). Such a launch inherits
+/// `launchd`'s environment rather than a login shell's, so `HOME`, `USER`,
+/// `SHELL`, `TMPDIR` and a bare `PATH` are there and almost nothing else is.
+///
+/// A parameter rather than a `cfg` read inside [`home_directory`], for
+/// [`shipped_for`]'s reason: what a macOS pane does is a claim a Windows runner
+/// is entitled to check.
+#[must_use]
+pub fn home_variable(platform: SeedPlatform) -> &'static str {
+    match platform {
+        SeedPlatform::Windows => "USERPROFILE",
+        SeedPlatform::MacOs | SeedPlatform::OtherUnix => "HOME",
+    }
+}
+
+/// The place this machine calls home — whatever [`home_variable`] names.
 ///
 /// Named here rather than read at the one call site because it is already the
-/// rule [`spawn_place`] applies for [`StartingDir::WindowsHome`], and "where
+/// rule [`spawn_place`] applies for [`StartingDir::AccountHome`], and "where
 /// does a thing start when nothing else says" must have exactly one answer. A
 /// files pane opened from a shell that has never reported a folder falls back to
 /// it (H115), which is the same fallback a shell of that profile would take.
@@ -3970,7 +4362,9 @@ pub fn revived_cwd(profile: usize, cwd: &Path) -> Option<PathBuf> {
 /// `%USERPROFILE%` the user changed under us.
 #[must_use]
 pub fn home_directory(environment: &dyn ShellEnvironment) -> Option<PathBuf> {
-    environment.var_os("USERPROFILE").map(PathBuf::from)
+    environment
+        .var_os(home_variable(SeedPlatform::of_this_build()))
+        .map(PathBuf::from)
 }
 
 #[must_use]
@@ -3984,7 +4378,7 @@ pub fn spawn_place(
             || {
                 (
                     StartAt::Inherit,
-                    StartingDir::WindowsHome,
+                    StartingDir::AccountHome,
                     PathNamespace::Windows,
                 )
             },
@@ -4030,14 +4424,18 @@ fn place_for(
         StartAt::Fixed(fixed) => translate_cwd(PathNamespace::Windows, namespace, &fixed),
     };
     match starting_dir {
-        StartingDir::WindowsHome => {
-            let directory = place.or_else(|| environment.var_os("USERPROFILE").map(PathBuf::from));
+        StartingDir::AccountHome => {
+            // **And this is where a Finder-launched pane gets its folder.** Nothing was
+            // inherited, because nothing started this window from anywhere — so the answer is
+            // the account's home, read through [`home_directory`] rather than through a second
+            // copy of the same variable name.
+            let directory = place.or_else(|| home_directory(environment));
             SpawnPlace {
                 working_directory: directory.clone(),
                 arguments: Vec::new(),
                 directory,
-                // `%USERPROFILE%` is a home this machine can spell, so there is no mark here for
-                // anybody downstream to expand.
+                // The account's home is a home this machine can spell, so there is no mark here
+                // for anybody downstream to expand.
                 at_shell_home: false,
             }
         }
@@ -4163,11 +4561,20 @@ impl ProfilePrograms {
     /// Ask the machine, once, what each profile would start.
     #[must_use]
     pub fn probe(environment: &dyn ShellEnvironment) -> Self {
+        with_table(|table| Self::probe_rows(&table.profiles, environment))
+    }
+
+    /// The same probe over rows handed in rather than over this process's table.
+    ///
+    /// Split off for [`shipped_for`]'s reason: the question *which of these rows
+    /// can this machine start* is asked about a macOS seed by a Windows runner,
+    /// and a probe that could only read the process's own table could only ever
+    /// be asked about the platform it was running on.
+    #[must_use]
+    pub fn probe_rows(rows: &[Profile], environment: &dyn ShellEnvironment) -> Self {
         Self {
-            resolved: with_table(|table| {
-                table
-                    .profiles
-                    .iter()
+            resolved: {
+                rows.iter()
                     .map(|profile| match &profile.program {
                         // A real `None` on a machine with no PowerShell 7, which
                         // is what greys the row rather than starting 5.1 under
@@ -4186,7 +4593,7 @@ impl ProfilePrograms {
                             .then(|| path.clone().into_os_string()),
                     })
                     .collect()
-            }),
+            },
         }
     }
 
@@ -14457,7 +14864,7 @@ mod tests {
             assert!(row.args.is_empty(), "{id} passes no arguments");
             assert!(row.env.is_empty(), "{id} sets nothing in the environment");
             assert_eq!(row.start_at, StartAt::Inherit, "{id}");
-            assert_eq!(row.starting_dir, StartingDir::WindowsHome, "{id}");
+            assert_eq!(row.starting_dir, StartingDir::AccountHome, "{id}");
             assert_eq!(row.paths, PathNamespace::Windows, "{id}");
             assert_eq!(
                 row.compared_title, None,
@@ -15311,35 +15718,490 @@ mod tests {
         }
     }
 
+    // ── M1-5: the tables a build off Windows ships ───────────────────────────
+
+    /// A Mac with nothing installed on top of it: the three shells that platform
+    /// ships, the home `launchd` sets, and `$SHELL` where every macOS account
+    /// starts — `/bin/zsh`.
+    fn bare_macos() -> FakeMachine {
+        FakeMachine::default()
+            .with_var("HOME", "/Users/alice")
+            .with_var("SHELL", "/bin/zsh")
+            .with_file("/bin/zsh")
+            .with_file("/bin/bash")
+            .with_file("/bin/sh")
+    }
+
+    /// The path a row would start, for the rows off Windows, which all name one.
+    fn named_program(profile: &Profile) -> &Path {
+        match &profile.program {
+            ProgramSource::Path(path) => path.as_path(),
+            other => panic!("{} names {other:?} rather than one path", profile.id),
+        }
+    }
+
+    /// Which row a machine that has never been asked opens with, over a seed
+    /// handed in rather than over this process's own table.
+    fn automatic_row(platform: SeedPlatform, machine: &FakeMachine) -> String {
+        let table = ProfileTable {
+            profiles: shipped_for(platform, machine),
+        };
+        let programs = ProfilePrograms::probe_rows(&table.profiles, machine);
+        let index = automatic_profile_in(&table, shipped_order_for(platform), |index| {
+            programs.is_available(index)
+        });
+        table
+            .get(index)
+            .map(|row| row.id.clone())
+            .unwrap_or_default()
+    }
+
+    /// PIN — **the shell a first pane on a Mac starts** (M1-5, plan §2 M1 and §8
+    /// Q8). Three rows, in this order, at these paths, each an interactive
+    /// non-login shell with no arguments at all.
+    ///
+    /// RED GATE: hand a macOS build the Windows table — which is what it had
+    /// until this ticket, and what left M1-1's first pane empty — and every
+    /// assertion here names what is missing. Add `-i`, or `--login`, or a
+    /// `-NoLogo` that reached zsh as `no such option: Logo`, and the argument
+    /// check fails.
+    #[test]
+    fn the_shipped_profiles_on_macos_are_zsh_bash_and_sh() {
+        let machine = bare_macos();
+        let rows = shipped_for(SeedPlatform::MacOs, &machine);
+        assert_eq!(
+            ids(&rows),
+            ["zsh", "bash", "sh"],
+            "the picker's own order, and the order an unchosen default walks"
+        );
+        assert_eq!(
+            rows.iter().map(named_program).collect::<Vec<_>>(),
+            [
+                Path::new("/bin/zsh"),
+                Path::new("/bin/bash"),
+                Path::new("/bin/sh")
+            ],
+            "where macOS keeps each of them"
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.display_title.as_str())
+                .collect::<Vec<_>>(),
+            ["zsh", "bash", "sh"],
+            "each shell's own name, lower case, which is how each writes it"
+        );
+        for row in &rows {
+            assert!(
+                row.args.is_empty(),
+                "{}: a Unix shell is told nothing about being interactive — \
+                 `bt_pty::shell::UNIX_INTERACTIVE_ARGS` says why at length",
+                row.id
+            );
+            assert_eq!(row.starting_dir, StartingDir::AccountHome, "{}", row.id);
+            assert_eq!(row.start_at, StartAt::Inherit, "{}", row.id);
+            assert_eq!(row.origin, Origin::Builtin, "{}", row.id);
+            assert_eq!(row.qualifier, Qualifier::None, "{}", row.id);
+            assert_eq!(row.integration, IntegrationChoice::Auto, "{}", row.id);
+            assert_eq!(
+                row.compared_title, None,
+                "{}: neither script this build ships announces a title",
+                row.id
+            );
+            assert!(row.env.is_empty(), "{}", row.id);
+            assert!(!row.hidden, "{}", row.id);
+        }
+        // The door each one gets, derived from the program rather than named.
+        assert_eq!(served_by(&rows[0]), Integration::ZshDotDir);
+        assert_eq!(served_by(&rows[1]), Integration::BashInitFile);
+        assert_eq!(
+            served_by(&rows[2]),
+            Integration::None,
+            "`sh` ignores bash's init file in silence, so it is told it has no door (R3-6)"
+        );
+        // The mark: the chassis, and a colour apiece — see `unix_system_shells`.
+        let colours: Vec<MarkColour> = rows
+            .iter()
+            .map(|row| match row.mark {
+                ChromeMark::ProfileGeneric { colour } => colour,
+                other => panic!("{} wears {other:?} rather than the shell chassis", row.id),
+            })
+            .collect();
+        for (at, colour) in colours.iter().enumerate() {
+            assert_ne!(
+                *colour,
+                MarkColour::Slate,
+                "{}: Slate is a hue away from the ink an unavailable row is greyed with",
+                rows[at].id
+            );
+            assert!(
+                !colours[..at].contains(colour),
+                "{}: two rows in one colour is two rows nothing tells apart",
+                rows[at].id
+            );
+        }
+        // The other Unixes are the same table without the row macOS alone can
+        // state a path for.
+        let elsewhere = FakeMachine::default()
+            .with_file("/bin/zsh")
+            .with_file("/bin/bash")
+            .with_file("/bin/sh");
+        assert_eq!(
+            ids(&shipped_for(SeedPlatform::OtherUnix, &elsewhere)),
+            ["bash", "sh"],
+            "a Linux userland keeps zsh under `/usr/bin` as often as `/bin`, and often nowhere — \
+             so there is no row for a path this build cannot state"
+        );
+        assert_eq!(
+            ids(&shipped_for(SeedPlatform::OtherUnix, &machine)),
+            [USER_SHELL_ID, "bash", "sh"],
+            "and a reader there whose `$SHELL` is a zsh still gets it, as the row for the \
+             shell this account is set to"
+        );
+        // And Windows is untouched by any of it.
+        assert_eq!(
+            ids(&shipped_for(SeedPlatform::Windows, &FakeMachine::default())),
+            WINDOWS_SHIPPED_ORDER.to_vec(),
+            "the Windows table is what it was, and reads no `$SHELL` to be it"
+        );
+    }
+
+    /// PIN — **`$SHELL` is the answer, and the profile table and
+    /// `bt_pty::resolve_default_shell` give the same one** (plan §8 Q8).
+    ///
+    /// The table below is the rule stated once: a `$SHELL` this machine can start
+    /// is what opens, as the row of its own name when there is one and as a row
+    /// of its own when there is not; a `$SHELL` that names nothing startable is a
+    /// setting that outlived its shell and the system shells answer instead.
+    ///
+    /// RED GATE: make the seed a constant three rows and the `fish` case opens
+    /// `/bin/zsh` — a table overruling somebody's account. Point the `zsh` row at
+    /// `/bin/zsh` unconditionally and the Homebrew case starts the wrong zsh.
+    #[test]
+    fn the_default_profile_is_the_users_shell_when_it_names_an_executable() {
+        let fish = "/opt/homebrew/bin/fish";
+        let brew_zsh = "/opt/homebrew/bin/zsh";
+        let cases: Vec<(&str, FakeMachine, Vec<&str>, &str, &str)> = vec![
+            (
+                "the ordinary Mac: the account's shell is the platform's own",
+                bare_macos(),
+                vec!["zsh", "bash", "sh"],
+                "zsh",
+                "/bin/zsh",
+            ),
+            (
+                "a shell this table has no row for gets one of its own",
+                bare_macos().with_var("SHELL", fish).with_file(fish),
+                vec![USER_SHELL_ID, "zsh", "bash", "sh"],
+                USER_SHELL_ID,
+                fish,
+            ),
+            (
+                "and a second zsh is still the zsh row, pointed at theirs",
+                bare_macos().with_var("SHELL", brew_zsh).with_file(brew_zsh),
+                vec!["zsh", "bash", "sh"],
+                "zsh",
+                brew_zsh,
+            ),
+            (
+                "a `$SHELL` that outlived its shell is a setting, not a program",
+                bare_macos().with_var("SHELL", fish),
+                vec!["zsh", "bash", "sh"],
+                "zsh",
+                "/bin/zsh",
+            ),
+            (
+                "and so is no `$SHELL` at all",
+                FakeMachine::default()
+                    .with_file("/bin/zsh")
+                    .with_file("/bin/bash")
+                    .with_file("/bin/sh"),
+                vec!["zsh", "bash", "sh"],
+                "zsh",
+                "/bin/zsh",
+            ),
+            (
+                "a machine whose zsh was removed opens the next one down",
+                FakeMachine::default()
+                    .with_file("/bin/bash")
+                    .with_file("/bin/sh"),
+                vec!["zsh", "bash", "sh"],
+                "bash",
+                "/bin/bash",
+            ),
+            (
+                "and the floor is the one program POSIX promises is there",
+                FakeMachine::default().with_file("/bin/sh"),
+                vec!["zsh", "bash", "sh"],
+                "sh",
+                "/bin/sh",
+            ),
+        ];
+        for (what, machine, expected_ids, expected_default, expected_program) in cases {
+            let rows = shipped_for(SeedPlatform::MacOs, &machine);
+            assert_eq!(ids(&rows), expected_ids, "{what}: the rows");
+            let default = automatic_row(SeedPlatform::MacOs, &machine);
+            assert_eq!(default, expected_default, "{what}: the default row");
+            let started = rows
+                .iter()
+                .find(|row| row.id == default)
+                .map(named_program)
+                .unwrap_or_else(|| panic!("{what}: the default names no row"));
+            assert_eq!(
+                started,
+                Path::new(expected_program),
+                "{what}: the program that row starts"
+            );
+            // The user's own row is titled after the program and not after the
+            // id, because `usershell` is a key and `fish` is a word.
+            if default == USER_SHELL_ID {
+                assert_eq!(
+                    rows[0].display_title,
+                    Path::new(expected_program)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy(),
+                    "{what}: the row is called what the shell is called"
+                );
+            }
+            // **And the two altitudes agree.** `resolve_default_shell` is the
+            // spawn door's own rule and it is `cfg`-split, so this half can only
+            // be run where the Unix arm is compiled — which is the machine this
+            // ticket's acceptance runs on.
+            #[cfg(unix)]
+            {
+                let resolved = bt_pty::resolve_default_shell(&machine);
+                assert_eq!(
+                    Path::new(&resolved.program),
+                    Path::new(expected_program),
+                    "{what}: the table and `resolve_default_shell` must not disagree"
+                );
+                assert!(
+                    resolved.args.is_empty(),
+                    "{what}: interactive and non-login is spelled by what is absent"
+                );
+            }
+        }
+    }
+
+    /// PIN — **no table, order or floor off Windows names a PowerShell** (M1-5).
+    ///
+    /// M1-1 handed a macOS build the Windows table and the first pane got
+    /// `pwsh`'s `-NoLogo` passed to `/bin/zsh`, which answered `no such option:
+    /// Logo` and stopped. This is stated three ways because one way is a
+    /// coincidence: over the rows a machine is given, over the floor a failed
+    /// spawn lands on, and over the source of the off-Windows table itself, so
+    /// that a candidate list copied down from the rows above it is caught before
+    /// anybody runs it.
+    ///
+    /// **The one way the word may appear is the reader's own** — a `$SHELL` of
+    /// `/usr/local/bin/pwsh` is somebody telling this terminal which shell they
+    /// work in, and the last case says so out loud rather than leaving the rule
+    /// looking violated.
+    #[test]
+    fn nothing_off_windows_ever_names_powershell() {
+        let forbidden = ["pwsh", "powershell"];
+        let machines = [
+            bare_macos(),
+            FakeMachine::default(),
+            bare_macos()
+                .with_var("SHELL", "/opt/homebrew/bin/fish")
+                .with_file("/opt/homebrew/bin/fish"),
+        ];
+        for platform in [SeedPlatform::MacOs, SeedPlatform::OtherUnix] {
+            for machine in &machines {
+                let rows = shipped_for(platform, machine);
+                for row in &rows {
+                    let said = format!(
+                        "{} {} {} {}",
+                        row.id,
+                        row.display_title,
+                        named_program(row).display(),
+                        row.args.join(" ")
+                    )
+                    .to_ascii_lowercase();
+                    for word in forbidden {
+                        assert!(
+                            !said.contains(word),
+                            "{platform:?}: a row says {said:?}, which names {word}"
+                        );
+                    }
+                }
+                let floor = fallback_profile_id_for(platform);
+                assert_eq!(floor, BOURNE_SHELL_ID, "{platform:?}: the floor");
+                assert!(
+                    rows.iter().any(|row| row.id == floor),
+                    "{platform:?}: and it is a row this table ships, or it is not a floor"
+                );
+                assert!(
+                    shipped_order_for(platform).contains(&floor),
+                    "{platform:?}: and the walk ends on it"
+                );
+            }
+        }
+        // The source of the off-Windows table, comments stripped — a candidate
+        // copied down from the Windows rows is a compile-time fact, not a
+        // runtime one, and would slip past every assertion above on a machine
+        // where the file it names is missing.
+        for header in [
+            "fn unix_shipped(",
+            "fn unix_system_shells(",
+            "fn unix_shell_row(",
+            "fn users_shell(",
+        ] {
+            let region = crate::source_pin::code_of(crate::source_pin::source_region(
+                include_str!("profiles.rs"),
+                header,
+            ))
+            .to_ascii_lowercase();
+            for word in forbidden {
+                assert!(
+                    !region.contains(word),
+                    "{header}: the off-Windows table's own source names {word}"
+                );
+            }
+        }
+        // And the exception, stated: the account's own word for its own shell.
+        let theirs = "/usr/local/bin/pwsh";
+        let rows = shipped_for(
+            SeedPlatform::MacOs,
+            &bare_macos().with_var("SHELL", theirs).with_file(theirs),
+        );
+        assert_eq!(rows[0].id, USER_SHELL_ID);
+        assert_eq!(named_program(&rows[0]), Path::new(theirs));
+        assert_eq!(
+            rows[0].display_title, "pwsh",
+            "a PowerShell somebody chose for themselves is theirs to name"
+        );
+    }
+
+    /// PIN — **a pane nobody told where to stand opens in the account's home**
+    /// (M1-5, plan §8 Q8).
+    ///
+    /// It is the Finder case and it is the ordinary one: an app opened from the
+    /// Dock or from Finder was started from nowhere, so there is no folder to
+    /// inherit, and the working directory this process itself has is `/` — which
+    /// is the macOS twin of the `C:\WINDOWS\system32` a Windows shortcut used to
+    /// leave a pane standing in.
+    ///
+    /// RED GATE: leave `AccountHome` reading `%USERPROFILE%` and a macOS pane
+    /// starts wherever the process was launched from, because no such variable
+    /// exists there.
+    #[test]
+    fn a_finder_launched_pane_starts_in_the_home_directory() {
+        assert_eq!(home_variable(SeedPlatform::MacOs), "HOME");
+        assert_eq!(home_variable(SeedPlatform::OtherUnix), "HOME");
+        assert_eq!(home_variable(SeedPlatform::Windows), "USERPROFILE");
+        let home = "/Users/alice";
+        // Keyed by this build's own variable, so the claim is the same one on
+        // either host: what a pane does when nothing has told it where to stand.
+        let machine = FakeMachine::default()
+            .with_var(home_variable(SeedPlatform::of_this_build()), home)
+            .with_var("SHELL", "/bin/zsh")
+            .with_file("/bin/zsh")
+            .with_file("/bin/bash")
+            .with_file("/bin/sh");
+        let row = shipped_for(SeedPlatform::MacOs, &machine).remove(0);
+        assert_eq!(row.id, "zsh");
+        let opened = |inherited: Option<PathBuf>, machine: &FakeMachine| {
+            place_for(
+                &row.start_at,
+                &row.starting_dir,
+                row.paths,
+                inherited,
+                machine,
+            )
+        };
+        let place = opened(None, &machine);
+        assert_eq!(
+            place.working_directory,
+            Some(PathBuf::from(home)),
+            "the child is handed the home directory as its working directory"
+        );
+        assert_eq!(place.directory, Some(PathBuf::from(home)));
+        assert!(
+            place.arguments.is_empty(),
+            "a shell of this platform's own takes its place as a working directory, \
+             not as a launcher's flag"
+        );
+        assert!(
+            !place.at_shell_home,
+            "the account's home is a place this machine can spell"
+        );
+        // A pane opened beside one that *is* standing somewhere keeps it: home
+        // is what an unanswered question resolves to, not an override.
+        let beside = PathBuf::from("/Users/alice/code");
+        assert_eq!(
+            opened(Some(beside.clone()), &machine).working_directory,
+            Some(beside)
+        );
+        // And a machine that cannot say where home is hands over nothing rather
+        // than a guess — `bt-pty` then starts the child where this process
+        // stands, which is the documented answer and not a second one.
+        assert_eq!(
+            opened(None, &FakeMachine::default()).working_directory,
+            None
+        );
+    }
+
     /// PIN — the order a machine that was never asked is searched in is the
     /// order the rows are shipped in, and the two cannot drift.
     ///
-    /// [`SHIPPED_ORDER`] is a second list of the same ids, written out so
+    /// [`WINDOWS_SHIPPED_ORDER`] is a second list of the same ids, written out so
     /// that a table the reader has reordered cannot move the answer. A second
     /// list is a second thing to maintain, and this is what stops it becoming a
     /// second thing to *believe*: a row renamed or added in [`shipped`] and not
     /// here would silently drop out of the walk, and the machine's answer would
     /// quietly skip it.
+    ///
+    /// **Off Windows one row of the seed is named by the machine, and the list
+    /// is still written down** (M1-5): `usershell` is on it whether or not this
+    /// account produced that row, because the walk steps over an id that names
+    /// none. That is what keeps this list free of the environment and of the
+    /// filesystem, which matters because the Profiles page asks it twice a
+    /// frame — and the guarantee is the same one on every platform: the walk is
+    /// over what this build *ships*, never over the table the reader can drag.
     #[test]
     fn the_automatic_default_walks_the_shipped_order() {
-        let rows = shipped_rows();
+        let machine = FakeMachine::default();
+        let rows = shipped_for(SeedPlatform::Windows, &machine);
         let ids: Vec<&str> = rows.iter().map(|profile| profile.id.as_str()).collect();
         assert_eq!(
             ids,
-            SHIPPED_ORDER.to_vec(),
+            WINDOWS_SHIPPED_ORDER.to_vec(),
             "every shipped row is in the walk, in the order it is shipped in"
         );
+        for platform in [SeedPlatform::MacOs, SeedPlatform::OtherUnix] {
+            // Every row this platform can seed is on the list, in the order the
+            // seed writes them — a subsequence rather than the same list,
+            // because `usershell` is on it for the accounts that do not produce
+            // that row either.
+            for machine in [bare_macos(), FakeMachine::default()] {
+                let seeded: Vec<String> = shipped_for(platform, &machine)
+                    .into_iter()
+                    .map(|profile| profile.id)
+                    .collect();
+                let mut walked = shipped_order_for(platform).iter();
+                for id in &seeded {
+                    assert!(
+                        walked.any(|listed| listed == id),
+                        "{platform:?}: {id} is not on the walk, or not in the seed's own order"
+                    );
+                }
+            }
+        }
         // And the walk itself: the first *available* one, not the first one.
         let table = ProfileTable {
             profiles: shipped(),
         };
+        let order = shipped_order();
+        let last = table.profiles.len() - 1;
         assert_eq!(
-            automatic_profile_in(&table, |index| index == index_of_id("cmd")),
-            index_of_id("cmd"),
-            "four rows greyed and the fifth is the answer, wherever it sits"
+            automatic_profile_in(&table, order, |index| index == last),
+            last,
+            "every row but the last greyed and the last is the answer, wherever it sits"
         );
         assert_eq!(
-            automatic_profile_in(&table, |_| false),
+            automatic_profile_in(&table, order, |_| false),
             fallback_profile_in(&table),
             "and a machine that can start none of them still opens a window"
         );
@@ -22271,13 +23133,13 @@ mod tests {
         );
         assert_eq!(
             default_profile_in(&after, "claude-7f3a", |_| true),
-            automatic_profile_in(&after, |_| true),
+            automatic_profile_in(&after, shipped_order(), |_| true),
             "the default falls to what a machine with no choice on it answers, \
              rather than to nothing"
         );
         assert_eq!(
             after.get(fallback_profile_in(&after)).map(|row| &*row.id),
-            Some(WINDOWS_POWERSHELL_ID),
+            Some(fallback_profile_id()),
             "and the floor under that walk is the built-in every machine has"
         );
 
@@ -22632,7 +23494,7 @@ mod tests {
 
         let place = place_for(
             &StartAt::Inherit,
-            &StartingDir::WindowsHome,
+            &StartingDir::AccountHome,
             PathNamespace::Windows,
             inherited.clone(),
             &machine,
@@ -22641,7 +23503,7 @@ mod tests {
 
         let place = place_for(
             &StartAt::Home,
-            &StartingDir::WindowsHome,
+            &StartingDir::AccountHome,
             PathNamespace::Windows,
             inherited.clone(),
             &machine,
@@ -22655,7 +23517,7 @@ mod tests {
 
         let place = place_for(
             &StartAt::Fixed(PathBuf::from(r"E:\work")),
-            &StartingDir::WindowsHome,
+            &StartingDir::AccountHome,
             PathNamespace::Windows,
             inherited.clone(),
             &machine,

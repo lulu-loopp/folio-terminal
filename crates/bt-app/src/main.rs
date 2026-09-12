@@ -106,6 +106,11 @@ mod settings;
 mod settling;
 mod shell_integration;
 mod shortcuts;
+/// Reading this crate's own source — for the pins that are about what the code
+/// says rather than about what it does. Test-only, so it is not compiled into
+/// the product at all.
+#[cfg(test)]
+mod source_pin;
 mod storage_watch;
 mod table_block;
 mod termscroll;

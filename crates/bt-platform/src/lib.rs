@@ -943,6 +943,79 @@ mod web_security_tests {
 }
 
 #[cfg(test)]
+mod locale_tests {
+    use super::{choose_posix_locale, posix_locale_candidates};
+
+    /// The locales a stock macOS has, abbreviated to the ones these cases are
+    /// about — read off `locale -a` on the Mac this ticket ran on, where there
+    /// are 288 of them.
+    const INSTALLED: [&str; 5] = [
+        "C",
+        "en_US.UTF-8",
+        "zh_CN.UTF-8",
+        "zh_TW.UTF-8",
+        "ja_JP.UTF-8",
+    ];
+
+    fn chosen(apple_locale: &str) -> Option<String> {
+        choose_posix_locale(apple_locale, INSTALLED.into_iter())
+    }
+
+    /// PIN — **the system's own setting, turned into POSIX's spelling, and only
+    /// if this machine has that locale** (M1-5, plan §8 Q8).
+    ///
+    /// RED GATE: default to `en_US.UTF-8` when the setting does not map — the
+    /// obvious repair, and the one the ticket forbids — and the last two cases
+    /// go green with a language and a country this product chose for somebody.
+    #[test]
+    fn a_locale_is_the_systems_own_or_it_is_nothing() {
+        assert_eq!(chosen("en_US"), Some("en_US.UTF-8".to_owned()));
+        assert_eq!(chosen("ja_JP"), Some("ja_JP.UTF-8".to_owned()));
+        // CLDR writes the script when a language has more than one; POSIX has no
+        // such concept and the machine's own name for it drops it.
+        assert_eq!(chosen("zh-Hans_CN"), Some("zh_CN.UTF-8".to_owned()));
+        assert_eq!(chosen("zh-Hant_TW"), Some("zh_TW.UTF-8".to_owned()));
+        // CLDR keywords are about calendars and numbering, and no POSIX locale
+        // name carries them.
+        assert_eq!(
+            chosen("ja_JP@calendar=japanese"),
+            Some("ja_JP.UTF-8".to_owned())
+        );
+        // **The real case this ticket met**: a Chinese interface in the United
+        // States. Neither `zh-Hans_US.UTF-8` nor `zh_US.UTF-8` is a locale any
+        // machine has, and there is no third answer that is not this product
+        // picking a country.
+        assert_eq!(chosen("zh-Hans_US"), None);
+        assert_eq!(chosen("de_DE"), None, "a locale this machine has not got");
+        assert_eq!(chosen(""), None);
+        assert_eq!(chosen("   "), None);
+    }
+
+    /// PIN — the candidates are the setting itself and the setting without its
+    /// script, in that order, and there is no third.
+    ///
+    /// A third would have to invent a region for a language that named none, and
+    /// `zh-Hans` alone does not say China rather than Singapore.
+    #[test]
+    fn nothing_is_invented_to_fill_a_miss() {
+        assert_eq!(posix_locale_candidates("en_US"), ["en_US.UTF-8"]);
+        assert_eq!(
+            posix_locale_candidates("zh-Hans_CN"),
+            ["zh-Hans_CN.UTF-8", "zh_CN.UTF-8"]
+        );
+        assert_eq!(posix_locale_candidates("zh-Hans"), ["zh-Hans.UTF-8"]);
+        assert_eq!(posix_locale_candidates("en"), ["en.UTF-8"]);
+        assert!(posix_locale_candidates("").is_empty());
+        for candidate in posix_locale_candidates("zh-Hans_CN") {
+            assert!(
+                candidate.ends_with(".UTF-8"),
+                "a pane decodes UTF-8, so it may not ask a shell for another encoding"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod visual_layer_tests {
     use super::VisualLayer;
 
@@ -2238,6 +2311,140 @@ pub fn process_image_path(pid: u32) -> Option<std::path::PathBuf> {
 #[must_use]
 pub fn quiet_command_named(name: &std::path::Path) -> Option<std::process::Command> {
     Some(quiet_command(handoff::program_on_path(name)?))
+}
+
+/// **The POSIX locale this account's system settings name, when this machine has
+/// one installed to match** — or `None`, which is a whole answer and not a
+/// failure (M1-5, plan §8 Q8).
+///
+/// # What this is for
+///
+/// An app launched from Finder inherits `launchd`'s environment, and `launchd`
+/// sets no `LC_*` and usually no `LANG`. Terminal.app fills that gap from the
+/// user's own region setting; a terminal that did not would hand every pane a
+/// child running in the `C` locale, where a UTF-8 path prints as question marks
+/// and `ls` sorts by byte. **`en_US.UTF-8` is not the answer**: it is a country
+/// and a language this product would be choosing on somebody's behalf, and the
+/// reader who set their region to Japan would find their terminal disagreeing
+/// with the rest of their desktop.
+///
+/// # The rule
+///
+/// The system setting is `AppleLocale`, which is written in CLDR's spelling
+/// (`en_US`, `zh-Hans_CN`) and not in POSIX's. [`posix_locale_candidates`] turns
+/// one into the other and **every candidate is checked against the locales this
+/// machine actually has** (`locale -a`) before it is used. Nothing is invented to
+/// fill a miss: a reader whose region is a combination no installed locale names
+/// — `zh-Hans_US`, a Chinese interface in the United States, which is a real and
+/// ordinary setting — gets `None`, and the pane is left with the environment it
+/// inherited rather than with a locale that does not exist on this machine.
+///
+/// # Windows, and every other platform
+///
+/// `None`, because there is nothing here to answer: a Windows console child is
+/// told its encoding by the code page and `LANG` is not part of that
+/// conversation, so declaring one would be this terminal inventing a variable
+/// the platform does not use. That is the same rule this function states for
+/// macOS read from the other side — say what the system says, or say nothing.
+///
+/// Read once per process: it costs two child processes, and the answer is a
+/// system setting that a running app does not watch.
+#[must_use]
+pub fn system_posix_locale() -> Option<&'static str> {
+    static LOCALE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    LOCALE.get_or_init(read_system_posix_locale).as_deref()
+}
+
+#[cfg(target_os = "macos")]
+fn read_system_posix_locale() -> Option<String> {
+    let apple_locale = quiet_command_text("defaults", &["read", "-g", "AppleLocale"])?;
+    let installed = quiet_command_text("locale", &["-a"])?;
+    choose_posix_locale(&apple_locale, installed.lines())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_system_posix_locale() -> Option<String> {
+    None
+}
+
+/// One short-lived child, through the one door, read for its standard output.
+///
+/// `None` for a program that would not start, a non-zero exit and output that is
+/// not text — all three are the same answer here, which is *this machine did not
+/// say*, and the caller's whole contract is to carry on without it.
+#[cfg(target_os = "macos")]
+fn quiet_command_text(program: &str, arguments: &[&str]) -> Option<String> {
+    let output = quiet_command(program).args(arguments).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout).ok())
+        .flatten()
+}
+
+/// `AppleLocale` as POSIX would spell it, most specific first — the candidates
+/// [`system_posix_locale`] looks for among the locales a machine has.
+///
+/// Two forms and no more, because a third would be a guess:
+///
+/// 1. **the setting itself**, with `.UTF-8` after it. `en_US` → `en_US.UTF-8`,
+///    which is the whole of the common case.
+/// 2. **the setting with its script subtag dropped**. CLDR writes the script when
+///    a language has more than one (`zh-Hans_CN`), POSIX does not have the
+///    concept, and the locale that machine has is `zh_CN.UTF-8`. Only the leading
+///    language subtag and the trailing region are kept, which is exactly what the
+///    two spellings have in common.
+///
+/// What is deliberately **not** here is a third candidate that supplies a missing
+/// region, or substitutes a nearby one: `zh-Hans` alone does not say China rather
+/// than Singapore, and this product may not decide that for somebody.
+///
+/// `.UTF-8` and only `.UTF-8`: a pane decodes UTF-8, so a `zh_CN.GB18030`
+/// declaration would be this terminal asking a shell to speak an encoding the
+/// window cannot read back.
+///
+/// Anything after an `@` — CLDR's keywords, `@calendar=japanese` — is a request
+/// about calendars and numbering rather than about an encoding, and no POSIX
+/// locale name carries it.
+#[must_use]
+pub fn posix_locale_candidates(apple_locale: &str) -> Vec<String> {
+    let setting = apple_locale
+        .trim()
+        .split('@')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if setting.is_empty() {
+        return Vec::new();
+    }
+    let mut candidates = vec![format!("{setting}.UTF-8")];
+    if let Some((language, rest)) = setting.split_once('-')
+        && let Some((_script, region)) = rest.rsplit_once('_')
+        && !language.is_empty()
+        && !region.is_empty()
+    {
+        let stripped = format!("{language}_{region}.UTF-8");
+        if !candidates.contains(&stripped) {
+            candidates.push(stripped);
+        }
+    }
+    candidates
+}
+
+/// The first of [`posix_locale_candidates`] that `installed` — the lines of
+/// `locale -a` — actually names.
+///
+/// The match is exact on the name, because that is what `setlocale` will look up
+/// and a near-miss is a locale that is not there.
+#[must_use]
+pub fn choose_posix_locale<'a>(
+    apple_locale: &str,
+    installed: impl Iterator<Item = &'a str>,
+) -> Option<String> {
+    let installed: Vec<&str> = installed.map(str::trim).collect();
+    posix_locale_candidates(apple_locale)
+        .into_iter()
+        .find(|candidate| installed.contains(&candidate.as_str()))
 }
 
 /// The family the renderer draws when a settings file names none.
