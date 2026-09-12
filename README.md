@@ -194,6 +194,49 @@ application.
        breadcrumb address field above it.">
 </picture>
 
+### Markdown you can edit where you read it
+
+A `.md` file is typed into on the page you were reading, in the typeface you
+were reading it in.
+
+- Click into a paragraph, heading, list or quote and it shows its own
+  Markdown — the `#` of a heading, the `**` around a bold phrase, the `- ` in
+  front of an item, the `> ` down the side of a quote — in the reading typeface
+  and at the reading size, while every other block on the page stays as it
+  reads. Leave the block and it is back to its rendered form.
+- A code block, a table or a formula turns to monospace source instead, because
+  there the way the characters line up is part of what they say.
+- The caret moves between blocks the way it moves between lines, so there is
+  nothing to enter and nothing to leave: arrows, `Home`, `End`, `Enter` and
+  `Backspace` do what they do anywhere else. What you select is what you copy,
+  and a copy out of a document you are editing brings the marks with it, so what
+  you paste back is what was there.
+- `Ctrl+S` writes the file, `Ctrl+Z` takes back the last change and `Ctrl+Y`
+  puts it again. A run of typing comes back in one press rather than a letter at
+  a time, and the unsaved dot goes out when you undo back to your last save.
+- A save changes the part you edited and leaves the rest of the file identical,
+  down to the byte. A file that names its own encoding in its first bytes —
+  what Windows PowerShell writes is the common case — is written back in it.
+  Line endings, trailing spaces and a missing last line break survive as they
+  always did.
+- `Esc` leaves the page, and so does clicking the empty space beside the text or
+  clicking away from the pane altogether. The page goes back to reading as a
+  page, and the caret stays where you left it.
+- A file over 8 MB, and one Folio could not read as text all the way through,
+  opens and reads and copies as before but is not edited; the foot of the pane
+  says why.
+- The files column's right-click menu makes a file or a folder in place:
+  `New file…` and `New folder…` put the name field in the tree where the new row
+  will appear, `Enter` creates it and `Esc` cancels. A name the folder will not
+  take turns red in the field rather than being explained somewhere else.
+  `Delete` sends a file, or a whole folder, to the Recycle Bin and asks nothing
+  first, because the Recycle Bin is where it goes.
+- Right-clicking the empty space in a files column opens the menu of the folder
+  the column is standing in, so a folder with nothing in it can still be given
+  its first file.
+- `Ctrl+Shift+P` finds a file under the folder the column is standing in, and
+  `Enter` opens it in the preview pane, ready to be typed into.
+
 ### Panes, tabs and windows that move
 
 The layout changes while the sessions inside it keep running, and all of them can
@@ -399,8 +442,7 @@ go through the private channel in [`SECURITY.md`](SECURITY.md), not an issue.
 
 ## What's next
 
-- Markdown editing in the preview pane.
-- macOS and Linux.
+- macOS, then Linux.
 - The terminal from a phone.
 
 These are directions, not dates.
