@@ -709,6 +709,14 @@ pub enum Text {
     /// [`Self::PreviewTruncated`] stands on, and in the same two-fact shape —
     /// what you are looking at, then why.
     PreviewAnimationTooLarge,
+    /// **The other size**, and it is a different fact about a different number
+    /// (user report 2026-09-12): the file is longer than this window will read
+    /// looking for frames. It used to share
+    /// [`Self::PreviewAnimationTooLarge`]'s sentence, so a reader whose 11.7 MB
+    /// recording was declined for its length was told its picture was too big —
+    /// about a file whose frames were well inside the ceiling that sentence is
+    /// about.
+    PreviewAnimationFileTooLong,
     /// The other reason a `.gif` does not move: the frames behind the first one
     /// would not read. A file that is one still frame says **nothing** — it
     /// looks like a still picture because it is one.
@@ -2984,6 +2992,9 @@ impl Text {
             Self::PreviewAnimationTooLarge => {
                 pick(lang, "First frame · too large", "首帧 · 画面太大")
             }
+            Self::PreviewAnimationFileTooLong => {
+                pick(lang, "First frame · file too long", "首帧 · 文件太大")
+            }
             Self::PreviewAnimationBroken => {
                 pick(lang, "First frame · would not play", "首帧 · 无法播放")
             }
@@ -4426,7 +4437,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 611] = [
+    pub const ALL: [Self; 612] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4568,6 +4579,7 @@ impl Text {
         Self::PreviewLossy,
         Self::PreviewTooLargeToEdit,
         Self::PreviewAnimationTooLarge,
+        Self::PreviewAnimationFileTooLong,
         Self::PreviewAnimationBroken,
         Self::PreviewSaved,
         Self::PreviewConflict,
@@ -5082,7 +5094,10 @@ impl Text {
     /// read and named for exactly what it is. `docs/DESIGN.md` §7.59 names the ruling that
     /// created it.
     #[cfg(test)]
-    const CHINESE_PENDING: [Self; 0] = [];
+    const CHINESE_PENDING: [Self; 0] = [
+        // zh: pending — the foot line for a `.gif` longer than this window will
+        // read (user report 2026-09-12).
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
