@@ -8322,3 +8322,158 @@ written against. **The chord comes back with M3-2, not with a hook here**: a
 real menu bar's key equivalents are answered by AppKit *before* the responder
 chain's `keyDown:`, so a `Quit`, a `New tab` or a palette row on the menu fires
 over a composition without this window installing an event monitor of its own.
+
+### 13.18 T-MAC-PILL: 水平布局的标签在 mac 上是 30 pt 的浮动药丸,红黄绿居中到 40 的条上 (`crates/bt-app/src/seats.rs`、`crates/bt-render/src/{theme,scheme}.rs`、`crates/bt-platform/src/{macos_impl,portable_impl}.rs`)
+
+**① One capability, two answers, and the second one is the tab's shape.** M3-3
+(§13.11 ②) left the strip's own drawing untouched on purpose: the owner had seen
+the window and was choosing the tab's new form on a mock. The choice, on
+2026-09-12, is 「就药丸」 — the strict mock's section 1 variant B. On a window
+whose title bar is the platform's (`PlatformChrome::buttons_are_the_platforms`)
+a horizontal tab is a **30-point pill centred on the 40-point strip**: top at 5,
+bottom at 35, `WINDOW_TAB_RADIUS` on all four corners, **no skirt and no seam**,
+so the strip's floor runs unbroken underneath it. On a window that draws its own
+whole bar the tab is what it has always been — 34 tall, standing on the bar's
+foot, flaring outward into the pane at both lower corners, *being* the pane's
+surface carried up into the strip.
+
+The capability therefore has two readers in `seats.rs` now rather than one, and
+that is the honest count rather than a relaxation: `caption_targets` decides
+which buttons stand in the caption run and `tab_strip_geometry` decides whether
+the tabs float, and neither answer is derivable from the other.
+`the_caption_run_is_decided_by_one_capability_read` was a *count* and is now a
+*list* — each occurrence is located inside the function that is entitled to it,
+which is strictly the stronger claim and still fails the day somebody reaches for
+a `cfg`.
+
+**② The geometry is the source of truth, so the shape is decided exactly once.**
+`tab_strip_geometry` already measured every box a tab has — the mark, the title,
+the badge, the pin, the `×`, the folder trigger — and it measured all of them
+against the tab's own body. Two numbers move: `tab_height` (30 instead of 34) and
+`tab_top` (`(title - height) / 2` instead of `title - height`), plus one that was
+never a tab's number at all — the folder trigger used to be centred between the
+tab's top and the *bar's* foot, which is the same line on an attached tab and a
+different one on a pill, so it is now centred on the tab like everything else.
+Everything else follows for free: `tab_mark_box`, `tab_title_box` (which is the
+rename editor's box — "same box, same metrics", mock-up 376-378), the hit test,
+`TabGeometry::shifted` and therefore the drag, the FLIP a landing tab flies, and
+the tooltip anchors. **Padding 12 / 6, mark 15, gap 8, font 13, close box 17 at
+radius 4, the badge, the progress ring, the width tiers: not one of them
+changes.** A pill that also moved its mark would be a second tab design rather
+than the same tab on a different bar, and the ruling is explicitly the latter —
+which is why `the_mac_tab_is_a_thirty_point_pill_centred_on_the_strip` asserts
+the two geometries side by side and holds every one of those boxes to the same
+number on both.
+
+**The lead-in is air now, and it was not air before.** An attached run leads in
+by `--tabr`: `.tabs-inline { padding-left: var(--tabr) }` exists so the first
+tab's outward skirt has somewhere to land, which is what puts the silhouette on
+the window's own edge. A pill has no skirt, so its lead-in is struck as what it
+is — `WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX`, the mock's `--after-lights`, twelve
+points after the band the platform's buttons occupy. 69 + 12 = 81, which is the
+mock's own number. It is taken out of the run at the top of the solver, where the
+traffic lights' band and the drag reserve are already taken out, and for their
+reason: everything the strip decides is decided against the run it is given, so a
+tab walks down its width tiers inside the smaller run first and the run begins to
+scroll only once the tabs are on their floor.
+
+**③ Every ground a tab can wear is the same silhouette, and that is the whole of
+the paint.** The fill is the easy half. `window_tab_strip` lays five different
+grounds on a tab over its life — the hover fill, the active silhouette, the
+landing wash, the landing ring, and the shadow under a tab in flight — and if any
+one of them kept the attached tab's outline, a tab in *that state* would be
+wearing the other window's shape for exactly as long as the state lasted. So the
+shape is read off `TabStripGeometry::floating` once and every ground goes through
+the same two helpers: `ChromeMark::TabBody`/`TabBodyRing` (round on top, open at
+the foot) on an attached tab, `ControlPill`/`ControlPillRing` (closed, round on
+all four corners) on a pill. **No new mark was cut.** `ControlPillRing` already
+existed, and its own note says why: a landing ring has to follow whatever
+silhouette the row it lands in actually wears, and the rail's rows are closed
+boxes. A pill is the strip's row wearing the rail's silhouette, so the mark that
+was made for the rail is the mark for this.
+
+**④ The hairline is the only thing separating `#FFFFFF` from `#F7F7F5`.** An
+attached tab needs no edge — it is the pane's surface, and the join is the whole
+silhouette. A pill floats, and on the light canvas its fill and the strip under
+it are three levels apart. The owner struck the line: `rgba(0,0,0,.14)`, half a
+point. It is a named palette entry (`tab_pill_edge` / `tab_pill_edge_alpha`)
+derived exactly the way `menu_border` is — the canvas's own hairline *shade*
+(black on paper, white on night) at the canvas's own alpha for this mark — and
+carried as colour *and* alpha rather than pre-composited, which is `menu_border`'s
+reason said about a different surface: the ring is drawn over a fill that is
+still fading in (`TAB_ACTIVATION`), so the ground under it is a mix rather than a
+known colour, and the honest hairline is the one the renderer blends at draw
+time. It fades in with the fill it edges, because an outline at full strength
+around a silhouette that is half there is the outline of a tab that is not yet
+the active one.
+
+**The dark value is derived and the derivation is written down.** The owner set
+`.14` on the light canvas and said nothing about the dark one. Night takes the
+same multiple of *its own* hairline alpha that paper's does of its —
+`94 × 140 / 88 = 149.5`, so `pill_edge` is 150 on night against 140 on paper —
+which is the relation the two canvases already carry on both existing hairlines
+(`border` 94 against 88, `border_soft` 60 against 55). The reason those two run
+that way is `thumb`'s own: a white line laid on night covers less ground per unit
+of alpha than a black one laid on paper.
+
+**And it is drawn *inside* the pill's edge, not spread outside it.** CSS's
+`box-shadow: 0 0 0 .5px` is an outset ring, which would make the ink 31 points
+tall and start it at 4.5. The ruling gives the pill 30 points and a top at 5.
+Half a logical pixel is one device pixel at the backing scale this window is
+drawn at, so the line the reader sees is the same line either way and the box
+stays the box.
+
+**⑤ The five points of strip above and below a pill are not the tab.** The hit
+test reads `tab.body` and the geometry moved, so this needed no code at all — but
+it is a consequence worth stating, because it is what "floating" means when you
+reach for one: a press at y 2 on a 40-point strip answers nothing, where on an
+attached tab it answered the tab. Those bands are also **not** the window's drag
+region: `title_bar_drag_point` divides the bar by `x` alone (`§13.11 ④`), and
+extending it to the `y` a pill leaves over is a ruling rather than a patch —
+noted here rather than taken.
+
+**⑥ The lights move onto the strip's axis, and the notifications are what keeps
+them there.** macOS sizes its window buttons for a 32-point title bar: 14 points
+of button with nine of air above and below, centred at y 16. Folio's strip is 40
+tall and its pills are centred at y 20, and three buttons sitting four points
+high of everything beside them is the first thing a reader would see in that bar.
+So `centre_window_buttons` sets the three `standardWindowButton:` frames' origins
+— **`y` only**; the x rhythm is macOS's own and `strip_left_px` is measured off
+wherever the buttons actually are — to put the button's top at
+`(bar - button) / 2`, which is 13 at the standard metrics. The distance is
+computed against the view the button is *in*, and `isFlipped` is asked rather
+than assumed, because the whole of what this computes is a distance from the top
+and a flipped view measures it directly. At the standard metrics the button lands
+13..27 inside a 32-point title bar view, so it moves four points down and still
+stands wholly inside the view it is in — which is why this is a move and not
+`NSTitlebarContainerView` surgery.
+
+**A frame set on a standard window button is not a setting AppKit remembers.**
+It lays the title bar out again on its own schedule and the buttons go back to
+the 32-point bar's axis, so the placement is re-stated from a `WindowButtonsWatch`
+subscribed to the five notifications that are known to re-lay it — resize,
+entering and leaving full screen, and the key/resign pair, where AppKit swaps the
+buttons' own appearance. Notifications and **not a timer**: a timer would be a
+guess about when AppKit is done, restated for the life of the window, and a
+placement that still would not hold against these five is a fact about the
+platform worth reporting rather than papering over. The registration is scoped to
+its own window (`object:`) and the watch is held on `CustomWindowFrame` and
+nowhere else, so it is removed when the frame is — an observer outliving its
+window is the bug that shape makes unwritable.
+
+`CustomFrameGeometry` is read for the first time on this arm. It was taken and
+dropped while this platform had nothing in that band to agree with; the height of
+the bar the lights are centred on is the *caller's* fact — a number about Folio's
+design — and not something AppKit could be asked for.
+
+**⑦ The window Folio draws the whole bar on is byte-for-byte what it was.**
+`the_windows_tab_strip_is_unchanged_by_the_pill` feeds
+`PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR` and pins struck numbers rather than
+relations — lead-in 7, body 6..40, the `×` at 6 from the trailing edge in a
+17-box on the tab's axis, the mark 12 in at 15 — which is the one place in this
+file that is the right way round: everything else derives from a capability so
+that a Windows machine can ask what a Mac does, and this pins the answer the
+reader at the keyboard is actually looking at. The vertical layouts and the focus
+column are not this section's and were not touched.
+
+*(本节英文,待中文文案改写。)*

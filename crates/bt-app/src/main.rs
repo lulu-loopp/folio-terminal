@@ -156283,13 +156283,25 @@ mod platform_gate_tests {
     /// buttons and hit-tests one.
     ///
     /// Three claims, and the third is the one a `cfg` would break: the door is
-    /// reached exactly once; the capability is *branched on* in exactly one
-    /// place in the whole application; and the module that decides the run names
-    /// no platform anywhere.
+    /// reached exactly once; the capability is *branched on* only in the two
+    /// named functions whose answers it decides; and the module that decides the
+    /// run names no platform anywhere.
+    ///
+    /// **Two readers and not one, since T-MAC-PILL** (owner ruling 2026-09-12
+    /// 「就药丸」). The capability says two things about this window, and they are
+    /// not the same thing said twice: `caption_targets` decides which buttons
+    /// stand in the caption run, and `tab_strip_geometry` decides whether the
+    /// tabs float as pills on the strip or stand attached to its floor. Both are
+    /// facts about the bar this window has, both are answered off the same
+    /// value, and neither is derivable from the other. So what the pin holds is
+    /// the *list* rather than the count: every occurrence in the file is one of
+    /// these, named and located, and a third reader — which is the shape of the
+    /// ask a `cfg` would be the lazy answer to — fails here rather than
+    /// spreading.
     ///
     /// MUTATION: reach the frame for its chrome a second time anywhere and the
-    /// first assertion names it; branch on
-    /// `buttons_are_the_platforms` outside `seats::caption_targets` and the
+    /// first assertion names it; branch on `buttons_are_the_platforms` anywhere
+    /// in `seats.rs` but `caption_targets` and `tab_strip_geometry` and the
     /// second does; put a `cfg!(target_os = …)` in `seats.rs` and the third
     /// does.
     #[test]
@@ -156311,35 +156323,55 @@ mod platform_gate_tests {
             "and it is read there"
         );
 
-        // The decision itself. One `match` on the capability, in the one
-        // function whose whole job is the list — and its test helper, which is
-        // how the other arm is written down at all.
+        // The decisions themselves. One reader per question — the `match` in
+        // the function whose whole job is the caption run, and the one branch in
+        // the solver that decides the tabs' shape — and the module's own test
+        // helper, which is how the other arm is written down at all.
         let decisions: Vec<usize> = SEATS
             .match_indices("buttons_are_the_platforms")
             .map(|(at, _)| at)
             .collect();
+        let body_of = |signature: &str| -> std::ops::Range<usize> {
+            let at = SEATS
+                .find(signature)
+                .unwrap_or_else(|| panic!("`{signature}` is not in `seats.rs`"));
+            let end = SEATS[at..]
+                .find("\n}\n")
+                .map(|to| at + to)
+                .expect("a function is closed at column zero");
+            at..end
+        };
+        let readers = [
+            ("caption_targets", body_of("pub fn caption_targets(")),
+            ("tab_strip_geometry", body_of("pub fn tab_strip_geometry(")),
+        ];
         assert_eq!(
             decisions.len(),
-            2,
+            readers.len() + 1,
             "the capability is named {} times in `seats.rs`; it is read by \
-             `caption_targets` and constructed by that module's own test helper, and \
-             nothing else may branch on it",
+             `caption_targets` and by `tab_strip_geometry`, and constructed once by \
+             that module's own test helper — nothing else may branch on it",
             decisions.len()
         );
-        let run = SEATS
-            .find("pub fn caption_targets(")
-            .expect("the list that decides the run");
-        let run_end = SEATS[run..]
-            .find("\n}\n")
-            .map(|at| run + at)
-            .expect("a function is closed at column zero");
+        // Matched by *containment* rather than by position, because the order
+        // the two functions happen to stand in the file is not part of the
+        // claim: each named body holds exactly one read, and what is left over
+        // is the helper.
+        for (name, body) in &readers {
+            assert_eq!(
+                decisions.iter().filter(|at| body.contains(*at)).count(),
+                1,
+                "`{name}` does not read the capability exactly once"
+            );
+        }
+        let helper = decisions
+            .iter()
+            .find(|at| !readers.iter().any(|(_, body)| body.contains(*at)))
+            .expect("one occurrence outside the two readers");
         assert!(
-            (run..run_end).contains(&decisions[0]),
-            "the first reader of the capability is not `caption_targets`"
-        );
-        assert!(
-            SEATS[decisions[1]..].starts_with("buttons_are_the_platforms: true"),
-            "the second is not the test helper that states the other arm"
+            SEATS[*helper..].starts_with("buttons_are_the_platforms: true"),
+            "the occurrence outside the two readers is not the test helper that states \
+             the other arm"
         );
 
         // And the module that draws and hit-tests the bar knows nothing about
