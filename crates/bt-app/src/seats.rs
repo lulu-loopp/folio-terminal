@@ -37420,6 +37420,59 @@ mod tests {",
             .expect("focus mode puts a column on screen")
     }
 
+    /// **A card is measured at the scale of the display it is on, and at no
+    /// other** (user report 2026-09-12, §7.1.6b′).
+    ///
+    /// The card column has no built-at scale anywhere in it: its boxes, its mini
+    /// seats and the line its projection is laid out on are all worked out from
+    /// the `scale` it is handed on the frame it is drawn. This holds that, so
+    /// that the day one of them is cached the report is this test and not a
+    /// photograph of a second display.
+    ///
+    /// Stated as a ratio rather than as a table of numbers, because the claim is
+    /// a similarity and not a list: the same column at half the scale is the same
+    /// column at half the size, to the rounding each length is put on.
+    #[test]
+    fn a_card_laid_out_at_one_scale_and_shown_at_another_is_re_laid_out() {
+        let tree = bt_layout::LayoutNode::seat(bt_layout::Seat::new(
+            SeatId(1),
+            bt_layout::SeatKind::Terminal,
+        ));
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let big = focus_rail_geometry(1200.0, 2.0, 3, 0, 0.0, state).expect("a column at 200%");
+        let small = focus_rail_geometry(600.0, 1.0, 3, 0, 0.0, state).expect("the same at 100%");
+
+        for (index, (big_card, small_card)) in big.cards.iter().zip(&small.cards).enumerate() {
+            for edge in 0..4 {
+                assert!(
+                    (big_card.body[edge] / 2.0 - small_card.body[edge]).abs() <= 1.0,
+                    "card {index}'s box is measured at the scale it is drawn at"
+                );
+                assert!(
+                    (big_card.mini[edge] / 2.0 - small_card.mini[edge]).abs() <= 1.0,
+                    "card {index}'s body is too"
+                );
+            }
+        }
+
+        let big_seats = focus_mini_seats(&tree, big.cards[0].mini, 2.0);
+        let small_seats = focus_mini_seats(&tree, small.cards[0].mini, 1.0);
+        assert_eq!(big_seats.len(), small_seats.len(), "one tree, two sizes");
+        for edge in 0..4 {
+            assert!(
+                (big_seats[0].rect[edge] / 2.0 - small_seats[0].rect[edge]).abs() <= 1.0,
+                "and the seat inside it is placed at the scale it is drawn at"
+            );
+        }
+        assert!(
+            (crate::focus_thumb::MiniMetrics::TERM.line_px(2.0) / 2.0
+                - crate::focus_thumb::MiniMetrics::TERM.line_px(1.0))
+            .abs()
+                <= 1.0,
+            "and the row its projection is laid out on is the current scale's"
+        );
+    }
+
     /// The house window: 960x618, which is what every fixture here is built at.
     const FIXTURE_HEIGHT: f32 = 618.0;
     /// A window tall enough for four cards with their bodies — see

@@ -57,13 +57,29 @@
 #                          [-PressX .. -PressY ..] [-Out shot.png]
 #                                                              → open a menu, hold it open, photograph
 #                                                                it, and press one of its rows
+#   .\post-probe.ps1 wheel -ProcId <pid> -X .. -Y .. [-Steps 3] [-Delta -120] [-Mods a]
+#                                                              → notches over a point, with the
+#                                                                modifiers a hand would be holding
+#   .\post-probe.ps1 sizemove -ProcId <pid> -Name enter|exit    → the OS's modal move/size loop,
+#                                                                opened and closed by hand
+#
+# **`sizemove`, and the one thing it is for.** A window dragged between two
+# monitors of different scale does not merely change DPI: every message of that
+# change arrives *inside* the modal move/size loop, and §7.50 defers the
+# expensive half of the answer until the hand lets go. `place` moves a window
+# with `SetWindowPos`, which runs in no such loop, so it exercises the immediate
+# path and can never reproduce a defect that lives in the deferred one. Posting
+# `WM_ENTERSIZEMOVE`, moving, and posting `WM_EXITSIZEMOVE` is that loop's own
+# message sequence, and it is the only way to reach it without taking the real
+# mouse away from whoever is holding it. Always close what you open: a window
+# left believing a hand is on its frame defers everything for ever.
 #
 # X/Y are **client** pixels, which for this window are also window pixels: the
 # self-drawn frame makes the client area the whole outer rectangle, so a
 # coordinate read off a `ui-probe capture` is a coordinate this script can press.
 param(
   [Parameter(Position = 0, Mandatory = $true)]
-  [ValidateSet("list", "place", "left", "right", "drag", "menu", "type", "key", "shot", "wheel", "chord")]
+  [ValidateSet("list", "place", "left", "right", "drag", "menu", "type", "key", "shot", "wheel", "chord", "sizemove")]
   [string]$Cmd,
   [Parameter(Mandatory = $true)][int]$ProcId,
   [int]$Window = 0,
@@ -85,10 +101,12 @@ param(
   [int]$Gap = 20,
   [string]$Out = "",
   # type: the characters to post. key: one of the names in $POSTED_KEYS.
+  # sizemove: `enter` or `exit`.
   [string]$Text = "",
   [string]$Name = "",
   # chord: modifiers as any of c(trl) s(hift) a(lt); -Name is the base key, either
-  # one of $POSTED_KEYS or the single character printed on it.
+  # one of $POSTED_KEYS or the single character printed on it. wheel reads the
+  # same letters and holds them down across its notches.
   [string]$Mods = "",
   # wheel: how many notches, and the WHEEL_DELTA each one carries (negative
   # scrolls down, which is Win32's own sign).
@@ -201,14 +219,70 @@ public class PostProbe {
      Windows itself would send. */
   public static void Chord(IntPtr h, bool ctrl, bool shift, bool alt, ushort vk) {
     uint down = alt ? 0x0104u : 0x0100u, up = alt ? 0x0105u : 0x0101u;
+    HoldMods(h, ctrl, shift, alt);
+    PostMessage(h, down, (IntPtr)vk, Down(vk));
+    PostMessage(h, up,   (IntPtr)vk, Up(vk));
+    /* The hand does not let go before the window has read the chord: the key
+       table is shared state and `DropMods` clears it, so releasing it in the
+       same breath would have winit read the base key with nothing held. */
+    System.Threading.Thread.Sleep(150);
+    DropMods(h, ctrl, shift, alt);
+  }
+  /* `Chord`'s two halves on their own, because a chord's base is not always a
+     key: `Alt`+wheel is a modifier held across a run of mouse messages, and
+     `WM_MOUSEWHEEL`'s own wParam has no bit for `Alt` to ride in.
+
+     **A posted modifier is not a held modifier, and this is the third thing
+     learned the hard way** (measured 2026-09-12). winit answers "is Alt down"
+     with `GetKeyState`, and a thread's key-state table is moved only by
+     messages the system itself put in the queue — a `PostMessage`d
+     `WM_SYSKEYDOWN` leaves it at zero. Posting the key alone therefore looked
+     exactly like a chord and was read as a bare press: `Ctrl+Shift+Z` did not
+     toggle the mode and `Alt`+wheel scrolled the list. So the state is *set*
+     as well as posted, through the one door Windows has for it:
+     `AttachThreadInput` makes this thread and the window's thread share one
+     input state, and `SetKeyboardState` then writes the table winit is about
+     to read. The posted key message is still sent, because it is what makes
+     winit *look* — it calls `update_modifiers` out of its key handlers and
+     nowhere else. Attach, set, post; and undo all three in the reverse order,
+     because a table left with Alt down is a modifier stuck on a window nobody
+     is holding. */
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint attach, uint attachTo, bool on);
+  [DllImport("user32.dll")] public static extern bool GetKeyboardState(byte[] state);
+  [DllImport("user32.dll")] public static extern bool SetKeyboardState(byte[] state);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  static uint ThreadOf(IntPtr h) { uint pid; return GetWindowThreadProcessId(h, out pid); }
+  /* VK_MENU and VK_LMENU together, and the pair for each of the other two: the
+     agnostic key is what `GetKeyState` is asked for and the sided one is what a
+     real keyboard would also have down. */
+  static void Table(bool ctrl, bool shift, bool alt, bool down) {
+    var state = new byte[256];
+    if (!GetKeyboardState(state)) return;
+    byte bit = down ? (byte)0x80 : (byte)0x00;
+    if (ctrl)  { state[0x11] = bit; state[0xA2] = bit; }
+    if (shift) { state[0x10] = bit; state[0xA0] = bit; }
+    if (alt)   { state[0x12] = bit; state[0xA4] = bit; }
+    SetKeyboardState(state);
+  }
+  public static void HoldMods(IntPtr h, bool ctrl, bool shift, bool alt) {
+    AttachThreadInput(GetCurrentThreadId(), ThreadOf(h), true);
+    Table(ctrl, shift, alt, true);
     if (ctrl)  PostMessage(h, 0x0100, (IntPtr)0x11, Down(0x11));
     if (shift) PostMessage(h, 0x0100, (IntPtr)0x10, Down(0x10));
     if (alt)   PostMessage(h, 0x0104, (IntPtr)0x12, Down(0x12));
-    PostMessage(h, down, (IntPtr)vk, Down(vk));
-    PostMessage(h, up,   (IntPtr)vk, Up(vk));
+  }
+  public static void DropMods(IntPtr h, bool ctrl, bool shift, bool alt) {
+    Table(ctrl, shift, alt, false);
     if (alt)   PostMessage(h, 0x0105, (IntPtr)0x12, Up(0x12));
     if (shift) PostMessage(h, 0x0101, (IntPtr)0x10, Up(0x10));
     if (ctrl)  PostMessage(h, 0x0101, (IntPtr)0x11, Up(0x11));
+    AttachThreadInput(GetCurrentThreadId(), ThreadOf(h), false);
+  }
+  /* `WM_ENTERSIZEMOVE` / `WM_EXITSIZEMOVE` — the modal move/size loop's own
+     brackets. See this file's header for why a `place` cannot stand in for
+     them. */
+  public static void SizeMove(IntPtr h, bool entering) {
+    PostMessage(h, entering ? 0x0231u : 0x0232u, IntPtr.Zero, IntPtr.Zero);
   }
 }
 '@
@@ -276,8 +350,16 @@ switch ($Cmd) {
   }
   "wheel" {
     $hwnd = Get-Target
-    for ($i = 0; $i -lt $Steps; $i++) { [PostProbe]::Wheel($hwnd, $X, $Y, $Delta); Start-Sleep -Milliseconds 40 }
-    "posted $Steps notches of $Delta at ($X,$Y) to window $Window"
+    $ctrl = $Mods -match "c"; $shift = $Mods -match "s"; $alt = $Mods -match "a"
+    if ($ctrl -or $shift -or $alt) { [PostProbe]::HoldMods($hwnd, $ctrl, $shift, $alt); Start-Sleep -Milliseconds 150 }
+    for ($i = 0; $i -lt $Steps; $i++) { [PostProbe]::Wheel($hwnd, $X, $Y, $Delta); Start-Sleep -Milliseconds 60 }
+    if ($ctrl -or $shift -or $alt) { Start-Sleep -Milliseconds 150; [PostProbe]::DropMods($hwnd, $ctrl, $shift, $alt) }
+    "posted $Steps notches of $Delta at ($X,$Y)$(if ($Mods) { " under $Mods" }) to window $Window"
+  }
+  "sizemove" {
+    if ($Name -ne "enter" -and $Name -ne "exit") { throw "sizemove needs -Name enter or -Name exit" }
+    [PostProbe]::SizeMove((Get-Target), ($Name -eq "enter"))
+    "posted size-move $Name to window $Window"
   }
   "chord" {
     $base = if ($POSTED_KEYS.ContainsKey($Name)) { $POSTED_KEYS[$Name] } else { [PostProbe]::VkKeyScanW($Name[0]) -band 0xFF }
