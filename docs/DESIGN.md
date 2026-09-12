@@ -8550,6 +8550,48 @@ It is a sentence about *what stands in the bar* rather than a table of layouts: 
 **And the band can change while the window is open**, because `Tab layout`, `Sidebar` and focus mode all move a window between the two without relaunching it. So the placement is a door rather than an argument to `install`: `CustomWindowFrame::set_window_band` re-centres the buttons for the new band **and** writes it into the watch of §13.19, which re-applies the placement every time AppKit re-lays the title bar — a watch left holding the band the window opened with would spend the rest of the session dragging the buttons back to a bar the window no longer has. `bt-app` says it in one place, `Runtime::follow_the_window_band`, off `window_band_px` and `rail_posture`: once in `dress_new_window`, before the window is ever shown, and again after each of the two writes of the posture (`set_rail_state`, `set_focus_mode`). `install` is still handed Folio's own 40, because a frame cannot know the platform's band before it has measured it; a window opening into a vertical layout is corrected by that first call, which runs before its first frame. Nothing here names a platform: `FILES_THAT_MAY_NAME_A_PLATFORM` is unchanged.
 
 One number moved on merge that neither ticket had to change alone: `tab_strip_geometry` measured its pills off `WINDOW_TITLE_BAR_LOGICAL_PX` directly, and now reads `window_band_px`'s horizontal answer. The two agree on every band shorter than Folio's own — which is every band macOS has — so no pixel moves; what changes is that the pill's axis and the bar it is centred on can no longer be told two different numbers.
+**⑨ The merge's own run, and the one thing it found.** M4 / macOS 26.6.2, a 4K
+at backing scale 2, a debug bundle of the merge commit, four homes of their own,
+every number read out of the window's own capture and halved to points.
+
+| the window | the band over the content | the three buttons | the first tab |
+| --- | --- | --- | --- |
+| horizontal | **40** (80 physical) | **13..27** | pill **5..35** |
+| vertical, expanded sidebar | **32** (64) | **9..23** | — |
+| vertical, parked icon rail | **32** (64) | **9..23** | — |
+| focus column | **32** (64) | **9..23** | — |
+
+**And the switch was measured live rather than relaunched.** One window opened
+into the expanded sidebar — band 32, buttons at 9 — was driven by mouse clicks on
+its own surface through `设置 ▸ 外观 ▸ 标签布局` to `横向`, and without a relaunch the
+same window measured band **40**, buttons **13..27** and pills **5..35**. That is
+`set_window_band` doing the whole of what it is for.
+
+**The one thing the run found is that five notifications were not enough.**
+§13.19's watch held the placement through a resize and a full-screen round trip
+and did not hold it through a launch: the trace has the frames set to the strip's
+axis at `adopt`, read back at AppKit's own 9 a moment later, set again on
+`DidBecomeKey` — and the window photographed after all of that still wore them at
+9, so something in the display pass re-lays the title bar and posts none of the
+five. `NSWindowDidUpdate` is posted at the end of every pass in which the window
+was updated, which is *after* whatever did it, and with it the horizontal window
+reads 13..27. It is affordable because the placement is now written only when it
+is not already there — a frame set inside an update is a reason for another
+update, and without that guard the window would chase itself for as long as it
+was on screen. The first four layouts were photographed before this was found and
+read 9 in all four, which is why "the vertical answer is also what an unmoved
+button looks like" is worth saying out loud: three of those four pictures were
+right by accident.
+
+**A note for the next Mac ticket that needs a session file.** The layout a run
+opens with lives in `session.json`, which is written on the clean-exit path, and
+since M3-1 (§13.21) closing the last window is no longer that path — the
+application outlives its window, and a click on the red button leaves a live
+process with no windows and no session behind it. The other door a reader has is
+the quit itself, and `osascript -e 'tell application id "io.github.lulu-loopp.folio" to quit'`
+is it: addressed to this bundle identifier and no other, it ends the run and the
+session lands.
+
 *(本节英文,待中文文案改写。)*
 
 ### 13.18 M2-2 / M2-4: 交给机器的那四个动词、Delete 走的那只废纸篓、字体选择器里的真名单(`crates/bt-platform/src/handoff.rs`、`crates/bt-platform/src/macos_files.rs`、`crates/bt-platform/src/macos_fonts.rs`、`crates/bt-platform/src/{lib,portable_impl}.rs`、`crates/bt-app/src/{settings,main}.rs`、`crates/bt-render/src/lib.rs`)
