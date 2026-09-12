@@ -87569,9 +87569,13 @@ impl Runtime<'_> {
             // platform hands the press to the application, and the door it calls
             // refuses on the platform where it cannot be right.
             //
-            // Reported and not propagated: a drag that would not start is a
-            // window that stayed still, which is worth a line and not a killed
-            // press.
+            // **A press and not only a drag.** What the door does with it is
+            // the platform's business: one click picks the window up, two do
+            // whatever the reader has asked a title bar's double click to do.
+            //
+            // Reported and not propagated: a press the platform would not act
+            // on is a window that stayed still, which is worth a line and not a
+            // killed press.
             if seats::title_bar_drag_point(
                 self.window
                     .renderer
@@ -87589,7 +87593,7 @@ impl Runtime<'_> {
                 if let Err(reason) = self.window.custom_window_frame.press_title_bar() {
                     eprintln!("{reason}");
                 }
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-title-bar-drag state={state:?} button={button:?} target={traced_target:?}"));
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-title-bar state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             // The body's own bar answers first of all: it is the outermost piece
@@ -97695,7 +97699,8 @@ mod mouse_trace_station_tests {
         // and it joins the exits the other line had already counted to 23.
         // 28 → 29 on 2026-09-12: M3-3 gave the empty part of the title bar a
         // verb on the platform that hands that press to the application — the
-        // window's own drag (`at=press-title-bar-drag`).
+        // window's own, which is a drag on one click and the reader's chosen
+        // action on two (`at=press-title-bar`).
         assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 29);
     }
 
