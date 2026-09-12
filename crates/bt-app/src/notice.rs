@@ -82,6 +82,15 @@ pub enum NoticeVerb {
     /// read; the disagreement is still there and [`crate::preview::PreviewBuffer::save`]
     /// is still the thing that will report it.
     KeepMyEdits,
+    /// **Hand the file to the machine** — the one way out of a page this window
+    /// will not let you edit (owner's ruling 2026-09-12).
+    ///
+    /// The verb the refused page's card has offered since `3af60fa` and the same
+    /// door (`Runtime::open_preview_externally_on`), said on the pill that
+    /// answers a reader who has just tried to type into a file too large to
+    /// edit: a refusal with no way out is a refusal that leaves the reader
+    /// holding the file and nothing to do with it.
+    OpenExternally,
 }
 
 impl NoticeVerb {
@@ -98,6 +107,7 @@ impl NoticeVerb {
             Self::Restart => Text::TermMenuShellAgain.text(),
             Self::ReloadFromDisk => Text::PreviewDiskReload.text(),
             Self::KeepMyEdits => Text::PreviewDiskKeep.text(),
+            Self::OpenExternally => Text::PreviewOpenExternally.text(),
         }
     }
 }
@@ -151,6 +161,71 @@ impl Notice {
     }
 }
 
+/// **Which of the two shapes this notice is drawn in** (owner's ruling
+/// 2026-09-12).
+///
+/// One module and two shapes, because they are one piece of furniture answering
+/// one question — *here is something you did not ask for, and here is what you
+/// can do about it* — on two kinds of surface:
+///
+/// * a **band** across the top of a pane's body, which is what a shell's offer
+///   has always been: a terminal is a column of rows, there is nothing to float
+///   over, and a strip parked on the first line would hide output for as long as
+///   it is up. It takes a row and the body yields.
+/// * a **pill** over the bottom edge of a preview's body, which is what every
+///   preview's news is since the ruling: a document, a picture or a recording is
+///   a *surface*, and a message that lasts a second is not worth a row that
+///   stands there all day. It costs the layout nothing and the body never moves.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum NoticeShape {
+    /// A row of the pane's own layout, hairline and `×` included.
+    #[default]
+    Band,
+    /// A bubble floating over the bottom edge of a body — see
+    /// [`crate::seats::news_pill_box`], which cuts the rectangle this is laid
+    /// out in.
+    Pill,
+}
+
+/// **What one notice is saying this frame**, which is not always a [`Notice`].
+///
+/// The strip's two sentences are a fixed pair of states and choose their own
+/// verbs. A preview's pill carries those two *and* the two the ruling of
+/// 2026-09-12 gave it — a flashed confirmation with no verb at all, and the
+/// reason a page would not take an edit, whose words come from the buffer and
+/// cannot be a variant of an enum. So the layout is handed the sentence and the
+/// verbs rather than deriving them, and [`Self::band`] is how the fixed states
+/// still say themselves once.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NoticeSay<'a> {
+    pub text: &'a str,
+    pub verbs: &'a [NoticeVerb],
+    pub shape: NoticeShape,
+}
+
+impl<'a> NoticeSay<'a> {
+    /// One of the fixed states in a band — a shell's offer, and the two answers
+    /// to it.
+    #[must_use]
+    pub fn band(notice: Notice) -> Self {
+        Self {
+            text: notice.text(),
+            verbs: notice.verbs(),
+            shape: NoticeShape::Band,
+        }
+    }
+
+    /// A pill with words of its own — a confirmation, or a refusal's reason.
+    #[must_use]
+    pub fn pill(text: &'a str, verbs: &'a [NoticeVerb]) -> Self {
+        Self {
+            text,
+            verbs,
+            shape: NoticeShape::Pill,
+        }
+    }
+}
+
 /// Something on the strip the pointer can be over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoticeElement {
@@ -166,14 +241,22 @@ pub enum NoticeElement {
 #[derive(Clone, Debug, PartialEq)]
 pub struct NoticeBar {
     pub frame: [f32; 4],
+    /// Which shape this is, which the paint needs and the hit test does not: a
+    /// pill is a rounded surface of its own and a band is a row of the pane's.
+    pub shape: NoticeShape,
     /// The hairline across its foot — the whole of its separation from the
-    /// terminal below, exactly as the pane head's is.
+    /// terminal below, exactly as the pane head's is. Zero-height on a pill,
+    /// which has no row below it to be separated from.
     pub edge: [f32; 4],
     /// Where the sentence goes. What gives way in a narrow pane, because a strip
     /// whose verbs had been squeezed out would be a strip with nothing to press.
     pub text: [f32; 4],
     pub verbs: Vec<(NoticeVerb, [f32; 4])>,
-    pub close: [f32; 4],
+    /// The `×`, and **`None` on a pill**: a preview's news either expires by
+    /// itself or is a question whose own verbs are the two answers to it —
+    /// `Keep my edits` is the `×` said in words, which is the door
+    /// `Runtime::close_pane_notice` has always been (user ruling 2026-08-29).
+    pub close: Option<[f32; 4]>,
 }
 
 /// Lay the strip out in `strip`, the row [`crate::seats::pane_notice_strip`]
@@ -207,33 +290,46 @@ pub struct NoticeBar {
 /// second state leaves standing alone. What survives every width is the `×`,
 /// which is the only control that can end the asking without an answer.
 #[must_use]
-pub fn lay_out(strip: [f32; 4], notice: Notice, widths: &[f32], scale: f32) -> NoticeBar {
+pub fn lay_out(strip: [f32; 4], say: NoticeSay<'_>, widths: &[f32], scale: f32) -> NoticeBar {
     let px = |logical: f32| logical * scale;
     let hairline = px(1.0).round().max(1.0);
+    let pill = say.shape == NoticeShape::Pill;
     let middle = (strip[1] + strip[3]) / 2.0;
     let centred_box = |height: f32| {
         let top = (middle - height / 2.0).round();
         (top, top + height)
     };
 
-    let close_box = px(CLOSE_BOX_LOGICAL_PX).round();
-    let (close_top, close_bottom) = centred_box(close_box);
-    let close_right = (strip[2] - px(PADDING_RIGHT_LOGICAL_PX)).round();
-    let close = [
-        close_right - close_box,
-        close_top,
-        close_right,
-        close_bottom,
-    ];
+    // **A pill has no `×`** — its own verbs are the whole of what it offers, and
+    // the trailing column they would have kept clear of one is theirs.
+    let close = (!pill).then(|| {
+        let close_box = px(CLOSE_BOX_LOGICAL_PX).round();
+        let (close_top, close_bottom) = centred_box(close_box);
+        let close_right = (strip[2] - px(PADDING_RIGHT_LOGICAL_PX)).round();
+        [
+            close_right - close_box,
+            close_top,
+            close_right,
+            close_bottom,
+        ]
+    });
 
     let verb_height = px(VERB_HEIGHT_LOGICAL_PX).round();
     let (verb_top, verb_bottom) = centred_box(verb_height);
     let verb_padding = px(VERB_PADDING_X_LOGICAL_PX).round();
     let gap = px(GAP_LOGICAL_PX).round();
-    let text_left = (strip[0] + px(PADDING_LEFT_LOGICAL_PX)).round();
-    let mut right = close[0] - px(VERB_TRAILING_GAP_LOGICAL_PX).round();
+    let pad_left = if pill {
+        px(crate::seats::NEWS_PILL_PAD_X_LOGICAL_PX)
+    } else {
+        px(PADDING_LEFT_LOGICAL_PX)
+    };
+    let text_left = (strip[0] + pad_left).round();
+    let mut right = match close {
+        Some(close) => close[0] - px(VERB_TRAILING_GAP_LOGICAL_PX).round(),
+        None => (strip[2] - px(crate::seats::NEWS_PILL_PAD_X_LOGICAL_PX)).round(),
+    };
     let mut verbs: Vec<(NoticeVerb, [f32; 4])> = Vec::new();
-    for (verb, width) in notice.verbs().iter().rev().zip(widths.iter().rev()) {
+    for (verb, width) in say.verbs.iter().rev().zip(widths.iter().rev()) {
         let box_width = (width + 2.0 * verb_padding).round();
         let left = right - box_width;
         // **A word that does not fit is a word that is not offered**, and every
@@ -251,7 +347,7 @@ pub fn lay_out(strip: [f32; 4], notice: Notice, widths: &[f32], scale: f32) -> N
     // own furniture: the sentence is gone rather than creeping back into the
     // space the dropped word left, which would be a notice that grows its prose
     // as the pane gets smaller.
-    let all_offered = verbs.len() == notice.verbs().len();
+    let all_offered = verbs.len() == say.verbs.len();
     // Laid out right to left and read left to right, which is the order the
     // caller's `widths` are in and the order a hit test walks.
     verbs.reverse();
@@ -263,7 +359,15 @@ pub fn lay_out(strip: [f32; 4], notice: Notice, widths: &[f32], scale: f32) -> N
     };
     NoticeBar {
         frame: strip,
-        edge: [strip[0], strip[3] - hairline, strip[2], strip[3]],
+        shape: say.shape,
+        // A pill is a surface and not a row: nothing stands under it to be
+        // separated from, so its hairline has no height and the paint draws
+        // none.
+        edge: if pill {
+            [strip[0], strip[3], strip[2], strip[3]]
+        } else {
+            [strip[0], strip[3] - hairline, strip[2], strip[3]]
+        },
         text: [text_left, strip[1], text_right, strip[3]],
         verbs,
         close,
@@ -285,7 +389,7 @@ pub fn lay_out(strip: [f32; 4], notice: Notice, widths: &[f32], scale: f32) -> N
 /// plus the ellipsis, and under it the row is the buttons and the `×`.
 #[must_use]
 pub fn sentence(
-    notice: Notice,
+    say: NoticeSay<'_>,
     bar: &NoticeBar,
     font_px: f32,
     measure: &mut dyn FnMut(&str, f32) -> f32,
@@ -294,7 +398,7 @@ pub fn sentence(
     if available <= 0.0 {
         return String::new();
     }
-    let said = crate::settings::ellipsized(notice.text(), available, font_px, measure);
+    let said = crate::settings::ellipsized(say.text, available, font_px, measure);
     if said.chars().all(|character| character == '\u{2026}') {
         return String::new();
     }
@@ -308,7 +412,7 @@ pub fn hit(bar: &NoticeBar, x: f32, y: f32) -> Option<NoticeElement> {
     if !inside(bar.frame) {
         return None;
     }
-    if inside(bar.close) {
+    if bar.close.is_some_and(inside) {
         return Some(NoticeElement::Close);
     }
     Some(
@@ -338,22 +442,59 @@ pub fn build(
 ) -> OverlayLayer {
     let px = |logical: f32| logical * scale;
     let alpha = |value: u8| f32::from(value) / 255.0;
-    let mut quads = vec![
-        OverlayQuad {
-            rect: bar.frame,
-            color: palette.termhost,
-            alpha: 1.0,
-        },
-        // `--border` rather than the pane head's `--border-soft`: the head's
-        // hairline is a composite over `--termbg` and this band is not on
-        // `--termbg`, so it takes the one border in the palette that carries its
-        // own alpha and is therefore true on any ground.
-        OverlayQuad {
-            rect: bar.edge,
-            color: palette.menu_border,
-            alpha: alpha(palette.menu_border_alpha),
-        },
-    ];
+    let pill = bar.shape == NoticeShape::Pill;
+    // **A pill is a floating surface and a band is a row of the pane.**
+    //
+    // The band takes `--panel`, opaque, with the palette's one self-alpha'd
+    // border along its foot: it is furniture in the pane's own column and the
+    // thing under it is a terminal.
+    //
+    // The pill takes the raised colour every floating surface in this window
+    // takes, let down to `NEWS_PILL_GROUND_ALPHA` so the document reads through
+    // it — the ruling's own 92%: a message standing *over* a page rather than
+    // cut out of it, which is how a reader knows nothing has moved underneath.
+    // Its border is the same ring a menu wears, drawn as the outer of the two
+    // rounded fills exactly as a `border: 1px solid` border-box is.
+    let mut quads = if pill {
+        let radius = px(crate::seats::NEWS_PILL_RADIUS_LOGICAL_PX);
+        let border = px(1.0).round().max(1.0);
+        let face = [
+            bar.frame[0] + border,
+            bar.frame[1] + border,
+            bar.frame[2] - border,
+            bar.frame[3] - border,
+        ];
+        let mut quads = rounded_overlay_fill(
+            bar.frame,
+            radius,
+            palette.menu_border,
+            crate::seats::NEWS_PILL_GROUND_ALPHA,
+        );
+        quads.extend(rounded_overlay_fill(
+            face,
+            (radius - border).max(0.0),
+            palette.menu_surface,
+            crate::seats::NEWS_PILL_GROUND_ALPHA,
+        ));
+        quads
+    } else {
+        vec![
+            OverlayQuad {
+                rect: bar.frame,
+                color: palette.termhost,
+                alpha: 1.0,
+            },
+            // `--border` rather than the pane head's `--border-soft`: the head's
+            // hairline is a composite over `--termbg` and this band is not on
+            // `--termbg`, so it takes the one border in the palette that carries
+            // its own alpha and is therefore true on any ground.
+            OverlayQuad {
+                rect: bar.edge,
+                color: palette.menu_border,
+                alpha: alpha(palette.menu_border_alpha),
+            },
+        ]
+    };
     let mut labels = Vec::new();
     let mut sprites = Vec::new();
 
@@ -394,7 +535,18 @@ pub fn build(
             // The full ink of this ground against the sentence's muted one, at
             // rest and under the pointer alike: a word that only becomes ink
             // when the pointer finds it is a word nobody knows is pressable.
-            color: palette.title_text_hover,
+            //
+            // **And the accent on a pill** (owner's ruling 2026-09-12, mock
+            // §一: `.notice .act { color: var(--accent) }`). A band is a row of
+            // chrome whose words are the only pressable thing in it; a pill is a
+            // sentence floating over a document, and the one thing in it you can
+            // act on has to say so in a colour rather than by being the only
+            // text on the row.
+            color: if pill {
+                palette.accent
+            } else {
+                palette.title_text_hover
+            },
             align_right: false,
             align_center: true,
             letter_spacing_em: 0.0,
@@ -404,24 +556,26 @@ pub fn build(
         });
     }
 
-    let closing = hover == Some(NoticeElement::Close);
-    if closing {
-        quads.extend(rounded_overlay_fill(
-            bar.close,
-            px(CLOSE_RADIUS_LOGICAL_PX),
-            palette.caption_hover,
-            1.0,
+    if let Some(close) = bar.close {
+        let closing = hover == Some(NoticeElement::Close);
+        if closing {
+            quads.extend(rounded_overlay_fill(
+                close,
+                px(CLOSE_RADIUS_LOGICAL_PX),
+                palette.caption_hover,
+                1.0,
+            ));
+        }
+        sprites.push(ChromeSprite::new(
+            ChromeMark::TabClose,
+            centred(close, px(CLOSE_GLYPH_LOGICAL_PX)),
+            if closing {
+                palette.title_text_hover
+            } else {
+                palette.title_text_muted
+            },
         ));
     }
-    sprites.push(ChromeSprite::new(
-        ChromeMark::TabClose,
-        centred(bar.close, px(CLOSE_GLYPH_LOGICAL_PX)),
-        if closing {
-            palette.title_text_hover
-        } else {
-            palette.title_text_muted
-        },
-    ));
 
     OverlayLayer {
         quads,
@@ -444,14 +598,79 @@ mod tests {
 
     const STRIP: [f32; 4] = [100.0, 40.0, 700.0, 70.0];
 
+    /// A band's `×`. Every test below that reads one is about a band, where
+    /// it is always there; a pill has none by the ruling of 2026-09-12.
+    fn close_of(bar: &NoticeBar) -> [f32; 4] {
+        bar.close.expect("a band wears a close")
+    }
+
+    /// RED — **the disk-change pill keeps its two verbs and drops the `×`**
+    /// (owner's ruling 2026-09-12; §7.1.3x ②; mock §一).
+    ///
+    /// The band and the pill are one piece of furniture in two shapes, which is
+    /// why they are one module: `Reload` in a window and `Reload` in a pane have
+    /// to be the same press of the same button. What changes with the shape is
+    /// the ground it is drawn on, the ink of the word you can act on, and the
+    /// `×` — which a pill has not got, because `Keep my edits` is that door said
+    /// in words and Escape is the ladder it always was.
+    ///
+    /// RED GATE: give the pill a close box and the last assertion goes red; drop
+    /// a verb from it and the first two do.
+    #[test]
+    fn the_disk_change_pill_keeps_its_two_verbs_and_drops_the_close() {
+        let pill = lay_out(
+            STRIP,
+            NoticeSay::pill(Notice::DiskChanged.text(), Notice::DiskChanged.verbs()),
+            &[90.0, 60.0],
+            1.0,
+        );
+        assert_eq!(
+            pill.verbs.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
+            [NoticeVerb::KeepMyEdits, NoticeVerb::ReloadFromDisk],
+            "the pill offers something other than the two answers the strip offered"
+        );
+        let boxes: Vec<[f32; 4]> = pill.verbs.iter().map(|(_, box_)| *box_).collect();
+        assert!(
+            boxes[0][2] < boxes[1][0],
+            "the two words share a pixel: {boxes:?}"
+        );
+        assert_eq!(
+            boxes[1][2],
+            STRIP[2] - 10.0,
+            "the action does not stand at the pill's own right hand"
+        );
+        assert_eq!(pill.close, None, "a pill wears an × it has no room to mean");
+        assert_eq!(
+            pill.edge[3], pill.edge[1],
+            "a pill drew a hairline under itself, as though something stood below it"
+        );
+        // The sentence still takes what is left, and the words still keep their
+        // whole boxes — §7.43's order, unchanged by the shape.
+        assert!(pill.text[2] <= boxes[0][0]);
+        // A confirmation has no verbs at all, and then the sentence has the
+        // whole pill: nothing to press, and nothing that takes a press.
+        let flash = lay_out(STRIP, NoticeSay::pill("Saved", &[]), &[], 1.0);
+        assert!(flash.verbs.is_empty() && flash.close.is_none());
+        assert!(flash.text[2] > flash.text[0]);
+        // And the band is untouched: a shell's offer keeps its row, its hairline
+        // and its ×.
+        let band = lay_out(STRIP, NoticeSay::band(Notice::Offer), &[90.0, 100.0], 1.0);
+        assert!(band.close.is_some(), "the terminal's band lost its way out");
+        assert!(band.edge[3] > band.edge[1]);
+    }
+
     /// The `×` keeps the trailing column, the verbs keep theirs in the order
     /// they are read, and the sentence takes what is left — the strip's whole
     /// arithmetic, in the order it is decided.
     #[test]
     fn the_close_keeps_the_trailing_column_and_the_sentence_takes_what_is_left() {
-        let bar = lay_out(STRIP, Notice::Offer, &[90.0, 100.0], 1.0);
-        assert_eq!(bar.close[2], 692.0, "8px of padding off the right edge");
-        assert_eq!(bar.close[2] - bar.close[0], 22.0);
+        let bar = lay_out(STRIP, NoticeSay::band(Notice::Offer), &[90.0, 100.0], 1.0);
+        assert_eq!(
+            close_of(&bar)[2],
+            692.0,
+            "8px of padding off the right edge"
+        );
+        assert_eq!(close_of(&bar)[2] - close_of(&bar)[0], 22.0);
         let boxes: Vec<[f32; 4]> = bar.verbs.iter().map(|(_, box_)| *box_).collect();
         assert_eq!(
             bar.verbs.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
@@ -463,7 +682,7 @@ mod tests {
             "the two words never share a pixel: {boxes:?}"
         );
         assert!(
-            boxes[1][2] <= bar.close[0],
+            boxes[1][2] <= close_of(&bar)[0],
             "nor does the last word share one with the ×"
         );
         assert_eq!(
@@ -483,8 +702,13 @@ mod tests {
     /// nobody can act on would be the wrong half surviving.
     #[test]
     fn a_narrow_pane_keeps_its_verbs_and_gives_up_its_sentence() {
-        let bar = lay_out([0.0, 0.0, 275.0, 30.0], Notice::Offer, &[90.0, 100.0], 1.0);
-        assert_eq!(bar.close[2] - bar.close[0], 22.0);
+        let bar = lay_out(
+            [0.0, 0.0, 275.0, 30.0],
+            NoticeSay::band(Notice::Offer),
+            &[90.0, 100.0],
+            1.0,
+        );
+        assert_eq!(close_of(&bar)[2] - close_of(&bar)[0], 22.0);
         assert_eq!(bar.verbs.len(), 2);
         assert!(
             bar.text[2] <= bar.text[0],
@@ -505,7 +729,7 @@ mod tests {
     /// terminal cell that is nowhere near the pointer.
     #[test]
     fn the_strip_claims_its_whole_width_and_answers_for_every_part_of_it() {
-        let bar = lay_out(STRIP, Notice::Offer, &[90.0, 100.0], 1.0);
+        let bar = lay_out(STRIP, NoticeSay::band(Notice::Offer), &[90.0, 100.0], 1.0);
         assert_eq!(hit(&bar, 105.0, 55.0), Some(NoticeElement::Body));
         assert_eq!(hit(&bar, 690.0, 55.0), Some(NoticeElement::Close));
         let (verb, box_) = bar.verbs[0];
@@ -523,7 +747,7 @@ mod tests {
     #[test]
     fn the_written_state_offers_one_verb() {
         assert_eq!(Notice::Added.verbs(), [NoticeVerb::Restart]);
-        let bar = lay_out(STRIP, Notice::Added, &[80.0], 1.0);
+        let bar = lay_out(STRIP, NoticeSay::band(Notice::Added), &[80.0], 1.0);
         assert_eq!(bar.verbs.len(), 1);
         assert_eq!(bar.verbs[0].0, NoticeVerb::Restart);
     }
@@ -575,9 +799,9 @@ mod tests {
         let mut seen_elided = false;
         for width in (1..=900).map(|step| step as f32) {
             let strip = [0.0, 0.0, width, 30.0];
-            let bar = lay_out(strip, Notice::Offer, &widths, 1.0);
+            let bar = lay_out(strip, NoticeSay::band(Notice::Offer), &widths, 1.0);
             let available = bar.text[2] - bar.text[0];
-            let say = sentence(Notice::Offer, &bar, font, &mut measured);
+            let say = sentence(NoticeSay::band(Notice::Offer), &bar, font, &mut measured);
             seen_elided |= say.ends_with('\u{2026}');
             seen_without_every_verb |= bar.verbs.len() < Notice::Offer.verbs().len();
 
@@ -604,7 +828,7 @@ mod tests {
                     verb.text()
                 );
                 assert!(
-                    box_[2] <= bar.close[0],
+                    box_[2] <= close_of(&bar)[0],
                     "at {width}px `{}` reaches into the ×: {box_:?} / {:?}",
                     verb.text(),
                     bar.close
@@ -626,7 +850,7 @@ mod tests {
                 );
             }
             assert!(
-                bar.text[2] <= bar.close[0] || bar.text[2] <= bar.text[0],
+                bar.text[2] <= close_of(&bar)[0] || bar.text[2] <= bar.text[0],
                 "at {width}px the sentence's box runs into the ×: {:?}",
                 bar.text
             );
@@ -646,7 +870,10 @@ mod tests {
                 );
             }
             // The × is the last thing standing, at every width.
-            assert_eq!(bar.close[2] - bar.close[0], (CLOSE_BOX_LOGICAL_PX).round());
+            assert_eq!(
+                close_of(&bar)[2] - close_of(&bar)[0],
+                (CLOSE_BOX_LOGICAL_PX).round()
+            );
         }
         assert!(
             seen_elided,
@@ -673,7 +900,12 @@ mod tests {
             .iter()
             .map(|verb| measured(verb.text(), font))
             .collect();
-        let bar = lay_out([0.0, 0.0, 660.0, 30.0], Notice::Offer, &widths, 1.0);
+        let bar = lay_out(
+            [0.0, 0.0, 660.0, 30.0],
+            NoticeSay::band(Notice::Offer),
+            &widths,
+            1.0,
+        );
         assert_eq!(bar.verbs.len(), 2, "both words fit a 660px row whole");
         assert!(
             bar.text[2] <= bar.verbs[0].1[0],
@@ -681,7 +913,7 @@ mod tests {
             bar.text,
             bar.verbs
         );
-        let say = sentence(Notice::Offer, &bar, font, &mut measured);
+        let say = sentence(NoticeSay::band(Notice::Offer), &bar, font, &mut measured);
         let layer = build(&bar, &say, None, &bt_render::chrome_palette(), 1.0);
         for label in &layer.labels {
             assert!(
