@@ -1074,9 +1074,20 @@ mod macos_handoff {
             // found that file gone — which is a *modal* question on this
             // platform, and a modal question is one no quit request gets past.
             // So the wait is here, before the file goes.
+            //
+            // **And "is it gone" is asked the same way "is it there" was.**
+            // `isTerminated` is KVO-backed and reads the same cache the
+            // workspace's array does, so on this thread it answers `false` for
+            // a process that has already quit; the honest question is whether
+            // LaunchServices still lists the instance.
+            let mut gone = ended.is_none();
             if let Some(ended) = &ended {
                 for _ in 0..50 {
-                    if ended.isTerminated() {
+                    if !standing(&handler)
+                        .iter()
+                        .any(|running| **running == **ended)
+                    {
+                        gone = true;
                         break;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1087,11 +1098,13 @@ mod macos_handoff {
             // application standing on somebody's desk should say so rather than
             // let them find it.
             println!(
-                "handed the document to {handler}; {} were running before; ended: {}",
+                "handed the document to {handler}; {} were running before; {}",
                 before.len(),
-                match &ended {
-                    Some(app) => format!("{}", app.isTerminated()),
-                    None => "nothing new appeared to end".to_owned(),
+                match (&ended, gone) {
+                    (None, _) => "nothing new appeared to end".to_owned(),
+                    (Some(_), true) => "the one this opened has gone again".to_owned(),
+                    (Some(_), false) =>
+                        "the one this opened was asked to quit and is still standing".to_owned(),
                 }
             );
             let _ = std::fs::remove_dir_all(&root);
