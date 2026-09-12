@@ -20919,6 +20919,7 @@ mod tests {
             rgba: Arc::from(vec![0x7f; width_px as usize * height_px as usize * 4]),
             width_px,
             height_px,
+            native_size: None,
             animated,
         }
     }

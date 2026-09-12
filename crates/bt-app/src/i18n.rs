@@ -726,6 +726,29 @@ pub enum Text {
     /// The clause that gets filled into [`not_saved`].
     PreviewNothingToSave,
     PreviewFailedImageLoad,
+    /// **A picture file longer than the picture lane will read** (owner's ruling
+    /// 2026-09-12; `bt_term::MAX_LOCAL_IMAGE_FILE_BYTES`).
+    ///
+    /// Its own sentence and not [`Self::PreviewFailedImageLoad`], for the reason
+    /// [`Self::PreviewAnimationFileTooLong`] is not
+    /// [`Self::PreviewAnimationTooLarge`]: "could not be loaded" is what a
+    /// broken file gets, and a reader whose perfectly good 80 MB scan was
+    /// declined for its length would go looking for the fault in the file.
+    PreviewFailedFileTooLarge,
+    /// **And the other size**: the picture inside the file has more pixels than
+    /// this build will decode at all. Every picture between that line and the
+    /// one this program *holds* is reduced and shown, so a reader who sees this
+    /// sentence is looking at something genuinely enormous.
+    PreviewFailedTooManyPixels,
+    /// **The lead of the meta line's second field**, when the pixels on the
+    /// glass are a reduction of the file's own (owner's ruling 2026-09-12) —
+    /// `6000 × 4000 · shown at 5016 × 3344 · PNG · 92.0 MB`.
+    ///
+    /// A word and not a sentence, because the two numbers either side of it are
+    /// spelled once for the whole window (`preview::format_pixel_size`) and this
+    /// is the only part of the field there is anything to translate in. See
+    /// [`picture_shown_at`], which is where it is joined to them.
+    PictureShownAt,
     /// One string for the three call sites that used to spell it out separately.
     PreviewFailedImageWorker,
     PreviewFailedSeatTooSmall,
@@ -3014,6 +3037,17 @@ impl Text {
                 "Preview failed: image could not be loaded",
                 "预览失败：图片无法载入",
             ),
+            Self::PreviewFailedFileTooLarge => pick(
+                lang,
+                "Preview failed: this picture file is too large",
+                "预览失败：图片文件过大",
+            ),
+            Self::PreviewFailedTooManyPixels => pick(
+                lang,
+                "Preview failed: this picture has too many pixels",
+                "预览失败：图片像素过多",
+            ),
+            Self::PictureShownAt => pick(lang, "shown at", "显示为"),
             // **Not "image worker"** (user ruling 2026-08-29): the reader has
             // never met the thing that stopped, and naming it tells them
             // nothing they can act on. What is true and useful is that this
@@ -4437,7 +4471,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 612] = [
+    pub const ALL: [Self; 615] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -4585,6 +4619,9 @@ impl Text {
         Self::PreviewConflict,
         Self::PreviewNothingToSave,
         Self::PreviewFailedImageLoad,
+        Self::PreviewFailedFileTooLarge,
+        Self::PreviewFailedTooManyPixels,
+        Self::PictureShownAt,
         Self::PreviewFailedImageWorker,
         Self::PreviewFailedSeatTooSmall,
         Self::FloatDock,
@@ -5095,8 +5132,9 @@ impl Text {
     /// created it.
     #[cfg(test)]
     const CHINESE_PENDING: [Self; 0] = [
-        // zh: pending — the foot line for a `.gif` longer than this window will
-        // read (user report 2026-09-12).
+        // zh: pending — the two refusals a picture file raises on its own size,
+        // and the word that joins a reduced picture's two sizes (owner's ruling
+        // 2026-09-12).
     ];
 }
 
@@ -5967,6 +6005,56 @@ fn window_row_in(lang: Lang, ordinal: usize, tabs: usize) -> String {
         Lang::English if tabs == 1 => format!("Window {ordinal} · 1 tab"),
         Lang::English => format!("Window {ordinal} · {tabs} tabs"),
         Lang::Chinese => format!("窗口 {ordinal} · {tabs} 个标签"),
+    }
+}
+
+/// **The meta line's second field**, when the pixels under it are a reduction of
+/// the file's own (owner's ruling 2026-09-12) — see [`Text::PictureShownAt`].
+///
+/// The numbers come from `preview::format_pixel_size`, the one spelling of a
+/// picture's size in this window, so a reduced picture's two sizes are written
+/// the same way as every other size the program prints.
+#[must_use]
+pub fn picture_shown_at(width: u32, height: u32) -> String {
+    format!(
+        "{} {}",
+        Text::PictureShownAt.text(),
+        crate::preview::format_pixel_size(width, height)
+    )
+}
+
+/// **Why this picture is not on the glass** (owner's ruling 2026-09-12).
+///
+/// It takes the **error** and not a rendered string, which is
+/// [`background_picture_refused`]'s arrangement and for its reason: the refusals
+/// a picture raises about its own *size* are facts this table can say in either
+/// language, and a `to_string()` at the worker would have arrived here in
+/// English with nothing left to translate.
+///
+/// **One sentence per verdict, wherever the pane hears it.** The two call sites
+/// used to disagree: the surface that happened to be watching when the answer
+/// landed got the decoder's `Display`, and a surface that opened the same file
+/// afterwards got [`Text::PreviewFailedImageLoad`] — two sentences about one
+/// file, chosen by timing. They come through here now.
+///
+/// Three verdicts keep an untranslated clause, and each is a **known seam**
+/// recorded in the inventory's §E exactly as [`not_saved`]'s is: an `io::Error`
+/// is the operating system's own sentence, a decode failure is the decoder's,
+/// and both say something the reader can act on that no table entry could. Every
+/// other verdict is a fact about the file with no detail to add, and gets the
+/// one sentence this table has always had for it.
+#[must_use]
+pub fn picture_refused(error: &bt_term::InlineImageDecodeError) -> String {
+    use bt_term::InlineImageDecodeError as Refusal;
+    match error {
+        Refusal::FileTooLarge { .. } => Text::PreviewFailedFileTooLarge.text().to_owned(),
+        Refusal::TooManyPixels => Text::PreviewFailedTooManyPixels.text().to_owned(),
+        Refusal::Io(reason) | Refusal::Decode(reason) => preview_failed(reason),
+        Refusal::InvalidBase64
+        | Refusal::TooLarge
+        | Refusal::InvalidPath
+        | Refusal::UnsupportedFormat
+        | Refusal::InvalidDimensions => Text::PreviewFailedImageLoad.text().to_owned(),
     }
 }
 
