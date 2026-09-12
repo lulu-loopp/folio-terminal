@@ -28,6 +28,16 @@
 //! is a set of ordinary functions with ordinary tests, because the one thing
 //! that can be wrong here is a string and a string can be shot at without
 //! launching anything.
+//!
+//! **And on macOS it is the same module with a second shell behind it** (M2-2).
+//! `macos_handoff` holds the only `NSWorkspace` hand-off in the workspace for
+//! the same reason `windows_handoff` holds the only `ShellExecuteW`: the four
+//! verbs are one decision about what a real target is, and the decision does
+//! not become four decisions because there are two machines. What it does
+//! become is **two readings of a path**, and that is the one thing the crossing
+//! genuinely changes — Win32's grammar (drive letters, `PATHEXT`, the
+//! trailing-dot trim) versus POSIX's (bytes, a leading `/`, the execute bit) —
+//! so each arm states its own and neither borrows the other's.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -82,7 +92,9 @@ const ALWAYS_A_PROGRAM: &[&str] = &[
 ///
 /// `#[cfg(windows)]` with the search that reads it. On Unix the question this
 /// answers — which spellings of a bare name are a program — is the execute bit
-/// and not an extension list, which is M2-2's to write.
+/// and not an extension list; `macos_handoff::opening_it_would_run_it` is where
+/// that question is really asked, and it is asked of a file rather than of a
+/// name.
 #[cfg(windows)]
 const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
 
@@ -394,18 +406,17 @@ pub fn program_in_directories(
 }
 
 /// **The five verbs that leave this window, on a platform whose shell has not
-/// been asked yet** (M2-2 owns the process door: `NSWorkspace.openURL:`,
-/// `openURLs:withApplicationAtURL:` and
-/// `activateFileViewerSelectingURLs:` for the reveal).
+/// been asked yet** (M2-2 wrote the macOS arm next door; this is what a third
+/// platform still meets).
 ///
 /// Three things are worth reading here rather than in a ticket.
 ///
 /// **The window goes.** Every one of these took an `HWND` because
 /// `ShellExecuteW` takes one — it is the window an error box would be parented
 /// to. `NSWorkspace` has nothing to be given, so on macOS the parameter is
-/// spare exactly as the clipboard's was (M1-9); it stays in the signature for
-/// now because the Windows arm still needs it, and dropping it is M2-2's to do
-/// with the rest of this door.
+/// spare exactly as the clipboard's was (M1-9); it stays in the signature
+/// because the Windows arm still needs it, and a door in this crate has one
+/// signature (§4.4 ②).
 ///
 /// **The refusal is not the same as `PROGRAM_REFUSED`.** That sentence is *this
 /// window will not run programs*, a product rule the caller matches on and
@@ -417,22 +428,39 @@ pub fn program_in_directories(
 /// `names_a_program` still run on the caller's side of these doors, and their
 /// grammar is Windows' — `PATHEXT`, drive letters, the trailing-dot trim. On
 /// Unix the question "is this a program" is the execute bit and the answer is
-/// a different one; M2-2 states that rather than letting a Windows reading of a
-/// Unix path decide anything, which is the second reason these refuse today
-/// instead of quietly calling `open`.
+/// a different one; `macos_handoff` states that rather than letting a Windows
+/// reading of a Unix path decide anything, and until a third platform has a
+/// shell backend of its own that is the second reason these refuse instead of
+/// quietly calling `open`.
 #[cfg(not(windows))]
 mod portable_handoff {
     use std::path::{Path, PathBuf};
 
+    #[cfg(not(target_os = "macos"))]
     use crate::NativeWindow;
 
     /// The sentence all five say.
+    #[cfg(not(target_os = "macos"))]
     fn not_here(what: &str) -> String {
         format!("{what} is not on this platform yet")
     }
 
-    /// Where a bare program name resolves on `PATH`. Refused: the resolution
-    /// rule here is the execute bit rather than `PATHEXT`, and M2-2 writes it.
+    /// **Where a bare program name resolves on `PATH`, and off Windows nowhere**
+    /// — this arm's one door that macOS takes too (M2-2 looked at it and left
+    /// it).
+    ///
+    /// The refusal is M1-10's and it is a decision rather than a gap. `PATHEXT`
+    /// is the Windows spelling of "which spellings of this bare name are a
+    /// program", and the POSIX question is a different one — the execute bit —
+    /// so the two are not one rule with a parameter. Writing the POSIX search
+    /// here would be writing a door with no caller: the one reader of this name
+    /// is `attention_copilot::run_probe`, which is inside one of the eleven
+    /// `#[cfg(windows)]` arms §4.3 of the plan lists, and a Mac has no copilot
+    /// probe until the ticket that decides what discovering an agent means on
+    /// this platform (M4-6's neighbourhood, plan §4.3). Porting the shape
+    /// rather than the behaviour is the mistake the backend inventory's §5 asks
+    /// the port not to make; the honest answer until then is the refusal, and
+    /// `a_posix_program_is_looked_for_where_an_administrator_put_it` holds it.
     #[must_use]
     pub fn program_on_path(name: &Path) -> Option<PathBuf> {
         let _ = name;
@@ -440,41 +468,564 @@ mod portable_handoff {
     }
 
     /// Open one already-policy-checked address with the system's handler.
+    #[cfg(not(target_os = "macos"))]
     pub fn shell_execute(window: NativeWindow, target: &str) -> Result<(), String> {
         let _ = (window, target);
         Err(not_here("opening an address"))
     }
 
     /// Open one worker-validated local image with its default handler.
+    #[cfg(not(target_os = "macos"))]
     pub fn open_local_file(window: NativeWindow, path: &Path) -> Result<(), String> {
         let _ = (window, path);
         Err(not_here("opening a file"))
     }
 
     /// Open one file a person picked out of a directory listing.
+    #[cfg(not(target_os = "macos"))]
     pub fn open_local_path(window: NativeWindow, path: &Path) -> Result<(), String> {
         let _ = (window, path);
         Err(not_here("opening a file"))
     }
 
     /// Show a file in the file manager.
+    #[cfg(not(target_os = "macos"))]
     pub fn reveal_in_explorer(window: NativeWindow, path: &Path) -> Result<(), String> {
         let _ = (window, path);
         Err(not_here("showing a file in the file manager"))
     }
 
     /// Open the system's font page — Font Book, or the fonts folder.
+    #[cfg(not(target_os = "macos"))]
     pub fn open_system_fonts_page(window: NativeWindow) -> Result<(), String> {
         let _ = window;
         Err(not_here("the system font settings"))
     }
 }
 
+/// **`program_on_path` has one arm off Windows and macOS takes it too**, which
+/// is why it is re-exported on its own rather than with the five beside it.
 #[cfg(not(windows))]
+pub use portable_handoff::program_on_path;
+
+/// The other five, on a platform with neither a Win32 shell nor a `NSWorkspace`.
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub use portable_handoff::{
-    open_local_file, open_local_path, open_system_fonts_page, program_on_path, reveal_in_explorer,
-    shell_execute,
+    open_local_file, open_local_path, open_system_fonts_page, reveal_in_explorer, shell_execute,
 };
+
+/// **The five verbs that leave this window, over `NSWorkspace`** (M2-2).
+#[cfg(target_os = "macos")]
+pub use macos_handoff::{
+    open_local_file, open_local_path, open_system_fonts_page, reveal_in_explorer, shell_execute,
+};
+
+/// **Everything this product gives to the machine, on a Mac** — the macOS twin
+/// of `windows_handoff`, and the ninth unsafe boundary in this crate (M2-2).
+///
+/// # The thread, and why this file has no gate where `macos_impl` has one
+///
+/// Every door in `macos_impl` begins by proving it is on the main thread,
+/// because everything in it is `NSWindow`, `NSScreen` and `NSView` — AppKit's
+/// view layer, which is the main thread's or it is undefined behaviour. **These
+/// doors are not that**, and the difference is not a relaxation somebody took:
+/// `NSWorkspace` owns no view and draws nothing. What it does is send a request
+/// to LaunchServices and, for the reveal, an Apple event to Finder; the window
+/// the file opens in belongs to another process.
+///
+/// The citation is Apple's own, and it is a rule rather than a sentence about
+/// this class. The *Thread Safety Summary* (Cocoa Multithreading Programming
+/// Guide) lists the Foundation and AppKit classes that are thread-safe and the
+/// ones that are not, and says of everything it does not list: **"In most
+/// cases, you can use these classes from any thread as long as you use them
+/// from only one thread at a time."** `NSWorkspace` is on neither list, and its
+/// own class reference states no thread requirement — unlike `NSView`,
+/// `NSWindow` and `NSApplication`, each of which says outright that it is the
+/// main thread's. So the honest statement is the one this file makes: **there
+/// is no main-thread requirement to prove here, and a gate in front of a call
+/// that does not need one would be a check that proves nothing** — which is
+/// what `every_macos_window_door_proves_its_thread_before_it_calls_appkit`
+/// already says about the two doors in `macos_impl` that reach no AppKit.
+///
+/// What these calls *are* is **synchronous and blocking**: `openURL:` waits on
+/// a LaunchServices round trip, which is why Apple added
+/// `openURL:configuration:completionHandler:` beside it. That is the same
+/// bargain the Windows arm takes — `ShellExecuteW` blocks the window thread
+/// too — and taking the asynchronous form would mean a completion block, a
+/// package (`block2`) and a second answer arriving after the caller has already
+/// been told `Ok`. A door whose `Result` is a real answer is worth the wait
+/// this one costs.
+///
+/// # The window is spare, and stays in the signature
+///
+/// Each of these takes a `NativeWindow` because `ShellExecuteW` takes an
+/// `HWND` — the window an error box is parented to. `NSWorkspace` has nothing
+/// to be given one. The parameter stays because a door in this crate has one
+/// signature on every platform (§4.4 ②, M1-9), and it is consumed with
+/// `let _ = window;` at the top of each body so that a reader meets the fact
+/// rather than deducing it.
+///
+/// # The path gate is this platform's, not Windows'
+///
+/// [`validate_openable_path`] wants a drive letter or a UNC share and
+/// [`names_a_program`] reads `PATHEXT`. Neither is a question about a Unix
+/// path, so neither is asked here; `openable_unix_path` and
+/// `opening_it_would_run_it` are, and they are two paragraphs rather than two
+/// translations. See each for what it decided and what it costs.
+#[cfg(target_os = "macos")]
+mod macos_handoff {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSArray, NSString, NSURL, ns_string};
+
+    use super::PROGRAM_REFUSED;
+    use crate::NativeWindow;
+    use crate::macos_files::file_url;
+
+    /// **The shape gate every path this module hands to the workspace keeps**,
+    /// and it is three lines because a POSIX path has three ways of not being
+    /// one.
+    ///
+    /// The Windows twin, [`super::validate_openable_path`], is long because
+    /// Win32 has a path *grammar*: drive letters, UNC shares, verbatim prefixes
+    /// that turn normalisation off, a trailing-dot trim that makes two
+    /// spellings one file. None of that exists here. A POSIX path is bytes with
+    /// `/` between them, it is absolute when the first byte is `/`, and the one
+    /// byte it may never contain is NUL — because that is the terminator of the
+    /// C string the kernel is handed, so a path carrying one would reach the
+    /// file system cut short at a different file.
+    ///
+    /// **Relative is refused rather than resolved**, for `program_in_directories`'
+    /// reason one floor down: what a relative path resolves against is this
+    /// process's working directory, which is whatever folder the shell that
+    /// started Folio was standing in — not something a reader pointed at.
+    fn openable_unix_path(path: &Path) -> Result<(), String> {
+        let bytes = path.as_os_str().as_bytes();
+        if bytes.is_empty() {
+            return Err("path is empty".to_owned());
+        }
+        if bytes.contains(&0) {
+            return Err("path contains an embedded NUL".to_owned());
+        }
+        if !path.is_absolute() {
+            return Err("path must be absolute".to_owned());
+        }
+        Ok(())
+    }
+
+    /// The narrower gate the image lane keeps: absolute, and a picture.
+    ///
+    /// The macOS reading of [`super::validate_local_image_path`], with the one
+    /// clause that was Windows' — drive-rooted — replaced by this platform's
+    /// answer to the same question and the extension list left exactly as it
+    /// is, because that list is the decoder's and the decoder is the same
+    /// program on both machines.
+    fn openable_local_image(path: &Path) -> Result<(), String> {
+        openable_unix_path(path).map_err(|reason| format!("local image {reason}"))?;
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let allowed = name
+            .rsplit_once('.')
+            .map(|(_, extension)| extension.to_ascii_lowercase())
+            .is_some_and(|extension| crate::IMAGE_FILE_EXTENSIONS.contains(&extension.as_str()));
+        if !allowed {
+            return Err("local image path extension is not supported".to_owned());
+        }
+        Ok(())
+    }
+
+    /// **Whether opening this would run it rather than show it, on macOS.**
+    ///
+    /// The product rule is `DESIGN.md` §7.1.3's and it does not change at the
+    /// border: *the tree is a way of looking at files, and the thing next to it
+    /// that runs programs is the terminal.* What changes is the fact the rule
+    /// is asked of. Windows answers with an extension list, because Windows
+    /// decides what a file is by its extension and `ShellExecuteW` on a `.exe`
+    /// runs it. macOS decides by type, and **opening a document here never
+    /// executes it** — LaunchServices hands it to the application registered
+    /// for its type. There are exactly two shapes where opening *is* running,
+    /// and they are what this asks about:
+    ///
+    /// ① **a bundle** — a directory whose name ends in `.app`. Double-clicking
+    ///    one launches it, and that is the whole of what an application is on
+    ///    this platform. Other packages (`.bundle`, `.framework`,
+    ///    `.qlgenerator`) are libraries something else loads; opening one in
+    ///    Finder shows a folder.
+    /// ② **a file with the execute bit** — which is how a Mach-O binary, a
+    ///    `.command` and a shell script with no extension at all get typed
+    ///    `public.unix-executable`, the type Terminal is registered to *run*.
+    ///
+    /// **The cost, said out loud.** ② is coarser than the type system it stands
+    /// in for: a `readme.txt` somebody has `chmod +x`'d is `public.plain-text`
+    /// to LaunchServices and would open in TextEdit, and this refuses it. That
+    /// is the safe direction and the recoverable one — the reader is holding a
+    /// window that will show them the file itself, and the refusal names the
+    /// rule — where the other direction is a row in a files tree that ran
+    /// something. Asking LaunchServices for the real type would mean the
+    /// `UniformTypeIdentifiers` framework and a package this crate does not
+    /// carry, for a sharper answer to a question whose wrong answers are not
+    /// symmetric.
+    ///
+    /// **The disk is asked once, by the caller**, and this is the rule over
+    /// what it said — for [`super::reveal_arguments`]' reason turned into a
+    /// shape: the execute bit is not in the name, so a rule read off a string
+    /// would be answering about a file nobody has looked at, and a rule that
+    /// did its own `stat` would be a second one the call below could disagree
+    /// with. The `metadata` here is the same one the URL's `isDirectory` is
+    /// built from.
+    fn opening_it_would_run_it(path: &Path, metadata: &std::fs::Metadata) -> bool {
+        if metadata.is_dir() {
+            return path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"));
+        }
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    /// Hand one URL to LaunchServices, and say so when it will not take it.
+    ///
+    /// `openURL:` answers `NO` for a URL with no registered handler, a scheme
+    /// this machine has nothing for, and a file that is not there. It does not
+    /// say *which*, so neither does this: what the caller puts in front of a
+    /// reader is the target it asked for and the fact the machine declined it,
+    /// which is the same shape the Windows arm's `ShellExecuteW` failure has.
+    fn hand_over(url: &NSURL, what: &str) -> Result<(), String> {
+        let workspace = NSWorkspace::sharedWorkspace();
+        if workspace.openURL(url) {
+            Ok(())
+        } else {
+            Err(format!("the system has nothing registered to open {what}"))
+        }
+    }
+
+    /// Ask the workspace to open one already-policy-checked address with its
+    /// registered default handler.
+    ///
+    /// Scheme allowlisting deliberately belongs to the caller — in this product
+    /// that is `webnav::address_bar`, which every caller passes through — and
+    /// this bridge supplies the parse. `URLWithString:` is that parse, and its
+    /// refusal is the honest one: a string that is not a URL never reaches
+    /// LaunchServices, so there is nothing here for a target to be reparsed as.
+    pub fn shell_execute(window: NativeWindow, target: &str) -> Result<(), String> {
+        let _ = window;
+        if target.contains('\0') {
+            return Err("address contains an embedded NUL".to_owned());
+        }
+        let text = NSString::from_str(target);
+        let url = NSURL::URLWithString(&text)
+            .ok_or_else(|| format!("{target} is not an address this system can read"))?;
+        hand_over(&url, target)
+    }
+
+    /// Open one worker-validated local image with its registered default
+    /// handler.
+    ///
+    /// The caller must obtain `path` from a successful image decode record,
+    /// never directly from terminal text; this bridge independently enforces
+    /// the slice's syntax policy over the path it is handed, exactly as the
+    /// Windows arm does, with this platform's spelling of "absolute".
+    pub fn open_local_file(window: NativeWindow, path: &Path) -> Result<(), String> {
+        let _ = window;
+        openable_local_image(path)?;
+        let url = file_url(path, false)?;
+        hand_over(&url, &path.to_string_lossy())
+    }
+
+    /// Open one file the user picked out of a directory listing with its
+    /// registered default handler — and never run a program.
+    ///
+    /// The two gates are [`openable_unix_path`] and [`opening_it_would_run_it`],
+    /// and the second is the product rule the files column matches on:
+    /// [`PROGRAM_REFUSED`] is the sentence `bt-app` turns into *the tree does
+    /// not run programs*, and every other refusal here is a fact about the
+    /// machine that the same caller shows as a toast.
+    pub fn open_local_path(window: NativeWindow, path: &Path) -> Result<(), String> {
+        let _ = window;
+        openable_unix_path(path)?;
+        let metadata = std::fs::metadata(path).map_err(|error| format!("{path:?}: {error}"))?;
+        if opening_it_would_run_it(path, &metadata) {
+            return Err(PROGRAM_REFUSED.to_owned());
+        }
+        let url = file_url(path, metadata.is_dir())?;
+        hand_over(&url, &path.to_string_lossy())
+    }
+
+    /// Open Finder on a path, with the file **selected** inside its folder.
+    ///
+    /// `activateFileViewerSelectingURLs:` is `explorer /select,` without the
+    /// command line: it takes an array of `NSURL`, Finder opens the containing
+    /// folder for each and selects the item. A folder passed to it is selected
+    /// in *its* parent, which is one level further out than a foot pointing at
+    /// a root is offering — so a directory is opened instead, which is
+    /// [`super::reveal_arguments`]' ruling and the same reading of it.
+    ///
+    /// **The disk is asked first, and that is the whole of this door's
+    /// `Result`.** `activateFileViewerSelectingURLs:` returns nothing: it posts
+    /// a request to Finder and a path that is not there produces no window and
+    /// no answer. So the refusal has to be made before the call, which is
+    /// exactly why the Windows arm canonicalises too — there, an argument that
+    /// named nothing left Explorer opening a folder nobody asked for. Here
+    /// `canonicalize` resolves the symlinks Finder would resolve, settles `..`,
+    /// and fails in the operating system's own words when the path is gone.
+    ///
+    /// **No program is refused and none can be started.** A `.app` revealed is
+    /// a `.app` sitting selected in a folder window, which is what somebody
+    /// asking "where is this" wants to see — the same reasoning the Windows arm
+    /// gives for having no extension gate on its reveal.
+    pub fn reveal_in_explorer(window: NativeWindow, path: &Path) -> Result<(), String> {
+        let _ = window;
+        openable_unix_path(path)?;
+        let real = std::fs::canonicalize(path).map_err(|error| format!("{path:?}: {error}"))?;
+        let directory = std::fs::metadata(&real)
+            .map_err(|error| format!("{real:?}: {error}"))?
+            .is_dir();
+        let url = file_url(&real, directory)?;
+        let workspace = NSWorkspace::sharedWorkspace();
+        if directory {
+            // A folder is *opened*, not selected in its parent. `openURL:` on a
+            // folder is what Finder does with a double click, and it answers
+            // whether it took it — which is more than the viewer call can say.
+            return hand_over(&url, &real.to_string_lossy());
+        }
+        workspace.activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
+        Ok(())
+    }
+
+    /// **Open the system's font page** (user ruling 2026-08-19), which on macOS
+    /// is Font Book.
+    ///
+    /// The Windows arm hands `ShellExecuteW` a `ms-settings:` URI and falls
+    /// back to `%WINDIR%\Fonts` through Explorer. Neither half crosses: this
+    /// platform has no settings URI for fonts, and the folders a font lives in
+    /// (`/System/Library/Fonts`, `/Library/Fonts`, `~/Library/Fonts`) are three
+    /// places rather than one, so opening "the fonts folder" would be choosing
+    /// one of them on the reader's behalf. Font Book is the single answer, and
+    /// it is what a Mac installs a font with.
+    ///
+    /// **LaunchServices is asked where it is, rather than told.**
+    /// `/System/Applications/Font Book.app` is where it stands today and a path
+    /// spelled here would be a claim that goes stale on an OS update — the
+    /// mistake `bt-render`'s macOS font loader documents at length about the
+    /// `AssetsV2` font assets. `URLForApplicationWithBundleIdentifier:` asks the
+    /// database that actually knows, and its `nil` is the honest refusal for a
+    /// machine whose Font Book has been removed.
+    ///
+    /// **This product installs and deletes nothing**, which is the Windows
+    /// arm's closing paragraph and is not a platform fact: a font is a
+    /// machine-wide resource and the door is the whole feature.
+    pub fn open_system_fonts_page(window: NativeWindow) -> Result<(), String> {
+        let _ = window;
+        let workspace = NSWorkspace::sharedWorkspace();
+        let url = workspace
+            .URLForApplicationWithBundleIdentifier(ns_string!("com.apple.FontBook"))
+            .ok_or_else(|| "this machine has no Font Book".to_owned())?;
+        hand_over(&url, "the system font settings")
+    }
+
+    /// **These run on a Mac and only on a Mac**, which is the point of them:
+    /// every rule above is a claim about what LaunchServices and Finder do, and
+    /// a claim about another program's behaviour cannot be checked by a source
+    /// pin. The Windows side of this ticket holds the *signatures* instead
+    /// (`macos_process_door_tests`).
+    ///
+    /// **Two of them make something visible happen on the desk**, and that is
+    /// deliberate rather than careless — a door that reports success while
+    /// nothing opened is precisely the failure they exist to catch. Each says
+    /// in its own note what it leaves behind and what it takes back.
+    #[cfg(test)]
+    mod tests {
+        use std::path::PathBuf;
+
+        use objc2::rc::Retained;
+        use objc2_app_kit::NSRunningApplication;
+
+        use super::*;
+
+        /// A directory of this test's own, under the system's temporary
+        /// directory and named for this process, removed however the case ends.
+        fn scratch(name: &str) -> PathBuf {
+            let directory =
+                std::env::temp_dir().join(format!("folio-handoff-{}-{name}", std::process::id()));
+            std::fs::create_dir_all(&directory).expect("a scratch directory");
+            directory
+        }
+
+        /// RED — **the tree does not run programs, and on this platform that is
+        /// a fact about the file rather than about its name.**
+        ///
+        /// The two shapes where opening is running, and the one where it is
+        /// not, each asked of a real file on a real disk: a `.app` directory, a
+        /// file with the execute bit, and an ordinary document.
+        ///
+        /// MUTATION: drop the directory clause and a bundle in a files column
+        /// becomes a row that launches an application; drop the mode clause and
+        /// a shell script becomes a row that runs it in Terminal.
+        #[test]
+        fn opening_a_bundle_or_an_executable_would_run_it_and_a_document_would_not() {
+            let root = scratch("programs");
+            let bundle = root.join("Thing.app");
+            std::fs::create_dir_all(&bundle).expect("a bundle");
+            let folder = root.join("plain-folder");
+            std::fs::create_dir_all(&folder).expect("a folder");
+            let script = root.join("run-me");
+            std::fs::write(&script, b"#!/bin/sh\nexit 0\n").expect("a script");
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("the execute bit");
+            let document = root.join("notes.txt");
+            std::fs::write(&document, b"x").expect("a document");
+
+            let says = |path: &std::path::Path| {
+                let metadata = std::fs::metadata(path).expect("a file that is there");
+                opening_it_would_run_it(path, &metadata)
+            };
+            assert!(says(&bundle), "a `.app` is what an application is here");
+            assert!(says(&script), "the execute bit is the type Terminal runs");
+            assert!(!says(&folder), "an ordinary folder opens in Finder");
+            assert!(!says(&document), "a document opens in its editor");
+
+            // And the door itself says the product's sentence for the first two,
+            // which is the one `bt-app` matches on.
+            let window = crate::NativeWindow::stand_in(0);
+            for program in [&bundle, &script] {
+                assert_eq!(
+                    open_local_path(window, program),
+                    Err(PROGRAM_REFUSED.to_owned()),
+                    "{program:?} is a program and this door does not run one"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// RED — **every refusal this door can give is a sentence, and none of
+        /// them is the product's own.**
+        ///
+        /// A relative path, a path that is not there, a picture lane handed
+        /// something that is not a picture, a reveal of nothing, and an address
+        /// carrying a NUL: five different mistakes, five reasons a toast can
+        /// carry, and not one of them
+        /// [`PROGRAM_REFUSED`] — which `bt-app` matches with `.contains` and
+        /// turns into *the tree does not run programs*. A refusal that
+        /// accidentally carried that sentence would tell a reader their file is
+        /// an executable because the disk was busy.
+        ///
+        /// **Nothing opens.** Each of these is the real call, and each is
+        /// refused before LaunchServices is reached.
+        #[test]
+        fn a_refusal_carries_its_own_reason_and_never_the_products() {
+            let window = crate::NativeWindow::stand_in(0);
+            let missing = scratch("refusals").join("not-here.txt");
+            let refusals = [
+                open_local_path(window, std::path::Path::new("notes/a.txt")),
+                open_local_path(window, &missing),
+                open_local_file(window, std::path::Path::new("/tmp/a.txt")),
+                reveal_in_explorer(window, &missing),
+                shell_execute(window, "https://example.invalid/\0"),
+            ];
+            for refusal in refusals {
+                let reason = refusal.expect_err("each of these is refused");
+                assert!(!reason.is_empty(), "a refusal says something");
+                assert!(
+                    !reason.contains(PROGRAM_REFUSED),
+                    "a refusal about the machine wears the product's sentence: {reason:?}"
+                );
+            }
+            let _ = std::fs::remove_dir_all(scratch("refusals"));
+        }
+
+        /// RED — **a reveal asks the disk before it asks Finder**, because
+        /// `activateFileViewerSelectingURLs:` has no answer of its own.
+        ///
+        /// The `Result` this door gives is made entirely of what the file
+        /// system said: canonicalise, `stat`, and only then post the request.
+        /// So the case worth pinning is the pair — a path that is gone is an
+        /// `Err` in the operating system's own words, and a path that is there
+        /// is `Ok`.
+        ///
+        /// **This opens one Finder window**, on a directory under the system's
+        /// temporary folder, and leaves it open: closing somebody else's window
+        /// needs an Apple event this process is not authorized to send, and the
+        /// venue's rules forbid reaching for another program by name. One
+        /// window is the honest price of proving the door reaches Finder at
+        /// all.
+        #[test]
+        fn a_reveal_asks_the_disk_before_it_asks_finder() {
+            let window = crate::NativeWindow::stand_in(0);
+            let root = scratch("reveal");
+            let file = root.join("a file, with a \" in it.txt");
+            std::fs::write(&file, b"x").expect("a file to point at");
+
+            assert!(
+                reveal_in_explorer(window, &root.join("gone.txt")).is_err(),
+                "a path that is not there is refused rather than shown"
+            );
+            assert_eq!(
+                reveal_in_explorer(window, &file),
+                Ok(()),
+                "a quote in a name is an ordinary character here — there is no \
+                 command line for it to break"
+            );
+            // The folder half takes the other road (`openURL:`), and that one
+            // does answer.
+            assert_eq!(reveal_in_explorer(window, &root), Ok(()));
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// RED — **a file handed to the workspace really opens**, which is the
+        /// one claim about LaunchServices that nothing else in this file can
+        /// make.
+        ///
+        /// **It ends what it started, and only that.** The applications running
+        /// before the call are written down; afterwards the one that is not
+        /// among them is the one this test launched, and it is asked to quit by
+        /// its own object. Apple's note on `processIdentifier` says to compare
+        /// with `isEqual:` rather than with a pid, and `isEqual:` is what the
+        /// search below uses — so a TextEdit the owner already had open cannot
+        /// be matched, because it is in the *before* list.
+        ///
+        /// If nothing new appears — the handler was already running and reused
+        /// its process — there is nothing to end and nothing is ended. The
+        /// assertion is on the door's answer, not on a new process, so that is
+        /// not a failure.
+        #[test]
+        fn open_local_path_hands_a_file_to_the_workspace() {
+            let window = crate::NativeWindow::stand_in(0);
+            let root = scratch("open");
+            let file = root.join("folio-m2-2.txt");
+            std::fs::write(&file, b"M2-2 opened this.\n").expect("a document");
+
+            let workspace = NSWorkspace::sharedWorkspace();
+            let before: Vec<Retained<NSRunningApplication>> =
+                workspace.runningApplications().to_vec();
+
+            assert_eq!(
+                open_local_path(window, &file),
+                Ok(()),
+                "the workspace took the document"
+            );
+
+            // LaunchServices answers before the application has finished
+            // launching, so the new process is waited for rather than assumed.
+            let mut opened: Option<Retained<NSRunningApplication>> = None;
+            for _ in 0..50 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                opened = workspace
+                    .runningApplications()
+                    .to_vec()
+                    .into_iter()
+                    .find(|running| !before.iter().any(|known| **known == **running));
+                if opened.is_some() {
+                    break;
+                }
+            }
+            if let Some(opened) = opened {
+                opened.terminate();
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+}
 
 /// The Windows half: the real directories, the real `PATHEXT`, the real disk.
 #[cfg(windows)]
@@ -840,9 +1391,10 @@ mod tests {
     /// ② the question *this* module would otherwise answer with
     ///    [`names_a_program`] is not answered here at all: off Windows a program
     ///    is one the execute bit says is a program, `PATHEXT` names nothing, and
-    ///    `program_on_path` refuses rather than guessing (M2-2 writes the real
-    ///    rule). A refusal is the honest answer; a Windows reading of a Unix
-    ///    name would be a wrong one.
+    ///    `program_on_path` refuses rather than guessing (M2-2 read that door
+    ///    and left the refusal standing; its own note says why). A refusal is
+    ///    the honest answer; a Windows reading of a Unix name would be a wrong
+    ///    one.
     ///
     /// MUTATION: build the candidate out of [`effective_final_component`]
     /// instead of out of the name and the second half goes green, which is the
@@ -1010,7 +1562,7 @@ mod tests {
     ///
     /// What `open -R <path>` takes — and what
     /// `-[NSWorkspace activateFileViewerSelectingURLs:]` takes, which is what
-    /// M2-2 will actually call — is **one element of an `argv` array, or one
+    /// M2-2's arm really calls — is **one element of an `argv` array, or one
     /// `NSURL`**. Nothing between this process and Finder re-parses a string,
     /// so a quote in a file name is an ordinary character and `/select,` has no
     /// counterpart at all: the whole of [`reveal_argument_form`]'s subject is a
@@ -1023,9 +1575,14 @@ mod tests {
     /// asked" and "this window will not run programs" are two different
     /// sentences and the files column matches on the second.
     ///
+    /// **Not on macOS**, where the door is written and the same two paths are a
+    /// real reveal and a real refusal —
+    /// `macos_handoff::tests::a_reveal_asks_the_disk_before_it_asks_finder`
+    /// asks this question of that arm.
+    ///
     /// MUTATION: make the portable arm answer `Ok(())` and the first assertion
     /// goes red, which is a reveal that reports success and shows nothing.
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     #[test]
     fn the_posix_reveal_hands_over_a_path_and_not_a_command_line() {
         let window = crate::NativeWindow::stand_in(0);
@@ -1167,9 +1724,10 @@ mod tests {
     /// nowhere but Windows, so an extension-less `copilot` — the ordinary shape
     /// of a Unix program — produces no candidate at all and is not found. That
     /// is why [`program_on_path`] refuses off Windows instead of calling this:
-    /// the POSIX question is the execute bit, and M2-2 writes it. A green test
-    /// that quietly resolved a bare name here would be this module claiming a
-    /// rule it has not been given.
+    /// the POSIX question is the execute bit, and no caller off Windows asks it
+    /// yet — M2-2 wrote that reasoning onto the door rather than writing a
+    /// search nothing reaches. A green test that quietly resolved a bare name
+    /// here would be this module claiming a rule it has not been given.
     ///
     /// MUTATION: put `/home/a/clone` at the head of `directories` and the last
     /// assertion of the first block finds the planted program, which is the

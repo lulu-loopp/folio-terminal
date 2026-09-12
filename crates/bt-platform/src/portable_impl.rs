@@ -964,10 +964,37 @@ pub fn os_ui_language() -> String {
 
 // ── the shell, the trash, the volume (M2-2) ────────────────────────────────
 
-/// Move a path to the trash. `NSFileManager.trashItemAtURL:`; M2-2.
+/// Move a path to the trash, on a platform whose desktop has not been asked.
+///
+/// **`macos_files` is where this really happens** (M2-2). What is left here is
+/// the third platform's answer, and it is a refusal rather than a
+/// `remove_file`: the product's own sentence is that a deleted file goes
+/// somewhere it can be fetched back from, and a door that quietly destroyed one
+/// because this platform has no trash implementation would be keeping the
+/// signature and breaking the promise. X11 desktops do have a trash — the
+/// freedesktop.org spec puts it at `$XDG_DATA_HOME/Trash` with a `.trashinfo`
+/// file per entry — and writing it is a Linux backend's decision, which this
+/// workspace has not scheduled.
+#[cfg(not(target_os = "macos"))]
 pub fn recycle(path: &Path) -> Result<bool, String> {
     let _ = path;
     Err(not_here("moving a file to the trash"))
+}
+
+/// **The monospaced families this machine has**, on a platform with no font
+/// enumeration written (M2-4).
+///
+/// A `Vec` and not a refusal, because the type has no empty answer and the
+/// caller is a picker that has to draw something: what comes back is
+/// [`crate::order_monospace_families`]'s guarantee and nothing else — one row,
+/// the family the renderer is already drawing. That is exactly what
+/// `bt-app`'s settings page did behind its own `#[cfg(not(windows))]` until
+/// M2-4; the arm moved here so that the application names one function on every
+/// platform and asks no question about the machine it is on.
+#[cfg(not(target_os = "macos"))]
+#[must_use]
+pub fn monospace_font_families() -> Vec<crate::MonospaceFamily> {
+    crate::order_monospace_families(Vec::new())
 }
 
 /// **Whether this volume treats two spellings of one name as one file.**

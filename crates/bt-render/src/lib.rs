@@ -348,12 +348,21 @@ fn math_overflow_fade_slabs(
 /// [`terminal_font_system`]'s preference list, which asks the database whether
 /// a family is really there, because SF Mono's family name and its file have
 /// both moved between releases and a constant cannot check itself.
+/// **`pub` since M2-4, and for one reader only.** `bt_platform`'s
+/// `DEFAULT_MONOSPACE_FAMILY` is the family the settings page's picker promises
+/// to have a row for, and that promise is only true if it names *this* — the
+/// face the grid is actually drawn in when `settings.json` chooses none. The
+/// two constants live in two crates that do not know about each other, so the
+/// rule is held from the one crate that sees both:
+/// `the_default_family_is_the_one_the_renderer_draws`, in `bt-app`. Reading it
+/// is the whole of what this visibility is for; nothing else in the workspace
+/// may branch on it.
 #[cfg(target_os = "windows")]
-const DEFAULT_PRIMARY_FONT_FAMILY: &str = "Consolas";
+pub const DEFAULT_PRIMARY_FONT_FAMILY: &str = "Consolas";
 #[cfg(target_os = "macos")]
-const DEFAULT_PRIMARY_FONT_FAMILY: &str = "Menlo";
+pub const DEFAULT_PRIMARY_FONT_FAMILY: &str = "Menlo";
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-const DEFAULT_PRIMARY_FONT_FAMILY: &str = "monospace";
+pub const DEFAULT_PRIMARY_FONT_FAMILY: &str = "monospace";
 
 /// The family `Family::Monospace` resolves to right now.
 ///
