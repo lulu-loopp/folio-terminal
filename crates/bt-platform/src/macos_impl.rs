@@ -90,13 +90,15 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-    NSApplication, NSColor, NSEvent, NSFloatingWindowLevel, NSNormalWindowLevel, NSScreen, NSView,
-    NSWindow, NSWindowDelegate, NSWindowOcclusionState, NSWindowStyleMask, NSWorkspace,
+    NSApplication, NSColor, NSEvent, NSEventType, NSFloatingWindowLevel, NSNormalWindowLevel,
+    NSScreen, NSView, NSWindow, NSWindowButton, NSWindowDelegate, NSWindowOcclusionState,
+    NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
 };
 use objc2_foundation::{
     NSArray, NSDictionary, NSKeyValueObservingOptions, NSLocale, NSNotification, NSNumber,
-    NSObjectNSKeyValueObserverRegistration, NSPoint, NSRect, NSSize, NSString, ns_string,
+    NSObjectNSKeyValueObserverRegistration, NSPoint, NSRect, NSSize, NSString, NSUserDefaults,
+    ns_string,
 };
 
 use crate::{NativeWindow, WheelScrollAmount, WindowRect};
@@ -796,6 +798,163 @@ pub fn install_window_class_background(
         }
     }
     Ok(())
+}
+
+// ── the title bar, taken over (M3-3) ───────────────────────────────────────
+
+/// **Take this window's native title bar into Folio's chrome, and measure what
+/// AppKit goes on drawing in it** (M3-3, owner ruling 2026-09-12).
+///
+/// The ruling is that the window must not carry two sets of window controls,
+/// and the way it is kept here is the opposite of the way it is kept on
+/// Windows. There the frame is taken away outright: `WM_NCCALCSIZE` hands the
+/// application the whole outer rectangle and Folio draws all four caption
+/// slots itself. Here the title bar is **kept and made transparent** —
+/// `NSFullSizeContentView` so the content view reaches under it,
+/// `titlebarAppearsTransparent` so nothing of it is painted, `titleVisibility
+/// = .hidden` because Folio draws the tab's own name — which leaves exactly
+/// one thing of AppKit's standing in that band: the three traffic lights,
+/// where macOS puts them and where every other application's are.
+///
+/// **`isMovableByWindowBackground` is turned off on purpose.** With it on, a
+/// drag anywhere over Folio's own surface would move the window; the drag
+/// region is the strip's empty part and nothing else, and it is asked for
+/// explicitly through [`press_title_bar`].
+///
+/// **What comes back is a measurement, not a platform name.** The inset is the
+/// right edge of the rightmost standard window button, in this module's own
+/// units (physical pixels at the window's backing scale), and it is what
+/// `bt-app` starts its tab strip from. A window whose style mask carries no
+/// title bar has no standard buttons at all — `standardWindowButton:` answers
+/// `nil` for each — and the honest answer for it is
+/// [`crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR`], the same answer
+/// Windows gives, so nothing downstream has to know which platform it is on.
+///
+/// **The outer rectangle does not move.** `NSWindow.frame` is the outer
+/// rectangle before and after (M1-3 ①), so the session round trip this changes
+/// nothing about is still the identity; what changes is that the *content*
+/// view now fills that rectangle instead of stopping below a title bar, which
+/// is the same client-equals-outer contract `WM_NCCALCSIZE` produces on the
+/// other platform.
+pub fn adopt_window_chrome(window: NativeWindow) -> Result<crate::PlatformChrome, String> {
+    let what = "taking over a window's title bar";
+    let (_, ns_window) = window_for(window, what)?;
+    ns_window.setStyleMask(ns_window.styleMask() | NSWindowStyleMask::FullSizeContentView);
+    ns_window.setTitlebarAppearsTransparent(true);
+    ns_window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+    // The window's `title` is left alone: Mission Control, the window menu and
+    // the Dock still read it, and none of them draws it in this bar.
+    ns_window.setMovableByWindowBackground(false);
+    let scale = ns_window.backingScaleFactor();
+    // The three are asked for individually rather than assumed to be in order:
+    // a window may carry any subset of them, and what the strip has to clear is
+    // whichever of them is furthest right. Their frames are in the frame view's
+    // own space, whose origin is the window's leading edge, so `maxX` is
+    // already the inset measured from there.
+    let inset = [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ]
+    .into_iter()
+    .filter_map(|which| ns_window.standardWindowButton(which))
+    .map(|button| {
+        let frame = button.frame();
+        frame.origin.x + frame.size.width
+    })
+    .fold(None, |best: Option<f64>, edge| {
+        Some(best.map_or(edge, |best| best.max(edge)))
+    });
+    let Some(inset) = inset else {
+        return Ok(crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR);
+    };
+    Ok(crate::PlatformChrome {
+        // Up and not to nearest: the strip may begin one pixel clear of the
+        // buttons, never one pixel into them.
+        strip_left_px: (inset * scale).ceil() as i32,
+        buttons_are_the_platforms: true,
+    })
+}
+
+/// **Answer a press on the empty part of the window's own title bar** —
+/// `performWindowDragWithEvent:`, or the reader's double-click action.
+///
+/// The macOS counterpart of `HTCAPTION`, and it has to be a call rather than a
+/// hit-test answer because there is no hit test to answer: AppKit asks a
+/// *view* whether a press may move the window (`mouseDownCanMoveWindow`), and
+/// the view under Folio's title bar is winit's, which answers `NO` because it
+/// implements `mouseDown:` itself. So `bt-app` decides — it already knows,
+/// pixel for pixel, which part of its own strip is empty — and says so here,
+/// inside the press.
+///
+/// **The double click is this door's too, and that is a measurement rather
+/// than a preference.** `performWindowDragWithEvent:` is widely described as
+/// carrying the standard title-bar behaviours with it, the reader's
+/// `AppleActionOnDoubleClick` included, and this ticket wrote it that way
+/// first. Measured on macOS 26.6 on 2026-09-12, in a probe with no Folio in it
+/// at all — a plain `NSWindow` whose own view calls this selector from
+/// `mouseDown:` with `clickCount == 2` — **it does not**: the window stays
+/// where it is, while a double click on AppKit's own title bar in the same run
+/// zooms the window beside it. So the action is performed here, off the one
+/// preference that decides it, and the two verbs are `NSWindow`'s own.
+///
+/// The event is `NSApp.currentEvent`, which during the press `bt-app` is
+/// answering **is** that press. Refused rather than guessed when it is not a
+/// left mouse-down: a drag started from some other event is a drag the reader
+/// did not begin.
+pub fn press_title_bar(window: NativeWindow) -> Result<(), String> {
+    let what = "a press on the window's own title bar";
+    let (mtm, ns_window) = window_for(window, what)?;
+    let application = NSApplication::sharedApplication(mtm);
+    let event = application
+        .currentEvent()
+        .ok_or_else(|| format!("{what}: there is no event in hand to answer"))?;
+    if event.r#type() != NSEventType::LeftMouseDown {
+        return Err(format!(
+            "{what}: the event in hand is not a press, so there is nothing to answer"
+        ));
+    }
+    if event.clickCount() >= 2 {
+        return act_on_double_click(&ns_window);
+    }
+    ns_window.performWindowDragWithEvent(&event);
+    Ok(())
+}
+
+/// **What a double click on a title bar does on this desk** — the reader's
+/// `AppleActionOnDoubleClick`, and nothing of this program's own invention.
+///
+/// Read through the **standard** user defaults rather than off the preferences
+/// file, which is the difference between what the reader chose and what the
+/// system does: `defaults read -g AppleActionOnDoubleClick` says the key does
+/// not exist on a machine nobody has touched it on, and the standard defaults
+/// answer `Maximize` there anyway, because that is the value AppKit registers
+/// for itself. Asking the file would have made "the default" into "nothing
+/// happens".
+///
+/// The three values are Apple's own spelling. Anything else — including a
+/// nothing nobody registered — is left alone rather than guessed at: a title
+/// bar that minimised a window on a setting it did not recognise would be worse
+/// than one that did not move.
+fn act_on_double_click(window: &NSWindow) -> Result<(), String> {
+    let action = NSUserDefaults::standardUserDefaults()
+        .stringForKey(ns_string!("AppleActionOnDoubleClick"))
+        .map(|value| value.to_string());
+    match action.as_deref() {
+        Some("Maximize") => {
+            window.zoom(None);
+            Ok(())
+        }
+        Some("Minimize") => {
+            window.miniaturize(None);
+            Ok(())
+        }
+        Some("None") | None => Ok(()),
+        Some(other) => Err(format!(
+            "a double click on the title bar: this system asks for `{other}`, which this \
+             version does not know how to do"
+        )),
+    }
 }
 
 // ── the system's own preferences (M1-3) ────────────────────────────────────

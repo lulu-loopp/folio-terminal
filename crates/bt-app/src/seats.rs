@@ -28,6 +28,20 @@ use bt_layout::{
     window_min_inner_size,
 };
 use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
+/// **What the platform already draws in this window's title bar** (M3-3) — the
+/// one fact this module takes from the backend, and the reason none of it asks
+/// which host it is on. See [`caption_targets`] and [`tab_strip_geometry`].
+use bt_platform::PlatformChrome;
+
+/// **The window whose whole title bar is Folio's** — every Windows window, and
+/// every test in this crate whose subject is the tabs rather than the chrome
+/// under them.
+///
+/// Named so that a geometry test reads as a statement about a strip instead of
+/// a statement about a platform. The tests that *are* about M3-3 write the
+/// other value out in full, which is what makes them visible.
+#[cfg(test)]
+pub(crate) const FOLIO_BAR: PlatformChrome = PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR;
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, ChromePalette, ChromeQuad,
     DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX, FOCUS_CARD_BORDER_LOGICAL_PX,
@@ -3186,6 +3200,7 @@ pub struct TabStripGeometry {
 pub fn tab_strip_geometry(
     width: f32,
     scale: f32,
+    chrome: PlatformChrome,
     trailers: &[TabTrailer],
     active_tab: usize,
     scroll: f32,
@@ -3208,13 +3223,23 @@ pub fn tab_strip_geometry(
     // picture and the bridge cannot disagree about where the app's run ends.
     let reserve = WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX * scale;
     let strip_right = (run_left - reserve).max(0.0);
+    // **The platform's own band, taken off the front of the run** (M3-3, owner
+    // ruling 2026-09-12). On macOS the window keeps its native title bar and
+    // therefore keeps the three traffic lights AppKit draws at its leading
+    // edge; the strip begins to their right. `0` everywhere else, which is the
+    // arithmetic this function has always done. It is taken out here for the
+    // reserve's reason — everything the strip decides is decided against the
+    // run it is given, so a tab walks down its width tiers inside the smaller
+    // run first and the run begins to scroll only once the tabs are on their
+    // floor.
+    let strip_left = (chrome.strip_left_px as f32).clamp(0.0, strip_right);
     let gap = WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX * scale;
     let new_box = WINDOW_NEW_TAB_BOX_LOGICAL_PX * scale;
     let new_margin = WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX * scale;
     // Two buttons now stand at the end of the run, and both of them have to fit
     // before a tab may claim the rest — the `˅` is `margin-left: 0`, so the pair
     // costs one margin and two boxes.
-    let available = (strip_right - radius - new_margin - 2.0 * new_box).max(0.0);
+    let available = (strip_right - strip_left - radius - new_margin - 2.0 * new_box).max(0.0);
     let total_gaps = gap * tab_count.saturating_sub(1) as f32;
     let tab_width = if tab_count == 0 {
         0.0
@@ -3232,9 +3257,9 @@ pub fn tab_strip_geometry(
     // now that they stop at 46px it is allowed to exceed it, and the excess is
     // exactly how far the strip may be scrolled.
     let content = tab_count as f32 * tab_width + total_gaps + new_margin + 2.0 * new_box;
-    let max_scroll = (radius + content - strip_right).max(0.0);
+    let max_scroll = (strip_left + radius + content - strip_right).max(0.0);
     let scroll = scroll.clamp(0.0, max_scroll);
-    let origin = radius - scroll;
+    let origin = strip_left + radius - scroll;
     let tier = tab_width_tier(tab_width, scale);
     let tab_height = (WINDOW_TAB_HEIGHT_LOGICAL_PX * scale).round();
     let tab_top = title - tab_height;
@@ -3430,20 +3455,28 @@ pub fn tab_strip_geometry(
             menu_left + new_box,
             new_bottom,
         ],
-        viewport: [0.0, strip_right],
+        viewport: [strip_left, strip_right],
         max_scroll,
     }
 }
 
-/// Whether a mark at `rect` may be drawn without spilling past the strip's
-/// right edge.
+/// Whether a mark at `rect` may be drawn without spilling past either end of
+/// the strip.
 ///
-/// Only that edge is tested, and that asymmetry is the honest one: the strip's
-/// left edge *is* the surface's left edge, so a quad running off it is clipped
+/// The right edge has always been tested: nothing lies beyond it but the caption
+/// buttons, and a tab drawn over those is the very bug the mock-up added this
+/// scroller to fix (line 187).
+///
+/// **The left edge is tested only when something stands against it** (M3-3). It
+/// used not to be, and the asymmetry was the honest one at the time: the strip's
+/// left edge *was* the surface's left edge, so a quad running off it is clipped
 /// by the framebuffer with its texture coordinates interpolated correctly, for
-/// free and exactly. Nothing lies beyond the right edge but the caption buttons,
-/// and a tab drawn over those is the very bug the mock-up added this scroller to
-/// fix (line 187).
+/// free and exactly. On a window whose platform draws in the title bar that is
+/// no longer true — macOS's traffic lights stand in the band the strip now
+/// begins after, and they are drawn *over* this window's own pixels — so a
+/// scrolled-out tab reaching under them would show up around three buttons it
+/// has nothing to do with. `viewport[0] > 0` is that condition and is read from
+/// the one place it is decided, [`tab_strip_geometry`], rather than restated.
 ///
 /// That a mark crossing the right edge is dropped rather than cropped is a
 /// **ruling**. `ChromeLabel` clips per glyph and per pixel, so a title is cropped
@@ -3455,7 +3488,7 @@ pub fn tab_strip_geometry(
 /// always whole, because activating a tab scrolls it wholly into view first (see
 /// [`tab_scroll_to_reveal`]).
 fn within_strip(viewport: [f32; 2], rect: [f32; 4]) -> bool {
-    rect[2] <= viewport[1]
+    rect[2] <= viewport[1] && (viewport[0] <= 0.0 || rect[0] >= viewport[0])
 }
 
 /// The leftmost box of a tab's trailing cluster — the pin when one is drawn, the
@@ -3798,6 +3831,7 @@ pub fn tab_title_box(
 fn tab_strip_bodies(
     width: f32,
     scale: f32,
+    chrome: PlatformChrome,
     tab_count: usize,
     active_tab: usize,
     scroll: f32,
@@ -3805,6 +3839,7 @@ fn tab_strip_bodies(
     tab_strip_geometry(
         width,
         scale,
+        chrome,
         &vec![TabTrailer::default(); tab_count],
         active_tab,
         scroll,
@@ -3823,12 +3858,13 @@ fn tab_strip_bodies(
 pub fn tab_scroll_to_reveal(
     width: f32,
     scale: f32,
+    chrome: PlatformChrome,
     tab_count: usize,
     active_tab: usize,
     scroll: f32,
     index: usize,
 ) -> f32 {
-    let geometry = tab_strip_bodies(width, scale, tab_count, active_tab, scroll);
+    let geometry = tab_strip_bodies(width, scale, chrome, tab_count, active_tab, scroll);
     let Some(tab) = geometry.tabs.get(index) else {
         return scroll.clamp(0.0, geometry.max_scroll);
     };
@@ -5684,6 +5720,7 @@ fn tab_width_tier(tab_width: f32, scale: f32) -> TabWidthTier {
 pub fn title_bar_app_run_right_px(
     width: f32,
     scale: f32,
+    chrome: PlatformChrome,
     tab_count: usize,
     rail: RailState,
 ) -> i32 {
@@ -5698,10 +5735,10 @@ pub fn title_bar_app_run_right_px(
         return 0;
     }
     match rail.layout {
-        TabLayoutMode::Horizontal => tab_strip_right_px(width, scale, tab_count),
+        TabLayoutMode::Horizontal => tab_strip_right_px(width, scale, chrome, tab_count),
         // Written off the box itself rather than off `12 + 30`, so a toggle that
         // moves takes its dead zone with it.
-        TabLayoutMode::Vertical => panel_toggle_box(scale, rail)
+        TabLayoutMode::Vertical => panel_toggle_box(scale, chrome, rail)
             .map_or(0, |toggle| toggle[2].ceil() as i32)
             .max(0),
     }
@@ -5723,11 +5760,11 @@ pub fn title_bar_app_run_right_px(
 /// Callers outside this module want [`title_bar_app_run_right_px`], which is
 /// this answer for the layout that has a strip and a different one for the
 /// layout that does not.
-pub fn tab_strip_right_px(width: f32, scale: f32, tab_count: usize) -> i32 {
+pub fn tab_strip_right_px(width: f32, scale: f32, chrome: PlatformChrome, tab_count: usize) -> i32 {
     // Neither the tiers nor the scroll offset move this answer: the tiers change
     // nothing outside a tab's own body, and a strip either scrolls or it does
     // not, whatever it currently shows.
-    let geometry = tab_strip_bodies(width, scale, tab_count, 0, 0.0);
+    let geometry = tab_strip_bodies(width, scale, chrome, tab_count, 0, 0.0);
     if geometry.max_scroll > 0.0 {
         geometry.viewport[1].ceil() as i32
     } else {
@@ -5735,9 +5772,11 @@ pub fn tab_strip_right_px(width: f32, scale: f32, tab_count: usize) -> i32 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn hit_tab_chrome(
     width: f32,
     scale: f32,
+    chrome: PlatformChrome,
     trailers: &[TabTrailer],
     active_tab: usize,
     scroll: f32,
@@ -5745,7 +5784,7 @@ pub fn hit_tab_chrome(
     y: f64,
 ) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
-    let geometry = tab_strip_geometry(width, scale, trailers, active_tab, scroll);
+    let geometry = tab_strip_geometry(width, scale, chrome, trailers, active_tab, scroll);
     // What is cropped away is not there to be clicked. Without this the run's
     // scrolled-out tail would still answer the pointer, under the caption
     // buttons drawn on top of it.
@@ -5792,9 +5831,16 @@ pub fn hit_tab_chrome(
 /// It is the *strip's* box and not the title bar's: the caption buttons share
 /// that bar and a notch over them is not the strip's to take.
 #[must_use]
-pub fn tab_strip_contains(width: f32, scale: f32, tab_count: usize, x: f64, y: f64) -> bool {
+pub fn tab_strip_contains(
+    width: f32,
+    scale: f32,
+    chrome: PlatformChrome,
+    tab_count: usize,
+    x: f64,
+    y: f64,
+) -> bool {
     let (x, y) = (x as f32, y as f32);
-    let geometry = tab_strip_bodies(width, scale, tab_count, 0, 0.0);
+    let geometry = tab_strip_bodies(width, scale, chrome, tab_count, 0, 0.0);
     let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
     x >= geometry.viewport[0] && x < geometry.viewport[1] && y >= 0.0 && y < title
 }
@@ -6048,21 +6094,73 @@ pub fn hit_pane_ghost(
 }
 
 /// Hit-test the application-owned boxes of the title bar. The remaining title
-/// area is deliberately absent: Win32 owns it through `HTCAPTION`, not winit
-/// client input.
+/// area is deliberately absent: it is the window's own drag handle. On Windows
+/// it never reaches winit at all — `HTCAPTION` answers it in the frame — and on
+/// macOS it is [`title_bar_drag_point`], asked inside the press.
 pub fn hit_window_chrome(
     width: f32,
     scale: f32,
+    chrome: PlatformChrome,
     rail: RailState,
     summoned: bool,
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
-    window_chrome_boxes(width, scale, rail, summoned)
+    window_chrome_boxes(width, scale, chrome, rail, summoned)
         .into_iter()
         .find(|(_, rect)| contains(*rect, x, y))
         .map(|(target, _)| target)
+}
+
+/// **The empty part of the title bar — the window's own drag handle** (M3-3,
+/// owner ruling 2026-09-12).
+///
+/// The same band Windows' frame answers `HTCAPTION` for, written here because
+/// on macOS nobody asks: AppKit puts the question to a *view*
+/// (`mouseDownCanMoveWindow`), and the view under this bar is winit's, which
+/// answers no because it takes `mouseDown:` itself. So the application decides
+/// inside the press and says so through
+/// `bt_platform::CustomWindowFrame::press_title_bar`, which is AppKit's own
+/// drag and, on a double click, whatever the reader has asked a title bar's
+/// double click to do (`AppleActionOnDoubleClick`).
+///
+/// **It is the Windows rule restated and not a second rule.** Both ends are read
+/// off the same two functions the picture is drawn from:
+/// [`title_bar_app_run_right_px`] is where Folio's own content stops — the strip
+/// in one layout, the sidebar toggle in the other — and [`caption_run_left`] is
+/// where the gear's run begins. Everything between them, for the height of the
+/// bar, belongs to the window. The band is never empty: the strip's run was cut
+/// [`WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX`] short before a single tab was
+/// placed in it (user ruling 2026-09-09), so there is a handle however many tabs
+/// are open.
+///
+/// **The platform's own band is not in it.** Left of `strip_left_px` stand the
+/// traffic lights, and a press there is AppKit's — the buttons are views above
+/// this window's content and take it before winit sees it. Answering `true` for
+/// the pixels *between* them would start a drag from inside a button's own
+/// rectangle, so the leading band is left out whole.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn title_bar_drag_point(
+    width: f32,
+    scale: f32,
+    chrome: PlatformChrome,
+    tab_count: usize,
+    rail: RailState,
+    summoned: bool,
+    x: f64,
+    y: f64,
+) -> bool {
+    let (x, y) = (x as f32, y as f32);
+    if y < 0.0 || y >= (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round() {
+        return false;
+    }
+    if x < chrome.strip_left_px as f32 {
+        return false;
+    }
+    x >= title_bar_app_run_right_px(width, scale, chrome, tab_count, rail) as f32
+        && x < caption_run_left(width, scale, chrome, summoned)
 }
 
 /// The boxes of the caption run, in the order they stand: the gear, then
@@ -6091,14 +6189,15 @@ pub fn hit_window_chrome(
 pub fn window_chrome_boxes(
     width: f32,
     scale: f32,
+    chrome: PlatformChrome,
     rail: RailState,
     summoned: bool,
 ) -> Vec<(ChromeTarget, [f32; 4])> {
     let mut boxes = Vec::with_capacity(5);
-    if let Some(rect) = panel_toggle_box(scale, rail) {
+    if let Some(rect) = panel_toggle_box(scale, chrome, rail) {
         boxes.push((ChromeTarget::PanelToggle, rect));
     }
-    boxes.extend(window_caption_boxes(width, scale, summoned));
+    boxes.extend(window_caption_boxes(width, scale, chrome, summoned));
     boxes
 }
 
@@ -6122,17 +6221,36 @@ pub fn window_chrome_boxes(
 /// What is left is the gear — which opens this window's own settings page — and
 /// one `×`, whose verb is `hide` and is the chord's verb through the chord's own
 /// door. See `FolioApp::close`'s caller in `main.rs`.
+///
+/// **And a window whose platform draws those buttons itself carries none of
+/// them** (M3-3, owner ruling 2026-09-12). The ruling is one sentence — a window
+/// must not carry two sets of window controls — and this is the single place it
+/// is kept: macOS leaves its three traffic lights in the title bar Folio has
+/// taken over, so minimise, zoom and close are already on this window and
+/// drawing Folio's own would be a second set an inch to the right of the first.
+/// The gear stays, on both windows, because nothing else draws it.
+///
+/// `chrome` and not a `cfg`: the answer is a fact about *this window* — read off
+/// its own standard buttons at install — and a window with no native title bar
+/// to keep gets the Windows answer on any host. This is the one capability read
+/// the caption run makes, which is what
+/// `no_caption_button_is_laid_out_where_the_platform_draws_its_own` and its
+/// source pin hold it to.
 #[must_use]
-pub fn caption_targets(summoned: bool) -> &'static [ChromeTarget] {
-    if summoned {
-        &[ChromeTarget::Settings, ChromeTarget::CloseWindow]
-    } else {
-        &[
+pub fn caption_targets(chrome: PlatformChrome, summoned: bool) -> &'static [ChromeTarget] {
+    match (chrome.buttons_are_the_platforms, summoned) {
+        // The platform's three are already standing in this bar. The summoned
+        // window's `×` goes with them and its verb is not lost: the native close
+        // button reaches the same `CloseRequested` this window answers with
+        // `hide` (`bt_platform::request_window_close`'s own note).
+        (true, _) => &[ChromeTarget::Settings],
+        (false, true) => &[ChromeTarget::Settings, ChromeTarget::CloseWindow],
+        (false, false) => &[
             ChromeTarget::Settings,
             ChromeTarget::Minimize,
             ChromeTarget::Maximize,
             ChromeTarget::CloseWindow,
-        ]
+        ],
     }
 }
 
@@ -6145,9 +6263,9 @@ pub fn caption_targets(summoned: bool) -> &'static [ChromeTarget] {
 /// alternative is a tab-strip geometry that answers differently on one window — one more thing
 /// that can disagree between the paint and the hit test, over 92 logical pixels.
 #[must_use]
-pub fn caption_run_left(width: f32, scale: f32, summoned: bool) -> f32 {
+pub fn caption_run_left(width: f32, scale: f32, chrome: PlatformChrome, summoned: bool) -> f32 {
     let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
-    (width - caption_targets(summoned).len() as f32 * button).max(0.0)
+    (width - caption_targets(chrome, summoned).len() as f32 * button).max(0.0)
 }
 
 /// The caption run alone — the boxes anchored to the window's right edge,
@@ -6156,13 +6274,14 @@ pub fn caption_run_left(width: f32, scale: f32, summoned: bool) -> f32 {
 pub fn window_caption_boxes(
     width: f32,
     scale: f32,
+    chrome: PlatformChrome,
     summoned: bool,
 ) -> Vec<(ChromeTarget, [f32; 4])> {
     let title = WINDOW_TITLE_BAR_LOGICAL_PX * scale;
     let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
-    let targets = caption_targets(summoned);
+    let targets = caption_targets(chrome, summoned);
     let last = targets.len() as f32;
-    let run_left = caption_run_left(width, scale, summoned);
+    let run_left = caption_run_left(width, scale, chrome, summoned);
     // The last button ends at the window's own edge rather than at
     // `run_left + n * button`, so a fractional scale cannot leave a seam of
     // unclaimed pixels in the corner where "close" is supposed to be.
@@ -7877,6 +7996,7 @@ pub fn build_chrome_with_preview(
         ChromeContent {
             update_mark: false,
             summoned: false,
+            chrome: FOLIO_BAR,
             head_ink: HeadInk::default(),
             active_ink: TabInk::default(),
             card_ink: TabInk::default(),
@@ -8157,6 +8277,15 @@ pub struct ChromeContent<'a> {
     /// draw. What it decides is the caption run — see [`caption_targets`], which is where the
     /// ruling is written down.
     pub summoned: bool,
+    /// **What the platform already draws in this window's title bar** (M3-3,
+    /// owner ruling 2026-09-12).
+    ///
+    /// Beside `summoned` and for exactly its reason: it is a fact about this
+    /// window that `main.rs` reads once — `Runtime::platform_chrome`, the one
+    /// capability read — and this module turns into a picture. What it decides
+    /// is the same two things everywhere it is passed: which buttons stand in
+    /// the caption run, and where the strip begins.
+    pub chrome: PlatformChrome,
     pub tabs: &'a [TabContent],
     /// How far each pane's hover-revealed head furniture has come up — see
     /// [`HeadInk`], which is also where the rule about the hit test is written.
@@ -8755,6 +8884,7 @@ pub fn build_chrome_for_tabs(
     let ChromeContent {
         update_mark,
         summoned,
+        chrome,
         tabs,
         head_ink,
         active_ink,
@@ -8859,6 +8989,7 @@ pub fn build_chrome_for_tabs(
         },
         update_mark,
         summoned,
+        chrome,
         (&mut quads, &mut labels, &mut sprites),
         &mut flight_group,
     );
@@ -10555,6 +10686,10 @@ fn window_chrome(
     // Which run the caption is — see `caption_targets`. Beside `update_mark` and
     // for its reason: it is a fact about the window rather than about the tabs.
     summoned: bool,
+    // And the other fact about the window the run is decided by (M3-3): what the
+    // platform already draws in this bar. Beside `summoned` for the same reason,
+    // and read here once for both the caption run and the strip's own origin.
+    chrome: PlatformChrome,
     output: (
         &mut Vec<ChromeQuad>,
         &mut Vec<ChromeLabel>,
@@ -10606,6 +10741,7 @@ fn window_chrome(
             window_tab_strip(
                 width,
                 scale,
+                chrome,
                 hover,
                 strip,
                 palette,
@@ -10617,7 +10753,7 @@ fn window_chrome(
             // `.panel-toggle` stands first in `.drag`, and the name begins after
             // it and its 8px gap. Both read their x from the same box, so the
             // name cannot come to rest under a button that moved.
-            if let Some(toggle) = panel_toggle_box(scale, rail) {
+            if let Some(toggle) = panel_toggle_box(scale, chrome, rail) {
                 let hovered = hover == Some(ChromeTarget::PanelToggle);
                 // `.panel-toggle:hover { background: var(--hover) }` over a 6px
                 // radius, which is the `+`'s own pill at another size rather than
@@ -10654,7 +10790,7 @@ fn window_chrome(
                     },
                 ));
             }
-            let left = app_title_left_px(scale, rail);
+            let left = app_title_left_px(scale, chrome, rail);
             labels.push(ChromeLabel {
                 mono: false,
                 text: crate::APP_NAME.to_owned(),
@@ -10685,8 +10821,12 @@ fn window_chrome(
     // is what keeps the paint and the hit test one derivation: `window_caption_boxes`
     // walks the same list from the same origin, so a window that draws two buttons
     // cannot be a window that answers presses on four.
-    let caption_left = caption_run_left(width, scale, summoned);
-    for (index, target) in caption_targets(summoned).iter().copied().enumerate() {
+    let caption_left = caption_run_left(width, scale, chrome, summoned);
+    for (index, target) in caption_targets(chrome, summoned)
+        .iter()
+        .copied()
+        .enumerate()
+    {
         let (mark, glyph_logical_px) = match target {
             ChromeTarget::Settings => (
                 crate::icons::ActionIcon::OpenSettings.mark(),
@@ -10772,9 +10912,11 @@ fn window_chrome(
 /// than an omission: quads are drawn under every mark, and the active tab's
 /// silhouette *is* a mark, so a flat fill under it would be a fill nobody sees.
 /// Everything the strip lays down is therefore a sprite or a label.
+#[allow(clippy::too_many_arguments)]
 fn window_tab_strip(
     width: f32,
     scale: f32,
+    chrome: PlatformChrome,
     hover: Option<ChromeTarget>,
     strip: TabStrip<'_>,
     palette: ChromePalette,
@@ -10800,14 +10942,24 @@ fn window_tab_strip(
     let (labels, sprites) = output;
     let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
     let trailers = tabs.iter().map(|tab| tab.trailer).collect::<Vec<_>>();
-    let geometry = tab_strip_geometry(width, scale, &trailers, active_tab, tab_scroll);
+    let geometry = tab_strip_geometry(width, scale, chrome, &trailers, active_tab, tab_scroll);
     let viewport = geometry.viewport;
     // `.tabs-inline` crops its content, and a label is the one chrome primitive
     // that can be cropped exactly: `ChromeLabel`'s rect is also its clip box, and
-    // the text renderer clips it per glyph and per pixel. Only the right edge
-    // needs pulling in — the left edge of the strip is the surface's own, so a
-    // glyph that runs off it is clipped by the framebuffer for free.
-    let clip_label = |rect: [f32; 4]| [rect[0], rect[1], rect[2].min(viewport[1]), rect[3]];
+    // the text renderer clips it per glyph and per pixel. **Both edges**, since
+    // M3-3: the right one because the caption run is beyond it, and the left one
+    // because on a window whose platform draws in this bar the strip begins
+    // after the traffic lights and a glyph before them would be drawn under
+    // three buttons. Where nothing stands there the left clip is the surface's
+    // own edge and costs nothing, which is what it was before.
+    let clip_label = |rect: [f32; 4]| {
+        [
+            rect[0].max(viewport[0]),
+            rect[1],
+            rect[2].min(viewport[1]),
+            rect[3],
+        ]
+    };
     // `.tab.active { z-index: 1 }` (mock-up line 216) — the active tab stands
     // above its neighbours, corners and all. A painter's-algorithm list has no
     // z-index, so the strip is laid down in two passes: every other tab first,
@@ -11630,7 +11782,7 @@ const WINDOW_TITLE_DRAG_GAP_LOGICAL_PX: f32 = 8.0;
 /// has to survive its own verb, which is why the mock-up hangs `rail-collapsed`
 /// on the rail and never on this.
 #[must_use]
-pub fn panel_toggle_box(scale: f32, rail: RailState) -> Option<[f32; 4]> {
+pub fn panel_toggle_box(scale: f32, chrome: PlatformChrome, rail: RailState) -> Option<[f32; 4]> {
     // `.window.focusmode .panel-toggle { display: none }` — the button folds the
     // *sidebar*, and while the card column is up there is no sidebar for it to
     // act on. Answering `None` here takes it out of the paint, out of the hit
@@ -11643,7 +11795,12 @@ pub fn panel_toggle_box(scale: f32, rail: RailState) -> Option<[f32; 4]> {
     }
     // `.titlebar .drag { padding-left: 12px }` — the same inset the app name
     // takes in this layout, and the toggle is the first thing in that box.
-    let left = (WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round();
+    // **After the platform's own band** (M3-3): the traffic lights stand in this
+    // bar's leading edge on macOS, and the first thing Folio puts in it begins
+    // where they end — the same sentence the tab strip is given in
+    // [`tab_strip_geometry`], said about the other layout's first control.
+    let left = (chrome.strip_left_px as f32).max(0.0)
+        + (WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round();
     let width = (WINDOW_PANEL_TOGGLE_WIDTH_LOGICAL_PX * scale).round();
     let height = (WINDOW_PANEL_TOGGLE_HEIGHT_LOGICAL_PX * scale).round();
     // `align-items: center` in a 40px bar: the button is shorter than the bar
@@ -11658,10 +11815,15 @@ pub fn panel_toggle_box(scale: f32, rail: RailState) -> Option<[f32; 4]> {
 ///
 /// Written off [`panel_toggle_box`] rather than as a second sum, so the name
 /// cannot come to rest under a button that moved.
-fn app_title_left_px(scale: f32, rail: RailState) -> f32 {
-    match panel_toggle_box(scale, rail) {
+fn app_title_left_px(scale: f32, chrome: PlatformChrome, rail: RailState) -> f32 {
+    match panel_toggle_box(scale, chrome, rail) {
         Some(toggle) => toggle[2] + (WINDOW_TITLE_DRAG_GAP_LOGICAL_PX * scale).round(),
-        None => (WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round(),
+        // The same band the toggle would have started after — there is simply no
+        // toggle here for it to be written off (M3-3).
+        None => {
+            (chrome.strip_left_px as f32).max(0.0)
+                + (WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round()
+        }
     }
 }
 
@@ -21221,6 +21383,16 @@ mod tests {
     /// whatever the tabs and the seats are doing — a whole `ChromeContent` here
     /// would be a page of fields the assertions never read.
     fn caption_sprites(update_mark: bool) -> Vec<ChromeSprite> {
+        caption_sprites_with(update_mark, FOLIO_BAR)
+    }
+
+    /// [`caption_sprites`] on a window whose platform draws part of the bar
+    /// itself — M3-3's half of the same picture.
+    fn caption_sprites_on(chrome: PlatformChrome) -> Vec<ChromeSprite> {
+        caption_sprites_with(false, chrome)
+    }
+
+    fn caption_sprites_with(update_mark: bool, chrome: PlatformChrome) -> Vec<ChromeSprite> {
         let tabs = [TabContent {
             flight: 0.0,
             mark_kind: ChromeMark::ProfilePowerShell,
@@ -21252,6 +21424,7 @@ mod tests {
             },
             update_mark,
             false,
+            chrome,
             (&mut quads, &mut labels, &mut sprites),
             &mut flight,
         );
@@ -22112,6 +22285,7 @@ mod tests {
             ChromeContent {
                 update_mark: false,
                 summoned: false,
+                chrome: FOLIO_BAR,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -22200,6 +22374,7 @@ mod tests {
                 ChromeContent {
                     update_mark: false,
                     summoned: false,
+                    chrome: FOLIO_BAR,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -22333,6 +22508,7 @@ mod tests {
                 ChromeContent {
                     update_mark: false,
                     summoned: false,
+                    chrome: FOLIO_BAR,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -25348,17 +25524,17 @@ mod tests {",
         let horizontal = RailState::default();
 
         assert_eq!(
-            panel_toggle_box(1.0, expanded),
+            panel_toggle_box(1.0, FOLIO_BAR, expanded),
             Some([12.0, 7.0, 42.0, 33.0]),
             "`.panel-toggle` is 30x26 at the bar's 12px inset, centred in 40px"
         );
         assert_eq!(
-            panel_toggle_box(1.0, horizontal),
+            panel_toggle_box(1.0, FOLIO_BAR, horizontal),
             None,
             "no toggle on a strip"
         );
         assert_eq!(
-            panel_toggle_box(1.0, icons),
+            panel_toggle_box(1.0, FOLIO_BAR, icons),
             None,
             "an icon rail is already parked, so there is nothing left to collapse"
         );
@@ -25367,6 +25543,7 @@ mod tests {",
         assert_eq!(
             panel_toggle_box(
                 1.0,
+                FOLIO_BAR,
                 RailState {
                     collapsed: true,
                     ..expanded
@@ -25378,9 +25555,10 @@ mod tests {",
 
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let width = 960.0 * scale;
-            let toggle = panel_toggle_box(scale, expanded).expect("the expanded bar carries one");
+            let toggle =
+                panel_toggle_box(scale, FOLIO_BAR, expanded).expect("the expanded bar carries one");
             assert_eq!(
-                window_chrome_boxes(width, scale, expanded, false).first(),
+                window_chrome_boxes(width, scale, FOLIO_BAR, expanded, false).first(),
                 Some(&(ChromeTarget::PanelToggle, toggle)),
                 "it leads the run: `.drag`'s first child, at the far left"
             );
@@ -25389,6 +25567,7 @@ mod tests {",
                 hit_window_chrome(
                     width,
                     scale,
+                    FOLIO_BAR,
                     expanded,
                     false,
                     f64::from((toggle[0] + toggle[2]) / 2.0),
@@ -25402,6 +25581,7 @@ mod tests {",
                 hit_window_chrome(
                     width,
                     scale,
+                    FOLIO_BAR,
                     horizontal,
                     false,
                     f64::from((toggle[0] + toggle[2]) / 2.0),
@@ -25411,7 +25591,7 @@ mod tests {",
                 "a horizontal bar draws no toggle, so it cannot be hit at {scale}x"
             );
             assert!(
-                !window_chrome_boxes(width, scale, icons, false)
+                !window_chrome_boxes(width, scale, FOLIO_BAR, icons, false)
                     .iter()
                     .any(|(target, _)| *target == ChromeTarget::PanelToggle),
                 "nor does an icon rail at {scale}x"
@@ -25419,12 +25599,12 @@ mod tests {",
             // A4 — the name stands after the toggle and its 8px gap, and at the
             // bar's own inset when there is no toggle to stand after.
             assert_eq!(
-                app_title_left_px(scale, expanded),
+                app_title_left_px(scale, FOLIO_BAR, expanded),
                 toggle[2] + (8.0 * scale).round(),
                 "`.apptitle` follows the toggle across `.drag`'s gap at {scale}x"
             );
             assert_eq!(
-                app_title_left_px(scale, icons),
+                app_title_left_px(scale, FOLIO_BAR, icons),
                 (WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round(),
                 "with no toggle the name takes the bar's own inset at {scale}x"
             );
@@ -25465,19 +25645,19 @@ mod tests {",
 
         for tabs in [1_usize, 2, 30] {
             assert_eq!(
-                title_bar_app_run_right_px(width, scale, tabs, expanded),
+                title_bar_app_run_right_px(width, scale, FOLIO_BAR, tabs, expanded),
                 42,
                 "the app owns the toggle and nothing else, whatever {tabs} tabs \
                  would have done to a strip"
             );
             assert_eq!(
-                title_bar_app_run_right_px(width, scale, tabs, icons),
+                title_bar_app_run_right_px(width, scale, FOLIO_BAR, tabs, icons),
                 0,
                 "an icon rail puts nothing in the bar at all, so all of it drags"
             );
             assert_eq!(
-                title_bar_app_run_right_px(width, scale, tabs, horizontal),
-                tab_strip_right_px(width, scale, tabs),
+                title_bar_app_run_right_px(width, scale, FOLIO_BAR, tabs, horizontal),
+                tab_strip_right_px(width, scale, FOLIO_BAR, tabs),
                 "the horizontal bar's answer is unchanged: it really does hold a \
                  strip"
             );
@@ -25485,8 +25665,8 @@ mod tests {",
         // The witness itself: a strip's boundary grows with its tabs, which is
         // exactly the growth that used to leak into the vertical layout.
         assert!(
-            tab_strip_right_px(width, scale, 30)
-                > title_bar_app_run_right_px(width, scale, 30, expanded),
+            tab_strip_right_px(width, scale, FOLIO_BAR, 30)
+                > title_bar_app_run_right_px(width, scale, FOLIO_BAR, 30, expanded),
             "a thirty-tab strip claims far more of the bar than the toggle does"
         );
     }
@@ -25529,24 +25709,24 @@ mod tests {",
         // The gear leads the caption run, and the strip reserves that run's four
         // slots on every window (see `caption_run_left`), so this is the edge the
         // band is measured back from.
-        let gear_left = window_caption_boxes(width, scale, false)[0].1[0];
+        let gear_left = window_caption_boxes(width, scale, FOLIO_BAR, false)[0].1[0];
 
         // The dozen the report was made with — a strip pressed flat against the
         // gear without yet scrolling — and two counts past the floor, where it
         // scrolls as well.
         assert_eq!(
-            tab_strip_geometry(width, scale, &resting(12), 0, 0.0).max_scroll,
+            tab_strip_geometry(width, scale, FOLIO_BAR, &resting(12), 0, 0.0).max_scroll,
             0.0,
             "twelve tabs fit this bar, which is what made the report's window a \
              window with no handle rather than merely a crowded one"
         );
         assert!(
-            tab_strip_geometry(width, scale, &resting(30), 0, 0.0).max_scroll > 0.0,
+            tab_strip_geometry(width, scale, FOLIO_BAR, &resting(30), 0, 0.0).max_scroll > 0.0,
             "thirty do not, and the reserve holds under scroll too"
         );
         for tabs in [12_usize, 16, 30] {
-            let geometry = tab_strip_geometry(width, scale, &resting(tabs), 0, 0.0);
-            let run_right = title_bar_app_run_right_px(width, scale, tabs, rail);
+            let geometry = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(tabs), 0, 0.0);
+            let run_right = title_bar_app_run_right_px(width, scale, FOLIO_BAR, tabs, rail);
             assert_eq!(
                 run_right,
                 geometry.viewport[1].ceil() as i32,
@@ -25581,6 +25761,7 @@ mod tests {",
                     hit_tab_chrome(
                         width,
                         scale,
+                        FOLIO_BAR,
                         &resting(tabs),
                         0,
                         0.0,
@@ -25596,10 +25777,10 @@ mod tests {",
 
         // A short strip is untouched: its tabs are at their cap, so the run ends
         // where the `˅` ends and the band beside it was always there.
-        let roomy = tab_strip_geometry(1920.0, scale, &resting(2), 0, 0.0);
+        let roomy = tab_strip_geometry(1920.0, scale, FOLIO_BAR, &resting(2), 0, 0.0);
         assert_eq!(roomy.max_scroll, 0.0);
         assert_eq!(
-            title_bar_app_run_right_px(1920.0, scale, 2, rail),
+            title_bar_app_run_right_px(1920.0, scale, FOLIO_BAR, 2, rail),
             470,
             "two tabs on a wide bar end their run exactly where they did before \
              the reserve existed"
@@ -25609,8 +25790,8 @@ mod tests {",
         // The tabs pay in width before they pay in scroll: a bar wider by the
         // reserve draws the strip the old arithmetic drew, and five tabs on this
         // one are narrower without having begun to scroll.
-        let squeezed = tab_strip_geometry(width, scale, &resting(5), 0, 0.0);
-        let unreserved = tab_strip_geometry(width + reserve, scale, &resting(5), 0, 0.0);
+        let squeezed = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(5), 0, 0.0);
+        let unreserved = tab_strip_geometry(width + reserve, scale, FOLIO_BAR, &resting(5), 0, 0.0);
         assert_eq!(squeezed.max_scroll, 0.0, "five tabs still fit, tighter");
         assert_eq!(unreserved.max_scroll, 0.0);
         let tab_of = |strip: &TabStripGeometry| strip.tabs[0].body[2] - strip.tabs[0].body[0];
@@ -25636,7 +25817,7 @@ mod tests {",
         };
         for tabs in [1_usize, 12, 30] {
             assert_eq!(
-                title_bar_app_run_right_px(width, scale, tabs, vertical),
+                title_bar_app_run_right_px(width, scale, FOLIO_BAR, tabs, vertical),
                 42,
                 "the tabs are down the side, so {tabs} of them still buy the app \
                  nothing but its toggle"
@@ -25644,6 +25825,340 @@ mod tests {",
         }
     }
 
+    /// **What macOS leaves standing in a title bar Folio has taken over.**
+    ///
+    /// Measured on macOS 26.6 on 2026-09-12: the close button's frame is
+    /// `(9, 9, 14, 14)`, miniaturize's begins at 32 and zoom's at 55, so the
+    /// rightmost edge is 69 points. The inset is that edge times the window's
+    /// backing scale, which is why this is one logical number read at two
+    /// scales rather than two numbers — 69 physical pixels on a plain desk, 138
+    /// on a Retina one.
+    ///
+    /// **The number is not what the tests below assert**; every one of them
+    /// asserts a relation to it, so a macOS that moves its own buttons moves
+    /// this constant and nothing else. `bt_platform::adopt_window_chrome` never
+    /// reads it: it asks the window. §13.11 records the measurement.
+    const MAC_TRAFFIC_LIGHTS_LOGICAL_PX: f32 = 69.0;
+
+    /// A window whose platform draws its own three buttons, at `scale`.
+    fn mac_bar(scale: f32) -> PlatformChrome {
+        PlatformChrome {
+            strip_left_px: (MAC_TRAFFIC_LIGHTS_LOGICAL_PX * scale) as i32,
+            buttons_are_the_platforms: true,
+        }
+    }
+
+    /// RED — **the strip begins to the right of the traffic lights, and pays
+    /// for the band out of its own run** (M3-3, owner ruling 2026-09-12).
+    ///
+    /// The ruling keeps macOS's window buttons where macOS puts them and starts
+    /// Folio's tab strip after them. Three things have to be true at once for
+    /// that to be a strip rather than a strip drawn under three buttons: its
+    /// viewport begins at the inset, no tab body starts before it, and the band
+    /// comes out of the run *before* the tabs are shared out — the same ordering
+    /// the drag reserve is taken in, so tabs walk down their width tiers inside
+    /// the smaller run first and scroll only once they are on their floor.
+    ///
+    /// The hit test is the fourth: the strip's crop is `viewport`, so a press in
+    /// the traffic lights' own band answers nothing. It never reaches Folio on a
+    /// real Mac — AppKit's buttons are views above this window's content — but a
+    /// strip that would have claimed those pixels is a strip that is drawn
+    /// there too.
+    ///
+    /// MUTATION: leave `origin` at `radius - scroll`, or `viewport[0]` at `0.0`,
+    /// and this names it at both scales.
+    #[test]
+    fn the_mac_strip_starts_right_of_the_traffic_lights() {
+        for scale in [1.0_f32, 2.0] {
+            let width = 960.0 * scale;
+            let mac = mac_bar(scale);
+            let inset = mac.strip_left_px as f32;
+            let strip = tab_strip_geometry(width, scale, mac, &resting(4), 0, 0.0);
+            assert_eq!(
+                strip.viewport[0], inset,
+                "the strip's own left wall is the inset at scale {scale}"
+            );
+            for (index, tab) in strip.tabs.iter().enumerate() {
+                assert!(
+                    tab.body[0] >= inset,
+                    "tab {index} begins at {} and the traffic lights end at {inset}",
+                    tab.body[0]
+                );
+            }
+            assert!(
+                strip.new_tab[0] > inset && strip.new_tab_menu[2] <= strip.viewport[1],
+                "the `+` and the `˅` ride inside the same run"
+            );
+
+            // The band is taken out of the run and not clamped onto the answers:
+            // the same window with no platform chrome draws wider tabs and ends
+            // its strip in the same place.
+            let folio = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(4), 0, 0.0);
+            assert_eq!(
+                strip.viewport[1], folio.viewport[1],
+                "the right edge is the caption run's and is not moved by the inset"
+            );
+            let body =
+                |geometry: &TabStripGeometry| geometry.tabs[0].body[2] - geometry.tabs[0].body[0];
+            assert!(
+                body(&strip) < body(&folio),
+                "the inset comes out of the tabs' width: {} against {}",
+                body(&strip),
+                body(&folio)
+            );
+
+            // And nothing in the strip answers a press inside the band.
+            for x in (0..inset as i32).step_by(5) {
+                assert_eq!(
+                    hit_tab_chrome(width, scale, mac, &resting(4), 0, 0.0, f64::from(x), 10.0),
+                    None,
+                    "x={x} is in the traffic lights' own band at scale {scale}"
+                );
+            }
+
+            // The other layout's first control obeys the same sentence: the
+            // sidebar toggle is what stands at the leading edge there.
+            let vertical = RailState {
+                layout: TabLayoutMode::Vertical,
+                mode: RailMode::Expanded,
+                ..RailState::default()
+            };
+            let toggle =
+                panel_toggle_box(scale, mac, vertical).expect("the expanded bar carries one");
+            assert!(
+                toggle[0] >= inset,
+                "the sidebar toggle stands at {} with the lights ending at {inset}",
+                toggle[0]
+            );
+        }
+    }
+
+    /// RED — **Folio draws no button where the platform draws its own** (M3-3,
+    /// owner ruling 2026-09-12: the window must not carry two sets of window
+    /// controls).
+    ///
+    /// One list decides the caption run on every window and on every platform,
+    /// and it decides by capability. On a window whose own standard buttons
+    /// AppKit is still drawing there is nothing left for Folio to draw but the
+    /// gear; on every other window the run is exactly what it was. The paint is
+    /// asserted beside the geometry, because a list that dropped the three and a
+    /// painter that drew them anyway is the bug this whole ticket is about.
+    ///
+    /// MUTATION: return the four-button run for a window with platform buttons
+    /// and this names the first of them; keep the list and paint the marks
+    /// directly and the sprite half names that instead.
+    #[test]
+    fn no_caption_button_is_laid_out_where_the_platform_draws_its_own() {
+        let forbidden = [
+            ChromeTarget::Minimize,
+            ChromeTarget::Maximize,
+            ChromeTarget::CloseWindow,
+        ];
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let width = 960.0 * scale;
+            let mac = mac_bar(scale);
+            for summoned in [false, true] {
+                assert_eq!(
+                    caption_targets(mac, summoned),
+                    &[ChromeTarget::Settings],
+                    "the gear stays and nothing else does (summoned={summoned})"
+                );
+                let boxes = window_caption_boxes(width, scale, mac, summoned);
+                assert_eq!(boxes.len(), 1);
+                assert_eq!(
+                    boxes[0].1[2], width,
+                    "the run still ends at the window's own edge, so no seam of unclaimed \
+                     pixels is left in the corner"
+                );
+                for (target, _) in
+                    window_chrome_boxes(width, scale, mac, RailState::default(), summoned)
+                {
+                    assert!(
+                        !forbidden.contains(&target),
+                        "{target:?} is laid out on a window whose platform draws its own"
+                    );
+                }
+                // And no pixel of the bar answers one of the three, which is
+                // the claim the box list alone cannot make: the gear moves into
+                // the corner slot the `×` used to hold, so what has to be shown
+                // is not that those slots are dead but that nothing anywhere up
+                // here is a second minimise, zoom or close.
+                let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+                for step in 0..(width as i32 / 3) {
+                    let (x, y) = (f64::from(step * 3), f64::from(title / 2.0));
+                    let answer =
+                        hit_window_chrome(width, scale, mac, RailState::default(), summoned, x, y);
+                    assert!(
+                        !answer.is_some_and(|target| forbidden.contains(&target)),
+                        "x={x} answers {answer:?} on a window whose platform draws its own                          (summoned={summoned})"
+                    );
+                }
+            }
+            // The mutation guard the other way: nothing about the run changed on
+            // the window Folio draws the whole bar on.
+            assert_eq!(
+                caption_targets(FOLIO_BAR, false),
+                &[
+                    ChromeTarget::Settings,
+                    ChromeTarget::Minimize,
+                    ChromeTarget::Maximize,
+                    ChromeTarget::CloseWindow,
+                ],
+                "the Windows run is untouched at scale {scale}"
+            );
+            assert_eq!(
+                caption_targets(FOLIO_BAR, true),
+                &[ChromeTarget::Settings, ChromeTarget::CloseWindow],
+                "and so is the summoned terminal's"
+            );
+        }
+
+        // The paint, on the same terms: the caption sprites of a window whose
+        // platform draws its own buttons carry the gear's glyph and neither of
+        // the other three marks.
+        let drawn = caption_sprites_on(mac_bar(1.0));
+        for mark in [
+            crate::icons::ActionIcon::MinimiseWindow.mark(),
+            crate::icons::ActionIcon::MaximiseWindow.mark(),
+            crate::icons::ActionIcon::CloseWindow.mark(),
+        ] {
+            assert!(
+                !drawn.iter().any(|sprite| sprite.mark == mark),
+                "{mark:?} is painted in a bar that already carries the platform's own"
+            );
+        }
+        assert!(
+            drawn
+                .iter()
+                .any(|sprite| sprite.mark == crate::icons::ActionIcon::OpenSettings.mark()),
+            "the gear stays, which is the other half of the ruling"
+        );
+    }
+
+    /// RED — **the empty part of the strip is the window's drag region, and
+    /// exactly that part** (M3-3, owner ruling 2026-09-12).
+    ///
+    /// The rule is the one Windows' frame already answers with `HTCAPTION`,
+    /// written where macOS can reach it: between where Folio's own content stops
+    /// and where the gear's run begins, for the height of the bar. This walks
+    /// the whole bar three pixels at a time and holds the predicate to the hit
+    /// test — every pixel the window may be picked up by is a pixel no control
+    /// of Folio's answers for, and every pixel a control answers for is not the
+    /// window's.
+    ///
+    /// The traffic lights' own band is the one exception and it is stated: it is
+    /// neither Folio's nor the window's to drag by, because AppKit's buttons
+    /// take those presses before winit sees them and a drag begun from inside a
+    /// button's rectangle is a button that cannot be pressed.
+    ///
+    /// MUTATION: answer `true` for the whole bar and the caption run names it;
+    /// answer from the strip's right edge alone and the vertical layout names
+    /// it; drop the leading band and the first pixel does.
+    #[test]
+    fn the_strips_empty_part_is_the_drag_region() {
+        use bt_platform::{CustomFrameHit, CustomFrameMetrics, custom_frame_hit_test};
+        let layouts = [
+            RailState::default(),
+            RailState {
+                layout: TabLayoutMode::Vertical,
+                mode: RailMode::Expanded,
+                ..RailState::default()
+            },
+        ];
+        for scale in [1.0_f32, 2.0] {
+            let width = 960.0 * scale;
+            let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+            for chrome in [FOLIO_BAR, mac_bar(scale)] {
+                for rail in layouts {
+                    for tabs in [1_usize, 12, 30] {
+                        let trailers = resting(tabs);
+                        // The other platform's own answer about the same bar,
+                        // built from the same two numbers its frame is given:
+                        // where the app's run ends, and how many slots the
+                        // caption run holds. Two implementations, one rule.
+                        let frame = CustomFrameMetrics {
+                            width: width as i32,
+                            height: 700,
+                            title_bar_height: title as i32,
+                            tab_strip_right_px: title_bar_app_run_right_px(
+                                width, scale, chrome, tabs, rail,
+                            ),
+                            caption_button_width: (WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale) as i32,
+                            caption_button_count: caption_targets(chrome, false).len() as i32,
+                            resize_border: 0,
+                            resizable: false,
+                        };
+                        let mut handle = 0;
+                        for step in 0..(width as i32 / 3) {
+                            let x = step * 3;
+                            let y = (title / 2.0) as i32;
+                            let (fx, fy) = (f64::from(x), f64::from(y));
+                            let dragging = title_bar_drag_point(
+                                width, scale, chrome, tabs, rail, false, fx, fy,
+                            );
+                            // Below the platform's own band the two are the same
+                            // rule; inside it, this window has nothing to say —
+                            // AppKit's buttons take the press before winit sees
+                            // it, and a drag begun from inside one is a button
+                            // that cannot be pressed.
+                            let expected = x >= chrome.strip_left_px
+                                && custom_frame_hit_test(frame, x, y) == CustomFrameHit::Caption;
+                            assert_eq!(
+                                dragging, expected,
+                                "x={x} scale={scale} tabs={tabs} layout={:?} lights={}: the two \
+                                 platforms' one rule disagrees with itself",
+                                rail.layout, chrome.strip_left_px,
+                            );
+                            // And whatever else it is, it is never a control:
+                            // the handle and Folio's own boxes tile the bar
+                            // without overlapping.
+                            if dragging {
+                                assert_eq!(
+                                    hit_window_chrome(width, scale, chrome, rail, false, fx, fy),
+                                    None,
+                                    "x={x} is both the window's handle and one of Folio's buttons"
+                                );
+                                if matches!(rail.layout, TabLayoutMode::Horizontal) {
+                                    assert_eq!(
+                                        hit_tab_chrome(
+                                            width, scale, chrome, &trailers, 0, 0.0, fx, fy,
+                                        ),
+                                        None,
+                                        "x={x} is both the window's handle and a tab"
+                                    );
+                                }
+                            }
+                            handle += i32::from(dragging);
+                        }
+                        assert!(
+                            handle > 0,
+                            "a bar with {tabs} tabs at scale {scale} has no handle at all \
+                             (layout {:?}) — the reserve is what makes this true however many \
+                             tabs are open",
+                            rail.layout
+                        );
+                    }
+                }
+                // Below the bar the window is never picked up: that is the
+                // terminal, a pane head, or the sidebar.
+                for y in [title, title + 1.0, title * 4.0] {
+                    assert!(
+                        !title_bar_drag_point(
+                            width,
+                            scale,
+                            chrome,
+                            3,
+                            RailState::default(),
+                            false,
+                            f64::from(width / 2.0),
+                            f64::from(y),
+                        ),
+                        "y={y} is under the title bar"
+                    );
+                }
+            }
+        }
+    }
     /// The caption run's boxes and its hit test are one arithmetic, and this is
     /// what says so: every box answers with its own target when asked at its
     /// centre, and the run tiles the corner with no seam between the buttons.
@@ -25658,22 +26173,22 @@ mod tests {",
         let rail = RailState::default();
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let width = 960.0 * scale;
-            let boxes = window_caption_boxes(width, scale, false);
+            let boxes = window_caption_boxes(width, scale, FOLIO_BAR, false);
             assert_eq!(
-                window_chrome_boxes(width, scale, rail, false),
+                window_chrome_boxes(width, scale, FOLIO_BAR, rail, false),
                 boxes.clone(),
                 "a horizontal bar carries no panel toggle, so the run is the \
                  caption run and nothing else"
             );
             assert_eq!(
                 boxes.iter().map(|(target, _)| *target).collect::<Vec<_>>(),
-                caption_targets(false).to_vec(),
+                caption_targets(FOLIO_BAR, false).to_vec(),
                 "the gear leads the run"
             );
             // **And the summoned terminal's run is the two the ruling leaves it**
             // (§7.54e ②), measured from the same origin so the paint and this
             // hit test cannot disagree about where the `×` is.
-            let summoned = window_caption_boxes(width, scale, true);
+            let summoned = window_caption_boxes(width, scale, FOLIO_BAR, true);
             assert_eq!(
                 summoned
                     .iter()
@@ -25689,7 +26204,7 @@ mod tests {",
             );
             assert_eq!(
                 summoned.first().map(|(_, rect)| rect[0]),
-                Some(caption_run_left(width, scale, true)),
+                Some(caption_run_left(width, scale, FOLIO_BAR, true)),
                 "and the run starts where `caption_run_left` says it does"
             );
             for (target, rect) in boxes.iter().copied() {
@@ -25697,6 +26212,7 @@ mod tests {",
                     hit_window_chrome(
                         width,
                         scale,
+                        FOLIO_BAR,
                         rail,
                         false,
                         f64::from((rect[0] + rect[2]) / 2.0),
@@ -25714,7 +26230,15 @@ mod tests {",
             }
             assert!((boxes[3].1[2] - width).abs() < 1e-4);
             assert_eq!(
-                hit_window_chrome(width, scale, rail, false, f64::from(width) - 0.5, 1.0),
+                hit_window_chrome(
+                    width,
+                    scale,
+                    FOLIO_BAR,
+                    rail,
+                    false,
+                    f64::from(width) - 0.5,
+                    1.0
+                ),
                 Some(ChromeTarget::CloseWindow)
             );
             // And nothing to the left of the run is the run's.
@@ -25722,6 +26246,7 @@ mod tests {",
                 hit_window_chrome(
                     width,
                     scale,
+                    FOLIO_BAR,
                     rail,
                     false,
                     f64::from(boxes[0].1[0]) - 1.0,
@@ -25763,8 +26288,8 @@ mod tests {",
         let (width, scale, tabs) = (1920.0_f32, 1.0_f32, 1_usize);
         let rail = RailState::default();
         let trailers = resting(tabs);
-        let chevron = tab_strip_geometry(width, scale, &trailers, 0, 0.0).new_tab_menu;
-        let run_right = title_bar_app_run_right_px(width, scale, tabs, rail);
+        let chevron = tab_strip_geometry(width, scale, FOLIO_BAR, &trailers, 0, 0.0).new_tab_menu;
+        let run_right = title_bar_app_run_right_px(width, scale, FOLIO_BAR, tabs, rail);
         assert_eq!(
             run_right,
             chevron[2].ceil() as i32,
@@ -25786,7 +26311,16 @@ mod tests {",
         // The button itself is the app's, and the gate hears `Button` there.
         let on = ((chevron[0] + chevron[2]) / 2.0).round() as i32;
         assert_eq!(
-            hit_tab_chrome(width, scale, &trailers, 0, 0.0, f64::from(on), f64::from(y)),
+            hit_tab_chrome(
+                width,
+                scale,
+                FOLIO_BAR,
+                &trailers,
+                0,
+                0.0,
+                f64::from(on),
+                f64::from(y)
+            ),
             Some(ChromeTarget::NewTabMenu),
             "the `⌄` answers at its own centre"
         );
@@ -25801,7 +26335,16 @@ mod tests {",
         assert!(buttons_left > run_right, "there is a band to test");
         for x in (run_right..buttons_left).step_by(17) {
             assert_eq!(
-                hit_tab_chrome(width, scale, &trailers, 0, 0.0, f64::from(x), f64::from(y)),
+                hit_tab_chrome(
+                    width,
+                    scale,
+                    FOLIO_BAR,
+                    &trailers,
+                    0,
+                    0.0,
+                    f64::from(x),
+                    f64::from(y)
+                ),
                 None,
                 "x={x} lies outside the `⌄`'s box, so nothing in the strip claims it"
             );
@@ -25840,6 +26383,7 @@ mod tests {",
                 ChromeContent {
                     update_mark: false,
                     summoned: false,
+                    chrome: FOLIO_BAR,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -25881,7 +26425,7 @@ mod tests {",
                 },
             )
             .flattened();
-            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(3), 0, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, FOLIO_BAR, &resting(3), 0, 0.0);
             // Compared as sets, because the strip paints the quiet tabs first
             // and the active one last (`.tab.active { z-index: 1 }`), so draw
             // order is deliberately not strip order.
@@ -25912,7 +26456,7 @@ mod tests {",
     #[test]
     fn multi_tab_strip_is_equal_width_and_exposes_plus_close_and_middle_click_targets() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
-            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(4), 2, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, FOLIO_BAR, &resting(4), 2, 0.0);
             assert_eq!(geometry.tabs.len(), 4);
             let widths = geometry
                 .tabs
@@ -25931,6 +26475,7 @@ mod tests {",
                 hit_tab_chrome(
                     960.0 * scale,
                     scale,
+                    FOLIO_BAR,
                     &resting(4),
                     2,
                     0.0,
@@ -25944,6 +26489,7 @@ mod tests {",
                 hit_tab_chrome(
                     960.0 * scale,
                     scale,
+                    FOLIO_BAR,
                     &resting(4),
                     2,
                     0.0,
@@ -25957,6 +26503,7 @@ mod tests {",
                 hit_tab_chrome(
                     960.0 * scale,
                     scale,
+                    FOLIO_BAR,
                     &resting(4),
                     2,
                     0.0,
@@ -25973,15 +26520,16 @@ mod tests {",
     fn tab_count_layout_changes_publish_a_new_strip_right_edge() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let width = 960.0 * scale;
-            let one = tab_strip_right_px(width, scale, 1);
-            let two = tab_strip_right_px(width, scale, 2);
+            let one = tab_strip_right_px(width, scale, FOLIO_BAR, 1);
+            let two = tab_strip_right_px(width, scale, FOLIO_BAR, 2);
             assert!(
                 two > one,
                 "adding a tab must move the edge at scale {scale}"
             );
             assert_eq!(
                 one,
-                tab_strip_geometry(width, scale, &resting(1), 0, 0.0).new_tab_menu[2].ceil() as i32,
+                tab_strip_geometry(width, scale, FOLIO_BAR, &resting(1), 0, 0.0).new_tab_menu[2]
+                    .ceil() as i32,
                 "the published edge includes both end buttons at scale {scale}"
             );
         }
@@ -26069,6 +26617,7 @@ mod tests {",
             ChromeContent {
                 update_mark: false,
                 summoned: false,
+                chrome: FOLIO_BAR,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -26180,6 +26729,7 @@ mod tests {",
             ChromeContent {
                 update_mark: false,
                 summoned: false,
+                chrome: FOLIO_BAR,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -27777,7 +28327,7 @@ mod tests {",
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let titles = strip_titles(3);
             let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
-            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(3), 1, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, FOLIO_BAR, &resting(3), 1, 0.0);
             let body = geometry.tabs[1].body;
             // The two 7x7 boxes the `::before`/`::after` pair occupies: one
             // `--tabr` outside each edge of the active tab, sitting on its foot.
@@ -27851,7 +28401,7 @@ mod tests {",
         for scale in [1.0_f32, 1.5, 2.0] {
             let titles = strip_titles(4);
             let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
-            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(4), 0, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, FOLIO_BAR, &resting(4), 0, 0.0);
             let (_, _, sprites) =
                 strip_chrome(scale, &titles, 0, Some(ChromeTarget::Tab(2)), false);
             let silhouette = sprites
@@ -27907,7 +28457,7 @@ mod tests {",
         for scale in [1.0_f32, 1.5, 2.0] {
             let titles = strip_titles(1);
             let radius = (WINDOW_NEW_TAB_RADIUS_LOGICAL_PX * scale).round() as u32;
-            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(1), 0, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, FOLIO_BAR, &resting(1), 0, 0.0);
             for (rest_hover, hovered_target, box_rect) in [
                 (None, ChromeTarget::NewTab, geometry.new_tab),
                 (None, ChromeTarget::NewTabMenu, geometry.new_tab_menu),
@@ -27961,7 +28511,7 @@ mod tests {",
     fn the_strip_s_two_end_buttons_share_one_box_and_one_ink() {
         let palette = chrome_palette();
         for scale in [1.0_f32, 1.25, 2.0] {
-            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(1), 0, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, FOLIO_BAR, &resting(1), 0, 0.0);
             let box_side = WINDOW_NEW_TAB_BOX_LOGICAL_PX * scale;
             for rect in [geometry.new_tab, geometry.new_tab_menu] {
                 assert!((rect[2] - rect[0] - box_side).abs() < 0.01);
@@ -28133,6 +28683,7 @@ mod tests {",
             ChromeContent {
                 update_mark: false,
                 summoned: false,
+                chrome: FOLIO_BAR,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -28290,7 +28841,7 @@ mod tests {",
                 (9, TabWidthTier::Squeezed),
             ] {
                 let width = 960.0 * scale;
-                let geometry = tab_strip_geometry(width, scale, &resting(count), 0, 0.0);
+                let geometry = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(count), 0, 0.0);
                 assert_eq!(
                     geometry.tabs[0].tier, tier,
                     "scale {scale}: {count} tabs must land in {tier:?}"
@@ -28311,6 +28862,7 @@ mod tests {",
                         hit_tab_chrome(
                             width,
                             scale,
+                            FOLIO_BAR,
                             &resting(count),
                             0,
                             0.0,
@@ -28327,6 +28879,7 @@ mod tests {",
                         hit_tab_chrome(
                             width,
                             scale,
+                            FOLIO_BAR,
                             &resting(count),
                             0,
                             0.0,
@@ -28347,7 +28900,7 @@ mod tests {",
                 !labels.iter().any(|label| label.text == "tab 1"),
                 "scale {scale}: `.tab.squeezed .ttitle {{ display: none }}`"
             );
-            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(9), 0, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, FOLIO_BAR, &resting(9), 0, 0.0);
             let body = geometry.tabs[1].body;
             let mark = sprites
                 .iter()
@@ -28374,10 +28927,11 @@ mod tests {",
             // not.
             let full_titles = strip_titles(2);
             let close_ink = |hover: Option<ChromeTarget>, index: usize| {
-                let close = tab_strip_geometry(960.0 * scale, scale, &resting(2), 0, 0.0).tabs
-                    [index]
-                    .close
-                    .expect("a Full-tier tab has its ×");
+                let close =
+                    tab_strip_geometry(960.0 * scale, scale, FOLIO_BAR, &resting(2), 0, 0.0).tabs
+                        [index]
+                        .close
+                        .expect("a Full-tier tab has its ×");
                 let (_, _, sprites) = strip_chrome(scale, &full_titles, 0, hover, false);
                 sprites
                     .iter()
@@ -28436,7 +28990,7 @@ mod tests {",
         let palette = chrome_palette();
         for scale in [1.0_f32, 1.5, 2.0] {
             let titles = strip_titles(2);
-            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(2), 0, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, FOLIO_BAR, &resting(2), 0, 0.0);
             let radius = (WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX * scale).round() as u32;
             for (index, expected) in [
                 (0, palette.tab_close_pill_on_content),
@@ -28508,7 +29062,7 @@ mod tests {",
     fn a_tab_title_clears_the_trailing_cluster_by_the_clusters_own_tighter_gap() {
         for scale in [1.0_f32, 1.5, 2.0] {
             let titles = strip_titles(2);
-            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(2), 0, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, FOLIO_BAR, &resting(2), 0, 0.0);
             let close = geometry.tabs[0].close.expect("a Full-tier tab has its ×");
             let gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
             let tightened = gap - WINDOW_TAB_TRAILER_TIGHTEN_LOGICAL_PX * scale;
@@ -28572,7 +29126,7 @@ mod tests {",
             let floor = WINDOW_TAB_MIN_WIDTH_LOGICAL_PX * scale;
             let mut ever_scrolled = false;
             for count in 1..=40 {
-                let geometry = tab_strip_geometry(width, scale, &resting(count), 0, 0.0);
+                let geometry = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(count), 0, 0.0);
                 let tab_width = geometry.tabs[0].body[2] - geometry.tabs[0].body[0];
                 assert!(
                     tab_width >= floor - 0.01,
@@ -28605,10 +29159,10 @@ mod tests {",
         // run before the tabs are shared out, so it is felt as two tabs' worth of
         // room rather than as a strip that overhangs its own drag handle.
         assert_eq!(
-            tab_strip_geometry(960.0, 1.0, &resting(13), 0, 0.0).max_scroll,
+            tab_strip_geometry(960.0, 1.0, FOLIO_BAR, &resting(13), 0, 0.0).max_scroll,
             0.0
         );
-        assert!(tab_strip_geometry(960.0, 1.0, &resting(14), 0, 0.0).max_scroll > 0.0);
+        assert!(tab_strip_geometry(960.0, 1.0, FOLIO_BAR, &resting(14), 0, 0.0).max_scroll > 0.0);
     }
 
     /// PIN — A7/A8: the strip is cropped to its viewport, and no caller can park
@@ -28616,20 +29170,27 @@ mod tests {",
     #[test]
     fn a_scrolling_strip_is_cropped_and_never_parks_past_its_content() {
         let (scale, width, count) = (1.0_f32, 960.0_f32, 30);
-        let rest = tab_strip_geometry(width, scale, &resting(count), 0, 0.0);
+        let rest = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(count), 0, 0.0);
         assert!(rest.max_scroll > 0.0);
         assert!(
             (rest.tabs[0].body[0] - (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round()).abs() < 0.01,
             "at rest the first tab still sits at its own inset"
         );
-        let end = tab_strip_geometry(width, scale, &resting(count), 0, rest.max_scroll);
+        let end = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(count), 0, rest.max_scroll);
         assert_eq!(
-            tab_strip_geometry(width, scale, &resting(count), 0, rest.max_scroll * 4.0),
+            tab_strip_geometry(
+                width,
+                scale,
+                FOLIO_BAR,
+                &resting(count),
+                0,
+                rest.max_scroll * 4.0
+            ),
             end,
             "a strip cannot be scrolled past its own content"
         );
         assert_eq!(
-            tab_strip_geometry(width, scale, &resting(count), 0, -500.0),
+            tab_strip_geometry(width, scale, FOLIO_BAR, &resting(count), 0, -500.0),
             rest,
             "nor before the start of it"
         );
@@ -28645,7 +29206,16 @@ mod tests {",
             rest.viewport[1] + 40.0,
         ] {
             assert_eq!(
-                hit_tab_chrome(width, scale, &resting(count), 0, 0.0, f64::from(x), y),
+                hit_tab_chrome(
+                    width,
+                    scale,
+                    FOLIO_BAR,
+                    &resting(count),
+                    0,
+                    0.0,
+                    f64::from(x),
+                    y
+                ),
                 None,
                 "x={x} is past the strip's crop and belongs to the caption run"
             );
@@ -28664,17 +29234,17 @@ mod tests {",
     #[test]
     fn a_scrolling_strip_owns_its_whole_run_and_no_more() {
         let (scale, width) = (1.0_f32, 960.0_f32);
-        let roomy = tab_strip_geometry(width, scale, &resting(2), 0, 0.0);
+        let roomy = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(2), 0, 0.0);
         assert_eq!(roomy.max_scroll, 0.0);
         assert_eq!(
-            tab_strip_right_px(width, scale, 2),
+            tab_strip_right_px(width, scale, FOLIO_BAR, 2),
             roomy.new_tab_menu[2].ceil() as i32,
             "with room to spare the app owns up to the `˅`, and the rest is drag"
         );
-        let full = tab_strip_geometry(width, scale, &resting(30), 0, 0.0);
+        let full = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(30), 0, 0.0);
         assert!(full.max_scroll > 0.0);
         assert_eq!(
-            tab_strip_right_px(width, scale, 30),
+            tab_strip_right_px(width, scale, FOLIO_BAR, 30),
             full.viewport[1].ceil() as i32,
             "a scrolling strip owns its whole run"
         );
@@ -28687,8 +29257,9 @@ mod tests {",
         let (scale, width, count) = (1.0_f32, 960.0_f32, 30);
         let skirt = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round();
         for index in [0, 1, 7, 15, count - 1] {
-            let scrolled = tab_scroll_to_reveal(width, scale, count, index, 0.0, index);
-            let geometry = tab_strip_geometry(width, scale, &resting(count), index, scrolled);
+            let scrolled = tab_scroll_to_reveal(width, scale, FOLIO_BAR, count, index, 0.0, index);
+            let geometry =
+                tab_strip_geometry(width, scale, FOLIO_BAR, &resting(count), index, scrolled);
             let body = geometry.tabs[index].body;
             assert!(
                 body[0] - skirt >= geometry.viewport[0] - 0.01
@@ -28698,14 +29269,14 @@ mod tests {",
             );
         }
         assert_eq!(
-            tab_scroll_to_reveal(width, scale, count, 0, 0.0, 0),
+            tab_scroll_to_reveal(width, scale, FOLIO_BAR, count, 0, 0.0, 0),
             0.0,
             "a tab already framed does not move the strip"
         );
-        let once = tab_scroll_to_reveal(width, scale, count, 20, 0.0, 20);
+        let once = tab_scroll_to_reveal(width, scale, FOLIO_BAR, count, 20, 0.0, 20);
         assert!(once > 0.0);
         assert_eq!(
-            tab_scroll_to_reveal(width, scale, count, 20, once, 20),
+            tab_scroll_to_reveal(width, scale, FOLIO_BAR, count, 20, once, 20),
             once,
             "revealing does not overshoot: asking twice is asking once"
         );
@@ -28760,7 +29331,7 @@ mod tests {",
     #[test]
     fn the_badge_is_the_mockups_pill_and_stands_between_the_title_and_the_close() {
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
-            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(2), 0, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, FOLIO_BAR, &resting(2), 0, 0.0);
             let tab = &geometry.tabs[0];
             let badge = tab_badge_rect(tab, 3, 0.0, scale).expect("three panes wear a badge");
             assert_eq!(
@@ -28794,7 +29365,7 @@ mod tests {",
             );
         }
         // `.tab.squeezed .panecount { display: none }` (mock-up line 201).
-        let squeezed = tab_strip_geometry(960.0, 1.0, &resting(30), 0, 0.0);
+        let squeezed = tab_strip_geometry(960.0, 1.0, FOLIO_BAR, &resting(30), 0, 0.0);
         assert_eq!(squeezed.tabs[1].tier, TabWidthTier::Squeezed);
         assert!(
             tab_badge_rect(&squeezed.tabs[1], 3, 0.0, 1.0).is_none(),
@@ -28820,7 +29391,7 @@ mod tests {",
 
     /// The title box the strip gives the one tab in `tabs`.
     fn only_title_box(scale: f32) -> [f32; 4] {
-        let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(1), 0, 0.0);
+        let geometry = tab_strip_geometry(960.0 * scale, scale, FOLIO_BAR, &resting(1), 0, 0.0);
         tab_title_box(&geometry.tabs[0], 1, 0.0, scale).expect("a lone tab has room for its title")
     }
 
@@ -29145,13 +29716,13 @@ mod tests {",
     /// an editor. The draft is not lost, it is merely not on screen.
     #[test]
     fn a_squeezed_tab_has_no_title_box_for_an_editor_to_take() {
-        let squeezed = tab_strip_geometry(960.0, 1.0, &resting(30), 0, 0.0);
+        let squeezed = tab_strip_geometry(960.0, 1.0, FOLIO_BAR, &resting(30), 0, 0.0);
         assert_eq!(squeezed.tabs[1].tier, TabWidthTier::Squeezed);
         assert!(
             tab_title_box(&squeezed.tabs[1], 1, 0.0, 1.0).is_none(),
             "`.tab.squeezed .ttitle {{ display: none }}` (mock-up 201)"
         );
-        let roomy = tab_strip_geometry(960.0, 1.0, &resting(2), 0, 0.0);
+        let roomy = tab_strip_geometry(960.0, 1.0, FOLIO_BAR, &resting(2), 0, 0.0);
         assert!(tab_title_box(&roomy.tabs[0], 1, 0.0, 1.0).is_some());
     }
 
@@ -29183,7 +29754,8 @@ mod tests {",
                     .find(|label| label.text == "measure-me")
                     .expect("the tab is titled")
                     .rect;
-                let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(1), 0, 0.0);
+                let geometry =
+                    tab_strip_geometry(960.0 * scale, scale, FOLIO_BAR, &resting(1), 0, 0.0);
                 let measured =
                     tab_title_box(&geometry.tabs[0], pane_count, badge_text_width, scale)
                         .expect("a lone tab has room");
@@ -29458,7 +30030,7 @@ mod tests {",
         // Enough tabs to drive the strip through all three tiers.
         for count in [2_usize, 8, 30] {
             let tabs: Vec<TabContent> = (0..count).map(|_| tab_with(mark)).collect();
-            let geometry = tab_strip_geometry(960.0, 1.0, &resting(count), 0, 0.0);
+            let geometry = tab_strip_geometry(960.0, 1.0, FOLIO_BAR, &resting(count), 0, 0.0);
             let tier = geometry.tabs[0].tier;
             let (_, _, sprites) = strip_chrome_of(1.0, &tabs, 0, 0.0, None, false);
             assert!(
@@ -29472,7 +30044,7 @@ mod tests {",
         }
         // And the narrowest tier really is reached, or the loop proved nothing.
         assert_eq!(
-            tab_strip_geometry(960.0, 1.0, &resting(30), 0, 0.0).tabs[0].tier,
+            tab_strip_geometry(960.0, 1.0, FOLIO_BAR, &resting(30), 0, 0.0).tabs[0].tier,
             TabWidthTier::Squeezed
         );
     }
@@ -29645,7 +30217,7 @@ mod tests {",
             files_lit: 0.0,
             audible: true,
         }];
-        let geometry = tab_strip_geometry(1200.0, scale, &trailers, 0, 0.0);
+        let geometry = tab_strip_geometry(1200.0, scale, FOLIO_BAR, &trailers, 0, 0.0);
         let tab = geometry.tabs[0];
         let pin = tab.pin.expect("a pinned tab wears its pin");
         let speaker = tab
@@ -29663,6 +30235,7 @@ mod tests {",
             hit_tab_chrome(
                 1200.0,
                 scale,
+                FOLIO_BAR,
                 &trailers,
                 0,
                 0.0,
@@ -29679,7 +30252,7 @@ mod tests {",
             ..trailers[0]
         }];
         assert_eq!(
-            tab_strip_geometry(1200.0, scale, &silent, 0, 0.0).tabs[0].speaker,
+            tab_strip_geometry(1200.0, scale, FOLIO_BAR, &silent, 0, 0.0).tabs[0].speaker,
             None
         );
     }
@@ -29707,14 +30280,14 @@ mod tests {",
                 },
                 TabTrailer::default(),
             ];
-            let geometry = tab_strip_geometry(width, scale, &pinned, 0, 0.0);
+            let geometry = tab_strip_geometry(width, scale, FOLIO_BAR, &pinned, 0, 0.0);
             let tab = geometry.tabs[0];
             assert_eq!(
                 tab.close, None,
                 "scale {scale}: `tabTrailer` writes no `.close` for a pinned tab"
             );
             let pin = tab.pin.expect("a pinned tab wears its pin");
-            let close = tab_strip_geometry(width, scale, &resting(2), 0, 0.0).tabs[0]
+            let close = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(2), 0, 0.0).tabs[0]
                 .close
                 .expect("an unpinned Full-tier tab has its ×");
             assert_eq!(
@@ -29735,6 +30308,7 @@ mod tests {",
             let hovered = tab_strip_geometry(
                 width,
                 scale,
+                FOLIO_BAR,
                 &[
                     TabTrailer {
                         pinned: true,
@@ -29785,7 +30359,7 @@ mod tests {",
                     };
                     count
                 ];
-                let geometry = tab_strip_geometry(width, scale, &trailers, 0, 0.0);
+                let geometry = tab_strip_geometry(width, scale, FOLIO_BAR, &trailers, 0, 0.0);
                 assert_eq!(
                     geometry.tabs[0].tier, tier,
                     "scale {scale}: {count} tabs must land in {tier:?}"
@@ -29803,7 +30377,7 @@ mod tests {",
                 }
                 // A tight tab that is *not* pinned still keeps the active tab's
                 // `×`: it is the pin's rule that is unqualified, not the `×`'s.
-                let ordinary = tab_strip_geometry(width, scale, &resting(count), 0, 0.0);
+                let ordinary = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(count), 0, 0.0);
                 assert!(
                     ordinary.tabs[0].close.is_some(),
                     "scale {scale}/{tier:?}: `.tab.tight:not(.active) .close` spares the active tab"
@@ -29836,17 +30410,17 @@ mod tests {",
                 },
                 TabTrailer::default(),
             ];
-            let slot = tab_strip_geometry(width, scale, &pinned, 0, 0.0).tabs[0]
+            let slot = tab_strip_geometry(width, scale, FOLIO_BAR, &pinned, 0, 0.0).tabs[0]
                 .pin
                 .expect("a pinned tab wears its pin");
             let (x, y) = centre(slot);
             assert_eq!(
-                hit_tab_chrome(width, scale, &pinned, 0, 0.0, x, y),
+                hit_tab_chrome(width, scale, FOLIO_BAR, &pinned, 0, 0.0, x, y),
                 Some(ChromeTarget::TabPin(0)),
                 "scale {scale}: the pinned tab's slot is the pin's"
             );
             assert_eq!(
-                hit_tab_chrome(width, scale, &resting(2), 0, 0.0, x, y),
+                hit_tab_chrome(width, scale, FOLIO_BAR, &resting(2), 0, 0.0, x, y),
                 Some(ChromeTarget::TabClose(0)),
                 "scale {scale}: and on an unpinned tab the same slot is still the ×'s"
             );
@@ -29861,22 +30435,22 @@ mod tests {",
                 },
                 TabTrailer::default(),
             ];
-            let open = tab_strip_geometry(width, scale, &revealed, 0, 0.0).tabs[0]
+            let open = tab_strip_geometry(width, scale, FOLIO_BAR, &revealed, 0, 0.0).tabs[0]
                 .pin
                 .expect("a full reveal opens the box");
             let (open_x, open_y) = centre(open);
             assert_eq!(
-                hit_tab_chrome(width, scale, &revealed, 0, 0.0, open_x, open_y),
+                hit_tab_chrome(width, scale, FOLIO_BAR, &revealed, 0, 0.0, open_x, open_y),
                 Some(ChromeTarget::TabPin(0)),
                 "scale {scale}: the revealed pin answers the pointer"
             );
             assert_eq!(
-                hit_tab_chrome(width, scale, &resting(2), 0, 0.0, open_x, open_y),
+                hit_tab_chrome(width, scale, FOLIO_BAR, &resting(2), 0, 0.0, open_x, open_y),
                 Some(ChromeTarget::Tab(0)),
                 "scale {scale}: a pin that is not drawn is not pressable"
             );
             // And the two never trade places: the pin is left of the ×, always.
-            let close = tab_strip_geometry(width, scale, &revealed, 0, 0.0).tabs[0]
+            let close = tab_strip_geometry(width, scale, FOLIO_BAR, &revealed, 0, 0.0).tabs[0]
                 .close
                 .expect("an unpinned Full-tier tab keeps its ×");
             assert!(open[2] <= close[0], "scale {scale}: pin, then ×");
@@ -29901,7 +30475,7 @@ mod tests {",
             let width = 960.0 * scale;
             let gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
             let tightened = gap - WINDOW_TAB_TRAILER_TIGHTEN_LOGICAL_PX * scale;
-            let rest = tab_strip_geometry(width, scale, &resting(2), 0, 0.0).tabs[0];
+            let rest = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(2), 0, 0.0).tabs[0];
             assert!(
                 rest.pin.is_none(),
                 "scale {scale}: a zero-width box is no box at all"
@@ -29922,6 +30496,7 @@ mod tests {",
             let pinned = tab_strip_geometry(
                 width,
                 scale,
+                FOLIO_BAR,
                 &[
                     TabTrailer {
                         pinned: true,
@@ -29960,6 +30535,7 @@ mod tests {",
                 tab_strip_geometry(
                     width,
                     scale,
+                    FOLIO_BAR,
                     &[
                         TabTrailer {
                             pinned: false,
@@ -30001,7 +30577,7 @@ mod tests {",
             let badge_right = |tab: &TabGeometry| {
                 tab_badge_rect(tab, 3, 0.0, scale).expect("three panes wear a badge")[2]
             };
-            let rest = tab_strip_geometry(width, scale, &resting(2), 0, 0.0).tabs[0];
+            let rest = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(2), 0, 0.0).tabs[0];
             let paid = badge_right(&rest) - badge_right(&open);
             assert!(
                 (paid - (box_px + gap)).abs() < 1.01,
@@ -30080,6 +30656,7 @@ mod tests {",
             let box_rect = tab_strip_geometry(
                 960.0 * scale,
                 scale,
+                FOLIO_BAR,
                 &[tabs[0].trailer, tabs[1].trailer],
                 0,
                 0.0,
@@ -30234,7 +30811,7 @@ mod tests {",
                 },
             ];
             let tabs = [pinnable_tab(trailers[0]), pinnable_tab(trailers[1])];
-            let geometry = tab_strip_geometry(960.0 * scale, scale, &trailers, 0, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, FOLIO_BAR, &trailers, 0, 0.0);
             for (index, expected, lit) in [
                 (
                     0,
@@ -30315,8 +30892,8 @@ mod tests {",
                         ..TabTrailer::default()
                     })
                     .collect::<Vec<_>>();
-                let plain = tab_strip_geometry(width, scale, &resting(count), 0, 0.0);
-                let trailed = tab_strip_geometry(width, scale, &mixed, 0, 0.0);
+                let plain = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(count), 0, 0.0);
+                let trailed = tab_strip_geometry(width, scale, FOLIO_BAR, &mixed, 0, 0.0);
                 assert_eq!(
                     plain.new_tab, trailed.new_tab,
                     "scale {scale}, {count} tabs"
@@ -30501,8 +31078,8 @@ mod tests {",
             reveal: 0.5,
             ..TabTrailer::default()
         };
-        let before = tab_strip_geometry(960.0, 1.0, &[pinned, open, open], 0, 0.0);
-        let after = tab_strip_geometry(960.0, 1.0, &[open, pinned, open], 1, 0.0);
+        let before = tab_strip_geometry(960.0, 1.0, FOLIO_BAR, &[pinned, open, open], 0, 0.0);
+        let after = tab_strip_geometry(960.0, 1.0, FOLIO_BAR, &[open, pinned, open], 1, 0.0);
         let mids = strip_run(&before, 1.0).mids();
         assert_eq!(mids, strip_run(&after, 1.0).mids());
         // And they are the slots' own centres: each one inside the tab it
@@ -30551,7 +31128,7 @@ mod tests {",
             reveal: 1.0,
             ..TabTrailer::default()
         };
-        let geometry = tab_strip_geometry(960.0, 1.0, &[trailer, trailer], 0, 0.0);
+        let geometry = tab_strip_geometry(960.0, 1.0, FOLIO_BAR, &[trailer, trailer], 0, 0.0);
         let slot = geometry.tabs[0];
         let moved = slot.shifted(31.0);
         assert_eq!(moved.body[0], slot.body[0] + 31.0);
@@ -30590,6 +31167,7 @@ mod tests {",
             ChromeContent {
                 update_mark: false,
                 summoned: false,
+                chrome: FOLIO_BAR,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -30655,7 +31233,7 @@ mod tests {",
     /// By its slot's own address rather than by "the first mark in the list",
     /// because the list's order is exactly what these tests are about.
     fn mark_paint_index(sprites: &[ChromeSprite], count: usize, scale: f32, tab: usize) -> usize {
-        let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(count), 0, 0.0);
+        let geometry = tab_strip_geometry(960.0 * scale, scale, FOLIO_BAR, &resting(count), 0, 0.0);
         let left = tab_mark_left(&geometry.tabs[tab], scale);
         sprites
             .iter()
@@ -30748,7 +31326,8 @@ mod tests {",
         let (_, moved_labels, moved_sprites) = strip_chrome_grabbed(&carried, 0, Some(0));
         assert_eq!(resting_sprites.len(), moved_sprites.len());
         assert_eq!(resting_labels.len(), moved_labels.len());
-        let first_slot_right = tab_strip_geometry(960.0, 1.0, &resting(3), 0, 0.0).tabs[0].body[2];
+        let first_slot_right =
+            tab_strip_geometry(960.0, 1.0, FOLIO_BAR, &resting(3), 0, 0.0).tabs[0].body[2];
         for (resting, moved) in resting_sprites.iter().zip(&moved_sprites) {
             let dx = if resting.rect[0] < first_slot_right {
                 37.0
@@ -30801,6 +31380,7 @@ mod tests {",
                 ChromeContent {
                     update_mark: false,
                     summoned: false,
+                    chrome: FOLIO_BAR,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -30917,6 +31497,7 @@ mod tests {",
                 ChromeContent {
                     update_mark: false,
                     summoned: false,
+                    chrome: FOLIO_BAR,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -31221,6 +31802,7 @@ mod tests {",
             ChromeContent {
                 update_mark: false,
                 summoned: false,
+                chrome: FOLIO_BAR,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -33132,7 +33714,7 @@ mod tests {",
             reveal: 1.0,
             ..TabTrailer::default()
         };
-        let geometry = tab_strip_geometry(width, scale, &[carried, bare], 0, 0.0);
+        let geometry = tab_strip_geometry(width, scale, FOLIO_BAR, &[carried, bare], 0, 0.0);
         assert!(
             geometry.tabs[0].files.is_some(),
             "the lone-terminal tab speaks for it"
@@ -33162,7 +33744,7 @@ mod tests {",
         // rather than assumed.
         for (count, tier) in [(6, TabWidthTier::Tight), (9, TabWidthTier::Squeezed)] {
             let tabs = vec![carried; count];
-            let geometry = tab_strip_geometry(960.0, scale, &tabs, 0, 0.0);
+            let geometry = tab_strip_geometry(960.0, scale, FOLIO_BAR, &tabs, 0, 0.0);
             assert_eq!(geometry.tabs[0].tier, tier, "the width tier under test");
             assert!(
                 geometry.tabs[0].files.is_none(),
@@ -33231,7 +33813,7 @@ mod tests {",
             reveal: 1.0,
             ..TabTrailer::default()
         };
-        let geometry = tab_strip_geometry(960.0, scale, &[carried], 0, 0.0);
+        let geometry = tab_strip_geometry(960.0, scale, FOLIO_BAR, &[carried], 0, 0.0);
         let tab = geometry.tabs[0];
         let files = tab.files.expect("revealed");
         assert!(
@@ -34769,6 +35351,7 @@ mod tests {",
             ChromeContent {
                 update_mark: false,
                 summoned: false,
+                chrome: FOLIO_BAR,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -34842,6 +35425,7 @@ mod tests {",
             ChromeContent {
                 update_mark: false,
                 summoned: false,
+                chrome: FOLIO_BAR,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -35651,6 +36235,7 @@ mod tests {",
             ChromeContent {
                 update_mark: false,
                 summoned: false,
+                chrome: FOLIO_BAR,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -35932,6 +36517,7 @@ mod tests {",
             ChromeContent {
                 update_mark: false,
                 summoned: false,
+                chrome: FOLIO_BAR,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -36197,6 +36783,7 @@ mod tests {",
             ChromeContent {
                 update_mark: false,
                 summoned: false,
+                chrome: FOLIO_BAR,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -36367,6 +36954,7 @@ mod tests {",
             ChromeContent {
                 update_mark: false,
                 summoned: false,
+                chrome: FOLIO_BAR,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -37086,7 +37674,7 @@ mod tests {",
         // The mirror: the strip's own row, which in a vertical layout is not
         // drawn and must not be reachable. It is below the title bar in the rail
         // and inside it in the strip, so the two do not even overlap.
-        let strip_row = tab_strip_geometry(960.0, 1.0, &trailers, 1, 0.0).tabs[1];
+        let strip_row = tab_strip_geometry(960.0, 1.0, FOLIO_BAR, &trailers, 1, 0.0).tabs[1];
         let (sx, sy) = centre(strip_row.body);
         assert!(
             sy < WINDOW_TITLE_BAR_LOGICAL_PX.into(),
@@ -37871,6 +38459,7 @@ mod tests {",
             ChromeContent {
                 update_mark: false,
                 summoned: false,
+                chrome: FOLIO_BAR,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::new(card_ink),
@@ -39809,7 +40398,7 @@ mod tests {",
     /// constructor and that surface answers `0.0` for a list that scrolls.
     #[test]
     fn all_three_tab_surfaces_run_under_a_hand_at_their_own_far_edge() {
-        let strip = tab_strip_geometry(960.0, 1.0, &resting(30), 0, 0.0);
+        let strip = tab_strip_geometry(960.0, 1.0, FOLIO_BAR, &resting(30), 0, 0.0);
         let strip_run = strip_run(&strip, 1.0);
         let rail = rail_of(expanded_rail(), &resting(30), 0);
         let rail_run = rail_run(&rail);
@@ -39905,7 +40494,7 @@ mod tests {",
     fn a_spring_switching_tabs_cannot_change_what_the_edge_auto_scroll_is_doing() {
         const WIDTH: f32 = 960.0;
         let trailers = resting(30);
-        let reference = tab_strip_geometry(WIDTH, 1.0, &trailers, 0, 0.0);
+        let reference = tab_strip_geometry(WIDTH, 1.0, FOLIO_BAR, &trailers, 0, 0.0);
         let reference_run = strip_run(&reference, 1.0);
         assert!(
             reference.max_scroll > 0.0,
@@ -39921,7 +40510,7 @@ mod tests {",
         let want = autoscroll_speed(&reference_run, 0.0, hand, 1.0, crate::Motion::Full);
         assert!(want > 0.0, "and the hand is really in the band");
         for active in 0..trailers.len() {
-            let geometry = tab_strip_geometry(WIDTH, 1.0, &trailers, active, 0.0);
+            let geometry = tab_strip_geometry(WIDTH, 1.0, FOLIO_BAR, &trailers, active, 0.0);
             let run = strip_run(&geometry, 1.0);
             assert_eq!(
                 (run.viewport, run.max_scroll, run.band),
@@ -40277,7 +40866,7 @@ mod tests {",
         );
         // And the strip, where the same guard is inert because the band was
         // struck from the clip in the first place.
-        let strip = tab_strip_geometry(960.0, 1.0, &resting(30), 0, 0.0);
+        let strip = tab_strip_geometry(960.0, 1.0, FOLIO_BAR, &resting(30), 0, 0.0);
         let strip_run = strip_run(&strip, 1.0);
         assert!(strip.max_scroll > 0.0, "the strip fixture overflows too");
         assert!(
@@ -42345,6 +42934,7 @@ mod tests {",
             ChromeContent {
                 update_mark: false,
                 summoned: false,
+                chrome: FOLIO_BAR,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -42878,7 +43468,7 @@ mod tests {",
         );
 
         // ── reachability: neither run claims the pointer ──
-        let strip = tab_strip_geometry(width as f32, scale, &resting(2), 0, 0.0);
+        let strip = tab_strip_geometry(width as f32, scale, FOLIO_BAR, &resting(2), 0, 0.0);
         let flat_run = strip_run(&strip, scale);
         let rail_geometry = rail_of(expanded_rail(), &resting(2), 0);
         let rail_run = rail_run(&rail_geometry);
@@ -42948,7 +43538,7 @@ mod tests {",
             "the rail reads the pointer's y and nothing else"
         );
 
-        let strip = tab_strip_geometry(1_600.0, 1.0, &resting(4), 0, 0.0);
+        let strip = tab_strip_geometry(1_600.0, 1.0, FOLIO_BAR, &resting(4), 0, 0.0);
         let run = strip_run(&strip, 1.0);
         assert_eq!(run.axis, Axis::Row);
         let mids = run.mids();
@@ -43007,7 +43597,7 @@ mod tests {",
             "while the insertion question still has its ordinary answer there"
         );
 
-        let strip = tab_strip_geometry(1_600.0, 1.0, &resting(4), 0, 0.0);
+        let strip = tab_strip_geometry(1_600.0, 1.0, FOLIO_BAR, &resting(4), 0, 0.0);
         let run = strip_run(&strip, 1.0);
         for (index, tab) in strip.tabs.iter().enumerate() {
             let body = tab.body;
@@ -43062,7 +43652,10 @@ mod tests {",
     /// once and asked twice.
     fn both_runs() -> [TabRun; 2] {
         [
-            strip_run(&tab_strip_geometry(1_600.0, 1.0, &resting(4), 0, 0.0), 1.0),
+            strip_run(
+                &tab_strip_geometry(1_600.0, 1.0, FOLIO_BAR, &resting(4), 0, 0.0),
+                1.0,
+            ),
             rail_run(&rail_of(expanded_rail(), &resting(4), 0)),
         ]
     }
@@ -43528,7 +44121,14 @@ mod tests {",
             (24, 0.0, 1.5),
             (7, 40.0, 2.0),
         ] {
-            let geometry = tab_strip_geometry(1_600.0 * scale, scale, &resting(count), 0, scroll);
+            let geometry = tab_strip_geometry(
+                1_600.0 * scale,
+                scale,
+                FOLIO_BAR,
+                &resting(count),
+                0,
+                scroll,
+            );
             let run = strip_run(&geometry, scale);
             let case = format!("{count} tabs, scroll {scroll}, scale {scale}");
             assert_eq!(
@@ -44422,6 +45022,7 @@ mod tests {",
                 ChromeContent {
                     update_mark: false,
                     summoned: false,
+                    chrome: FOLIO_BAR,
                     head_ink: HeadInk::default(),
                     active_ink: TabInk::default(),
                     card_ink: TabInk::default(),
@@ -44565,6 +45166,7 @@ mod tests {",
             ChromeContent {
                 update_mark: false,
                 summoned: false,
+                chrome: FOLIO_BAR,
                 head_ink: HeadInk::default(),
                 active_ink: TabInk::default(),
                 card_ink: TabInk::default(),
@@ -45380,7 +45982,8 @@ mod drop_geometry_tests {
     fn the_strip_ends_exactly_where_the_layout_begins() {
         for dpi_milli in [1_000u32, 1_250, 1_500, 1_750, 2_000, 2_500] {
             let scale = dpi_milli as f32 / 1_000.0;
-            let geometry = tab_strip_geometry(W as f32, scale, &[TabTrailer::default()], 0, 0.0);
+            let geometry =
+                tab_strip_geometry(W as f32, scale, FOLIO_BAR, &[TabTrailer::default()], 0, 0.0);
             let band = strip_band(&geometry, scale);
             let host = device_viewport(W, H, scale_ppm(dpi_milli), 0);
             assert_eq!(

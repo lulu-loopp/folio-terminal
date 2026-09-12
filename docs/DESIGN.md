@@ -8100,3 +8100,35 @@ spike 量到的是「这个 workspace 今天已经有约 90% 能在 macOS 上编
 **③ 关窗那扇门。** M1-1 记下过:关最后一张标签页时这扇门拒绝,整次运行以 exit 0 收场。`request_window_close` 是 `performClose:`,它去问代理 `windowShouldClose:`;winit 的代理把 `WindowEvent::CloseRequested` 排进队列然后答 NO,所以 **AppKit 什么也不关**,决定权留在应用这边,和 `PostMessageW(WM_CLOSE)` 留下的一模一样。一扇没有关闭按钮的窗 — M3-3 自绘窗框之后就是这样一扇 — 直接经同一个代理去问,因为 `performClose:` 对这种窗只会响一声。在 Mac 上量过:第一个窗格的 shell 给的是 `-c 'sleep 6'`,它结束,标签页关掉,窗口关掉,会话写了出去,进程以 `exit 0` 离开,没有那行拒绝。**最后一扇窗关掉时进程仍然结束** — 这是 Folio 自己的规矩,要让它留在 Dock 里,是 M3-1 的 `applicationShouldTerminateAfterLastWindowClosed:`(X-4)连同 M3-3 的事。
 
 **④ 亮暗那条通知,以及 winit 会闭嘴的那一刻。** `set_window_dark_mode` 是 `NSWindow.appearance`,`DWMWA_USE_IMMERSIVE_DARK_MODE` 的孪生。发现是这样的:**一扇窗自己的外观一旦被设过,winit 就不再为它发 `WindowEvent::ThemeChanged`**(它的 `observe_value` 对定制过的窗口提前返回,理由是这种变化本来就是应用自己弄出来的)— 而 Folio 在主题落地的那一刻就把它设了。于是桌面的底色现在改经 `SystemSettingsWatch` 到达循环:对**应用的** `effectiveAppearance` 做 KVO(没有任何窗口覆盖会碰到它),外加 `NSWorkspace` 那条无障碍显示通知管 Reduce Motion,两者在 AppKit 自己的派发里什么也不做,只捅一下 winit 的用户事件通道 — X-4 的规矩。`bt-app` 的 `SystemPreferencesChanged` 分支多了第二个读者(`adopt_system_canvas`),它是幂等的,在 Windows 上无害,那里 `WM_THEMECHANGED` 本来就是唤醒它的两条消息之一。**核不到的那件事,直说**:`defaults write -g AppleInterfaceStyle Dark` 什么也没触到 — 没触到 Folio,也没触到我们自己那个持有同样两份订阅的探针,正是靠后者才知道是系统根本没发,而不是 Folio 没动。那台机器上没有授予自动化权限(`osascript` 会需要它),所以现场切换这件事对 agent 来说是 NOT-CHECKABLE,由单元测试代管。
+
+### 13.11 M3-3: 一扇窗一套窗控——原生标题栏被接管而不是被拿掉(`crates/bt-platform/src/macos_impl.rs`、`crates/bt-platform/src/portable_impl.rs`、`crates/bt-app/src/seats.rs`、`crates/bt-app/src/main.rs`)
+
+**① 裁决是接管,而且它是 Windows 那一手的反面。** 用户 2026-09-12 从 Mac 上第一扇窗里裁的一句话:一扇窗不能带两套窗控。Windows 上的做法是把系统窗框**拿掉**——`WM_NCCALCSIZE` 把整块外框交给应用,四个 caption 槽全由 Folio 自己画。macOS 上反过来:标题栏**留着**,被四句话改成 Folio 自己的一部分——`NSFullSizeContentView`、`titlebarAppearsTransparent = true`、`titleVisibility = .hidden`(标签名由 Folio 自己画)、`isMovableByWindowBackground = false`;于是那条 bar 里 AppKit 还在画的只剩三盏红绿灯,在 macOS 自己摆的位置上,而 Folio 的最小化、缩放、关闭一个都不画。齿轮留着,因为没有别人画它。窗口的 `title` 照旧设——Mission Control、窗口菜单和 Dock 都读它——只是不显示。
+
+**外框矩形不动,动的是 content view。** `NSWindow.frame` 前后都是外框(§13.10 ①),所以会话的存—取往返仍然是恒等;变的是 content view 现在铺满这个矩形,而不是停在标题栏下面——也就是 `WM_NCCALCSIZE` 在另一个平台上造出来的那条「client 就是 outer」。**在 Mac 上量到的**:一扇 `contentRect` 960×600 的窗,style mask 加上 `FullSizeContentView` 之前 frame 是 960×**632**,之后是 960×**600**——那 32 点的标题栏离开了外框;Folio 自己的窗口报 `rect=1030,334,2950,1534`、`inner_size=1920x1200`,外框和客户区是同一个 1920×1200。
+
+**② 这是一次能力读数,不是一个 `cfg`。** 承担接管的是 `CustomWindowFrame`:它本来就是两个平台都站着的那个类型,本来就在建窗时装上(启动十六步的第 5 步),所以 macOS 那一侧的 `install` 调 `macos_impl::adopt_window_chrome`,量出来的数存在 frame 上,`platform_chrome()` 是 `bt-app` 唯一那次读。`PlatformChrome` 只有两个字段:红绿灯占掉的那条带子(物理像素),和「这三个按钮是平台画的」。
+
+**为什么是能力而不是平台名**:答案是关于**这一扇窗**的。一扇 style mask 里没有标题栏的窗,`standardWindowButton:` 三次都答 `nil`,它拿到的就是 Windows 那扇窗拿到的答案(`FOLIO_DRAWS_THE_WHOLE_BAR`),于是下游没有一处需要知道自己在哪台机器上。M3-6 的首启卡按同一条规矩决定行数。
+
+`install` 不许拒绝——它是那五个仍然带 `?` 的构造之一,`deferred_service_tests` 从另一侧钉着——所以 AppKit 那边的拒绝是**报告而不是传播**(§13.8 ②)。而报告路径上的答案是自洽的而不是省事的:没接管成的窗就是**还穿着系统窗框的那扇窗**,红绿灯还在它自己那条 bar 里,Folio 在自己这条 bar 里画的还是这张票之前画的那一排。那是一扇看起来不对、并且在 stderr 上说了为什么的窗,不是一扇被悄悄告知平台在画它其实没画的按钮的窗。
+
+`bt-app` 这边只有一次读(`Runtime::platform_chrome`)和一处分支(`seats::caption_targets` 的一个 `match`),`seats.rs` 整个文件没有一个平台名——`the_caption_run_is_decided_by_one_capability_read` 钉这三条。
+
+**③ 红绿灯那条带子是从 run 的前面扣掉的,不是事后夹住的。** `tab_strip_geometry` 在把 run 分给各个 tab **之前**扣掉它,和 2026-09-09 那条拖拽留白同一个次序:tab 先在更小的 run 里走它的宽度档,踩到 46px 地板才开始滚。`viewport` 于是从 `[0, strip_right]` 变成 `[strip_left, strip_right]`,而画、命中测试和滚轮读的是同一个数。
+
+`within_strip` 因此长出一堵左墙,**而且只在有人靠着它的时候才立**:过去左边就是画布边缘,跑出去的 quad 由 framebuffer 精确且免费地裁掉;红绿灯是画在本窗像素**之上**的,一个滚出去的 tab 探到它们底下,会绕着那三个按钮露出来。竖排那边是同一句话说给另一个控件:`panel_toggle_box` 和 `app_title_left_px` 也从这条带子之后开始。四个 caption 槽照旧每扇窗都预留(§7.54e ②),mac 上只画一个齿轮,空出来的三格连同 96 点的留白一起是把手。
+
+**在 Mac 上量到的红绿灯**(macOS 26.6,2026-09-12):关闭按钮 frame `(9, 9, 14, 14)`,最小化从 32 起,缩放从 55 起,最右一条边 **69 点**——也就是缩放 1 时 69 物理像素、缩放 2 时 138。`adopt_window_chrome` 从不写死这个数,它问窗口;测试里那个常数也只被用来断言「关系」,所以哪天 macOS 挪了自己的按钮,挪的是这一个常数。
+
+**标签自己长什么样,这张票一笔没动,而这是用户当天看过这扇窗之后的裁决。** 红绿灯和 Folio 现在这个标签形状并排看着不合,用户正在一份小样上挑新的形态(pill / attached / underline / segmented,外加「一个标签时它就是标题」那一条)。所以 M3-3 只落窗口这一层——透明标题栏、`FullSizeContentView`、隐藏标题、红绿灯那扇门、mac 上不画三个按钮、strip 空处当把手、双击按系统偏好——**strip 的画法原样保留**。macOS 上标签的形态是另一张票,等用户选定。
+
+**④ 拖拽是 AppKit 的,双击是读者的——而这一句是量出来的,不是查出来的。** macOS 上没有 `WM_NCHITTEST` 可答:AppKit 把「这一按能不能移动窗口」问给一个 **view**(`mouseDownCanMoveWindow`),而这条 bar 底下的 view 是 winit 的,它自己实现了 `mouseDown:`,所以答 NO。于是应用在按下**里面**自己判定——它本来就逐像素知道自己那条 strip 哪里是空的——然后调 `press_title_bar`,也就是 `performWindowDragWithEvent:`。
+
+这张票第一版按「这扇门连双击一起带过来」写的,因为那正是这个选择器到处被描述的样子。**探针说不是**:一扇没有 Folio 参与的普通 `NSWindow`,它自己的 view 在 `mouseDown:` 里以 `clickCount == 2` 调这个选择器,窗口一动不动;同一次运行里,旁边那扇窗的 AppKit 自带标题栏被同样一对合成事件双击,缩放了。所以双击这一半是这扇门自己做的:`clickCount >= 2` 时读 `AppleActionOnDoubleClick`,`Maximize` → `zoom:`,`Minimize` → `miniaturize:`,`None` → 什么都不做,别的值拒绝而不是猜。
+
+**偏好从标准 user defaults 读,不从偏好文件读**,这是「读者选了什么」和「系统会做什么」的差别:一台没人动过这个键的机器上 `defaults read -g AppleActionOnDoubleClick` 说这个键不存在,而标准 defaults 在那里答 `Maximize`——因为那是 AppKit 自己注册的。问文件会把「默认」变成「什么也不发生」。
+
+判定本身是 Windows 那条规矩原样搬过来的,不是第二条规矩:`title_bar_drag_point` = `[title_bar_app_run_right_px, caption_run_left)` × bar 的高度,再把红绿灯那条带子整块让出去——那些像素既不是 Folio 的也不是拖拽的,AppKit 的按钮在 winit 之前就把按下拿走了,而从一个按钮矩形**里面**开始的拖拽是一个按不动的按钮。红测试 `the_strips_empty_part_is_the_drag_region` 把这个谓词按在 `custom_frame_hit_test` 对同一条 bar 给出的独立答案上,两个平台一条规矩。
+
+**⑤ 在 Mac 上跑出来的那一趟。** 4K(1920×1080 点,缩放 2)上,本票自己的 bundle:截图里红绿灯、标签、`×`、`+`、`˅` 和最右的齿轮在同一行上,没有第二套窗控。`CGEvent` 在 strip 空处按下、二十步拖动、抬起:窗口从 `515,167` 走到 `675,277`,正好是要求的 `+160,+110`,而窗口自己的那条路上写着 `chrome_mouse_input taken=1 at=press-title-bar`,那扇门一声没吭。同一处双击:窗口从 `675,277 960×600` 变成 `71,30 1849×1050`——正是这台桌子的可用区,也就是 `AppleActionOnDoubleClick = Maximize` 对应的 `zoom:`;再双击一次,回到 `675,277 960×600`。会话往返:开在 `515,167`,拖到 `735,257`,会话写下 `{735, 257, 960, 600}`,再开回到 `735,257`(物理 `1470,514,3390,1714`)——同一个外框矩形。第一趟两个手势都没动,原因写在这里免得下一个人再撞:一份全新的数据目录必然升起首启卡(`first_run::due` 就是「设置文件不在」),而那张卡吞掉每一次按下;所以每一趟现在都从一次热身启动写出的 `settings.json` 上开始。

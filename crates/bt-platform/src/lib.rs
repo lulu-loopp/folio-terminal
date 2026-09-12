@@ -205,6 +205,47 @@ pub struct CustomFrameGeometry {
     pub caption_button_logical_px: u32,
 }
 
+/// **What the platform's own window frame already draws in this window's title
+/// bar** (M3-3, owner ruling 2026-09-12).
+///
+/// One window must not carry two sets of window controls. On Windows nobody
+/// else draws in that bar — `WM_NCCALCSIZE` has handed the whole outer
+/// rectangle to the application — so both fields are the "nothing" answer and
+/// Folio goes on drawing the run it always drew. On macOS the window keeps its
+/// native title bar (transparent, titleless, full-size content) and therefore
+/// keeps the traffic lights AppKit draws in it: Folio's strip has to begin to
+/// their right and Folio's own minimise, zoom and close must not be drawn at
+/// all.
+///
+/// **Measured and not assumed.** Both fields come off the live window through
+/// [`CustomWindowFrame::platform_chrome`], not off a `cfg`: a window whose
+/// style mask carries no title bar has no standard buttons to ask for, and the
+/// honest answer for it is the same "nothing" Windows gives. That is what makes
+/// this a capability rather than a platform name, and it is why `bt-app` reads
+/// it once per window instead of branching on the host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlatformChrome {
+    /// Physical pixels at the leading edge of the title bar that the platform's
+    /// own window buttons stand in — the rectangle macOS's three traffic lights
+    /// occupy, read off `standardWindowButton(…)`. `0` where the platform draws
+    /// none.
+    pub strip_left_px: i32,
+    /// Whether the platform draws this window's minimise, zoom and close
+    /// itself. When it does, Folio draws none of the three.
+    pub buttons_are_the_platforms: bool,
+}
+
+impl PlatformChrome {
+    /// The window whose whole title bar belongs to Folio: every Windows
+    /// window, every window on a platform with no native title bar to take
+    /// over, and any window this crate was unable to measure — which is a
+    /// window that still wears the frame the system gave it.
+    pub const FOLIO_DRAWS_THE_WHOLE_BAR: Self = Self {
+        strip_left_px: 0,
+        buttons_are_the_platforms: false,
+    };
+}
+
 /// Win32 non-client regions expressed without Win32 constants so their mapping
 /// can be pinned on every host used by the workspace tests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2818,10 +2859,10 @@ mod windows_impl {
 
     use super::{
         CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, GroundBand,
-        INSERT_ABOVE_REFERENCE, NativeWindow, PageVisual, PendingWindowPos, TaskbarProgress,
-        TaskbarProgressState, ThreadPriority, VisualLayer, WheelScrollAmount, WindowRect,
-        composition_visual_offset, custom_frame_hit_test, hold_pending_pos_to, logical_px_for_dpi,
-        window_skirt,
+        INSERT_ABOVE_REFERENCE, NativeWindow, PageVisual, PendingWindowPos, PlatformChrome,
+        TaskbarProgress, TaskbarProgressState, ThreadPriority, VisualLayer, WheelScrollAmount,
+        WindowRect, composition_visual_offset, custom_frame_hit_test, hold_pending_pos_to,
+        logical_px_for_dpi, window_skirt,
     };
 
     /// GDI brush currently owned by this process and installed on winit's shared window class.
@@ -4179,6 +4220,34 @@ mod windows_impl {
         #[must_use]
         pub fn in_size_move(&self) -> bool {
             self.state.in_size_move.load(Ordering::Acquire)
+        }
+
+        /// **What the platform draws in this window's title bar: nothing**
+        /// (M3-3).
+        ///
+        /// The subclass installed above is precisely the statement that it
+        /// draws nothing — `WM_NCCALCSIZE` has handed the application the whole
+        /// outer rectangle, so there is no system button, no system title and
+        /// no inset in it, and Folio's own run stands where it always has. This
+        /// is a constant because the frame makes it one, not because the host
+        /// is Windows.
+        #[must_use]
+        pub fn platform_chrome(&self) -> PlatformChrome {
+            PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR
+        }
+
+        /// **Answer a press on the empty part of the title bar.** Refused here,
+        /// and the refusal is the design: this window's title bar answers
+        /// `HTCAPTION` from [`custom_frame_hit_test`] and the OS takes the press
+        /// itself, drag and double click alike, so it never reaches the
+        /// application to be forwarded. A caller that reaches this line has lost
+        /// the hit test.
+        pub fn press_title_bar(&self) -> Result<(), String> {
+            Err(
+                "a press on the window's own title bar: this window's frame answers the \
+                 system's own hit test, and the press was taken without us"
+                    .to_owned(),
+            )
         }
 
         pub fn set_tab_strip_right_px(&self, tab_strip_right_px: i32) {
@@ -10570,6 +10639,15 @@ mod macos_window_backend_tests {
         "work_area_at",
     ];
 
+    /// **The two doors M3-3 added to the macOS arm**, which are not in the
+    /// group above and must not be: they have no portable twin to be one arm
+    /// of. `CustomWindowFrame` is the type that stands on both platforms, and
+    /// it reaches these through its own `cfg` rather than through a name the
+    /// re-export lists carry — so what is pinned about them here is the one
+    /// thing the group's pins are for, that a door touching AppKit has proved
+    /// its thread.
+    const CHROME_DOORS: [&str; 2] = ["adopt_window_chrome", "press_title_bar"];
+
     /// The text from the start of the line `pub fn NAME(` back to the end of
     /// the doc comment above it — the attributes, and nothing else.
     fn attributes_above(source: &str, name: &str) -> String {
@@ -10636,7 +10714,7 @@ mod macos_window_backend_tests {
     /// that.
     #[test]
     fn every_macos_window_door_proves_its_thread_before_it_calls_appkit() {
-        for door in DOORS {
+        for door in DOORS.into_iter().chain(CHROME_DOORS) {
             let needle = format!("\npub fn {door}(");
             let at = MACOS.find(&needle).expect("named in the pin above");
             let rest = &MACOS[at + 1..];
@@ -10694,6 +10772,131 @@ mod macos_window_backend_tests {
                  the application:\n{body}"
             );
         }
+    }
+
+    /// RED — **the native title bar is emptied, not taken away, and the
+    /// traffic lights are measured rather than moved** (M3-3, owner ruling
+    /// 2026-09-12).
+    ///
+    /// The ruling has five parts and four of them are one call each; the fifth
+    /// is the whole point of the door, which is that the inset it reports is
+    /// read off the standard window buttons AppKit drew. A door that placed
+    /// them itself, or that answered a constant, would satisfy every other line
+    /// of this ticket and put Folio's tabs a few pixels into somebody's close
+    /// button on the next macOS that moves them.
+    ///
+    /// MUTATION: drop `FullSizeContentView` and Folio's first row of tabs is
+    /// pushed below a title bar that is still reserving its own height; drop
+    /// `titleVisibility` and the window shows two titles; turn
+    /// `MovableByWindowBackground` on and every drag anywhere in the window
+    /// moves it; answer a constant instead of `standardWindowButton` and this
+    /// names it.
+    #[test]
+    fn the_macos_title_bar_is_kept_and_emptied_rather_than_taken_away() {
+        let needle = "\npub fn adopt_window_chrome(";
+        let at = MACOS.find(needle).expect("M3-3's door");
+        let rest = &MACOS[at + 1..];
+        let end = rest.find("\n}\n").expect("a door is closed at column zero");
+        let body = &rest[..end];
+        for required in [
+            "NSWindowStyleMask::FullSizeContentView",
+            "setTitlebarAppearsTransparent(true)",
+            "setTitleVisibility(NSWindowTitleVisibility::Hidden)",
+            "setMovableByWindowBackground(false)",
+            "standardWindowButton(",
+            "backingScaleFactor()",
+        ] {
+            assert!(
+                body.contains(required),
+                "the chrome door does not `{required}`, so the owner's ruling is kept by \
+                 something other than this door:\n{body}"
+            );
+        }
+        assert!(
+            !body.contains("setFrame") && !body.contains("setFrameOrigin"),
+            "the door moves a standard window button; the ruling is that they stay where macOS \
+             puts them:\n{body}"
+        );
+        assert!(
+            MACOS[at..].contains("FOLIO_DRAWS_THE_WHOLE_BAR"),
+            "a window with no standard buttons to measure is not given the same answer Windows \
+             gets, so a title-bar-less window would have its strip pushed in by an inset nobody \
+             measured"
+        );
+    }
+
+    /// RED — **one press, two answers: AppKit's own drag, and the reader's own
+    /// double click.**
+    ///
+    /// `performWindowDragWithEvent:` is widely described as carrying the
+    /// standard title-bar behaviour with it, `AppleActionOnDoubleClick`
+    /// included, and this ticket wrote the door that way first. **Measured on
+    /// macOS 26.6, 2026-09-12, with no Folio in the probe at all**: a plain
+    /// `NSWindow` whose own view calls that selector from `mouseDown:` with
+    /// `clickCount == 2` does not move, while a double click on AppKit's own
+    /// title bar zooms the window beside it in the same run. So the action is
+    /// the door's, taken off the one preference that decides it, and both verbs
+    /// are `NSWindow`'s.
+    ///
+    /// **The preference is read from the standard defaults and not from the
+    /// file.** `defaults read -g AppleActionOnDoubleClick` says the key does not
+    /// exist on a machine nobody has set it on, and the standard defaults answer
+    /// `Maximize` there because AppKit registers that itself — reading the file
+    /// would have turned "the default" into "nothing happens".
+    ///
+    /// MUTATION: drop the click-count arm and the double click goes back to
+    /// doing nothing; read the preference from anywhere but the standard
+    /// defaults and the commonest machine of all stops zooming; invent a verb
+    /// of this program's own for a value Apple has not named and this names it.
+    #[test]
+    fn one_title_bar_press_is_appkits_drag_and_the_readers_own_double_click() {
+        let door = {
+            let needle = "\npub fn press_title_bar(";
+            let at = MACOS.find(needle).expect("M3-3's title-bar door");
+            let rest = &MACOS[at + 1..];
+            let end = rest.find("\n}\n").expect("a door is closed at column zero");
+            rest[..end].to_owned()
+        };
+        assert!(
+            door.contains("performWindowDragWithEvent("),
+            "the drag is not AppKit's own:\n{door}"
+        );
+        assert!(
+            door.contains("NSEventType::LeftMouseDown"),
+            "the door answers whatever event happens to be in hand:\n{door}"
+        );
+        assert!(
+            door.contains("clickCount()") && door.contains("act_on_double_click("),
+            "the door does not tell a double click from a press, so the reader's own \
+             `AppleActionOnDoubleClick` is never honoured:\n{door}"
+        );
+
+        let action = {
+            let needle = "\nfn act_on_double_click(";
+            let at = MACOS.find(needle).expect("the door's double-click half");
+            let rest = &MACOS[at + 1..];
+            let end = rest
+                .find("\n}\n")
+                .expect("a function is closed at column zero");
+            rest[..end].to_owned()
+        };
+        assert!(
+            action.contains("standardUserDefaults()")
+                && action.contains("AppleActionOnDoubleClick"),
+            "the action is not the reader's own, read where AppKit registers its \
+             default:\n{action}"
+        );
+        for (value, verb) in [("Maximize", "zoom("), ("Minimize", "miniaturize(")] {
+            assert!(
+                action.contains(value) && action.contains(verb),
+                "`{value}` does not reach `{verb}`, which is the verb macOS gives it:\n{action}"
+            );
+        }
+        assert!(
+            action.contains("Some(\"None\") | None => Ok(())"),
+            "a reader who asked for nothing, and a system that registered nothing, are not \
+             both left alone:\n{action}"
+        );
     }
 
     /// RED — **a dark-mode change arrives on the window thread, through

@@ -37,6 +37,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     # `NSApp` itself: the application's effective appearance, and the window a
     # window number belongs to.
     "NSApplication",
+    # M3-3: `-[NSWindow standardWindowButton:]` answers an `NSButton`, and an
+    # `NSButton` is an `NSControl`. Two classes and no package — what the
+    # traffic-light inset is measured off.
+    "NSButton",
+    "NSControl",
     # The window's backing colour, which is the class brush's twin.
     "NSColor",
     # `+[NSEvent mouseLocation]` — where the pointer is, for the summon.
@@ -78,6 +83,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSString",
     # `NSNumber`, which is what `NSScreenNumber` comes back as.
     "NSValue",
+    # M3-3: `AppleActionOnDoubleClick`, the one preference a title bar's own
+    # double click obeys. Read through the standard defaults, which is where
+    # AppKit registers its own answer for a reader who has never set one.
+    "NSUserDefaults",
     "std",
 ] }
 
