@@ -127,6 +127,18 @@ session which started the probe can photograph it — the grant that lets a
 process photograph a window belongs to that session and not to a throwaway
 bundle. Neither name is read by `folio` itself.
 
+The macOS glyph measurement (`crates/bt-app/tests/macos_glyph_surface.rs`) reads
+the same two names and means the same things by them, with one difference worth
+stating: there `BT_MAC_GUI_SHOT=<dir>` is **required** rather than optional, because
+the photograph is not an illustration. A swapchain cannot be mapped, so the only
+way to read the pixels a Metal surface actually presented is a picture of the
+window, and a run with nowhere to put one has nothing to compare the offscreen
+texture against. The target publishes its window number into
+`<BT_MAC_GUI_SHOT>/glyph.window` and reads the picture from
+`<BT_MAC_GUI_SHOT>/glyph.png`, taking it itself when this process holds the
+Screen Recording grant and waiting for the session that started it when it does
+not.
+
 ## Files Folio writes without being asked
 
 For completeness beside the list above, and because none of these needs a variable
