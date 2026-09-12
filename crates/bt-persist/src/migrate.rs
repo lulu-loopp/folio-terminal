@@ -69,6 +69,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (30, migrate_settings_v30_to_v31),
     (31, migrate_settings_v31_to_v32),
     (32, migrate_settings_v32_to_v33),
+    (33, migrate_settings_v33_to_v34),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -782,6 +783,27 @@ fn migrate_settings_v32_to_v33(mut value: Value) -> Value {
             serde_json::to_value(crate::LaunchOpensV1::NewWindow)
                 .unwrap_or_else(|_| Value::from("NewWindow")),
         );
+    }
+    value
+}
+
+/// v33 -> v34: `option_sends_alt`, the row that says what the Option key is (macOS plan §8 Q9,
+/// ruled 2026-09-12; M1-7).
+///
+/// **The v13-v16 shape, and the one rung on this ladder where "the answer every build before it
+/// gave" and "the shipped default" cannot come apart.** Every document this step walks was written
+/// by a build that ran on Windows, where there is no Option key; `false` is therefore both the
+/// behaviour these files were written under (vacuously) and what this build would tell a new
+/// machine. The two arguments the ladder above spends most of its length distinguishing — v13-v16's
+/// habit and v28's default — agree here, and the step is written down anyway so that the rung is
+/// not read later as having had a choice it did not have.
+///
+/// See [`crate::SETTINGS_SCHEMA_VERSION`]'s v34 note for why the key is written into every
+/// document rather than only into a Mac's.
+fn migrate_settings_v33_to_v34(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(34));
+        object.insert("option_sends_alt".to_owned(), Value::from(false));
     }
     value
 }

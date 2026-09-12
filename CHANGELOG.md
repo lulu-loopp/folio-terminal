@@ -6,6 +6,19 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- **A letter your keyboard layout makes reaches the shell.** On a German layout
+  `ü`, `ä`, `ö` and `ß` produced nothing at all — the key was pressed, and not a
+  byte left this window — and the same was true of every other letter a layout
+  composes outside ASCII. They are sent now, as the bytes they are. A character
+  an input method is still composing is unaffected: it arrives once, when the
+  method commits it, exactly as before.
+- **A chord held with the Windows key no longer types its letter into a box.**
+  With the caret in the command palette, the search box, a name being edited, the
+  branch prompt, the commit graph's search or a document being edited, `Win+C`
+  typed a `c`. A chord is not text, and none of these take one now.
+
 ### Changed
 
 - **A file the preview cannot show offers to open it in the default app, like an

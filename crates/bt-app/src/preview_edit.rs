@@ -523,13 +523,25 @@ pub enum EditCommand {
 /// means nothing; an editor is exactly a thing to type into, so every key it
 /// receives is its own.
 pub fn command(key: &Key, modifiers: ModifiersState) -> EditCommand {
-    let ctrl = modifiers.control_key();
+    // **The modifier an application verb wears here**, asked of the platform
+    // since M1-7: Control on Windows, Command on a Mac. The name stays `ctrl`
+    // because every arm below is about what this editor *does* with it, and what
+    // it does is the same thing on both keyboards — `Cmd+C` is the copy there
+    // exactly as `Ctrl+C` is here, and `Ctrl+C` there is the child's interrupt
+    // arriving at a surface that has no child, which is nothing at all.
+    let ctrl = crate::input::is_command_chord(modifiers);
     let alt = modifiers.alt_key();
     let shift = modifiers.shift_key();
     // AltGr arrives as Ctrl+Alt and is *typing* — the one chord shape where a
     // Ctrl means nothing at all. This is the same exemption the PTY encoder
     // already makes, applied to the one other surface that takes characters.
-    let altgr = ctrl && alt;
+    //
+    // **It asks `control_key()` and not `ctrl`** (M1-7), and the two stopped
+    // being the same question the day there were two dialects: AltGr is a fact
+    // about a keyboard that has one, reported by that keyboard as exactly this
+    // pair. On a Mac the pair is Control and Option, which is a chord aimed past
+    // this editor and not a way of typing `@`.
+    let altgr = modifiers.control_key() && alt;
     if ctrl && !alt {
         if let Key::Character(text) = key {
             return match text.to_ascii_lowercase().as_str() {
@@ -595,7 +607,22 @@ pub fn command(key: &Key, modifiers: ModifiersState) -> EditCommand {
     match key {
         // A bare character, or one wearing AltGr. Alt alone is a menu
         // accelerator on this platform and types nothing.
-        Key::Character(text) if !alt || altgr => EditCommand::Insert(text.to_string()),
+        //
+        // **And never a chord's letter** (M1-7, X-3 §4 ③): the modifier that is
+        // not this platform's application modifier reaches this arm — the
+        // Windows key here, Control on a Mac — and a page being edited took its
+        // letter as text, which is how `Cmd+X` would have cut an `x` into
+        // somebody's document instead of cutting their selection out of it.
+        //
+        // **`is_terminal_chord` and not `types_a_character`**, which is the
+        // predicate the six one-line fields ask, and the difference is the line
+        // directly above: this surface exempts AltGr, so Control is not always a
+        // chord here and a guard that said "no Control" would take `€` off every
+        // German keyboard. What this arm has to refuse is the *other* modifier,
+        // which is exactly the one that predicate names.
+        Key::Character(text) if (!alt || altgr) && !crate::input::is_terminal_chord(modifiers) => {
+            EditCommand::Insert(text.to_string())
+        }
         _ => EditCommand::Ignore,
     }
 }

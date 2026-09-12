@@ -2048,6 +2048,22 @@ pub enum Text {
     /// it, and the one fact a reader needs before deciding: **it never takes a
     /// key**.
     DescKeyHints,
+    /// **`General ▸ Option key sends Alt`** — the row, on macOS only (M1-7,
+    /// macOS plan §8 Q9).
+    ///
+    /// Named for what turning it **on** does, which is this page's rule for a
+    /// switch, and named with the platform's own two words: the key is printed
+    /// `option` and what a terminal calls the modifier is `Alt`. A title reading
+    /// `Option types text` would name the state the row is in when it is off,
+    /// which is the one thing a switch's label must never do.
+    RowOptionSendsAlt,
+    /// Its sentence: what each side costs, in the reader's own keyboard.
+    ///
+    /// It names a character rather than a policy — `⌥a` is either an `å` or an
+    /// `ESC a`, and that is the entire decision — because a reader who has come
+    /// to this row has come from a key that did the wrong thing and is looking
+    /// for the sentence with their own keypress in it.
+    DescOptionSendsAlt,
     // ── the tree row's menu, completed (user ruling 2026-08-25) ────────────
     //
     // One contiguous block at the end, per this table's standing rule. Four
@@ -3768,6 +3784,20 @@ impl Text {
                 "Hold a modifier for a moment and this window lists the shortcuts that start with it.",
                 "按住修饰键片刻，窗口列出以该键开头的快捷键。列表不截走按键。",
             ),
+            // **English in both columns until somebody writes the Chinese**
+            // (2026-09-07 copy ruling; the pair is filed in `CHINESE_PENDING`).
+            // A machine translation of a sentence about two keycaps is the kind
+            // of line that reads as a product nobody proofread.
+            Self::RowOptionSendsAlt => pick(
+                lang,
+                "Option key sends Alt",
+                "Option key sends Alt",
+            ),
+            Self::DescOptionSendsAlt => pick(
+                lang,
+                "Off, Option composes characters: ⌥a types å. On, it is the Alt a terminal means: ⌥a sends ESC a.",
+                "Off, Option composes characters: ⌥a types å. On, it is the Alt a terminal means: ⌥a sends ESC a.",
+            ),
             // ── the tree row's menu, completed (user ruling 2026-08-25) ────
             //
             // `default app` is Windows' own phrase for the association it means,
@@ -4471,7 +4501,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 615] = [
+    pub const ALL: [Self; 617] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -5007,6 +5037,8 @@ impl Text {
         Self::PaneMenuRestore,
         Self::RowKeyHints,
         Self::DescKeyHints,
+        Self::RowOptionSendsAlt,
+        Self::DescOptionSendsAlt,
         Self::FileMenuOpenWith,
         Self::FolderMenuExpand,
         Self::FolderMenuCollapse,
@@ -5131,10 +5163,17 @@ impl Text {
     /// read and named for exactly what it is. `docs/DESIGN.md` §7.59 names the ruling that
     /// created it.
     #[cfg(test)]
-    const CHINESE_PENDING: [Self; 0] = [
+    const CHINESE_PENDING: [Self; 2] = [
         // zh: pending — the two refusals a picture file raises on its own size,
         // and the word that joins a reduced picture's two sizes (owner's ruling
         // 2026-09-12).
+        //
+        // zh: pending — the General page's macOS row and its sentence (M1-7,
+        // 2026-09-12). English both, because the row is about a key on a
+        // keyboard this product does not ship to yet and the copy ruling of
+        // 2026-09-07 says who writes the Chinese.
+        Self::RowOptionSendsAlt,
+        Self::DescOptionSendsAlt,
     ];
 }
 
