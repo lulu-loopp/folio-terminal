@@ -8476,4 +8476,35 @@ that a Windows machine can ask what a Mac does, and this pins the answer the
 reader at the keyboard is actually looking at. The vertical layouts and the focus
 column are not this section's and were not touched.
 
+**⑧ What the Mac measured** (macOS 26.6.2, M4, 2026-09-12).
+
+**The reset is real, and it is what the watch is for.** A probe with no Folio in
+it — a plain `NSWindow` wearing M3-3's four settings — reports the three buttons
+at `(9, 9, 14, 14)`, `(32, 9, …)`, `(55, 9, …)` in an **unflipped**
+`NSTitlebarView` 32 points tall, so nine points of air above each. Centring puts
+them at `y = 5`, which is a top gap of **13**. A `setFrame:` on the window and
+they are back at `y = 9` with no help from anybody; re-applying puts them at 5
+again. So the placement is not a setting AppKit keeps, and the notification the
+watch subscribes to is the event that undid it. (The probe's own full-screen leg
+is **NOT-CHECKABLE** from an ssh session: a process started there is in a
+background session and its `toggleFullScreen:` never completes, so that half is
+measured in the real window below instead.)
+
+**The window itself**, `screencapture -o` of one window, read in points at
+backing scale 2, with the lead-in at 81 and the first pill 200 wide:
+
+| | lights (top..bottom) | pill (top..bottom) | strip floor at y 39 |
+|---|---|---|---|
+| at rest, 960×600 | 13..27 | 5..35 | `#F7F7F5` across the run |
+| after a resize to 1200×760 | 13..27 | 5..35 | `#F7F7F5` |
+| in full screen | *withdrawn* | 5..35 | `#F7F7F5` |
+| back out of full screen | 13..27 | 5..35 | `#F7F7F5` |
+
+The lights' centre is therefore **20** in every state the window has one, which
+is the pill's own centre, and they come back to it across both round trips. That
+they are **withdrawn** in full screen is macOS's own behaviour and not this
+ticket's: the system takes the buttons away until the pointer reaches the top
+edge. The floor row is the strip's own panel colour at every x sampled inside
+the tab run, which is "no flare and no fusing seam" stated as a pixel.
+
 *(本节英文,待中文文案改写。)*
