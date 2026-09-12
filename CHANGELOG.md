@@ -18,8 +18,9 @@ All notable changes to Folio are recorded here. The format follows
   or deleted from there, because that folder is the column itself rather than a
   row in it.
 - **A Markdown file can be edited where it is shown.** Click into the text and
-  the paragraph, list, table or formula under the caret turns into its own
-  source, while everything else on the page stays as it reads; type, and it is
+  the block under the caret shows its own Markdown — a paragraph, heading, list
+  or quote in the reading typeface, a code block, table or formula in the
+  monospace source view — while everything else on the page stays as it reads; type, and it is
   back to its rendered form as soon as you leave it. The caret moves between
   blocks the way it moves between lines, so there is nothing to enter and
   nothing to leave — arrows, Home and End, Enter and Backspace all do what they
@@ -68,6 +69,16 @@ All notable changes to Folio are recorded here. The format follows
   it back up.
 
 ### Changed
+
+- **A paragraph, heading, list or quote you click into stays in the reading
+  typeface and shows its Markdown marks.** The `#` of a heading, the `**` around
+  a bold phrase, the `- ` in front of a list item and the `> ` down the side of
+  a quote come back where the file spells them, in the same face and at the same
+  size the page was being read in — the block you are editing looks like the
+  page it is part of, and the caret walks the file's own characters through the
+  marks. Only code blocks, tables and formulas switch to the monospace source
+  view, because for those the way the characters line up is part of what they
+  say.
 
 - **Folio is one program now: starting it again opens another window of the one
   that is running, instead of a second copy.** One Folio, one set of settings,

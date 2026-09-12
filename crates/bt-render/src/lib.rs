@@ -1514,6 +1514,33 @@ pub struct PreviewRunBox {
     pub baseline_px: f32,
 }
 
+/// **One place a caret may stand in a shaped paragraph**: the byte it is drawn
+/// in front of, and the x it is struck at.
+///
+/// The seam between two clusters, which is the only thing a proportional face
+/// has instead of a column. `offset` is into [`preview_paragraph_text`] and `x`
+/// is a whole-surface physical pixel, exactly as [`PreviewParagraph::rect`] is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewTextSeam {
+    pub offset: usize,
+    pub x: f32,
+}
+
+/// **One visual row of a shaped paragraph, and every seam in it** — see
+/// [`preview_text_rows`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreviewTextRow {
+    /// The top of the row's line box, in whole-surface physical pixels.
+    pub top: f32,
+    /// The row's line box height — the paragraph's own leading, so two rows of
+    /// one paragraph meet with no seam between them.
+    pub height: f32,
+    /// Left to right, the places a caret may stand on this row. Never empty:
+    /// a row with no glyphs at all — an empty line — carries the one seam its
+    /// only offset has.
+    pub seams: Vec<PreviewTextSeam>,
+}
+
 /// One flat fill under a preview body's text.
 ///
 /// The diff's line tints, the code fence's ground and border, and the table's
@@ -6613,6 +6640,22 @@ impl WindowRenderer {
         preview_hit(&mut gpu.font_system, paragraph, x, y)
     }
 
+    /// **Every row of a shaped paragraph and every seam in it** — see
+    /// [`preview_text_rows`].
+    ///
+    /// The fifth pass to ask [`shape_preview_paragraph`] about a paragraph, and
+    /// the one a *caret* asks: where the rows are, and where between two letters
+    /// a bar may be struck. A proportional face has no column to multiply, so
+    /// this is the only honest answer, and it is the one the letters were placed
+    /// by.
+    pub fn measure_preview_rows(
+        &mut self,
+        gpu: &mut GpuContext,
+        paragraph: &PreviewParagraph,
+    ) -> Vec<PreviewTextRow> {
+        preview_text_rows(&mut gpu.font_system, paragraph)
+    }
+
     /// **The bands a selected byte range draws over a paragraph** — see
     /// [`preview_highlight`].
     pub fn measure_preview_highlight(
@@ -10824,6 +10867,76 @@ fn preview_hit(
         None if y >= top + shaped_height(&buffer, paragraph) => text.len(),
         None => 0,
     }
+}
+
+/// **Every row a shaped paragraph draws, and every place a caret may stand in
+/// it** — the geometry a proportional caret is struck, banded, walked and
+/// clicked by.
+///
+/// [`preview_hit`]'s twin: that one answers a pointer with a byte and this one
+/// answers a byte with a place, and the answers are the same shaper's because
+/// the buffer is the same buffer ([`shape_preview_paragraph`]). What the caller
+/// gets is the whole geometry as a value — rows top to bottom, seams left to
+/// right — so that a window can put a caret, a candidate box, a selection band
+/// and an Up on one arithmetic instead of asking four questions that can
+/// disagree.
+///
+/// **A seam and not a cell.** A cluster's leading edge is where a caret sitting
+/// in front of it belongs — its `x` for left-to-right text, its right edge for
+/// right-to-left — and the row's last seam is the trailing edge of its last
+/// cluster, which is where the caret at the end of a row stands. Offsets are
+/// into [`preview_paragraph_text`], so a paragraph whose runs are the file's own
+/// bytes hands back the file's own offsets.
+fn preview_text_rows(
+    font_system: &mut FontSystem,
+    paragraph: &PreviewParagraph,
+) -> Vec<PreviewTextRow> {
+    let buffer = shape_preview_paragraph(font_system, paragraph);
+    let left = preview_paragraph_left(paragraph, &buffer);
+    let top = paragraph.rect[1];
+    let mut rows: Vec<PreviewTextRow> = Vec::new();
+    for line in buffer.layout_runs() {
+        let mut seams: Vec<PreviewTextSeam> = Vec::new();
+        // The cluster that ends last in the *text*, which is the one the row's
+        // trailing seam belongs to — glyphs arrive in visual order and a
+        // right-to-left run's last cluster is its leftmost.
+        let mut trailing: Option<(usize, f32)> = None;
+        for glyph in line.glyphs {
+            let rtl = glyph.level.is_rtl();
+            let (lead, trail) = if rtl {
+                (glyph.x + glyph.w, glyph.x)
+            } else {
+                (glyph.x, glyph.x + glyph.w)
+            };
+            seams.push(PreviewTextSeam {
+                offset: glyph.start,
+                x: left + lead,
+            });
+            if trailing.is_none_or(|(end, _)| glyph.end > end) {
+                trailing = Some((glyph.end, left + trail));
+            }
+        }
+        match trailing {
+            Some((offset, x)) => seams.push(PreviewTextSeam { offset, x }),
+            // A row with no glyphs is an empty line — the paragraph a blank
+            // source line is set as — and it has exactly one place a caret can
+            // be, at the pen's own origin.
+            None => seams.push(PreviewTextSeam { offset: 0, x: left }),
+        }
+        rows.push(PreviewTextRow {
+            top: top + line.line_top,
+            height: paragraph.line_height_px,
+            seams,
+        });
+    }
+    if rows.is_empty() {
+        rows.push(PreviewTextRow {
+            top,
+            height: paragraph.line_height_px,
+            seams: vec![PreviewTextSeam { offset: 0, x: left }],
+        });
+    }
+    rows
 }
 
 /// How tall the rows of a shaped paragraph actually came out.
@@ -22627,6 +22740,105 @@ mod tests {
                  {cells}px — {drift}px a wide cluster, which is the gap the caret stood in",
             );
         }
+    }
+
+    /// **Every seam of a proportional row is struck where its own cluster is
+    /// drawn, and a wrapped line hands back one row per row** (§7.1.3w, the
+    /// prose block's whole geometry).
+    ///
+    /// This is the answer a monospace face gets from `column × advance` and a
+    /// proportional face can only get from the shaper: the caret's x, the
+    /// candidate box, the band and the click all read these seams, so a seam
+    /// that was not the cluster's own x would be a caret standing beside the
+    /// character it edits — on a line of Chinese, every character.
+    ///
+    /// MUTATIONS: take a cluster's trailing edge as its seam and the caret
+    /// stands one character to the right on every byte; drop the row's trailing
+    /// seam and the caret cannot reach the end of a line.
+    #[test]
+    fn every_seam_of_a_shaped_row_stands_where_its_cluster_does() {
+        let mut font_system = terminal_font_system();
+        let paragraph = |text: &str, width: f32| PreviewParagraph {
+            runs: vec![PreviewRun {
+                text: text.to_owned(),
+                color: [0, 0, 0],
+                mono: false,
+                bold: false,
+                italic: false,
+                font_scale: 1.0,
+                inline_box_px: None,
+            }],
+            rect: [100.0, 200.0, 100.0 + width, 224.0],
+            font_size_px: 15.0,
+            line_height_px: 24.0,
+            wrap: true,
+            letter_spacing_em: 0.0,
+            align_right: false,
+            align_center: false,
+            cell_advance: None,
+        };
+        // ASCII, CJK and a line that changes script twice — the three fixtures
+        // every text ticket in this window carries.
+        for text in ["alpha beta", "预览窗格提示", "abc 中文 def"] {
+            let shaped = paragraph(text, 4000.0);
+            let rows = preview_text_rows(&mut font_system, &shaped);
+            assert_eq!(rows.len(), 1, "{text:?} fits on one row at 4000px");
+            let buffer = shape_preview_paragraph(&mut font_system, &shaped);
+            let glyphs: Vec<_> = buffer
+                .layout_runs()
+                .flat_map(|run| run.glyphs.iter())
+                .collect();
+            for glyph in &glyphs {
+                let seam = rows[0]
+                    .seams
+                    .iter()
+                    .find(|seam| seam.offset == glyph.start)
+                    .unwrap_or_else(|| panic!("{text:?} has a seam in front of {}", glyph.start));
+                // **Exactly**, and not nearly: the seam *is* the cluster's own
+                // x, so the error a caret on a line of Chinese carries is zero
+                // by construction rather than by rounding. The monospace face
+                // needed a fix to say this (§7.1.3q, `4381300`); this face says
+                // it because the shaper that draws is the shaper that places.
+                assert!(
+                    (seam.x - (100.0 + glyph.x)).abs() < f32::EPSILON,
+                    "{text:?}: the cluster at {} is drawn at {} and its seam at {}",
+                    glyph.start,
+                    100.0 + glyph.x,
+                    seam.x,
+                );
+            }
+            // The end of the line is a place a caret may stand, and it is the
+            // trailing edge of the last cluster.
+            let last = rows[0].seams.last().copied().expect("a row has seams");
+            assert_eq!(last.offset, text.len(), "{text:?} ends at its last byte");
+            let width = buffer
+                .layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0_f32, f32::max);
+            assert!(
+                (last.x - (100.0 + width)).abs() < 0.01,
+                "{text:?}: the line is {width}px wide and its last seam is at {}",
+                last.x - 100.0,
+            );
+        }
+        // A line too long for its box folds, and every row it folds into comes
+        // back with its own top and its own seams.
+        let folded = preview_text_rows(&mut font_system, &paragraph("alpha beta gamma", 60.0));
+        assert!(folded.len() > 1, "a narrow box folds the line");
+        for (index, row) in folded.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let want = 200.0 + 24.0 * index as f32;
+            assert!(
+                (row.top - want).abs() < 0.01,
+                "row {index} stands at {want}"
+            );
+            assert!(!row.seams.is_empty(), "row {index} has a seam");
+        }
+        // An empty line is a row with one place in it.
+        let empty = preview_text_rows(&mut font_system, &paragraph("", 400.0));
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].seams.len(), 1);
+        assert_eq!(empty[0].seams[0].offset, 0);
     }
 
     /// **A pointer put on a paragraph names the byte it is standing on, and a
