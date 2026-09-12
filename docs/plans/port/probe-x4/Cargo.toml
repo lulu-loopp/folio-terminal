@@ -1,0 +1,34 @@
+# X-4's scratch probe: deliberately outside the workspace (the empty
+# `[workspace]` table below), so that a crate naming AppKit never enters
+# Folio's own dependency graph. winit and objc2 are the versions `Cargo.lock`
+# already pins, as X-1's probe used them.
+[package]
+name = "probe-x4"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSURL",
+    "NSArray",
+    "NSValue",
+    "NSObject",
+    "NSThread",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSResponder",
+    "NSWindow",
+    "NSPasteboard",
+    "NSPasteboardItem",
+    "NSRunningApplication",
+] }
+
+[profile.dev]
+opt-level = 1
