@@ -397,12 +397,11 @@ pub use windows_handoff::{
 
 #[cfg(windows)]
 mod windows_handoff {
-    use std::ffi::c_void;
-    use std::num::NonZeroIsize;
     use std::os::windows::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
 
-    use windows::Win32::Foundation::{HWND, MAX_PATH};
+    use crate::NativeWindow;
+    use windows::Win32::Foundation::MAX_PATH;
     use windows::Win32::System::SystemInformation::{GetSystemDirectoryW, GetWindowsDirectoryW};
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -430,12 +429,12 @@ mod windows_handoff {
     /// loads. Each caller names a directory it can defend: a file's own folder
     /// for a file, the system directory for an address that has no folder.
     fn hand_over(
-        hwnd: NonZeroIsize,
+        window: NativeWindow,
         program: &str,
         arguments: Option<&std::ffi::OsStr>,
         directory: &Path,
     ) -> Result<(), String> {
-        let hwnd = HWND(hwnd.get() as *mut c_void);
+        let hwnd = window.as_hwnd();
         let mut operation = wide("open");
         let mut program = wide(program);
         let mut arguments = arguments.map(wide_os);
@@ -545,11 +544,11 @@ mod windows_handoff {
     /// this bridge supplies the audited UTF-16 boundary and the working
     /// directory. No parameters are supplied, so the address is never reparsed
     /// as a command line.
-    pub fn shell_execute(hwnd: NonZeroIsize, target: &str) -> Result<(), String> {
+    pub fn shell_execute(window: NativeWindow, target: &str) -> Result<(), String> {
         if target.contains('\0') {
             return Err("ShellExecuteW target contains an embedded NUL".to_owned());
         }
-        hand_over(hwnd, target, None, &system_directory())
+        hand_over(window, target, None, &system_directory())
     }
 
     /// Open one worker-validated local image with its registered default
@@ -561,10 +560,10 @@ mod windows_handoff {
     /// no embedded NUL, no verbatim spelling) over the name **Windows will
     /// resolve**, and supplies no parameters, preventing command-line
     /// reinterpretation. It performs no event-thread file I/O.
-    pub fn open_local_file(hwnd: NonZeroIsize, path: &Path) -> Result<(), String> {
+    pub fn open_local_file(window: NativeWindow, path: &Path) -> Result<(), String> {
         let path = normalised_target(path).ok_or_else(|| "path has no name".to_owned())?;
         validate_local_image_path(&path)?;
-        hand_over(hwnd, &path.to_string_lossy(), None, &folder_of(&path))
+        hand_over(window, &path.to_string_lossy(), None, &folder_of(&path))
     }
 
     /// Open one file the user picked out of a directory listing with its
@@ -589,13 +588,13 @@ mod windows_handoff {
     /// normalised first and everything below — the extension check and the
     /// hand-off — uses that one value, so there is no spelling in which the two
     /// can be talking about different files.
-    pub fn open_local_path(hwnd: NonZeroIsize, path: &Path) -> Result<(), String> {
+    pub fn open_local_path(window: NativeWindow, path: &Path) -> Result<(), String> {
         let path = normalised_target(path).ok_or_else(|| "path has no name".to_owned())?;
         validate_openable_path(&path)?;
         if names_a_program(&path, std::env::var("PATHEXT").unwrap_or_default().as_str()) {
             return Err(PROGRAM_REFUSED.to_owned());
         }
-        hand_over(hwnd, &path.to_string_lossy(), None, &folder_of(&path))
+        hand_over(window, &path.to_string_lossy(), None, &folder_of(&path))
     }
 
     /// Open Explorer on a path, with a file **highlighted** inside its folder
@@ -617,12 +616,12 @@ mod windows_handoff {
     /// The one program this can ever launch is Explorer, and it is named
     /// absolutely so that a `explorer.exe` in some working directory cannot be
     /// the one that starts.
-    pub fn reveal_in_explorer(hwnd: NonZeroIsize, path: &Path) -> Result<(), String> {
+    pub fn reveal_in_explorer(window: NativeWindow, path: &Path) -> Result<(), String> {
         let arguments =
             reveal_arguments(path).ok_or_else(|| "path is not one to reveal".to_owned())?;
         let explorer = windows_directory().join("explorer.exe");
         hand_over(
-            hwnd,
+            window,
             &explorer.to_string_lossy(),
             Some(arguments.as_os_str()),
             &windows_directory(),
@@ -653,9 +652,9 @@ mod windows_handoff {
     /// one a program is drawing with is a decision that was never a terminal's
     /// to take. So there is no in-app font management behind this door and
     /// there will not be — the door is the whole feature.
-    pub fn open_system_fonts_page(hwnd: NonZeroIsize) -> Result<(), String> {
+    pub fn open_system_fonts_page(window: NativeWindow) -> Result<(), String> {
         let system = system_directory();
-        if hand_over(hwnd, crate::FONT_SETTINGS_URI, None, &system).is_ok() {
+        if hand_over(window, crate::FONT_SETTINGS_URI, None, &system).is_ok() {
             return Ok(());
         }
         // The URI was refused — no handler, or a policy that removed the page.
@@ -666,7 +665,7 @@ mod windows_handoff {
             .ok_or_else(|| "no fonts folder".to_owned())?;
         let explorer = windows_directory().join("explorer.exe");
         hand_over(
-            hwnd,
+            window,
             &explorer.to_string_lossy(),
             Some(arguments.as_os_str()),
             &windows_directory(),

@@ -251,10 +251,9 @@ pub use windows_hotkey::{
 mod windows_hotkey {
     use std::ffi::c_void;
     use std::marker::PhantomData;
-    use std::num::NonZeroIsize;
     use std::time::Instant;
 
-    use windows::Win32::Foundation::{ERROR_HOTKEY_ALREADY_REGISTERED, HWND};
+    use windows::Win32::Foundation::ERROR_HOTKEY_ALREADY_REGISTERED;
     // `AttachThreadInput` is filed under `Threading` and not under
     // `KeyboardAndMouse` beside the three below it, which reads oddly until you
     // remember what it does: it joins two *threads'* input queues, and the
@@ -269,6 +268,7 @@ mod windows_hotkey {
     };
 
     use super::{Hotkey, HotkeyFault, registration_bits};
+    use crate::NativeWindow;
 
     /// **A claim on a chord, held for as long as this value is alive.**
     ///
@@ -416,11 +416,11 @@ mod windows_hotkey {
     /// second chance to read it — by the time the quake window is going away, the
     /// foreground is the quake window.
     #[must_use]
-    pub fn foreground_window() -> Option<NonZeroIsize> {
+    pub fn foreground_window() -> Option<NativeWindow> {
         // SAFETY: a read with no arguments and no lifetime; the handle is
         // immediately narrowed to an integer and never dereferenced.
         let hwnd = unsafe { GetForegroundWindow() };
-        NonZeroIsize::new(hwnd.0 as isize)
+        NativeWindow::from_hwnd(hwnd)
     }
 
     /// **Hand this process's foreground rights to another process** (`docs/DESIGN.md` §7.59).
@@ -480,8 +480,8 @@ mod windows_hotkey {
     /// nothing a person can do about a foreground lock, and a card appearing over
     /// their editor to say the terminal could not give the keyboard back would be
     /// a worse interruption than the one it was reporting.
-    pub fn give_foreground_to(hwnd: NonZeroIsize) -> bool {
-        let target = HWND(hwnd.get() as *mut c_void);
+    pub fn give_foreground_to(window: NativeWindow) -> bool {
+        let target = window.as_hwnd();
         // **The handle is revalidated before it is used** (R2-3). It was read at
         // the moment the summon came down, and between then and now the window it
         // named may have closed — an `HWND` is reused by Windows the moment a
@@ -499,7 +499,7 @@ mod windows_hotkey {
                 return false;
             }
             // SAFETY: a read with no arguments; the handle is only compared.
-            if unsafe { GetForegroundWindow() }.0 as isize == hwnd.get() {
+            if unsafe { GetForegroundWindow() } == target {
                 return true;
             }
             // SAFETY: `GetForegroundWindow` may answer null, which
@@ -540,7 +540,7 @@ mod windows_hotkey {
                 let _ = unsafe { AttachThreadInput(mine, theirs, false) };
             }
             // SAFETY: a read with no arguments.
-            if unsafe { GetForegroundWindow() }.0 as isize == hwnd.get() {
+            if unsafe { GetForegroundWindow() } == target {
                 return true;
             }
         }
@@ -620,16 +620,27 @@ pub const fn handover_step(
 }
 
 /// The handover, on a host with no foreground to hand.
+///
+/// **Not the same statement as "there is no frontmost application"** — macOS
+/// has one, `NSWorkspace.frontmostApplication`, and M4-8 gives this arm a real
+/// answer when the quake terminal's foreground rules are ported. What this arm
+/// says is that nobody has asked yet, and the caller's own reading of `None`
+/// (`bt_app::quake`: remember nothing, give nothing back) is the honest
+/// behaviour until then.
 #[cfg(not(windows))]
 #[must_use]
-pub fn foreground_window() -> Option<std::num::NonZeroIsize> {
+pub fn foreground_window() -> Option<crate::NativeWindow> {
     None
 }
 
 /// The handover, on a host with no foreground to hand.
+///
+/// The `bool` is read by `bt-app`, which prints one line when the window it
+/// summoned could not take the keyboard — so the refusal is visible in
+/// `diagnostics.log` rather than silent. M4-8 owns the real arm.
 #[cfg(not(windows))]
 #[must_use]
-pub fn give_foreground_to(_hwnd: std::num::NonZeroIsize) -> bool {
+pub fn give_foreground_to(_window: crate::NativeWindow) -> bool {
     false
 }
 

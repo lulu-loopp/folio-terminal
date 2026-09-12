@@ -556,6 +556,12 @@ pub(crate) fn claimable_chords(shortcuts: &Shortcuts, focus: Focus) -> Vec<Claim
                     ctrl: chord.modifiers.contains(ModifiersState::CONTROL),
                     shift: chord.modifiers.contains(ModifiersState::SHIFT),
                     alt: chord.modifiers.contains(ModifiersState::ALT),
+                    // **The table has no Command column yet** — M1-7 owns the
+                    // macOS dialect of `BINDINGS`, and until it lands every
+                    // chord this window claims from a page is a Windows-shaped
+                    // one. `WebChord` carries the field so that nothing has to
+                    // change shape when it does.
+                    command: false,
                 },
                 action: row.action,
             })
@@ -589,6 +595,7 @@ pub(crate) fn claims_chord(
             ctrl,
             shift,
             alt,
+            command: false,
         },
     )
     .is_some()
@@ -1526,7 +1533,7 @@ enum BrowserWait {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SeatAddress {
     pub(crate) page: bt_platform::PageVisual,
-    pub(crate) hwnd: std::num::NonZeroIsize,
+    pub(crate) window: bt_platform::NativeWindow,
 }
 
 /// How one [`WebSeat::rehost`] ended, in the caller's own vocabulary.
@@ -1794,7 +1801,7 @@ impl WebSeat {
     /// wrong from its first frame — see [`Self::scale`].
     pub(crate) fn open(
         page: bt_platform::PageVisual,
-        hwnd: std::num::NonZeroIsize,
+        window: bt_platform::NativeWindow,
         url: &str,
         minted: Mint,
         scale: f64,
@@ -1877,7 +1884,7 @@ impl WebSeat {
             wake,
         );
         let mut web = Self {
-            address: SeatAddress { page, hwnd },
+            address: SeatAddress { page, window },
             folder,
             machine: WebMachine::new(),
             host,
@@ -2443,7 +2450,7 @@ impl WebSeat {
                 // leaves the seat with nothing on it.
                 match self
                     .host
-                    .request_controller(self.address.hwnd, self.machine.generation())
+                    .request_controller(self.address.window, self.machine.generation())
                 {
                     Ok(()) => {
                         self.engine_owes_an_answer = Some(Instant::now() + ENGINE_START_DEADLINE);
@@ -3079,12 +3086,12 @@ impl WebSeat {
             &bt_platform::RehostSide {
                 compositor: from,
                 page: self.address.page,
-                hwnd: self.address.hwnd,
+                window: self.address.window,
             },
             &bt_platform::RehostSide {
                 compositor: to,
                 page: address.page,
-                hwnd: address.hwnd,
+                window: address.window,
             },
             rect,
             visible,
@@ -4388,8 +4395,8 @@ mod folder_tests {
 mod rehost_address_tests {
     use super::*;
 
-    pub(super) fn hwnd(value: isize) -> std::num::NonZeroIsize {
-        std::num::NonZeroIsize::new(value).expect("a non-zero window handle")
+    pub(super) fn window(value: u16) -> bt_platform::NativeWindow {
+        bt_platform::NativeWindow::stand_in(value)
     }
 
     pub(super) fn page(tab: u64, seat: u64) -> bt_platform::PageVisual {
@@ -4457,7 +4464,7 @@ mod rehost_address_tests {
     fn a_card_for_an_engine_that_said_nothing_has_a_button_that_can_fire() {
         let mut seat = detached(SeatAddress {
             page: page(1, 1),
-            hwnd: hwnd(1),
+            window: window(1),
         });
         // The seat has asked for an engine and is waiting on the answer, which
         // is the state the deadline exists for.
@@ -4546,7 +4553,7 @@ mod rehost_address_tests {
     fn a_seat_whose_gates_did_not_attach_opens_no_local_file() {
         let mut seat = detached(SeatAddress {
             page: page(1, 1),
-            hwnd: hwnd(1),
+            window: window(1),
         });
         let minted = Mint::file(Path::new(r"D:\tmp\page\report.html")).expect("a local file");
         let target = minted.target().expect("a minted URL").to_owned();
@@ -4607,7 +4614,7 @@ mod rehost_address_tests {
     fn a_closing_seat_is_not_audible() {
         let mut seat = detached(SeatAddress {
             page: page(1, 1),
-            hwnd: hwnd(1),
+            window: window(1),
         });
         seat.playing_audio = true;
         assert!(
@@ -4639,14 +4646,14 @@ mod rehost_address_tests {
     /// move that has to happen and a live page composing into another tab's box.
     #[test]
     fn one_window_two_tabs_one_seat_number_is_two_addresses() {
-        let same_window = hwnd(0x1111);
+        let same_window = window(0x1111);
         let first = SeatAddress {
             page: page(1, 1),
-            hwnd: same_window,
+            window: same_window,
         };
         let second = SeatAddress {
             page: page(2, 1),
-            hwnd: same_window,
+            window: same_window,
         };
         assert_ne!(
             first, second,
@@ -4672,11 +4679,11 @@ mod rehost_address_tests {
     fn a_rehosted_seat_rebuilds_in_the_window_it_moved_to() {
         let source = SeatAddress {
             page: page(1, 3),
-            hwnd: hwnd(0x1111),
+            window: window(0x1111),
         };
         let target = SeatAddress {
             page: page(4, 9),
-            hwnd: hwnd(0x2222),
+            window: window(0x2222),
         };
         let mut seat = detached(source);
         seat.machine.request("https://example.com/");
@@ -4712,11 +4719,11 @@ mod rehost_address_tests {
     fn a_handoff_that_could_not_be_undone_rebuilds_in_the_target_window() {
         let target = SeatAddress {
             page: page(4, 9),
-            hwnd: hwnd(0x2222),
+            window: window(0x2222),
         };
         let mut seat = detached(SeatAddress {
             page: page(1, 3),
-            hwnd: hwnd(0x1111),
+            window: window(0x1111),
         });
         seat.machine.request("https://example.com/");
         let generation = seat.machine.generation();
@@ -4745,7 +4752,7 @@ mod rehost_address_tests {
     fn a_moved_seat_forgets_what_the_old_window_was_told() {
         let mut seat = detached(SeatAddress {
             page: page(1, 3),
-            hwnd: hwnd(0x1111),
+            window: window(0x1111),
         });
         let rectangle = WebBounds {
             x: 10,
@@ -4761,7 +4768,7 @@ mod rehost_address_tests {
 
         seat.take_address(SeatAddress {
             page: page(4, 9),
-            hwnd: hwnd(0x2222),
+            window: window(0x2222),
         });
 
         assert_eq!(
@@ -4794,7 +4801,7 @@ mod rehost_address_tests {
     fn the_old_window_is_paid_its_buttons_before_the_parent_changes() {
         let mut seat = detached(SeatAddress {
             page: page(1, 3),
-            hwnd: hwnd(0x1111),
+            window: window(0x1111),
         });
         seat.buttons = bt_platform::web_mouse_buttons::LEFT | bt_platform::web_mouse_buttons::X1;
         seat.last_left_press = Some((Instant::now(), (40, 40)));
@@ -4818,13 +4825,13 @@ mod rehost_address_tests {
 /// the window says it and the detection is switched off.
 #[cfg(test)]
 mod rasterization_tests {
-    use super::rehost_address_tests::{detached, hwnd, page};
+    use super::rehost_address_tests::{detached, page, window};
     use super::*;
 
     fn seat_at(scale: f64) -> WebSeat {
         let mut seat = detached(SeatAddress {
             page: page(1, 1),
-            hwnd: hwnd(0x1111),
+            window: window(0x1111),
         });
         seat.scale = scale;
         seat
@@ -5150,11 +5157,11 @@ mod fault_tests {
     /// the controller's and the "half an engine is not one" assertion goes red.
     #[test]
     fn an_engine_that_would_not_come_up_is_a_card_and_not_a_coloured_hole() {
-        use super::rehost_address_tests::{detached, hwnd, page};
+        use super::rehost_address_tests::{detached, page, window};
 
         let mut seat = detached(SeatAddress {
             page: page(1, 1),
-            hwnd: hwnd(0x2222),
+            window: window(0x2222),
         });
         let mut outcomes = Vec::new();
         assert_eq!(
@@ -5729,13 +5736,13 @@ mod search_tests {
 /// and its caller inserted no seat. A card is something a seat draws.
 #[cfg(test)]
 mod engine_absence_tests {
-    use super::rehost_address_tests::{detached, hwnd, page};
+    use super::rehost_address_tests::{detached, page, window};
     use super::*;
 
     fn seat() -> WebSeat {
         detached(SeatAddress {
             page: page(1, 1),
-            hwnd: hwnd(0x40),
+            window: window(0x40),
         })
     }
 
@@ -5969,7 +5976,7 @@ mod engine_absence_tests {
 /// *door*. Browserless, because what is under test is which door answers.
 #[cfg(test)]
 mod refusal_card_tests {
-    use super::rehost_address_tests::{detached, hwnd, page};
+    use super::rehost_address_tests::{detached, page, window};
     use super::*;
 
     /// A seat whose controller carries every gate — which is what an install on
@@ -5978,7 +5985,7 @@ mod refusal_card_tests {
     fn seat() -> WebSeat {
         let mut seat = detached(SeatAddress {
             page: page(1, 1),
-            hwnd: hwnd(0x41),
+            window: window(0x41),
         });
         seat.guards = bt_platform::WebGuards {
             script_dialogs: true,
@@ -6151,7 +6158,7 @@ mod refusal_card_tests {
 /// and pushes nothing, which is exactly the shape of "the ask was made".
 #[cfg(test)]
 mod favicon_tests {
-    use super::rehost_address_tests::{detached, hwnd, page};
+    use super::rehost_address_tests::{detached, page, window};
     use super::*;
 
     /// A detached seat standing on one address, as if a navigation had
@@ -6159,7 +6166,7 @@ mod favicon_tests {
     fn seat_on(url: &str) -> WebSeat {
         let mut web = detached(SeatAddress {
             page: page(1, 1),
-            hwnd: hwnd(0x40),
+            window: window(0x40),
         });
         web.page.url = url.to_owned();
         web

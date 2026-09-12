@@ -2,6 +2,151 @@
 
 use std::num::NonZeroIsize;
 
+/// **The window this process's platform knows, named without naming a
+/// platform** (M1-1).
+///
+/// Every door in this crate that acts on a window used to take a
+/// `NonZeroIsize`, which is an `HWND` in everything but its spelling: the
+/// caller had to produce a Win32 handle, on a platform that may not have one,
+/// for a function whose macOS twin wants an `NSView*` instead. The backend
+/// inventory counts forty such signatures and calls the shape the hard leak
+/// (`docs/plans/port/backend-inventory-2026-09-12.md` §5, §6 ③); this type is
+/// the door that closes it.
+///
+/// **It is opaque, and that is its whole design.** Nothing outside this crate
+/// can read what is inside one, so nothing outside this crate can be written
+/// against Win32's idea of a window by accident. What a caller may do with one
+/// is hold it, copy it, compare two of them, and hand it back — which is
+/// exactly what `bt-app` does with the fifty it takes.
+///
+/// **Where the handle is spelled.** Twice, and both spellings are gated:
+/// [`NativeWindow::from_win32`] on Windows and [`NativeWindow::from_appkit`] on
+/// macOS. That is §4.4 ① of the plan applied to a type rather than to a
+/// module — an SDK type stays inside a backend definition — and it is the same
+/// arrangement `instance::DataDirectoryClaim` already has. The rule is pinned
+/// by `the_native_window_door_has_no_windows_type_in_its_signature`.
+///
+/// **The bits inside.** An `HWND` on Windows and an `NSView*` on macOS, both
+/// held as a `NonZeroIsize` rather than as a pointer, so the value is `Send`
+/// and `Sync` for the same reason the `NonZeroIsize` it replaces was: it is a
+/// number that names something, not a reference to it. Whether the thread
+/// holding it may *use* it is unchanged and is stated per door — the
+/// `Ownership / thread` column of the inventory is still the contract.
+///
+/// **The view and not the window, on macOS.** `RawWindowHandle::AppKit` carries
+/// `ns_view`, which is what winit owns and what wgpu draws to; the `NSWindow`
+/// is reached from it (`-[NSView window]`) and is not always there — a view
+/// that has been pulled out of its hierarchy has none. Doors that need the
+/// window say so and answer honestly when there is none.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct NativeWindow {
+    /// The platform's own handle, as a number. Private, and the reason this
+    /// type exists.
+    ///
+    /// Read on Windows by `NativeWindow::as_hwnd` and on macOS by
+    /// `NativeWindow::as_ns_view`; on a platform with neither backend there is
+    /// no constructor and no reader, and the field is carried so that the type
+    /// has one shape everywhere rather than three.
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        expect(
+            dead_code,
+            reason = "a platform with no window backend has nothing to read it with, and the type \
+                      keeps one shape on all three rather than becoming a different type on the \
+                      third"
+        )
+    )]
+    handle: NonZeroIsize,
+}
+
+impl NativeWindow {
+    /// The window behind a Win32 `HWND`.
+    ///
+    /// The one place in this workspace where an `HWND` becomes a
+    /// [`NativeWindow`], and `bt-app`'s `native_window` is its one caller.
+    #[cfg(windows)]
+    #[must_use]
+    pub const fn from_win32(hwnd: NonZeroIsize) -> Self {
+        Self { handle: hwnd }
+    }
+
+    /// The window behind an AppKit `NSView*`.
+    ///
+    /// `RawWindowHandle::AppKit`'s `ns_view` is a `NonNull`, so the number is
+    /// never zero and the conversion cannot fail.
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn from_appkit(ns_view: std::ptr::NonNull<std::ffi::c_void>) -> Self {
+        let handle = NonZeroIsize::new(ns_view.as_ptr() as isize)
+            .expect("a NonNull pointer is not the null address");
+        Self { handle }
+    }
+
+    /// **A window token that names no window**, for a test that needs two
+    /// values it can tell apart.
+    ///
+    /// `bt-app`'s quake and web-host suites decide things *about* handles —
+    /// which window the keyboard goes back to, which seat a page is addressed
+    /// at — and none of them touches the machine. Before M1-1 they wrote
+    /// `NonZeroIsize::new(0x1234)`; a platform-shaped constructor would put
+    /// them back where this type came from, and a real window would make a unit
+    /// test open one.
+    ///
+    /// Deliberately not a door: the number is offset into a range no real
+    /// handle occupies on either platform, nothing in this crate will accept it
+    /// for a call that reaches the machine without failing the way it fails for
+    /// any other stale handle, and the one gate that matters —
+    /// `a_stand_in_window_is_only_named_by_tests` — refuses the spelling
+    /// anywhere but a test module.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn stand_in(tag: u16) -> Self {
+        // `tag + 1` so that `stand_in(0)` is a value like any other rather than
+        // the one number a `NonZeroIsize` cannot hold.
+        let handle = 0x0bad_0000_isize + (tag as isize) + 1;
+        match NonZeroIsize::new(handle) {
+            Some(handle) => Self { handle },
+            // `0x0bad_0000 + tag + 1` is positive for every `u16`.
+            None => unreachable!(),
+        }
+    }
+}
+
+/// The Win32 reading of a [`NativeWindow`], for this crate's Windows backend
+/// and for nothing above it.
+#[cfg(windows)]
+impl NativeWindow {
+    /// The handle, as Win32 wants it.
+    ///
+    /// `pub(crate)` and not `pub`: the whole point of the type is that the
+    /// value on this side of the door is a `NativeWindow` and the value on the
+    /// far side is an `HWND`, and a public reader would put the leak back one
+    /// method deeper.
+    pub(crate) fn as_hwnd(self) -> windows::Win32::Foundation::HWND {
+        windows::Win32::Foundation::HWND(self.handle.get() as *mut std::ffi::c_void)
+    }
+
+    /// The window an `HWND` this crate received from Win32 names, or `None` for
+    /// the null handle every failing Win32 call answers with.
+    pub(crate) fn from_hwnd(hwnd: windows::Win32::Foundation::HWND) -> Option<Self> {
+        NonZeroIsize::new(hwnd.0 as isize).map(Self::from_win32)
+    }
+}
+
+/// The AppKit reading of a [`NativeWindow`], for this crate's macOS backend and
+/// for nothing above it.
+#[cfg(target_os = "macos")]
+impl NativeWindow {
+    /// The `NSView*` winit handed out, as a pointer again.
+    ///
+    /// The caller is on the main thread and the view is winit's, which is the
+    /// whole of what makes dereferencing it legal; every use of this states
+    /// that in its own safety note.
+    pub(crate) fn as_ns_view(self) -> *mut std::ffi::c_void {
+        self.handle.get() as *mut std::ffi::c_void
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WindowRect {
     pub left: i32,
@@ -2400,7 +2545,7 @@ mod windows_impl {
 
     use super::{
         CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, GroundBand,
-        INSERT_ABOVE_REFERENCE, NonZeroIsize, PageVisual, PendingWindowPos, TaskbarProgress,
+        INSERT_ABOVE_REFERENCE, NativeWindow, PageVisual, PendingWindowPos, TaskbarProgress,
         TaskbarProgressState, ThreadPriority, VisualLayer, WheelScrollAmount, WindowRect,
         composition_visual_offset, custom_frame_hit_test, hold_pending_pos_to, logical_px_for_dpi,
         window_skirt,
@@ -2431,7 +2576,7 @@ mod windows_impl {
     /// window and closes them in any order; the newest one still standing is
     /// the answer, and a handle whose window has gone is dropped on the way
     /// past rather than handed to a call that would fail on it.
-    static CLIPBOARD_OWNERS: OnceLock<Mutex<Vec<NonZeroIsize>>> = OnceLock::new();
+    static CLIPBOARD_OWNERS: OnceLock<Mutex<Vec<NativeWindow>>> = OnceLock::new();
     /// The crop a visual that is **not on the glass** wears — see
     /// [`Compositor::hide_web_visual`]. An empty rectangle rather than an
     /// offscreen one, so that nothing about where the page last stood survives
@@ -2694,8 +2839,8 @@ mod windows_impl {
 
     impl Compositor {
         /// Build the tree for one window. The window must already exist.
-        pub fn new(hwnd: NonZeroIsize) -> Result<Self, String> {
-            let hwnd = HWND(hwnd.get() as *mut c_void);
+        pub fn new(window: NativeWindow) -> Result<Self, String> {
+            let hwnd = window.as_hwnd();
             // A null rendering device is the documented way to ask for a
             // composition device that only arranges visuals: this one never
             // rasterizes anything itself, because the only content it will ever
@@ -3678,8 +3823,11 @@ mod windows_impl {
     }
 
     impl CustomWindowFrame {
-        pub fn install(hwnd: NonZeroIsize, geometry: CustomFrameGeometry) -> Result<Self, String> {
-            let hwnd = HWND(hwnd.get() as *mut c_void);
+        pub fn install(
+            window: NativeWindow,
+            geometry: CustomFrameGeometry,
+        ) -> Result<Self, String> {
+            let hwnd = window.as_hwnd();
             let state = Box::new(CustomFrameState {
                 geometry,
                 tab_strip_right_px: AtomicI32::new(0),
@@ -4120,8 +4268,8 @@ mod windows_impl {
     }
 
     impl Taskbar {
-        pub fn new(hwnd: NonZeroIsize) -> Result<Self, String> {
-            let hwnd = HWND(hwnd.get() as *mut c_void);
+        pub fn new(window: NativeWindow) -> Result<Self, String> {
+            let hwnd = window.as_hwnd();
             // SAFETY: this runs on the window's own event-loop thread, which is
             // the thread that owns the HWND and the apartment. Every failure
             // path below releases what it took, in the order it took it.
@@ -4245,8 +4393,8 @@ mod windows_impl {
     struct SystemSettingsWake(Box<dyn Fn()>);
 
     impl SystemSettingsWatch {
-        pub fn install(hwnd: NonZeroIsize, wake: Box<dyn Fn()>) -> Result<Self, String> {
-            let hwnd = HWND(hwnd.get() as *mut c_void);
+        pub fn install(window: NativeWindow, wake: Box<dyn Fn()>) -> Result<Self, String> {
+            let hwnd = window.as_hwnd();
             let wake = Box::new(SystemSettingsWake(wake));
             let reference_data = (&*wake as *const SystemSettingsWake) as usize;
             // SAFETY: called on the window's own thread with a live HWND, and
@@ -4590,16 +4738,9 @@ mod windows_impl {
         .max(1)
     }
 
-    pub fn request_window_close(hwnd: NonZeroIsize) -> Result<(), String> {
-        unsafe {
-            PostMessageW(
-                Some(HWND(hwnd.get() as *mut c_void)),
-                WM_CLOSE,
-                WPARAM(0),
-                LPARAM(0),
-            )
-        }
-        .map_err(|error| format!("PostMessageW(WM_CLOSE) failed: {error}"))
+    pub fn request_window_close(window: NativeWindow) -> Result<(), String> {
+        unsafe { PostMessageW(Some(window.as_hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0)) }
+            .map_err(|error| format!("PostMessageW(WM_CLOSE) failed: {error}"))
     }
 
     /// Put the keyboard back on this window itself.
@@ -4613,8 +4754,8 @@ mod windows_impl {
     ///
     /// Never called for anything but that: this window does not otherwise move
     /// its own focus, because there is nothing inside it that Win32 knows about.
-    pub fn take_keyboard_focus(hwnd: NonZeroIsize) -> Result<(), String> {
-        let hwnd = HWND(hwnd.get() as *mut c_void);
+    pub fn take_keyboard_focus(window: NativeWindow) -> Result<(), String> {
+        let hwnd = window.as_hwnd();
         // SAFETY: `SetFocus` takes a window handle by value. It answers the
         // previously focused window or null, and null with a last error of zero
         // is "there was no focus to take", which is not a failure.
@@ -4749,7 +4890,7 @@ mod windows_impl {
     /// Registering the same window twice makes it the newest rather than
     /// listing it twice, so a constructor that runs again for a rebuilt window
     /// leaves no duplicate behind.
-    pub fn register_clipboard_owner(hwnd: NonZeroIsize) {
+    pub fn register_clipboard_owner(owner: NativeWindow) {
         let Ok(mut owners) = CLIPBOARD_OWNERS
             .get_or_init(|| Mutex::new(Vec::new()))
             .lock()
@@ -4760,8 +4901,8 @@ mod windows_impl {
             // nothing here to recover *to*.
             return;
         };
-        owners.retain(|window| *window != hwnd);
-        owners.push(hwnd);
+        owners.retain(|window| *window != owner);
+        owners.push(owner);
     }
 
     /// The newest registered window that is still one of this thread's, with
@@ -4771,9 +4912,9 @@ mod windows_impl {
     /// closure so that the choice can be stated without a window existing —
     /// see `the_windows_clipboard_finds_its_owner_itself`.
     fn newest_live_owner(
-        registered: &mut Vec<NonZeroIsize>,
-        mut still_ours: impl FnMut(NonZeroIsize) -> bool,
-    ) -> Option<NonZeroIsize> {
+        registered: &mut Vec<NativeWindow>,
+        mut still_ours: impl FnMut(NativeWindow) -> bool,
+    ) -> Option<NativeWindow> {
         registered.retain(|window| still_ours(*window));
         registered.last().copied()
     }
@@ -4786,11 +4927,11 @@ mod windows_impl {
     /// for one that is settles the other question: `OpenClipboard` wants a
     /// window of the calling thread, and a recycled handle that now belongs to
     /// somebody else fails the same test as a closed one.
-    fn window_is_on_this_thread(hwnd: NonZeroIsize) -> bool {
+    fn window_is_on_this_thread(window: NativeWindow) -> bool {
         use windows::Win32::System::Threading::GetCurrentThreadId;
         use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
-        let hwnd = HWND(hwnd.get() as *mut c_void);
+        let hwnd = window.as_hwnd();
         // SAFETY: neither call dereferences the handle; an invalid one is
         // answered with 0 rather than undefined behaviour, and the out
         // parameter is declined.
@@ -4813,7 +4954,7 @@ mod windows_impl {
             .lock()
             .map_err(|_| "clipboard owner list lock poisoned".to_owned())?;
         newest_live_owner(&mut owners, window_is_on_this_thread)
-            .map(|hwnd| HWND(hwnd.get() as *mut c_void))
+            .map(NativeWindow::as_hwnd)
             .ok_or_else(|| "no window of this thread owns the clipboard".to_owned())
     }
 
@@ -5008,8 +5149,8 @@ mod windows_impl {
     }
 
     impl MathContextMenu {
-        pub fn new(hwnd: NonZeroIsize) -> Result<Self, String> {
-            let hwnd = HWND(hwnd.get() as *mut c_void);
+        pub fn new(window: NativeWindow) -> Result<Self, String> {
+            let hwnd = window.as_hwnd();
             let state = Arc::new(MathMenuState::new());
             // SAFETY: installation and removal occur on the HWND's event-loop thread. The Arc
             // keeps dwRefData live for the full installed interval; the callback takes its own
@@ -5151,8 +5292,8 @@ mod windows_impl {
     }
 
     impl FolderPicker {
-        pub fn new(hwnd: NonZeroIsize) -> Result<Self, String> {
-            let hwnd = HWND(hwnd.get() as *mut c_void);
+        pub fn new(window: NativeWindow) -> Result<Self, String> {
+            let hwnd = window.as_hwnd();
             let state = Arc::new(FolderPickerState::new());
             // SAFETY: installation and removal occur on the HWND's event-loop thread. The Arc
             // keeps dwRefData live for the full installed interval; the callback takes its own
@@ -5266,8 +5407,8 @@ mod windows_impl {
     pub type FilePickKind = ShellPickKind;
 
     impl ImagePicker {
-        pub fn new(hwnd: NonZeroIsize) -> Result<Self, String> {
-            let hwnd = HWND(hwnd.get() as *mut c_void);
+        pub fn new(window: NativeWindow) -> Result<Self, String> {
+            let hwnd = window.as_hwnd();
             let state = Arc::new(ImagePickerState::new());
             // SAFETY: installation and removal occur on the HWND's event-loop thread. The Arc
             // keeps dwRefData live for the full installed interval; the callback takes its own
@@ -5382,17 +5523,17 @@ mod windows_impl {
     /// `SWP_NOACTIVATE`, because "stay in front" is not "come to the front now":
     /// switching the row on while another window has the keyboard must not steal
     /// it, and switching it off must not either.
-    pub fn set_window_topmost(hwnd: NonZeroIsize, topmost: bool) -> Result<(), String> {
+    pub fn set_window_topmost(window: NativeWindow, topmost: bool) -> Result<(), String> {
         let after = if topmost {
             HWND_TOPMOST
         } else {
             HWND_NOTOPMOST
         };
-        // SAFETY: `hwnd` originates from winit's live Win32WindowHandle, and the insert-after
+        // SAFETY: `window` originates from winit's live Win32WindowHandle, and the insert-after
         // handle is one of the two documented sentinels rather than a window we might outlive.
         unsafe {
             SetWindowPos(
-                HWND(hwnd.get() as *mut c_void),
+                window.as_hwnd(),
                 Some(after),
                 0,
                 0,
@@ -5431,13 +5572,13 @@ mod windows_impl {
     /// [`set_system_backdrop`]: there is no settings row whose position claims
     /// this happened, so a Windows too old to know the attribute (it is
     /// 20H1's; 1809 spelled it 19) simply keeps the border it already had.
-    pub fn set_window_dark_mode(hwnd: NonZeroIsize, dark: bool) -> Result<(), String> {
+    pub fn set_window_dark_mode(window: NativeWindow, dark: bool) -> Result<(), String> {
         let value = i32::from(dark);
         // SAFETY: as `set_system_backdrop` — the pointer is to a live local of
         // exactly the size passed, and DWM copies it before returning.
         unsafe {
             DwmSetWindowAttribute(
-                HWND(hwnd.get() as *mut c_void),
+                window.as_hwnd(),
                 DWMWA_USE_IMMERSIVE_DARK_MODE,
                 std::ptr::from_ref(&value).cast::<c_void>(),
                 size_of::<i32>() as u32,
@@ -5463,7 +5604,7 @@ mod windows_impl {
     /// call above it, because this one has a row on a settings page: a user who
     /// switches it on is owed the reason it did not take, and
     /// [`system_backdrop_available`] is that reason asked in advance.
-    pub fn set_system_backdrop(hwnd: NonZeroIsize, acrylic: bool) -> Result<(), String> {
+    pub fn set_system_backdrop(window: NativeWindow, acrylic: bool) -> Result<(), String> {
         let backdrop = if acrylic {
             DWMSBT_TRANSIENTWINDOW
         } else {
@@ -5473,7 +5614,7 @@ mod windows_impl {
         // before returning.
         unsafe {
             DwmSetWindowAttribute(
-                HWND(hwnd.get() as *mut c_void),
+                window.as_hwnd(),
                 DWMWA_SYSTEMBACKDROP_TYPE,
                 std::ptr::from_ref(&backdrop).cast::<c_void>(),
                 size_of::<DWM_SYSTEMBACKDROP_TYPE>() as u32,
@@ -5493,12 +5634,12 @@ mod windows_impl {
     /// Windows has which feature, which is a table that is wrong the moment
     /// anybody backports anything.
     #[must_use]
-    pub fn system_backdrop_available(hwnd: NonZeroIsize) -> bool {
+    pub fn system_backdrop_available(window: NativeWindow) -> bool {
         let probe = DWMSBT_AUTO;
         // SAFETY: as `set_system_backdrop`; the value written is the attribute's own default.
         unsafe {
             DwmSetWindowAttribute(
-                HWND(hwnd.get() as *mut c_void),
+                window.as_hwnd(),
                 DWMWA_SYSTEMBACKDROP_TYPE,
                 std::ptr::from_ref(&probe).cast::<c_void>(),
                 size_of::<DWM_SYSTEMBACKDROP_TYPE>() as u32,
@@ -5695,9 +5836,9 @@ mod windows_impl {
     }
 
     impl ImeSystemCaret {
-        pub fn new(hwnd: NonZeroIsize) -> Self {
+        pub fn new(window: NativeWindow) -> Self {
             Self {
-                hwnd: HWND(hwnd.get() as *mut c_void),
+                hwnd: window.as_hwnd(),
                 active: false,
             }
         }
@@ -5798,10 +5939,10 @@ mod windows_impl {
         language_id & 0x03ff
     }
 
-    pub fn get_dpi_for_window(hwnd: NonZeroIsize) -> Result<u32, String> {
-        // SAFETY: `hwnd` originates from winit's live Win32WindowHandle. GetDpiForWindow only
+    pub fn get_dpi_for_window(window: NativeWindow) -> Result<u32, String> {
+        // SAFETY: `window` originates from winit's live Win32WindowHandle. GetDpiForWindow only
         // reads the DPI associated with that window and returns zero for an invalid handle.
-        let dpi = unsafe { GetDpiForWindow(HWND(hwnd.get() as *mut c_void)) };
+        let dpi = unsafe { GetDpiForWindow(window.as_hwnd()) };
         if dpi == 0 {
             Err("GetDpiForWindow returned zero".to_owned())
         } else {
@@ -5825,10 +5966,10 @@ mod windows_impl {
     /// from `GetWindowRect`'s screen coordinates by the work-area origin. Mixing
     /// the two would reintroduce exactly the per-restart drift that making this
     /// module speak one rectangle — the outer rect — was meant to end.
-    pub fn is_window_minimized(hwnd: NonZeroIsize) -> bool {
-        // SAFETY: `hwnd` originates from winit's live Win32WindowHandle.
+    pub fn is_window_minimized(window: NativeWindow) -> bool {
+        // SAFETY: `window` originates from winit's live Win32WindowHandle.
         // IsIconic only reads window state and reports false for a bad handle.
-        unsafe { IsIconic(HWND(hwnd.get() as *mut c_void)) }.as_bool()
+        unsafe { IsIconic(window.as_hwnd()) }.as_bool()
     }
 
     /// **Whether the desktop compositor is holding this window back from the
@@ -5849,14 +5990,14 @@ mod windows_impl {
     ///
     /// **A read that fails answers `false`** — see [`cloaked_from_attribute`]
     /// for why that direction and not the other.
-    pub fn is_window_cloaked(hwnd: NonZeroIsize) -> bool {
+    pub fn is_window_cloaked(window: NativeWindow) -> bool {
         let mut cloaked: u32 = 0;
-        // SAFETY: `hwnd` originates from winit's live Win32WindowHandle, and the
+        // SAFETY: `window` originates from winit's live Win32WindowHandle, and the
         // out-parameter is a `u32` matching the documented size of
         // `DWMWA_CLOAKED`. DwmGetWindowAttribute only reads composition state.
         let read = unsafe {
             DwmGetWindowAttribute(
-                HWND(hwnd.get() as *mut c_void),
+                window.as_hwnd(),
                 DWMWA_CLOAKED,
                 std::ptr::from_mut(&mut cloaked).cast(),
                 u32::try_from(size_of::<u32>()).unwrap_or(4),
@@ -5902,10 +6043,10 @@ mod windows_impl {
     /// `FlashWindowEx` has no failure mode a caller could act on — it returns
     /// the window's previous foreground state, not a status — so this answers
     /// nothing. A window handle that names nothing simply flashes nothing.
-    pub fn flash_window(hwnd: NonZeroIsize) {
+    pub fn flash_window(window: NativeWindow) {
         let mut flash = FLASHWINFO {
             cbSize: u32::try_from(size_of::<FLASHWINFO>()).unwrap_or(0),
-            hwnd: HWND(hwnd.get() as *mut c_void),
+            hwnd: window.as_hwnd(),
             dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
             uCount: 0,
             dwTimeout: 0,
@@ -5999,7 +6140,7 @@ mod windows_impl {
     /// `None` for the desktop, for a point no window covers, and for a window
     /// this process cannot name; those are one answer to the caller ("not one of
     /// ours") and it is deliberately not three.
-    pub fn top_level_window_at(x: i32, y: i32) -> Option<NonZeroIsize> {
+    pub fn top_level_window_at(x: i32, y: i32) -> Option<NativeWindow> {
         // SAFETY: both calls are read-only hit tests over screen coordinates and
         // take no pointers; `WindowFromPoint` answers a null handle for a point
         // no window covers, which `GetAncestor` in turn answers null for.
@@ -6007,7 +6148,7 @@ mod windows_impl {
             let hit = WindowFromPoint(POINT { x, y });
             GetAncestor(hit, GA_ROOT)
         };
-        NonZeroIsize::new(root.0 as isize)
+        NativeWindow::from_hwnd(root)
     }
 
     /// **The three screen points a window's exposure is asked about** (user
@@ -6092,9 +6233,9 @@ mod windows_impl {
     /// marks this answer is about are behind that window either way.
     #[must_use]
     pub fn exposed_from_probe(
-        own: NonZeroIsize,
+        own: NativeWindow,
         rect: Option<WindowRect>,
-        mut probe: impl FnMut(i32, i32) -> Option<NonZeroIsize>,
+        mut probe: impl FnMut(i32, i32) -> Option<NativeWindow>,
     ) -> bool {
         let Some(rect) = rect else {
             return true;
@@ -6113,8 +6254,8 @@ mod windows_impl {
     /// `IsIconic` / `DwmGetWindowAttribute` / `SHAppBarMessage` it already makes
     /// on the same turn.
     #[must_use]
-    pub fn window_is_exposed(hwnd: NonZeroIsize) -> bool {
-        exposed_from_probe(hwnd, get_window_rect(hwnd).ok(), top_level_window_at)
+    pub fn window_is_exposed(window: NativeWindow) -> bool {
+        exposed_from_probe(window, get_window_rect(window).ok(), top_level_window_at)
     }
 
     /// **Which window in this thread holds the Win32 mouse capture, if any**
@@ -6132,11 +6273,11 @@ mod windows_impl {
     /// *calling* thread, and every window in this program is on the loop's
     /// thread, so "the capture" and "this thread's capture" are the same thing
     /// here.
-    pub fn thread_mouse_capture() -> Option<NonZeroIsize> {
+    pub fn thread_mouse_capture() -> Option<NativeWindow> {
         // SAFETY: a read-only query taking no arguments and returning a handle
         // that may be null, which is exactly the "nobody has it" answer.
         let held = unsafe { GetCapture() };
-        NonZeroIsize::new(held.0 as isize)
+        NativeWindow::from_hwnd(held)
     }
 
     /// **The whole virtual desktop, in physical pixels** (multiwindow slice
@@ -6288,11 +6429,11 @@ mod windows_impl {
         (!name.is_empty()).then_some(name)
     }
 
-    pub fn get_window_rect(hwnd: NonZeroIsize) -> Result<WindowRect, String> {
+    pub fn get_window_rect(window: NativeWindow) -> Result<WindowRect, String> {
         let mut rect = RECT::default();
-        // SAFETY: `hwnd` originates from winit's live Win32WindowHandle and `rect` remains valid
+        // SAFETY: `window` originates from winit's live Win32WindowHandle and `rect` remains valid
         // and exclusively borrowed for the duration of this read-only query.
-        unsafe { GetWindowRect(HWND(hwnd.get() as *mut c_void), &mut rect) }
+        unsafe { GetWindowRect(window.as_hwnd(), &mut rect) }
             .map_err(|error| format!("GetWindowRect failed: {error}"))?;
         Ok(WindowRect {
             left: rect.left,
@@ -6311,12 +6452,12 @@ mod windows_impl {
     /// derivation adds a frame margin the window does not wear. Passing the outer
     /// rect straight through is what makes `GetWindowRect` -> save -> restore ->
     /// `GetWindowRect` an identity.
-    pub fn set_window_outer_rect(hwnd: NonZeroIsize, rect: WindowRect) -> Result<(), String> {
-        // SAFETY: `hwnd` originates from winit's live Win32WindowHandle. No
+    pub fn set_window_outer_rect(window: NativeWindow, rect: WindowRect) -> Result<(), String> {
+        // SAFETY: `window` originates from winit's live Win32WindowHandle. No
         // insert-after handle is passed, which `SWP_NOZORDER` makes inert.
         unsafe {
             SetWindowPos(
-                HWND(hwnd.get() as *mut c_void),
+                window.as_hwnd(),
                 None,
                 rect.left,
                 rect.top,
@@ -6364,11 +6505,11 @@ mod windows_impl {
     ///
     /// A window that could not be read is reported rather than retried: a
     /// rectangle nobody can check is one this function has nothing to say about.
-    pub fn stand_window_at(hwnd: NonZeroIsize, rect: WindowRect) -> Result<(), String> {
+    pub fn stand_window_at(window: NativeWindow, rect: WindowRect) -> Result<(), String> {
         let mut last = None;
         for _ in 0..STANDING_ATTEMPTS {
-            set_window_outer_rect(hwnd, rect)?;
-            let standing = get_window_rect(hwnd)?;
+            set_window_outer_rect(window, rect)?;
+            let standing = get_window_rect(window)?;
             if standing == rect {
                 return Ok(());
             }
@@ -6399,18 +6540,17 @@ mod windows_impl {
     /// the window refuse to shrink past something the user can never see all of.
     /// Failure is reported rather than guessed at, because tiny-window §4.4 rules
     /// that a never-observed work area means "set no minimum at all".
-    pub fn get_work_area(hwnd: NonZeroIsize) -> Result<WindowRect, String> {
+    pub fn get_work_area(window: NativeWindow) -> Result<WindowRect, String> {
         let mut info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
-        // SAFETY: `hwnd` originates from winit's live Win32WindowHandle.
+        // SAFETY: `window` originates from winit's live Win32WindowHandle.
         // MonitorFromWindow with MONITOR_DEFAULTTONEAREST always returns a valid
         // monitor handle, and `info` stays valid and exclusively borrowed across
         // this read-only query with its `cbSize` set as the API requires.
         let ok = unsafe {
-            let monitor =
-                MonitorFromWindow(HWND(hwnd.get() as *mut c_void), MONITOR_DEFAULTTONEAREST);
+            let monitor = MonitorFromWindow(window.as_hwnd(), MONITOR_DEFAULTTONEAREST);
             GetMonitorInfoW(monitor, &mut info)
         };
         if !ok.as_bool() {
@@ -6567,7 +6707,7 @@ mod windows_impl {
     /// theme colour. That is the correct answer for a window the user has asked
     /// to be see-through, and it is why the opaque case keeps its brush.
     pub fn install_window_class_background(
-        hwnd: NonZeroIsize,
+        window: NativeWindow,
         rgb: Option<[u8; 3]>,
     ) -> Result<(), String> {
         let mut installed = WINDOW_CLASS_BACKGROUND
@@ -6593,7 +6733,7 @@ mod windows_impl {
 
             SetLastError(WIN32_ERROR(0));
             let previous = SetClassLongPtrW(
-                HWND(hwnd.get() as *mut c_void),
+                window.as_hwnd(),
                 GCLP_HBRBACKGROUND,
                 brush.map_or(0, |brush| brush.0 as isize),
             );
@@ -7474,8 +7614,8 @@ mod windows_impl {
             ShellPickKind, compositor_failure, newest_live_owner, primary_language_id,
             retry_open_clipboard, wide_null,
         };
+        use crate::NativeWindow;
         use crate::handoff::{validate_local_image_path, validate_openable_path};
-        use std::num::NonZeroIsize;
         use std::path::{Path, PathBuf};
 
         /// A DirectComposition refusal has to be readable by the person holding
@@ -7527,7 +7667,7 @@ mod windows_impl {
         /// second does.
         #[test]
         fn the_windows_clipboard_finds_its_owner_itself() {
-            let handle = |value: isize| NonZeroIsize::new(value).expect("a test handle is not 0");
+            let handle = NativeWindow::stand_in;
             let mut registered = vec![handle(11), handle(22), handle(33)];
 
             assert_eq!(
@@ -9441,6 +9581,167 @@ mod platform_door_tests {
     }
 }
 
+/// **The native-window door, and the two places a platform handle is spelled**
+/// (`docs/plans/port/macos-plan-2026-09-12.md` §4.4 ②, ticket M1-1).
+///
+/// The rule the clipboard test above states for three functions, stated for the
+/// whole crate. The backend inventory counts **forty** public items carrying an
+/// `HWND` as a `NonZeroIsize` — a parameter in thirty-eight of them, a field in
+/// `RehostSide`, a constructor argument in every window-scoped handle type —
+/// and calls that the hard leak
+/// (`docs/plans/port/backend-inventory-2026-09-12.md` §5). Every one of them now
+/// takes [`NativeWindow`], which is opaque; the handle itself is spelled twice,
+/// in two constructors that are gated to the platform whose handle it is.
+///
+/// **Two named exceptions, and they are the plan's own §4.4 ①** — an SDK type
+/// stays inside a backend definition:
+///
+/// * `NativeWindow::from_win32`, `#[cfg(windows)]`, is the door's Windows side
+///   and the one place an `HWND` becomes a window in this workspace;
+/// * `msix::explorer_command_clsid`, `#[cfg(windows)]`, returns a
+///   `windows::core::GUID` and has no caller in `bt-app` at all. The plan names
+///   it by name as the example of a signature that must not be lifted.
+///
+/// A source pin and not a type assertion, for [`platform_door_tests`]'s reason:
+/// what is guarded is the *text*, and on the platform where the parameter would
+/// work the compiler has nothing to say about it.
+///
+/// MUTATION: give any door back its `hwnd: NonZeroIsize`, or make either
+/// constructor ungated, and this goes red naming the file and the declaration.
+#[cfg(test)]
+mod native_window_door_tests {
+    use std::path::{Path, PathBuf};
+
+    /// The spellings that are a Windows handle however they are dressed.
+    const WINDOWS_SHAPES: [&str; 4] = ["NonZeroIsize", "HWND", "HANDLE", "windows::"];
+
+    /// The two declarations that may name one, each for a reason written in
+    /// this module's own note.
+    const SPELLED_ON_PURPOSE: [&str; 2] = ["from_win32", "explorer_command_clsid"];
+
+    fn crate_sources() -> Vec<PathBuf> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found = Vec::new();
+        walk(&root, &mut found);
+        found.sort();
+        assert!(
+            found.len() >= 10,
+            "the walk found {} files, which is not this crate's source tree",
+            found.len()
+        );
+        found
+    }
+
+    fn walk(directory: &Path, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, found);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                found.push(path);
+            }
+        }
+    }
+
+    /// Every public declaration in one file: a `pub fn` header up to the brace
+    /// or semicolon that ends it, and every `pub NAME: TYPE` field line.
+    ///
+    /// Deliberately line-based and deliberately generous — a header split over
+    /// four lines is joined, and a `pub` anything that mentions one of the four
+    /// spellings is reported whether it is a function, a field or an alias. A
+    /// gate that missed a declaration because of how it was wrapped would be a
+    /// gate the next leak walks straight through.
+    fn public_declarations(text: &str) -> Vec<String> {
+        let mut declarations = Vec::new();
+        let mut open: Option<String> = None;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            match open.as_mut() {
+                Some(header) => {
+                    header.push(' ');
+                    header.push_str(trimmed);
+                }
+                None => {
+                    if !trimmed.starts_with("pub ") {
+                        continue;
+                    }
+                    open = Some(trimmed.to_owned());
+                }
+            }
+            let header = open.as_ref().expect("a header was just opened or extended");
+            if header.contains('{') || header.ends_with(';') || header.ends_with(',') {
+                declarations.push(open.take().expect("the header that just ended"));
+            }
+        }
+        declarations
+    }
+
+    /// RED — **no public item of this crate names a Windows handle.**
+    #[test]
+    fn the_native_window_door_has_no_windows_type_in_its_signature() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut leaks = Vec::new();
+        for file in crate_sources() {
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            for declaration in public_declarations(&text) {
+                if SPELLED_ON_PURPOSE
+                    .iter()
+                    .any(|allowed| declaration.contains(allowed))
+                {
+                    continue;
+                }
+                for shape in WINDOWS_SHAPES {
+                    if declaration.contains(shape) {
+                        leaks.push(format!(
+                            "{}: {declaration}",
+                            file.strip_prefix(root).unwrap_or(&file).display()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            leaks.is_empty(),
+            "a public item of `bt-platform` names a Windows handle, so every caller on every \
+             platform has to have one to hand; the window door is `NativeWindow` and the handle \
+             is spelled only in the two gated constructors: {leaks:#?}"
+        );
+    }
+
+    /// RED — **the handle is spelled twice, and each spelling is gated.**
+    ///
+    /// The other half of the rule: it is not enough that no door names an
+    /// `HWND` if some ungated helper hands one out. The two constructors are
+    /// the whole of the crate's window vocabulary, and each is compiled only on
+    /// the platform whose handle it takes.
+    #[test]
+    fn each_native_window_constructor_is_gated_to_its_own_platform() {
+        let source = include_str!("lib.rs");
+        for (constructor, gate) in [
+            ("pub const fn from_win32(", "#[cfg(windows)]"),
+            ("pub fn from_appkit(", "#[cfg(target_os = \"macos\")]"),
+        ] {
+            let at = source
+                .find(constructor)
+                .unwrap_or_else(|| panic!("{constructor} is this crate's window constructor"));
+            let before = &source[..at];
+            assert!(
+                before.lines().rev().take(4).any(|line| line.trim() == gate),
+                "{constructor} is not gated with {gate}, so the handle it takes is spelled on a \
+                 platform that does not have one"
+            );
+        }
+    }
+}
+
 /// The band contract, asked where there are no bands.
 ///
 /// It is the whole of what [`portable_priority`] promises, and it is worth a
@@ -9662,7 +9963,7 @@ mod taskbar_state_tests {
 #[cfg(all(test, windows))]
 mod exposure_probe_tests {
     use super::{WindowRect, exposed_from_probe, exposure_probe_points};
-    use std::num::NonZeroIsize;
+    use crate::NativeWindow;
 
     /// A window at a plain place on a plain screen: 800 x 600 at (100, 100).
     const WINDOW: WindowRect = WindowRect {
@@ -9672,8 +9973,8 @@ mod exposure_probe_tests {
         bottom: 700,
     };
 
-    fn handle(value: isize) -> NonZeroIsize {
-        NonZeroIsize::new(value).expect("the fixture's handle is not null")
+    fn handle(value: u16) -> NativeWindow {
+        NativeWindow::stand_in(value)
     }
 
     /// PIN — **the three points stand where the ruling put them: the centre and
@@ -11747,6 +12048,26 @@ mod quiet_door_tests {
     /// MUTATION: match without the word boundary and every `PtyCommand` in
     /// `bt-pty` reads as a violation, so the gate has to be weakened to pass and
     /// stops being one.
+    /// **The one child this workspace builds that is not a door**, and why it
+    /// is not one.
+    ///
+    /// `bt-pty`'s Unix suite asks the operating system's own process table
+    /// whether a child it reaped is really gone, and it asks `ps` because
+    /// asking `waitpid` again would be asking this crate's bookkeeping whether
+    /// this crate's bookkeeping is right. It is `#[cfg(unix)]` and it is a
+    /// test, so the console this gate exists to refuse is a console it can
+    /// never be handed: Windows does not compile the line, and Unix has no
+    /// console to flash.
+    ///
+    /// Named as one exact occurrence rather than as a file, so that a *second*
+    /// child built in that file — or that one turned into something else —
+    /// fails the gate the way any other would. Arrived with M1-6, which is the
+    /// slice that gave `bt-pty` real Unix children.
+    const PROCESS_TABLE_READER: (&str, &str) = (
+        "crates/bt-pty/src/lib.rs",
+        concat!("std::process::Command", "::new(\"ps\")"),
+    );
+
     #[test]
     fn no_command_is_built_outside_the_quiet_door() {
         let root = repository_root();
@@ -11755,13 +12076,18 @@ mod quiet_door_tests {
             .join("bt-platform")
             .join("src")
             .join("lib.rs");
+        let (table_reader_file, table_reader_call) = PROCESS_TABLE_READER;
+        let table_reader = root.join(table_reader_file.replace('/', std::path::MAIN_SEPARATOR_STR));
         let mut outside = Vec::new();
         let mut inside = 0;
         for file in shipped_sources(&root) {
             let Ok(text) = std::fs::read_to_string(&file) else {
                 continue;
             };
-            let built = doors_built_in(&text);
+            let mut built = doors_built_in(&text);
+            if file == table_reader && text.contains(table_reader_call) {
+                built = built.saturating_sub(1);
+            }
             if built == 0 {
                 continue;
             }
@@ -11774,6 +12100,11 @@ mod quiet_door_tests {
                 ));
             }
         }
+        assert!(
+            std::fs::read_to_string(&table_reader)
+                .is_ok_and(|text| text.contains(table_reader_call)),
+            "the one named exception is gone from {table_reader_file}, so the exception should              go with it"
+        );
         assert!(
             outside.is_empty(),
             "every child process this product starts goes through \

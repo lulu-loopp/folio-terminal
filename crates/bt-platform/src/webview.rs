@@ -32,11 +32,10 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::ffi::c_void;
-use std::num::NonZeroIsize;
 use std::path::Path;
 use std::rc::Rc;
 
+use crate::NativeWindow;
 use webview2_com::Microsoft::Web::WebView2::Win32::*;
 // Named one by one rather than globbed: `webview2_com` exports a `Result` alias
 // of its own, and a glob here would quietly make every `Result<(), String>` in
@@ -100,15 +99,30 @@ fn failure(step: &str, error: &windows::core::Error) -> String {
 
 /// A chord the window claims from a focused page.
 ///
-/// A Win32 virtual key and three booleans, because that is the vocabulary
+/// A Win32 virtual key and four booleans, because that is the vocabulary
 /// `AcceleratorKeyPressed` speaks and there is no second one. Translating the
 /// product's own table into this is `bt_app::webhost::claimable_chords`.
+///
+/// **`command` is macOS's, and it is data before it is routing** (M1-1, for
+/// M1-7). The plan's §4.4 ② names this struct as a signature that encodes
+/// Windows without saying so: three modifiers is not a missing field on
+/// Windows, it is the complete set, and on macOS the modifier that carries
+/// every application shortcut — `Cmd+C`, `Cmd+T`, `Cmd+W` — had nowhere to go,
+/// so a Command chord over a focused page degraded to an unmodified key
+/// (`webhost.rs` copied three booleans and the fourth did not exist to copy).
+/// The field is added here, now, so that the type is the same on both
+/// platforms before anything is written against it; **what fills it and what
+/// it means for `BINDINGS` is M1-7**, and the Windows arm leaves it `false`
+/// because Win32's accelerator callback has no such modifier to report.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WebChord {
     pub virtual_key: u16,
     pub ctrl: bool,
     pub shift: bool,
     pub alt: bool,
+    /// The macOS Command modifier. Always `false` on Windows — see the type's
+    /// own note.
+    pub command: bool,
 }
 
 /// One key, as the accelerator callback saw it.
@@ -1006,7 +1020,7 @@ pub enum RehostOutcome {
 pub struct RehostSide<'a> {
     pub compositor: &'a Compositor,
     pub page: PageVisual,
-    pub hwnd: NonZeroIsize,
+    pub window: NativeWindow,
 }
 
 /// Everything the undo needs, read **before** the handoff touches anything.
@@ -1294,7 +1308,7 @@ impl WebHost {
     /// a [`WebEvent::Controller`] for this generation.
     pub fn request_controller(
         &mut self,
-        hwnd: NonZeroIsize,
+        window: NativeWindow,
         generation: u64,
     ) -> Result<(), String> {
         let environment = self.adopt_environment()?;
@@ -1329,7 +1343,7 @@ impl WebHost {
         // [`Self::close_pending_controller`] states for the caller's side of it.
         self.close_pending_controller();
         self.pending_controller = Some((generation, holder));
-        let hwnd = HWND(hwnd.get() as *mut c_void);
+        let hwnd = window.as_hwnd();
         unsafe { environment3.CreateCoreWebView2CompositionController(hwnd, &handler) }
             .map_err(|error| failure("CreateCoreWebView2CompositionController", &error))
     }
@@ -1503,7 +1517,7 @@ impl WebHost {
         let restore = Restore {
             source: from.compositor,
             target: to.compositor,
-            hwnd: HWND(from.hwnd.get() as *mut c_void),
+            hwnd: from.window.as_hwnd(),
             visual: source_visual,
             bounds: read::<RECT>(|out| unsafe { controller.Bounds(out) }),
             visible: read_bool(|out| unsafe { controller.IsVisible(out) }),
@@ -1525,7 +1539,7 @@ impl WebHost {
                 }
                 RehostStep::CommitSource => from.compositor.commit(),
                 RehostStep::ParentWindow => {
-                    unsafe { controller.SetParentWindow(HWND(to.hwnd.get() as *mut c_void)) }
+                    unsafe { controller.SetParentWindow(to.window.as_hwnd()) }
                         .map_err(|error| failure("put_ParentWindow", &error))
                 }
                 RehostStep::SetRootVisualTarget => {
@@ -2201,6 +2215,9 @@ impl WebHost {
                             ctrl,
                             shift,
                             alt,
+                            // Win32's accelerator callback has no Command
+                            // modifier to report — see `WebChord`'s note.
+                            command: false,
                         };
                         // The whole reason this callback matters: it runs on the
                         // window's thread *before* the page sees the key, so a
@@ -3238,8 +3255,8 @@ mod webview2_runtime_probe {
             Self(hwnd)
         }
 
-        fn key(&self) -> std::num::NonZeroIsize {
-            std::num::NonZeroIsize::new(self.0.0 as isize).expect("a real window handle")
+        fn key(&self) -> crate::NativeWindow {
+            crate::NativeWindow::from_hwnd(self.0).expect("a real window handle")
         }
     }
 

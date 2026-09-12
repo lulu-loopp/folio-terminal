@@ -151,15 +151,15 @@ impl ApplicationHandler for Probe {
         // nothing ships. It also keeps every `unsafe` line in this workspace
         // where it already is — `bt_platform::Compositor` makes the visual and
         // `bt_render::create_surface` is the one call that dereferences it.
-        let hwnd = match window_hwnd(&window) {
-            Some(hwnd) => hwnd,
+        let native = match native_window(&window) {
+            Some(native) => native,
             None => {
                 eprintln!("PROBE the window has no Win32 handle");
                 event_loop.exit();
                 return;
             }
         };
-        let compositor = match bt_platform::Compositor::new(hwnd) {
+        let compositor = match bt_platform::Compositor::new(native) {
             Ok(compositor) => compositor,
             Err(error) => {
                 eprintln!("PROBE no composition visual: {error}");
@@ -406,10 +406,10 @@ impl Probe {
 }
 
 /// The window's own `HWND`, which is what a composition visual is built over.
-fn window_hwnd(window: &Window) -> Option<std::num::NonZeroIsize> {
+fn native_window(window: &Window) -> Option<bt_platform::NativeWindow> {
     let handle = window.window_handle().ok()?;
     match handle.as_raw() {
-        RawWindowHandle::Win32(handle) => Some(handle.hwnd),
+        RawWindowHandle::Win32(handle) => Some(bt_platform::NativeWindow::from_win32(handle.hwnd)),
         _ => None,
     }
 }

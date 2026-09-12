@@ -26,7 +26,7 @@
 //! restore prompt's election — a question about a window nobody can see is a
 //! question nobody can answer.
 
-use std::num::NonZeroIsize;
+use bt_platform::NativeWindow;
 
 use bt_platform::WindowRect;
 use bt_platform::hotkey::{GlobalHotkey, Hotkey, HotkeyFault};
@@ -234,7 +234,7 @@ impl SummonScreen {
     /// This is the machine-reading half of the one summon door; the deciding half is
     /// [`Quake::placement`], which is pure and is where the rules live.
     #[must_use]
-    pub(crate) fn under_the_pointer(window: NonZeroIsize, cached_dpi: u32) -> Self {
+    pub(crate) fn under_the_pointer(window: NativeWindow, cached_dpi: u32) -> Self {
         let pointer = bt_platform::pointer_position();
         let work = pointer
             .and_then(|(x, y)| bt_platform::work_area_at(x, y).ok())
@@ -341,7 +341,7 @@ pub(crate) struct Quake {
     /// Read once, at the moment of showing, and spent once, at the moment of
     /// hiding. There is no second chance to read it: by the time the window is
     /// going away the foreground is the window.
-    give_back: Option<NonZeroIsize>,
+    give_back: Option<NativeWindow>,
     /// **A press that has arrived and not yet been acted on.**
     ///
     /// The message hook does nothing but wake the loop (see the hook's own note
@@ -472,14 +472,14 @@ impl Quake {
     }
 
     /// Record that the window is up, and who is owed the keyboard back.
-    pub(crate) fn shown_over(&mut self, previous: Option<NonZeroIsize>) {
+    pub(crate) fn shown_over(&mut self, previous: Option<NativeWindow>) {
         self.shown = true;
         self.pending_dismiss = false;
         self.give_back = previous;
     }
 
     /// Record that it is down, and hand back whoever was owed the keyboard.
-    pub(crate) fn hidden(&mut self) -> Option<NonZeroIsize> {
+    pub(crate) fn hidden(&mut self) -> Option<NativeWindow> {
         self.shown = false;
         self.pending_dismiss = false;
         self.give_back.take()
@@ -862,11 +862,11 @@ mod tests {
     /// puts it up again, and the one that sent it away sends it away twice.
     #[test]
     fn ten_cycles_leave_the_summon_exactly_where_one_did() {
-        use std::num::NonZeroIsize;
+        use bt_platform::NativeWindow;
 
         let mut quake = Quake::default();
-        for cycle in 1..=10_isize {
-            let over = NonZeroIsize::new(0x1000 + cycle);
+        for cycle in 1..=10_u16 {
+            let over = Some(NativeWindow::stand_in(cycle));
             assert!(!quake.is_showing(), "cycle {cycle} starts with it away");
             quake.shown_over(over);
             assert!(quake.is_showing(), "cycle {cycle} put it up");
@@ -998,9 +998,9 @@ mod tests {
     /// before the *first* summon — very often one that has since been closed.
     #[test]
     fn the_window_owed_the_keyboard_is_handed_back_exactly_once() {
-        use std::num::NonZeroIsize;
+        use bt_platform::NativeWindow;
 
-        let previous = NonZeroIsize::new(0x1234);
+        let previous = Some(NativeWindow::stand_in(0x34));
         let mut quake = Quake::default();
         quake.shown_over(previous);
         assert!(quake.is_showing());
