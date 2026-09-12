@@ -432,21 +432,40 @@ fn is_flag(text: &str, name: &str) -> bool {
 /// is split off the **encoded** argument rather than off the decoded copy,
 /// because the half after the sign is a path and a path is not required to be
 /// text. `--cwd=` is ASCII, so the sign sits at the same offset in both, and
-/// `from_wide` hands back exactly what Windows said.
+/// what comes back is exactly what the operating system said.
 ///
 /// Called only where [`is_flag`] has already said yes, which is what makes
 /// "longer than the name" the test for the joined form.
+///
+/// # The split is portable, and it was not (M1-1, for M1-10)
+///
+/// This function used to reach for `std::os::windows::ffi` — one of two ungated
+/// Windows uses in this file, which `scripts/check-portable-core.ps1` never sees
+/// because it scans the thirteen portable crates and `bt-app` is not one of
+/// them (`docs/plans/port/macos-plan-2026-09-12.md` §4.3). The plan's
+/// recommendation was the second of its two options: give this function a
+/// portable implementation rather than admit `cli.rs` to the eleven-file gate
+/// list, **because what it actually does is split at a known ASCII offset** and
+/// both platforms can express that.
+///
+/// The split itself is `bt_platform::argument_after_ascii`, and it is there
+/// rather than here for the reason the workspace's `unsafe_code = "deny"`
+/// states: taking an `OsStr` apart in the operating system's own encoding and
+/// putting one back is one `unsafe` call in the standard library, and this
+/// workspace keeps every one of those behind that one door.
+///
+/// The *test* beside this function has no portable twin at all and is M1-10's
+/// second decision: a lone surrogate is not a thing a Unix `OsString` can hold.
 fn value_for(
     name: &'static str,
     text: &str,
     arg: &OsString,
     args: &mut impl Iterator<Item = OsString>,
 ) -> Result<OsString, CliFault> {
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
-
     if text.len() > name.len() {
-        let wide: Vec<u16> = arg.encode_wide().collect();
-        let value = OsString::from_wide(&wide[name.len() + 1..]);
+        // `is_flag` has already found the `=` at `name.len()`, so the value is
+        // everything after it.
+        let value = bt_platform::argument_after_ascii(arg, name.len() + 1);
         if value.is_empty() {
             return Err(CliFault::MissingValue(name));
         }

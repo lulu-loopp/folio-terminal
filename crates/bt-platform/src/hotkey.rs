@@ -229,6 +229,12 @@ pub fn registration_is_live(id: i32) -> bool {
 }
 
 /// Record a claim Windows accepted.
+///
+/// `#[cfg(windows)]` with the registration that calls it: off Windows nothing
+/// claims a chord yet (M4-8), so the ledger [`registration_is_live`] reads is
+/// only ever written on the platform that has one. The reader stays ungated,
+/// because "is this chord ours" has an answer everywhere and that answer is no.
+#[cfg(windows)]
 fn note_claimed(id: i32) {
     let mut live = claims();
     if !live.contains(&id) {
@@ -237,6 +243,7 @@ fn note_claimed(id: i32) {
 }
 
 /// Record a claim that has been released, or that Windows refused.
+#[cfg(windows)]
 fn note_released(id: i32) {
     claims().retain(|held| *held != id);
 }
@@ -251,10 +258,9 @@ pub use windows_hotkey::{
 mod windows_hotkey {
     use std::ffi::c_void;
     use std::marker::PhantomData;
-    use std::num::NonZeroIsize;
     use std::time::Instant;
 
-    use windows::Win32::Foundation::{ERROR_HOTKEY_ALREADY_REGISTERED, HWND};
+    use windows::Win32::Foundation::ERROR_HOTKEY_ALREADY_REGISTERED;
     // `AttachThreadInput` is filed under `Threading` and not under
     // `KeyboardAndMouse` beside the three below it, which reads oddly until you
     // remember what it does: it joins two *threads'* input queues, and the
@@ -269,6 +275,7 @@ mod windows_hotkey {
     };
 
     use super::{Hotkey, HotkeyFault, registration_bits};
+    use crate::NativeWindow;
 
     /// **A claim on a chord, held for as long as this value is alive.**
     ///
@@ -416,11 +423,11 @@ mod windows_hotkey {
     /// second chance to read it — by the time the quake window is going away, the
     /// foreground is the quake window.
     #[must_use]
-    pub fn foreground_window() -> Option<NonZeroIsize> {
+    pub fn foreground_window() -> Option<NativeWindow> {
         // SAFETY: a read with no arguments and no lifetime; the handle is
         // immediately narrowed to an integer and never dereferenced.
         let hwnd = unsafe { GetForegroundWindow() };
-        NonZeroIsize::new(hwnd.0 as isize)
+        NativeWindow::from_hwnd(hwnd)
     }
 
     /// **Hand this process's foreground rights to another process** (`docs/DESIGN.md` §7.59).
@@ -480,8 +487,8 @@ mod windows_hotkey {
     /// nothing a person can do about a foreground lock, and a card appearing over
     /// their editor to say the terminal could not give the keyboard back would be
     /// a worse interruption than the one it was reporting.
-    pub fn give_foreground_to(hwnd: NonZeroIsize) -> bool {
-        let target = HWND(hwnd.get() as *mut c_void);
+    pub fn give_foreground_to(window: NativeWindow) -> bool {
+        let target = window.as_hwnd();
         // **The handle is revalidated before it is used** (R2-3). It was read at
         // the moment the summon came down, and between then and now the window it
         // named may have closed — an `HWND` is reused by Windows the moment a
@@ -499,7 +506,7 @@ mod windows_hotkey {
                 return false;
             }
             // SAFETY: a read with no arguments; the handle is only compared.
-            if unsafe { GetForegroundWindow() }.0 as isize == hwnd.get() {
+            if unsafe { GetForegroundWindow() } == target {
                 return true;
             }
             // SAFETY: `GetForegroundWindow` may answer null, which
@@ -540,7 +547,7 @@ mod windows_hotkey {
                 let _ = unsafe { AttachThreadInput(mine, theirs, false) };
             }
             // SAFETY: a read with no arguments.
-            if unsafe { GetForegroundWindow() }.0 as isize == hwnd.get() {
+            if unsafe { GetForegroundWindow() } == target {
                 return true;
             }
         }
@@ -619,17 +626,88 @@ pub const fn handover_step(
     }
 }
 
-/// The handover, on a host with no foreground to hand.
+/// **The global summon key, on a platform whose event tap is M4-8's** (gated
+/// behind X-5, because Accessibility is granted against a code signature and an
+/// agent that re-signs on every build would be granting it again every time).
+///
+/// `CGEventTap` is the mechanism the owner ruled for (§8 Q2), authorized
+/// through an in-app *Enable global shortcut* action rather than at first
+/// summon — a chord that cannot be heard has no first summon to ask at. So the
+/// fault this arm answers with is the one M4-8 turns into that row's
+/// *not authorized* state, and it is `Refused` with a sentence rather than a
+/// new variant, because the variant M4-8 adds is about a permission that has
+/// been asked for and declined, which is a different thing from a mechanism
+/// that has not been written.
+#[cfg(not(windows))]
+#[derive(Debug)]
+pub struct GlobalHotkey {
+    /// Never constructed: [`register`] refuses.
+    _never: std::convert::Infallible,
+}
+
+#[cfg(not(windows))]
+impl GlobalHotkey {
+    /// The id this claim was made under. Unreachable: there is no claim.
+    #[must_use]
+    pub const fn id(&self) -> i32 {
+        match self._never {}
+    }
+}
+
+/// Claim the chord. Refused; M4-8.
+#[cfg(not(windows))]
+pub fn register(id: i32, hotkey: Hotkey) -> Result<GlobalHotkey, HotkeyFault> {
+    let _ = id;
+    // **The product's own refusal first, exactly as the Windows arm orders
+    // them** (R2-14): a chord with no modifier on it is refused for a reason
+    // that is true on every platform, and telling the reader "not on this
+    // platform" about a chord that would be refused anyway sends them to fix
+    // the wrong thing.
+    if !holds_a_summon_modifier(hotkey) {
+        return Err(HotkeyFault::NoModifier);
+    }
+    Err(HotkeyFault::Refused(
+        "the global summon key is not on this platform yet".to_owned(),
+    ))
+}
+
+/// **Let the process we are handing a launch to come to the front.**
+///
+/// A no-op answering `false`, and one of §4.4's class-N items rather than
+/// deferred work: `AllowSetForegroundWindow` exists because Windows has a
+/// foreground *lock* to ask permission from, and macOS has none — the launch
+/// handover simply activates the other application. The `false` says no
+/// permission was granted, which is true, and the caller's own next step is the
+/// activation that needs none.
 #[cfg(not(windows))]
 #[must_use]
-pub fn foreground_window() -> Option<std::num::NonZeroIsize> {
+pub fn allow_foreground_for(process: u32) -> bool {
+    let _ = process;
+    false
+}
+
+/// The handover, on a host with no foreground to hand.
+///
+/// **Not the same statement as "there is no frontmost application"** — macOS
+/// has one, `NSWorkspace.frontmostApplication`, and M4-8 gives this arm a real
+/// answer when the quake terminal's foreground rules are ported. What this arm
+/// says is that nobody has asked yet, and the caller's own reading of `None`
+/// (`bt_app::quake`: remember nothing, give nothing back) is the honest
+/// behaviour until then.
+#[cfg(not(windows))]
+#[must_use]
+pub fn foreground_window() -> Option<crate::NativeWindow> {
     None
 }
 
 /// The handover, on a host with no foreground to hand.
+///
+/// The `bool` is read by `bt-app`, which prints one line when the window it
+/// summoned could not take the keyboard — so the refusal is visible in
+/// `diagnostics.log` rather than silent. M4-8 owns the real arm.
 #[cfg(not(windows))]
 #[must_use]
-pub fn give_foreground_to(_hwnd: std::num::NonZeroIsize) -> bool {
+pub fn give_foreground_to(_window: crate::NativeWindow) -> bool {
     false
 }
 
@@ -637,8 +715,16 @@ pub fn give_foreground_to(_hwnd: std::num::NonZeroIsize) -> bool {
 mod tests {
     use super::{
         HandoverStep, Hotkey, another_round, handover_step, holds_a_summon_modifier, is_our_hotkey,
-        note_claimed, note_released, registration_bits, registration_is_live, summon_should_act,
+        registration_bits,
     };
+    // **The ledger's two writers are Windows'**, because nothing claims a chord
+    // anywhere else yet (M4-8), and so is `summon_should_act`, which reads a
+    // `WM_HOTKEY` — the inventory classifies that predicate as a compile-time
+    // absence for exactly that reason. `is_our_hotkey` stays above with the
+    // rest: it is a pure predicate over four integers and its test is a claim
+    // about arithmetic, which is true on every platform.
+    #[cfg(windows)]
+    use super::{note_claimed, note_released, registration_is_live, summon_should_act};
 
     const fn chord(ctrl: bool, alt: bool, shift: bool, win: bool, virtual_key: u16) -> Hotkey {
         Hotkey {
@@ -771,6 +857,7 @@ mod tests {
     ///
     /// MUTATION: drop the liveness clause and the two `!` assertions below fail,
     /// which is a window that answers a key nobody registered.
+    #[cfg(windows)]
     #[test]
     fn a_summon_is_acted_on_only_while_this_process_holds_the_claim() {
         // An id of this test's own: the ledger is process-wide, and the product's

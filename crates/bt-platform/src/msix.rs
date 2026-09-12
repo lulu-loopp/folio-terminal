@@ -415,6 +415,59 @@ mod deployment {
 #[cfg(windows)]
 pub use deployment::{PackageRegistration, register, registered, remove, windows_build};
 
+/// **Sparse-package deployment, on a platform that has no packages** (M1-1, and
+/// there is no later ticket: §1 of the macOS plan puts "any MSIX equivalent"
+/// out of 0.4 by name, because macOS has no first-page context menu to register
+/// into).
+///
+/// The pure half of this module — the six identity constants, the build test
+/// and the whole certificate-subject parser — is **ungated and compiles here
+/// today**, which is a correction the inventory makes to §4.4's closing
+/// sentence: "`msix.rs` is absent" would send a ticket to delete something that
+/// already builds. Only the four deployment entry points and the CLSID are
+/// Windows, and these are the three of them `bt-app` names without a gate of
+/// its own.
+#[cfg(not(windows))]
+mod no_deployment {
+    use std::path::{Path, PathBuf};
+
+    /// A package of ours that this user currently has registered. There is
+    /// never one; the type exists so that `bt-app`'s settings row reads the
+    /// same shape on both platforms.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct PackageRegistration {
+        /// What [`remove`] has to be given.
+        pub full_name: String,
+        /// The folder the registration points its content at, when it has one.
+        pub external_path: Option<PathBuf>,
+    }
+
+    /// What this user has registered. Nothing, and that is not a failure: the
+    /// row above reads `Ok(None)` as *not installed*, which is true and final
+    /// here rather than pending.
+    pub fn registered() -> Result<Option<PackageRegistration>, String> {
+        Ok(None)
+    }
+
+    /// Register the package. Refused, with the reason the row shows.
+    pub fn register(msix: &Path, external: &Path) -> Result<(), String> {
+        let _ = (msix, external);
+        Err(NO_PACKAGES.to_owned())
+    }
+
+    /// Remove it. Refused, and nothing is there to remove.
+    pub fn remove(full_name: &str) -> Result<(), String> {
+        let _ = full_name;
+        Err(NO_PACKAGES.to_owned())
+    }
+
+    const NO_PACKAGES: &str =
+        "this platform has no package to register: the first-page context menu is Windows only";
+}
+
+#[cfg(not(windows))]
+pub use no_deployment::{PackageRegistration, register, registered, remove};
+
 /// The class this build registers, as a GUID.
 #[cfg(windows)]
 #[must_use]
