@@ -145,10 +145,9 @@ use bt_render::{
     WINDOW_TAB_BREATHE_MIN_OPACITY, WINDOW_TAB_BREATHE_PERIOD_MS,
     WINDOW_TAB_BREATHE_REDUCED_OPACITY, WINDOW_TAB_PIN_FADE_MS, WINDOW_TAB_PIN_REVEAL_MS,
     WINDOW_TAB_RING_INDETERMINATE_TURNS, WINDOW_TAB_RING_SPIN_PERIOD_MS,
-    WINDOW_TAB_RING_SWEEP_TRANSITION_MS, WindowRenderer, WindowTarget, background_rgb,
-    compose_preedit, current_cursor_style, foreground_rgb, frame_content_digest,
-    frame_is_alternate_screen, preview_image_extent, scheme_in_force, set_cursor_style, set_theme,
-    theme_revision,
+    WINDOW_TAB_RING_SWEEP_TRANSITION_MS, WindowRenderer, background_rgb, compose_preedit,
+    current_cursor_style, foreground_rgb, frame_content_digest, frame_is_alternate_screen,
+    preview_image_extent, scheme_in_force, set_cursor_style, set_theme, theme_revision,
 };
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, ProgressState,
@@ -35862,7 +35861,7 @@ impl Runtime<'_> {
                 .create_window(attributes)
                 .context("create native window")?,
         );
-        install_theme_class_background(&window)?;
+        install_theme_class_background(&window);
         window.set_ime_allowed(true);
         let native = native_window(&window)?;
         // **The clipboard's owner window, told once here and never carried by a
@@ -35923,12 +35922,11 @@ impl Runtime<'_> {
         // restart. Left as a note rather than as a helper because the slice that
         // opens a second window is the one that will have somewhere to put it.
         let opened_at = dpi_snapshot(&window)?;
-        bt_platform::set_window_outer_rect(
+        stand_the_window_at(
             native,
             startup_window_rect(restored, opened_at.rect, opened_at.authoritative_scale),
-        )
-        .map_err(|error| anyhow!(error))
-        .context("restore the window's outer rectangle")?;
+            "restore the first window's outer rectangle",
+        );
         let window_time = phase_started.elapsed();
         let startup_dpi = dpi_snapshot(&window)?;
         let physical = window.inner_size();
@@ -35949,7 +35947,7 @@ impl Runtime<'_> {
         // would be black under the first one.
         install_page_ground_color(&compositor);
         let (mut gpu, mut renderer) = pollster::block_on(GpuContext::open(
-            bt_render::WindowTarget::CompositionVisual(compositor.gpu_visual_ptr()),
+            window_surface_target(&window, &compositor),
             physical.width,
             physical.height,
             startup_scale_factor,
@@ -36489,7 +36487,7 @@ impl Runtime<'_> {
                 .create_window(attributes)
                 .context("create native window")?,
         );
-        install_theme_class_background(&window)?;
+        install_theme_class_background(&window);
         window.set_ime_allowed(true);
         let native = native_window(&window)?;
         // A second window is a second owner the clipboard may go through — see
@@ -36586,9 +36584,7 @@ impl Runtime<'_> {
         let stood_at = standing.unwrap_or_else(|| {
             startup_window_rect(placement, opened_at.rect, opened_at.authoritative_scale)
         });
-        bt_platform::set_window_outer_rect(native, stood_at)
-            .map_err(|error| anyhow!(error))
-            .context("state the new window's outer rectangle")?;
+        stand_the_window_at(native, stood_at, "state the new window's outer rectangle");
         let physical = window.inner_size();
         let scale_factor = dpi_snapshot(&window)?.authoritative_scale;
         // The visual tree first, because the swapchain hangs off it — §2.3's
@@ -36607,7 +36603,7 @@ impl Runtime<'_> {
         // that last is the saving that is not on the GPU at all.
         let mut renderer = WindowRenderer::new(
             &mut app.gpu,
-            bt_render::WindowTarget::CompositionVisual(compositor.gpu_visual_ptr()),
+            window_surface_target(&window, &compositor),
             physical.width,
             physical.height,
             scale_factor,
@@ -47791,7 +47787,7 @@ impl Runtime<'_> {
         // them may have gone stale — and DWM's acrylic plate and border are
         // drawn from that statement, not from anything in this process's frame.
         self.apply_window_dark_mode()?;
-        install_theme_class_background(&self.window.window)?;
+        install_theme_class_background(&self.window.window);
         // **And the floor under every page in this window** (§7.14). Beside
         // the class brush and not somewhere else, because the two answer the
         // same question about the same ground for two different surfaces —
@@ -101443,13 +101439,14 @@ impl LostDevice for TheDeviceAndItsWindows<'_> {
             .in_order_mut()
             .into_iter()
             .map(|window| {
-                // Read before the renderer is borrowed, and it is a `*mut c_void`
-                // copied out of a `Compositor` this window goes on owning.
-                let visual = window.compositor.gpu_visual_ptr();
-                RebuiltWindow::OnScreen(
-                    &mut window.renderer,
-                    WindowTarget::CompositionVisual(visual),
-                )
+                // **Built before the renderer is borrowed**, out of a
+                // `Compositor` and a `Window` this entry goes on owning, and
+                // never stored — see [`window_surface_target`], which is the one
+                // place either platform's door is named, and
+                // `bt_render::WindowTarget::CompositionVisual`, whose contract
+                // is that the visual is live at the instant the surface is made.
+                let target = window_surface_target(&window.window, &window.compositor);
+                RebuiltWindow::OnScreen(&mut window.renderer, target)
             })
             .collect();
         pollster::block_on(self.gpu.rebuild_after_device_loss(rebuilt))
@@ -106242,20 +106239,71 @@ fn ensure_metrics_match_authoritative_scale(
     Ok(())
 }
 
+/// **The window's scale and rectangle, from the platform when it has a second
+/// opinion and from winit when it has not** (M1-1).
+///
+/// This function exists because on Windows winit's `scale_factor()` and
+/// `GetDpiForWindow` can disagree, and the one that decides what a frame is
+/// solved for has to be named: `GetDpiForWindow` is authoritative and the whole
+/// `BT_DPI` trace is built around printing both.
+///
+/// **On a platform where there is no second opinion there is nothing to
+/// reconcile**, and the refusal is the honest answer rather than a failure:
+/// winit's `scale_factor()` on macOS *is* `NSWindow.backingScaleFactor`, read
+/// from AppKit by winit itself, so a platform arm answering `96` here would be
+/// this program inventing a scale of 1.0 for a Retina window. So the platform
+/// is asked, and a refusal falls through to winit's own numbers — which is also
+/// what a Windows machine that somehow could not answer should have done, and
+/// is the one behaviour this changes there: a window used to refuse to open.
+///
+/// The rectangle follows the same rule and is read the same way winit reads it:
+/// the outer position and the outer size, which is what `GetWindowRect` hands
+/// back on Windows once `WM_NCCALCSIZE` has made the client the whole window.
+/// A window that has not been placed yet has no outer position, and an empty
+/// rectangle is what `startup_window_rect` already treats as "nothing known".
 fn dpi_snapshot(window: &Window) -> Result<DpiSnapshot> {
     let native = native_window(window)?;
-    let win32_dpi = bt_platform::get_dpi_for_window(native)
-        .map_err(|error| anyhow!(error))
-        .context("query authoritative window DPI with GetDpiForWindow")?;
-    let rect = bt_platform::get_window_rect(native)
-        .map_err(|error| anyhow!(error))
-        .context("query native window rectangle for DPI diagnostics")?;
+    let winit_scale = window.scale_factor();
+    let (win32_dpi, authoritative_scale) = match bt_platform::get_dpi_for_window(native) {
+        Ok(dpi) => (dpi, f64::from(dpi) / WIN32_DEFAULT_DPI),
+        Err(_) => (
+            (winit_scale * WIN32_DEFAULT_DPI).round() as u32,
+            winit_scale,
+        ),
+    };
+    let rect = match bt_platform::get_window_rect(native) {
+        Ok(rect) => rect,
+        Err(_) => winit_outer_rect(window),
+    };
     Ok(DpiSnapshot {
-        winit_scale: window.scale_factor(),
+        winit_scale,
         win32_dpi,
-        authoritative_scale: f64::from(win32_dpi) / WIN32_DEFAULT_DPI,
+        authoritative_scale,
         rect,
     })
+}
+
+/// The window's outer rectangle as winit itself reports it, in physical pixels.
+///
+/// The fall-back half of [`dpi_snapshot`]. An empty rectangle for a window
+/// whose position the platform will not state — which every caller already
+/// reads as "no geometry is known about this window" rather than as a place.
+fn winit_outer_rect(window: &Window) -> bt_platform::WindowRect {
+    let Ok(position) = window.outer_position() else {
+        return bt_platform::WindowRect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+    };
+    let size = window.outer_size();
+    bt_platform::WindowRect {
+        left: position.x,
+        top: position.y,
+        right: position.x.saturating_add(size.width as i32),
+        bottom: position.y.saturating_add(size.height as i32),
+    }
 }
 
 fn log_dpi_snapshot(
@@ -108002,14 +108050,108 @@ fn install_page_ground_color(compositor: &bt_platform::Compositor) {
     }
 }
 
-fn install_theme_class_background(window: &Window) -> Result<()> {
+/// **The colour the window wears before the first present, and where its
+/// failure goes** (M1-1).
+///
+/// Step 2 of the sixteen-step startup path, and it used to be one of the seven
+/// that killed a launch with `?`. It is now reported and not propagated, for
+/// the reason `install_page_ground_color` next door already gives: a window
+/// whose backing colour could not be set is a window that flashes the system's
+/// own colour for the few milliseconds before the first frame, which is a
+/// blemish and not a reason to refuse to open.
+///
+/// It is also the shape §4.4 of the macOS plan asks for. On a platform with no
+/// window class to hang a brush on, this call answers "not on this platform
+/// yet" — M1-3 gives it `contentView.layer.backgroundColor` — and a `?` here
+/// would mean that the platform arm which has not been written yet decides
+/// whether a window opens at all.
+/// **The door this window's frames go through, and the one place a platform
+/// chooses it** (M1-1; the seam M1-4 plugs into).
+///
+/// On Windows the surface hangs off the `IDCompositionVisual` the
+/// [`bt_platform::Compositor`] owns, because a window that will one day have a
+/// hole cut in it for a web preview has to be `PreMultiplied` and no amount of
+/// configuring an `HWND` swapchain will make it so
+/// (`bt_render::WindowTarget`'s own note). That is the whole reason the enum
+/// has two arms.
+///
+/// **On macOS neither half of that sentence holds yet, and X-1 measured why.**
+/// wgpu-hal 30's Metal backend offers only `Opaque` and `PostMultiplied` —
+/// `PreMultiplied` does not exist there — so the Windows composition contract
+/// cannot be carried over at all, and the probe's answer is that Folio keeps
+/// writing premultiplied pixels and declares `PostMultiplied` to wgpu, with the
+/// platform arm owning the `CAMetalLayer` and clearing the view's sublayers
+/// before every reconstruction
+/// (`docs/plans/port/probe-x1-metal-alpha-2026-09-12.md`).
+///
+/// **None of that is here.** What is here is the portable door: wgpu builds a
+/// `SurfaceTarget` from the window winit handed out — an `NSView`'s handle on
+/// macOS — and its own Metal backend decides what to attach to it, which
+/// `required_alpha_mode` asks for as `Opaque` and Metal offers. The window
+/// presents, the frame is opaque, and no page can be opened to want a hole
+/// (`WebHost::request_environment` refuses first).
+///
+/// **The seam M1-4 replaces is exactly this function.** It gains a third
+/// spelling — a `WindowTargetKind` arm with its own alpha policy, built from a
+/// layer the `Compositor`'s macOS arm owns — and every caller keeps calling
+/// this and nothing else. There are three: the two window constructors and the
+/// device-loss rebuild, and the third is why the choice is a function rather
+/// than a line in each of them.
+fn window_surface_target(
+    window: &Arc<Window>,
+    compositor: &bt_platform::Compositor,
+) -> bt_render::WindowTarget {
+    #[cfg(windows)]
+    {
+        let _ = window;
+        // Read at the moment of use and never stored — see
+        // `bt_render::WindowTarget::CompositionVisual`, whose contract is that
+        // the visual is live at the instant the surface is made and that the
+        // `Compositor` the caller holds is what makes it so.
+        bt_render::WindowTarget::CompositionVisual(compositor.gpu_visual_ptr())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = compositor;
+        bt_render::WindowTarget::Hwnd(Arc::clone(window).into())
+    }
+}
+
+/// **Restate the window's outer rectangle, and report rather than propagate if
+/// the platform will not** (M1-1).
+///
+/// Step 12 of the sixteen-step startup path, at both constructors, and it used
+/// to be one of the seven fatal `?`. What it does on Windows is not optional —
+/// `WM_NCCALCSIZE` has just made the client area the whole outer rectangle, so
+/// what winit built is the saved size plus a native frame margin this window
+/// does not wear, and a window that skips the line grows by one margin on every
+/// restart. That is a defect worth a line in the log.
+///
+/// **It is not worth a launch.** A window that could not be restated is a
+/// window standing where winit put it, at the size winit gave it, which is a
+/// window a reader can use and move; a `?` here is no window at all. On a
+/// platform whose geometry backend is M1-3's, the second reading is the only
+/// one available, and the plan's §4.4 says which of the two a deferred service
+/// owes its caller.
+fn stand_the_window_at(
+    window: bt_platform::NativeWindow,
+    rect: bt_platform::WindowRect,
+    what: &str,
+) {
+    if let Err(error) = bt_platform::set_window_outer_rect(window, rect) {
+        eprintln!("BT_WINDOW {what}: {error}");
+    }
+}
+
+fn install_theme_class_background(window: &Window) {
     let opaque = bt_render::window_ground().alpha >= 1.0;
-    bt_platform::install_window_class_background(
-        native_window(window)?,
-        opaque.then(background_rgb),
-    )
-    .map_err(|error| anyhow!(error))
-    .context("install theme-colored winit class background brush")
+    let installed = native_window(window).and_then(|native| {
+        bt_platform::install_window_class_background(native, opaque.then(background_rgb))
+            .map_err(|error| anyhow!(error))
+    });
+    if let Err(error) = installed {
+        eprintln!("BT_WINDOW backing colour: {error:#}");
+    }
 }
 
 fn render_theme_mode(theme: SessionThemeV1) -> ThemeModeV1 {
@@ -154702,6 +154844,123 @@ mod cross_window_drag_tests {
             right,
             bottom,
         }
+    }
+
+    /// **The sixteen-step startup path, and which of its platform calls may still
+    /// kill a launch** (ticket M1-1; `docs/plans/port/macos-plan-2026-09-12.md`
+    /// §4.4, `docs/plans/port/backend-inventory-2026-09-12.md` §3 (a) and §6 ⑥).
+    ///
+    /// The inventory's finding, and it is the reason M1-1 is an L rather than an M:
+    /// **seven** of the sixteen steps between `main` and the first frame are a
+    /// `bt-platform` call propagated with `?` and `anyhow::Context`, in **both**
+    /// window constructors, and every one of them is a Win32 bridge with no work to
+    /// do on a platform that has no Win32. A stub that refuses at construction
+    /// therefore does not produce a toast saying "not on this platform"; it
+    /// produces no window, and the reader is told nothing at all.
+    ///
+    /// Two of the seven are now reported instead of propagated, because what they
+    /// do cannot be done off Windows at all until M1-3: the window's backing colour
+    /// and the restatement of its outer rectangle. The other five stay `?` on
+    /// purpose — their portable arms answer `Ok`, which
+    /// `bt_platform`'s own `deferred_service_tests` pins from the other side, and a
+    /// `?` on a call that cannot fail is not a hazard, it is the caller reading a
+    /// `Result`.
+    ///
+    /// So this test is a list, and the list is the claim: **these five and no
+    /// others.** A sixth name appearing here is a launch that a platform arm
+    /// nobody has written yet gets to veto.
+    ///
+    /// MUTATION: put the `?` back on either of the two, or add a `?` to a sixth
+    /// platform call in either constructor, and this goes red naming it.
+    #[test]
+    fn the_m1_startup_path_has_no_fatal_platform_call_off_windows() {
+        /// The five that may still propagate: each of them answers `Ok` on every
+        /// platform, and each is named with the step of the path it is.
+        const MAY_STILL_PROPAGATE: [&str; 5] = [
+            "CustomWindowFrame::install", // step 5
+            "MathContextMenu::new",       // step 7
+            "FolderPicker::new",          // step 8
+            "ImagePicker::new",           // step 9
+            "Compositor::new",            // step 13
+        ];
+
+        /// Every `bt_platform::…` call in `body` whose statement carries a `?`.
+        ///
+        /// A statement is read as far as the newline that ends it, which is what
+        /// `rustfmt` guarantees here: the `?` of a propagated call is the last
+        /// thing on its own line, either directly or after a `.context(…)` chain.
+        fn propagated(body: &str) -> Vec<String> {
+            let mut found = Vec::new();
+            for (at, _) in body.match_indices("bt_platform::") {
+                let rest = &body[at..];
+                let end = rest.find(";\n").unwrap_or(rest.len());
+                let statement = &rest[..end];
+                if !statement.contains("?") {
+                    continue;
+                }
+                let name: String = rest["bt_platform::".len()..]
+                    .chars()
+                    .take_while(|character| character.is_alphanumeric() || *character == '_')
+                    .collect();
+                let after = &rest["bt_platform::".len() + name.len()..];
+                let (path, after) = if let Some(rest) = after.strip_prefix("::") {
+                    let method: String = rest
+                        .chars()
+                        .take_while(|character| character.is_alphanumeric() || *character == '_')
+                        .collect();
+                    let after = &rest[method.len()..];
+                    (format!("{name}::{method}"), after)
+                } else {
+                    (name, after)
+                };
+                // **A call and not a type.** `CustomWindowFrame::install(…)`
+                // takes a `bt_platform::CustomFrameGeometry { … }` as its
+                // second argument, and a scan that counted every
+                // `bt_platform::` in the statement would report the struct
+                // literal as a second fatal call.
+                if !after.starts_with('(') {
+                    continue;
+                }
+                if !found.contains(&path) {
+                    found.push(path);
+                }
+            }
+            found
+        }
+
+        for constructor in ["create", "open_window"] {
+            let body = fn_body(constructor);
+            let mut fatal = propagated(body);
+            fatal.retain(|name| !MAY_STILL_PROPAGATE.contains(&name.as_str()));
+            assert!(
+                fatal.is_empty(),
+                "`Runtime::{constructor}` lets a platform call that can refuse off Windows decide \
+                 whether a window opens at all; each of these is a launch that dies with no window \
+                 and no toast: {fatal:#?}"
+            );
+            assert!(
+                !body.contains("bt_platform::set_window_outer_rect("),
+                "`Runtime::{constructor}` states its own rectangle again; the one door is \
+                 `stand_the_window_at`, which reports what it could not do"
+            );
+            assert!(
+                body.contains("window_surface_target(&window, &compositor)"),
+                "`Runtime::{constructor}` names a surface door directly; the one place either \
+                 platform's door is chosen is `window_surface_target`, and it is the seam M1-4 \
+                 plugs into"
+            );
+            assert!(
+                !body.contains("WindowTarget::CompositionVisual("),
+                "`Runtime::{constructor}` names the Windows-only surface arm, which does not exist \
+                 on a platform with no visual tree"
+            );
+        }
+
+        assert!(
+            SOURCE.contains("fn install_theme_class_background(window: &Window) {"),
+            "the window's backing colour is reported and not propagated: it returns nothing, so \
+             there is no `?` for a caller to write"
+        );
     }
 
     /// **The spring across a window boundary comes due under a hand that has
