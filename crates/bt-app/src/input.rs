@@ -150,7 +150,7 @@ pub(crate) enum MouseProtocolEvent {
 
 /// **`Ctrl+V` and `Ctrl+Shift+V`, and `Shift+Insert`.**
 ///
-/// The shifted spelling is here because [`is_copy_shortcut`] has always carried
+/// The shifted spelling is here because [`is_copy_shortcut_on`] has always carried
 /// its own (gesture audit 2026-08-26, 附 ①). This asked for `modifiers ==
 /// CONTROL` *exactly*, so a hand that pressed `Ctrl+Shift+C` to copy and
 /// `Ctrl+Shift+V` to paste — the pair Windows Terminal ships — got the copy and
@@ -930,7 +930,7 @@ mod tests {
     /// full-screen programs bind, and a copy of nothing is not a reason to take
     /// it from them — the same trade `Ctrl+C` makes with `^C`.
     ///
-    /// MUTATION: drop the `Insert` arm of [`is_copy_shortcut`] and the first
+    /// MUTATION: drop the `Insert` arm of [`is_copy_shortcut_on`] and the first
     /// assertion goes red.
     #[test]
     fn ctrl_insert_copies_a_selection_and_stays_the_child_s_otherwise() {
@@ -1293,9 +1293,17 @@ mod tests {
         let insert = Key::Named(NamedKey::Insert);
 
         assert!(is_copy_shortcut_on(&c, ModifiersState::CONTROL, WINDOWS));
-        assert!(is_copy_shortcut_on(&insert, ModifiersState::CONTROL, WINDOWS));
+        assert!(is_copy_shortcut_on(
+            &insert,
+            ModifiersState::CONTROL,
+            WINDOWS
+        ));
         assert!(is_paste_shortcut_on(&v, ModifiersState::CONTROL, WINDOWS));
-        assert!(is_paste_shortcut_on(&insert, ModifiersState::SHIFT, WINDOWS));
+        assert!(is_paste_shortcut_on(
+            &insert,
+            ModifiersState::SHIFT,
+            WINDOWS
+        ));
 
         assert!(is_copy_shortcut_on(&c, CMD, MAC));
         assert!(is_paste_shortcut_on(&v, CMD, MAC));

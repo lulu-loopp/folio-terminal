@@ -157832,7 +157832,9 @@ mod field_command_tests {
             "the modifier door takes winit's answer without applying the Option ruling"
         );
         assert_eq!(
-            SOURCE.matches(concat!("set_option_as_alt(&", "window, ")).count(),
+            SOURCE
+                .matches(concat!("set_option_as_alt(&", "window, "))
+                .count(),
             2,
             "both window constructors have to tell the window what Option is"
         );

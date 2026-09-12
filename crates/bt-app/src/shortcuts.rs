@@ -2934,11 +2934,13 @@ pub(crate) fn format_chord(chord: &Chord) -> String {
     // not move — a file is read left to right by a parser and the caps are what
     // a person compares it against, which is the sentence above.
     if chord.modifiers.super_key() {
-        out.push_str(if bt_platform::host_platform() == bt_platform::HostPlatform::MacOs {
-            "Cmd+"
-        } else {
-            "Win+"
-        });
+        out.push_str(
+            if bt_platform::host_platform() == bt_platform::HostPlatform::MacOs {
+                "Cmd+"
+            } else {
+                "Win+"
+            },
+        );
     }
     if chord.modifiers.control_key() {
         out.push_str("Ctrl+");
@@ -6206,7 +6208,11 @@ mod tests {
             };
             let _ = windows;
             if unbound_on_purpose.contains(&row.id) {
-                assert!(row.mac.is_none(), "{} is unbound on macOS on purpose", row.id);
+                assert!(
+                    row.mac.is_none(),
+                    "{} is unbound on macOS on purpose",
+                    row.id
+                );
                 continue;
             }
             let mac = row

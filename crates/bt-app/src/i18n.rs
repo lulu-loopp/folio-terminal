@@ -3788,11 +3788,7 @@ impl Text {
             // (2026-09-07 copy ruling; the pair is filed in `CHINESE_PENDING`).
             // A machine translation of a sentence about two keycaps is the kind
             // of line that reads as a product nobody proofread.
-            Self::RowOptionSendsAlt => pick(
-                lang,
-                "Option key sends Alt",
-                "Option key sends Alt",
-            ),
+            Self::RowOptionSendsAlt => pick(lang, "Option key sends Alt", "Option key sends Alt"),
             Self::DescOptionSendsAlt => pick(
                 lang,
                 "Off, Option composes characters: ⌥a types å. On, it is the Alt a terminal means: ⌥a sends ESC a.",
