@@ -131,6 +131,21 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Pictures up to 64 MB open in the preview, and one with more pixels than
+  Folio keeps is shown reduced instead of refused.** A phone photograph or a 4K
+  screenshot is five to fifteen megabytes and a 24 megapixel frame is ninety-six
+  megabytes of pixels, and both came back as `Preview failed: inline image
+  exceeds its decode limit` — from the files column, from a link, from a
+  `.md` page and from the card that pops up over a file name. The limit was real
+  and it belonged to something else: eight megabytes is the allowance for a
+  picture a program pastes straight into a terminal, where it arrives unasked and
+  a screenful of them can arrive at once. A picture file you opened is now read
+  up to 64 MB, and one whose picture is larger than Folio will hold is resampled
+  down to fit and shown, with its real size in the line under it —
+  `6000 × 4000 · shown at 5016 × 3344 · PNG · 92.0 MB · Fit`. Past either line the
+  pane says which one: the file is too large, or the picture has too many pixels.
+  Nothing changed for a picture written into the terminal itself, which keeps the
+  allowance it had.
 - **Moving the pointer over a floating window no longer highlights, or pops the
   preview card of, the row hidden underneath it.** A preview window standing
   over a files column was solid to look at and see-through to the mouse: resting

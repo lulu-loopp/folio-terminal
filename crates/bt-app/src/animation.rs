@@ -2528,14 +2528,24 @@ mod tests {
     /// it.
     ///
     /// The four answers are here: a `.gif` this lane **refuses** still has a
-    /// picture; a `.gif` past the picture lane's own file cap has one **from
-    /// here** and provably not from there; a frame past this lane's ceiling
-    /// answers `None`, so the picture decoder decides it; and so does a name
-    /// that is not `.gif` at all. Those last two are the fork and not a
-    /// fallback: the name said GIF and only the bytes could say otherwise.
+    /// picture; a long `.gif` has one **from here**, named by this lane's own
+    /// key and drawn without the file ever being held whole; a frame past this
+    /// lane's ceiling answers `None`, so the picture decoder decides it; and so
+    /// does a name that is not `.gif` at all. Those last two are the fork and
+    /// not a fallback: the name said GIF and only the bytes could say otherwise.
     ///
-    /// MUTATION: send the still back down the picture lane and the second block
-    /// is the reader's empty pane again, word for word.
+    /// **The reported length is no longer the reason** (owner's ruling
+    /// 2026-09-12): a picture file somebody opened is read up to
+    /// `bt_term::MAX_LOCAL_IMAGE_FILE_BYTES` now, so the 11.7 MB recording this
+    /// test was born quoting would not raise that sentence today. The fork is
+    /// unchanged, because what it is about is a file read **whole** against a
+    /// frame pulled through a cursor — which is the difference at 39 MB, and at
+    /// a capture still being written to.
+    ///
+    /// MUTATION: send the still back down the picture lane and the first and
+    /// second blocks go red on the key — the pixels would come back named
+    /// `image:<hash of the whole file>`, which is the hash of bytes this lane
+    /// exists not to have read.
     #[test]
     fn a_refused_animations_first_frame_is_decoded_by_the_gif_decoder() {
         const OLD_CAP: u64 = 8 * 1024 * 1024;
@@ -2563,29 +2573,39 @@ mod tests {
         assert!(still.key.ends_with(":16x16"), "{}", still.key);
         let _ = std::fs::remove_file(&path);
 
-        // ② and here is the lane the still used to come from, refusing the
-        // reader's own kind of file — which is the sentence off their pane.
+        // ② and here is the lane the still used to come from, over the cap that
+        // produced the sentence on the reader's pane.
+        //
+        // **That cap is no longer on this file** (owner's ruling 2026-09-12):
+        // the picture lane reads a file somebody opened up to
+        // `bt_term::MAX_LOCAL_IMAGE_FILE_BYTES`, so the very refusal this test
+        // was born quoting cannot be raised about eleven megabytes any more.
+        // What that ruling did **not** do is make this fork unnecessary, and the
+        // assertion says which half survives: the picture lane reads a file
+        // *whole* whatever its cap is, and this lane pulls one frame through a
+        // streaming cursor. For the long recordings §7.44 ⑤″ is about — 39 MB in
+        // the reader's own folder, and a capture still being written to — that
+        // is the difference between a still and a still plus forty megabytes.
         let path = scratch_gif("long-and-playing", &a_noisy_gif(2_400, SIDE, 5));
         let length = std::fs::metadata(&path).expect("it is on disk").len();
         assert!(
             length > OLD_CAP,
             "the fixture is over the cap that refused the reader's file: {length}",
         );
-        assert_eq!(
-            bt_term::InlineImageDecoder::default()
-                .decode(bt_term::InlineImageTask {
-                    occurrence_id: 0,
-                    source: bt_term::InlineImageSource::LocalPath(path.clone()),
-                })
-                .err(),
-            Some(bt_term::InlineImageDecodeError::TooLarge),
-            "the picture decoder reads a file whole behind eight megabytes",
+        assert!(
+            length < bt_term::MAX_LOCAL_IMAGE_FILE_BYTES,
+            "and inside the one that replaced it, or this says nothing: {length}",
         );
         assert!(decode(&path).is_ok(), "and this lane plays it");
         let still = first_frame(&path).expect("and draws its first frame");
         assert_eq!(
             (still.width_px, still.height_px),
             (u32::from(SIDE), u32::from(SIDE))
+        );
+        assert!(
+            still.key.starts_with("gif-frame:"),
+            "and the still on the pane is this lane's, not the picture decoder's: {}",
+            still.key
         );
         let _ = std::fs::remove_file(&path);
 

@@ -1298,6 +1298,10 @@ fn peek_pixels(
             rgba: still.rgba,
             width_px: still.width_px,
             height_px: still.height_px,
+            // The animation lane hands back the frame the file declares and
+            // reduces nothing (`animation.rs` keeps its own caps), so these
+            // pixels are the file's own.
+            native_size: None,
             // It is a GIF, which this window has always reported as animated
             // whether or not it plays it.
             animated: true,
@@ -2660,8 +2664,9 @@ fn answer_one_picture(
             rgba,
             width_px,
             height_px,
+            ..
         }) => Some((key.clone(), Some(Arc::clone(rgba)), [*width_px, *height_px])),
-        Some(PeekCacheEntry::Failed) => return PagePicture::drawn(MarkdownPicture::Failed),
+        Some(PeekCacheEntry::Failed(_)) => return PagePicture::drawn(MarkdownPicture::Failed),
         // **A read is out, or the store has let the pixels go** — and the page's
         // answer to both is the same one, which is why they are one arm. It
         // keeps drawing what it was drawing rather than going blank, and it goes
@@ -20396,19 +20401,30 @@ impl PeekHover {
 /// it is what a resample at any later display size is computed from — it never reaches the GPU.
 enum PeekCacheEntry {
     Pending,
-    Failed,
+    /// **And why it failed** (owner's ruling 2026-09-12). The entry used to be a
+    /// bare word, so the only surface that ever heard the reason was one that
+    /// happened to be on the glass at the moment the answer landed; a pane that
+    /// opened the same file afterwards found this entry and had nothing to say
+    /// but "image could not be loaded". A file over the picture lane's length
+    /// cap and a file with more pixels than this build holds are two different
+    /// sentences, and both of them are facts about the file — so they live with
+    /// the file's answer rather than with whoever was watching.
+    Failed(bt_term::InlineImageDecodeError),
     Ready {
         key: String,
         rgba: Arc<[u8]>,
         width_px: u32,
         height_px: u32,
+        /// The picture's own size when `rgba` is a reduction of it — see
+        /// [`bt_term::DecodedInlineImage::native_size`].
+        native_size: Option<(u32, u32)>,
     },
 }
 
 impl bt_term::Weighed for PeekCacheEntry {
     fn bytes_held(&self) -> u64 {
         match self {
-            Self::Pending | Self::Failed => 0,
+            Self::Pending | Self::Failed(_) => 0,
             Self::Ready { rgba, .. } => rgba.len() as u64,
         }
     }
@@ -20427,7 +20443,10 @@ type PeekCache = bt_term::BoundedCache<String, PeekCacheEntry>;
 ///
 /// The number is read off the two things that fill it. A single entry is capped
 /// at `bt_term::MAX_INLINE_IMAGE_RGBA_BYTES` (64 MiB), so this is three of the
-/// largest picture the decoder will ever hand back; and a documentation page's
+/// largest picture the decoder will ever hand back — **still three, since the
+/// owner's ruling of 2026-09-12**, because a picture with more pixels than that
+/// arrives here already reduced to fit it and it is those bytes this counts; and
+/// a documentation page's
 /// screenshots are two to eight megabytes each, so it is a page's worth of them
 /// with room over. Past it the oldest goes, and the cost of having been wrong is
 /// one worker read of a file that is still on the disk.
@@ -20664,9 +20683,19 @@ struct PreviewImageState {
     /// **How large the thing in this file really is, when that is not how large
     /// the pixels are** (user ruling 2026-08-27; §7.23).
     ///
-    /// `None` for a picture, and it is `None` for a picture because for a
-    /// picture there is no difference: [`Self::native`] is the decode, and the
-    /// decode is the file.
+    /// `None` for most pictures, and it is `None` for them because for them
+    /// there is no difference: [`Self::native`] is the decode, and the decode is
+    /// the file.
+    ///
+    /// **A picture over the pixel budget parts them too** (owner's ruling
+    /// 2026-09-12). The decoder reduces such a picture to fit
+    /// `bt_term::MAX_INLINE_IMAGE_RGBA_BYTES` rather than refusing it, so a
+    /// 6000×4000 photograph arrives as 5016×3344 of pixels with 6000×4000
+    /// recorded beside them
+    /// ([`bt_term::DecodedInlineImage::native_size`]) — the same two numbers in
+    /// the same two roles as a recording's, which is why it is this field and
+    /// not a second one. The meta line says both when they differ; see
+    /// [`image_meta_sentence`].
     ///
     /// A **video** parts the two. Its pixels are one frame decoded into
     /// [`VIDEO_FRAME_FIT_PX`], so `native` is at most 1920×1080 however large the
@@ -21682,6 +21711,9 @@ enum SurfacePixels {
         content: String,
         rgba: Arc<[u8]>,
         native: [u32; 2],
+        /// The picture's own size, when `native` is a reduction of it — see
+        /// [`bt_term::DecodedInlineImage::native_size`].
+        stated: Option<(u32, u32)>,
     },
     /// The store has let the decode go and this surface is still drawing the
     /// answer it was given. There is nothing here to resample *from*, which is
@@ -21689,6 +21721,9 @@ enum SurfacePixels {
     Standing {
         content: String,
         native: [u32; 2],
+        /// What the surface was told about the file's own size when it was
+        /// answered; the store no longer holds the decode that said it.
+        stated: Option<(u32, u32)>,
         /// Whether a read for these pixels is already out.
         read_is_out: bool,
     },
@@ -21697,8 +21732,8 @@ enum SurfacePixels {
         /// Whether somebody has already asked for it.
         asked: bool,
     },
-    /// This file will not decode.
-    Failed,
+    /// This file will not decode, and the reason the decoder gave.
+    Failed(bt_term::InlineImageDecodeError),
 }
 
 /// **What this surface has to draw with** — the decode if the store still holds
@@ -21721,6 +21756,7 @@ fn surface_pixels(
     peek_cache: &mut PeekCache,
     standing: Option<&str>,
     native: Option<(u32, u32)>,
+    stated: Option<(u32, u32)>,
     cache_key: &str,
 ) -> SurfacePixels {
     // What the surface holds, which outlives the pixels it was made from: the
@@ -21736,18 +21772,21 @@ fn surface_pixels(
             rgba,
             width_px,
             height_px,
+            native_size,
         }) => SurfacePixels::Decoded {
             content: key.clone(),
             rgba: Arc::clone(rgba),
             native: [*width_px, *height_px],
+            stated: *native_size,
         },
-        Some(PeekCacheEntry::Failed) => SurfacePixels::Failed,
+        Some(PeekCacheEntry::Failed(reason)) => SurfacePixels::Failed(reason.clone()),
         // A read is out. What this surface is holding stays on the glass while
         // the answer travels, rather than the picture vanishing and coming back.
         Some(PeekCacheEntry::Pending) => match held {
             Some((content, native)) => SurfacePixels::Standing {
                 content,
                 native,
+                stated,
                 read_is_out: true,
             },
             None => SurfacePixels::Nothing { asked: true },
@@ -21756,6 +21795,7 @@ fn surface_pixels(
             Some((content, native)) => SurfacePixels::Standing {
                 content,
                 native,
+                stated,
                 read_is_out: false,
             },
             None => SurfacePixels::Nothing { asked: false },
@@ -21802,7 +21842,7 @@ fn picture_errand(pixels: &SurfacePixels, held_exactly: bool) -> PictureErrand {
             read_is_out: true, ..
         }
         | SurfacePixels::Nothing { asked: true }
-        | SurfacePixels::Failed => PictureErrand::Wait,
+        | SurfacePixels::Failed(_) => PictureErrand::Wait,
     }
 }
 
@@ -21907,8 +21947,18 @@ fn image_raster_cap(image_px: [u32; 2]) -> (u32, u32) {
 /// it stands where the eye leaves the sentence. It is also never alone — a bare
 /// "Fit" under a picture the window cannot yet name the size of would be a word
 /// with no sentence around it.
+///
+/// **`shown` is the second field and not a second line** (owner's ruling
+/// 2026-09-12). A picture with more pixels than this build holds is reduced
+/// rather than refused, so `native` stops being the size of the pixels on the
+/// glass — and both numbers are about the file being looked at, which is what
+/// this sentence is for. It rides here, immediately after the size it qualifies
+/// (`6000 × 4000 · shown at 5016 × 3344 · PNG · 92.0 MB · Fit`), because a second
+/// strip saying the same kind of thing in another corner is how a pane comes to
+/// state one picture's size twice.
 fn image_meta_sentence(
     native: Option<(u32, u32)>,
+    shown: Option<(u32, u32)>,
     extension: Option<&str>,
     bytes: Option<u64>,
     zoom: Option<&str>,
@@ -21920,6 +21970,9 @@ fn image_meta_sentence(
     // site is a middle dot that can drift.
     let file = preview::join_facts([
         native.map(|(width, height)| preview::format_pixel_size(width, height)),
+        shown
+            .filter(|_| native.is_some())
+            .map(|(width, height)| i18n::picture_shown_at(width, height)),
         extension.map(str::to_owned),
         bytes.map(preview::format_byte_size),
     ])?;
@@ -61261,8 +61314,18 @@ impl Runtime<'_> {
         let caption = image
             .native
             .map(|(width, height)| image_zoom_caption(body, [width, height], zoom));
+        // **The file's own size first, and what is on the glass beside it**
+        // (owner's ruling 2026-09-12). A picture the decoder reduced to fit the
+        // pixel budget has two true sizes — see
+        // [`PreviewImageState::stated_size`] — and the reader is owed the one
+        // about the file, because that is the one that travels with a copy of it.
+        let (stated, shown) = match image.stated_size {
+            Some(size) => (Some(size), image.native.filter(|native| *native != size)),
+            None => (image.native, None),
+        };
         let sentence = image_meta_sentence(
-            image.native,
+            stated,
+            shown,
             extension.as_deref(),
             image.bytes,
             caption.as_deref(),
@@ -62301,29 +62364,34 @@ impl Runtime<'_> {
         // loop with no input in it: each arrival evicts a decode another host is
         // drawing, the refit that arrival triggers finds the miss, asks again,
         // and the answer evicts the next.
-        let (standing_content, standing_native) =
-            self.preview_picture(surface)
-                .map_or((None, None), |picture| {
-                    (
-                        picture
-                            .raster
-                            .as_ref()
-                            .map(|raster| raster.content_key.clone()),
-                        picture.native,
-                    )
-                });
+        let (standing_content, standing_native, standing_stated) = self
+            .preview_picture(surface)
+            .map_or((None, None, None), |picture| {
+                (
+                    picture
+                        .raster
+                        .as_ref()
+                        .map(|raster| raster.content_key.clone()),
+                    picture.native,
+                    picture.stated_size,
+                )
+            });
         let pixels = surface_pixels(
             &mut self.window.peek_cache,
             standing_content.as_deref(),
             standing_native,
+            standing_stated,
             &cache_key,
         );
-        let (content_key, native_rgba, native_width, native_height) = match pixels.clone() {
+        let (content_key, native_rgba, native_width, native_height, reduced_from) = match pixels
+            .clone()
+        {
             SurfacePixels::Decoded {
                 content,
                 rgba,
                 native,
-            } => (content, Some(rgba), native[0], native[1]),
+                stated,
+            } => (content, Some(rgba), native[0], native[1], stated),
             // **What it was told, when the store no longer holds what it was told
             // it from.** The raster on the glass stays there and the arithmetic
             // below runs on the decode's own dimensions exactly as it did when
@@ -62331,9 +62399,12 @@ impl Runtime<'_> {
             // sharper pass would be made from, and that is the errand at the foot
             // of this function.
             SurfacePixels::Standing {
-                content, native, ..
-            } => (content, None, native[0], native[1]),
-            SurfacePixels::Failed => {
+                content,
+                native,
+                stated,
+                ..
+            } => (content, None, native[0], native[1], stated),
+            SurfacePixels::Failed(reason) => {
                 // **A video that would not decode is not a failure of this pane** (user ruling
                 // 2026-08-27; §7.23). A file called `.png` that no decoder can read is something
                 // the reader should be told about, because there is nothing else to say about it;
@@ -62345,9 +62416,16 @@ impl Runtime<'_> {
                 if !preview::path_names_a_video(&path)
                     && let Some(picture) = self.preview_picture_mut(surface)
                 {
-                    picture.failure.get_or_insert_with(|| {
-                        i18n::Text::PreviewFailedImageLoad.text().to_owned()
-                    });
+                    // **The decoder's own reason, not this pane's guess**
+                    // (owner's ruling 2026-09-12). A surface that opens a file
+                    // this window has already refused reads its answer out of
+                    // the store, and the store now remembers *why* — so a
+                    // picture too long or too many pixels says which, here as
+                    // much as on the surface that was watching when the answer
+                    // arrived.
+                    picture
+                        .failure
+                        .get_or_insert_with(|| i18n::picture_refused(&reason));
                 }
                 self.hide_preview_picture(surface);
                 return None;
@@ -62382,7 +62460,11 @@ impl Runtime<'_> {
             .flatten();
         if let Some(picture) = self.preview_picture_mut(surface) {
             picture.native = Some((native_width, native_height));
-            picture.stated_size = stated;
+            // **A reduced picture parts the same two sizes a recording does**
+            // (owner's ruling 2026-09-12), so it is filed in the same field: a
+            // 6000×4000 photograph decoded down to the pixel budget is a file
+            // whose picture is 6000×4000 and pixels that are not.
+            picture.stated_size = stated.or(reduced_from);
         }
         // `.pv-image svg { max-width: 86%; max-height: 70% }` (mock-up 606).
         //
@@ -67335,7 +67417,7 @@ impl Runtime<'_> {
                 height_px,
                 ..
             } => Some((*width_px, *height_px)),
-            PeekCacheEntry::Pending | PeekCacheEntry::Failed => None,
+            PeekCacheEntry::Pending | PeekCacheEntry::Failed(_) => None,
         }
     }
 
@@ -67364,8 +67446,9 @@ impl Runtime<'_> {
                     rgba,
                     width_px,
                     height_px,
+                    ..
                 }) => (key.clone(), Arc::clone(rgba), *width_px, *height_px),
-                Some(PeekCacheEntry::Pending | PeekCacheEntry::Failed) => return None,
+                Some(PeekCacheEntry::Pending | PeekCacheEntry::Failed(_)) => return None,
                 None => {
                     if self.request_peek_pixels(path) {
                         self.window.peek_cache.insert(key, PeekCacheEntry::Pending);
@@ -81763,10 +81846,11 @@ impl Runtime<'_> {
                     rgba,
                     width_px,
                     height_px,
+                    ..
                 }) => (key.clone(), Arc::clone(rgba), *width_px, *height_px),
                 // A failed decode stays silent: the terminal text is the honest surface, and the
                 // negative entry keeps hovers from re-hitting the disk.
-                Some(PeekCacheEntry::Pending) | Some(PeekCacheEntry::Failed) => return Ok(()),
+                Some(PeekCacheEntry::Pending) | Some(PeekCacheEntry::Failed(_)) => return Ok(()),
                 None => {
                     // Nothing to read: a stream payload is cached when its decode lands or never,
                     // and the session only names one whose decode already succeeded, so a miss
@@ -81871,6 +81955,7 @@ impl Runtime<'_> {
                 rgba: Arc::clone(&decoded.rgba),
                 width_px: decoded.width_px,
                 height_px: decoded.height_px,
+                native_size: decoded.native_size,
             },
         );
     }
@@ -81934,6 +82019,7 @@ impl Runtime<'_> {
                         rgba: decoded.rgba,
                         width_px: decoded.width_px,
                         height_px: decoded.height_px,
+                        native_size: decoded.native_size,
                     },
                 );
                 if let Some(active) = self.window.peek_hover.active.clone()
@@ -81943,14 +82029,17 @@ impl Runtime<'_> {
                 }
             }
             Err(error) => {
-                self.window
-                    .peek_cache
-                    .insert(cache_key.clone(), PeekCacheEntry::Failed);
                 for surface in &waiting {
                     if let Some(picture) = self.preview_picture_mut(*surface) {
-                        picture.failure = Some(i18n::preview_failed(&error.to_string()));
+                        picture.failure = Some(i18n::picture_refused(&error));
                     }
                 }
+                // **Filed with its reason** (owner's ruling 2026-09-12), so that
+                // a surface which opens this file later says the same sentence
+                // rather than the one generic line — see [`PeekCacheEntry::Failed`].
+                self.window
+                    .peek_cache
+                    .insert(cache_key.clone(), PeekCacheEntry::Failed(error));
             }
         }
         // **And every markdown page that was waiting to see this file**
@@ -82021,8 +82110,22 @@ impl Runtime<'_> {
                 rgba: Arc::from(frame.rgba.into_boxed_slice()),
                 width_px: frame.width,
                 height_px: frame.height,
+                // A frame is already fitted into [`VIDEO_FRAME_FIT_PX`] and the
+                // recording's own size is filed beside it in `video_facts`,
+                // which is where every surface reads it from — see
+                // [`PreviewImageState::stated_size`].
+                native_size: None,
             },
-            None => PeekCacheEntry::Failed,
+            // **A container this machine has no codec for, said in the
+            // decoder's own words.** The picture lane's variants are about a
+            // picture file's size and none of them is this; `Decode` is the
+            // seam that carries a reason nobody here can translate, which is
+            // what the pane has always printed for a video that would not
+            // decode — and it prints nothing at all for one, by the paragraph
+            // above.
+            None => PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Decode(
+                "no decoder for this container".to_owned(),
+            )),
         };
         self.window.peek_cache.insert(cache_key.clone(), entry);
         // Every surface standing on this file, for `complete_peek_image`'s reason: a decode is
@@ -108189,13 +108292,14 @@ fn card_picture_in<'a>(cache: &'a PeekCache, path: &Path) -> Option<focus_thumb:
             rgba,
             width_px,
             height_px,
+            ..
         } => Some(focus_thumb::CardPicture {
             key,
             rgba,
             width_px: *width_px,
             height_px: *height_px,
         }),
-        PeekCacheEntry::Pending | PeekCacheEntry::Failed => None,
+        PeekCacheEntry::Pending | PeekCacheEntry::Failed(_) => None,
     }
 }
 
@@ -119989,6 +120093,7 @@ mod tests {
             rgba: Arc::from(vec![0u8; 4]),
             width_px: 1,
             height_px: 1,
+            native_size: None,
             animated: false,
         };
 
@@ -121418,7 +121523,10 @@ mod tests {
             card_picture_in(&cache, path).is_none(),
             "a decode that is still out is a face, not a half-drawn picture"
         );
-        cache.insert(key.clone(), PeekCacheEntry::Failed);
+        cache.insert(
+            key.clone(),
+            PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::UnsupportedFormat),
+        );
         assert!(
             card_picture_in(&cache, path).is_none(),
             "and a decode that failed is the same face"
@@ -121430,6 +121538,7 @@ mod tests {
                 rgba: Arc::clone(&rgba),
                 width_px: 8,
                 height_px: 2,
+                native_size: None,
             },
         );
         let picture = card_picture_in(&cache, path).expect("a decoded file draws");
@@ -121488,6 +121597,7 @@ mod tests {
                     rgba: Arc::from(vec![index; PICTURE_BYTES]),
                     width_px: 2048,
                     height_px: 4096,
+                    native_size: None,
                 },
             );
         }
@@ -124146,7 +124256,13 @@ mod tests {
     #[test]
     fn the_meta_line_says_how_the_picture_is_being_looked_at() {
         assert_eq!(
-            image_meta_sentence(Some((1280, 800)), Some("PNG"), Some(219_136), Some("Fit")),
+            image_meta_sentence(
+                Some((1280, 800)),
+                None,
+                Some("PNG"),
+                Some(219_136),
+                Some("Fit")
+            ),
             Some("1280 × 800 · PNG · 214 KB · Fit".to_owned())
         );
         assert_eq!(
@@ -124163,10 +124279,180 @@ mod tests {
             "rounded to whole percent; the wheel's own steps land nowhere round"
         );
         assert_eq!(
-            image_meta_sentence(None, None, None, Some("Fit")),
+            image_meta_sentence(None, None, None, None, Some("Fit")),
             None,
             "and the word is never said alone — there would be no sentence around it"
         );
+    }
+
+    /// RED — **the foot says both sizes when the picture on the glass is a
+    /// reduction of the file** (owner's ruling 2026-09-12; `bt_term`'s test of
+    /// the same name is the decode half).
+    ///
+    /// A picture over the pixel budget is reduced rather than refused, so the
+    /// pane holds fewer pixels than the file has — and the number a reader wants
+    /// under a 24 megapixel photograph is the photograph's. Both are true, they
+    /// answer different questions, and the second rides on the sentence that was
+    /// already there rather than in a corner of its own.
+    ///
+    /// RED GATE: drop the `shown` field and the first assertion reads
+    /// `6000 × 4000 · PNG · 92 MB · Fit` — a pane claiming to be drawing
+    /// 24 million pixels it does not have.
+    #[test]
+    fn a_picture_over_the_pixel_budget_is_reduced_to_fit_it_and_says_so() {
+        assert_eq!(
+            image_meta_sentence(
+                Some((6000, 4000)),
+                Some((5016, 3344)),
+                Some("PNG"),
+                Some(96_468_992),
+                Some("Fit")
+            ),
+            Some("6000 × 4000 · shown at 5016 × 3344 · PNG · 92.0 MB · Fit".to_owned())
+        );
+        assert_eq!(
+            image_meta_sentence(Some((1280, 800)), None, Some("PNG"), Some(219_136), None),
+            Some("1280 × 800 · PNG · 214 KB".to_owned()),
+            "and an ordinary picture says its one size, as it always has"
+        );
+        assert_eq!(
+            image_meta_sentence(None, Some((5016, 3344)), None, None, Some("Fit")),
+            None,
+            "a size the window has not been told cannot be qualified by a second one"
+        );
+    }
+
+    /// RED — **a 24 megapixel photograph is resampled on the decode worker, and
+    /// the window thread never touches it** (owner's ruling 2026-09-12).
+    ///
+    /// The reduction is a full Lanczos3 pass over the native decode — tenths of
+    /// a second on a photograph, which is the measurement §7.1.3j (e) was
+    /// written about. On the thread that answers the keyboard that is a window
+    /// that has stopped answering it, and the hang watchdog would not even catch
+    /// it: that watchdog times one turn, and this would be one turn.
+    ///
+    /// So the pin is structural, because the cost is structural. `bt_term` puts
+    /// the resample inside the file lane itself rather than owing it back as an
+    /// errand, and this window builds exactly one picture decoder — inside the
+    /// decoration worker's closure.
+    ///
+    /// MUTATION: build a second one anywhere outside that closure, or lift the
+    /// one there is out of it, and the count or the bounds go red.
+    #[test]
+    fn the_reduction_happens_on_the_worker_not_the_window_thread() {
+        const SOURCE: &str = include_str!("main.rs");
+        const DECODER: &str = include_str!("../../bt-term/src/inline_image.rs");
+        // Spelled in two pieces so that this test's own text is not one of the
+        // sites it is counting, and read over the production half of the file:
+        // a fixture in the test module below builds a decoder of its own, on a
+        // thread that is nobody's window.
+        let decoder = concat!("InlineImage", "Decoder");
+        let production = SOURCE
+            .split("\nmod tests {")
+            .next()
+            .expect("this file has a production half");
+        assert_eq!(
+            production.matches(&format!("{decoder}::default()")).count(),
+            1,
+            "this window builds more than one picture decoder"
+        );
+        let worker = production
+            .find(r#""bt-math-worker""#)
+            .expect("the decoration worker is spawned in this file");
+        let ends = production
+            .find(r#".context("spawn math rendering worker")"#)
+            .expect("and its spawn is checked");
+        for (what, needle) in [
+            (
+                "the decoder",
+                format!("let mut image_decoder = {decoder}::default();"),
+            ),
+            (
+                "the inline lane",
+                "image_decoder.decode(task.clone())".to_owned(),
+            ),
+            (
+                "the picture lane",
+                "peek_pixels(&mut image_decoder, &path)".to_owned(),
+            ),
+        ] {
+            let at = production
+                .find(&needle)
+                .unwrap_or_else(|| panic!("{what} is written in this file: {needle}"));
+            assert!(
+                at > worker && at < ends,
+                "{what} stands outside the decoration worker's closure"
+            );
+        }
+        // And the pass itself is made where the decode is, rather than handed
+        // back to whoever asked: an answer that came back as an errand would be
+        // an errand for the thread that asked for it.
+        let lane = DECODER
+            .split("fn decode_local_image_bytes(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("the picture lane is declared in that file");
+        assert!(
+            lane.contains("scale_inline_image(&InlineImageScaleTask {"),
+            "the reduction is not made where the decode is:\n{lane}"
+        );
+        assert_eq!(
+            DECODER.matches("decode_local_image_bytes(").count(),
+            2,
+            "and that lane is declared once and called once — from the file read, \
+             which is the worker's own"
+        );
+    }
+
+    /// RED — **a picture in a Markdown page and a picture on the glance card are
+    /// read by the one decoder, under the one pair of caps** (owner's ruling
+    /// 2026-09-12).
+    ///
+    /// The ruling set two numbers for a picture file and said the Markdown path
+    /// and the glance card get them "because they read the same decoder". That
+    /// is a claim about this file's shape, and it is asserted as one: the three
+    /// surfaces that show a picture — a page's block, the card, and a picture
+    /// pane — read `peek_cache` under the decoder's own key for a file, and none
+    /// of them names a byte cap of its own.
+    ///
+    /// MUTATION: give any of the three its own cap — a length test before it
+    /// asks, a pixel test after it is answered — and the inner loop goes red.
+    #[test]
+    fn the_markdown_page_and_the_glance_card_read_the_same_caps() {
+        const SOURCE: &str = include_str!("main.rs");
+        /// One item's text, from its signature to the first closing brace at
+        /// its own indentation.
+        fn body(signature: &str, end: &str) -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find(end).unwrap_or(rest.len())]
+        }
+        let page = body("fn answer_one_picture(", "\n}\n");
+        let card = body("fn file_peek_fitted_pixels(", "\n    }\n");
+        let pane = body("fn refit_preview_picture(", "\n    }\n");
+        for (surface, text) in [("the page", page), ("the card", card), ("the pane", pane)] {
+            assert!(
+                text.contains("peek_cache"),
+                "{surface} does not read the one decode store"
+            );
+            assert!(
+                text.contains("local_image_path_key("),
+                "{surface} does not key by the decoder's own identity for a file"
+            );
+            for cap in [
+                concat!("MAX_LOCAL_IMAGE", "_FILE_BYTES"),
+                concat!("MAX_INLINE_IMAGE", "_RGBA_BYTES"),
+                concat!("MAX_BACKGROUND_IMAGE", "_RGBA_BYTES"),
+                concat!("MAX_INLINE_IMAGE", "_BYTES"),
+            ] {
+                assert!(
+                    !text.contains(cap),
+                    "{surface} applies {cap} for itself; the caps belong to the decoder"
+                );
+            }
+        }
     }
 
     #[test]
@@ -135449,6 +135735,7 @@ mod tests {
                         rgba: Arc::from(vec![0u8; PIXELS].into_boxed_slice()),
                         width_px: 1024,
                         height_px: 768,
+                        native_size: None,
                     },
                 );
             }
@@ -135600,6 +135887,7 @@ mod tests {
                         rgba: Arc::from(vec![0u8; PIXELS].into_boxed_slice()),
                         width_px: NATIVE[0],
                         height_px: NATIVE[1],
+                        native_size: None,
                     },
                 );
             }
@@ -135765,6 +136053,7 @@ mod tests {
             rgba: Arc::from(vec![0_u8; bytes].into_boxed_slice()),
             width_px: native.0,
             height_px: native.1,
+            native_size: None,
         }
     }
 
@@ -135849,6 +136138,7 @@ mod tests {
             &mut peek,
             Some(held.content_key.as_str()),
             Some(NATIVE),
+            None,
             &keys[0],
         );
         assert!(
@@ -135876,6 +136166,7 @@ mod tests {
             &mut peek,
             Some(held.content_key.as_str()),
             Some(NATIVE),
+            None,
             &keys[0],
         );
         assert_eq!(
@@ -135940,6 +136231,7 @@ mod tests {
                         .as_ref()
                         .map(|raster| raster.content_key.as_str()),
                     native[index],
+                    None,
                     &keys[index],
                 );
                 // `refit_preview_picture`'s own order: a surface with nothing to
@@ -145599,6 +145891,7 @@ mod tests {
                     rgba: decoded.rgba,
                     width_px: decoded.width_px,
                     height_px: decoded.height_px,
+                    native_size: decoded.native_size,
                 },
             );
         }
@@ -145610,7 +145903,7 @@ mod tests {
                     height_px,
                     ..
                 } => Some((*width_px, *height_px)),
-                PeekCacheEntry::Pending | PeekCacheEntry::Failed => None,
+                PeekCacheEntry::Pending | PeekCacheEntry::Failed(_) => None,
             }
         }
 

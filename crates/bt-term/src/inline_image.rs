@@ -17,6 +17,26 @@ pub const MAX_INLINE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_INLINE_IMAGE_BASE64_BYTES: usize = MAX_INLINE_IMAGE_BYTES.div_ceil(3) * 4;
 /// Keep a compressed image from expanding into an unbounded CPU/GPU artifact.
 pub const MAX_INLINE_IMAGE_RGBA_BYTES: u64 = 64 * 1024 * 1024;
+/// **What a picture *file* somebody asked to look at may weigh** (owner's ruling
+/// 2026-09-12).
+///
+/// 64 MiB, the same number [`MAX_BACKGROUND_IMAGE_BYTES`] is set to and for the
+/// same reading of the same question: the largest ordinary camera JPEG in
+/// circulation — a 100 MP medium-format frame at maximum quality — is under 60
+/// MB, and everything above that is a scan, a render or a wrong file.
+///
+/// **It is deliberately not [`MAX_INLINE_IMAGE_BYTES`]**, which is what the
+/// local-file lane used to read behind. Eight megabytes is the honest allowance
+/// for a picture a shell *pastes into a scrollback*: it arrives unasked, it may
+/// arrive a hundred times in a screenful, and it costs a texture each. A file in
+/// the files column is the opposite object in every one of those respects —
+/// there is one of it, a hand named it, and the read is transient because the
+/// bytes are dropped the moment the pixels exist — and a phone photograph or a
+/// 4K screenshot is five to fifteen megabytes, so the terminal's allowance
+/// refused the ordinary case of the other lane. The OSC 1337 payload cap stays
+/// where it is, because that one really is a byte stream nobody asked for, and
+/// [`MAX_INLINE_IMAGE_BASE64_BYTES`] follows *it* and not this.
+pub const MAX_LOCAL_IMAGE_FILE_BYTES: u64 = 64 * 1024 * 1024;
 /// **How many bytes of remembered decodes [`InlineImageDecoder`] may hold**
 /// (review row R1-8, adversarial review 2026-09-08).
 ///
@@ -28,6 +48,12 @@ pub const MAX_INLINE_IMAGE_RGBA_BYTES: u64 = 64 * 1024 * 1024;
 /// for the life of the process. Two of the largest single decode this crate will
 /// admit ([`MAX_INLINE_IMAGE_RGBA_BYTES`]) is the ceiling, and an ordinary
 /// screenful of inline pictures is a long way under it.
+///
+/// **Two is still two after the owner's ruling of 2026-09-12**, which raised the
+/// length a picture file may have and left the pixel budget where it was: a
+/// picture over [`MAX_INLINE_IMAGE_RGBA_BYTES`] is reduced to fit it before it
+/// is remembered, so what this counts is the reduced bytes and the largest
+/// single entry has not moved.
 pub const MAX_LOCAL_IMAGE_MEMO_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_OSC_1337_FILE_HEADER_BYTES: usize = 4 * 1024;
 /// How many bytes of an `OSC 1337;<key>` are read before the key is abandoned.
@@ -98,6 +124,19 @@ pub struct DecodedInlineImage {
     pub rgba: Arc<[u8]>,
     pub width_px: u32,
     pub height_px: u32,
+    /// **How large the picture in the file is, when these pixels are a reduction
+    /// of it** (owner's ruling 2026-09-12) — `None` when they are the file's own
+    /// pixels, which is the ordinary answer.
+    ///
+    /// A picture whose decode is over [`MAX_INLINE_IMAGE_RGBA_BYTES`] is
+    /// resampled down to fit it rather than refused ([`size_within_rgba_budget`]),
+    /// so for a 24 MP photograph `width_px`/`height_px` are no longer what the
+    /// file holds. Both numbers are true and they answer different questions —
+    /// the same parting a video's frame makes against its recording — so the one
+    /// about the *file* is carried beside the one about the pixels instead of
+    /// being lost at the moment the resample happens, which is the only moment
+    /// anybody knows it.
+    pub native_size: Option<(u32, u32)>,
     /// GIF and APNG are deliberately decoded as one static frame.
     pub animated: bool,
 }
@@ -457,11 +496,33 @@ fn resize_lanczos3_rgba8_across(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InlineImageDecodeError {
     InvalidBase64,
+    /// An `OSC 1337` payload past [`MAX_INLINE_IMAGE_BYTES`]. A *file* past its
+    /// own allowance is [`Self::FileTooLarge`], which carries the two numbers so
+    /// the sentence can name the limit it applied.
     TooLarge,
+    /// A picture file past [`MAX_LOCAL_IMAGE_FILE_BYTES`].
+    ///
+    /// Both numbers, for [`BackgroundImageError::TooLarge`]'s reason: a refusal
+    /// that says only "too large" leaves the reader with no way to tell a 70 MB
+    /// file from a 700 MB one.
+    FileTooLarge {
+        bytes: u64,
+        limit: u64,
+    },
     InvalidPath,
     Io(String),
     UnsupportedFormat,
     Decode(String),
+    /// More pixels than the budget in force would hold, **before** any reduction
+    /// — for a file that is the transient bound, [`MAX_BACKGROUND_IMAGE_RGBA_BYTES`].
+    ///
+    /// Its own variant and not [`Self::InvalidDimensions`], because the two are
+    /// different facts: a picture with no pixels at all, or one whose decoder
+    /// contradicted itself about how many it produced, is a broken file, and a
+    /// 192-megapixel scan is a perfectly good file this build will not hold.
+    /// They were one variant while both were simply refused; once one of them is
+    /// answered by resampling, the sentence has to be able to say which happened.
+    TooManyPixels,
     InvalidDimensions,
 }
 
@@ -470,12 +531,21 @@ impl fmt::Display for InlineImageDecodeError {
         match self {
             Self::InvalidBase64 => formatter.write_str("invalid base64 image payload"),
             Self::TooLarge => formatter.write_str("inline image exceeds its decode limit"),
+            Self::FileTooLarge { bytes, limit } => write!(
+                formatter,
+                "picture file is {} and this window opens up to {}",
+                mebibytes(*bytes),
+                mebibytes(*limit)
+            ),
             Self::InvalidPath => formatter.write_str("local image path is not admissible"),
             Self::Io(error) => write!(formatter, "local image read failed: {error}"),
             Self::UnsupportedFormat => {
                 formatter.write_str("inline image format is not supported in v1")
             }
             Self::Decode(error) => write!(formatter, "inline image decode failed: {error}"),
+            Self::TooManyPixels => {
+                formatter.write_str("picture has more pixels than this build will decode")
+            }
             Self::InvalidDimensions => {
                 formatter.write_str("inline image dimensions are invalid or too large")
             }
@@ -491,6 +561,8 @@ struct DecodedImagePayload {
     rgba: Arc<[u8]>,
     width_px: u32,
     height_px: u32,
+    /// See [`DecodedInlineImage::native_size`], which this is carried out to.
+    native_size: Option<(u32, u32)>,
     animated: bool,
 }
 
@@ -625,6 +697,7 @@ impl InlineImageDecoder {
             rgba: payload.rgba,
             width_px: payload.width_px,
             height_px: payload.height_px,
+            native_size: payload.native_size,
             animated: payload.animated,
         })
     }
@@ -674,22 +747,123 @@ fn read_and_decode_local_image(path: &Path) -> Result<DecodedImagePayload, Inlin
     if !metadata.is_file() {
         return Err(InlineImageDecodeError::InvalidPath);
     }
-    if metadata.len() > MAX_INLINE_IMAGE_BYTES as u64 {
-        return Err(InlineImageDecodeError::TooLarge);
+    if metadata.len() > MAX_LOCAL_IMAGE_FILE_BYTES {
+        return Err(InlineImageDecodeError::FileTooLarge {
+            bytes: metadata.len(),
+            limit: MAX_LOCAL_IMAGE_FILE_BYTES,
+        });
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.by_ref()
-        .take(MAX_INLINE_IMAGE_BYTES as u64 + 1)
+        .take(MAX_LOCAL_IMAGE_FILE_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| InlineImageDecodeError::Io(error.to_string()))?;
-    if bytes.len() > MAX_INLINE_IMAGE_BYTES {
-        return Err(InlineImageDecodeError::TooLarge);
+    if bytes.len() as u64 > MAX_LOCAL_IMAGE_FILE_BYTES {
+        return Err(InlineImageDecodeError::FileTooLarge {
+            bytes: bytes.len() as u64,
+            limit: MAX_LOCAL_IMAGE_FILE_BYTES,
+        });
     }
-    decode_image_bytes(&bytes)
+    decode_local_image_bytes(&bytes)
 }
 
 fn decode_image_bytes(bytes: &[u8]) -> Result<DecodedImagePayload, InlineImageDecodeError> {
     decode_image_bytes_within(bytes, MAX_INLINE_IMAGE_RGBA_BYTES)
+}
+
+/// The picture in a file somebody asked to look at: **decoded whole, and then
+/// reduced to fit the pixel budget rather than refused by it** (owner's ruling
+/// 2026-09-12).
+///
+/// A viewer does not need the native pixels of a 24 megapixel photograph; it
+/// needs the picture. [`MAX_INLINE_IMAGE_RGBA_BYTES`] is the right ceiling on
+/// what this program *holds* — a decode is a texture, a memo entry and a share
+/// of a window's peek cache, and every one of those is counted in bytes — and it
+/// was the wrong answer to a picture over it, because "6000×4000 is 96 MiB" is a
+/// fact about the file and "Preview failed" is a sentence about the reader.
+///
+/// So the budget is met by resampling, in one pass, to the largest size that
+/// fits it with the aspect ratio kept ([`size_within_rgba_budget`]), through
+/// [`scale_inline_image`] — the same Lanczos3 the exact-size lane uses, so one
+/// filter lives in this tree and a reduced picture is made of the same pixels a
+/// zoom would have made of it.
+///
+/// **The transient decode is what the bound is really on.** The full picture
+/// exists for the length of the resample and is dropped, so what has to be
+/// bounded is that moment, not the artifact: it gets
+/// [`MAX_BACKGROUND_IMAGE_RGBA_BYTES`], already the allowance the background
+/// lane trusts on a worker for exactly this shape of transient. Above it the
+/// refusal is [`InlineImageDecodeError::TooManyPixels`], which is what the
+/// sentence should always have said.
+///
+/// **Worker work, always.** Every caller of [`InlineImageDecoder::decode`] is on
+/// the decoration worker (`bt_app`'s `run_decoration_worker`), which is what
+/// keeps a half-second resample off the thread that answers the keyboard —
+/// `bt_app`'s `the_reduction_happens_on_the_worker_not_the_window_thread` pins
+/// it from the other side.
+fn decode_local_image_bytes(bytes: &[u8]) -> Result<DecodedImagePayload, InlineImageDecodeError> {
+    let payload = decode_image_bytes_within(bytes, MAX_BACKGROUND_IMAGE_RGBA_BYTES)?;
+    let Some((width_px, height_px)) = size_within_rgba_budget(
+        (payload.width_px, payload.height_px),
+        MAX_INLINE_IMAGE_RGBA_BYTES,
+    ) else {
+        return Ok(payload);
+    };
+    let native_size = (payload.width_px, payload.height_px);
+    let scaled = scale_inline_image(&InlineImageScaleTask {
+        // This lane is asked about a file, never about an occurrence in a stream.
+        occurrence_id: 0,
+        content_key: payload.key.clone(),
+        rgba: payload.rgba,
+        width_px: payload.width_px,
+        height_px: payload.height_px,
+        display_width_px: width_px,
+        display_height_px: height_px,
+    });
+    Ok(DecodedImagePayload {
+        // **The content key is the file's bytes and stays the file's bytes.** The
+        // reduction is a pure function of those bytes and of a constant in this
+        // build, so two decodes of one file are the same pixels; and the display
+        // identity every consumer actually rasters by is
+        // [`display_texture_key`], which carries the display size on top of this.
+        key: payload.key,
+        rgba: scaled.rgba,
+        width_px,
+        height_px,
+        native_size: Some(native_size),
+        animated: payload.animated,
+    })
+}
+
+/// The largest box inside `max_rgba_bytes` that keeps `size`'s proportions, or
+/// `None` when `size` is already inside it.
+///
+/// `None` rather than "the size you gave me" so that the caller cannot resample
+/// a picture into its own dimensions, which is a full Lanczos3 pass that
+/// produces the bytes it started with.
+///
+/// The scale is one number for both axes — the aspect ratio belongs to the
+/// picture — and both edges are floored, so the product is under the budget by
+/// construction. The two clamps after it are for the one shape floors cannot
+/// answer: a picture so long and thin that one edge floors to nothing is raised
+/// to a pixel, and a raised edge can put the product back over. Each clamp is
+/// the other edge's own division, so they are exact rather than a search.
+#[must_use]
+pub fn size_within_rgba_budget(size: (u32, u32), max_rgba_bytes: u64) -> Option<(u32, u32)> {
+    let (width, height) = size;
+    let pixels = u64::from(width).checked_mul(u64::from(height))?;
+    let budget = max_rgba_bytes / 4;
+    if width == 0 || height == 0 || budget == 0 || pixels <= budget {
+        return None;
+    }
+    let scale = (budget as f64 / pixels as f64).sqrt();
+    let shrink = |side: u32| ((f64::from(side) * scale).floor() as u32).max(1);
+    let mut target_width = shrink(width);
+    let mut target_height = shrink(height);
+    let fit = |side: u32, other: u32| (budget / u64::from(other)).clamp(1, u64::from(side)) as u32;
+    target_width = fit(target_width, target_height);
+    target_height = fit(target_height, target_width);
+    Some((target_width, target_height))
 }
 
 /// The container walk, under a caller's pixel budget.
@@ -720,6 +894,24 @@ fn decode_image_bytes_within(
     ) {
         return Err(InlineImageDecodeError::UnsupportedFormat);
     }
+    // **The header's own answer, before a buffer is asked for** (owner's ruling
+    // 2026-09-12). The `Limits` below already stop an over-budget decode, but
+    // they stop it as a `Decode` failure with the `image` crate's own wording in
+    // it — and "too many pixels" is a different fact from "this file is broken",
+    // which is exactly the difference a reader is owed now that one of them is
+    // answered by resampling instead. A second reader over the same bytes is the
+    // container's header again and nothing more.
+    if let Some((width, height)) = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|header| header.into_dimensions().ok())
+        && u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .is_none_or(|expected| expected > max_rgba_bytes)
+    {
+        return Err(InlineImageDecodeError::TooManyPixels);
+    }
     let animated = match format {
         ImageFormat::Gif => true,
         ImageFormat::Png => PngDecoder::new(Cursor::new(bytes))
@@ -740,8 +932,10 @@ fn decode_image_bytes_within(
         .checked_mul(u64::from(height_px))
         .and_then(|pixels| pixels.checked_mul(4))
         .ok_or(InlineImageDecodeError::InvalidDimensions)?;
-    if width_px == 0 || height_px == 0 || expected > max_rgba_bytes || expected != rgba.len() as u64
-    {
+    if expected > max_rgba_bytes {
+        return Err(InlineImageDecodeError::TooManyPixels);
+    }
+    if width_px == 0 || height_px == 0 || expected != rgba.len() as u64 {
         return Err(InlineImageDecodeError::InvalidDimensions);
     }
 
@@ -750,6 +944,7 @@ fn decode_image_bytes_within(
         rgba: Arc::from(rgba.into_raw()),
         width_px,
         height_px,
+        native_size: None,
         animated,
     })
 }
@@ -766,6 +961,7 @@ fn decode_svg_bytes(bytes: &[u8]) -> Result<DecodedImagePayload, InlineImageDeco
         rgba: Arc::from(raster.rgba),
         width_px: raster.width_px,
         height_px: raster.height_px,
+        native_size: None,
         animated: false,
     })
 }
@@ -986,8 +1182,16 @@ pub fn decode_background_image(
                 InlineImageDecodeError::UnsupportedFormat => {
                     BackgroundImageError::UnsupportedFormat
                 }
-                InlineImageDecodeError::InvalidDimensions => {
-                    BackgroundImageError::InvalidDimensions
+                // **One sentence for both, and it is the sentence that was
+                // already there**: "has no pixels, or more of them than this
+                // build will decode" is exactly the pair this row can raise, and
+                // splitting the decoder's variant in two (owner's ruling
+                // 2026-09-12) was for a *picture pane*, where one of the two is
+                // now answered by resampling. Nothing about a wallpaper changed.
+                InlineImageDecodeError::InvalidDimensions
+                | InlineImageDecodeError::TooManyPixels => BackgroundImageError::InvalidDimensions,
+                InlineImageDecodeError::FileTooLarge { bytes, limit } => {
+                    BackgroundImageError::TooLarge { bytes, limit }
                 }
                 InlineImageDecodeError::TooLarge => BackgroundImageError::TooLarge {
                     bytes: bytes.len() as u64,
@@ -1013,6 +1217,12 @@ pub fn decode_background_image(
         rgba: scaled.rgba,
         width_px,
         height_px,
+        // The ground picture is cut to the largest monitor on its way out
+        // ([`background_target_size`]), which is the same parting the picture
+        // lane records — said here too so that no holder of this type has to
+        // know which lane filled it.
+        native_size: ((payload.width_px, payload.height_px) != (width_px, height_px))
+            .then_some((payload.width_px, payload.height_px)),
         animated: payload.animated,
     })
 }
@@ -3234,21 +3444,16 @@ mod tests {
     }
 
     #[test]
-    fn local_decoder_quietly_rejects_non_images_and_files_over_eight_mib() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "betterterminal-inline-path-reject-{}-{unique}",
-            std::process::id()
-        ));
-        std::fs::create_dir(&directory).unwrap();
+    fn local_decoder_quietly_rejects_non_images_and_files_over_its_length_cap() {
+        let directory = a_scratch_directory("inline-path-reject");
         let fake = directory.join("not-an-image.png");
         std::fs::write(&fake, b"plain terminal text").unwrap();
         let oversized = directory.join("oversized.webp");
         let file = std::fs::File::create(&oversized).unwrap();
-        file.set_len(MAX_INLINE_IMAGE_BYTES as u64 + 1).unwrap();
+        // **The picture lane's cap and no longer the terminal's** (owner's
+        // ruling 2026-09-12): `MAX_INLINE_IMAGE_BYTES` is what an `OSC 1337`
+        // payload may weigh, and this is a file somebody opened.
+        file.set_len(MAX_LOCAL_IMAGE_FILE_BYTES + 1).unwrap();
 
         let mut decoder = InlineImageDecoder::default();
         assert_eq!(
@@ -3263,12 +3468,364 @@ mod tests {
                 occurrence_id: 42,
                 source: InlineImageSource::LocalPath(oversized.clone()),
             }),
-            Err(InlineImageDecodeError::TooLarge)
+            Err(InlineImageDecodeError::FileTooLarge {
+                bytes: MAX_LOCAL_IMAGE_FILE_BYTES + 1,
+                limit: MAX_LOCAL_IMAGE_FILE_BYTES,
+            })
         );
 
         std::fs::remove_file(fake).unwrap();
         std::fs::remove_file(oversized).unwrap();
         std::fs::remove_dir(directory).unwrap();
+    }
+
+    /// A directory of this test module's own, named so that two of these
+    /// running at once cannot meet in it.
+    fn a_scratch_directory(what: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "betterterminal-{what}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        directory
+    }
+
+    /// A PNG of a stated size whose bytes **do not compress**, so that the file
+    /// on disk is about as long as the pixels in it.
+    ///
+    /// A flat colour is the wrong fixture for every question about a picture's
+    /// *length*: `png_of(2000, 2000, …)` is nine kilobytes. The noise is a plain
+    /// xorshift rather than a crate, because the only property asked of it is
+    /// that deflate cannot find a pattern in it, and a test that generated a
+    /// different picture on every run would be a test whose file length is a
+    /// different number on every run.
+    fn incompressible_png_of(width: u32, height: u32) -> Vec<u8> {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut pixels = Vec::with_capacity(width as usize * height as usize * 3);
+        for _ in 0..width as usize * height as usize * 3 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            pixels.push((state >> 24) as u8);
+        }
+        let picture = image::DynamicImage::ImageRgb8(
+            image::RgbImage::from_raw(width, height, pixels).expect("the buffer is the right size"),
+        );
+        let mut bytes = Cursor::new(Vec::new());
+        picture
+            .write_to(&mut bytes, ImageFormat::Png)
+            .expect("a PNG this crate wrote");
+        bytes.into_inner()
+    }
+
+    /// The first chunks of a PNG, **declaring** a size without carrying it.
+    ///
+    /// The fixture for a picture past the transient bound, and the only one
+    /// there can be: 192 megapixels of real pixels is 768 MiB of memory to write
+    /// the file and as much again to read it, which is not a test, it is an
+    /// outage. A decoder answers "how many pixels does this file claim" out of
+    /// `IHDR` and nothing else, which is exactly the question the refusal under
+    /// test asks — so the fixture is `IHDR`, an `IDAT` header the reader stops
+    /// at, and `IEND`.
+    fn png_header_declaring(width: u32, height: u32) -> Vec<u8> {
+        fn crc32(bytes: &[u8]) -> u32 {
+            let mut crc = 0xffff_ffff_u32;
+            for byte in bytes {
+                crc ^= u32::from(*byte);
+                for _ in 0..8 {
+                    crc = if crc & 1 == 1 {
+                        (crc >> 1) ^ 0xedb8_8320
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            !crc
+        }
+        fn chunk(bytes: &mut Vec<u8>, kind: &[u8; 4], body: &[u8]) {
+            bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            let start = bytes.len();
+            bytes.extend_from_slice(kind);
+            bytes.extend_from_slice(body);
+            let crc = crc32(&bytes[start..]);
+            bytes.extend_from_slice(&crc.to_be_bytes());
+        }
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        let mut header = Vec::new();
+        header.extend_from_slice(&width.to_be_bytes());
+        header.extend_from_slice(&height.to_be_bytes());
+        // Eight bits a channel, truecolour, no interlace — the ordinary PNG.
+        header.extend_from_slice(&[8, 2, 0, 0, 0]);
+        chunk(&mut bytes, b"IHDR", &header);
+        chunk(&mut bytes, b"IDAT", &[0x78, 0x9c, 0x01]);
+        chunk(&mut bytes, b"IEND", &[]);
+        bytes
+    }
+
+    /// RED — **a picture file of an ordinary modern size opens** (owner's ruling
+    /// 2026-09-12).
+    ///
+    /// A phone photograph or a 4K screenshot is five to fifteen megabytes, and
+    /// the local-file lane read behind `MAX_INLINE_IMAGE_BYTES` — the eight
+    /// megabytes an `OSC 1337` payload gets, because a picture pasted into a
+    /// scrollback arrives unasked and may arrive a hundred times in a screenful.
+    /// A file in the files column is none of those things, and the pane said
+    /// "Preview failed: inline image exceeds its decode limit" about a file
+    /// nothing was wrong with.
+    ///
+    /// RED GATE: put `MAX_INLINE_IMAGE_BYTES` back on the file read and this
+    /// fails at the decode, `TooLarge` where a picture should be.
+    #[test]
+    fn a_local_picture_over_eight_megabytes_opens() {
+        let directory = a_scratch_directory("inline-big-picture");
+        let path = directory.join("screenshot.png");
+        let bytes = incompressible_png_of(2000, 2000);
+        assert!(
+            bytes.len() > MAX_INLINE_IMAGE_BYTES,
+            "the fixture must be past the terminal's allowance to mean anything: {}",
+            bytes.len()
+        );
+        assert!(
+            (bytes.len() as u64) < MAX_LOCAL_IMAGE_FILE_BYTES,
+            "and inside the picture lane's: {}",
+            bytes.len()
+        );
+        std::fs::write(&path, &bytes).unwrap();
+
+        let decoded = InlineImageDecoder::default()
+            .decode(InlineImageTask {
+                occurrence_id: 1,
+                source: InlineImageSource::LocalPath(path.clone()),
+            })
+            .expect("a twelve megabyte screenshot is a picture, not a mistake");
+        assert_eq!((decoded.width_px, decoded.height_px), (2000, 2000));
+        assert_eq!(
+            decoded.native_size, None,
+            "sixteen megabytes of pixels is inside the budget, so nothing was reduced"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// RED — **and one past the picture lane's own length says so honestly**
+    /// (owner's ruling 2026-09-12).
+    ///
+    /// The refusal carries both numbers for [`BackgroundImageError::TooLarge`]'s
+    /// reason: a sentence that says only "too large" leaves the reader with no
+    /// way to tell a 70 MB file from a 700 MB one. And it is a variant of its
+    /// own, so that the window can say it in either language without parsing a
+    /// string — see `bt_app::i18n::picture_refused`.
+    ///
+    /// RED GATE: answer this with `TooLarge` again and both the variant and the
+    /// sentence go red; the sentence is the half that matters, because "inline
+    /// image exceeds its decode limit" names a mechanism this reader has never
+    /// met.
+    #[test]
+    fn a_local_picture_over_sixty_four_megabytes_is_refused_by_length_with_the_honest_sentence() {
+        let directory = a_scratch_directory("inline-huge-file");
+        let path = directory.join("scan.png");
+        let file = std::fs::File::create(&path).unwrap();
+        let length = MAX_LOCAL_IMAGE_FILE_BYTES + 1;
+        file.set_len(length).unwrap();
+        drop(file);
+
+        let refusal = InlineImageDecoder::default()
+            .decode(InlineImageTask {
+                occurrence_id: 2,
+                source: InlineImageSource::LocalPath(path.clone()),
+            })
+            .expect_err("past the length cap");
+        assert_eq!(
+            refusal,
+            InlineImageDecodeError::FileTooLarge {
+                bytes: length,
+                limit: MAX_LOCAL_IMAGE_FILE_BYTES,
+            }
+        );
+        assert_eq!(
+            refusal.to_string(),
+            "picture file is 64 MB and this window opens up to 64 MB",
+            "the sentence names what was asked of the file and never an inline image"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// RED — **the terminal's own cap did not move** (owner's ruling
+    /// 2026-09-12).
+    ///
+    /// The ruling raised the allowance for a *file somebody opened* and said in
+    /// the same breath why the stream's stays: an `OSC 1337` payload is bytes
+    /// arriving from the far end of a pipe, unasked, as many times as the
+    /// program on the other end likes. The base64 bound follows that one and not
+    /// the new one.
+    ///
+    /// RED GATE: point `decode_osc_payload` at `MAX_LOCAL_IMAGE_FILE_BYTES` and
+    /// this goes red — an eight-megabyte-and-one payload is admitted instead of
+    /// being refused.
+    #[test]
+    fn an_inline_osc_1337_picture_still_stops_at_eight_megabytes() {
+        assert_eq!(
+            MAX_INLINE_IMAGE_BYTES as u64,
+            8 * 1024 * 1024,
+            "the number the terminal stream is held to"
+        );
+        assert_eq!(
+            MAX_INLINE_IMAGE_BASE64_BYTES,
+            MAX_INLINE_IMAGE_BYTES.div_ceil(3) * 4,
+            "and the encoded bound follows it, not the picture lane's"
+        );
+        let encoded = STANDARD.encode(vec![0_u8; MAX_INLINE_IMAGE_BYTES + 1]);
+        assert_eq!(
+            decode_inline_image(InlineImageTask {
+                occurrence_id: 3,
+                source: InlineImageSource::Osc1337(encoded.into_bytes()),
+            }),
+            Err(InlineImageDecodeError::TooLarge)
+        );
+    }
+
+    /// RED — **a picture with more pixels than this program holds is shown
+    /// reduced, and what the file holds is recorded beside it** (owner's ruling
+    /// 2026-09-12).
+    ///
+    /// `MAX_INLINE_IMAGE_RGBA_BYTES` is the right ceiling on what is *held* — a
+    /// decode is a texture, a memo entry and a share of a window's peek cache —
+    /// and it was the wrong answer to a picture over it. A viewer does not need
+    /// the native pixels of a 24 megapixel photograph; it needs the picture.
+    ///
+    /// The assertions are the three halves of the ruling: the pixels fit the
+    /// budget, the shape is the file's own, and the file's own size is recorded
+    /// beside them so the pane's foot can say both — `bt_app`'s test of the same
+    /// name is where that sentence is pinned.
+    ///
+    /// RED GATE: send the file lane back through `decode_image_bytes` and the
+    /// decode is `Err(TooManyPixels)` where a picture should be.
+    #[test]
+    fn a_picture_over_the_pixel_budget_is_reduced_to_fit_it_and_says_so() {
+        let directory = a_scratch_directory("inline-reduced");
+        let path = directory.join("photo.png");
+        // 24 megapixels: 96 MiB of RGBA against a 64 MiB budget. Flat colour,
+        // because this test is about the pixel count and not the file length.
+        std::fs::write(&path, png_of(6000, 4000, [10, 20, 30, 255])).unwrap();
+
+        let decoded = InlineImageDecoder::default()
+            .decode(InlineImageTask {
+                occurrence_id: 4,
+                source: InlineImageSource::LocalPath(path.clone()),
+            })
+            .expect("a 24 megapixel photograph is a picture, not a refusal");
+        let held = u64::from(decoded.width_px) * u64::from(decoded.height_px) * 4;
+        assert!(
+            held <= MAX_INLINE_IMAGE_RGBA_BYTES,
+            "the picture that is held fits the budget: {held}"
+        );
+        assert_eq!(
+            decoded.rgba.len() as u64,
+            held,
+            "and the pixels are the ones it says it has"
+        );
+        // The largest box under the budget with 6000:4000 kept — one scale for
+        // both axes, floored.
+        assert_eq!(
+            (decoded.width_px, decoded.height_px),
+            size_within_rgba_budget((6000, 4000), MAX_INLINE_IMAGE_RGBA_BYTES).unwrap()
+        );
+        assert_eq!(
+            decoded.native_size,
+            Some((6000, 4000)),
+            "and what the file holds is recorded beside what this window does"
+        );
+        assert_eq!(
+            &decoded.rgba[..4],
+            &[10, 20, 30, 255],
+            "a flat picture resampled is the same flat picture"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// RED — **the transient decode has a bound of its own, and past it the
+    /// sentence is about pixels** (owner's ruling 2026-09-12).
+    ///
+    /// Reducing a picture means decoding it whole first, so the moment that has
+    /// to be bounded is that one — `MAX_BACKGROUND_IMAGE_RGBA_BYTES`, already
+    /// the allowance the background lane trusts on a worker for exactly this
+    /// shape of transient. Above it there is nothing to reduce *from*, and the
+    /// refusal says the thing that is true of the file rather than naming an
+    /// inline image nobody sent.
+    ///
+    /// RED GATE: drop the header gate and this comes back `Decode(..)` carrying
+    /// the `image` crate's own words about a memory limit.
+    #[test]
+    fn a_picture_over_the_transient_bound_is_refused_as_too_many_pixels() {
+        let directory = a_scratch_directory("inline-too-many-pixels");
+        let path = directory.join("enormous.png");
+        // 16384 × 16384 is 268 megapixels — 1 GiB of RGBA, past the 768 MiB a
+        // transient decode is allowed.
+        std::fs::write(&path, png_header_declaring(16384, 16384)).unwrap();
+
+        let refusal = InlineImageDecoder::default()
+            .decode(InlineImageTask {
+                occurrence_id: 5,
+                source: InlineImageSource::LocalPath(path.clone()),
+            })
+            .expect_err("past the transient bound");
+        assert_eq!(refusal, InlineImageDecodeError::TooManyPixels);
+        assert_eq!(
+            refusal.to_string(),
+            "picture has more pixels than this build will decode"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// The budget arithmetic on its own: the aspect ratio kept, the answer
+    /// always inside the budget, and never a pass that produces the bytes it
+    /// started from.
+    #[test]
+    fn the_reduced_size_is_the_largest_one_that_fits() {
+        const BUDGET: u64 = 64 * 1024 * 1024;
+        assert_eq!(
+            size_within_rgba_budget((4000, 3000), BUDGET),
+            None,
+            "a picture already inside the budget is not resampled into itself"
+        );
+        // **A picture one pixel tall is the one shape whose proportions cannot
+        // survive**: 4 294 967 295 × 1 scaled to fit is a row of pixels and a
+        // fraction of a row, and there is no such thing. The floors put a pixel
+        // back on the short axis and the long one is cut to the budget against
+        // it, so the answer is inside the bound and has a picture in it — which
+        // is the whole of what can be promised here.
+        let (width, height) = size_within_rgba_budget((u32::MAX, 1), BUDGET).unwrap();
+        assert_eq!((width, height), ((BUDGET / 4) as u32, 1));
+        for size in [
+            (6000_u32, 4000_u32),
+            (12000, 2000),
+            (2000, 12000),
+            (9000, 9000),
+        ] {
+            let (width, height) =
+                size_within_rgba_budget(size, BUDGET).expect("this one is over the budget");
+            assert!(
+                u64::from(width) * u64::from(height) * 4 <= BUDGET,
+                "{size:?} came back {width}x{height}, which is still over"
+            );
+            let before = f64::from(size.0) / f64::from(size.1);
+            let after = f64::from(width) / f64::from(height);
+            assert!(
+                (after / before - 1.0).abs() < 0.01,
+                "{size:?} came back {width}x{height}, which is a different shape"
+            );
+        }
     }
 
     /// RED — **the decoder's memo has a ceiling** (review row R1-8, adversarial
@@ -3656,8 +4213,15 @@ mod tests {
     ///
     /// The probe is a 4200x4200 greyscale PNG — a few kilobytes of file and
     /// 70.6 MiB of RGBA, so it clears every file-size gate in the module and is
-    /// stopped only by the pixel budget. The inline decoder refuses it; the
-    /// background decoder takes it and hands back a texture cut to the ceiling.
+    /// stopped only by the pixel budget.
+    ///
+    /// **Both lanes take it now, and to two different sizes** (owner's ruling
+    /// 2026-09-12). This test used to read "the inline decoder refuses it", and
+    /// that half retired with the ruling that a picture over the pixel budget is
+    /// reduced rather than refused — but what it was pinning did not: two lanes,
+    /// two budgets, and neither borrowing the other's. The picture lane cuts to
+    /// what this program *holds* ([`MAX_INLINE_IMAGE_RGBA_BYTES`]); the ground
+    /// cuts to the largest monitor it was handed.
     ///
     /// Red gate: point `decode_background_image` at
     /// `MAX_INLINE_IMAGE_RGBA_BYTES` and the second half goes red.
@@ -3694,10 +4258,17 @@ mod tests {
         let inline = decode_inline_image(InlineImageTask {
             occurrence_id: 0,
             source: InlineImageSource::LocalPath(path.clone()),
-        });
-        assert!(
-            inline.is_err(),
-            "an inline image of this size is still refused, which is the gate              the background was borrowing"
+        })
+        .expect("the picture lane reduces a picture of this size rather than refusing it");
+        assert_eq!(
+            (inline.width_px, inline.height_px),
+            size_within_rgba_budget((SIDE, SIDE), MAX_INLINE_IMAGE_RGBA_BYTES).unwrap(),
+            "the picture lane cuts to what this program holds"
+        );
+        assert_eq!(
+            inline.native_size,
+            Some((SIDE, SIDE)),
+            "and says so, which is the gate the background was borrowing"
         );
 
         let ground = decode_background_image(&path, (3840, 2160)).unwrap();
