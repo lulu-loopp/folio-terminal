@@ -51,7 +51,7 @@
 //! * a **ring** — the standing frame and the frames queued behind it, bounded by
 //!   [`MAX_ANIMATION_RING_BYTES`] and by [`MAX_ANIMATION_RING_LEAD`], whichever
 //!   is reached first; and
-//! * an [`AnimationCursor`] — the file's bytes, a sequential reader over them
+//! * an [`AnimationCursor`] — a handle on the file, a sequential reader over it
 //!   and the canvas its frames are composed onto — which is handed to a worker
 //!   to be filled and comes back parked in the animation until it is wanted
 //!   again.
@@ -60,10 +60,42 @@
 //! *n* is a patch on the composition of every frame before it, so there is no
 //! seeking, and a decoder that has read to the end of the file is a decoder that
 //! must **start again from the first frame** to play the loop a second time.
-//! That re-decode is the honest cost of not holding the whole file, it is what
-//! every browser does with a long animation, and it is why the cursor keeps the
-//! file's bytes: they are at most [`MAX_ANIMATION_FILE_BYTES`], and they are the
-//! only way back to frame zero.
+//! That re-read is the honest cost of not holding the whole file, and it is what
+//! every browser does with a long animation.
+//!
+//! # And the file is read, not held (user report 2026-09-12)
+//!
+//! **What was wrong, the third time.** The streaming above was written over an
+//! `Arc<[u8]>` of the whole file: the cursor kept every byte because that was
+//! the only way it knew back to frame zero, [`Animation::bytes_held`] charged
+//! those bytes to the window's ceiling, and so a cap on the *file's length* had
+//! to exist — [`MAX_ANIMATION_FILE_BYTES`], set to `bt_term::MAX_INLINE_IMAGE_BYTES`,
+//! which is **eight megabytes** and was chosen for a picture a shell pastes into
+//! a scrollback. A reader opened an 11.7 MB `simulation.gif` and got an empty
+//! pane: the animation was refused for its length before a byte of it was
+//! decoded, and the still that was to stand in for it was refused by the picture
+//! lane's copy of the same eight megabytes. Two refusals for one file, both of
+//! them about a number that has nothing to do with what the file costs to play.
+//! A GIF of ten to thirty megabytes is the ordinary output of a screen recorder.
+//!
+//! So the loop comes round by **seeking the file**, not by holding it: an
+//! [`AnimationSource`] is a reader that can be told to start again, the
+//! production one is a bounded reader over a [`std::fs::File`], and what stays
+//! in memory is only what the ring already bounds. The cap on file length stays
+//! as a **sanity** bound and stops being a memory charge — see
+//! [`MAX_ANIMATION_FILE_BYTES`] for the number and why it is the size it is.
+//!
+//! **A file may change under the loop.** The cursor keeps the [`AnimationStamp`]
+//! it opened with — when the file was last written and how long it was, the same
+//! identity the decode memo keys on (§7.1.3k ⑧) — and compares it when the loop
+//! comes round. A file that has been rewritten ends its playback rather than
+//! being decoded half-old and half-new; the window lets that playback go and
+//! opens the file again down the ordinary path, which is what shows the new one.
+//! A file *deleted* mid-play is not that case: the open handle keeps it readable
+//! on Windows until this cursor drops it, so the animation plays to the end of
+//! its loop, and it is the next open that fails — the pane then shows the
+//! ordinary not-found foot, which is the same answer any other vanished file
+//! gets.
 //!
 //! **And never on the thread that draws.** [`AnimationCursor::next_frames`] is
 //! tens of milliseconds of pixels; it runs on the decoration worker that
@@ -100,16 +132,33 @@
 //! An animation over any of them is drawn as its **first frame, still**, and the
 //! foot of the pane says so: `Runtime::preview_foot_notice` carries the reason
 //! to the reader, which is the difference between this window declining and this
-//! window appearing not to work.
+//! window appearing not to work. The two are two sentences and not one
+//! ([`AnimationRefusal::FrameTooLarge`] and [`AnimationRefusal::FileTooLong`]),
+//! because "its frames are too big" and "it is longer than this window will
+//! read" are different facts about different numbers and a reader who is told
+//! the wrong one is told something untrue.
+//!
+//! # And that first frame is decoded here
+//!
+//! [`first_frame`] is the still lane's answer for a `.gif`: exactly one frame,
+//! pulled through the same streaming cursor under the same
+//! [`MAX_ANIMATION_FRAME_BYTES`]. It is here and not in the picture decoder
+//! because the picture decoder reads a whole file into memory behind the eight
+//! megabytes an inline image is worth, and a `.gif` this window is happy to
+//! *play* may be forty times that. A file this lane will not open — a JPEG that
+//! is called `.gif`, a frame past the ceiling — answers `None` and the picture
+//! lane decodes it, which is the fork and not a fallback: the name said GIF and
+//! only the bytes could say otherwise.
 
 use std::collections::VecDeque;
-use std::io::{Cursor, Read};
+use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroU64;
+use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use gif::{ColorOutput, DisposalMethod, MemoryLimit};
-use image::{ImageFormat, ImageReader};
+use image::ImageFormat;
 
 /// **How many bytes of decoded frames one animation keeps queued.**
 ///
@@ -151,13 +200,12 @@ pub const MAX_ANIMATION_RING_LEAD: Duration = Duration::from_secs(1);
 /// pixels for one hover than every other picture in the window together.
 pub const MAX_ANIMATION_FRAME_BYTES: u64 = MAX_ANIMATION_RING_BYTES / 2;
 
-/// **What one animation costs this window at its fullest**, all four
-/// allocations of it (adversarial review 2026-09-11, B9).
+/// **What one animation costs this window at its fullest**, all three
+/// allocations of it (adversarial review 2026-09-11, B9; user report
+/// 2026-09-12).
 ///
-/// It used to be two — the ring, and the file's own bytes, which the cursor
-/// keeps because they are the only way back to frame zero when the loop comes
-/// round — and the other two were real memory that no counter in this window
-/// had ever heard of:
+/// It was once two — the ring, and the file's own bytes — and B9 found two more
+/// that no counter in this window had ever heard of:
 ///
 /// * the **canvas** ([`AnimationCursor::over`]), one whole logical screen that
 ///   every frame is composed onto and that lives for as long as the cursor
@@ -166,24 +214,33 @@ pub const MAX_ANIMATION_FRAME_BYTES: u64 = MAX_ANIMATION_RING_BYTES / 2;
 ///   composed on the worker ([`frames_wanted`]) — outside the window's map from
 ///   the moment the cursor leaves until it is parked again.
 ///
-/// So the honest worst case is `32 + 8 + 16 + 32` and the two that were counted
-/// were slightly under half of it: a ceiling built on the old number was a
-/// ceiling a window could stand at while holding twice it.
-pub const MAX_ANIMATION_HELD_BYTES: u64 = MAX_ANIMATION_RING_BYTES
-    + MAX_ANIMATION_FILE_BYTES
-    + MAX_ANIMATION_FRAME_BYTES
-    + MAX_ANIMATION_RING_BYTES;
+/// **And then one of the original two went away.** The file's own bytes are no
+/// longer held at all: the cursor reads the file through a handle and seeks back
+/// to the top when the loop comes round (see the module note), so the length of
+/// the file is not a number this window is holding and must not be a number it
+/// is charged for. What is left is `32 + 16 + 32`, and every term of it is
+/// pixels this process really has.
+pub const MAX_ANIMATION_HELD_BYTES: u64 =
+    MAX_ANIMATION_RING_BYTES + MAX_ANIMATION_FRAME_BYTES + MAX_ANIMATION_RING_BYTES;
 
-/// **How many bytes of a file this window will read looking for frames**
-/// (review row R1-7, adversarial review 2026-09-08).
+/// **How many bytes of a file this window will read looking for frames** — a
+/// **sanity** bound, and no longer a memory charge (user report 2026-09-12).
 ///
-/// `bt_term::MAX_INLINE_IMAGE_BYTES`, and it is that number rather than one of
-/// this module's own because the two lanes are looking at the same files: the
-/// picture lane has refused a local image past this cap since it was written, so
-/// a `.gif` over it cannot be *drawn* by this window at all. Reading it whole to
-/// find frames for a picture that will never appear was the plainest form of the
-/// defect — one hover, one `std::fs::read`, no ceiling.
-pub const MAX_ANIMATION_FILE_BYTES: u64 = bt_term::MAX_INLINE_IMAGE_BYTES as u64;
+/// 512 MiB. It used to be `bt_term::MAX_INLINE_IMAGE_BYTES` — eight megabytes,
+/// the allowance for a picture a shell pastes into a scrollback — and it had to
+/// be a small number because the whole file was held in memory. It is not held
+/// any more, so the only question this number still answers is "what length is
+/// so large that a file claiming it cannot be an animation a reader meant to
+/// open", and the number is chosen to be nowhere near anything real: the file
+/// this was reported against was **11.7 MB**, the largest in the folder it came
+/// from was **39.9 MB**, and this is more than a dozen times that.
+///
+/// It is not dead weight even so. The length is read off the handle the bytes
+/// are then read through and the read itself is bounded by this cap rather than
+/// by that length ([`FileAnimationSource`]), so a file being appended to between
+/// the two — a capture still being written — cannot hand this window bytes
+/// without end.
+pub const MAX_ANIMATION_FILE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// **The largest side this window will decode an animation's frames at.**
 ///
@@ -229,6 +286,227 @@ pub struct AnimationFrame {
     pub delay: Duration,
 }
 
+/// **The first frame of one animated file, as the picture lane's pixels** — see
+/// [`first_frame`].
+///
+/// RGBA and not the BGRA the ring carries, because the two are going to two
+/// different places: a played frame goes to a texture created in the swapchain's
+/// own order (§7.42 ②) and this goes into `bt_term::DecodedInlineImage`, which
+/// is RGBA everywhere it is read. The conversion is one pass over one frame,
+/// once per file, on the worker.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnimationStill {
+    /// What the shared GPU cache is to call these pixels — see
+    /// [`still_texture_key`].
+    pub key: String,
+    pub rgba: Arc<[u8]>,
+    pub width_px: u32,
+    pub height_px: u32,
+}
+
+/// **Which file this is, and which version of it**: when it was last written
+/// and how long it is.
+///
+/// The identity `bt_term`'s decode memo already keys on (§7.1.3k ⑧), asked here
+/// for the two questions this module has that a path alone cannot answer — is
+/// the file under the loop still the file the loop started on, and are these
+/// still pixels the same picture as the ones the renderer is holding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AnimationStamp {
+    modified: Option<SystemTime>,
+    length: u64,
+}
+
+impl AnimationStamp {
+    /// One `metadata` call, and `None` for a file that is not there to stat.
+    #[must_use]
+    pub fn of(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(Self {
+            modified: metadata.modified().ok(),
+            length: metadata.len(),
+        })
+    }
+
+    /// How this stamp is spelled in a texture key.
+    fn spelled(self) -> String {
+        let modified = self
+            .modified
+            .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map_or_else(|| "?".to_owned(), |since| since.as_nanos().to_string());
+        format!("{modified}:{}", self.length)
+    }
+}
+
+/// **Where one animation's bytes come from**, which is a file, and the two
+/// things a looping decoder asks of them (user report 2026-09-12).
+///
+/// It is a trait for one reason and it is not abstraction for its own sake:
+/// production reads a [`std::fs::File`] and the tests in this module hold their
+/// fixtures as bytes, and a design in which every test of the loop had to write
+/// a temporary file would be a design nobody would keep tests for. Both halves
+/// go through the same two verbs below, so the thing under test is the thing
+/// that ships.
+///
+/// **`Send`, because the cursor crosses to a worker** — see [`AnimationCursor`].
+pub trait AnimationSource: Read + Send {
+    /// **Start again at the first byte**, which is all that coming round to
+    /// frame zero is once the file is not being held.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the seek failed with. A source that cannot start again ends the
+    /// animation on the frame it was standing on.
+    fn restart(&mut self) -> std::io::Result<()>;
+
+    /// **What the file looked like when this source opened it**, or `None` for
+    /// a source that is not a file.
+    fn opened_as(&self) -> Option<AnimationStamp>;
+
+    /// **What the file at that name looks like now.**
+    ///
+    /// Compared with [`Self::opened_as`] when the loop comes round: a file that
+    /// has been rewritten under the loop ends this playback rather than being
+    /// decoded half-old and half-new. For a source with no file behind it the
+    /// two are both `None`, which reads as "unchanged" and is the truth about a
+    /// slice of bytes.
+    fn looks_like_now(&self) -> Option<AnimationStamp>;
+}
+
+/// **A bounded reader over an open file** — what every animation this window
+/// plays is read through.
+///
+/// The handle is kept open for the life of the cursor, which is what makes
+/// [`Self::restart`] a seek rather than a second `open`, and is also why a file
+/// deleted mid-play goes on playing: on Windows the name goes and the handle
+/// keeps the bytes readable until it is dropped.
+pub struct FileAnimationSource {
+    file: std::fs::File,
+    path: std::path::PathBuf,
+    opened_as: AnimationStamp,
+    /// How much of this pass has been handed out, against
+    /// [`MAX_ANIMATION_FILE_BYTES`] — the read is bounded by the cap and not by
+    /// the length that was stat-ed, so a capture still being written to cannot
+    /// hand this window bytes without end.
+    read: u64,
+}
+
+impl FileAnimationSource {
+    /// Open `path` for reading, with the stamp it had at the moment it opened.
+    ///
+    /// # Errors
+    ///
+    /// The open itself. Nothing else is read here.
+    pub fn open(path: &Path) -> std::io::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        // **Asked of the handle and not of the name**, which is the same
+        // discipline the length has always been read under: a stat of the name
+        // and an open of the name are two different files the moment somebody
+        // writes between them, and what this stamp has to describe is the bytes
+        // that are about to be read. [`Self::looks_like_now`] asks the *name*,
+        // because that is the other half of the question — is the file at that
+        // name still the one this handle holds.
+        let metadata = file.metadata()?;
+        Ok(Self {
+            file,
+            path: path.to_owned(),
+            opened_as: AnimationStamp {
+                modified: metadata.modified().ok(),
+                length: metadata.len(),
+            },
+            read: 0,
+        })
+    }
+
+    /// What the handle said this file was when it opened.
+    #[must_use]
+    pub fn stamp(&self) -> AnimationStamp {
+        self.opened_as
+    }
+}
+
+impl Read for FileAnimationSource {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let room = MAX_ANIMATION_FILE_BYTES.saturating_sub(self.read);
+        if room == 0 {
+            // **The cap reads as the end of the file**, deliberately: a pass
+            // that reaches it ends the way a truncated file ends, on the frames
+            // it did get, rather than by raising an error a reader would have to
+            // be told about for a file no reader will ever open.
+            return Ok(0);
+        }
+        let want = buffer
+            .len()
+            .min(usize::try_from(room).unwrap_or(usize::MAX));
+        let read = self.file.read(&mut buffer[..want])?;
+        self.read += read as u64;
+        Ok(read)
+    }
+}
+
+impl AnimationSource for FileAnimationSource {
+    fn restart(&mut self) -> std::io::Result<()> {
+        self.file.seek(SeekFrom::Start(0))?;
+        self.read = 0;
+        Ok(())
+    }
+
+    fn opened_as(&self) -> Option<AnimationStamp> {
+        Some(self.opened_as)
+    }
+
+    fn looks_like_now(&self) -> Option<AnimationStamp> {
+        AnimationStamp::of(&self.path)
+    }
+}
+
+/// **Bytes already in hand** — the half a test can hold, behind the same two
+/// verbs the file answers.
+///
+/// `cfg(test)` and not shipped: every animation this window draws is a file on a
+/// disk, and a second production way in would be a second set of answers to
+/// "what happens when the file changes".
+#[cfg(test)]
+pub struct BytesAnimationSource {
+    bytes: Arc<[u8]>,
+    at: usize,
+}
+
+#[cfg(test)]
+impl BytesAnimationSource {
+    #[must_use]
+    pub fn over(bytes: Arc<[u8]>) -> Self {
+        Self { bytes, at: 0 }
+    }
+}
+
+#[cfg(test)]
+impl Read for BytesAnimationSource {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let rest = &self.bytes[self.at.min(self.bytes.len())..];
+        let read = rest.len().min(buffer.len());
+        buffer[..read].copy_from_slice(&rest[..read]);
+        self.at += read;
+        Ok(read)
+    }
+}
+
+#[cfg(test)]
+impl AnimationSource for BytesAnimationSource {
+    fn restart(&mut self) -> std::io::Result<()> {
+        self.at = 0;
+        Ok(())
+    }
+
+    fn opened_as(&self) -> Option<AnimationStamp> {
+        None
+    }
+
+    fn looks_like_now(&self) -> Option<AnimationStamp> {
+        None
+    }
+}
+
 /// **A sequential reader over one animated file, and the canvas its frames are
 /// composed onto.**
 ///
@@ -247,10 +525,15 @@ pub struct AnimationFrame {
 ///
 /// **A worker, never the thread that draws** — see [`Self::next_frames`].
 pub struct AnimationCursor {
-    /// The file, kept for the same reason a looping animation needs it: GIF has
-    /// no seek, so coming round to frame zero is opening these bytes again.
-    bytes: Arc<[u8]>,
-    reader: gif::Decoder<Cursor<Arc<[u8]>>>,
+    /// The decoder, and the source it owns.
+    ///
+    /// **An `Option` because coming round to frame zero is a move out of this
+    /// field**: the decoder owns the handle, `gif::Decoder::into_inner` is by
+    /// value, and the handle has to be recovered to be seeked and given to a new
+    /// decoder. It is `Some` at every point a caller can observe; the one moment
+    /// it is not is inside [`Self::start_again`], which either puts a decoder
+    /// back or ends the cursor.
+    reader: Option<gif::Decoder<Box<dyn AnimationSource>>>,
     width_px: u32,
     height_px: u32,
     /// The composition every frame is a patch on, in BGRA — carried from frame
@@ -263,6 +546,16 @@ pub struct AnimationCursor {
     /// Set when the file has nothing more to give and starting it again did not
     /// help — a truncated frame on the very first frame of a pass.
     ended: bool,
+    /// **Set when the file was rewritten under the loop** (user report
+    /// 2026-09-12): the stamp it was opened with and the stamp its name carries
+    /// now disagree at the moment the loop comes round.
+    ///
+    /// It ends the cursor like any other end, and it is a separate fact from
+    /// [`Self::ended`] because the window does a different thing with it: a
+    /// playback that ran out of file stands on its last frame, and a playback
+    /// whose file changed is let go of so the pane opens the new file down the
+    /// ordinary path. See `adopt_animation_fill`.
+    stale: bool,
 }
 
 /// **This cursor crosses threads, and the whole design rests on it.**
@@ -289,9 +582,6 @@ pub struct Animation {
     ring: VecDeque<AnimationFrame>,
     width_px: u32,
     height_px: u32,
-    /// The file's bytes, counted once for the cache — the cursor holds the same
-    /// allocation.
-    bytes: Arc<[u8]>,
     /// The decoder, parked here between fills. `None` while it is away on a
     /// worker, which is also this window's "a fill is in flight" — one fact, in
     /// one place, and no flag to fall out of step with it.
@@ -359,31 +649,40 @@ pub enum AnimationRefusal {
     /// picture, and this is the answer for one: the picture channel already
     /// draws it and does not need help.
     OneFrame,
-    /// **One frame of it is too big to stream**, or the file is over
-    /// [`MAX_ANIMATION_FILE_BYTES`], or its declared screen is over
-    /// [`MAX_ANIMATION_SIDE_PX`].
+    /// **One frame of it is too big to stream** — its declared screen is over
+    /// [`MAX_ANIMATION_SIDE_PX`], or one composed frame of it would be over
+    /// [`MAX_ANIMATION_FRAME_BYTES`].
     ///
-    /// Never again a verdict on how *many* frames a file has: that was this
-    /// module's own limit and streaming retired it (user report 2026-09-10). A
-    /// file that earns this is drawn as its first frame and the foot of the pane
-    /// says why.
-    TooLarge,
+    /// Never a verdict on how *many* frames a file has: that was this module's
+    /// own limit and streaming retired it (user report 2026-09-10). A file that
+    /// earns this is drawn as its first frame and the foot of the pane says why.
+    FrameTooLarge,
+    /// **The file is longer than [`MAX_ANIMATION_FILE_BYTES`]**, which is a
+    /// sanity bound and not a memory one (user report 2026-09-12).
+    ///
+    /// A separate verdict from [`Self::FrameTooLarge`] because it is a separate
+    /// fact about a separate number, and the foot of the pane says which: the
+    /// two were one variant, spelled "First frame · too large", and a reader
+    /// whose 11.7 MB recording was refused for its *length* was told its frames
+    /// were too big. They were 2400 by 1200, which composes to 11.5 MB — well
+    /// inside [`MAX_ANIMATION_FRAME_BYTES`].
+    FileTooLong,
 }
 
 impl AnimationRefusal {
     /// **Whether a reader is owed a sentence about this.**
     ///
-    /// Two of the four are ordinary answers to an ordinary question and say
+    /// Two of the five are ordinary answers to an ordinary question and say
     /// nothing: a file that is not an animation is being drawn by the lane that
     /// does draw it, and a one-frame `.gif` is a still picture that looks
-    /// exactly like a still picture. The other two leave a reader looking at a
+    /// exactly like a still picture. The other three leave a reader looking at a
     /// picture that ought to be moving, which is a thing this window has to
     /// account for — see `Runtime::preview_foot_notice`.
     #[must_use]
     pub fn is_worth_saying(self) -> bool {
         match self {
             Self::NotAnAnimation | Self::OneFrame => false,
-            Self::Undecodable | Self::TooLarge => true,
+            Self::Undecodable | Self::FrameTooLarge | Self::FileTooLong => true,
         }
     }
 }
@@ -398,79 +697,43 @@ impl AnimationRefusal {
 ///
 /// **A worker, never the thread that draws.** Decoding even a ring of frames is
 /// tens of milliseconds and this window has one thread that must not spend them.
-pub fn decode(path: &std::path::Path) -> Result<Animation, AnimationRefusal> {
+pub fn decode(path: &Path) -> Result<Animation, AnimationRefusal> {
+    stream(file_source(path)?)
+}
+
+/// **The handle one animated file is read through**, and the two things that can
+/// be decided about it before a byte of it is read: the name, and the length.
+///
+/// The length is asked of the handle the bytes are then read through and the
+/// read is bounded by the cap rather than by that length — the discipline
+/// `pdf::read_capped` states in the same words, for the same reason — but since
+/// 2026-09-12 the cap is a sanity bound rather than a memory one, because the
+/// bytes are not kept. See [`MAX_ANIMATION_FILE_BYTES`].
+fn file_source(path: &Path) -> Result<Box<dyn AnimationSource>, AnimationRefusal> {
     if !path_names_an_animation(path) {
         return Err(AnimationRefusal::NotAnAnimation);
     }
-    // **The length is asked of the handle the bytes are then read through, and
-    // the read is bounded by the cap rather than by that length** — the
-    // discipline `pdf::read_capped` states in the same words, for the same
-    // reason: a file being appended to between the two calls is a file this
-    // window may not be handed unboundedly much of.
-    let mut file = std::fs::File::open(path).map_err(|_| AnimationRefusal::Undecodable)?;
-    let length = file
-        .metadata()
-        .map_err(|_| AnimationRefusal::Undecodable)?
-        .len();
-    if length > MAX_ANIMATION_FILE_BYTES {
-        return Err(AnimationRefusal::TooLarge);
+    let source = FileAnimationSource::open(path).map_err(|_| AnimationRefusal::Undecodable)?;
+    if source.stamp().length > MAX_ANIMATION_FILE_BYTES {
+        return Err(AnimationRefusal::FileTooLong);
     }
-    let mut bytes = Vec::with_capacity(length as usize);
-    (&mut file)
-        .take(MAX_ANIMATION_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| AnimationRefusal::Undecodable)?;
-    if bytes.len() as u64 > MAX_ANIMATION_FILE_BYTES {
-        return Err(AnimationRefusal::TooLarge);
-    }
-    decode_bytes(bytes)
+    Ok(Box::new(source))
 }
 
 /// The same, from bytes already in hand — the half a test can hold.
 ///
-/// It takes the bytes rather than borrowing them because the animation keeps
-/// them: a looping decoder has to be able to open the file again, and copying
-/// eight megabytes to hand them over would be a copy per hover.
+/// It takes the bytes rather than borrowing them because the source keeps them:
+/// a looping decoder has to be able to start again, and a slice that has to
+/// outlive this call is a lifetime on a thing that crosses to a worker.
+#[cfg(test)]
 pub fn decode_bytes(bytes: Vec<u8>) -> Result<Animation, AnimationRefusal> {
-    open(Arc::from(bytes))
+    stream(Box::new(BytesAnimationSource::over(Arc::from(bytes))))
 }
 
-/// **Open one animated file: judge its descriptor, then read the ring's worth of
-/// frames behind it.**
-///
-/// The order is the point (review row R1-7): everything that can be known from
-/// the header is decided here, **before** [`AnimationCursor::over`] allocates a
-/// canvas and before [`AnimationCursor::next_frames`] pulls a frame.
-fn open(bytes: Arc<[u8]>) -> Result<Animation, AnimationRefusal> {
-    // The container is judged by its own header and not by the name that led
-    // here, which is the discipline `decode_image_bytes_within` already keeps: a
-    // `.gif` that is a JPEG is a JPEG.
-    let format = ImageReader::new(Cursor::new(&bytes[..]))
-        .with_guessed_format()
-        .ok()
-        .and_then(|reader| reader.format());
-    if format != Some(ImageFormat::Gif) {
-        return Err(AnimationRefusal::NotAnAnimation);
-    }
-    let reader = gif_reader(Arc::clone(&bytes)).map_err(|_| AnimationRefusal::Undecodable)?;
-    // **The logical screen descriptor is the whole judgement, and it is read off
-    // the header with no buffer anywhere.** A file declaring a 65535-square
-    // screen asks a decoder for seventeen gigabytes on its first frame, and the
-    // refusal that used to exist counted pixels that had already been made.
-    let width_px = u32::from(reader.width());
-    let height_px = u32::from(reader.height());
-    if width_px == 0 || height_px == 0 {
-        return Err(AnimationRefusal::Undecodable);
-    }
-    if width_px > MAX_ANIMATION_SIDE_PX || height_px > MAX_ANIMATION_SIDE_PX {
-        return Err(AnimationRefusal::TooLarge);
-    }
+/// **Open one animated file and read the ring's worth of frames behind it.**
+fn stream(source: Box<dyn AnimationSource>) -> Result<Animation, AnimationRefusal> {
+    let (mut cursor, width_px, height_px) = open(source)?;
     let frame_bytes = u64::from(width_px) * u64::from(height_px) * 4;
-    if frame_bytes > MAX_ANIMATION_FRAME_BYTES {
-        return Err(AnimationRefusal::TooLarge);
-    }
-
-    let mut cursor = AnimationCursor::over(Arc::clone(&bytes), reader, width_px, height_px);
     // An empty ring, no lead, and no frame yet to read a delay off — so the
     // opening batch is asked for at the browsers' assumed tenth of a second.
     let want = frames_wanted(frame_bytes, 0, Duration::ZERO, DEFAULT_FRAME_DELAY);
@@ -485,14 +748,135 @@ fn open(bytes: Arc<[u8]>) -> Result<Animation, AnimationRefusal> {
         frames,
         width_px,
         height_px,
-        bytes,
-        Box::new(cursor),
+        cursor,
         Instant::now(),
     ))
 }
 
-/// One decoder over one file's bytes, opened at the header.
-fn gif_reader(bytes: Arc<[u8]>) -> Result<gif::Decoder<Cursor<Arc<[u8]>>>, gif::DecodingError> {
+/// **One frame of one animated file, for the lane that draws still pictures**
+/// (user report 2026-09-12).
+///
+/// `None` is "not this lane's file", and the caller decodes it with the picture
+/// decoder: a name that is not `.gif`, a path this window does not read unasked,
+/// a container that turns out not to be a GIF after all, a frame past the
+/// ceiling. Everything else comes back as exactly one composed frame — the same
+/// cursor, the same bounds, one call of [`AnimationCursor::next_frames`] — which
+/// is what lets a `.gif` far past the picture lane's eight-megabyte file cap
+/// still show a picture when this lane will not *play* it.
+#[must_use]
+pub fn first_frame(path: &Path) -> Option<AnimationStill> {
+    // **The gate the picture lane reads behind, asked here because this lane is
+    // now reading the same files** (route A of the untrusted-path audit,
+    // 2026-09-08). `bt_term`'s `read_and_decode_local_image` asks it one line
+    // above its own open; a fork that skipped it would be a way to the disk that
+    // did not.
+    if !bt_transcript::paths::may_read_unasked_through_links(
+        path,
+        bt_transcript::paths::PathNamer::ThisWindow,
+    ) {
+        return None;
+    }
+    let source = file_source(path).ok()?;
+    let stamp = source.opened_as();
+    let (mut cursor, width_px, height_px) = open(source).ok()?;
+    let frame = cursor.next_frames(1).into_iter().next()?;
+    Some(AnimationStill {
+        key: still_texture_key(path, stamp, width_px, height_px),
+        // The ring's frames are in the swapchain's byte order because they go
+        // to a texture created in it; these go to `DecodedInlineImage`, which
+        // is RGBA. One pass over one frame, once per file, on the worker.
+        rgba: Arc::from(
+            frame
+                .bgra
+                .chunks_exact(4)
+                .flat_map(|bgra| [bgra[2], bgra[1], bgra[0], bgra[3]])
+                .collect::<Vec<u8>>(),
+        ),
+        width_px,
+        height_px,
+    })
+}
+
+/// **What the shared GPU cache calls one animation's first frame**: the file,
+/// when it was last written, and the size it came back at.
+///
+/// `video_frame_texture_key`'s twin, for its reason said about the other kind of
+/// moving picture — a still picture's texture is named by a hash of its own
+/// bytes, and this one cannot be, because the bytes it was composed from are a
+/// container this process never held whole.
+fn still_texture_key(
+    path: &Path,
+    stamp: Option<AnimationStamp>,
+    width_px: u32,
+    height_px: u32,
+) -> String {
+    let stamp = stamp.map_or_else(|| "?".to_owned(), AnimationStamp::spelled);
+    format!(
+        "gif-frame:{}:{stamp}:{width_px}x{height_px}",
+        path.display()
+    )
+}
+
+/// **Judge one animated file's descriptor, and hand back the cursor over it.**
+///
+/// The order is the point (review row R1-7): everything that can be known from
+/// the header is decided here, **before** [`AnimationCursor::over`] allocates a
+/// canvas — and no frame is pulled here at all, because the two callers want
+/// different numbers of them.
+fn open(
+    source: Box<dyn AnimationSource>,
+) -> Result<(Box<AnimationCursor>, u32, u32), AnimationRefusal> {
+    // The container is judged by its own header and not by the name that led
+    // here, which is the discipline `decode_image_bytes_within` already keeps: a
+    // `.gif` that is a JPEG is a JPEG. Read off the front of the stream and then
+    // wound back, because a stream cannot be guessed at twice.
+    let mut source = source;
+    let mut head = [0_u8; 16];
+    let read = read_head(&mut *source, &mut head).map_err(|_| AnimationRefusal::Undecodable)?;
+    if image::guess_format(&head[..read]).ok() != Some(ImageFormat::Gif) {
+        return Err(AnimationRefusal::NotAnAnimation);
+    }
+    source
+        .restart()
+        .map_err(|_| AnimationRefusal::Undecodable)?;
+    let reader = gif_reader(source).map_err(|_| AnimationRefusal::Undecodable)?;
+    // **The logical screen descriptor is the whole judgement, and it is read off
+    // the header with no buffer anywhere.** A file declaring a 65535-square
+    // screen asks a decoder for seventeen gigabytes on its first frame, and the
+    // refusal that used to exist counted pixels that had already been made.
+    let width_px = u32::from(reader.width());
+    let height_px = u32::from(reader.height());
+    if width_px == 0 || height_px == 0 {
+        return Err(AnimationRefusal::Undecodable);
+    }
+    if width_px > MAX_ANIMATION_SIDE_PX || height_px > MAX_ANIMATION_SIDE_PX {
+        return Err(AnimationRefusal::FrameTooLarge);
+    }
+    let frame_bytes = u64::from(width_px) * u64::from(height_px) * 4;
+    if frame_bytes > MAX_ANIMATION_FRAME_BYTES {
+        return Err(AnimationRefusal::FrameTooLarge);
+    }
+    let cursor = AnimationCursor::over(reader, width_px, height_px);
+    Ok((Box::new(cursor), width_px, height_px))
+}
+
+/// Fill as much of `head` as the source has, so a short file is guessed at on
+/// what it does have rather than on a buffer of zeroes.
+fn read_head(source: &mut dyn AnimationSource, head: &mut [u8]) -> std::io::Result<usize> {
+    let mut read = 0;
+    while read < head.len() {
+        match source.read(&mut head[read..])? {
+            0 => break,
+            more => read += more,
+        }
+    }
+    Ok(read)
+}
+
+/// One decoder over one file, opened at the header.
+fn gif_reader(
+    source: Box<dyn AnimationSource>,
+) -> Result<gif::Decoder<Box<dyn AnimationSource>>, gif::DecodingError> {
     // The frame ceiling goes onto the decoder as its own memory limit as well as
     // being checked above: one guards the composition this module writes, the
     // other guards the buffer the `gif` crate allocates for a frame whose
@@ -501,7 +885,7 @@ fn gif_reader(bytes: Arc<[u8]>) -> Result<gif::Decoder<Cursor<Arc<[u8]>>>, gif::
     let mut options = gif::DecodeOptions::new();
     options.set_color_output(ColorOutput::RGBA);
     options.set_memory_limit(MemoryLimit::Bytes(FRAME_LIMIT));
-    options.read_info(Cursor::new(bytes))
+    options.read_info(source)
 }
 
 /// **How many frames to ask the cursor for**, given what one costs, what the
@@ -532,25 +916,27 @@ fn frames_wanted(frame_bytes: u64, held_bytes: u64, lead: Duration, typical: Dur
 }
 
 impl AnimationCursor {
-    fn over(
-        bytes: Arc<[u8]>,
-        reader: gif::Decoder<Cursor<Arc<[u8]>>>,
-        width_px: u32,
-        height_px: u32,
-    ) -> Self {
+    fn over(reader: gif::Decoder<Box<dyn AnimationSource>>, width_px: u32, height_px: u32) -> Self {
         // Checked against [`MAX_ANIMATION_FRAME_BYTES`] by the only caller,
         // before this allocation is reached.
         let canvas = vec![0_u8; (width_px as usize) * (height_px as usize) * 4];
         Self {
-            bytes,
-            reader,
+            reader: Some(reader),
             width_px,
             height_px,
             canvas,
             pass_frames: 0,
             frames_in_file: None,
             ended: false,
+            stale: false,
         }
+    }
+
+    /// **Whether the file was rewritten under the loop** (user report
+    /// 2026-09-12) — see [`Self::stale`] and `adopt_animation_fill`.
+    #[must_use]
+    pub fn file_changed(&self) -> bool {
+        self.stale
     }
 
     /// How many frames the file holds, once one whole pass of it has been read.
@@ -615,7 +1001,7 @@ impl AnimationCursor {
     /// animation on the two hundredth frame — would stop a picture that had been
     /// moving for twenty seconds.
     fn step(&mut self) -> Option<AnimationFrame> {
-        let frame = match self.reader.read_next_frame() {
+        let frame = match self.reader.as_mut()?.read_next_frame() {
             Ok(Some(frame)) => frame,
             Ok(None) | Err(_) => return None,
         };
@@ -627,12 +1013,35 @@ impl AnimationCursor {
         ))
     }
 
-    /// **Open the file again at its first frame**, which is what a loop is.
+    /// **Wind the file back to its first frame**, which is what a loop is (user
+    /// report 2026-09-12).
+    ///
+    /// It used to be a second decoder over bytes this cursor was holding; now it
+    /// is a seek on the handle it has had open all along, which is the whole of
+    /// what made the file's length stop being this window's memory.
+    ///
+    /// **A file that has been rewritten ends here instead.** The stamp it opened
+    /// with and the stamp its name carries now are compared at exactly this
+    /// moment — the one moment the decoder is between passes and a change can be
+    /// acted on rather than decoded into the middle of a picture. The window
+    /// lets the playback go and opens the file again down the ordinary path,
+    /// which is what shows the new one.
     fn start_again(&mut self) -> bool {
-        let Ok(reader) = gif_reader(Arc::clone(&self.bytes)) else {
+        let Some(reader) = self.reader.take() else {
             return false;
         };
-        self.reader = reader;
+        let mut source = reader.into_inner().into_inner();
+        if source.looks_like_now() != source.opened_as() {
+            self.stale = true;
+            return false;
+        }
+        if source.restart().is_err() {
+            return false;
+        }
+        let Ok(reader) = gif_reader(source) else {
+            return false;
+        };
+        self.reader = Some(reader);
         self.canvas.fill(0);
         self.pass_frames = 0;
         true
@@ -723,18 +1132,30 @@ impl Animation {
     /// **How many bytes this animation is holding** — what the window's own
     /// ceiling over every animation at once is counted against.
     ///
-    /// Four allocations and not two (adversarial review 2026-09-11, B9). The
-    /// ring and the file are the obvious pair, and the file is counted once
-    /// because the cursor's copy of it is the same allocation. The other two are
-    /// the ones the count used to walk past: the **canvas** every frame is
-    /// composed onto, which is a whole logical screen and outlives any one
-    /// frame, and the **fill in flight**, which is pixels this process is
-    /// holding on a worker thread. Leaving either out did not make the memory
-    /// smaller; it made the ceiling a number that was reached at roughly twice
-    /// the footprint it named.
+    /// Three allocations, and every one of them is pixels (adversarial review
+    /// 2026-09-11, B9; user report 2026-09-12): the **ring**, the **canvas**
+    /// every frame is composed onto — a whole logical screen, outliving any one
+    /// frame — and the **fill in flight**, which is frames this process is
+    /// holding on a worker thread. B9 found the last two; what went away after
+    /// it was the file, which this animation no longer holds at all (see the
+    /// module note), so charging its length here would be charging for memory
+    /// nobody has.
     #[must_use]
     pub fn bytes_held(&self) -> u64 {
-        self.ring_bytes() + self.bytes.len() as u64 + self.canvas_bytes + self.in_flight_bytes
+        self.ring_bytes() + self.canvas_bytes + self.in_flight_bytes
+    }
+
+    /// **Whether the file changed under the loop** — asked of the cursor, which
+    /// is the thing that noticed, and `false` while the cursor is away.
+    ///
+    /// A playback that answers `true` is one the window lets go of: see
+    /// `adopt_animation_fill`, which is the only caller and the only moment the
+    /// cursor is certainly home.
+    #[must_use]
+    pub fn file_changed(&self) -> bool {
+        self.cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.file_changed())
     }
 
     /// What the ring alone is holding.
@@ -779,7 +1200,6 @@ impl Animation {
         frames: Vec<AnimationFrame>,
         width_px: u32,
         height_px: u32,
-        bytes: Arc<[u8]>,
         cursor: Box<AnimationCursor>,
         started: Instant,
     ) -> Self {
@@ -792,7 +1212,6 @@ impl Animation {
             ring,
             width_px,
             height_px,
-            bytes,
             cursor: Some(cursor),
             standing_seq: 0,
             // **A guess, and it is replaced the moment a reader can see it.**
@@ -833,7 +1252,6 @@ impl Animation {
             ring,
             width_px,
             height_px,
-            bytes: Arc::from(Vec::new()),
             cursor: None,
             standing_seq: 0,
             due_at: started + first,
@@ -980,6 +1398,8 @@ impl Animation {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use super::*;
 
     fn fixture() -> Vec<u8> {
@@ -988,6 +1408,27 @@ mod tests {
                 .join("../../tests/assets/folio-anim-test.gif"),
         )
         .expect("the animation fixture is in tests/assets")
+    }
+
+    /// **A file a test may write**, under the build directory and therefore
+    /// inside this checkout: the lane under test opens files now, so some of
+    /// these tests need one, and none of them may go looking for somewhere to
+    /// put it on the machine that is running them.
+    ///
+    /// Named for the test and the process, so two of them running at once are
+    /// two files.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/animation-tests");
+        std::fs::create_dir_all(&directory).expect("a scratch directory under the build directory");
+        directory.join(format!("{name}-{}.gif", std::process::id()))
+    }
+
+    /// The same, written and handed back — and removed by the caller.
+    fn scratch_gif(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let path = scratch(name);
+        std::fs::write(&path, bytes).expect("a scratch file this test owns");
+        path
     }
 
     /// **The worker's half of the loop, run here on this thread.**
@@ -1218,13 +1659,19 @@ mod tests {
     ///
     /// **The structural half is the load-bearing one and it stands first**,
     /// because the two readings agree about the verdict and differ only in what
-    /// they spend reaching it: both answer [`AnimationRefusal::TooLarge`], and
-    /// only one of them allocates seventeen gigabytes on the way. The order
-    /// inside [`open`] is where the difference lives — the screen descriptor is
-    /// read off the header and judged against [`MAX_ANIMATION_SIDE_PX`] and
+    /// they spend reaching it: both answer
+    /// [`AnimationRefusal::FrameTooLarge`], and only one of them allocates
+    /// seventeen gigabytes on the way. The order inside [`open`] is where the
+    /// difference lives — the screen descriptor is read off the header and
+    /// judged against [`MAX_ANIMATION_SIDE_PX`] and
     /// [`MAX_ANIMATION_FRAME_BYTES`] **before** [`AnimationCursor::over`]
-    /// allocates a canvas and before a frame is pulled — so the order is what is
-    /// asserted on, and it is asserted on *before* the fixtures are decoded.
+    /// allocates a canvas — so the order is what is asserted on, and it is
+    /// asserted on *before* the fixtures are decoded.
+    ///
+    /// **And no frame is pulled in there at all**, which is the shape since
+    /// 2026-09-12: [`open`] judges and allocates the canvas, and its two callers
+    /// pull as many frames as each of them wants — a ring for [`stream`], one
+    /// for [`first_frame`].
     ///
     /// MUTATION: move either ceiling below `AnimationCursor::over` and the first
     /// assertion goes red; drop it and the verdicts below go red.
@@ -1245,12 +1692,13 @@ mod tests {
         let canvas = walk
             .find("AnimationCursor::over(")
             .expect("and the canvas comes after");
-        let frames = walk
-            .find("next_frames(")
-            .expect("and the frames are pulled from it");
         assert!(
-            side < canvas && frame < canvas && canvas < frames,
+            side < canvas && frame < canvas,
             "the screen is judged before a pixel is allocated:\n{walk}",
+        );
+        assert!(
+            !walk.contains("next_frames("),
+            "the judge does not decode: its callers ask for the frames they want:\n{walk}",
         );
 
         // And the verdict, at the size the review named and at one a machine can
@@ -1258,7 +1706,7 @@ mod tests {
         for side in [16_384_u16, 65_535] {
             assert_eq!(
                 decode_bytes(a_gif_declaring(side, side)).err(),
-                Some(AnimationRefusal::TooLarge),
+                Some(AnimationRefusal::FrameTooLarge),
                 "a {side}-square logical screen is over this window's ceiling",
             );
         }
@@ -1281,37 +1729,44 @@ mod tests {
     /// ```
     ///
     /// `decode` was a bare `std::fs::read`, so a hover over any file named
-    /// `.gif` pulled all of it into memory before anything looked at it — while
-    /// the still-picture lane next door has refused past
-    /// `bt_term::MAX_INLINE_IMAGE_BYTES` since it was written, which means a file
-    /// over that cap could not be *shown* by this window and was read whole
-    /// anyway. The animation lane now reads behind the same number.
+    /// `.gif` pulled all of it into memory before anything looked at it. The cap
+    /// it reads behind was `bt_term::MAX_INLINE_IMAGE_BYTES` until 2026-09-12
+    /// and is now [`MAX_ANIMATION_FILE_BYTES`]'s own half-gigabyte sanity bound
+    /// — the length of a file stopped being a thing this window holds — but the
+    /// discipline is the same one and it is what this pins: the length is read
+    /// off the handle the bytes are then read through, and nothing reads a whole
+    /// file into memory to find out how long it is.
     ///
     /// MUTATION: go back to `std::fs::read` and the verdict is whatever the
     /// bytes happen to guess as, after all of them have been read.
     #[test]
     fn a_gif_past_the_encoded_cap_is_not_read_whole() {
         const SOURCE: &str = include_str!("animation.rs");
-        let at = SOURCE
-            .find("\npub fn decode(")
-            .expect("the file reader is a free function in this file");
-        let rest = &SOURCE[at..];
-        let reader = &rest[..rest.find("\n}\n").expect("and it ends") + 3];
-        assert!(
-            !reader.contains("fs::read("),
-            "a file is read behind a cap and not whole:\n{reader}",
-        );
+        for function in ["\npub fn decode(", "\nfn file_source("] {
+            let at = SOURCE
+                .find(function)
+                .expect("the file reader is a free function in this file");
+            let rest = &SOURCE[at..];
+            let reader = &rest[..rest.find("\n}\n").expect("and it ends") + 3];
+            assert!(
+                !reader.contains("fs::read("),
+                "a file is read behind a cap and not whole:\n{reader}",
+            );
+        }
 
-        let path = std::env::temp_dir().join(format!("bt-anim-huge-{}.gif", std::process::id()));
+        let path = scratch("past-the-cap");
         let _ = std::fs::remove_file(&path);
-        let file = std::fs::File::create(&path).expect("a file in the temp directory");
+        let file = std::fs::File::create(&path).expect("a file this test owns");
+        // Declared and not written: on NTFS this is a sparse file and costs
+        // nothing, which is the only reason a half-gigabyte fixture is
+        // affordable in a unit test.
         file.set_len(MAX_ANIMATION_FILE_BYTES + 1)
             .expect("a file of a declared length");
         drop(file);
         assert_eq!(
             decode(&path).err(),
-            Some(AnimationRefusal::TooLarge),
-            "a file past the cap is refused on its size",
+            Some(AnimationRefusal::FileTooLong),
+            "a file past the cap is refused on its length, and says so",
         );
         let _ = std::fs::remove_file(&path);
     }
@@ -1548,16 +2003,17 @@ mod tests {
         // that, before anything behind it is read.
         assert_eq!(
             refusal(decode_bytes(a_gif_declaring(20_000, 4))),
-            Some(AnimationRefusal::TooLarge)
+            Some(AnimationRefusal::FrameTooLarge)
         );
-        // A frame too large to stream is the one shape `TooLarge` still means:
+        // A frame too large to stream is the one shape `FrameTooLarge` means:
         // 2048 square is 16 MiB a frame, which is the whole ring twice over.
         assert_eq!(
             refusal(decode_bytes(a_gif_declaring(2_048, 2_049))),
-            Some(AnimationRefusal::TooLarge)
+            Some(AnimationRefusal::FrameTooLarge)
         );
-        // The two a reader is owed a sentence about, and the two they are not.
-        assert!(AnimationRefusal::TooLarge.is_worth_saying());
+        // The three a reader is owed a sentence about, and the two they are not.
+        assert!(AnimationRefusal::FrameTooLarge.is_worth_saying());
+        assert!(AnimationRefusal::FileTooLong.is_worth_saying());
         assert!(AnimationRefusal::Undecodable.is_worth_saying());
         assert!(!AnimationRefusal::OneFrame.is_worth_saying());
         assert!(!AnimationRefusal::NotAnAnimation.is_worth_saying());
@@ -1565,12 +2021,14 @@ mod tests {
         // a comparison.
         assert_eq!(MAX_ANIMATION_RING_BYTES, 32 * 1024 * 1024);
         assert_eq!(MAX_ANIMATION_FRAME_BYTES, 16 * 1024 * 1024);
-        // 88 and not 40: the ring and the file were two of an animation's four
-        // allocations, and the canvas and the fill in flight were the other two
-        // (adversarial review 2026-09-11, B9).
-        assert_eq!(MAX_ANIMATION_HELD_BYTES, 88 * 1024 * 1024);
+        // 80 and not 88: the ring, the canvas and the fill in flight are what an
+        // animation holds, and the file — which used to be the fourth term — is
+        // read rather than held (user report 2026-09-12).
+        assert_eq!(MAX_ANIMATION_HELD_BYTES, 80 * 1024 * 1024);
         assert_eq!(MAX_ANIMATION_SIDE_PX, 8192);
-        assert_eq!(MAX_ANIMATION_FILE_BYTES, 8 * 1024 * 1024);
+        // A sanity bound on a length this window no longer pays for, and it is
+        // deliberately far away from anything a screen recorder writes.
+        assert_eq!(MAX_ANIMATION_FILE_BYTES, 512 * 1024 * 1024);
     }
 
     /// PIN — **a redraw inside the standing frame's own delay uploads nothing**
@@ -1693,10 +2151,10 @@ mod tests {
         assert_eq!(animation.frame_index(), 2);
     }
 
-    /// RED — **an animation is weighed by all four of its allocations**
-    /// (adversarial review 2026-09-11, B9).
+    /// RED — **an animation is weighed by all three of its allocations**
+    /// (adversarial review 2026-09-11, B9; user report 2026-09-12).
     ///
-    /// RED EVIDENCE (2026-09-11), the count before this ticket:
+    /// RED EVIDENCE (2026-09-11), the count before B9:
     ///
     /// ```text
     /// bytes_held() = ring_bytes() + bytes.len()
@@ -1709,21 +2167,28 @@ mod tests {
     /// window standing exactly at `MAX_ANIMATION_CACHE_BYTES` was a process
     /// holding about twice it.
     ///
-    /// MUTATION: drop either term from `bytes_held` and the first or the second
-    /// block fails by exactly that allocation.
+    /// **And the fourth term has since gone away**: `bytes.len()` was the file,
+    /// and an animation reads its file rather than holding it (user report
+    /// 2026-09-12). So this now pins three, and it pins the absence of the
+    /// fourth — the count must not grow with the length of the file, because
+    /// nothing in this process does.
+    ///
+    /// MUTATION: drop either remaining term from `bytes_held` and the first or
+    /// the second block fails by exactly that allocation.
     #[test]
     fn an_animation_is_weighed_by_its_canvas_and_by_the_fill_in_flight() {
         const SIDE: u16 = 256;
         let frame_bytes = u64::from(SIDE) * u64::from(SIDE) * 4;
-        let mut animation = decode_bytes(a_gif_of(240, SIDE, 5)).expect("a long small capture");
-        let file_bytes = animation.bytes.len() as u64;
-        assert!(file_bytes > 0, "the file is kept, and it is counted once");
+        let bytes = a_gif_of(240, SIDE, 5);
+        let file_bytes = bytes.len() as u64;
+        assert!(file_bytes > 0, "and the file is a real one");
+        let mut animation = decode_bytes(bytes).expect("a long small capture");
 
         // ① the canvas, which is one whole logical screen and outlives any one
-        // frame.
+        // frame — and the file, which is not here at all.
         assert_eq!(
             animation.bytes_held(),
-            animation.ring_bytes() + file_bytes + frame_bytes,
+            animation.ring_bytes() + frame_bytes,
             "the composition canvas is held whether or not a frame is due",
         );
 
@@ -1739,7 +2204,7 @@ mod tests {
         );
         assert_eq!(
             animation.bytes_held(),
-            animation.ring_bytes() + file_bytes + frame_bytes + want as u64 * frame_bytes,
+            animation.ring_bytes() + frame_bytes + want as u64 * frame_bytes,
         );
         // ③ and the peak — cursor away, ring as full as it will be — is under
         // the number the window's own ceiling is a multiple of.
@@ -1753,17 +2218,14 @@ mod tests {
         let frames = cursor.next_frames(want);
         animation.park_cursor(cursor, frames);
         assert_eq!(animation.in_flight_bytes, 0);
-        assert_eq!(
-            animation.bytes_held(),
-            animation.ring_bytes() + file_bytes + frame_bytes,
-        );
+        assert_eq!(animation.bytes_held(), animation.ring_bytes() + frame_bytes,);
         assert!(animation.bytes_held() <= MAX_ANIMATION_HELD_BYTES);
 
-        // ⑤ the ceiling itself: every one of the four, and the two that were
-        // missing are the larger half of it.
+        // ⑤ the ceiling itself: every one of the three, and no term for a length
+        // this process is not holding.
         assert_eq!(
             MAX_ANIMATION_HELD_BYTES,
-            MAX_ANIMATION_RING_BYTES * 2 + MAX_ANIMATION_FILE_BYTES + MAX_ANIMATION_FRAME_BYTES,
+            MAX_ANIMATION_RING_BYTES * 2 + MAX_ANIMATION_FRAME_BYTES,
         );
     }
 
@@ -1811,5 +2273,334 @@ mod tests {
             frames_wanted(tiny, 0, MAX_ANIMATION_RING_LEAD, MIN_FRAME_DELAY),
             0
         );
+    }
+
+    /// **A GIF of `frames` small frames whose pixels do not compress**, so that
+    /// the file on disk is large while nothing decoded from it is.
+    ///
+    /// [`a_gif_of`] writes the opposite shape — an enormous decoded frame behind
+    /// a tiny file — and that was the right fixture for a ceiling counted in
+    /// *pixels*. The cap this one is about was counted in **bytes of file**, so
+    /// the fixture has to be a long file, and the honest way to make one is the
+    /// way a screen recorder makes one: many frames of picture that does not
+    /// deflate. The indices come off a small deterministic generator so the
+    /// file is the same file on every machine and every run.
+    fn a_noisy_gif(frames: u16, side: u16, delay_hundredths: u16) -> Vec<u8> {
+        let palette: Vec<u8> = (0..=255_u8)
+            .flat_map(|index| [index, index.wrapping_mul(7), index.wrapping_mul(31)])
+            .collect();
+        let pixels = side as usize * side as usize;
+        let mut seed = 0x2545_F491_4F6C_DD1D_u64;
+        let mut out = Vec::new();
+        {
+            let mut encoder =
+                gif::Encoder::new(&mut out, side, side, &palette).expect("a writer this test owns");
+            encoder
+                .set_repeat(gif::Repeat::Infinite)
+                .expect("and it takes a repeat");
+            for _ in 0..frames {
+                let indices: Vec<u8> = (0..pixels)
+                    .map(|_| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        (seed >> 24) as u8
+                    })
+                    .collect();
+                let mut frame = gif::Frame::from_indexed_pixels(side, side, indices, None);
+                frame.delay = delay_hundredths;
+                frame.dispose = gif::DisposalMethod::Keep;
+                encoder.write_frame(&frame).expect("a frame of noise");
+            }
+        }
+        out
+    }
+
+    /// RED — **an animation longer than the old byte cap plays** (user report
+    /// 2026-09-12).
+    ///
+    /// RED EVIDENCE (2026-09-12), before the file was streamed —
+    /// `MAX_ANIMATION_FILE_BYTES` was `bt_term::MAX_INLINE_IMAGE_BYTES`, eight
+    /// megabytes, and the length was judged before a byte was decoded:
+    ///
+    /// ```text
+    /// an ordinary screen recording opens: Err(TooLarge)
+    /// ```
+    ///
+    /// The reader's own file was an 11.7 MB `simulation.gif`; the fixture here
+    /// is the same shape — small frames, a great many of them, and a file well
+    /// over the cap that refused it. What is asserted is the whole of the fix:
+    ///
+    /// * it **opens**, so the length of a file is not a verdict on it any more;
+    /// * it **moves**, with a worker filling the ring behind it; and
+    /// * what it **holds** is the ring and the canvas and nothing else — the
+    ///   file's own length is not in the number, which is the difference
+    ///   between streaming a file and keeping it.
+    ///
+    /// MUTATION: put the file's bytes back into the cursor and the third block
+    /// fails by exactly the length of the file.
+    #[test]
+    fn an_animation_longer_than_the_old_byte_cap_plays() {
+        const OLD_CAP: u64 = 8 * 1024 * 1024;
+        const SIDE: u16 = 64;
+        let bytes = a_noisy_gif(2_400, SIDE, 5);
+        assert!(
+            bytes.len() as u64 > OLD_CAP,
+            "the fixture is over the cap that refused the reader's file: {} bytes",
+            bytes.len(),
+        );
+        let file_bytes = bytes.len() as u64;
+        let path = scratch_gif("longer-than-the-old-cap", &bytes);
+        drop(bytes);
+
+        // ① it opens, from the file, standing on a ring.
+        let mut animation = decode(&path).expect("an ordinary screen recording opens");
+        assert!(animation.ring.len() >= 2, "and it opens with a ring");
+
+        // ② it moves, and the ring refills behind it.
+        let frame_bytes = u64::from(SIDE) * u64::from(SIDE) * 4;
+        let canvas_bytes = frame_bytes;
+        let mut now = Instant::now();
+        animation.present(now);
+        for step in 0..200_u64 {
+            pump(&mut animation);
+            // ③ and at no point in the walk is the file's length in the number.
+            assert!(
+                animation.bytes_held() <= MAX_ANIMATION_RING_BYTES + canvas_bytes,
+                "at step {step} it holds {} bytes of a {file_bytes}-byte file",
+                animation.bytes_held(),
+            );
+            assert!(
+                animation.bytes_held() < file_bytes,
+                "the file is being read, not held: {} of {file_bytes}",
+                animation.bytes_held(),
+            );
+            now += Duration::from_millis(50);
+            animation.advance(now);
+        }
+        assert_eq!(
+            animation.frame_index(),
+            200,
+            "two hundred frames of the file, one every fifty milliseconds",
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// RED — **the loop comes round by seeking the file, not by holding it**
+    /// (user report 2026-09-12).
+    ///
+    /// The old cursor kept an `Arc<[u8]>` of the whole file for exactly one
+    /// reason — GIF has no seek, so playing the loop a second time meant opening
+    /// the bytes again — and that one reason is what made a cap on the file's
+    /// *length* necessary, which is what refused an 11.7 MB recording. A handle
+    /// answers the same question: the file is still open, so coming round is a
+    /// seek to nought and a new decoder over the same handle.
+    ///
+    /// Two halves, and both are needed. The **behaviour**: a file-backed
+    /// animation walked past its own last frame is standing on frame zero again,
+    /// with its delays intact. The **structure**: the cursor holds no copy of
+    /// the file, and it is the source that is wound back.
+    ///
+    /// MUTATION: make `restart` a no-op and the second turn reads the frames
+    /// after the end of the file, which is no frames at all — the walk stops.
+    #[test]
+    fn the_loop_comes_round_by_seeking_the_file_not_by_holding_it() {
+        const FRAMES: u64 = 40;
+        let path = scratch_gif("the-loop-seeks", &a_noisy_gif(FRAMES as u16, 32, 5));
+        let mut animation = decode(&path).expect("a file-backed animation opens");
+        let mut now = Instant::now();
+        animation.present(now);
+        let mut seen = Vec::new();
+        for _ in 0..(2 * FRAMES + 1) {
+            pump(&mut animation);
+            seen.push(animation.frame_index());
+            now += Duration::from_millis(50);
+            animation.advance(now);
+        }
+        assert_eq!(animation.frames_in_file(), Some(FRAMES));
+        let walk: Vec<u64> = (0..FRAMES).collect();
+        assert_eq!(&seen[..FRAMES as usize], &walk[..], "the first turn");
+        assert_eq!(
+            &seen[FRAMES as usize..2 * FRAMES as usize],
+            &walk[..],
+            "and the second, which begins at frame zero again",
+        );
+
+        // And the structure: the way back to frame zero is the source winding
+        // itself back, not a second decoder over bytes this window is carrying.
+        const SOURCE: &str = include_str!("animation.rs");
+        let at = SOURCE
+            .find("    fn start_again(&mut self) -> bool {")
+            .expect("the loop's own function is in this file");
+        let rest = &SOURCE[at..];
+        let again = &rest[..rest.find("\n    }\n").expect("and it ends") + 6];
+        assert!(
+            again.contains("restart()"),
+            "coming round is a seek on the source:\n{again}",
+        );
+        assert!(
+            !again.contains("Arc::clone(&self.bytes)"),
+            "and not a second reader over a held copy of the file:\n{again}",
+        );
+        let at = SOURCE
+            .find("pub struct AnimationCursor {")
+            .expect("the cursor is declared in this file");
+        let rest = &SOURCE[at..];
+        let declared = &rest[..rest.find("\n}\n").expect("and it ends") + 3];
+        assert!(
+            !declared.contains("Arc<[u8]>"),
+            "the cursor holds no copy of the file:\n{declared}",
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// RED — **a file rewritten under the loop ends its playback** (user report
+    /// 2026-09-12, the cost of not holding the file).
+    ///
+    /// Holding the bytes made this question go away by making the animation a
+    /// picture of a file that no longer existed; a handle makes it real, because
+    /// a file being written to under an open handle is a file whose frame two
+    /// hundred may belong to a different recording than its frame one. So the
+    /// cursor keeps the stamp it opened with — when the file was last written
+    /// and how long it was, the identity `bt_term`'s decode memo already keys on
+    /// (§7.1.3k ⑧) — and compares it at the one moment a change can be acted on
+    /// instead of decoded into the middle of a picture: the moment the loop
+    /// comes round.
+    ///
+    /// The window's half of this is `adopt_animation_fill`, which lets the
+    /// playback go so the pane opens the file again — see the test of that name
+    /// in `main.rs`.
+    ///
+    /// MUTATION: drop the comparison and the second block reads `false`, which
+    /// is a decoder reading the first half of one file and the second half of
+    /// another.
+    #[test]
+    fn a_file_rewritten_under_the_loop_ends_the_playback_and_is_reopened() {
+        const FRAMES: u16 = 40;
+        let path = scratch_gif("rewritten-under-the-loop", &a_noisy_gif(FRAMES, 32, 5));
+
+        // ① the control: a file nobody touches comes round as many times as it
+        // is asked to, and says nothing about having changed.
+        let (mut cursor, _, _) = open(file_source(&path).expect("the file opens")).expect("a GIF");
+        let frames = cursor.next_frames(3 * FRAMES as usize);
+        assert_eq!(frames.len(), 3 * FRAMES as usize, "three whole turns");
+        assert!(!cursor.file_changed(), "nothing happened to the file");
+        drop(cursor);
+
+        // ② and a file rewritten while the loop is inside it ends there.
+        let (mut cursor, _, _) = open(file_source(&path).expect("the file opens")).expect("a GIF");
+        let head = cursor.next_frames(FRAMES as usize / 2);
+        assert_eq!(head.len(), FRAMES as usize / 2, "half a turn");
+        assert!(!cursor.file_changed(), "and it is the file it opened");
+        // A different recording, under the same name and of a different length
+        // — which is what an export written again, or a `mv` over it, is.
+        std::fs::write(&path, a_noisy_gif(FRAMES + 7, 32, 5)).expect("the file is written again");
+        let rest = cursor.next_frames(3 * FRAMES as usize);
+        assert!(
+            cursor.file_changed(),
+            "the loop came round onto a file that is not the one it opened",
+        );
+        assert!(
+            rest.len() < 3 * FRAMES as usize,
+            "and it stopped there rather than decoding a stranger: {} frames",
+            rest.len(),
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// RED — **a refused animation's first frame is decoded by the GIF
+    /// decoder** (user report 2026-09-12).
+    ///
+    /// RED EVIDENCE (2026-09-12), the second sentence on the reader's empty
+    /// pane, under a foot that had already declined to play the file:
+    ///
+    /// ```text
+    /// Preview failed: inline image exceeds its decode limit
+    /// ```
+    ///
+    /// The still that stands in for an animation this window will not play came
+    /// from the picture decoder, which reads a file whole behind
+    /// `bt_term::MAX_INLINE_IMAGE_BYTES` — eight megabytes, the allowance for a
+    /// picture a shell pastes into a scrollback. So the one file that most needs
+    /// a still is the one file that cannot have one. [`first_frame`] pulls
+    /// exactly one frame through the same streaming cursor under the same
+    /// [`MAX_ANIMATION_FRAME_BYTES`], and the length of the file is nothing to
+    /// it.
+    ///
+    /// The four answers are here: a `.gif` this lane **refuses** still has a
+    /// picture; a `.gif` past the picture lane's own file cap has one **from
+    /// here** and provably not from there; a frame past this lane's ceiling
+    /// answers `None`, so the picture decoder decides it; and so does a name
+    /// that is not `.gif` at all. Those last two are the fork and not a
+    /// fallback: the name said GIF and only the bytes could say otherwise.
+    ///
+    /// MUTATION: send the still back down the picture lane and the second block
+    /// is the reader's empty pane again, word for word.
+    #[test]
+    fn a_refused_animations_first_frame_is_decoded_by_the_gif_decoder() {
+        const OLD_CAP: u64 = 8 * 1024 * 1024;
+        const SIDE: u16 = 64;
+
+        // ① a `.gif` with one frame in it is refused as an animation — one frame
+        // is not a thing that moves — and it still has a picture, from here.
+        let path = scratch_gif("one-frame", &a_gif_of(1, 16, 10));
+        assert_eq!(decode(&path).err(), Some(AnimationRefusal::OneFrame));
+        let still = first_frame(&path).expect("a refused animation still has a first frame");
+        assert_eq!((still.width_px, still.height_px), (16, 16));
+        assert_eq!(
+            still.rgba.len() as u64,
+            u64::from(still.width_px) * u64::from(still.height_px) * 4,
+            "one whole frame of pixels",
+        );
+        // RGBA and not the ring's BGRA, because these go to the picture lane.
+        assert_eq!(
+            still.rgba[3], 0xFF,
+            "opaque, as a GIF without a transparent index is"
+        );
+        // The key names the file and the stamp it had, because the bytes it was
+        // composed from are a container this process never held whole.
+        assert!(still.key.starts_with("gif-frame:"), "{}", still.key);
+        assert!(still.key.ends_with(":16x16"), "{}", still.key);
+        let _ = std::fs::remove_file(&path);
+
+        // ② and here is the lane the still used to come from, refusing the
+        // reader's own kind of file — which is the sentence off their pane.
+        let path = scratch_gif("long-and-playing", &a_noisy_gif(2_400, SIDE, 5));
+        let length = std::fs::metadata(&path).expect("it is on disk").len();
+        assert!(
+            length > OLD_CAP,
+            "the fixture is over the cap that refused the reader's file: {length}",
+        );
+        assert_eq!(
+            bt_term::InlineImageDecoder::default()
+                .decode(bt_term::InlineImageTask {
+                    occurrence_id: 0,
+                    source: bt_term::InlineImageSource::LocalPath(path.clone()),
+                })
+                .err(),
+            Some(bt_term::InlineImageDecodeError::TooLarge),
+            "the picture decoder reads a file whole behind eight megabytes",
+        );
+        assert!(decode(&path).is_ok(), "and this lane plays it");
+        let still = first_frame(&path).expect("and draws its first frame");
+        assert_eq!(
+            (still.width_px, still.height_px),
+            (u32::from(SIDE), u32::from(SIDE))
+        );
+        let _ = std::fs::remove_file(&path);
+
+        // ③ a frame past this lane's own ceiling is not this lane's to draw
+        // either, so the picture decoder is asked — `None`, not an empty
+        // picture.
+        let path = scratch_gif("frame-past-the-ceiling", &a_gif_declaring(2_048, 2_049));
+        assert_eq!(decode(&path).err(), Some(AnimationRefusal::FrameTooLarge));
+        assert!(
+            first_frame(&path).is_none(),
+            "the picture lane answers this"
+        );
+        let _ = std::fs::remove_file(&path);
+
+        // ④ and neither is a file that is not named like one.
+        assert!(first_frame(std::path::Path::new(r"D:\shots\a.png")).is_none());
     }
 }

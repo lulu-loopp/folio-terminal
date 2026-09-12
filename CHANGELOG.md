@@ -131,6 +131,13 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **An animated picture of any ordinary size plays.** A `.gif` over about 8 MB
+  showed nothing at all — an empty pane saying the picture was too large and the
+  preview had failed — which is the size an ordinary screen recording or a
+  simulation reaches in a few seconds. Folio now reads an animation from its file
+  as it plays it instead of holding the whole file in memory, so the length of
+  the file is no longer a limit on it, and the foot of the pane says which of the
+  two sizes it means on the rare file it still declines.
 - **Switching between animated pictures shows the right one at once.** Opening a
   second `.gif` on a pane or a card that was already playing one could leave the
   first file's picture on the glass, under the second file's name, for as long as

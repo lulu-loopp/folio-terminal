@@ -1268,6 +1268,47 @@ fn video_frame_texture_key(
     format!("video-frame:{}:{stamp}:{width}x{height}", path.display())
 }
 
+/// **One file's native pixels, down whichever decoder can read that file** (user
+/// report 2026-09-12).
+///
+/// The fork is one line and it is not a fallback: a `.gif`'s picture is its
+/// first frame, and the lane that can pull one frame out of a long file without
+/// reading the whole of it is [`animation::first_frame`]. The picture decoder
+/// reads a file whole behind `bt_term::MAX_INLINE_IMAGE_BYTES` — eight
+/// megabytes, the allowance for a picture a shell pastes into a scrollback — so
+/// an ordinary 11.7 MB screen recording came back "inline image exceeds its
+/// decode limit" and the pane drew nothing at all, under a foot line saying the
+/// animation had been declined too. One file, two refusals, and neither of them
+/// about anything the reader had done.
+///
+/// `None` from the animation lane is "not this lane's file" — a name that is not
+/// `.gif`, a path this window does not read unasked, a container that turns out
+/// to be a JPEG, a frame past the ceiling — and the picture decoder answers
+/// those, which is the whole of why the name alone cannot decide it.
+fn peek_pixels(
+    decoder: &mut InlineImageDecoder,
+    path: &Path,
+) -> std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError> {
+    if let Some(still) = animation::first_frame(path) {
+        return Ok(bt_term::DecodedInlineImage {
+            // The peek's own numbering, and the only one there is: this lane is
+            // asked for a file and not for an occurrence in a stream.
+            occurrence_id: 0,
+            key: still.key,
+            rgba: still.rgba,
+            width_px: still.width_px,
+            height_px: still.height_px,
+            // It is a GIF, which this window has always reported as animated
+            // whether or not it plays it.
+            animated: true,
+        });
+    }
+    decoder.decode(bt_term::InlineImageTask {
+        occurrence_id: 0,
+        source: bt_term::InlineImageSource::LocalPath(path.to_owned()),
+    })
+}
+
 struct MathWorker {
     tasks: mpsc::Sender<MathWorkerRequest>,
     scale_tasks: mpsc::Sender<ScaleWorkerRequest>,
@@ -1382,10 +1423,7 @@ impl MathWorker {
                             )
                         }
                         MathWorkerRequest::PeekImage { leaf, path } => {
-                            let result = image_decoder.decode(bt_term::InlineImageTask {
-                                occurrence_id: 0,
-                                source: bt_term::InlineImageSource::LocalPath(path.clone()),
-                            });
+                            let result = peek_pixels(&mut image_decoder, &path);
                             (leaf, DecorationWorkerCompletion::PeekImage { path, result })
                         }
                         MathWorkerRequest::PeekVideoFrame { leaf, path } => {
@@ -25989,15 +26027,23 @@ impl bt_term::Weighed for AnimationEntry {
 /// can only be tested by building a window.
 ///
 /// See [`Runtime::animation_refusal_notice`] for what asks, and
-/// [`animation::AnimationRefusal::is_worth_saying`] for why two of the four say
+/// [`animation::AnimationRefusal::is_worth_saying`] for why two of the five say
 /// nothing: a `.gif` that is one still picture looks exactly like a still
 /// picture, which is what it is.
+///
+/// **Three sentences and not two** (user report 2026-09-12). "Its frames are
+/// each too big to keep two of" and "it is longer than this window will read"
+/// were one refusal wearing one sentence, and the sentence was the first one —
+/// so a reader whose 11.7 MB recording was declined for its *length* was told
+/// its picture was too large — about a file whose frames compose to 11.5 MB,
+/// well inside the ceiling that sentence is about.
 fn animation_refusal_notice(refusal: animation::AnimationRefusal) -> Option<&'static str> {
     if !refusal.is_worth_saying() {
         return None;
     }
     Some(match refusal {
-        animation::AnimationRefusal::TooLarge => i18n::Text::PreviewAnimationTooLarge.text(),
+        animation::AnimationRefusal::FrameTooLarge => i18n::Text::PreviewAnimationTooLarge.text(),
+        animation::AnimationRefusal::FileTooLong => i18n::Text::PreviewAnimationFileTooLong.text(),
         _ => i18n::Text::PreviewAnimationBroken.text(),
     })
 }
@@ -26147,30 +26193,54 @@ fn animations_opened(
 /// halfway through the file and a ring of frames from the middle of it. The
 /// serial is what makes those two answers distinguishable at all; the key names
 /// the file, and the file is not the playback.
+///
+/// **And a third way, which is not "for nobody" but "of nothing"** (user report
+/// 2026-09-12): the file was rewritten under the loop. The cursor noticed it at
+/// the moment the loop came round, which is the only moment a change can be
+/// acted on rather than decoded into the middle of a picture; this window's part
+/// is to let the playback go, key and all, so that the next pass over the drawn
+/// animations opens the file again down the ordinary path and shows whatever is
+/// there now.
 fn adopt_animation_fill(
     animations: &mut AnimationCache,
     key: String,
     serial: u64,
     cursor: Box<animation::AnimationCursor>,
     frames: Vec<animation::AnimationFrame>,
-) -> bool {
+) -> AnimationFillOutcome {
     let answers_this_playback = matches!(
         animations.get(&key),
         Some(AnimationEntry::Ready { serial: held, .. }) if *held == serial
     );
     if !answers_this_playback {
-        return false;
+        return AnimationFillOutcome::ForNobody;
     }
     let Some(AnimationEntry::Ready {
         serial,
         mut animation,
     }) = animations.remove(&key)
     else {
-        return false;
+        return AnimationFillOutcome::ForNobody;
     };
     animation.park_cursor(cursor, frames);
+    if animation.file_changed() {
+        return AnimationFillOutcome::FileChanged;
+    }
     animations.insert(key, AnimationEntry::Ready { serial, animation });
-    true
+    AnimationFillOutcome::Parked
+}
+
+/// **What became of one fill coming home** — see [`adopt_animation_fill`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AnimationFillOutcome {
+    /// The frames went into the ring they were decoded for.
+    Parked,
+    /// Nothing under that key wanted them: the entry was evicted, or it is a
+    /// second playback of the same file.
+    ForNobody,
+    /// The file changed under the loop, so the playback was let go of and the
+    /// pane is owed a fresh open.
+    FileChanged,
 }
 
 /// **How many bytes of decoded frames one window may hold, over every animation
@@ -26186,9 +26256,13 @@ fn adopt_animation_fill(
 /// its 240 MiB ceiling was a process holding about twice it. Charging all four
 /// roughly doubled the per-animation number, and six of *that* would have been
 /// half a gigabyte — a ceiling raised by the act of learning what it was already
-/// spending, which is the wrong answer to a measurement. Three of the honest
-/// figure is 264 MiB, within a tenth of the number this map has always named,
-/// and it is now a bound the process actually keeps.
+/// spending, which is the wrong answer to a measurement.
+///
+/// **And then one of the four went away** (user report 2026-09-12): an animation
+/// reads its file instead of holding it, so the file's own length is no longer
+/// memory and no longer charged. Three of the remaining three is exactly the
+/// 240 MiB this map has named since it was written, and this time every
+/// megabyte of it is pixels the process really has.
 ///
 /// Counted as a multiple rather than as a number of its own because the two
 /// answer different questions and only one of them is this map's: how much *one*
@@ -78658,7 +78732,23 @@ impl Runtime<'_> {
                     frames,
                 } => {
                     let key = normalized_local_image_path_key(&path);
-                    adopt_animation_fill(&mut self.window.animations, key, serial, cursor, frames);
+                    if adopt_animation_fill(
+                        &mut self.window.animations,
+                        key,
+                        serial,
+                        cursor,
+                        frames,
+                    ) == AnimationFillOutcome::FileChanged
+                    {
+                        // **The file was rewritten under the loop.** The
+                        // playback is gone and nothing else would notice: the
+                        // pass that opens animations runs off the video layers,
+                        // and with no entry under this key there is no animation
+                        // to keep the loop awake. So it is asked here, once, and
+                        // what comes back is the new file standing on frame zero.
+                        self.refresh_video_layers();
+                        self.present_chrome_change()?;
+                    }
                     false
                 }
                 // **A video's frame**, on exactly the terms above: it lands in the same cache, is
@@ -121112,8 +121202,9 @@ mod tests {
         let frame_before = generation_of(&cache, "the.gif");
 
         // (1) it comes home to a playback this window has moved on from.
-        assert!(
-            !adopt_animation_fill(&mut cache, "the.gif".to_owned(), 6, away, frames),
+        assert_eq!(
+            adopt_animation_fill(&mut cache, "the.gif".to_owned(), 6, away, frames),
+            AnimationFillOutcome::ForNobody,
             "a fill for a playback that is gone was taken",
         );
         assert_eq!(
@@ -121124,21 +121215,19 @@ mod tests {
 
         // (2) and to a key the map has let go of.
         let (_, cursor, frames) = a_playback_with_a_fill_in_the_air();
-        assert!(
-            !adopt_animation_fill(&mut cache, "gone.gif".to_owned(), 7, cursor, frames),
+        assert_eq!(
+            adopt_animation_fill(&mut cache, "gone.gif".to_owned(), 7, cursor, frames),
+            AnimationFillOutcome::ForNobody,
             "an eviction was undone by its own answer",
         );
 
         // (3) and to the playback that actually asked, which is taken.
         let (_, cursor, frames) = a_playback_with_a_fill_in_the_air();
         assert!(!frames.is_empty());
-        assert!(adopt_animation_fill(
-            &mut cache,
-            "the.gif".to_owned(),
-            7,
-            cursor,
-            frames
-        ));
+        assert_eq!(
+            adopt_animation_fill(&mut cache, "the.gif".to_owned(), 7, cursor, frames),
+            AnimationFillOutcome::Parked,
+        );
         assert!(
             ring_bytes_of(&cache, "the.gif") > ring_before,
             "the frames it asked for did not land",
@@ -121191,7 +121280,7 @@ mod tests {
     fn an_animation_this_window_will_not_play_says_why_in_the_pane_s_foot() {
         use animation::AnimationRefusal;
         assert_eq!(
-            animation_refusal_notice(AnimationRefusal::TooLarge),
+            animation_refusal_notice(AnimationRefusal::FrameTooLarge),
             Some(i18n::Text::PreviewAnimationTooLarge.text()),
         );
         assert_eq!(
@@ -121219,11 +121308,119 @@ mod tests {
         // And the reason is carried by the entry the foot reads it out of, which
         // is the half of this that used to be missing: an `AnimationEntry` with
         // no payload could not have answered any of the four calls above.
-        let entry = AnimationEntry::Refused(AnimationRefusal::TooLarge);
+        let entry = AnimationEntry::Refused(AnimationRefusal::FrameTooLarge);
         let AnimationEntry::Refused(carried) = entry else {
             panic!("a refusal is filed with its reason");
         };
         assert_eq!(animation_refusal_notice(carried), Some(too_large));
+    }
+
+    /// RED — **the foot distinguishes a long file from a large frame** (user
+    /// report 2026-09-12).
+    ///
+    /// RED EVIDENCE (2026-09-12), the reader's pane, about an 820-pixel-wide
+    /// recording that had been declined for being 11.7 MB:
+    ///
+    /// ```text
+    /// foot: First frame · too large
+    /// body: Preview failed: inline image exceeds its decode limit
+    /// ```
+    ///
+    /// "Its frames are too big to keep two of" and "it is longer than this
+    /// window will read looking for frames" were one variant wearing one
+    /// sentence, and the sentence was the first one. They are two facts about
+    /// two numbers: a two-thousand-square animation is a few megabytes on disk
+    /// and sixteen decoded, and the reader's file was the opposite of that in
+    /// both halves. So the refusal splits and the strip says which.
+    ///
+    /// MUTATION: map both refusals to one sentence and the second assertion
+    /// goes red, which is the reader being told the wrong thing.
+    #[test]
+    fn the_foot_distinguishes_a_long_file_from_a_large_frame() {
+        use animation::AnimationRefusal;
+        let frame = animation_refusal_notice(AnimationRefusal::FrameTooLarge)
+            .expect("a frame too large to stream is worth a sentence");
+        let file = animation_refusal_notice(AnimationRefusal::FileTooLong)
+            .expect("and so is a file too long to read");
+        assert_ne!(frame, file, "two facts about two numbers are two sentences",);
+        // Each names the thing it is actually about, in this strip's own shape —
+        // the state, then the reason.
+        assert_eq!(frame, i18n::Text::PreviewAnimationTooLarge.text());
+        assert_eq!(file, i18n::Text::PreviewAnimationFileTooLong.text());
+        for notice in [frame, file] {
+            assert!(
+                notice.contains('·'),
+                "{notice:?} names a state and a reason"
+            );
+        }
+        assert!(
+            file.contains("file"),
+            "{file:?} is about the file's length, and says so"
+        );
+        // And the third of the three that are worth saying keeps its own words.
+        assert_eq!(
+            animation_refusal_notice(AnimationRefusal::Undecodable),
+            Some(i18n::Text::PreviewAnimationBroken.text()),
+        );
+    }
+
+    /// RED — **a file rewritten under the loop ends the playback and is
+    /// reopened** (user report 2026-09-12, the window's half).
+    ///
+    /// An animation reads its file rather than holding it, so a file rewritten
+    /// while the loop is inside it is a decoder about to read the second half of
+    /// one recording after the first half of another. `AnimationCursor` notices
+    /// at the moment the loop comes round — see
+    /// `a_file_rewritten_under_the_loop_ends_the_playback_and_is_reopened` in
+    /// `animation.rs` — and this is what the window does about it: the playback
+    /// is let go of, **key and all**, so the pass that opens animations finds no
+    /// entry under that name and opens the file again. What comes back is the
+    /// new file, standing on frame zero, with a serial of its own.
+    ///
+    /// MUTATION: park the stale cursor like any other and the entry stays, which
+    /// is a pane playing a recording that no longer exists for as long as it is
+    /// on the glass.
+    #[test]
+    fn a_file_rewritten_under_the_loop_ends_the_playback_and_is_reopened() {
+        let directory =
+            std::env::temp_dir().join(format!("bt-anim-rewrite-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("a directory this test owns");
+        let path = directory.join("capture.gif");
+        std::fs::copy(an_animated_file(), &path).expect("the fixture, under a name this test owns");
+
+        let mut cache = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
+        let mut playing = animation::decode(&path).expect("the fixture is four frames");
+        let start = Instant::now();
+        playing.present(start);
+        playing.advance(start + Duration::from_secs(5));
+        let (mut cursor, want) = playing.take_cursor().expect("a played-out ring has room");
+        cache.insert(
+            "capture.gif".to_owned(),
+            AnimationEntry::Ready {
+                serial: 11,
+                animation: Box::new(playing),
+            },
+        );
+
+        // The file is rewritten while the cursor is out — a longer one, which is
+        // what an export written again is.
+        let mut longer = std::fs::read(an_animated_file()).expect("the fixture reads");
+        longer.extend_from_slice(&std::fs::read(an_animated_file()).expect("twice"));
+        std::fs::write(&path, &longer).expect("the file is written again");
+        let frames = cursor.next_frames(want.max(16));
+
+        assert_eq!(
+            adopt_animation_fill(&mut cache, "capture.gif".to_owned(), 11, cursor, frames),
+            AnimationFillOutcome::FileChanged,
+            "a cursor that came round onto another file was parked as if nothing had happened",
+        );
+        assert!(
+            !cache.contains_key("capture.gif"),
+            "the playback is let go of, so the next pass opens the file again",
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// RED — **a recording follows the pane it is drawn in** (user report on
