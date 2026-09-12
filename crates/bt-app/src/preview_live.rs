@@ -6,12 +6,17 @@
 //! Leaving the block renders it again. There is no third state and no block is
 //! exempt — a table under the caret shows its pipes, a fence shows its markers
 //! and keeps its highlighting, display mathematics shows its delimiters and its
-//! picture stands down until the caret leaves. That is not a compromise: every
-//! line of arithmetic [`crate::preview_edit`] owns — a column is x over the
-//! monospace advance, wrapped rows, tab stops, the composition's caret box —
-//! assumes a monospace grid, so turning the caret's block into a monospace body
-//! is the one move that lets the editor this window already has be *reused*
-//! rather than rewritten for proportional text.
+//! picture stands down until the caret leaves.
+//!
+//! **What face it is shown in is the block's kind's** (owner's ruling
+//! 2026-09-11, §7.1.3w). A heading, a paragraph, a list and a quote keep the
+//! body face they were read in and show their marks in it — the `#`, the `**`,
+//! the `- `, the `> ` — because a paragraph you click into must not change
+//! typeface. A fence, a table and a display formula turn monospace, because
+//! their *alignment* is their content. The two faces are one slot and one rule;
+//! what differs is the arithmetic that puts a caret on the glass, which is
+//! [`BlockRows`] over a monospace grid and [`ProseRows`] over the shaper's own
+//! seams.
 //!
 //! # What is drawn when the caret is in no block at all
 //!
@@ -45,9 +50,15 @@
 //! # Pure, in `preview_edit`'s style
 //!
 //! Every function here is a function of the ranges, the bytes and an offset —
-//! no window, no pane, no geometry. A width is deliberately absent: which block
-//! is the source block is a fact about the document and the caret, and it must
-//! not be able to change because somebody dragged a window edge.
+//! no window and no pane. A width is deliberately absent: which block is the
+//! caret's block is a fact about the document and the caret, and it must not be
+//! able to change because somebody dragged a window edge.
+//!
+//! [`ProseRows`] is the one value in here that carries pixels, and it carries
+//! them as *data*: it is what the shaper answered about the rows it drew, and
+//! every rule read off it — where the caret is struck, which row a press is on,
+//! what a selection bands — is a function of that value and is held to in a test
+//! with no window and no GPU in the room.
 
 use std::ops::Range;
 
@@ -299,6 +310,191 @@ impl BlockRows<'_> {
     }
 }
 
+/// **One place a caret may stand on a drawn row of prose**: the byte of the
+/// *file* it is in front of, and the x it is struck at (§7.1.3w).
+///
+/// [`bt_render::PreviewTextSeam`] with the paragraph's own offsets turned into
+/// the file's, which is the one thing the window adds to the shaper's answer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProseSeam {
+    pub offset: usize,
+    pub x: f32,
+}
+
+/// One drawn row of the caret's prose block.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProseRow {
+    pub top: f32,
+    pub height: f32,
+    /// Left to right. Never empty — an empty line carries the one seam it has.
+    pub seams: Vec<ProseSeam>,
+}
+
+impl ProseRow {
+    /// The first file byte this row draws.
+    fn start(&self) -> usize {
+        self.seams.first().map_or(0, |seam| seam.offset)
+    }
+
+    /// One past the last file byte this row draws — the row's own end, where
+    /// the caret at the end of a row stands.
+    fn end(&self) -> usize {
+        self.seams.last().map_or(0, |seam| seam.offset)
+    }
+
+    /// Where a byte of this row is struck.
+    ///
+    /// The seam that names it, or — for a byte inside a cluster the shaper drew
+    /// as one thing, which is where a caret may not stand and an unnormalised
+    /// offset may still ask about — the nearest seam in front of it.
+    fn x_at(&self, offset: usize) -> f32 {
+        // The greatest offset at or before it, and not the last one in the
+        // row's own order: glyphs arrive in *visual* order, so a row that
+        // changes direction inside itself is a row whose seams do not ascend.
+        self.seams
+            .iter()
+            .filter(|seam| seam.offset <= offset)
+            .max_by_key(|seam| seam.offset)
+            .or_else(|| self.seams.first())
+            .map_or(0.0, |seam| seam.x)
+    }
+}
+
+/// **The caret's prose block as the shaper that drew it laid it out** — every
+/// row of it, and every seam in every row (§7.1.3w).
+///
+/// The counterpart of [`BlockRows`] for the face that has no columns, and the
+/// one geometry five passes read: the caret is struck at a seam, the IME's
+/// candidate box hangs from the same seam, a selection band runs from seam to
+/// seam, a press is the nearest seam to the pointer, and Up and Down step these
+/// rows. §7.1.3u was paid for twice by two derivations of one caret's x; this is
+/// the answer to it on a proportional face, where `column × advance` is not an
+/// answer at all.
+///
+/// **Pure data, and deliberately.** It arrives from the shaper and is then a
+/// value like any other, so every rule above is a function of it and can be
+/// held to in a test with no window and no GPU in the room.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProseRows {
+    /// Which block of the document these rows draw.
+    pub index: usize,
+    /// Top to bottom, in the order they are drawn.
+    pub rows: Vec<ProseRow>,
+}
+
+impl ProseRows {
+    /// How many rows the block is drawn as.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// **The row a file byte is drawn on, and where along it** — the whole of
+    /// "where is the caret".
+    ///
+    /// **A byte that ends one row and begins the next belongs to the first**
+    /// (audit A5, fixed here on this face) — the affinity a model with no
+    /// affinity bit has to pick, and the two candidates are not equal.
+    ///
+    /// One offset, two places on the glass: the end of the row it finishes and
+    /// the start of the row it begins. Giving it to the *second* is what made
+    /// Down land at the far left of the row under the one the reader was aiming
+    /// at, and then Up from there answer with the very same byte — a caret that
+    /// sticks at every soft-wrap seam. Giving it to the first costs one thing
+    /// and it is smaller: a press on the extreme left edge of a wrapped
+    /// continuation row draws the caret at the end of the row above, which is
+    /// the same byte of the file and the same place in the sentence.
+    #[must_use]
+    pub fn row_of(&self, offset: usize) -> Option<(usize, f32)> {
+        let index = self
+            .rows
+            .iter()
+            .position(|row| row.start() <= offset && offset <= row.end())?;
+        Some((index, self.rows[index].x_at(offset)))
+    }
+
+    /// The rectangle the caret is struck in — a hairline at the seam, as tall as
+    /// the row's own line box.
+    #[must_use]
+    pub fn caret(&self, offset: usize) -> Option<[f32; 4]> {
+        let (index, x) = self.row_of(offset)?;
+        let row = &self.rows[index];
+        Some([x, row.top, x, row.top + row.height])
+    }
+
+    /// The row a y is level with, clamped: above the block is its first row and
+    /// below it its last, because a press has already been judged to belong to
+    /// this block by the time it arrives.
+    #[must_use]
+    pub fn row_at_y(&self, y: f32) -> usize {
+        let last = self.rows.len().saturating_sub(1);
+        self.rows
+            .iter()
+            .position(|row| y < row.top + row.height)
+            .unwrap_or(last)
+    }
+
+    /// **The file byte a point on a row names** — [`Self::row_of`] backwards,
+    /// and the whole of a press landing in the prose block.
+    ///
+    /// The *nearest seam* and not the letter the pointer is inside, which is
+    /// this window's rule on every face it has (§7.1.3q): a click on the right
+    /// half of a character puts the caret after it.
+    #[must_use]
+    pub fn offset_at(&self, row: usize, x: f32) -> usize {
+        let Some(row) = self.rows.get(row) else {
+            return self.rows.last().map_or(0, ProseRow::end);
+        };
+        row.seams
+            .iter()
+            .min_by(|one, two| {
+                (one.x - x)
+                    .abs()
+                    .partial_cmp(&(two.x - x).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map_or_else(|| row.end(), |seam| seam.offset)
+    }
+
+    /// The byte a press at a point in the block names.
+    #[must_use]
+    pub fn press(&self, x: f32, y: f32) -> usize {
+        self.offset_at(self.row_at_y(y), x)
+    }
+
+    /// **The bands a range of the file draws over this block** — one per row it
+    /// touches, from seam to seam, because a row is what the reader sees and a
+    /// band per *line* would run off the right edge of a folded one.
+    #[must_use]
+    pub fn bands(&self, range: &Range<usize>) -> Vec<[f32; 4]> {
+        let mut bands = Vec::new();
+        for row in &self.rows {
+            let from = range.start.max(row.start());
+            let to = range.end.min(row.end());
+            if from >= to {
+                continue;
+            }
+            let (one, two) = (row.x_at(from), row.x_at(to));
+            bands.push([one.min(two), row.top, one.max(two), row.top + row.height]);
+        }
+        bands
+    }
+}
+
+/// **The rows of the caret's block, in whichever of the two faces its kind
+/// wears** (§7.1.3w).
+///
+/// One parameter rather than two, for [`CaretSeat`]'s reason: a block is drawn
+/// in one face or the other and never both, and a stepper handed two options
+/// could be told it is in neither and asked to walk one anyway.
+#[derive(Clone, Copy, Debug)]
+pub enum CaretRows<'a> {
+    /// A fence, a table, a display formula: the monospace grid's folded rows.
+    Mono(BlockRows<'a>),
+    /// A heading, a paragraph, a list, a quote: the shaper's own rows.
+    Prose(&'a ProseRows),
+}
+
 /// **One row up or down on a live-preview page**, wherever the caret happens to
 /// be standing (T5 ②, §7.1.3t).
 ///
@@ -318,16 +514,20 @@ impl BlockRows<'_> {
 /// the source block. That is §7.1.3q's own account of Arrow-Up out of a block,
 /// and it is why nothing here needs a "leaving a block" event.
 ///
-/// **The desired column carries in monospace columns** across the seam, which is
-/// honest because both sides are drawn in the same monospace face by the time
-/// the caret is in them. What it cannot promise is the column of a *folded* row
-/// against the column of a whole line: leaving a folded block at row three
-/// carries the column of that row, not of the line it is part of. That is the
-/// same compromise the source face's own [`crate::step_preview_caret_by_row`]
-/// makes, said once here rather than discovered twice.
+/// **What a run of these keeps is the coordinate the face it is walking has**
+/// (§7.1.3w): a monospace column inside a [`CaretRows::Mono`] block, a pixel
+/// inside a [`CaretRows::Prose`] one ([`preview_edit::EditCaret::desired_x`]),
+/// and the *file's* own column across the seam between a block and its
+/// neighbour, because the block a step lands in has no rows of its own until
+/// the next parse makes it the caret's. What neither can promise is the column
+/// of a *folded* row against the column of a whole line: leaving a folded block
+/// at row three carries the column of that row, not of the line it is part of.
+/// That is the same compromise the source face's own
+/// [`crate::step_preview_caret_by_row`] makes, said once here rather than
+/// discovered twice.
 pub fn step_by_row(
     content: &str,
-    block: Option<BlockRows<'_>>,
+    block: Option<CaretRows<'_>>,
     caret: &mut preview_edit::EditCaret,
     motion: preview_edit::Motion,
     page_rows: usize,
@@ -340,7 +540,8 @@ pub fn step_by_row(
         _ => return false,
     };
     caret.heal(content);
-    if let Some(block) = block.filter(|block| block.holds(caret.caret))
+    if let Some(CaretRows::Mono(block)) = block
+        && block.holds(caret.caret)
         && let Some((row, column)) = block.row_of(caret.caret)
     {
         let wanted = caret.desired_column.unwrap_or(column);
@@ -352,6 +553,42 @@ pub fn step_by_row(
             return true;
         }
         return step_by_line(content, caret, step, wanted);
+    }
+    // **A prose block walks the shaper's rows, and keeps a pixel rather than a
+    // column** (§7.1.3w). There is no column on a proportional face — the whole
+    // of what this ticket learned — so what a run of Up and Down carries is the
+    // x the caret set out from, which is a page coordinate and so means the same
+    // thing in the block above as in this one.
+    if let Some(CaretRows::Prose(prose)) = block
+        && let Some((row, x)) = prose.row_of(caret.caret)
+    {
+        #[allow(clippy::cast_possible_truncation)]
+        let wanted = caret.desired_x.unwrap_or_else(|| x.round() as i32);
+        let target = row as isize + step;
+        if target >= 0 && (target as usize) < prose.len() {
+            caret.caret = preview_edit::normalize(
+                content,
+                #[allow(clippy::cast_precision_loss)]
+                prose.offset_at(target as usize, wanted as f32),
+            );
+            caret.desired_x = Some(wanted);
+            return true;
+        }
+        // Off the top or the bottom: the file's own lines, in the file's own
+        // columns — the block it lands in is drawn as prose and has no rows of
+        // its own until the caret arrives in it and the next parse makes it the
+        // caret's block. The x is kept, so the step *after* that one returns to
+        // it.
+        let starts = preview_edit::line_starts(content);
+        let line = preview_edit::line_index(&starts, caret.caret);
+        let (start, _) = preview_edit::line_bounds(content, &starts, line);
+        let column = preview_edit::column_of(
+            preview_edit::line_text(content, &starts, line),
+            caret.caret.saturating_sub(start),
+        );
+        let moved = step_by_line(content, caret, step, column);
+        caret.desired_x = Some(wanted);
+        return moved;
     }
     // In a gap, or on a page whose caret has no block: the file's lines, which
     // is the only model there is out here.
@@ -734,10 +971,11 @@ mod tests {
             anchor: 1,
             caret: 1,
             desired_column: None,
+            desired_x: None,
         };
         assert!(step_by_row(
             content,
-            Some(rows),
+            Some(CaretRows::Mono(rows)),
             &mut caret,
             preview_edit::Motion::Down,
             10
@@ -779,11 +1017,12 @@ mod tests {
             anchor: 26,
             caret: 26,
             desired_column: None,
+            desired_x: None,
         };
         assert_eq!(rows.row_of(26), Some((2, 6)), "six columns into line three");
         assert!(step_by_row(
             content,
-            Some(rows),
+            Some(CaretRows::Mono(rows)),
             &mut caret,
             preview_edit::Motion::Up,
             10
@@ -791,7 +1030,7 @@ mod tests {
         assert_eq!(caret.caret, 19, "the short line, at its end");
         assert!(step_by_row(
             content,
-            Some(rows),
+            Some(CaretRows::Mono(rows)),
             &mut caret,
             preview_edit::Motion::Up,
             10
@@ -808,6 +1047,7 @@ mod tests {
             anchor: 4,
             caret: 4,
             desired_column: None,
+            desired_x: None,
         };
         assert!(step_by_row(
             content,
@@ -825,5 +1065,251 @@ mod tests {
             10
         ));
         assert_eq!(caret.caret, 0, "a horizontal motion is not this one's");
+    }
+    // ── the prose face ──────────────────────────────────────────────────────
+
+    /// The rows a shaper handed back, as a test can write them down: one entry
+    /// per row, each a top and the seams on it.
+    ///
+    /// Twenty pixels a row, which is the number every arithmetic below is done
+    /// in, and the x's are the ones a body face would put an ideograph at
+    /// sixteen pixels and a star at eight.
+    fn prose_rows(rows: &[(f32, &[(usize, f32)])]) -> ProseRows {
+        ProseRows {
+            index: 1,
+            rows: rows
+                .iter()
+                .map(|(top, seams)| ProseRow {
+                    top: *top,
+                    height: 20.0,
+                    seams: seams
+                        .iter()
+                        .map(|(offset, x)| ProseSeam {
+                            offset: *offset,
+                            x: *x,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    /// `**预览**窗格` at the offsets and x's the body face draws it at — the
+    /// mixed line this whole ticket is about, marks and all: two stars, two
+    /// ideographs, two stars, two ideographs.
+    fn marked_cjk_row() -> ProseRows {
+        prose_rows(&[(
+            100.0,
+            &[
+                (0, 0.0),
+                (1, 8.0),
+                (2, 16.0),
+                (5, 32.0),
+                (8, 48.0),
+                (9, 56.0),
+                (10, 64.0),
+                (13, 80.0),
+                (16, 96.0),
+            ],
+        )])
+    }
+
+    /// **A press in a prose block names the byte under the pointer** (§7.1.3w),
+    /// on a line of Chinese and on a line that changes script — the two the
+    /// monospace grid got wrong in 2026-09-11's report.
+    ///
+    /// The nearest *seam* and not the cluster the pointer is inside: a press on
+    /// the right half of a character puts the caret after it, which is this
+    /// window's rule on every face it has. A cluster three bytes long and
+    /// sixteen pixels wide is one place either side and nothing in between.
+    ///
+    /// MUTATION: round to the cluster the pointer is inside and a press past the
+    /// middle of the last character can never reach the end of the line.
+    #[test]
+    fn a_press_in_a_prose_block_names_the_byte_under_the_pointer() {
+        let rows = marked_cjk_row();
+        // On the marks themselves, which is the whole point of this face: the
+        // stars are characters and a caret may stand between them.
+        assert_eq!(rows.press(0.0, 105.0), 0, "in front of the first star");
+        assert_eq!(rows.press(9.0, 105.0), 1, "between the two stars");
+        assert_eq!(
+            rows.press(17.0, 105.0),
+            2,
+            "in front of the first ideograph"
+        );
+        // Left half of an ideograph rounds back, right half rounds on.
+        assert_eq!(rows.press(20.0, 105.0), 2, "its left half");
+        assert_eq!(rows.press(28.0, 105.0), 5, "its right half");
+        assert_eq!(rows.press(96.0, 105.0), 16, "the end of the line");
+        assert_eq!(rows.press(400.0, 105.0), 16, "and past the end of it");
+        // Mixed script, and a y above and below the block: a press has already
+        // been judged to be this block's by the time it arrives.
+        let mixed = prose_rows(&[(
+            100.0,
+            &[
+                (0, 0.0),
+                (1, 9.0),
+                (2, 18.0),
+                (3, 27.0),
+                (4, 36.0),
+                (7, 52.0),
+            ],
+        )]);
+        assert_eq!(mixed.press(19.0, 105.0), 2, "abc, the b");
+        assert_eq!(mixed.press(-40.0, 40.0), 0, "above the block is its start");
+        assert_eq!(mixed.press(400.0, 900.0), 7, "below it is its end");
+    }
+
+    /// **The caret, the candidate box and the press read one geometry**
+    /// (§7.1.3u, on the face that has no columns).
+    ///
+    /// The x a press rounds to is the x the caret is struck at, exactly, and it
+    /// is the x the IME is handed — because all three are this one value. The
+    /// round trip is the assertion: press anywhere, and the caret that press
+    /// seats stands on the seam the press was rounded to, to the pixel.
+    ///
+    /// MUTATION: derive the caret's x from anything but these seams — an advance
+    /// times an index, say — and the two stop agreeing on the very first
+    /// ideograph, which is the 3.19px-a-character report of 2026-09-11 said in
+    /// the proportional face.
+    #[test]
+    fn the_caret_and_the_ime_box_and_the_press_share_one_geometry_in_a_prose_block() {
+        let rows = marked_cjk_row();
+        for x in [0.0, 5.0, 9.0, 17.0, 20.0, 28.0, 50.0, 70.0, 95.0, 200.0] {
+            let offset = rows.press(x, 105.0);
+            let caret = rows.caret(offset).expect("the byte a press named is drawn");
+            let seam = rows.rows[0]
+                .seams
+                .iter()
+                .find(|seam| seam.offset == offset)
+                .expect("a press rounds to a seam");
+            assert!(
+                (caret[0] - seam.x).abs() < f32::EPSILON,
+                "a press at {x} named byte {offset}, drawn at {}, and the caret stands at {}",
+                seam.x,
+                caret[0],
+            );
+            // The caret is a hairline on the row's own line box — which is the
+            // rectangle the candidate list is told not to cover.
+            assert!((caret[1] - 100.0).abs() < f32::EPSILON);
+            assert!((caret[3] - 120.0).abs() < f32::EPSILON);
+        }
+    }
+
+    /// **Up and Down walk the shaper's rows** (§7.1.3w), and the x survives a
+    /// short row on the way — the behaviour every editor has, said in pixels
+    /// because a proportional face has no column to say it in.
+    ///
+    /// MUTATION: keep the desired place in columns and a walk down a page of
+    /// Chinese drifts a character to the left per row; drop the `< len()` guard
+    /// and no arrow key can ever leave the block.
+    #[test]
+    fn up_and_down_walk_the_shapers_rows_in_a_prose_block() {
+        // One source line folded into three rows: a long first row, a short
+        // second one, and a third as long as the first.
+        let content = "alpha beta gamma delta\n\nnext\n";
+        let rows = prose_rows(&[
+            (100.0, &[(0, 0.0), (3, 30.0), (6, 60.0), (9, 90.0)]),
+            (120.0, &[(9, 0.0), (12, 30.0)]),
+            (140.0, &[(12, 0.0), (15, 30.0), (18, 60.0), (22, 90.0)]),
+        ]);
+        let mut caret = preview_edit::EditCaret {
+            anchor: 6,
+            caret: 6,
+            desired_column: None,
+            desired_x: None,
+        };
+        assert!(step_by_row(
+            content,
+            Some(CaretRows::Prose(&rows)),
+            &mut caret,
+            preview_edit::Motion::Down,
+            10
+        ));
+        assert_eq!(caret.caret, 12, "the short row, at its end");
+        assert_eq!(caret.desired_x, Some(60), "and the x it set out from");
+        assert!(step_by_row(
+            content,
+            Some(CaretRows::Prose(&rows)),
+            &mut caret,
+            preview_edit::Motion::Down,
+            10
+        ));
+        assert_eq!(caret.caret, 18, "the x comes back on the row under it");
+        // Off the bottom row is the file's own lines again, which is where the
+        // next block begins — and the x is kept for the block it lands in.
+        assert!(step_by_row(
+            content,
+            Some(CaretRows::Prose(&rows)),
+            &mut caret,
+            preview_edit::Motion::Down,
+            10
+        ));
+        assert_eq!(caret.caret, 23, "the blank line after the paragraph");
+        assert_eq!(caret.desired_x, Some(60));
+        // And up out of the top row, the same way.
+        let mut caret = preview_edit::EditCaret {
+            anchor: 3,
+            caret: 3,
+            desired_column: None,
+            desired_x: None,
+        };
+        assert!(step_by_row(
+            content,
+            Some(CaretRows::Prose(&rows)),
+            &mut caret,
+            preview_edit::Motion::Up,
+            10
+        ));
+        assert_eq!(
+            caret.caret, 0,
+            "off the top of the block is the file's line"
+        );
+    }
+
+    /// **A selection across a wrapped prose line draws one band per row**
+    /// (§7.1.3w) — a band per *line* would start on the first row and run off
+    /// the right edge of the pane instead of turning the corner with the text.
+    ///
+    /// MUTATION: band from the range's ends without cutting it against each
+    /// row's own bytes and a two-row selection comes back as one rectangle from
+    /// the first seam to the last, covering the margin between them.
+    #[test]
+    fn a_selection_across_a_wrapped_prose_line_draws_one_band_per_row() {
+        let rows = prose_rows(&[
+            (100.0, &[(0, 0.0), (3, 30.0), (6, 60.0), (9, 90.0)]),
+            (120.0, &[(9, 0.0), (12, 30.0), (15, 60.0)]),
+        ]);
+        let bands = rows.bands(&(3..12));
+        assert_eq!(bands.len(), 2, "one band per row the selection touches");
+        assert_eq!(bands[0], [30.0, 100.0, 90.0, 120.0], "the first row's tail");
+        assert_eq!(bands[1], [0.0, 120.0, 30.0, 140.0], "the second row's head");
+        // A selection inside one row is one band, and an empty one is none.
+        assert_eq!(rows.bands(&(3..6)), vec![[30.0, 100.0, 60.0, 120.0]]);
+        assert!(rows.bands(&(6..6)).is_empty());
+        // A selection that began in the block above draws the part of itself
+        // that is here, which is what makes one drag across two faces one band.
+        let from_above = rows.bands(&(0..4));
+        assert_eq!(from_above.len(), 1);
+        assert!((from_above[0][0] - 0.0).abs() < f32::EPSILON);
+    }
+
+    /// **A byte that ends one row and begins the next is drawn on the first**
+    /// (§7.1.3w, audit A5) — the affinity a face with no affinity bit has to
+    /// pick, and the one that stops Down landing at the far left of the row
+    /// under the one the reader was aiming at and Up from there answering with
+    /// the same byte for ever.
+    #[test]
+    fn a_soft_wrap_seam_belongs_to_the_row_that_ends_with_it() {
+        let rows = prose_rows(&[
+            (100.0, &[(0, 0.0), (3, 30.0), (6, 60.0)]),
+            (120.0, &[(6, 0.0), (9, 30.0)]),
+        ]);
+        assert_eq!(rows.row_of(6), Some((0, 60.0)), "the row it ends");
+        assert_eq!(rows.caret(6).map(|rect| rect[1]), Some(100.0));
+        // The end of the last row is the end of the block, and it has nowhere
+        // else to be.
+        assert_eq!(rows.row_of(9), Some((1, 30.0)));
+        assert_eq!(rows.row_of(10), None, "past the block is not the block's");
     }
 }

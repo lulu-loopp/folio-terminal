@@ -1584,7 +1584,7 @@ enum PreviewDocument {
         /// clicked into, and a variant carrying the block's bytes inline would
         /// make every `PreviewDocument` — a diff, a table, an empty pane — as
         /// large as the rarest thing any of them can hold.
-        source: Option<Box<MarkdownSourceBlock>>,
+        source: Option<Box<MarkdownCaretBlock>>,
         /// One entry per block, measured **once per content change** — see
         /// [`MarkdownBlockIntrinsic`].
         intrinsic: Vec<MarkdownBlockIntrinsic>,
@@ -1665,6 +1665,112 @@ impl MarkdownSourceBlock {
             preview_edit::WrapLayout::wrapped(&self.lines, columns as usize)
         } else {
             preview_edit::WrapLayout::unwrapped(&self.lines)
+        }
+    }
+}
+
+/// **The caret's block, cut out of the buffer and dressed in the body face,
+/// marks and all** (§7.1.3w, owner's ruling 2026-09-11 「就按 Obsidian 那样
+/// 做」).
+///
+/// [`MarkdownSourceBlock`]'s opposite number, and the difference between them is
+/// the whole of that ruling: a paragraph you click into must not change
+/// typeface. What comes back when the caret arrives is not a face but the
+/// **marks** — the `#`, the `**`, the `_`, the `[…](…)`, the `- ` and the `> `
+/// are drawn as the characters they are, at the places they are in the file, and
+/// the caret walks the file's bytes through them.
+///
+/// **One visual line per source line**, soft-wrapped by the ordinary paragraph
+/// shaper at the block's own width — the same arrangement the monospace block
+/// has, said in the face that has no columns. And **no chrome**: no bullet
+/// glyph, no quote bar, no heading rule, because the bytes that would have
+/// produced them are on the screen instead.
+///
+/// What is deliberately *not* here is any geometry. Where the rows came to rest
+/// and where a caret may stand on them is the shaper's answer and nothing else's
+/// ([`preview_live::ProseRows`]), which is why this type carries only the bytes
+/// and the two numbers the face is set in.
+#[derive(Clone, Debug, PartialEq)]
+struct MarkdownProseBlock {
+    /// Which block of the document is drawn as its own bytes.
+    index: usize,
+    /// The block's byte range in the buffer — its identity in the key.
+    range: std::ops::Range<usize>,
+    /// The block's own bytes, its trailing line ending off
+    /// ([`preview_live::block_source`]).
+    ///
+    /// **Tabs are not expanded**, which is the one place this differs from
+    /// [`MarkdownSourceBlock::lines`] and it is not an omission: every byte this
+    /// block draws is a byte of the file, at its own offset, which is what lets
+    /// a press, a caret and a band be read straight back as file offsets. A tab
+    /// is a character the shaper advances by, exactly as it advances by a
+    /// letter.
+    text: String,
+    /// One entry per source line: its byte range inside [`Self::text`].
+    lines: Vec<std::ops::Range<usize>>,
+    /// Set in the heading's face — its size, and its weight with it. A heading
+    /// that kept its size and lost its weight would be a heading changing
+    /// typeface, which is the thing the ruling forbids.
+    heading: bool,
+    font_size: f32,
+    line_height: f32,
+}
+
+impl MarkdownProseBlock {
+    /// One source line's own bytes.
+    fn line_text(&self, line: usize) -> &str {
+        self.lines
+            .get(line)
+            .map_or("", |range| &self.text[range.clone()])
+    }
+
+    /// The **file** offset one source line begins at.
+    fn line_start(&self, line: usize) -> usize {
+        self.range.start + self.lines.get(line).map_or(0, |range| range.start)
+    }
+}
+
+/// **The caret's block, in whichever of the two faces its kind wears**
+/// (§7.1.3w).
+///
+/// One slot and not two, for [`preview_live::CaretSeat`]'s reason: a block is
+/// drawn in one face or the other and never both, and a document carrying two
+/// options could be told it is in neither and asked to draw one anyway. Which
+/// arm it is is decided by the block's *kind* and by nothing else
+/// ([`markdown_prose_face`]): prose keeps the body face it was read in, and
+/// everything else turns monospace.
+#[derive(Clone, Debug, PartialEq)]
+enum MarkdownCaretBlock {
+    /// A fence, a table, a display formula, a rule, a picture: monospace,
+    /// because what those blocks mean is partly where their characters line up,
+    /// and none of them is a sentence.
+    Mono(MarkdownSourceBlock),
+    /// A heading, a paragraph, a list, a quote: the body face, marks and all.
+    Prose(MarkdownProseBlock),
+}
+
+impl MarkdownCaretBlock {
+    /// Which block of the document holds the caret.
+    fn index(&self) -> usize {
+        match self {
+            Self::Mono(block) => block.index,
+            Self::Prose(block) => block.index,
+        }
+    }
+
+    /// The monospace block, when that is the face this one wears.
+    fn mono(&self) -> Option<&MarkdownSourceBlock> {
+        match self {
+            Self::Mono(block) => Some(block),
+            Self::Prose(_) => None,
+        }
+    }
+
+    /// The prose block, when that is the face this one wears.
+    fn prose(&self) -> Option<&MarkdownProseBlock> {
+        match self {
+            Self::Prose(block) => Some(block),
+            Self::Mono(_) => None,
         }
     }
 }
@@ -3546,6 +3652,21 @@ struct PreviewPane {
     /// [`Self::links`] is, and read by the pointer that arrives between two
     /// frames.
     md_text: Vec<PreviewTextBox>,
+    /// **The caret's prose block, as the shaper that drew it laid it out**
+    /// (§7.1.3w) — [`Self::md_text`]'s sibling, and a paint artifact for the
+    /// same reason it is one: it is what the last body build asked the shaper,
+    /// and the next thing to ask about it is a pointer or a keystroke that
+    /// arrives between two frames.
+    ///
+    /// `None` on every page whose caret is in no block, and on every page whose
+    /// caret's block is drawn in the monospace face — that one is a grid and
+    /// answers out of its own arithmetic ([`markdown_source_cell`]).
+    ///
+    /// **Five readers, one value**: the caret's own bar, the band under a
+    /// selection, the candidate box an IME hangs, the byte a press names, and
+    /// the rows Up and Down walk. §7.1.3u is the account of what a second
+    /// derivation of any one of those costs.
+    md_prose: Option<preview_live::ProseRows>,
     /// Where the caret is in this surface's buffer, and what it has selected.
     caret: preview_edit::EditCaret,
     /// The sentence this surface's body owes about its last save, and when it
@@ -5299,6 +5420,14 @@ enum MarkdownCaretSeat {
     /// Inside the block the document is already carrying as its source block:
     /// the line of that block's own source, and the column in it.
     Source(usize, usize),
+    /// Inside the block the document is carrying as its **prose** block
+    /// (§7.1.3w), at this byte of the file.
+    ///
+    /// A byte and not a row and a column, because the face it is drawn in has
+    /// neither: where that byte stands is the shaper's answer
+    /// ([`preview_live::ProseRows`]), and it is asked in the one pass that holds
+    /// a shaper rather than guessed at here.
+    Prose(usize),
     /// In the tissue between two blocks, where no block was parsed from and none
     /// ever will be. **One empty source line, standing immediately under the
     /// block in front of it** — see [`preview_live`]'s module note for why that
@@ -5340,7 +5469,7 @@ struct MarkdownCaretPaint {
 /// changes nothing a reader can see.
 #[derive(Clone, Copy, Default)]
 struct MarkdownLive<'a> {
-    source: Option<&'a MarkdownSourceBlock>,
+    source: Option<&'a MarkdownCaretBlock>,
     caret: Option<&'a MarkdownCaretPaint>,
 }
 
@@ -5519,19 +5648,42 @@ fn build_preview_markdown_body(
         // paragraph under the caret are the same monospace lines, and the only
         // thing the block's kind still decides is whether the highlighting the
         // measuring pass computed for it applies.
-        if let Some(source) = live.source.filter(|source| source.index == block_index) {
-            push_markdown_source_block(
-                (quads, paragraphs),
-                source,
-                live.caret,
-                intrinsic
-                    .get(index)
-                    .map_or(&NO_HIGHLIGHTING, |block| &block.highlight),
-                [left, top, right, top + height],
-                body,
-                palette,
-            );
-            continue;
+        match live.source.filter(|block| block.index() == block_index) {
+            Some(MarkdownCaretBlock::Mono(source)) => {
+                push_markdown_source_block(
+                    (quads, paragraphs),
+                    source,
+                    live.caret,
+                    intrinsic
+                        .get(index)
+                        .map_or(&NO_HIGHLIGHTING, |block| &block.highlight),
+                    [left, top, right, top + height],
+                    body,
+                    palette,
+                );
+                continue;
+            }
+            // **The prose block draws its letters here and its caret nowhere
+            // near here** (§7.1.3w). Where a caret stands on a proportional row
+            // is the shaper's answer and this builder holds no shaper, so the
+            // bar and the selection's bands are struck in the one pass that does
+            // ([`Runtime::preview_prose_geometry`]) — which is exactly where the
+            // rendered page's own bands have always been struck, and for the
+            // identical reason.
+            Some(MarkdownCaretBlock::Prose(prose)) => {
+                for (_, paragraph) in markdown_prose_paragraphs(
+                    prose,
+                    [left, top, right, top + height],
+                    &placed.rows,
+                    palette,
+                ) {
+                    if paragraph.rect[3] > body[1] && paragraph.rect[1] < body[3] {
+                        paragraphs.push(paragraph);
+                    }
+                }
+                continue;
+            }
+            None => {}
         }
         match block {
             preview::MarkdownBlock::Heading { level, spans } => {
@@ -6121,6 +6273,144 @@ fn build_preview_markdown_body(
         math: math_sites,
         text: text_sites,
     }
+}
+
+/// **Which face a block wears when the caret is in it** (§7.1.3w, owner's
+/// ruling 2026-09-11) — `Some(level)` for a heading, `Some(None)` for the rest
+/// of the prose, and `None` for the kinds that turn monospace.
+///
+/// **Prose is a heading, a paragraph, a list and a quote**, and they keep the
+/// body face they were read in: a paragraph you click into must not change
+/// typeface, and what comes back is the marks and not a face. **Monospace is a
+/// fence, a table, a display formula and a rule**, because those are the blocks
+/// whose *alignment* is part of what they say, and a proportional face would be
+/// telling the reader a lie about where their characters line up while they were
+/// editing them.
+///
+/// A free function over the kind alone: the face is a fact about what the block
+/// is and about nothing else — not about the width, not about the caret's
+/// position in it, not about the pane.
+fn markdown_prose_face(block: &preview::MarkdownBlock) -> Option<Option<u8>> {
+    match block {
+        preview::MarkdownBlock::Heading { level, .. } => Some(Some(*level)),
+        preview::MarkdownBlock::Paragraph(_)
+        | preview::MarkdownBlock::List { .. }
+        | preview::MarkdownBlock::Quote(_) => Some(None),
+        // A picture is monospace too, and by the ruling's own list rather than
+        // by an argument of its own: the four kinds named as prose are the ones
+        // that carry sentences, and what a picture block holds is a path — often
+        // the `<img>` or `<picture>` HTML the file spells it as, which reads as
+        // markup and is edited as markup.
+        preview::MarkdownBlock::Code { .. }
+        | preview::MarkdownBlock::Table { .. }
+        | preview::MarkdownBlock::Math { .. }
+        | preview::MarkdownBlock::Image(_)
+        | preview::MarkdownBlock::Rule => None,
+    }
+}
+
+/// **The prose block's own lines**, as byte ranges into its own bytes.
+///
+/// [`preview_edit::display_lines`]'s opposite number for the face that draws the
+/// file rather than a picture of it: the editor's own line model
+/// ([`preview_edit::line_starts`]), the break excluded on both halves so a CRLF
+/// file draws the same line a LF one does — and **no tab expansion**, because
+/// every byte this block draws has to be a byte of the file at its own offset.
+fn prose_source_lines(text: &str) -> Vec<std::ops::Range<usize>> {
+    let starts = preview_edit::line_starts(text);
+    (0..starts.len())
+        .map(|line| {
+            let (start, end) = preview_edit::line_bounds(text, &starts, line);
+            start..end
+        })
+        .collect()
+}
+
+/// **One source line of the prose block, as the runs it is set in** (§7.1.3w).
+///
+/// The face is the block's — a heading's size and weight, or the body's — and
+/// the text is the file's own bytes, marks included. One run and not several:
+/// the marks a rendered page hides are drawn here as the characters they are,
+/// and until the inline parse is read backwards onto them (this ticket's second
+/// half, left undone and written down in §7.1.3w) a `**bold**` phrase inside the
+/// caret's own paragraph is set as plainly as the stars around it.
+///
+/// **One derivation, called by both passes**, exactly as
+/// [`MarkdownSourceBlock::wrap`] is: the measuring pass asks how tall each line
+/// folds to and the painter draws it, and a line measured from one string and
+/// drawn from another is a block that ends in the middle of the paragraph under
+/// it.
+fn markdown_prose_runs(
+    prose: &MarkdownProseBlock,
+    line: usize,
+    palette: &bt_render::ChromePalette,
+) -> Vec<bt_render::PreviewRun> {
+    vec![bt_render::PreviewRun {
+        text: prose.line_text(line).to_owned(),
+        // The page's own two inks: the heavier one a heading and a bold run are
+        // set in, and the prose ink everything else is
+        // ([`Runtime::resolve_document_math`] says the same thing one block kind
+        // over).
+        color: if prose.heading {
+            palette.preview_body_text
+        } else {
+            palette.files_row_text
+        },
+        mono: false,
+        bold: prose.heading,
+        italic: false,
+        font_scale: 1.0,
+        inline_box_px: None,
+    }]
+}
+
+/// **The prose block's lines, as the paragraphs the shaper is handed** — the one
+/// derivation of its geometry (§7.1.3w).
+///
+/// One paragraph per source line, stacked at the heights the measuring pass
+/// wrote down, each wrapped by the ordinary paragraph shaper at the block's own
+/// width. Beside each one is the **file** offset its first byte stands at, which
+/// is what turns the shaper's answers about a paragraph into answers about the
+/// file — every byte drawn here is a byte of the file, in order, so that map is
+/// an addition and nothing more.
+///
+/// **One paragraph per line and not one per block**, and that is not a
+/// preference: a `bt_render` paragraph is one shaped line, so an offset inside a
+/// buffer holding several would be counted from the wrong one
+/// ([`bt_render::preview_paragraph_text`] and every caller of it says so).
+///
+/// Called by the painter, by the pass that reads the rows back out of the shaper
+/// and by nothing else — and by both of those rather than by one of them, so
+/// that the geometry a caret is struck in is the geometry the letters were drawn
+/// in.
+fn markdown_prose_paragraphs(
+    prose: &MarkdownProseBlock,
+    box_of_block: [f32; 4],
+    rows: &[f32],
+    palette: &bt_render::ChromePalette,
+) -> Vec<(usize, bt_render::PreviewParagraph)> {
+    let [left, top, right, _] = box_of_block;
+    let mut line_top = top;
+    (0..prose.lines.len())
+        .map(|line| {
+            let height = rows.get(line).copied().unwrap_or(prose.line_height);
+            let paragraph = bt_render::PreviewParagraph {
+                runs: markdown_prose_runs(prose, line, palette),
+                rect: [left, line_top, right.max(left), line_top + height],
+                font_size_px: prose.font_size,
+                line_height_px: prose.line_height,
+                wrap: true,
+                letter_spacing_em: 0.0,
+                align_right: false,
+                align_center: false,
+                // No grid: this is the proportional face, and the whole of
+                // §7.1.3w is that it stays the proportional face.
+                cell_advance: None,
+            };
+            line_top += height;
+            (prose.line_start(line), paragraph)
+        })
+        .collect()
 }
 
 /// **The caret's block, drawn as the file's own bytes** (§7.1.3q, ticket T4).
@@ -55994,14 +56284,15 @@ impl Runtime<'_> {
     /// rectangle and drawn in another is a caret that lands where nobody
     /// pointed.
     ///
-    /// A source block never scrolls sideways inside itself (it folds on the
-    /// source face's own terms, §7.1.3q), so unlike a table or a fence its box
-    /// is the page's column and no block offset is subtracted from it.
-    fn markdown_source_box(
+    /// A caret's block never scrolls sideways inside itself — the monospace one
+    /// folds on the source face's own terms (§7.1.3q) and the prose one wraps
+    /// like any paragraph (§7.1.3w) — so unlike a table or a fence its box is
+    /// the page's column and no block offset is subtracted from it.
+    fn markdown_caret_box(
         &self,
         surface: PreviewSurface,
         scale: f32,
-    ) -> Option<([f32; 4], &MarkdownSourceBlock)> {
+    ) -> Option<([f32; 4], &MarkdownCaretBlock, &MarkdownBlockLayout)> {
         let body = self.preview_surface_body_rect(surface, scale)?;
         let metrics = seats::preview_markdown_metrics(scale);
         let (left, right) = preview::markdown_measure_box(body, metrics);
@@ -56010,9 +56301,23 @@ impl Runtime<'_> {
             return None;
         };
         let source = source.as_deref()?;
-        let placed = layout.get(source.index)?;
+        let placed = layout.get(source.index())?;
         let top = body[1] + metrics.padding_y - pane.scroll[1] + placed.top;
-        Some(([left, top, right.max(left), top + placed.height], source))
+        Some((
+            [left, top, right.max(left), top + placed.height],
+            source,
+            placed,
+        ))
+    }
+
+    /// The monospace block's box, when the caret's block wears that face.
+    fn markdown_source_box(
+        &self,
+        surface: PreviewSurface,
+        scale: f32,
+    ) -> Option<([f32; 4], &MarkdownSourceBlock)> {
+        let (box_of_block, block, _) = self.markdown_caret_box(surface, scale)?;
+        Some((box_of_block, block.mono()?))
     }
 
     /// **Which byte of the file a point in a rendered markdown page names**
@@ -56056,6 +56361,21 @@ impl Runtime<'_> {
             && y < box_of_block[3]
         {
             return Some(markdown_source_offset_at(source, box_of_block, x, y));
+        }
+        // **And the prose block is hit-tested first for the same reason**
+        // (§7.1.3w). It pushes no [`PreviewTextSite`]s either — what it draws is
+        // the file's own bytes and not a piece of the parse, so there is no
+        // provenance under it to ask — and the geometry it is drawn in is the
+        // geometry it is read back in: the nearest seam to the pointer, which is
+        // the very seam the caret will be struck at.
+        if let Some(prose) = self
+            .preview_pane(surface)
+            .and_then(|pane| pane.md_prose.as_ref())
+            && let (Some(first), Some(last)) = (prose.rows.first(), prose.rows.last())
+            && y >= first.top
+            && y < last.top + last.height
+        {
+            return Some(prose.press(x, y));
         }
         if let Some(body) = self.preview_surface_body_rect(surface, scale)
             && let Some(pane) = self.preview_pane(surface)
@@ -57486,6 +57806,26 @@ impl Runtime<'_> {
         scale: f32,
     ) -> Option<ImeCursorArea> {
         let caret = self.preview_live_caret(surface)?;
+        // **On a prose block it is the bar's own rectangle** (§7.1.3w), which is
+        // this function's own rule one face over: a candidate list placed from a
+        // second derivation is a list standing beside the caret it claims to
+        // follow. There is no cell to be a character wide on a proportional
+        // face, so the strip the list may not cover is the caret's own bar.
+        if let Some(prose) = self
+            .preview_pane(surface)
+            .and_then(|pane| pane.md_prose.as_ref())
+        {
+            let [x, top, _, bottom] = prose.caret(caret.caret)?;
+            let width = (bt_render::CURSOR_BAR_WIDTH_LOGICAL_PX * scale)
+                .round()
+                .max(1.0);
+            return Some(ImeCursorArea {
+                x: x.clamp(body[0], body[2]).round() as i32,
+                y: top.clamp(body[1], body[3]).round() as i32,
+                width: width as u32,
+                height: (bottom - top).round().max(1.0) as u32,
+            });
+        }
         let (box_of_block, source) = self.markdown_source_box(surface, scale)?;
         let wrap = source.wrap((box_of_block[2] - box_of_block[0]).max(1.0));
         let (row, column) = preview_live::BlockRows {
@@ -57669,24 +58009,36 @@ impl Runtime<'_> {
         // makes whichever it is the source block.
         let stepped = if self.preview_shows_live_markdown(surface) {
             let scale = self.window.renderer.metrics().scale_factor as f32;
+            let prose = self
+                .preview_pane(surface)
+                .and_then(|pane| pane.md_prose.as_ref());
             let moved = match self.markdown_source_box(surface, scale) {
                 Some((box_of_block, source)) => {
                     let wrap = source.wrap((box_of_block[2] - box_of_block[0]).max(1.0));
                     preview_live::step_by_row(
                         &content,
-                        Some(preview_live::BlockRows {
+                        Some(preview_live::CaretRows::Mono(preview_live::BlockRows {
                             text: &source.text,
                             start: source.range.start,
                             wrap: &wrap,
-                        }),
+                        })),
                         &mut caret,
                         motion,
                         rows,
                     )
                 }
-                // A caret in a gap has no block to walk: the gap's empty line is
-                // one place, and the way out of it is the file's own lines.
-                None => preview_live::step_by_row(&content, None, &mut caret, motion, rows),
+                // **A prose block walks the shaper's rows** (§7.1.3w): the rows
+                // the reader can see, which on this face are a soft wrap of the
+                // block's own lines and not a fold of a grid. A caret in a gap
+                // has no block to walk either way: the gap's empty line is one
+                // place, and the way out of it is the file's own lines.
+                None => preview_live::step_by_row(
+                    &content,
+                    prose.map(preview_live::CaretRows::Prose),
+                    &mut caret,
+                    motion,
+                    rows,
+                ),
             };
             moved.then_some(())
         } else {
@@ -57842,6 +58194,27 @@ impl Runtime<'_> {
         let scroll = self
             .preview_pane(surface)
             .map_or([0.0, 0.0], |pane| pane.scroll);
+        // **A prose block's rows are the shaper's** (§7.1.3w), and the arithmetic
+        // under them is this one's: back out of window pixels into the content
+        // the scroll is measured in.
+        if let Some(prose) = self
+            .preview_pane(surface)
+            .and_then(|pane| pane.md_prose.as_ref())
+        {
+            let seat = prose.row_of(caret.caret).and_then(|(row, _)| {
+                let row = prose.rows.get(row)?;
+                let top = row.top - body[1] + scroll[1];
+                Some((top, top + row.height))
+            });
+            let Some((top, bottom)) = seat else {
+                return;
+            };
+            let mut wanted = scroll;
+            wanted[1] = wanted[1].min(top).max(bottom - (body[3] - body[1]));
+            let scrolled = self.clamped_preview_scroll(surface, body, scale, wanted);
+            self.preview_pane_mut(surface).scroll = scrolled;
+            return;
+        }
         // The block's borrow ends with this expression, before the scroll is
         // written back through the same runtime.
         let seat = {
@@ -58492,7 +58865,9 @@ impl Runtime<'_> {
             // takes — the parse stands, one block stops being prose and another
             // becomes it — so the block the last layout was drawn against is
             // exactly what must not be reused.
-            let source = self.markdown_source_block(surface, standing_source.as_ref(), scale);
+            let source =
+                self.markdown_caret_block(surface, standing_source.as_ref(), &blocks, scale);
+
             let math = self.resolve_document_math(
                 &blocks,
                 metrics,
@@ -58666,7 +59041,9 @@ impl Runtime<'_> {
                         preview_live::caret_seat(&content, &ranges, caret.caret).block()
                     })
                     .and_then(|index| Some((index, ranges.get(index)?.clone())));
-                let source = self.markdown_source_block(surface, parsed_source.as_ref(), scale);
+                let source =
+                    self.markdown_caret_block(surface, parsed_source.as_ref(), &blocks, scale);
+
                 let math = self.resolve_document_math(
                     &blocks,
                     metrics,
@@ -58833,34 +59210,61 @@ impl Runtime<'_> {
         Some((index, ranges.get(index)?.clone()))
     }
 
-    /// **The caret's block, cut out of the buffer and dressed in the source
-    /// face** (§7.1.3q) — everything [`MarkdownSourceBlock`] is.
+    /// **The caret's block, cut out of the buffer and dressed in the face its
+    /// kind wears** (§7.1.3q for the one, §7.1.3w for the other).
     ///
     /// Built from the buffer rather than from the parse, because the whole point
-    /// of the source block is that it is **the file's own bytes** and not a
+    /// of the caret's block is that it is **the file's own bytes** and not a
     /// rendering of them: the block beside it in `blocks` has already lost its
     /// hashes, its pipes and its indent.
-    fn markdown_source_block(
+    ///
+    /// **The parse decides only the face.** A heading, a paragraph, a list and a
+    /// quote keep the body face they were read in and show their marks in it; a
+    /// fence, a table, a display formula and a rule turn monospace, because for
+    /// those the alignment is the content and monospace is the honest face for
+    /// it. Nothing else about this depends on the kind — the bytes, the range
+    /// and the line breaks are the same bytes, range and breaks either way.
+    fn markdown_caret_block(
         &self,
         surface: PreviewSurface,
         source: Option<&(usize, std::ops::Range<usize>)>,
+        blocks: &[preview::MarkdownBlock],
         scale: f32,
-    ) -> Option<Box<MarkdownSourceBlock>> {
+    ) -> Option<Box<MarkdownCaretBlock>> {
         let (index, range) = source?;
         let content = self.preview_buffer_on(surface)?.content.as_deref()?;
         let text = preview_live::block_source(content, range).to_owned();
-        let metrics = seats::preview_text_metrics(scale);
-        Some(Box::new(MarkdownSourceBlock {
+        let Some(heading) = markdown_prose_face(blocks.get(*index)?) else {
+            let metrics = seats::preview_text_metrics(scale);
+            return Some(Box::new(MarkdownCaretBlock::Mono(MarkdownSourceBlock {
+                index: *index,
+                range: range.clone(),
+                lines: preview_edit::display_lines(&text),
+                text,
+                font_size: metrics.font_size,
+                line_height: metrics.line_height,
+                advance: self
+                    .preview_pane(surface)
+                    .map_or(0.0, |pane| pane.mono_advance),
+            })));
+        };
+        let metrics = seats::preview_markdown_metrics(scale);
+        let (font_size, line_height) = match heading {
+            Some(level) => (
+                metrics.heading_font(level),
+                metrics.heading_line_height(level),
+            ),
+            None => (metrics.font_size, metrics.line_height),
+        };
+        Some(Box::new(MarkdownCaretBlock::Prose(MarkdownProseBlock {
             index: *index,
             range: range.clone(),
-            lines: preview_edit::display_lines(&text),
+            lines: prose_source_lines(&text),
             text,
-            font_size: metrics.font_size,
-            line_height: metrics.line_height,
-            advance: self
-                .preview_pane(surface)
-                .map_or(0.0, |pane| pane.mono_advance),
-        }))
+            heading: heading.is_some(),
+            font_size,
+            line_height,
+        })))
     }
 
     /// Everything about a document that a pane's width cannot change.
@@ -59118,7 +59522,7 @@ impl Runtime<'_> {
         &mut self,
         blocks: &[preview::MarkdownBlock],
         intrinsic: &[MarkdownBlockIntrinsic],
-        source: Option<&MarkdownSourceBlock>,
+        source: Option<&MarkdownCaretBlock>,
         width: f32,
         metrics: seats::PreviewMarkdownMetrics,
         art: PageArt<'_>,
@@ -59299,7 +59703,7 @@ fn measure_markdown_intrinsics(
 fn lay_markdown_out(
     blocks: &[preview::MarkdownBlock],
     intrinsic: &[MarkdownBlockIntrinsic],
-    source: Option<&MarkdownSourceBlock>,
+    source: Option<&MarkdownCaretBlock>,
     width: f32,
     metrics: seats::PreviewMarkdownMetrics,
     art: PageArt<'_>,
@@ -59317,11 +59721,26 @@ fn lay_markdown_out(
             // what it was worth rendered. The shaper is not asked — a monospace
             // line's height is a fact, and asking would be asking a proportional
             // question about a monospace body.
-            let source = source.filter(|source| source.index == index);
-            let mut measured = match source {
-                Some(source) => {
+            let mut measured = match source.filter(|source| source.index() == index) {
+                Some(MarkdownCaretBlock::Mono(source)) => {
                     let rows = source.wrap(width).rows().max(1);
                     MarkdownBlockLayout::rows(vec![source.line_height; rows], 0.0)
+                }
+                // **And a prose block is as tall as its own lines fold to**
+                // (§7.1.3w). The shaper *is* asked, because this face is the
+                // proportional one and how many rows a line of it takes is the
+                // one question only a shaper answers — the same question every
+                // paragraph on the page asks, over the block's own bytes instead
+                // of its rendered ones.
+                Some(MarkdownCaretBlock::Prose(prose)) => {
+                    let palette = bt_render::chrome_palette();
+                    let rows: Vec<f32> = (0..prose.lines.len())
+                        .map(|line| {
+                            let runs = markdown_prose_runs(prose, line, &palette);
+                            measure(&runs, width, prose.font_size, prose.line_height)
+                        })
+                        .collect();
+                    MarkdownBlockLayout::rows(rows, 0.0)
                 }
                 None => measure_markdown_block(block, intrinsic, width, metrics, art, measure),
             };
@@ -59923,6 +60342,40 @@ impl Runtime<'_> {
             }));
         }
         self.preview_pane_mut(surface).md_text = text_boxes;
+        // **The prose block's own geometry, and everything struck in it**
+        // (§7.1.3w). Here rather than in the builder for the bands' own reason,
+        // one paragraph up: which glass a byte of a proportional row covers is a
+        // question only the shaper answers, and the builder holds no shaper.
+        // Asked once and read five times — by the bar below, by the bands below
+        // it, and between frames by the press, the IME and the arrow keys.
+        let prose = self.preview_prose_geometry(surface, scale);
+        if let (Some(prose), Some(caret)) = (&prose, &caret_paint) {
+            // The selection is the file's and this block is a window onto it,
+            // exactly as [`push_markdown_source_block`] cuts the same range
+            // against the monospace face.
+            built.quads.extend(
+                prose
+                    .bands(&caret.selection)
+                    .into_iter()
+                    .filter_map(|band| bt_render::crop_to(band, built.clip))
+                    .map(|rect| bt_render::PreviewQuad {
+                        rect,
+                        color: palette.preview_selection,
+                    }),
+            );
+            if caret.lit
+                && let MarkdownCaretSeat::Prose(offset) = caret.seat
+                && let Some([x, top, _, bottom]) = prose.caret(offset)
+                && let Some(rect) =
+                    bt_render::crop_to([x, top, x + caret.caret_width, bottom], built.clip)
+            {
+                built.quads.push(bt_render::PreviewQuad {
+                    rect,
+                    color: palette.preview_caret,
+                });
+            }
+        }
+        self.preview_pane_mut(surface).md_prose = prose;
         let links =
             measure_preview_links(&mut self.app.gpu, &mut self.window.renderer, &built, &sites);
         if let Some((hovered_surface, hovered)) = self.preview_link_hover.as_ref()
@@ -60006,6 +60459,59 @@ impl Runtime<'_> {
         Some((start, end))
     }
 
+    /// **The caret's prose block, as the shaper that drew it laid it out**
+    /// (§7.1.3w) — the one geometry the bar, the band, the candidate box, the
+    /// press and the arrow keys all read.
+    ///
+    /// The paragraphs are built by the very function the painter builds them
+    /// with ([`markdown_prose_paragraphs`]) out of the very block the document
+    /// is carrying, so what is measured here is what is on the glass; the offsets
+    /// come back as the **file's** own bytes, because every byte this block draws
+    /// is a byte of the file at its own offset.
+    ///
+    /// Every row, not only the ones on screen: a page scrolled so that half the
+    /// block is above it still has to answer Up and Down about the rows that are
+    /// not showing, and the count is the block's lines rather than the document's.
+    fn preview_prose_geometry(
+        &mut self,
+        surface: PreviewSurface,
+        scale: f32,
+    ) -> Option<preview_live::ProseRows> {
+        let palette = bt_render::chrome_palette();
+        // The document's borrow ends with this expression, before the shaper's
+        // begins.
+        let (index, paragraphs) = {
+            let (box_of_block, block, placed) = self.markdown_caret_box(surface, scale)?;
+            let prose = block.prose()?;
+            (
+                prose.index,
+                markdown_prose_paragraphs(prose, box_of_block, &placed.rows, &palette),
+            )
+        };
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut rows = Vec::new();
+        for (start, paragraph) in &paragraphs {
+            rows.extend(
+                renderer
+                    .measure_preview_rows(gpu, paragraph)
+                    .into_iter()
+                    .map(|row| preview_live::ProseRow {
+                        top: row.top,
+                        height: row.height,
+                        seams: row
+                            .seams
+                            .iter()
+                            .map(|seam| preview_live::ProseSeam {
+                                offset: start + seam.offset,
+                                x: seam.x,
+                            })
+                            .collect(),
+                    }),
+            );
+        }
+        Some(preview_live::ProseRows { index, rows })
+    }
+
     fn preview_markdown_caret(
         &self,
         surface: PreviewSurface,
@@ -60019,16 +60525,23 @@ impl Runtime<'_> {
         };
         let seat = match preview_live::caret_seat(content, ranges, caret.caret) {
             preview_live::CaretSeat::Block(index) => {
-                if source.as_ref().map(|source| source.index) != Some(index) {
-                    return None;
+                let source = source.as_deref().filter(|block| block.index() == index)?;
+                match source {
+                    MarkdownCaretBlock::Mono(_) => {
+                        let (line, column) =
+                            preview_live::place_in_block(content, ranges, index, caret.caret)?;
+                        MarkdownCaretSeat::Source(line, column)
+                    }
+                    MarkdownCaretBlock::Prose(_) => MarkdownCaretSeat::Prose(caret.caret),
                 }
-                let (line, column) =
-                    preview_live::place_in_block(content, ranges, index, caret.caret)?;
-                MarkdownCaretSeat::Source(line, column)
             }
+            // **A gap takes the prose face too** (§7.1.3w): it is an empty line
+            // of a document whose prose is set in the body face, and a caret a
+            // monospace line tall standing between two paragraphs would be a
+            // caret announcing a face nothing on the page is set in.
             preview_live::CaretSeat::Gap { after } => MarkdownCaretSeat::Gap {
                 after,
-                line_height: seats::preview_text_metrics(scale).line_height,
+                line_height: seats::preview_markdown_metrics(scale).line_height,
             },
         };
         Some(MarkdownCaretPaint {
@@ -77432,6 +77945,7 @@ impl Runtime<'_> {
             anchor: offset,
             caret: offset,
             desired_column: None,
+            desired_x: None,
         };
         let moved = pane.scroll != scrolled;
         pane.scroll = scrolled;
@@ -136419,6 +136933,7 @@ mod tests {
                 anchor: 12,
                 caret: 20,
                 desired_column: None,
+                desired_x: None,
             },
             ..PreviewPane::default()
         };
@@ -136890,6 +137405,7 @@ mod tests {
             anchor: 12,
             caret: 12,
             desired_column: None,
+            desired_x: None,
         };
         assert_eq!(
             preview_live::caret_seat(&content, &ranges, caret.caret),
@@ -136920,6 +137436,7 @@ mod tests {
             anchor: 3,
             caret: 3,
             desired_column: None,
+            desired_x: None,
         };
         let eol = preview_edit::eol_of(&content).to_owned();
         assert!(preview_edit::insert(&mut content, &mut caret, &eol));
@@ -136940,6 +137457,7 @@ mod tests {
             anchor: 5,
             caret: 5,
             desired_column: None,
+            desired_x: None,
         };
         assert!(preview_edit::backspace(&mut content, &mut caret));
         assert_eq!(content, "one\ntwo\n");
@@ -136967,6 +137485,7 @@ mod tests {
             anchor: 0,
             caret: 6,
             desired_column: None,
+            desired_x: None,
         };
         assert_eq!(
             caret.selected(content),
@@ -136977,6 +137496,7 @@ mod tests {
             anchor: 13,
             caret: 21,
             desired_column: None,
+            desired_x: None,
         };
         assert_eq!(across.selected(content), "**bold**");
     }
@@ -137767,6 +138287,27 @@ mod tests {
         }
     }
 
+    /// The same block in the slot the document carries it in — the monospace
+    /// face, which is what a fence, a table and a formula wear (§7.1.3w).
+    fn mono_caret_block(index: usize, at: usize, text: &str) -> MarkdownCaretBlock {
+        MarkdownCaretBlock::Mono(source_block(index, at, text))
+    }
+
+    /// **The caret's block in the prose face**: the same bytes, the same range,
+    /// set in the body face at twenty pixels a line (§7.1.3w).
+    fn prose_caret_block(index: usize, at: usize, text: &str) -> MarkdownCaretBlock {
+        let metrics = seats::preview_markdown_metrics(1.0);
+        MarkdownCaretBlock::Prose(MarkdownProseBlock {
+            index,
+            range: at..at + text.len() + 1,
+            lines: prose_source_lines(text),
+            text: text.to_owned(),
+            heading: text.starts_with('#'),
+            font_size: metrics.font_size,
+            line_height: metrics.line_height,
+        })
+    }
+
     /// A page of paragraphs, one word each.
     fn prose(words: &[&str]) -> Vec<preview::MarkdownBlock> {
         words
@@ -137821,7 +138362,7 @@ mod tests {
         let rendered =
             lay_markdown_out(&blocks, &intrinsic, None, width, metrics, art, &mut shaper);
 
-        let source = source_block(1, 6, "one\ntwo\nthree\nfour");
+        let source = mono_caret_block(1, 6, "one\ntwo\nthree\nfour");
         let asked = calls.get();
         let live = lay_markdown_out(
             &blocks,
@@ -137855,7 +138396,7 @@ mod tests {
         // **And a source line too wide for the column folds**, on the source
         // face's own terms — the block is taller, and it is taller by whole
         // rows.
-        let long = source_block(1, 6, &"x".repeat(200));
+        let long = mono_caret_block(1, 6, &"x".repeat(200));
         let folded = lay_markdown_out(
             &blocks,
             &intrinsic,
@@ -137872,6 +138413,514 @@ mod tests {
             folded[1].rows.len(),
             (200.0_f32 / (width / 8.0)).ceil() as usize,
             "one row per column-full of a two-hundred-character line",
+        );
+    }
+
+    /// **A paragraph under the caret keeps the body face and shows its marks**
+    /// (§7.1.3w, owner's ruling 2026-09-11 「就按 Obsidian 那样做」).
+    ///
+    /// The ruling reversed §7.1.3q's one exception: a paragraph you click into
+    /// must not change typeface. What comes back when the caret arrives is the
+    /// **marks** — the stars, the brackets, the `- ` — drawn as the characters
+    /// they are, at the places they are in the file; the face is the face the
+    /// page was read in, and the block is soft-wrapped by the ordinary paragraph
+    /// shaper rather than folded on a grid.
+    ///
+    /// The fixtures are the three every text ticket here carries: ASCII, CJK and
+    /// a line that changes script.
+    ///
+    /// MUTATION ①: set the prose block's runs `mono` and a reader who clicks
+    /// into a paragraph watches the whole paragraph change typeface, which is
+    /// exactly the report. MUTATION ②: draw the rendered arm as well and the
+    /// paragraph is set twice, over itself. MUTATION ③: give the paragraph
+    /// `wrap: false` and a long line runs off the right of a page that has no
+    /// horizontal axis.
+    #[test]
+    fn a_paragraph_under_the_caret_keeps_the_body_face_and_shows_its_marks() {
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let palette = bt_render::chrome_palette();
+        let body = [0.0, 0.0, 400.0, 400.0];
+        let art = PageArt {
+            math: &DocumentMath::default(),
+            pictures: &DocumentPictures::default(),
+            theme: bt_render::Theme::Dark,
+        };
+        let mut shaper = |runs: &[bt_render::PreviewRun], width: f32, _: f32, line: f32| {
+            line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
+        };
+        for marked in [
+            "a **bold** word and a [link](x)",
+            "**预览**窗格提示",
+            "abc **中文** def",
+        ] {
+            let blocks = prose(&["first", "middle", "last"]);
+            let intrinsic = vec![MarkdownBlockIntrinsic::default(); blocks.len()];
+            let source = prose_caret_block(1, 6, marked);
+            let layout = lay_markdown_out(
+                &blocks,
+                &intrinsic,
+                Some(&source),
+                400.0,
+                metrics,
+                art,
+                &mut shaper,
+            );
+            let built = build_preview_markdown_body(
+                body,
+                metrics,
+                [0.0, 0.0],
+                rested_bars(&[]),
+                MarkdownPage {
+                    blocks: &blocks,
+                    intrinsic: &intrinsic,
+                    layout: &layout,
+                    live: MarkdownLive {
+                        source: Some(&source),
+                        caret: None,
+                    },
+                },
+                &palette,
+                art,
+            );
+            let words: Vec<String> = built
+                .body
+                .paragraphs
+                .iter()
+                .map(|paragraph| {
+                    paragraph
+                        .runs
+                        .iter()
+                        .map(|run| run.text.as_str())
+                        .collect::<String>()
+                })
+                .collect();
+            assert_eq!(
+                words,
+                ["first", marked, "last"],
+                "the caret's block is its own bytes, marks and all, and is set once",
+            );
+            let block = &built.body.paragraphs[1];
+            assert!(
+                block.runs.iter().all(|run| !run.mono),
+                "{marked:?} keeps the body face it was read in",
+            );
+            assert!(
+                (block.font_size_px - metrics.font_size).abs() < f32::EPSILON,
+                "and the paragraph's own size: {} against {}",
+                block.font_size_px,
+                metrics.font_size,
+            );
+            assert!(block.wrap, "and it soft-wraps like any other paragraph");
+            assert_eq!(
+                block.cell_advance, None,
+                "on no grid: the grid is the other face's",
+            );
+            // No chrome: the bytes that would have made it are on the screen.
+            assert!(
+                built.body.quads.is_empty(),
+                "{marked:?} draws no bar, no bullet and no rule: {:#?}",
+                built.body.quads,
+            );
+        }
+    }
+
+    /// **A heading under the caret keeps its size and shows its hashes**
+    /// (§7.1.3w).
+    ///
+    /// The one prose kind whose face is not the paragraph's: a heading is set at
+    /// its own size and weight, and the `##` stands inside it at that size,
+    /// because a heading that shrank to body size when it was clicked into would
+    /// be changing typeface exactly as a paragraph turning monospace would.
+    ///
+    /// MUTATION: set every prose block at `metrics.font_size` and clicking into
+    /// a title makes the title the size of the prose under it.
+    #[test]
+    fn a_heading_under_the_caret_keeps_its_size_and_shows_its_hashes() {
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let palette = bt_render::chrome_palette();
+        let body = [0.0, 0.0, 400.0, 400.0];
+        let art = PageArt {
+            math: &DocumentMath::default(),
+            pictures: &DocumentPictures::default(),
+            theme: bt_render::Theme::Dark,
+        };
+        let mut shaper = |runs: &[bt_render::PreviewRun], width: f32, _: f32, line: f32| {
+            line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
+        };
+        let blocks = vec![preview::MarkdownBlock::Heading {
+            level: 2,
+            spans: vec![preview::Span::plain("标题 Title")],
+        }];
+        let intrinsic = vec![MarkdownBlockIntrinsic::default(); blocks.len()];
+        let heading = "## 标题 Title";
+        let source = MarkdownCaretBlock::Prose(MarkdownProseBlock {
+            index: 0,
+            range: 0..heading.len() + 1,
+            lines: prose_source_lines(heading),
+            text: heading.to_owned(),
+            heading: true,
+            font_size: metrics.heading_font(2),
+            line_height: metrics.heading_line_height(2),
+        });
+        let layout = lay_markdown_out(
+            &blocks,
+            &intrinsic,
+            Some(&source),
+            400.0,
+            metrics,
+            art,
+            &mut shaper,
+        );
+        let built = build_preview_markdown_body(
+            body,
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            MarkdownPage {
+                blocks: &blocks,
+                intrinsic: &intrinsic,
+                layout: &layout,
+                live: MarkdownLive {
+                    source: Some(&source),
+                    caret: None,
+                },
+            },
+            &palette,
+            art,
+        );
+        let [line] = built.body.paragraphs.as_slice() else {
+            panic!("one line, set once: {:#?}", built.body.paragraphs);
+        };
+        assert_eq!(
+            line.runs
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>(),
+            heading,
+            "the hashes are on the screen",
+        );
+        assert!(
+            (line.font_size_px - metrics.heading_font(2)).abs() < f32::EPSILON,
+            "at the heading's own size",
+        );
+        assert!(
+            line.runs.iter().all(|run| run.bold && !run.mono),
+            "and in the heading's own weight, in the body family",
+        );
+        assert!(
+            built.body.quads.is_empty(),
+            "and the heading's hairline stands down with the rest of the chrome",
+        );
+    }
+
+    /// **A code fence, a table and a display formula under the caret are still
+    /// the monospace source block** (§7.1.3w).
+    ///
+    /// The ruling's other half, and the reason for it: those are the blocks
+    /// whose *alignment* is part of what they say, so monospace is the honest
+    /// face to edit them in. Prose is the four kinds that carry sentences.
+    ///
+    /// MUTATION: answer prose for a fence and a reader editing a table watches
+    /// its columns stop lining up under their own pipes.
+    #[test]
+    fn a_code_fence_under_the_caret_is_still_the_monospace_source_block() {
+        let mono = [
+            preview::MarkdownBlock::Code {
+                lang: Some("rust".to_owned()),
+                text: "fn main() {}\n".to_owned(),
+            },
+            preview::MarkdownBlock::Table {
+                rows: vec![vec![vec![preview::Span::plain("a")]]],
+                alignments: Vec::new(),
+            },
+            preview::MarkdownBlock::Math {
+                source: "x^2".to_owned(),
+            },
+            preview::MarkdownBlock::Rule,
+        ];
+        for block in &mono {
+            assert_eq!(
+                markdown_prose_face(block),
+                None,
+                "{block:?} is drawn in the monospace source face",
+            );
+        }
+        assert_eq!(
+            markdown_prose_face(&preview::MarkdownBlock::Paragraph(vec![
+                preview::Span::plain("p")
+            ])),
+            Some(None),
+            "a paragraph is prose at the paragraph's size",
+        );
+        assert_eq!(
+            markdown_prose_face(&preview::MarkdownBlock::Quote(vec![vec![
+                preview::Span::plain("q")
+            ]])),
+            Some(None),
+            "and so is a quote",
+        );
+        assert_eq!(
+            markdown_prose_face(&preview::MarkdownBlock::List {
+                ordered: None,
+                items: vec![vec![preview::Span::plain("i")]],
+            }),
+            Some(None),
+            "and a list",
+        );
+        assert_eq!(
+            markdown_prose_face(&preview::MarkdownBlock::Heading {
+                level: 3,
+                spans: vec![preview::Span::plain("h")],
+            }),
+            Some(Some(3)),
+            "and a heading, at its own level's size",
+        );
+    }
+
+    /// **The prose block draws the file's own bytes at their own offsets**
+    /// (§7.1.3w) — which is what lets a press, a caret and a band be read
+    /// straight back as file offsets, with no provenance in between.
+    ///
+    /// Every line is one paragraph, the paragraphs concatenate to the block's own
+    /// bytes with the file's own breaks between them, and the offset beside each
+    /// one is where that line begins **in the file**. Tabs are not expanded and
+    /// nothing is normalised: this is the file and not a rendering of it.
+    ///
+    /// MUTATION: expand tabs the way the monospace face does and every offset
+    /// after the first tab on a line names the wrong byte.
+    #[test]
+    fn a_prose_block_draws_the_files_own_bytes_at_their_own_offsets() {
+        let file = "intro\n\n- \tone **two**\n- 三 four\n";
+        let block = file.find("- \t").expect("the fixture has a list in it");
+        let text = "- \tone **two**\n- 三 four";
+        let prose = MarkdownProseBlock {
+            index: 1,
+            range: block..file.len(),
+            lines: prose_source_lines(text),
+            text: text.to_owned(),
+            heading: false,
+            font_size: 14.0,
+            line_height: 20.0,
+        };
+        let palette = bt_render::chrome_palette();
+        let paragraphs =
+            markdown_prose_paragraphs(&prose, [10.0, 100.0, 210.0, 140.0], &[20.0, 20.0], &palette);
+        assert_eq!(paragraphs.len(), 2, "one paragraph per source line");
+        for (start, paragraph) in &paragraphs {
+            let drawn: String = paragraph.runs.iter().map(|run| run.text.as_str()).collect();
+            assert_eq!(
+                &file[*start..*start + drawn.len()],
+                drawn,
+                "the line drawn at {start} is the file's own bytes there",
+            );
+        }
+        assert!(
+            paragraphs[0].1.runs[0].text.contains('\t'),
+            "and a tab is drawn as the character it is, not as the spaces it stands in for",
+        );
+        // Stacked at the heights the measuring pass wrote down, and both
+        // wrapped into the same column.
+        assert!((paragraphs[0].1.rect[1] - 100.0).abs() < f32::EPSILON);
+        assert!((paragraphs[1].1.rect[1] - 120.0).abs() < f32::EPSILON);
+        assert!(
+            paragraphs
+                .iter()
+                .all(|(_, p)| (p.rect[0] - 10.0).abs() < f32::EPSILON
+                    && (p.rect[2] - 210.0).abs() < f32::EPSILON)
+        );
+    }
+
+    /// **Seating a caret in a prose block re-flows the page and does not
+    /// re-parse it** (§7.1.3q, kept whole by §7.1.3w).
+    ///
+    /// The caret's block is a *layout* fact: the page is laid out again because
+    /// one block is now drawn from other bytes, and the parse standing behind it
+    /// is untouched. What the shaper is asked is one question per line of the
+    /// prose block — how far that line folds — and nothing at all about the
+    /// block's rendered spans, which are not on the glass while the caret is in
+    /// it.
+    ///
+    /// MUTATION: measure the rendered arm as well and every keystroke pays for a
+    /// block that is not being drawn.
+    #[test]
+    fn seating_a_caret_in_a_prose_block_reflows_and_does_not_reparse() {
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let art = PageArt {
+            math: &DocumentMath::default(),
+            pictures: &DocumentPictures::default(),
+            theme: bt_render::Theme::Dark,
+        };
+        let blocks = prose(&["first", "middle", "last"]);
+        let intrinsic = vec![MarkdownBlockIntrinsic::default(); blocks.len()];
+        let asked = std::cell::RefCell::new(Vec::<String>::new());
+        let mut shaper = |runs: &[bt_render::PreviewRun], width: f32, _: f32, line: f32| {
+            asked
+                .borrow_mut()
+                .push(runs.iter().map(|run| run.text.as_str()).collect::<String>());
+            line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
+        };
+        let width = 400.0;
+        let rendered =
+            lay_markdown_out(&blocks, &intrinsic, None, width, metrics, art, &mut shaper);
+        asked.borrow_mut().clear();
+        let source = prose_caret_block(1, 6, "**middle**\nsecond line");
+        let live = lay_markdown_out(
+            &blocks,
+            &intrinsic,
+            Some(&source),
+            width,
+            metrics,
+            art,
+            &mut shaper,
+        );
+        assert_eq!(
+            asked.borrow().clone(),
+            ["first", "**middle**", "second line", "last"],
+            "the shaper is asked about the prose block's own lines and never \
+             about the rendering it is standing in for",
+        );
+        assert_eq!(
+            live[1].rows.len(),
+            2,
+            "the block is as tall as its own two lines",
+        );
+        assert!(
+            live[2].top > rendered[2].top,
+            "and the block under it moved by the difference",
+        );
+        // The parse is untouched: the same blocks, in the same order, with the
+        // same spans — the caret changed a layout and nothing else.
+        assert_eq!(blocks, prose(&["first", "middle", "last"]));
+    }
+
+    /// **The empty page and a gap take the prose face** (§7.1.3w).
+    ///
+    /// A caret between two blocks stands on an empty line of a document whose
+    /// prose is set in the body face, so the bar it is drawn as is a body line
+    /// tall. A caret a monospace line tall standing between two paragraphs would
+    /// be announcing a face nothing on that page is set in.
+    ///
+    /// MUTATION: hand the gap the text face's line height and the caret between
+    /// two paragraphs is visibly shorter than the words either side of it.
+    #[test]
+    fn the_empty_page_and_a_gap_take_the_prose_face() {
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let palette = bt_render::chrome_palette();
+        let body = [0.0, 0.0, 400.0, 400.0];
+        let art = PageArt {
+            math: &DocumentMath::default(),
+            pictures: &DocumentPictures::default(),
+            theme: bt_render::Theme::Dark,
+        };
+        let mut shaper = |runs: &[bt_render::PreviewRun], width: f32, _: f32, line: f32| {
+            line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
+        };
+        let blocks = prose(&["first", "last"]);
+        let intrinsic = vec![MarkdownBlockIntrinsic::default(); blocks.len()];
+        let layout = lay_markdown_out(&blocks, &intrinsic, None, 400.0, metrics, art, &mut shaper);
+        let caret = MarkdownCaretPaint {
+            seat: MarkdownCaretSeat::Gap {
+                after: Some(0),
+                line_height: metrics.line_height,
+            },
+            lit: true,
+            selection: 0..0,
+            caret_width: 2.0,
+        };
+        let built = build_preview_markdown_body(
+            body,
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            MarkdownPage {
+                blocks: &blocks,
+                intrinsic: &intrinsic,
+                layout: &layout,
+                live: MarkdownLive {
+                    source: None,
+                    caret: Some(&caret),
+                },
+            },
+            &palette,
+            art,
+        );
+        let [bar] = built.body.quads.as_slice() else {
+            panic!("one caret and nothing else: {:#?}", built.body.quads);
+        };
+        assert!(
+            (bar.rect[3] - bar.rect[1] - metrics.line_height).abs() < f32::EPSILON,
+            "the gap's caret is a body line tall: {bar:?}",
+        );
+        // And the page with nothing on it at all is the same gap with no block
+        // in front of it — it still takes a caret from a press anywhere in it.
+        let empty = PreviewDocument::Markdown {
+            blocks: Vec::new(),
+            ranges: Vec::new(),
+            maps: Vec::new(),
+            source: None,
+            intrinsic: Vec::new(),
+            layout: Vec::new(),
+            math: DocumentMath::default(),
+            pictures: DocumentPictures::default(),
+        };
+        assert_eq!(
+            markdown_empty_page_offset(&empty, body, 200.0, 200.0),
+            Some(0)
+        );
+        // And the face that height comes from is the page's own, which is the
+        // decision this test is really about: the seat is cut in
+        // `preview_markdown_caret` and nowhere else.
+        const SOURCE: &str = include_str!("main.rs");
+        const END: &str = "\n    }\n";
+        let seat = SOURCE
+            .find("fn preview_markdown_caret(")
+            .map(|at| &SOURCE[at..])
+            .and_then(|rest| rest.find(END).map(|end| &rest[..end]))
+            .expect("the one place a caret's seat is decided");
+        assert!(
+            seat.contains("preview_markdown_metrics(scale).line_height"),
+            "the gap's empty line is a body line, not a source line",
+        );
+    }
+
+    /// **One geometry answers the caret, the candidate box, the press, the rows
+    /// and the scroll in a prose block** (§7.1.3u, §7.1.3w).
+    ///
+    /// Said about the source rather than about a rectangle, because what is
+    /// being held is not a number but a *shape*: every one of the five reads the
+    /// pane's own [`PreviewPane::md_prose`], which is what the pass that drew the
+    /// block asked the shaper that drew it. A second derivation of any of them is
+    /// a caret standing beside the character it edits, and this window has paid
+    /// for that twice (§7.1.3q's last paragraph, `4381300`).
+    #[test]
+    fn the_carets_prose_block_is_read_in_one_geometry() {
+        const SOURCE: &str = include_str!("main.rs");
+        /// A method's own closing brace, at the one indentation a method's is
+        /// written at.
+        const END: &str = "\n    }\n";
+        let body = |signature: &str| {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find(END).unwrap_or(rest.len())]
+        };
+        for (reader, what) in [
+            ("fn preview_md_file_offset_at(", "the press"),
+            ("fn live_markdown_ime_cursor_area(", "the candidate box"),
+            ("fn move_preview_caret(", "Up and Down"),
+            ("fn reveal_live_markdown_caret(", "the scroll"),
+        ] {
+            assert!(
+                body(reader).contains("md_prose"),
+                "{what} reads the prose block's one geometry",
+            );
+        }
+        // And the one pass that fills it is the one that drew the block: the
+        // paragraphs it measures come from the painter's own function.
+        assert!(
+            body("fn preview_prose_geometry(").contains("markdown_prose_paragraphs("),
+            "the geometry is measured off the very paragraphs that are drawn",
         );
     }
 
@@ -137908,7 +138957,10 @@ mod tests {
             calls.set(calls.get() + 1);
             line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
         };
-        let source = source_block(1, 6, "one\ntwo");
+        let source = mono_caret_block(1, 6, "one\ntwo");
+        let mono = source
+            .mono()
+            .expect("a paragraph of source wears the mono face");
         let layout = lay_markdown_out(
             &blocks,
             &intrinsic,
@@ -137969,7 +139021,7 @@ mod tests {
         );
         assert_eq!(
             rows[1][1] - rows[0][1],
-            source.line_height,
+            mono.line_height,
             "and the rows are the source face's line apart",
         );
         assert!(
@@ -137986,7 +139038,7 @@ mod tests {
         };
         assert_eq!(
             [caret_quad.rect[0], caret_quad.rect[1]],
-            [left + source.advance * 2.0, top + source.line_height],
+            [left + mono.advance * 2.0, top + mono.line_height],
             "two columns into the second row",
         );
 
@@ -138005,7 +139057,7 @@ mod tests {
             !intrinsic[0].highlight.is_plain(),
             "the fixture is highlighted, or this proves nothing",
         );
-        let source = source_block(0, 0, fence);
+        let source = mono_caret_block(0, 0, fence);
         let layout = lay_markdown_out(
             &blocks,
             &intrinsic,
@@ -138499,7 +139551,7 @@ mod tests {
         );
         let intrinsics = clock.elapsed();
         let clock = Instant::now();
-        let source = MarkdownSourceBlock {
+        let source = MarkdownCaretBlock::Mono(MarkdownSourceBlock {
             index: 0,
             range: ranges[0].clone(),
             text: preview_live::block_source(content, &ranges[0]).to_owned(),
@@ -138507,7 +139559,7 @@ mod tests {
             font_size: 14.0,
             line_height: 20.0,
             advance: 8.0,
-        };
+        });
         let layout = lay_markdown_out(
             &blocks,
             &intrinsic,
@@ -140005,6 +141057,7 @@ mod tests {
                 anchor: 40,
                 caret: 12,
                 desired_column: Some(7),
+                desired_x: None,
             },
             scroll: [16.0, 380.0],
         };
@@ -140017,6 +141070,7 @@ mod tests {
                     anchor: 3,
                     caret: 3,
                     desired_column: None,
+                    desired_x: None,
                 },
                 scroll: [0.0, 19.0],
             },
@@ -140394,6 +141448,7 @@ mod tests {
             anchor: 2,
             caret: 2,
             desired_column: None,
+            desired_x: None,
         };
         step_preview_caret_by_row(content, &mut caret, preview_edit::Motion::Down, &wrap, 10)
             .expect("Down is a vertical motion");
@@ -140522,6 +141577,7 @@ mod tests {
             anchor: body.len() / 2,
             caret: body.len() / 2,
             desired_column: None,
+            desired_x: None,
         };
 
         const KEYS: usize = 60;

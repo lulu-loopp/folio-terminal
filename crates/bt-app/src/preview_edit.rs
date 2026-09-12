@@ -402,6 +402,24 @@ pub struct EditCaret {
     /// other side comes back to the column you started in — the behaviour every
     /// editor has and none of them writes down.
     pub desired_column: Option<usize>,
+    /// **The x Up and Down are trying to land on, on a face that has no
+    /// columns** (§7.1.3w) — [`Self::desired_column`]'s twin, in pixels.
+    ///
+    /// A proportional row has seams and not cells, so what a run of vertical
+    /// motions keeps inside a Markdown prose block is the place on the glass it
+    /// set out from. It is a *page* coordinate, which is why it survives a step
+    /// out of one block and into the next: every block on that page is laid out
+    /// in the same column, so the x means the same thing in both.
+    ///
+    /// Set and cleared exactly where the column is, and by the same two
+    /// sentences: a vertical motion keeps it and everything else lets it go.
+    ///
+    /// **Whole device pixels**, which is the finest place the glass has: a
+    /// caret is struck on a pixel, the seam a walk lands on is the *nearest*
+    /// one to this number, and a fraction of a pixel could not move that answer.
+    /// An `f32` here would also make two carets' equality turn on a difference
+    /// nobody can see, and this type is compared by value all over the editor.
+    pub desired_x: Option<i32>,
 }
 
 impl EditCaret {
@@ -422,6 +440,7 @@ impl EditCaret {
         self.anchor = offset;
         self.caret = offset;
         self.desired_column = None;
+        self.desired_x = None;
     }
 
     /// Put the caret somewhere, taking the anchor with it unless the gesture is
@@ -637,6 +656,7 @@ pub fn select_all(content: &str, caret: &mut EditCaret) {
     caret.anchor = 0;
     caret.caret = content.len();
     caret.desired_column = None;
+    caret.desired_x = None;
 }
 
 /// The offset one cluster before `offset`, breaks counted whole.
@@ -753,6 +773,11 @@ fn finish_move(
         caret.anchor = offset;
     }
     caret.desired_column = desired;
+    // The two memories live and die together: a horizontal motion lets go of
+    // both, and a vertical one keeps whichever face it is walking.
+    if desired.is_none() {
+        caret.desired_x = None;
+    }
 }
 
 /// The offset a row and a drawn column name.
@@ -814,6 +839,7 @@ mod tests {
             anchor: offset,
             caret: offset,
             desired_column: None,
+            desired_x: None,
         }
     }
 

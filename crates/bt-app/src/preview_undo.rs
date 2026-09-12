@@ -40,6 +40,7 @@ fn collapsed(offset: usize) -> EditCaret {
         anchor: offset,
         caret: offset,
         desired_column: None,
+        desired_x: None,
     }
 }
 
