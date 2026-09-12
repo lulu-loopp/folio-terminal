@@ -8163,3 +8163,94 @@ spike 量到的是「这个 workspace 今天已经有约 90% 能在 macOS 上编
 **⑥ `WebChord::command` 现在是从行上读出来的,而填它的那一侧属于 M4-2。** 转换只有一行:行的和弦已经是本次构建跑的那个方言(`Shortcuts::defaults_for`),所以第四个修饰键和上面三个一样直接读。Windows 上那一列除了被上游滤掉的 quake 行之外没有一行戴 SUPER,所以这一行**字面上就是它替换掉的那个 `false`**。宿主那侧没有 accelerator 回调可填它,也不需要:`WKWebView` 是响应链里的一个 `NSView`,窗口在宿主 view 的 `performKeyEquivalent:` 上把和弦拿回来——**每一个 Command 和弦,且仅此**——W0′ 的隐患在那边是一条保证。
 
 **⑦ 设置行的形状,和它为什么在 General。** `Option key sends Alt`,开关,默认关(§8 Q9 的裁决),schema v34 一个 key。放 General 不放 Terminal:这一页的行问的是「我手底下这个东西是什么」(`Language`、`Key hints`),而 Terminal 那一页的行问的是一个 shell 的事。**只在有这个键的机器上列出来**——`visible_rows` 问 `host_platform()`,和这一页每一条与机器有关的行同一扇门——但 **key 写进每一份文件**,因为 `settings.json` 记的是读者的回答而不是机器的形状,一份从 Mac 拷到 Windows 再拷回来的文件必须还是同一句话。行本身的英文是 `⌥a types å` 与 `⌥a sends ESC a` 两句,因为来找这一行的读者是刚刚被一次按键打了个措手不及的人,他要找的是带着自己那一下按键的那句话;中文按 2026-09-07 的文案裁决挂在 `CHINESE_PENDING` 上。
+
+### 13.15 M1-8: one composition belongs to one field, and on a Mac the input method has to be told (`crates/bt-platform/src/lib.rs`、`crates/bt-platform/Cargo.toml`、`crates/bt-app/src/main.rs`)
+
+**① The one door has a macOS arm now, and `false` was never a harmless stub.**
+§7.1.5a″ rules that a composition belongs to the field it was started in and is
+*cancelled* when that field goes away, and it names one door for the ending:
+`bt_platform::cancel_composition`. Off Windows that door answered `false`
+without asking anybody, and here is what it cost, measured on the Mac at
+`055dd6d` with Pinyin – Simplified selected: `ni hao` composed at a shell, one
+injected click on a Markdown page in the other half of the window, and the next
+five letters arrived as **`ni hao ni hao`** — one composition, two fields, and
+the candidate list still hanging at the shell's caret (it stood at `840,273`
+before the click and at `840,273` after it, while the page's caret was at
+`1218,343`). The application had already done its own half correctly: the
+pre-edit left the grid, nothing was written to the child, `WindowRuntime::composing`
+was cleared. What survived was the **method's** half. The arm is two calls:
+`discardMarkedText` on `+[NSTextInputContext currentInputContext]`, which is the
+method's own half and the twin of IMM32's `CPS_CANCEL`, and `unmarkText` on that
+context's client, which is the half the *view* owns — the marked range it is
+drawing. **The client is how winit's view is reached, and that is why this door
+still needs no handle**: what winit exposes of its view is a raw pointer on the
+window handle (`rwh_06::AppKitWindowHandle::ns_view`) and nothing else, M1-9 took
+the handle out of this signature (§13.2), and `-[NSTextInputContext client]` is
+the same view for free. After the change the same script against the same window reads `ni hao` — a new
+composition, in the field the keyboard moved to — and the list is at
+`1211,358`, under that field's caret.
+
+**② The caret is published by the door the letters go through.** X-3 reported
+the preview seat publishing no caret and the candidate list parking at the
+window's corner; measured again with every cell starting from no composition at
+all, that is not what happens. A composition begun in the Markdown page, in the
+palette and in the search capsule each hangs the list at its own caret at
+backing scale 2 — the numbers are in ④ — because the method asks
+`firstRectForCharacterRange:` when a composition **begins**, and winit answers it
+out of `set_ime_cursor_area`, which `apply_ime_cursor_area` has always fed in
+window physical pixels (§13.10 ①). What X-3 saw was ① wearing a second face: a
+composition carried into a second field never asks again, so the list stays
+where the first field put it. The gap that was real is narrower and is on both
+platforms: `preview_ime_cursor_area` measured from `preview_edit_focus` while
+`ime_owner` decided the rung from `preview_keyboard_surface` and `edit_preview`
+inserted the commit through `preview_keyboard_surface`. **One door now**, which
+is §7.1.5a″'s own sentence one surface along: the answer that places the list is
+the answer that routed the letters. **Carried forward, not taken here**: a
+composition made over a preview seat that only *browses* is routed to the
+preview, inserts on commit, and is drawn nowhere — `preview_key` refuses what
+`preview_ime` accepts — and which of the two is right is a ruling rather than a
+patch.
+
+**③ One commit, one write, and the detector is kept.** X-3 measured `你好`
+reaching the child exactly once and M1-8 measured it again: the recording holds
+the six bytes once for one commit, and `nihao` — the raw reading — zero times.
+The case matters more since M1-7 than it did before, because the `is_ascii()`
+half of `keyboard_bytes`'s character arm is gone (§13.13 ④): what keeps a
+composed character from being typed twice is now only that **no key arrives
+under a commit**, the physical key during a composition being `NamedKey::Process`,
+which that function answers `None` for on its first arm.
+`one_composition_commits_its_characters_exactly_once` is X-3's detector written
+down — a commit followed by a key event carrying the same text — so the day the
+first arm changes, the wire is counted rather than trusted.
+
+**④ What the Mac measured.** Window `518,167 960×600` points, backing scale 2.
+Candidate list, which on this platform is a layer-20 window of our own process
+and is read out of `CGWindowListCopyWindowInfo` rather than photographed: at a
+shell's caret `550,273`; in the Markdown page's prose `1211,358`; on the same
+page's source face, which is the monospace block, `1152,357`; in the command
+palette `727,289`; in the search capsule `645,280`. Each of those stands at the
+left edge of the composition and immediately under its line, which is the whole
+of what `set_ime_cursor_area` promises. The pre-edit is drawn under the letters
+on both faces of a page — the prose block and the monospace one — as it is on
+Windows. `Esc` cancels with no commit and no byte to the child, and the whole
+recording of a run that composed eight times holds the two characters once and
+the raw reading `nihao` never.
+
+**⑤ A chord pressed into a live composition is the input method's, and that is
+winit's `keyDown:`.** X-3's failing case — a chord committing the raw reading
+into the shell — does **not** reproduce on M1-7's tree, and what replaces it is
+worth writing down. `⌘⇧P` over a live `ni hao` opened no palette and committed
+nothing: the reading became `ni hao P`, and the only thing that did come up was
+the key-hint card for `Shift` `Cmd` — which is the picture of the split, the
+modifiers reaching this window through `ModifiersChanged` and the letter never
+leaving the input method. winit's `keyDown:` hands every key to
+`interpretKeyEvents` while the IME is allowed and queues a `KeyboardInput` only
+if the method did not take it (`had_ime_input || forward_key_to_app`), and Apple
+Pinyin takes `⌘⇧P` as a letter. So the application never sees that chord, and
+"cancel before the chord is dispatched" has no dispatch to stand in front of;
+what this door does cover is every way the keyboard actually moves — a click, a
+pane change, a tab switch, a float closing — which is the list §7.1.5a″ is
+written against. **The chord comes back with M3-2, not with a hook here**: a
+real menu bar's key equivalents are answered by AppKit *before* the responder
+chain's `keyDown:`, so a `Quit`, a `New tab` or a palette row on the menu fires
+over a composition without this window installing an event monitor of its own.

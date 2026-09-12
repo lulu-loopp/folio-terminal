@@ -58518,8 +58518,21 @@ impl Runtime<'_> {
     /// Win32's caret is thread-level and IMM32 asks the focused window, so there
     /// is nothing to switch but the rectangle: the same two calls
     /// ([`Self::apply_ime_cursor_area`]) serve whichever surface is composing.
+    ///
+    /// **The surface is the one the letters are going to, and it is asked for
+    /// through the same door** (M1-8; `docs/DESIGN.md` §13.15 ②). This used to
+    /// start at [`Self::preview_edit_focus`] while the rung above it was decided
+    /// by [`Self::preview_keyboard_surface`] — which is also what
+    /// [`Self::insert_into_preview`] inserts through — so a preview *seat*
+    /// holding the keyboard without the quick edit's focus was answered
+    /// `ImeOwner::Preview` by [`ime_owner`], had its commits inserted, and
+    /// published no caret at all: two doors, one composition, and the candidate
+    /// list left standing wherever it was last put. That is §7.1.5a″'s own rule
+    /// one surface along — the answer that places the list has to be the answer
+    /// that routed the letters — and it is one door here for the same reason it
+    /// is one door there.
     fn preview_ime_cursor_area(&self) -> Option<ImeCursorArea> {
-        let surface = self.preview_edit_focus()?;
+        let surface = self.preview_keyboard_surface()?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let body = self.preview_surface_body_rect(surface, scale)?;
         // **On a rendered page the box comes from the source block** (T5 ②,
@@ -141386,6 +141399,93 @@ mod tests {
         assert!(
             !preedit_arm.contains("insert_into_preview"),
             "a pre-edit is drawn and never inserted",
+        );
+    }
+
+    /// **One composition, one write** (M1-8; `docs/DESIGN.md` §13.15 ③).
+    ///
+    /// X-3 measured `你好` reaching the child exactly once on macOS 26.6 with
+    /// winit 0.30.13 — the duplicate-commit hazard that platform is known for
+    /// did not reproduce — and named the detector to keep: **a duplicate is an
+    /// `Ime::Commit(t)` followed by a `KeyboardInput` whose text is `t`**, with
+    /// the payload twice on the wire. This is that detector as a test, and it
+    /// matters more since M1-7 than it did before: the character arm of
+    /// [`input::keyboard_bytes`] used to refuse everything outside ASCII, so a
+    /// composed character could not have been typed twice even if the key had
+    /// arrived. The guard is gone (it was swallowing `ü ä ö ß`), and what holds
+    /// the line now is that **no key arrives under a commit**: while a
+    /// composition is in flight the physical key is `NamedKey::Process`, which
+    /// this function answers `None` for on its first arm.
+    ///
+    /// MUTATION: let `Process` fall through to the character arm and the second
+    /// assertion goes red — the wire then carries `你好` twice for one commit.
+    #[test]
+    fn one_composition_commits_its_characters_exactly_once() {
+        let committed = ime_commit_bytes("你好");
+        assert_eq!(committed, vec![0xe4, 0xbd, 0xa0, 0xe5, 0xa5, 0xbd]);
+        // The key the commit came out of, which is every key pressed while a
+        // composition is live.
+        let under_the_commit = input::keyboard_bytes(
+            &Key::Named(NamedKey::Process),
+            ModifiersState::empty(),
+            false,
+        );
+        assert_eq!(under_the_commit, None, "no key writes under a commit");
+        let mut wire = committed.clone();
+        wire.extend(under_the_commit.unwrap_or_default());
+        assert_eq!(
+            wire.windows(committed.len())
+                .filter(|window| *window == committed.as_slice())
+                .count(),
+            1,
+            "one commit puts the characters on the wire once",
+        );
+    }
+
+    /// **The preview publishes the caret of the surface its letters go to**
+    /// (M1-8; `docs/DESIGN.md` §13.15 ②; measured on the Mac).
+    ///
+    /// Three readers, one door. `ime_owner` calls the rung `Preview` when
+    /// `preview_keyboard_surface` answers, `edit_preview` inserts the commit
+    /// into whatever that door names, and the caret the candidate list hangs
+    /// from was measured from `preview_edit_focus` instead — a narrower door.
+    /// A preview seat holding the keyboard without the quick edit's focus was
+    /// therefore routed, inserted into, and given no caret, and the list stayed
+    /// wherever it had last been put. On Windows that is a list standing at a
+    /// stale rectangle; on a Mac, where nothing else has ever placed one, it is
+    /// a list at the corner of the window (X-3).
+    ///
+    /// A source pin because the three readers are the invariant: a behavioural
+    /// test would fix one of them and leave the other two free to part company
+    /// again.
+    ///
+    /// MUTATION: send any of the three back to `preview_edit_focus` and this
+    /// goes red.
+    #[test]
+    fn the_preview_publishes_the_caret_of_the_surface_its_letters_go_to() {
+        const SOURCE: &str = include_str!("main.rs");
+        fn body(signature: &str) -> &'static str {
+            const END: &str = "\n    }\n";
+            SOURCE
+                .find(signature)
+                .map(|at| &SOURCE[at..])
+                .and_then(|rest| rest.find(END).map(|end| &rest[..end]))
+                .expect("the door this test is about")
+        }
+        assert!(
+            body("fn keyboard_owner(&self) -> KeyboardOwner {")
+                .contains("preview: self.preview_keyboard_surface().is_some()"),
+            "the rung a composition is routed by",
+        );
+        assert!(
+            body("fn preview_ime_cursor_area(&self) -> Option<ImeCursorArea> {")
+                .contains("let surface = self.preview_keyboard_surface()?;"),
+            "the caret the candidate list is hung from",
+        );
+        assert!(
+            body("    fn edit_preview(")
+                .contains("let Some(surface) = self.preview_keyboard_surface() else {"),
+            "the buffer a commit is inserted into",
         );
     }
 

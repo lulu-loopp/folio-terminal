@@ -9917,17 +9917,91 @@ pub use portable_priority::{
     current_thread_priority, set_current_thread_priority, spawn_at_priority,
 };
 
+/// **Ending a composition on macOS: the input context's, and the view's**
+/// (M1-8; `docs/DESIGN.md` §7.1.5a″, §13.15).
+///
+/// The twin of `windows_impl::cancel_composition`, saying the same sentence to
+/// a different input method: the composition in flight is **thrown away**, and
+/// the candidate list goes with it because that window is the method's and the
+/// method has been told the composition is over.
+///
+/// **Two calls, and they are two halves rather than one with a spare.**
+/// `discardMarkedText` is the *method's* half — it tells the input method to
+/// abandon the text it is converting, which is what `CPS_CANCEL` says to IMM32
+/// — and `unmarkText` is the *client's*: AppKit splits the composition between
+/// the method, which owns the reading and the candidate list, and the view
+/// implementing `NSTextInputClient`, which owns the marked range it is drawing.
+/// Discarding without unmarking leaves the view believing it still has marked
+/// text, and the next keystroke continues a composition the method has already
+/// forgotten.
+///
+/// **The view is reached through the responder chain, and that is the whole
+/// reason this door needs no handle.** What winit exposes of its view is a raw
+/// pointer on the window (`rwh_06::AppKitWindowHandle::ns_view`, through
+/// `HasWindowHandle`) and nothing else — no accessor for the marked text, no
+/// method for ending a composition, and no way to ask it for its input context.
+/// M1-9 took the handle out of this signature (§13.2's rule), and it does not
+/// need to come back: `+[NSTextInputContext currentInputContext]` *is* the
+/// context of the first responder, and `-[NSTextInputContext client]` is that
+/// responder — which, while this process is composing, is winit's
+/// `WinitView`. A context exists only because it was made with a client
+/// (`initWithClient:` is the designated initialiser and `client` is its strong
+/// property), so the `None` this guards against is "nothing is composing", and
+/// it is answered before the client is asked for.
+///
+/// **What the view does with `unmarkText` is winit's, and it is more than the
+/// name says** (winit 0.30.13 `platform_impl/macos/view.rs`): it empties the
+/// marked text it was drawing, calls `discardMarkedText` on its own context
+/// again, puts its `ImeState` back to `Ground` and **queues an
+/// `Ime::Preedit("")`**. That last one reaches `bt-app` a moment later and runs
+/// the composition's end a second time, which is why this door can be called
+/// from inside the event loop without ceremony: the arriving empty pre-edit
+/// finds `WindowRuntime::composing` already `None` and is the no-op arm of
+/// `ime_input`. The order here is the ruling's — the method is told first, so
+/// that the view's own `discardMarkedText` is the second of two rather than the
+/// only one, and a first responder that is *not* winit's view (a future native
+/// field) is still answered by the first call.
+///
+/// **The main thread or nothing**, like every other AppKit door in this crate
+/// (§13.10 ②) — and a refusal rather than an assertion, for that section's own
+/// reason. `false` is not a failure here either: a process with no composition
+/// in flight has no input context to ask, and the caller clears its own picture
+/// of the composition either way.
+#[cfg(target_os = "macos")]
+mod macos_ime {
+    use objc2_app_kit::{NSTextInputClient, NSTextInputContext};
+    use objc2_foundation::MainThreadMarker;
+
+    /// Whether an input method was told to throw its composition away.
+    #[must_use]
+    pub fn cancel_composition() -> bool {
+        let Some(main_thread) = MainThreadMarker::new() else {
+            return false;
+        };
+        let Some(context) = NSTextInputContext::currentInputContext(main_thread) else {
+            return false;
+        };
+        context.discardMarkedText();
+        context.client().unmarkText();
+        true
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub use macos_ime::cancel_composition;
+
 /// Ending a composition, on a platform whose input methods have not been asked
 /// yet.
 ///
 /// The same contract [`portable_priority`] answers and for the same reason: the
 /// caller reads the `bool`, clears its own picture of the composition either
-/// way, and goes on. What a macOS or an X11 arm would call here is a different
-/// call with a different lifetime — `NSTextInputClient`'s
-/// `discardMarkedText`, an IBus context reset — and choosing between them is a
+/// way, and goes on. What an X11 arm would call here is a different call with a
+/// different lifetime — an IBus context reset — and choosing between them is a
 /// backend's decision (`docs/plans/port/macos-spike-2026-09-07.md` class C),
-/// not one to take by accident on the way past.
-#[cfg(not(windows))]
+/// not one to take by accident on the way past. **macOS is no longer one of
+/// them**: [`macos_ime`] answers for a Mac, which is why this module now stands
+/// aside there the way the clipboard's portable arm does.
+#[cfg(all(not(windows), not(target_os = "macos")))]
 mod portable_ime {
     /// Whether an input method was told to throw its composition away. Off
     /// Windows none was asked, so `false` — the same answer Win32 gives for a
@@ -9946,7 +10020,7 @@ mod portable_ime {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub use portable_ime::cancel_composition;
 
 /// **The clipboard on macOS: `NSPasteboard`, and no window anywhere in it.**
@@ -10118,6 +10192,56 @@ mod platform_door_tests {
                 }
             }
         }
+    }
+
+    /// **A Mac ends a composition, and it is the one door that does it**
+    /// (M1-8; `docs/DESIGN.md` §7.1.5a″, §13.15).
+    ///
+    /// The arm this pins was `false` until 2026-09-12, and `false` there is not
+    /// a harmless stub: measured on the Mac, a reading composed in a terminal
+    /// **survived the keyboard moving to another pane** and went on growing in
+    /// the field it moved to (`ni hao` typed at a shell, a click on a Markdown
+    /// page, and the next `nihao` arrived as `ni hao ni hao`), because the
+    /// application cleared its own picture of the composition and the input
+    /// method was never told anything. §7.1.5a″ rules that a composition is
+    /// cancelled when the field it belongs to goes away, and a platform arm
+    /// that answers without asking cannot obey it.
+    ///
+    /// A source pin rather than a call, for `platform_door_tests`' own reason:
+    /// this test runs on a Windows CI runner where the macOS arm is not
+    /// compiled, and what has to hold is the *text* of an arm no build here
+    /// executes. The call itself is proved on the Mac, by the run this ticket
+    /// records.
+    ///
+    /// MUTATION: drop either call from the macOS arm, or give the portable arm
+    /// the Mac back, and this goes red on every platform.
+    #[test]
+    fn the_composition_door_has_an_arm_for_a_mac() {
+        assert_eq!(
+            declarations("cancel_composition").len(),
+            3,
+            "three arms: Windows, macOS, and the platforms nobody has asked yet",
+        );
+        assert!(
+            SOURCE.contains(
+                "#[cfg(all(not(windows), not(target_os = \"macos\")))]\nmod portable_ime {"
+            ),
+            "the portable arm no longer answers for a Mac",
+        );
+        let arm = SOURCE
+            .split_once("mod macos_ime {")
+            .map(|(_, rest)| rest.split_once("\n}\n").expect("the module closes").0)
+            .expect("the macOS arm of the composition door");
+        for call in ["discardMarkedText", "unmarkText"] {
+            assert!(
+                arm.contains(call),
+                "the macOS arm is both halves of ending a composition, and {call} is missing",
+            );
+        }
+        assert!(
+            arm.contains("MainThreadMarker::new()"),
+            "an AppKit door proves its thread before it touches AppKit",
+        );
     }
 }
 
