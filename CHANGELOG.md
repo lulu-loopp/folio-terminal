@@ -6,7 +6,19 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Changed
+
+- **A file the preview cannot show offers to open it in the default app, like an
+  executable does.** A picture Folio declines — one with too many pixels, a file
+  too large to read, a picture that would not load — used to say so in the middle
+  of an empty pane and leave you there. It now wears the card an unknown file
+  type has always worn: the same sentence, and under it the same
+  `Open in default app` button, which hands the file to whatever the system has
+  registered for it. The same goes for a picture Folio could not draw, a pane too
+  small to draw one in, and a recording in a format this machine cannot play. It
+  is the same card in a torn-off window as in a pane. A file the disk itself
+  refused to read still says only what happened, because another program would
+  be refused in the same way.
 
 ## 0.3.0-preview — 2026-09-12
 
