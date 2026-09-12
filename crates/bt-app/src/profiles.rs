@@ -888,12 +888,12 @@ impl SeedPlatform {
     /// The one this build is.
     #[must_use]
     pub fn of_this_build() -> Self {
-        if cfg!(windows) {
-            Self::Windows
-        } else if cfg!(target_os = "macos") {
-            Self::MacOs
-        } else {
-            Self::OtherUnix
+        // Asked of the platform crate rather than of `cfg!` here: the files of this crate that
+        // may name a platform are a short list, and the profile seed is not on it.
+        match bt_platform::host_platform() {
+            bt_platform::HostPlatform::Windows => Self::Windows,
+            bt_platform::HostPlatform::MacOs => Self::MacOs,
+            bt_platform::HostPlatform::OtherUnix => Self::OtherUnix,
         }
     }
 }
@@ -15964,11 +15964,11 @@ mod tests {
                 );
             }
             // **And the two altitudes agree.** `resolve_default_shell` is the
-            // spawn door's own rule and it is `cfg`-split, so this half can only
-            // be run where the Unix arm is compiled — which is the machine this
-            // ticket's acceptance runs on.
-            #[cfg(unix)]
-            {
+            // spawn door's own rule and it is `cfg`-split inside `bt-pty`, so this
+            // half is asked only where the Unix arm is the one compiled — decided
+            // at run time through the platform door, because this file is not one
+            // of the few that may name a platform.
+            if bt_platform::host_platform() != bt_platform::HostPlatform::Windows {
                 let resolved = bt_pty::resolve_default_shell(&machine);
                 assert_eq!(
                     Path::new(&resolved.program),

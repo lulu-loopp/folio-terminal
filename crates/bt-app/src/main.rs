@@ -154805,6 +154805,168 @@ otes.md"
     }
 }
 
+/// **The files in which `bt-app` is allowed to know what platform it is on**
+/// (`docs/plans/port/macos-plan-2026-09-12.md` §4.3, ticket M1-10).
+///
+/// §4.3's sentence is the design and it is a *ratio*: this crate names
+/// `bt_platform::` at several hundred call sites with no gate at all, and asks
+/// what machine it is running on in a dozen files. The gate is the list, and
+/// the list is here rather than in the plan because a document cannot go red.
+///
+/// **`scripts/check-portable-core.ps1` is this test's twin and reads this very
+/// array out of this very file**, so there is one list and two readers: the
+/// script runs in five seconds on a tree that does not compile and names the
+/// rule, and this runs on three platforms in CI and names the file and the
+/// line. A list that lived in both would drift, and drift in a gate is a gate
+/// that is decoration.
+///
+/// Two corrections to §4.3's own eleven, both measured rather than assumed, and
+/// both recorded in `docs/DESIGN.md`'s CI-gate record:
+///
+/// * **`git.rs` was missed.** It asks `cfg!(windows)` three times. A runtime
+///   predicate is as much "this file decides what platform it is on" as an
+///   attribute is — it is the same question asked of the same compiler — so the
+///   rule counts both spellings and the file is on the list.
+/// * **`cli.rs` joins, for a test and not for the product.** §4.3 offered M1-10
+///   two ways out of that file's two ungated `std::os::windows` uses, and both
+///   halves landed: the production one became
+///   [`bt_platform::argument_after_ascii`] (M1-1), and the test one is a
+///   fixture — a lone high surrogate — that only Windows can hold, so it is
+///   gated on its fixture with a POSIX sibling beside it (`docs/DESIGN.md`
+///   §13.6). Nothing `cli.rs` *does* is platform-shaped any more.
+#[cfg(test)]
+mod platform_gate_tests {
+    use std::path::{Path, PathBuf};
+
+    /// **The list.** One file per line, in the order `ls` gives them, each with
+    /// the reason it is allowed to ask.
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 13] = [
+        // The hook this build writes into somebody else's settings file names a
+        // program, and a program is named differently on each platform.
+        "attention_copilot.rs",
+        // The fixture for "an argument is not text", and nothing else — see the
+        // module's own note above.
+        "cli.rs",
+        // The Explorer verb itself, which has no counterpart off Windows.
+        "explorer_menu.rs",
+        // Drive roots, the recycle bin, and the reveal.
+        "files.rs",
+        // `cfg!(windows)` three times, about how a path compares.
+        "git.rs",
+        // The same question one layer up, in the panel.
+        "git_panel.rs",
+        // The startup path: the native-window door's two arms, and the five
+        // platform calls M1-1 made non-fatal.
+        "main.rs",
+        // Which rows the palette offers on this machine.
+        "palette_index.rs",
+        // A PowerShell module, which is a Windows fact end to end.
+        "psreadline.rs",
+        // Which rows the settings page offers on this machine.
+        "settings.rs",
+        // Which shells can be integrated with here.
+        "shell_integration.rs",
+        // The in-place swap, which off Windows becomes "open the release page".
+        "update.rs",
+        // WSL.
+        "wsl.rs",
+    ];
+
+    /// The predicates that make a `cfg` a *platform* `cfg`. `test`, `debug_assertions`
+    /// and `feature = …` are not statements about a machine and are not counted.
+    const PLATFORM_WORDS: [&str; 5] = ["windows", "unix", "macos", "target_os", "target_family"];
+
+    /// Every `.rs` file under this crate's `src`, relative path first.
+    fn sources() -> Vec<(String, String)> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(directory) = stack.pop() {
+            for entry in std::fs::read_dir(&directory).expect("a directory of this crate") {
+                let path: PathBuf = entry.expect("a directory entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    let relative = path
+                        .strip_prefix(&root)
+                        .expect("a file under src")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    let text = std::fs::read_to_string(&path).expect("a source file");
+                    found.push((relative, text));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// The code half of each line — a comment is prose about a rule and not a
+    /// use of it, which is the same reading `the_shell_page_is_gone` takes of
+    /// its own needles and the same one `scripts/check-portable-core.ps1` takes
+    /// of every line it walks.
+    fn code_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
+        text.lines().enumerate().map(|(index, line)| {
+            let code = line.find("//").map_or(line, |at| &line[..at]);
+            (index + 1, code)
+        })
+    }
+
+    /// Whether `line` asks the compiler what machine this is.
+    ///
+    /// Both spellings, because they are the same question: the attribute
+    /// (`#[cfg(…)]`, `#![cfg(…)]`, `#[cfg_attr(…)]`) compiles one arm or the
+    /// other, and the macro (`cfg!(…)`) answers it as a `bool`. A file that
+    /// contains either is a file that knows what platform it is on.
+    fn names_a_platform(line: &str) -> bool {
+        let opens = line.contains("cfg(") || line.contains("cfg!(") || line.contains("cfg_attr(");
+        opens && PLATFORM_WORDS.iter().any(|word| line.contains(word))
+    }
+
+    /// RED — **no twelfth file, and no name on the list that has stopped
+    /// asking.**
+    ///
+    /// Two directions, because a one-way list rots: a file that starts naming a
+    /// platform has to be admitted on purpose, and a name that no longer names
+    /// one has to leave — otherwise the list slowly becomes "files that once
+    /// did", which forbids nothing.
+    ///
+    /// MUTATIONS: put a platform `cfg` in any other module of this crate and
+    /// the first assertion names it; take the last one out of `wsl.rs` and the
+    /// second does.
+    #[test]
+    fn only_the_named_files_decide_what_platform_this_is() {
+        let mut asking: Vec<String> = Vec::new();
+        let mut strangers: Vec<String> = Vec::new();
+        for (relative, text) in sources() {
+            let Some((line, _)) = code_lines(&text).find(|(_, line)| names_a_platform(line)) else {
+                continue;
+            };
+            asking.push(relative.clone());
+            if !FILES_THAT_MAY_NAME_A_PLATFORM.contains(&relative.as_str()) {
+                strangers.push(format!("{relative}:{line}"));
+            }
+        }
+        assert!(
+            strangers.is_empty(),
+            "these files of bt-app decide what platform they are on and are not on the list \
+             `docs/plans/port/macos-plan-2026-09-12.md` §4.3 keeps: {strangers:#?}\n\
+             Platform code lives behind bt-platform's interface — either the call belongs \
+             there, or this file joins the list on purpose and the list says why."
+        );
+        let silent: Vec<&str> = FILES_THAT_MAY_NAME_A_PLATFORM
+            .iter()
+            .copied()
+            .filter(|name| !asking.iter().any(|found| found == name))
+            .collect();
+        assert!(
+            silent.is_empty(),
+            "these names are on the list and no longer name a platform, so the list is \
+             promising less than it says: {silent:#?}"
+        );
+    }
+}
+
 /// **F2/F4 — the application-level drag broker, and the whole of what it decides**
 /// (`docs/plans/multiwindow-ef/plan.md` F2+F4 and the v3 增补「F2 spring deadline」).
 ///

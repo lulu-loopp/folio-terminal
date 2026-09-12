@@ -187,3 +187,99 @@ if ($violations.Count -gt 0) {
 }
 
 Write-Host "the $($portable.Count) portable crates name no Win32 outside a #[cfg(windows)] gate"
+
+# ── the second check: bt-app knows what platform it is on in a named list of
+#    files, and nowhere else ────────────────────────────────────────────────
+#
+# The first check is about the thirteen crates that must not name a platform at
+# all. This one is about the one crate that may, and it asks the opposite
+# question: *where*. `docs/plans/port/macos-plan-2026-09-12.md` §4.3 states the
+# design as a ratio — `bt-app` names `bt_platform::` at several hundred call
+# sites with no gate, and asks what machine it is on in a short list of files —
+# and a ratio that nothing enforces is a sentence about a day in September.
+#
+# **This is the twin of `bt_app::platform_gate_tests::
+# only_the_named_files_decide_what_platform_this_is`, and it reads that test's
+# own array out of `main.rs` rather than keeping a second copy.** One list, two
+# readers, exactly as `core-macos` and `core-linux` read one crate list: the
+# Rust pin runs on three platforms in CI and names the file and the line; this
+# runs in five seconds on a tree that does not compile and can be run before a
+# commit. A list that lived in both files would drift, and drift in a gate is a
+# gate that is decoration.
+#
+# The rule counts both spellings of the question, because they are one question:
+# the attribute (`#[cfg(...)]`, `#![cfg(...)]`, `#[cfg_attr(...)]`) compiles one
+# arm or the other, and the macro (`cfg!(...)`) answers it as a `bool`. `test`,
+# `debug_assertions` and `feature = "..."` are not statements about a machine and
+# are not counted.
+
+$appSource = Join-Path $repo "crates/bt-app/src"
+$pin = Join-Path $appSource "main.rs"
+if (-not (Test-Path -LiteralPath $pin)) {
+    throw "crates/bt-app/src/main.rs is not in the tree - there is no list to read"
+}
+
+# The array as `main.rs` writes it, from the opening bracket to the `];` that
+# closes it. Read rather than repeated: see the note above.
+$pinText = [IO.File]::ReadAllText($pin)
+$match = [regex]::Match(
+    $pinText,
+    'const\s+FILES_THAT_MAY_NAME_A_PLATFORM\s*:\s*\[&str;\s*\d+\]\s*=\s*\[(?<body>[^\]]*)\]\s*;'
+)
+if (-not $match.Success) {
+    throw ("crates/bt-app/src/main.rs no longer declares FILES_THAT_MAY_NAME_A_PLATFORM, which " +
+        "is the list this gate and its Rust twin both read. If the pin moved, move this with it.")
+}
+# Every entry carries a comment saying why it is on the list, and those comments
+# contain quoted English. The names are the strings in the *code*, so the
+# comments go first - the same reading every other walk in this file takes.
+$body = ($match.Groups["body"].Value -split "`n" |
+    ForEach-Object { $_ -replace '//.*$', '' }) -join "`n"
+$allowed = [regex]::Matches($body, '"(?<name>[^"]+)"') |
+    ForEach-Object { $_.Groups["name"].Value }
+if ($allowed.Count -lt 5) {
+    throw "the list read out of main.rs has $($allowed.Count) entries, which is not that list"
+}
+
+$platformWords = @("windows", "unix", "macos", "target_os", "target_family")
+$asking = @{}
+$strangers = @()
+
+foreach ($file in Get-ChildItem -Path $appSource -Recurse -File -Filter *.rs) {
+    $relative = $file.FullName.Substring($appSource.Length + 1).Replace("\", "/")
+    $lines = [IO.File]::ReadAllLines($file.FullName)
+    for ($index = 0; $index -lt $lines.Length; $index++) {
+        # A comment is prose about a rule and not a use of it - the same reading
+        # the walk above takes, and the same one the Rust twin takes.
+        $code = $lines[$index] -replace '//.*$', ''
+        if ($code -notmatch 'cfg\(|cfg!\(|cfg_attr\(') { continue }
+        $named = $false
+        foreach ($word in $platformWords) {
+            if ($code.Contains($word)) { $named = $true; break }
+        }
+        if (-not $named) { continue }
+        if (-not $asking.ContainsKey($relative)) {
+            $asking[$relative] = $index + 1
+            if ($allowed -notcontains $relative) {
+                $strangers += "${relative}:$($index + 1): $($lines[$index].Trim())"
+            }
+        }
+    }
+}
+
+if ($strangers.Count -gt 0) {
+    $details = ($strangers | Sort-Object) -join [Environment]::NewLine
+    throw ("bt-app decides what platform it is on outside the list main.rs keeps:" +
+        [Environment]::NewLine + $details + [Environment]::NewLine +
+        "Platform code lives behind bt-platform's interface. If the call belongs there, move " +
+        "it; if this file really has to ask, add it to FILES_THAT_MAY_NAME_A_PLATFORM with the " +
+        "reason, which admits it to this gate and to its Rust twin at once.")
+}
+
+$silent = @($allowed | Where-Object { -not $asking.ContainsKey($_) })
+if ($silent.Count -gt 0) {
+    throw ("these names are on bt-app's list and no longer name a platform, so the list is " +
+        "promising less than it says: " + ($silent -join ", "))
+}
+
+Write-Host "bt-app names a platform in the $($allowed.Count) files its own list admits"

@@ -43,19 +43,17 @@ pub struct NativeWindow {
     /// The platform's own handle, as a number. Private, and the reason this
     /// type exists.
     ///
-    /// Read on Windows by `NativeWindow::as_hwnd`. Off Windows nothing reads
-    /// it yet — M1-3 and M1-4 are the tickets that reach the `NSView` behind
-    /// it — and the field is carried so that the type has one shape everywhere
-    /// rather than a different one per platform.
-    #[cfg_attr(
-        not(any(windows, target_os = "macos")),
-        expect(
-            dead_code,
-            reason = "a platform with no window backend has nothing to read it with, and the type \
-                      keeps one shape on all three rather than becoming a different type on the \
-                      third"
-        )
-    )]
+    /// Read on Windows by `NativeWindow::as_hwnd`. Off Windows nothing reaches
+    /// through it yet — M1-3 and M1-4 are the tickets that reach the `NSView`
+    /// behind it — and the field is carried so that the type has one shape
+    /// everywhere rather than a different one per platform.
+    ///
+    /// M1-1 carried an `#[expect(dead_code)]` here for the third platform, and
+    /// **M1-10 measured that it is unfulfilled**: a Linux `cargo check
+    /// --all-targets -p bt-platform` reports the expectation itself as the
+    /// warning, because the derives above read this field and `dead_code` never
+    /// fires. An expectation that cannot be met is a warning of its own, which
+    /// is the opposite of what it was written for.
     handle: NonZeroIsize,
 }
 
@@ -2219,6 +2217,30 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// *given* a pseudoconsole rather than allocated a real one, so it has no window
 /// to suppress and `PtyCommand` is not this type. The gate matches
 /// `Command::new` on a word boundary for exactly that reason.
+/// **Which platform this build is**, as a value — the one place in the workspace that answers
+/// the question with `cfg!`, so that `bt-app` never has to (its gate, `only_the_named_files_
+/// decide_what_platform_this_is`, keeps the files that may name a platform to a list and this
+/// crate is the door those files reach through). A value rather than three gated bodies, so a
+/// test on one platform can ask what another ships.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HostPlatform {
+    Windows,
+    MacOs,
+    OtherUnix,
+}
+
+/// The platform this executable was built for.
+#[must_use]
+pub const fn host_platform() -> HostPlatform {
+    if cfg!(windows) {
+        HostPlatform::Windows
+    } else if cfg!(target_os = "macos") {
+        HostPlatform::MacOs
+    } else {
+        HostPlatform::OtherUnix
+    }
+}
+
 #[must_use]
 pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     #[cfg_attr(
@@ -10152,6 +10174,17 @@ mod native_window_door_tests {
     /// Braces inside string and character literals and inside comments would
     /// throw the count off, so both are skipped. It is a small parser and it is
     /// the only honest way to ask the question this gate asks.
+    ///
+    /// **Raw strings are their own arm, and M1-10 is why.** A `r"\\?\"` — a
+    /// Windows verbatim prefix, of which this crate's tests are full — ends with
+    /// a backslash immediately before its closing quote. Read as an ordinary
+    /// string that backslash escapes the quote, the scan runs on into the next
+    /// literal, and from there the brace count is somebody else's. The effect
+    /// was silent and it was total: this walk never closed `handoff.rs`'s test
+    /// module at all, so the gate below covered none of it, and the first line
+    /// in that module to name `stand_in` was reported as a shipped path. A gate
+    /// that answers about a file it cannot parse is worse than one that says it
+    /// cannot, which is why this is a fix rather than an exception.
     fn test_module_spans(text: &str) -> Vec<(usize, usize)> {
         let bytes = text.as_bytes();
         let mut spans = Vec::new();
@@ -10164,6 +10197,9 @@ mod native_window_door_tests {
                 let mut index = open;
                 while index < bytes.len() {
                     match bytes[index] {
+                        b'r' if raw_string_opens_at(bytes, index) => {
+                            index = skip_raw_string(bytes, index);
+                        }
                         b'"' => index = skip_string(bytes, index),
                         b'\'' => index = skip_char(bytes, index),
                         b'/' if bytes.get(index + 1) == Some(&b'/') => {
@@ -10184,6 +10220,58 @@ mod native_window_door_tests {
             }
         }
         spans
+    }
+
+    /// Whether the `r` at `at` opens a raw string rather than sitting inside a
+    /// word.
+    ///
+    /// Two readings and both are cheap: the byte before it may not be part of an
+    /// identifier — `for` must not open one — except that it may be the `b` of
+    /// `br"…"`, which is the byte-string spelling of the same literal. What
+    /// follows has to be `#`* `"`, and [`skip_raw_string`] answers that by
+    /// declining to move, so this predicate is allowed to be the loose half.
+    fn raw_string_opens_at(bytes: &[u8], at: usize) -> bool {
+        let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+        let before = match at.checked_sub(1).map(|before| bytes[before]) {
+            Some(b'b') => at.checked_sub(2).map(|before| bytes[before]),
+            other => other,
+        };
+        if before.is_some_and(is_word) {
+            return false;
+        }
+        let mut index = at + 1;
+        while bytes.get(index) == Some(&b'#') {
+            index += 1;
+        }
+        bytes.get(index) == Some(&b'"')
+    }
+
+    /// Past the raw string that starts at the `r` at `at` — the closing quote
+    /// and its hashes — or `at` itself when that is not what is there.
+    ///
+    /// A raw string has no escapes at all: it ends at the first `"` followed by
+    /// as many `#` as opened it, and a backslash before that quote is one more
+    /// character of the path.
+    fn skip_raw_string(bytes: &[u8], at: usize) -> usize {
+        let mut hashes = 0_usize;
+        let mut index = at + 1;
+        while bytes.get(index) == Some(&b'#') {
+            hashes += 1;
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b'"') {
+            return at;
+        }
+        index += 1;
+        while index < bytes.len() {
+            if bytes[index] == b'"'
+                && (1..=hashes).all(|offset| bytes.get(index + offset) == Some(&b'#'))
+            {
+                return index + hashes;
+            }
+            index += 1;
+        }
+        bytes.len()
     }
 
     /// Past the string literal that starts at `at`.
@@ -12062,6 +12150,17 @@ mod context_menu_tests {
     /// ③ ask whether *every* tree names a live stranger rather than whether
     ///    *any* does, and the mixed pair goes red — a registration half of which
     ///    still names a running install would be taken anyway.
+    ///
+    /// **Gated on its fixture** (`docs/DESIGN.md` §13.6, ticket M1-10). Every
+    /// path here is a Windows path and the `on_disk` predicate is written with
+    /// `Path::starts_with`, which walks *components*: off Windows
+    /// `D:\installed\folio.exe` is one component with backslashes inside it, so
+    /// the live install reads as gone and the rule is being asked about a
+    /// machine that does not exist.
+    /// `the_posix_launch_finds_no_registration_to_repair` is the mirror, and it
+    /// is a different claim rather than the same one restated — macOS has no
+    /// registration to repair at all.
+    #[cfg(windows)]
     #[test]
     fn the_launch_repairs_a_dead_registration_and_leaves_a_live_one_standing() {
         let desired = desired();
@@ -12138,6 +12237,60 @@ mod context_menu_tests {
             ),
             "and a machine that needs nothing is not written to"
         );
+    }
+
+    /// PIN — **the POSIX mirror: there is nothing registered, so the launch
+    /// reads an absence, repairs nothing, and the two writing doors refuse**
+    /// (M1-10, `docs/DESIGN.md` §13.6).
+    ///
+    /// The Windows test above is the repair rule; this is the same launch on a
+    /// platform where the mechanism does not exist. `NSServices` is declarative
+    /// — the entry is read out of `Info.plist` and there is no store to write,
+    /// nothing to announce and nothing to read back (M4-9) — so the honest
+    /// reading of "what is registered" is an empty list, which
+    /// [`context_menu_verdict`] turns into [`ContextMenuState::Absent`], which
+    /// is not [`ContextMenuState::Stale`], which is why
+    /// [`context_menu_reassert_wanted`] answers `false` without touching the
+    /// disk predicate at all.
+    ///
+    /// That chain is the thing worth pinning: **a launch on macOS must not
+    /// decide it has repair work to do.** The two writing doors refuse with a
+    /// reason beside it, so a settings row that asks for the verb gets a
+    /// sentence rather than silence.
+    ///
+    /// MUTATION: make the portable `read_context_menu` answer a `Broken` tree
+    /// per [`CONTEXT_MENU_TREES`] entry instead of an empty list and the second
+    /// assertion goes red — every launch would then try to write a registry
+    /// that is not there.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_posix_launch_finds_no_registration_to_repair() {
+        let desired = desired();
+        let found = read_context_menu("Software\\Classes");
+        assert!(
+            found.is_empty(),
+            "there is no registration store here, and an empty reading is the honest one"
+        );
+        assert_eq!(
+            context_menu_verdict(&found, &desired),
+            ContextMenuState::Absent
+        );
+        assert!(
+            !context_menu_reassert_wanted(&found, &desired, |_| unreachable!(
+                "nothing is stale, so no path is ever asked about"
+            )),
+            "a launch on a platform with no registry has no registration to repair"
+        );
+
+        for refusal in [
+            install_context_menu("Software\\Classes", &desired),
+            remove_context_menu("Software\\Classes"),
+        ] {
+            let reason = refusal.expect_err("there is no Explorer verb on this platform");
+            assert!(!reason.is_empty(), "a refusal carries its own reason");
+        }
+        // And telling a shell that is not there is a no-op rather than a call.
+        announce_explorer_menu_change();
     }
 
     /// RED (2026-09-07) — **every write to what Explorer's menu holds ends by

@@ -103,6 +103,34 @@ jobs:
           }
           exit 0
 
+      # The same script's *second* check, and a separate canary because it is a
+      # separate rule with a separate list: `bt-app` may know what platform it
+      # is on, and `main.rs`'s own `FILES_THAT_MAY_NAME_A_PLATFORM` says in which
+      # files. The violation is planted in a file that is not on that list, which
+      # is the only shape this check refuses. Note that the *first* check runs
+      # first and passes — `bt-app` is not one of the thirteen portable crates —
+      # so a red here is this rule's red and nobody else's.
+      - name: the bt-app platform-gate check can actually fail
+        shell: pwsh
+        run: |
+          $file = "crates/bt-app/src/notice.rs"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "`n#[cfg(windows)]`nfn _platform_gate_probe() {}`n")
+            $failed = $false
+            try {
+              & ./scripts/check-portable-core.ps1 *> $null
+            } catch {
+              $failed = $true
+            }
+            if (-not $failed) {
+              throw "the gate accepted a platform cfg in a bt-app file that is not on the list"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          exit 0
+
       - name: the lint gate can actually fail
         shell: pwsh
         run: |
@@ -376,8 +404,11 @@ jobs:
   # and nothing will say so, and the 90 % is then a number about a day in
   # September rather than about this repository.
   #
-  # So the crates are named one at a time, exactly as `scripts/check-portable-core.ps1`
-  # names them, and for the same reason: "everything except bt-app" is a shape a
+  # So the crates are named one at a time — the thirteen
+  # `scripts/check-portable-core.ps1` names, plus the vendored terminal they are
+  # all downstream of, plus `bt-platform` and `bt-app`, which that script does
+  # not name because they are the two crates that *may* know what platform they
+  # are on. The reason is the same for all of them: "everything" is a shape a
   # script can infer, while "these are the crates we promise compile on a second
   # platform" is a decision. A crate that joins the workspace joins this list on
   # purpose, or the promise does not cover it.
@@ -386,21 +417,41 @@ jobs:
   # file is `continue-on-error`, and `gates-can-fail` differs from its neighbours
   # by *proving itself* rather than by being optional. A red here is a red run.
   #
-  # `bt-app` is deliberately absent and is expected to fail: 321 errors naming 79
-  # items missing from `bt_platform`, which is the port and not this job's
-  # business. `bt-pty` and `bt-render` are checked but not tested — one starts
-  # real child processes through a ConPTY that does not exist off Windows and the
-  # other asks for a real adapter, exactly as the `conpty` and `gpu` jobs above
-  # say. `core-linux` below does test `bt-pty`, and the difference is not the
-  # operating system's ancestry: that crate's Windows-only tests carry a gate now,
-  # and what is left of the suite would run here too. **M1-6 has since run that
-  # suite on the owner's Mac mini and it is green there, real Unix children and
-  # all**, so the reason this line still stops at `check` is no longer that
-  # nobody knows — it is that moving it is M1-10's job, together with the
-  # `-D warnings` line and the dead-code that platform still carries.
-  # `bt-term` and `bt-corpus` are checked but not tested because the spike never
-  # got far enough to measure their suites there; they join the test line the day
-  # somebody does.
+  # **M1-10 grew this job from thirteen crates to the whole of what compiles.**
+  # The two sentences that used to stand here — "`bt-app` is deliberately absent
+  # and is expected to fail: 321 errors naming 79 items missing from
+  # `bt_platform`" and "moving `bt-pty` onto the test line is M1-10's job,
+  # together with the `-D warnings` line" — were both true when they were
+  # written and are both retired. M1-1 gave `bt_platform` the missing items and
+  # `bt-app` links here; M1-6 ran `bt-pty`'s suite against real Unix children on
+  # the owner's Mac mini; M1-10 fixed the last three `bt-app` targets that only
+  # `--all-targets` ever compiles, and cleared the warnings the `-D warnings`
+  # line tripped over.
+  #
+  # So what this job now proves, in the order the steps make the claims:
+  #
+  # ① the fifteen crates below compile on macOS with their test code, which is
+  #    the promise `core-linux` makes in the same words;
+  # ② **`bt-app` compiles here, every target of it** — the binary, its test
+  #    target and both video probes in `examples/`. `--all-targets` is the whole
+  #    point: a `#[cfg(test)]` module and an example are where a platform
+  #    assumption hides most cheaply, and the three targets M1-10 fixed were
+  #    exactly those;
+  # ③ twelve suites run, `bt-platform`'s and `bt-pty`'s among them — the second
+  #    starts real Unix children over a real pty, which is a thing no Windows job
+  #    in this file can do;
+  # ④ `bt-platform` passes clippy with `-D warnings`, which is the lint line
+  #    `logic` holds on Windows, held on the platform where half that crate is a
+  #    refusal.
+  #
+  # What is still checked and not tested, and why: `bt-render` asks for a real
+  # adapter and a runner has none (the `gpu` job above is where that question is
+  # asked); `bt-term` and `bt-corpus` because nobody has measured their suites on
+  # a second platform, and a list of what we have measured is worth more than a
+  # list of what we hope. **`bt-app` is checked and not tested on purpose**: its
+  # suite is 3,498 tests and most of them want a window, a renderer or a ConPTY,
+  # and turning that on here would be a different ticket with a different
+  # acceptance line rather than a longer command.
   core-macos:
     runs-on: macos-latest
     timeout-minutes: 45
@@ -416,25 +467,70 @@ jobs:
       # `--all-targets`, because the test code is where a platform assumption
       # hides most cheaply: five of the seven errors this branch fixed were in
       # `#[cfg(test)]` modules that had never been compiled anywhere else.
+      #
+      # The same fifteen `core-linux` checks and in the same order, for the
+      # reason that job's own comment gives: two lists that mean one thing
+      # drift, and a diff that changes one and not the other is meant to be read
+      # as the mistake it is.
       - name: check the portable crates
         run: >
           cargo check --locked --all-targets
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
-          -p bt-render -p bt-term -p bt-pty -p bt-corpus
+          -p bt-render -p bt-term -p bt-pty -p bt-corpus -p bt-platform
           -p alacritty_terminal
 
+      # **The application, every target of it** (M1-10). A step of its own and
+      # not a name on the line above, because the claim is a different one: the
+      # list above is "the core still compiles somewhere that is not Windows"
+      # and this is "the product does". It is also the step whose red is worth
+      # reading on its own — `bt-app` is where the port actually happens, and a
+      # failure buried in a fifteen-crate command names a crate rather than a
+      # milestone.
+      #
+      # `--all-targets` reaches three targets nothing else compiles: the bin's
+      # own `#[cfg(test)]` modules and the two probes in `examples/`, which name
+      # DirectComposition and Media Foundation and are `#[cfg(windows)]` per item
+      # with a portable `main` beside them. Those three were the whole of what
+      # M1-1 left failing here.
+      - name: check the application, every target of it
+        run: cargo check --locked --all-targets -p bt-app
+
       # The eight suites the spike's own table records as green here, plus the
-      # two this branch made green — `bt-transcript` and `bt-viewport`, whose
-      # seven failures were all one cause: a path grammar that only knew Windows.
-      # Ten of the fourteen checked above; the other four are the two that want
-      # hardware and the two nobody has measured yet.
+      # two M1-1's branch made green — `bt-transcript` and `bt-viewport`, whose
+      # seven failures were all one cause: a path grammar that only knew Windows
+      # — plus the two M1-10 added.
+      #
+      # **`bt-platform` and `bt-pty` are the two this ticket moved from `check`
+      # to `test`, and they are the two that matter most here.** `bt-platform`
+      # off Windows is mostly refusals, and a refusal that is never called is a
+      # claim nobody has read back: `portable_impl::refusal_tests` calls every
+      # door, and the four fixture-gated rules M1-10 mirrored (the trailing-dot
+      # trim, the reveal argument, where a program is looked for, the Explorer
+      # registration) each have a POSIX twin that only runs here and on Linux.
+      # `bt-pty` starts real Unix children over a real pty — spawn, resize, exit
+      # and reap — which M1-6 measured on the owner's Mac mini and which no
+      # Windows job in this file can do.
       - name: test the portable crates
         run: >
           cargo test --locked
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
-          -p alacritty_terminal
+          -p bt-platform -p bt-pty -p alacritty_terminal
+
+      # **The lint line, held on the second platform** (M1-10). `logic` runs
+      # `clippy --workspace --all-targets -- -D warnings` on Windows, and until
+      # this ticket nothing held that bar anywhere else: M1-6 reported
+      # `bt-platform` and `bt-transcript` red here on Windows-only dead code,
+      # which is how a `#[cfg(windows)]` that should have been written gets
+      # noticed at all.
+      #
+      # `bt-platform` and not the workspace, for now. It is the crate the port
+      # is about and the one whose non-Windows half is written rather than
+      # inherited; widening this to the crates above is cheap and is a decision
+      # somebody should take on purpose rather than a flag that grew.
+      - name: the lint line on bt-platform
+        run: cargo clippy --locked --all-targets -p bt-platform -- -D warnings
 
   # ── the platform the remote work runs on ──────────────────────────────────
   #
@@ -512,17 +608,28 @@ jobs:
       # it installs the pinned *version* against this runner's own host triple.
       - uses: ./.github/actions/toolchain
 
-      # The same fourteen crates `core-macos` checks and in the same order,
+      # The same fifteen crates `core-macos` checks and in the same order,
       # because they are the same promise: `scripts/check-portable-core.ps1`'s
-      # thirteen, plus the vendored terminal they are all downstream of. Two
-      # lists that mean one thing drift; a diff that changes one and not the
-      # other is meant to be read as the mistake it is.
+      # thirteen, plus the vendored terminal they are all downstream of, plus
+      # `bt-platform` (M1-10). Two lists that mean one thing drift; a diff that
+      # changes one and not the other is meant to be read as the mistake it is.
+      #
+      # **`bt-platform` is here and `bt-app` is not, and the asymmetry is the
+      # point.** §4.6 of `docs/plans/port/macos-plan-2026-09-12.md` states the
+      # rule the remote server inherits: the macOS GUI dependencies are declared
+      # only for macOS targets, so a Linux build of this crate links *nothing* —
+      # `Cargo.toml`'s dependency table is empty outside the two platform
+      # sections. Checking it here is what turns that from a manifest one can
+      # read into a claim a machine has answered, and it is the only place in
+      # this file where it is answered at all. `bt-app` stays off: the server
+      # never depends on it (§4.6, unconditional), and a Linux build of the
+      # application is a milestone nobody has scheduled.
       - name: check the portable crates
         run: >
           cargo check --locked --all-targets
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
-          -p bt-render -p bt-term -p bt-pty -p bt-corpus
+          -p bt-render -p bt-term -p bt-pty -p bt-corpus -p bt-platform
           -p alacritty_terminal
 
       # `core-macos`'s ten, plus `bt-pty` for the reason above and minus

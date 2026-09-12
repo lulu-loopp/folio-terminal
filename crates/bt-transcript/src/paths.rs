@@ -272,6 +272,12 @@ pub fn distro_path_to_local_path(distro: &str, below_root: &str) -> Option<PathB
 /// registry: a name carrying a separator, a colon or a control character would compose a path
 /// naming somewhere else entirely, and `.`/`..` name the share's own parents. Everything WSL itself
 /// allows in a distribution name — letters, digits, `-`, `_`, `.` — passes.
+///
+/// Gated where its two readers are (M1-10): [`distro_path_to_local_path`] and
+/// [`wsl_share_root_length`] are both `#[cfg(windows)]`, because a WSL share is
+/// a Windows path that only Windows can hold, so off Windows this is a rule
+/// nobody asks.
+#[cfg(windows)]
 fn is_distribution_name(distro: &str) -> bool {
     !distro.is_empty()
         && distro != "."

@@ -1638,10 +1638,26 @@ mod tests {
     use super::*;
     use bt_term::{DualPlaneSession, RESIZE_REQUEST_QUIET, TerminalAdapter, TerminalCursor};
 
+    // ── the resize cursor oracle, which is a PSReadLine measurement ─────────
+    //
+    // Everything from here to `assert_resize_cursor_outcome_contract` exists for
+    // the two `#[cfg(windows)]` tests at the end of this module: they drive a
+    // real interactive PowerShell through a real ConPTY resize storm and read
+    // where its line editor left the cursor. Off Windows there is no PowerShell,
+    // no ConPTY and no line editor to ask, and the scaffolding was ungated — so
+    // a `cargo test -p bt-pty` on the Mac compiled fourteen warnings' worth of
+    // dead code before it ran a single test (M1-6 counted them; M1-10 is the
+    // ticket that moved that command onto `core-macos`'s test line, and dead code
+    // that nobody can reach is the first thing a `-D warnings` run would stop on).
+    // Each item is gated where its reader is, one at a time rather than by a
+    // module of their own: they are interleaved with scaffolding the portable
+    // half does use, and moving them would be a rewrite rather than a gate.
+    #[cfg(windows)]
     const ORACLE_EMPTY_PROMPT_LINE: &str = concat!(
         "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
         "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
     );
+    #[cfg(windows)]
     const ORACLE_PROMPT: &str = concat!(
         "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
         "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
@@ -1682,7 +1698,9 @@ mod tests {
     /// honest cost, because reaching it means a defect and never a busy afternoon.
     const PROBE_CEILING: Duration = Duration::from_secs(180);
 
+    #[cfg(windows)]
     const ORACLE_HISTORY_COMMAND: &str = "echo BTHT";
+    #[cfg(windows)]
     const ORACLE_HISTORY_OUTPUT: &[u8] = b"BTHT";
 
     /// What `BTHOLD` prints on the way in, so that "the child is now held" is something the probe
@@ -1691,6 +1709,7 @@ mod tests {
     /// Deliberately not the spelling of the command itself: the typed line is echoed back
     /// keystroke by keystroke, so waiting for `BTHOLD` in the output would match the child
     /// repeating the request rather than the child obeying it.
+    #[cfg(windows)]
     const ORACLE_HELD_MARKER: &str = "BTHELD";
 
     /// A hold on the child that the probe opens itself, standing where a clock used to.
@@ -1708,10 +1727,12 @@ mod tests {
     /// process has deliberately not created, and the probe creates it once the last resize is in:
     /// the same child, held for exactly as long as this machine turns out to need, and released by
     /// an event rather than by a guess about how fast the afternoon is.
+    #[cfg(windows)]
     struct ProbeLatch {
         path: PathBuf,
     }
 
+    #[cfg(windows)]
     impl ProbeLatch {
         fn new() -> Self {
             static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -1739,14 +1760,18 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     impl Drop for ProbeLatch {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.path);
         }
     }
+    #[cfg(windows)]
     const ORACLE_EDITING_PREFIX: &str = "typed_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+    #[cfg(windows)]
     const ORACLE_POST_RESIZE_INPUT: &str = "Z";
 
+    #[cfg(windows)]
     #[derive(Debug)]
     struct CursorOracleEvidence {
         synchronization_dsr_requests: usize,
@@ -1778,6 +1803,7 @@ mod tests {
     impl InteractiveOracle {
         /// The resize oracle's child: the tall prompt every row of its evidence is addressed
         /// against, plus the `BTHOLD` latch described on [`ProbeLatch`].
+        #[cfg(windows)]
         fn spawn_holding(latch: &ProbeLatch) -> Self {
             let startup = format!(
                 "Set-PSReadLineOption -HistorySaveStyle SaveNothing; \
@@ -1882,6 +1908,7 @@ mod tests {
 
         /// Whether [`ORACLE_POST_RESIZE_INPUT`] is anywhere on the screen — the one character that
         /// tells the edited line apart from the recalled one.
+        #[cfg(windows)]
         fn showing_edited_input(&self) -> bool {
             self.terminal
                 .visible_text()
@@ -1910,6 +1937,7 @@ mod tests {
         /// finished, and what became of the rows above — none of which this waits for.
         /// [`ORACLE_POST_RESIZE_INPUT`] is the discriminator because it is the one character that
         /// tells the edited line apart from the recalled one.
+        #[cfg(windows)]
         fn wait_for_edited_input(&mut self, present: bool) {
             let started = Instant::now();
             let mut last_output = Instant::now();
@@ -2017,6 +2045,7 @@ mod tests {
                 .unwrap_or_default()
         }
 
+        #[cfg(windows)]
         fn current_prompt_text(&self) -> String {
             let cursor_row = self.terminal.cursor().row as usize;
             let rows = self.terminal.visible_text();
@@ -2122,6 +2151,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     fn run_resize_cursor_oracle() -> CursorOracleEvidence {
         let latch = ProbeLatch::new();
         let mut oracle = InteractiveOracle::spawn_holding(&latch);
@@ -3429,6 +3459,7 @@ mod tests {
     /// implementations reach this contract by different means: the pinned sidecar asks the terminal
     /// `CSI 6 n` and adopts the reply (`microsoft/terminal#19535`), while the Windows inbox
     /// implementation repaints the whole viewport and places the cursor itself.
+    #[cfg(windows)]
     fn assert_resize_cursor_outcome_contract(evidence: &CursorOracleEvidence) {
         assert_eq!(
             evidence.typed_line,
