@@ -976,18 +976,32 @@ mod macos_handoff {
         /// one claim about LaunchServices that nothing else in this file can
         /// make.
         ///
-        /// **It ends what it started, and only that.** The applications running
-        /// before the call are written down; afterwards the one that is not
-        /// among them is the one this test launched, and it is asked to quit by
-        /// its own object. Apple's note on `processIdentifier` says to compare
-        /// with `isEqual:` rather than with a pid, and `isEqual:` is what the
-        /// search below uses — so a TextEdit the owner already had open cannot
-        /// be matched, because it is in the *before* list.
+        /// # It ends what it started, and it cannot end anything else
         ///
-        /// If nothing new appears — the handler was already running and reused
-        /// its process — there is nothing to end and nothing is ended. The
-        /// assertion is on the door's answer, not on a new process, so that is
-        /// not a failure.
+        /// Two conditions have to hold together before this asks anything to
+        /// quit, and either alone would be a test that can reach somebody
+        /// else's work:
+        ///
+        /// ① **it was not running before.** The applications running before the
+        ///    call are written down, and the candidate must not be among them.
+        ///    Apple's note on `processIdentifier` says to compare processes with
+        ///    `isEqual:` rather than with a pid, and that is what the search
+        ///    uses — so a TextEdit the reader already had open is in the
+        ///    *before* list and can never match.
+        /// ② **it is the application LaunchServices named for this file.**
+        ///    `URLForApplicationToOpenURL:` is asked *before* the door is
+        ///    called, and the candidate's `bundleURL` has to be that one. ①
+        ///    alone is not enough: anything at all may launch during the second
+        ///    this test waits — a reader double-clicking something, an agent
+        ///    somebody else is running, a helper the system starts — and
+        ///    "whatever appeared next" is not a description of what this test
+        ///    opened.
+        ///
+        /// Nothing is asserted about the quit. The claim is the door's answer;
+        /// ending the application is tidiness, and a handler that was already
+        /// running reused its process, so there is nothing to end. The
+        /// terminate is asked once the application says it has finished
+        /// launching, because one asked mid-launch is documented to be refused.
         #[test]
         fn open_local_path_hands_a_file_to_the_workspace() {
             let window = crate::NativeWindow::stand_in(0);
@@ -996,6 +1010,8 @@ mod macos_handoff {
             std::fs::write(&file, b"M2-2 opened this.\n").expect("a document");
 
             let workspace = NSWorkspace::sharedWorkspace();
+            let url = file_url(&file, false).expect("a file URL");
+            let handler = workspace.URLForApplicationToOpenURL(&url);
             let before: Vec<Retained<NSRunningApplication>> =
                 workspace.runningApplications().to_vec();
 
@@ -1007,20 +1023,42 @@ mod macos_handoff {
 
             // LaunchServices answers before the application has finished
             // launching, so the new process is waited for rather than assumed.
-            let mut opened: Option<Retained<NSRunningApplication>> = None;
-            for _ in 0..50 {
+            let Some(handler) = handler else {
+                // No registered handler to identify, so nothing may be ended.
+                let _ = std::fs::remove_dir_all(&root);
+                return;
+            };
+            // Both URLs come from LaunchServices, but one names a bundle and
+            // the other a directory, so a trailing slash is not a difference
+            // about which application it is.
+            let bundle_path = |url: &NSURL| {
+                url.path()
+                    .map(|path| path.to_string().trim_end_matches('/').to_owned())
+            };
+            let Some(wanted) = bundle_path(&handler) else {
+                // An application this process cannot name is one it must not
+                // end. Nothing here asserts on the quit, so there is nothing
+                // to report.
+                let _ = std::fs::remove_dir_all(&root);
+                return;
+            };
+            for _ in 0..100 {
                 std::thread::sleep(std::time::Duration::from_millis(100));
-                opened = workspace
+                let opened = workspace
                     .runningApplications()
                     .to_vec()
                     .into_iter()
-                    .find(|running| !before.iter().any(|known| **known == **running));
-                if opened.is_some() {
+                    .find(|running| {
+                        running.bundleURL().and_then(|url| bundle_path(&url))
+                            == Some(wanted.clone())
+                            && !before.iter().any(|known| **known == **running)
+                    });
+                if let Some(opened) = opened
+                    && opened.isFinishedLaunching()
+                {
+                    opened.terminate();
                     break;
                 }
-            }
-            if let Some(opened) = opened {
-                opened.terminate();
             }
             let _ = std::fs::remove_dir_all(&root);
         }
