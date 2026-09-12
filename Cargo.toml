@@ -133,6 +133,19 @@ regex = "1"
 # one belongs to the whole process — typst's layout included.
 rayon = "1"
 thiserror = "2"
+# **One number out of one table**: `head.unitsPerEm`, which is what decides
+# whether a face can be shaped at all (`bt_render::terminal_font_system`, M2-5).
+# cosmic-text divides every advance by it and does not guard the division, so a
+# face declaring zero answers `inf` for every advance and one such glyph puts a
+# whole line at `NaN` — measured on macOS, where `GB18030 Bitmap` is exactly
+# that face and a Chinese line finds it without being asked.
+#
+# Already in the lock file — `fontdb` is built on it, which is how `glyphon`
+# reads a family name in the first place — so naming it here costs no new
+# package, which is `docs/DESIGN.md` §8's bar. It must stay the version `fontdb`
+# resolves: a second major would be a second copy of a font parser in the tree
+# for the sake of two bytes.
+ttf-parser = "0.25"
 # The user's own `~/.codex/config.toml`, which the attention block's codex
 # installer adds one key to and must be able to hand back byte for byte
 # (`attention_codex`). A format-preserving editor and not `toml` + a serializer:

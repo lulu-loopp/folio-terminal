@@ -8546,4 +8546,257 @@ What completes it is `TerminationAnswer::answer`, called from `settle_quit` — 
 
 **⑪ The Dock click is NOT-CHECKABLE and is covered rather than missing.** X-4 measured that clicking the Dock needs `System Events`, and therefore Accessibility *and* Automation, and that `osascript` from ssh answered `-1712` behind a TCC prompt no agent can reach. A Dock click delivers exactly the `applicationShouldHandleReopen:hasVisibleWindows:` that `open -a` delivers — which is how the same event is reached here, with windows and without — so what is untested is the gesture and not the path. The owner's own acceptance line is the one that closes it.
 
+### 13.22 M2-5: Metal 路上的字形是量出来的(`crates/bt-render/src/glyph_probe.rs`、`crates/bt-render/tests/glyph_output.rs`、`crates/bt-app/tests/macos_glyph_surface.rs`、`crates/bt-render/src/lib.rs`)
+
+**① One page, one builder, two surfaces — and that is the whole design.** The
+port's glyph question is not CoreText against DirectWrite. Folio shapes and
+rasterizes through Swash via glyphon on both machines, so the rasterizer does
+not change at all (`docs/plans/port/macos-plan-2026-09-12.md` §R4); what changes
+is the presentation path around it — a `CAMetalLayer` on a view Folio owns,
+declared `PostMultiplied` and carrying premultiplied pixels (§13.14, X-1). A
+difference between the two paths is therefore a defect **in the path**, and the
+only way to make that sentence mean anything is for the two paths to be handed
+the same frame *by construction* rather than by two call sites that look alike.
+`bt_render::glyph_probe::GlyphFixture` is that construction: one builder, one
+`present`, two targets — the offscreen texture `read_back` can map, and a real
+Metal swapchain, which cannot be mapped at all and is read as a photograph of
+the window.
+
+**② What is on the page, and why the box-drawing row is the control.** Eight
+grid rows — Latin, Chinese, box drawing, braille, a bold run, an italic run, an
+underlined hyperlink wearing its dotted underline, and a row of narrow stems —
+and under them four rows of prose. Two of those rows are there to be *compared*
+with the others: **box drawing is not rasterized in this renderer at all**, it
+is cell geometry (`procedural.rs`) coming out of the rectangle pipeline, while
+braille beside it is an ordinary glyph. So a difference that appears in both is
+the surface, and one that appears only in the glyph rows is the rasterizer —
+which is the question this ticket exists to be able to answer rather than guess.
+Every cell declares white ink on an explicit black ground, so no number below
+depends on which theme the process happened to be holding.
+
+**③ Why numbers and not a committed picture.** A PNG would pin the bytes of one
+machine's font: the grid is `Consolas` on Windows and `Menlo` on a Mac (§13.18
+⑤), so a byte comparison across the two would fail for the one reason that is
+not a defect. What is the same on both, because the rasterizer is, is the
+*shape of the coverage* — the peak, the mean, and the share of inked pixels
+lying strictly between nearly clear and nearly solid. Coverage is read off the
+**encoded byte**, because that is what a reader's eye meets; every centroid is
+weighted by **linear light**, because that is what ink is (see ⑤).
+
+**Measured at backing scale 2, one page of 900x760 physical pixels.** Windows:
+Consolas at 32 px, cell 18 px wide, padding 16. Mac (M4, macOS 26.6.2): Menlo at
+32 px, cell 20 px wide, padding 16. `peak` is 1.0000 in all sixteen readings and
+is left out of the table.
+
+| band | rasterized | Windows ink / mean / aa | Mac ink / mean / aa |
+|---|---|---|---|
+| latin | yes | 3976 / 0.8201 / 0.4799 | 4646 / 0.8404 / 0.4090 |
+| cjk | yes | 2730 / 0.7338 / 0.7473 | 4040 / 0.7942 / 0.5223 |
+| box | **no** | 1212 / 1.0000 / **0.0000** | 1260 / 1.0000 / **0.0000** |
+| braille | yes | 873 / 0.7475 / 0.6541 | 783 / 0.6853 / 0.7152 |
+| bold | yes | 3434 / 0.8695 / 0.3480 | 4381 / 0.8819 / 0.3079 |
+| italic | yes | 2727 / 0.8132 / 0.4895 | 3275 / 0.8337 / 0.4192 |
+| link | yes | 3612 / 0.8498 / 0.3829 | 4144 / 0.8588 / 0.3451 |
+| stems | yes | 4420 / 0.8337 / 0.4462 | 3944 / 0.8494 / 0.4397 |
+
+Every rasterized band on both machines reaches **full coverage** somewhere — a
+stem's interior is solid ink — and carries a partial-coverage skirt of between a
+third and three quarters of its pixels. The mean coverages agree to within 0.06
+band for band, on two different faces. The box-drawing row is 1.0000 mean and
+**zero** antialiasing on both, which is the control saying what it is there to
+say: that row never goes near the rasterizer, and the rows around it do.
+
+**④ §13.14 ⑥'s open question, answered: the blend is in linear light and the
+stored bytes are not.** M1-4 left one thing deliberately unanswered — whether
+the premultiplied arithmetic this renderer writes holds on the *encoded* bytes
+or in linear light — and said it belonged here, "where an antialiased edge is
+the thing someone actually looks at". It is both, and they are different
+numbers:
+
+* **In linear light the contract is exact.** Over a translucent ground, at every
+  alpha measured, on both machines, **not one pixel** of the frame carries a
+  colour its own alpha cannot account for once the colour byte is decoded.
+  `a_translucent_page_holds_no_pixel_brighter_than_its_own_alpha` pins that at
+  zero.
+* **As stored bytes it does not hold, and cannot.** `Bgra8UnormSrgb` encodes the
+  three colour channels and leaves alpha linear, so an antialiased edge stores a
+  colour byte *above* its alpha byte by construction. At a ground worth 0.30,
+  **9822** pixels of this page are in that state on Windows and **9688** on the
+  Mac; at 0.60, none are on either, because by then the ground's own
+  contribution has risen past what the encoding adds. Pinning that count to zero
+  would be pinning the absence of antialiasing, so it is reported and not
+  asserted.
+
+**One unit of that alpha is the hardware's and not this renderer's**, and it is
+worth a line because a gate written any tighter would have pinned it: a clear
+colour is a float and the surface stores eight bits, so at a ground worth 0.30 —
+which is 0.300000012 as an `f32` — the bare corner of the page reads **76**
+through D3D12 and **77** through Metal. Two backends rounding the same exact
+half the two ways it can be rounded; the gate reads the corner within one, and
+says why.
+
+What it costs is stated rather than hidden. X-1 measured that CoreAnimation
+composites these bytes **premultiplied without decoding them**, so a Folio window
+at a low ground opacity draws the antialiased skirt of its letters brighter than
+the arithmetic says — most at a third opacity, none at two thirds. That is a
+colour-management question about a translucent window and belongs to whoever
+takes translucency further; it is not a rasterization defect, and no arm of this
+ticket touches the rasterizer to hide it.
+
+**⑤ Subpixel positioning: the terminal never asks, and the prose lane does.**
+The ticket's question was "subpixel positioning at fractional advances", and the
+first half of the answer is that **a terminal grid has no fractional advances**:
+`CellMetrics::measure` takes `primary_advance_px.ceil()` for the cell width and
+`(8 x scale).ceil()` for the padding, so `padding + column x cell_width_px` is a
+whole number in every column. Measured: thirty-four copies of one character,
+each read against its own cell origin, land on the same phase to the last
+fraction of a pixel — spread **0.0000** on both machines (8.7522 px on Windows,
+10.1097 px on the Mac, which is each face's own left side bearing).
+`every_column_of_the_grid_draws_its_stem_in_the_same_place` pins it there,
+because a spread that was not zero is a caret that no longer stands on the
+character it edits (§7.1.3q's own illness).
+
+So the question is asked where it exists. A prose paragraph's rectangle is
+wherever the document solver put it, and the fixture draws four rows of one
+string at origins a quarter of a pixel apart. The ink moves with them:
+
+| origin | Windows | Mac |
+|---|---|---|
+| +0.00 px | +0.0000 | +0.0000 |
+| +0.25 px | +0.2348 | +0.2382 |
+| +0.50 px | +0.4941 | +0.4819 |
+| +0.75 px | +0.7288 | +0.7463 |
+
+Twenty-two thousandths of a pixel is the worst error on either machine, against
+a quarter being asked for. **One measurement trap is written down here because
+it cost a wrong answer first:** an ink centroid weighted by the *stored byte* is
+not an ink centroid — sRGB encoding is convex, so it over-weights the faint
+skirt, and the same four rows first came back at +0.31 / +0.52 / +1.32, a
+placement that looked quantized and was not.
+
+**⑥ The CJK case that failed on the Mac, and it was not the fallback table.**
+M1-4 recorded `every_cluster_of_a_grid_paragraph_stands_on_its_own_column`
+failing on the Mac and put it down to the CJK fallback lists being Windows font
+file names, "dead code on macOS". **That diagnosis was wrong.** The macOS arm
+has had its own chain (`MACOS_CJK_FALLBACK_FAMILIES`) and its own `Fallback`
+implementation since `026d765`, and PingFang SC is installed on that machine.
+What the case actually reported was `the cluster "页" at byte 3 is drawn at NaN`.
+
+Read back glyph by glyph, the run says why: the `M` came from Menlo advancing
+19.265625 px, and every Han cluster came from **`GB18030 Bitmap`** advancing
+`inf`. Two facts make that happen and neither is about the fallback table.
+
+- **The face has no scalable em.** It is one of Apple's bitmap-only faces and
+  carries `bhed` where a scalable face carries `head`, so swash reports zero
+  units per em — and cosmic-text scales every advance by that number without
+  guarding the division (`shape.rs`, `let font_scale =
+  font.metrics().units_per_em as f32`; `decoration_metrics` next door *does*
+  guard its own). Every advance is `inf`, the line's width is `inf`, and the
+  grid's tracking — `(target − natural) / font_size / glyphs` — is `NaN`, which
+  is the letter spacing the second shaping pass is then given. Hence a cluster
+  drawn at `NaN`, and a caret, a band and a click all pointing nowhere, with no
+  error anywhere.
+- **Nothing asked for it.** The face is flagged *monospaced* and covers Han, and
+  cosmic-text's fallback iterator, for a `Family::Monospace` request, gathers
+  every monospaced face in the database that covers the word and takes the best
+  of them **before** it reaches `script_fallback`
+  (`font/fallback/mod.rs`, the `monospace_fallbacks_buffer` stage).
+  `forbidden_fallback` cannot stop it either: that list filters only the
+  last-resort "any other font" walk at the bottom of the iterator.
+
+So the decision this crate writes down could not be in force, and the only place
+left to make it is the **database**. The Windows loader names seven files and
+never asks the directory, so its database is a list somebody wrote; the macOS
+loader has to call `load_system_fonts`, because PingFang lives behind a
+content-hashed `AssetsV2` path that cannot be named (§13.18's own lesson), which
+puts the whole machine's library in.
+
+The fix is therefore a capability and not a name. `drop_faces_with_no_scalable_em`
+removes every face with no `head` em, in **every** arm, before any family is
+chosen, and `set_terminal_font` puts a file a reader picked through the same
+door. Naming `GB18030 Bitmap` would have fixed one machine and said nothing
+about the next. The number it reads is two bytes out of one table through
+`ttf_parser::RawFace`, which parses the table directory and nothing else;
+`ttf-parser` becomes a named dependency of `bt-render` and adds **no package** —
+`fontdb` is built on it. **Measured on the Mac: one face out of 917 goes**, and
+it is that one; on Windows none of the sixteen does, which is the seven-file list
+saying what it always said.
+`no_face_in_the_font_database_has_an_em_this_renderer_cannot_divide_by` runs on
+both machines and pins it, and asserts in the same breath that the embedded emoji
+face survives — the rule is about the em, not about outlines.
+
+**⑦ One more thing the measurement found: drawing this page is a critical
+section.** The window's ground is process-global (`ground::set_window_ground`)
+and the frame path reads its alpha **more than once** — the clear has a read of
+its own. Two concurrent draws are therefore a race with a very quiet failure: a
+frame that straddles somebody else's set and restore comes back *mixed*, cell
+grounds at one alpha and the clear at another, and every number taken off it is
+about no window at all. Measured, under libtest's default parallelism on the
+Mac: 212 887 pixels of cell ground at `round(0.3 x 255)` beside 458 717 pixels
+of clear at 255, in one frame. `GlyphFixture::present` holds a lock across the
+whole call, which is the fixture being honest about what it is doing rather than
+a rule written in a test's comment.
+
+**⑧ The gate.** `crates/bt-render/tests/glyph_output.rs` runs on either machine
+and pins seven facts about the offscreen frame: the page fits the surface it is
+measured on and the window really is at backing scale 2; two draws of one
+fixture are byte for byte the same frame; **every band has ink of its own** —
+which is what makes a font stack that cannot answer a row a red line here rather
+than a surprise in a screenshot; every rasterized band carries an antialiased
+skirt while the geometric one carries none; the grid's stems agree; the prose
+lane moves with its fraction; and a translucent frame is premultiplied in linear
+light with the clear's own alpha in its bare corner.
+
+`crates/bt-app/tests/macos_glyph_surface.rs` is the Mac half and is a
+`harness = false` target for M2-3's reason, said again: it runs an event loop,
+an event loop is the main thread's, and libtest does not hand a case that
+thread. Without `BT_MAC_GUI` it prints one line and exits, so an ordinary
+`cargo test -p bt-app` on the Mac costs nothing; off macOS the file has no body
+at all. It opens **winit's** window — the product's window — undecorated at the
+drawable's size on the monitor winit says is at backing scale 2 (asked rather
+than assumed, because X-1 and X-2 both recorded a window landing on the owner's
+other screen), puts Folio's own surface view under it through
+`bt_platform::surface_view`, and redraws the same fixture the way a window
+redraws.
+
+**A hand-made `NSWindow` was tried first and is not a swapchain host on this
+machine**, which is worth the sentence because `macos_sheet.rs` makes one and it
+is the obvious pattern to copy: `visible=true` at `scale=2`, a content view of
+exactly the right bounds, sixty turns of the run loop before the surface and four
+presents after it — and every present answered `Skipped`, `nextDrawable` handing
+back nothing, with the photograph coming out as the flat colour painted behind
+the layer. A `CAMetalLayer` wants the window an application of its own is
+running. **The photograph is the readback**: a swapchain
+cannot be mapped, so the pixels the window server holds are reached from outside
+the surface or not at all. M2-3 measured that a throwaway bundle is refused the
+Screen Recording grant while the session that started it holds it, so the probe
+publishes its window number and waits for the session's picture one redraw at a
+time — a window that stops drawing is a window the server stops compositing.
+`objc2` and `objc2-app-kit` become **dev**-dependencies of `bt-app` for the one
+name winit does not expose, `-[NSWindow windowNumber]`, and add no package to
+`Cargo.lock`: both are already there through `bt-platform`.
+
+**⑨ The answer.** M4, macOS 26.6.2, a winit window at backing scale 2 on the
+2x display, drawable 900x760, `target=MetalLayerOnOwnedView
+offered=[Opaque, PostMultiplied] chosen=PostMultiplied`, `cleared=0` — a
+window's first surface clears nothing (§13.14 ③). The page drawn into that
+swapchain and photographed, and the same page drawn into a texture on the same
+device and mapped, are **identical: 684 000 pixels, not one byte between them,
+digest `b29b55b160aa8c47` twice.** Every band's ink count, peak, mean and
+antialiased share is the same number on both sides of the comparison, and so is
+every prose row's centroid.
+
+So the presentation path does not change the picture, and M2-5's question is
+answered in the direction §R4 predicted: the rasterizer is the same rasterizer,
+the surface is the surface, and the letters a Mac shows are the letters this
+renderer drew.
+
+**Two things that run only said by measuring them.** The **first two presents on
+a freshly created layer come back `Skipped`** — `nextDrawable` has nothing until
+the layer has been through a display cycle — which is why the probe draws the
+page the way a window draws it rather than once. And `screencapture` **from
+inside the bundle** answers `could not create image from window`, which is M2-3's
+TCC finding measured a second time and the reason the photographer is the session
+outside.
+
 *(本节英文,待中文文案改写。)*
