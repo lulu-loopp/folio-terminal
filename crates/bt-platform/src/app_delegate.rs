@@ -88,6 +88,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use crate::menu::MenuChoice;
+
 // ── what crosses ───────────────────────────────────────────────────────────
 
 /// **Which delegate method this event came from.**
@@ -109,6 +111,19 @@ pub enum AppDelegateOrigin {
     Termination,
     /// `applicationShouldTerminateAfterLastWindowClosed:`.
     LastWindowClosed,
+    /// **A row of the application menu bar** (M3-2), whose action is
+    /// `folioMenuChosen:` on a target [`crate::macos_menu`] owns.
+    ///
+    /// Not a delegate selector at all, and it is on this channel on purpose:
+    /// what a menu press has in common with a reopen is everything that made
+    /// this channel the shape it is. It arrives at **AppKit** rather than at any
+    /// window of ours, on the main thread, inside a callback with a framework
+    /// frame underneath it — for a menu, AppKit's own tracking loop — so it is
+    /// under rule (1) of this module's header word for word, and it needs the
+    /// same buffer, the same ordering and the same one drain on the loop's own
+    /// turn. A second channel beside this one would be a second answer to the
+    /// same question about the same stack.
+    Menu,
 }
 
 impl AppDelegateOrigin {
@@ -120,6 +135,7 @@ impl AppDelegateOrigin {
             Self::OpenUrls => "application:openURLs:",
             Self::Termination => "applicationShouldTerminate:",
             Self::LastWindowClosed => "applicationShouldTerminateAfterLastWindowClosed:",
+            Self::Menu => "folioMenuChosen:",
         }
     }
 }
@@ -155,6 +171,15 @@ pub enum AppDelegateEventKind {
     /// (the application stays in the Dock, plan Q10), and this says only that
     /// the moment happened.
     LastWindowClosed,
+    /// **A row of the menu bar was pressed** (M3-2), carrying the row's own
+    /// choice: the stable id of a shortcut-table row, or one of the few verbs
+    /// that has no row there.
+    ///
+    /// The application answers it through the same `run_shortcut` a chord
+    /// reaches — see `docs/DESIGN.md` §13.26 ③. Rows AppKit answers by
+    /// itself never arrive here at all; they have no choice behind them, which
+    /// is what "standard" means in [`crate::menu::MenuAction`].
+    MenuChosen(MenuChoice),
 }
 
 /// One application-level event, with the selector it came from.
@@ -304,13 +329,6 @@ impl Outbox {
 
     /// Take one event from AppKit. Never blocks and never runs application code
     /// while the door's own lock is held.
-    #[cfg_attr(
-        not(any(target_os = "macos", test)),
-        expect(
-            dead_code,
-            reason = "M3-1: the four delegate methods are what post, and there are none here"
-        )
-    )]
     pub(crate) fn post(&self, event: AppDelegateEvent) {
         self.held
             .lock()
@@ -428,6 +446,24 @@ impl AppDelegate {
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.outbox.is_ready()
+    }
+
+    /// **A second AppKit door, speaking into this same channel** (M3-2).
+    ///
+    /// The menu bar is not a delegate selector, and it is on this channel for
+    /// the reason [`AppDelegateOrigin::Menu`] gives: the press arrives at
+    /// AppKit inside a callback with a framework frame underneath it, so it
+    /// wants this channel's buffer, this channel's ordering and this channel's
+    /// single drain on the loop's own turn. A sender of its own would be a
+    /// second answer to the same question about the same stack — and, less
+    /// abstractly, a reopen and the `New window` row a reader pressed a
+    /// millisecond later would arrive in two inboxes with no order between them.
+    ///
+    /// It is handed out rather than the outbox itself, so that nothing outside
+    /// this module can release the buffer or read what is held.
+    pub fn sender(&self) -> impl Fn(AppDelegateEvent) + Send + Sync + Clone + 'static {
+        let outbox = Arc::clone(&self.outbox);
+        move |event| outbox.post(event)
     }
 }
 
@@ -619,6 +655,9 @@ mod tests {
                 format!("{:?} terminate", event.origin)
             }
             AppDelegateEventKind::LastWindowClosed => format!("{:?} last-window", event.origin),
+            AppDelegateEventKind::MenuChosen(choice) => {
+                format!("{:?} menu {choice:?}", event.origin)
+            }
         }
     }
 

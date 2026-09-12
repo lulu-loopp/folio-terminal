@@ -99,6 +99,20 @@ name = "macos_compose"
 path = "tests/macos_compose.rs"
 harness = false
 
+# **Another target that owns the process's main thread** (M3-2), and for the
+# others' reason word for word: `NSApplication`, `NSMenu` and every key
+# equivalent on the bar are AppKit's, and `bt_platform::menu::install` refuses
+# off the main thread by design — so a `#[test]` could only ever assert its own
+# refusal. It is a target of its own rather than another case in either of them
+# because it is about a different thing and needs less than both: it opens no
+# window, posts no key and builds no event loop — a menu bar is the
+# application's, and a press is delivered by handing
+# `-[NSMenu performKeyEquivalent:]` an `NSEvent` the file makes.
+[[test]]
+name = "macos_menu_bar"
+path = "tests/macos_menu_bar.rs"
+harness = false
+
 # **M2-2 adds no package either**, and it is worth saying because it looks like
 # it should: the process door (`src/handoff.rs`'s macOS arm) is `NSWorkspace`,
 # which is already on, and the trash (`src/macos_files.rs`) is `NSFileManager`,
@@ -305,6 +319,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSAlert",
     # M2-3: the formula menu — one item, popped over the window at the pointer,
     # and the `bool` it answers is `TrackPopupMenu`'s returned command.
+    # **M3-2 adds no package and no feature either**: the application menu bar is
+    # these same two classes, plus `NSApplication`'s three menu properties
+    # (`setMainMenu:`, `setServicesMenu:`, `setWindowsMenu:`), which are on
+    # already. The whole of what that ticket adds to this table is the
+    # `NSGraphicsContext` line below, and that is its test's.
     "NSMenu",
     "NSMenuItem",
     # M2-3: the folder and file choosers. `NSOpenPanel` names `NSSavePanel` and
@@ -336,8 +355,18 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSControl",
     # The window's backing colour, which is the class brush's twin.
     "NSColor",
-    # `+[NSEvent mouseLocation]` — where the pointer is, for the summon.
+    # `+[NSEvent mouseLocation]` — where the pointer is, for the summon; and
+    # M3-2's `NSEventModifierFlags`, which is what a menu row's key equivalent
+    # carries its Command and its Shift in.
     "NSEvent",
+    # M3-2, and its test alone: `+[NSEvent keyEventWithType:…]`, which is how a
+    # press is put to `-[NSMenu performKeyEquivalent:]` without a `CGEvent`, a
+    # window or an Accessibility grant. The constructor's generated binding is
+    # gated on this feature because it takes an `NSGraphicsContext` — a
+    # parameter Apple documents as unused and this crate always passes nil.
+    # **Not a package**: `objc2-app-kit` is already here and this turns on one
+    # more class.
+    "NSGraphicsContext",
     "NSPasteboard",
     # `NSResponder`, because a window is one and `makeFirstResponder:` takes
     # one; `NSView`, because that is what a `NativeWindow` holds.

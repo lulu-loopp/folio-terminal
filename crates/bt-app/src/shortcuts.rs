@@ -1032,9 +1032,10 @@ pub(crate) const BINDINGS: &[Binding] = &[
         // [`crate::quit`] — so the session is never written, no window reaches
         // Recent, and the next launch opens nothing. `main.rs` turns that menu
         // off (`with_default_menu(false)`) so the press arrives here as a key
-        // like any other; M3-2 builds the real menu bar and its `Quit` item
-        // dispatches this same row, under X-4's rule that `terminate:` is never
-        // called from inside a handler.
+        // like any other. **M3-2 built the real menu bar and its `Quit` item
+        // dispatches this same row** (`crates/bt-app/src/menubar.rs`, under X-4's
+        // rule that `terminate:` is never called from inside a handler) — so the
+        // chord now has two doors onto one verb rather than a second answer.
         mac(CMD, character("q")),
     ),
     Binding::window(
@@ -1843,6 +1844,22 @@ impl Shortcuts {
     #[must_use]
     pub(crate) fn rows(&self) -> &[Binding] {
         &self.rows
+    }
+
+    /// **The row this id names**, in this table's own dialect (M3-2).
+    ///
+    /// The effective table and not [`BINDINGS`], on [`Self::accelerator`]'s
+    /// reasoning exactly: the one caller is the menu bar, which prints the chord
+    /// beside the title and answers the press, and a bar built out of the
+    /// factory column after somebody rebound a row would be a shortcut table
+    /// with two answers.
+    ///
+    /// `None` for an id this build does not know, which is the same ordinary
+    /// state `apply_overrides` reads out of a file written by a newer build —
+    /// and, for the menu, the state its own test exists to make impossible.
+    #[must_use]
+    pub(crate) fn row(&self, id: &str) -> Option<&Binding> {
+        self.rows.iter().find(|row| row.id == id)
     }
 
     /// **The chord a menu prints beside a row that is this verb** (gesture audit

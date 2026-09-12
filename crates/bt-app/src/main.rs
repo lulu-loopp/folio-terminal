@@ -75,6 +75,7 @@ mod keyhint;
 mod launch_wire;
 mod linebreak;
 mod marks;
+mod menubar;
 mod mouse_trace;
 mod notice;
 mod notify;
@@ -103672,6 +103673,68 @@ impl FolioApp {
                     self.begin_the_systems_quit(answer);
                 }
                 bt_platform::AppDelegateEventKind::LastWindowClosed => {}
+                // **A row of the menu bar** (M3-2, §13.26 ③). It lands here and
+                // not on a channel of its own for the reason
+                // `AppDelegateOrigin::Menu` gives: the press arrived at AppKit
+                // inside a callback with the menu's own tracking underneath it,
+                // which is this channel's whole subject. **A verb reaches
+                // `run_shortcut`, which is the very function the chord reaches**;
+                // the whole of what the menu adds is the id of the row pressed.
+                //
+                // The window is the one the keyboard is on. A choice that
+                // arrives with none is dropped rather than held: the only state
+                // that reaches it is macOS's own, the application alive in the
+                // Dock with every window closed, and the bar says so meanwhile
+                // by greying every verb row (`menubar::plan`). The door that
+                // opens a window again is the reopen three arms up.
+                bt_platform::AppDelegateEventKind::MenuChosen(choice) => {
+                    self.answer_a_menu_row(choice)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// **One row of the menu bar, run on the window that has the keyboard**
+    /// (M3-2).
+    ///
+    /// Beside [`Self::open_one_path_for_the_delegate`] because it is the same
+    /// kind of thing: a gesture that arrived at AppKit rather than at a window,
+    /// spent on the loop's own turn. It is **not** routed through
+    /// [`Self::a_window_for_the_delegate`], and that is the difference between
+    /// the two: a document handed over from Finder is a request for a window if
+    /// there is none, and a menu row is not — the rows are greyed with no window
+    /// open, so a choice arriving there is a race rather than a request.
+    fn answer_a_menu_row(&mut self, choice: bt_platform::menu::MenuChoice) -> Result<()> {
+        let Some(id) = self.frontmost_window() else {
+            return Ok(());
+        };
+        match choice {
+            bt_platform::menu::MenuChoice::Verb(row) => {
+                let Some(action) = self
+                    .app
+                    .as_ref()
+                    .and_then(|app| app.shortcuts.row(row))
+                    .map(|row| row.action)
+                else {
+                    // A row this build does not know, which
+                    // `menubar::every_verb_on_the_bar_names_a_row` makes
+                    // impossible and which is still not worth a fault: the
+                    // honest answer to a verb that is not there is to do
+                    // nothing.
+                    return Ok(());
+                };
+                if let Some(mut runtime) = self.runtime(id) {
+                    runtime.run_shortcut(action)?;
+                }
+            }
+            // The one row of the bar that is this product's and has no row in
+            // the shortcut table. It leaves through the same door every other
+            // address in this window leaves through.
+            bt_platform::menu::MenuChoice::Application(bt_platform::menu::AppMenuAction::Help) => {
+                if let Some(mut runtime) = self.runtime(id) {
+                    runtime.hand_url_to_the_browser(update::RELEASES_PAGE)?;
+                }
             }
         }
         Ok(())
@@ -103901,6 +103964,107 @@ impl FolioApp {
             && !bt_platform::hotkey::give_foreground_to(native)
         {
             eprintln!("BT_LAUNCH the window a second start asked for could not take the keyboard");
+        }
+    }
+
+    /// **The window the keyboard is on**, or `None` while this application is
+    /// not the frontmost one (M3-2).
+    ///
+    /// Read off the windows themselves rather than remembered, on
+    /// [`Self::settle_quake`]'s own footing: the presses this answers for did
+    /// not arrive at a window of ours — a menu row is AppKit's — so which window
+    /// they are *about* is a question that has to be looked up rather than
+    /// carried.
+    ///
+    /// A window on its way out is not one of them, for
+    /// [`Self::for_each_window`]'s reason: it draws nothing, it is already
+    /// photographed, and a verb run on it would be a verb run on a window the
+    /// reader has closed.
+    fn frontmost_window(&mut self) -> Option<WindowId> {
+        (0..self.windows.len()).find_map(|index| {
+            let id = self.windows.key_at(index)?;
+            let window = self.windows.get_mut(id)?;
+            (window.window_focused && window.leaving.is_none()).then_some(id)
+        })
+    }
+
+    /// **Carry what is true now onto the bar** (M3-2).
+    ///
+    /// Three things move under a menu bar and none of them announces itself to
+    /// this function: the language (`Settings ▸ Language`, a process-wide
+    /// switch), a rebound chord (the recorder, a hand-edited
+    /// `keybindings.json`, `Restore all defaults` — the same three doors
+    /// [`Self::settle_quake`] reconciles against), and the keyboard landing
+    /// somewhere a scoped row is not in force. So the bar is reconciled every
+    /// turn rather than hooked at three places, which is that method's own
+    /// argument: a turn that reads the table is one statement that covers all
+    /// three, and a hook missed is a bar that draws yesterday's key.
+    ///
+    /// It costs nothing where there is no bar. `is_installed` is a constant
+    /// `false` off macOS, so the walk of the table below never happens there;
+    /// on a Mac a plan equal to the one on the screen is one comparison and no
+    /// AppKit at all.
+    fn refresh_main_menu(&mut self) {
+        if !bt_platform::menu::is_installed() {
+            return;
+        }
+        let focus = self
+            .frontmost_window()
+            .and_then(|id| self.runtime(id))
+            .map(|runtime| runtime.shortcut_focus());
+        let Some(app) = self.app.as_ref() else {
+            return;
+        };
+        let plan = menubar::plan(&app.shortcuts, focus);
+        if let Err(error) = bt_platform::menu::refresh(&plan) {
+            eprintln!("recoverable menu bar failure: {error}");
+        }
+    }
+
+    /// **Hang the application's menu bar**, once, on the turn the first window
+    /// opened (M3-2).
+    ///
+    /// Here and not in `main`, because the bar is built out of the shortcut
+    /// table and there is no table until `App` has read `keybindings.json` —
+    /// which is [`Runtime::create`]'s, and which is what `resumed` has just
+    /// done. It is also the first moment there is an `NSApplication` to hang a
+    /// bar on: winit brings it up on its way to this callback.
+    ///
+    /// **What the sender is allowed to be.** One statement: hand the choice to
+    /// the application delegate's own sender, which parks it and posts one
+    /// `AppDelegateSpoke`. The closure runs inside an AppKit action with the
+    /// menu's tracking still on the stack, so it may not touch anything this
+    /// program owns, and it does not — X-4's rule, and the reason the menu is on
+    /// M3-1's channel rather than beside it (`AppDelegateOrigin::Menu`).
+    ///
+    /// A failure is reported and the launch carries on: a Mac with no menu bar
+    /// is a Mac where every chord still works, and a window that refused to open
+    /// over it would be trading the product for its bar.
+    fn install_main_menu(&mut self) {
+        let focus = self
+            .frontmost_window()
+            .and_then(|id| self.runtime(id))
+            .map(|runtime| runtime.shortcut_focus());
+        let Some(app) = self.app.as_ref() else {
+            return;
+        };
+        let plan = menubar::plan(&app.shortcuts, focus);
+        // **M3-1's channel, not a second one** (§13.26 ③). The delegate's
+        // sender is what a menu press crosses on: same buffer, same arrival
+        // order, same single drain on the loop's own turn. With no delegate
+        // there is nowhere for a press to go, so there is no bar either — which
+        // is the honest answer rather than a bar whose rows do nothing.
+        let Some(send) = self.delegate.as_ref().map(bt_platform::AppDelegate::sender) else {
+            return;
+        };
+        let send = Box::new(move |choice| {
+            send(bt_platform::AppDelegateEvent {
+                origin: bt_platform::AppDelegateOrigin::Menu,
+                kind: bt_platform::AppDelegateEventKind::MenuChosen(choice),
+            });
+        });
+        if let Err(error) = bt_platform::menu::install(&plan, send) {
+            eprintln!("recoverable menu bar failure: {error}");
         }
     }
 
@@ -104975,6 +105139,11 @@ impl FolioApp {
             self.fail(event_loop, error);
             return;
         }
+        // **After every door above**, because what the bar draws is what is true
+        // when this turn has finished deciding: a window opened, a tab closed,
+        // the keyboard landing on a preview. Free where there is no bar — see
+        // [`Self::refresh_main_menu`].
+        self.refresh_main_menu();
         let now = Instant::now();
         // **The application's own pointer, turned before the windows are**
         // (multiwindow slice F2/F4). It writes what a target window draws, so it
@@ -105262,6 +105431,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 let id = window.window.id();
                 self.app = Some(app);
                 self.windows.insert(id, window);
+                // **The bar, once, and here** (M3-2): the shortcut table it is
+                // built from was read a statement ago, and this is the first
+                // moment there is an application to hang a bar on. Off macOS it
+                // is a no-op that costs one branch.
+                self.install_main_menu();
                 // A shortcut file that could not be read owes the user a sentence
                 // naming it (§5.3), and this is the first moment there is a window
                 // to say it on — the store was opened before one existed. Anchored
@@ -111390,11 +111564,12 @@ fn main() -> Result<()> {
     // `shortcuts::BINDINGS`' macOS column answers it with `Action::Quit`, and the
     // verb this window already has runs.
     //
-    // **The menu comes back in M3-2 and this line stays.** A real menu bar is
-    // that ticket's, and its `Quit` item will dispatch this same row rather than
-    // `terminate:` — X-4's rule. What is refused here is not a menu; it is a
-    // second answer to what `Cmd+Q` does, installed by a library that cannot
-    // know this program has a session to write.
+    // **The menu came back in M3-2 and this line stays.** The real bar is
+    // `crates/bt-app/src/menubar.rs` hung by `bt_platform::menu`, and its `Quit`
+    // item dispatches this same row rather than `terminate:` — X-4's rule, kept
+    // by a test in the crate that speaks Objective-C. What is refused here is
+    // not a menu; it is a second answer to what `Cmd+Q` does, installed by a
+    // library that cannot know this program has a session to write.
     #[cfg(target_os = "macos")]
     {
         use winit::platform::macos::EventLoopBuilderExtMacOS;
@@ -159128,7 +159303,8 @@ mod field_command_tests {
         // The other half of X-4's rule — that nothing ever sends the selector
         // itself — is not assertable here and is not this file's to keep: this
         // crate speaks no Objective-C at all, so the only way that call could
-        // enter this program is through `bt-platform`, where M3-2's menu bar
-        // will be built and where the rule belongs.
+        // enter this program is through `bt-platform`. That is where M3-2's menu
+        // bar is hung, and where the rule is kept:
+        // `macos_menu::tests::the_menu_bar_does_not_end_the_process_where_it_stands`.
     }
 }
