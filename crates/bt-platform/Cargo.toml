@@ -69,6 +69,19 @@ name = "macos_sheet"
 path = "tests/macos_sheet.rs"
 harness = false
 
+# **The second target that owns the process's main thread** (M4-1), and it is a
+# second one rather than two more functions in the first because the two ask
+# different things of the machine: `macos_sheet` puts a panel in front of a
+# reader and waits, and this one builds a composition on a real window at
+# backing scale 2 and reads the window server's own pixels back. Everything in
+# the note above applies unchanged — `harness = false` because libtest does not
+# hand a case the main thread, `BT_MAC_GUI` because these cases open windows,
+# nothing at all off macOS.
+[[test]]
+name = "macos_compose"
+path = "tests/macos_compose.rs"
+harness = false
+
 # **M2-2 adds no package either**, and it is worth saying because it looks like
 # it should: the process door (`src/handoff.rs`'s macOS arm) is `NSWorkspace`,
 # which is already on, and the trash (`src/macos_files.rs`) is `NSFileManager`,
@@ -110,6 +123,47 @@ objc2-core-text = { version = "0.3", default-features = false, features = [
     # `kCTFontSymbolicTrait` and `kCTFontTraitMonoSpace`, which is the whole of
     # the filter.
     "CTFontTraits",
+    "std",
+] }
+# **M4-1 adds no package either, and the two rows below are the reason it is
+# worth saying.** The `CALayer` composition (`src/macos_compose.rs`) names two
+# crates this file has not named before, and **both are already in
+# `Cargo.lock` and already in `THIRD-PARTY-NOTICES.md`**: `objc2-quartz-core`
+# 0.3.2 arrives through wgpu's own Metal backend and through
+# `raw-window-metal`, and `objc2-core-graphics` 0.3.2 arrives through
+# `objc2-quartz-core` itself. Naming them directly moves not one line in either
+# file — `docs/DESIGN.md` §8's bar — and it is the same door
+# `objc2-core-foundation` came through in M2-1. What it buys is the two
+# statements this arm is: a page's floor is a layer's background colour, and
+# nothing it does animates.
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+    # `-[CALayer setBackgroundColor:]`, which is a page's floor, and the
+    # `sublayers` pair M1-4's `clear_surface_layers` already reaches through
+    # `objc2-app-kit`'s own feature of this crate's name.
+    "CALayer",
+    # `CATransaction`'s `begin` / `setDisableActions:` / `commit` — the one
+    # scope in which a frame can be written without CoreAnimation animating it.
+    "CATransaction",
+    # The feature that generates `setBackgroundColor:` at all: without it
+    # `CALayer` is compiled with every `CGColor`-typed method left out, which is
+    # an unresolved method rather than a silent absence.
+    "objc2-core-graphics",
+    # And the same door one type over: `-[CALayer setFrame:]` is typed in
+    # `CGRect` and `-[CALayer setContentsScale:]` in `CGFloat`, so without this
+    # a `CALayer` has no settable geometry at all. `tests/macos_compose.rs` is
+    # what lays a layer out by hand — it stands a frame where wgpu's
+    # `CAMetalLayer` would be — and **not a package**: `objc2-core-foundation`
+    # 0.3.2 is a direct dependency of this crate already, three rows down.
+    "objc2-core-foundation",
+    "std",
+] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    # `CGColorCreateSRGB` and nothing else. **sRGB by name**: X-1 measured that
+    # CoreAnimation blends on the encoded bytes rather than in linear light, so
+    # the numbers `bt-render` computed have to be handed over in the space they
+    # were computed in — a generic or device space would be a second encoding of
+    # the same colour.
+    "CGColor",
     "std",
 ] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = [

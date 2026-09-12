@@ -127,6 +127,15 @@ session which started the probe can photograph it — the grant that lets a
 process photograph a window belongs to that session and not to a throwaway
 bundle. Neither name is read by `folio` itself.
 
+The macOS composition proof (`crates/bt-platform/tests/macos_compose.rs`) reads
+the same two names and nothing else. `BT_MAC_GUI=1` is the same consent — that
+target opens a window at backing scale 2 and reads its own pixels back — and
+`BT_MAC_GUI_SHOT=<dir>` names a directory the captures are written into, one
+`.ppm` per step, for a reader who would rather look than read numbers. It needs
+no photographer outside the process: a window this process owns can be read back
+with `CGWindowListCreateImage` without a Screen Recording grant, which the sheet
+probe's own note explains is not true of a sheet somebody else has to photograph.
+
 ## Files Folio writes without being asked
 
 For completeness beside the list above, and because none of these needs a variable

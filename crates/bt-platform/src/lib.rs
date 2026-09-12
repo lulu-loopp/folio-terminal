@@ -9673,7 +9673,7 @@ mod portable_impl;
 
 #[cfg(not(windows))]
 pub use portable_impl::{
-    Compositor, CustomWindowFrame, FilePickKind, ImeSystemCaret, Notifier, ShellPickKind, Taskbar,
+    CustomWindowFrame, FilePickKind, ImeSystemCaret, Notifier, ShellPickKind, Taskbar,
     adopt_parent_console, announce_explorer_menu_change, detach_console, directory_folds_case,
     flash_window, hide_every_window_of_this_process, install_console_ctrl_handler,
     install_context_menu, is_window_cloaked, leave_process, read_context_menu,
@@ -9681,6 +9681,17 @@ pub use portable_impl::{
     set_system_backdrop, silence_std_streams, system_backdrop_available, taskbar_is_auto_hidden,
     thread_mouse_capture, virtual_key_for_character, write_to_console,
 };
+
+/// **The window's composition, on a platform that has none** (M4-1).
+///
+/// The same split as the four below, one type wide: `portable_impl`'s
+/// `Compositor` is constructible and inert, and [`macos_compose`] answers the
+/// same eleven doors for a real window. It is listed on its own because the
+/// thing it answers for is the one item in the whole backend that is *both* a
+/// startup step that must not fail and a per-frame call — see
+/// `docs/plans/port/backend-inventory-2026-09-12.md` §6, steps 13 and 15.
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub use portable_impl::Compositor;
 
 /// **The two choosers, the formula menu and the alert, on a platform that has
 /// no panel to put up** — the four names [`macos_dialogs`] answers for a Mac and
@@ -9777,6 +9788,410 @@ pub use macos_impl::{
 /// type.
 #[cfg(target_os = "macos")]
 pub use macos_impl::{clear_surface_layers, surface_view};
+
+/// **The window's composition, over `CALayer` and the subview list** (M4-1).
+///
+/// The macOS twin of [`windows_impl`]'s `Compositor`, and a file of its own for
+/// the reason [`macos_dialogs`] and [`macos_watch`] are: everything in
+/// [`macos_impl`] is a reading or a statement about a window that already
+/// exists, and this is a **structure** the window carries for as long as it is
+/// open — one object with a lifetime, a page per seat inside it, and an
+/// ordering rule that has to be the same rule on every call.
+///
+/// It is the tenth unsafe boundary in this crate and it is against the same
+/// thing the third is: **AppKit, which is the main thread's or it is undefined
+/// behaviour**. The gate is `macos_impl`'s own, reached through the same
+/// `MainThreadMarker`, and the surface view it orders every page under is the
+/// same object `surface_view` above hands to wgpu — one door makes it, and both
+/// callers go through that door.
+#[cfg(target_os = "macos")]
+mod macos_compose;
+
+#[cfg(target_os = "macos")]
+pub use macos_compose::Compositor;
+
+/// **The composition has exactly one arm per platform, and the Windows one did
+/// not move** (ticket M4-1).
+///
+/// Source pins, for `macos_window_backend_tests`' reason: the arm they are
+/// mostly about is the one this workstation does not compile, and the claim is
+/// about which text is in which file. The behavioural twin runs on the Mac —
+/// `macos_compose`'s own suite and the `.app` proof in
+/// `tests/macos_compose.rs`, which builds the arrangement on a real window and
+/// reads the window server's pixels back.
+///
+/// What they guard is the pair of failures this split can have and no compiler
+/// on this machine would catch. A macOS arm that quietly changed a signature
+/// would be a `bt-app` that compiles on one platform; a Windows arm "harmonised"
+/// to match the new one would be a DirectComposition tree edited by a ticket
+/// that never ran on Windows.
+#[cfg(test)]
+mod compositor_arms_tests {
+    /// The three texts these pins are about.
+    const ROOT: &str = include_str!("lib.rs");
+    const MACOS: &str = include_str!("macos_compose.rs");
+    const WEBVIEW: &str = include_str!("webview.rs");
+
+    /// The names of every `pub fn` inside the first `impl Compositor {` block
+    /// of `source`, in the order they are written.
+    ///
+    /// A lexical reading and deliberately not a parse: the claim is about what
+    /// a reader of the two files sees side by side, and a gate that needed a
+    /// syntax tree would be a gate that needs the crate to build for a platform
+    /// this machine does not have.
+    fn compositor_doors(source: &str) -> Vec<String> {
+        let at = source
+            .find("impl Compositor {")
+            .expect("both arms name the type they implement");
+        let indent = source[..at].rfind('\n').map_or(0, |line| at - line - 1);
+        let closing = format!("\n{}}}\n", " ".repeat(indent));
+        let rest = &source[at..];
+        let end = rest
+            .find(&closing)
+            .expect("an impl block is closed at the indent it was opened at");
+        // Whole lines at the method indent, rather than every "pub fn" the text
+        // happens to contain: a door named inside a doc comment is a sentence
+        // about a door and not one.
+        let method = format!("{}pub fn ", " ".repeat(indent + 4));
+        rest[..end]
+            .lines()
+            .filter_map(|line| line.strip_prefix(&method))
+            .filter_map(|tail| tail.split('(').next())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// RED — **the two arms answer the same doors, and the macOS one answers
+    /// exactly one more.**
+    ///
+    /// `bt-app` names `Compositor` in thirty-odd places and none of them is
+    /// inside a platform gate; that is only true for as long as the two arms
+    /// have one public shape. The one difference is
+    /// `Compositor::attach_page_view` and it is a difference in the
+    /// *direction the handle travels*: WebView2 composes into a visual the host
+    /// makes, so Windows hands one out (`web_visual`), and WebKit makes its own
+    /// `NSView`, so macOS has to take one. There is nothing for the Windows arm
+    /// to refuse and nothing for `bt-app` to call on it.
+    ///
+    /// MUTATION: rename any door in either arm, or give the macOS arm a second
+    /// extra one, and this names it.
+    #[test]
+    fn the_two_compositors_answer_the_same_doors() {
+        let windows = compositor_doors(ROOT);
+        let macos = compositor_doors(MACOS);
+        assert_eq!(
+            windows,
+            [
+                "new",
+                "set_window_size",
+                "set_covered_size",
+                "skirt_covers_anything",
+                "gpu_visual_ptr",
+                "set_gpu_offset",
+                "attach_web_visual",
+                "set_page_ground_color",
+                "detach_web_visual",
+                "place_web_visual",
+                "hide_web_visual",
+                "commit",
+            ],
+            "the DirectComposition arm is this ticket's baseline and this ticket does not touch \
+             it — a change here is a change to a tree nothing in M4-1 ran"
+        );
+        for door in &windows {
+            assert!(
+                macos.contains(door),
+                "`{door}` is a door `bt-app` calls without a platform gate, and the macOS arm \
+                 does not have it"
+            );
+        }
+        let extra: Vec<&str> = macos
+            .iter()
+            .filter(|door| !windows.contains(*door))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            extra,
+            ["attach_page_view"],
+            "the one door the macOS arm has of its own is the one that takes the page's own view, \
+             because WebKit makes it and WebView2 does not"
+        );
+    }
+
+    /// RED — **the Windows arm's `Compositor` still takes a window token**, and
+    /// so does the rehost's description of one end of a handoff (§4.4 ②).
+    ///
+    /// The plan's second leak is a Win32 handle visible to a caller, and
+    /// `RehostSide` is the last place it was: a `NonZeroIsize` that *is* an
+    /// `HWND`, in a struct compiled on every platform. It is a `NativeWindow`
+    /// now, and it has to stay one in **one** definition rather than two arms —
+    /// the type is plain data about what a window wants from a page, and
+    /// `webview_portable` and `webview` speak it to each other.
+    ///
+    /// MUTATION: put an `hwnd` back, or gate the struct, and this names it.
+    #[test]
+    fn a_rehost_side_carries_a_window_token_on_both_arms() {
+        let at = WEBVIEW
+            .find("pub struct RehostSide<'a> {")
+            .expect("the type exists");
+        let rest = &WEBVIEW[at..];
+        let body = &rest[..rest.find("\n}\n").expect("a struct is closed")];
+        assert!(
+            body.contains("pub window: NativeWindow,"),
+            "one end of a rehost names a window token:\n{body}"
+        );
+        assert!(
+            !body.contains("hwnd"),
+            "and it names no Win32 handle at all:\n{body}"
+        );
+        let before = &WEBVIEW[..at];
+        let attributes = &before[before.rfind("///").expect("the type carries a doc comment")..];
+        assert!(
+            !attributes.contains("#[cfg("),
+            "the type is one definition on every platform, not two arms:\n{attributes}"
+        );
+        // Spelled in pieces so that this test's own source is not the thing it
+        // finds — the same guard `visual_layer_tests` uses one file over.
+        assert!(
+            ROOT.contains(concat!(
+                "pub fn ",
+                "new(window: NativeWindow) -> Result<Self, String> {"
+            )),
+            "and the Windows compositor is built from the same token"
+        );
+    }
+
+    /// RED — **a page slot is ordered by the enum and never by the boolean.**
+    ///
+    /// [`VisualLayer::insert_above_with_null_reference`] is `AddVisual`'s
+    /// `insertAbove` argument and its value is a fact about DirectComposition's
+    /// child list, which runs front to back. AppKit's runs back to front, and
+    /// `addSubview:positioned:relativeTo:` takes an ordering mode rather than a
+    /// boolean — so the `true` that means *bottom* over there is the number of
+    /// `NSWindowAbove` over here. A reader who carried it across would put
+    /// Folio's page on top of Folio's frame, which is the failure the W0′ probe
+    /// photographed on Windows.
+    ///
+    /// MUTATION: read `insert_above_with_null_reference` anywhere in the macOS
+    /// arm outside its own test, or place a slot at anything but the bottom,
+    /// and this names it.
+    #[test]
+    fn the_macos_arm_orders_by_the_enum_and_never_by_the_boolean() {
+        assert!(
+            MACOS.contains("VisualLayer::Bottom => NSWindowOrderingMode::Below,")
+                && MACOS.contains("VisualLayer::Top => NSWindowOrderingMode::Above,"),
+            "the translation is the two arms of one function"
+        );
+        let product = MACOS
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file has a body before its tests");
+        // The *code*, not the prose: the boolean is named in one doc comment,
+        // which is where it is explained and is the opposite of reading it.
+        let code: String = product
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with("//")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("insert_above_with_null_reference"),
+            "the DirectComposition boolean must not reach AppKit, where its value spells the \
+             opposite end of the stack"
+        );
+        assert_eq!(
+            product.matches("ordering_for(VisualLayer::Bottom)").count(),
+            1,
+            "exactly one call puts a page's slot at the bottom of the window's subview list"
+        );
+        assert_eq!(
+            product.matches("ordering_for(VisualLayer::Top)").count(),
+            1,
+            "and exactly one puts the page's own view at the top of its slot"
+        );
+    }
+
+    /// RED (X-1's fourth case) — **a surface rebuild cannot reach a page
+    /// slot.**
+    ///
+    /// A dropped `wgpu::Surface` leaves its `CAMetalLayer` on the view, so
+    /// `clear_surface_layers` empties that view's layer before every
+    /// reconstruction — and *empties* is the word: `setSublayers:nil` takes
+    /// everything. If a page slot lived under that layer, a device loss would
+    /// take every open page out of the window and nothing would put it back.
+    ///
+    /// It cannot, and the reason is structural rather than a rule somebody
+    /// remembers: a slot is a **subview of the content view**, which is one
+    /// level up and on the other side of the hierarchy from the surface view's
+    /// own layer. This pin is that the arrangement stays that way.
+    ///
+    /// MUTATION: add a slot to `self.surface`, or reach for `setSublayers` in
+    /// the composition, and this names it. The behavioural twin is
+    /// `a_rebuild_empties_the_surface_view_and_not_the_page_slot`, which does it
+    /// on a real window.
+    #[test]
+    fn a_surface_rebuild_cannot_reach_a_page_slot() {
+        assert!(
+            MACOS.contains("self.content.addSubview_positioned_relativeTo("),
+            "a slot is a subview of the content view"
+        );
+        assert!(
+            !MACOS.contains("self.surface.addSubview"),
+            "and never a subview of the view whose layer a rebuild empties"
+        );
+        assert!(
+            !MACOS.contains("setSublayers"),
+            "the composition owns no sublayer of the surface view's layer, which is the only \
+             thing a rebuild takes away"
+        );
+    }
+
+    /// RED — **nothing in the composition animates.**
+    ///
+    /// Every animatable property of a layer-backed view has a default
+    /// CoreAnimation *action*, and a frame written outside a transaction runs
+    /// it: a pane whose rectangle moved would slide there over a quarter of a
+    /// second, on every frame that moved one, while the picture Folio drew for
+    /// it was already in place. `setDisableActions:` is the switch and a
+    /// transaction is its only scope.
+    ///
+    /// The pin is lexical and says so: every line that mutates the hierarchy is
+    /// either inside a `without_animation(|| { … })` block or is the body of a
+    /// one-line one. `setBackgroundColor` is reached through `paint_floor`, so
+    /// it is that call that has to be inside the transaction — which is why the
+    /// list below names the function and the last assertion holds the setter to
+    /// its one call site.
+    ///
+    /// MUTATION: move any of these calls out of a transaction and this names
+    /// the line.
+    #[test]
+    fn nothing_in_the_macos_composition_animates() {
+        const MUTATORS: [&str; 6] = [
+            "setFrame(",
+            "addSubview_positioned_relativeTo(",
+            "removeFromSuperview(",
+            "paint_floor(",
+            "setWantsLayer(",
+            "setLayer(",
+        ];
+        let product = MACOS
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file has a body before its tests");
+        let mut inside = false;
+        let mut depth = 0_i32;
+        for (number, line) in product.lines().enumerate() {
+            let code = line.trim_start();
+            // A doc line naming a call is a sentence about it, and the line
+            // that *defines* `paint_floor` is not a call to it either.
+            let prose = code.starts_with("//")
+                || code.starts_with('*')
+                || code.starts_with("fn ")
+                || code.starts_with("pub fn ");
+            if line.contains("without_animation(|| {") {
+                inside = true;
+                depth = 0;
+            }
+            if inside {
+                depth += i32::try_from(line.matches('{').count()).unwrap_or(0);
+                depth -= i32::try_from(line.matches('}').count()).unwrap_or(0);
+            }
+            let guarded = inside || line.contains("without_animation(||");
+            if !prose {
+                for mutator in MUTATORS {
+                    assert!(
+                        !line.contains(mutator) || guarded,
+                        "line {} mutates the window's hierarchy outside a CATransaction with \
+                         actions disabled, so it animates: {line}",
+                        number + 1
+                    );
+                }
+            }
+            if inside && depth <= 0 {
+                inside = false;
+            }
+        }
+        assert_eq!(
+            product.matches("setBackgroundColor(").count(),
+            1,
+            "a floor's colour is written in one place, and that place is reached from inside a \
+             transaction"
+        );
+        assert!(
+            product.contains("CATransaction::setDisableActions(true);"),
+            "and the transaction is the one that turns the actions off"
+        );
+    }
+
+    /// RED — **every door of the composition that touches AppKit proves its
+    /// thread first.**
+    ///
+    /// AppKit from any thread but the main one is undefined behaviour rather
+    /// than a wrong answer, which is why this is the same pin
+    /// `every_macos_window_door_proves_its_thread_before_it_calls_appkit` makes
+    /// one file over.
+    ///
+    /// **Five named exceptions, and each reaches no AppKit at all**:
+    /// `gpu_visual_ptr` hands back a pointer it was given in the constructor,
+    /// `skirt_covers_anything` is arithmetic over two cells, the two size
+    /// setters move those cells and nothing else, and `commit` has an empty
+    /// body because CoreAnimation commits the run loop's own transaction.
+    /// `new` gates through `folios_surface_view`, which is `macos_impl`'s door
+    /// and asks the same question.
+    ///
+    /// MUTATION: take the gate out of any other door and this names it.
+    #[test]
+    fn every_door_of_the_macos_composition_proves_its_thread() {
+        for door in compositor_doors(MACOS) {
+            let needle = format!("\n    pub fn {door}(");
+            let at = MACOS.find(&needle).expect("named by the pin above");
+            let rest = &MACOS[at + 1..];
+            let end = rest
+                .find("\n    }\n")
+                .expect("a method is closed at one indent");
+            let body = &rest[..end];
+            if matches!(
+                door.as_str(),
+                "gpu_visual_ptr"
+                    | "skirt_covers_anything"
+                    | "commit"
+                    | "set_window_size"
+                    | "set_covered_size"
+            ) {
+                // Every AppKit call in that file goes through one of five
+                // helpers, and a door that reaches none of them sends no
+                // message — which is what "exempt" has to mean. Not "names no
+                // field": `gpu_visual_ptr` hands back the address of the view
+                // it was given in the constructor, which is a number and not a
+                // message.
+                for helper in [
+                    "without_animation(",
+                    "backing_scale(",
+                    "self.ensure_slot(",
+                    "self.in_content(",
+                    "paint_floor(",
+                ] {
+                    assert!(
+                        !body.contains(helper),
+                        "`{door}` is exempt from the gate because it reaches no AppKit of its \
+                         own, and it now reaches `{helper}`:\n{body}"
+                    );
+                }
+                continue;
+            }
+            assert!(
+                body.contains("window_thread(")
+                    || body.contains("window_for(")
+                    || body.contains("folios_surface_view(")
+                    || body.contains("self.ensure_slot("),
+                "`{door}` reaches AppKit without asking whether it is on the window's \
+                 thread:\n{body}"
+            );
+        }
+    }
+}
 
 /// **The two choosers, the formula menu and the last-resort alert, over
 /// AppKit** (M2-3).
@@ -11018,11 +11433,29 @@ mod macos_window_backend_tests {
                 continue;
             }
             assert!(
-                body.contains("window_thread(") || body.contains("window_for("),
+                body.contains("window_thread(")
+                    || body.contains("window_for(")
+                    // M4-1 split the surface door in two so that the
+                    // composition next door reaches the same view through the
+                    // same creator. The gate did not move, it moved *in*: the
+                    // door's one statement is a call to the function that asks.
+                    || body.contains("folios_surface_view("),
                 "`{door}` reaches AppKit without asking whether it is on the window's \
                  thread:\n{body}"
             );
         }
+        // And the function the split made is itself gated, which is what makes
+        // the delegation above an answer rather than a hole.
+        let minting = {
+            let needle = "\npub(crate) fn folios_surface_view(";
+            let at = MACOS.find(needle).expect("the minting function exists");
+            let rest = &MACOS[at + 1..];
+            rest[..rest.find("\n}\n").expect("closed at column zero")].to_owned()
+        };
+        assert!(
+            minting.contains("window_for("),
+            "the one function that makes Folio's view asks whose thread it is on:\n{minting}"
+        );
     }
 
     /// RED (M1-4, on X-1's shape) — **the view wgpu draws into is a subview
@@ -11064,9 +11497,29 @@ mod macos_window_backend_tests {
             "the surface view is a class of Folio's own, subclassing NSView — that class is how \
              a rebuild finds the same view again"
         );
-        let body = {
+        // **The door and the minting function are two things since M4-1.**
+        // `surface_view` is the pointer the graphics API takes and
+        // `folios_surface_view` is the one place the view is made, because the
+        // composition next door has to order every page slot under the same
+        // object and a second creator would be a second answer to "which view
+        // is Folio's". The claims below are about the making, so they read the
+        // function that makes it — and the first of them is that the public
+        // door still goes through it.
+        let door = {
             let needle = "\npub fn surface_view(";
             let at = MACOS.find(needle).expect("the door exists");
+            let rest = &MACOS[at + 1..];
+            let end = rest.find("\n}\n").expect("a door is closed at column zero");
+            rest[..end].to_owned()
+        };
+        assert!(
+            door.contains("folios_surface_view(window,"),
+            "the public door must reach the one function that makes the view, or there are two \
+             views called Folio's own:\n{door}"
+        );
+        let body = {
+            let needle = "\npub(crate) fn folios_surface_view(";
+            let at = MACOS.find(needle).expect("the minting function exists");
             let rest = &MACOS[at + 1..];
             let end = rest.find("\n}\n").expect("a door is closed at column zero");
             rest[..end].to_owned()
