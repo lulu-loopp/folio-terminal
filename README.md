@@ -14,14 +14,14 @@ is waiting for you.
 [中文说明](README.zh-CN.md) · [Shortcuts](docs/shortcuts.md) ·
 [Security](SECURITY.md) · [Changes](CHANGELOG.md)
 
-> **Preview.** 0.2.5 is a preview build, signed by Weiyi Shi — see
+> **Preview.** 0.3.0 is a preview build, signed by Weiyi Shi — see
 > [Download](#download) below.
 
 ---
 
 ## Download
 
-Take [`folio-0.2.5-windows-x64.zip`](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.2.5-preview/folio-0.2.5-windows-x64.zip)
+Take [`folio-0.3.0-windows-x64.zip`](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.3.0-preview/folio-0.3.0-windows-x64.zip)
 from the [releases page](https://github.com/lulu-loopp/folio-terminal/releases),
 unpack it wherever you keep programs, and run `folio.exe`. There is no
 installer; keep the extracted files together in one folder. `SHA256SUMS.txt` is
