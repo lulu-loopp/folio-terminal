@@ -704,6 +704,8 @@ permanent — TCC keys every granted permission on it. The deployment target mus
 be stated rather than inherited from whatever `macos-latest` happens to be, or
 compatibility is decided by accident.
 
+> **Ruled 2026-09-12 (merger, on the owner's authorization):** the identifier is **`io.github.lulu-loopp.folio`** — reverse DNS under the project's GitHub home, which the owner controls, and a hyphen is legal in a bundle id. The signing team is the owner's **Developer ID team**, read from the certificate subject at release time (`security find-identity -v -p codesigning`) and never written into the repository. The deployment target is **macOS 14.0**, stated in `LSMinimumSystemVersion`. Laid down in `packaging/macos/Info.plist.in` by P-2.
+
 **Q5 — Is a reduced WKWebView capability set acceptable?** *Recommendation: yes,
 if X-2 names exactly what is reduced and the product says so where a reader can
 see it.* WebView2's `WebResourceRequested` filter covers more than WKWebView's
@@ -714,6 +716,8 @@ hole a reader finds on the first afternoon.
 
 **Q6 — arm64 only?** *Recommendation: yes for the preview.* A universal binary
 doubles every compile on the one Mac that is already the constraint.
+
+> **Ruled 2026-09-12 (merger, on the owner's authorization):** **arm64 only** for the preview. A universal binary is not ruled out for a later release; it is not paid for by this one.
 
 **Q7 — Where are releases signed, and how is the private key reached?**
 *Recommendation: a dedicated non-login signing keychain on the Mac mini, unlocked

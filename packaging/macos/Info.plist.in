@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The template the bundle's `Contents/Info.plist` is generated from.
+
+  `@VERSION@` is the only substitution. It is filled at bundle time from
+  `[workspace.package] version` in the workspace `Cargo.toml` — the same single
+  line `bt_app::version::tests::the_version_is_the_manifests_and_nothing_elses`
+  holds the executable, the PE resource and every diagnostic header to. This
+  file therefore carries no literal version, and copying one in here by hand is
+  the thing that gate exists to catch.
+
+  This template is not signed and not installed; the generated plist is.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+
+	<!-- APPL is what makes this directory an application rather than a folder
+	     with an executable in it; Launch Services reads it before anything
+	     else here. -->
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+
+	<!-- Permanent. TCC keys every permission the user ever grants on this
+	     string, so changing it after a release throws away the grants that
+	     release collected. Reverse DNS under the project's GitHub home. -->
+	<key>CFBundleIdentifier</key>
+	<string>io.github.lulu-loopp.folio</string>
+
+	<key>CFBundleName</key>
+	<string>Folio</string>
+
+	<key>CFBundleDisplayName</key>
+	<string>Folio</string>
+
+	<!-- `Contents/MacOS/folio`. The same file name the Windows build gives
+	     `OriginalFilename`, minus the extension. -->
+	<key>CFBundleExecutable</key>
+	<string>folio</string>
+
+	<!-- Both version fields are the manifest's, and both are filled from the
+	     one line. `CFBundleShortVersionString` is what the user is shown;
+	     `CFBundleVersion` is what the system compares builds with, and it
+	     accepts only dotted integers — a release channel suffix belongs to the
+	     tag and never reaches the manifest, so neither field ever sees one. -->
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+
+	<!-- `Contents/Resources/Folio.icns`, named without its extension as the
+	     key wants it. -->
+	<key>CFBundleIconFile</key>
+	<string>Folio</string>
+
+	<!-- The deployment target, stated rather than inherited from whichever
+	     macOS the build machine happens to be running. -->
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.developer-tools</string>
+
+	<!-- The window is drawn at the display's backing scale. Without this the
+	     system hands the process a 1x framebuffer and magnifies it, which for
+	     a terminal is the whole product. -->
+	<key>NSHighResolutionCapable</key>
+	<true/>
+
+	<!-- A text window has no business holding the discrete GPU awake on a
+	     machine that has one. -->
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+
+	<!-- Word for word the notice `LICENSE-MIT` and `LICENSE-APACHE` carry, and
+	     the same string `crates/bt-app/build.rs` writes into `LegalCopyright`
+	     on Windows. One notice, two platforms. -->
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright (c) 2026 Weiyi Shi and Folio contributors. Licensed under MIT OR Apache-2.0.</string>
+
+	<!--
+	  **No usage-description keys, on purpose.** The plan names exactly two
+	  permissions Folio asks for (§5 ④): Notifications, and Accessibility for
+	  the global shortcut. Neither is a plist-declared purpose string —
+	  `UNUserNotificationCenter` prompts against the bundle identifier and the
+	  code signature, and Accessibility is granted in System Settings against
+	  the same signature, with no `Info.plist` key to carry a sentence. Adding a
+	  `NS…UsageDescription` here for either would be a permission this product
+	  does not request. Nothing else in §2 or §6 asks the user for anything.
+
+	  `NSServices` is not here either: a Service needs a registered provider
+	  object as well as this array (§8 Q3), so the array arrives with M4-9 that
+	  builds it, not before.
+	-->
+</dict>
+</plist>
