@@ -42,6 +42,19 @@ use bt_platform::PlatformChrome;
 /// other value out in full, which is what makes them visible.
 #[cfg(test)]
 pub(crate) const FOLIO_BAR: PlatformChrome = PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR;
+
+/// **The bar such a window wears, in device pixels** — [`FOLIO_BAR`]'s own
+/// answer to [`chrome_band_device_px`], for the geometry tests whose subject is
+/// the stage rather than the chrome above it.
+///
+/// Named for the same reason the constant beside it is: a viewport test reads as
+/// a statement about where the seats begin, not as one about a platform. The
+/// tests that are about T-MAC-LIGHTS ask [`chrome_band_device_px`] with a
+/// measured window's chrome, which is what makes them visible.
+#[cfg(test)]
+pub(crate) fn folio_band_device_px(scale_ppm: u32) -> u32 {
+    chrome_band_device_px(scale_ppm, FOLIO_BAR, RailState::default())
+}
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, ChromePalette, ChromeQuad,
     DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX, FOCUS_CARD_BORDER_LOGICAL_PX,
@@ -2259,6 +2272,23 @@ pub fn rail_inset_device_px(state: RailState, scale_ppm: u32) -> u32 {
     logical_to_device(state.terminal_inset_logical_px(), scale_ppm)
 }
 
+/// **The bar across the top of the content, in whole physical pixels** —
+/// [`rail_inset_device_px`]'s twin on the other axis, and its own note applies
+/// word for word (T-MAC-LIGHTS).
+///
+/// [`logical_viewport`] and [`device_viewport`] take this answer rather than
+/// deriving it, so the row the solver starts the seats on and the row the
+/// pointer enters the layout on cannot come out one pixel apart. It is
+/// [`window_band_px`] read at the scale the viewport speaks — the same
+/// multiplication [`logical_to_device`] makes, so a Folio bar lands on exactly
+/// the pixel it always did.
+#[must_use]
+pub fn chrome_band_device_px(scale_ppm: u32, chrome: PlatformChrome, rail: RailState) -> u32 {
+    window_band_px(scale_ppm as f32 / 1_000_000.0, chrome, rail)
+        .round()
+        .max(0.0) as u32
+}
+
 /// The seats viewport rectangle, in logical pixels, for a client area of this
 /// many device pixels. Its top is the lower edge of the 40px window title bar,
 /// and its left is whatever the vertical rail is keeping clear
@@ -2276,8 +2306,9 @@ pub fn logical_viewport(
     height_px: u32,
     scale_ppm: u32,
     rail_inset_px: u32,
+    band_px: u32,
 ) -> LogicalRect {
-    let title_px = seats_top_device_px(height_px, scale_ppm);
+    let title_px = seats_top_device_px(height_px, band_px);
     LogicalRect::new(
         device_to_logical(seats_left_device_px(width_px, rail_inset_px), scale_ppm),
         device_to_logical(title_px, scale_ppm),
@@ -2296,10 +2327,16 @@ fn seats_left_device_px(width_px: u32, rail_inset_px: u32) -> u32 {
     rail_inset_px.min(width_px.saturating_sub(1))
 }
 
-/// The device row the seats begin on: the lower edge of the 40px title bar,
+/// The device row the seats begin on: the lower edge of the bar across the top,
 /// never past the bottom of a client area too short to hold it.
-fn seats_top_device_px(height_px: u32, scale_ppm: u32) -> u32 {
-    logical_to_device(WINDOW_TITLE_BAR_LOGICAL_PX, scale_ppm).min(height_px.saturating_sub(1))
+///
+/// **The bar is handed in rather than derived** (T-MAC-LIGHTS), for
+/// [`rail_inset_device_px`]'s reason on the other axis: it is not 40 logical
+/// pixels on every window any more — the platform's own band is shorter, and
+/// which of the two this window has is a question about the window rather than
+/// about its height. [`chrome_band_device_px`] is the one place it is converted.
+fn seats_top_device_px(height_px: u32, band_px: u32) -> u32 {
+    band_px.min(height_px.saturating_sub(1))
 }
 
 /// The layout's own box in device pixels — the mock-up's `#termhost` rectangle
@@ -2318,8 +2355,10 @@ fn seats_top_device_px(height_px: u32, scale_ppm: u32) -> u32 {
 /// pointer enters the layout on, and a drop zone that disagreed with the solver
 /// by one pixel would be a zone that aims at a seam.
 ///
-/// `rail_inset_px` is the same argument [`logical_viewport`] is handed, from the
-/// same [`rail_inset_device_px`], and it shares [`seats_left_device_px`] for the
+/// `rail_inset_px` and `band_px` are the same two arguments [`logical_viewport`]
+/// is handed, from the same [`rail_inset_device_px`] and
+/// [`chrome_band_device_px`] — this one needs no scale of its own because both
+/// of its edges arrive already converted. It shares [`seats_left_device_px`] for the
 /// paragraph above's reason on the other axis. The two are twins and have to
 /// stay in lockstep: hit-testing is derived from this rectangle and sizing from
 /// the other, so one pixel of disagreement about where the rail ends aims every
@@ -2328,12 +2367,12 @@ fn seats_top_device_px(height_px: u32, scale_ppm: u32) -> u32 {
 pub fn device_viewport(
     width_px: u32,
     height_px: u32,
-    scale_ppm: u32,
     rail_inset_px: u32,
+    band_px: u32,
 ) -> [f64; 4] {
     [
         f64::from(seats_left_device_px(width_px, rail_inset_px)),
-        f64::from(seats_top_device_px(height_px, scale_ppm)),
+        f64::from(seats_top_device_px(height_px, band_px)),
         f64::from(width_px),
         f64::from(height_px),
     ]
@@ -4139,6 +4178,20 @@ impl RailState {
         self.focus
     }
 
+    /// **Whether the tab strip is one of the things standing in the bar across
+    /// the top** (T-MAC-LIGHTS).
+    ///
+    /// The horizontal layout's own sentence, and the two exclusions are the ones
+    /// [`window_chrome`] already makes in its own branch: the vertical layout put
+    /// the tab list down the side, and focus mode takes the strip away in
+    /// *either* layout because the card column is the tab list. Asked by
+    /// [`window_band_px`], which has to know whether a 32-point band would be
+    /// cropping a 40px strip.
+    #[must_use]
+    pub fn strip_stands_in_the_bar(self) -> bool {
+        !self.draws_focus_rail() && self.layout == TabLayoutMode::Horizontal
+    }
+
     /// **Which way the `+`'s profile picker hangs off the `˅` beside it**, or
     /// `None` when this window has no such button on screen at all.
     ///
@@ -4397,6 +4450,7 @@ impl RailGeometry {
 pub fn rail_geometry(
     height: f32,
     scale: f32,
+    chrome: PlatformChrome,
     trailers: &[TabTrailer],
     pinned_count: usize,
     scroll: f32,
@@ -4416,7 +4470,12 @@ pub fn rail_geometry(
     if width <= 0.0 {
         return None;
     }
-    let top = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+    // **Beneath this window's header, whatever that header is** (T-MAC-LIGHTS):
+    // Folio's own 40px bar where the whole bar is Folio's, the platform's
+    // 32-point one where it is not. The panel's own right edge starts here too
+    // (`edge`, at the end), so the line never runs up into the header this panel
+    // shares a colour with — the two are one surface.
+    let top = window_band_px(scale, chrome, state);
     let bottom = height.max(top);
     let parked = state.draws_icon_rail();
     // The border is inside the rail's width, not added to it: the mock-up is
@@ -4752,6 +4811,7 @@ pub fn pinned_run_len(trailers: &[TabTrailer]) -> usize {
 pub fn hit_rail_chrome(
     height: f32,
     scale: f32,
+    chrome: PlatformChrome,
     trailers: &[TabTrailer],
     pinned_count: usize,
     scroll: f32,
@@ -4760,7 +4820,7 @@ pub fn hit_rail_chrome(
     y: f64,
 ) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
-    let geometry = rail_geometry(height, scale, trailers, pinned_count, scroll, state)?;
+    let geometry = rail_geometry(height, scale, chrome, trailers, pinned_count, scroll, state)?;
     if !contains(geometry.body, x, y) {
         return None;
     }
@@ -5065,6 +5125,7 @@ fn focus_card_height(scale: f32, body_logical_px: f32) -> f32 {
 pub fn focus_rail_geometry(
     height: f32,
     scale: f32,
+    chrome: PlatformChrome,
     tab_count: usize,
     guests: usize,
     scroll: f32,
@@ -5074,7 +5135,9 @@ pub fn focus_rail_geometry(
         return None;
     }
     let width = state.width_logical_px() * scale;
-    let top = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+    // Beneath this window's header, exactly as the rail's own column is — see
+    // [`rail_geometry`].
+    let top = window_band_px(scale, chrome, state);
     let bottom = height.max(top);
     // The rail's own border-box arithmetic, unchanged: the hairline comes out of
     // the panel's width rather than being added to it, so a card's run is 263
@@ -5628,6 +5691,7 @@ pub struct FocusThumbnail<'a> {
 pub fn hit_focus_rail(
     height: f32,
     scale: f32,
+    chrome: PlatformChrome,
     tabs: &[TabTrailer],
     guests: usize,
     scroll: f32,
@@ -5636,7 +5700,7 @@ pub fn hit_focus_rail(
     y: f64,
 ) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
-    let geometry = focus_rail_geometry(height, scale, tabs.len(), guests, scroll, state)?;
+    let geometry = focus_rail_geometry(height, scale, chrome, tabs.len(), guests, scroll, state)?;
     if !contains(geometry.body, x, y) {
         return None;
     }
@@ -6093,6 +6157,46 @@ pub fn hit_pane_ghost(
     })
 }
 
+// ══ T-MAC-LIGHTS: the header a window wears across its top ══
+//
+// The owner's ruling of 2026-09-12, in its final form: **in every vertical
+// layout there is one 32-point header running the whole width of the window**.
+// The platform's own buttons stay exactly where the platform puts them, the gear
+// stands at the header's right in its 46-wide box, the header is what the window
+// is dragged by, and the column begins beneath it — one surface in one colour,
+// with nothing drawn between the two. The horizontal layout is M3-3's and is
+// untouched: its strip *is* the header. All of that is one number, and this is
+// where it is answered.
+
+/// **How tall the header across the top of this window is** — Folio's own title
+/// bar, or the platform's (T-MAC-LIGHTS, owner ruling 2026-09-12).
+///
+/// The one number the seats, the rail, the caption run and the drag handle are
+/// all measured from. Two answers:
+///
+/// * **Folio's whole bar**, on every window whose whole bar is Folio's. That is
+///   the only arm a Windows window can reach, which is what makes its picture
+///   byte for byte the one it was.
+/// * **The platform's own band**, on a window whose platform draws in this bar —
+///   *unless Folio's tab strip is one of the things standing in it*, because a
+///   32-point header would crop a 40px strip. So the two arms are one sentence
+///   about what stands in the bar rather than a table of layouts, and the three
+///   vertical layouts, which put their tab list down the side, all come out at
+///   the platform's own 32.
+#[must_use]
+pub fn window_band_px(scale: f32, chrome: PlatformChrome, rail: RailState) -> f32 {
+    let folios_own = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+    if chrome.band_px <= 0 {
+        return folios_own;
+    }
+    let platforms_own = chrome.band_px as f32;
+    if rail.strip_stands_in_the_bar() {
+        folios_own.max(platforms_own)
+    } else {
+        platforms_own
+    }
+}
+
 /// Hit-test the application-owned boxes of the title bar. The remaining title
 /// area is deliberately absent: it is the window's own drag handle. On Windows
 /// it never reaches winit at all — `HTCAPTION` answers it in the frame — and on
@@ -6140,6 +6244,12 @@ pub fn hit_window_chrome(
 /// this window's content and take it before winit sees it. Answering `true` for
 /// the pixels *between* them would start a drag from inside a button's own
 /// rectangle, so the leading band is left out whole.
+///
+/// **And the band is this window's own header, not a constant** (T-MAC-LIGHTS,
+/// owner ruling 2026-09-12): a vertical layout on a platform that draws its own
+/// buttons wears that platform's 32 rather than Folio's 40, so the height this
+/// answers for is [`window_band_px`]'s and the run of pixels below it belongs to
+/// whatever is drawn there.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn title_bar_drag_point(
@@ -6153,7 +6263,7 @@ pub fn title_bar_drag_point(
     y: f64,
 ) -> bool {
     let (x, y) = (x as f32, y as f32);
-    if y < 0.0 || y >= (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round() {
+    if y < 0.0 || y >= window_band_px(scale, chrome, rail) {
         return false;
     }
     if x < chrome.strip_left_px as f32 {
@@ -6197,7 +6307,7 @@ pub fn window_chrome_boxes(
     if let Some(rect) = panel_toggle_box(scale, chrome, rail) {
         boxes.push((ChromeTarget::PanelToggle, rect));
     }
-    boxes.extend(window_caption_boxes(width, scale, chrome, summoned));
+    boxes.extend(window_caption_boxes(width, scale, chrome, rail, summoned));
     boxes
 }
 
@@ -6275,9 +6385,14 @@ pub fn window_caption_boxes(
     width: f32,
     scale: f32,
     chrome: PlatformChrome,
+    rail: RailState,
     summoned: bool,
 ) -> Vec<(ChromeTarget, [f32; 4])> {
-    let title = WINDOW_TITLE_BAR_LOGICAL_PX * scale;
+    // The run is as tall as the bar it stands in, which is not 40 on every
+    // window any more (T-MAC-LIGHTS): under an icon rail the platform's own
+    // 32-point band is the whole of the bar, and a 40px button in it would hang
+    // eight points over the rail beneath.
+    let title = window_band_px(scale, chrome, rail);
     let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
     let targets = caption_targets(chrome, summoned);
     let last = targets.len() as f32;
@@ -10270,6 +10385,7 @@ pub fn build_chrome_for_tabs(
         focus_rail_chrome(
             surface_height,
             scale,
+            chrome,
             pointer.hover,
             FocusRail {
                 tabs,
@@ -10293,6 +10409,7 @@ pub fn build_chrome_for_tabs(
         rail_chrome(
             surface_height,
             scale,
+            chrome,
             pointer.hover,
             Rail {
                 tabs,
@@ -10700,7 +10817,13 @@ fn window_chrome(
     let layout = rail.layout;
     let (quads, labels, sprites) = output;
     let palette = chrome_palette();
-    let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+    // **The bar, as this window wears it** (T-MAC-LIGHTS): 40px where the whole
+    // bar is Folio's, the platform's own band where it is not, and beginning at
+    // the right edge of the column when that column is what carries the
+    // platform's buttons. Every box below is placed against these two numbers
+    // rather than against the constant, so a window with a shorter bar is one
+    // shorter bar rather than a row of boxes that each had to be told.
+    let title = window_band_px(scale, chrome, rail);
     // `.titlebar` in the mock-up carries a background and nothing else — no
     // border, no rule, no hairline. What separates it from the content below is
     // the tonal step from `--panel` to `--termbg`, and in the tab's own span
@@ -11792,19 +11915,21 @@ pub fn panel_toggle_box(scale: f32, chrome: PlatformChrome, rail: RailState) -> 
     if rail.layout != TabLayoutMode::Vertical || rail.mode == RailMode::Icons {
         return None;
     }
+    let title = window_band_px(scale, chrome, rail);
     // `.titlebar .drag { padding-left: 12px }` — the same inset the app name
     // takes in this layout, and the toggle is the first thing in that box.
-    // **After the platform's own band** (M3-3): the traffic lights stand in this
-    // bar's leading edge on macOS, and the first thing Folio puts in it begins
-    // where they end — the same sentence the tab strip is given in
-    // [`tab_strip_geometry`], said about the other layout's first control.
+    // **After whatever the bar begins after** (M3-3, amended by T-MAC-LIGHTS):
+    // the first thing Folio puts in this bar begins where the bar itself does —
+    // after the traffic lights when they stand at its leading edge, and after
+    // the column the lights went into when the band runs over the content only.
+    // The same sentence the tab strip is given in [`tab_strip_geometry`], said
+    // about the other layout's first control.
     let left = (chrome.strip_left_px as f32).max(0.0)
         + (WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round();
     let width = (WINDOW_PANEL_TOGGLE_WIDTH_LOGICAL_PX * scale).round();
     let height = (WINDOW_PANEL_TOGGLE_HEIGHT_LOGICAL_PX * scale).round();
-    // `align-items: center` in a 40px bar: the button is shorter than the bar
-    // and rides its middle.
-    let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+    // `align-items: center` in the bar, whatever this window's bar measures: the
+    // button is shorter than the bar and rides its middle.
     let top = ((title - height) * 0.5).round();
     Some([left, top, left + width, top + height])
 }
@@ -11893,9 +12018,11 @@ fn faded(ink: [u8; 3], ground: [u8; 3], opacity: f32) -> [u8; 3] {
 ///
 /// Returns nothing when no rail is on screen, which [`rail_geometry`] answers
 /// with `None`: a horizontal layout, or a collapsed one.
+#[allow(clippy::too_many_arguments)]
 fn rail_chrome(
     height: f32,
     scale: f32,
+    chrome: PlatformChrome,
     hover: Option<ChromeTarget>,
     rail: Rail<'_>,
     palette: ChromePalette,
@@ -11922,6 +12049,7 @@ fn rail_chrome(
     let Some(geometry) = rail_geometry(
         height,
         scale,
+        chrome,
         &trailers,
         pinned_run_len(&trailers),
         scroll,
@@ -12916,9 +13044,11 @@ fn focus_card_paint_order(count: usize, grabbed: Option<usize>) -> impl Iterator
 ///
 /// Returns nothing when focus mode is off, which [`focus_rail_geometry`] answers
 /// with `None`.
+#[allow(clippy::too_many_arguments)]
 fn focus_rail_chrome(
     height: f32,
     scale: f32,
+    chrome: PlatformChrome,
     hover: Option<ChromeTarget>,
     rail: FocusRail<'_>,
     palette: ChromePalette,
@@ -12950,7 +13080,8 @@ fn focus_rail_chrome(
     // Counting it twice would draw the column a card longer than the list it is
     // holding; counting it *nowhere* is what left the scroller short, and that
     // is the other caller's zero to fix.
-    let Some(geometry) = focus_rail_geometry(height, scale, tabs.len(), 0, scroll, state) else {
+    let Some(geometry) = focus_rail_geometry(height, scale, chrome, tabs.len(), 0, scroll, state)
+    else {
         return;
     };
     let ground = palette.title_bar;
@@ -21319,7 +21450,13 @@ mod tests {
     };
 
     fn viewport_of(width: u32, height: u32, dpi_milli: u32) -> LogicalRect {
-        logical_viewport(width, height, scale_ppm(dpi_milli), 0)
+        logical_viewport(
+            width,
+            height,
+            scale_ppm(dpi_milli),
+            0,
+            folio_band_device_px(scale_ppm(dpi_milli)),
+        )
     }
 
     fn seats_surface(width: u32, height: u32, dpi_milli: u32) -> SeatViewport {
@@ -22126,7 +22263,7 @@ mod tests {
             ),
         ] {
             let (rail_quads, _, _) = rail_paint_of(1.0, &tabs, 0, None, None, state, None);
-            let geometry = rail_geometry(600.0, 1.0, &trailers, 0, 0.0, state)
+            let geometry = rail_geometry(600.0, 1.0, FOLIO_BAR, &trailers, 0, 0.0, state)
                 .expect("every state in this list puts a rail on screen");
             let panel = rail_quads
                 .iter()
@@ -22165,7 +22302,7 @@ mod tests {
             ),
         ] {
             assert!(
-                rail_geometry(600.0, 1.0, &trailers, 0, 0.0, state).is_none(),
+                rail_geometry(600.0, 1.0, FOLIO_BAR, &trailers, 0, 0.0, state).is_none(),
                 "{name} puts no rail on screen, so it owes the glass nothing"
             );
         }
@@ -26032,7 +26169,7 @@ mod tests {",
         // The gear leads the caption run, and the strip reserves that run's four
         // slots on every window (see `caption_run_left`), so this is the edge the
         // band is measured back from.
-        let gear_left = window_caption_boxes(width, scale, FOLIO_BAR, false)[0].1[0];
+        let gear_left = window_caption_boxes(width, scale, FOLIO_BAR, rail, false)[0].1[0];
 
         // The dozen the report was made with — a strip pressed flat against the
         // gear without yet scrolling — and two counts past the floor, where it
@@ -26163,10 +26300,18 @@ mod tests {",
     /// reads it: it asks the window. §13.11 records the measurement.
     const MAC_TRAFFIC_LIGHTS_LOGICAL_PX: f32 = 69.0;
 
+    /// **How tall the bar those buttons stand in is** — macOS 26.6's other
+    /// measured number (§13.11 ①: a 960×632 frame around a 960×600 content
+    /// rectangle), held here on the same terms as the run's width: the backend
+    /// asks the window, and this constant exists so that the tests can state
+    /// what a measured window looks like.
+    const MAC_TITLE_BAR_LOGICAL_PX: f32 = 32.0;
+
     /// A window whose platform draws its own three buttons, at `scale`.
     fn mac_bar(scale: f32) -> PlatformChrome {
         PlatformChrome {
             strip_left_px: (MAC_TRAFFIC_LIGHTS_LOGICAL_PX * scale) as i32,
+            band_px: (MAC_TITLE_BAR_LOGICAL_PX * scale) as i32,
             buttons_are_the_platforms: true,
         }
     }
@@ -26286,7 +26431,7 @@ mod tests {",
                     &[ChromeTarget::Settings],
                     "the gear stays and nothing else does (summoned={summoned})"
                 );
-                let boxes = window_caption_boxes(width, scale, mac, summoned);
+                let boxes = window_caption_boxes(width, scale, mac, RailState::default(), summoned);
                 assert_eq!(boxes.len(), 1);
                 assert_eq!(
                     boxes[0].1[2], width,
@@ -26358,6 +26503,301 @@ mod tests {",
         );
     }
 
+    // ── T-MAC-LIGHTS: the header a window wears across its top ──
+    //
+    // The owner's ruling of 2026-09-12 in its final form: one 32-point header
+    // across the whole width in every vertical layout, the platform's buttons
+    // where the platform puts them, the gear at the header's right, the header
+    // as the drag region, and the column beneath it — one surface, one colour,
+    // nothing drawn between the two. The horizontal layout is M3-3's, unchanged.
+    // The last test is the one that says Windows is untouched.
+
+    /// The postures a window can be in, as this block names them.
+    fn vertical(mode: RailMode) -> RailState {
+        RailState {
+            layout: TabLayoutMode::Vertical,
+            mode,
+            ..RailState::default()
+        }
+    }
+
+    fn cards() -> RailState {
+        RailState {
+            focus: true,
+            ..RailState::default()
+        }
+    }
+
+    /// RED — **every vertical layout wears the platform's own header, and the
+    /// gear stands at its right** (T-MAC-LIGHTS, owner ruling 2026-09-12).
+    ///
+    /// One header, three vertical layouts, and the same 32 points in each: the
+    /// expanded sidebar, the parked icon rail and the card column differ in what
+    /// stands *under* the header and in nothing about the header itself. The
+    /// horizontal layout keeps Folio's 40, because its strip is what stands in
+    /// the bar and a 32-point header would crop it.
+    ///
+    /// The gear is asserted beside the height because the two are one box: it is
+    /// as tall as the header it stands in and ends at the window's own edge, so
+    /// a header that changed height without taking the run with it would leave a
+    /// 40px button hanging eight points over the panel below.
+    ///
+    /// MUTATION: give a vertical layout Folio's 40 and the first assertion names
+    /// it; let the horizontal one take the platform's 32 and the strip is
+    /// cropped; leave the caption run at `WINDOW_TITLE_BAR_LOGICAL_PX` and the
+    /// gear's own box goes red at every scale.
+    #[test]
+    fn every_vertical_layout_wears_the_platforms_own_header() {
+        let width = 1600.0_f32;
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let mac = mac_bar(scale);
+            let platforms = mac.band_px as f32;
+            let folios = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+            for (rail, what) in [
+                (vertical(RailMode::Expanded), "the expanded sidebar"),
+                (vertical(RailMode::Icons), "the parked icon rail"),
+                (cards(), "the card column"),
+            ] {
+                assert_eq!(
+                    window_band_px(scale, mac, rail),
+                    platforms,
+                    "{what} stands under the platform's own 32 ({scale}x)"
+                );
+                // The gear, at the header's right and as tall as the header.
+                let caption = window_caption_boxes(width, scale, mac, rail, false);
+                assert_eq!(
+                    caption
+                        .iter()
+                        .map(|(target, _)| *target)
+                        .collect::<Vec<_>>(),
+                    vec![ChromeTarget::Settings],
+                    "the platform's three are the platform's; the gear is Folio's"
+                );
+                let gear = caption[0].1;
+                assert_eq!(gear[2], width, "it ends at the window's own edge");
+                assert_eq!(
+                    gear[2] - gear[0],
+                    WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale,
+                    "and it is the run's own 46 wide"
+                );
+                assert_eq!((gear[1], gear[3]), (0.0, platforms), "{what} ({scale}x)");
+            }
+            // The strip's own layout is M3-3's and keeps Folio's bar.
+            let strip = RailState::default();
+            assert_eq!(
+                window_band_px(scale, mac, strip),
+                folios,
+                "a 32-point header would crop a 40px strip ({scale}x)"
+            );
+        }
+    }
+
+    /// RED — **the column begins beneath the header, and its edge line begins
+    /// there too** (T-MAC-LIGHTS, owner ruling 2026-09-12).
+    ///
+    /// The header and the panel under it are one surface in one colour, so the
+    /// only thing that could separate them is the panel's own hairline — and the
+    /// ruling is that it must not: the line starts at the header's bottom edge
+    /// and never runs up into it. Both halves are read off the same `top`, which
+    /// is what makes them impossible to disagree.
+    ///
+    /// MUTATION: start the column at `0` and the first assertion names it; start
+    /// its edge line at `0` while the panel starts at the header and the line
+    /// runs up through the buttons.
+    #[test]
+    fn the_column_begins_beneath_the_header_and_so_does_its_edge_line() {
+        let height = 900.0_f32;
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let mac = mac_bar(scale);
+            let header = mac.band_px as f32;
+            let pad = RAIL_PADDING_TOP_LOGICAL_PX * scale;
+
+            let sidebar = rail_geometry(
+                height,
+                scale,
+                mac,
+                &resting(2),
+                0,
+                0.0,
+                vertical(RailMode::Expanded),
+            )
+            .expect("an expanded sidebar is on screen");
+            assert_eq!(sidebar.body[1], header, "the panel begins under the header");
+            assert_eq!(
+                sidebar.label.expect("the Tabs heading")[1],
+                header + pad,
+                "and its own content at its own padding under it ({scale}x)"
+            );
+            assert_eq!(
+                sidebar.edge.expect("an open rail draws its edge")[1],
+                header,
+                "the hairline starts where the panel does and never runs up into \
+                 the header ({scale}x)"
+            );
+
+            let parked = rail_geometry(
+                height,
+                scale,
+                mac,
+                &resting(2),
+                0,
+                0.0,
+                vertical(RailMode::Icons),
+            )
+            .expect("a parked rail is on screen");
+            assert_eq!(parked.body[1], header);
+            assert_eq!(parked.tabs[0].body[1], header + pad);
+
+            let column = focus_rail_geometry(height, scale, mac, 2, 0, 0.0, cards())
+                .expect("the card column is on screen");
+            assert_eq!(column.body[1], header);
+            assert_eq!(
+                column.cards[0].body[1],
+                header + pad,
+                "the first card begins at 32 + 6 ({scale}x)"
+            );
+            assert_eq!(column.edge[1], header);
+        }
+    }
+
+    /// RED — **the panes begin under the header, and its empty part is what the
+    /// window is dragged by** (T-MAC-LIGHTS).
+    ///
+    /// The seats' own top edge is the header's foot, through the one helper that
+    /// converts it, and the drag handle is the part of the header that is not
+    /// the platform's buttons and not Folio's own boxes. Both are asserted for
+    /// all three vertical layouts, because the ruling's whole point is that they
+    /// do not differ between them.
+    ///
+    /// MUTATION: leave the seats at Folio's 40 and the panes float eight points
+    /// below the header; answer the drag from the window's leading edge and a
+    /// press inside the traffic lights starts moving the window.
+    #[test]
+    fn the_panes_begin_under_the_header_and_its_empty_part_is_the_handle() {
+        let (width, height) = (1600.0_f32, 900.0_f32);
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let mac = mac_bar(scale);
+            let ppm = scale_ppm((scale * 1_000.0) as u32);
+            let header = mac.band_px as f32;
+            for rail in [
+                vertical(RailMode::Expanded),
+                vertical(RailMode::Icons),
+                cards(),
+            ] {
+                assert_eq!(
+                    chrome_band_device_px(ppm, mac, rail),
+                    header as u32,
+                    "the seats begin under the platform's own header ({scale}x)"
+                );
+                let seats = device_viewport(
+                    width as u32,
+                    height as u32,
+                    rail_inset_device_px(rail, ppm),
+                    chrome_band_device_px(ppm, mac, rail),
+                );
+                assert_eq!(
+                    seats[1],
+                    f64::from(header),
+                    "and the stage's own rim with them"
+                );
+
+                let handle = |x: f32, y: f32| {
+                    title_bar_drag_point(
+                        width,
+                        scale,
+                        mac,
+                        2,
+                        rail,
+                        false,
+                        f64::from(x),
+                        f64::from(y),
+                    )
+                };
+                let lights = mac.strip_left_px as f32;
+                let gear = width - WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
+                let middle = (lights + gear) / 2.0;
+                assert!(
+                    handle(middle, header / 2.0),
+                    "the header's own empty part ({scale}x)"
+                );
+                assert!(
+                    !handle(middle, header),
+                    "nothing under the header is the header's, whatever is drawn there"
+                );
+                assert!(
+                    !handle(lights - 1.0, header / 2.0),
+                    "nor is the platform's own run of buttons ({scale}x)"
+                );
+                assert!(!handle(width - 1.0, header / 2.0), "nor the gear's own box");
+            }
+        }
+    }
+
+    /// RED — **a window whose whole bar is Folio's is the window it was**
+    /// (T-MAC-LIGHTS).
+    ///
+    /// The ticket's own condition, and the one this file cannot check by reading
+    /// a platform name: for a `FOLIO_DRAWS_THE_WHOLE_BAR` window in all four
+    /// layouts, every number this ruling introduced answers exactly what the
+    /// picture answered before it existed — Folio's 40px bar across the whole
+    /// width, the rail under it, the seats under it, and the four-button run.
+    ///
+    /// MUTATION: give `FOLIO_DRAWS_THE_WHOLE_BAR` a band of its own and this
+    /// goes red in four places at once.
+    #[test]
+    fn nothing_here_touches_the_window_whose_whole_bar_is_folios() {
+        let (width, height) = (1600.0_f32, 900.0_f32);
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let folios = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+            let ppm = scale_ppm((scale * 1_000.0) as u32);
+            for rail in [
+                RailState::default(),
+                vertical(RailMode::Expanded),
+                vertical(RailMode::Icons),
+                cards(),
+            ] {
+                assert_eq!(window_band_px(scale, FOLIO_BAR, rail), folios);
+                assert_eq!(chrome_band_device_px(ppm, FOLIO_BAR, rail), folios as u32);
+                assert_eq!(
+                    device_viewport(
+                        width as u32,
+                        height as u32,
+                        rail_inset_device_px(rail, ppm),
+                        chrome_band_device_px(ppm, FOLIO_BAR, rail),
+                    )[1],
+                    f64::from(folios)
+                );
+                // Every box in the bar is as tall as the bar, and the caption run
+                // is still the four a Windows window carries.
+                for (_, rect) in window_caption_boxes(width, scale, FOLIO_BAR, rail, false) {
+                    assert_eq!(rect[3], folios);
+                }
+                assert_eq!(caption_targets(FOLIO_BAR, false).len(), 4);
+            }
+            // And the panel the vertical layouts stand on begins at the bar's
+            // foot, where it has always begun.
+            let sidebar = rail_geometry(
+                height,
+                scale,
+                FOLIO_BAR,
+                &resting(2),
+                0,
+                0.0,
+                vertical(RailMode::Expanded),
+            )
+            .expect("an expanded sidebar is on screen");
+            assert_eq!(sidebar.body[1], folios);
+            assert_eq!(
+                sidebar.label.expect("the Tabs heading")[1],
+                folios + RAIL_PADDING_TOP_LOGICAL_PX * scale
+            );
+            assert_eq!(sidebar.edge.expect("its edge")[1], folios);
+            let column = focus_rail_geometry(height, scale, FOLIO_BAR, 2, 0, 0.0, cards())
+                .expect("the card column is on screen");
+            assert_eq!(column.body[1], folios);
+        }
+    }
+
     /// RED — **the empty part of the strip is the window's drag region, and
     /// exactly that part** (M3-3, owner ruling 2026-09-12).
     ///
@@ -26380,21 +26820,27 @@ mod tests {",
     #[test]
     fn the_strips_empty_part_is_the_drag_region() {
         use bt_platform::{CustomFrameHit, CustomFrameMetrics, custom_frame_hit_test};
+        // Every layout this window can be in, because the header is the same
+        // header in all of them (T-MAC-LIGHTS) and the rule about its empty part
+        // is the one rule.
         let layouts = [
             RailState::default(),
-            RailState {
-                layout: TabLayoutMode::Vertical,
-                mode: RailMode::Expanded,
-                ..RailState::default()
-            },
+            vertical(RailMode::Expanded),
+            vertical(RailMode::Icons),
+            cards(),
         ];
         for scale in [1.0_f32, 2.0] {
             let width = 960.0 * scale;
-            let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
             for chrome in [FOLIO_BAR, mac_bar(scale)] {
                 for rail in layouts {
                     for tabs in [1_usize, 12, 30] {
                         let trailers = resting(tabs);
+                        // The bar as *this* window wears it (T-MAC-LIGHTS): 40
+                        // where the whole bar is Folio's, the platform's own band
+                        // where it is not. Both sides of the comparison are given
+                        // the same number, which is what keeps this a test about
+                        // one rule rather than about two heights.
+                        let title = window_band_px(scale, chrome, rail);
                         // The other platform's own answer about the same bar,
                         // built from the same two numbers its frame is given:
                         // where the app's run ends, and how many slots the
@@ -26419,11 +26865,11 @@ mod tests {",
                             let dragging = title_bar_drag_point(
                                 width, scale, chrome, tabs, rail, false, fx, fy,
                             );
-                            // Below the platform's own band the two are the same
-                            // rule; inside it, this window has nothing to say —
-                            // AppKit's buttons take the press before winit sees
-                            // it, and a drag begun from inside one is a button
-                            // that cannot be pressed.
+                            // After the platform's own run of buttons the two
+                            // are the same rule; inside it this window has
+                            // nothing to say — AppKit takes the press before
+                            // winit sees it, and a drag begun from inside a
+                            // button is a button that cannot be pressed.
                             let expected = x >= chrome.strip_left_px
                                 && custom_frame_hit_test(frame, x, y) == CustomFrameHit::Caption;
                             assert_eq!(
@@ -26441,7 +26887,13 @@ mod tests {",
                                     None,
                                     "x={x} is both the window's handle and one of Folio's buttons"
                                 );
-                                if matches!(rail.layout, TabLayoutMode::Horizontal) {
+                                // **Asked of the strip that is on the glass**,
+                                // not of the layout: focus mode draws its card
+                                // column in either tab layout and no strip at
+                                // all, so a horizontal window in that mode has
+                                // tab boxes that nothing paints and the handle
+                                // rightly runs through them (T-MAC-LIGHTS).
+                                if rail.strip_stands_in_the_bar() {
                                     assert_eq!(
                                         hit_tab_chrome(
                                             width, scale, chrome, &trailers, 0, 0.0, fx, fy,
@@ -26463,8 +26915,11 @@ mod tests {",
                     }
                 }
                 // Below the bar the window is never picked up: that is the
-                // terminal, a pane head, or the sidebar.
-                for y in [title, title + 1.0, title * 4.0] {
+                // terminal, a pane head, or the sidebar. Asked of the bar this
+                // window wears (T-MAC-LIGHTS), which is the platform's own band
+                // where the platform has one.
+                let bar = window_band_px(scale, chrome, RailState::default());
+                for y in [bar, bar + 1.0, bar * 4.0] {
                     assert!(
                         !title_bar_drag_point(
                             width,
@@ -26496,7 +26951,7 @@ mod tests {",
         let rail = RailState::default();
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let width = 960.0 * scale;
-            let boxes = window_caption_boxes(width, scale, FOLIO_BAR, false);
+            let boxes = window_caption_boxes(width, scale, FOLIO_BAR, rail, false);
             assert_eq!(
                 window_chrome_boxes(width, scale, FOLIO_BAR, rail, false),
                 boxes.clone(),
@@ -26511,7 +26966,7 @@ mod tests {",
             // **And the summoned terminal's run is the two the ruling leaves it**
             // (§7.54e ②), measured from the same origin so the paint and this
             // hit test cannot disagree about where the `×` is.
-            let summoned = window_caption_boxes(width, scale, FOLIO_BAR, true);
+            let summoned = window_caption_boxes(width, scale, FOLIO_BAR, rail, true);
             assert_eq!(
                 summoned
                     .iter()
@@ -36645,7 +37100,7 @@ mod tests {",
                 for y in [0.0, 100.0, 300.0, 590.0] {
                     for x in [0.0, 10.0, 100.0, 219.0] {
                         assert_eq!(
-                            hit_rail_chrome(600.0, 1.0, &resting, 0, 0.0, state, x, y),
+                            hit_rail_chrome(600.0, 1.0, FOLIO_BAR, &resting, 0, 0.0, state, x, y),
                             None,
                             "a folded rail claims no point, but claimed ({x}, {y})"
                         );
@@ -36903,13 +37358,13 @@ mod tests {",
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let dpi_milli = (scale * 1_000.0) as u32;
             let ppm = scale_ppm(dpi_milli);
-            let bare = logical_viewport(W, H, ppm, 0);
+            let bare = logical_viewport(W, H, ppm, 0, folio_band_device_px(ppm));
             assert_eq!(
                 bare.left,
                 LogicalPx::ZERO,
                 "scale {scale}: with no rail the terminal starts at the window's edge"
             );
-            assert_eq!(device_viewport(W, H, ppm, 0)[0], 0.0);
+            assert_eq!(device_viewport(W, H, 0, folio_band_device_px(ppm))[0], 0.0);
 
             for (state, expected_logical) in [
                 (expanded_rail(), RAIL_WIDTH_LOGICAL_PX),
@@ -36922,8 +37377,8 @@ mod tests {",
                 (RailState::default(), 0.0),
             ] {
                 let inset = rail_inset_device_px(state, ppm);
-                let view = logical_viewport(W, H, ppm, inset);
-                let host = device_viewport(W, H, ppm, inset);
+                let view = logical_viewport(W, H, ppm, inset, folio_band_device_px(ppm));
+                let host = device_viewport(W, H, inset, folio_band_device_px(ppm));
                 // The left edge moved by exactly the inset, and by nothing else:
                 // the top, the right and the bottom are the ones the bare
                 // viewport already had.
@@ -36953,7 +37408,7 @@ mod tests {",
                      re-snapped — one pixel apart here is a drop zone aimed at a seam"
                 );
                 assert_eq!([host[1], host[2], host[3]], {
-                    let bare_host = device_viewport(W, H, ppm, 0);
+                    let bare_host = device_viewport(W, H, 0, folio_band_device_px(ppm));
                     [bare_host[1], bare_host[2], bare_host[3]]
                 });
             }
@@ -36971,8 +37426,8 @@ mod tests {",
         let ppm = scale_ppm(1_000);
         let inset = rail_inset_device_px(expanded_rail(), ppm);
         for width in [1_u32, 40, 120, 219, 220, 400] {
-            let view = logical_viewport(width, 600, ppm, inset);
-            let host = device_viewport(width, 600, ppm, inset);
+            let view = logical_viewport(width, 600, ppm, inset, folio_band_device_px(ppm));
+            let host = device_viewport(width, 600, inset, folio_band_device_px(ppm));
             assert!(
                 view.left <= view.right,
                 "{width}px wide: the viewport stays the right way round"
@@ -37148,7 +37603,7 @@ mod tests {",
             },
         )
         .flattened();
-        let geometry = rail_geometry(600.0, 1.0, &trailers, 1, 0.0, expanded_rail())
+        let geometry = rail_geometry(600.0, 1.0, FOLIO_BAR, &trailers, 1, 0.0, expanded_rail())
             .expect("an expanded rail is on screen");
         let quad_at = |rect: [f32; 4]| quads.iter().find(|quad| quad.rect == rect).map(|q| q.color);
         assert_eq!(
@@ -37263,7 +37718,7 @@ mod tests {",
             },
         ];
         let trailers = tabs.iter().map(|tab| tab.trailer).collect::<Vec<_>>();
-        let geometry = rail_geometry(600.0, 1.0, &trailers, 1, 0.0, expanded_rail())
+        let geometry = rail_geometry(600.0, 1.0, FOLIO_BAR, &trailers, 1, 0.0, expanded_rail())
             .expect("a rail is on screen");
         let dpi_milli = 1_000;
         let metrics = seat_metrics(dpi_milli);
@@ -37375,7 +37830,7 @@ mod tests {",
                 ..TabTrailer::default()
             },
         ];
-        let open = rail_geometry(600.0, 1.0, &revealed, 1, 0.0, expanded_rail())
+        let open = rail_geometry(600.0, 1.0, FOLIO_BAR, &revealed, 1, 0.0, expanded_rail())
             .expect("a rail is on screen");
         let row = &open.tabs[1];
         let pin = row.pin.expect("`.vtab:hover .pin` — the offer is revealed");
@@ -37403,6 +37858,7 @@ mod tests {",
             hit_rail_chrome(
                 600.0,
                 1.0,
+                FOLIO_BAR,
                 &revealed,
                 1,
                 0.0,
@@ -37495,6 +37951,7 @@ mod tests {",
         let geometry = rail_geometry(
             600.0,
             1.0,
+            FOLIO_BAR,
             &[TabTrailer::default(), TabTrailer::default()],
             0,
             0.0,
@@ -37588,6 +38045,7 @@ mod tests {",
         let geometry = rail_geometry(
             600.0,
             1.0,
+            FOLIO_BAR,
             &[TabTrailer::default(), TabTrailer::default()],
             0,
             0.0,
@@ -37631,7 +38089,7 @@ mod tests {",
             },
         ];
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
-            let rail = rail_geometry(600.0, scale, &trailers, 1, 0.0, expanded_rail())
+            let rail = rail_geometry(600.0, scale, FOLIO_BAR, &trailers, 1, 0.0, expanded_rail())
                 .expect("a rail is on screen");
             let pinned = rail_trailing_edge(&rail.tabs[0], scale);
             let resting = rail_trailing_edge(&rail.tabs[1], scale);
@@ -37690,7 +38148,7 @@ mod tests {",
         // a draw for an ink that has arrived at fully transparent.
         let trailers = [TabTrailer::default(); 2];
         let run = |state| {
-            rail_geometry(600.0, 1.0, &trailers, 0, 0.0, state)
+            rail_geometry(600.0, 1.0, FOLIO_BAR, &trailers, 0, 0.0, state)
                 .expect("an icon rail is on screen")
                 .tabs[0]
                 .title
@@ -37744,6 +38202,7 @@ mod tests {",
             let geometry = rail_geometry(
                 (600.0 * scale).round(),
                 scale,
+                FOLIO_BAR,
                 &[TabTrailer::default(); 2],
                 0,
                 0.0,
@@ -37913,7 +38372,13 @@ mod tests {",
         let column = seats.files().first().copied().expect("a files column");
         let layout = solved(
             &seats,
-            logical_viewport(width, height, scale_ppm(dpi_milli), parked),
+            logical_viewport(
+                width,
+                height,
+                scale_ppm(dpi_milli),
+                parked,
+                folio_band_device_px(scale_ppm(dpi_milli)),
+            ),
             &seat_metrics(dpi_milli),
         );
         let mut trees = BTreeMap::new();
@@ -37921,7 +38386,7 @@ mod tests {",
 
         let trailers = resting(2);
         let state = icon_rail(1.0);
-        let rail = rail_geometry(height as f32, scale, &trailers, 0, 0.0, state)
+        let rail = rail_geometry(height as f32, scale, FOLIO_BAR, &trailers, 0, 0.0, state)
             .expect("an open icon rail is on screen");
 
         // Every point the rail's rectangle covers, on a one-pixel-in grid.
@@ -37932,8 +38397,18 @@ mod tests {",
             while y < rail.body[3] {
                 let (px, py) = (f64::from(x), f64::from(y));
                 assert!(
-                    hit_rail_chrome(height as f32, scale, &trailers, 0, 0.0, state, px, py)
-                        .is_some(),
+                    hit_rail_chrome(
+                        height as f32,
+                        scale,
+                        FOLIO_BAR,
+                        &trailers,
+                        0,
+                        0.0,
+                        state,
+                        px,
+                        py
+                    )
+                    .is_some(),
                     "({px}, {py}) is inside the rail and the rail said nothing"
                 );
                 if matches!(
@@ -37954,8 +38429,16 @@ mod tests {",
 
         // And a parked rail claims only the strip the seats already keep clear,
         // so the tree beside it goes on answering for itself.
-        let parked_rail = rail_geometry(height as f32, scale, &trailers, 0, 0.0, icon_rail(0.0))
-            .expect("a parked icon rail is still on screen");
+        let parked_rail = rail_geometry(
+            height as f32,
+            scale,
+            FOLIO_BAR,
+            &trailers,
+            0,
+            0.0,
+            icon_rail(0.0),
+        )
+        .expect("a parked icon rail is still on screen");
         assert!(
             parked_rail.body[2] <= parked as f32,
             "a parked rail is no wider than the inset the seats were given"
@@ -37974,7 +38457,7 @@ mod tests {",
     #[test]
     fn only_one_of_the_two_tab_lists_can_answer_a_pointer() {
         let trailers = [TabTrailer::default(); 3];
-        let rail_row = rail_geometry(600.0, 1.0, &trailers, 0, 0.0, expanded_rail())
+        let rail_row = rail_geometry(600.0, 1.0, FOLIO_BAR, &trailers, 0, 0.0, expanded_rail())
             .expect("a vertical layout has a rail")
             .tabs[1];
         let centre = |rect: [f32; 4]| {
@@ -37985,12 +38468,32 @@ mod tests {",
         };
         let (x, y) = centre(rail_row.body);
         assert_eq!(
-            hit_rail_chrome(600.0, 1.0, &trailers, 0, 0.0, expanded_rail(), x, y),
+            hit_rail_chrome(
+                600.0,
+                1.0,
+                FOLIO_BAR,
+                &trailers,
+                0,
+                0.0,
+                expanded_rail(),
+                x,
+                y
+            ),
             Some(ChromeTarget::Tab(1)),
             "the rail names the row the pointer is on, in the index the strip uses"
         );
         assert_eq!(
-            hit_rail_chrome(600.0, 1.0, &trailers, 0, 0.0, RailState::default(), x, y),
+            hit_rail_chrome(
+                600.0,
+                1.0,
+                FOLIO_BAR,
+                &trailers,
+                0,
+                0.0,
+                RailState::default(),
+                x,
+                y
+            ),
             None,
             "and says nothing at all in a horizontal layout — there is no rail to hit"
         );
@@ -38004,7 +38507,17 @@ mod tests {",
             "the strip lives in the title bar"
         );
         assert_eq!(
-            hit_rail_chrome(600.0, 1.0, &trailers, 0, 0.0, expanded_rail(), sx, sy),
+            hit_rail_chrome(
+                600.0,
+                1.0,
+                FOLIO_BAR,
+                &trailers,
+                0,
+                0.0,
+                expanded_rail(),
+                sx,
+                sy
+            ),
             None,
             "and the rail begins below it, so a pointer up there is never the rail's"
         );
@@ -38019,8 +38532,16 @@ mod tests {",
             let height = 618.0 * scale;
             let crowded = resting(40);
             let at = |trailers: &[TabTrailer], scroll: f32| {
-                rail_geometry(height, scale, trailers, 0, scroll, expanded_rail())
-                    .expect("a rail is on screen")
+                rail_geometry(
+                    height,
+                    scale,
+                    FOLIO_BAR,
+                    trailers,
+                    0,
+                    scroll,
+                    expanded_rail(),
+                )
+                .expect("a rail is on screen")
             };
             let full = at(&crowded, 0.0);
             assert!(
@@ -38245,7 +38766,8 @@ mod tests {",
     }
 
     fn rail_of(state: RailState, trailers: &[TabTrailer], pinned: usize) -> RailGeometry {
-        rail_geometry(618.0, 1.0, trailers, pinned, 0.0, state).expect("a rail is on screen")
+        rail_geometry(618.0, 1.0, FOLIO_BAR, trailers, pinned, 0.0, state)
+            .expect("a rail is on screen")
     }
 
     /// **An open icon rail's `×` stands *over* a pane, not beside it** (user
@@ -38284,7 +38806,7 @@ mod tests {",
             let x = f64::from((close[0] + close[2]) / 2.0);
             let y = f64::from((close[1] + close[3]) / 2.0);
             assert_eq!(
-                hit_rail_chrome(618.0, 1.0, &trailers, 0, 0.0, state, x, y),
+                hit_rail_chrome(618.0, 1.0, FOLIO_BAR, &trailers, 0, 0.0, state, x, y),
                 Some(ChromeTarget::TabClose(index)),
                 "the rail answers for its own close box at {x},{y}",
             );
@@ -38327,7 +38849,7 @@ mod tests {",
     /// enough for their cards; every test that is genuinely about capacity keeps
     /// [`FIXTURE_HEIGHT`].
     fn focus_of_in(height: f32, state: RailState, tabs: usize) -> FocusRailGeometry {
-        focus_rail_geometry(height, 1.0, tabs, 0, 0.0, state)
+        focus_rail_geometry(height, 1.0, FOLIO_BAR, tabs, 0, 0.0, state)
             .expect("focus mode puts a column on screen")
     }
 
@@ -38350,8 +38872,10 @@ mod tests {",
             bt_layout::SeatKind::Terminal,
         ));
         let state = focus_rail(TabLayoutMode::Vertical);
-        let big = focus_rail_geometry(1200.0, 2.0, 3, 0, 0.0, state).expect("a column at 200%");
-        let small = focus_rail_geometry(600.0, 1.0, 3, 0, 0.0, state).expect("the same at 100%");
+        let big = focus_rail_geometry(1200.0, 2.0, FOLIO_BAR, 3, 0, 0.0, state)
+            .expect("a column at 200%");
+        let small =
+            focus_rail_geometry(600.0, 1.0, FOLIO_BAR, 3, 0, 0.0, state).expect("the same at 100%");
 
         for (index, (big_card, small_card)) in big.cards.iter().zip(&small.cards).enumerate() {
             for edge in 0..4 {
@@ -38972,9 +39496,15 @@ mod tests {",
                         ..RailState::default()
                     };
                     let case = format!("{layout:?}/{mode:?}/collapsed={collapsed}/dpi={dpi_milli}");
-                    let column = focus_rail_geometry(H as f32, scale, 3, 0, 0.0, focused)
-                        .expect("focus mode puts a column on screen");
-                    let stage = device_viewport(W, H, ppm, rail_inset_device_px(focused, ppm));
+                    let column =
+                        focus_rail_geometry(H as f32, scale, FOLIO_BAR, 3, 0, 0.0, focused)
+                            .expect("focus mode puts a column on screen");
+                    let stage = device_viewport(
+                        W,
+                        H,
+                        rail_inset_device_px(focused, ppm),
+                        folio_band_device_px(ppm),
+                    );
                     assert!(
                         (stage[0] - f64::from(column.body[2])).abs() <= 0.5,
                         "{case}: the stage starts at the column's right edge \
@@ -38996,8 +39526,12 @@ mod tests {",
                         focus: false,
                         ..focused
                     };
-                    let left_back =
-                        device_viewport(W, H, ppm, rail_inset_device_px(ordinary, ppm))[0];
+                    let left_back = device_viewport(
+                        W,
+                        H,
+                        rail_inset_device_px(ordinary, ppm),
+                        folio_band_device_px(ppm),
+                    )[0];
                     match (layout, mode, collapsed) {
                         (TabLayoutMode::Horizontal, _, _) | (TabLayoutMode::Vertical, _, true) => {
                             assert_eq!(
@@ -39119,7 +39653,7 @@ mod tests {",
                 "{layout:?}: and the stage gives up exactly what the panel takes"
             );
             for scale in [1.0_f32, 1.25, 1.5, 2.0] {
-                let column = focus_rail_geometry(1_200.0, scale, 3, 0, 0.0, state)
+                let column = focus_rail_geometry(1_200.0, scale, FOLIO_BAR, 3, 0, 0.0, state)
                     .expect("focus mode puts a column on screen");
                 assert_eq!(
                     column.body[2] - column.body[0],
@@ -39296,6 +39830,7 @@ mod tests {",
                 hit_focus_rail(
                     618.0,
                     1.0,
+                    FOLIO_BAR,
                     &trailers,
                     0,
                     0.0,
@@ -39364,6 +39899,7 @@ mod tests {",
                 let hit = hit_focus_rail(
                     FIXTURE_HEIGHT,
                     1.0,
+                    FOLIO_BAR,
                     &trailers,
                     0,
                     0.0,
@@ -39412,9 +39948,16 @@ mod tests {",
     /// equality goes by exactly the term that was dropped.
     #[test]
     fn the_reporters_four_cards_hang_below_the_fold_by_what_the_column_offers() {
-        let column =
-            focus_rail_geometry(1080.0, 1.5, 4, 0, 0.0, focus_rail(TabLayoutMode::Vertical))
-                .expect("focus mode puts a column on screen");
+        let column = focus_rail_geometry(
+            1080.0,
+            1.5,
+            FOLIO_BAR,
+            4,
+            0,
+            0.0,
+            focus_rail(TabLayoutMode::Vertical),
+        )
+        .expect("focus mode puts a column on screen");
         assert!(
             column.max_scroll > 0.0,
             "four default cards outrun this window, which is what the report says"
@@ -39458,7 +40001,7 @@ mod tests {",
     #[test]
     fn a_card_scrolled_out_of_the_list_is_not_on_screen() {
         let state = focus_rail(TabLayoutMode::Vertical);
-        let column = focus_rail_geometry(618.0, 1.0, 8, 0, 0.0, state)
+        let column = focus_rail_geometry(618.0, 1.0, FOLIO_BAR, 8, 0, 0.0, state)
             .expect("focus mode puts a column on screen");
         assert!(column.max_scroll > 0.0, "eight cards do not fit in 618px");
         assert!(column.card_is_in_view(0), "the first card is at the top");
@@ -39471,7 +40014,7 @@ mod tests {",
             !column.card_is_in_view(column.cards.len()),
             "a tab with no card of its own is not on screen either"
         );
-        let scrolled = focus_rail_geometry(618.0, 1.0, 8, 0, column.max_scroll, state)
+        let scrolled = focus_rail_geometry(618.0, 1.0, FOLIO_BAR, 8, 0, column.max_scroll, state)
             .expect("focus mode puts a column on screen");
         assert!(
             scrolled.card_is_in_view(last),
@@ -39494,7 +40037,7 @@ mod tests {",
     fn the_offer_does_not_move_as_the_column_scrolls() {
         let state = focus_rail(TabLayoutMode::Vertical);
         let at = |scroll: f32| {
-            focus_rail_geometry(1080.0, 1.5, 4, 0, scroll, state)
+            focus_rail_geometry(1080.0, 1.5, FOLIO_BAR, 4, 0, scroll, state)
                 .expect("focus mode puts a column on screen")
                 .max_scroll
         };
@@ -39900,7 +40443,7 @@ mod tests {",
              assertion worth making"
         );
         assert_eq!(
-            hit_focus_rail(618.0, 1.0, &trailers, 0, 0.0, state, x, y),
+            hit_focus_rail(618.0, 1.0, FOLIO_BAR, &trailers, 0, 0.0, state, x, y),
             Some(ChromeTarget::Tab(1)),
             "and a press there still chooses the second tab: the target is a fact \
              about the mode, and the card is a picture of it arriving"
@@ -39972,7 +40515,17 @@ mod tests {",
         let (x, y) = centre_of(card.trailing);
 
         assert_eq!(
-            hit_focus_rail(FIXTURE_HEIGHT, 1.0, &trailers, 0, 0.0, state, x, y),
+            hit_focus_rail(
+                FIXTURE_HEIGHT,
+                1.0,
+                FOLIO_BAR,
+                &trailers,
+                0,
+                0.0,
+                state,
+                x,
+                y
+            ),
             Some(ChromeTarget::TabPin(0)),
             "the pin stands where the `×` would have, so unpinning is where you \
              already are"
@@ -40015,7 +40568,17 @@ mod tests {",
         let card = focus_of(state, 1).cards[0];
         let (x, y) = centre_of(card.trailing);
         assert_eq!(
-            hit_focus_rail(FIXTURE_HEIGHT, 1.0, &trailers, 0, 0.0, state, x, y),
+            hit_focus_rail(
+                FIXTURE_HEIGHT,
+                1.0,
+                FOLIO_BAR,
+                &trailers,
+                0,
+                0.0,
+                state,
+                x,
+                y
+            ),
             Some(ChromeTarget::TabClose(0)),
             "the `×` keeps the trailing slot on a tab that is not pinned"
         );
@@ -40043,7 +40606,17 @@ mod tests {",
         );
         let (x, y) = centre_of(pin.rect);
         assert_eq!(
-            hit_focus_rail(FIXTURE_HEIGHT, 1.0, &trailers, 0, 0.0, state, x, y),
+            hit_focus_rail(
+                FIXTURE_HEIGHT,
+                1.0,
+                FOLIO_BAR,
+                &trailers,
+                0,
+                0.0,
+                state,
+                x,
+                y
+            ),
             Some(ChromeTarget::TabPin(0)),
             "and pressing it pins the tab — a mark with no verb behind it is the \
              defect this test is named after"
@@ -40444,6 +41017,7 @@ mod tests {",
         focus_rail_geometry(
             FIXTURE_HEIGHT,
             1.0,
+            FOLIO_BAR,
             12,
             guests,
             scroll,
@@ -40861,6 +41435,7 @@ mod tests {",
         focus_rail_geometry(
             height,
             1.0,
+            FOLIO_BAR,
             tabs,
             0,
             0.0,
@@ -40975,6 +41550,7 @@ mod tests {",
             focus_rail_geometry(
                 FIXTURE_HEIGHT,
                 1.0,
+                FOLIO_BAR,
                 TABS + 1,
                 0,
                 scroll,
@@ -41427,8 +42003,9 @@ mod tests {",
                         "{layout:?}/{mode:?}: and no icon rail is drawn beside it"
                     );
                     assert!(
-                        focus_rail_geometry(618.0, 1.0, 3, 0, 0.0, focused).is_some()
-                            && rail_geometry(618.0, 1.0, &resting(3), 0, 0.0, focused).is_none(),
+                        focus_rail_geometry(618.0, 1.0, FOLIO_BAR, 3, 0, 0.0, focused).is_some()
+                            && rail_geometry(618.0, 1.0, FOLIO_BAR, &resting(3), 0, 0.0, focused)
+                                .is_none(),
                         "{layout:?}/{mode:?}: exactly one of the two panels is on screen"
                     );
                     // Leaving is turning the bit off, and nothing else: the state
@@ -41494,7 +42071,7 @@ mod tests {",
     fn a_cards_head_is_where_it_was_before_the_body_grew_under_it() {
         for scale in [1.0_f32, 1.5, 2.0] {
             let state = focus_rail(TabLayoutMode::Vertical);
-            let geometry = focus_rail_geometry(618.0, scale, 3, 0, 0.0, state)
+            let geometry = focus_rail_geometry(618.0, scale, FOLIO_BAR, 3, 0, 0.0, state)
                 .expect("focus mode puts a column on screen");
             for card in &geometry.cards {
                 assert_eq!(
@@ -41555,7 +42132,7 @@ mod tests {",
         for rung in bt_render::FOCUS_CARD_HEIGHT_OPTIONS_LOGICAL_PX {
             for scale in [1.0_f32, 1.5, 2.0] {
                 let state = focus_rail_at(TabLayoutMode::Vertical, rung);
-                let geometry = focus_rail_geometry(2_400.0, scale, 3, 0, 0.0, state)
+                let geometry = focus_rail_geometry(2_400.0, scale, FOLIO_BAR, 3, 0, 0.0, state)
                     .expect("focus mode puts a column on screen");
                 let head = focus_card_head_height(scale);
                 let border = (FOCUS_CARD_BORDER_LOGICAL_PX * scale).round().max(1.0);
@@ -41596,6 +42173,7 @@ mod tests {",
             let shipped = focus_rail_geometry(
                 2_400.0,
                 scale,
+                FOLIO_BAR,
                 3,
                 0,
                 0.0,
@@ -41605,6 +42183,7 @@ mod tests {",
             let chosen = focus_rail_geometry(
                 2_400.0,
                 scale,
+                FOLIO_BAR,
                 3,
                 0,
                 0.0,
@@ -41647,7 +42226,7 @@ mod tests {",
         let mut held = Vec::new();
         for rung in bt_render::FOCUS_CARD_HEIGHT_OPTIONS_LOGICAL_PX {
             let state = focus_rail_at(TabLayoutMode::Vertical, rung);
-            let geometry = focus_rail_geometry(2_400.0, 1.0, 3, 0, 0.0, state)
+            let geometry = focus_rail_geometry(2_400.0, 1.0, FOLIO_BAR, 3, 0, 0.0, state)
                 .expect("focus mode puts a column on screen");
             let cell = lone_terminal_cell(&geometry.cards[0]);
             held.push(crate::focus_thumb::mini_rows(
@@ -41675,12 +42254,13 @@ mod tests {",
                     hit_focus_rail(
                         2_400.0,
                         1.0,
+                        FOLIO_BAR,
                         &trailers,
                         0,
                         0.0,
                         state,
                         f64::from((second.body[0] + second.body[2]) / 2.0),
-                        f64::from(y),
+                        f64::from(y)
                     ),
                     Some(ChromeTarget::Tab(1)),
                     "a press anywhere down the second card is that tab, at {rung}px"
@@ -41700,6 +42280,7 @@ mod tests {",
             focus_rail_geometry(
                 618.0,
                 1.0,
+                FOLIO_BAR,
                 6,
                 0,
                 0.0,
@@ -42756,12 +43337,13 @@ mod tests {",
                     hit_focus_rail(
                         TALL_FIXTURE_HEIGHT,
                         1.0,
+                        FOLIO_BAR,
                         &tabs,
                         0,
                         0.0,
                         state,
                         f64::from(middle),
-                        f64::from(y),
+                        f64::from(y)
                     ),
                     Some(ChromeTarget::Tab(index)),
                     "card {index} at y={y} is the tab, all the way down"
@@ -42776,6 +43358,7 @@ mod tests {",
                 hit_focus_rail(
                     TALL_FIXTURE_HEIGHT,
                     1.0,
+                    FOLIO_BAR,
                     &tabs,
                     0,
                     0.0,
@@ -43121,9 +43704,16 @@ mod tests {",
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let mut centres = Vec::new();
             for open in [0.0_f32, 0.3, 0.6, 1.0] {
-                let rail =
-                    rail_geometry(618.0 * scale, scale, &resting(3), 0, 0.0, icon_rail(open))
-                        .expect("an icon rail is on screen");
+                let rail = rail_geometry(
+                    618.0 * scale,
+                    scale,
+                    FOLIO_BAR,
+                    &resting(3),
+                    0,
+                    0.0,
+                    icon_rail(open),
+                )
+                .expect("an icon rail is on screen");
                 let mark = rail.tabs[0].mark;
                 centres.push((mark[0] + mark[2]) / 2.0);
             }
@@ -43175,8 +43765,16 @@ mod tests {",
         let trailers = [pinned, revealed];
 
         for scale in [1.0_f32, 1.5, 2.0] {
-            let parked = rail_geometry(618.0 * scale, scale, &trailers, 1, 0.0, icon_rail(0.0))
-                .expect("a parked icon rail is on screen");
+            let parked = rail_geometry(
+                618.0 * scale,
+                scale,
+                FOLIO_BAR,
+                &trailers,
+                1,
+                0.0,
+                icon_rail(0.0),
+            )
+            .expect("a parked icon rail is on screen");
             for (index, row) in parked.tabs.iter().enumerate() {
                 for (name, slot) in [("pin", row.pin), ("close", row.close)] {
                     let Some(slot) = slot else { continue };
@@ -43400,8 +43998,16 @@ mod tests {",
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let height = 618.0 * scale;
             let rail_of_at = |count: usize, scroll: f32| {
-                rail_geometry(height, scale, &resting(count), 0, scroll, expanded_rail())
-                    .expect("a rail is on screen")
+                rail_geometry(
+                    height,
+                    scale,
+                    FOLIO_BAR,
+                    &resting(count),
+                    0,
+                    scroll,
+                    expanded_rail(),
+                )
+                .expect("a rail is on screen")
             };
             // The stuck line, from the two declarations that set it: the row's
             // 30px border box plus the 4px of padding it wears so its fill
@@ -43472,11 +44078,20 @@ mod tests {",
         };
         assert_eq!(collapsed.width_logical_px(), 0.0);
         assert!(
-            rail_geometry(618.0, 1.0, &resting(3), 0, 0.0, collapsed).is_none(),
+            rail_geometry(618.0, 1.0, FOLIO_BAR, &resting(3), 0, 0.0, collapsed).is_none(),
             "a collapsed rail has no box, so there is nothing to draw or click"
         );
         assert!(
-            rail_geometry(618.0, 1.0, &resting(3), 0, 0.0, RailState::default()).is_none(),
+            rail_geometry(
+                618.0,
+                1.0,
+                FOLIO_BAR,
+                &resting(3),
+                0,
+                0.0,
+                RailState::default()
+            )
+            .is_none(),
             "and neither has a horizontal layout"
         );
     }
@@ -43517,9 +44132,16 @@ mod tests {",
         // --railpark)` is that same edge written in the terminal's coordinates.
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             for open in [0.05_f32, 0.4, 0.8, 1.0] {
-                let rail =
-                    rail_geometry(618.0 * scale, scale, &resting(2), 0, 0.0, icon_rail(open))
-                        .expect("an opening icon rail is on screen");
+                let rail = rail_geometry(
+                    618.0 * scale,
+                    scale,
+                    FOLIO_BAR,
+                    &resting(2),
+                    0,
+                    0.0,
+                    icon_rail(open),
+                )
+                .expect("an opening icon rail is on screen");
                 let shade = rail.shade.expect("an opening rail casts a shade");
                 assert_eq!(
                     shade[0], rail.body[2],
@@ -43590,6 +44212,7 @@ mod tests {",
             hit_rail_chrome(
                 618.0,
                 1.0,
+                FOLIO_BAR,
                 &trailers,
                 1,
                 0.0,
@@ -43612,12 +44235,13 @@ mod tests {",
             hit_rail_chrome(
                 618.0,
                 1.0,
+                FOLIO_BAR,
                 &trailers,
                 1,
                 0.0,
                 state,
                 f64::from(body[0] + 2.0),
-                f64::from((body[1] + body[3]) / 2.0),
+                f64::from((body[1] + body[3]) / 2.0)
             ),
             Some(ChromeTarget::Tab(1))
         );
@@ -43628,7 +44252,9 @@ mod tests {",
         );
         // Nothing outside the rail belongs to the rail.
         assert_eq!(
-            hit_rail_chrome(618.0, 1.0, &trailers, 1, 0.0, state, 400.0, 300.0),
+            hit_rail_chrome(
+                618.0, 1.0, FOLIO_BAR, &trailers, 1, 0.0, state, 400.0, 300.0
+            ),
             None
         );
     }
@@ -43639,7 +44265,8 @@ mod tests {",
     fn rows_scrolled_out_of_the_rail_are_not_clickable() {
         let trailers = resting(40);
         let state = expanded_rail();
-        let scrolled = rail_geometry(618.0, 1.0, &trailers, 0, 200.0, state).expect("rail");
+        let scrolled =
+            rail_geometry(618.0, 1.0, FOLIO_BAR, &trailers, 0, 200.0, state).expect("rail");
         let first = scrolled.tabs[0].body;
         assert!(
             first[3] < scrolled.viewport[0],
@@ -43649,12 +44276,13 @@ mod tests {",
             hit_rail_chrome(
                 618.0,
                 1.0,
+                FOLIO_BAR,
                 &trailers,
                 0,
                 200.0,
                 state,
                 f64::from(first[0] + 2.0),
-                f64::from((first[1] + first[3]) / 2.0),
+                f64::from((first[1] + first[3]) / 2.0)
             ),
             None,
             "what is cropped away is not there to be clicked"
@@ -43672,8 +44300,9 @@ mod tests {",
                 icon_rail(0.5),
                 icon_rail(1.0),
             ] {
-                let rail = rail_geometry(618.0 * scale, scale, &resting(4), 2, 0.0, state)
-                    .expect("a rail is on screen");
+                let rail =
+                    rail_geometry(618.0 * scale, scale, FOLIO_BAR, &resting(4), 2, 0.0, state)
+                        .expect("a rail is on screen");
                 let boxes = rail
                     .tabs
                     .iter()
@@ -43753,10 +44382,16 @@ mod tests {",
             let inset = rail_inset_device_px(state, scale_ppm);
             let layout = solved(
                 &seats,
-                logical_viewport(width, height, scale_ppm, inset),
+                logical_viewport(
+                    width,
+                    height,
+                    scale_ppm,
+                    inset,
+                    folio_band_device_px(scale_ppm),
+                ),
                 &metrics,
             );
-            let host = device_viewport(width, height, scale_ppm, inset);
+            let host = device_viewport(width, height, inset, folio_band_device_px(scale_ppm));
             (layout, host, inset)
         };
         let flat = RailState::default();
@@ -44503,7 +45138,7 @@ mod tests {",
     /// its 960x600 window works out to, so a rectangle asserted against this
     /// geometry is the rectangle the paint had in front of it.
     fn painted_rail(trailers: &[TabTrailer]) -> RailGeometry {
-        rail_geometry(600.0, 1.0, trailers, 0, 0.0, expanded_rail())
+        rail_geometry(600.0, 1.0, FOLIO_BAR, trailers, 0, 0.0, expanded_rail())
             .expect("an expanded rail is on screen")
     }
 
@@ -45993,7 +46628,7 @@ mod drop_geometry_tests {
         let ppm = scale_ppm(dpi_milli);
         let layout = solve(
             &tree,
-            logical_viewport(W, H, ppm, 0),
+            logical_viewport(W, H, ppm, 0, folio_band_device_px(ppm)),
             &metrics,
             SeatId(1),
             LayoutMode::Parallel,
@@ -46003,7 +46638,7 @@ mod drop_geometry_tests {
         let count = tree.seats_in_order().len();
         (
             layout,
-            device_viewport(W, H, ppm, 0),
+            device_viewport(W, H, 0, folio_band_device_px(ppm)),
             count,
             dpi_milli as f32 / 1_000.0,
         )
@@ -46307,7 +46942,7 @@ mod drop_geometry_tests {
             let geometry =
                 tab_strip_geometry(W as f32, scale, FOLIO_BAR, &[TabTrailer::default()], 0, 0.0);
             let band = strip_band(&geometry, scale);
-            let host = device_viewport(W, H, scale_ppm(dpi_milli), 0);
+            let host = device_viewport(W, H, 0, folio_band_device_px(scale_ppm(dpi_milli)));
             assert_eq!(
                 f64::from(band[3]),
                 host[1],
@@ -46404,11 +47039,17 @@ mod drop_plan_tests {
     }
 
     fn view() -> LogicalRect {
-        logical_viewport(W, H, scale_ppm(DPI), 0)
+        logical_viewport(
+            W,
+            H,
+            scale_ppm(DPI),
+            0,
+            folio_band_device_px(scale_ppm(DPI)),
+        )
     }
 
     fn host() -> [f64; 4] {
-        device_viewport(W, H, scale_ppm(DPI), 0)
+        device_viewport(W, H, 0, folio_band_device_px(scale_ppm(DPI)))
     }
 
     fn live(seats: &Seats) -> SeatLayout {
@@ -46533,7 +47174,13 @@ mod drop_plan_tests {
     fn a_fourth_column_that_fits_is_not_refused_by_halving_the_third() {
         let seats = window(row(1, row(2, term(1), term(2)), term(3)));
         let metrics = metrics();
-        let view = logical_viewport(1_080, 700, scale_ppm(DPI), 0);
+        let view = logical_viewport(
+            1_080,
+            700,
+            scale_ppm(DPI),
+            0,
+            folio_band_device_px(scale_ppm(DPI)),
+        );
         let planned = seats
             .plan_drop(
                 &metrics,
@@ -46593,7 +47240,13 @@ mod drop_plan_tests {
     #[test]
     fn a_split_neither_half_can_afford_is_refused() {
         let seats = window(row(1, term(1), term(2)));
-        let narrow = logical_viewport(620, 500, scale_ppm(DPI), 0);
+        let narrow = logical_viewport(
+            620,
+            500,
+            scale_ppm(DPI),
+            0,
+            folio_band_device_px(scale_ppm(DPI)),
+        );
         let planned = seats
             .plan_drop(
                 &metrics(),
@@ -46965,8 +47618,14 @@ mod drop_plan_tests {
     #[test]
     fn a_refusal_traces_the_pane_it_will_not_cut() {
         let seats = window(row(1, term(1), term(2)));
-        let narrow_view = logical_viewport(620, 500, scale_ppm(DPI), 0);
-        let narrow_host = device_viewport(620, 500, scale_ppm(DPI), 0);
+        let narrow_view = logical_viewport(
+            620,
+            500,
+            scale_ppm(DPI),
+            0,
+            folio_band_device_px(scale_ppm(DPI)),
+        );
+        let narrow_host = device_viewport(620, 500, 0, folio_band_device_px(scale_ppm(DPI)));
         let live = seats
             .solve(narrow_view, &metrics(), SizePolicy::Lawful)
             .expect("two panes fit");
@@ -47013,8 +47672,14 @@ mod drop_plan_tests {
     #[test]
     fn a_refused_rim_traces_the_whole_layout() {
         let seats = window(row(1, term(1), term(2)));
-        let narrow_view = logical_viewport(620, 500, scale_ppm(DPI), 0);
-        let narrow_host = device_viewport(620, 500, scale_ppm(DPI), 0);
+        let narrow_view = logical_viewport(
+            620,
+            500,
+            scale_ppm(DPI),
+            0,
+            folio_band_device_px(scale_ppm(DPI)),
+        );
+        let narrow_host = device_viewport(620, 500, 0, folio_band_device_px(scale_ppm(DPI)));
         let live = seats
             .solve(narrow_view, &metrics(), SizePolicy::Lawful)
             .expect("two panes fit");
@@ -47326,7 +47991,13 @@ mod drop_plan_tests {
     /// layout whose panes are under `MIN_PANE_W`.
     #[test]
     fn a_refused_plan_does_not_land() {
-        let narrow = logical_viewport(560, H, scale_ppm(DPI), 0);
+        let narrow = logical_viewport(
+            560,
+            H,
+            scale_ppm(DPI),
+            0,
+            folio_band_device_px(scale_ppm(DPI)),
+        );
         let mut seats = window(row(1, row(2, term(1), term(2)), term(3)));
         let before = seats.tree().clone();
         let refused = seats

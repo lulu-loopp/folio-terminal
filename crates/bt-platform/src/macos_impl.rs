@@ -1002,7 +1002,7 @@ pub fn clear_surface_layers(window: NativeWindow) -> Result<usize, String> {
 /// other platform.
 pub fn adopt_window_chrome(window: NativeWindow) -> Result<crate::PlatformChrome, String> {
     let what = "taking over a window's title bar";
-    let (_, ns_window) = window_for(window, what)?;
+    let (mtm, ns_window) = window_for(window, what)?;
     ns_window.setStyleMask(ns_window.styleMask() | NSWindowStyleMask::FullSizeContentView);
     ns_window.setTitlebarAppearsTransparent(true);
     ns_window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
@@ -1032,12 +1032,57 @@ pub fn adopt_window_chrome(window: NativeWindow) -> Result<crate::PlatformChrome
     let Some(inset) = inset else {
         return Ok(crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR);
     };
-    Ok(crate::PlatformChrome {
+    Ok(platform_chrome_of(
+        inset,
+        title_bar_height(&ns_window, mtm),
+        scale,
+    ))
+}
+
+/// **How tall the bar those buttons stand in is** (T-MAC-LIGHTS) — asked of
+/// AppKit rather than assumed to be the 32 points this machine measured.
+///
+/// Asked as arithmetic on a *style mask* and not as a rectangle off this
+/// window, which is what makes it independent of the order
+/// [`adopt_window_chrome`] does its work in: `frameRectForContentRect:` on the
+/// live window answers the mask it currently has, and the mask it currently has
+/// is `FullSizeContentView` — under which the content *is* the frame and the
+/// honest answer to "how tall is the title bar" would be zero. So the one bit
+/// the take-over sets is taken back out, and the question is put to the class.
+///
+/// This is §13.11 ①'s own measurement generalised: a `contentRect` 960×600 window
+/// reported a 960×632 frame before `FullSizeContentView` and 960×600 after, and
+/// the 32 points that left the outer rectangle are exactly this band.
+fn title_bar_height(ns_window: &NSWindow, mtm: MainThreadMarker) -> f64 {
+    let bar_style = ns_window
+        .styleMask()
+        .difference(NSWindowStyleMask::FullSizeContentView);
+    // Any content rectangle answers this: the difference between a frame and its
+    // content is the chrome around it, and it does not depend on the size.
+    let content = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(100.0, 100.0));
+    let framed = NSWindow::frameRectForContentRect_styleMask(content, bar_style, mtm);
+    (framed.size.height - content.size.height).max(0.0)
+}
+
+/// The two sides of the platform's own run, struck together (T-MAC-LIGHTS).
+///
+/// A function of three measurements rather than three lines inside
+/// [`adopt_window_chrome`], because the pair is a claim that can be checked:
+/// the run has a width and a height, both are this window's own numbers at this
+/// window's own backing scale, and a window with a run has both of them or it is
+/// [`crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR`] — there is no window
+/// whose buttons occupy a band of no height.
+fn platform_chrome_of(inset: f64, band: f64, scale: f64) -> crate::PlatformChrome {
+    crate::PlatformChrome {
         // Up and not to nearest: the strip may begin one pixel clear of the
         // buttons, never one pixel into them.
         strip_left_px: (inset * scale).ceil() as i32,
+        // And the same direction on the other axis, for the same reason: what
+        // stands below this band may start one pixel clear of it, never one
+        // pixel inside it.
+        band_px: (band * scale).ceil() as i32,
         buttons_are_the_platforms: true,
-    })
+    }
 }
 
 /// **Answer a press on the empty part of the window's own title bar** —
@@ -1347,6 +1392,41 @@ impl SystemSettingsObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **RED — the platform's run is a rectangle, and both of its numbers are
+    /// this window's own** (T-MAC-LIGHTS).
+    ///
+    /// The numbers are macOS 26.6's, measured on 2026-09-12 and recorded in
+    /// `docs/DESIGN.md` §13.11: the zoom button's right edge at 69 points and a
+    /// 32-point title bar. What is pinned here is not those two values — the
+    /// window is asked for them — but the arithmetic that carries them into the
+    /// physical pixels every layout downstream measures in.
+    ///
+    /// MUTATION: round the band to nearest instead of up and the fractional
+    /// case goes red at 31; drop the `* scale` and the 2× case does.
+    #[test]
+    fn the_platforms_run_is_measured_on_both_axes_at_the_windows_own_scale() {
+        let at_one = platform_chrome_of(69.0, 32.0, 1.0);
+        assert_eq!(
+            (at_one.strip_left_px, at_one.band_px),
+            (69, 32),
+            "at backing scale 1 the run's two numbers are the points themselves"
+        );
+        assert!(
+            at_one.buttons_are_the_platforms,
+            "a window with a run of its own is a window whose buttons are the platform's"
+        );
+        let at_two = platform_chrome_of(69.0, 32.0, 2.0);
+        assert_eq!(
+            (at_two.strip_left_px, at_two.band_px),
+            (138, 64),
+            "and on a 2x display it is the same bar in twice as many pixels"
+        );
+        // Up on both axes and for one reason: what stands after the run may
+        // begin one pixel clear of it, never one pixel inside it.
+        let fractional = platform_chrome_of(68.5, 31.5, 1.0);
+        assert_eq!((fractional.strip_left_px, fractional.band_px), (69, 32));
+    }
 
     /// The rectangle a window reports and the rectangle winit reports are the
     /// same rectangle, because they are the same arithmetic.
