@@ -16964,6 +16964,42 @@ struct PreviewHeadFrame {
     content: seats::PreviewHeadContent<'static>,
 }
 
+/// **The card a surface with nothing to draw wears** (owner's ruling
+/// 2026-09-12) — its sentence, and under it the one way out.
+///
+/// One shape for the two pages that reach it, and one function so that they
+/// cannot drift apart: the file nothing here reads — a `folio.exe`, the
+/// mock-up's own `.pv-unknown` — and the file this window *refused to draw*,
+/// which said its sentence in the middle of an empty pane and offered nothing.
+/// The owner's ruling is that the second is the first: a preview the pane cannot
+/// show hands the file to the machine exactly as an executable does. So the
+/// caller brings the sentence and the verdict, and everything else about the
+/// card — the mark, the button's caption, where the button is drawn and what
+/// pressing it means — is decided here, once.
+///
+/// `offers_the_default_app` is the caller's own answer and not a constant,
+/// because R1-12 is still true of both pages: a refusal about *where* a file is
+/// rather than about what is in it has nothing the machine's handler could be
+/// offered for, and the absence travels as an absence so the layout takes the
+/// row back rather than leaving a hole where a control was.
+fn refused_preview_card(
+    notice: String,
+    offers_the_default_app: bool,
+    open_label: &str,
+) -> CardWords {
+    CardWords {
+        notice,
+        detail: String::new(),
+        detail_lines: Vec::new(),
+        verb: offers_the_default_app.then(|| open_label.to_owned()),
+        mark: marks::ChromeMark::File,
+        // Not a page's fault: this button hands a *file* to the system, which is
+        // where the press goes.
+        fault: false,
+        width: 0.0,
+    }
+}
+
 /// One preview rail's owned strings and the measurement they were taken with
 /// (user ruling 2026-08-24).
 ///
@@ -20642,13 +20678,55 @@ struct PeekPageRaster {
     height_px: u32,
 }
 
+/// **What a picture surface has instead of a picture** (owner's ruling
+/// 2026-09-12).
+///
+/// A sentence, and the answer to the one question the card under it asks: is the
+/// machine's own handler worth offering. The pair travels together for
+/// [`seats::PreviewCardButton`]'s reason — a caption drawn without the verdict
+/// that earned it is a button nobody decided to draw — and it is the picture
+/// lane's counterpart of [`preview::PreviewRefusal`], which answers the same two
+/// questions for a document.
+struct PictureRefusal {
+    notice: String,
+    /// [`preview::PreviewRefusal::offers_the_default_app`], asked of a picture
+    /// (R1-12): true of every refusal about the *content* or about this window,
+    /// false when the disk is what said no — a second process reading the same
+    /// file with the same rights would fail again, somewhere the reader cannot
+    /// see it.
+    offers_the_default_app: bool,
+}
+
+impl PictureRefusal {
+    /// **The decoder's verdict** — one sentence per refusal
+    /// ([`i18n::picture_refused`]), and the button withheld from the one of them
+    /// that is the operating system's own refusal to read the file.
+    fn decoded(error: &bt_term::InlineImageDecodeError) -> Self {
+        Self {
+            notice: i18n::picture_refused(error),
+            offers_the_default_app: !matches!(error, bt_term::InlineImageDecodeError::Io(_)),
+        }
+    }
+
+    /// **This window's own inability**, and not the file's: no worker to decode
+    /// with, no room to draw in, no codec to play with. The file on the disk is
+    /// untouched by any of them, so the handler is always worth offering.
+    fn this_window_cannot(notice: &'static str) -> Self {
+        Self {
+            notice: notice.to_owned(),
+            offers_the_default_app: true,
+        }
+    }
+}
+
 /// Persistent preview-seat state. Native pixels remain in `peek_cache`; this holds only the one
 /// display-sized raster and the question currently in flight for the solver's body rectangle.
 struct PreviewImageState {
     path: PathBuf,
     pending: Option<PeekThumbnailTarget>,
     raster: Option<PeekThumbnail>,
-    failure: Option<String>,
+    /// **Why there is no picture here**, and what may still be done about it.
+    failure: Option<PictureRefusal>,
     /// The decode's native dimensions, once known — shown beside the file name so the title
     /// answers "how big is this really" while the body shows the fitted version.
     native: Option<(u32, u32)>,
@@ -20771,10 +20849,28 @@ impl PreviewImageState {
     }
 
     fn message(&self) -> Option<String> {
-        self.failure.clone().or_else(|| {
-            (self.pending.is_some() || self.raster.is_none())
-                .then(|| i18n::preview_loading(&self.file_name()))
-        })
+        self.failure
+            .as_ref()
+            .map(|refusal| refusal.notice.clone())
+            .or_else(|| {
+                (self.pending.is_some() || self.raster.is_none())
+                    .then(|| i18n::preview_loading(&self.file_name()))
+            })
+    }
+
+    /// **The refusal this surface is showing instead of a picture** (owner's
+    /// ruling 2026-09-12) — the sentence, and with it the button that hands the
+    /// file to the machine.
+    ///
+    /// The gate is [`Self::drawn`], which is this window's own answer to "is
+    /// there anything on the glass": a sentence *over a frame* is not a refusal
+    /// of the page — a `.gif` standing on its first frame says why it is not
+    /// moving, and a recording this machine has no codec for still shows its
+    /// still — and a card drawn over either would cover the very picture it is
+    /// explaining. What is left is the page the pane refuses to draw, which is
+    /// what the card is for.
+    fn refusal(&self) -> Option<&PictureRefusal> {
+        self.failure.as_ref().filter(|_| self.drawn.is_none())
     }
 
     /// Accept only the answer to the newest size question. A superseded answer leaves `pending`
@@ -38646,25 +38742,42 @@ impl Runtime<'_> {
                         },
                     ));
                 }
+                let here = self.preview_here(seat);
+                // **A picture this pane refused to draw is a card too** (owner's
+                // ruling 2026-09-12). It used to be a sentence alone in the
+                // middle of an empty pane — `Preview failed: this picture has
+                // too many pixels` and no way on — while the file beside it that
+                // nothing here reads at all got a mark, a sentence and a button.
+                // The two are the same page: this window cannot show it, and the
+                // machine may be able to. Asked before the buffer below because
+                // a picture *is* not one (`preview_chrome_on`), so the two
+                // cannot both answer.
+                if let Some(refusal) = self
+                    .preview_picture(here)
+                    .and_then(PreviewImageState::refusal)
+                {
+                    return Some((
+                        seat,
+                        refused_preview_card(
+                            refusal.notice.clone(),
+                            refusal.offers_the_default_app,
+                            preview_open_label,
+                        ),
+                    ));
+                }
                 // **The button belongs to the refusals it is true of**
                 // (R1-12): a card that cannot read *this content* offers the
                 // machine's own handler, and a card refusing a share or
                 // reporting a disk that said no offers nothing, because there
                 // is nothing it could honestly offer.
-                let refusal = self.preview_buffer_on(self.preview_here(seat))?.refusal()?;
+                let refusal = self.preview_buffer_on(here)?.refusal()?;
                 Some((
                     seat,
-                    CardWords {
-                        notice: refusal.notice().to_owned(),
-                        detail: String::new(),
-                        detail_lines: Vec::new(),
-                        verb: refusal
-                            .offers_the_default_app()
-                            .then(|| preview_open_label.to_owned()),
-                        mark: marks::ChromeMark::File,
-                        fault: false,
-                        width: 0.0,
-                    },
+                    refused_preview_card(
+                        refusal.notice().to_owned(),
+                        refusal.offers_the_default_app(),
+                        preview_open_label,
+                    ),
                 ))
             })
             .collect();
@@ -52834,7 +52947,9 @@ impl Runtime<'_> {
             self.mouse_trace(|| format!("video_seat surface={surface:?} fault={error:?}"));
             self.window.video.close(surface);
             if let Some(picture) = self.preview_picture_mut(surface) {
-                picture.failure = Some(i18n::Text::VideoFormatCannotPlay.text().to_owned());
+                picture.failure = Some(PictureRefusal::this_window_cannot(
+                    i18n::Text::VideoFormatCannotPlay.text(),
+                ));
             }
         }
     }
@@ -53574,7 +53689,9 @@ impl Runtime<'_> {
             // surface's failures already live and already draw — the same slot a
             // picture that would not decode writes into.
             if let Some(picture) = self.preview_picture_mut(surface) {
-                picture.failure = Some(i18n::Text::VideoFormatCannotPlay.text().to_owned());
+                picture.failure = Some(PictureRefusal::this_window_cannot(
+                    i18n::Text::VideoFormatCannotPlay.text(),
+                ));
             }
         } else if let Some(picture) = self.preview_picture_mut(surface) {
             // And a play that worked clears whatever the last one said.
@@ -55105,7 +55222,7 @@ impl Runtime<'_> {
     /// to the door rather than to the call sites that knock on it.
     ///
     /// **This seat's own buffer and not the focused one**: the button stands on a
-    /// head, and a head belongs to a pane. Asking `current_preview_buffer` here
+    /// head, and a head belongs to a pane. Asking `seats.preview()` for it here
     /// would hand over whatever the *focused* seat happened to be showing, which
     /// on a window with two preview panes is the other one.
     ///
@@ -55278,17 +55395,13 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// The buffer **the** preview seat is showing, if it is showing one.
-    ///
-    /// [`Self::preview_buffer_on`] asked about [`seats::Seats::preview`], and it
-    /// is kept for exactly the callers that still mean that and nothing plural: a
-    /// tab's caption, a schematic's, and the two hit tests that belong to the
-    /// docked pane's own furniture. Everything that answers a gesture resolves a
-    /// surface first and asks about that one instead — the pane the pointer is in
-    /// is not always the first preview leaf in the tree.
-    fn current_preview_buffer(&self) -> Option<&preview::PreviewBuffer> {
-        self.preview_buffer_on(self.preview_here(self.seats.preview()?))
-    }
+    // `current_preview_buffer` stood here — the buffer "the" preview seat was
+    // showing, `preview_buffer_on` asked about `seats::Seats::preview`. Its last
+    // caller was the card button's verb, and the owner's ruling of 2026-09-12
+    // took that verb through `open_preview_externally_on`: a picture is not a
+    // buffer, so a door that could only ever find one answered for half the
+    // cards this window draws. What is left names its surface first, which is
+    // what every other gesture in this window already did.
 
     // `current_preview_image` stood here — the picture "the" preview seat was
     // showing. Its last caller was the singular body message, and that went
@@ -57669,34 +57782,48 @@ impl Runtime<'_> {
     /// says "Opened" over a launch that was refused is the one thing worse than
     /// silence — the foot's own rule, applied to the card.
     fn open_preview_externally(&mut self) -> Result<()> {
-        // The system's handler is asked to open a *file*; there is no such door
-        // for a document this window composed out of a repository.
-        let Some(path) = self
-            .current_preview_buffer()
-            .and_then(|buffer| buffer.source.file_path())
-            .map(Path::to_path_buf)
-        else {
+        let Some(seat) = self.seats.preview() else {
             return Ok(());
         };
-        self.open_path_in_default_app(&path)
+        self.open_preview_externally_on(self.preview_here(seat))
     }
 
     /// The same, on a surface the caller has already named (§7.39).
     ///
     /// A no-preview card in a **float** hands its file to the system exactly as
     /// the one in a pane does — the card is the same card, so its button is the
-    /// same verb — and the only thing that differs is which surface's buffer
-    /// names the file. The pane-side caller reaches the file through
-    /// [`Self::current_preview_buffer`]; a float names its own surface.
+    /// same verb — and the only thing that differs is which surface names the
+    /// file. Since the owner's ruling of 2026-09-12 the pane's own button comes
+    /// through here too, because there is one verb and naming the surface is the
+    /// only question it has.
     fn open_preview_externally_on(&mut self, surface: PreviewSurface) -> Result<()> {
-        let Some(path) = self
-            .preview_buffer_on(surface)
-            .and_then(|buffer| buffer.source.file_path())
-            .map(Path::to_path_buf)
-        else {
+        let Some(path) = self.preview_file_on(surface) else {
             return Ok(());
         };
         self.open_path_in_default_app(&path)
+    }
+
+    /// **The file this surface is showing, whichever lane it came down**
+    /// (owner's ruling 2026-09-12).
+    ///
+    /// The system's handler is asked to open a *file*; there is no such door for
+    /// a document this window composed out of a repository, which is what the
+    /// `None` is.
+    ///
+    /// The picture is asked second and not instead: a surface showing one has no
+    /// buffer at all (`preview_chrome_on`), so a card over a refused `.png` used
+    /// to press a button that reached for a buffer that was never there and did
+    /// nothing at all. The two lanes are one question here for
+    /// [`Self::preview_chrome_on`]'s reason — a caller that asked only one of
+    /// them would be answering for half the surfaces in this window.
+    fn preview_file_on(&self, surface: PreviewSurface) -> Option<PathBuf> {
+        self.preview_buffer_on(surface)
+            .and_then(|buffer| buffer.source.file_path())
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                self.preview_picture(surface)
+                    .map(|picture| picture.path.clone())
+            })
     }
 
     /// Hand one file to the system's default handler and acknowledge the press.
@@ -62390,75 +62517,77 @@ impl Runtime<'_> {
             standing_stated,
             &cache_key,
         );
-        let (content_key, native_rgba, native_width, native_height, reduced_from) = match pixels
-            .clone()
-        {
-            SurfacePixels::Decoded {
-                content,
-                rgba,
-                native,
-                stated,
-            } => (content, Some(rgba), native[0], native[1], stated),
-            // **What it was told, when the store no longer holds what it was told
-            // it from.** The raster on the glass stays there and the arithmetic
-            // below runs on the decode's own dimensions exactly as it did when
-            // the decode was in hand; what is missing is only the pixels a
-            // sharper pass would be made from, and that is the errand at the foot
-            // of this function.
-            SurfacePixels::Standing {
-                content,
-                native,
-                stated,
-                ..
-            } => (content, None, native[0], native[1], stated),
-            SurfacePixels::Failed(reason) => {
-                // **A video that would not decode is not a failure of this pane** (user ruling
-                // 2026-08-27; §7.23). A file called `.png` that no decoder can read is something
-                // the reader should be told about, because there is nothing else to say about it;
-                // a `.webm` in a codec this machine has not got is an ordinary file, and the pane
-                // still has its length, its size and its name to state. So the sentence is
-                // withheld and the two fact lines carry the surface — see
-                // [`Self::preview_image_meta`], whose degraded form exists for exactly this
-                // frame.
-                if !preview::path_names_a_video(&path)
-                    && let Some(picture) = self.preview_picture_mut(surface)
-                {
-                    // **The decoder's own reason, not this pane's guess**
-                    // (owner's ruling 2026-09-12). A surface that opens a file
-                    // this window has already refused reads its answer out of
-                    // the store, and the store now remembers *why* — so a
-                    // picture too long or too many pixels says which, here as
-                    // much as on the surface that was watching when the answer
-                    // arrived.
-                    picture
-                        .failure
-                        .get_or_insert_with(|| i18n::picture_refused(&reason));
+        let (content_key, native_rgba, native_width, native_height, reduced_from) =
+            match pixels.clone() {
+                SurfacePixels::Decoded {
+                    content,
+                    rgba,
+                    native,
+                    stated,
+                } => (content, Some(rgba), native[0], native[1], stated),
+                // **What it was told, when the store no longer holds what it was told
+                // it from.** The raster on the glass stays there and the arithmetic
+                // below runs on the decode's own dimensions exactly as it did when
+                // the decode was in hand; what is missing is only the pixels a
+                // sharper pass would be made from, and that is the errand at the foot
+                // of this function.
+                SurfacePixels::Standing {
+                    content,
+                    native,
+                    stated,
+                    ..
+                } => (content, None, native[0], native[1], stated),
+                SurfacePixels::Failed(reason) => {
+                    // **A video that would not decode is not a failure of this pane** (user ruling
+                    // 2026-08-27; §7.23). A file called `.png` that no decoder can read is something
+                    // the reader should be told about, because there is nothing else to say about it;
+                    // a `.webm` in a codec this machine has not got is an ordinary file, and the pane
+                    // still has its length, its size and its name to state. So the sentence is
+                    // withheld and the two fact lines carry the surface — see
+                    // [`Self::preview_image_meta`], whose degraded form exists for exactly this
+                    // frame.
+                    if !preview::path_names_a_video(&path)
+                        && let Some(picture) = self.preview_picture_mut(surface)
+                    {
+                        // **The decoder's own reason, not this pane's guess**
+                        // (owner's ruling 2026-09-12). A surface that opens a file
+                        // this window has already refused reads its answer out of
+                        // the store, and the store now remembers *why* — so a
+                        // picture too long or too many pixels says which, here as
+                        // much as on the surface that was watching when the answer
+                        // arrived.
+                        picture
+                            .failure
+                            .get_or_insert_with(|| PictureRefusal::decoded(&reason));
+                    }
+                    self.hide_preview_picture(surface);
+                    return None;
                 }
-                self.hide_preview_picture(surface);
-                return None;
-            }
-            SurfacePixels::Nothing { asked } => {
-                self.hide_preview_picture(surface);
-                if !self.app.math_worker_running {
-                    if let Some(picture) = self.preview_picture_mut(surface) {
-                        picture.failure =
-                            Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
+                SurfacePixels::Nothing { asked } => {
+                    self.hide_preview_picture(surface);
+                    if !self.app.math_worker_running {
+                        if let Some(picture) = self.preview_picture_mut(surface) {
+                            picture.failure = Some(PictureRefusal::this_window_cannot(
+                                i18n::Text::PreviewFailedImageWorker.text(),
+                            ));
+                        }
+                        return None;
+                    }
+                    if asked {
+                        return None;
+                    }
+                    if self.request_peek_pixels(&path) {
+                        self.window
+                            .peek_cache
+                            .insert(cache_key, PeekCacheEntry::Pending);
+                    } else if let Some(picture) = self.preview_picture_mut(surface) {
+                        picture.failure = Some(PictureRefusal::this_window_cannot(
+                            i18n::Text::PreviewFailedImageWorker.text(),
+                        ));
                     }
                     return None;
                 }
-                if asked {
-                    return None;
-                }
-                if self.request_peek_pixels(&path) {
-                    self.window
-                        .peek_cache
-                        .insert(cache_key, PeekCacheEntry::Pending);
-                } else if let Some(picture) = self.preview_picture_mut(surface) {
-                    picture.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
-                }
-                return None;
-            }
-        };
+            };
         // **What the recording is, when the pixels are only a frame of it** — see
         // [`PreviewImageState::stated_size`]. Read before the borrow below because it is a
         // lookup on the window, and `None` for everything that is not a video.
@@ -62498,7 +62627,9 @@ impl Runtime<'_> {
             || native_height == 0
         {
             if let Some(picture) = self.preview_picture_mut(surface) {
-                picture.failure = Some(i18n::Text::PreviewFailedSeatTooSmall.text().to_owned());
+                picture.failure = Some(PictureRefusal::this_window_cannot(
+                    i18n::Text::PreviewFailedSeatTooSmall.text(),
+                ));
             }
             self.hide_preview_picture(surface);
             return None;
@@ -62558,7 +62689,9 @@ impl Runtime<'_> {
             native_height,
         ) else {
             if let Some(picture) = self.preview_picture_mut(surface) {
-                picture.failure = Some(i18n::Text::PreviewFailedSeatTooSmall.text().to_owned());
+                picture.failure = Some(PictureRefusal::this_window_cannot(
+                    i18n::Text::PreviewFailedSeatTooSmall.text(),
+                ));
             }
             self.hide_preview_picture(surface);
             return None;
@@ -62673,7 +62806,9 @@ impl Runtime<'_> {
                 picture.failure = None;
             }
         } else if let Some(picture) = self.preview_picture_mut(surface) {
-            picture.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
+            picture.failure = Some(PictureRefusal::this_window_cannot(
+                i18n::Text::PreviewFailedImageWorker.text(),
+            ));
         }
         produced
     }
@@ -74987,14 +75122,12 @@ impl Runtime<'_> {
         // acknowledgement that briefly replaces it — so it is asked here for
         // `dock_label`'s reason exactly, and `preview_card_geometry` centres a
         // button of this width in whichever window is refused below.
-        let open_button_px = {
-            let label = self.preview_open_button_label(now);
-            self.window.renderer.measure_chrome_text(
-                &mut self.app.gpu,
-                label,
-                seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
-            )
-        };
+        let open_label = self.preview_open_button_label(now);
+        let open_button_px = self.window.renderer.measure_chrome_text(
+            &mut self.app.gpu,
+            open_label,
+            seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
+        );
         let (x, y) = (position.x as f32, position.y as f32);
         // The identities first, then the windows one at a time: the head's tools
         // are a question about the *content* plane, which is `&self`, and asking
@@ -75048,10 +75181,15 @@ impl Runtime<'_> {
             // lands on the rectangle that was drawn rather than on a second guess
             // at it. `None` for every window that is not refused, which is a body
             // with no button to take the press.
+            //
+            // **Whichever refusal this window is standing on** (owner's ruling
+            // 2026-09-12): the document nothing here reads, or the picture this
+            // window would not draw. One question, asked through the same
+            // `float_refusal_words` the paint asked, so a button that was drawn
+            // is a button that can be pressed.
             let card_button = self
-                .preview_buffer_on(PreviewSurface::Float(id))
-                .and_then(|buffer| buffer.refusal())
-                .filter(|refusal| refusal.offers_the_default_app())
+                .float_refusal_words(PreviewSurface::Float(id), open_label)
+                .filter(|words| words.verb.is_some())
                 .and_then(|_| {
                     seats::preview_card_geometry(geometry.body, Some(open_button_px), 0, scale)
                         .button
@@ -77104,6 +77242,76 @@ impl Runtime<'_> {
         self.window.float_git_pages_shown.insert(id, content);
     }
 
+    /// **The card a window with nothing to draw wears**, drawn into its body
+    /// (§7.39; owner's ruling 2026-09-12).
+    ///
+    /// [`refused_preview_card`]'s second host. The pane builds its own
+    /// [`CardWords`] and hands them to the paint through
+    /// [`seats::PreviewCardContent`]; a float has no seat and no dressing pass,
+    /// so it builds the same words here and pushes them through the same
+    /// [`seats::push_preview_card`] — which is what keeps a refused file from
+    /// looking like two different things on the two surfaces, and what puts the
+    /// button where [`Self::float_hit_at`] goes looking for it.
+    ///
+    /// Both of the window's refusals come through here: the document nothing in
+    /// this window reads, and the picture this window would not draw.
+    fn push_float_refusal_card(
+        &mut self,
+        id: float::FloatId,
+        body: [f32; 4],
+        scale: f32,
+        palette: &bt_render::ChromePalette,
+        words: &CardWords,
+    ) -> float::FloatBody {
+        let button_text_px = self.window.renderer.measure_chrome_text(
+            &mut self.app.gpu,
+            words.verb.as_deref().unwrap_or_default(),
+            seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
+        );
+        let card = seats::PreviewCardContent {
+            notice: &words.notice,
+            detail: &words.detail_lines,
+            mark: words.mark,
+            fault: words.fault,
+            button: words.verb.as_deref(),
+            button_text_px,
+            button_hovered: self.window.float_hover == Some((id, float::FloatPart::CardButton)),
+        };
+        let (mut sprites, mut labels) = (Vec::new(), Vec::new());
+        seats::push_preview_card(body, &card, scale, palette, &mut sprites, &mut labels);
+        float::FloatBody {
+            quads: Vec::new(),
+            labels,
+            sprites,
+        }
+    }
+
+    /// **The refusal this window is standing on**, whichever lane it came down
+    /// (owner's ruling 2026-09-12).
+    ///
+    /// The pane's card builder asks these two questions in this order and for
+    /// this reason: a picture is not a buffer (`preview_chrome_on`), so the two
+    /// cannot both answer, and asking the picture first is what lets a window
+    /// showing a refused `.png` wear a card at all.
+    fn float_refusal_words(&self, surface: PreviewSurface, open_label: &str) -> Option<CardWords> {
+        if let Some(refusal) = self
+            .preview_picture(surface)
+            .and_then(PreviewImageState::refusal)
+        {
+            return Some(refused_preview_card(
+                refusal.notice.clone(),
+                refusal.offers_the_default_app,
+                open_label,
+            ));
+        }
+        let refusal = self.preview_buffer_on(surface)?.refusal()?;
+        Some(refused_preview_card(
+            refusal.notice().to_owned(),
+            refusal.offers_the_default_app(),
+            open_label,
+        ))
+    }
+
     /// The buffer tenant, drawn — P43-P67's window.
     ///
     /// **The document does not go through the chassis's channels.** A float's
@@ -77330,41 +77538,10 @@ impl Runtime<'_> {
                 // pane's is (`FloatPart::CardButton`). A document with no refusal
                 // keeps the quiet centred notice an empty diff or unreadable
                 // repository prints.
-                if let Some((notice, offers_the_handler)) = self
-                    .preview_buffer_on(surface)
-                    .and_then(|buffer| buffer.refusal())
-                    .map(|refusal| (refusal.notice(), refusal.offers_the_default_app()))
+                if let Some(words) =
+                    self.float_refusal_words(surface, self.preview_open_button_label(now))
                 {
-                    let label = self.preview_open_button_label(now);
-                    let button_text_px = self.window.renderer.measure_chrome_text(
-                        &mut self.app.gpu,
-                        label,
-                        seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
-                    );
-                    let card = seats::PreviewCardContent {
-                        notice,
-                        detail: &[],
-                        mark: marks::ChromeMark::File,
-                        fault: false,
-                        button: offers_the_handler.then_some(label),
-                        button_text_px,
-                        button_hovered: self.window.float_hover
-                            == Some((id, float::FloatPart::CardButton)),
-                    };
-                    let (mut sprites, mut labels) = (Vec::new(), Vec::new());
-                    seats::push_preview_card(
-                        geometry.body,
-                        &card,
-                        scale,
-                        &palette,
-                        &mut sprites,
-                        &mut labels,
-                    );
-                    float::FloatBody {
-                        quads: Vec::new(),
-                        labels,
-                        sprites,
-                    }
+                    self.push_float_refusal_card(id, geometry.body, scale, &palette, &words)
                 } else {
                     float::FloatBody {
                         quads: Vec::new(),
@@ -77392,7 +77569,20 @@ impl Runtime<'_> {
             }
             // Pixels, on this layer's own image channel further down — see the
             // note there for why a float cannot use the seat's texture lane.
-            preview::PreviewChrome::Picture => float::FloatBody::default(),
+            //
+            // **Unless there are no pixels** (owner's ruling 2026-09-12): a
+            // picture this window refused to draw is a page with nothing on it,
+            // and it wears the pane's card — the sentence and the button that
+            // hands the file to the machine — rather than the blank window a
+            // `.png` too large to decode used to be here.
+            preview::PreviewChrome::Picture => {
+                match self.float_refusal_words(surface, self.preview_open_button_label(now)) {
+                    Some(words) => {
+                        self.push_float_refusal_card(id, geometry.body, scale, &palette, &words)
+                    }
+                    None => float::FloatBody::default(),
+                }
+            }
             // The picture that is made of marks, in this window's body rectangle
             // — the same three channels the docked pane's graph is drawn into,
             // built by the same `build_git_graph`.
@@ -82034,7 +82224,7 @@ impl Runtime<'_> {
             Err(error) => {
                 for surface in &waiting {
                     if let Some(picture) = self.preview_picture_mut(*surface) {
-                        picture.failure = Some(i18n::picture_refused(&error));
+                        picture.failure = Some(PictureRefusal::decoded(&error));
                     }
                 }
                 // **Filed with its reason** (owner's ruling 2026-09-12), so that
@@ -97961,9 +98151,20 @@ mod files_locate_door_tests {
     #[test]
     fn a_file_nobody_previews_wears_the_same_card_in_a_float_as_in_a_pane() {
         let layer = body("    fn preview_float_layer(");
+        // **Through the window's own card door** since the owner's ruling of
+        // 2026-09-12, which gave the picture lane a card as well: the two arms
+        // that can be refused — a document and a picture — both send their words
+        // to `push_float_refusal_card`, and that is what reaches the pane's
+        // painter. The pin follows the call rather than loosening: what it is
+        // holding is that a refused window is not drawn twice, by two hands.
+        assert_eq!(
+            layer.matches("self.push_float_refusal_card(").count(),
+            2,
+            "a refused document or picture in a float does not draw the pane's card, so the window is blank"
+        );
         assert!(
-            layer.contains("seats::push_preview_card("),
-            "a refused document in a float does not draw the pane's card, so the window is blank"
+            body("    fn push_float_refusal_card(").contains("seats::push_preview_card("),
+            "the window's card is drawn by something other than the pane's own painter"
         );
         let hit = body("    fn float_hit_at(");
         assert!(
@@ -156891,6 +157092,243 @@ mod live_markdown_edit_tests {
         assert!(
             body("    fn preview_selected_text(").contains("caret.selected(content)"),
             "and a caret selection copies the file's own bytes",
+        );
+    }
+}
+
+/// **A preview this window refuses to draw offers the way out an unknown type
+/// offers** (owner's ruling 2026-09-12).
+///
+/// The `.pv-unknown` page has had a mark, a sentence and one `Open in default
+/// app` button since the mock-up; a picture this window declined — too many
+/// pixels, a file past the picture lane's ceiling, a decode nothing here reads —
+/// had the sentence alone in the middle of an empty pane and no way on. The two
+/// are one page: this window cannot show the file, and the machine may be able
+/// to. So there is one card shape, built in one place
+/// ([`refused_preview_card`]), drawn by the one painter both hosts already
+/// shared ([`seats::push_preview_card`]) and pressed through the one verb
+/// (`open_preview_externally_on`).
+///
+/// Half of what is asserted here is shape rather than behaviour, for
+/// `launch_landing_tests`' own reason: a card's rectangle is arithmetic and can
+/// be held directly, but *which door a press knocks on* is a window, a seat tree
+/// and a `ShellExecuteW`, none of which stands up in a test process. So those
+/// are held as the source they are written in, and every needle is spelled
+/// through `concat!` because this module is read out of the same file it is
+/// asserting about.
+#[cfg(test)]
+mod refused_preview_card_tests {
+    use super::{PictureRefusal, i18n, refused_preview_card, seats};
+
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The body of a method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+    }
+
+    /// Every refusal the picture lane can put on a pane with nothing on it.
+    fn every_refusal() -> Vec<PictureRefusal> {
+        use bt_term::InlineImageDecodeError as Refusal;
+        vec![
+            // The three sentences the owner's ruling names, reached by the
+            // verdicts that produce them: too many pixels, a file too large,
+            // a picture that could not be loaded.
+            PictureRefusal::decoded(&Refusal::TooManyPixels),
+            PictureRefusal::decoded(&Refusal::FileTooLarge {
+                bytes: 92_000_000,
+                limit: 64_000_000,
+            }),
+            PictureRefusal::decoded(&Refusal::UnsupportedFormat),
+            // And the three this window raises about itself.
+            PictureRefusal::this_window_cannot(i18n::Text::PreviewFailedImageWorker.text()),
+            PictureRefusal::this_window_cannot(i18n::Text::PreviewFailedSeatTooSmall.text()),
+            PictureRefusal::this_window_cannot(i18n::Text::VideoFormatCannotPlay.text()),
+        ]
+    }
+
+    /// RED — **the button is under the sentence, on every refusal the pane can
+    /// show.**
+    ///
+    /// RED GATE: it was red the day it was written. `refused_preview_card` did
+    /// not exist and the picture lane's sentence never reached a card at all —
+    /// it was a body notice, which is a centred label and nothing else, so there
+    /// was no rectangle for this to find.
+    ///
+    /// MUTATION: hand the card `false` for `offers_the_default_app` and the verb
+    /// goes, which is the shipped build one sentence at a time.
+    #[test]
+    fn a_refused_preview_offers_the_default_app_button() {
+        let seat = [0.0, 0.0, 480.0, 360.0];
+        let label = "Open in default app";
+        for refusal in every_refusal() {
+            assert!(
+                !refusal.notice.is_empty(),
+                "a refusal with no sentence is a blank pane"
+            );
+            assert!(
+                refusal.offers_the_default_app,
+                "`{}` is this window's own inability and not the disk's, so the machine's handler is worth offering",
+                refusal.notice
+            );
+            let card = refused_preview_card(
+                refusal.notice.clone(),
+                refusal.offers_the_default_app,
+                label,
+            );
+            assert_eq!(
+                card.verb.as_deref(),
+                Some(label),
+                "`{}` draws no button, so the pane still has no way out",
+                refusal.notice
+            );
+            assert_eq!(card.notice, refusal.notice, "the card says something else");
+            let geometry = seats::preview_card_geometry(seat, Some(96.0), 0, 1.0);
+            let button = geometry
+                .button
+                .expect("a card with a verb lays out a rectangle for it");
+            assert!(
+                button[1] >= geometry.notice[3],
+                "the button is not under the sentence: {button:?} against {:?}",
+                geometry.notice
+            );
+            assert!(
+                button[2] > button[0] && button[3] > button[1],
+                "the button has no area to press: {button:?}"
+            );
+        }
+        // **And R1-12 still holds where it always did.** The disk having said no
+        // to this process is not a refusal about the content: another program
+        // reading the same file with the same rights fails again, somewhere the
+        // reader cannot see it.
+        let denied = PictureRefusal::decoded(&bt_term::InlineImageDecodeError::Io(
+            "Access is denied. (os error 5)".to_owned(),
+        ));
+        assert!(
+            !denied.offers_the_default_app,
+            "the disk's own refusal offers a handler that would fail again"
+        );
+        assert!(
+            refused_preview_card(denied.notice, denied.offers_the_default_app, label)
+                .verb
+                .is_none(),
+            "a card with nothing to offer draws a button anyway"
+        );
+    }
+
+    /// RED — **one card, one painter, one hit test.**
+    ///
+    /// The refused page and the unknown page are not two cards that happen to
+    /// look alike: they are built by one function and drawn by one painter, so a
+    /// change to either reaches both. Five joints, each with the arm whose
+    /// removal is two cards again.
+    ///
+    /// RED GATE: `refused_preview_card` did not exist; the unknown page built
+    /// its `CardWords` inline in the dressing pass and the refused page built
+    /// nothing at all.
+    #[test]
+    fn the_refused_and_unknown_pages_share_one_card() {
+        assert_eq!(
+            SOURCE
+                .matches(concat!("fn ", "refused_preview_card("))
+                .count(),
+            1,
+            "the card is built in more than one place, or nowhere"
+        );
+        // ① the pane's dressing pass builds both of its cards there — the
+        //    picture it would not draw, and the document nothing here reads.
+        let dressing = body(concat!("    fn ", "refresh_chrome("));
+        assert_eq!(
+            dressing
+                .matches(concat!("refused_preview_card", "("))
+                .count(),
+            2,
+            "the pane's two refusals no longer share the one card"
+        );
+        assert!(
+            dressing.contains(concat!("PreviewImageState::", "refusal)")),
+            "the pane's card builder never asks the picture lane, so a refused picture is a bare sentence again"
+        );
+        // ② and a window's two, through the same function.
+        let window = body(concat!("    fn ", "float_refusal_words("));
+        assert_eq!(
+            window.matches(concat!("refused_preview_card", "(")).count(),
+            2,
+            "a window's two refusals no longer share the one card"
+        );
+        // ③ both hosts paint through the painter they already shared.
+        assert!(
+            body(concat!("    fn ", "push_float_refusal_card("))
+                .contains(concat!("seats::", "push_preview_card(")),
+            "a window draws the card with something other than the pane's painter"
+        );
+        // ④ the pane's paint and its hit test read one geometry — the pane's
+        //    card button is sized by the words this frame dressed.
+        assert!(
+            body(concat!("    fn ", "docked_chrome_target_at("))
+                .contains(concat!("preview_card", "_verbs")),
+            "the pane's card button is hit from something other than the words it was drawn with"
+        );
+        // ⑤ and the window's hit test asks the same question its paint asked.
+        assert!(
+            body(concat!("    fn ", "float_hit_at(")).contains(concat!("float_refusal_words", "(")),
+            "the window's card button is hit from a second reading of what is refused"
+        );
+    }
+
+    /// RED — **pressing it runs the verb the unknown page's button runs.**
+    ///
+    /// One door out of this window and no second launcher: the press names a
+    /// surface, the surface names a file — through the picture lane as well as
+    /// the buffer, because a picture is not a buffer — and the file goes to
+    /// `open_local_path`, which is where `bt_platform`'s own refusals live.
+    ///
+    /// RED GATE: `open_preview_externally` reached for a buffer, and a surface
+    /// showing a picture has none. A button drawn on a refused picture would
+    /// have stood over a verb that did nothing at all.
+    #[test]
+    fn pressing_the_button_on_a_refused_page_runs_the_same_verb_as_the_unknown_page() {
+        // The pane's button and the window's reach the same verb.
+        assert!(
+            body(concat!("    fn ", "chrome_mouse_input("))
+                .contains(concat!("ChromeTarget::", "PreviewOpenButton(_) => {")),
+            "the pane's card button no longer takes a press"
+        );
+        assert!(
+            body(concat!("    fn ", "open_preview_externally("))
+                .contains(concat!("open_preview_externally_on", "(")),
+            "the pane's button has grown a second verb of its own"
+        );
+        assert!(
+            body(concat!("    fn ", "press_float(")).contains(concat!(
+                "open_preview_externally_on(",
+                "PreviewSurface::Float(id))"
+            )),
+            "the window's card button no longer reaches the pane's verb"
+        );
+        // And that one verb names the file through both lanes.
+        let verb = body(concat!("    fn ", "open_preview_externally_on("));
+        assert!(
+            verb.contains(concat!("preview_file_on(", "surface)"))
+                && verb.contains(concat!("open_path_in_default_app", "(")),
+            "the verb no longer asks this surface for its file, or no longer hands it over"
+        );
+        let file = body(concat!("    fn ", "preview_file_on("));
+        assert!(
+            file.contains(concat!("preview_buffer_on(", "surface)"))
+                && file.contains(concat!("preview_picture(", "surface)")),
+            "the file question misses one of the two lanes, so one kind of card presses nothing"
+        );
+        // One launcher, and it is the door it has always been.
+        assert!(
+            body(concat!("    fn ", "open_path_in_default_app("))
+                .contains(concat!("self.", "open_local_path(path)")),
+            "the card's button no longer goes through this window's one door"
         );
     }
 }
