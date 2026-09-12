@@ -168,6 +168,91 @@ mod tests {
         ]
     }
 
+    /// PIN — **the macOS bundle says the version twice and the template says
+    /// it never.**
+    ///
+    /// The same rule as the test above, over the fourth surface: what a Mac
+    /// user reads in *About Folio* and what Launch Services orders two builds
+    /// with are `CFBundleShortVersionString` and `CFBundleVersion`, and both are
+    /// generated from `packaging/macos/Info.plist.in` at bundle time. The
+    /// template is on no list of places carrying a version because it carries
+    /// none; this test is what keeps that true.
+    ///
+    /// Red gate: write `0.3.0` into either field of the template by hand. The
+    /// bundle then agrees with the manifest exactly until the next release
+    /// moves the manifest, which is the same failure the sibling test above was
+    /// written for and is invisible for exactly as long.
+    #[test]
+    fn the_plist_carries_the_workspace_version_twice_and_no_literal() {
+        let template = info_plist_template();
+
+        assert!(
+            !template.contains(VERSION),
+            "the template carries no literal version — it is a template"
+        );
+        assert_eq!(
+            template.matches("@VERSION@").count(),
+            2,
+            "the two fields are both substitutions"
+        );
+
+        let plist = bt_winres::plist::render(&template, VERSION)
+            .expect("the workspace version renders into the bundle's template");
+        assert_eq!(
+            plist_string(&plist, "CFBundleShortVersionString"),
+            VERSION,
+            "what the user is shown is the manifest's version"
+        );
+        assert_eq!(
+            plist_string(&plist, "CFBundleVersion"),
+            VERSION,
+            "and so is what the system compares builds with"
+        );
+        assert_eq!(
+            plist.matches(VERSION).count(),
+            2,
+            "two places in the bundle and no third"
+        );
+        assert!(
+            !plist.contains('@'),
+            "nothing is left for a later step to fill: {plist}"
+        );
+    }
+
+    /// `packaging/macos/Info.plist.in`, as text.
+    ///
+    /// Found from this crate rather than from the working directory, the same
+    /// way [`manifest_version`] finds the workspace manifest.
+    fn info_plist_template() -> String {
+        std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/macos/Info.plist.in"
+        ))
+        .expect("the bundle template is at packaging/macos/Info.plist.in")
+    }
+
+    /// The `<string>` a plist files under `key`.
+    ///
+    /// A reader for the one shape this file uses — a `<key>` followed by its
+    /// value — rather than an XML parse, for the reason [`manifest_version`]
+    /// gives: the thing under test is the text of a generated file, and a
+    /// parser would only ever agree with the writer.
+    fn plist_string(plist: &str, key: &str) -> String {
+        let after = plist
+            .split_once(&format!("<key>{key}</key>"))
+            .unwrap_or_else(|| panic!("the plist files a {key}"))
+            .1;
+        let value = after
+            .split_once("<string>")
+            .unwrap_or_else(|| panic!("{key} is followed by a string"))
+            .1;
+        value
+            .split_once("</string>")
+            .unwrap_or_else(|| panic!("{key}'s string is closed"))
+            .0
+            .to_owned()
+    }
+
     /// PIN — **every file this build writes says which build wrote it.**
     ///
     /// The three are not interchangeable and all three are shipped: a panic log

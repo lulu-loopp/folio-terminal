@@ -6169,6 +6169,8 @@ commit 短哈希由 `build.rs` 从 git 读,并把 `HEAD`(以及 `HEAD` 指向的
 
 红门是 `bt_app::version::tests::the_version_is_the_manifests_and_nothing_elses`:它读 `Cargo.toml` 的那一行、读 `banner()`、并**把 `build.rs` 刚写出来的那份 `.res` 用 `include_bytes!` 读进来**,比对里面的 UTF-16 字符串和 `VS_FIXEDFILEINFO` 的四个数。任何一处被人手写死,下一次改版本时这条测试红。
 
+macOS 应用包的 `Info.plist` 没有进上面那张表,因为它不是一个说得出版本的地方:`packaging/macos/Info.plist.in` 里 `CFBundleShortVersionString` 与 `CFBundleVersion` 两个字段都是占位符,整份模板不含版本字面量,打包脚本用 `cargo run -q -p bt-winres --bin render-info-plist > Folio.app/Contents/Info.plist` 现渲一份。渲染器是 `crates/bt-winres/src/plist.rs` 的 `render(template, version)`:它只替换那一个占位符,见到别的 `@…@` 报错,见到 `CFBundleVersion` 装不下的版本——带 `-preview` 或 `+build` 后缀、或者超过三段点分整数——也报错;`CFBundleVersion` 只收一到三段点分整数,而发布渠道后缀按 `docs/RELEASING.md` 只活在 tag 上,从不进 manifest。**它放在 `bt-winres` 而不是别处,是因为这个 crate 干的就是「把工作区那一行版本喂给某个平台的容器、容器装不下就拒绝」**:Windows 那边是 `FileVersion::parse_semver` 把它压进 `VS_FIXEDFILEINFO` 的四个数,macOS 这边是同一件事;而 `bt-app` 是个没有 lib 的二进制 crate,打包脚本要调它,就得把整个工作区(几百个包)编一遍才能打印四十行 XML。红门 `the_plist_carries_the_workspace_version_twice_and_no_literal` 就写在上面那条旁边:读模板、断言模板里没有版本字面量、渲染一遍、断言两个字段都等于工作区版本、并断言版本在渲染结果里恰好出现两次。
+
 ### 12.2 PE 资源:为什么 `.res` 是自己写的
 
 `folio.exe` 需要两样只能以字节形式交给链接器的东西:应用图标(`bt_platform::context_menu_shape` 注册的 `folio.exe,0` 指的就是它),和 `VERSIONINFO`。
