@@ -77,6 +77,18 @@ pub const PSREADLINE_INVOKE_PROMPT_INPUT: &[u8] = b"\x1b[24;8~";
 /// composed `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` would be this crate
 /// guessing at a layout the loader already knows.
 pub const WINDOWS_POWERSHELL: &str = "powershell.exe";
+
+/// The shell a recoverable spawn failure retries against, whatever platform this is.
+///
+/// Every property the paragraph above claims for Windows PowerShell holds of `/bin/sh` off
+/// Windows and for the same reason: it is part of the operating system, it is always there, and
+/// it is therefore the one answer that has nothing further to fall back to. The three places that
+/// have to agree — the fallback command, the "do not retry what already failed" guard, and the
+/// record a fallback leaves behind — read this name rather than spelling one of their own.
+#[cfg(windows)]
+pub const LAST_RESORT_SHELL: &str = WINDOWS_POWERSHELL;
+#[cfg(unix)]
+pub const LAST_RESORT_SHELL: &str = shell::BOURNE_SHELL;
 const READER_CHUNK_BYTES: usize = 16 * 1024;
 const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
 
@@ -580,6 +592,23 @@ impl PtyCommand {
         Self::interactive_shell(WINDOWS_POWERSHELL).arg("-NoLogo")
     }
 
+    /// The shell every recoverable spawn failure retries against, as this terminal starts it.
+    ///
+    /// [`Self::powershell`] on Windows and an argument-free `/bin/sh` off it — the same standing,
+    /// named once. This is the only door the fallback path goes through, which is what keeps
+    /// `-NoLogo` (a flag `sh` reads as a file to open) on the side of the `cfg` that has a
+    /// PowerShell to give it to.
+    pub fn last_resort_shell() -> Self {
+        #[cfg(windows)]
+        {
+            Self::powershell()
+        }
+        #[cfg(unix)]
+        {
+            Self::interactive_shell(LAST_RESORT_SHELL)
+        }
+    }
+
     /// An interactive, color-capable shell command for `program` — the `COLORTERM`/`TERM`
     /// declaration policy, and **no arguments**.
     ///
@@ -694,28 +723,50 @@ fn backend(error: impl std::fmt::Display) -> PtyError {
     PtyError::Backend(error.to_string())
 }
 
-/// `spawn_default`'s fallback is a single retry against `powershell.exe`: once resolution has
-/// already landed on `WindowsPowerShell` (nothing overrode it, no `pwsh` was found), a spawn
-/// failure has no further shell left to fall back to, so it propagates instead of retrying the
-/// identical command.
+/// `spawn_default`'s fallback is a single retry against [`LAST_RESORT_SHELL`]: once resolution
+/// has already landed on the floor — `WindowsPowerShell` because nothing overrode it and no
+/// `pwsh` was found, `BourneShell` because `$SHELL` said nothing usable and no system shell was
+/// there — a spawn failure has no further shell left to fall back to, so it propagates instead
+/// of retrying the identical command.
+///
+/// The two arms are one rule read on two platforms, and the arm that does not apply does not
+/// exist: [`ShellChoice`]'s PowerShell variants are `#[cfg(windows)]` and its Unix variants are
+/// not, so a match that forgot one of them would not compile.
 fn shell_spawn_failure_should_fall_back(choice: ShellChoice) -> bool {
-    choice != ShellChoice::WindowsPowerShell
+    #[cfg(windows)]
+    {
+        choice != ShellChoice::WindowsPowerShell
+    }
+    #[cfg(unix)]
+    {
+        choice != ShellChoice::BourneShell
+    }
 }
-
-/// The flags this terminal starts any PowerShell with.
-const POWERSHELL_INTERACTIVE_ARGS: &[&str] = &["-NoLogo"];
 
 /// Whether `program` already names the shell the fallback would retry with.
 ///
 /// The named-program half of [`shell_spawn_failure_should_fall_back`]'s rule, and the same rule:
 /// retrying a spawn that has just failed with the identical program is not a fallback, it is the
-/// same failure twice. Compared case-insensitively and by file name because Windows paths are
-/// case-insensitive and `powershell.exe` reaches this both as a bare name (what
-/// `resolve_default_shell` returns) and as the System32 path a profile would resolve to.
-fn program_is_windows_powershell(program: &OsStr) -> bool {
-    Path::new(program)
-        .file_name()
-        .is_some_and(|name| name.eq_ignore_ascii_case(OsStr::new(WINDOWS_POWERSHELL)))
+/// same failure twice.
+///
+/// **The comparison is the platform's own and not one rule bent to fit both.** On Windows it is
+/// case-insensitive and by file name, because Windows paths are case-insensitive and
+/// `powershell.exe` reaches this both as a bare name (what `resolve_default_shell` returns) and
+/// as the System32 path a profile would resolve to. Off Windows it is the exact path, because
+/// `/bin/sh` is where the last-resort shell is and `/usr/local/bin/sh` is a different program
+/// with the same file name — a rule that folded those two together would refuse the retry that
+/// is the whole point of having one.
+fn program_is_the_last_resort_shell(program: &OsStr) -> bool {
+    #[cfg(windows)]
+    {
+        Path::new(program)
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case(OsStr::new(LAST_RESORT_SHELL)))
+    }
+    #[cfg(unix)]
+    {
+        program == OsStr::new(LAST_RESORT_SHELL)
+    }
 }
 
 #[derive(Default)]
@@ -999,7 +1050,7 @@ pub struct PtySession {
     conpty_source: ConPtySource,
     /// Shared with the reader thread so `resize` can interleave `# RESIZE` markers with chunks.
     dump: Option<Arc<Mutex<PtyDump>>>,
-    /// Set once, only when a spawn had to fall back to [`WINDOWS_POWERSHELL`] after the
+    /// Set once, only when a spawn had to fall back to [`LAST_RESORT_SHELL`] after the
     /// resolved shell failed to start. `Runtime` turns it into the pane's first line, then
     /// discards it.
     shell_fallback: Option<ShellFallback>,
@@ -1025,7 +1076,8 @@ pub struct PtySession {
 pub struct ShellFallback {
     /// The program that would not start.
     pub requested: OsString,
-    /// The program that did — always [`WINDOWS_POWERSHELL`], which is part of Windows.
+    /// The program that did — always [`LAST_RESORT_SHELL`], which is part of the operating
+    /// system whichever one this is.
     pub started: &'static str,
 }
 
@@ -1159,22 +1211,26 @@ fn quoted_for_cmd(token: &OsStr, line: &mut OsString) {
 }
 
 impl PtySession {
-    /// Shell selection order (ruling 2026-08-04): `BT_SHELL` wins outright; otherwise
-    /// `pwsh.exe` (PowerShell 7) is used when [`resolve_default_shell`]'s probe can find an
-    /// install, and `powershell.exe` (Windows PowerShell 5.1) is the default. See
-    /// `docs/shell-integration.md` and `crate::shell` for the full rationale and the exact
-    /// `BT_SHELL` semantics.
+    /// Shell selection order (rulings 2026-08-04 and 2026-09-12): `BT_SHELL` wins outright on
+    /// every platform. On Windows, `pwsh.exe` (PowerShell 7) is used when
+    /// [`resolve_default_shell`]'s probe can find an install, and `powershell.exe` (Windows
+    /// PowerShell 5.1) is the default. Off Windows, `$SHELL` when it names a program this
+    /// machine can start, then the system shells this platform is probed for, then `/bin/sh` —
+    /// interactive and non-login. See `docs/shell-integration.md` and `crate::shell` for the
+    /// full rationale and the exact `BT_SHELL` semantics.
     ///
-    /// If the resolved shell fails to spawn, this falls back to `powershell.exe` once and
-    /// records what happened (`take_shell_fallback`) instead of failing the session —
-    /// a Windows PowerShell 5.1 install is effectively guaranteed, while a `BT_SHELL` override or
-    /// a `pwsh` resolved from a stale PATH entry is not.
+    /// If the resolved shell fails to spawn, this falls back to [`LAST_RESORT_SHELL`] once and
+    /// records what happened (`take_shell_fallback`) instead of failing the session — a Windows
+    /// PowerShell 5.1 install and a `/bin/sh` are each effectively guaranteed on their own
+    /// platform, while a `BT_SHELL` override, a `pwsh` resolved from a stale PATH entry or a
+    /// `$SHELL` naming a package that has since been removed is not.
     ///
-    /// Whichever program resolution picks — `BT_SHELL`'s value, a found `pwsh.exe`, or the
-    /// `powershell.exe` default — is spawned exactly as `spawn_default` always has: `-NoLogo`
-    /// plus the terminal's color-capable environment declarations (`PtyCommand::interactive_shell`).
-    /// `BT_SHELL` exists to pick *which* PowerShell-family build runs, not to swap in an unrelated
-    /// shell, so this is a single uniform rule rather than a per-source special case.
+    /// Whichever program resolution picks, it is spawned with **that shell's own arguments**
+    /// (`ResolvedShell::args`) plus the terminal's colour-capable environment declarations
+    /// (`PtyCommand::interactive_shell`). On Windows that argument list is `-NoLogo` for every
+    /// arm, because `BT_SHELL` exists to pick *which* PowerShell-family build runs rather than to
+    /// swap in an unrelated shell; off Windows it is empty for every arm, because a shell whose
+    /// standard input is a terminal is already interactive.
     pub fn spawn_default(size: PtySize, wake: OutputWake) -> Result<Self, PtyError> {
         Self::spawn_default_with(size, wake, None, &SystemShellEnvironment)
     }
@@ -1208,15 +1264,15 @@ impl PtySession {
     /// **paths** — the init file a bash-family profile is handed — and a path is not text this
     /// crate is entitled to require be UTF-8.
     ///
-    /// `environment` is applied to the resolved program only. The `powershell.exe` retry below is a
-    /// *different profile* by the time it runs, and variables that were chosen for the shell that
-    /// would not start are not facts about the one that did.
+    /// `environment` is applied to the resolved program only. The [`LAST_RESORT_SHELL`] retry
+    /// below is a *different profile* by the time it runs, and variables that were chosen for the
+    /// shell that would not start are not facts about the one that did.
     ///
     /// It keeps the same recoverable-failure contract as `spawn_default`: a program that will not
-    /// start falls back once to `powershell.exe` and leaves a record of the swap
+    /// start falls back once to [`LAST_RESORT_SHELL`] and leaves a record of the swap
     /// (`take_shell_fallback`) rather than failing the session, because a window with no
     /// shell in it is worse than a window with the wrong one *provided the swap is stated*. The
-    /// retry is skipped when the program is already `powershell.exe`, where it would repeat an
+    /// retry is skipped when the program is already that shell, where it would repeat an
     /// identical, already-failed spawn.
     pub fn spawn_shell_in(
         program: impl Into<OsString>,
@@ -1227,7 +1283,7 @@ impl PtySession {
         working_directory: Option<PathBuf>,
     ) -> Result<Self, PtyError> {
         let program = program.into();
-        let fall_back = !program_is_windows_powershell(&program);
+        let fall_back = !program_is_the_last_resort_shell(&program);
         Self::spawn_interactive(
             program,
             args,
@@ -1251,12 +1307,11 @@ impl PtySession {
         let resolved = resolve_default_shell(environment);
         Self::spawn_interactive(
             resolved.program,
-            // PowerShell's own flag, stated by the one entry point that knows it is starting a
-            // PowerShell. Every other shell's arguments arrive through `spawn_shell_in`.
-            &POWERSHELL_INTERACTIVE_ARGS
-                .iter()
-                .map(OsString::from)
-                .collect::<Vec<_>>(),
+            // The resolved shell's own flags, stated by the only code that knows which shell it
+            // picked — `-NoLogo` where that is a PowerShell, nothing at all off Windows, and the
+            // reasoning for both is in `crate::shell`. Every *named* shell's arguments arrive
+            // through `spawn_shell_in` instead, because there the caller picked the program.
+            &resolved.args.iter().map(OsString::from).collect::<Vec<_>>(),
             &[],
             size,
             wake,
@@ -1316,14 +1371,14 @@ impl PtySession {
                 // carried up: see [`ShellFallback`].
                 eprintln!(
                     "recoverable shell spawn failure: {} did not start ({spawn_error}); \
-                     using {WINDOWS_POWERSHELL} instead",
+                     using {LAST_RESORT_SHELL} instead",
                     Path::new(&program).display()
                 );
-                let fallback = PtyCommand::powershell().working_directory(working_directory);
+                let fallback = PtyCommand::last_resort_shell().working_directory(working_directory);
                 let mut session = Self::spawn(fallback, size, wake)?;
                 session.shell_fallback = Some(ShellFallback {
                     requested: program,
-                    started: WINDOWS_POWERSHELL,
+                    started: LAST_RESORT_SHELL,
                 });
                 Ok(session)
             }
@@ -3299,6 +3354,7 @@ mod tests {
         session.shutdown().unwrap();
     }
 
+    #[cfg(windows)]
     #[test]
     fn fallback_retry_is_only_attempted_for_a_resolved_shell_other_than_windows_powershell() {
         // Pins the exact condition `spawn_default_with` retries on. A `WindowsPowerShell`
@@ -3312,6 +3368,33 @@ mod tests {
         assert!(!shell_spawn_failure_should_fall_back(
             ShellChoice::WindowsPowerShell
         ));
+    }
+
+    /// The same rule read on the other platform, and it is the same rule: everything retries once
+    /// except the floor, which has nothing under it to retry against.
+    ///
+    /// Gated rather than written once for both, because [`ShellChoice`]'s arms are gated — a
+    /// single test naming all five would not compile on either platform, which is the property
+    /// that makes "the PowerShell path is never reached off Windows" checkable instead of
+    /// claimed.
+    #[cfg(unix)]
+    #[test]
+    fn fallback_retry_is_only_attempted_for_a_resolved_shell_other_than_the_bourne_shell() {
+        assert!(shell_spawn_failure_should_fall_back(ShellChoice::Override));
+        assert!(shell_spawn_failure_should_fall_back(ShellChoice::UserShell));
+        assert!(shell_spawn_failure_should_fall_back(
+            ShellChoice::SystemShell
+        ));
+        assert!(!shell_spawn_failure_should_fall_back(
+            ShellChoice::BourneShell
+        ));
+        // And the named-program half of the same rule: `/bin/sh` is the retry, and a different
+        // program that happens to be called `sh` is not it.
+        assert!(program_is_the_last_resort_shell(OsStr::new("/bin/sh")));
+        assert!(!program_is_the_last_resort_shell(OsStr::new(
+            "/usr/local/bin/sh"
+        )));
+        assert!(!program_is_the_last_resort_shell(OsStr::new("/bin/zsh")));
     }
 
     /// Windows: `CONPTY_SIDECAR_VERSION` and `ConPtySource::Sidecar` are
@@ -6912,5 +6995,328 @@ mod tests {
                  grid={ours:?} conhost={theirs:?}"
             );
         }
+    }
+    // ── real Unix children (M1-6, and remote T2's "a real-pty test") ─────────────────────────
+    //
+    // `.github/workflows/ci.yml`'s `core-linux` job used to say of this crate that "nothing here
+    // spawns a child yet, because off Windows this crate has no default shell to spawn". These
+    // five tests are what retires that sentence. They deliberately go through the crate's own
+    // door — `PtyCommand` into `PtySession::spawn` — rather than through `portable_pty`
+    // underneath it, because what is under test is *this* crate's account of a Unix pty: that
+    // output reaches the ring, that an exit code survives the trip, that a reap happens, that a
+    // resize reaches the child, what ends a child that does not want to end, and the one thing
+    // the vendored backend does on the way out that has no Windows counterpart at all.
+
+    /// How long these tests wait on a **silent** child before calling it dead.
+    ///
+    /// The same judgement as `CONPTY_SILENCE_BUDGET` above and for the same reason: a total would
+    /// measure the machine rather than the pty, and a starved runner delivers the same bytes
+    /// further apart.
+    #[cfg(unix)]
+    const UNIX_CHILD_SILENCE_BUDGET: Duration = Duration::from_secs(10);
+
+    /// Drain `session` until `needle` has been seen, or until the child has produced nothing at
+    /// all for [`UNIX_CHILD_SILENCE_BUDGET`].
+    #[cfg(unix)]
+    fn read_until(session: &PtySession, needle: &str) -> String {
+        let mut seen = String::new();
+        let mut last_byte = Instant::now();
+        loop {
+            let chunk = session.read_output();
+            if chunk.is_empty() {
+                assert!(
+                    last_byte.elapsed() <= UNIX_CHILD_SILENCE_BUDGET,
+                    "the child went silent without ever printing {needle:?}; it printed {seen:?}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            last_byte = Instant::now();
+            seen.push_str(&String::from_utf8_lossy(&chunk));
+            if seen.contains(needle) {
+                return seen;
+            }
+        }
+    }
+
+    /// What the operating system's own process table says about `pid`, or `None` when it has
+    /// never heard of it. A **`Z`** here is a zombie: a child that exited and was never reaped.
+    ///
+    /// Asked of `ps` rather than of `waitpid`, because `waitpid` is the call this crate has
+    /// already made by then — asking it again would be asking our own bookkeeping whether our own
+    /// bookkeeping is right. `ps` reads the kernel's table and knows nothing about us. It is on
+    /// every Unix, and a failure to run it is a failed test rather than a skipped one, because a
+    /// test that cannot see the process table cannot make the claim it exists to make.
+    #[cfg(unix)]
+    fn process_table_state(pid: u32) -> Option<String> {
+        let listing = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps is on every Unix; without it this test can prove nothing");
+        let state = String::from_utf8_lossy(&listing.stdout).trim().to_owned();
+        (!state.is_empty()).then_some(state)
+    }
+
+    /// Poll the process table until it has forgotten `pid`, and say what it still held if it
+    /// never does.
+    #[cfg(unix)]
+    fn wait_until_the_process_table_forgets(pid: u32) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match process_table_state(pid) {
+                None => return,
+                Some(state) => assert!(
+                    Instant::now() < deadline,
+                    "pid {pid} is still in the process table as {state:?}; \
+                     a `Z` there is a child this crate exited and never reaped"
+                ),
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// **The whole round trip over a real Unix pty in one child**: it is started through this
+    /// crate's own command builder, what it writes reaches the output ring, the exit code it
+    /// chose arrives intact rather than flattened to success-or-failure, and the process is
+    /// reaped rather than left as a zombie for the lifetime of the window.
+    ///
+    /// Exit code 3 and not 1: `ExitStatus::from(std::process::ExitStatus)` has an arm that turns
+    /// anything it cannot read into `1`, so a test that expected 1 would pass through that arm
+    /// without noticing.
+    ///
+    /// MUTATION: make `PtySession::try_wait` answer `Ok(None)` unconditionally and this fails on
+    /// the wait rather than on the code, which is the point — the status has to come from the
+    /// reap and not from the test's own optimism.
+    #[cfg(unix)]
+    #[test]
+    fn a_unix_child_is_heard_exits_with_its_own_code_and_is_reaped() {
+        let mut session = PtySession::spawn(
+            PtyCommand::new("/bin/sh").arg("-c").arg("echo hi; exit 3"),
+            size(80, 24),
+            no_wake(),
+        )
+        .unwrap();
+        let pid = session
+            .child_id()
+            .expect("a child that has just been spawned has a process id");
+
+        read_until(&session, "hi");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = session.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the child printed its line and then never exited"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(status.exit_code(), 3, "status was {status}");
+        assert_eq!(
+            status.signal(),
+            None,
+            "a child that chose its own exit code was not signalled"
+        );
+        wait_until_the_process_table_forgets(pid);
+
+        assert!(
+            session.shutdown().unwrap().is_some(),
+            "a shutdown after a reap reports how the child ended rather than nothing"
+        );
+    }
+
+    /// **A resize reaches the child**, which is the one thing a terminal's resize is for.
+    ///
+    /// `PtySession::resize` is `TIOCSWINSZ` on the master fd on this platform
+    /// (`portable_pty`'s `PtyFd::resize`), and the child's own `stty size` is the kernel's answer
+    /// read back from the other end of the same pty — so the assertion is about the operating
+    /// system's state and not about a value this crate remembered.
+    ///
+    /// The child prints its size, blocks on a line of input, then prints it again; the resize
+    /// happens between those two, and the newline that releases it is written *after* the ioctl
+    /// has returned. That ordering is what makes the second reading a statement about the resize
+    /// rather than a race with it.
+    ///
+    /// MUTATION: make `PtySession::resize` return `Ok(())` without calling the backend and the
+    /// second reading comes back as the first one.
+    #[cfg(unix)]
+    #[test]
+    fn a_resize_reaches_a_unix_child_through_its_controlling_terminal() {
+        let mut session = PtySession::spawn(
+            PtyCommand::new("/bin/sh")
+                .arg("-c")
+                .arg("stty size; read reply; stty size"),
+            size(80, 24),
+            no_wake(),
+        )
+        .unwrap();
+
+        // `stty size` prints rows first.
+        read_until(&session, "24 80");
+        session.resize(size(100, 40)).unwrap();
+        session.write(b"\n").unwrap();
+        read_until(&session, "40 100");
+
+        session.shutdown().unwrap();
+    }
+
+    /// **What ends a pane's child off Windows, stated and pinned.**
+    ///
+    /// The crate's policy is not "closing the pty hangs the child up". Closing the master does
+    /// send `SIGHUP` to the foreground process group, and a child is entitled to ignore it —
+    /// every `nohup`-ed program, and anything that inherited a `SIG_IGN` across its `exec`, does.
+    /// `shutdown` does not rely on it: it **ends the child and reaps it before the master is
+    /// dropped**, in that order. `Drop` is that same `shutdown`, which is why a session that
+    /// merely goes out of scope ends its child too.
+    ///
+    /// **What "ends" is, exactly, because the vendored backend does not spell it the way the name
+    /// `kill` suggests.** `portable_pty`'s `ChildKiller for std::process::Child` on Unix sends
+    /// `SIGHUP` first, waits up to five 50 ms turns for the child to take the hint, and only then
+    /// sends the `SIGKILL` that cannot be declined (`vendor/conpty/portable-pty/src/lib.rs`). So
+    /// a well-behaved child gets a quarter of a second to write its history file, and the child
+    /// below — which has trapped `HUP` away and then `exec`ed, carrying that `SIG_IGN` with it —
+    /// is the one that proves the second signal is really sent.
+    ///
+    /// `sleep` rather than a shell blocked on `read`, and that is not a detail: see
+    /// `shutting_a_session_down_hands_the_child_a_newline_first`. A child reading its terminal is
+    /// ended by that newline long before any signal, so it could not tell these two apart.
+    ///
+    /// **The known limit, written down rather than tested away**: the ending reaches the child and
+    /// not the session it leads. `portable_pty` makes the child a session leader (`setsid`), and
+    /// off Windows there is no job object to catch what it started in turn, so a grandchild
+    /// outlives the pane until it notices its terminal has gone. On Windows the job object closes
+    /// with the child handle and takes the whole tree. Closing that gap is the platform's own
+    /// work (a process-group kill), and it belongs with the shipped profiles in M1-5 rather than
+    /// here, where the claim would be untestable without leaving a stray process on the machine.
+    ///
+    /// MUTATION: drop the `child.kill()?` from `shutdown` and both halves fail — nothing but the
+    /// ignored `SIGHUP` ever reaches this child, so the process table keeps the pid and the
+    /// status never arrives.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_ignores_sighup_is_ended_anyway_by_the_session_it_belongs_to() {
+        // `exec` on purpose: a disposition of `SIG_IGN` survives `execve`, so the process that
+        // remains is deaf to `SIGHUP`, reads nothing, and starts nothing of its own — one pid,
+        // ended by one signal or not at all. `30` rather than an hour so that a failure here
+        // cannot leave anything on the machine for longer than the next test run.
+        let deaf_to_hangup = || {
+            PtyCommand::new("/bin/sh")
+                .arg("-c")
+                .arg("trap \"\" HUP; echo ready; exec sleep 30")
+        };
+
+        // Dropped, which is the way a closing pane ends one.
+        let dropped = PtySession::spawn(deaf_to_hangup(), size(80, 24), no_wake()).unwrap();
+        let dropped_pid = dropped
+            .child_id()
+            .expect("a spawned child has a process id");
+        read_until(&dropped, "ready");
+        assert_eq!(
+            process_table_state(dropped_pid)
+                .as_deref()
+                .map(|state| state.chars().next().unwrap_or('?')),
+            Some('S'),
+            "the child has to be alive — not merely listed — before its ending is evidence"
+        );
+        drop(dropped);
+        wait_until_the_process_table_forgets(dropped_pid);
+
+        // And again through the door `Drop` goes through, so that *how* it ended is readable.
+        let mut told = PtySession::spawn(deaf_to_hangup(), size(80, 24), no_wake()).unwrap();
+        let told_pid = told.child_id().expect("a spawned child has a process id");
+        read_until(&told, "ready");
+        let status = told
+            .shutdown()
+            .unwrap()
+            .expect("shutdown reports how the child ended");
+        assert!(
+            status.signal().is_some(),
+            "a child deaf to SIGHUP and reading nothing can only have been signalled; \
+             status was {status}"
+        );
+        assert!(!status.success(), "status was {status}");
+        wait_until_the_process_table_forgets(told_pid);
+    }
+
+    /// **Closing a pane types a newline at the child**, and that is the vendored backend's
+    /// behaviour rather than this crate's choice — so it is written down here rather than
+    /// discovered again by whoever next wonders why a shell in a closing pane ran one more line.
+    ///
+    /// `shutdown` closes the input ring first, which releases the writer thread, which drops the
+    /// master writer — and `UnixMasterWriter::drop` writes `"\n"` followed by the terminal's own
+    /// `VEOF` byte (`vendor/conpty/portable-pty/src/unix.rs`), because an end-of-file is only
+    /// read at the start of a line. There is no such step on Windows.
+    ///
+    /// The consequence is visible and worth a reader's attention: a child blocked on `read` is
+    /// **not** killed when its pane closes, it is answered, and it then exits of its own accord
+    /// with whatever that made it do. This test's child says which of the two happened by
+    /// exiting 5 rather than 6, and the status comes back with no signal in it at all.
+    ///
+    /// **It has to trap `HUP` to show it, and that is the finding rather than a workaround.**
+    /// The line and the `SIGHUP` that `ChildKiller::kill` sends are microseconds apart, and
+    /// measured on macOS 26.6 the signal wins: the same child without the `trap` comes back
+    /// `Terminated by Hangup: 1`, having been hung up before it could act on the line it had
+    /// already been given. So which of the two a closing pane's child sees is **not** settled by
+    /// this crate — it is settled by whether that child happens to be deaf to a hangup. Both
+    /// halves of that are pinned: this test is the deaf one, and the test above is the same fact
+    /// read from the other side, which is why its child must not read at all.
+    #[cfg(unix)]
+    #[test]
+    fn shutting_a_session_down_hands_the_child_a_newline_first() {
+        let mut session = PtySession::spawn(
+            PtyCommand::new("/bin/sh")
+                .arg("-c")
+                .arg("trap \"\" HUP; echo ready; if read ignored; then exit 5; else exit 6; fi"),
+            size(80, 24),
+            no_wake(),
+        )
+        .unwrap();
+        let pid = session
+            .child_id()
+            .expect("a spawned child has a process id");
+        read_until(&session, "ready");
+
+        let status = session
+            .shutdown()
+            .unwrap()
+            .expect("shutdown reports how the child ended");
+        assert_eq!(
+            status.exit_code(),
+            5,
+            "6 would mean the read saw end-of-file rather than a line, and a signal would mean \
+             the child never got to act on the line at all; status was {status}"
+        );
+        assert_eq!(status.signal(), None, "status was {status}");
+        wait_until_the_process_table_forgets(pid);
+    }
+
+    /// The other half of the same platform question, asked of resolution rather than of a
+    /// process: **`spawn_default` really does start a shell here**, and it is one of the three
+    /// this platform's rule names.
+    ///
+    /// No fake and no named program: this is the real `SystemShellEnvironment` reading the real
+    /// `$SHELL` on the machine running the test, which is the one thing the resolution tests in
+    /// `crate::shell` deliberately cannot do.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_default_starts_a_real_shell_on_this_machine() {
+        let mut session = PtySession::spawn_default(size(80, 24), no_wake()).unwrap();
+        assert!(
+            session.take_shell_fallback().is_none(),
+            "the resolved shell started, so there is nothing to report"
+        );
+        let pid = session
+            .child_id()
+            .expect("a spawned child has a process id");
+
+        // A shell, and this one: it answers a command typed at it the way an interactive shell on
+        // a terminal does, without having been told it is interactive.
+        session.write(b"echo folio-$((6*7))\n").unwrap();
+        read_until(&session, "folio-42");
+
+        session.shutdown().unwrap();
+        wait_until_the_process_table_forgets(pid);
     }
 }
