@@ -39,13 +39,51 @@ publish.workspace = true
 # in **CoreServices**, which has no binding in this family and no crate in the
 # lock file; its seven entry points are declared in that module, which is what
 # this crate is for.
+#
+# **M2-2 adds no package either**, and it is worth saying because it looks like
+# it should: the process door (`src/handoff.rs`'s macOS arm) is `NSWorkspace`,
+# which is already on, and the trash (`src/macos_files.rs`) is `NSFileManager`,
+# `NSURL` and `NSError` — three Foundation classes the `NSWorkspace` feature
+# already turns on for its own methods. They are named below anyway, because a
+# feature that arrives by union is a feature nobody declared.
+#
+# **M2-4 adds one package, and it is the only one either ticket adds**:
+# `objc2-core-text` 0.3.2, for the font enumeration in `src/macos_fonts.rs`.
+# CoreText is the opposite case to M2-1's CoreServices — it *has* a binding in
+# this family, from the same repository and the same release as the three crates
+# above, generated from the same headers — so the choice was between one line in
+# `Cargo.lock` and `THIRD-PARTY-NOTICES.md` and four hand-declared entry points
+# whose returns are all `Copy`/`Create`, i.e. four retains and releases written
+# by hand. `docs/DESIGN.md` §8's bar is that a dependency is a line somebody
+# reads; this is that line. With `default-features = false` and the three
+# feature sets its code names, the only crates it pulls are `bitflags` and
+# `objc2-core-foundation`, both already in the lock file.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+objc2-core-text = { version = "0.3", default-features = false, features = [
+    # `CTFontCollectionCreateFromAvailableFonts` and
+    # `CTFontCollectionCreateMatchingFontDescriptors` — the database and its
+    # contents.
+    "CTFontCollection",
+    # `CTFontDescriptorCopyAttribute`, `kCTFontFamilyNameAttribute` and
+    # `kCTFontTraitsAttribute` — one face's family and its traits dictionary.
+    "CTFontDescriptor",
+    # `kCTFontSymbolicTrait` and `kCTFontTraitMonoSpace`, which is the whole of
+    # the filter.
+    "CTFontTraits",
+    "std",
+] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
     # The array of paths a stream is created over — one path, but the API takes
-    # an array — and the strings in it.
+    # an array — and the strings in it. `CFArray` is also what CoreText hands
+    # back its font descriptors in (M2-4).
     "CFArray",
     "CFString",
+    # M2-4: a face's traits arrive as a `CFDictionary` keyed by CoreText's own
+    # constant strings, and the symbolic-traits value inside it is a `CFNumber`
+    # of bit flags.
+    "CFDictionary",
+    "CFNumber",
     # The watcher thread's own run loop: what the stream is scheduled on, the
     # source the owner signals to stop it, and the default mode both are
     # attached in.
@@ -81,7 +119,15 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSWindow",
     # Reduce Motion, and the notification that says it moved.
     "NSAccessibility",
+    # M2-2: the four verbs that leave this window — `openURL:`,
+    # `activateFileViewerSelectingURLs:` and
+    # `URLForApplicationWithBundleIdentifier:`.
     "NSWorkspace",
+    # M2-2, and only its test: `runningApplications`, so that the case which
+    # really opens a document can end the application it started and nothing
+    # else. Apple's own note on `processIdentifier` says to compare instances
+    # with `isEqual:` rather than with a pid, which is what that case does.
+    "NSRunningApplication",
     # A screen's device description, which is where its `CGDirectDisplayID` is.
     "NSGraphics",
     # `CGFloat` — the type every backing scale and every rectangle in AppKit is
@@ -99,6 +145,13 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSDictionary",
     # The appearance is observed rather than polled.
     "NSKeyValueObserving",
+    # M2-2: the trash (`NSFileManager.trashItemAtURL:resultingItemURL:error:`),
+    # the object every path crosses as, and the reason a refusal carries.
+    # Already on through `objc2-app-kit`'s `NSWorkspace`; named here because
+    # this crate's own code writes all three.
+    "NSError",
+    "NSFileManager",
+    "NSURL",
     # `NSLocale.preferredLanguages` — the language the system is read in.
     "NSLocale",
     # The notification an accessibility-display change arrives as.

@@ -155401,6 +155401,17 @@ otes.md"
 /// line. A list that lived in both would drift, and drift in a gate is a gate
 /// that is decoration.
 ///
+/// **`settings.rs` left the list in M2-4**, and its leaving is what the gate's
+/// second direction is for. It was on it for one pair of arms — the font
+/// picker's `#[cfg(windows)] monospace_font_families()` against
+/// `order_monospace_families(Vec::new())` — and that pair was this page
+/// deciding what machine it was on for a reason that belonged to `bt-platform`:
+/// there is one `monospace_font_families` now and it answers everywhere. The
+/// row-visibility question M1-7 put on this page never was a `cfg` — it asks
+/// `bt_platform::host_platform()`, which is a *value*, and the whole of §4.3's
+/// design is that the application reads values and the platform crate reads
+/// machines.
+///
 /// Two corrections to §4.3's own eleven, both measured rather than assumed, and
 /// both recorded in `docs/DESIGN.md`'s CI-gate record:
 ///
@@ -155421,7 +155432,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 13] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 12] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -155443,8 +155454,6 @@ mod platform_gate_tests {
         "palette_index.rs",
         // A PowerShell module, which is a Windows fact end to end.
         "psreadline.rs",
-        // Which rows the settings page offers on this machine.
-        "settings.rs",
         // Which shells can be integrated with here.
         "shell_integration.rs",
         // The in-place swap, which off Windows becomes "open the release page".

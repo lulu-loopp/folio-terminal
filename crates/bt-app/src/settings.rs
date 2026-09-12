@@ -1278,10 +1278,14 @@ impl MonospaceFamilySlot {
         if held.0 == revision && revision > 0 {
             return held.1;
         }
-        #[cfg(windows)]
+        // **One name, no gate** (M2-4). This used to be a `#[cfg(windows)]`
+        // pair — the real DirectWrite enumeration on one side and
+        // `order_monospace_families(Vec::new())` on the other — which was this
+        // page deciding what platform it was on for a reason that had nothing
+        // to do with the page. `bt_platform` answers it on every platform now:
+        // DirectWrite here, CoreText on a Mac, and the one-row list anywhere
+        // else.
         let enumerated = bt_platform::monospace_font_families();
-        #[cfg(not(windows))]
-        let enumerated = bt_platform::order_monospace_families(Vec::new());
         // The families this machine had a moment ago are the families it has
         // now, on every launch but the one where somebody installed a font — so
         // the common rescan keeps the slice it already leaked and costs the
@@ -13731,6 +13735,36 @@ pub(crate) fn push_float_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED — **the family the picker promises is the family the grid draws**
+    /// (M2-4).
+    ///
+    /// `bt_platform::order_monospace_families` guarantees that
+    /// `DEFAULT_MONOSPACE_FAMILY` is a row of the list whatever the machine
+    /// reported, and [`family_index`] falls back to that row for a
+    /// `settings.json` that names no family — because the row shown as selected
+    /// has to exist or the combo draws a blank. All of that is worth nothing if
+    /// the constant names a family the renderer is not drawing: the reader
+    /// would see `Consolas` ticked on a Mac whose grid is Menlo, and changing
+    /// the tick to what is already on screen would be a no-op they cannot
+    /// perform.
+    ///
+    /// The two constants are in two crates that cannot see each other —
+    /// `bt-render` does not depend on `bt-platform` and must not start — so the
+    /// rule is held here, in the one crate that depends on both. **This is why
+    /// `bt_render::DEFAULT_PRIMARY_FONT_FAMILY` is public**, and its own note
+    /// says so.
+    ///
+    /// MUTATION: give either constant a different family on any platform and
+    /// this names it on that platform.
+    #[test]
+    fn the_default_family_is_the_one_the_renderer_draws() {
+        assert_eq!(
+            bt_platform::DEFAULT_MONOSPACE_FAMILY,
+            bt_render::DEFAULT_PRIMARY_FONT_FAMILY,
+            "the picker promises a row for a family the grid is not drawn in"
+        );
+    }
 
     /// The window every geometry claim below is stated against — an ordinary
     /// desk's window, roomier than the dialog is allowed to be.

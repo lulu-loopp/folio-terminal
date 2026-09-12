@@ -2538,8 +2538,29 @@ pub fn choose_posix_locale<'a>(
 /// It is a constant here rather than a lookup because [`monospace_font_families`]
 /// promises the list contains it: a picker whose list can come back without the
 /// entry that is currently selected is a picker that shows a blank row on the
-/// one machine where DirectWrite refuses.
+/// one machine where the font enumeration refuses.
+///
+/// **One per platform, because the promise is about another crate's constant**
+/// (M2-4). What this names has to be the family `bt_render`'s
+/// `DEFAULT_PRIMARY_FONT_FAMILY` really draws when `set_terminal_font` is
+/// handed an empty name — that is the whole of the guarantee, and the two are
+/// held to each other by `the_default_family_is_the_one_the_renderer_draws` in
+/// `bt-app`, which is the one crate that can see both. A Mac whose picker
+/// promised `Consolas` would be offering a row for a font that machine has
+/// never had, and selecting it for a reader who has chosen nothing.
+///
+/// Menlo is macOS's Consolas here for `bt-render`'s own stated reason: it has
+/// shipped in `/System/Library/Fonts` since 10.6, it is what Terminal opens
+/// with, and it cannot be removed. SF Mono is the better-looking face and is
+/// deliberately not this constant — the renderer offers it first through a
+/// preference list that asks the database whether it is really there, because
+/// SF Mono's family name and its file have both moved between releases.
+#[cfg(windows)]
 pub const DEFAULT_MONOSPACE_FAMILY: &str = "Consolas";
+#[cfg(target_os = "macos")]
+pub const DEFAULT_MONOSPACE_FAMILY: &str = "Menlo";
+#[cfg(not(any(windows, target_os = "macos")))]
+pub const DEFAULT_MONOSPACE_FAMILY: &str = "monospace";
 
 /// Sort the enumerated families into the order a list draws them in, and
 /// guarantee the default is among them.
@@ -9656,10 +9677,10 @@ pub use portable_impl::{
     MathContextMenu, Notifier, ShellPickKind, Taskbar, adopt_parent_console,
     announce_explorer_menu_change, detach_console, directory_folds_case, flash_window,
     hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
-    is_window_cloaked, leave_process, message_box, read_context_menu, recycle,
-    redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
-    set_system_backdrop, silence_std_streams, system_backdrop_available, taskbar_is_auto_hidden,
-    thread_mouse_capture, virtual_key_for_character, write_to_console,
+    is_window_cloaked, leave_process, message_box, read_context_menu, redirect_std_streams_to_file,
+    register_clipboard_owner, remove_context_menu, set_system_backdrop, silence_std_streams,
+    system_backdrop_available, taskbar_is_auto_hidden, thread_mouse_capture,
+    virtual_key_for_character, write_to_console,
 };
 
 /// **The watch doors, on a platform whose filesystem does not speak** (M2-1).
@@ -9670,6 +9691,16 @@ pub use portable_impl::{
 /// portable one would be a duplicate definition there.
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub use portable_impl::{DirChange, DirWatch};
+
+/// **The trash and the font list, on a platform that has neither door written**
+/// (M2-2, M2-4).
+///
+/// The same split as the watch group above and for the same reason: both names
+/// were this module's for every non-Windows target, and `macos_files` and
+/// `macos_fonts` now answer them for a Mac. A third platform still meets the
+/// refusal and the one-row list.
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub use portable_impl::{monospace_font_families, recycle};
 
 /// **The window and the screen doors, on a platform that has neither** — the
 /// twenty-two names [`macos_impl`] answers for a Mac and this module still
@@ -9741,6 +9772,39 @@ mod macos_watch;
 /// three files and holds the lists to each other.
 #[cfg(target_os = "macos")]
 pub use macos_watch::{DirChange, DirWatch};
+
+/// **A path as `NSURL`, and the trash** (M2-2).
+///
+/// The ninth module in this crate to hold a boundary of its own, and the
+/// smallest: `Foundation`'s file manager, plus the one conversion every macOS
+/// crossing in this crate goes through — see its header for why those two live
+/// together rather than in `macos_impl`, which is AppKit and is the main
+/// thread's.
+#[cfg(target_os = "macos")]
+mod macos_files;
+
+/// **The trash, on macOS** — `windows_impl`'s `recycle` with `NSFileManager`
+/// behind it instead of `SHFileOperationW`.
+///
+/// A list of its own rather than a name in the portable list below, for the
+/// watch doors' reason: this name was `portable_impl`'s for every non-Windows
+/// target until M2-2 and is now the portable module's for every non-Windows
+/// target *but* this one. `a_trash_door_has_one_arm_per_platform` holds the
+/// two files to each other.
+#[cfg(target_os = "macos")]
+pub use macos_files::recycle;
+
+/// **The machine's monospaced families, over CoreText** (M2-4).
+///
+/// A module of its own rather than a section of `macos_files`, because the two
+/// share nothing but the platform: that one is a file manager and a path, and
+/// this is the font database. See its header for why `files` comes back empty
+/// here and is load-bearing on Windows.
+#[cfg(target_os = "macos")]
+mod macos_fonts;
+
+#[cfg(target_os = "macos")]
+pub use macos_fonts::monospace_font_families;
 
 /// **The tail of a command-line argument, split at an ASCII offset, in the
 /// operating system's own encoding** (M1-1, for M1-10).
@@ -11250,6 +11314,267 @@ mod watch_contract_tests {
     }
 }
 
+/// **The process door, the trash and the font list have one arm per platform,
+/// and the arms answer the same signatures** (tickets M2-2 and M2-4).
+///
+/// Source pins, for `macos_window_backend_tests`' reason: three of the four
+/// files they are about are ones this workstation does not compile, and what is
+/// claimed is a fact about the text — which door is defined where, and what
+/// shape it has. The behavioural twins run on the Mac
+/// (`handoff::macos_handoff::tests`, `macos_files::tests`, `macos_fonts::tests`).
+///
+/// The failure they exist to catch is the split's own, and it has two
+/// directions: a door that gained a macOS arm and **kept** its portable one is
+/// a duplicate definition there, caught late and on another machine; a door
+/// that lost its portable arm without gaining a macOS one is a **Linux** build
+/// that stops compiling, which nothing in this workspace builds today and §4.6
+/// of the plan says must stay possible.
+///
+/// And the third direction, which is this pair of tickets' own: a door whose
+/// two arms have drifted apart in *signature* is a door `bt-app` cannot call
+/// without a `cfg`, which is the one thing this crate exists to spare it
+/// (§4.4 ②).
+#[cfg(test)]
+mod macos_process_door_tests {
+    /// The four arms' own text. `lib.rs` is here twice over — it holds the
+    /// Windows `recycle` and font enumeration *and* the re-export lists — so it
+    /// is cut at these pins for `watch_contract_tests`' reason: a pin that
+    /// searched the whole file would find its own assertion.
+    const HANDOFF: &str = include_str!("handoff.rs");
+    const PORTABLE: &str = include_str!("portable_impl.rs");
+    const MACOS_FILES: &str = include_str!("macos_files.rs");
+    const MACOS_FONTS: &str = include_str!("macos_fonts.rs");
+    const WHOLE_FILE: &str = include_str!("lib.rs");
+
+    /// The gate every door that macOS now answers stands behind in the portable
+    /// arm.
+    const NOT_MACOS: &str = "#[cfg(not(target_os = \"macos\"))]";
+
+    /// **This file, up to where these pins begin.**
+    fn above_the_pins() -> &'static str {
+        let at = WHOLE_FILE
+            .find("\nmod macos_process_door_tests {")
+            .expect("these pins are in this file");
+        &WHOLE_FILE[..at]
+    }
+
+    /// The attributes between a doc comment and the item it is on.
+    fn attributes_above(source: &str, item: &str) -> String {
+        let at = source
+            .find(item)
+            .unwrap_or_else(|| panic!("`{item}` is defined in this arm"));
+        let before = &source[..at];
+        let doc_ends = before
+            .rfind("///")
+            .expect("every door here carries a doc comment");
+        let line_end = before[doc_ends..]
+            .find('\n')
+            .expect("a doc comment ends in a newline");
+        before[doc_ends + line_end..].to_owned()
+    }
+
+    /// One door's signature, from `pub fn` to the brace, as one line.
+    ///
+    /// **Two spellings are folded**, and neither is a difference a caller can
+    /// see: a module inside `lib.rs` writes `std::path::Path` and
+    /// `super::MonospaceFamily` where a module of its own writes `Path` and
+    /// `MonospaceFamily`, because the paths that are in scope are not the same
+    /// paths. Everything else — the parameter names, the order, the return
+    /// type — is compared exactly, which is the whole point.
+    fn signature(source: &str, name: &str) -> String {
+        let needle = format!("pub fn {name}(");
+        let at = source
+            .find(&needle)
+            .unwrap_or_else(|| panic!("`{name}` is defined in this arm"));
+        let rest = &source[at..];
+        let end = rest
+            .find(" {")
+            .expect("a function signature ends at its brace");
+        rest[..end]
+            .replace("std::path::", "")
+            .replace("super::", "")
+            .replace("crate::", "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// RED — **each of the five verbs that leave this window has exactly one
+    /// arm per platform.**
+    ///
+    /// MUTATION: drop the `cfg` from any one of the portable five and a macOS
+    /// build defines that door twice; delete one from the macOS arm and a Mac
+    /// stops compiling.
+    #[test]
+    fn a_process_door_has_one_arm_per_platform() {
+        for door in [
+            "shell_execute",
+            "open_local_file",
+            "open_local_path",
+            "reveal_in_explorer",
+            "open_system_fonts_page",
+        ] {
+            let portable = HANDOFF
+                .find("mod portable_handoff {")
+                .expect("the portable arm is a module");
+            let macos = HANDOFF
+                .find("mod macos_handoff {")
+                .expect("the macOS arm is a module");
+            let portable_arm = &HANDOFF[portable..macos];
+            let attributes = attributes_above(portable_arm, &format!("pub fn {door}("));
+            assert!(
+                attributes.contains(NOT_MACOS),
+                "`{door}` is still the portable arm's on macOS, where `macos_handoff` also \
+                 defines it:\n{attributes}"
+            );
+            assert!(
+                HANDOFF[macos..].contains(&format!("pub fn {door}(")),
+                "`{door}` left the portable arm without arriving in the macOS one"
+            );
+        }
+        // And the one door macOS takes *from* the portable arm keeps its single
+        // re-export, because both platforms answer it the same way.
+        assert!(
+            HANDOFF.contains("#[cfg(not(windows))]\npub use portable_handoff::program_on_path;"),
+            "`program_on_path` has grown a second arm or lost its shared one"
+        );
+    }
+
+    /// RED — **the trash and the font list have one arm per platform too.**
+    ///
+    /// Same split, same two failures, two doors that are not in the group
+    /// above because they are not hand-offs: one is `NSFileManager` and one is
+    /// CoreText.
+    #[test]
+    fn the_trash_and_the_font_list_have_one_arm_per_platform() {
+        for (door, macos_arm, module) in [
+            ("recycle", MACOS_FILES, "macos_files"),
+            ("monospace_font_families", MACOS_FONTS, "macos_fonts"),
+        ] {
+            let attributes = attributes_above(PORTABLE, &format!("pub fn {door}("));
+            assert!(
+                attributes.contains(NOT_MACOS),
+                "`{door}` is still the portable arm's on macOS, where `{module}` also defines \
+                 it:\n{attributes}"
+            );
+            assert!(
+                macos_arm.contains(&format!("pub fn {door}(")),
+                "`{door}` left the portable arm without arriving in `{module}`"
+            );
+        }
+        let root = above_the_pins();
+        assert!(
+            root.contains(
+                "#[cfg(all(not(windows), not(target_os = \"macos\")))]\n\
+                 pub use portable_impl::{monospace_font_families, recycle};"
+            ),
+            "the portable re-export is the one a third platform still meets"
+        );
+        assert!(
+            root.contains("#[cfg(target_os = \"macos\")]\npub use macos_files::recycle;"),
+            "macOS takes its trash from the file manager arm"
+        );
+        assert!(
+            root.contains(
+                "#[cfg(target_os = \"macos\")]\npub use macos_fonts::monospace_font_families;"
+            ),
+            "macOS takes its font list from the CoreText arm"
+        );
+    }
+
+    /// RED — **every door of these two tickets has the same signature on both
+    /// machines.**
+    ///
+    /// This is the claim `bt-app` rests on and the one a compiler on this
+    /// workstation cannot make: the application names each of these without a
+    /// `cfg`, so an arm that took an extra argument, dropped the spare window
+    /// or widened a return type would compile here, fail on the Mac, and fail
+    /// in `bt-app` rather than in the crate that changed.
+    ///
+    /// MUTATION: take the `window: NativeWindow` out of any macOS arm — the
+    /// parameter `NSWorkspace` has no use for — and this names the door.
+    #[test]
+    fn every_door_of_this_ticket_keeps_its_signature() {
+        let windows_arm = {
+            let at = WHOLE_FILE
+                .find("mod windows_impl {")
+                .expect("the Windows arm is a module");
+            &WHOLE_FILE[at..]
+        };
+        for door in [
+            "shell_execute",
+            "open_local_file",
+            "open_local_path",
+            "reveal_in_explorer",
+            "open_system_fonts_page",
+        ] {
+            let windows = {
+                let at = HANDOFF
+                    .find("mod windows_handoff {")
+                    .expect("the Windows hand-off is a module");
+                signature(&HANDOFF[at..], door)
+            };
+            let macos = {
+                let at = HANDOFF
+                    .find("mod macos_handoff {")
+                    .expect("the macOS hand-off is a module");
+                signature(&HANDOFF[at..], door)
+            };
+            assert_eq!(windows, macos, "`{door}` is two different doors");
+        }
+        assert_eq!(
+            signature(windows_arm, "recycle"),
+            signature(MACOS_FILES, "recycle"),
+            "the trash is two different doors"
+        );
+        assert_eq!(
+            signature(windows_arm, "monospace_font_families"),
+            signature(MACOS_FONTS, "monospace_font_families"),
+            "the font list is two different doors"
+        );
+    }
+
+    /// RED — **the product's own refusal survives the crossing, and only where
+    /// it belongs.**
+    ///
+    /// [`handoff::PROGRAM_REFUSED`] is a sentinel `bt-app` matches with
+    /// `.contains` and turns into *the tree does not run programs*. Two things
+    /// about it are worth a pin rather than a comment: the door that opens a
+    /// row **says it**, on this platform as on the other; and the door that
+    /// *reveals* a row does not — a `.app` shown in Finder is a `.app` sitting
+    /// selected in a folder, which is what somebody asking "where is this"
+    /// wants and is not a way to start it.
+    ///
+    /// MUTATION: drop the check from the macOS `open_local_path` and a row in
+    /// the files column launches an application; add one to the reveal and
+    /// "show me where this is" stops working for every program on the machine.
+    #[test]
+    fn the_macos_tree_still_refuses_to_run_a_program() {
+        let at = HANDOFF
+            .find("mod macos_handoff {")
+            .expect("the macOS hand-off is a module");
+        let arm = &HANDOFF[at..];
+        let door_body = |name: &str| {
+            let at = arm
+                .find(&format!("pub fn {name}("))
+                .unwrap_or_else(|| panic!("`{name}` is in this arm"));
+            let rest = &arm[at..];
+            let end = rest
+                .find("\n    }\n")
+                .expect("a door in a module is closed at four spaces");
+            rest[..end].to_owned()
+        };
+        assert!(
+            door_body("open_local_path").contains("PROGRAM_REFUSED"),
+            "the macOS tree opens programs, which the Windows one refuses to do"
+        );
+        assert!(
+            !door_body("reveal_in_explorer").contains("PROGRAM_REFUSED"),
+            "the reveal refuses programs, so nobody can be shown where one is"
+        );
+    }
+}
+
 /// The band contract, asked where there are no bands.
 ///
 /// It is the whole of what [`portable_priority`] promises, and it is worth a
@@ -12280,6 +12605,12 @@ mod monospace_family_tests {
     /// MUTATIONS: ① sort by `name` directly and `MS Gothic` sorts before
     /// `Consolas`, because every uppercase letter sorts before every lowercase
     /// one; ② drop the sort and the order is whatever the machine said.
+    ///
+    /// **The default is filtered out of the first assertion rather than named
+    /// in it** (M2-4): [`DEFAULT_MONOSPACE_FAMILY`] is a different family on
+    /// each platform now, so a literal list would be pinning which machine this
+    /// test is running on. The second assertion is the sort itself and it holds
+    /// over *every* row, the inserted one included.
     #[test]
     fn the_family_list_is_alphabetical_without_regard_to_case() {
         let ordered = order_monospace_families(vec![
@@ -12288,10 +12619,19 @@ mod monospace_family_tests {
             named("Cascadia Mono"),
             named("Lucida Console"),
         ]);
+        let listed = names(&ordered);
         assert_eq!(
-            names(&ordered),
+            listed
+                .iter()
+                .copied()
+                .filter(|name| *name != DEFAULT_MONOSPACE_FAMILY)
+                .collect::<Vec<_>>(),
             vec!["Cascadia Mono", "consolas", "Lucida Console", "MS Gothic"]
         );
+        let lowered: Vec<String> = listed.iter().map(|name| name.to_lowercase()).collect();
+        let mut sorted = lowered.clone();
+        sorted.sort();
+        assert_eq!(lowered, sorted, "every row is where the alphabet puts it");
     }
 
     /// PIN — the default face is in the list even when the machine did not
@@ -12329,8 +12669,14 @@ mod monospace_family_tests {
     /// rows, one of which cannot be loaded, is worse than either alternative.
     #[test]
     fn a_reported_default_keeps_its_files_and_is_not_doubled() {
-        let ordered = order_monospace_families(vec![named("Consolas"), named("Cascadia Mono")]);
-        assert_eq!(names(&ordered), vec!["Cascadia Mono", "Consolas"]);
+        let ordered = order_monospace_families(vec![
+            named(DEFAULT_MONOSPACE_FAMILY),
+            named("Cascadia Mono"),
+        ]);
+        assert_eq!(
+            names(&ordered),
+            vec!["Cascadia Mono", DEFAULT_MONOSPACE_FAMILY]
+        );
         assert!(
             !ordered[1].files.is_empty(),
             "the machine's own files survive"
@@ -12345,14 +12691,17 @@ mod monospace_family_tests {
     /// gives a combo two rows that select differently while reading identically.
     #[test]
     fn a_family_reported_twice_is_one_row() {
+        // The default in both of its spellings, and one family that sorts after
+        // it on every platform — so the claim is about the de-duplication
+        // rather than about which machine is running the test.
         let ordered = order_monospace_families(vec![
-            named("Consolas"),
-            named("consolas"),
-            named("Fira Code"),
+            named(DEFAULT_MONOSPACE_FAMILY),
+            named(&DEFAULT_MONOSPACE_FAMILY.to_lowercase()),
+            named("Zilla Mono"),
         ]);
         assert_eq!(
             names(&ordered),
-            vec!["Consolas", "Fira Code"],
+            vec![DEFAULT_MONOSPACE_FAMILY, "Zilla Mono"],
             "which of the two spellings survives matters less than that the same              one survives every time — the tie is broken by exact bytes, so the              answer cannot depend on the order the machine reported them in"
         );
     }
