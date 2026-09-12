@@ -370,6 +370,7 @@ version = "0.3.0"
 dependencies = [
  "bt-term",
  "bt-transcript",
+ "nix",
  "portable-pty",
  "thiserror 2.0.18",
 ]
