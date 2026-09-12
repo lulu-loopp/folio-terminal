@@ -29369,6 +29369,32 @@ struct PanePress {
     latch: DragLatch,
 }
 
+/// **What the pointer is on, with the floating windows counted in** (user
+/// report 2026-09-12, `docs/DESIGN.md` §7.15 ⑩).
+///
+/// [`Runtime::chrome_target_at`] answers about the *docked* chrome, and the
+/// docked chrome is only what is left when no window is standing in the way. A
+/// float is opaque: the topmost one to claim a point owns it, and what is behind
+/// it is not under the pointer at all. Before this type existed that rule was
+/// written at one caller — the right press's [`Runtime::file_row_under`] — and
+/// so it held for the press and not for the hover, which is how a row hidden
+/// under a preview window went on lighting up and raising its glance card.
+///
+/// The two arms are the two vocabularies, and they are separate because a float
+/// has parts no docked pane has and a pane has chrome no window carries: a
+/// window's head, grip and `DOCK` are [`float::FloatPart`]'s, and there is no
+/// [`seats::ChromeTarget`] that could honestly stand for them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PointerTarget {
+    /// The topmost floating window claimed the point, and this is the part of it
+    /// the pointer is on — [`float::FloatPart::Body`] and
+    /// [`float::FloatPart::Head`] included, because a window with no answer for
+    /// a point still consumes it.
+    Float(float::FloatId, float::FloatPart),
+    /// No window claimed it, so the answer is the docked chrome's.
+    Chrome(seats::ChromeTarget),
+}
+
 /// Which surface a files tree is drawn on — the two hosts P81 asks to be wired.
 ///
 /// "delegated on both hosts, so re-rendered rows keep working" (P150, mock-up
@@ -42003,7 +42029,12 @@ impl Runtime<'_> {
     /// A tab's own controls count as the tab: `pointerenter`/`pointerleave` do
     /// not fire for a child, so in the mock-up the pointer crossing onto the pin
     /// never leaves the tab, and the schematic stays up.
-    fn layout_peek_target_at(&self, position: PhysicalPosition<f64>) -> Option<usize> {
+    ///
+    /// `&mut self` because [`Self::chrome_target_at`] is the float-aware router
+    /// now and a window's claim is measured, not remembered — which is also what
+    /// makes "a tab a float is covering is not under the pointer" true here
+    /// without a word about floats.
+    fn layout_peek_target_at(&mut self, position: PhysicalPosition<f64>) -> Option<usize> {
         let tab = match self.chrome_target_at(position)? {
             seats::ChromeTarget::Tab(index)
             | seats::ChromeTarget::TabPin(index)
@@ -69701,45 +69732,53 @@ impl Runtime<'_> {
     /// float is opaque: when the topmost window answers the point at all, the
     /// answer is that window's own applicable target or nothing, and never the
     /// docked chrome behind it. It used to be terminal for one part only —
-    /// [`float::FloatPart::Row`] — and every other part fell through to
-    /// [`Self::chrome_target_at`], which does not consider floats at all. So a
-    /// right press on a preview float's text, or on the empty space below a
-    /// floating tree's last row, raised the menu of the *covered* row: a face of
-    /// verbs with no file name on it, drawn on top of the float, with `Delete`
-    /// among them. The float is deliberately left standing when this menu opens
-    /// ([`Self::open_file_menu`]'s `close_popups_except`), so there was nothing
-    /// on screen that could have said which file it meant.
+    /// [`float::FloatPart::Row`] — and every other part fell through to the
+    /// docked chrome. So a right press on a preview float's text, or on the
+    /// empty space below a floating tree's last row, raised the menu of the
+    /// *covered* row: a face of verbs with no file name on it, drawn on top of
+    /// the float, with `Delete` among them. The float is deliberately left
+    /// standing when this menu opens ([`Self::open_file_menu`]'s
+    /// `close_popups_except`), so there was nothing on screen that could have
+    /// said which file it meant.
+    ///
+    /// **And the rule is no longer this door's** (user report 2026-09-12). It
+    /// was written here, at one caller, and so it held for the press and not for
+    /// the hover — which asks the same question through
+    /// [`Self::chrome_target_at`] and never came past this function at all. It
+    /// now lives in [`Self::pointer_target_at`], the one router both gestures
+    /// go through; what is left here is the part of the answer only a menu
+    /// knows, which is which float parts have a file behind them.
     fn file_row_under(&mut self, position: PhysicalPosition<f64>) -> Option<FileMenuTarget> {
-        // Asked only when there is a window to ask about, on
-        // [`Self::preview_open_pill_at`]'s note: `float_hit_at` measures two
-        // captions before it looks at anything.
-        if self.window.float.hit_order().next().is_some()
-            && let Some((id, part)) = self.float_hit_at(position)
-        {
+        let (seat, index) = match self.pointer_target_at(position) {
+            // A row of a floating tree raises that window's own menu, about the
+            // file that window is showing.
+            Some(PointerTarget::Float(id, float::FloatPart::Row(index))) => {
+                let files = self.window.float.live(id)?.files()?;
+                let rows = files::tree_view(&files.files, &files.cache).rows;
+                let row = rows.get(index)?;
+                let subject = files_row_menu_subject(row.kind)?;
+                return Some(FileMenuTarget {
+                    row: Some(FileMenuTreeRow {
+                        host: RowHost::Float(id),
+                        key: row.key.clone(),
+                    }),
+                    activation: files_row_activation(&files.files.root, &row.key),
+                    subject,
+                    crumbs: Vec::new(),
+                    rail: None,
+                });
+            }
             // Every other part of a float — its head, its foot, its rail, its
             // body, and a body its tenant declined — is this window's own and
-            // raises no file menu. Silence, and not the chrome underneath.
-            let float::FloatPart::Row(index) = part else {
-                return None;
-            };
-            let files = self.window.float.live(id)?.files()?;
-            let rows = files::tree_view(&files.files, &files.cache).rows;
-            let row = rows.get(index)?;
-            let subject = files_row_menu_subject(row.kind)?;
-            return Some(FileMenuTarget {
-                row: Some(FileMenuTreeRow {
-                    host: RowHost::Float(id),
-                    key: row.key.clone(),
-                }),
-                activation: files_row_activation(&files.files.root, &row.key),
-                subject,
-                crumbs: Vec::new(),
-                rail: None,
-            });
-        }
-        let Some(seats::ChromeTarget::FilesRow { seat, index }) = self.chrome_target_at(position)
-        else {
-            return self.files_ground_under(position);
+            // raises no file menu. Silence, and not the chrome underneath, and
+            // not the covered column's ground either.
+            Some(PointerTarget::Float(..)) => return None,
+            Some(PointerTarget::Chrome(seats::ChromeTarget::FilesRow { seat, index })) => {
+                (seat, index)
+            }
+            Some(PointerTarget::Chrome(_)) | None => {
+                return self.files_ground_under(position);
+            }
         };
         let now = Instant::now();
         let trees = self.files_trees(now);
@@ -69841,7 +69880,11 @@ impl Runtime<'_> {
     /// The floats first and topmost first, then the docked columns, which is the
     /// order every other pointer question in this window is asked in: a window
     /// is drawn over the panes, so a point inside a floating tree standing
-    /// across a column belongs to the window.
+    /// across a column belongs to the window. That order is
+    /// [`Self::pointer_target_at`]'s since the report of 2026-09-12 and no
+    /// longer this function's own — which is what makes the *other* half of it
+    /// true here too: a point inside a float that is not one of its rows is no
+    /// row at all, rather than the row the window is covering.
     ///
     /// [`Self::file_row_under`] answers the *context menu's* question, which is
     /// a different question and not a narrower one: it wants a whole
@@ -69850,11 +69893,19 @@ impl Runtime<'_> {
     /// row", because the glance card has its own rules about which kinds of row
     /// it will show and the drag has different ones again.
     fn row_under(&mut self, position: PhysicalPosition<f64>) -> Option<(RowHost, usize)> {
-        if let Some((id, float::FloatPart::Row(index))) = self.float_hit_at(position) {
-            return Some((RowHost::Float(id), index));
-        }
-        match self.chrome_target_at(position) {
-            Some(seats::ChromeTarget::FilesRow { seat, index }) => {
+        match self.pointer_target_at(position) {
+            Some(PointerTarget::Float(id, float::FloatPart::Row(index))) => {
+                Some((RowHost::Float(id), index))
+            }
+            // **And every other part of that window is no row at all** (user
+            // report 2026-09-12). A float is opaque to the hover exactly as it
+            // is to the press: a hand resting on a preview window's text is not
+            // resting on the docked row behind it, so nothing lights and the
+            // glance clock arms nothing — and a card already up is retired by
+            // this `None`, which is what `observe_file_peek` is told when the
+            // hand leaves a row.
+            Some(PointerTarget::Float(..)) => None,
+            Some(PointerTarget::Chrome(seats::ChromeTarget::FilesRow { seat, index })) => {
                 Some((RowHost::Column(seat), index))
             }
             // **A column on its Git page answers the same question** (user
@@ -69862,10 +69913,10 @@ impl Runtime<'_> {
             // way a tree row's triangle and its name do: a hand crossing from a
             // path to the `+` beside it has not left the row, and a glance that
             // reset there would be a glance that never matured.
-            Some(seats::ChromeTarget::GitRow { seat, index })
-            | Some(seats::ChromeTarget::GitAct { seat, index, .. }) => {
-                Some((RowHost::Git(seat), index))
-            }
+            Some(PointerTarget::Chrome(
+                seats::ChromeTarget::GitRow { seat, index }
+                | seats::ChromeTarget::GitAct { seat, index, .. },
+            )) => Some((RowHost::Git(seat), index)),
             // **And last, the output itself** (user ruling 2026-08-27, §7.29).
             // Last because the chrome is drawn over the panes and a point inside
             // a tree standing across a terminal belongs to the tree, which is
@@ -72961,7 +73012,11 @@ impl Runtime<'_> {
     /// and [`Self::rearm_hover_intents`] asking again once the glass came free.
     /// A second copy of the match would be a second opinion about which chrome
     /// targets are triggers.
-    fn float_trigger_at(&self, position: PhysicalPosition<f64>) -> Option<float::FloatTrigger> {
+    ///
+    /// `&mut self` for [`Self::layout_peek_target_at`]'s reason: the trigger is
+    /// read through the float-aware router, so a `Files` button a window is
+    /// standing on arms nothing.
+    fn float_trigger_at(&mut self, position: PhysicalPosition<f64>) -> Option<float::FloatTrigger> {
         match self.chrome_target_at(position) {
             Some(seats::ChromeTarget::TabFiles(index)) => self
                 .window
@@ -73235,11 +73290,11 @@ impl Runtime<'_> {
                     // the pane head's reason one arm up — and through the very
                     // door a press on it goes through, so the menu a rest raises
                     // and the menu a click raises are one menu in one place.
-                    if let Some(position) = self.window.pointer_position
-                        && let Some(surface) =
-                            self.preview_open_pill_at(position, self.chrome_target_at(position))
-                    {
-                        self.open_preview_rail_menu(surface)?;
+                    if let Some(position) = self.window.pointer_position {
+                        let docked = self.chrome_target_at(position);
+                        if let Some(surface) = self.preview_open_pill_at(position, docked) {
+                            self.open_preview_rail_menu(surface)?;
+                        }
                     }
                 }
                 // **Only the menu a pill raised is closed by a pill's grace.**
@@ -82894,10 +82949,17 @@ impl Runtime<'_> {
         // the hovers below because it belongs to the same surface the two
         // gestures above do — and answered `None` while an overlay owns the
         // pointer, so a scrim never leaves a bar lit behind it.
+        //
+        // **And `None` under a floating window too** (user report 2026-09-12).
+        // It is the same sentence the scrim gets and it is asked of the same
+        // door: `pointer_target_at` is `None` only where *nothing* on the glass
+        // has claimed the point, so a preview window standing over a pane no
+        // longer leaves that pane's scrollbar, its link underline or its hex
+        // column lit under a hand that is on the window.
         let free = self.settings_layout().is_none()
             && self.dirty_gate_layout().is_none()
             && !self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
-            && self.chrome_target_at(position).is_none();
+            && self.pointer_target_at(position).is_none();
         self.note_preview_body_hover(free.then_some(position))?;
         // The lane the pointer is in — the fact that lights one pane's mark and
         // holds it on the glass. Answered `None` behind an overlay for the
@@ -83687,7 +83749,20 @@ impl Runtime<'_> {
         }
     }
 
-    fn chrome_target_at(&self, position: PhysicalPosition<f64>) -> Option<seats::ChromeTarget> {
+    /// **The docked chrome's own ladder** — everything this window draws *in*
+    /// the layout, smallest target first.
+    ///
+    /// Reached only through [`Self::pointer_target_at`], which asks the floating
+    /// windows first, and private to it for the reason the whole of §7.15 ⑩
+    /// exists: this ladder knows nothing about floats, so anything that called
+    /// it directly would be reading the chrome *behind* a window as though the
+    /// window were not there. It keeps `&self` because that is what it is — a
+    /// walk of solved rectangles — and the router above it is the one that needs
+    /// a face to measure a caption with.
+    fn docked_chrome_target_at(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<seats::ChromeTarget> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, _) = self.window.renderer.presentation_geometry().swapchain_size;
         let width = width as f32;
@@ -83919,6 +83994,55 @@ impl Runtime<'_> {
             })
     }
 
+    /// **Where the pointer is: the floating windows first, then the chrome
+    /// behind them** (user report 2026-09-12, `docs/DESIGN.md` §7.15 ⑩).
+    ///
+    /// The one door every pointer question in this window goes through, hover
+    /// and press alike. `b1cf054` made a float's claim terminal for the press by
+    /// writing the rule into [`Self::file_row_under`] — one caller — and the
+    /// hover, which does not go through that caller, went on reading the docked
+    /// ladder as though the window in front of it were glass: the row hidden
+    /// under a preview float lit up, and after the peek delay raised its glance
+    /// card on top of the window that was covering it. The rule belongs here,
+    /// where both gestures pass.
+    ///
+    /// **A window's claim is terminal.** [`Self::float_hit_at`] is total inside
+    /// a frame — a body its tenant declines comes back
+    /// [`float::FloatPart::Body`], anything the named rectangles miss comes back
+    /// [`float::FloatPart::Head`] — so there is no answer of "the pointer went
+    /// through". Whatever the topmost window says is the whole answer, and the
+    /// panes behind it are not asked.
+    ///
+    /// The sweep is entered only when there is a window to sweep, on
+    /// [`Self::preview_open_pill_at`]'s note: `float_hit_at` measures two
+    /// captions before it looks at anything, and a window with nothing floating
+    /// should pay none of it.
+    fn pointer_target_at(&mut self, position: PhysicalPosition<f64>) -> Option<PointerTarget> {
+        if self.window.float.hit_order().next().is_some()
+            && let Some((id, part)) = self.float_hit_at(position)
+        {
+            return Some(PointerTarget::Float(id, part));
+        }
+        self.docked_chrome_target_at(position)
+            .map(PointerTarget::Chrome)
+    }
+
+    /// The docked chrome under the pointer, or `None` where a window is standing.
+    ///
+    /// [`Self::pointer_target_at`] read by everything that speaks
+    /// [`seats::ChromeTarget`] and nothing else — which is most of this window:
+    /// the hover, the press, the release, every "is the pointer on *that*
+    /// button" question. A point a float has claimed is `None` here because a
+    /// window has no `ChromeTarget` to give: its head, its grip and its `DOCK`
+    /// are [`float::FloatPart`]'s, and the one thing this answer must never be
+    /// is the chrome the window is covering.
+    fn chrome_target_at(&mut self, position: PhysicalPosition<f64>) -> Option<seats::ChromeTarget> {
+        match self.pointer_target_at(position)? {
+            PointerTarget::Chrome(target) => Some(target),
+            PointerTarget::Float(..) => None,
+        }
+    }
+
     /// How wide each column's switch is, for the hit test.
     ///
     /// Derived from the same map the paint was handed, so the two halves of "the
@@ -83944,14 +84068,22 @@ impl Runtime<'_> {
         // [`Self::press_web_sheet`]'s, which swallows the card and the scrim
         // whole, and a router that also returned the sheet's controls would be
         // two doors onto one press.
-        let hover = self
+        let sheet = self
             .window
             .web_sheet_layouts
             .iter()
             .find_map(|(seat, layout)| {
                 websheet::hit(layout, *seat, position.x as f32, position.y as f32)
-            })
-            .or_else(|| self.chrome_target_at(position));
+            });
+        // One question, asked once, for both halves below.
+        let target = self.pointer_target_at(position);
+        let hover = sheet.or(match target {
+            Some(PointerTarget::Chrome(target)) => Some(target),
+            // **A window is opaque to the hover** (user report 2026-09-12): a
+            // point inside a float is the float's, so there is no docked chrome
+            // under this pointer to light.
+            Some(PointerTarget::Float(..)) | None => None,
+        });
         // `.pane:hover` is a second question about the same pointer, and it has
         // to be asked here rather than derived from `hover`: over a terminal's
         // body `hover` is `None`, because a terminal is not chrome, and that is
@@ -83962,9 +84094,16 @@ impl Runtime<'_> {
         // reads the seat layout, and the seat layout keeps only the *parked*
         // width clear of an icon rail — so under an open one it would go on
         // naming the pane the rail is standing over.
-        let pane = (!self.panel_covers(position))
-            .then(|| seats::pane_at(&self.seat_layout, position.x, position.y))
-            .flatten();
+        //
+        // **And a float's the same way, and for the same reason the router
+        // states once** (2026-09-12): the seat layout is the docked geometry and
+        // knows nothing about the windows drawn over it, so a pane a float is
+        // covering would go on wearing `.pane:hover` — and on showing the four
+        // head controls that come with it — under a hand that is on the window.
+        let pane = (!matches!(target, Some(PointerTarget::Float(..)))
+            && !self.panel_covers(position))
+        .then(|| seats::pane_at(&self.seat_layout, position.x, position.y))
+        .flatten();
         self.update_chrome_hover_target_in_pane(hover, pane)
     }
 
@@ -98500,7 +98639,7 @@ mod focus_mode_door_tests {
         // And the window's one reading of what is under a pointer has never
         // heard of it.
         assert!(
-            !body("    fn chrome_target_at(").contains("card_hint"),
+            !body("    fn docked_chrome_target_at(").contains("card_hint"),
             "the hit test knows the bubble exists, so a press can land on it",
         );
     }
@@ -99046,7 +99185,7 @@ mod page_under_the_tab_list_tests {
     /// every click on an open rail to whatever is underneath it (R1).
     #[test]
     fn the_chrome_ladder_still_begins_with_the_tab_list() {
-        let chrome_target_at = body("    fn chrome_target_at(");
+        let chrome_target_at = body("    fn docked_chrome_target_at(");
         let list = chrome_target_at
             .find("tab_list_target_at")
             .expect("the chrome ladder asks the tab list");
@@ -143541,43 +143680,73 @@ mod tests {
         &rest[..end]
     }
 
+    /// The pointer router's own signature, assembled rather than written out.
+    ///
+    /// `runtime_fn_body` takes the *first* occurrence of what it is given, so a
+    /// signature spelled in full in this module is a signature this module
+    /// satisfies by existing: delete `pointer_target_at` from the window and the
+    /// pins below would go on passing, reading their own assertion text back to
+    /// themselves. Split across a `concat`, the needle exists only where the
+    /// declaration does.
+    fn router_signature() -> String {
+        ["    fn pointer_target", "_at("].concat()
+    }
+
+    /// The one call of the docked ladder, on the same terms and for the same
+    /// reason: a test that counts the callers must not be one of them.
+    fn ladder_call() -> String {
+        ["self.docked_chrome_target", "_at(position)"].concat()
+    }
+
     /// RED (adversarial review 2026-09-11, row D1) — **a right press inside a
     /// floating window never names a row of the column underneath it.**
     ///
     /// `float_hit_at` claims every point inside a float's frame, but
     /// `file_row_under` consumed the claim for one part only — a tree row — and
     /// let a head, a foot, a rail, a body and a body the tenant declined fall
-    /// through to `chrome_target_at`, which does not consider floats at all. So
+    /// through to the docked ladder, which does not consider floats at all. So
     /// a right press on a preview float's text, at a y that happened to land on
     /// a docked row, produced that row's menu: a face of verbs with no file name
     /// on it, drawn on top of the float that was hiding the row it was about,
     /// with `Delete` among them since `4031215`.
     ///
-    /// Red gate: put the part back in the pattern —
-    /// `if let Some((id, float::FloatPart::Row(index))) = self.float_hit_at(…)`
-    /// — and the second assertion fails by name; drop the `return None` and the
-    /// third does.
+    /// **Read at the router since the report of 2026-09-12**, which is where the
+    /// rule moved: `file_row_under` had it for the press alone, and the same
+    /// hole was still open for the hover. What is left to pin here is that this
+    /// door consumes the router's answer rather than keeping a second opinion
+    /// about floats of its own.
+    ///
+    /// Red gate: make the router answer `None` for a part instead of naming it
+    /// and the ordering assertion fails; drop `file_row_under`'s float arm and
+    /// the last one does.
     #[test]
     fn a_press_inside_a_float_never_names_a_docked_row() {
-        let body = runtime_fn_body("    fn file_row_under(");
-        let claim = body
-            .find("self.float_hit_at(position)")
+        let router = runtime_fn_body(router_signature().as_str());
+        let claim = router
+            .find(["self.float_hit_at", "(position)"].concat().as_str())
             .expect("the float is asked first, because a float is drawn over the columns");
-        let docked = body
-            .find("self.chrome_target_at(position)")
+        let docked = router
+            .find(ladder_call().as_str())
             .expect("the docked chrome is asked second");
         assert!(
             claim < docked,
             "the topmost window answers before the panes behind it"
         );
         assert!(
-            !body.contains("float::FloatPart::Row(index))) = self.float_hit_at"),
-            "the float is asked about the *point*, not about one part of it: a \
-             pattern that matched only `Row` let every other part of an opaque \
-             window fall through to the chrome behind it"
+            router[claim..docked].contains("return Some(PointerTarget::Float(id, part));"),
+            "the float is asked about the *point*, not about one part of it: an \
+             answer that named only some parts would let every other part of an \
+             opaque window fall through to the chrome behind it"
+        );
+        let body = runtime_fn_body("    fn file_row_under(");
+        assert!(
+            !body.contains(["self.float_hit_at", "("].concat().as_str()),
+            "the menu's door asks the one router and never the windows directly: \
+             a second reading of the floats is a second rule to forget, and \
+             forgetting it once is what left the hover transparent"
         );
         assert!(
-            body[claim..docked].contains("return None;"),
+            body.contains("Some(PointerTarget::Float(..)) => return None,"),
             "and a part this door has no answer for ends the question, rather \
              than passing it to the row hidden under the window"
         );
@@ -143593,16 +143762,16 @@ mod tests {
     /// standing on. A float's ground is the window's, which
     /// `files_ground_under`'s own doc already said it intended.
     ///
-    /// Red gate: move the ground fallback above the float branch, or drop the
-    /// branch's `return None`, and the ordering assertion fails.
+    /// Red gate: move the ground fallback above the float arm, or drop the
+    /// arm's `return None`, and the ordering assertion fails.
     #[test]
     fn a_press_on_a_floats_body_over_a_column_raises_no_root_menu() {
         let body = runtime_fn_body("    fn file_row_under(");
         let claim = body
-            .find("self.float_hit_at(position)")
-            .expect("the float is asked first");
+            .find("Some(PointerTarget::Float(")
+            .expect("the float's claim is read first");
         let declined = body[claim..]
-            .find("return None;")
+            .find("=> return None,")
             .map(|at| claim + at)
             .expect("a float part with no row behind it ends the question");
         let ground = body
@@ -143628,8 +143797,9 @@ mod tests {
     /// `float_hit` is total inside the frame: a body its tenant has no answer
     /// for comes back `FloatPart::Body`, and anything the named rectangles miss
     /// comes back `FloatPart::Head`. There is no `None` for the caller to read
-    /// as "the pointer went through". So the *caller* is where the rule has to
-    /// live, and it now lives there.
+    /// as "the pointer went through". So the *router* is where the rule has to
+    /// live, and since the report of 2026-09-12 it lives there — one place for
+    /// the press and the hover both.
     ///
     /// Red gate: make `float_hit`'s body arm answer `None` when the tenant
     /// declines and the first assertion fails; then `file_row_under`'s rule
@@ -143667,9 +143837,214 @@ mod tests {
         // press anywhere inside this window a drag of it.
         let body = runtime_fn_body("    fn file_row_under(");
         assert!(
-            body.contains("let float::FloatPart::Row(index) = part else {"),
+            body.contains("Some(PointerTarget::Float(id, float::FloatPart::Row(index)))"),
             "so the door that raises a file menu names the one part it can \
              answer for and returns nothing for the rest"
+        );
+    }
+
+    /// RED (user report 2026-09-12, during `next60` acceptance) — **a hand
+    /// resting on a floating window lights no row of the column underneath it.**
+    ///
+    /// The press half of this is `b1cf054`'s, and it was written at one caller:
+    /// `file_row_under`. The hover does not pass that caller — `pointer_moved`
+    /// asks `update_chrome_hover`, which asks `chrome_target_at`, and the docked
+    /// ladder does not consider floats at all — so a preview window standing
+    /// over a files column was opaque to the eye and transparent to the hover.
+    /// The row behind it lit up, and after `peek_strip::PEEK_DELAY` raised its
+    /// glance card on top of the window that was hiding it.
+    ///
+    /// Read as text for this family's stated reason: what it guards against is a
+    /// *second* door onto one question, and a second door that agrees today
+    /// cannot be driven into disagreeing by any state machine.
+    ///
+    /// Red gate: put the ladder's body back under the name `chrome_target_at`,
+    /// or let its float arm answer with the chrome behind the window, and the
+    /// first two assertions fail by name.
+    #[test]
+    fn a_hover_inside_a_floats_body_lights_no_docked_row() {
+        let door = runtime_fn_body("    fn chrome_target_at(");
+        assert!(
+            door.contains("self.pointer_target_at(position)?"),
+            "the chrome's door is the router's answer read through, and not a \
+             walk of the docked ladder that never heard of a window"
+        );
+        assert!(
+            door.contains("PointerTarget::Float(..) => None,"),
+            "and a point a window has claimed is no chrome at all — never the \
+             chrome that window is covering"
+        );
+        let hover = runtime_fn_body("    fn update_chrome_hover(");
+        assert!(
+            hover.contains("Some(PointerTarget::Float(..)) | None => None,"),
+            "so the hover this window paints is read through the same claim"
+        );
+    }
+
+    /// RED (the same report, the glance half) — **a hand resting on a floating
+    /// window arms no peek for the row beneath it.**
+    ///
+    /// `row_under` is the glance clock's one question, and it consumed the
+    /// float's claim for a tree row only: every other part of a window fell
+    /// through to the docked columns, and then to the terminal's own printed
+    /// references. So a rest on a preview window's text armed the covered row's
+    /// glance, which matured into a card drawn on top of the window.
+    ///
+    /// Red gate: drop the declining arm and the ordering assertions fail by
+    /// name; move it below the docked rows and the first one does.
+    #[test]
+    fn a_hover_inside_a_float_arms_no_peek_for_the_row_beneath() {
+        let rows = runtime_fn_body("    fn row_under(");
+        let own = rows
+            .find("Some(PointerTarget::Float(id, float::FloatPart::Row(index)))")
+            .expect("a window's own tree row is that window's row");
+        let declined = rows
+            .find("Some(PointerTarget::Float(..)) => None,")
+            .expect("and every other part of that window is no row at all");
+        let docked = rows
+            .find("Some(PointerTarget::Chrome(")
+            .expect("the docked columns answer after the windows");
+        assert!(
+            own < declined && declined < docked,
+            "the window's own row first, then its refusal, and only then the \
+             chrome it is standing on"
+        );
+        let cell = rows
+            .find("self.terminal_reference_cell()")
+            .expect("a printed reference is the last row this question has");
+        assert!(
+            declined < cell,
+            "a reference printed under a window is not under the pointer either"
+        );
+        let glancing = runtime_fn_body("    fn glancing_row_at(");
+        assert!(
+            glancing.contains("self.row_under(position)?"),
+            "and the glance's clock is armed from this one answer, so `None` \
+             here is both `no row lights` and `the card already up is retired`"
+        );
+    }
+
+    /// RED (the same report, the other side of it) — **a window's own rows still
+    /// hover, and still peek.**
+    ///
+    /// The fix must not be "a float swallows the pointer": a floating tree is a
+    /// list you read with the mouse, and its rows have answered a resting hand
+    /// with a glance since P150. What the window claims it also answers for.
+    ///
+    /// Red gate: have the router return `None` for a claimed point instead of
+    /// the part, and the first two assertions fail by name.
+    #[test]
+    fn a_hover_over_a_floating_trees_row_is_that_rows_hover() {
+        let router = runtime_fn_body(router_signature().as_str());
+        assert!(
+            router.contains("Some(PointerTarget::Float(id, part))"),
+            "the router carries the part the window answered with, rather than \
+             the bare fact that something is in the way"
+        );
+        let rows = runtime_fn_body("    fn row_under(");
+        assert!(
+            rows.contains("Some((RowHost::Float(id), index))"),
+            "so a row of a floating tree is still that float's row"
+        );
+        let peek = runtime_fn_body("    fn peek_row(");
+        assert!(
+            peek.contains("RowHost::Column(_) | RowHost::Float(_) =>"),
+            "and the glance card resolves it on either host, exactly as it did"
+        );
+    }
+
+    /// RED (the same report) — **the pane a window is standing on is not the
+    /// hovered pane.**
+    ///
+    /// `.pane:hover` is asked separately from the chrome target, against the
+    /// seat layout, because over a terminal's body the chrome answer is `None`
+    /// and that is most of a pane. The seat layout is the *docked* geometry and
+    /// knows nothing about the windows drawn over it — so a pane a float was
+    /// covering went on wearing the hover, and with it the four head controls
+    /// that are only drawn while the hand is inside that pane.
+    ///
+    /// Red gate: drop the float subtraction and the first assertion fails by
+    /// name; drop the panel's and the second does.
+    #[test]
+    fn the_pane_under_a_float_is_not_the_hovered_pane() {
+        let hover = runtime_fn_body("    fn update_chrome_hover(");
+        let pane = hover
+            .find("seats::pane_at(")
+            .expect("`.pane:hover` is resolved against the seat layout");
+        assert!(
+            hover[..pane].contains("!matches!(target, Some(PointerTarget::Float(..)))"),
+            "the window's claim is subtracted from `.pane:hover` too, because \
+             the seat layout cannot subtract it for itself"
+        );
+        assert!(
+            hover[..pane].contains("!self.panel_covers(position)"),
+            "beside the open rail's own subtraction and not instead of it"
+        );
+    }
+
+    /// RED (the same report, the root of it) — **the press and the hover ask one
+    /// router.**
+    ///
+    /// This is the finding rather than the symptom. `b1cf054` put the rule at a
+    /// caller, so it held for the gesture that went through that caller and for
+    /// no other; the hover, the `.pane:hover` question and every "is the pointer
+    /// on *that* button" in this file kept reading a ladder that has never heard
+    /// of a floating window. The rule now lives in `pointer_target_at`, and the
+    /// only places left that ask a float about a point are the float's own
+    /// gestures — which is what this asserts, by name, so that the next door
+    /// onto this question cannot be opened quietly.
+    ///
+    /// Red gate: call `float_hit_at` from anywhere else, or the ladder from
+    /// anywhere but the router, and this names the place.
+    #[test]
+    fn the_press_and_the_hover_ask_one_router() {
+        const SOURCE: &str = include_str!("main.rs");
+        // Assembled rather than written out, for this family's stated reason: a
+        // literal spelled in full here is itself a line of `main.rs`, so the
+        // scan would find its own needle.
+        let needle = ["self.float_hit_at", "("].concat();
+        let mut arms: Vec<&str> = Vec::new();
+        for (at, _) in SOURCE.match_indices(needle.as_str()) {
+            let opened = "\n    fn ";
+            let start = SOURCE[..at]
+                .rfind(opened)
+                .expect("every call stands inside a method of this file");
+            let name = &SOURCE[start + opened.len()..];
+            let name = &name[..name
+                .find('(')
+                .expect("a method's name ends at its arguments")];
+            if !arms.contains(&name) {
+                arms.push(name);
+            }
+        }
+        arms.sort_unstable();
+        assert_eq!(
+            arms,
+            [
+                "close_hover_floats_except",
+                "drive_float_hover",
+                "mouse_wheel",
+                "pointer_target_at",
+                "press_float",
+                "preview_open_pill_at",
+                "scroll_float_git_page",
+                "scroll_float_tree",
+            ],
+            "a float is asked about a pointer *target* in one place — the \
+             router — and everywhere else only about its own gestures: which \
+             window the peek is, the window's own hover, its press, its wheel, \
+             the two scrollers that move rows under a still hand, and its rail's \
+             own pill, which names a part no `ChromeTarget` could stand for"
+        );
+        let ladder = ladder_call();
+        assert_eq!(
+            SOURCE.matches(ladder.as_str()).count(),
+            1,
+            "and the docked ladder is reached through the router and nowhere else"
+        );
+        assert!(
+            runtime_fn_body(router_signature().as_str()).contains(ladder.as_str()),
+            "which is the router"
         );
     }
 

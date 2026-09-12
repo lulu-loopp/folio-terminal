@@ -131,6 +131,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Moving the pointer over a floating window no longer highlights, or pops the
+  preview card of, the row hidden underneath it.** A preview window standing
+  over a files column was solid to look at and see-through to the mouse: resting
+  the pointer on the window's own text lit up whichever row of the column was
+  behind it, and a moment later raised that row's preview card on top of the
+  window. The window now takes the pointer over its whole face, exactly as it
+  takes a click — nothing behind it lights up, nothing behind it opens a card,
+  and the pane it is covering no longer shows the buttons a pane shows when the
+  pointer is inside it. The window's own rows go on lighting up and go on
+  showing their cards.
 - **Typing with an input method into a Markdown page shows the letters being
   composed.** Typing Chinese into a `.md` file put the candidate list under the
   caret and drew nothing at all between them: the reading you were part-way
