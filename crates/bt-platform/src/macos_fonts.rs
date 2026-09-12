@@ -199,6 +199,19 @@ mod tests {
     #[test]
     fn monospace_families_are_real_and_sorted() {
         let families = monospace_font_families();
+        // **The list itself, for a reader running `-- --nocapture`.** Everything
+        // below is a property rather than a name, on purpose — but the one
+        // question somebody porting this actually asks is *what did the machine
+        // say*, and an assertion message only answers it when the test fails.
+        println!(
+            "{} monospaced families; the first ten: {:?}",
+            families.len(),
+            families
+                .iter()
+                .take(10)
+                .map(|family| family.name.as_str())
+                .collect::<Vec<_>>()
+        );
         assert!(
             families.iter().any(|family| family
                 .name
