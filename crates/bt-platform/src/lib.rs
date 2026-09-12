@@ -2690,8 +2690,19 @@ pub mod video;
 #[cfg(windows)]
 pub mod http;
 
-/// The same one `GET`, before `NSURLSession` (M4-10).
-#[cfg(not(windows))]
+/// **The same one `GET`, over `NSURLSession`** (M4-10, DESIGN §13.27).
+///
+/// A third arm rather than a second, because the two real ones are two stacks
+/// and the third is neither: a Linux build still has no HTTP at all, and
+/// `http_portable.rs` is what says so honestly. The contract the three keep is
+/// one signature and one set of refusals — `update_check_transport_tests`
+/// compares the files as text, because no compiler on one machine can.
+#[cfg(target_os = "macos")]
+#[path = "macos_http.rs"]
+pub mod http;
+
+/// The same one `GET`, on a platform with neither stack.
+#[cfg(all(not(windows), not(target_os = "macos")))]
 #[path = "http_portable.rs"]
 pub mod http;
 
@@ -12117,6 +12128,215 @@ mod macos_process_door_tests {
         assert!(
             !door_body("reveal_in_explorer").contains("PROGRAM_REFUSED"),
             "the reveal refuses programs, so nobody can be shown where one is"
+        );
+    }
+}
+
+/// **The update check's transport, held to one contract across three arms**
+/// (M4-10, DESIGN §13.27).
+///
+/// `bt_app::update::GitHubReleases::latest_tag` names [`http::https_get`] with
+/// no `cfg` at all — that is the point of M4-10, and it is what took `update.rs`
+/// off `only_the_named_files_decide_what_platform_this_is`' list. The price of
+/// that is that **three files have to agree about one signature and one set of
+/// refusals, and no compiler on one machine can check more than one of them**:
+/// a Windows box compiles `http.rs`, a Mac compiles `macos_http.rs`, and
+/// `http_portable.rs` is the arm neither of them builds.
+///
+/// So these read the three as text, which is the same instrument
+/// `macos_process_door_tests` above uses on the five process doors and for the
+/// same reason. They run on every platform.
+#[cfg(test)]
+mod update_check_transport_tests {
+    /// The three arms' own text.
+    const WINDOWS: &str = include_str!("http.rs");
+    const MACOS: &str = include_str!("macos_http.rs");
+    const PORTABLE: &str = include_str!("http_portable.rs");
+    const WHOLE_FILE: &str = include_str!("lib.rs");
+
+    /// **This file, up to where these pins begin** — a pin that searched the
+    /// whole file would find its own assertion.
+    fn above_the_pins() -> &'static str {
+        let at = WHOLE_FILE
+            .find("\nmod update_check_transport_tests {")
+            .expect("these pins are in this file");
+        &WHOLE_FILE[..at]
+    }
+
+    /// The one door's signature, from `pub fn` to the brace, as one line.
+    fn signature(source: &str) -> String {
+        let at = source
+            .find("pub fn https_get(")
+            .expect("every arm defines the door");
+        let rest = &source[at..];
+        let end = rest
+            .find(" {")
+            .expect("a function signature ends at its brace");
+        rest[..end].split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// **The code half of a file**, so that a sentence quoted in a header — and
+    /// `macos_http.rs` quotes all four of them in a table — cannot stand in for
+    /// one the program actually says.
+    fn code_only(source: &str) -> String {
+        source
+            .lines()
+            .map(|line| line.find("//").map_or(line, |at| &line[..at]))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The request struct's fields, in declaration order, without their prose.
+    fn fields(source: &str) -> Vec<String> {
+        const DECLARATION: &str = "pub struct HttpsGet<'a> {";
+        let at = source
+            .find(DECLARATION)
+            .expect("every arm describes the request");
+        // Past the declaration line, which is itself a `pub` and is not a
+        // field.
+        let rest = &source[at + DECLARATION.len()..];
+        let end = rest.find("\n}").expect("a struct ends at column zero");
+        rest[..end]
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("pub "))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// RED — **one door, spelled the same way in all three arms.**
+    ///
+    /// This is the claim `bt-app` rests on: it names the function without a
+    /// `cfg`, so an arm that took an extra argument or widened a return type
+    /// would compile on the machine it was written on and fail on the other
+    /// two — in `bt-app`, rather than in the crate that changed.
+    ///
+    /// MUTATION: give the macOS arm a `&mut HttpsGet`, or let it answer
+    /// `Result<Vec<u8>, String>`, and this names it.
+    #[test]
+    fn the_three_arms_declare_one_door() {
+        let windows = signature(WINDOWS);
+        assert_eq!(windows, signature(MACOS), "the macOS arm is a second door");
+        assert_eq!(
+            windows,
+            signature(PORTABLE),
+            "the portable arm is a second door"
+        );
+    }
+
+    /// RED — **one request, described with the same six fields in the same
+    /// order.**
+    ///
+    /// The fields are the whole of what a caller says, and four of the six are
+    /// strings and numbers of the same shape: an arm that reordered `host` and
+    /// `path`, or took `budget` in milliseconds, would be a compiling program
+    /// that asks the wrong server or waits the wrong length of time.
+    ///
+    /// MUTATION: drop `cap` from any arm, or change a `Duration` to a `u64`.
+    #[test]
+    fn the_three_arms_describe_one_request() {
+        let windows = fields(WINDOWS);
+        assert_eq!(windows.len(), 6, "{windows:#?}");
+        assert_eq!(
+            windows,
+            fields(MACOS),
+            "the macOS arm asks for other things"
+        );
+        assert_eq!(
+            windows,
+            fields(PORTABLE),
+            "the portable arm asks for other things"
+        );
+    }
+
+    /// RED — **the two arms that really fetch refuse in the same words.**
+    ///
+    /// Four of the refusals are statements about the *answer* rather than about
+    /// the stack that fetched it — a status, a length, a deadline, a body that
+    /// is not text — so they are the same sentence on both machines or the
+    /// product has two behaviours wearing one name. The rest deliberately name
+    /// their stack (`WinHttpSendRequest: …` against `NSURLSession: …`), which
+    /// is a log line and not a contract.
+    ///
+    /// MUTATION: rephrase any one of the four in either file.
+    #[test]
+    fn the_two_real_arms_refuse_in_the_same_words() {
+        let windows = code_only(WINDOWS);
+        let macos = code_only(MACOS);
+        for sentence in [
+            "the server answered {status}",
+            "the body is longer than {} bytes",
+            "the body did not arrive inside its budget",
+            "the body is not text",
+        ] {
+            assert!(
+                windows.contains(sentence),
+                "the Windows arm no longer says `{sentence}`"
+            );
+            assert!(
+                macos.contains(sentence),
+                "the macOS arm no longer says `{sentence}`"
+            );
+        }
+    }
+
+    /// RED — **the macOS arm composes `https` and nothing else, and proves it
+    /// after composing.**
+    ///
+    /// The Windows arm cannot be handed a scheme — `host` and `path` go to two
+    /// different WinHTTP calls and `WINHTTP_FLAG_SECURE` is the whole of the
+    /// TLS decision — but the macOS arm has to build a URL string, and a
+    /// `host` carrying a scheme of its own is the way `http://` would reach the
+    /// wire. Two lines stop it: the literal that is composed, and the
+    /// parse-back that checks what the system read out of it.
+    ///
+    /// MUTATION: change the composed literal to `{host}{path}` and let the
+    /// caller supply the scheme, or delete the scheme check, and this names it.
+    #[test]
+    fn the_macos_arm_can_only_compose_an_https_address() {
+        assert!(
+            MACOS.contains("format!(\"https://{host}{path}\")"),
+            "the one address this arm builds is no longer an https one"
+        );
+        assert!(
+            !MACOS.contains("http://{"),
+            "something in this arm now composes a plaintext address"
+        );
+        assert!(
+            MACOS.contains("if scheme.as_deref() != Some(\"https\")"),
+            "the composed address is no longer asked what scheme it parsed as"
+        );
+    }
+
+    /// RED — **three arms, one module name, and each gate names the file it
+    /// means.**
+    ///
+    /// The `cfg` triple is the only place in the workspace that decides which
+    /// HTTP stack a build has, and the failure it guards against is quiet: a
+    /// macOS arm that was added without narrowing the portable gate would give
+    /// a Mac two `pub mod http` and no build at all, while a Mac that kept the
+    /// portable arm would compile, ship, and answer *could not check* forever.
+    ///
+    /// MUTATION: widen the last gate back to `#[cfg(not(windows))]`.
+    #[test]
+    fn each_platform_takes_the_http_arm_that_is_its_own() {
+        let root = above_the_pins();
+        assert!(
+            root.contains("#[cfg(windows)]\npub mod http;"),
+            "Windows no longer takes WinHTTP"
+        );
+        assert!(
+            root.contains(
+                "#[cfg(target_os = \"macos\")]\n#[path = \"macos_http.rs\"]\npub mod http;"
+            ),
+            "macOS no longer takes NSURLSession"
+        );
+        assert!(
+            root.contains(
+                "#[cfg(all(not(windows), not(target_os = \"macos\")))]\n\
+                 #[path = \"http_portable.rs\"]\npub mod http;"
+            ),
+            "the portable arm is still standing in for a platform that has a stack"
         );
     }
 }

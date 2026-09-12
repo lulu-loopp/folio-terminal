@@ -7060,7 +7060,7 @@ BT_DPI stage=resized              winit_scale=2   win32_dpi=192 authoritative_sc
 
 除了包的数量，还有两条更重要的：**代理和证书是机器自己的答案**。`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` 会读本机的静态代理、PAC 与 WPAD，证书走系统 store、吊销走系统策略——一个自带 root store 的 Rust 客户端等于对「这个人信任谁」给出第二个、而且更陈旧的意见，在一台被管的笔记本上还会以「在写代码的人那台机器上看起来是对的」这种最坏的分布失败。
 
-`crates/bt-platform/src/http.rs` 是这个 crate 的**第五道 unsafe 边界**(前四道：Win32 给窗口用、WebView2、Win32 对着本进程、命名管道)，也是全产品**唯一一个本进程自己开的 socket**。它刻意**不是一个客户端**：没有重定向、没有 keep-alive、没有 POST、没有请求体、没有调用方能指定的 header、没有 `http://`。一个函数，长成产品实际要发的那一次调用的形状。
+`crates/bt-platform/src/http.rs` 是这个 crate 的**第五道 unsafe 边界**(前四道：Win32 给窗口用、WebView2、Win32 对着本进程、命名管道)，也是全产品**唯一一个本进程自己开的 socket**。它刻意**不是一个客户端**：没有 keep-alive、没有 POST、没有请求体、没有调用方能指定的 header、没有 `http://`。一个函数，长成产品实际要发的那一次调用的形状。(**这里原本还写着「没有重定向」，那句话不准，M4-10 查清后已改**：这个模块自己不写重定向代码，但 WinHTTP 默认就跟——最多十跳，且 `https` 转 `http` 的那一跳不跟，`30x` 直接当响应交回来。默认值就是这扇门要的策略，所以两个选项一个都不设；macOS 那一臂是照着这条默认值写的，见 §13.27 ④。)
 
 **时限是两层的。** WinHTTP 的四个超时是**按阶段**的(解析/连接/发送/接收各 5s)，也就是说它们**合起来不构成一个上界**——一个一字节一字节滴的响应永远待在接收超时以内。所以读循环自己带一个 15s 的 deadline，那个数才是调用方能拿去推理的数。
 
@@ -8492,5 +8492,177 @@ they are **withdrawn** in full screen is macOS's own behaviour and not this
 ticket's: the system takes the buttons away until the pointer reaches the top
 edge. The floor row is the strip's own panel colour at every x sampled inside
 the tab run, which is "no flare and no fusing seam" stated as a pixel.
+
+*(本节英文,待中文文案改写。)*
+### 13.27 M4-10: 更新检查走 NSURLSession,原地换包在 mac 上变成「打开发布页」(`crates/bt-platform/src/macos_http.rs`、`crates/bt-platform/src/{lib,http_portable}.rs`、`crates/bt-platform/Cargo.toml`、`crates/bt-app/src/{update,main}.rs`)
+
+**① The half of this ticket that was already true, and saying so is the finding.**
+§M4 defers in-place self-update out of 0.4 and rules that it "becomes *open the
+release page*" on a Mac. Read against the code, that ruling costs this product
+**nothing**, because the swap it replaces was never built: `update.rs`'s own
+header has said "Downloads nothing. There is no installer, no replacement, no
+restart" since §7.51 landed, and the one press the settings row offers is
+`Text::OpenReleasesPage` → `settings::releases_page_requested` →
+`hand_url_to_the_browser(update::RELEASES_PAGE)` → `bt_platform::shell_execute`,
+which is one of the five verbs M2-2 already answers with `-[NSWorkspace
+openURL:]`. So a Mac was going to open the release page from that row the day
+M2-2 merged; no `_mac` key, no schema change, no second behaviour to choose
+between, and the once-a-day rule and the row's four states are untouched. **The
+list in `main.rs` said otherwise and was wrong**: `update.rs` was on
+`FILES_THAT_MAY_NAME_A_PLATFORM` with the reason "the in-place swap, which off
+Windows becomes *open the release page*", and the arms it was actually on the
+list for were `latest_tag`'s — WinHTTP against `Err("this build has no HTTP
+stack")`, a question about a *transport*. That is what this ticket is, and
+everything below is one layer down from the row.
+
+**② The stack is `NSURLSession`, and it is Foundation, so it costs no package.**
+The Windows arm's header gives three reasons for reaching for the operating
+system's HTTP stack rather than a Rust client, and all three survive the
+crossing: it adds no package (a blocking Rust client is roughly forty once its
+TLS stack and its certificate store are counted, and every one of them lands in
+`THIRD-PARTY-NOTICES.md` and in the audit surface of a terminal that otherwise
+reaches the network exactly never); it is the machine's own configuration —
+proxy including PAC and WPAD, the certificate store, revocation, ATS, and
+whatever an MDM profile put there; and its failure mode is a `String` to throw
+away. What M4-10 adds to `Cargo.toml` is five `objc2-foundation` class features
+(`NSURLSession`, `NSURLRequest`, `NSURLResponse`, `NSData`, `NSOperation`) and
+that crate's own `block2` feature. **No package**, which is §8's bar and the same
+door `Win32_Networking_WinHttp` came through on the other platform. Stated
+exactly, because it is not quite the zero the Windows ticket could claim:
+`Cargo.lock` gains **one line** — `block2 0.6.2` appears in
+`objc2-foundation`'s dependency list, because that feature is now on — and
+`block2` was already in the lock file and already in `THIRD-PARTY-NOTICES.md`,
+which therefore does not move at all.
+
+**③ An ephemeral configuration, because the shared session is three stores this
+request must not touch.** `+[NSURLSession sharedSession]` is the obvious call and
+it is the wrong one twice over. It uses the shared `NSURLCache`, the shared
+`NSHTTPCookieStorage` and the shared `NSURLCredentialStorage`, each of which
+persists under the container — so one update check would both read from and
+write to process-wide state that outlives it, which is the exact opposite of
+"carries nothing about the machine and leaves nothing behind". And
+`-[NSURLSession configuration]` answers a *copy*, so the shared session cannot be
+given the two timeouts this call is bounded by; a door whose deadline cannot be
+set is not this door.
+`+[NSURLSessionConfiguration ephemeralSessionConfiguration]` is Apple's own name
+for "no persistent storage for caches, cookies, or credentials", the session is
+`invalidateAndCancel`'d before the function returns, and `HTTPShouldSetCookies`
+is turned off on top of that — belt for the ephemeral session's braces.
+
+**④ A delegate and not `dataTaskWithRequest:completionHandler:`, because two of
+the four promises are decisions taken mid-transfer.** The convenience method
+hands the body back whole, and Apple documents that supplying it turns the
+response and data delegate callbacks *off* — so it is one or the other, and this
+is the other.
+
+* **The cap.** `HttpsGet::cap` is a refusal and not a truncation: half a JSON
+  document is not a smaller answer, it is a different one. A refusal that arrives
+  after the megabyte has already been read is a refusal that did not do its job,
+  so the check is in `URLSession:dataTask:didReceiveData:`, before the chunk is
+  kept, and it cancels the task — which is exactly where the Windows arm's
+  `body.len() + want > request.cap` sits, one `WinHttpReadData` at a time.
+* **The redirect policy.** This is the one place the two stacks disagree by
+  default, and it is worth the paragraph. WinHTTP follows redirects
+  automatically, up to `WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS` (ten), and
+  refuses exactly one kind:
+  `WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP`, which is the default.
+  A redirect it will not follow is not an error — the `30x` is handed to the
+  caller as the response, `WinHttpQueryHeaders` reports it, and the arm answers
+  `the server answered 302`. `NSURLSession` also follows redirects, **and follows
+  the downgrade**, unless a task delegate says otherwise. So
+  `URLSession:task:willPerformHTTPRedirection:newRequest:completionHandler:` is
+  implemented, it passes the new request back when its scheme is `https` and the
+  count is inside ten, and it passes `nil` otherwise — and `nil` there means the
+  loading system stops and completes the task with the redirect response, which
+  is the same sentence out of the same state. The count is kept here rather than
+  left to Foundation because Foundation's own limit is twenty; ten is what the
+  other arm does.
+
+**⑤ The deadline is the Windows arm's, restated in this platform's three
+places.** `timeoutIntervalForRequest` is the per-response idle timeout and takes
+`phase_timeout`, which is what WinHTTP's four *phase* timeouts are;
+`timeoutIntervalForResource` takes `budget`, which is what the read loop's own
+deadline is over there; and the calling thread waits `budget + phase_timeout`,
+because the Windows loop tests its budget *before* a read and may therefore
+overshoot by one phase. "Nothing here outlives it by more than one phase timeout"
+is one sentence that is now true on both machines.
+
+**A `Mutex` and a `Condvar`, not a `dispatch_semaphore`.** The delegate is
+accumulating a `Vec<u8>` this thread reads, and carrying the status and the
+refusal across the same boundary, so a lock is there whatever else is; a
+semaphore beside it would be a second primitive saying the same thing, and
+`Condvar::wait_timeout` already carries the deadline. (`dispatch2` is in
+`Cargo.lock`, so this was a choice about shape and not about packages.) The call
+is synchronous on the caller's own thread — `update::begin`'s background-band
+thread, the one that is *supposed* to block — and the delegate runs on the serial
+queue `NSURLSession` makes when it is handed no queue, so the two never share a
+thread and there is nothing to deadlock. `invalidateAndCancel` runs on every
+path out, because a session with a delegate retains that delegate until it is
+invalidated and a task this thread gave up on is a task that must stop.
+
+**⑥ HTTPS-only is a rule about construction here, not a filter.** The Windows arm
+*cannot* be handed a scheme: `host` goes to `WinHttpConnect`, `path` goes to
+`WinHttpOpenRequest`, and `WINHTTP_FLAG_SECURE` is the whole of the TLS decision.
+This arm has to compose a string, and composition is where a scheme could be
+smuggled in — a `host` of `http://elsewhere` becomes `https://http://elsewhere…`,
+which a parser may well read as a host of `http`. So the composed URL is parsed
+back and asked two questions: **is its scheme `https`**, and **is its host the
+host that was asked for**. That is one general rule rather than a list of
+forbidden characters, and the same line refuses a scheme, a credential, a port
+and a second authority. It answers before a socket exists, which is the point: a
+request refused *after* it is sent has already put the agent and the path on a
+plaintext channel.
+
+**⑦ One door, three arms, and no compiler that can see more than one of them.**
+`http` is now a three-way module — `http.rs` on Windows, `macos_http.rs` on
+macOS, `http_portable.rs` on everything else, which is the Linux build and not a
+product. `bt-app` names `https_get` with no `cfg` at all, so the three have to
+agree about one signature, six fields in one order, and one set of refusals; and
+no machine in this workspace can compile more than one of them.
+`update_check_transport_tests` in `lib.rs` therefore reads all three as *text* —
+the instrument `macos_process_door_tests` already uses on the five process doors
+— and pins five things: the signature is one line in all three, the request's six
+fields are the same six in the same order, the two real arms carry the four
+refusals that are statements about the *answer* word for word (`the server
+answered {status}`, `the body is longer than {} bytes`, `the body did not arrive
+inside its budget`, `the body is not text` — compared against the *code* half of
+each file, because `macos_http.rs` also quotes all four in a table), the macOS
+arm composes `https://{host}{path}` and asks the parse what scheme it got, and
+each of the three `cfg`s names the file it means. The refusals that name their
+own stack are deliberately *not* pinned: `WinHttpSendRequest: {error}` against
+`NSURLSession: {what Foundation called it}` is a log line, and `update.rs` turns
+every `Err` into the same silence anyway.
+
+**⑧ `update.rs` left the cfg list, which is the second file ever to do so.**
+`GitHubReleases::latest_tag` is one arm again, so the file no longer asks the
+compiler what machine it is on, so
+`only_the_named_files_decide_what_platform_this_is`' **second** direction — a
+name on the list that has stopped naming a platform — goes red until the list
+loses it. Eleven files, and the reason the list is worth its second direction is
+in this entry's ①: the comment beside `update.rs` described a feature that did
+not exist, and a one-way list would have kept that comment for as long as anybody
+cared to read it. The claim is pinned from both ends now: that gate from
+`main.rs`, and `the_check_asks_one_stack_on_every_platform` from inside
+`update.rs`, which refuses a platform word on any `cfg` line of that file and
+names the one call to `bt_platform::http::https_get`.
+
+**⑨ What acceptance ⑦ costs, and the one case that needs the network.** §M4's
+line is "the update check reports the current release from a pane-visible
+settings row", and the transport is the whole of what stood between a Mac and it.
+`macos_http.rs`'s own suite is six cases. **Two are answered without a packet** —
+a port written into the host, five shapes of smuggled scheme, and a path that
+does not start with a slash, all refused by ⑥ in under a second. **One needs
+only the loopback**: nothing listens on `127.0.0.1:443`, which is the connection
+refusal an offline machine really has and the one the row's *could not check*
+state is for, and the case asserts it arrives inside the deadline rather than at
+it. **Three really ask `api.github.com`** — the release list, the cap against
+that list with `cap: 64`, and the `404` GitHub answers for a repository that is
+not there, which is the cheapest real non-`200` there is. Those three are
+ungated, because a transport that is only ever asked questions it can
+answer offline has not been shown to do the thing the acceptance line says — the
+certificate store, the proxy configuration and the ATS policy are all only
+exercised by a real request. The cost is stated rather than hidden: `cargo test
+-p bt-platform` on a macOS machine with no network has three red cases, and they
+are red for the reason a reader would guess.
 
 *(本节英文,待中文文案改写。)*

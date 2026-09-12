@@ -1,16 +1,18 @@
-//! **One `GET`, before there is a stack to make it with** (M4-10).
+//! **One `GET`, on a platform with no stack to make it with** (M4-10).
 //!
-//! WinHTTP on Windows, `NSURLSession` on macOS, and the reason this is a
-//! platform door at all rather than a Rust HTTP client is written in the
-//! Windows arm's own header: what the operating system's stack buys is its TLS,
-//! its certificate store and its proxy configuration — including the PAC file a
-//! managed laptop is handed — rather than forty packages and a trust store of
-//! our own.
+//! WinHTTP on Windows (`http.rs`), `NSURLSession` on macOS (`macos_http.rs`),
+//! and the reason this is a platform door at all rather than a Rust HTTP client
+//! is written in the Windows arm's own header: what the operating system's
+//! stack buys is its TLS, its certificate store and its proxy configuration —
+//! including the PAC file a managed laptop is handed — rather than forty
+//! packages and a trust store of our own.
 //!
-//! `bt-app`'s one caller is the update check, and it already names this module
-//! only inside `#[cfg(windows)]` (`update.rs:376`, one of the eleven files
-//! §4.3 lists). The module exists here anyway so that the crate's shape does
-//! not depend on which arm a caller happens to be in, and M4-10 fills it.
+//! **This is now the third arm and not the unwritten one.** Since M4-10 the two
+//! platforms Folio ships on both answer this call; what is left here is the
+//! Linux build, which has neither stack and is not a product. `bt-app`'s one
+//! caller — the update check — names this module with no `cfg` at all, and the
+//! `Err` below is what turns into the settings row's own *could not check*
+//! state there.
 
 use std::time::Duration;
 

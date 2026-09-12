@@ -156134,6 +156134,17 @@ otes.md"
 /// design is that the application reads values and the platform crate reads
 /// machines.
 ///
+/// **`update.rs` left the list in M4-10**, the second file to leave and the
+/// clearest case of what the gate's second direction is worth. It was on it for
+/// one pair of arms — `GitHubReleases::latest_tag`, WinHTTP on one side and
+/// `Err("this build has no HTTP stack")` on the other — and its comment on this
+/// list said the arms were "the in-place swap, which off Windows becomes *open
+/// the release page*". **That comment described a thing that did not exist**:
+/// the settings row has only ever offered the release page, on every platform,
+/// and the `cfg` was about the transport rather than about the verb. Giving
+/// `bt_platform::http::https_get` a macOS arm removed the pair, and the file
+/// stopped naming a platform the same hour.
+///
 /// Two corrections to §4.3's own eleven, both measured rather than assumed, and
 /// both recorded in `docs/DESIGN.md`'s CI-gate record:
 ///
@@ -156154,7 +156165,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 12] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 11] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -156178,8 +156189,6 @@ mod platform_gate_tests {
         "psreadline.rs",
         // Which shells can be integrated with here.
         "shell_integration.rs",
-        // The in-place swap, which off Windows becomes "open the release page".
-        "update.rs",
         // WSL.
         "wsl.rs",
     ];
