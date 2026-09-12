@@ -120,7 +120,10 @@ check above; their switches are documented where they are read.
 ## Files Folio writes without being asked
 
 For completeness beside the list above, and because none of these needs a variable
-set:
+set. Where a path below is written `%APPDATA%\Folio\`, a macOS build reads `HOME`
+instead and keeps the same files under `~/Library/Application Support/Folio/`
+(`docs/DESIGN.md` §13.15); a process with neither variable set falls back to its
+temp directory.
 
 - `%APPDATA%\Folio\diagnostics.log` — `stdout` and `stderr` for a run that did not
   keep its console. Checked **once, at startup**: if it is already 4 MiB or larger

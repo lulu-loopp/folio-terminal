@@ -9,6 +9,7 @@
 //! startup.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
@@ -1153,10 +1154,86 @@ const PREVIOUS_STORAGE_NAME: &str = "BetterTerminal";
 /// The directory the product writes under, which is its name.
 const STORAGE_NAME: &str = "Folio";
 
-/// `%APPDATA%\Folio\` (§1.2). Falls back to the process temp directory when the
-/// environment has no `APPDATA` — the same reasoning as the panic log's: a
-/// diagnostic that cannot be written is worse than one written somewhere less
-/// convenient.
+/// Where this build keeps its files, and whether anything has to be carried
+/// there first.
+///
+/// Two fields rather than one path because the second question has a different
+/// answer on each platform and the first one does not carry it: a directory
+/// that exists is not evidence that a previous name ever did.
+#[derive(Debug, PartialEq, Eq)]
+struct StorageLocation {
+    /// The directory itself, with [`STORAGE_NAME`] already joined on.
+    directory: PathBuf,
+    /// The directory the same product wrote under before it was named, on the
+    /// one platform that has such a history. `None` is what keeps [`relocate`]
+    /// from being called at all.
+    previous: Option<PathBuf>,
+}
+
+/// **Which directory this platform keeps a program's files in**, as a decision
+/// rather than as a `cfg` — `bt-app` asks [`bt_platform::host_platform`] what
+/// machine this is, and `only_the_named_files_decide_what_platform_this_is`
+/// keeps that true of this file (see `docs/plans/port/macos-plan-2026-09-12.md`
+/// §4.3). The environment is handed in for the same reason the platform is: a
+/// process-wide variable changed from a test is changed for every other test
+/// running beside it, so the three arms are pinned by calling this with the
+/// values instead of with a machine.
+///
+/// - **Windows:** `%APPDATA%\Folio\` (§1.2), and `%APPDATA%\BetterTerminal\` is
+///   the name to carry over.
+/// - **macOS:** `~/Library/Application Support/Folio`, and **nothing to carry**
+///   — the `BetterTerminal` → `Folio` rename is a Windows-only history, because
+///   the product never shipped under the old name on this platform. A
+///   relocation offered here could only ever find a directory somebody else
+///   made, and moving that would be worse than ignoring it.
+/// - **Other Unix** (not a shipped platform): `$XDG_DATA_HOME`, or
+///   `~/.local/share` when it is unset, joined with `Folio`.
+///
+/// Each arm falls back to the process temp directory when the variable naming
+/// the home is unset — the panic log's reasoning, which the Windows arm has
+/// always used: a diagnostic that cannot be written is worse than one written
+/// somewhere less convenient.
+fn storage_location(
+    platform: bt_platform::HostPlatform,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> StorageLocation {
+    /// A home directory with the platform's data sub-path joined on, or the
+    /// process temp directory when the environment did not say where home is.
+    fn under(home: Option<OsString>, parts: &[&str]) -> PathBuf {
+        let Some(home) = home else {
+            return std::env::temp_dir();
+        };
+        let mut path = PathBuf::from(home);
+        path.extend(parts);
+        path
+    }
+    match platform {
+        bt_platform::HostPlatform::Windows => {
+            let appdata = under(env("APPDATA"), &[]);
+            StorageLocation {
+                directory: appdata.join(STORAGE_NAME),
+                previous: Some(appdata.join(PREVIOUS_STORAGE_NAME)),
+            }
+        }
+        bt_platform::HostPlatform::MacOs => StorageLocation {
+            directory: under(env("HOME"), &["Library", "Application Support"]).join(STORAGE_NAME),
+            previous: None,
+        },
+        bt_platform::HostPlatform::OtherUnix => {
+            let data_home = match env("XDG_DATA_HOME") {
+                Some(explicit) => PathBuf::from(explicit),
+                None => under(env("HOME"), &[".local", "share"]),
+            };
+            StorageLocation {
+                directory: data_home.join(STORAGE_NAME),
+                previous: None,
+            }
+        }
+    }
+}
+
+/// `%APPDATA%\Folio\` on Windows, `~/Library/Application Support/Folio` on
+/// macOS — [`storage_location`] holds the rule and the reasons.
 ///
 /// **Resolved once per process, and the move a rename owes the user happens on
 /// that first call.** Three callers ask for this directory — the session store,
@@ -1164,17 +1241,22 @@ const STORAGE_NAME: &str = "Folio";
 /// first is the one that pays for the relocation; the other two find it done.
 /// The alternative, a relocation stapled to `main`, would leave the answer
 /// depending on whether that line ran, which is exactly the kind of ordering a
-/// `OnceLock` exists to remove.
+/// `OnceLock` exists to remove. On a platform with no previous name there is
+/// nothing to pay for and the directory is the answer straight away.
 pub fn storage_dir() -> PathBuf {
     static DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
     DIRECTORY
         .get_or_init(|| {
-            let root = match std::env::var_os("APPDATA") {
-                Some(appdata) => PathBuf::from(appdata),
-                None => std::env::temp_dir(),
+            // A closure rather than `std::env::var_os` itself: the function item
+            // is generic over the key's type, and handing it over directly binds
+            // one lifetime where the parameter asks for any.
+            let location = storage_location(bt_platform::host_platform(), |name: &str| {
+                std::env::var_os(name)
+            });
+            let current = location.directory;
+            let Some(previous) = location.previous else {
+                return current;
             };
-            let current = root.join(STORAGE_NAME);
-            let previous = root.join(PREVIOUS_STORAGE_NAME);
             match relocate(&previous, &current) {
                 Relocation::Nothing | Relocation::AlreadyHere => current,
                 Relocation::Moved => {
@@ -1658,6 +1740,134 @@ mod tests {
 
         store.writer.close();
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An environment that answers only what it was handed, so a platform's arm
+    /// can be asked about a machine this test is not running on. The real
+    /// `std::env::var_os` is process-wide and a test that set it would be
+    /// setting it for every test running beside it.
+    fn machine(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
+        let known: HashMap<String, OsString> = pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), OsString::from(*value)))
+            .collect();
+        move |name: &str| known.get(name).cloned()
+    }
+
+    /// PIN — **Windows is `%APPDATA%\Folio`, and it is the one platform with a
+    /// name to carry** (M2-6).
+    ///
+    /// The dialect this product has shipped under since before it was named.
+    /// Both halves are pinned in one place because they are one sentence: the
+    /// directory, and the `BetterTerminal` beside it that a single startup owes
+    /// the reader.
+    ///
+    /// Red gate: give the macOS arm's shape to this one and the first assertion
+    /// names it; drop the old name from this arm and the second does, which is
+    /// every upgrading reader's files left behind.
+    #[test]
+    fn windows_is_appdata_folio_with_the_old_name_beside_it() {
+        let appdata = PathBuf::from(r"X:\Users\dev\AppData\Roaming");
+        let chosen = storage_location(
+            bt_platform::HostPlatform::Windows,
+            machine(&[("APPDATA", r"X:\Users\dev\AppData\Roaming")]),
+        );
+        assert_eq!(chosen.directory, appdata.join("Folio"));
+        assert_eq!(chosen.previous, Some(appdata.join("BetterTerminal")));
+    }
+
+    /// PIN — **no `APPDATA`, so the temp directory, and the old name follows it
+    /// there** (M2-6).
+    ///
+    /// The fallback is not a courtesy: a store that cannot resolve a directory
+    /// has nowhere to write the diagnostic that would say so. The relocation
+    /// still applies, because a previous build with the same broken environment
+    /// wrote to the same place.
+    #[test]
+    fn windows_without_appdata_falls_back_to_the_temp_directory() {
+        let chosen = storage_location(bt_platform::HostPlatform::Windows, machine(&[]));
+        assert_eq!(chosen.directory, std::env::temp_dir().join("Folio"));
+        assert_eq!(
+            chosen.previous,
+            Some(std::env::temp_dir().join("BetterTerminal"))
+        );
+    }
+
+    /// PIN — **macOS is `~/Library/Application Support/Folio`, and there is
+    /// nothing to relocate** (M2-6).
+    ///
+    /// The second assertion is the ruling, not an implementation detail: the
+    /// `BetterTerminal` → `Folio` rename is a Windows-only history, so a
+    /// `~/Library/Application Support/BetterTerminal` on a Mac was made by
+    /// somebody else and moving it would be a bug wearing a migration's clothes.
+    /// `None` is what stops `relocate` from ever being asked.
+    ///
+    /// Red gate: hand the macOS arm a previous name and the second assertion
+    /// names it.
+    #[test]
+    fn macos_is_the_application_support_directory_and_carries_nothing() {
+        let chosen = storage_location(
+            bt_platform::HostPlatform::MacOs,
+            machine(&[("HOME", "/Users/dev")]),
+        );
+        assert_eq!(
+            chosen.directory,
+            PathBuf::from("/Users/dev")
+                .join("Library")
+                .join("Application Support")
+                .join("Folio")
+        );
+        assert_eq!(chosen.previous, None);
+    }
+
+    /// PIN — **no `HOME`, so the temp directory, exactly as the Windows arm
+    /// answers a missing `APPDATA`** (M2-6).
+    ///
+    /// One fallback for both platforms, for one reason, and the test says so by
+    /// asking for the same path the Windows case above asks for.
+    #[test]
+    fn macos_without_home_falls_back_to_the_temp_directory() {
+        let chosen = storage_location(bt_platform::HostPlatform::MacOs, machine(&[]));
+        assert_eq!(chosen.directory, std::env::temp_dir().join("Folio"));
+        assert_eq!(chosen.previous, None);
+    }
+
+    /// PIN — **other Unix takes `$XDG_DATA_HOME` when it is set** (M2-6).
+    ///
+    /// Not a shipped platform; pinned so that the arm which exists because
+    /// `HostPlatform` has three variants says something true rather than
+    /// something Windows-shaped.
+    #[test]
+    fn other_unix_takes_xdg_data_home_when_it_is_set() {
+        let chosen = storage_location(
+            bt_platform::HostPlatform::OtherUnix,
+            machine(&[
+                ("XDG_DATA_HOME", "/home/dev/elsewhere"),
+                ("HOME", "/home/dev"),
+            ]),
+        );
+        assert_eq!(
+            chosen.directory,
+            PathBuf::from("/home/dev/elsewhere").join("Folio")
+        );
+        assert_eq!(chosen.previous, None);
+    }
+
+    /// PIN — **and `~/.local/share` when it is not** (M2-6).
+    #[test]
+    fn other_unix_falls_back_to_the_local_share_directory() {
+        let chosen = storage_location(
+            bt_platform::HostPlatform::OtherUnix,
+            machine(&[("HOME", "/home/dev")]),
+        );
+        assert_eq!(
+            chosen.directory,
+            PathBuf::from("/home/dev")
+                .join(".local")
+                .join("share")
+                .join("Folio")
+        );
+        assert_eq!(chosen.previous, None);
     }
 
     /// PIN — state one of three: nothing was ever written under the old name, so
