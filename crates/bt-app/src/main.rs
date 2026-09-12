@@ -33429,6 +33429,8 @@ fn create_tab_state(
     default_profile: usize,
     policy: SizePolicy,
     rail: seats::RailState,
+    // The other half of the stage this tab is born into — see [`solve_seats`].
+    chrome: bt_platform::PlatformChrome,
     formulas: FormulaSwitches,
     // Every terminal seat of the new tab is born holding the same capacity, for
     // the reason each is born obeying the same block switches.
@@ -33443,7 +33445,7 @@ fn create_tab_state(
     // rail is the same argument on the other axis: a tab born while the sidebar
     // is out gets the width the sidebar left, not the whole window's.
     let (seat_layout, seat_overflow, _, _) =
-        solve_seats(&seats, renderer, render_physical, policy, rail);
+        solve_seats(&seats, renderer, render_physical, policy, rail, chrome);
     // Captured before `seats` moves into the tab: the seat the tab's identity
     // shell draws into is the key its session is filed under.
     let terminal_seat_id = seats.identity();
@@ -36057,6 +36059,14 @@ impl Runtime<'_> {
         )
         .map_err(|error| anyhow!(error))
         .context("install self-drawn Win32 window frame")?;
+        // **This window's own chrome, read where it was measured** (M3-3;
+        // T-MAC-LIGHTS needs it one step earlier than M3-3 did). `install` is
+        // where the platform is asked what it still draws in this bar, and the
+        // tabs this constructor is about to build are solved against a stage
+        // whose top edge that answer decides — so it is read here, once, and
+        // handed down. Every reader after the window exists asks the window
+        // (`Runtime::platform_chrome`); there is no window to ask yet.
+        let platform_chrome = custom_window_frame.platform_chrome();
         let ime_system_caret = bt_platform::ImeSystemCaret::new(native);
         let math_context_menu = bt_platform::MathContextMenu::new(native)
             .map_err(|error| anyhow!(error))
@@ -36293,6 +36303,7 @@ impl Runtime<'_> {
                     focus: focus_mode,
                     ..rail
                 },
+                platform_chrome,
                 FormulaSwitches::from_settings(settings_store.loaded()),
                 scrollback_quota(settings_store.loaded().scrollback_lines),
                 settings_store.loaded().line_wrapping,
@@ -36333,6 +36344,7 @@ impl Runtime<'_> {
                 focus: focus_mode,
                 ..rail
             },
+            platform_chrome,
         );
         renderer.set_seat_viewport(terminal_seat);
         if trace_startup || trace_resize {
@@ -36678,6 +36690,14 @@ impl Runtime<'_> {
         )
         .map_err(|error| anyhow!(error))
         .context("install self-drawn Win32 window frame")?;
+        // **This window's own chrome, read where it was measured** (M3-3;
+        // T-MAC-LIGHTS needs it one step earlier than M3-3 did). `install` is
+        // where the platform is asked what it still draws in this bar, and the
+        // tabs this constructor is about to build are solved against a stage
+        // whose top edge that answer decides — so it is read here, once, and
+        // handed down. Every reader after the window exists asks the window
+        // (`Runtime::platform_chrome`); there is no window to ask yet.
+        let platform_chrome = custom_window_frame.platform_chrome();
         let ime_system_caret = bt_platform::ImeSystemCaret::new(native);
         let math_context_menu = bt_platform::MathContextMenu::new(native)
             .map_err(|error| anyhow!(error))
@@ -36908,6 +36928,7 @@ impl Runtime<'_> {
                 // shown yet.
                 SizePolicy::Lawful,
                 opening_rail,
+                platform_chrome,
                 FormulaSwitches::from_settings(app.settings_store.loaded()),
                 scrollback_quota(app.settings_store.loaded().scrollback_lines),
                 app.settings_store.loaded().line_wrapping,
@@ -36936,6 +36957,7 @@ impl Runtime<'_> {
             render_physical,
             SizePolicy::Lawful,
             opening_rail,
+            platform_chrome,
         );
         renderer.set_seat_viewport(terminal_seat);
         let maximized = placement.is_some_and(|placement| placement.maximized);
@@ -37116,6 +37138,15 @@ impl Runtime<'_> {
             self.request_revived_previews(index);
         }
         self.apply_window_min_inner_size()?;
+        // **The platform's own buttons, put on the band this window is opening
+        // with** (T-MAC-LIGHTS x T-MAC-PILL). `CustomWindowFrame::install` was
+        // handed Folio's own bar height, because that is the one number a frame
+        // knows before anything has measured the platform's; a window opening
+        // into a layout that wears the platform's band instead is corrected
+        // here — in the step both doors that open a window take, and before the
+        // window is on the glass, so no frame is ever drawn with the lights on
+        // the wrong axis.
+        self.follow_the_window_band()?;
         self.window.window.set_title(&self.display_title());
         self.refresh_chrome();
         Ok(())
@@ -37507,6 +37538,7 @@ impl Runtime<'_> {
             // column is up is born into a stage that starts a column-width
             // further in.
             self.rail_posture(),
+            self.platform_chrome(),
             FormulaSwitches::from_settings(self.app.settings_store.loaded()),
             scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
             self.app.settings_store.loaded().line_wrapping,
@@ -37819,6 +37851,7 @@ impl Runtime<'_> {
             self.window.size_policy,
             // The posture, for [`Self::resolve_seat_layout`]'s reason.
             self.rail_posture(),
+            self.platform_chrome(),
             FormulaSwitches::from_settings(self.app.settings_store.loaded()),
             scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
             self.app.settings_store.loaded().line_wrapping,
@@ -37988,6 +38021,7 @@ impl Runtime<'_> {
                 self.window.size_policy,
                 // The posture, for [`Self::resolve_seat_layout`]'s reason.
                 self.rail_posture(),
+                self.platform_chrome(),
                 FormulaSwitches::from_settings(self.app.settings_store.loaded()),
                 scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
                 self.app.settings_store.loaded().line_wrapping,
@@ -38158,6 +38192,7 @@ impl Runtime<'_> {
             // the stored preference is a solve told the mode is off — which is
             // the whole of "the column floated over the panes".
             self.rail_posture(),
+            self.platform_chrome(),
         );
         // **The one gate the type system cannot hold: the stage was solved against
         // the panel this window is actually wearing.**
@@ -38179,6 +38214,11 @@ impl Runtime<'_> {
                 seats::rail_inset_device_px(
                     self.rail_posture(),
                     seats::scale_ppm(self.window.renderer.metrics().dpi_milli().get()),
+                ),
+                seats::chrome_band_device_px(
+                    seats::scale_ppm(self.window.renderer.metrics().dpi_milli().get()),
+                    self.platform_chrome(),
+                    self.rail_posture(),
                 ),
             ),
             "the stage was laid out against a panel this window is not wearing"
@@ -42732,6 +42772,7 @@ impl Runtime<'_> {
                 seats::rail_geometry(
                     height as f32,
                     scale,
+                    self.platform_chrome(),
                     &trailers,
                     pinned,
                     self.window.rail_scroll,
@@ -84540,6 +84581,7 @@ impl Runtime<'_> {
             None => seats::hit_focus_rail(
                 height,
                 scale,
+                self.platform_chrome(),
                 &trailers,
                 self.strip_guests(),
                 self.window.rail_scroll,
@@ -84550,6 +84592,7 @@ impl Runtime<'_> {
             Some(seats::TabLayoutMode::Vertical) => seats::hit_rail_chrome(
                 height,
                 scale,
+                self.platform_chrome(),
                 &trailers,
                 pinned,
                 self.window.rail_scroll,
@@ -86180,11 +86223,15 @@ impl Runtime<'_> {
         seats::device_viewport(
             width,
             height,
-            scale_ppm,
             // The posture, because the solver is handed the posture: a rim
             // measured against the stored preference would aim its left-edge drop
             // zone at the pixels the card column is standing on.
             seats::rail_inset_device_px(self.rail_posture(), scale_ppm),
+            // The same bar the solver's viewport starts under, through the same
+            // helper and for [`seats::device_viewport`]'s own reason: a rim
+            // measured one row above where the seats begin is a top-edge drop
+            // zone aimed at the bar.
+            seats::chrome_band_device_px(scale_ppm, self.platform_chrome(), self.rail_posture()),
         )
     }
 
@@ -86887,11 +86934,12 @@ impl Runtime<'_> {
         // whatever the window's rail is currently keeping clear.
         let policy = self.window.size_policy;
         let rail = self.rail_posture();
+        let chrome = self.platform_chrome();
         let (from, into) = two_tabs_mut(&mut self.window.tabs, index, self.window.active_tab);
         let ejected =
             absorb_tab_into_layout(from, into, arrived, displaced.as_ref(), id, |seats| {
                 let (layout, overflow, _, _) =
-                    solve_seats(seats, renderer, render_physical, policy, rail);
+                    solve_seats(seats, renderer, render_physical, policy, rail, chrome);
                 (layout, overflow)
             });
         debug_assert!(
@@ -87053,6 +87101,7 @@ impl Runtime<'_> {
             self.default_profile(),
             self.window.size_policy,
             self.rail_posture(),
+            self.platform_chrome(),
             FormulaSwitches::from_settings(self.app.settings_store.loaded()),
             scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
             self.app.settings_store.loaded().line_wrapping,
@@ -87223,10 +87272,11 @@ impl Runtime<'_> {
         let renderer = &self.window.renderer;
         let policy = self.window.size_policy;
         let rail = self.rail_posture();
+        let chrome = self.platform_chrome();
         let (source, host) = two_tabs_mut(&mut self.window.tabs, from, into);
         let moved = pane_into_tab(source, host, leaf.seat, &arrival, Some(watching), |seats| {
             let (layout, overflow, _, _) =
-                solve_seats(seats, renderer, render_physical, policy, rail);
+                solve_seats(seats, renderer, render_physical, policy, rail, chrome);
             (layout, overflow)
         });
         let Some(moved) = moved else {
@@ -87338,6 +87388,7 @@ impl Runtime<'_> {
         let motion = self.app.motion;
         let policy = self.window.size_policy;
         let rail = self.rail_posture();
+        let chrome = self.platform_chrome();
         let torn = tear_pane_into_tab(
             &mut self.window.tabs[source],
             &metrics,
@@ -87347,7 +87398,7 @@ impl Runtime<'_> {
             motion,
             |seats| {
                 let (layout, overflow, _, _) =
-                    solve_seats(seats, renderer, render_physical, policy, rail);
+                    solve_seats(seats, renderer, render_physical, policy, rail, chrome);
                 (layout, overflow)
             },
         );
@@ -89996,6 +90047,46 @@ impl Runtime<'_> {
         }
     }
 
+    /// **Put the platform's own window buttons on the band this window wears**
+    /// (T-MAC-LIGHTS x T-MAC-PILL, the owner's rulings of 2026-09-12 read
+    /// together).
+    ///
+    /// The two rulings meet on one number. A window whose tab strip stands in
+    /// its bar wears Folio's 40 and the three lights are centred on it; every
+    /// layout that puts the tab list down the side wears a header of the
+    /// platform's own height instead, and centring the lights on *that* is
+    /// exactly where the platform had them. So there is no second rule for the
+    /// vertical layouts — there is one rule, and [`seats::window_band_px`] is
+    /// the number it is given.
+    ///
+    /// **A door and not an argument to `install`, because the band changes while
+    /// the window is open.** `Tab layout`, `Sidebar` and focus mode all move a
+    /// window between the two bars without relaunching it. So this is said three
+    /// times and in one voice: once in [`Self::dress_new_window`], before the
+    /// window is ever shown, and again after each of the two writes of the
+    /// posture ([`Self::set_rail_state`], [`Self::set_focus_mode`]). What a host
+    /// does about it is `bt-platform`'s to decide; one that draws nothing in
+    /// this bar answers `Ok(())`.
+    ///
+    /// **Read off the window and not off a caller's arguments**, and after the
+    /// write rather than before it: the band comes from [`Self::rail_posture`],
+    /// so the buttons follow the posture the stage is about to be solved with
+    /// and not the one it had.
+    ///
+    /// **Logical pixels**, which is the unit the frame speaks
+    /// ([`bt_platform::CustomFrameGeometry`]) and the unit AppKit places a
+    /// button in; `window_band_px` answers in the physical pixels the stage is
+    /// solved in, so the scale it was solved at is divided back out here.
+    fn follow_the_window_band(&self) -> Result<()> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let band = seats::window_band_px(scale, self.platform_chrome(), self.rail_posture());
+        self.window
+            .custom_window_frame
+            .set_window_band(band / scale)
+            .map_err(|reason| anyhow!(reason))
+            .context("place the platform's window buttons on this window's band")
+    }
+
     /// The focus column's live geometry — [`Self::rail_geometry_now`]'s opposite
     /// number, and `None` in exactly the case that one is `Some`.
     ///
@@ -90010,6 +90101,7 @@ impl Runtime<'_> {
         seats::focus_rail_geometry(
             height as f32,
             scale,
+            self.platform_chrome(),
             self.window.tabs.len(),
             self.strip_guests(),
             self.window.rail_scroll,
@@ -90550,6 +90642,11 @@ impl Runtime<'_> {
         // rail would enter focus mode looking at nothing; both geometries clamp,
         // but neither can invent the row you were on.
         self.window.rail_scroll = 0.0;
+        // The other half of the posture, and therefore the other route into the
+        // band — see [`Self::set_rail_state`]'s own line. Focus mode takes the
+        // strip out of the bar in *either* tab layout, which is precisely the
+        // case `RailState::strip_stands_in_the_bar` is false for.
+        self.follow_the_window_band()?;
         let mut settings = self.app.settings_store.loaded().clone();
         settings.focus_mode = on;
         let _ = self.app.settings_store.store(settings);
@@ -91572,6 +91669,7 @@ impl Runtime<'_> {
         seats::rail_geometry(
             height as f32,
             scale,
+            self.platform_chrome(),
             &trailers,
             pinned,
             self.window.rail_scroll,
@@ -91608,9 +91706,17 @@ impl Runtime<'_> {
             ..self.window.rail
         };
         let width = f64::from(target.width_logical_px()) * scale;
-        // The rail begins at the title bar's lower edge, so a pointer up in the
-        // caption run is not in the rail however far left it is.
-        let top = f64::from(bt_render::WINDOW_TITLE_BAR_LOGICAL_PX) * scale;
+        // The rail begins at the bar's lower edge, so a pointer up in the
+        // caption run is not in the rail however far left it is. **Asked of the
+        // panel rather than of the constant** (T-MAC-LIGHTS): a window whose
+        // platform draws its own buttons wears that platform's shorter band, and
+        // a trigger measured from Folio's 40 would leave the top of the parked
+        // rail refusing to open.
+        let top = f64::from(seats::window_band_px(
+            scale as f32,
+            self.platform_chrome(),
+            target,
+        ));
         // The peek is handed over as **the trigger it hangs from**, not as a
         // yes/no: only a peek hanging off a rail row is the rail's business, and
         // that is a question about identity that no boolean can carry. See
@@ -91719,6 +91825,11 @@ impl Runtime<'_> {
             );
         }
         self.window.rail = state;
+        // **The bar this window wears may have just changed, and the platform's
+        // own buttons stand in it** (T-MAC-LIGHTS x T-MAC-PILL). Ahead of the
+        // solve below, so the first frame drawn against the new band is drawn
+        // with the lights already on it.
+        self.follow_the_window_band()?;
         eprintln!(
             "BT_RAIL layout={:?} mode={:?} focus={} inset={}px",
             self.window.rail.layout,
@@ -110068,6 +110179,11 @@ fn solve_seats(
     render_physical: PhysicalSize<u32>,
     policy: SizePolicy,
     rail: seats::RailState,
+    // **And what the platform draws in this window's bar** (T-MAC-LIGHTS).
+    // Beside the rail and for its reason: the stage's top edge is as much a fact
+    // about the window as its left edge is, and a solve handed the wrong one
+    // lays the panes out under a bar this window does not have.
+    chrome: bt_platform::PlatformChrome,
 ) -> (
     SeatLayout,
     Option<seats::FitOverflow>,
@@ -110086,6 +110202,10 @@ fn solve_seats(
         // strip clear, so this number is constant while the panel slides and
         // the panes never reflow just because you went looking for a tab.
         seats::rail_inset_device_px(rail, scale_ppm),
+        // And the same thing on the other axis: the bar this window wears,
+        // through the one helper that converts it, so the row the seats begin on
+        // and the row the pointer enters the layout on are one number.
+        seats::chrome_band_device_px(scale_ppm, chrome, rail),
     );
     let (layout, overflow) = solve_tree(seats, viewport, &metrics, policy);
     // **The focused seat's body, which is what the renderer keeps this for.**
@@ -114874,7 +114994,13 @@ mod tests {
         let metrics = seats::seat_metrics(dpi_milli);
         // 1920x1200 physical at 2x — the very window the real-machine capture
         // was taken in, which is 960x560 of usable logical room.
-        let viewport = seats::logical_viewport(1920, 1200, seats::scale_ppm(dpi_milli), 0);
+        let viewport = seats::logical_viewport(
+            1920,
+            1200,
+            seats::scale_ppm(dpi_milli),
+            0,
+            seats::folio_band_device_px(seats::scale_ppm(dpi_milli)),
+        );
         let mut seats = seats::Seats::lone_terminal();
         let pinned = seats
             .add_preview(&metrics)
@@ -114929,6 +115055,7 @@ mod tests {
             1200,
             scale_ppm,
             seats::rail_inset_device_px(rail, scale_ppm),
+            seats::folio_band_device_px(scale_ppm),
         );
         let mut seats = seats::Seats::lone_terminal();
         let first = seats.identity();
@@ -118670,6 +118797,7 @@ mod tests {
         seats::focus_rail_geometry(
             height,
             scale,
+            seats::FOLIO_BAR,
             tabs,
             0,
             scroll,
@@ -127093,6 +127221,7 @@ mod tests {
         let rail = seats::rail_geometry(
             600.0,
             scale,
+            seats::FOLIO_BAR,
             &trailers,
             0,
             0.0,
@@ -127292,10 +127421,26 @@ mod tests {
         };
         let strip_state =
             rail_state_for(seats::TabLayoutMode::Horizontal, seats::RailMode::Expanded);
-        let column = seats::focus_rail_geometry(600.0, scale, trailers.len(), 0, 0.0, focus_state)
-            .expect("a focus-mode window draws its card column");
-        let rail = seats::rail_geometry(600.0, scale, &trailers, 0, 0.0, rail_state)
-            .expect("an expanded rail holding one tab is on screen");
+        let column = seats::focus_rail_geometry(
+            600.0,
+            scale,
+            seats::FOLIO_BAR,
+            trailers.len(),
+            0,
+            0.0,
+            focus_state,
+        )
+        .expect("a focus-mode window draws its card column");
+        let rail = seats::rail_geometry(
+            600.0,
+            scale,
+            seats::FOLIO_BAR,
+            &trailers,
+            0,
+            0.0,
+            rail_state,
+        )
+        .expect("an expanded rail holding one tab is on screen");
 
         // The bug, stated: focus mode over a vertical layout has a card column
         // and **no** ordinary rail, and the menu still has a button to hang off.
@@ -128391,8 +128536,16 @@ mod tests {
         };
         let trailers = vec![seats::TabTrailer::default(); 3];
         let title_run = |open: f32| {
-            let geometry = seats::rail_geometry(600.0, 1.0, &trailers, 0, 0.0, icon_rail(open))
-                .expect("an icon rail is on screen in a vertical layout");
+            let geometry = seats::rail_geometry(
+                600.0,
+                1.0,
+                seats::FOLIO_BAR,
+                &trailers,
+                0,
+                0.0,
+                icon_rail(open),
+            )
+            .expect("an icon rail is on screen in a vertical layout");
             let title = geometry.tabs[0].title;
             title[1] - title[0]
         };
@@ -129233,6 +129386,7 @@ mod tests {
             render_physical.height,
             seats::scale_ppm(dpi_milli),
             0,
+            seats::folio_band_device_px(seats::scale_ppm(dpi_milli)),
         );
         let layout = match seats.solve(viewport, &metrics, SizePolicy::Lawful) {
             Ok(layout) => layout,
@@ -129456,6 +129610,7 @@ mod tests {
             render_physical.height,
             seats::scale_ppm(dpi_milli),
             0,
+            seats::folio_band_device_px(seats::scale_ppm(dpi_milli)),
         );
         let layout = seats
             .solve(viewport, &metrics, SizePolicy::Lawful)
@@ -129566,7 +129721,13 @@ mod tests {
         let dpi_milli = 1_000_u32;
         let scale = dpi_milli as f32 / 1_000.0;
         let metrics = seats::seat_metrics(dpi_milli);
-        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(dpi_milli), 0);
+        let viewport = seats::logical_viewport(
+            1600,
+            900,
+            seats::scale_ppm(dpi_milli),
+            0,
+            seats::folio_band_device_px(seats::scale_ppm(dpi_milli)),
+        );
         let solve = |seats: &seats::Seats| {
             seats
                 .solve(viewport, &metrics, SizePolicy::Lawful)
@@ -131837,6 +131998,7 @@ mod tests {
         let rail = seats::rail_geometry(
             HEIGHT,
             1.0,
+            seats::FOLIO_BAR,
             &trailers,
             0,
             0.0,
@@ -131899,6 +132061,7 @@ mod tests {
         seats::focus_rail_geometry(
             618.0,
             1.0,
+            seats::FOLIO_BAR,
             tabs,
             0,
             0.0,
@@ -132627,7 +132790,13 @@ mod tests {
     /// extent would leave two of the three clauses of the counter-scale untested.
     fn split_window(leading: bool) -> (seats::Seats, SeatLayout, SeatLayout, SeatId, SeatId) {
         let metrics = seats::seat_metrics(1_000);
-        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000), 0);
+        let viewport = seats::logical_viewport(
+            1600,
+            900,
+            seats::scale_ppm(1_000),
+            0,
+            seats::folio_band_device_px(seats::scale_ppm(1_000)),
+        );
         let mut seats = seats::Seats::lone_terminal();
         let survivor = seats.identity();
         let before = seats
@@ -132765,7 +132934,13 @@ mod tests {
     fn a_pane_growing_out_of_a_closed_sibling_is_clipped_into_the_space_not_stretched_into_it() {
         let now = Instant::now();
         let metrics = seats::seat_metrics(1_000);
-        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000), 0);
+        let viewport = seats::logical_viewport(
+            1600,
+            900,
+            seats::scale_ppm(1_000),
+            0,
+            seats::folio_band_device_px(seats::scale_ppm(1_000)),
+        );
         let (mut seats, _, split, survivor, arriving) = split_window(true);
         let before = split;
         assert!(seats.close_seat(&metrics, arriving), "the left pane closes");
@@ -132835,7 +133010,13 @@ mod tests {
     #[test]
     fn a_divider_drag_and_a_focus_change_start_no_pane_tween_and_a_split_starts_one() {
         let metrics = seats::seat_metrics(1_000);
-        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000), 0);
+        let viewport = seats::logical_viewport(
+            1600,
+            900,
+            seats::scale_ppm(1_000),
+            0,
+            seats::folio_band_device_px(seats::scale_ppm(1_000)),
+        );
         let (mut seats, _, split, survivor, arriving) = split_window(true);
 
         // A split: the shape changed, so the gate fires.
@@ -132888,7 +133069,13 @@ mod tests {
             .split_terminal(&metrics, first, bt_layout::Axis::Row, false)
             .expect("a wide window divides");
         let ladder = (200..900).step_by(4).find_map(|width| {
-            let viewport = seats::logical_viewport(width, 600, seats::scale_ppm(1_000), 0);
+            let viewport = seats::logical_viewport(
+                width,
+                600,
+                seats::scale_ppm(1_000),
+                0,
+                seats::folio_band_device_px(seats::scale_ppm(1_000)),
+            );
             narrow.set_focus(first);
             let with_first = narrow.solve(viewport, &metrics, SizePolicy::Lawful).ok()?;
             narrow.set_focus(second);
@@ -132901,7 +133088,13 @@ mod tests {
              about what it says it is",
         );
         let revision = narrow.structure_revision();
-        let ladder_viewport = seats::logical_viewport(ladder, 600, seats::scale_ppm(1_000), 0);
+        let ladder_viewport = seats::logical_viewport(
+            ladder,
+            600,
+            seats::scale_ppm(1_000),
+            0,
+            seats::folio_band_device_px(seats::scale_ppm(1_000)),
+        );
         narrow.set_focus(first);
         let with_first = narrow
             .solve(ladder_viewport, &metrics, SizePolicy::Lawful)
@@ -132949,7 +133142,13 @@ mod tests {
     fn an_in_flight_pane_animation_asks_conpty_for_no_resize_at_all() {
         let now = Instant::now();
         let metrics = seats::seat_metrics(1_000);
-        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000), 0);
+        let viewport = seats::logical_viewport(
+            1600,
+            900,
+            seats::scale_ppm(1_000),
+            0,
+            seats::folio_band_device_px(seats::scale_ppm(1_000)),
+        );
         let (mut seats, _, split, survivor, arriving) = split_window(true);
         assert!(seats.close_seat(&metrics, arriving));
         let after = seats
@@ -133591,7 +133790,13 @@ mod tests {
     fn a_preview_seats_picture_travels_with_its_pane_rather_than_waiting_at_the_destination() {
         let now = Instant::now();
         let metrics = seats::seat_metrics(1_000);
-        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000), 0);
+        let viewport = seats::logical_viewport(
+            1600,
+            900,
+            seats::scale_ppm(1_000),
+            0,
+            seats::folio_band_device_px(seats::scale_ppm(1_000)),
+        );
         let mut seats = seats::Seats::lone_terminal();
         let first = seats.identity();
         let second = seats
@@ -133715,7 +133920,13 @@ mod tests {
     #[test]
     fn every_picture_is_placed_against_the_pane_that_holds_it() {
         let metrics = seats::seat_metrics(1_000);
-        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000), 0);
+        let viewport = seats::logical_viewport(
+            1600,
+            900,
+            seats::scale_ppm(1_000),
+            0,
+            seats::folio_band_device_px(seats::scale_ppm(1_000)),
+        );
         let mut seats = seats::Seats::lone_terminal();
         let first = seats.add_preview(&metrics).expect("the preview lands");
         // Locked, so the next one is a second leaf beside it rather than a reuse
@@ -148715,7 +148926,13 @@ mod tests {
     }
 
     fn cross_view() -> LogicalRect {
-        seats::logical_viewport(CROSS_W, CROSS_H, seats::scale_ppm(CROSS_DPI), 0)
+        seats::logical_viewport(
+            CROSS_W,
+            CROSS_H,
+            seats::scale_ppm(CROSS_DPI),
+            0,
+            seats::folio_band_device_px(seats::scale_ppm(CROSS_DPI)),
+        )
     }
 
     /// The window's contribution, supplied by hand: the real solver against a
@@ -156292,23 +156509,36 @@ mod platform_gate_tests {
     /// buttons and hit-tests one.
     ///
     /// Three claims, and the third is the one a `cfg` would break: the door is
-    /// reached exactly once; the capability is *branched on* only in the two
-    /// named functions whose answers it decides; and the module that decides the
-    /// run names no platform anywhere.
+    /// reached once per window and nowhere else; the capability is *branched
+    /// on* only in the named functions whose answers it decides; and the module
+    /// that decides the run names no platform anywhere.
     ///
-    /// **Two readers and not one, since T-MAC-PILL** (owner ruling 2026-09-12
-    /// 「就药丸」). The capability says two things about this window, and they are
-    /// not the same thing said twice: `caption_targets` decides which buttons
-    /// stand in the caption run, and `tab_strip_geometry` decides whether the
-    /// tabs float as pills on the strip or stand attached to its floor. Both are
-    /// facts about the bar this window has, both are answered off the same
-    /// value, and neither is derivable from the other. So what the pin holds is
-    /// the *list* rather than the count: every occurrence in the file is one of
-    /// these, named and located, and a third reader — which is the shape of the
-    /// ask a `cfg` would be the lazy answer to — fails here rather than
-    /// spreading.
+    /// **Three reads, because the answer is needed before there is a window to
+    /// ask** (T-MAC-LIGHTS, owner ruling 2026-09-12). M3-3 needed it only where
+    /// there was — `Runtime::platform_chrome` — because the only thing it
+    /// decided was a run of buttons in a bar. The lights rule decides the
+    /// *stage's own top edge*, and the two window constructors solve a stage
+    /// before there is a `Runtime` to put the question to: they read it off the
+    /// frame they have just installed, at the one moment the measurement is
+    /// taken, and bind it to a local named for what it is. That is still one
+    /// answer per window — measured once, at `install`, with every later reader
+    /// asking the window — so the claim is unchanged in substance and stricter
+    /// in letter: each of the three reads is named here, and a fourth is a
+    /// second opinion.
     ///
-    /// MUTATION: reach the frame for its chrome a second time anywhere and the
+    /// **And more than one reader of the answer, since T-MAC-PILL** (owner
+    /// ruling 2026-09-12 「就药丸」). The capability says more than one thing
+    /// about this window, and they are not the same thing said twice:
+    /// `caption_targets` decides which buttons stand in the caption run, and
+    /// `tab_strip_geometry` decides whether the tabs float as pills on the strip
+    /// or stand attached to its floor. Both are facts about the bar this window
+    /// has, both are answered off the same value, and neither is derivable from
+    /// the other. So what the pin holds is the *list* rather than the count:
+    /// every occurrence in the file is one of these, named and located, and a
+    /// reader that is on neither list — which is the shape of the ask a `cfg`
+    /// would be the lazy answer to — fails here rather than spreading.
+    ///
+    /// MUTATION: reach the frame for its chrome anywhere but those three and the
     /// first assertion names it; branch on `buttons_are_the_platforms` anywhere
     /// in `seats.rs` but `caption_targets` and `tab_strip_geometry` and the
     /// second does; put a `cfg!(target_os = …)` in `seats.rs` and the third
@@ -156321,16 +156551,35 @@ mod platform_gate_tests {
         // a pin that spelled its own needle would be an occurrence of the very
         // thing it counts, and this count has to be exact.
         const DOOR: &str = concat!("custom_window_frame", ".platform_chrome()");
+        let reads: Vec<usize> = MAIN.match_indices(DOOR).map(|(at, _)| at).collect();
         assert_eq!(
-            MAIN.matches(DOOR).count(),
-            1,
-            "the window's chrome capability is read more than once; the one read is \
-             `Runtime::platform_chrome` and everything else takes its answer"
+            reads.len(),
+            3,
+            "the window's chrome capability is read {} times; the three reads are \
+             `Runtime::platform_chrome` and the two window constructors, and \
+             everything else takes their answer",
+            reads.len()
         );
         assert!(
             MAIN.contains("fn platform_chrome(&self) -> bt_platform::PlatformChrome {"),
             "and it is read there"
         );
+        // The accessor is the last of the three: the constructors stand above it
+        // in the file, and each binds what it reads to the local every argument
+        // below it is written off.
+        let accessor = MAIN
+            .find("fn platform_chrome(&self) -> bt_platform::PlatformChrome {")
+            .expect("the one accessor");
+        let (in_accessor, in_constructors): (Vec<usize>, Vec<usize>) =
+            reads.iter().partition(|at| **at > accessor);
+        assert_eq!(in_accessor.len(), 1, "the accessor reads it once");
+        for at in in_constructors {
+            assert!(
+                MAIN[..at].ends_with("let platform_chrome = "),
+                "a read outside the accessor is a window constructor binding the \
+                 measurement it has just taken, and nothing else"
+            );
+        }
 
         // The decisions themselves. One reader per question — the `match` in
         // the function whose whole job is the caption run, and the one branch in

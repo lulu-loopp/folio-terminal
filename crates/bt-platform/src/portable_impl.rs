@@ -230,20 +230,16 @@ pub struct CustomWindowFrame {
     /// install, because it is a fact about *this* window and not about the
     /// host.
     chrome: crate::PlatformChrome,
-    /// **What keeps the platform's own buttons on the axis of Folio's strip**
-    /// (T-MAC-PILL): the subscriptions that re-state their placement every time
-    /// AppKit lays the title bar out again. Held here and nowhere else, so it
-    /// is removed when the frame is — a window's observer outliving its window
-    /// is the bug this shape makes unwritable.
+    /// **What keeps the platform's own buttons on the band this window wears**
+    /// (T-MAC-PILL, amended by T-MAC-LIGHTS): the subscriptions that re-state
+    /// their placement every time AppKit lays the title bar out again, holding
+    /// the band [`Self::set_window_band`] last named. Held here and nowhere
+    /// else, so it is removed when the frame is — a window's observer outliving
+    /// its window is the bug this shape makes unwritable.
     ///
     /// `None` on a window whose title bar is not the platform's, which is every
     /// window on every other host and any window this crate could not measure.
     #[cfg(target_os = "macos")]
-    #[expect(
-        dead_code,
-        reason = "held for its `Drop` and read by nobody: the subscriptions exist exactly as \
-                  long as the frame does, which is the whole of what this field is for"
-    )]
     buttons: Option<crate::macos_impl::WindowButtonsWatch>,
 }
 
@@ -276,6 +272,33 @@ impl CustomWindowFrame {
     #[must_use]
     pub fn platform_chrome(&self) -> crate::PlatformChrome {
         self.chrome
+    }
+
+    /// **This window wears a different band now — put the platform's own
+    /// buttons on it** (T-MAC-LIGHTS x T-MAC-PILL, the owner's rulings of
+    /// 2026-09-12 read together).
+    ///
+    /// The band a window wears is not fixed for its life: Folio's own 40-point
+    /// strip stands across the top while the tabs run along it, and every
+    /// layout that puts the tab list down the side wears a header of the
+    /// platform's own height instead — and the reader changes between them
+    /// without relaunching anything. So this is a door and not an argument to
+    /// [`Self::install`]: whoever decides the band says so again every time it
+    /// is decided.
+    ///
+    /// **`bt-app` decides the number and this crate decides what to do with
+    /// it.** The height arrives in logical pixels, the unit
+    /// [`crate::CustomFrameGeometry`] already speaks, and on a host that draws
+    /// nothing in this window's bar there is nothing to place: the answer is
+    /// `Ok(())` and the call costs a branch.
+    pub fn set_window_band(&self, band_logical_px: f32) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        if let Some(buttons) = &self.buttons {
+            buttons.follow_the_band(f64::from(band_logical_px));
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = band_logical_px;
+        Ok(())
     }
 
     /// **Answer a press on the empty part of the title bar.** The macOS

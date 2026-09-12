@@ -230,6 +230,17 @@ pub struct PlatformChrome {
     /// occupy, read off `standardWindowButton(…)`. `0` where the platform draws
     /// none.
     pub strip_left_px: i32,
+    /// **How tall that run is** — physical pixels, the height of the band the
+    /// platform's own buttons stand in (T-MAC-LIGHTS, owner ruling
+    /// 2026-09-12). `0` where the platform draws none, which is the same
+    /// window [`Self::strip_left_px`] answers `0` for: the two numbers are the
+    /// two sides of one rectangle and are struck together or not at all.
+    ///
+    /// The other field measures how much of the *leading edge* the platform has
+    /// taken; this one measures how much of the *top*, and it is the height of
+    /// the header a window whose bar the platform draws in wears across it —
+    /// the owner's ruling of 2026-09-12, which is `docs/DESIGN.md` §13.20.
+    pub band_px: i32,
     /// Whether the platform draws this window's minimise, zoom and close
     /// itself. When it does, Folio draws none of the three.
     pub buttons_are_the_platforms: bool,
@@ -242,6 +253,7 @@ impl PlatformChrome {
     /// window that still wears the frame the system gave it.
     pub const FOLIO_DRAWS_THE_WHOLE_BAR: Self = Self {
         strip_left_px: 0,
+        band_px: 0,
         buttons_are_the_platforms: false,
     };
 }
@@ -671,6 +683,35 @@ pub fn window_skirt(window: (u32, u32), covered: (u32, u32)) -> [GroundBand; 2] 
             height: height - covered_height,
         },
     ]
+}
+
+#[cfg(test)]
+mod platform_chrome_tests {
+    use super::PlatformChrome;
+
+    /// **RED — the window whose bar is Folio's has a run of no width and no
+    /// height, and those are one fact** (T-MAC-LIGHTS).
+    ///
+    /// The two numbers are the two sides of one rectangle: the leading edge the
+    /// platform's buttons have taken and the header they stand in. The layout
+    /// reads them as a pair — the owner's 2026-09-12 ruling gives a window whose
+    /// platform draws in its bar that platform's own header — and the window
+    /// with nothing up there must answer nothing on both axes. Half a rectangle
+    /// is what would put a 32-pixel header across the top of every Windows
+    /// window.
+    ///
+    /// MUTATION: give the constant a `band_px` of 32 "because that is what a
+    /// title bar is" and this goes red.
+    #[test]
+    fn folios_own_bar_is_a_run_of_no_width_and_no_height() {
+        let folio = PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR;
+        assert_eq!(folio.strip_left_px, 0);
+        assert_eq!(folio.band_px, 0);
+        assert!(
+            !folio.buttons_are_the_platforms,
+            "and it is the same window: nobody else's buttons are in this bar"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4255,6 +4296,28 @@ mod windows_impl {
         #[must_use]
         pub fn platform_chrome(&self) -> PlatformChrome {
             PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR
+        }
+
+        /// **This window wears a different band now — put the platform's own
+        /// buttons on it** (T-MAC-LIGHTS x T-MAC-PILL, the owner's rulings of
+        /// 2026-09-12 read together).
+        ///
+        /// The band a window wears is not fixed for its life: Folio's own 40-point
+        /// strip stands across the top while the tabs run along it, and every
+        /// layout that puts the tab list down the side wears a header of the
+        /// platform's own height instead — and the reader changes between them
+        /// without relaunching anything. So this is a door and not an argument to
+        /// [`Self::install`]: whoever decides the band says so again every time it
+        /// is decided.
+        ///
+        /// **`bt-app` decides the number and this crate decides what to do with
+        /// it.** The height arrives in logical pixels, the unit
+        /// [`crate::CustomFrameGeometry`] already speaks, and on a host that draws
+        /// nothing in this window's bar there is nothing to place: the answer is
+        /// `Ok(())` and the call costs a branch.
+        pub fn set_window_band(&self, band_logical_px: f32) -> Result<(), String> {
+            let _ = band_logical_px;
+            Ok(())
         }
 
         /// **Answer a press on the empty part of the title bar.** Refused here,
