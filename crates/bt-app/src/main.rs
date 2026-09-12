@@ -37123,6 +37123,27 @@ impl Runtime<'_> {
         self.app.quake.is_quake(self.window.window.id())
     }
 
+    /// **What the platform draws in this window's title bar** (M3-3, owner
+    /// ruling 2026-09-12).
+    ///
+    /// The one capability read the window chrome makes, and the only one it is
+    /// allowed to make: every caller below — the caption run, the strip's own
+    /// origin, the hit test, the drag band, the picture — takes its answer from
+    /// here, so the buttons that are drawn and the buttons that are clickable
+    /// cannot come from two different opinions about whose title bar this is.
+    ///
+    /// **Not a `cfg`, and deliberately not.** `main.rs` is one of the eleven
+    /// files §4.3 of the port plan lets name a platform, and naming one here
+    /// would still be wrong: the answer is a fact about *this window*, measured
+    /// off its own standard window buttons when the frame was installed, so a
+    /// window with no native title bar to keep gets the same answer on macOS
+    /// that every window gets on Windows. `first_run`'s rows are ruled the same
+    /// way (M3-6), and the pin is
+    /// `the_caption_run_is_decided_by_one_capability_read`.
+    fn platform_chrome(&self) -> bt_platform::PlatformChrome {
+        self.window.custom_window_frame.platform_chrome()
+    }
+
     /// **This window is the one the reader is in now** (§7.59).
     ///
     /// Moved to the back rather than appended, so the list stays a history with
@@ -37342,6 +37363,7 @@ impl Runtime<'_> {
         let scrolled = seats::tab_scroll_to_reveal(
             width,
             scale,
+            self.platform_chrome(),
             self.window.tabs.len(),
             self.window.active_tab,
             self.window.tab_scroll,
@@ -38171,6 +38193,7 @@ impl Runtime<'_> {
             .set_tab_strip_right_px(seats::title_bar_app_run_right_px(
                 width as f32,
                 scale,
+                self.platform_chrome(),
                 self.window.tabs.len(),
                 self.rail_posture(),
             ));
@@ -39045,6 +39068,10 @@ impl Runtime<'_> {
                 // window whose `×` hides rather than closes, and which therefore
                 // has no second button that means the same thing.
                 summoned: self.is_quake_window(),
+                // **What AppKit still draws in this window's bar** (M3-3) — the
+                // one capability read, made here and handed on, so the caption
+                // run that is painted is the caption run that is hit-tested.
+                chrome: self.platform_chrome(),
                 tabs: &tabs,
                 head_ink: seats::HeadInk::new(&head_ink),
                 active_ink: seats::TabInk::new(&active_ink),
@@ -39204,6 +39231,7 @@ impl Runtime<'_> {
             let strip = seats::tab_strip_geometry(
                 width,
                 scale,
+                self.platform_chrome(),
                 &self.tab_trailers(now),
                 self.window.active_tab,
                 self.window.tab_scroll,
@@ -39243,6 +39271,7 @@ impl Runtime<'_> {
             for (target, rect) in seats::window_chrome_boxes(
                 width,
                 scale,
+                self.platform_chrome(),
                 self.rail_posture(),
                 self.is_quake_window(),
             ) {
@@ -42263,6 +42292,7 @@ impl Runtime<'_> {
                 let geometry = seats::tab_strip_geometry(
                     width as f32,
                     scale,
+                    self.platform_chrome(),
                     &self.tab_trailers(now),
                     self.window.active_tab,
                     self.window.tab_scroll,
@@ -42476,6 +42506,7 @@ impl Runtime<'_> {
                 let geometry = seats::tab_strip_geometry(
                     width,
                     scale,
+                    self.platform_chrome(),
                     &trailers,
                     self.window.active_tab,
                     self.window.tab_scroll,
@@ -42571,6 +42602,7 @@ impl Runtime<'_> {
         let strip = seats::tab_strip_geometry(
             width as f32,
             scale,
+            self.platform_chrome(),
             &self.tab_trailers(now),
             self.window.active_tab,
             self.window.tab_scroll,
@@ -77590,6 +77622,7 @@ impl Runtime<'_> {
                         seats::tab_strip_geometry(
                             width as f32,
                             scale,
+                            self.platform_chrome(),
                             &self.tab_trailers(Instant::now()),
                             self.window.active_tab,
                             self.window.tab_scroll,
@@ -83932,6 +83965,7 @@ impl Runtime<'_> {
             Some(seats::TabLayoutMode::Horizontal) => seats::hit_tab_chrome(
                 width,
                 scale,
+                self.platform_chrome(),
                 &trailers,
                 self.window.active_tab,
                 self.window.tab_scroll,
@@ -83964,6 +83998,7 @@ impl Runtime<'_> {
                 seats::hit_window_chrome(
                     width,
                     scale,
+                    self.platform_chrome(),
                     rail,
                     self.is_quake_window(),
                     position.x,
@@ -84567,6 +84602,7 @@ impl Runtime<'_> {
         seats::tab_strip_geometry(
             width as f32,
             scale,
+            self.platform_chrome(),
             &self.tab_trailers(now),
             self.window.active_tab,
             self.window.tab_scroll,
@@ -87519,6 +87555,43 @@ impl Runtime<'_> {
             // every terminal leaf answers for itself; see [`press_reaches_no_grid`]
             // for the primary-seat version this replaced and what it cost.
             self.window.tab_clicks.interrupt();
+            // **The window's own drag handle, before anything under it** (M3-3,
+            // owner ruling 2026-09-12). The empty part of the title bar is the
+            // band between where Folio's own content stops and where the gear's
+            // run begins, and picking the window up by it is what every title
+            // bar on every platform does.
+            //
+            // It is answered here, in the arm for a press that named no chrome,
+            // because that is precisely what it is: the complement of every box
+            // this window draws up there. On Windows the press never arrives —
+            // the frame answers `HTCAPTION` and the OS starts the move before
+            // winit sees anything — so this arm is reached only where the
+            // platform hands the press to the application, and the door it calls
+            // refuses on the platform where it cannot be right.
+            //
+            // Reported and not propagated: a drag that would not start is a
+            // window that stayed still, which is worth a line and not a killed
+            // press.
+            if seats::title_bar_drag_point(
+                self.window
+                    .renderer
+                    .presentation_geometry()
+                    .swapchain_size
+                    .0 as f32,
+                self.window.renderer.metrics().scale_factor as f32,
+                self.platform_chrome(),
+                self.window.tabs.len(),
+                self.rail_posture(),
+                self.is_quake_window(),
+                position.x,
+                position.y,
+            ) {
+                if let Err(reason) = self.window.custom_window_frame.begin_window_drag() {
+                    eprintln!("{reason}");
+                }
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-title-bar-drag state={state:?} button={button:?} target={traced_target:?}"));
+                return Ok(true);
+            }
             // The body's own bar answers first of all: it is the outermost piece
             // of furniture the pane has, drawn over the document, over every
             // block in it and over every link in those — and a press on it was
@@ -91476,6 +91549,7 @@ impl Runtime<'_> {
         let geometry = seats::tab_strip_geometry(
             width,
             scale,
+            self.platform_chrome(),
             &self.tab_trailers(Instant::now()),
             self.window.active_tab,
             self.window.tab_scroll,
@@ -91728,6 +91802,7 @@ impl Runtime<'_> {
                     .swapchain_size
                     .0 as f32,
                 self.window.renderer.metrics().scale_factor as f32,
+                self.platform_chrome(),
                 self.window.tabs.len(),
                 position.x,
                 position.y,
@@ -97618,7 +97693,10 @@ mod mouse_trace_station_tests {
         // Twenty-four once the two 2026-08-24/25 lines met: the address row's
         // press takes the event whole exactly as the name's double click does,
         // and it joins the exits the other line had already counted to 23.
-        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 28);
+        // 28 → 29 on 2026-09-12: M3-3 gave the empty part of the title bar a
+        // verb on the platform that hands that press to the application — the
+        // window's own drag (`at=press-title-bar-drag`).
+        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 29);
     }
 
     /// Both `None`s here are silent by construction — the callers turn them into
@@ -105723,7 +105801,8 @@ mod tab_close_tip_tests {
         const WIDTH: f32 = 1200.0;
 
         let trailers = vec![seats::TabTrailer::default(); 3];
-        let strip = seats::tab_strip_geometry(WIDTH, SCALE, &trailers, 0, 0.0);
+        let strip =
+            seats::tab_strip_geometry(WIDTH, SCALE, crate::seats::FOLIO_BAR, &trailers, 0, 0.0);
         // Every ordinary tab really draws a clickable `×` to be tipped — the
         // premise the gate rests on.
         assert!(
@@ -105754,7 +105833,8 @@ mod tab_close_tip_tests {
             pinned: true,
             ..seats::TabTrailer::default()
         };
-        let pstrip = seats::tab_strip_geometry(WIDTH, SCALE, &pinned, 0, 0.0);
+        let pstrip =
+            seats::tab_strip_geometry(WIDTH, SCALE, crate::seats::FOLIO_BAR, &pinned, 0, 0.0);
         assert!(
             pstrip.tabs[1].close.is_none(),
             "the pinned tab really draws no close",
@@ -107517,7 +107597,7 @@ mod floated_page_tests {
         // And there is one button on that window that can mean it, which is the
         // other half of 「窗上只留一个 ×」 — see `seats::caption_targets`.
         assert_eq!(
-            crate::seats::caption_targets(true),
+            crate::seats::caption_targets(crate::seats::FOLIO_BAR, true),
             [
                 crate::seats::ChromeTarget::Settings,
                 crate::seats::ChromeTarget::CloseWindow
@@ -107526,7 +107606,7 @@ mod floated_page_tests {
              does not go through the chord's door"
         );
         assert_eq!(
-            crate::seats::caption_targets(false).len(),
+            crate::seats::caption_targets(crate::seats::FOLIO_BAR, false).len(),
             4,
             "and every other window keeps the four the mock-up drew"
         );
@@ -125950,7 +126030,8 @@ mod tests {
             reveal: 1.0,
             ..seats::TabTrailer::default()
         }];
-        let strip = seats::tab_strip_geometry(width, scale, &trailers, 0, 0.0);
+        let strip =
+            seats::tab_strip_geometry(width, scale, crate::seats::FOLIO_BAR, &trailers, 0, 0.0);
         // The rail the window would actually be showing: vertical, expanded, and
         // fully open — `sampled_rail`'s own answer for a rail that is not the
         // parked icon kind.
@@ -126141,7 +126222,8 @@ mod tests {
             reveal: 1.0,
             ..seats::TabTrailer::default()
         }];
-        let strip = seats::tab_strip_geometry(960.0, scale, &trailers, 0, 0.0);
+        let strip =
+            seats::tab_strip_geometry(960.0, scale, crate::seats::FOLIO_BAR, &trailers, 0, 0.0);
         // The three postures, named once and then used both to *measure* the
         // surfaces and to *ask* about them — a state that disagreed with the
         // geometry beside it would be a fixture no window can be in.
@@ -150715,7 +150797,13 @@ mod tests {
             width: width as i32,
             height: 600,
             title_bar_height: 40,
-            tab_strip_right_px: seats::title_bar_app_run_right_px(width, scale, tabs, rail),
+            tab_strip_right_px: seats::title_bar_app_run_right_px(
+                width,
+                scale,
+                crate::seats::FOLIO_BAR,
+                tabs,
+                rail,
+            ),
             caption_button_width: 46,
             caption_button_count: 4,
             resize_border: 8,
@@ -155032,6 +155120,90 @@ mod platform_gate_tests {
             "these names are on the list and no longer name a platform, so the list is \
              promising less than it says: {silent:#?}"
         );
+    }
+
+    /// RED — **the caption run is decided by one capability read, and by no
+    /// platform name at all** (M3-3, owner ruling 2026-09-12; `first_run`'s
+    /// M3-6 pattern).
+    ///
+    /// The ruling that a window must not carry two sets of window controls
+    /// could have been kept with a `cfg` — `main.rs` is on the list above, so it
+    /// would even have been legal. It is kept with a value instead, and this
+    /// pin is the difference: the application asks the window's own frame what
+    /// the platform is still drawing in its bar, once, and every reader
+    /// downstream takes that answer. A second read is a second opinion, and two
+    /// opinions about whose title bar this is are a window that draws four
+    /// buttons and hit-tests one.
+    ///
+    /// Three claims, and the third is the one a `cfg` would break: the door is
+    /// reached exactly once; the capability is *branched on* in exactly one
+    /// place in the whole application; and the module that decides the run names
+    /// no platform anywhere.
+    ///
+    /// MUTATION: reach the frame for its chrome a second time anywhere and the
+    /// first assertion names it; branch on
+    /// `buttons_are_the_platforms` outside `seats::caption_targets` and the
+    /// second does; put a `cfg!(target_os = …)` in `seats.rs` and the third
+    /// does.
+    #[test]
+    fn the_caption_run_is_decided_by_one_capability_read() {
+        const MAIN: &str = include_str!("main.rs");
+        const SEATS: &str = include_str!("seats.rs");
+        // Assembled rather than written whole, for `attention_hooks`' reason:
+        // a pin that spelled its own needle would be an occurrence of the very
+        // thing it counts, and this count has to be exact.
+        const DOOR: &str = concat!("custom_window_frame", ".platform_chrome()");
+        assert_eq!(
+            MAIN.matches(DOOR).count(),
+            1,
+            "the window's chrome capability is read more than once; the one read is \
+             `Runtime::platform_chrome` and everything else takes its answer"
+        );
+        assert!(
+            MAIN.contains("fn platform_chrome(&self) -> bt_platform::PlatformChrome {"),
+            "and it is read there"
+        );
+
+        // The decision itself. One `match` on the capability, in the one
+        // function whose whole job is the list — and its test helper, which is
+        // how the other arm is written down at all.
+        let decisions: Vec<usize> = SEATS
+            .match_indices("buttons_are_the_platforms")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            decisions.len(),
+            2,
+            "the capability is named {} times in `seats.rs`; it is read by \
+             `caption_targets` and constructed by that module's own test helper, and \
+             nothing else may branch on it",
+            decisions.len()
+        );
+        let run = SEATS
+            .find("pub fn caption_targets(")
+            .expect("the list that decides the run");
+        let run_end = SEATS[run..]
+            .find("\n}\n")
+            .map(|at| run + at)
+            .expect("a function is closed at column zero");
+        assert!(
+            (run..run_end).contains(&decisions[0]),
+            "the first reader of the capability is not `caption_targets`"
+        );
+        assert!(
+            SEATS[decisions[1]..].starts_with("buttons_are_the_platforms: true"),
+            "the second is not the test helper that states the other arm"
+        );
+
+        // And the module that draws and hit-tests the bar knows nothing about
+        // which machine it is on.
+        for gate in ["target_os", "cfg!(windows)", "#[cfg(windows)]"] {
+            assert!(
+                !SEATS.contains(gate),
+                "`seats.rs` names `{gate}`; the chrome is a capability and this file decides \
+                 by the value it is handed"
+            );
+        }
     }
 }
 

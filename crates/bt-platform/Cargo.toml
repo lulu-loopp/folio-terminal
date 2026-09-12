@@ -37,6 +37,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     # `NSApp` itself: the application's effective appearance, and the window a
     # window number belongs to.
     "NSApplication",
+    # M3-3: `-[NSWindow standardWindowButton:]` answers an `NSButton`, and an
+    # `NSButton` is an `NSControl`. Two classes and no package — what the
+    # traffic-light inset is measured off.
+    "NSButton",
+    "NSControl",
     # The window's backing colour, which is the class brush's twin.
     "NSColor",
     # `+[NSEvent mouseLocation]` — where the pointer is, for the summon.

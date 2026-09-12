@@ -90,8 +90,9 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-    NSApplication, NSColor, NSEvent, NSFloatingWindowLevel, NSNormalWindowLevel, NSScreen, NSView,
-    NSWindow, NSWindowDelegate, NSWindowOcclusionState, NSWindowStyleMask, NSWorkspace,
+    NSApplication, NSColor, NSEvent, NSEventType, NSFloatingWindowLevel, NSNormalWindowLevel,
+    NSScreen, NSView, NSWindow, NSWindowButton, NSWindowDelegate, NSWindowOcclusionState,
+    NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
 };
 use objc2_foundation::{
@@ -795,6 +796,120 @@ pub fn install_window_class_background(
             ns_window.setBackgroundColor(Some(&NSColor::clearColor()));
         }
     }
+    Ok(())
+}
+
+// ── the title bar, taken over (M3-3) ───────────────────────────────────────
+
+/// **Take this window's native title bar into Folio's chrome, and measure what
+/// AppKit goes on drawing in it** (M3-3, owner ruling 2026-09-12).
+///
+/// The ruling is that the window must not carry two sets of window controls,
+/// and the way it is kept here is the opposite of the way it is kept on
+/// Windows. There the frame is taken away outright: `WM_NCCALCSIZE` hands the
+/// application the whole outer rectangle and Folio draws all four caption
+/// slots itself. Here the title bar is **kept and made transparent** —
+/// `NSFullSizeContentView` so the content view reaches under it,
+/// `titlebarAppearsTransparent` so nothing of it is painted, `titleVisibility
+/// = .hidden` because Folio draws the tab's own name — which leaves exactly
+/// one thing of AppKit's standing in that band: the three traffic lights,
+/// where macOS puts them and where every other application's are.
+///
+/// **`isMovableByWindowBackground` is turned off on purpose.** With it on, a
+/// drag anywhere over Folio's own surface would move the window; the drag
+/// region is the strip's empty part and nothing else, and it is asked for
+/// explicitly through [`begin_window_drag`].
+///
+/// **What comes back is a measurement, not a platform name.** The inset is the
+/// right edge of the rightmost standard window button, in this module's own
+/// units (physical pixels at the window's backing scale), and it is what
+/// `bt-app` starts its tab strip from. A window whose style mask carries no
+/// title bar has no standard buttons at all — `standardWindowButton:` answers
+/// `nil` for each — and the honest answer for it is
+/// [`crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR`], the same answer
+/// Windows gives, so nothing downstream has to know which platform it is on.
+///
+/// **The outer rectangle does not move.** `NSWindow.frame` is the outer
+/// rectangle before and after (M1-3 ①), so the session round trip this changes
+/// nothing about is still the identity; what changes is that the *content*
+/// view now fills that rectangle instead of stopping below a title bar, which
+/// is the same client-equals-outer contract `WM_NCCALCSIZE` produces on the
+/// other platform.
+pub fn adopt_window_chrome(window: NativeWindow) -> Result<crate::PlatformChrome, String> {
+    let what = "taking over a window's title bar";
+    let (_, ns_window) = window_for(window, what)?;
+    ns_window.setStyleMask(ns_window.styleMask() | NSWindowStyleMask::FullSizeContentView);
+    ns_window.setTitlebarAppearsTransparent(true);
+    ns_window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+    // The window's `title` is left alone: Mission Control, the window menu and
+    // the Dock still read it, and none of them draws it in this bar.
+    ns_window.setMovableByWindowBackground(false);
+    let scale = ns_window.backingScaleFactor();
+    // The three are asked for individually rather than assumed to be in order:
+    // a window may carry any subset of them, and what the strip has to clear is
+    // whichever of them is furthest right. Their frames are in the frame view's
+    // own space, whose origin is the window's leading edge, so `maxX` is
+    // already the inset measured from there.
+    let inset = [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ]
+    .into_iter()
+    .filter_map(|which| ns_window.standardWindowButton(which))
+    .map(|button| {
+        let frame = button.frame();
+        frame.origin.x + frame.size.width
+    })
+    .fold(None, |best: Option<f64>, edge| {
+        Some(best.map_or(edge, |best| best.max(edge)))
+    });
+    let Some(inset) = inset else {
+        return Ok(crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR);
+    };
+    Ok(crate::PlatformChrome {
+        // Up and not to nearest: the strip may begin one pixel clear of the
+        // buttons, never one pixel into them.
+        strip_left_px: (inset * scale).ceil() as i32,
+        buttons_are_the_platforms: true,
+    })
+}
+
+/// **Pick the window up by the press that is happening right now** —
+/// `performWindowDragWithEvent:`.
+///
+/// The macOS counterpart of `HTCAPTION`, and it has to be a call rather than a
+/// hit-test answer because there is no hit test to answer: AppKit asks a
+/// *view* whether a press may move the window (`mouseDownCanMoveWindow`), and
+/// the view under Folio's title bar is winit's, which answers `NO` because it
+/// implements `mouseDown:` itself. So `bt-app` decides — it already knows,
+/// pixel for pixel, which part of its own strip is empty — and says so here,
+/// inside the press.
+///
+/// **It is also the double click.** AppKit's own drag implementation carries
+/// the standard title-bar behaviours with it, including the action the reader
+/// has chosen for a double click in System Settings
+/// (`AppleActionOnDoubleClick`: zoom, minimise or nothing). Reading that
+/// preference here and acting on it would be a second implementation of
+/// something the system already does, and one that would go out of date.
+///
+/// The event is `NSApp.currentEvent`, which during the press `bt-app` is
+/// answering **is** that press. Refused rather than guessed when it is not a
+/// left mouse-down: a drag started from some other event is a drag the reader
+/// did not begin.
+pub fn begin_window_drag(window: NativeWindow) -> Result<(), String> {
+    let what = "picking a window up by its title bar";
+    let (mtm, ns_window) = window_for(window, what)?;
+    let application = NSApplication::sharedApplication(mtm);
+    let event = application
+        .currentEvent()
+        .ok_or_else(|| format!("{what}: there is no event in hand to drag from"))?;
+    if event.r#type() != NSEventType::LeftMouseDown {
+        return Err(format!(
+            "{what}: the event in hand is not a press, so there is no drag to begin"
+        ));
+    }
+    ns_window.performWindowDragWithEvent(&event);
     Ok(())
 }
 

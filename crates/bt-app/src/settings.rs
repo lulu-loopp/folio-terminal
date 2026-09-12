@@ -16910,6 +16910,7 @@ mod tests {
             crate::seats::hit_window_chrome(
                 surface_width,
                 scale,
+                crate::seats::FOLIO_BAR,
                 crate::seats::RailState::default(),
                 false,
                 gear,

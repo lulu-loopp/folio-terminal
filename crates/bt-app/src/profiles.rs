@@ -13198,7 +13198,15 @@ mod tests {
             reveal: 0.0,
             ..crate::seats::TabTrailer::default()
         }];
-        crate::seats::tab_strip_geometry(960.0 * scale, scale, &strip, 0, 0.0).new_tab_menu
+        crate::seats::tab_strip_geometry(
+            960.0 * scale,
+            scale,
+            crate::seats::FOLIO_BAR,
+            &strip,
+            0,
+            0.0,
+        )
+        .new_tab_menu
     }
 
     /// A vault with nothing in it: the menu every test that predates Recent was

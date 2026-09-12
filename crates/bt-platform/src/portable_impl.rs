@@ -191,26 +191,39 @@ impl Compositor {
 
 // ── the self-drawn frame (M3-3) ────────────────────────────────────────────
 
-/// **The window's own frame, against traffic lights that are not there yet**
-/// (M3-3).
+/// **The window's own frame, against the traffic lights** (M3-3).
 ///
-/// On Windows this is a `WM_NCCALCSIZE` subclass that makes the client area the
-/// whole outer rectangle, and installing it is step 5 of the startup path — one
-/// of the seven fatal `?`. macOS draws its own title bar and its own three
-/// buttons, and a window that wears Folio's frame there is a
-/// `titlebarAppearsTransparent` / `NSFullSizeContentView` window with the
-/// traffic lights placed by hand. That is M3-3's whole ticket.
+/// On Windows this is a `WM_NCCALCSIZE` subclass that takes the system title
+/// bar away outright: the client area becomes the whole outer rectangle and
+/// Folio draws all four caption slots itself. Installing it is step 5 of the
+/// startup path — one of the seven fatal `?`.
 ///
-/// Until then the window wears the system frame, which is a window that opens
-/// and can be moved rather than a window that is missing. The three accessors
-/// answer what a frame that is not there would answer.
+/// **On macOS the opposite move, ruled by the owner on 2026-09-12**: the
+/// native title bar is *kept* and made part of Folio's chrome —
+/// `NSFullSizeContentView`, `titlebarAppearsTransparent`, no title text — so
+/// that the three traffic lights stay exactly where macOS puts them and Folio
+/// draws no minimise, zoom or close of its own. One window, one set of window
+/// controls. The work is [`crate::macos_impl::adopt_window_chrome`]'s, because
+/// AppKit lives there and not here; what this type keeps is the measurement it
+/// hands back, and [`Self::platform_chrome`] is where `bt-app` reads it.
+///
+/// On a third platform there is no title bar to take over, and every accessor
+/// answers what a frame that is not there would answer.
 pub struct CustomWindowFrame {
-    /// As [`Compositor::window`]: M3-3 needs it, and holding it keeps one shape.
-    #[expect(
-        dead_code,
-        reason = "M3-3 reads it to reach the NSWindow whose title bar it takes over"
+    /// As [`Compositor::window`]: the drag door reaches the `NSWindow` through
+    /// it, and holding it keeps one shape.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(
+            dead_code,
+            reason = "only the macOS arm has a native title bar to reach back into"
+        )
     )]
     window: NativeWindow,
+    /// What the platform goes on drawing in this window's bar — measured at
+    /// install, because it is a fact about *this* window and not about the
+    /// host.
+    chrome: crate::PlatformChrome,
 }
 
 impl CustomWindowFrame {
@@ -220,7 +233,29 @@ impl CustomWindowFrame {
         geometry: crate::CustomFrameGeometry,
     ) -> Result<Self, String> {
         let _ = geometry;
-        Ok(Self { window })
+        let chrome = adopt_platform_chrome(window);
+        Ok(Self { window, chrome })
+    }
+
+    /// **What the platform draws in this window's title bar** — the one read
+    /// `bt-app` makes, and the reason it never asks which host it is on.
+    #[must_use]
+    pub fn platform_chrome(&self) -> crate::PlatformChrome {
+        self.chrome
+    }
+
+    /// **Pick the window up by the press in hand.** The macOS `HTCAPTION`: the
+    /// application has decided this press landed on the empty part of its own
+    /// strip, and this is it saying so.
+    pub fn begin_window_drag(&self) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            crate::macos_impl::begin_window_drag(self.window)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(not_here("dragging a window by its title bar"))
+        }
     }
 
     /// Whether the window is inside a system move/resize loop. macOS has no
@@ -230,18 +265,56 @@ impl CustomWindowFrame {
         false
     }
 
-    /// Where the tab strip ends, for the caption's hit test. Nothing hit-tests
-    /// against this frame yet.
+    /// Where the tab strip ends, for the caption's hit test. There is no native
+    /// hit-test message here to answer: the application decides inside the
+    /// press and says so through [`Self::begin_window_drag`].
     pub fn set_tab_strip_right_px(&self, tab_strip_right_px: i32) {
         let _ = tab_strip_right_px;
     }
 
     /// The smallest client the window may be dragged to. The system frame
-    /// enforces its own until M3-3; refusing would be one line of stderr every
-    /// time a pane is added, so this is an N and not an X.
+    /// enforces its own; refusing would be one line of stderr every time a pane
+    /// is added, so this is an N and not an X.
     pub fn set_min_client_size(&self, logical: Option<(u32, u32)>) -> Result<(), String> {
         let _ = logical;
         Ok(())
+    }
+}
+
+/// [`CustomWindowFrame::install`]'s macOS half, **reported rather than
+/// propagated** (§13.8 ②).
+///
+/// A free function and not a line of `install`, because `install` is step 5 of
+/// the startup path and may not refuse: a window that failed to open is a
+/// launch with nothing on the screen and nothing said. The refusal this can
+/// meet is one of the two the AppKit module makes — asked off the window's
+/// thread, or handed a view that is in no window — and neither is reachable
+/// from the constructor that calls it.
+///
+/// **The answer on the refusing path is coherent rather than convenient.** If
+/// the title bar could not be taken over, then it was not taken over: the
+/// window still wears the frame the system gave it, the traffic lights are
+/// still in a bar of their own above Folio's, and the run Folio draws in its
+/// own bar is the run it drew before this ticket. That is a window that looks
+/// wrong and says why on stderr, not a window that has been quietly told the
+/// platform draws buttons it does not.
+fn adopt_platform_chrome(window: NativeWindow) -> crate::PlatformChrome {
+    #[cfg(target_os = "macos")]
+    {
+        match crate::macos_impl::adopt_window_chrome(window) {
+            Ok(chrome) => chrome,
+            Err(reason) => {
+                eprintln!(
+                    "bt-platform: {reason}; the window keeps the title bar the system gave it"
+                );
+                crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+        crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR
     }
 }
 
