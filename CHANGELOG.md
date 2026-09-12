@@ -6,6 +6,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.3.0-preview — 2026-09-12
+
 ### Added
 
 - **Right-clicking the empty space in a files column opens the folder the column
