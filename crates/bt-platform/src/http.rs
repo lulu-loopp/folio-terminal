@@ -30,11 +30,25 @@
 //!
 //! # What it deliberately is not
 //!
-//! Not a client. There is no redirect following, no keep-alive, no connection
-//! reuse, no POST, no request body, no header the caller can name, and no
-//! `http://`. It is one function, it is shaped like the one call the product
-//! makes, and the next caller that needs something else should widen it on
-//! purpose rather than find it already widened.
+//! Not a client. There is no keep-alive, no connection reuse, no POST, no
+//! request body, no header the caller can name, and no `http://`. It is one
+//! function, it is shaped like the one call the product makes, and the next
+//! caller that needs something else should widen it on purpose rather than find
+//! it already widened.
+//!
+//! **Redirects are the one exception, and they are WinHTTP's own** — this
+//! module writes no redirect code, which is not the same thing as a request
+//! that does not follow one, and M4-10 had to find out which (the macOS arm has
+//! to be given a policy explicitly, so the policy had to be named). Left alone,
+//! WinHTTP follows redirects automatically up to
+//! `WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS`, which defaults to ten, under
+//! `WINHTTP_OPTION_REDIRECT_POLICY`, which defaults to
+//! `DISALLOW_HTTPS_TO_HTTP`: a redirect that would take an `https` request to
+//! `http` is **not** followed, and the `30x` is handed back as the response
+//! instead — so `WinHttpQueryHeaders` reports it and the line below answers
+//! `the server answered 302`. Neither option is set here, deliberately: the
+//! defaults are the policy this door wants, and
+//! `crates/bt-platform/src/macos_http.rs` is written to be them.
 //!
 //! # The bound on how long it can take
 //!
