@@ -105,8 +105,7 @@ use objc2_app_kit::{
     NSWindowDidBecomeKeyNotification, NSWindowDidEnterFullScreenNotification,
     NSWindowDidExitFullScreenNotification, NSWindowDidResignKeyNotification,
     NSWindowDidResizeNotification, NSWindowDidUpdateNotification, NSWindowOcclusionState,
-    NSWindowStyleMask,
-    NSWindowTitleVisibility, NSWorkspace,
+    NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
 };
 use objc2_foundation::{
