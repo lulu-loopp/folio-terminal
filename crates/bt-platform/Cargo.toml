@@ -450,6 +450,30 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# **M3-7 adds one line and no package, and it is the first dependency this crate
+# has that a Linux build also links.** `dup2` is the whole of the stdio door —
+# moving `stdout` and `stderr` onto a log file, or onto `/dev/null`, for the rest
+# of a run — and Rust's standard library has no spelling for it: `std::os::fd`
+# owns descriptors and never renumbers one. `libc` 0.2.186 is **already in
+# `Cargo.lock`** and already in `THIRD-PARTY-NOTICES.md` (winit, wgpu and
+# `portable-pty` all carry it), so naming it here moves neither file's contents;
+# what it costs is the declaration below.
+#
+# `cfg(unix)` and not `cfg(target_os = "macos")`, because the three calls this
+# crate makes — `dup`, `dup2` and `close` — are POSIX and are the same two
+# sentences on a Mac and on the Linux server §4.6 of the plan keeps possible. The
+# arm that uses them is `portable_impl`'s own `#[cfg(unix)]` pair, beside the one
+# `same_file` already has.
+#
+# `nix` was the other candidate and is already a `bt-pty` dev-dependency. It was
+# not taken: its `dup2` is typed in `OwnedFd`/`BorrowedFd` and would have this
+# crate constructing an `OwnedFd` for descriptor 1 — a value whose `Drop` closes
+# the process's own standard output — to hand to a call that is defined as *not*
+# taking ownership of it. The raw call says what is happening; the safe wrapper
+# would need a `ManuallyDrop` around every argument to mean the same thing.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # This crate is the deliberately narrow unsafe boundary for native Win32 APIs. All other
 # first-party crates continue inheriting the workspace-wide `unsafe_code = "deny"` policy.
 [lints.clippy]

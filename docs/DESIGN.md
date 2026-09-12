@@ -8798,5 +8798,178 @@ page the way a window draws it rather than once. And `screencapture` **from
 inside the bundle** answers `could not create image from window`, which is M2-3's
 TCC finding measured a second time and the reason the photographer is the session
 outside.
+### 13.23 M3-7: 标准流——终端启动留在 tty 上,Finder 启动进日志,leave_process 真的退出(`crates/bt-platform/src/portable_impl.rs`、`crates/bt-platform/src/{lib.rs,Cargo.toml}`、`crates/bt-app/src/diagnostics.rs`)
+
+**① Five doors, and they split two ways — on who reads the answer, not on how
+hard they are.** `adopt_parent_console`, `detach_console`,
+`redirect_std_streams_to_file`, `silence_std_streams` and `leave_process` are
+one group in the backend inventory and are not one group here. The line between
+them is the plan's §4.4 ③: a door whose `bool` decides something has to really
+do the thing, and a door whose answer reaches no branch may be what the kernel
+already did. `bt_app::diagnostics` picks `Channel::Log` or `Channel::Nowhere`
+off the redirect's `bool` and calls the silence in the `else`, so those two are
+real on every platform now. The two console doors are called for their effect
+and their answers are dropped, so on a Unix they are nothing — and the licence
+for that is a fact about the *caller*, which is why it is pinned at the caller
+(`nothing_branches_on_the_two_console_no_ops` reads both call sites and requires
+each name to appear exactly once, as a statement) rather than asserted at the
+arm.
+
+A Unix process is handed its parent's stdio by the kernel before its first
+instruction, so there is nothing to adopt; it joins no console group, so there is
+nothing to leave. What `AttachConsole` and `SetStdHandle` spend two calls
+reaching on the other platform is the state this one starts in.
+
+**② The port is `dup2`, and four things in it are decisions rather than
+translation.** The log is opened **append-only**, which is the kernel's own
+append — every write lands at the end whichever thread issues it, with no seek of
+its own to race — and is what `FILE_APPEND_DATA` buys on the other platform. It
+is created **`0o600`**, because a `diagnostics.log` carries window titles, file
+paths and shell output and the directory it lives in is a home directory; a file
+that already exists keeps the mode it has, because changing the permissions of a
+file somebody deliberately opened up is not this call's business. **Both**
+descriptors move, because a `println!` left on the terminal is half the fault the
+channel was written for. And the descriptor is **never closed, on any path**: on
+the path that works it *is* the process's diagnostic stream and lives exactly as
+long as the process, which is word for word what the Windows arm says of its
+handle; on the path that does not, closing it would be a call that has just
+refused to move anything reaching for a descriptor `open` may have been handed
+*as* descriptor 1 — the state of a process started with its standard streams
+closed — and taking out the stream it was asked to move.
+
+**A refusal leaves both descriptors where they were, and that is what makes the
+caller's `else` mean anything.** The duplicate the first stream is put back from
+is taken before anything moves, with `F_DUPFD_CLOEXEC` and a floor of 3 rather
+than with `dup`, for two reasons that are both about which number comes back:
+`dup` answers the lowest free descriptor, which on a process whose standard error
+is closed is 2 — the descriptor the next line is about to write — and it does not
+set close-on-exec, which would put a spare copy of somebody's terminal into every
+shell this window opens. `a_refused_redirect_moves_nothing` reads the device and
+inode behind both descriptors before and after a refused call and requires them
+unchanged.
+
+**One line in `Cargo.lock` and no package.** `libc` 0.2.186 is already there
+through winit, wgpu and `portable-pty`, and already in `THIRD-PARTY-NOTICES.md`;
+Rust's standard library owns descriptors and never renumbers one, so there is no
+`std` spelling of this. It is declared `cfg(unix)` and not
+`cfg(target_os = "macos")` because `dup`, `dup2` and `close` are POSIX and are
+the same two sentences on the Linux server §4.6 keeps possible. `nix` was the
+other candidate and was not taken: its `dup2` is typed in `OwnedFd`/`BorrowedFd`,
+so this crate would be constructing an `OwnedFd` for descriptor 1 — a value whose
+`Drop` closes the process's own standard output — to hand to a call that is
+defined as not taking ownership of it.
+
+**③ `leave_process` really terminates, and the flush is written here rather than
+inherited.** `std::process::exit` and not the Windows arm's `TerminateProcess`:
+that call exists for one measured reason and the reason is a tenant — a process
+that has loaded the Edge WebView2 client DLL cannot walk out through the loader's
+`DLL_PROCESS_DETACH` (§7.35) — and nothing on this platform is that tenant today,
+so the ordinary exit is both the honest door and the better one, because it runs
+the `atexit` chain. The two flush lines are not redundant with what that function
+already does on its own: they make the flush a property of `leave_process` rather
+than of which exit primitive an arm happens to call, so that the day a
+`WKWebView` in the process forces the faster door — `_exit`, which the backend
+inventory's own row anticipates — the run's footer does not leave with it.
+Nothing else on the way out depended on a Windows-only order: `bt_pty`'s
+recording writes through an unbuffered `File` and publishes with `sync_data` on
+its own thread, the session document and its sentinel are written inside the loop
+above every caller, and the footer is an `eprintln!`, which Rust does not buffer.
+The sixteen steps are the same sixteen steps.
+
+**④ The two launches, measured on the Mac mini** — macOS 26.6.2, Apple M4, the
+debug build at `74a3ef21`, each against an isolated `HOME` under the ticket's own
+worktree.
+
+**(a) A direct exec from a terminal**, under a real pty. Three runs, one rule,
+and the rule is the one the other platform already has.
+
+* A refused flag is answered on the terminal and nothing is written:
+  `folio --m3-7-not-a-flag` put `There is no --m3-7-not-a-flag option.` and the
+  usage block on the tty, exited 2, and the log path did not exist afterwards.
+  The front door is still the front door.
+* The same binary with no arguments wrote **four bytes** to the tty — the pty's
+  own end-of-file echo, and not one byte of Folio's — while the file took the
+  banner and the whole of the run: 1371 bytes, one run header, and under it the
+  startup's `BT_DPI` lines and the window thread's first-turn report.
+* With `BT_STARTUP_TRACE=1` the same launch talked to the terminal for the whole
+  run — its first line there is
+  `BT_STARTUP_TRACE: from here Folio talks to the console that started it` — and
+  the log **did not grow**: 1371 bytes before and 1371 after, still exactly one
+  run header. A run that names the console keeps it, which is the rule and not an
+  exception to it.
+
+**(b) `open -a` on a bundle**, which is what Finder, the Dock and LaunchServices
+all do. The bundle's executable is a wrapper that records its own three
+descriptors and then `exec`s Folio, so the pid and every descriptor belong to the
+launched process and not to the wrapper:
+
+```
+COMMAND  PID     USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+bash    4899 <user>      0r   CHR    3,2      0t0  336 /dev/null
+bash    4899 <user>      1u   CHR    3,2      0t0  336 /dev/null
+bash    4899 <user>      2u   CHR    3,2      0t0  336 /dev/null
+```
+
+and the first line of the file that run wrote is
+
+```
+── Folio 0.3.0 (74a3ef21e7) — run started 2026-09-12T22:29:19.590Z, pid 4899 ──
+```
+
+— the same pid, and the banner is the file's first line, so nothing between
+launchd's `/dev/null` and it was lost. 1455 bytes followed. **Before this ticket
+that file did not exist and those 1455 bytes were discarded by the kernel, one
+`write` at a time, while the channel reported `Nowhere`.**
+
+**The panic hook reaches it too, in a process with no screen at all.** A second
+bundle launch carrying `BT_PANIC_SELFTEST=4` — the debug-build one-shot §7.43
+already has, so nothing test-only was added for this — put the fault in the same
+file:
+
+```
+thread 'main' (11203438) panicked at crates/bt-app/src/main.rs:110709:5:
+BT_PANIC_SELFTEST: faulting the window thread on purpose
+```
+
+with the hook's own report beside it in that run's temporary directory
+(`folio-panic.log`, opening with the build stamp, the thread and the backtrace).
+**What follows the alert does not follow it here**, and that is the hook's
+documented order rather than a defect: `announce_panic` raises `NSAlert.runModal`
+on the thread that panicked, which is the window thread, so the footer and
+`leave_process` are reached when the box is dismissed. The probe ended that run
+by the pid the log's own header carries instead of dismissing it, so its file has
+no footer. Whether a crash on this platform should stand still behind a modal box
+is M4-11's question; the half this ticket owed — that the words reach the file —
+is measured.
+
+**⑤ What this ticket did not close, and it is one door.**
+`install_console_ctrl_handler` still answers `false`. The Unix half of the fault
+the Windows arm exists for is real — a process started from a shell is in that
+shell's foreground process group, so a `Ctrl+C` typed there is delivered here —
+but what the two signals should *do* is a decision and not a translation.
+`SIGINT` is the one the Windows arm refuses and refusing it here is the same
+sentence; `SIGTERM` is not, and on this platform it is how the system asks an
+application to go away at logout and at shutdown, so a handler for it is a path
+that has to write the session document and leave through `leave_process` — which
+is M3-1's application delegate and M3-5's single writer, neither of which exists
+yet. The door is booked here rather than guessed at.
+
+**⑥ Tests.** Source pins on the Windows workstation, where the arm is not
+compiled at all: `bt_platform::macos_stdio_tests`' four —
+`the_redirect_moves_both_descriptors_onto_an_appended_private_file`,
+`the_silence_points_both_descriptors_at_the_null_device`,
+`the_two_console_doors_stay_the_no_ops_their_class_says_they_are` and
+`the_process_flushes_what_it_wrote_before_it_leaves` — plus `bt_app`'s own
+`nothing_branches_on_the_two_console_no_ops`, which is ①'s claim read off the two
+call sites. Behaviour on the Mac: `portable_impl::stream_tests`' two, which
+really renumber this process's own descriptors and put them back from a duplicate
+taken before the call, so a failed assertion still prints where `cargo test` is
+reading. **They are written against the handles and not against the macros, and
+that is not a stylistic choice**: `print!` and `eprint!` both go through
+`std::io::print_to`, which hands the bytes to libtest's per-test capture buffer
+rather than to the descriptor, so the first draft of the behavioural case failed
+on the Mac with an empty file and both of its lines sitting in the harness's
+capture. A case written with the macros would have passed against a completely
+empty implementation of the door.
 
 *(本节英文,待中文文案改写。)*
