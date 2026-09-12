@@ -6,6 +6,29 @@ license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# **The first dependencies this crate has ever had off Windows** (M1-9), and
+# they are target-scoped so that a Linux build still links a `bt-platform` with
+# no dependencies at all — `docs/plans/port/macos-plan-2026-09-12.md` §4.6, the
+# rule the 0.5 remote server inherits.
+#
+# `objc2-app-kit` 0.3 gates every class behind a feature of its own name, so
+# `NSPasteboard` is asked for by name and nothing else in AppKit is generated;
+# a missing feature is an unresolved import rather than a silent absence
+# (`docs/plans/port/probe-x6-cross-check-2026-09-12.md`, Probe A). The versions
+# are the ones that probe resolved. `objc2` 0.6.4 and `objc2-foundation` 0.3.2
+# were already in `Cargo.lock` through winit and wgpu, so the whole of what this
+# edge adds to it is one package: `objc2-app-kit` 0.3.2.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "NSPasteboard",
+    "std",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "NSString",
+    "std",
+] }
+
 [target.'cfg(windows)'.dependencies]
 # One spelling of "a path as a `file:` URI", shared with every other place this
 # workspace writes one (`bt_transcript::paths::local_path_to_file_uri`). It is

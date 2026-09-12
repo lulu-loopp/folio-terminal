@@ -3519,7 +3519,7 @@ of what has to be said about a modified copy.
 
 | Licence | Packages |
 |---|---:|
-| MIT License | 466 |
+| MIT License | 467 |
 | Apache License 2.0 | 36 |
 | Unicode License v3 | 26 |
 | BSD 2-Clause "Simplified" License | 6 |
@@ -9478,7 +9478,7 @@ SOFTWARE.
 
 ### MIT License
 
-Used by 79 package(s):
+Used by 80 package(s):
 
 - **block2 0.5.1** — <https://github.com/madsmtm/objc2>
 - **block2 0.6.2** — <https://github.com/madsmtm/objc2>
@@ -9501,6 +9501,7 @@ Used by 79 package(s):
 - **ndk 0.9.0** — <https://github.com/rust-mobile/ndk>
 - **objc-sys 0.3.5** — <https://github.com/madsmtm/objc2>
 - **objc2-app-kit 0.2.2** — <https://github.com/madsmtm/objc2>
+- **objc2-app-kit 0.3.2** — <https://github.com/madsmtm/objc2>
 - **objc2-core-foundation 0.3.2** — <https://github.com/madsmtm/objc2>
 - **objc2-core-graphics 0.3.2** — <https://github.com/madsmtm/objc2>
 - **objc2-encode 4.1.0** — <https://github.com/madsmtm/objc2>
@@ -11798,7 +11799,7 @@ the following restrictions:
 
 ## In the lock file, not in any resolved build
 
-`Cargo.lock` pins 563 packages from crates.io. 528 of them are in the
+`Cargo.lock` pins 564 packages from crates.io. 529 of them are in the
 dependency graph this workspace resolves, and are attributed above with their
 licence texts. The 35 below are optional or platform-specific entries
 that no feature resolution here reaches: nothing links them, so nothing
