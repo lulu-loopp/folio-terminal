@@ -535,6 +535,48 @@ const ALT_SHIFT: ModifiersState = ModifiersState::ALT.union(ModifiersState::SHIF
 /// takes, and a bare `ModifiersState::SUPER` in the middle of a row is the one
 /// modifier a reader would have to translate.
 const WIN: ModifiersState = ModifiersState::SUPER;
+/// **The Command key**, which every application verb wears on macOS (M1-7,
+/// X-3 §4 ①).
+///
+/// The same flag as [`WIN`] — winit calls the fourth modifier `SUPER` on every
+/// platform and the keyboard it is printed on decides what it is called — and a
+/// second name for it rather than a reuse of the first, because a table a reader
+/// is scanning for "which keys does this product take on my machine" must not
+/// answer `Win` on a Mac. Which of the two names a row wears says which column
+/// it is in; nothing downstream can tell them apart, and nothing needs to.
+const CMD: ModifiersState = ModifiersState::SUPER;
+const CMD_SHIFT: ModifiersState = ModifiersState::SUPER.union(ModifiersState::SHIFT);
+
+/// **One chord per platform per row** — the dialect column X-3 §4 ① asks for.
+///
+/// Not a second table and not a fork of this one: `BINDINGS` keeps one row per
+/// verb, with its id, its name, its scope and its note, and the *chord* is the
+/// one thing in a row that a platform gets an opinion about. A Mac's `Cmd+T` and
+/// a Windows box's `Ctrl+Shift+N` are the same row of the same table — the same
+/// line in `keybindings.json`, the same line on the Shortcuts page, the same
+/// verb in the palette — which is what makes `docs/shortcuts.md` a table with a
+/// second column rather than a second document (§4.7).
+///
+/// **A value rather than two `cfg`-gated constants**, for the reason
+/// [`bt_platform::host_platform`] is one: a test on Windows can ask what the
+/// Mac's table says, which is the only way this ticket's own red tests could be
+/// written at all on the machine that has to write them —
+/// [`Shortcuts::defaults_for`] is where a build picks its column.
+///
+/// **The macOS column wears Command, and Command only** — optionally with
+/// Shift, never with Control and never with Option. Control is the terminal's
+/// whole alphabet there exactly as it is here (X-3 measured `^C ^D ^Z` already
+/// reaching the child untouched), and Option is *text* under Q9's ruling, so a
+/// row that wore either would be taking a byte or a character away from the
+/// person typing. `every_mac_chord_wears_command_and_nothing_it_may_not` holds
+/// the whole column to it.
+///
+/// The macOS chord for a row that has one. A row that has none writes `None`,
+/// which is a real answer and not a gap — see the quake row, whose key is
+/// claimed process-wide by a Windows API with no counterpart here.
+const fn mac(modifiers: ModifiersState, key: ChordKey) -> Option<Chord> {
+    Some(Chord::new(modifiers, key))
+}
 
 /// One row of the table: what it is called, what it does, what it is pressed
 /// with, and where it is in force.
@@ -554,6 +596,15 @@ const WIN: ModifiersState = ModifiersState::SUPER;
 /// `keybindings.json`). Both mean "this verb has no key today", and a row that
 /// vanished from the table instead would be a verb the panel could not offer a
 /// key *to*.
+///
+/// **`chord` and `mac` are one column read twice** (M1-7). In [`BINDINGS`] the
+/// first is the row's chord on Windows and the second is its chord on macOS; in
+/// a [`Shortcuts`] — which is the only table dispatch, the editor, the hint card
+/// and `docs/shortcuts.md`'s generator ever read — `chord` is **the chord of the
+/// dialect that table was built for**, because [`Shortcuts::defaults_for`] is
+/// where a build picks, once. Everything downstream therefore goes on asking one
+/// row one question, which is why adding a platform to this product did not add
+/// a platform to twenty call sites.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Binding {
     /// The stable id this row is named by in `keybindings.json`.
@@ -578,6 +629,11 @@ pub(crate) struct Binding {
     pub(crate) family: Option<Text>,
     pub(crate) action: Action,
     pub(crate) chord: Option<Chord>,
+    /// **The same row's chord on macOS**, read only out of [`BINDINGS`] and only
+    /// by [`Shortcuts::defaults_for`] and the documents generator. In a table
+    /// that has already picked its dialect it is the column that was not picked,
+    /// and nothing asks it.
+    pub(crate) mac: Option<Chord>,
     pub(crate) scope: Scope,
     /// **Whether a reader is shown this row at all** — on the Shortcuts page
     /// ([`Shortcuts::editor_rows`]) and in `docs/shortcuts.md`, which are the two
@@ -598,13 +654,20 @@ pub(crate) struct Binding {
 
 impl Binding {
     /// A row in force everywhere.
-    const fn window(id: &'static str, title: Text, action: Action, chord: Chord) -> Self {
+    const fn window(
+        id: &'static str,
+        title: Text,
+        action: Action,
+        chord: Chord,
+        mac: Option<Chord>,
+    ) -> Self {
         Self {
             id,
             title,
             family: None,
             action,
             chord: Some(chord),
+            mac,
             scope: Scope::Window,
             surfaced: true,
         }
@@ -622,6 +685,7 @@ impl Binding {
         family: Text,
         action: Action,
         chord: Chord,
+        mac: Option<Chord>,
     ) -> Self {
         Self {
             id,
@@ -629,6 +693,7 @@ impl Binding {
             family: Some(family),
             action,
             chord: Some(chord),
+            mac,
             scope: Scope::Window,
             surfaced: true,
         }
@@ -657,86 +722,150 @@ impl Binding {
             family: None,
             action,
             chord: None,
+            mac: None,
             scope: Scope::Window,
             surfaced: false,
         }
     }
 
     /// A row in force only while the preview seat holds the focus.
-    const fn preview(id: &'static str, title: Text, action: Action, chord: Chord) -> Self {
+    const fn preview(
+        id: &'static str,
+        title: Text,
+        action: Action,
+        chord: Chord,
+        mac: Option<Chord>,
+    ) -> Self {
         Self {
             id,
             title,
             family: None,
             action,
             chord: Some(chord),
+            mac,
             scope: Scope::Preview,
             surfaced: true,
         }
     }
 
     /// A row in force only on a preview seat with a document of ours under it.
-    const fn preview_document(id: &'static str, title: Text, action: Action, chord: Chord) -> Self {
+    const fn preview_document(
+        id: &'static str,
+        title: Text,
+        action: Action,
+        chord: Chord,
+        mac: Option<Chord>,
+    ) -> Self {
         Self {
             id,
             title,
             family: None,
             action,
             chord: Some(chord),
+            mac,
             scope: Scope::PreviewDocument,
             surfaced: true,
         }
     }
 
     /// A row in force only on a terminal showing its primary screen.
-    const fn terminal_primary(id: &'static str, title: Text, action: Action, chord: Chord) -> Self {
+    const fn terminal_primary(
+        id: &'static str,
+        title: Text,
+        action: Action,
+        chord: Chord,
+        mac: Option<Chord>,
+    ) -> Self {
         Self {
             id,
             title,
             family: None,
             action,
             chord: Some(chord),
+            mac,
             scope: Scope::TerminalPrimary,
             surfaced: true,
         }
     }
 
     /// A row in force only while the search capsule is up.
-    const fn search_open(id: &'static str, title: Text, action: Action, chord: Chord) -> Self {
+    const fn search_open(
+        id: &'static str,
+        title: Text,
+        action: Action,
+        chord: Chord,
+        mac: Option<Chord>,
+    ) -> Self {
         Self {
             id,
             title,
             family: None,
             action,
             chord: Some(chord),
+            mac,
             scope: Scope::SearchOpen,
             surfaced: true,
         }
     }
 
     /// A row in force only where the search capsule has somewhere to open.
-    const fn search_host(id: &'static str, title: Text, action: Action, chord: Chord) -> Self {
+    const fn search_host(
+        id: &'static str,
+        title: Text,
+        action: Action,
+        chord: Chord,
+        mac: Option<Chord>,
+    ) -> Self {
         Self {
             id,
             title,
             family: None,
             action,
             chord: Some(chord),
+            mac,
             scope: Scope::SearchHost,
             surfaced: true,
         }
     }
 
     /// A row in force only while a hosted page holds the keyboard.
-    const fn web_page(id: &'static str, title: Text, action: Action, chord: Chord) -> Self {
+    const fn web_page(
+        id: &'static str,
+        title: Text,
+        action: Action,
+        chord: Chord,
+        mac: Option<Chord>,
+    ) -> Self {
         Self {
             id,
             title,
             family: None,
             action,
             chord: Some(chord),
+            mac,
             scope: Scope::WebPage,
             surfaced: true,
+        }
+    }
+
+    /// **The chord this row answers to in a named dialect**, read out of
+    /// [`BINDINGS`] — where the two columns still stand side by side — rather
+    /// than out of an effective table, where one of them has already been
+    /// chosen. [`Shortcuts::defaults_for`] and `docs/shortcuts.md`'s generator
+    /// are its two callers, and they are the same caller seen from either end:
+    /// one picks a column to run, the other prints both.
+    #[must_use]
+    pub(crate) fn chord_on(&self, platform: bt_platform::HostPlatform) -> Option<&Chord> {
+        match platform {
+            // **A Unix that is not a Mac reads the Control column**, and that is
+            // the honest answer rather than a placeholder: what the macOS column
+            // is *for* is a keyboard with a Command key on it, and X11 and
+            // Wayland desktops spell an application verb with Control exactly as
+            // Windows does.
+            bt_platform::HostPlatform::Windows | bt_platform::HostPlatform::OtherUnix => {
+                self.chord.as_ref()
+            }
+            bt_platform::HostPlatform::MacOs => self.mac.as_ref(),
         }
     }
 
@@ -829,6 +958,16 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::RailNewTab,
         Action::NewTab,
         Chord::new(CTRL_SHIFT, character("n")),
+        // **`Cmd+T`, and the collision this table has carried since 2026-08-10
+        // simply is not there on the other side.** The Windows column had to
+        // choose between `Ctrl+Shift+N` and `Ctrl+Shift+T` for two verbs that
+        // both wanted `T`, and it gave `T` to `reopen-closed`; macOS asks nobody
+        // to choose, because `Cmd+T` is a new tab and `Cmd+N` a new window in
+        // every application on the platform, which frees `Cmd+Shift+T` for the
+        // reopen exactly where a browser puts it. Nothing is overturned by this:
+        // a dialect is a second answer to "which keys", not a second answer to
+        // "which verbs".
+        mac(CMD, character("t")),
     ),
     // **`Ctrl+Shift+M`, ruled by the user 2026-08-19** — no longer a placeholder
     // (multiwindow slice C shipped it provisionally the same day).
@@ -871,6 +1010,9 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutNewWindow,
         Action::NewWindow,
         Chord::new(CTRL_SHIFT, character("m")),
+        // The chord the whole note above says this verb wants, arriving in the
+        // one dialect where it was free: `Cmd+N`.
+        mac(CMD, character("n")),
     ),
     // **`Ctrl+Shift+Q`, ruled by the user 2026-08-20** — and the key was free,
     // which is the whole of why this row needed no argument: `Q` is claimed by
@@ -884,24 +1026,43 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutQuit,
         Action::Quit,
         Chord::new(CTRL_SHIFT, character("q")),
+        // **`Cmd+Q`, and it is this table's row and not AppKit's menu item**
+        // (X-3 §4 ⑦). winit installs a default application menu whose `Quit`
+        // sends `terminate:`, which ends the process rather than running
+        // [`crate::quit`] — so the session is never written, no window reaches
+        // Recent, and the next launch opens nothing. `main.rs` turns that menu
+        // off (`with_default_menu(false)`) so the press arrives here as a key
+        // like any other; M3-2 builds the real menu bar and its `Quit` item
+        // dispatches this same row, under X-4's rule that `terminate:` is never
+        // called from inside a handler.
+        mac(CMD, character("q")),
     ),
     Binding::window(
         "close-pane",
         Text::ClosePane,
         Action::ClosePane,
         Chord::new(CTRL_SHIFT, character("w")),
+        mac(CMD, character("w")),
     ),
     Binding::window(
         "next-tab",
         Text::ShortcutNextTab,
         Action::NextTab,
         Chord::new(CTRL, ChordKey::Named(NamedKey::Tab)),
+        // **`Cmd+Shift+]`, and pointedly not `Ctrl+Tab`.** The Windows chord is
+        // the one place in this table where a *bare* `Ctrl` is a window verb, and
+        // it can be because `^I` is Tab and the pair `Ctrl+Tab` has belonged to
+        // the window manager since Windows 3. On macOS `Ctrl+Tab` is the
+        // terminal's — `^I` is what a child receives from it — and the brackets
+        // are what Safari, Chrome, Terminal.app and iTerm2 all walk tabs with.
+        mac(CMD_SHIFT, character("]")),
     ),
     Binding::window(
         "prev-tab",
         Text::ShortcutPrevTab,
         Action::PrevTab,
         Chord::new(CTRL_SHIFT, ChordKey::Named(NamedKey::Tab)),
+        mac(CMD_SHIFT, character("[")),
     ),
     // **Nine rows the editor draws as one line.** They stay nine bindings — the
     // file names each of them, and a user who wants only `Ctrl+Shift+9` moved
@@ -915,6 +1076,10 @@ pub(crate) const BINDINGS: &[Binding] = &[
         FAMILY_GOTO_TAB,
         Action::GotoTab(1),
         Chord::new(CTRL_SHIFT, character("1")),
+        // Nine rows, and on macOS nine bare `Cmd+digit`s: the digits carry no
+        // control code for Command to take, so the Shift the Windows column
+        // wears for discipline ① is simply not needed on the other side.
+        mac(CMD, character("1")),
     ),
     Binding::family(
         "goto-tab-2",
@@ -922,6 +1087,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         FAMILY_GOTO_TAB,
         Action::GotoTab(2),
         Chord::new(CTRL_SHIFT, character("2")),
+        mac(CMD, character("2")),
     ),
     Binding::family(
         "goto-tab-3",
@@ -929,6 +1095,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         FAMILY_GOTO_TAB,
         Action::GotoTab(3),
         Chord::new(CTRL_SHIFT, character("3")),
+        mac(CMD, character("3")),
     ),
     Binding::family(
         "goto-tab-4",
@@ -936,6 +1103,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         FAMILY_GOTO_TAB,
         Action::GotoTab(4),
         Chord::new(CTRL_SHIFT, character("4")),
+        mac(CMD, character("4")),
     ),
     Binding::family(
         "goto-tab-5",
@@ -943,6 +1111,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         FAMILY_GOTO_TAB,
         Action::GotoTab(5),
         Chord::new(CTRL_SHIFT, character("5")),
+        mac(CMD, character("5")),
     ),
     Binding::family(
         "goto-tab-6",
@@ -950,6 +1119,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         FAMILY_GOTO_TAB,
         Action::GotoTab(6),
         Chord::new(CTRL_SHIFT, character("6")),
+        mac(CMD, character("6")),
     ),
     Binding::family(
         "goto-tab-7",
@@ -957,6 +1127,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         FAMILY_GOTO_TAB,
         Action::GotoTab(7),
         Chord::new(CTRL_SHIFT, character("7")),
+        mac(CMD, character("7")),
     ),
     Binding::family(
         "goto-tab-8",
@@ -964,6 +1135,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         FAMILY_GOTO_TAB,
         Action::GotoTab(8),
         Chord::new(CTRL_SHIFT, character("8")),
+        mac(CMD, character("8")),
     ),
     Binding::family(
         "goto-tab-9",
@@ -971,18 +1143,27 @@ pub(crate) const BINDINGS: &[Binding] = &[
         FAMILY_GOTO_TAB,
         Action::GotoTab(9),
         Chord::new(CTRL_SHIFT, character("9")),
+        mac(CMD, character("9")),
     ),
     Binding::window(
         "reopen-closed",
         Text::ShortcutReopenClosed,
         Action::ReopenClosed,
         Chord::new(CTRL_SHIFT, character("t")),
+        // The browser's chord, free here for the reason `new-tab` gives above.
+        mac(CMD_SHIFT, character("t")),
     ),
     Binding::window(
         "jump-attention",
         Text::ShortcutJumpAttention,
         Action::JumpAttention,
         Chord::new(CTRL_SHIFT, character("a")),
+        // **Shift is kept, and here it is doing real work rather than following
+        // a discipline.** A bare `Cmd+A` is Select All on this platform — in
+        // every field of this window and in every page a seat can hold — so the
+        // one letter the Windows column could afford bare is the one letter the
+        // macOS column cannot.
+        mac(CMD_SHIFT, character("a")),
     ),
     // **`command-palette` came back on 2026-09-02, into the key it left**
     // (DESIGN.md §7.55). It stood here from the 2026-08-10 audit, stepped out
@@ -995,6 +1176,10 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutCommandPalette,
         Action::CommandPalette,
         Chord::new(CTRL_SHIFT, character("p")),
+        // The same chord on both sides of the water, because the surface it
+        // opens learned its shape from an editor that spells it this way on both
+        // (`Cmd+Shift+P`).
+        mac(CMD_SHIFT, character("p")),
     ),
     //
     // **`Ctrl+Shift+Z`, and the settling of the chord P2-7 left open**
@@ -1016,24 +1201,51 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::RowFocusMode,
         Action::ToggleFocusMode,
         Chord::new(CTRL_SHIFT, character("z")),
+        // **`Cmd+Shift+E`, and the one row of the macOS column whose letter was
+        // chosen rather than mapped.** `Z` cannot come across: `Cmd+Shift+Z` is
+        // Redo on this platform the way `Cmd+Z` is Undo, and `redo-preview`
+        // takes it below — which is the same trade the Windows column made in
+        // the other direction on 2026-08-10, settled there by which chord was
+        // already under a hand and settled here by which chord a Mac already
+        // means something by. The argument for `E` is the argument the Windows
+        // row gives for `Z`: it is free in this product, it is not a chord this
+        // platform has taught anybody, and the verb it turns is one bit with a
+        // row in Appearance showing which way it is set. It is one
+        // `keybindings.json` line away from anything else.
+        mac(CMD_SHIFT, character("e")),
     ),
     Binding::window(
         "split-horizontal",
         Text::ShortcutSplitHorizontal,
         Action::SplitHorizontal,
         Chord::new(ALT_SHIFT, character("-")),
+        // **The two split rows lose Alt entirely, and Q9 is why.** With Option
+        // ruled to be *text* (`⌥-` types `–` and `⌥=` types `≠`), a macOS chord
+        // wearing Alt would fire a verb and type a character on one press. The
+        // pair that replaces them is iTerm2's and Terminal.app's own — `Cmd+D`
+        // opens a pane beside this one, `Cmd+Shift+D` one below it — which is
+        // also the platform's answer to what the Windows column spells with `-`
+        // and `=`.
+        mac(CMD_SHIFT, character("d")),
     ),
     Binding::window(
         "split-vertical",
         Text::ShortcutSplitVertical,
         Action::SplitVertical,
         Chord::new(ALT_SHIFT, character("=")),
+        mac(CMD, character("d")),
     ),
     Binding::window(
         "duplicate-pane-split",
         Text::ShortcutDuplicatePaneSplit,
         Action::DuplicatePaneSplit,
         Chord::new(CTRL_SHIFT, character("d")),
+        // **`Cmd+Shift+U`, the second of the three chosen letters**, and chosen
+        // for the row above: `D` is spent on the two splits there, because on
+        // this platform `D` *is* the split. `U` is free in this table, free on
+        // the platform, and the verb has a pane menu row and the `⌄` menu beside
+        // this key.
+        mac(CMD_SHIFT, character("u")),
     ),
     // **`Ctrl+Shift+X`, ruled by the user 2026-08-25** — the keyboard door
     // §7.1.6l shipped without. The verb had two pointer doors (a double-click on
@@ -1064,6 +1276,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::PaneMenuZoom,
         Action::ZoomPane,
         Chord::new(CTRL_SHIFT, character("x")),
+        mac(CMD_SHIFT, character("x")),
     ),
     // **`Ctrl+Shift+B`, and pointedly not the mock-up's `Ctrl+B`.**
     //
@@ -1084,6 +1297,12 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutFilesPane,
         Action::FilesPane,
         Chord::new(CTRL_SHIFT, character("b")),
+        // **Shift stays on the macOS side too**, and not out of company: `Cmd+B`
+        // is Bold in the one surface of this window that takes formatted text,
+        // which is the Markdown page 0.3 is building. The reference product
+        // spends a bare `Cmd+B` on its sidebar and can, because it has no
+        // terminal and no document under the same key.
+        mac(CMD_SHIFT, character("b")),
     ),
     // **`Ctrl+Shift+G`** (R28, 2026-08-15) — the chord VS Code has spent a
     // decade teaching, for the surface it taught it on.
@@ -1102,12 +1321,23 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutGitPage,
         Action::GitPage,
         Chord::new(CTRL_SHIFT, character("g")),
+        // **`Cmd+Shift+R`, the third and last chosen letter.** `G` is not
+        // available in this dialect: `Cmd+G` and `Cmd+Shift+G` are Find Again
+        // and Find Previous everywhere on this platform, and the two capsule
+        // rows below take them — a `Window`-scoped row on `Cmd+Shift+G` would
+        // stand in front of the capsule's own walk every time the capsule was
+        // open, because `lookup` reads this table in order. `R` is free here and
+        // says *repository*, which is the page this row turns to.
+        mac(CMD_SHIFT, character("r")),
     ),
     Binding::window(
         "open-settings",
         Text::Settings,
         Action::OpenSettings,
         Chord::new(CTRL, character(",")),
+        // The platform's own Preferences chord, and the one row where the two
+        // dialects differ by nothing but which modifier the comma wears.
+        mac(CMD, character(",")),
     ),
     // **The one scoped row** (ruling 9, 2026-08-12). It is the mock-up's chord
     // verbatim — bare `Ctrl+S`, from any focus state *inside the preview*, so a
@@ -1121,6 +1351,14 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutSavePreview,
         Action::SavePreview,
         Chord::new(CTRL, character("s")),
+        // **The scope stops mattering on this side, and the row keeps it
+        // anyway.** `Cmd+S` is not a control code, so nothing is being taken
+        // from a shell and the exception ruling 9 had to make does not have to
+        // be made again. The scope stays because it is not a modifier policy —
+        // it is *where there is something to save*, which is as true on a Mac as
+        // here, and a row that widened itself on one platform would be two
+        // answers to what this verb does.
+        mac(CMD, character("s")),
     ),
     // **The scoped row's two companions** (ticket T3, 2026-09-10), on ruling 9's
     // own footing and reaching the buffer through the same door the save does.
@@ -1140,12 +1378,21 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutUndoPreview,
         Action::UndoPreview,
         Chord::new(CTRL, character("z")),
+        mac(CMD, character("z")),
     ),
     Binding::preview_document(
         "redo-preview",
         Text::ShortcutRedoPreview,
         Action::RedoPreview,
         Chord::new(CTRL, character("y")),
+        // **`Cmd+Shift+Z`, which is the half of the desktop's split this
+        // dialect *does* have free.** The Windows row's note explains why it
+        // spells the redo `Ctrl+Y`: `Ctrl+Shift+Z` was already `focus-mode` and
+        // under a user's fingers. Neither half of that is true here — macOS has
+        // only one spelling of Redo, and no hand has ever held a macOS chord of
+        // this product — so the platform's answer is taken and `focus-mode`
+        // moves, which is the trade written out at that row.
+        mac(CMD_SHIFT, character("z")),
     ),
     // **`Ctrl+Shift` and an arrow, and pointedly not the mock-up's `Ctrl+Alt`
     // and one** (user ruling 2026-08-16, inventory D-1).
@@ -1172,12 +1419,18 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutPrevCommandMark,
         Action::PrevCommandMark,
         Chord::new(CTRL_SHIFT, ChordKey::Named(NamedKey::ArrowUp)),
+        // The same pair with Command in Control's place. The AltGr argument that
+        // chose Shift over Alt on Windows is a fact about a Windows keyboard, and
+        // the arrows arrive here for the other half of that argument: they are
+        // not a letter and take no control code from anyone.
+        mac(CMD_SHIFT, ChordKey::Named(NamedKey::ArrowUp)),
     ),
     Binding::terminal_primary(
         "next-command-mark",
         Text::ShortcutNextCommandMark,
         Action::NextCommandMark,
         Chord::new(CTRL_SHIFT, ChordKey::Named(NamedKey::ArrowDown)),
+        mac(CMD_SHIFT, ChordKey::Named(NamedKey::ArrowDown)),
     ),
     // **`Ctrl+F`, and it is an exception to discipline (1) written down as one**
     // (user ruling, 2026-08-16, inventory D-2).
@@ -1220,6 +1473,15 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutOpenSearch,
         Action::OpenSearch,
         Chord::new(CTRL, character("f")),
+        // **The exception this row is on Windows is not an exception here at
+        // all.** Everything the 2026-08-16 ruling had to argue — that `^F` has
+        // no owner a terminal user meets, that the reference product takes the
+        // key, that the scope hands it back to a full-screen program — was
+        // argument for taking a *control letter*. `Cmd+F` takes none: `^F` still
+        // reaches the child from this same keyboard, on this same press, with
+        // Control held instead. The scope stays for its own reason, which is
+        // where the capsule has somewhere to open.
+        mac(CMD, character("f")),
     ),
     // **The alias is retired** (user ruling 2026-08-18). `open-search-alias` was
     // a second row naming the same verb, so that a reader whose muscles knew
@@ -1245,12 +1507,20 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutNextMatch,
         Action::NextMatch,
         Chord::new(ModifiersState::empty(), ChordKey::Named(NamedKey::F3)),
+        // **`Cmd+G` / `Cmd+Shift+G`, and the function key does not come
+        // across.** `F3` is bare on Windows because a function key is not a
+        // control code; on a Mac the top row is Mission Control, brightness and
+        // volume unless a reader holds `fn`, so a walk bound there is a walk
+        // bound to two keys. `Cmd+G` is Find Again in every application on the
+        // platform, and it is what pushes `git-page` off `G` above.
+        mac(CMD, character("g")),
     ),
     Binding::search_open(
         "prev-match",
         Text::ShortcutPrevMatch,
         Action::PrevMatch,
         Chord::new(ModifiersState::SHIFT, ChordKey::Named(NamedKey::F3)),
+        mac(CMD_SHIFT, character("g")),
     ),
     // **Bare `Escape`, and the one row in this table that exists because of
     // something *below* the keyboard** (§7.7, W2 slice ④).
@@ -1295,6 +1565,13 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutCloseSearch,
         Action::CloseSearch,
         Chord::new(ModifiersState::empty(), ChordKey::Named(NamedKey::Escape)),
+        // **The one row whose two columns are the same chord, and the only row
+        // in the macOS column that wears no Command.** Everything above it is a
+        // key this window takes from something else and therefore a key a
+        // platform has an opinion about; this is a bare `Escape` in force only
+        // while a capsule of ours is up, which is the same sentence in both
+        // languages.
+        mac(ModifiersState::empty(), ChordKey::Named(NamedKey::Escape)),
     ),
     // **`Ctrl+L` and `F12`** (user ruling 2026-08-22, W1's open question 3).
     //
@@ -1315,6 +1592,10 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutWebAddress,
         Action::WebAddress,
         Chord::new(CTRL, character("l")),
+        // `Cmd+L` is the address bar on this platform too, and the scoped-row
+        // argument this one is written on does not have to be made twice: no
+        // control letter is being taken from anybody.
+        mac(CMD, character("l")),
     ),
     // **`Ctrl+Shift+L`** (§7.7 ⑨, Claude 定 2026-08-24) — the row above with the
     // scope taken off, and therefore a different verb. See
@@ -1330,12 +1611,21 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutWindowAddress,
         Action::WindowAddress,
         Chord::new(CTRL_SHIFT, character("l")),
+        mac(CMD_SHIFT, character("l")),
     ),
     Binding::web_page(
         "web-devtools",
         Text::ShortcutWebDevTools,
         Action::WebDevTools,
         Chord::new(ModifiersState::empty(), ChordKey::Named(NamedKey::F12)),
+        // **`Cmd+Shift+I` and not the browsers' `Cmd+Option+I`**, for
+        // `next-match`'s two reasons one after the other: `F12` is a key a Mac
+        // reader reaches through `fn`, and Option is text under Q9 — so the
+        // chord every engine on this platform actually ships would type an `ˆ`
+        // into whatever has the caret on the way to opening the inspector.
+        // `Cmd+Shift+I` is the same verb's chord on the other platform and is
+        // free in both dialects here.
+        mac(CMD_SHIFT, character("i")),
     ),
     // **The row whose key Windows reads and this window usually does not** (0.2
     // shortcut terminal, §7.54). `Win+\`` since next29 — see
@@ -1346,6 +1636,15 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutSummonQuake,
         Action::SummonQuake,
         Chord::new(WIN, character("`")),
+        // **No macOS chord, and that is the answer rather than a gap.** This row
+        // is the one whose key never reaches a window at all: `RegisterHotKey`
+        // takes it out of the input stream process-wide
+        // ([`Action::is_claimed_from_windows`]), and the door that does the same
+        // thing here is a different one that no ticket has opened yet. A chord
+        // written in this column today would be a key that quietly did nothing
+        // on a Mac — the exact shape [`Binding::unbuilt`] exists to refuse —
+        // and, worse, one this window would take from whatever *had* claimed it.
+        None,
     ),
     // **The first rows in this table that exist in order to be configured**
     // (mock-up 6104-6106, §7.1.5e), and the first that ship with nothing in
@@ -1497,6 +1796,14 @@ const ARROW_CAPS: &str = "← ↑ → ↓";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Shortcuts {
     rows: Vec<Binding>,
+    /// **Which column of [`BINDINGS`] these rows were dealt from** (M1-7).
+    ///
+    /// Carried rather than re-asked, so that a table built for one platform
+    /// cannot be compared against another's defaults halfway through its life —
+    /// which is exactly what `overrides()`, `is_overridden` and `restore` would
+    /// do if they read `host_platform()` for themselves. It is also what lets a
+    /// Windows test hold the Mac's whole table in its hand and ask it questions.
+    dialect: bt_platform::HostPlatform,
 }
 
 impl Default for Shortcuts {
@@ -1569,12 +1876,47 @@ impl Shortcuts {
             .map(|chord| chord_caps(chord).join("+"))
     }
 
-    /// The table as this build ships it.
+    /// The table as this build ships it, in this machine's dialect.
     #[must_use]
     pub(crate) fn defaults() -> Self {
+        Self::defaults_for(bt_platform::host_platform())
+    }
+
+    /// **The table as it ships on a named platform** — the one place a dialect
+    /// is chosen, and the reason nothing downstream of here has to know there
+    /// are two (M1-7).
+    ///
+    /// A parameter rather than a `cfg`, on [`bt_platform::host_platform`]'s own
+    /// argument: the dialect is a *value*, so the machine writing this ticket
+    /// can ask what the machine running it will do. Every red test of the macOS
+    /// column is `defaults_for(HostPlatform::MacOs)` read on Windows.
+    ///
+    /// A row with no chord in the chosen column simply has none — which is
+    /// already a state this table has ([`Binding::unbuilt`]) and already means
+    /// what it means everywhere else: this verb has no key today.
+    #[must_use]
+    pub(crate) fn defaults_for(platform: bt_platform::HostPlatform) -> Self {
         Self {
-            rows: BINDINGS.to_vec(),
+            rows: BINDINGS
+                .iter()
+                .map(|row| Binding {
+                    chord: row.chord_on(platform).cloned(),
+                    ..row.clone()
+                })
+                .collect(),
+            dialect: platform,
         }
+    }
+
+    /// What this build ships for the row at `index`, in this table's dialect.
+    ///
+    /// The four callers below all ask the same question — *what would this row
+    /// be if nobody had touched it* — and before there was a dialect they asked
+    /// it of `BINDINGS[index].chord` directly. That reading is now right on one
+    /// platform out of two, so it is spelled once here instead of four times
+    /// there.
+    fn shipped_chord(&self, index: usize) -> Option<&'static Chord> {
+        BINDINGS[index].chord_on(self.dialect)
     }
 
     /// Lay a `keybindings.json` over the defaults, reporting every line that
@@ -1687,7 +2029,7 @@ impl Shortcuts {
             }
         }
         for index in refused_rows {
-            let Some(default) = BINDINGS[index].chord.clone() else {
+            let Some(default) = self.shipped_chord(index).cloned() else {
                 continue;
             };
             if chord_verdict(&self.rows, self.rows[index].id, &default) == ChordVerdict::Free {
@@ -1709,9 +2051,9 @@ impl Shortcuts {
     pub(crate) fn overrides(&self) -> Vec<Override> {
         self.rows
             .iter()
-            .zip(BINDINGS)
-            .filter(|(row, default)| row.chord != default.chord)
-            .map(|(row, _)| Override {
+            .enumerate()
+            .filter(|(index, row)| row.chord.as_ref() != self.shipped_chord(*index))
+            .map(|(_, row)| Override {
                 id: row.id.to_owned(),
                 chord: row.chord.as_ref().map(format_chord),
             })
@@ -1723,8 +2065,8 @@ impl Shortcuts {
     pub(crate) fn is_overridden(&self, id: &str) -> bool {
         self.rows
             .iter()
-            .zip(BINDINGS)
-            .any(|(row, default)| row.id == id && row.chord != default.chord)
+            .enumerate()
+            .any(|(index, row)| row.id == id && row.chord.as_ref() != self.shipped_chord(index))
     }
 
     /// Give one row a chord, or take its chord away.
@@ -1755,19 +2097,20 @@ impl Shortcuts {
 
     /// Put one row back the way this build ships it.
     pub(crate) fn restore(&mut self, id: &str) {
+        let dialect = self.dialect;
         if let Some((row, default)) = self
             .rows
             .iter_mut()
             .zip(BINDINGS)
             .find(|(row, _)| row.id == id)
         {
-            row.chord.clone_from(&default.chord);
+            row.chord = default.chord_on(dialect).cloned();
         }
     }
 
     /// Put the whole table back, which is the same as deleting the file.
     pub(crate) fn restore_all(&mut self) {
-        *self = Self::defaults();
+        *self = Self::defaults_for(self.dialect);
     }
 
     /// Whether a chord may be given to the row called `id`, and why not when it
@@ -2410,25 +2753,40 @@ const REACHABLE_FOCUS: [Focus; 6] = [
 // the arrow into the file would be asking someone to paste a glyph they cannot
 // type.
 
-/// The modifiers, in the order Windows itself writes them.
+/// The modifiers, in the order this machine's platform writes them.
 fn modifier_caps(modifiers: ModifiersState) -> Vec<String> {
+    modifier_caps_on(modifiers, bt_platform::host_platform())
+}
+
+/// **The same, in a named platform's own hand** (M1-7).
+///
+/// Two spellings and two *orders*, and neither is a preference. The fourth
+/// modifier is one flag with two names printed on it — `Win` on one keyboard,
+/// `Cmd` on the other — so a cap that said `Win` on a Mac would be naming a key
+/// that is not on the machine. And the orders differ because the two desktops
+/// have taught two: Microsoft writes `Windows logo key + Ctrl + D` with the
+/// fourth in front, Apple writes `⇧⌘T` with it last, and a reader compares a cap
+/// against every other cap they have ever read on the machine in front of them.
+///
+/// The platform is a parameter for [`Shortcuts::defaults_for`]'s reason: the
+/// documents generator prints both columns from whichever machine runs it.
+fn modifier_caps_on(modifiers: ModifiersState, platform: bt_platform::HostPlatform) -> Vec<String> {
+    let mac = platform == bt_platform::HostPlatform::MacOs;
     let mut caps = Vec::new();
-    // **First, which is Microsoft's own order** (`Windows logo key + Ctrl + D`
-    // throughout their shortcut documentation). The three below it were in this
-    // order before there was a fourth, and the fourth goes in front of them
-    // rather than at the end because that is where a reader has read it every
-    // other time they have seen it written down.
-    if modifiers.super_key() {
+    if modifiers.super_key() && !mac {
         caps.push(MODIFIER_WIN.to_owned());
     }
     if modifiers.control_key() {
         caps.push(MODIFIER_CTRL.to_owned());
     }
     if modifiers.alt_key() {
-        caps.push(MODIFIER_ALT.to_owned());
+        caps.push(if mac { MODIFIER_OPTION } else { MODIFIER_ALT }.to_owned());
     }
     if modifiers.shift_key() {
         caps.push(MODIFIER_SHIFT.to_owned());
+    }
+    if modifiers.super_key() && mac {
+        caps.push(MODIFIER_CMD.to_owned());
     }
     caps
 }
@@ -2439,11 +2797,27 @@ const MODIFIER_SHIFT: &str = "Shift";
 /// **What the Windows key is called**, in the one spelling that is the same word
 /// in both of this window's languages and on the cap of the key itself.
 const MODIFIER_WIN: &str = "Win";
+/// The same flag on the other keyboard, and the same rule: the word on the cap.
+///
+/// **Words and not `⌘ ⌥ ⇧`**, which is what Apple draws. The symbols are the
+/// platform's own spelling and they are refused here for one reason, which is
+/// that they are *drawn*: these caps are laid out by this product's own text
+/// stack in this product's own chrome font, and a modifier that arrived as a
+/// missing glyph would be a shortcut page that could not say what its keys are.
+/// The order is Apple's, which is the half of their spelling that costs nothing.
+const MODIFIER_CMD: &str = "Cmd";
+const MODIFIER_OPTION: &str = "Option";
 
 /// A chord as the caps the dialog draws, left to right.
 #[must_use]
 pub(crate) fn chord_caps(chord: &Chord) -> Vec<String> {
-    let mut caps = modifier_caps(chord.modifiers);
+    chord_caps_on(chord, bt_platform::host_platform())
+}
+
+/// The same, in a named platform's hand — see [`modifier_caps_on`].
+#[must_use]
+pub(crate) fn chord_caps_on(chord: &Chord, platform: bt_platform::HostPlatform) -> Vec<String> {
+    let mut caps = modifier_caps_on(chord.modifiers, platform);
     caps.push(key_label(&chord.key));
     caps
 }
@@ -2552,8 +2926,21 @@ pub(crate) fn format_chord(chord: &Chord) -> String {
     // The same order [`modifier_caps`] draws, and it has to be the same order:
     // what this writes is what `parse_chord` reads back, and what the caps show
     // is what a reader compares against the file.
+    //
+    // **The fourth modifier is written by the name of the key it is on** (M1-7),
+    // which is the one place the *file* knows there are two platforms. It is not
+    // a second format: `parse_chord` reads both words on both machines, so a
+    // `keybindings.json` carried between them lands whole, and the order does
+    // not move — a file is read left to right by a parser and the caps are what
+    // a person compares it against, which is the sentence above.
     if chord.modifiers.super_key() {
-        out.push_str("Win+");
+        out.push_str(
+            if bt_platform::host_platform() == bt_platform::HostPlatform::MacOs {
+                "Cmd+"
+            } else {
+                "Win+"
+            },
+        );
     }
     if chord.modifiers.control_key() {
         out.push_str("Ctrl+");
@@ -2584,9 +2971,19 @@ pub(crate) fn parse_chord(text: &str) -> Option<Chord> {
     let mut rest = text;
     loop {
         let candidate = [
+            // **Three words for one flag, read on every platform** (M1-7).
+            // `format_chord` writes whichever one is printed on this machine's
+            // keyboard; this end takes all of them, because a file is a thing
+            // people copy between machines and refusing to read `Cmd+` on
+            // Windows would turn a carried file into a refused line for no
+            // reason a reader could act on. `Command+` is here because it is
+            // what a person who does not know our spelling would type.
             ("Win+", ModifiersState::SUPER),
+            ("Cmd+", ModifiersState::SUPER),
+            ("Command+", ModifiersState::SUPER),
             ("Ctrl+", ModifiersState::CONTROL),
             ("Alt+", ModifiersState::ALT),
+            ("Option+", ModifiersState::ALT),
             ("Shift+", ModifiersState::SHIFT),
         ]
         .into_iter()
@@ -4699,6 +5096,7 @@ mod tests {
     fn flipping_surfaced_brings_the_hidden_rows_back_whole() {
         let table = Shortcuts {
             rows: as_if_the_verb_had_landed(),
+            dialect: bt_platform::host_platform(),
         };
         let lines = table.editor_rows();
         for slot in 1..=4u8 {
@@ -5109,6 +5507,7 @@ mod tests {
             Text::ShortcutSummonPip1,
             Action::SummonPip(1),
             Chord::new(CTRL_SHIFT, super::character("0")),
+            mac(CMD_SHIFT, super::character("0")),
         );
         assert!(
             !pending.answers_a_hand_holding(CTRL_SHIFT, ON_A_TERMINAL),
@@ -5119,6 +5518,7 @@ mod tests {
             Text::ShortcutJumpAttention,
             Action::JumpAttention,
             Chord::new(CTRL_SHIFT, super::character("0")),
+            mac(CMD_SHIFT, super::character("0")),
         );
         assert!(
             arrived.answers_a_hand_holding(CTRL_SHIFT, ON_A_TERMINAL),
@@ -5757,6 +6157,324 @@ mod tests {
         );
     }
 
+    // ── The two dialects (M1-7, probe X-3 §4) ──────────────────────────────
+
+    /// The table as it ships on a Mac, held on whatever machine is reading this.
+    fn mac_table() -> Shortcuts {
+        Shortcuts::defaults_for(bt_platform::HostPlatform::MacOs)
+    }
+
+    /// Every row of a named dialect as `id → chord`, unbound rows included.
+    fn dialect(platform: bt_platform::HostPlatform) -> Vec<(&'static str, Option<String>)> {
+        BINDINGS
+            .iter()
+            .map(|row| {
+                (
+                    row.id,
+                    row.chord_on(platform)
+                        .map(|chord| chord_caps_on(chord, platform).join("+")),
+                )
+            })
+            .collect()
+    }
+
+    /// RED (M1-7, X-3 §4 ①) — **every application verb wears Command on macOS.**
+    ///
+    /// The ticket's first sentence, asserted over the whole table rather than
+    /// over the dozen rows a reader would think to name: a row added tomorrow
+    /// with a Windows chord and no macOS one is a verb that silently has no key
+    /// on that platform, and a row given a macOS chord that forgot Command is a
+    /// verb competing with the shell for a control code.
+    ///
+    /// **The two rows that answer differently are named here**, because each is
+    /// a decision rather than an omission: `close-search` is a bare `Escape` in
+    /// force only while a capsule of ours is up, and `summon-quake`'s key is
+    /// claimed process-wide by an API that has no macOS counterpart yet.
+    ///
+    /// MUTATION: drop any row's `mac(…)` and this names it.
+    #[test]
+    fn the_mac_dialect_maps_every_application_verb_to_command() {
+        let unbound_on_purpose = ["summon-quake"];
+        let bare_on_purpose = ["close-search"];
+        for row in BINDINGS.iter().filter(|row| row.surfaced) {
+            let Some(windows) = row.chord.as_ref() else {
+                assert!(
+                    row.mac.is_none(),
+                    "{} has a macOS chord and no Windows one, which is a row \
+                     nobody decided",
+                    row.id
+                );
+                continue;
+            };
+            let _ = windows;
+            if unbound_on_purpose.contains(&row.id) {
+                assert!(
+                    row.mac.is_none(),
+                    "{} is unbound on macOS on purpose",
+                    row.id
+                );
+                continue;
+            }
+            let mac = row
+                .mac
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} has no macOS chord", row.id));
+            if bare_on_purpose.contains(&row.id) {
+                assert!(
+                    mac.modifiers.is_empty(),
+                    "{} is the bare row and wears a modifier",
+                    row.id
+                );
+                continue;
+            }
+            assert!(
+                mac.modifiers.super_key(),
+                "{} answers to {} on macOS, which is not this application's \
+                 modifier there",
+                row.id,
+                chord_caps_on(mac, bt_platform::HostPlatform::MacOs).join("+")
+            );
+        }
+    }
+
+    /// RED (M1-7, X-3 §4 ①) — **and it wears nothing it may not.**
+    ///
+    /// The other half of the rule, and the half with a cost behind it: Control
+    /// on that platform is the child's whole control-code alphabet (X-3 measured
+    /// `^C ^D ^Z` reaching a shell untouched), and Option is *text* under Q9 — so
+    /// a macOS chord wearing either takes a byte or a character away from the
+    /// person typing. `split-horizontal` and `split-vertical` are the rows this
+    /// is really about: their Windows chords are `Alt+Shift+-` and `Alt+Shift+=`,
+    /// and carrying that shape across would have fired a verb *and* typed a `–`
+    /// on one press.
+    ///
+    /// MUTATION: give any row `CTRL` or an `ALT` on the macOS side.
+    #[test]
+    fn every_mac_chord_wears_command_and_nothing_it_may_not() {
+        for row in BINDINGS {
+            let Some(mac) = row.mac.as_ref() else {
+                continue;
+            };
+            assert!(
+                !mac.modifiers.control_key(),
+                "{} takes Control from the child on macOS",
+                row.id
+            );
+            assert!(
+                !mac.modifiers.alt_key(),
+                "{} wears Option on macOS, which is a character rather than a \
+                 modifier there (§8 Q9)",
+                row.id
+            );
+        }
+    }
+
+    /// RED (M1-7) — **no two rows of the macOS dialect answer to one press.**
+    ///
+    /// The same property `chord_verdict` enforces on a table a reader edits,
+    /// asked of the column this ticket wrote by hand. It is the one that caught
+    /// `git-page` wanting `Cmd+Shift+G` while the capsule's own backwards walk
+    /// wanted it too — and caught it the right way round, because a `Window` row
+    /// stands in front of a scoped one in this table's order and the scoped row
+    /// would simply never have fired.
+    #[test]
+    fn the_mac_dialect_has_no_two_rows_answering_one_press() {
+        let table = mac_table();
+        for (index, row) in table.rows().iter().enumerate() {
+            let Some(chord) = row.chord.as_ref() else {
+                continue;
+            };
+            let verdict = chord_verdict(table.rows(), row.id, chord);
+            assert_eq!(
+                verdict,
+                ChordVerdict::Free,
+                "row {index} (`{}`) is refused its own shipped chord on macOS: \
+                 {verdict:?}",
+                row.id
+            );
+        }
+    }
+
+    /// RED (M1-7) — **`Cmd+Q` is Folio's `quit` verb.**
+    ///
+    /// X-3 measured `Cmd+Q` ending the process through AppKit's default menu and
+    /// `NSApplication terminate:` — past [`crate::quit`], so the session document
+    /// was never written and the next launch would have opened nothing. Half the
+    /// fix is `main.rs` turning that menu off; this is the other half, and it is
+    /// the half that says what the press *means*.
+    ///
+    /// MUTATION: take `mac(CMD, character("q"))` off the `quit` row.
+    #[test]
+    fn command_q_is_folios_quit_verb() {
+        let table = mac_table();
+        assert_eq!(
+            table.lookup(
+                &Key::Character("q".into()),
+                &Key::Character("q".into()),
+                CMD,
+                Focus::default(),
+            ),
+            Some(Action::Quit),
+        );
+    }
+
+    /// RED (M1-7, X-3 §4 ①) — **a Control chord is the child's on macOS**, and
+    /// this table does not claim one.
+    ///
+    /// The half of the rule that is about what this window *does not* do. X-3
+    /// found `^C`, `^D` and `^Z` already correct on the Mac — `0x03`, an EOF that
+    /// ended `cat`, and `zsh: suspended` — and the risk this ticket introduces is
+    /// that the macOS column takes one of those letters back while writing the
+    /// dialect. No row of that column may answer a chord whose only modifier is
+    /// Control, whatever the letter.
+    #[test]
+    fn a_control_chord_is_the_childs_on_macos() {
+        let table = mac_table();
+        for letter in ["c", "d", "z", "a", "f", "s", "l", "g", "b", "q", "w", "t"] {
+            let key = Key::Character(letter.into());
+            for focus in &REACHABLE_FOCUS {
+                assert_eq!(
+                    table.lookup(&key, &key, CTRL, *focus),
+                    None,
+                    "Ctrl+{letter} is the child's on macOS and this table claims it"
+                );
+            }
+        }
+    }
+
+    /// RED (M1-7) — **the Windows dialect is unchanged, chord for chord.**
+    ///
+    /// The whole of what this ticket promised the platform it is not being
+    /// written on. A dialect column is a change to a data structure every row of
+    /// this table passes through, so the cheapest way for it to go wrong is
+    /// quietly: one row's Windows chord moved while a reader's eye was on the
+    /// column beside it. The expected list is written out rather than derived,
+    /// because a derivation would move with the thing it is holding still.
+    ///
+    /// MUTATION: change any Windows chord in [`BINDINGS`] and this names it.
+    #[test]
+    fn the_windows_dialect_is_unchanged() {
+        assert_eq!(
+            dialect(bt_platform::HostPlatform::Windows),
+            WINDOWS_DIALECT
+                .iter()
+                .map(|(id, caps)| (*id, (!caps.is_empty()).then(|| (*caps).to_owned())))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// The Windows column as v0.3.0-preview shipped it. An empty string is a row
+    /// with no chord.
+    const WINDOWS_DIALECT: &[(&str, &str)] = &[
+        ("new-tab", "Ctrl+Shift+N"),
+        ("new-window", "Ctrl+Shift+M"),
+        ("quit", "Ctrl+Shift+Q"),
+        ("close-pane", "Ctrl+Shift+W"),
+        ("next-tab", "Ctrl+Tab"),
+        ("prev-tab", "Ctrl+Shift+Tab"),
+        ("goto-tab-1", "Ctrl+Shift+1"),
+        ("goto-tab-2", "Ctrl+Shift+2"),
+        ("goto-tab-3", "Ctrl+Shift+3"),
+        ("goto-tab-4", "Ctrl+Shift+4"),
+        ("goto-tab-5", "Ctrl+Shift+5"),
+        ("goto-tab-6", "Ctrl+Shift+6"),
+        ("goto-tab-7", "Ctrl+Shift+7"),
+        ("goto-tab-8", "Ctrl+Shift+8"),
+        ("goto-tab-9", "Ctrl+Shift+9"),
+        ("reopen-closed", "Ctrl+Shift+T"),
+        ("jump-attention", "Ctrl+Shift+A"),
+        ("command-palette", "Ctrl+Shift+P"),
+        ("focus-mode", "Ctrl+Shift+Z"),
+        ("split-horizontal", "Alt+Shift+-"),
+        ("split-vertical", "Alt+Shift+="),
+        ("duplicate-pane-split", "Ctrl+Shift+D"),
+        ("zoom-pane", "Ctrl+Shift+X"),
+        ("files-pane", "Ctrl+Shift+B"),
+        ("git-page", "Ctrl+Shift+G"),
+        ("open-settings", "Ctrl+,"),
+        ("save-preview", "Ctrl+S"),
+        ("undo-preview", "Ctrl+Z"),
+        ("redo-preview", "Ctrl+Y"),
+        ("prev-command-mark", "Ctrl+Shift+↑"),
+        ("next-command-mark", "Ctrl+Shift+↓"),
+        ("open-search", "Ctrl+F"),
+        ("next-match", "F3"),
+        ("prev-match", "Shift+F3"),
+        ("close-search", "Esc"),
+        ("web-address", "Ctrl+L"),
+        ("window-address", "Ctrl+Shift+L"),
+        ("web-devtools", "F12"),
+        ("summon-quake", "Win+`"),
+        ("summon-pip-1", ""),
+        ("summon-pip-2", ""),
+        ("summon-pip-3", ""),
+        ("summon-pip-4", ""),
+    ];
+
+    /// RED (M1-7) — **the macOS column, spelled out.**
+    ///
+    /// [`the_windows_dialect_is_unchanged`]'s twin, and it exists for the
+    /// opposite reason: that one holds a column still, this one says what the new
+    /// one *is*, in one place a reader can check against the plan's own list
+    /// without reading forty rows of table.
+    #[test]
+    fn the_mac_dialect_is_the_one_this_ticket_wrote() {
+        assert_eq!(
+            dialect(bt_platform::HostPlatform::MacOs),
+            MAC_DIALECT
+                .iter()
+                .map(|(id, caps)| (*id, (!caps.is_empty()).then(|| (*caps).to_owned())))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// The macOS column. An empty string is a row with no chord there.
+    const MAC_DIALECT: &[(&str, &str)] = &[
+        ("new-tab", "Cmd+T"),
+        ("new-window", "Cmd+N"),
+        ("quit", "Cmd+Q"),
+        ("close-pane", "Cmd+W"),
+        ("next-tab", "Shift+Cmd+]"),
+        ("prev-tab", "Shift+Cmd+["),
+        ("goto-tab-1", "Cmd+1"),
+        ("goto-tab-2", "Cmd+2"),
+        ("goto-tab-3", "Cmd+3"),
+        ("goto-tab-4", "Cmd+4"),
+        ("goto-tab-5", "Cmd+5"),
+        ("goto-tab-6", "Cmd+6"),
+        ("goto-tab-7", "Cmd+7"),
+        ("goto-tab-8", "Cmd+8"),
+        ("goto-tab-9", "Cmd+9"),
+        ("reopen-closed", "Shift+Cmd+T"),
+        ("jump-attention", "Shift+Cmd+A"),
+        ("command-palette", "Shift+Cmd+P"),
+        ("focus-mode", "Shift+Cmd+E"),
+        ("split-horizontal", "Shift+Cmd+D"),
+        ("split-vertical", "Cmd+D"),
+        ("duplicate-pane-split", "Shift+Cmd+U"),
+        ("zoom-pane", "Shift+Cmd+X"),
+        ("files-pane", "Shift+Cmd+B"),
+        ("git-page", "Shift+Cmd+R"),
+        ("open-settings", "Cmd+,"),
+        ("save-preview", "Cmd+S"),
+        ("undo-preview", "Cmd+Z"),
+        ("redo-preview", "Shift+Cmd+Z"),
+        ("prev-command-mark", "Shift+Cmd+↑"),
+        ("next-command-mark", "Shift+Cmd+↓"),
+        ("open-search", "Cmd+F"),
+        ("next-match", "Cmd+G"),
+        ("prev-match", "Shift+Cmd+G"),
+        ("close-search", "Esc"),
+        ("web-address", "Cmd+L"),
+        ("window-address", "Shift+Cmd+L"),
+        ("web-devtools", "Shift+Cmd+I"),
+        ("summon-quake", ""),
+        ("summon-pip-1", ""),
+        ("summon-pip-2", ""),
+        ("summon-pip-3", ""),
+        ("summon-pip-4", ""),
+    ];
+
     /// The workspace root, reached from the crate this test is compiled in.
     fn repository_root() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -5791,33 +6509,53 @@ mod tests {
                 Lang::English => (
                     "## English",
                     "Every key here can be changed on the Shortcuts page in Settings. \
-                     Changing one writes `%APPDATA%\\Folio\\keybindings.json`; the last \
-                     column is the name a row has in that file.",
-                    ["Key", "What it does", "Where it works", "Name in the file"],
+                     Changing one writes `keybindings.json` in Folio's settings folder \
+                     (`%APPDATA%\\Folio` on Windows); the last column is the name a row \
+                     has in that file. The first two columns are one row in the two \
+                     dialects Folio speaks: an application verb wears Ctrl on Windows and \
+                     Command on macOS, so that Control is left to the terminal on both.",
+                    [
+                        "Windows",
+                        "macOS",
+                        "What it does",
+                        "Where it works",
+                        "Name in the file",
+                    ],
                 ),
                 Lang::Chinese => (
                     "## 中文",
-                    "下面每一组键都能在设置的快捷键页里改。改过之后写进 \
-                     `%APPDATA%\\Folio\\keybindings.json`，最后一列就是这一行在那个文件里的名字。",
-                    ["按键", "作用", "在哪里生效", "文件里的名字"],
+                    "下面每一组键都能在设置的快捷键页里改。改过之后写进 Folio 设置目录里的 \
+                     `keybindings.json`（Windows 上是 `%APPDATA%\\Folio`），最后一列就是这一行\
+                     在那个文件里的名字。前两列是同一行的两种说法：窗口自己的动作在 Windows 上\
+                     按 Ctrl，在 macOS 上按 Command，两边都把 Control 留给终端。",
+                    ["Windows", "macOS", "作用", "在哪里生效", "文件里的名字"],
                 ),
             };
             let _ = write!(out, "\n{heading}\n\n{lead}\n\n");
             let _ = writeln!(
                 out,
-                "| {} | {} | {} | {} |",
-                columns[0], columns[1], columns[2], columns[3]
+                "| {} | {} | {} | {} | {} |",
+                columns[0], columns[1], columns[2], columns[3], columns[4]
             );
-            let _ = writeln!(out, "| --- | --- | --- | --- |");
+            let _ = writeln!(out, "| --- | --- | --- | --- | --- |");
             for binding in bindings.iter().filter(|binding| binding.surfaced) {
-                let key = binding.chord.as_ref().map_or_else(
-                    || Text::ShortcutUnbound.in_lang(lang).to_owned(),
-                    |chord| chord_caps(chord).join("+"),
-                );
+                // **Named platforms and not this machine's**, which is the whole
+                // of why `chord_caps_on` takes one: a document generated on a Mac
+                // and a document generated on Windows have to be the same bytes,
+                // or the gate that holds this file to the table would answer
+                // differently on the two machines it is run on.
+                let key = |platform| {
+                    binding.chord_on(platform).map_or_else(
+                        || Text::ShortcutUnbound.in_lang(lang).to_owned(),
+                        |chord| chord_caps_on(chord, platform).join("+"),
+                    )
+                };
                 let note = binding.note_in(lang).unwrap_or(Cow::Borrowed(""));
                 let _ = writeln!(
                     out,
-                    "| {key} | {} | {note} | `{}` |",
+                    "| {} | {} | {} | {note} | `{}` |",
+                    key(bt_platform::HostPlatform::Windows),
+                    key(bt_platform::HostPlatform::MacOs),
                     binding.title.in_lang(lang),
                     binding.id
                 );

@@ -2367,6 +2367,24 @@ pub enum SettingsRow {
     /// this page's rows about what the window **says to you**, and the three
     /// below them are about what it does with your machine.
     KeyHints,
+    /// **Whether the Option key is Alt rather than text** — the General page's
+    /// macOS row (macOS plan §8 Q9, ruled 2026-09-12; M1-7).
+    ///
+    /// **On this page and not on Terminal**, though what it changes is bytes a
+    /// child receives. The division this file is filed under is who the row is
+    /// about: Terminal's rows are about a *shell* — its scrollback, its wrapping,
+    /// its notifications — and this one is about a **key on the machine**, which
+    /// is what General's rows have always been. It reads beside `Language` and
+    /// `Key hints` for the same reason those two read beside each other: all
+    /// three are the window answering "what does this thing under my hand do".
+    ///
+    /// **Shown only where the key exists** — see [`visible_rows`], which is where
+    /// every other machine-shaped row of this page is decided, and
+    /// `bt_platform::host_platform` is what it asks. A Windows reader is not
+    /// offered a switch for a key their keyboard does not have; the *stored*
+    /// answer is carried on every platform all the same, because
+    /// `settings.json` holds a reader's answers rather than a machine's shape.
+    OptionSendsAlt,
     /// **Whether Folio is in Explorer's right-click menu** (§7.4, §7.4a, §7.4b)
     /// — the General page's fourth row, and a switch.
     ///
@@ -2938,6 +2956,7 @@ impl SettingsRow {
             | Self::DefaultProfile
             | Self::Language
             | Self::KeyHints
+            | Self::OptionSendsAlt
             | Self::SearchEngine
             | Self::LaunchOpens
             | Self::ContextMenu
@@ -3018,6 +3037,7 @@ impl SettingsRow {
             Self::CopilotHooks => Text::RowCopilotHooks.text(),
             Self::GitPanel => Text::RowGitPanel.text(),
             Self::KeyHints => Text::RowKeyHints.text(),
+            Self::OptionSendsAlt => Text::RowOptionSendsAlt.text(),
             Self::ContextMenu => Text::RowContextMenu.text(),
             Self::UpdateCheck => Text::RowUpdateCheck.text(),
             // Mock-up 2360.
@@ -3185,6 +3205,7 @@ impl SettingsRow {
             // might swallow the chord they were reaching for is a row they
             // switch off without trying it.
             Self::KeyHints => Text::DescKeyHints.text(),
+            Self::OptionSendsAlt => Text::DescOptionSendsAlt.text(),
             // **Not a constant**, because which of four sentences is true is a
             // fact about the machine rather than about the row — and since the
             // row became a switch that is the *only* place the machine shows:
@@ -3477,6 +3498,11 @@ impl SettingsRow {
             // and a switch they have to open a disclosure to find is a switch
             // they report as missing.
             | Self::KeyHints
+            // Not advanced, and on the shortcut hints' measure again: a reader
+            // looking for this row is one whose `⌥a` has just done the wrong
+            // thing, and the answer to "why does this key not do what it does
+            // everywhere else" must not be behind a disclosure.
+            | Self::OptionSendsAlt
             // Not advanced, on `PsReadLine`'s own measure: it is a row that
             // repairs something the reader has already gone looking for, and a
             // reader who wants Folio in their right-click menu has no reason to
@@ -3604,6 +3630,7 @@ impl SettingsRow {
             | Self::Tables
             | Self::GitPanel
             | Self::KeyHints
+            | Self::OptionSendsAlt
             | Self::PsReadLine
             | Self::CopyOnSelect
             | Self::Notifications
@@ -3690,6 +3717,7 @@ impl SettingsRow {
             | Self::Tables
             | Self::GitPanel
             | Self::KeyHints
+            | Self::OptionSendsAlt
             | Self::PsReadLine
             | Self::CopyOnSelect
             | Self::Notifications
@@ -4066,6 +4094,9 @@ impl SettingsRow {
             Self::KeyHints => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.key_hints),
+            Self::OptionSendsAlt => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.option_sends_alt),
             Self::CopyOnSelect => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.copy_on_select),
@@ -4328,6 +4359,20 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // what it does with the machine. A row about a card full of words belongs
     // beside the row that decides which words they are.
     rows.push(SettingsRow::KeyHints);
+    // **Directly under `Key hints`, and only where the key is** (M1-7, §8 Q9).
+    // It joins the pair above it rather than the group below: `Language`, `Key
+    // hints` and this row are the three that answer "what does this thing under
+    // my hand do", and the rows after them are about what this product does with
+    // the machine.
+    //
+    // `host_platform()` and not `cfg!`, which is the rule this whole file is
+    // already under (`only_the_named_files_decide_what_platform_this_is` keeps
+    // `settings.rs` on its list for exactly these questions): a row that decided
+    // for itself what platform it was on would be a row a Windows agent could
+    // not read out loud.
+    if bt_platform::host_platform() == bt_platform::HostPlatform::MacOs {
+        rows.push(SettingsRow::OptionSendsAlt);
+    }
     rows.push(SettingsRow::GitPanel);
     // Above `Default profile` and below `Git panel`, which keeps the last two
     // rows of this page where every keyboard walk in this file already expects
@@ -4770,6 +4815,8 @@ pub struct SettingsValues {
     /// Whether a modifier held on its own raises the card that lists what it
     /// starts (§7.1.5e′).
     pub key_hints: bool,
+    /// Whether the Option key is Alt rather than text (macOS plan §8 Q9; M1-7).
+    pub option_sends_alt: bool,
     /// Whether Explorer's right-click menu carries Folio's verb — **read off the
     /// registry, not out of `settings.json`**.
     ///
@@ -5003,6 +5050,8 @@ impl SettingsValues {
             powershell_install_pending: false,
             git_panel: true,
             key_hints: true,
+            // Option composes text, which is the platform's own answer.
+            option_sends_alt: false,
             // A machine that never installed the verb, which is what a fresh
             // one is.
             context_menu: false,
@@ -8416,6 +8465,18 @@ pub fn copilot_hooks_requested(target: SettingsTarget) -> Option<bool> {
 pub fn key_hints_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::KeyHints, index) => FORMULA_OPTIONS.get(index).copied(),
+        _ => None,
+    }
+}
+
+/// Whether the Option key is Alt rather than text, as a press on its picker
+/// (macOS plan §8 Q9; M1-7).
+#[must_use]
+pub fn option_sends_alt_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::OptionSendsAlt, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
         _ => None,
     }
 }

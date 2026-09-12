@@ -1,5 +1,131 @@
+use bt_platform::HostPlatform;
 use winit::event::ElementState;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+// ── The routing rule, and the one sentence it is (M1-7, probe X-3 §4) ───────
+//
+// **Command is the application's, Control is the terminal's, and no verb wears
+// both.** Everything in this module that asks about a modifier asks it through
+// the three predicates below, so that the rule is one sentence in one place
+// rather than a modifier test at every door. On Windows and on a Unix that is
+// not a Mac the application's modifier *is* Control, which is why the same three
+// predicates leave that dialect byte for byte where it was: `is_command_chord`
+// answers `control_key()` there, and `Ctrl+C` goes on being an interrupt with
+// nothing selected exactly as it was in v0.1.
+
+/// **Whether this press wears the modifier that makes a chord the
+/// application's** rather than the child's or the text's.
+///
+/// Control here, Command on a Mac — and the two are not interchangeable in
+/// either direction. `^C ^D ^Z` reach a child on macOS untouched (X-3 measured
+/// all three), so Control cannot be this window's modifier there; and Command
+/// has no control code to take, which is what lets the macOS column of
+/// `shortcuts::BINDINGS` claim a bare `Cmd+F` where the Windows column had to
+/// argue for one.
+#[must_use]
+pub(crate) fn is_command_chord(modifiers: ModifiersState) -> bool {
+    is_command_chord_on(modifiers, bt_platform::host_platform())
+}
+
+/// The same on a named platform, so a test on either machine can ask about the
+/// other — `bt_platform::host_platform`'s own argument for being a value.
+#[must_use]
+pub(crate) fn is_command_chord_on(modifiers: ModifiersState, platform: HostPlatform) -> bool {
+    match platform {
+        HostPlatform::MacOs => modifiers.super_key(),
+        HostPlatform::Windows | HostPlatform::OtherUnix => modifiers.control_key(),
+    }
+}
+
+/// **Whether this press wears the modifier that belongs to the child** — the
+/// other one, and the exact complement of [`is_command_chord`].
+///
+/// Super here, Control on a Mac. On this platform nothing is behind the Windows
+/// key but another program's verb (§7.54d); there it is the whole control-code
+/// alphabet. A field that has a verb for the application's modifier asks both
+/// questions, because the answer to "is this mine" is not the answer to "is this
+/// text".
+#[must_use]
+pub(crate) fn is_terminal_chord(modifiers: ModifiersState) -> bool {
+    is_terminal_chord_on(modifiers, bt_platform::host_platform())
+}
+
+/// The same on a named platform. See [`is_command_chord_on`].
+#[must_use]
+pub(crate) fn is_terminal_chord_on(modifiers: ModifiersState, platform: HostPlatform) -> bool {
+    match platform {
+        HostPlatform::MacOs => modifiers.control_key(),
+        HostPlatform::Windows | HostPlatform::OtherUnix => modifiers.super_key(),
+    }
+}
+
+/// **The application's modifier held on its own**, which is what a field asks
+/// before it runs one of its own verbs (select all, copy, cut, paste).
+///
+/// Neither Alt nor the other platform's modifier alongside it. Alt is out
+/// because AltGr arrives as `Ctrl+Alt` on this platform and is *typing* — the
+/// exemption `preview_edit::command` and `rename_key` both already make — and
+/// the other modifier is out because a chord wearing both is a chord aimed at
+/// neither of the two things this window could do with it.
+#[must_use]
+pub(crate) fn is_command_chord_alone(modifiers: ModifiersState) -> bool {
+    is_command_chord(modifiers) && !modifiers.alt_key() && !is_terminal_chord(modifiers)
+}
+
+/// **Whether a press is typing at all**, which is the question every one-line
+/// field in this window has to ask before it inserts a character.
+///
+/// Neither Control nor Super, on either platform and in both directions. X-3
+/// called the missing half of this the loudest defect it found and it is not
+/// macOS-specific: six fields guarded `ctrl` and `alt` and never `super`, so
+/// `Cmd+C` typed a `c` into whatever held the caret on a Mac — and `Win+C` did
+/// the same here, which nobody had noticed because the chord usually leaves for
+/// the shell first. A field asks this, not `is_command_chord`: the modifier that
+/// is not this application's on a given platform is the *terminal's*, and a
+/// terminal's chord is no more a character than an application's is.
+///
+/// Alt is deliberately not in the sentence. It composes text on both platforms —
+/// AltGr arrives as `Ctrl+Alt` on Windows and Option is text on a Mac under Q9 —
+/// and each field already says for itself what it does with it.
+#[must_use]
+pub(crate) fn types_a_character(modifiers: ModifiersState) -> bool {
+    !modifiers.control_key() && !modifiers.super_key()
+}
+
+/// **The modifiers as this window means them**, which on one platform is not
+/// quite what winit reported (M1-7, Q9's ruling made into code).
+///
+/// macOS hands an application *both* halves of the Option key: winit reports the
+/// composed character **and** `alt_key()`, so X-3 measured `⌥a` arriving at the
+/// pty as `ESC å` — neither Option-as-text nor Option-as-Alt but both at once.
+/// `OptionAsAlt::None` at the window constructor settles what the *character*
+/// is; this settles what the *modifier* is, and the two have to be settled
+/// together or the same press means two things.
+///
+/// So when Option is text — the shipped answer — Alt is simply not held as far
+/// as this window is concerned, and it is taken off here, once, at the door
+/// every modifier state in this process comes through
+/// (`WindowEvent::ModifiersChanged`). Downstream nothing changes and nothing
+/// asks: the encoder does not prefix `ESC`, the search capsule's `Alt`-toggles
+/// do not fire, a field inserts the character the layout produced, and the chord
+/// table is not consulted about a modifier nobody is holding. With the setting
+/// on, winit reports the raw letter instead and the Alt comes through untouched,
+/// which is `ESC a` — the other policy, whole.
+///
+/// Off macOS this is the identity function and says so: Alt is Alt on a keyboard
+/// with an Alt key on it.
+#[must_use]
+pub(crate) fn effective_modifiers(
+    reported: ModifiersState,
+    option_sends_alt: bool,
+    platform: HostPlatform,
+) -> ModifiersState {
+    if platform == HostPlatform::MacOs && !option_sends_alt {
+        reported.difference(ModifiersState::ALT)
+    } else {
+        reported
+    }
+}
 
 const CSI: &[u8] = b"\x1b[";
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
@@ -24,7 +150,7 @@ pub(crate) enum MouseProtocolEvent {
 
 /// **`Ctrl+V` and `Ctrl+Shift+V`, and `Shift+Insert`.**
 ///
-/// The shifted spelling is here because [`is_copy_shortcut`] has always carried
+/// The shifted spelling is here because [`is_copy_shortcut_on`] has always carried
 /// its own (gesture audit 2026-08-26, 附 ①). This asked for `modifiers ==
 /// CONTROL` *exactly*, so a hand that pressed `Ctrl+Shift+C` to copy and
 /// `Ctrl+Shift+V` to paste — the pair Windows Terminal ships — got the copy and
@@ -32,12 +158,28 @@ pub(crate) enum MouseProtocolEvent {
 /// mirror its partner rather than to a modifier policy of its own: the two
 /// answer the same question about the same hand, and a pair that disagrees
 /// about `Shift` is the bug this is fixing, not a second one to introduce.
+/// **On macOS it is `Cmd+V`, and the `Insert` half is not there** (M1-7, X-3 §4
+/// ②). The pair is the platform's, not the product's: no Apple keyboard has an
+/// `Insert` key at all, so a spelling for it would be a promise about a key the
+/// reader cannot press, and `Ctrl+V` there is `^V` — readline's quoted-insert —
+/// and stays the child's.
 pub(crate) fn is_paste_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
-    let ctrl_v = modifiers.control_key()
+    is_paste_shortcut_on(key, modifiers, bt_platform::host_platform())
+}
+
+/// The same on a named platform. See [`is_command_chord_on`] for why the
+/// platform is a parameter.
+pub(crate) fn is_paste_shortcut_on(
+    key: &Key,
+    modifiers: ModifiersState,
+    platform: HostPlatform,
+) -> bool {
+    let command_v = is_command_chord_on(modifiers, platform)
         && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("v"));
-    let shift_insert =
-        modifiers == ModifiersState::SHIFT && matches!(key, Key::Named(NamedKey::Insert));
-    ctrl_v || shift_insert
+    let shift_insert = platform != HostPlatform::MacOs
+        && modifiers == ModifiersState::SHIFT
+        && matches!(key, Key::Named(NamedKey::Insert));
+    command_v || shift_insert
 }
 
 /// **`Ctrl+C`, `Ctrl+Shift+C`, and `Ctrl+Insert`.**
@@ -51,12 +193,28 @@ pub(crate) fn is_paste_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
 ///
 /// Whether a press that *is* one of these actually copies is
 /// [`should_copy_selection`]'s question, not this one's.
-pub(crate) fn is_copy_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
-    let ctrl_c = modifiers.control_key()
+///
+/// **On macOS it is `Cmd+C`, without the `Insert` half** — see
+/// [`is_paste_shortcut`], whose note this one shares for the reason the two
+/// predicates share everything: they answer the same question about the same
+/// hand.
+///
+/// **It takes the platform and has no host-reading twin**, which its partner
+/// does, and the difference is that nothing outside this module asks it: the one
+/// caller is [`should_copy_selection_on`] one function down, which has the
+/// platform in its hand already. A wrapper here would be a door with nobody
+/// behind it.
+pub(crate) fn is_copy_shortcut_on(
+    key: &Key,
+    modifiers: ModifiersState,
+    platform: HostPlatform,
+) -> bool {
+    let command_c = is_command_chord_on(modifiers, platform)
         && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("c"));
-    let ctrl_insert =
-        modifiers == ModifiersState::CONTROL && matches!(key, Key::Named(NamedKey::Insert));
-    ctrl_c || ctrl_insert
+    let ctrl_insert = platform != HostPlatform::MacOs
+        && modifiers == ModifiersState::CONTROL
+        && matches!(key, Key::Named(NamedKey::Insert));
+    command_c || ctrl_insert
 }
 
 /// Whether a clipboard-shaped press should copy rather than reach the child.
@@ -67,12 +225,31 @@ pub(crate) fn is_copy_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
 /// `Insert` family has no shifted spelling of the copy: with a selection it
 /// copies, with none the key stays the child's, which is the same trade `^C`
 /// makes and the reason a full-screen program that binds `Insert` keeps it.
+/// **On macOS the Shift clause is gone and the answer is simply yes** (M1-7,
+/// X-3 §4 ②). Everything above is about a chord that is *also* an interrupt: the
+/// selection and the Shift are how one key serves two masters, and `Cmd+C` has
+/// no second master to serve — `^C` is still an interrupt on that keyboard, on
+/// the same press, with Control held instead. A `Cmd+C` with nothing selected
+/// therefore copies nothing and sends nothing, which is what every application
+/// on the platform does and what the clipboard door already answers for an empty
+/// selection.
 pub(crate) fn should_copy_selection(
     key: &Key,
     modifiers: ModifiersState,
     has_selection: bool,
 ) -> bool {
-    is_copy_shortcut(key, modifiers) && (modifiers.shift_key() || has_selection)
+    should_copy_selection_on(key, modifiers, has_selection, bt_platform::host_platform())
+}
+
+/// The same on a named platform. See [`is_command_chord_on`].
+pub(crate) fn should_copy_selection_on(
+    key: &Key,
+    modifiers: ModifiersState,
+    has_selection: bool,
+    platform: HostPlatform,
+) -> bool {
+    is_copy_shortcut_on(key, modifiers, platform)
+        && (platform == HostPlatform::MacOs || modifiers.shift_key() || has_selection)
 }
 
 /// One mouse event in SGR 1006, one-based.
@@ -285,9 +462,28 @@ pub(crate) fn keyboard_bytes(
         // rather than the text its key would have produced alone. Without this
         // an unclaimed `Win+j` types `j` into the shell, which is a keystroke
         // the reader aimed somewhere else entirely.
+        // **And the `is_ascii()` half of this arm is gone** (M1-7, X-3 §4 ⑤).
+        // It read `(text.is_ascii() || modifiers.alt_key())` and it swallowed
+        // `ü ä ö ß` whole on a German layout — zero bytes each, measured on the
+        // Mac and true on this platform for the same reason, while `⌥q` on the
+        // same keyboard produced `ESC «` only because Alt happened to be held.
+        // A character a layout produced is bytes for the child like any other:
+        // that is the whole of what a terminal does with a key.
+        //
+        // What the guard was for was a *composed* character being typed twice —
+        // once as the IME's commit and once as the key behind it — and the
+        // composition is already kept out of this stream by the platform on both
+        // sides. Windows never reaches here at all: an IME's `WM_CHAR` arrives
+        // with no key event under it and winit drops it ("Received a CHAR
+        // message but no `event_info` was available"), which is why the physical
+        // key during a composition is `NamedKey::Process` and is answered at the
+        // top of this function. macOS does not reach here either: X-3 measured
+        // `你好` arriving as one `Ime::Commit` and no `KeyboardInput`, and `⌥e e`
+        // as `Preedit("´")` then `Commit("é")` — three bytes, once. So what gates
+        // this arm is the live composition, and the code point was never the
+        // thing that knew about one.
         Key::Character(text)
-            if (text.is_ascii() || modifiers.alt_key())
-                && text.chars().all(|character| !character.is_control())
+            if text.chars().all(|character| !character.is_control())
                 && !modifiers.control_key()
                 && !modifiers.super_key() =>
         {
@@ -734,7 +930,7 @@ mod tests {
     /// full-screen programs bind, and a copy of nothing is not a reason to take
     /// it from them — the same trade `Ctrl+C` makes with `^C`.
     ///
-    /// MUTATION: drop the `Insert` arm of [`is_copy_shortcut`] and the first
+    /// MUTATION: drop the `Insert` arm of [`is_copy_shortcut_on`] and the first
     /// assertion goes red.
     #[test]
     fn ctrl_insert_copies_a_selection_and_stays_the_child_s_otherwise() {
@@ -927,5 +1123,204 @@ mod tests {
             keyboard_bytes(&Key::Named(NamedKey::Space), ModifiersState::empty(), false),
             Some(b" ".to_vec())
         );
+    }
+
+    // ── The routing rule (M1-7, probe X-3 §4) ──────────────────────────────
+
+    const MAC: HostPlatform = HostPlatform::MacOs;
+    const WINDOWS: HostPlatform = HostPlatform::Windows;
+    const CMD: ModifiersState = ModifiersState::SUPER;
+
+    /// RED (M1-7, X-3 §4 ①) — **a Control chord is the child's on macOS**, byte
+    /// for byte what it is here.
+    ///
+    /// The half of the rule that is about what this window must go on *not*
+    /// doing. X-3 found `^C`, `^D` and `^Z` already correct on that machine —
+    /// `0x03`, an EOF that ended `cat`, `zsh: suspended` — and the risk this
+    /// ticket carries is that a routing change quietly takes one of them back.
+    /// The encoder does not ask what platform it is on for these, and this is
+    /// what says that is deliberate.
+    ///
+    /// MUTATION: make the control-alphabet arm ask `is_command_chord` instead of
+    /// `control_key()`.
+    #[test]
+    fn a_control_chord_is_the_childs_on_macos() {
+        for (letter, byte) in [("c", 0x03u8), ("d", 0x04), ("z", 0x1a), ("b", 0x02)] {
+            assert_eq!(
+                keyboard_bytes(&character(letter), ModifiersState::CONTROL, false),
+                Some(vec![byte]),
+                "Ctrl+{letter} is the child's control code on every platform"
+            );
+        }
+        // And the modifier that is the *application's* there produces no byte at
+        // all — a Command chord this table does not claim is not a keystroke the
+        // shell should hear the letter of.
+        for letter in ["c", "d", "z", "t", "w", "q"] {
+            assert_eq!(
+                keyboard_bytes(&character(letter), CMD, false),
+                None,
+                "Cmd+{letter} is the application's and sends nothing"
+            );
+        }
+    }
+
+    /// RED (M1-7, X-3 §4 ⑤) — **a letter a layout makes reaches the child.**
+    ///
+    /// `keyboard_bytes` carried `(text.is_ascii() || modifiers.alt_key())` and
+    /// swallowed `ü ä ö ß` whole on a German layout — zero bytes each, measured
+    /// on the Mac and true here for the same reason — while `⌥q` on the same
+    /// keyboard produced `ESC «` only because Alt happened to be held. A
+    /// character a layout produced is bytes for the child like any other.
+    ///
+    /// MUTATION: put the `is_ascii()` clause back and every one of these goes to
+    /// `None`.
+    #[test]
+    fn a_layouts_non_ascii_letter_reaches_the_child() {
+        for letter in ["ü", "ä", "ö", "ß", "é", "å", "中"] {
+            assert_eq!(
+                keyboard_bytes(&character(letter), ModifiersState::empty(), false),
+                Some(letter.as_bytes().to_vec()),
+                "{letter} is what the keyboard produced and the child hears it"
+            );
+        }
+        // With Alt genuinely held it is still `ESC` and the same bytes, which is
+        // the one case the old guard let through and the reason the fault hid.
+        assert_eq!(
+            keyboard_bytes(&character("«"), ModifiersState::ALT, false),
+            Some(b"\x1b\xc2\xab".to_vec())
+        );
+    }
+
+    /// RED (M1-7, §8 Q9) — **Option types text unless the setting says Alt.**
+    ///
+    /// X-3 measured `⌥a` arriving at the pty as `ESC å` (`1b c3 a5`): winit hands
+    /// macOS applications the composed character **and** `alt_key()`, so Folio
+    /// was applying both policies to one press. The character half is settled at
+    /// the window (`OptionAsAlt`); this is the modifier half, and the two have to
+    /// agree or one press means two things.
+    ///
+    /// MUTATION: make `effective_modifiers` the identity and the first assertion
+    /// gets its `ESC` back.
+    #[test]
+    fn option_types_text_unless_the_setting_says_alt() {
+        // Off — the shipped answer. winit reports the composed `å` with Alt
+        // held; Alt is not held as far as this window is concerned, so the child
+        // hears two bytes and no escape.
+        let composed = effective_modifiers(ModifiersState::ALT, false, MAC);
+        assert!(!composed.alt_key());
+        assert_eq!(
+            keyboard_bytes(&character("å"), composed, false),
+            Some("å".as_bytes().to_vec()),
+            "Option is text, so the child hears the character and nothing else"
+        );
+
+        // On — winit reports the raw letter instead and the Alt comes through,
+        // which is the other policy, whole.
+        let meta = effective_modifiers(ModifiersState::ALT, true, MAC);
+        assert!(meta.alt_key());
+        assert_eq!(
+            keyboard_bytes(&character("a"), meta, false),
+            Some(b"\x1ba".to_vec()),
+        );
+
+        // And off macOS the answer never moves: Alt is Alt on a keyboard with an
+        // Alt key printed on it, whichever way the row is set.
+        for setting in [false, true] {
+            assert_eq!(
+                effective_modifiers(ModifiersState::ALT, setting, WINDOWS),
+                ModifiersState::ALT,
+            );
+        }
+    }
+
+    /// RED (M1-7, X-3 §4 ③) — **a chord is never typing.**
+    ///
+    /// The predicate every one-line field in this window asks before it inserts a
+    /// character, and the one six of them were missing: they guarded `ctrl` and
+    /// `alt` and never `super`, so `Cmd+C` typed a `c` into whatever held the
+    /// caret on a Mac and `Win+C` did the same here. Both modifiers, on both
+    /// platforms — the one that is not this platform's application modifier is
+    /// the *terminal's*, and a terminal's chord is no more a character than an
+    /// application's is.
+    ///
+    /// The six fields themselves are held by
+    /// `a_command_chord_never_types_its_letter_into_a_field` in `main.rs`, which
+    /// asks whether each of them consults this.
+    #[test]
+    fn a_chord_is_never_typing() {
+        assert!(types_a_character(ModifiersState::empty()));
+        assert!(types_a_character(ModifiersState::SHIFT));
+        assert!(
+            types_a_character(ModifiersState::ALT),
+            "Alt composes text on both platforms and each field says what it does with it"
+        );
+        assert!(!types_a_character(CMD));
+        assert!(!types_a_character(ModifiersState::CONTROL));
+        assert!(!types_a_character(CMD.union(ModifiersState::SHIFT)));
+    }
+
+    /// RED (M1-7, X-3 §4 ①/②) — **which modifier is whose, on each platform.**
+    ///
+    /// The three predicates the whole ticket is built on, asserted as the pair of
+    /// complements they are. A build that answered `control_key()` on both sides
+    /// would compile, pass every Windows test in this file, and hand a Mac's `^C`
+    /// to the command palette.
+    #[test]
+    fn command_is_the_applications_and_control_is_the_terminals() {
+        assert!(is_command_chord_on(ModifiersState::CONTROL, WINDOWS));
+        assert!(!is_command_chord_on(CMD, WINDOWS));
+        assert!(is_terminal_chord_on(CMD, WINDOWS));
+
+        assert!(is_command_chord_on(CMD, MAC));
+        assert!(!is_command_chord_on(ModifiersState::CONTROL, MAC));
+        assert!(is_terminal_chord_on(ModifiersState::CONTROL, MAC));
+    }
+
+    /// RED (M1-7, X-3 §4 ②) — **the clipboard pair speaks the platform's
+    /// dialect, and drops a key no keyboard there has.**
+    ///
+    /// `Ctrl+Insert` and `Shift+Insert` are the older Windows pair; no Apple
+    /// keyboard has an `Insert` key, so a spelling for it there would be a
+    /// promise about a key nobody can press. And `Cmd+C` copies unconditionally
+    /// where `Ctrl+C` copies only with Shift or a selection, because the Shift
+    /// clause exists to share one key with an interrupt and `Cmd+C` shares
+    /// nothing — `^C` is still the interrupt on that keyboard, on the same press,
+    /// with Control held instead.
+    #[test]
+    fn the_clipboard_pair_is_the_platforms() {
+        let c = character("c");
+        let v = character("v");
+        let insert = Key::Named(NamedKey::Insert);
+
+        assert!(is_copy_shortcut_on(&c, ModifiersState::CONTROL, WINDOWS));
+        assert!(is_copy_shortcut_on(
+            &insert,
+            ModifiersState::CONTROL,
+            WINDOWS
+        ));
+        assert!(is_paste_shortcut_on(&v, ModifiersState::CONTROL, WINDOWS));
+        assert!(is_paste_shortcut_on(
+            &insert,
+            ModifiersState::SHIFT,
+            WINDOWS
+        ));
+
+        assert!(is_copy_shortcut_on(&c, CMD, MAC));
+        assert!(is_paste_shortcut_on(&v, CMD, MAC));
+        assert!(
+            !is_copy_shortcut_on(&c, ModifiersState::CONTROL, MAC),
+            "Ctrl+C on a Mac is the child's interrupt and nothing else"
+        );
+        assert!(
+            !is_copy_shortcut_on(&insert, ModifiersState::CONTROL, MAC)
+                && !is_paste_shortcut_on(&insert, ModifiersState::SHIFT, MAC),
+            "no keyboard there has the key this pair is spelled on"
+        );
+
+        assert!(
+            !should_copy_selection_on(&c, ModifiersState::CONTROL, false, WINDOWS),
+            "with nothing selected `Ctrl+C` is an interrupt"
+        );
+        assert!(should_copy_selection_on(&c, CMD, false, MAC));
     }
 }

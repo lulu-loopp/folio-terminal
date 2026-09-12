@@ -13362,6 +13362,16 @@ struct ApplicationChange {
     /// The focused caret's shape moved in `bt-render`'s `CURSOR_STYLE`
     /// (multiwindow slice E1).
     caret: bool,
+    /// **What the Option key does moved in `settings.json`** (M1-7, macOS plan
+    /// §8 Q9).
+    ///
+    /// The fourth flag, and the first that is not about a process static: winit
+    /// holds this one **per window**, so a sibling that is never told would go on
+    /// composing `å` after the reader asked for `ESC a` — `adopt_terminal_font`'s
+    /// own sentence, about a key instead of a face. It is on this record rather
+    /// than re-read at some later door because there is no later door: the answer
+    /// is pushed into a window and never pulled out of one.
+    option: bool,
     /// The window whose verb made the change and which has therefore already
     /// re-derived it — or `None` when two windows changed things between drains
     /// and no one window has had both.
@@ -13377,6 +13387,7 @@ impl ApplicationChange {
                 font: self.font || previous.font,
                 look: self.look || previous.look,
                 caret: self.caret || previous.caret,
+                option: self.option || previous.option,
                 paid_by: (previous.paid_by == self.paid_by)
                     .then_some(self.paid_by)
                     .flatten(),
@@ -19931,9 +19942,7 @@ struct RenameClipboard<'a> {
 /// Split out so that the reading happens *before* the editor is borrowed, which
 /// is the borrow order `settings_field_key` already keeps for the same reason.
 fn rename_pastes(key: &Key, modifiers: ModifiersState) -> bool {
-    modifiers.control_key()
-        && !modifiers.alt_key()
-        && !modifiers.super_key()
+    input::is_command_chord_alone(modifiers)
         && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("v"))
 }
 
@@ -19953,12 +19962,20 @@ fn rename_key(
     // `TextField` gave it both, so the chords below are verbs this field really
     // has; what is left in the swallow arm is every `Ctrl` chord it still has no
     // answer for, which goes nowhere for the reason it always did.
-    let chorded = modifiers.alt_key() || modifiers.super_key();
+    //
+    // **Both halves are asked of the platform since M1-7**, and on this one they
+    // answer exactly what they answered before: the modifier a chord of this
+    // application wears is Control here and Command on a Mac, and the one that
+    // is left over is the child's. So the swallow arm keeps `Win`-modified keys
+    // out of this field here and `Ctrl`-modified ones out of it there, and the
+    // verbs below open on the one modifier that means *this window* on the
+    // machine they are being pressed on.
+    let chorded = modifiers.alt_key() || input::is_terminal_chord(modifiers);
     // AltGr arrives as Ctrl+Alt and is *typing*, so it is not a chord at all —
     // `preview_edit::command` makes the same exemption on the one other surface
     // that takes characters. (It still falls into the swallow arm above, as it
     // always has; this only keeps the doors below from opening on it.)
-    let control = modifiers.control_key() && !modifiers.alt_key() && !modifiers.super_key();
+    let control = input::is_command_chord_alone(modifiers);
     let shift = modifiers.shift_key();
     // A copy and a cut put the same run on the clipboard and differ in what they
     // leave behind, so the run is taken once — and a press with nothing selected
@@ -35964,6 +35981,12 @@ impl Runtime<'_> {
         );
         install_theme_class_background(&window);
         window.set_ime_allowed(true);
+        // Beside `set_ime_allowed` because it is the other half of the same
+        // sentence — what this window does with the keys that are not plain
+        // letters — and the stored answer rather than the shipped one, so a
+        // reader who turned the row on does not watch their first `⌥a` compose
+        // an `å` before the setting is read.
+        set_option_as_alt(&window, settings_store.loaded().option_sends_alt);
         let native = native_window(&window)?;
         // **The clipboard's owner window, told once here and never carried by a
         // caller again** (M1-9). `OpenClipboard` wants a window and
@@ -36590,6 +36613,11 @@ impl Runtime<'_> {
         );
         install_theme_class_background(&window);
         window.set_ime_allowed(true);
+        // A second window answers the Option key the way the first one does —
+        // see that constructor's note. The setting is the process's, and a
+        // window that opened before or after it was changed is still a window of
+        // this program.
+        set_option_as_alt(&window, app.settings_store.loaded().option_sends_alt);
         let native = native_window(&window)?;
         // A second window is a second owner the clipboard may go through — see
         // the first constructor's note.
@@ -41444,7 +41472,10 @@ impl Runtime<'_> {
         }
         use text_field::TextMove;
         let shift = self.window.modifiers.shift_key();
-        let control = self.window.modifiers.control_key();
+        // The application's modifier, whichever key it is printed on here
+        // (M1-7): this box's own `Ctrl+A` and `Ctrl+F` are `Cmd+A` and `Cmd+F` on
+        // a Mac, where `Ctrl+A` is the child's start-of-line and not a field's.
+        let control = input::is_command_chord(self.window.modifiers);
         let mut edited = false;
         match &event.logical_key {
             // Enter walks the matches; `Shift+Enter` walks them backwards (B70). It is a walk and
@@ -41490,7 +41521,9 @@ impl Runtime<'_> {
                 self.window.search.field_mut().step(TextMove::Home, shift)
             }
             Key::Named(NamedKey::End) => self.window.search.field_mut().step(TextMove::End, shift),
-            Key::Named(NamedKey::Space) => {
+            // The space is text and answers the guard the character arm below
+            // answers, for its reason (M1-7).
+            Key::Named(NamedKey::Space) if input::types_a_character(self.window.modifiers) => {
                 self.window.search.field_mut().insert(" ");
                 edited = true;
             }
@@ -41522,7 +41555,12 @@ impl Runtime<'_> {
                 }
                 return Ok(true);
             }
-            Key::Character(text) => {
+            // **A chord is not text** (M1-7, X-3 §4 ③). The arm above answers
+            // this platform's application modifier and the guard here answers
+            // the other one, so neither a `Cmd`-modified key on a Mac nor a
+            // `Win`-modified key here types its letter into the box — which is
+            // what `Cmd+C` did, measured, into three of this window's fields.
+            Key::Character(text) if input::types_a_character(self.window.modifiers) => {
                 self.window.search.field_mut().insert(text);
                 edited = true;
             }
@@ -43136,6 +43174,7 @@ impl Runtime<'_> {
             git_panel: self.app.settings_store.loaded().git_panel,
             update_check: self.app.settings_store.loaded().update_check,
             key_hints: self.app.settings_store.loaded().key_hints,
+            option_sends_alt: self.app.settings_store.loaded().option_sends_alt,
             // The machine's own answer, cached at the three moments it can
             // change — see `App::context_menu_installed`.
             context_menu: self.app.context_menu_installed,
@@ -45540,6 +45579,9 @@ impl Runtime<'_> {
         if let Some(enabled) = settings::key_hints_requested(target) {
             self.apply_key_hints(enabled)?;
         }
+        if let Some(enabled) = settings::option_sends_alt_requested(target) {
+            self.apply_option_sends_alt(enabled)?;
+        }
         if let Some(enabled) = settings::copy_on_select_requested(target) {
             self.apply_copy_on_select(enabled);
         }
@@ -45864,6 +45906,7 @@ impl Runtime<'_> {
             | Row::BlockMaxHeight
             | Row::GitPanel
             | Row::KeyHints
+            | Row::OptionSendsAlt
             | Row::DefaultProfile
             | Row::SearchEngine
             | Row::Language
@@ -46073,7 +46116,8 @@ impl Runtime<'_> {
             return Ok(false);
         }
         let shift = self.window.modifiers.shift_key();
-        let control = self.window.modifiers.control_key();
+        // The application's modifier — see `search_field_key`'s note (M1-7).
+        let control = input::is_command_chord(self.window.modifiers);
         let paste = matches!(&event.logical_key, Key::Character(text)
             if control && matches!(text.as_str(), "v" | "V"));
         let pasted = paste.then(|| bt_platform::clipboard_text().unwrap_or_default());
@@ -46107,7 +46151,9 @@ impl Runtime<'_> {
             ),
             Key::Named(NamedKey::Home) => field.step(TextMove::Home, shift),
             Key::Named(NamedKey::End) => field.step(TextMove::End, shift),
-            Key::Named(NamedKey::Space) => {
+            // Text, and therefore behind the guard the arm at the bottom of this
+            // match is behind (M1-7).
+            Key::Named(NamedKey::Space) if input::types_a_character(self.window.modifiers) => {
                 field.insert(" ");
                 edited = true;
             }
@@ -46134,7 +46180,14 @@ impl Runtime<'_> {
             // Whatever the keyboard produced, which is the layout's answer and
             // not this build's: a French `é` and a Chinese IME's commit arrive
             // the same way.
-            _ => {
+            //
+            // **Unless a chord produced it** (M1-7, X-3 §4 ③). This arm is the
+            // one that takes *every* key the arms above did not, so it is the one
+            // that typed a `c` into the profile's path field when somebody
+            // pressed `Cmd+C` over it. The modifier that is not this platform's
+            // application modifier reaches here — a `Win` chord on this machine,
+            // a `Ctrl` chord on a Mac — and it is not text either.
+            _ if input::types_a_character(self.window.modifiers) => {
                 let Some(text) = event.text.as_ref() else {
                     return Ok(false);
                 };
@@ -46145,6 +46198,9 @@ impl Runtime<'_> {
                 field.insert(&text);
                 edited = true;
             }
+            // A chord this field has no verb for. Swallowed, as every key is
+            // while the caret is in a field of this dialog.
+            _ => {}
         }
         if edited {
             self.write_editor_field(target)?;
@@ -47340,6 +47396,7 @@ impl Runtime<'_> {
             font: false,
             look: false,
             caret: true,
+            option: false,
             paid_by: Some(self.window.window.id()),
         });
         self.adopt_new_cursor_style()?;
@@ -47902,6 +47959,7 @@ impl Runtime<'_> {
             font: false,
             look: true,
             caret: false,
+            option: false,
             paid_by: Some(self.window.window.id()),
         });
         self.sync_math_layout_key();
@@ -47931,6 +47989,7 @@ impl Runtime<'_> {
             font: false,
             look: true,
             caret: false,
+            option: false,
             paid_by: Some(self.window.window.id()),
         });
         // The window's own colours moved, so what the window has told DWM about
@@ -50353,6 +50412,7 @@ impl Runtime<'_> {
             font: true,
             look: false,
             caret: false,
+            option: false,
             paid_by: Some(self.window.window.id()),
         });
         self.adopt_terminal_font()?;
@@ -50430,7 +50490,25 @@ impl Runtime<'_> {
         if change.caret && !(change.font || change.look) {
             self.adopt_new_cursor_style()?;
         }
+        // **And this one costs no frame at all**, which is why it is outside the
+        // interaction above: it changes what a *key* will mean on this window
+        // and nothing that is on the glass. See `apply_option_sends_alt`.
+        if change.option {
+            self.adopt_option_as_alt();
+        }
         Ok(())
+    }
+
+    /// Take up the stored answer about the Option key, which is the half of
+    /// [`Self::apply_option_sends_alt`] every window has to do for itself.
+    fn adopt_option_as_alt(&mut self) {
+        let option_sends_alt = self.app.settings_store.loaded().option_sends_alt;
+        set_option_as_alt(&self.window.window, option_sends_alt);
+        self.window.modifiers = input::effective_modifiers(
+            self.window.modifiers,
+            option_sends_alt,
+            bt_platform::host_platform(),
+        );
     }
 
     /// What the Terminal page's PSReadLine row is describing.
@@ -51588,6 +51666,42 @@ impl Runtime<'_> {
         if !enabled {
             self.hide_key_hint()?;
         }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// **What the Option key is**, stored and told to every window this process
+    /// has (M1-7, macOS plan §8 Q9).
+    ///
+    /// Two things have to hear it and they are not the same thing, which is why
+    /// this is not one line. winit decides at the **window** whether Option
+    /// composes a character or reports a raw letter with Alt held — so every
+    /// open window is told, not only the one the dialog is standing in — and
+    /// this window's own *modifier state* is stale the instant the answer
+    /// changes, because it was last written by a `ModifiersChanged` that applied
+    /// the old policy. A reader who turned the row on while holding Option and
+    /// then pressed `a` would otherwise get one more keystroke of the answer
+    /// they had just left.
+    ///
+    /// The other windows learn it the way they learn every application setting —
+    /// see `settle_application_change` — and what they learn is read from the
+    /// store, so there is one answer and no copy of it anywhere.
+    fn apply_option_sends_alt(&mut self, enabled: bool) -> Result<bool> {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.option_sends_alt = enabled;
+        if !self.app.settings_store.store(settings) {
+            return Ok(false);
+        }
+        self.note_application_change(ApplicationChange {
+            font: false,
+            look: false,
+            caret: false,
+            option: true,
+            paid_by: Some(self.window.window.id()),
+        });
+        self.adopt_option_as_alt();
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -71289,7 +71403,8 @@ impl Runtime<'_> {
     /// takes every key exactly as the graph's search field does.
     fn git_menu_key(&mut self, event: &KeyEvent) -> Result<()> {
         use text_field::TextMove;
-        let control = self.window.modifiers.control_key();
+        // The application's modifier — see `search_field_key`'s note (M1-7).
+        let control = input::is_command_chord(self.window.modifiers);
         let shift = self.window.modifiers.shift_key();
         if self
             .window
@@ -71360,7 +71475,10 @@ impl Runtime<'_> {
                         field.select_all();
                     }
                 }
-                Key::Character(text) => field.insert(text),
+                // A chord is not text (M1-7) — see `search_field_key`'s own arm.
+                Key::Character(text) if input::types_a_character(self.window.modifiers) => {
+                    field.insert(text);
+                }
                 // A modifier on its own, a function key, anything else: the field
                 // owns it and does nothing with it.
                 _ => {}
@@ -73780,7 +73898,8 @@ impl Runtime<'_> {
     /// the answer the files column and the read-only preview both already give.
     fn graph_search_key(&mut self, surface: PreviewSurface, event: &KeyEvent) -> Result<bool> {
         use text_field::TextMove;
-        let control = self.window.modifiers.control_key();
+        // The application's modifier — see `search_field_key`'s note (M1-7).
+        let control = input::is_command_chord(self.window.modifiers);
         let shift = self.window.modifiers.shift_key();
         let tab = self.preview_tab_index(surface);
         enum Then {
@@ -73855,7 +73974,8 @@ impl Runtime<'_> {
                 }
                 Then::Draw
             }
-            Key::Character(text) => {
+            // A chord is not text (M1-7) — see `search_field_key`'s own arm.
+            Key::Character(text) if input::types_a_character(self.window.modifiers) => {
                 view.search.insert(text);
                 Then::Draw
             }
@@ -90776,7 +90896,8 @@ impl Runtime<'_> {
             self.close_command_palette()?;
             return Ok(());
         }
-        let ctrl = self.window.modifiers.control_key();
+        // The application's modifier — see `search_field_key`'s note (M1-7).
+        let ctrl = input::is_command_chord(self.window.modifiers);
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
                 self.close_command_palette()?;
@@ -90878,11 +90999,23 @@ impl Runtime<'_> {
                 // A modified character is a chord somebody meant for something
                 // else, and typing its letter into the box would be the box
                 // answering a question it was not asked.
-                Key::Character(text) if !ctrl && !self.window.modifiers.alt_key() => {
+                //
+                // **And `!ctrl` was only half of that** (M1-7, X-3 §4 ③): the
+                // box took `Cmd+C`, `Cmd+V` and `Cmd+A` as `c`, `v` and `a` on
+                // the Mac — `helcv` is in X-3's own evidence — and `Win+C` here
+                // for the identical reason, which is that neither of these two
+                // guards ever asked about the fourth modifier.
+                Key::Character(text)
+                    if input::types_a_character(self.window.modifiers)
+                        && !self.window.modifiers.alt_key() =>
+                {
                     field.insert(text);
                     typed = true;
                 }
-                Key::Named(NamedKey::Space) if !ctrl && !self.window.modifiers.alt_key() => {
+                Key::Named(NamedKey::Space)
+                    if input::types_a_character(self.window.modifiers)
+                        && !self.window.modifiers.alt_key() =>
+                {
                     field.insert(" ");
                     typed = true;
                 }
@@ -101489,6 +101622,7 @@ mod application_change_tests {
             font: true,
             look: false,
             caret: false,
+            option: false,
             paid_by: Some(paid_by),
         }
     }
@@ -101498,6 +101632,7 @@ mod application_change_tests {
             font: false,
             look: true,
             caret: false,
+            option: false,
             paid_by: Some(paid_by),
         }
     }
@@ -101507,6 +101642,7 @@ mod application_change_tests {
             font: false,
             look: false,
             caret: true,
+            option: false,
             paid_by: Some(paid_by),
         }
     }
@@ -104716,7 +104852,16 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             } => runtime.keyboard_input(&event, is_synthetic),
             WindowEvent::Ime(event) => runtime.ime_input(event),
             WindowEvent::ModifiersChanged(modifiers) => {
-                runtime.window.modifiers = modifiers.state();
+                // **The one door every modifier state in this process comes
+                // through**, which is why Q9's ruling is applied here and
+                // nowhere else (M1-7). With Option ruled to be text, an Option
+                // that winit reports as `Alt` is a modifier nobody is holding —
+                // see `input::effective_modifiers`, which says the whole of it.
+                runtime.window.modifiers = input::effective_modifiers(
+                    modifiers.state(),
+                    runtime.app.settings_store.loaded().option_sends_alt,
+                    bt_platform::host_platform(),
+                );
                 // The pointing hand over a link is a statement about `Ctrl` as
                 // much as about where the pointer is (§7.1.5g), and `Ctrl` moves
                 // while the pointer does not. Without this the shape would only
@@ -106831,6 +106976,39 @@ fn opening_window_attributes(title: &'static str, size: LogicalSize<f64>) -> Win
         // `a = 1.0` and `install_window_class_background` keeps its opaque
         // brush, so there is no alpha anywhere for DWM to honour.
         .with_transparent(true)
+}
+
+/// **What the Option key does**, told to the window that has to do it (M1-7,
+/// §8 Q9's ruling).
+///
+/// Both constructors go through here and so does the settings row, which is the
+/// whole point: winit decides at the *window* whether Option composes a
+/// character or reports a raw letter with Alt held, and a program that set it in
+/// one of those three places would have a window whose behaviour depended on how
+/// it was opened.
+///
+/// `OptionAsAlt::None` is the shipped answer and `Both` is the row turned on —
+/// not `OnlyLeft` or `OnlyRight`, which winit also offers. The ruling asked for
+/// a setting, and a setting with four values where the question has two answers
+/// is a row a reader has to think about; the split is one line away here on the
+/// day somebody asks for it.
+///
+/// Off macOS this is nothing at all, and it says so where the compiler can see
+/// it: there is no Option key on the other keyboards and `Alt` is already Alt.
+fn set_option_as_alt(window: &Window, option_sends_alt: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::{OptionAsAlt, WindowExtMacOS};
+        window.set_option_as_alt(if option_sends_alt {
+            OptionAsAlt::Both
+        } else {
+            OptionAsAlt::None
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, option_sends_alt);
+    }
 }
 
 /// **The window's ground is told the new size before anything else is**
@@ -110199,6 +110377,27 @@ fn main() -> Result<()> {
                 }
             },
         ));
+    }
+    // **`Cmd+Q` is this product's `quit` row and not AppKit's menu item**
+    // (M1-7, X-3 §4 ⑦). winit installs a default application menu on macOS
+    // unless it is told not to, and that menu's `Quit` sends
+    // `NSApplication terminate:` — which ends the process where it stands.
+    // X-3 measured exactly that: `Cmd+Q` quit Folio, and it quit it *past*
+    // [`quit`], so the session document was never written, no window reached
+    // Recent and the next launch would have opened nothing. Turning the menu off
+    // is the whole fix at this stage: the press then arrives as an ordinary key,
+    // `shortcuts::BINDINGS`' macOS column answers it with `Action::Quit`, and the
+    // verb this window already has runs.
+    //
+    // **The menu comes back in M3-2 and this line stays.** A real menu bar is
+    // that ticket's, and its `Quit` item will dispatch this same row rather than
+    // `terminate:` — X-4's rule. What is refused here is not a menu; it is a
+    // second answer to what `Cmd+Q` does, installed by a library that cannot
+    // know this program has a session to write.
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::EventLoopBuilderExtMacOS;
+        builder.with_default_menu(false);
     }
     let event_loop = builder.build().context("create winit event loop")?;
     let _ = SUMMON_PROXY.set(event_loop.create_proxy());
@@ -123610,7 +123809,7 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_mapping_is_ascii_only_and_preserves_terminal_controls() {
+    fn keyboard_mapping_carries_the_layouts_letters_and_preserves_terminal_controls() {
         assert_eq!(
             input::keyboard_bytes(
                 &Key::Character("hello".into()),
@@ -123647,9 +123846,22 @@ mod tests {
             input::keyboard_bytes(&Key::Character("x".into()), ModifiersState::CONTROL, false),
             Some(vec![0x18])
         );
+        // **And a character outside ASCII is bytes like any other** (M1-7, X-3
+        // §4 ⑤). This case asserted `None` until 2026-09-12, and what it was
+        // really encoding was a guard (`text.is_ascii()`) that was supposed to
+        // stop a *composed* character being typed twice. It did not need to: a
+        // composition never arrives as a key event on either platform — winit
+        // drops an IME's `WM_CHAR` here because no key event stands under it, and
+        // on macOS a commit arrives as `Ime::Commit` with no `KeyboardInput` at
+        // all (X-3 measured `你好` once, six bytes). What the guard did instead
+        // was swallow `ü ä ö ß` on a German layout, on both platforms, whole.
         assert_eq!(
             input::keyboard_bytes(&Key::Character("中".into()), ModifiersState::empty(), false),
-            None
+            Some("中".as_bytes().to_vec())
+        );
+        assert_eq!(
+            input::keyboard_bytes(&Key::Character("ü".into()), ModifiersState::empty(), false),
+            Some("ü".as_bytes().to_vec())
         );
         assert_eq!(
             input::keyboard_bytes(
@@ -157514,5 +157726,145 @@ mod refused_preview_card_tests {
                 .contains(concat!("self.", "open_local_path(path)")),
             "the card's button no longer goes through this window's one door"
         );
+    }
+}
+
+/// **Every field in this window asks whether a press is typing before it types**
+/// (M1-7, probe X-3 §4 ③).
+///
+/// X-3 called this the loudest defect it found and said in the same breath that
+/// it is not macOS-specific: six one-line fields guarded `ctrl` and `alt` and
+/// never `super`, so a Command chord typed its letter into whatever held the
+/// caret on a Mac (`helcv` and `abcv` are in that probe's own evidence) and a
+/// `Win` chord did the same here, unnoticed because that chord usually leaves
+/// for the shell first.
+///
+/// **A source pin and not a behavioural test, because the subject is six
+/// handlers and a whole window.** Five of the six are `Runtime` methods that
+/// cannot be reached without a swapchain, a compositor and a shell; what can be
+/// asked without one is whether each of them consults the one predicate that
+/// answers the question — `input::types_a_character` — and that is a claim about
+/// the text of this file, which is exactly what a source pin holds.
+/// `preview_edit::command` and `rename_key` are pure functions and are held by
+/// value in their own modules as well.
+#[cfg(test)]
+mod field_command_tests {
+    const SOURCE: &str = include_str!("main.rs");
+    const PREVIEW_EDIT: &str = include_str!("preview_edit.rs");
+
+    /// One method's text, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// RED (M1-7, X-3 §4 ③) — **a Command chord never types its letter into a
+    /// field.**
+    ///
+    /// MUTATIONS: take `input::types_a_character` out of any one of these six
+    /// and that field starts typing `c` on `Cmd+C`; swap any one's
+    /// `input::is_command_chord` back to `control_key()` and that field's own
+    /// select-all, copy and paste stop answering on the Mac's keyboard.
+    #[test]
+    fn a_command_chord_never_types_its_letter_into_a_field() {
+        // The five that live here, each named by its handler.
+        for signature in [
+            concat!("    fn ", "palette_key("),
+            concat!("    fn ", "search_field_key("),
+            concat!("    fn ", "settings_field_key("),
+            concat!("    fn ", "git_menu_key("),
+            concat!("    fn ", "graph_search_key("),
+        ] {
+            let handler = body(signature);
+            assert!(
+                handler.contains(concat!("input::", "types_a_character")),
+                "{signature} inserts a character without asking whether this press is typing"
+            );
+            assert!(
+                handler.contains(concat!("input::", "is_command_chord")),
+                "{signature} decides what this application's modifier is for itself"
+            );
+        }
+        // The sixth is the Markdown page, whose one key handler is a pure
+        // function in its own module. It asks the other predicate of the pair,
+        // and that is written down at the arm: this surface exempts AltGr, so
+        // `types_a_character`'s "no Control" half would take `€` off a German
+        // keyboard.
+        assert!(
+            PREVIEW_EDIT.contains(concat!("!crate::input::", "is_terminal_chord(modifiers)")),
+            "the page being edited takes a chord's letter as text"
+        );
+        assert!(
+            PREVIEW_EDIT.contains(concat!("crate::input::", "is_command_chord(modifiers)")),
+            "the page being edited decides what this application's modifier is for itself"
+        );
+        // And the name box, which had the `super` half already and now asks the
+        // platform which modifier that is.
+        let rename = body(concat!("fn ", "rename_key("));
+        assert!(
+            rename.contains(concat!("input::", "is_terminal_chord(modifiers)"))
+                && rename.contains(concat!("input::", "is_command_chord_alone(modifiers)")),
+            "the name box names the two modifiers itself instead of asking which is whose"
+        );
+    }
+
+    /// RED (M1-7, §8 Q9) — **the Option policy is applied at the one door every
+    /// modifier state comes through, and both halves of it are told.**
+    ///
+    /// winit hands a macOS application the composed character **and**
+    /// `alt_key()`, so the two halves have to be settled together or one press
+    /// means two things (X-3 measured `ESC å`). The character half is the
+    /// window's (`set_option_as_alt`, told at both constructors and again when
+    /// the row is pressed); the modifier half is `ModifiersChanged`'s.
+    ///
+    /// MUTATIONS: read the modifiers straight off the event and `⌥a` is `ESC å`
+    /// again; drop `set_option_as_alt` from a constructor and a window opens
+    /// composing characters the reader asked it not to.
+    #[test]
+    fn the_option_policy_is_applied_at_one_door() {
+        let dispatch = body("fn window_event(");
+        assert!(
+            dispatch.contains(concat!("input::", "effective_modifiers(")),
+            "the modifier door takes winit's answer without applying the Option ruling"
+        );
+        assert_eq!(
+            SOURCE
+                .matches(concat!("set_option_as_alt(&", "window, "))
+                .count(),
+            2,
+            "both window constructors have to tell the window what Option is"
+        );
+        assert!(
+            body(concat!("    fn ", "adopt_option_as_alt("))
+                .contains(concat!("set_option_as_alt(&self.", "window.window")),
+            "a window that did not press the row is never told the answer changed"
+        );
+    }
+
+    /// RED (M1-7, X-3 §4 ⑦) — **`Cmd+Q` reaches this window as a key.**
+    ///
+    /// winit installs AppKit's default menu unless it is told not to, and that
+    /// menu's `Quit` sends `NSApplication terminate:` — which ends the process
+    /// past [`quit`], so the session document is never written and no window
+    /// reaches Recent. The chord table's macOS column answers `Cmd+Q` with
+    /// `Action::Quit`; this is what lets the press get there.
+    ///
+    /// MUTATION: drop the `with_default_menu(false)` block and `Cmd+Q` goes back
+    /// to ending the process where it stands.
+    #[test]
+    fn the_default_menu_does_not_own_command_q() {
+        assert!(
+            SOURCE.contains(concat!("builder.", "with_default_menu(false)")),
+            "winit's own menu still answers Cmd+Q, past Folio's quit verb"
+        );
+        // The other half of X-4's rule — that nothing ever sends the selector
+        // itself — is not assertable here and is not this file's to keep: this
+        // crate speaks no Objective-C at all, so the only way that call could
+        // enter this program is through `bt-platform`, where M3-2's menu bar
+        // will be built and where the rule belongs.
     }
 }

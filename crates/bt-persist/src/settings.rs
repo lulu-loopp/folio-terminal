@@ -274,7 +274,23 @@ use serde::{Deserialize, Serialize};
 /// leave the one group who did have an opinion (there were none; there was no row) indistinguishable
 /// from everybody else. The ruling is that the tab was the wrong default, so the migration writes
 /// the right one and the reader who wants the old behaviour has a row that says so in its own words.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 33;
+/// **v34 carries `option_sends_alt`**, the General page's own `Option key sends Alt` row
+/// (`docs/plans/port/macos-plan-2026-09-12.md` §8 Q9, ruled 2026-09-12; M1-7).
+///
+/// **It lands the v13-v16 way, and the value it writes is the behaviour every document this rung
+/// walks was written under** — `false`, Option composes text. That is not a compromise between two
+/// answers: no build that could have written one of these documents ran on a Mac at all, so there
+/// is no habit to carry and no Option key to have had an opinion about. What the step writes is the
+/// shipped answer, which is Terminal.app's and iTerm2's, and the ruling's reason is the reader
+/// rather than the terminal: Option-as-Alt takes away every accented character a person types, and
+/// the terminal users who want `Alt+f` are exactly the ones who know to turn a row on.
+///
+/// **The key is written into every document and not only into a Mac's**, which is the same rule
+/// every row of this file already follows: `settings.json` describes a *reader's* answers and not a
+/// machine's capabilities, so a file carried from a Mac to a Windows box arrives whole and means
+/// the same thing on the day it is carried back. What decides whether the row is *shown* is
+/// `bt_app::settings::visible_rows`, where every other platform-shaped row is decided.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 34;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -1159,6 +1175,26 @@ pub struct SettingsV1 {
     /// what every other Windows terminal does.
     #[serde(default)]
     pub launch_opens: LaunchOpensV1,
+    /// **Whether the Option key is Alt rather than text** — the General page's
+    /// `Option key sends Alt` row (v34, macOS plan §8 Q9, ruled 2026-09-12).
+    ///
+    /// Off is the shipped answer and it is the platform's: `⌥a` composes an `å`
+    /// and the child hears the two bytes of one, exactly as it does under
+    /// Terminal.app and iTerm2. On, the same press is `ESC a` and every accented
+    /// character on that keyboard stops being typeable — which is the trade, and
+    /// why it is a row and not a rule.
+    ///
+    /// **One key for a question with two answers, though winit offers four.**
+    /// `OptionAsAlt` can name the left Option key or the right one separately;
+    /// the ruling asked for a setting, and a row with four values where a reader
+    /// has two is a row that has to be thought about. The split is one value away
+    /// on the day somebody asks for it.
+    ///
+    /// `#[serde(default)]` because `false` is the honest missing-key answer for
+    /// the reason the v34 note gives: no document written before this key existed
+    /// was written on a machine with an Option key on it.
+    #[serde(default)]
+    pub option_sends_alt: bool,
 }
 
 /// How much of a summoned terminal a new run puts back — `docs/DESIGN.md` §7.54e.
@@ -1393,6 +1429,9 @@ impl Default for SettingsV1 {
             powershell_install_pending: false,
             // Starting a program again opens that program — see `LaunchOpensV1`.
             launch_opens: LaunchOpensV1::NewWindow,
+            // Option composes text, which is what the key does everywhere else
+            // on the machine it is printed on (§8 Q9).
+            option_sends_alt: false,
         }
     }
 }

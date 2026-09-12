@@ -556,12 +556,23 @@ pub(crate) fn claimable_chords(shortcuts: &Shortcuts, focus: Focus) -> Vec<Claim
                     ctrl: chord.modifiers.contains(ModifiersState::CONTROL),
                     shift: chord.modifiers.contains(ModifiersState::SHIFT),
                     alt: chord.modifiers.contains(ModifiersState::ALT),
-                    // **The table has no Command column yet** — M1-7 owns the
-                    // macOS dialect of `BINDINGS`, and until it lands every
-                    // chord this window claims from a page is a Windows-shaped
-                    // one. `WebChord` carries the field so that nothing has to
-                    // change shape when it does.
-                    command: false,
+                    // **The Command column arrived with M1-7**, and this is the
+                    // whole of the conversion: the row's chord is already the
+                    // dialect this build runs (`Shortcuts::defaults_for`), so the
+                    // fourth modifier is read off it exactly as the three above
+                    // it are. On Windows every row of that dialect answers
+                    // `false` except the quake row, which is filtered out above —
+                    // so this line is literally the `false` it replaces here, and
+                    // a Mac is the only machine where it is ever true.
+                    //
+                    // **What fills it on the host side is M4-2's** (X-3 §4 ⑥).
+                    // There is no accelerator callback on that platform to fill
+                    // it *from*: a `WKWebView` is an `NSView` in the responder
+                    // chain, so the window takes its chords back at
+                    // `performKeyEquivalent:` on the hosting view — every Command
+                    // chord and nothing else — which turns W0′'s hazard into a
+                    // guarantee. This side is data either way.
+                    command: chord.modifiers.contains(ModifiersState::SUPER),
                 },
                 action: row.action,
             })
