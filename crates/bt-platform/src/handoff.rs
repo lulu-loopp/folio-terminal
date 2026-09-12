@@ -79,6 +79,11 @@ const ALWAYS_A_PROGRAM: &[&str] = &[
 /// a search that found nothing because a variable was missing is a search that
 /// would then have fallen back to whatever the working directory holds, which
 /// is the thing this module exists to refuse.
+///
+/// `#[cfg(windows)]` with the search that reads it. On Unix the question this
+/// answers — which spellings of a bare name are a program — is the execute bit
+/// and not an extension list, which is M2-2's to write.
+#[cfg(windows)]
 const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
 
 /// **The final component of a path as Windows itself will resolve it.**

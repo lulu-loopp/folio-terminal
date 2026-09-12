@@ -69,6 +69,12 @@ use std::time::Duration;
 /// whole rather than partially, which is what the halving in [`read_stack`] is
 /// for. Deep enough to reach past a WebView2 message pump, small enough that
 /// the read is a memcpy and not an event.
+///
+/// `#[cfg(windows)]` with its one reader: `read_stack` suspends a thread and
+/// reads its stack through `ReadProcessMemory`, which is the facility this
+/// module's own header says is not reached for off Windows — M4-11 collects the
+/// system's crash reports there instead.
+#[cfg(windows)]
 const STACK_SCAN_BYTES: usize = 128 * 1024;
 
 /// One address, named by the module it fell in.

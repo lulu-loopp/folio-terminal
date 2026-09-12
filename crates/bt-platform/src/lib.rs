@@ -2114,6 +2114,11 @@ pub fn fonts_folder() -> std::path::PathBuf {
 /// console host is Windows Terminal rather than `conhost` — the console Windows
 /// handed that child was **a Windows Terminal window**, tab-titled
 /// `C:\WINDOWS\System32\wsl.exe`, opening in front of Folio at every launch.
+///
+/// `#[cfg(windows)]` because that is where the one reader is: the flag is a
+/// `CreateProcess` argument, and on a platform whose children are given no
+/// console to begin with there is none to suppress.
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// **The one door every child process this product starts outside a ConPTY goes
@@ -2143,6 +2148,13 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// `Command::new` on a word boundary for exactly that reason.
 #[must_use]
 pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    #[cfg_attr(
+        not(windows),
+        expect(
+            unused_mut,
+            reason = "the one thing this door does to the child it builds is a Windows flag, and                       the door itself is the rule rather than the flag"
+        )
+    )]
     let mut command = std::process::Command::new(program);
     #[cfg(windows)]
     {

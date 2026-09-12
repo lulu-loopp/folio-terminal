@@ -229,6 +229,12 @@ pub fn registration_is_live(id: i32) -> bool {
 }
 
 /// Record a claim Windows accepted.
+///
+/// `#[cfg(windows)]` with the registration that calls it: off Windows nothing
+/// claims a chord yet (M4-8), so the ledger [`registration_is_live`] reads is
+/// only ever written on the platform that has one. The reader stays ungated,
+/// because "is this chord ours" has an answer everywhere and that answer is no.
+#[cfg(windows)]
 fn note_claimed(id: i32) {
     let mut live = claims();
     if !live.contains(&id) {
@@ -237,6 +243,7 @@ fn note_claimed(id: i32) {
 }
 
 /// Record a claim that has been released, or that Windows refused.
+#[cfg(windows)]
 fn note_released(id: i32) {
     claims().retain(|held| *held != id);
 }
@@ -708,8 +715,16 @@ pub fn give_foreground_to(_window: crate::NativeWindow) -> bool {
 mod tests {
     use super::{
         HandoverStep, Hotkey, another_round, handover_step, holds_a_summon_modifier, is_our_hotkey,
-        note_claimed, note_released, registration_bits, registration_is_live, summon_should_act,
+        registration_bits,
     };
+    // **The ledger's two writers are Windows'**, because nothing claims a chord
+    // anywhere else yet (M4-8), and so is `summon_should_act`, which reads a
+    // `WM_HOTKEY` — the inventory classifies that predicate as a compile-time
+    // absence for exactly that reason. `is_our_hotkey` stays above with the
+    // rest: it is a pure predicate over four integers and its test is a claim
+    // about arithmetic, which is true on every platform.
+    #[cfg(windows)]
+    use super::{note_claimed, note_released, registration_is_live, summon_should_act};
 
     const fn chord(ctrl: bool, alt: bool, shift: bool, win: bool, virtual_key: u16) -> Hotkey {
         Hotkey {
@@ -842,6 +857,7 @@ mod tests {
     ///
     /// MUTATION: drop the liveness clause and the two `!` assertions below fail,
     /// which is a window that answers a key nobody registered.
+    #[cfg(windows)]
     #[test]
     fn a_summon_is_acted_on_only_while_this_process_holds_the_claim() {
         // An id of this test's own: the ledger is process-wide, and the product's
