@@ -1,0 +1,17 @@
+# Nothing a signing or notarization run leaves behind belongs in a public
+# repository, and `scripts/check-machine-paths.ps1` would not catch a key: it
+# looks for a person's name and a home directory, and a private key is neither.
+# So the refusal is here, beside the place the files would land.
+
+# Signing and notarization credentials. The App Store Connect key
+# (`AuthKey_<KEYID>.p8`) lives at `~/.appstoreconnect/private_keys/` with mode
+# 600 and is never copied into a checkout; the `.p12` is a Developer ID identity
+# exported out of a keychain, which is the private key itself.
+*.p8
+*.p12
+*.provisionprofile
+
+# Build output. The staged disk image and the archives a release run produces
+# are artifacts of a tag, not sources of one.
+*.dmg
+*.zip

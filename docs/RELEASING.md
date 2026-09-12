@@ -624,3 +624,27 @@ also carries the bill of materials and `SHA256SUMS.txt`, and neither of those is
 an installer. The trigger is the release
 event and not a tag push, because a tag push here only builds an unsigned
 rehearsal and the release page is made by a person from the signed machine.
+
+## macOS
+
+Nothing here is a release lane yet — that is M5's, and this section is the one
+paragraph P-2 owes the version gate.
+
+`packaging/macos/Info.plist.in` is a **template**, not a plist. Its
+`CFBundleShortVersionString` and `CFBundleVersion` are both the literal
+`@VERSION@`, and both are filled at bundle time from `[workspace.package]
+version` in the workspace `Cargo.toml` — the same line
+`bt_app::version::tests::the_version_is_the_manifests_and_nothing_elses` already
+holds `folio --version`, the PE `VERSIONINFO` block and every diagnostic header
+to. That is why the template is not on that test's list of places carrying a
+version: it carries none, so there is nothing for the list to disagree with, and
+the count stays at one. Writing a real number into either field by hand is
+exactly the drift the gate exists to catch, and it would not be caught there
+until the next release moved the other four. M5-5 closes that by extending the
+gate over the *generated* plist's two fields, which is where a literal finally
+appears.
+
+One consequence for the tag: `CFBundleVersion` accepts only dotted integers, so
+a `-preview` suffix could not go in it. It never has to — the suffix is a
+release channel that lives on the tag and never reaches the manifest, as the
+first section of this document says.

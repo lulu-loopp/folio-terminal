@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The entitlements `codesign -o runtime` is given when it signs the bundle.
+
+  **The baseline is the empty one, and this file says so out loud.** The
+  hardened runtime is turned on by `codesign`'s `-o runtime` flag, not by a key
+  here; what this file is for is the list of *exceptions* to it, and Folio takes
+  none. Every key below is therefore `false` rather than absent: an absent key
+  and a false key sign identically, and only one of them tells the next reader
+  that the question was asked and answered. Notarization asks about exactly
+  these keys, and every one of them that is true is a sentence the notary
+  service will want a reason for.
+
+  Adding a true value here is a decision, not a build fix. If a dependency ever
+  needs one, it goes to the owner before it goes in this file.
+-->
+<plist version="1.0">
+<dict>
+	<!-- Not sandboxed. Developer ID distribution outside the App Store; a
+	     terminal that could not reach the user's files would not be one. -->
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+
+	<!-- No JIT, and no unsigned executable memory: Folio has no interpreter of
+	     its own, and wgpu's Metal path compiles shaders through the system's
+	     own compiler rather than mapping pages itself. -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<false/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<false/>
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<false/>
+
+	<!-- Library validation stays on: everything loaded into this process is
+	     signed by the same team or by Apple. Turning it off is how a signed app
+	     becomes a host for code nobody signed. -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<false/>
+	<key>com.apple.security.cs.disable-executable-page-protection</key>
+	<false/>
+
+	<!-- A shipped build is not a debugger and does not attach to other
+	     processes. -->
+	<key>com.apple.security.get-task-allow</key>
+	<false/>
+	<key>com.apple.security.cs.debugger</key>
+	<false/>
+</dict>
+</plist>
