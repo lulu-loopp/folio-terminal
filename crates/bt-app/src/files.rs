@@ -667,6 +667,31 @@ pub fn child_key(parent: &str, name: &str) -> String {
     format!("{parent}/{name}")
 }
 
+/// **Whether two names are one name to the folder holding them** (D8(a) of the
+/// 2026-09-11 review).
+///
+/// `folds_case` is the folder's own answer, asked of the folder — see
+/// [`bt_platform::directory_folds_case`]. It is a parameter and not a `cfg`
+/// because the question has no platform-wide answer: Windows folds case on
+/// every volume it roots by default, and a single directory can have the
+/// folding turned off for lookups inside it, which is what WSL does to the
+/// trees it owns. The advisory that tells a reader their draft is taken and the
+/// `create_new` that refuses it have to be the same predicate asked of the same
+/// folder, or the box says a name is fine and Enter does nothing.
+///
+/// Folded with `char::to_lowercase` and not `eq_ignore_ascii_case`: a folder
+/// that folds case folds `Σ` and `σ` as surely as `S` and `s`, and an ASCII-only
+/// comparison is the same defect one alphabet along.
+#[must_use]
+pub fn names_are_one(left: &str, right: &str, folds_case: bool) -> bool {
+    if !folds_case {
+        return left == right;
+    }
+    left.chars()
+        .flat_map(char::to_lowercase)
+        .eq(right.chars().flat_map(char::to_lowercase))
+}
+
 /// Where a stable id points on disk right now.
 ///
 /// The id's `/` separators are not reused as path separators — each segment is

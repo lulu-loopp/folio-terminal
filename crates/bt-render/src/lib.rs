@@ -6956,6 +6956,55 @@ impl WindowRenderer {
         )
     }
 
+    /// **Where every character boundary of `text` falls** when it is drawn as a
+    /// plain [`ChromeLabel`] at `font_size_px`, in physical pixels from the
+    /// run's start.
+    ///
+    /// [`Self::measure_chrome_text`]'s answer for a whole string at once, and
+    /// the one a one-line editor asks: a box that scrolls has to find the first
+    /// character it can start drawing at, which is a search over the prefixes of
+    /// the draft. Asked as a width per prefix that search shapes the draft once
+    /// per character; asked here it shapes it once and reads the table.
+    pub fn chrome_text_advances(
+        &mut self,
+        gpu: &mut GpuContext,
+        text: &str,
+        font_size_px: f32,
+    ) -> ChromeTextAdvances {
+        self.chrome_label_advances(
+            gpu,
+            text,
+            font_size_px,
+            ChromeLabelWeight::Regular,
+            0.0,
+            false,
+        )
+    }
+
+    /// The same table for a label carrying `weight`, `letter_spacing_em` and
+    /// `tabular_numerals` — [`Self::measure_chrome_label`]'s attributes, for
+    /// that function's own reason: a run measured in another weight puts every
+    /// offset in it somewhere the ink is not.
+    pub fn chrome_label_advances(
+        &mut self,
+        gpu: &mut GpuContext,
+        text: &str,
+        font_size_px: f32,
+        weight: ChromeLabelWeight,
+        letter_spacing_em: f32,
+        tabular_numerals: bool,
+    ) -> ChromeTextAdvances {
+        chrome_label_advances(
+            &mut gpu.font_system,
+            text,
+            font_size_px,
+            weight,
+            letter_spacing_em,
+            tabular_numerals,
+            false,
+        )
+    }
+
     /// Re-measure the cell for a new scale factor and drop everything keyed by
     /// the pixel font size the old one named.
     ///
@@ -10296,6 +10345,109 @@ fn chrome_label_attrs(
     attrs
 }
 
+/// **Where every character boundary of one shaped run falls**, in physical
+/// pixels from the run's start.
+///
+/// The answer [`measure_chrome_label`] gives, asked once for a whole string
+/// instead of once per prefix. A one-line editor has four questions about the
+/// same draft on every frame — where the caret is, where a selection band
+/// begins and ends, and how far the drawn window has to be pushed along to keep
+/// the caret inside its box — and each of them used to be a fresh
+/// `cosmic_text::Buffer` over a fresh slice. The last of the four is a *loop*,
+/// so a draft of N characters cost N shaping passes over slices averaging N/2,
+/// which is a window that stops answering for a long enough paste.
+///
+/// One pass, and every offset read off it. The stops are the glyph starts the
+/// shaper produced, so this is not an estimate from character counts: it is the
+/// same face, the same size and the same attributes the ink is drawn with,
+/// which is exactly what [`measure_chrome_label`] promises and the reason
+/// neither of them may be replaced by an average advance.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChromeTextAdvances {
+    /// `(byte offset, pixels from the run's start)`, ascending by offset,
+    /// opening at `(0, 0.0)` and closing at `(text.len(), the run's width)`.
+    stops: Vec<(usize, f32)>,
+}
+
+impl ChromeTextAdvances {
+    /// The run of a string nobody shaped: no text, no width.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            stops: vec![(0, 0.0)],
+        }
+    }
+
+    /// Build a table from stops somebody else knows — the door a test measures
+    /// this editor through, and the only way to make one without a font.
+    ///
+    /// The stops are sorted and made monotonic here rather than trusted, so a
+    /// caller cannot hand in a table that says a longer prefix is narrower.
+    #[must_use]
+    pub fn from_stops(stops: impl IntoIterator<Item = (usize, f32)>) -> Self {
+        let mut stops: Vec<(usize, f32)> = std::iter::once((0, 0.0)).chain(stops).collect();
+        stops.sort_by(|left, right| left.0.cmp(&right.0));
+        stops.dedup_by_key(|stop| stop.0);
+        let mut widest = 0.0_f32;
+        for stop in &mut stops {
+            widest = widest.max(stop.1);
+            stop.1 = widest;
+        }
+        Self { stops }
+    }
+
+    /// How wide `text[..at]` is.
+    ///
+    /// An offset inside a cluster reads that cluster's left edge: a caret can
+    /// only stand where a glyph begins, and rounding it forward would draw the
+    /// caret past a character nobody has typed over yet.
+    #[must_use]
+    pub fn upto(&self, at: usize) -> f32 {
+        let index = self.stops.partition_point(|stop| stop.0 <= at);
+        self.stops[index.saturating_sub(1)].1
+    }
+
+    /// How wide `text[from..to]` is.
+    #[must_use]
+    pub fn between(&self, from: usize, to: usize) -> f32 {
+        (self.upto(to) - self.upto(from)).max(0.0)
+    }
+
+    /// The whole run's width — what [`measure_chrome_label`] answers.
+    #[must_use]
+    pub fn width(&self) -> f32 {
+        self.stops.last().map_or(0.0, |stop| stop.1)
+    }
+
+    /// **The first boundary at or after `from` that leaves `to` no further than
+    /// `room` away**, which is where a scrolling box's drawn window starts.
+    ///
+    /// The search is over the stops rather than over the string, so it costs a
+    /// binary search and no shaping at all. Monotonic by construction: the
+    /// further the window starts, the less of the prefix is in front of the
+    /// caret, so `partition_point` is exact and not a scan that happens to
+    /// stop early.
+    #[must_use]
+    pub fn window_start(&self, from: usize, to: usize, room: f32) -> usize {
+        let target = self.upto(to) - room.max(0.0);
+        let index = self.stops.partition_point(|stop| stop.1 < target);
+        self.stops
+            .get(index)
+            .map_or(to, |stop| stop.0)
+            .clamp(from, to)
+    }
+
+    /// **The earliest boundary at or before `from` whose tail still fits in
+    /// `room`**, which is how a box gives its slack back when the draft shrinks
+    /// under it.
+    #[must_use]
+    pub fn tail_start(&self, from: usize, room: f32) -> usize {
+        let target = self.width() - room.max(0.0);
+        let index = self.stops.partition_point(|stop| stop.1 < target);
+        self.stops.get(index).map_or(from, |stop| stop.0).min(from)
+    }
+}
+
 /// How wide a chrome label's text will be, in physical pixels.
 ///
 /// Shaped through the same face, the same size and the same shaper
@@ -10315,8 +10467,82 @@ fn measure_chrome_label(
     tabular_numerals: bool,
     mono: bool,
 ) -> f32 {
-    if text.is_empty() {
+    let Some(buffer) = shape_chrome_measurement(
+        font_system,
+        text,
+        font_size_px,
+        weight,
+        letter_spacing_em,
+        tabular_numerals,
+        mono,
+    ) else {
         return 0.0;
+    };
+    buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0_f32, f32::max)
+}
+
+/// **Where each character boundary of a chrome label falls**, from one shaping
+/// pass — [`ChromeTextAdvances`], measured through the very buffer
+/// [`measure_chrome_label`] measures a width through.
+///
+/// The stops are the shaper's own glyph starts, so an offset's advance is the
+/// left edge of the cluster that begins there and the last stop is the width
+/// the sibling function answers. A caller that wants both gets them for the
+/// price of one pass, which is the whole point: a box that asked for a width
+/// and four offsets used to shape five times.
+fn chrome_label_advances(
+    font_system: &mut FontSystem,
+    text: &str,
+    font_size_px: f32,
+    weight: ChromeLabelWeight,
+    letter_spacing_em: f32,
+    tabular_numerals: bool,
+    mono: bool,
+) -> ChromeTextAdvances {
+    let Some(buffer) = shape_chrome_measurement(
+        font_system,
+        text,
+        font_size_px,
+        weight,
+        letter_spacing_em,
+        tabular_numerals,
+        mono,
+    ) else {
+        return ChromeTextAdvances::empty();
+    };
+    let mut stops: Vec<(usize, f32)> = buffer
+        .layout_runs()
+        .flat_map(|run| run.glyphs.iter().map(|glyph| (glyph.start, glyph.x)))
+        .collect();
+    // A chrome label is one line — `Wrap::None`, and the text a one-line field
+    // holds has had its newlines taken out before it ever gets here — so the
+    // whole run's width is the line's, and it closes the table.
+    stops.push((
+        text.len(),
+        buffer
+            .layout_runs()
+            .map(|run| run.line_w)
+            .fold(0.0_f32, f32::max),
+    ));
+    ChromeTextAdvances::from_stops(stops)
+}
+
+/// The buffer both measurements read, shaped once — `None` for a string with
+/// nothing in it, which has no width and no boundaries but its own.
+fn shape_chrome_measurement(
+    font_system: &mut FontSystem,
+    text: &str,
+    font_size_px: f32,
+    weight: ChromeLabelWeight,
+    letter_spacing_em: f32,
+    tabular_numerals: bool,
+    mono: bool,
+) -> Option<Buffer> {
+    if text.is_empty() {
+        return None;
     }
     let line_height = font_size_px * 1.4;
     let mut buffer = Buffer::new(font_system, Metrics::new(font_size_px, line_height));
@@ -10341,10 +10567,7 @@ fn measure_chrome_label(
         None,
     );
     buffer.shape_until_scroll(font_system, false);
-    buffer
-        .layout_runs()
-        .map(|run| run.line_w)
-        .fold(0.0_f32, f32::max)
+    Some(buffer)
 }
 
 /// Shape every chrome label. The buffers are owned by the returned vector so
@@ -13907,6 +14130,125 @@ mod tests {
     use super::*;
     use bt_transcript::CapturedCell;
     use bt_viewport::horizontal::HorizontalProjection;
+
+    /// PIN (D2 of the 2026-09-11 adversarial review) — **one shaping pass
+    /// answers every offset in a run, and the last of them is the width the
+    /// sibling measurement answers.**
+    ///
+    /// [`ChromeTextAdvances`] exists so that a one-line editor can stop asking
+    /// for a width per prefix: fitting a draft into a box that scrolls is a
+    /// search over the prefixes of the draft, and asked one prefix at a time it
+    /// shapes the draft once per character — quadratic work on the window
+    /// thread, which is what a long pasted line turned a name box into.
+    ///
+    /// Four claims, and each is exact rather than approximate:
+    ///
+    /// ① the table opens at zero and never goes backwards, so a longer prefix is
+    ///    never narrower than a shorter one;
+    /// ② its last stop is the whole run's width — the number
+    ///    [`measure_chrome_label`] answers from the same pass, so a caller that
+    ///    wants both pays for one;
+    /// ③ widths add up: `between(a, b) + between(b, c)` is `between(a, c)`,
+    ///    which is what lets a caret and a selection band be read out of one
+    ///    coordinate system;
+    /// ④ `window_start` and `tail_start` land on the first stop that satisfies
+    ///    their own condition — checked against a scan of the stops, which is
+    ///    the walk they replace, so the binary search is exact and not a search
+    ///    that happens to stop in the right place.
+    ///
+    /// RED GATE: return the glyph's right edge instead of its left and ① holds
+    /// but the caret is drawn a character late; drop the closing stop and ② goes
+    /// red; take `partition_point` off a `<` and onto a `<=` and ④ names the
+    /// stop after the one the walk arrives at.
+    #[test]
+    fn a_runs_advances_are_read_from_one_shaping_pass() {
+        let mut font_system = terminal_font_system();
+        for text in ["Cargo.toml", "a very long draft of a name", "abc 中文 def"] {
+            let advances = chrome_label_advances(
+                &mut font_system,
+                text,
+                14.0,
+                ChromeLabelWeight::Regular,
+                0.0,
+                false,
+                false,
+            );
+            let stops = advances.stops.clone();
+            assert_eq!(stops.first(), Some(&(0, 0.0)), "the table opens at zero");
+            for pair in stops.windows(2) {
+                assert!(
+                    pair[0].0 < pair[1].0 && pair[0].1 <= pair[1].1,
+                    "{text:?}: the table goes forwards in both columns: {pair:?}"
+                );
+            }
+            assert_eq!(stops.last().map(|stop| stop.0), Some(text.len()));
+
+            let width = measure_chrome_label(
+                &mut font_system,
+                text,
+                14.0,
+                ChromeLabelWeight::Regular,
+                0.0,
+                false,
+                false,
+            );
+            assert_eq!(
+                advances.width(),
+                width,
+                "{text:?}: the run's width is the width the same pass measures"
+            );
+            assert_eq!(advances.upto(text.len()), width);
+            assert_eq!(advances.upto(0), 0.0);
+
+            // Widths add up, which is what puts the caret and the band in one
+            // coordinate system.
+            for stop in &stops {
+                let mid = stop.0;
+                assert_eq!(
+                    advances.between(0, mid) + advances.between(mid, text.len()),
+                    advances.between(0, text.len()),
+                    "{text:?}: the halves at {mid} do not add up to the whole"
+                );
+            }
+
+            // And the two searches land where the walk they replace lands.
+            let last = text.len();
+            for room in [0.0_f32, 3.0, 12.0, width * 0.5, width, width + 10.0] {
+                let want = stops
+                    .iter()
+                    .find(|stop| advances.upto(last) - stop.1 <= room)
+                    .map_or(last, |stop| stop.0);
+                assert_eq!(
+                    advances.window_start(0, last, room),
+                    want,
+                    "{text:?}: the window's start at {room} px of room"
+                );
+                let tail = stops
+                    .iter()
+                    .find(|stop| width - stop.1 <= room)
+                    .map_or(last, |stop| stop.0);
+                assert_eq!(
+                    advances.tail_start(last, room),
+                    tail,
+                    "{text:?}: the tail's start at {room} px of room"
+                );
+            }
+        }
+
+        // A string with nothing in it has no width and one boundary: its own.
+        let nothing = chrome_label_advances(
+            &mut font_system,
+            "",
+            14.0,
+            ChromeLabelWeight::Regular,
+            0.0,
+            false,
+            false,
+        );
+        assert_eq!(nothing.width(), 0.0);
+        assert_eq!(nothing.upto(0), 0.0);
+        assert_eq!(nothing.window_start(0, 0, 10.0), 0);
+    }
 
     /// Every style the sweep below asks `resolve_colors` about: the two defaults, both ends of
     /// the palette, a scheme index that collides with its own ground under Solarized, a direct

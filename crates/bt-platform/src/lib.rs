@@ -2322,12 +2322,13 @@ mod windows_impl {
             MONITORINFO, MONITORINFOEXW, MonitorFromPoint, MonitorFromWindow,
         },
         Storage::FileSystem::{
-            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED,
-            FILE_FLAGS_AND_ATTRIBUTES, FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE,
-            FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_DIR_NAME,
+            CreateFileW, FILE_CASE_SENSITIVE_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES, FILE_LIST_DIRECTORY,
+            FILE_NOTIFY_CHANGE, FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_DIR_NAME,
             FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
-            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileVersionInfoSizeW,
-            GetFileVersionInfoW, OPEN_EXISTING, ReadDirectoryChangesW, VerQueryValueW,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileCaseSensitiveInfo,
+            GetFileInformationByHandleEx, GetFileVersionInfoSizeW, GetFileVersionInfoW,
+            OPEN_EXISTING, ReadDirectoryChangesW, VerQueryValueW,
         },
         System::{
             Com::{
@@ -6328,6 +6329,77 @@ mod windows_impl {
         Ok(!operation.fAnyOperationsAborted.as_bool())
     }
 
+    /// The one bit `FileCaseSensitiveInfo` answers with: set when lookups
+    /// inside this directory tell case apart.
+    ///
+    /// Spelled out here because the binding does not carry it —
+    /// `FILE_CS_FLAG_CASE_SENSITIVE_DIR` is a `#define` in `winnt.h` and the
+    /// `windows` crate generates constants from metadata, which that header's
+    /// flags are not in. One named constant beside its only reader, rather than
+    /// a `1` in the expression.
+    const FILE_CS_FLAG_CASE_SENSITIVE_DIR: u32 = 0x0000_0001;
+
+    /// **Whether this directory treats two spellings of one name as one name.**
+    ///
+    /// Asked of the directory rather than assumed from the platform, which is
+    /// the whole reason it exists. Windows has folded case on every path since
+    /// NT — `Notes.md` and `notes.md` are one entry, and a `create_new` of the
+    /// second refuses because the first is there — but since Windows 10 1803 a
+    /// *directory* can carry a flag that turns the folding off for lookups
+    /// inside it, and WSL sets that flag on the trees it owns. So a window that
+    /// answered "this is Windows, therefore case is folded" would be right
+    /// almost everywhere and wrong in a reader's own source tree, which is
+    /// exactly where they are making files.
+    ///
+    /// `FileCaseSensitiveInfo` is the one call that knows, and it is asked of a
+    /// handle to the directory itself — `FILE_FLAG_BACKUP_SEMANTICS` is what
+    /// lets `CreateFileW` open one. **`true` when the directory cannot say** is
+    /// not a fallback standing in for an answer: the flag exists only where a
+    /// directory *can* be case-sensitive, so a filesystem that has never heard
+    /// of it, or a Windows older than the flag, is a filesystem that folds case.
+    /// The share mode is every mode, because this reads no bytes and must not
+    /// stand in the way of anything the reader is doing to the folder.
+    #[must_use]
+    pub fn directory_folds_case(directory: &Path) -> bool {
+        let mut wide: Vec<u16> = directory.as_os_str().encode_wide().collect();
+        if wide.contains(&0) {
+            return true;
+        }
+        wide.push(0);
+        // SAFETY: `wide` outlives the call and holds a NUL-terminated UTF-16
+        // path, which is what `PCWSTR` requires; the call returns a handle or an
+        // error and performs no callbacks.
+        let Ok(handle) = (unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                None,
+            )
+        }) else {
+            return true;
+        };
+        let mut info = FILE_CASE_SENSITIVE_INFO::default();
+        // SAFETY: `info` is exclusively borrowed for the call and its size is
+        // the size the class declares; the handle is open for the duration.
+        let asked = unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                FileCaseSensitiveInfo,
+                (&raw mut info).cast(),
+                u32::try_from(size_of::<FILE_CASE_SENSITIVE_INFO>()).unwrap_or(u32::MAX),
+            )
+        };
+        let _ = unsafe { CloseHandle(handle) };
+        match asked {
+            Ok(()) => info.Flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR == 0,
+            Err(_) => true,
+        }
+    }
+
     /// Paint this window's own background in `rgb`, or in **nothing** at all.
     ///
     /// `None` installs the null brush, and that is what a translucent ground is
@@ -8874,16 +8946,16 @@ pub use windows_impl::{
     ImeSystemCaret, MathContextMenu, Notifier, SystemSettingsWatch, Taskbar, adopt_parent_console,
     announce_explorer_menu_change, apartments_left, client_area_animation_enabled, clipboard_text,
     cloaked_from_attribute, current_thread_priority, current_user_registry_string,
-    current_user_registry_subkeys, detach_console, documents_directory, dpi_at, exposed_from_probe,
-    exposure_probe_points, file_product_version, flash_window, get_dpi_for_window, get_window_rect,
-    get_work_area, hide_every_window_of_this_process, install_console_ctrl_handler,
-    install_context_menu, install_window_class_background, is_window_cloaked, is_window_minimized,
-    leave_process, message_box, monitor_id_at, monospace_font_families, os_ui_language,
-    pointer_position, read_context_menu, recycle, redirect_std_streams_to_file,
-    remove_context_menu, request_window_close, set_clipboard_text, set_current_thread_priority,
-    set_system_backdrop, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
-    silence_std_streams, spawn_at_priority, stand_window_at, std_error_is_console,
-    system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
+    current_user_registry_subkeys, detach_console, directory_folds_case, documents_directory,
+    dpi_at, exposed_from_probe, exposure_probe_points, file_product_version, flash_window,
+    get_dpi_for_window, get_window_rect, get_work_area, hide_every_window_of_this_process,
+    install_console_ctrl_handler, install_context_menu, install_window_class_background,
+    is_window_cloaked, is_window_minimized, leave_process, message_box, monitor_id_at,
+    monospace_font_families, os_ui_language, pointer_position, read_context_menu, recycle,
+    redirect_std_streams_to_file, remove_context_menu, request_window_close, set_clipboard_text,
+    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
+    set_window_topmost, silence_std_streams, spawn_at_priority, stand_window_at,
+    std_error_is_console, system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
     taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
     top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
     window_is_exposed, work_area_at, write_to_console,

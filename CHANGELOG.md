@@ -38,8 +38,9 @@ All notable changes to Folio are recorded here. The format follows
   `Delete`. The two New rows put a field in the tree where the new row will
   appear, so the name is typed where the name is going to be: Enter creates,
   Escape cancels, and a name the folder will not take — nothing at all, a path
-  separator, a name something in that folder already has, a Windows device name
-  like `NUL` — turns red in the box rather than being explained somewhere else.
+  separator, a name something in that folder already has whether or not it is
+  spelled in the same case, a Windows device name like `NUL` — turns red in the
+  box rather than being explained somewhere else.
   A new file is created empty and selected; opening it is your next click.
   `Delete` asks nothing first, because what it does is reversible: the row goes
   to the Recycle Bin and never to a permanent delete, and a folder goes whole.
@@ -135,6 +136,11 @@ All notable changes to Folio are recorded here. The format follows
   and re-drawing that nobody asked for: what is already on the glass stays there.
   A picture that was fetched to sharpen now arrives by itself, and a card
   hovering a Markdown file shows its pictures instead of their placeholders.
+- **The name box takes a long pasted line without freezing the window**, and a
+  name the folder will not take now says so in the box even when the difference
+  is only upper and lower case, instead of leaving Enter doing nothing. Clicking
+  away from a half-typed new name lands on the row you clicked, not on the one
+  that moved up into its place.
 - **Saving a file you are editing no longer throws away what you can undo.**
   Folio now recognises its own write instead of reading it as somebody else's, so
   Ctrl+S leaves the history, the caret and the selection where they were — and a

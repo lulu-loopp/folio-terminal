@@ -18581,11 +18581,120 @@ enum RenameSubject {
     /// `folder` decides what Enter makes and what the row it is typed into is
     /// drawn as. It is a `bool` rather than a kind because there are two answers
     /// and no third: the menu offers exactly two rows.
+    ///
+    /// **`folds_case` is the folder's own answer to "are two spellings of one
+    /// name one name"**, asked of the folder the moment the box opened (D8(a)
+    /// of the 2026-09-11 review). It rides on the subject because that is where
+    /// the folder is named, and it is asked once because the thing that reads it
+    /// runs on every frame the caret blinks — a `stat` per frame is the shape
+    /// red line R-i forbids. See [`bt_platform::directory_folds_case`].
     FilesNew {
         leaf: LeafId,
         parent: String,
         folder: bool,
+        folds_case: bool,
     },
+}
+
+/// **The most characters a name can have on this platform.**
+///
+/// 255, which is what every filesystem Windows roots a volume on takes for one
+/// path component — NTFS, ReFS, exFAT and FAT32 alike — and what
+/// `MAX_PATH`-era code has always assumed a directory entry cannot exceed. A
+/// draft longer than this cannot become a file whatever else is right about it,
+/// so a field that holds a name stops taking characters here rather than
+/// carrying a draft that is going to be refused by the volume.
+///
+/// A tab's name is not on a disk, and it is bounded by this same number on
+/// purpose: it is a *label*, the strip cuts it to a few dozen pixels, and a
+/// second constant would be a second number to get wrong.
+const NAME_DRAFT_LIMIT: usize = 255;
+
+/// **The most characters an address field will take.**
+///
+/// Larger than a name's by a factor of eight, because a URL legitimately is:
+/// a query string carries state, and 2048 is the length every widely deployed
+/// client and server has interoperated on for twenty years (the shortest of the
+/// real limits — Internet Explorer's 2083 — rounded down to a power of two).
+/// A `data:` URI can exceed it; one typed into this box could not have been
+/// read back out of it either, and the box is a place to go somewhere rather
+/// than a place to store a document.
+const ADDRESS_DRAFT_LIMIT: usize = 2048;
+
+impl RenameSubject {
+    /// **How long a draft this kind of field will hold**, in characters.
+    ///
+    /// A property of the field's *kind* and not a guard at the paste site, which
+    /// is what makes it true of every source of text at once — a paste, an IME
+    /// commit, a held key. D2 of the 2026-09-11 review arrived through the
+    /// clipboard because that is the only door big enough to walk through in one
+    /// step, but the door was never the defect: an unbounded draft is unbounded
+    /// work for every surface that has to measure it.
+    const fn draft_limit(&self) -> usize {
+        match self {
+            Self::Tab(_)
+            | Self::PreviewName { .. }
+            | Self::PreviewCrumb { .. }
+            | Self::FilesRow { .. }
+            | Self::FilesNew { .. } => NAME_DRAFT_LIMIT,
+            Self::WebAddress { .. } => ADDRESS_DRAFT_LIMIT,
+        }
+    }
+}
+
+/// **What a press that blurred a name editor is about**, once the list it was
+/// measured against has been walked again (D4 of the 2026-09-11 review).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PressAfterBlur {
+    /// The press named no tree row, so nothing about it can have moved with the
+    /// box: the chrome is re-asked at the pointer, exactly as it always was.
+    AskAgain,
+    /// The press named a row, and that row is still in the list — **at this
+    /// index**, which is not the index it was pressed at when the pending row
+    /// was still above it.
+    Row(SeatId, usize),
+    /// The row it named went with the editor. Nothing else is entitled to the
+    /// press.
+    Gone,
+}
+
+/// **The identity a pressed target names**, resolved against the very rows the
+/// press was measured against.
+///
+/// A files row is the one chrome target keyed by a *position in a list*, and the
+/// list is the one thing closing a name editor changes: the pending row is in it
+/// while the box is open and gone the moment the box closes. So this is where an
+/// index stops being the answer and the row's stable key starts.
+fn pressed_row_identity(
+    target: Option<seats::ChromeTarget>,
+    measured: &BTreeMap<SeatId, seats::FilesTreeContent>,
+) -> Option<(SeatId, String)> {
+    let seats::ChromeTarget::FilesRow { seat, index } = target? else {
+        return None;
+    };
+    let row = measured.get(&seat)?.rows.get(index)?;
+    Some((seat, row.key.clone()))
+}
+
+/// Where that identity is in the rebuilt list — or that it is not in it.
+///
+/// The index is re-derived and the choice is not, which is the whole of the
+/// rule: a row that moved up because the box above it closed is still the row
+/// the reader pressed, and a row that *was* the box is a row nobody pressed
+/// twice.
+fn press_after_blur(
+    pressed: Option<(SeatId, String)>,
+    rebuilt: &BTreeMap<SeatId, seats::FilesTreeContent>,
+) -> PressAfterBlur {
+    let Some((seat, key)) = pressed else {
+        return PressAfterBlur::AskAgain;
+    };
+    rebuilt
+        .get(&seat)
+        .and_then(|tree| tree.rows.iter().position(|row| row.key == key))
+        .map_or(PressAfterBlur::Gone, |index| {
+            PressAfterBlur::Row(seat, index)
+        })
 }
 
 /// **Which files column has a name being typed in it, and where the box is**
@@ -18675,6 +18784,24 @@ struct TabRename {
     /// rectangles, and where a drawn window onto a long draft starts is a fact
     /// about a box measured in a particular face.
     first_visible: usize,
+    /// **The refusal the last submission actually raised, and the draft it was
+    /// raised on** (D8(a) of the 2026-09-11 review).
+    ///
+    /// The box draws its own advisory — a name the listing already holds, a name
+    /// this platform will not take — and that advisory is a *prediction* of what
+    /// Enter will do. A prediction can be wrong: the folder is asked with
+    /// `path.exists()` at the commit and with the rows on the glass here, and
+    /// the two can disagree about a file that arrived since the last listing, or
+    /// about two spellings of one name. When they disagreed the field sat there
+    /// looking valid with Enter doing nothing, for ever.
+    ///
+    /// So the refusal that *stopped* the commit is kept, and the box shows it.
+    /// **Paired with the draft it was raised on** rather than cleared by every
+    /// mutator: an edit changes the text and the refusal stops applying by
+    /// itself, and typing the refused name back in shows the refusal again —
+    /// which is right, because it is still refused. One field, and no hook in
+    /// any verb.
+    refused: Option<(String, files::NewNameRefusal)>,
 }
 
 impl TabRename {
@@ -18710,6 +18837,7 @@ impl TabRename {
             subject,
             field: text_field::TextField::holding_selected(&text, selected),
             first_visible: 0,
+            refused: None,
         }
     }
 
@@ -18797,12 +18925,13 @@ impl TabRename {
     /// caret at zero, where the first character typed is going to land.
     ///
     /// [`seed`]: TabRename::seed
-    fn open_files_new(leaf: LeafId, parent: &str, folder: bool) -> Self {
+    fn open_files_new(leaf: LeafId, parent: &str, folder: bool, folds_case: bool) -> Self {
         Self::seed(
             RenameSubject::FilesNew {
                 leaf,
                 parent: parent.to_owned(),
                 folder,
+                folds_case,
             },
             String::new(),
             0,
@@ -18861,11 +18990,30 @@ impl TabRename {
     /// about a line of text: the search capsule below it is entitled to hold
     /// whatever a reader typed.
     ///
+    /// **And a draft goes no further than its own kind of field can**
+    /// ([`RenameSubject::draft_limit`], D2 of the 2026-09-11 review). What is
+    /// left of the incoming text after the filter is cut to the room the field
+    /// has left — the selection this insert is about to replace counts as room,
+    /// because it is about to stop being in the draft.
+    ///
+    /// Here for the control filter's own reason: it is a fact about the *field*
+    /// and not about any one source of text, so a paste, an IME commit and a
+    /// held key are all bounded by one sentence. Cutting the clipboard at the
+    /// paste site instead would leave the other two doors open, and would be a
+    /// limit on the clipboard rather than on the name.
+    ///
+    /// The cut falls on a character and never inside one — `chars().take(..)` —
+    /// which is the promise every other edit in this field already makes.
+    ///
     /// [`TextField::insert`]: crate::text_field::TextField::insert
     fn insert(&mut self, text: &str) {
+        let selected = self.field.selected_text().chars().count();
+        let held = self.field.text().chars().count() - selected;
+        let room = self.subject.draft_limit().saturating_sub(held);
         let text = text
             .chars()
             .filter(|character| !matches!(character, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}'))
+            .take(room)
             .collect::<String>();
         if text.is_empty() {
             return;
@@ -18906,13 +19054,35 @@ impl TabRename {
     /// its window never leaves the start — a property of that box rather than an
     /// omission.
     ///
+    /// # One shaping pass, and every offset read off it
+    ///
+    /// **`shape` is asked exactly once per call**, for the whole composed
+    /// string, and the four numbers this function publishes — the window's
+    /// start, the caret, and the selection band's two edges — are read out of
+    /// the table it answers with ([`bt_render::ChromeTextAdvances`]).
+    ///
+    /// It used to take a `measure(&str) -> f32` and call it once per *prefix*,
+    /// which made the window's start a walk: the loop stepped `first_visible`
+    /// forward one character at a time and re-measured the whole remaining
+    /// prefix on each step, so a draft of N characters shaped ~N times over
+    /// slices averaging N/2. Every one of those measurements built a fresh
+    /// `cosmic_text::Buffer` and ran the shaper over it, on the window thread,
+    /// with nothing able to cancel it — so a long line pasted into a narrow box
+    /// was not a slow frame, it was a window that never drew again (D2 of the
+    /// 2026-09-11 review; the 0910 freeze's own failure class by another road).
+    ///
+    /// The bound a name field puts on what it will *accept* ([`Self::insert`])
+    /// is the other half of the same answer and does not replace this one: a
+    /// draft can be long without being pasted, and an address field's limit is
+    /// larger on purpose.
+    ///
     /// [`TextField::composed`]: crate::text_field::TextField::composed
     fn fit(
         &mut self,
         box_width: f32,
         caret_width: f32,
         scrolls: bool,
-        measure: &mut dyn FnMut(&str) -> f32,
+        shape: &mut dyn FnMut(&str) -> bt_render::ChromeTextAdvances,
     ) -> seats::TabEdit {
         let shown = self.field.composed().into_owned();
         // The caret stands **after** the composition, which is the one place the
@@ -18937,43 +19107,32 @@ impl TabRename {
         while self.first_visible > 0 && !shown.is_char_boundary(self.first_visible) {
             self.first_visible -= 1;
         }
+        // **The one pass.** Everything below is arithmetic on the table.
+        let advances = shape(&shown);
         if scrolls {
-            // Walk the window's start forward until the caret is inside the box.
+            // Where the window has to start for the caret to be inside the box.
             // The caret's own width is held back, because a caret drawn hard
             // against the right edge is a caret half outside it.
-            while self.first_visible < caret
-                && measure(&shown[self.first_visible..caret]) > box_width - caret_width
-            {
-                self.first_visible += 1;
-                while !shown.is_char_boundary(self.first_visible) {
-                    self.first_visible += 1;
-                }
-            }
-            // And give the slack back when the text shrinks under it, so deleting
-            // from the end reveals the head again instead of leaving the box
-            // parked where the longest draft left it. Pulling back only while the
-            // *whole* tail still fits cannot undo the loop above: a tail that
-            // fits contains a caret that fits.
-            while self.first_visible > 0 {
-                let mut candidate = self.first_visible - 1;
-                while !shown.is_char_boundary(candidate) {
-                    candidate -= 1;
-                }
-                if measure(&shown[candidate..]) > box_width {
-                    break;
-                }
-                self.first_visible = candidate;
-            }
+            self.first_visible =
+                advances.window_start(self.first_visible, caret, box_width - caret_width);
+            // And the slack given back when the text shrinks under it, so
+            // deleting from the end reveals the head again instead of leaving
+            // the box parked where the longest draft left it. Pulling back only
+            // while the *whole* tail still fits cannot undo the line above: a
+            // tail that fits contains a caret that fits.
+            self.first_visible = advances.tail_start(self.first_visible, box_width);
         }
         let from = self.first_visible;
         let band = (selection_to > from).then(|| {
             (
-                measure(&shown[from..selection_from.max(from)]).min(box_width),
-                measure(&shown[from..selection_to]).min(box_width),
+                advances
+                    .between(from, selection_from.max(from))
+                    .min(box_width),
+                advances.between(from, selection_to).min(box_width),
             )
         });
         seats::TabEdit {
-            caret_px: measure(&shown[from..caret]),
+            caret_px: advances.between(from, caret),
             text: shown[from..].to_owned(),
             // Filled by whichever surface has a layer under its name to reveal,
             // which is the tab strip and nowhere else.
@@ -18981,6 +19140,24 @@ impl TabRename {
             selection: band,
             caret_lit: false,
         }
+    }
+
+    /// **Record the refusal a submission of this draft ran into**, so the box
+    /// can say what Enter did instead of saying nothing.
+    ///
+    /// The draft is kept with it; see [`Self::refused`] for why that is the
+    /// whole of the invalidation.
+    fn refuse(&mut self, refusal: files::NewNameRefusal) {
+        self.refused = Some((self.field.text().to_owned(), refusal));
+    }
+
+    /// The refusal standing against the draft **as it is now** — `None` the
+    /// moment a character changes it.
+    fn refusal(&self) -> Option<files::NewNameRefusal> {
+        self.refused
+            .as_ref()
+            .filter(|(draft, _)| draft == self.field.text())
+            .map(|(_, refusal)| *refusal)
     }
 
     /// What committing this draft writes into `manual_name`.
@@ -41565,14 +41742,8 @@ impl Runtime<'_> {
         let Some(editor) = self.window.rename.as_mut() else {
             return;
         };
-        let mut measure = |text: &str| {
-            if text.is_empty() {
-                0.0
-            } else {
-                renderer.measure_chrome_text(gpu, text, font_px)
-            }
-        };
-        let fitted = editor.fit(box_width, caret_width, true, &mut measure);
+        let mut shape = |text: &str| renderer.chrome_text_advances(gpu, text, font_px);
+        let fitted = editor.fit(box_width, caret_width, true, &mut shape);
         let caret_px = fitted.caret_px;
         content.edit = Some(seats::TabEdit {
             placeholder: content
@@ -47623,28 +47794,24 @@ impl Runtime<'_> {
         let Some(editor) = self.window.rename.as_mut() else {
             return (tools, None);
         };
-        let mut measure = |text: &str| {
-            if text.is_empty() {
-                0.0
-            } else {
-                // The name's own face, as the box above was: the caret and the
-                // selection band are offsets *into* this run, so a run measured
-                // in another weight puts both of them in the wrong place.
-                renderer.measure_chrome_label(
-                    gpu,
-                    text,
-                    font,
-                    seats::PREVIEW_NAME_FACE.weight,
-                    seats::PREVIEW_NAME_FACE.letter_spacing_em,
-                    seats::PREVIEW_NAME_FACE.tabular_numerals,
-                )
-            }
+        // The name's own face, as the box above was: the caret and the
+        // selection band are offsets *into* this run, so a run measured in
+        // another weight puts both of them in the wrong place.
+        let mut shape = |text: &str| {
+            renderer.chrome_label_advances(
+                gpu,
+                text,
+                font,
+                seats::PREVIEW_NAME_FACE.weight,
+                seats::PREVIEW_NAME_FACE.letter_spacing_em,
+                seats::PREVIEW_NAME_FACE.tabular_numerals,
+            )
         };
         // A file has no name under its name, so there is no layer to reveal and
         // the placeholder stays empty by construction rather than by omission.
         let edit = seats::TabEdit {
             caret_lit: self.window.rename_blink.visible(),
-            ..editor.fit(box_width, caret_width, true, &mut measure)
+            ..editor.fit(box_width, caret_width, true, &mut shape)
         };
         // **Written here because here is the only place the box exists**, which
         // is `measure_open_rename`'s own sentence: the IME's candidate list has
@@ -47717,18 +47884,12 @@ impl Runtime<'_> {
         let Some(editor) = self.window.rename.as_mut() else {
             return (measure_in, None);
         };
-        let mut measure = |text: &str| {
-            if text.is_empty() {
-                0.0
-            } else {
-                renderer.measure_chrome_text(gpu, text, font)
-            }
-        };
+        let mut shape = |text: &str| renderer.chrome_text_advances(gpu, text, font);
         // An address has no address under it either: the field is seeded with
         // the committed URL and there is no second layer to reveal.
         let edit = seats::TabEdit {
             caret_lit: self.window.rename_blink.visible(),
-            ..editor.fit(box_width, caret_width, true, &mut measure)
+            ..editor.fit(box_width, caret_width, true, &mut shape)
         };
         // **Written here because here is the only place the box exists** — the
         // IME's candidate list has to stand under what is being typed, and this
@@ -47792,19 +47953,13 @@ impl Runtime<'_> {
         // this is the one place the two have to meet.
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let editor = self.window.rename.as_mut()?;
-        let mut measure = |text: &str| {
-            if text.is_empty() {
-                0.0
-            } else {
-                renderer.measure_chrome_text(gpu, text, font)
-            }
-        };
+        let mut shape = |text: &str| renderer.chrome_text_advances(gpu, text, font);
         // The window never leaves the start of the draft, which is what the
         // `false` says: a file has no name under its name, so there is no layer
         // to reveal and the placeholder stays empty.
         let edit = seats::TabEdit {
             caret_lit: self.window.rename_blink.visible(),
-            ..editor.fit(box_width, caret_width, false, &mut measure)
+            ..editor.fit(box_width, caret_width, false, &mut shape)
         };
         // **Written here because here is the only place the box exists** — the
         // IME's candidate list has to stand under what is being typed.
@@ -48074,7 +48229,15 @@ impl Runtime<'_> {
             }
         }
         let leaf = self.leaf_here(seat);
-        self.window.rename = Some(TabRename::open_files_new(leaf, parent, folder));
+        // **The folder is asked how it tells names apart, once, here** (D8(a)).
+        // The box's advisory runs on every frame the caret blinks and may not
+        // touch the disk; this is the one moment it can be asked, and the folder
+        // the name is going into is exactly what has to answer — a tree under
+        // WSL's case-sensitive flag and an ordinary volume disagree about
+        // whether `notes.md` is `Notes.md`, and the window must not guess.
+        let root = self.window.tabs[active].files_state(seat).root;
+        let folds_case = bt_platform::directory_folds_case(&files::full_path(&root, parent));
+        self.window.rename = Some(TabRename::open_files_new(leaf, parent, folder, folds_case));
         // A caret that arrives mid-blink arrives invisible half the time.
         self.window.rename_blink.reset(now, self.app.motion);
         self.refresh_chrome();
@@ -48082,14 +48245,23 @@ impl Runtime<'_> {
     }
 
     /// **Make the file or the folder the open box was naming** (0.3), and answer
-    /// whether the box is finished with.
+    /// **which refusal stopped it** — `None` when the box is finished with,
+    /// whether that is because the entry was made or because nothing here can
+    /// help.
     ///
-    /// `false` keeps the field open on the draft that was refused —
+    /// A refusal keeps the field open on the draft that raised it —
     /// [`seats::FilesRowEdit::refused`]'s channel, which is the address bar's
     /// and not the rename's. A rename refuses in silence because there is a name
     /// underneath to fall back to and the reader can see it; a new entry has no
     /// name underneath, so Enter doing nothing at all would be the window
     /// refusing without saying which of its refusals it meant.
+    ///
+    /// **Which is why it is the refusal and not a `bool`** (D8(a) of the
+    /// 2026-09-11 review). The box's own advisory is a prediction of this
+    /// answer, and a prediction that is wrong used to be invisible: the field
+    /// looked valid and Enter did nothing. The caller hands this back to the
+    /// editor ([`TabRename::refuse`]) so that the refusal a reader sees is the
+    /// refusal that stopped the commit.
     ///
     /// **`create_new` and not `create`** for the file: `File::create` truncates
     /// an existing file, and the folder can gain an entry between the judgement
@@ -48114,13 +48286,13 @@ impl Runtime<'_> {
         parent: &str,
         folder: bool,
         draft: &str,
-    ) -> Result<bool> {
+    ) -> Result<Option<files::NewNameRefusal>> {
         let Some(tab) = self.tab_slot_of(leaf.tab) else {
-            return Ok(true);
+            return Ok(None);
         };
         let root = self.window.tabs[tab].files_state(leaf.seat).root;
         if root.is_empty() {
-            return Ok(true);
+            return Ok(None);
         }
         let name = draft.trim();
         let directory = files::full_path(&root, parent);
@@ -48134,7 +48306,7 @@ impl Runtime<'_> {
         let refusal = files::judge_new_name(draft)
             .or_else(|| path.exists().then_some(files::NewNameRefusal::Taken));
         if refusal.is_some() {
-            return Ok(false);
+            return Ok(refusal);
         }
         let made = if folder {
             std::fs::create_dir(&path)
@@ -48148,7 +48320,7 @@ impl Runtime<'_> {
                 Some(name.to_owned()),
                 i18n::not_created(&error.to_string()),
             )?;
-            return Ok(true);
+            return Ok(None);
         }
         // Ahead of the watcher, which is `refresh_files_dirs_at`'s own sentence:
         // this window made the change, so it knows the truth a whole quiet
@@ -48161,7 +48333,7 @@ impl Runtime<'_> {
         // it is not more — it is where the press left the reader standing.
         self.open_files_path_to(leaf.seat, &files::child_key(parent, name))?;
         self.mark_session_dirty(Instant::now());
-        Ok(true)
+        Ok(None)
     }
 
     /// **Send one tree row to the Recycle Bin** (0.3, `Delete`).
@@ -64601,6 +64773,7 @@ impl Runtime<'_> {
                 leaf,
                 ref parent,
                 folder,
+                ..
             } if leaf.tab == active => Some(FilesEditPlace {
                 seat: leaf.seat,
                 at: FilesEditRow::New { parent, folder },
@@ -77716,13 +77889,38 @@ impl Runtime<'_> {
         // shape red line R-i forbids; the tree's own listing is what the reader
         // is looking at, so it is also the honest thing to answer from. The
         // authoritative check is at the commit, where it happens once.
+        //
+        // **But it is asked the way the folder itself would ask it** (D8(a) of
+        // the 2026-09-11 review). The rows were compared by exact bytes while
+        // the commit compared with `path.exists()`, which on an ordinary Windows
+        // volume folds case — so with `Notes.md` in the folder, `notes.md` drew
+        // no red, Enter hit `Taken`, and the field sat there looking valid and
+        // doing nothing for ever. The folder was asked which it is when the box
+        // opened ([`RenameSubject::FilesNew`]); one answer, read here.
+        let folds_case = matches!(
+            self.window.rename.as_ref().map(|editor| &editor.subject),
+            Some(RenameSubject::FilesNew {
+                folds_case: true,
+                ..
+            })
+        );
+        // **And the refusal the commit really raised outranks the prediction**
+        // (D8(a) again). Everything above is an advisory; a commit-only refusal
+        // — a file that arrived since the last listing, a volume that refused
+        // the name for a reason no listing shows — is what
+        // [`TabRename::refused`] carries, and it is drawn in the same red. The
+        // empty draft stays outside both: an empty field is a field nobody has
+        // finished, not a name the folder said no to.
         let refused = match (place.at, self.window.rename.as_ref()) {
             (FilesEditRow::New { parent, .. }, Some(editor)) if !editor.text().is_empty() => {
                 let name = editor.text().trim();
-                files::judge_new_name(editor.text()).is_some()
+                editor.refusal().is_some()
+                    || files::judge_new_name(editor.text()).is_some()
                     || trees.get(&seat).is_some_and(|tree| {
                         let taken = files::child_key(parent, name);
-                        tree.rows.iter().any(|row| row.key == taken)
+                        tree.rows
+                            .iter()
+                            .any(|row| files::names_are_one(&row.key, &taken, folds_case))
                     })
             }
             _ => false,
@@ -77754,14 +77952,8 @@ impl Runtime<'_> {
         let Some(editor) = self.window.rename.as_mut() else {
             return;
         };
-        let mut measure = |text: &str| {
-            if text.is_empty() {
-                0.0
-            } else {
-                renderer.measure_chrome_text(gpu, text, font)
-            }
-        };
-        let fitted = editor.fit(box_width, caret_width, true, &mut measure);
+        let mut shape = |text: &str| renderer.chrome_text_advances(gpu, text, font);
+        let fitted = editor.fit(box_width, caret_width, true, &mut shape);
         edit.text = fitted.text;
         edit.caret_px = fitted.caret_px;
         edit.selection = fitted.selection;
@@ -85475,13 +85667,22 @@ impl Runtime<'_> {
             leaf,
             parent,
             folder,
+            ..
         } = &editor.subject
         {
             if commit {
                 let (leaf, parent, folder) = (*leaf, parent.clone(), *folder);
-                if !self.create_files_row(leaf, &parent, folder, editor.text())?
+                // **And the refusal is written onto the editor before the
+                // editor goes back** (D8(a)): the box's own advisory is a
+                // prediction of this answer, and the one thing a reader must
+                // never be shown is a field that looks valid with Enter doing
+                // nothing.
+                if let Some(refusal) =
+                    self.create_files_row(leaf, &parent, folder, editor.text())?
                     && exit.may_stay_open()
                 {
+                    let mut editor = editor;
+                    editor.refuse(refusal);
                     self.window.rename = Some(editor);
                     self.refresh_chrome();
                     return self.present_chrome_change();
@@ -85796,6 +85997,10 @@ impl Runtime<'_> {
         // sized to its draft, a name that comes back), so the re-ask is
         // unconditional rather than a special case for the tree.
         let mut target = self.chrome_target_at(position);
+        // **Whether the row this press named went with the name editor it
+        // closed** (D4). Declared out here because the answer is reached inside
+        // the rename guard and spent below the blur's other orderings.
+        let mut row_gone = false;
         // **A press on a player, before P149 takes the card away** (route B
         // slice ②; §7.44 ②). Two gestures live here and both have to out-rank
         // the dismissal below: the play mark on a float's or a card's picture,
@@ -85942,8 +86147,38 @@ impl Runtime<'_> {
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-in-rename-editor state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
+            // **The row is resolved to an identity before the editor is
+            // finished, and dispatched to by that identity afterwards** (D4 of
+            // the 2026-09-11 review).
+            //
+            // Re-asking the chrome after the blur is right — the list really is
+            // a different list, because the pending row went with the box — but
+            // re-asking it *at the same pixels* re-decides the reader's choice:
+            // every row under the box moves up one row height, so the press
+            // landed on the row that moved into the space, and `press_files_row`
+            // selected or unfolded it. The same thing happens on a successful
+            // blur-commit that sorts the new row elsewhere, and on a rename that
+            // re-sorts.
+            //
+            // Re-deriving an *index* is necessary. Re-deriving the *choice* is
+            // not, and this is the difference between the two.
+            let pressed = pressed_row_identity(target, &self.files_tree_contents());
             self.finish_rename(RenameExit::Blur)?;
-            target = self.chrome_target_at(position);
+            match press_after_blur(pressed, &self.files_tree_contents()) {
+                PressAfterBlur::AskAgain => target = self.chrome_target_at(position),
+                PressAfterBlur::Row(seat, index) => {
+                    target = Some(seats::ChromeTarget::FilesRow { seat, index });
+                }
+                // The row the reader pressed left with the editor. Nothing else
+                // is entitled to the press — but it is **spent** below rather
+                // than here, so that the blur's own two orderings still run: the
+                // pane focus this press moved, and the page it took the keyboard
+                // away from.
+                PressAfterBlur::Gone => {
+                    target = None;
+                    row_gone = true;
+                }
+            }
         }
         // Blur is every press that is not inside the editor — the same sentence
         // the rename guard above makes, and the same reason: a surface that kept
@@ -85961,6 +86196,15 @@ impl Runtime<'_> {
             // gestures, and the caret stays where it was.
             self.leave_preview_page(focused);
             self.repaint_preview()?;
+        }
+        // **And now the press the closed editor took with it** (D4). The row it
+        // named is not in the list any more; no row that moved into its place
+        // inherits it, and neither does the terminal underneath.
+        if row_gone {
+            self.window.tab_clicks.interrupt();
+            self.window.preview_name_clicks.interrupt();
+            self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-row-gone-with-editor state={state:?} button={button:?} target={traced_target:?}"));
+            return Ok(true);
         }
         let Some(target) = target else {
             // Not on chrome, but possibly not on a terminal either — a press in a
@@ -95921,7 +96165,7 @@ mod mouse_trace_station_tests {
         // Twenty-four once the two 2026-08-24/25 lines met: the address row's
         // press takes the event whole exactly as the name's double click does,
         // and it joins the exits the other line had already counted to 23.
-        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 27);
+        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 28);
     }
 
     /// Both `None`s here are silent by construction — the callers turn them into
@@ -109976,6 +110220,478 @@ mod tests {
         );
     }
 
+    /// A shaping table for a face where every byte is one pixel wide.
+    ///
+    /// The door [`bt_render::ChromeTextAdvances::from_stops`] exists for: every
+    /// offset a pin below reads is then a length, and no font is involved in a
+    /// claim that is not about one. A real face answers the same shape through
+    /// `Renderer::chrome_text_advances`.
+    #[allow(clippy::cast_precision_loss)]
+    fn one_pixel_per_byte(text: &str) -> bt_render::ChromeTextAdvances {
+        bt_render::ChromeTextAdvances::from_stops(
+            text.char_indices()
+                .map(|(at, _)| (at, at as f32))
+                .chain(std::iter::once((text.len(), text.len() as f32))),
+        )
+    }
+
+    /// The leaf a files-column pin means when it has only ever had one.
+    const LEAF_ONE: LeafId = LeafId {
+        tab: TAB_ONE,
+        seat: SeatId(0),
+    };
+
+    /// PIN (D2 of the 2026-09-11 adversarial review) — **fitting a draft into
+    /// its box shapes the draft once, however long the draft is.**
+    ///
+    /// `TabRename::fit` used to be handed a `measure(&str) -> f32` and to call it
+    /// once per *prefix*: the window's start was walked forward one character at
+    /// a time with the whole remaining prefix re-measured on every step, and
+    /// every one of those measurements built a fresh `cosmic_text::Buffer` and
+    /// ran the shaper over it. N characters cost ~N passes over slices averaging
+    /// N/2 — quadratic work on the window thread, with nothing able to cancel
+    /// it. A long line pasted into a ~200 px name box was not a slow frame, it
+    /// was a window that never drew again: the 0910 freeze's own failure class
+    /// reached by another road.
+    ///
+    /// The claim is a **bound on measurements**, not a wall-clock reading: a
+    /// timing assertion would be a test about the machine it ran on, and the
+    /// defect was never a constant factor.
+    ///
+    /// RED GATE: put the walk back — step `first_visible` forward one character
+    /// at a time and measure `shown[first_visible..caret]` on each step — and
+    /// the count is in the hundreds for a draft this field will hold at all.
+    #[test]
+    fn a_long_pasted_name_costs_one_shaping_pass() {
+        let ctrl = ModifiersState::CONTROL;
+        let mut editor = TabRename::open_files_new(LEAF_ONE, "", false, true);
+        press_with_clipboard(
+            &mut editor,
+            &Key::Character("v".into()),
+            ctrl,
+            &"j".repeat(200_000),
+        );
+
+        let mut passes = 0usize;
+        {
+            let mut shape = |text: &str| {
+                passes += 1;
+                one_pixel_per_byte(text)
+            };
+            // A files column's name box, near enough: narrow, and the caret is at
+            // the end of everything the field took.
+            let drawn = editor.fit(200.0, 1.0, true, &mut shape);
+            assert!(
+                !drawn.text.is_empty() && drawn.caret_px <= 200.0,
+                "the box still shows the end of the draft with the caret in it"
+            );
+        }
+        assert_eq!(
+            passes, 1,
+            "the composed draft is shaped once and every offset is read off the \
+             table"
+        );
+
+        // The same for a field with nothing in it: the pass is not skipped on
+        // one draft and taken on another, because a surface that measured
+        // sometimes is a surface whose cost depends on what was typed.
+        let mut empty = TabRename::open_files_new(LEAF_ONE, "", false, true);
+        let mut idle = 0usize;
+        {
+            let mut shape = |text: &str| {
+                idle += 1;
+                one_pixel_per_byte(text)
+            };
+            let _ = empty.fit(200.0, 1.0, true, &mut shape);
+        }
+        assert_eq!(idle, 1);
+    }
+
+    /// PIN (D2) — **a name field takes a name's worth of characters and no
+    /// more, and an address field takes an address's worth.**
+    ///
+    /// The other half of the answer above, and the half that is about the
+    /// *field* rather than about the arithmetic: one shaping pass over a 200 KB
+    /// draft is linear rather than quadratic and still not work a frame should
+    /// do. The bound is a property of [`RenameSubject::draft_limit`] — the kind
+    /// of thing being named — and not a guard at the paste site, which is why
+    /// the third case below matters: a plain `insert` is bounded too, so an IME
+    /// commit and a held key cannot walk around it.
+    ///
+    /// RED GATE: bound the clipboard in `clipboard_line` instead and the direct
+    /// `insert` below carries 200 000 characters into the draft; drop the bound
+    /// and the first assertion reads 200 000.
+    #[test]
+    fn a_name_field_accepts_no_more_than_a_name() {
+        let ctrl = ModifiersState::CONTROL;
+        let huge = "j".repeat(200_000);
+
+        let mut name = TabRename::open_files_new(LEAF_ONE, "", false, true);
+        press_with_clipboard(&mut name, &Key::Character("v".into()), ctrl, &huge);
+        assert_eq!(
+            name.text().chars().count(),
+            NAME_DRAFT_LIMIT,
+            "a name goes no further than a directory entry's own maximum"
+        );
+        press(&mut name, &Key::Character("k".into()), NO_MODIFIERS);
+        assert_eq!(
+            name.text().chars().count(),
+            NAME_DRAFT_LIMIT,
+            "and a full field takes nothing more"
+        );
+
+        let mut address = TabRename::open_address(LEAF_ONE, "");
+        press_with_clipboard(&mut address, &Key::Character("v".into()), ctrl, &huge);
+        assert_eq!(
+            address.text().chars().count(),
+            ADDRESS_DRAFT_LIMIT,
+            "an address is a URL and keeps its own, larger limit"
+        );
+        assert!(
+            address.text().chars().count() > name.text().chars().count(),
+            "which is larger on purpose, and not the same number twice"
+        );
+
+        // Not the clipboard's limit — the field's. This door is the one an IME
+        // commit and a held key come through.
+        let mut typed = TabRename::open_files_new(LEAF_ONE, "", false, true);
+        typed.insert(&huge);
+        assert_eq!(typed.text().chars().count(), NAME_DRAFT_LIMIT);
+
+        // And the cut falls on a character, never inside one.
+        let mut wide = TabRename::open_files_new(LEAF_ONE, "", false, true);
+        wide.insert(&"字".repeat(400));
+        assert_eq!(wide.text().chars().count(), NAME_DRAFT_LIMIT);
+        assert_eq!(wide.text().len(), NAME_DRAFT_LIMIT * 3, "whole characters");
+    }
+
+    /// PIN (D2) — **where the drawn window starts is read off the one shaping
+    /// pass, and it is the same place the walk used to arrive at.**
+    ///
+    /// The bound above says the measurements are gone; this says the answer did
+    /// not change with them. Both halves of the old arithmetic are pinned: the
+    /// window is pushed along until the caret is inside the box less the caret's
+    /// own width, and it is pulled back again while the *whole* tail still fits,
+    /// so deleting from the end reveals the head instead of leaving the box
+    /// parked where the longest draft left it.
+    ///
+    /// RED GATE: derive `first_visible` from a character count and an average
+    /// advance and the numbers below move; drop the pull-back and the shrunk
+    /// draft is still drawn from where the long one left the window.
+    #[test]
+    fn the_window_start_is_read_from_advances_not_remeasured() {
+        let mut shape = |text: &str| one_pixel_per_byte(text);
+        let mut editor = TabRename::open(A, Some(&"j".repeat(100)));
+        press(&mut editor, &Key::Named(NamedKey::End), NO_MODIFIERS);
+
+        let drawn = editor.fit(20.0, 1.0, true, &mut shape);
+        assert_eq!(
+            drawn.text.len(),
+            20,
+            "the window holds exactly the box, ending at the caret"
+        );
+        assert_eq!(drawn.caret_px, 20.0, "and the caret stands at its far edge");
+
+        // The whole tail fits now, so the window comes back to the head.
+        for _ in 0..90 {
+            press(&mut editor, &Key::Named(NamedKey::Backspace), NO_MODIFIERS);
+        }
+        let shrunk = editor.fit(20.0, 1.0, true, &mut shape);
+        assert_eq!(shrunk.text.len(), 10, "the head is back in sight");
+        assert_eq!(shrunk.caret_px, 10.0);
+
+        // A box that does not scroll never leaves the start, whatever is in it.
+        let mut crumb = TabRename::open(A, Some(&"j".repeat(100)));
+        press(&mut crumb, &Key::Named(NamedKey::End), NO_MODIFIERS);
+        let fixed = crumb.fit(20.0, 1.0, false, &mut shape);
+        assert_eq!(fixed.text.len(), 100, "and the whole draft is handed over");
+    }
+
+    /// PIN (D4 of the 2026-09-11 adversarial review) — **a press that ends a
+    /// name editor lands on the row it was pressed on, not on the row that moved
+    /// up into its place.**
+    ///
+    /// Closing the box removes the pending row from the very list the press was
+    /// measured against, so every row under it moves up one row height. The
+    /// handler re-asked the chrome at the **unchanged** pointer coordinates,
+    /// which named whichever row had moved into that space — and
+    /// `press_files_row` then selected or unfolded it. Re-deriving an *index* is
+    /// necessary; re-deriving the reader's *choice* from stale pixels is not.
+    ///
+    /// RED GATE: dispatch on the index the press carried, or re-resolve the
+    /// target from the position after the rebuild, and the press names `/z.txt`
+    /// — the row the reader did not press.
+    #[test]
+    fn a_press_that_ends_the_editor_dispatches_to_the_row_it_pressed() {
+        let (mut tab, seat) = files_column(r"D:\work");
+        tab.files
+            .get_mut(&seat)
+            .expect("the column has state")
+            .open
+            .insert("/src".to_owned());
+        {
+            let cache = tab.file_trees.entry(seat).or_default();
+            cache.accept(
+                "",
+                listed(vec![
+                    dir_entry("src", true),
+                    dir_entry("y.txt", false),
+                    dir_entry("z.txt", false),
+                ]),
+            );
+            cache.accept("/src", listed(vec![dir_entry("x.txt", false)]));
+        }
+        let one = |tab: &TabState, place| -> BTreeMap<SeatId, seats::FilesTreeContent> {
+            tab.files_tree_walk(place)
+                .into_iter()
+                .map(|(seat, (content, _))| (seat, content))
+                .collect()
+        };
+
+        let measured = one(
+            &tab,
+            Some(FilesEditPlace {
+                seat,
+                at: FilesEditRow::New {
+                    parent: "/src",
+                    folder: false,
+                },
+            }),
+        );
+        let keys: Vec<&str> = measured[&seat]
+            .rows
+            .iter()
+            .map(|row| row.key.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["/src", "/src/x.txt", "/src/", "/y.txt", "/z.txt"]
+        );
+
+        // The reader presses `/y.txt`, which the box has pushed down to row 3.
+        let pressed = pressed_row_identity(
+            Some(seats::ChromeTarget::FilesRow { seat, index: 3 }),
+            &measured,
+        );
+        assert_eq!(pressed, Some((seat, "/y.txt".to_owned())));
+
+        let rebuilt = one(&tab, None);
+        assert_eq!(
+            rebuilt[&seat].rows[3].key, "/z.txt",
+            "row 3 is a different row now — this is what the stale pixels named"
+        );
+        assert_eq!(
+            press_after_blur(pressed, &rebuilt),
+            PressAfterBlur::Row(seat, 2),
+            "and the press goes to the row it was pressed on, at its new index"
+        );
+
+        // A press that never named a row has nothing that can have moved.
+        assert_eq!(pressed_row_identity(None, &measured), None);
+        assert_eq!(
+            press_after_blur(None, &rebuilt),
+            PressAfterBlur::AskAgain,
+            "so the chrome is re-asked at the pointer, exactly as it always was"
+        );
+    }
+
+    /// PIN (D4) — **a press whose row went with the editor is spent on closing
+    /// the editor, and reaches nothing else.**
+    ///
+    /// The other half of the rule. The pending row is the clear case — it exists
+    /// only while the box is open — and a rename that re-keys the row it was
+    /// typed in is the same shape: the identity the press named is not in the
+    /// rebuilt list, and no other row inherits it.
+    ///
+    /// RED GATE: answer `AskAgain` for a missing row and the press falls through
+    /// to whatever the rebuilt list put under the pointer.
+    #[test]
+    fn a_press_whose_row_is_gone_is_consumed() {
+        let (mut tab, seat) = files_column(r"D:\work");
+        tab.file_trees
+            .entry(seat)
+            .or_default()
+            .accept("", listed(vec![dir_entry("a.txt", false)]));
+        let one = |tab: &TabState, place| -> BTreeMap<SeatId, seats::FilesTreeContent> {
+            tab.files_tree_walk(place)
+                .into_iter()
+                .map(|(seat, (content, _))| (seat, content))
+                .collect()
+        };
+        let measured = one(
+            &tab,
+            Some(FilesEditPlace {
+                seat,
+                at: FilesEditRow::New {
+                    parent: "",
+                    folder: false,
+                },
+            }),
+        );
+        let rebuilt = one(&tab, None);
+
+        let pending = pressed_row_identity(
+            Some(seats::ChromeTarget::FilesRow { seat, index: 1 }),
+            &measured,
+        );
+        assert_eq!(
+            pending,
+            Some((seat, "/".to_owned())),
+            "the pending row's own key, which no entry on a disk can have"
+        );
+        assert_eq!(press_after_blur(pending, &rebuilt), PressAfterBlur::Gone);
+
+        // And a row whose name changed under the commit is gone by the same rule.
+        assert_eq!(
+            press_after_blur(Some((seat, "/old.txt".to_owned())), &rebuilt),
+            PressAfterBlur::Gone
+        );
+        assert_eq!(
+            press_after_blur(Some((seat, "/a.txt".to_owned())), &rebuilt),
+            PressAfterBlur::Row(seat, 0),
+            "while a row that is still there is still the row that was pressed"
+        );
+    }
+
+    /// PIN (D8(a) of the 2026-09-11 adversarial review) — **the box's advisory
+    /// asks the folder how it tells names apart, and gets the answer the commit
+    /// gets.**
+    ///
+    /// The advisory compared the tree's rows with the typed name by exact bytes
+    /// while the commit compared with `path.exists()`, which on an ordinary
+    /// Windows volume folds case. So with `Notes.md` in the folder, `notes.md`
+    /// drew no red, Enter hit `NewNameRefusal::Taken`, the field stayed open —
+    /// and sat there looking valid and doing nothing, for ever. Exact matching is
+    /// *right* on a case-sensitive directory; the defect was that nobody asked
+    /// the directory which it was.
+    ///
+    /// Run against a real folder on **this** volume, because that is the only
+    /// place the question has an answer: a Windows directory can carry the
+    /// case-sensitivity flag WSL sets, and a pin that hard-coded either answer
+    /// would be the defect written down as a test.
+    ///
+    /// RED GATE: compare the rows with `==` and the second assertion goes red
+    /// wherever `path.exists()` folds case — which is every ordinary volume.
+    #[test]
+    fn a_case_different_duplicate_is_refused_in_the_box_on_this_volume() {
+        let dir = std::env::temp_dir().join(format!("bt-name-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory to ask about");
+        std::fs::write(dir.join("Notes.md"), b"n").expect("one entry in it");
+
+        let folds = bt_platform::directory_folds_case(&dir);
+        let taken = dir.join("notes.md").exists();
+        assert_eq!(
+            folds, taken,
+            "what the folder says about case is what `path.exists()` — the \
+             commit's own question — does with a different spelling"
+        );
+        assert_eq!(
+            files::names_are_one("/notes.md", "/Notes.md", folds),
+            taken,
+            "so the advisory drawn in the box answers the same way the commit will"
+        );
+        assert!(files::names_are_one("/notes.md", "/notes.md", folds));
+        assert!(!files::names_are_one("/notes.md", "/other.md", folds));
+        assert!(
+            !files::names_are_one("/notes.md", "/Notes.md", false),
+            "and a folder that tells case apart is still told apart"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// PIN (D8(a)) — **the refusal that stopped the commit is the refusal the
+    /// box shows.**
+    ///
+    /// Everything the box draws by itself is a *prediction* of what Enter will
+    /// do, and a prediction can be wrong — a file that arrived since the last
+    /// listing, two spellings of one name, a volume that refused for a reason no
+    /// listing shows. When it was wrong the field looked valid and Enter did
+    /// nothing at all. So the refusal the commit really raised is kept on the
+    /// editor and drawn in the same red, which makes this defect visible and any
+    /// future commit-only refusal visible with it.
+    ///
+    /// **Paired with the draft it was raised on** rather than cleared by every
+    /// verb: an edit changes the text and the refusal stops applying by itself,
+    /// and typing the refused name back in shows it again — which is right,
+    /// because it is still refused.
+    ///
+    /// RED GATE: have `create_files_row` answer a bare `bool` again and there is
+    /// nothing to record; clear `refused` on open and never write it and the box
+    /// goes on showing a valid-looking field over a name Enter will not take.
+    #[test]
+    fn a_refusal_the_commit_raised_is_shown_in_the_box() {
+        const SOURCE: &str = include_str!("main.rs");
+        let body = |signature: &str| -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        };
+
+        let mut editor = TabRename::open_files_new(LEAF_ONE, "", false, true);
+        editor.insert("notes.md");
+        assert_eq!(editor.refusal(), None, "nothing has been put through yet");
+
+        editor.refuse(files::NewNameRefusal::Taken);
+        assert_eq!(
+            editor.refusal(),
+            Some(files::NewNameRefusal::Taken),
+            "the refusal the commit raised stands against this draft"
+        );
+
+        editor.insert("x");
+        assert_eq!(
+            editor.refusal(),
+            None,
+            "and stops standing the moment the draft is different"
+        );
+        press(&mut editor, &Key::Named(NamedKey::Backspace), NO_MODIFIERS);
+        assert_eq!(
+            editor.refusal(),
+            Some(files::NewNameRefusal::Taken),
+            "typing the refused name back in shows it again — it is still refused"
+        );
+
+        // The wiring, read off the source: a `Runtime` is a surface and a
+        // filesystem, and this module's standing rule is that what calls what is
+        // read rather than driven.
+        assert!(
+            body("    fn create_files_row(").contains("-> Result<Option<files::NewNameRefusal>>"),
+            "the commit answers which refusal stopped it, not a bare bool"
+        );
+        assert!(
+            body("    fn finish_rename(").contains("editor.refuse(refusal)"),
+            "and the editor is told before it goes back"
+        );
+        let dress = body("    fn dress_files_tree_editor(");
+        assert!(
+            dress.contains("editor.refusal().is_some()"),
+            "the box draws the refusal the commit raised"
+        );
+        assert!(
+            dress.contains("files::names_are_one(&row.key, &taken, folds_case)")
+                && !dress.contains("row.key == taken"),
+            "and its own advisory asks the folder about case rather than \
+             assuming an answer"
+        );
+        assert!(
+            dress.contains("!editor.text().is_empty()"),
+            "while an empty draft is still a field nobody has finished, and is \
+             not coloured"
+        );
+        assert!(
+            body("    fn open_files_row_new(").contains("bt_platform::directory_folds_case("),
+            "the folder is asked once, when the box opens — never on a frame"
+        );
+        assert!(
+            !dress.contains("directory_folds_case"),
+            "which is red line R-i: no disk call on a frame the caret blinks in"
+        );
+    }
+
     /// PIN (0.3) — **an IME composition is drawn at the caret and is not in the
     /// name.**
     ///
@@ -109999,12 +110715,12 @@ mod tests {
     fn a_composition_is_drawn_at_the_caret_and_never_enters_the_name() {
         // One pixel per byte, which makes every offset below readable as a
         // length — the shaping is not what this pin is about.
-        let mut measure = |text: &str| text.len() as f32;
+        let mut shape = |text: &str| one_pixel_per_byte(text);
         let mut editor = TabRename::open(A, Some("ab"));
         press(&mut editor, &Key::Named(NamedKey::End), NO_MODIFIERS);
         editor.field.set_preedit("ni");
 
-        let drawn = editor.fit(1_000.0, 1.0, true, &mut measure);
+        let drawn = editor.fit(1_000.0, 1.0, true, &mut shape);
         assert_eq!(
             drawn.text, "abni",
             "what is on the glass is the draft with the composition spliced in"
@@ -110227,7 +110943,7 @@ mod tests {
             seat: SeatId(3),
         };
         for folder in [false, true] {
-            let editor = TabRename::open_files_new(leaf, "/src", folder);
+            let editor = TabRename::open_files_new(leaf, "/src", folder, true);
             assert_eq!(editor.text(), "", "there is no name under this one");
             assert!(editor.selection().is_empty(), "so nothing is selected");
             assert_eq!(editor.caret(), 0, "and the first character lands first");
@@ -110240,7 +110956,7 @@ mod tests {
         }
         // The column's own root is a real answer and not a missing one: making a
         // file at the top of the tree names no parent row.
-        let at_root = TabRename::open_files_new(leaf, "", false);
+        let at_root = TabRename::open_files_new(leaf, "", false, true);
         assert!(matches!(
             &at_root.subject,
             RenameSubject::FilesNew { parent, .. } if parent.is_empty()
