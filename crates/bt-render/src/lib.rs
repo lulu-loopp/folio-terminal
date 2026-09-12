@@ -2,6 +2,7 @@
 
 mod contrast;
 mod glyph_census;
+pub mod glyph_probe;
 mod ground;
 pub mod motion;
 mod procedural;
@@ -5499,6 +5500,9 @@ impl GpuContext {
         for file in files {
             let _ = self.font_system.db_mut().load_font_file(file);
         }
+        // A file a reader picked is a file this renderer has never opened, and
+        // the one thing it may not be is a face with no em ([`drop_faces_with_no_scalable_em`]).
+        drop_faces_with_no_scalable_em(self.font_system.db_mut());
         // Asked of the database rather than assumed from `family`: a family the
         // machine no longer has (uninstalled since it was written to
         // `settings.json`) must leave the grid on the face it can actually
@@ -12325,6 +12329,89 @@ fn cursor_shape_pixel_bounds(
     }
 }
 
+/// Where `head` keeps `unitsPerEm`: past `version`, `fontRevision`,
+/// `checkSumAdjustment`, `magicNumber` and `flags`, which is sixteen bytes and
+/// two more.
+const HEAD_UNITS_PER_EM_OFFSET: usize = 18;
+
+/// **The em this face can be scaled by**, or `None` when it has none.
+///
+/// Two bytes out of one table, through `RawFace`, which parses the table
+/// directory and nothing else — the whole face is not parsed here, because the
+/// whole face is not the question and every face in a machine's library goes
+/// through this at startup.
+///
+/// **`head` and deliberately not `bhed`.** Apple's bitmap-only faces keep the
+/// same sixteen fields under the tag `bhed` instead, and a face that has only
+/// that has **no outline em at all**: swash answers zero for it, which is the
+/// number the whole of [`drop_faces_with_no_scalable_em`] is about. Reading
+/// `bhed` here would be finding a number that is true about a bitmap strike and
+/// false about everything this renderer does with it.
+fn scalable_units_per_em(db: &glyphon::fontdb::Database, id: glyphon::fontdb::ID) -> Option<u16> {
+    db.with_face_data(id, |data, index| {
+        let raw = ttf_parser::RawFace::parse(data, index).ok()?;
+        let head = raw.table(ttf_parser::Tag::from_bytes(b"head"))?;
+        let bytes = head.get(HEAD_UNITS_PER_EM_OFFSET..HEAD_UNITS_PER_EM_OFFSET + 2)?;
+        Some(u16::from_be_bytes([bytes[0], bytes[1]])).filter(|em| *em > 0)
+    })
+    .flatten()
+}
+
+/// **Drop every face with no scalable em**, and answer how many — M2-5
+/// (`docs/DESIGN.md` §13.22 ⑥).
+///
+/// # Why a face like that is not a harmless extra in the database
+///
+/// cosmic-text scales every advance by the face's own units-per-em — `let
+/// font_scale = font.metrics().units_per_em as f32` in `shape.rs`, and the
+/// division below it is not guarded the way `decoration_metrics` next door
+/// guards its own. A face with no em therefore answers `inf` for every advance
+/// it is asked for, and one such glyph puts every glyph after it on the line at
+/// `inf` and every position derived from them at `NaN`: a caret nowhere, a
+/// selection band nowhere, a paragraph drawn nowhere, and not one error
+/// anywhere.
+///
+/// # Why this is reached on a Mac and not on Windows, and why the chain could
+/// not stop it
+///
+/// The Windows loader names seven files and never asks the directory, so its
+/// database is a list somebody wrote. The macOS loader must call
+/// `load_system_fonts` — PingFang lives behind a content-hashed `AssetsV2` path
+/// that cannot be named — so its database is **the whole machine's library**,
+/// and that library contains `GB18030 Bitmap`: a bitmap-only CJK face, flagged
+/// *monospaced*, carrying `bhed` where a scalable face carries `head`.
+///
+/// A Chinese line finds it without being asked, and [`MACOS_CJK_FALLBACK_FAMILIES`]
+/// never gets a vote: cosmic-text's fallback iterator, when the request was
+/// `Family::Monospace`, gathers **every monospaced face in the database that
+/// covers the word** and takes the best of them *before* it reaches
+/// `script_fallback` (`font/fallback/mod.rs`, the `monospace_fallbacks_buffer`
+/// stage). `forbidden_fallback` does not reach that stage either — it filters
+/// only the last-resort "any other font" walk at the bottom. So the only place
+/// this decision can be made is the database itself.
+///
+/// # Why the rule is a capability and not a name
+///
+/// Naming `GB18030 Bitmap` would fix this machine and say nothing about the
+/// next one. What is actually true is that **a database this renderer shapes
+/// with holds no face whose em this stack cannot divide by**, and that is what
+/// is asked. It is asked of the Windows arm too, whose answer is zero and whose
+/// list is the same list it was: a rule worth keeping is worth both machines
+/// checking, and a test can only read one of them.
+fn drop_faces_with_no_scalable_em(db: &mut glyphon::fontdb::Database) -> usize {
+    let refused: Vec<glyphon::fontdb::ID> = {
+        let read: &glyphon::fontdb::Database = db;
+        read.faces()
+            .filter(|face| scalable_units_per_em(read, face.id).is_none())
+            .map(|face| face.id)
+            .collect()
+    };
+    for id in &refused {
+        db.remove_face(*id);
+    }
+    refused.len()
+}
+
 /// **The CJK half of the chrome's family stack, named and ordered** (i18n slice,
 /// 2026-08-17).
 ///
@@ -12477,6 +12564,7 @@ fn terminal_font_system() -> FontSystem {
     for file in CJK_FALLBACK_FONT_FILES {
         let _ = db.load_font_file(fonts.join(file));
     }
+    drop_faces_with_no_scalable_em(&mut db);
     db.set_monospace_family(DEFAULT_PRIMARY_FONT_FAMILY);
     load_chrome_sans_family(&mut db, &fonts);
     FontSystem::new_with_locale_and_db_and_fallback("en-US".to_owned(), db, FolioFallback)
@@ -12697,6 +12785,11 @@ fn terminal_font_system() -> FontSystem {
         NOTO_COLOR_EMOJI_BYTES,
     )));
     db.load_system_fonts();
+    // **Before any family is chosen**, because the choice this crate makes is
+    // only in force if the database cannot answer it with something nobody
+    // chose — see [`drop_faces_with_no_scalable_em`], which is the whole of M2-5's font
+    // half.
+    drop_faces_with_no_scalable_em(&mut db);
     db.set_monospace_family(
         first_installed_family(&db, &MACOS_MONOSPACE_FAMILIES)
             .unwrap_or(DEFAULT_PRIMARY_FONT_FAMILY),
@@ -12719,6 +12812,10 @@ fn terminal_font_system() -> FontSystem {
         .load_font_source(glyphon::fontdb::Source::Binary(Arc::new(
             NOTO_COLOR_EMOJI_BYTES,
         )));
+    // `FontSystem::new` asks the platform for every face it has, so this arm
+    // inherits the macOS arm's problem for the macOS arm's reason — see
+    // [`drop_faces_with_no_scalable_em`].
+    drop_faces_with_no_scalable_em(font_system.db_mut());
     font_system
 }
 
@@ -22167,6 +22264,49 @@ mod tests {
                  nobody chose"
             );
         }
+    }
+
+    /// RED — **the database this renderer shapes with holds no face with no
+    /// scalable em** (M2-5, `docs/DESIGN.md` §13.22 ⑥).
+    ///
+    /// cosmic-text divides every advance by the face's own units-per-em and does
+    /// not guard the division, so a face that has none answers `inf` for every
+    /// advance and one glyph of it puts a whole line at `NaN` — a caret nowhere,
+    /// a band nowhere, a paragraph drawn nowhere, and not one error anywhere.
+    /// macOS ships such a face — `GB18030 Bitmap`, which carries `bhed` where a
+    /// scalable face carries `head` — and a Chinese line found it without being
+    /// asked, because cosmic-text prefers *any* monospaced face that covers the
+    /// word over the script chain this crate wrote down.
+    ///
+    /// It runs on every machine on purpose: the answer on Windows is that the
+    /// seven named files never had one, and a rule only one platform checks is a
+    /// rule that goes stale on the other. The emoji face is asserted separately
+    /// because it is the one face here whose glyphs are *bitmaps* and it must
+    /// survive — the rule is about the em, not about outlines.
+    ///
+    /// MUTATION: take the `drop_faces_with_no_scalable_em` call out of this
+    /// platform's loader and a Mac goes red here and in
+    /// `every_cluster_of_a_grid_paragraph_stands_on_its_own_column`.
+    #[test]
+    fn no_face_in_the_font_database_has_an_em_this_renderer_cannot_divide_by() {
+        let font_system = terminal_font_system();
+        let db = font_system.db();
+        let broken: Vec<String> = db
+            .faces()
+            .filter(|face| scalable_units_per_em(db, face.id).is_none())
+            .map(|face| format!("{:?}", face.families))
+            .collect();
+        assert!(
+            broken.is_empty(),
+            "these faces have no scalable em, and every advance they report is \n             `inf`: {broken:#?}"
+        );
+        assert!(
+            db.faces().any(|face| face
+                .families
+                .iter()
+                .any(|(name, _)| name == COLOR_EMOJI_FONT_FAMILY)),
+            "the embedded emoji face draws bitmaps and must survive a rule that is \n             about the em rather than about outlines"
+        );
     }
 
     /// PIN — the chain is ordered, and the order is the design.

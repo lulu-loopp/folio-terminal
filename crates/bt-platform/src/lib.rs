@@ -2744,7 +2744,9 @@ pub mod hotkey;
 #[cfg(windows)]
 pub mod video;
 
-/// The same eleven names, before AVFoundation (M4-4, M4-5).
+/// The same eleven names off Windows, three of which are now real: M4-4 put the
+/// first frame on `AVAssetImageGenerator` for a Mac — see `src/macos_video.rs` — and
+/// playback is still M4-5's.
 #[cfg(not(windows))]
 #[path = "video_portable.rs"]
 pub mod video;
@@ -12056,7 +12058,7 @@ mod macos_process_door_tests {
     /// `MonospaceFamily`, because the paths that are in scope are not the same
     /// paths. Everything else — the parameter names, the order, the return
     /// type — is compared exactly, which is the whole point.
-    fn signature(source: &str, name: &str) -> String {
+    pub(super) fn signature(source: &str, name: &str) -> String {
         let needle = format!("pub fn {name}(");
         let at = source
             .find(&needle)
@@ -14688,5 +14690,336 @@ mod quiet_door_tests {
                 .contains("pub fn quiet_command("),
             "the door is still called `quiet_command`"
         );
+    }
+}
+
+/// **The standard streams have one real arm per platform, and the two console
+/// doors have none because there is nothing for them to do** (ticket M3-7,
+/// `docs/DESIGN.md` §13.23).
+///
+/// Source pins, for `deferred_service_tests`' reason: the module they are about
+/// is the one this workstation does **not** compile, and the claim is about what
+/// the text says rather than about what a call answers. The behavioural twin is
+/// `portable_impl::stream_tests`, which really renumbers this process's own
+/// descriptors and runs on the Mac.
+///
+/// What they guard is the one failure §4.4 ③ names and no compiler would catch
+/// on Windows: `redirect_std_streams_to_file` is **load-bearing** — `bt_app::
+/// diagnostics` picks `Channel::Log` or `Channel::Nowhere` off its `bool` — so
+/// an arm that answered `true` without moving anything would give every run on
+/// that platform a log file that stays empty and a channel that claims it is
+/// full. The pins are therefore about the calls the body makes, not about its
+/// signature, which the compiler already holds.
+#[cfg(test)]
+mod macos_stdio_tests {
+    /// The portable backend's own text — the arm this workstation does not
+    /// compile.
+    const PORTABLE: &str = include_str!("portable_impl.rs");
+
+    /// The text of the item `needle` opens, to the line that closes it at the
+    /// indentation `needle` itself is written at. `macos_dialog_backend_tests`'
+    /// reader, and crude for its reason.
+    fn item(needle: &str) -> String {
+        let indent: String = needle
+            .trim_start_matches('\n')
+            .chars()
+            .take_while(|character| *character == ' ')
+            .collect();
+        let closer = format!("\n{indent}}}\n");
+        let at = PORTABLE
+            .find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` is in the portable arm"));
+        let rest = &PORTABLE[at..];
+        let end = rest
+            .find(&closer)
+            .unwrap_or_else(|| panic!("`{needle}` opens an item that is never closed"));
+        rest[..end].to_owned()
+    }
+
+    /// RED — **the redirect really renumbers, and says how.**
+    ///
+    /// Five claims, and each is a different way to write the empty log file:
+    /// the file is opened for appending, so two runs and two threads do not
+    /// overwrite one another; it is created private, because a `diagnostics.log`
+    /// carries window titles and shell output; **both** descriptors are moved,
+    /// because a `println!` left on the terminal is the fault the channel
+    /// exists to stop; the duplicate that makes a refusal reversible is taken
+    /// with a floor of 3, because `dup` on a process with a closed standard
+    /// error answers 2; and the arm is gated, so the platform with no `libc` at
+    /// all still has a door.
+    ///
+    /// MUTATION: answer `true` with no `dup2` in the body and the third goes
+    /// red — which is exactly the arm §4.4 ③ warns about, and the one the
+    /// compiler is happy with.
+    #[test]
+    fn the_redirect_moves_both_descriptors_onto_an_appended_private_file() {
+        let body = item("\npub fn redirect_std_streams_to_file(path: &Path) -> bool {");
+        assert!(
+            body.contains(".append(true)"),
+            "the log is not opened for appending, so a second run starts by \
+             deleting the first one's evidence:\n{body}"
+        );
+        assert!(
+            body.contains(".mode(0o600)"),
+            "the log is created with whatever the umask says, on a machine that \
+             may have several people on it:\n{body}"
+        );
+        assert!(
+            body.contains("libc::dup2(log, libc::STDOUT_FILENO)")
+                && body.contains("libc::dup2(log, libc::STDERR_FILENO)"),
+            "the door does not renumber both standard descriptors, so it is the \
+             no-op arm with a `true` on the end of it:\n{body}"
+        );
+        assert!(
+            body.contains("libc::F_DUPFD_CLOEXEC, 3"),
+            "the duplicate a refusal is put back from is taken with `dup`, which \
+             answers the lowest free descriptor — 2, on a process whose standard \
+             error is closed:\n{body}"
+        );
+        assert!(
+            PORTABLE.contains(concat!(
+                "#[cfg(unix)]\npub fn redirect_std_",
+                "streams_to_file(path: &Path) -> bool {"
+            )) && PORTABLE.contains(concat!(
+                "#[cfg(not(unix))]\npub fn redirect_std_",
+                "streams_to_file(path: &Path) -> bool {"
+            )),
+            "the two arms are not the pair `same_file` above them is: a platform \
+             with no `libc` either loses the door or gains a second definition of it"
+        );
+    }
+
+    /// RED — **and the silence really silences.**
+    ///
+    /// The other half of the same branch. A `silence_std_streams` that did
+    /// nothing would leave a run whose log could not be opened printing into
+    /// somebody else's terminal — which is the report the whole channel came
+    /// from, arriving through the failure path instead of the ordinary one.
+    #[test]
+    fn the_silence_points_both_descriptors_at_the_null_device() {
+        let body = item("\npub fn silence_std_streams() {");
+        assert!(
+            body.contains("\"/dev/null\""),
+            "nothing is opened to discard the bytes:\n{body}"
+        );
+        assert!(
+            body.contains("libc::dup2(sink, slot)")
+                && body.contains("[libc::STDOUT_FILENO, libc::STDERR_FILENO]"),
+            "the streams are not moved onto it, so `Channel::Nowhere` is a name \
+             for a terminal that is still being written to:\n{body}"
+        );
+    }
+
+    /// RED — **the two console doors are no-ops, and that is allowed only
+    /// because nothing reads them.**
+    ///
+    /// §4.4's class **N** is not a licence to leave a body empty; it is a claim
+    /// about the caller, and this is where the claim is checked on this side.
+    /// The `bool` `detach_console` answers is `false` — the same word the
+    /// Windows arm answers when there was no console to let go — and
+    /// `bt_app::diagnostics` drops it. The other side of the same pin is
+    /// `bt_app::diagnostics::tests::nothing_branches_on_the_two_console_no_ops`,
+    /// which reads the callers.
+    ///
+    /// MUTATION: give either of them a body that does something and this goes
+    /// red, which is the intended reading — a Unix `AttachConsole` would be a
+    /// thing this platform does not have, and a `FreeConsole` would be leaving a
+    /// group nothing joined.
+    #[test]
+    fn the_two_console_doors_stay_the_no_ops_their_class_says_they_are() {
+        assert!(
+            PORTABLE.contains("pub fn adopt_parent_console() {}"),
+            "a Unix process is given its parent's stdio by the kernel, and this \
+             arm has started doing something about it"
+        );
+        let detach = item("\npub fn detach_console() -> bool {");
+        assert!(
+            detach.trim_end().ends_with("false"),
+            "`detach_console` answers something other than the `false` the \
+             Windows arm answers when nothing happened:\n{detach}"
+        );
+    }
+
+    /// RED — **the run's last line is on the disk before the process is told to
+    /// stop.**
+    ///
+    /// `leave_process` is §4.4 ③'s other name — a return type with no empty
+    /// answer — and the flush is the one thing in the exit chain that belongs to
+    /// this program. `std::process::exit` performs it today through the standard
+    /// library's own cleanup; writing it in the body makes it a property of this
+    /// function rather than of which exit primitive the arm happens to call, so
+    /// that the day a WKWebView in the process forces the faster door (the
+    /// backend inventory's own row anticipates `_exit`) the footer does not
+    /// leave with it.
+    #[test]
+    fn the_process_flushes_what_it_wrote_before_it_leaves() {
+        let body = item("\npub fn leave_process(code: i32) -> ! {");
+        let flushed = body.find("std::io::stderr().flush()").unwrap_or_else(|| {
+            panic!("nothing flushes the stream the footer is written on:\n{body}")
+        });
+        let left = body
+            .find("std::process::exit(code)")
+            .unwrap_or_else(|| panic!("`leave_process` does not leave:\n{body}"));
+        assert!(
+            flushed < left,
+            "the buffers are flushed after the process has been told to stop, \
+             which is to say never:\n{body}"
+        );
+    }
+}
+
+/// **The two video arms, compared on the one machine where only one of them
+/// compiles** (M4-4).
+///
+/// `bt-app` names `first_frame`, `VideoFrame` and `SEEK_FRACTION` with no `cfg`
+/// at all, and `crates/bt-platform/tests/video_first_frame.rs` runs the same
+/// assertions against whichever arm the machine built. Neither of those can
+/// catch the failure this module exists for: an arm that took an extra argument,
+/// widened a return type, renamed a field or drifted a constant would compile on
+/// its own machine, break on the other, and break in `bt-app` rather than in the
+/// crate that changed. The Windows workstation is where both files exist as
+/// *text* even though only one of them exists as code, so the comparison is made
+/// there, on the text.
+///
+/// It is the same instrument `macos_process_door_tests` uses for the five
+/// process doors, and it borrows that module's `signature` rather than writing a
+/// second one.
+#[cfg(test)]
+mod macos_video_signature_tests {
+    use super::macos_process_door_tests::signature;
+
+    /// Media Foundation's arm, AVFoundation's arm, and the file that holds
+    /// everything off Windows which is neither.
+    const WINDOWS_ARM: &str = include_str!("video/mod.rs");
+    const MACOS_ARM: &str = include_str!("macos_video.rs");
+    const OFF_WINDOWS: &str = include_str!("video_portable.rs");
+
+    /// The fields of a struct, with its documentation and its blank lines taken
+    /// out — what a caller can actually name.
+    fn fields(source: &str, item: &str) -> Vec<String> {
+        let at = source
+            .find(item)
+            .unwrap_or_else(|| panic!("`{item}` is defined in this arm"));
+        let body = &source[at + item.len()..];
+        let end = body.find("\n}").expect("a struct is closed at column zero");
+        body[..end]
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// RED — **each of the three first-frame doors has the same signature on
+    /// every machine.**
+    ///
+    /// Three doors and three arms: Media Foundation's, AVFoundation's, and the
+    /// refusal a third platform still meets. `bt-app` names the first of the
+    /// three without a `cfg`, and the other two are what `cargo test -p
+    /// bt-platform` runs on both machines.
+    ///
+    /// MUTATION: drop the `fit_height` from the macOS arm, or give it a
+    /// `Result` where the others have an `Option`, and this names the door.
+    #[test]
+    fn every_first_frame_door_keeps_its_signature_on_every_machine() {
+        for door in [
+            "first_frame",
+            "decode_first_frame",
+            "decode_first_frame_measured",
+        ] {
+            let windows = signature(WINDOWS_ARM, door);
+            let macos = signature(MACOS_ARM, door);
+            let neither = signature(OFF_WINDOWS, door);
+            assert_eq!(windows, macos, "`{door}` is two different doors");
+            assert_eq!(
+                windows, neither,
+                "`{door}` refuses with a different shape than it answers with"
+            );
+        }
+    }
+
+    /// RED — **the frame and its cost are the same type on both machines, field
+    /// for field.**
+    ///
+    /// This is the claim M4-4's title makes — that the pixel layout is the
+    /// Windows arm's with not one word different — reduced to the part a text
+    /// comparison can hold: the same fields in the same order with the same
+    /// types, and the same derives on them, so that a `VideoFrame` crossing into
+    /// `bt-app` is the same value whichever decoder filled it.
+    ///
+    /// The *bytes* in `rgba` are the other half and no source pin can state
+    /// them; `tests/video_first_frame.rs` measures those out of two real files
+    /// on both machines.
+    ///
+    /// MUTATION: reorder `width` and `height` in either arm, or make
+    /// `duration_ms` a `u64` in one of them, and this names it; drop `Eq` from
+    /// one derive and the refusal cases in `video_first_frame.rs` stop
+    /// compiling on that machine alone.
+    #[test]
+    fn the_frame_and_its_cost_are_the_same_type_on_both_machines() {
+        assert_eq!(
+            fields(WINDOWS_ARM, "pub struct VideoFrame {"),
+            fields(OFF_WINDOWS, "pub struct VideoFrame {"),
+            "the frame has drifted between the two arms"
+        );
+        assert_eq!(
+            fields(WINDOWS_ARM, "pub struct FirstFrameCost {"),
+            fields(OFF_WINDOWS, "pub struct FirstFrameCost {"),
+            "the cost breakdown has drifted between the two arms"
+        );
+        for (arm, source) in [("Windows", WINDOWS_ARM), ("off Windows", OFF_WINDOWS)] {
+            assert!(
+                source.contains("#[derive(Clone, Debug, Eq, PartialEq)]\npub struct VideoFrame {"),
+                "the {arm} frame no longer derives what a caller compares it with"
+            );
+            assert!(
+                source.contains(
+                    "#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]\n\
+                     pub struct FirstFrameCost {"
+                ),
+                "the {arm} cost breakdown no longer derives what a caller compares it with"
+            );
+            assert!(
+                source.contains(
+                    "self.session + self.open + self.output_type + self.seek + self.read_sample \
+                     + self.copy"
+                ),
+                "the {arm} total is no longer the six spans added up"
+            );
+        }
+    }
+
+    /// RED — **both arms take the same tenth, wait the same three seconds, and
+    /// write a real opaque alpha over the byte their decoder left behind.**
+    ///
+    /// Three facts that are policy rather than platform, and each one is a
+    /// different picture on a card if the two machines disagree about it: a
+    /// frame from a different moment, a hover that gives up at a different time,
+    /// and — the one that is invisible until it is catastrophic — a frame drawn
+    /// fully transparent because the fourth byte of a `BGRX` or a `RGBX` pixel
+    /// happened to be zero and was copied through.
+    ///
+    /// MUTATION: change either constant in one file and this names it; copy the
+    /// source pixel's fourth byte instead of writing `255` and it names that
+    /// arm.
+    #[test]
+    fn both_arms_take_the_same_tenth_the_same_budget_and_the_same_opaque_alpha() {
+        for (arm, source) in [("Windows", WINDOWS_ARM), ("off Windows", OFF_WINDOWS)] {
+            assert!(
+                source.contains("pub const SEEK_FRACTION: f64 = 0.10;"),
+                "the {arm} arm takes its frame from somewhere else now"
+            );
+            assert!(
+                source.contains("pub const FIRST_FRAME_BUDGET: Duration = Duration::from_secs(3);"),
+                "the {arm} arm gives up at a different time now"
+            );
+        }
+        for (arm, source) in [("Windows", WINDOWS_ARM), ("macOS", MACOS_ARM)] {
+            assert!(
+                source.contains("out[3] = 255;"),
+                "the {arm} arm no longer writes a real opaque alpha over the byte its decoder \
+                 left undefined"
+            );
+        }
     }
 }

@@ -8603,4 +8603,603 @@ What completes it is `TerminationAnswer::answer`, called from `settle_quit` — 
 
 **⑪ The Dock click is NOT-CHECKABLE and is covered rather than missing.** X-4 measured that clicking the Dock needs `System Events`, and therefore Accessibility *and* Automation, and that `osascript` from ssh answered `-1712` behind a TCC prompt no agent can reach. A Dock click delivers exactly the `applicationShouldHandleReopen:hasVisibleWindows:` that `open -a` delivers — which is how the same event is reached here, with windows and without — so what is untested is the gesture and not the path. The owner's own acceptance line is the one that closes it.
 
+### 13.22 M2-5: Metal 路上的字形是量出来的(`crates/bt-render/src/glyph_probe.rs`、`crates/bt-render/tests/glyph_output.rs`、`crates/bt-app/tests/macos_glyph_surface.rs`、`crates/bt-render/src/lib.rs`)
+
+**① One page, one builder, two surfaces — and that is the whole design.** The
+port's glyph question is not CoreText against DirectWrite. Folio shapes and
+rasterizes through Swash via glyphon on both machines, so the rasterizer does
+not change at all (`docs/plans/port/macos-plan-2026-09-12.md` §R4); what changes
+is the presentation path around it — a `CAMetalLayer` on a view Folio owns,
+declared `PostMultiplied` and carrying premultiplied pixels (§13.14, X-1). A
+difference between the two paths is therefore a defect **in the path**, and the
+only way to make that sentence mean anything is for the two paths to be handed
+the same frame *by construction* rather than by two call sites that look alike.
+`bt_render::glyph_probe::GlyphFixture` is that construction: one builder, one
+`present`, two targets — the offscreen texture `read_back` can map, and a real
+Metal swapchain, which cannot be mapped at all and is read as a photograph of
+the window.
+
+**② What is on the page, and why the box-drawing row is the control.** Eight
+grid rows — Latin, Chinese, box drawing, braille, a bold run, an italic run, an
+underlined hyperlink wearing its dotted underline, and a row of narrow stems —
+and under them four rows of prose. Two of those rows are there to be *compared*
+with the others: **box drawing is not rasterized in this renderer at all**, it
+is cell geometry (`procedural.rs`) coming out of the rectangle pipeline, while
+braille beside it is an ordinary glyph. So a difference that appears in both is
+the surface, and one that appears only in the glyph rows is the rasterizer —
+which is the question this ticket exists to be able to answer rather than guess.
+Every cell declares white ink on an explicit black ground, so no number below
+depends on which theme the process happened to be holding.
+
+**③ Why numbers and not a committed picture.** A PNG would pin the bytes of one
+machine's font: the grid is `Consolas` on Windows and `Menlo` on a Mac (§13.18
+⑤), so a byte comparison across the two would fail for the one reason that is
+not a defect. What is the same on both, because the rasterizer is, is the
+*shape of the coverage* — the peak, the mean, and the share of inked pixels
+lying strictly between nearly clear and nearly solid. Coverage is read off the
+**encoded byte**, because that is what a reader's eye meets; every centroid is
+weighted by **linear light**, because that is what ink is (see ⑤).
+
+**Measured at backing scale 2, one page of 900x760 physical pixels.** Windows:
+Consolas at 32 px, cell 18 px wide, padding 16. Mac (M4, macOS 26.6.2): Menlo at
+32 px, cell 20 px wide, padding 16. `peak` is 1.0000 in all sixteen readings and
+is left out of the table.
+
+| band | rasterized | Windows ink / mean / aa | Mac ink / mean / aa |
+|---|---|---|---|
+| latin | yes | 3976 / 0.8201 / 0.4799 | 4646 / 0.8404 / 0.4090 |
+| cjk | yes | 2730 / 0.7338 / 0.7473 | 4040 / 0.7942 / 0.5223 |
+| box | **no** | 1212 / 1.0000 / **0.0000** | 1260 / 1.0000 / **0.0000** |
+| braille | yes | 873 / 0.7475 / 0.6541 | 783 / 0.6853 / 0.7152 |
+| bold | yes | 3434 / 0.8695 / 0.3480 | 4381 / 0.8819 / 0.3079 |
+| italic | yes | 2727 / 0.8132 / 0.4895 | 3275 / 0.8337 / 0.4192 |
+| link | yes | 3612 / 0.8498 / 0.3829 | 4144 / 0.8588 / 0.3451 |
+| stems | yes | 4420 / 0.8337 / 0.4462 | 3944 / 0.8494 / 0.4397 |
+
+Every rasterized band on both machines reaches **full coverage** somewhere — a
+stem's interior is solid ink — and carries a partial-coverage skirt of between a
+third and three quarters of its pixels. The mean coverages agree to within 0.06
+band for band, on two different faces. The box-drawing row is 1.0000 mean and
+**zero** antialiasing on both, which is the control saying what it is there to
+say: that row never goes near the rasterizer, and the rows around it do.
+
+**④ §13.14 ⑥'s open question, answered: the blend is in linear light and the
+stored bytes are not.** M1-4 left one thing deliberately unanswered — whether
+the premultiplied arithmetic this renderer writes holds on the *encoded* bytes
+or in linear light — and said it belonged here, "where an antialiased edge is
+the thing someone actually looks at". It is both, and they are different
+numbers:
+
+* **In linear light the contract is exact.** Over a translucent ground, at every
+  alpha measured, on both machines, **not one pixel** of the frame carries a
+  colour its own alpha cannot account for once the colour byte is decoded.
+  `a_translucent_page_holds_no_pixel_brighter_than_its_own_alpha` pins that at
+  zero.
+* **As stored bytes it does not hold, and cannot.** `Bgra8UnormSrgb` encodes the
+  three colour channels and leaves alpha linear, so an antialiased edge stores a
+  colour byte *above* its alpha byte by construction. At a ground worth 0.30,
+  **9822** pixels of this page are in that state on Windows and **9688** on the
+  Mac; at 0.60, none are on either, because by then the ground's own
+  contribution has risen past what the encoding adds. Pinning that count to zero
+  would be pinning the absence of antialiasing, so it is reported and not
+  asserted.
+
+**One unit of that alpha is the hardware's and not this renderer's**, and it is
+worth a line because a gate written any tighter would have pinned it: a clear
+colour is a float and the surface stores eight bits, so at a ground worth 0.30 —
+which is 0.300000012 as an `f32` — the bare corner of the page reads **76**
+through D3D12 and **77** through Metal. Two backends rounding the same exact
+half the two ways it can be rounded; the gate reads the corner within one, and
+says why.
+
+What it costs is stated rather than hidden. X-1 measured that CoreAnimation
+composites these bytes **premultiplied without decoding them**, so a Folio window
+at a low ground opacity draws the antialiased skirt of its letters brighter than
+the arithmetic says — most at a third opacity, none at two thirds. That is a
+colour-management question about a translucent window and belongs to whoever
+takes translucency further; it is not a rasterization defect, and no arm of this
+ticket touches the rasterizer to hide it.
+
+**⑤ Subpixel positioning: the terminal never asks, and the prose lane does.**
+The ticket's question was "subpixel positioning at fractional advances", and the
+first half of the answer is that **a terminal grid has no fractional advances**:
+`CellMetrics::measure` takes `primary_advance_px.ceil()` for the cell width and
+`(8 x scale).ceil()` for the padding, so `padding + column x cell_width_px` is a
+whole number in every column. Measured: thirty-four copies of one character,
+each read against its own cell origin, land on the same phase to the last
+fraction of a pixel — spread **0.0000** on both machines (8.7522 px on Windows,
+10.1097 px on the Mac, which is each face's own left side bearing).
+`every_column_of_the_grid_draws_its_stem_in_the_same_place` pins it there,
+because a spread that was not zero is a caret that no longer stands on the
+character it edits (§7.1.3q's own illness).
+
+So the question is asked where it exists. A prose paragraph's rectangle is
+wherever the document solver put it, and the fixture draws four rows of one
+string at origins a quarter of a pixel apart. The ink moves with them:
+
+| origin | Windows | Mac |
+|---|---|---|
+| +0.00 px | +0.0000 | +0.0000 |
+| +0.25 px | +0.2348 | +0.2382 |
+| +0.50 px | +0.4941 | +0.4819 |
+| +0.75 px | +0.7288 | +0.7463 |
+
+Twenty-two thousandths of a pixel is the worst error on either machine, against
+a quarter being asked for. **One measurement trap is written down here because
+it cost a wrong answer first:** an ink centroid weighted by the *stored byte* is
+not an ink centroid — sRGB encoding is convex, so it over-weights the faint
+skirt, and the same four rows first came back at +0.31 / +0.52 / +1.32, a
+placement that looked quantized and was not.
+
+**⑥ The CJK case that failed on the Mac, and it was not the fallback table.**
+M1-4 recorded `every_cluster_of_a_grid_paragraph_stands_on_its_own_column`
+failing on the Mac and put it down to the CJK fallback lists being Windows font
+file names, "dead code on macOS". **That diagnosis was wrong.** The macOS arm
+has had its own chain (`MACOS_CJK_FALLBACK_FAMILIES`) and its own `Fallback`
+implementation since `026d765`, and PingFang SC is installed on that machine.
+What the case actually reported was `the cluster "页" at byte 3 is drawn at NaN`.
+
+Read back glyph by glyph, the run says why: the `M` came from Menlo advancing
+19.265625 px, and every Han cluster came from **`GB18030 Bitmap`** advancing
+`inf`. Two facts make that happen and neither is about the fallback table.
+
+- **The face has no scalable em.** It is one of Apple's bitmap-only faces and
+  carries `bhed` where a scalable face carries `head`, so swash reports zero
+  units per em — and cosmic-text scales every advance by that number without
+  guarding the division (`shape.rs`, `let font_scale =
+  font.metrics().units_per_em as f32`; `decoration_metrics` next door *does*
+  guard its own). Every advance is `inf`, the line's width is `inf`, and the
+  grid's tracking — `(target − natural) / font_size / glyphs` — is `NaN`, which
+  is the letter spacing the second shaping pass is then given. Hence a cluster
+  drawn at `NaN`, and a caret, a band and a click all pointing nowhere, with no
+  error anywhere.
+- **Nothing asked for it.** The face is flagged *monospaced* and covers Han, and
+  cosmic-text's fallback iterator, for a `Family::Monospace` request, gathers
+  every monospaced face in the database that covers the word and takes the best
+  of them **before** it reaches `script_fallback`
+  (`font/fallback/mod.rs`, the `monospace_fallbacks_buffer` stage).
+  `forbidden_fallback` cannot stop it either: that list filters only the
+  last-resort "any other font" walk at the bottom of the iterator.
+
+So the decision this crate writes down could not be in force, and the only place
+left to make it is the **database**. The Windows loader names seven files and
+never asks the directory, so its database is a list somebody wrote; the macOS
+loader has to call `load_system_fonts`, because PingFang lives behind a
+content-hashed `AssetsV2` path that cannot be named (§13.18's own lesson), which
+puts the whole machine's library in.
+
+The fix is therefore a capability and not a name. `drop_faces_with_no_scalable_em`
+removes every face with no `head` em, in **every** arm, before any family is
+chosen, and `set_terminal_font` puts a file a reader picked through the same
+door. Naming `GB18030 Bitmap` would have fixed one machine and said nothing
+about the next. The number it reads is two bytes out of one table through
+`ttf_parser::RawFace`, which parses the table directory and nothing else;
+`ttf-parser` becomes a named dependency of `bt-render` and adds **no package** —
+`fontdb` is built on it. **Measured on the Mac: one face out of 917 goes**, and
+it is that one; on Windows none of the sixteen does, which is the seven-file list
+saying what it always said.
+`no_face_in_the_font_database_has_an_em_this_renderer_cannot_divide_by` runs on
+both machines and pins it, and asserts in the same breath that the embedded emoji
+face survives — the rule is about the em, not about outlines.
+
+**⑦ One more thing the measurement found: drawing this page is a critical
+section.** The window's ground is process-global (`ground::set_window_ground`)
+and the frame path reads its alpha **more than once** — the clear has a read of
+its own. Two concurrent draws are therefore a race with a very quiet failure: a
+frame that straddles somebody else's set and restore comes back *mixed*, cell
+grounds at one alpha and the clear at another, and every number taken off it is
+about no window at all. Measured, under libtest's default parallelism on the
+Mac: 212 887 pixels of cell ground at `round(0.3 x 255)` beside 458 717 pixels
+of clear at 255, in one frame. `GlyphFixture::present` holds a lock across the
+whole call, which is the fixture being honest about what it is doing rather than
+a rule written in a test's comment.
+
+**⑧ The gate.** `crates/bt-render/tests/glyph_output.rs` runs on either machine
+and pins seven facts about the offscreen frame: the page fits the surface it is
+measured on and the window really is at backing scale 2; two draws of one
+fixture are byte for byte the same frame; **every band has ink of its own** —
+which is what makes a font stack that cannot answer a row a red line here rather
+than a surprise in a screenshot; every rasterized band carries an antialiased
+skirt while the geometric one carries none; the grid's stems agree; the prose
+lane moves with its fraction; and a translucent frame is premultiplied in linear
+light with the clear's own alpha in its bare corner.
+
+`crates/bt-app/tests/macos_glyph_surface.rs` is the Mac half and is a
+`harness = false` target for M2-3's reason, said again: it runs an event loop,
+an event loop is the main thread's, and libtest does not hand a case that
+thread. Without `BT_MAC_GUI` it prints one line and exits, so an ordinary
+`cargo test -p bt-app` on the Mac costs nothing; off macOS the file has no body
+at all. It opens **winit's** window — the product's window — undecorated at the
+drawable's size on the monitor winit says is at backing scale 2 (asked rather
+than assumed, because X-1 and X-2 both recorded a window landing on the owner's
+other screen), puts Folio's own surface view under it through
+`bt_platform::surface_view`, and redraws the same fixture the way a window
+redraws.
+
+**A hand-made `NSWindow` was tried first and is not a swapchain host on this
+machine**, which is worth the sentence because `macos_sheet.rs` makes one and it
+is the obvious pattern to copy: `visible=true` at `scale=2`, a content view of
+exactly the right bounds, sixty turns of the run loop before the surface and four
+presents after it — and every present answered `Skipped`, `nextDrawable` handing
+back nothing, with the photograph coming out as the flat colour painted behind
+the layer. A `CAMetalLayer` wants the window an application of its own is
+running. **The photograph is the readback**: a swapchain
+cannot be mapped, so the pixels the window server holds are reached from outside
+the surface or not at all. M2-3 measured that a throwaway bundle is refused the
+Screen Recording grant while the session that started it holds it, so the probe
+publishes its window number and waits for the session's picture one redraw at a
+time — a window that stops drawing is a window the server stops compositing.
+`objc2` and `objc2-app-kit` become **dev**-dependencies of `bt-app` for the one
+name winit does not expose, `-[NSWindow windowNumber]`, and add no package to
+`Cargo.lock`: both are already there through `bt-platform`.
+
+**⑨ The answer.** M4, macOS 26.6.2, a winit window at backing scale 2 on the
+2x display, drawable 900x760, `target=MetalLayerOnOwnedView
+offered=[Opaque, PostMultiplied] chosen=PostMultiplied`, `cleared=0` — a
+window's first surface clears nothing (§13.14 ③). The page drawn into that
+swapchain and photographed, and the same page drawn into a texture on the same
+device and mapped, are **identical: 684 000 pixels, not one byte between them,
+digest `b29b55b160aa8c47` twice.** Every band's ink count, peak, mean and
+antialiased share is the same number on both sides of the comparison, and so is
+every prose row's centroid.
+
+So the presentation path does not change the picture, and M2-5's question is
+answered in the direction §R4 predicted: the rasterizer is the same rasterizer,
+the surface is the surface, and the letters a Mac shows are the letters this
+renderer drew.
+
+**Two things that run only said by measuring them.** The **first two presents on
+a freshly created layer come back `Skipped`** — `nextDrawable` has nothing until
+the layer has been through a display cycle — which is why the probe draws the
+page the way a window draws it rather than once. And `screencapture` **from
+inside the bundle** answers `could not create image from window`, which is M2-3's
+TCC finding measured a second time and the reason the photographer is the session
+outside.
+### 13.23 M3-7: 标准流——终端启动留在 tty 上,Finder 启动进日志,leave_process 真的退出(`crates/bt-platform/src/portable_impl.rs`、`crates/bt-platform/src/{lib.rs,Cargo.toml}`、`crates/bt-app/src/diagnostics.rs`)
+
+**① Five doors, and they split two ways — on who reads the answer, not on how
+hard they are.** `adopt_parent_console`, `detach_console`,
+`redirect_std_streams_to_file`, `silence_std_streams` and `leave_process` are
+one group in the backend inventory and are not one group here. The line between
+them is the plan's §4.4 ③: a door whose `bool` decides something has to really
+do the thing, and a door whose answer reaches no branch may be what the kernel
+already did. `bt_app::diagnostics` picks `Channel::Log` or `Channel::Nowhere`
+off the redirect's `bool` and calls the silence in the `else`, so those two are
+real on every platform now. The two console doors are called for their effect
+and their answers are dropped, so on a Unix they are nothing — and the licence
+for that is a fact about the *caller*, which is why it is pinned at the caller
+(`nothing_branches_on_the_two_console_no_ops` reads both call sites and requires
+each name to appear exactly once, as a statement) rather than asserted at the
+arm.
+
+A Unix process is handed its parent's stdio by the kernel before its first
+instruction, so there is nothing to adopt; it joins no console group, so there is
+nothing to leave. What `AttachConsole` and `SetStdHandle` spend two calls
+reaching on the other platform is the state this one starts in.
+
+**② The port is `dup2`, and four things in it are decisions rather than
+translation.** The log is opened **append-only**, which is the kernel's own
+append — every write lands at the end whichever thread issues it, with no seek of
+its own to race — and is what `FILE_APPEND_DATA` buys on the other platform. It
+is created **`0o600`**, because a `diagnostics.log` carries window titles, file
+paths and shell output and the directory it lives in is a home directory; a file
+that already exists keeps the mode it has, because changing the permissions of a
+file somebody deliberately opened up is not this call's business. **Both**
+descriptors move, because a `println!` left on the terminal is half the fault the
+channel was written for. And the descriptor is **never closed, on any path**: on
+the path that works it *is* the process's diagnostic stream and lives exactly as
+long as the process, which is word for word what the Windows arm says of its
+handle; on the path that does not, closing it would be a call that has just
+refused to move anything reaching for a descriptor `open` may have been handed
+*as* descriptor 1 — the state of a process started with its standard streams
+closed — and taking out the stream it was asked to move.
+
+**A refusal leaves both descriptors where they were, and that is what makes the
+caller's `else` mean anything.** The duplicate the first stream is put back from
+is taken before anything moves, with `F_DUPFD_CLOEXEC` and a floor of 3 rather
+than with `dup`, for two reasons that are both about which number comes back:
+`dup` answers the lowest free descriptor, which on a process whose standard error
+is closed is 2 — the descriptor the next line is about to write — and it does not
+set close-on-exec, which would put a spare copy of somebody's terminal into every
+shell this window opens. `a_refused_redirect_moves_nothing` reads the device and
+inode behind both descriptors before and after a refused call and requires them
+unchanged.
+
+**One line in `Cargo.lock` and no package.** `libc` 0.2.186 is already there
+through winit, wgpu and `portable-pty`, and already in `THIRD-PARTY-NOTICES.md`;
+Rust's standard library owns descriptors and never renumbers one, so there is no
+`std` spelling of this. It is declared `cfg(unix)` and not
+`cfg(target_os = "macos")` because `dup`, `dup2` and `close` are POSIX and are
+the same two sentences on the Linux server §4.6 keeps possible. `nix` was the
+other candidate and was not taken: its `dup2` is typed in `OwnedFd`/`BorrowedFd`,
+so this crate would be constructing an `OwnedFd` for descriptor 1 — a value whose
+`Drop` closes the process's own standard output — to hand to a call that is
+defined as not taking ownership of it.
+
+**③ `leave_process` really terminates, and the flush is written here rather than
+inherited.** `std::process::exit` and not the Windows arm's `TerminateProcess`:
+that call exists for one measured reason and the reason is a tenant — a process
+that has loaded the Edge WebView2 client DLL cannot walk out through the loader's
+`DLL_PROCESS_DETACH` (§7.35) — and nothing on this platform is that tenant today,
+so the ordinary exit is both the honest door and the better one, because it runs
+the `atexit` chain. The two flush lines are not redundant with what that function
+already does on its own: they make the flush a property of `leave_process` rather
+than of which exit primitive an arm happens to call, so that the day a
+`WKWebView` in the process forces the faster door — `_exit`, which the backend
+inventory's own row anticipates — the run's footer does not leave with it.
+Nothing else on the way out depended on a Windows-only order: `bt_pty`'s
+recording writes through an unbuffered `File` and publishes with `sync_data` on
+its own thread, the session document and its sentinel are written inside the loop
+above every caller, and the footer is an `eprintln!`, which Rust does not buffer.
+The sixteen steps are the same sixteen steps.
+
+**④ The two launches, measured on the Mac mini** — macOS 26.6.2, Apple M4, the
+debug build at `74a3ef21`, each against an isolated `HOME` under the ticket's own
+worktree.
+
+**(a) A direct exec from a terminal**, under a real pty. Three runs, one rule,
+and the rule is the one the other platform already has.
+
+* A refused flag is answered on the terminal and nothing is written:
+  `folio --m3-7-not-a-flag` put `There is no --m3-7-not-a-flag option.` and the
+  usage block on the tty, exited 2, and the log path did not exist afterwards.
+  The front door is still the front door.
+* The same binary with no arguments wrote **four bytes** to the tty — the pty's
+  own end-of-file echo, and not one byte of Folio's — while the file took the
+  banner and the whole of the run: 1371 bytes, one run header, and under it the
+  startup's `BT_DPI` lines and the window thread's first-turn report.
+* With `BT_STARTUP_TRACE=1` the same launch talked to the terminal for the whole
+  run — its first line there is
+  `BT_STARTUP_TRACE: from here Folio talks to the console that started it` — and
+  the log **did not grow**: 1371 bytes before and 1371 after, still exactly one
+  run header. A run that names the console keeps it, which is the rule and not an
+  exception to it.
+
+**(b) `open -a` on a bundle**, which is what Finder, the Dock and LaunchServices
+all do. The bundle's executable is a wrapper that records its own three
+descriptors and then `exec`s Folio, so the pid and every descriptor belong to the
+launched process and not to the wrapper:
+
+```
+COMMAND  PID     USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+bash    4899 <user>      0r   CHR    3,2      0t0  336 /dev/null
+bash    4899 <user>      1u   CHR    3,2      0t0  336 /dev/null
+bash    4899 <user>      2u   CHR    3,2      0t0  336 /dev/null
+```
+
+and the first line of the file that run wrote is
+
+```
+── Folio 0.3.0 (74a3ef21e7) — run started 2026-09-12T22:29:19.590Z, pid 4899 ──
+```
+
+— the same pid, and the banner is the file's first line, so nothing between
+launchd's `/dev/null` and it was lost. 1455 bytes followed. **Before this ticket
+that file did not exist and those 1455 bytes were discarded by the kernel, one
+`write` at a time, while the channel reported `Nowhere`.**
+
+**The panic hook reaches it too, in a process with no screen at all.** A second
+bundle launch carrying `BT_PANIC_SELFTEST=4` — the debug-build one-shot §7.43
+already has, so nothing test-only was added for this — put the fault in the same
+file:
+
+```
+thread 'main' (11203438) panicked at crates/bt-app/src/main.rs:110709:5:
+BT_PANIC_SELFTEST: faulting the window thread on purpose
+```
+
+with the hook's own report beside it in that run's temporary directory
+(`folio-panic.log`, opening with the build stamp, the thread and the backtrace).
+**What follows the alert does not follow it here**, and that is the hook's
+documented order rather than a defect: `announce_panic` raises `NSAlert.runModal`
+on the thread that panicked, which is the window thread, so the footer and
+`leave_process` are reached when the box is dismissed. The probe ended that run
+by the pid the log's own header carries instead of dismissing it, so its file has
+no footer. Whether a crash on this platform should stand still behind a modal box
+is M4-11's question; the half this ticket owed — that the words reach the file —
+is measured.
+
+**⑤ What this ticket did not close, and it is one door.**
+`install_console_ctrl_handler` still answers `false`. The Unix half of the fault
+the Windows arm exists for is real — a process started from a shell is in that
+shell's foreground process group, so a `Ctrl+C` typed there is delivered here —
+but what the two signals should *do* is a decision and not a translation.
+`SIGINT` is the one the Windows arm refuses and refusing it here is the same
+sentence; `SIGTERM` is not, and on this platform it is how the system asks an
+application to go away at logout and at shutdown, so a handler for it is a path
+that has to write the session document and leave through `leave_process` — which
+is M3-1's application delegate and M3-5's single writer, neither of which exists
+yet. The door is booked here rather than guessed at.
+
+**⑥ Tests.** Source pins on the Windows workstation, where the arm is not
+compiled at all: `bt_platform::macos_stdio_tests`' four —
+`the_redirect_moves_both_descriptors_onto_an_appended_private_file`,
+`the_silence_points_both_descriptors_at_the_null_device`,
+`the_two_console_doors_stay_the_no_ops_their_class_says_they_are` and
+`the_process_flushes_what_it_wrote_before_it_leaves` — plus `bt_app`'s own
+`nothing_branches_on_the_two_console_no_ops`, which is ①'s claim read off the two
+call sites. Behaviour on the Mac: `portable_impl::stream_tests`' two, which
+really renumber this process's own descriptors and put them back from a duplicate
+taken before the call, so a failed assertion still prints where `cargo test` is
+reading. **They are written against the handles and not against the macros, and
+that is not a stylistic choice**: `print!` and `eprint!` both go through
+`std::io::print_to`, which hands the bytes to libtest's per-test capture buffer
+rather than to the descriptor, so the first draft of the behavioural case failed
+on the Mac with an empty file and both of its lines sitting in the harness's
+capture. A case written with the macros would have passed against a completely
+empty implementation of the door.
+### 13.25 M4-4: 视频首帧走 AVAssetImageGenerator,像素布局和 Windows 臂一个字不差(`crates/bt-platform/src/macos_video.rs`(新)、`crates/bt-platform/src/{video_portable,lib}.rs`、`crates/bt-platform/tests/video_first_frame.rs`(新)、`crates/bt-platform/Cargo.toml`)
+
+**① The ticket is not "decode a video", it is "hand over the same bytes".**
+`first_frame` had no body off Windows, so a hover over a recording in the files
+column showed the file's name and no picture — §7.23's refusal reached by absence
+rather than by failure. What replaces it is eight calls to AVFoundation and Core
+Graphics, and every decision in them is settled by a sentence §7.23 already wrote
+about Media Foundation rather than by what AVFoundation happens to make easy.
+**Straight — not premultiplied — RGBA8, row-major from the top row down, packed
+at `width * 4` bytes a row, every alpha byte `255`, in sRGB.** That is the
+contract the hover card, the preview seat and `bt-render`'s picture channel
+already read, and the point of this ticket is that none of the three learns which
+machine it is on.
+
+Three of those five are things Core Graphics settles the same way Media
+Foundation does, once it is asked properly. A 32-bit RGB bitmap context has **no
+straight-alpha form at all** — the supported layouts are premultiplied or
+skipped — so the context is asked for `kCGImageAlphaNoneSkipLast` with a
+big-endian 32-bit order, which is R, G, B and one byte the drawing leaves alone,
+and the copy writes `255` over that byte. That is exactly what the Windows arm
+does with Media Foundation's BGR**X**, and
+`both_arms_take_the_same_tenth_the_same_budget_and_the_same_opaque_alpha` pins
+the `out[3] = 255;` in both files — a frame that copied the decoder's undefined
+fourth byte through is drawn fully transparent on the day that byte happens to be
+zero, and correct on every day before it.
+
+A `CGBitmapContext`'s backing store runs from the top row down and
+`CGContextDrawImage` with the identity transform puts the image's top row in it,
+so **nothing is flipped**: the Windows arm's negative-pitch branch, which exists
+because RGB-32 is bottom-up in that platform's DIB heritage, has no twin here.
+The row width is still **read back** rather than assumed, for the reason the
+other arm reads its media type back — a stride that is not the one that was asked
+for shears every row after the first.
+
+**② The frame is not frame zero, and that was decided in August about content
+rather than about an API.** `SEEK_FRACTION` is a tenth because a great many
+videos open on black, and a thumbnail lane that took frame zero answers a hover
+over half a folder of screen captures with half a folder of identical black
+rectangles. The macOS arm inherits the constant rather than choosing one, because
+a card that showed a different picture depending on the machine would be two
+products.
+
+**The ask is exact, and then it is not.** Both `requestedTimeToleranceBefore` and
+`requestedTimeToleranceAfter` are zero, which makes the generator decode forward
+from the key frame before the target rather than hand back the key frame itself.
+When that exact ask fails — a container with an edit list, whose media timeline
+and presentation timeline are not the same line; a sample table with nothing at
+that instant — the tolerances are opened to infinity and **the same time** is
+asked for again. That is not a fallback to a different picture: it is the same
+request at the precision the file could meet, and it is the behaviour
+`IMFSourceReader::SetCurrentPosition` has by default, which is why the Windows
+arm never had to ask for it. Two attempts, like `request_rgb32`'s two.
+
+**③ What the two machines actually produced, out of the same two files**
+(2026-09-12; `tests/assets/PROVENANCE.md` records what is in them: 160×120, a
+fifth of a second of black and then one solid colour). The mean is over every
+pixel of the returned frame, and the whole frame is that one colour.
+
+| fixture | authored | Media Foundation (Windows) | AVFoundation (Mac mini, macOS 26.6.2) |
+|---|---|---|---|
+| `folio-video-test.mp4` | `E0 7A 2F` = (224,122,47) | **(224,122,48)** | **(223,136,53)** |
+| `folio-video-test.mov` | `2F 7A E0` = (47,122,224) | **(48,122,225)** | **(67,135,228)** |
+
+Both arms return a 160×120 raster, both report a native size of 160×120, and both
+read the declared length back exactly — 5000 ms and 3000 ms.
+
+**The two arms are not bit-identical, and the reason is stated rather than
+averaged away.** Media Foundation's video processor converts YUV to RGB with the
+stream's own matrix and hands the result over **untagged**, which the renderer
+then treats as sRGB; it lands within **1** of the colour ffmpeg was given. Core
+Graphics is handed a frame that carries a colour space and **colour-matches it
+into the sRGB the context declares**, which for an SD clip whose primaries are
+not sRGB's is a real conversion; it lands within **20**, the largest single
+channel being the `.mov`'s red at +20. Neither is a defect: the Windows number is
+the raw round trip and the macOS number is the colorimetric one, and at this
+magnitude the card shows the same picture. **Naming the space is the honest
+spelling of the assumption the other arm makes silently**, and the alternative —
+a bitmap context with no colour management — is not a thing Core Graphics offers.
+
+`video_first_frame.rs`'s `TOLERANCE` is **32**: that measured 20, with room for a
+macOS release whose matching moves a little, and still nowhere near the defects
+the assertion exists for. A red and blue swapped on the way out is ~180 off; a
+frame taken at time zero rather than a tenth in is the whole distance to black.
+
+**④ The cap is a cap, and the two platforms really do answer it differently.**
+Both arms compute the fitted size themselves — `contain`, which keeps the shape
+and **never enlarges** — and hand it down as a request. Asked for 80×80 with this
+160×120 clip, `AVAssetImageGenerator` returns **80×60** and Media Foundation
+returns **160×120**: its video processor refused the smaller output type for this
+file, and `request_rgb32`'s second attempt settled for RGB-32 at native size,
+which is the case that function's own header says it exists for. Neither is
+visible, because the window's sampler fits whichever it is given into the same
+box, so `a_frame_asked_for_smaller_keeps_its_proportions` asserts the two things
+that are true either way: nothing comes back larger than the file, and whatever
+comes back has the file's shape.
+
+**⑤ Where the file is cut, and why the portable file kept its name.** §4.3 of the
+port plan says a `#[cfg(windows)] pub mod` becomes a plain `pub mod` with
+`win`/`mac`/`neither` bodies. This ticket takes the half of that which is M4-4's:
+`video/mod.rs` and `video/engine.rs` are untouched Media Foundation, and
+`video_portable.rs` — the whole of `video` off Windows — grows a macOS body in
+`macos_video.rs` and a `no_decoder` one beside it, with a `cfg` on the arms and
+none on the call sites. It is `handoff.rs`'s shape exactly, where `macos_handoff`
+sits beside `portable_handoff`.
+
+What stayed in the shared file is everything that is **not** a decoder: the
+frame's shape, the two timing constants, the cost breakdown, `contain` and
+`within_budget`. What did not move is `VideoFrame` itself, and that is a refusal
+rather than an oversight. There are now two real implementations of the *first
+frame* and still only one of the engine, so gathering `VideoFrame` into a shared
+file today would take it out from beside `Frame`, `EngineError` and
+`EngineState`, which would still be written twice — **one definition shared and
+three copied reads worse than four copied.** M4-5 is when that moment arrives.
+
+**⑥ No main thread, and therefore no second `harness = false` target.** Nothing
+in this file touches AppKit, so there is no `window_thread()` at the top of any
+door the way `macos_impl.rs` opens every one of its own. The citation is the one
+§13.18 already gave for `NSWorkspace`: Apple's *Thread Safety Summary* lists the
+classes that are the main thread's — `NSView`, `NSWindow` and `NSApplication`
+each say so in their own reference — and says of everything it does not list,
+"In most cases, you can use these classes from any thread as long as you use them
+from only one thread at a time." `AVAsset`, `AVAssetImageGenerator` and
+`CGBitmapContext` are on neither list, and none of their references states a
+thread requirement.
+
+There is stronger evidence than an absence, in two places.
+`AVAssetImageGenerator`'s own asynchronous form documents that it calls its
+handler back on a queue **AVFoundation owns** rather than on the main queue, and
+a class that required the main thread could not offer that. And this repository
+produces its own: every case in `tests/video_first_frame.rs` runs on a thread
+libtest spawned — §13.17 measured that `MainThreadMarker::new()` is `None` there
+even under `--test-threads=1`, which is why the sheet cases needed a target of
+their own — and those cases are green on the Mac. **A green run of that file is
+the statement.** §13.17's pattern is for code that must own the process's first
+thread; this is not that code.
+
+What `first_frame` does need is to be off the thread that *draws*, and it takes
+the Windows arm's answer: a thread of its own with `FIRST_FRAME_BUDGET` over it.
+Apple's own note on `copyCGImageAtTime:` says the generator "may have to block
+the calling thread", and a file nothing can decode would otherwise be three
+seconds of frozen window.
+
+**⑦ Two deprecated calls, on purpose.** `copyCGImageAtTime:actualTime:error:` and
+`tracksWithMediaType:` are both marked deprecated since macOS 13 in favour of
+forms that take a completion handler. Those forms exist because the synchronous
+ones block, and **blocking is what this lane is built to do**: it already owns a
+thread and a budget, so the asynchronous shape would buy a `block2` closure, a
+channel, and an answer arriving after the budget had given up — the bargain
+§13.18 refused for `openURL:`. Neither call is removed and neither is unavailable
+at this product's deployment target.
+
+**⑧ Two packages compiled, five lines in the lock file, and both numbers are in
+`Cargo.toml`.** `objc2-av-foundation` 0.3.2 and `objc2-core-media` 0.3.2 are
+linked; `objc2-core-graphics` 0.3.2 was already in the lock file through wgpu's
+Metal backend and is only named now. `objc2-core-audio`, `objc2-core-audio-types`
+and `objc2-core-video` resolve into `Cargo.lock` and into nothing else — CoreMedia
+declares all three optional and no feature here turns any of them on — so they
+appear under *In the lock file, not in any resolved build* in
+`THIRD-PARTY-NOTICES.md`, the section that exists so the two counts a reader might
+compare are reconciled. All five are the same repository and the same release as
+the objc2 crates this crate already carries. The alternative was hand-declaring
+three selectors and a struct layout against classes this crate does not own.
+
+**⑨ Three instruments, because no one of them can hold the claim.**
+`tests/video_first_frame.rs` runs one set of assertions against whichever decoder
+the machine has and is the only place the *bytes* are checked; it is green on
+both machines and it is what ③ and ④ are measured with.
+`macos_video_signature_tests` in `lib.rs` compares the two arms as **text** on the
+Windows workstation, where only one of them compiles: the three doors'
+signatures, `VideoFrame`'s and `FirstFrameCost`'s fields and derives, the two
+constants, and the opaque alpha. And `cargo check -p bt-platform --target
+aarch64-apple-darwin --all-targets` on the Windows machine is what says the macOS
+arm compiles before it is ever pushed.
+
 *(本节英文,待中文文案改写。)*

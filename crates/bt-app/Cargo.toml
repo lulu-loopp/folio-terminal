@@ -16,6 +16,18 @@ publish.workspace = true
 name = "folio"
 path = "src/main.rs"
 
+# **The one target in this crate that owns the process's main thread** (M2-5).
+# The Mac's glyph measurement runs a winit event loop, an event loop is the main
+# thread's, and libtest does not hand a case that thread — M2-3 measured it, and
+# `crates/bt-platform/tests/macos_sheet.rs` states the measurement at length.
+# `harness = false` makes this file's own `main` the test, and that one really
+# is the main thread. It costs an ordinary run nothing: without `BT_MAC_GUI` it
+# prints one line and exits, and off macOS it has no body at all.
+[[test]]
+name = "macos_glyph_surface"
+path = "tests/macos_glyph_surface.rs"
+harness = false
+
 # The icon and the `VERSIONINFO` block, plus the commit hash the diagnostic files
 # carry. See `build.rs`.
 [build-dependencies]
@@ -107,6 +119,32 @@ serde_json.workspace = true
 # product binary has no use for a plist, and the crate is already in this
 # workspace's graph either way.
 bt-winres = { path = "../bt-winres" }
+
+# **Tests only, macOS only, and not one new package** (M2-5). The glyph
+# measurement opens winit's own window — the product's window — and needs one
+# thing winit does not expose: `-[NSWindow windowNumber]`, which is the only
+# name `screencapture -l` answers to and therefore the only way the pixels a
+# Metal swapchain presented can be read at all. Both crates are already in
+# `Cargo.lock` and in `THIRD-PARTY-NOTICES.md` through `bt-platform`, which is
+# `docs/DESIGN.md` §8's bar; what the features below buy is the generated
+# bindings for the two classes this one file names.
+#
+# They are **dev**-dependencies and stay ones: `bt-app`'s own rule is that
+# platform code lives behind `bt-platform`'s interface (the port plan's §4.1),
+# and a window number a measurement reads is not the product reading one.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    # `-[NSView window]`, which is how the number is reached from the handle
+    # winit hands over; `NSResponder`, because an `NSView` is one.
+    "NSResponder",
+    "NSView",
+    # `-[NSWindow windowNumber]` itself.
+    "NSWindow",
+    # `CGFloat`, the type every AppKit rectangle is written in. Not a package.
+    "objc2-core-foundation",
+    "std",
+] }
 
 [lints]
 workspace = true
