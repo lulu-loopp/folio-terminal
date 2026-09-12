@@ -3,12 +3,23 @@
 <!--
   The template the bundle's `Contents/Info.plist` is generated from.
 
-  `@VERSION@` is the only substitution. It is filled at bundle time from
-  `[workspace.package] version` in the workspace `Cargo.toml` — the same single
-  line `bt_app::version::tests::the_version_is_the_manifests_and_nothing_elses`
-  holds the executable, the PE resource and every diagnostic header to. This
-  file therefore carries no literal version, and copying one in here by hand is
-  the thing that gate exists to catch.
+  The two version fields below are the only substitution in this file, and a
+  template asking for any other placeholder is refused rather than shipped with
+  it unfilled. They are filled at bundle time from `[workspace.package] version`
+  in the workspace `Cargo.toml` — the same single line
+  `bt_app::version::tests::the_version_is_the_manifests_and_nothing_elses` holds
+  the executable, the PE resource and every diagnostic header to, and its
+  sibling `the_plist_carries_the_workspace_version_twice_and_no_literal` renders
+  this file and holds both fields to. This file therefore carries no literal
+  version, and copying one in here by hand is the thing those gates exist to
+  catch.
+
+  The placeholder is deliberately not quoted in this comment: it would be filled
+  in here too, and the generated plist would carry a sentence that had turned
+  into a statement about a version number.
+
+  `cargo run -q -p bt-winres --bin render-info-plist` prints what this renders
+  to; `crates/bt-winres/src/plist.rs` is the renderer.
 
   This template is not signed and not installed; the generated plist is.
 -->

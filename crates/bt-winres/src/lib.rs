@@ -43,6 +43,12 @@
 //! character** count for a text one, including its terminator in the second case
 //! and not the first.
 
+/// **The macOS bundle's `Info.plist`**, which is the third place the same
+/// version line has to arrive at. See the module: it is here because this crate
+/// is where a version meets a container that may refuse it, and that is the
+/// same job on both platforms.
+pub mod plist;
+
 use std::fmt;
 
 /// `RT_ICON` — one image out of an `.ico`.

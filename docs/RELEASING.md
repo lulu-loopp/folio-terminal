@@ -647,4 +647,31 @@ appears.
 One consequence for the tag: `CFBundleVersion` accepts only dotted integers, so
 a `-preview` suffix could not go in it. It never has to — the suffix is a
 release channel that lives on the tag and never reaches the manifest, as the
-first section of this document says.
+first section of this document says. The renderer below does not take one on
+trust: a version that is not one to three dotted integers is refused rather than
+truncated, so the day somebody puts a channel suffix in the manifest, the bundle
+step stops instead of shipping a build the system cannot order against the one
+before it.
+
+### Rendering the plist
+
+M5-5 closed the gate with a renderer, and the bundle step calls it:
+
+```sh
+cargo run -q -p bt-winres --bin render-info-plist > "$app/Contents/Info.plist"
+```
+
+Stdout is the finished plist and nothing else; a version the bundle cannot carry
+and a placeholder nothing fills both go to stderr with a non-zero exit, which
+under `set -e` stops the script before `codesign` sees the file. The version is
+`bt-winres`'s `CARGO_PKG_VERSION` — the workspace line — so the release script
+never reads `Cargo.toml` itself.
+
+The renderer is `crates/bt-winres/src/plist.rs`, in the crate that already turns
+that same line into the Windows `VERSIONINFO` numbers, and it has no
+dependencies, so the bundle machine compiles one small crate to get the file.
+The gate over it is
+`bt_app::version::tests::the_plist_carries_the_workspace_version_twice_and_no_literal`,
+beside the one named above: it renders `packaging/macos/Info.plist.in`, checks
+both version fields against the manifest's line, and checks that the template
+itself still carries no version at all.

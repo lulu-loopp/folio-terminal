@@ -17,5 +17,15 @@ publish.workspace = true
 
 [dependencies]
 
+# **The one thing in this workspace a shell script on the Mac has to be able to
+# run.** M5-3's bundle script needs `Info.plist` with the workspace version in
+# it before it can sign anything, and `cargo run -q -p bt-winres --bin
+# render-info-plist` is a compilation of one dependency-free crate rather than
+# of the whole window. Named here rather than left to `src/bin` autodiscovery so
+# that the name the script types appears in a file somebody greps.
+[[bin]]
+name = "render-info-plist"
+path = "src/bin/render-info-plist.rs"
+
 [lints]
 workspace = true
