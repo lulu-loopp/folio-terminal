@@ -213,6 +213,8 @@ edges, a resize, and a device-loss reconstruction.
 four. *Fail:* anything else — and then alpha representation and surface ownership
 become explicit design work before M1-4 is scoped.
 
+> **Result 2026-09-12 (`probe-x1-metal-alpha-2026-09-12.md`): FAIL on this section's wording, into exactly the two items it named, and both now have an answer.** wgpu reports `[Opaque, PostMultiplied]`; a `WKWebView` placed under a plain `NSView` that wgpu draws to composites correctly through the hole and survives a resize at scale 2. But `PostMultiplied` only marks the layer non-opaque — the compositor still reads the pixels as **premultiplied** (a straight-alpha edge came back with premultiplied arithmetic, a hand-premultiplied one came back right), and the blend is on encoded sRGB bytes. **Alpha policy for M1-4:** Folio keeps writing premultiplied pixels (what it writes for DirectComposition today) and declares `PostMultiplied` to wgpu on Metal; `required_alpha_mode` gains a Metal arm saying so, with the sRGB-encoded-blend caveat recorded where edge anti-aliasing is judged. **Surface ownership for M1-4:** a dropped `wgpu::Surface` leaves its `CAMetalLayer` on the view and a rebuild stacks a second one (the frame composited twice, to the byte); the platform arm owns the view and clears its sublayers before every reconstruction. Screen Recording is not granted on the Mac mini, so whole-screen capture from an agent fails; `CGWindowListCreateImage` over the probe's own window works without a grant.
+
 **X-2 — WKWebView policy enforcement.**
 `webview.rs` enforces the navigation policy through `WebResourceRequested` with a
 filter over every context (`crates/bt-platform/src/webview.rs:1831`), which is
