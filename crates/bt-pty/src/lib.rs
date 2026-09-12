@@ -7039,22 +7039,28 @@ mod tests {
         }
     }
 
-    /// What the operating system's own process table says about `pid`, or `None` when it has
-    /// never heard of it. A **`Z`** here is a zombie: a child that exited and was never reaped.
+    /// What the kernel's own process table says about `pid`: `Some` while it still has an entry
+    /// for it (alive or a zombie — a child that exited and was never reaped), `None` once it has
+    /// forgotten it.
     ///
-    /// Asked of `ps` rather than of `waitpid`, because `waitpid` is the call this crate has
-    /// already made by then — asking it again would be asking our own bookkeeping whether our own
-    /// bookkeeping is right. `ps` reads the kernel's table and knows nothing about us. It is on
-    /// every Unix, and a failure to run it is a failed test rather than a skipped one, because a
-    /// test that cannot see the process table cannot make the claim it exists to make.
+    /// Asked with `kill(pid, 0)` rather than with `waitpid`, because `waitpid` is the call this
+    /// crate has already made by then — asking it again would be asking our own bookkeeping
+    /// whether our own bookkeeping is right. The null signal reads the kernel's table and knows
+    /// nothing about us: `ESRCH` is the one answer a reaped child gives, and a zombie still
+    /// answers `0`. It is not asked of `ps`, which would be a second child built outside
+    /// `bt_platform::quiet_command` — the door `no_command_is_built_outside_the_quiet_door`
+    /// guards over every shipped source file, this test module included.
     #[cfg(unix)]
     fn process_table_state(pid: u32) -> Option<String> {
-        let listing = std::process::Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .expect("ps is on every Unix; without it this test can prove nothing");
-        let state = String::from_utf8_lossy(&listing.stdout).trim().to_owned();
-        (!state.is_empty()).then_some(state)
+        use nix::{errno::Errno, sys::signal::kill, unistd::Pid};
+        let pid =
+            Pid::from_raw(i32::try_from(pid).expect("a process id the kernel handed out fits"));
+        match kill(pid, None) {
+            Ok(()) => Some("present".to_owned()),
+            Err(Errno::ESRCH) => None,
+            // `EPERM` is a live process this user may not signal — still present.
+            Err(other) => Some(format!("present (kill answered {other})")),
+        }
     }
 
     /// Poll the process table until it has forgotten `pid`, and say what it still held if it
@@ -7068,7 +7074,7 @@ mod tests {
                 Some(state) => assert!(
                     Instant::now() < deadline,
                     "pid {pid} is still in the process table as {state:?}; \
-                     a `Z` there is a child this crate exited and never reaped"
+                     a child that exited and was never reaped stays there as a zombie"
                 ),
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -7213,12 +7219,11 @@ mod tests {
             .child_id()
             .expect("a spawned child has a process id");
         read_until(&dropped, "ready");
-        assert_eq!(
-            process_table_state(dropped_pid)
-                .as_deref()
-                .map(|state| state.chars().next().unwrap_or('?')),
-            Some('S'),
-            "the child has to be alive — not merely listed — before its ending is evidence"
+        // The child printed `ready` from inside `exec sleep 30`, so it is alive and not a
+        // zombie; the table is asked only to confirm the pid is the one still standing.
+        assert!(
+            process_table_state(dropped_pid).is_some(),
+            "the child has to be in the process table before its ending is evidence"
         );
         drop(dropped);
         wait_until_the_process_table_forgets(dropped_pid);

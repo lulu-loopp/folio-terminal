@@ -18,5 +18,11 @@ thiserror.workspace = true
 [dev-dependencies]
 bt-term = { path = "../bt-term" }
 
+# The Unix child tests ask the kernel whether a pid is still in its table with `kill(pid, 0)`;
+# `nix` is already in the tree through `portable-pty`, so this adds no package, and its
+# safe `kill` keeps this crate free of `unsafe`, which the workspace denies.
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.28", features = ["signal"] }
+
 [lints]
 workspace = true
