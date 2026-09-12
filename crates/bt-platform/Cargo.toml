@@ -69,6 +69,24 @@ name = "macos_sheet"
 path = "tests/macos_sheet.rs"
 harness = false
 
+# **The second target that owns the process's main thread** (M3-1), and it owns
+# something `macos_sheet` does not: a **winit event loop**. The door this ticket
+# adds hangs four selectors on the private delegate class winit registers, so a
+# proof of it that did not build a winit event loop would be a proof about a
+# class that does not exist. `harness = false` for the reason above, and for a
+# second one — the exercise is a script over a real application (a reopen, an
+# opened document, a quit) driven from inside its own run loop, which is a
+# `main` rather than a set of cases.
+#
+# It costs an ordinary run nothing for `macos_sheet`'s reason with one word
+# changed: the body runs only when this binary finds itself **inside a bundle**
+# the launcher assembled, so a plain `cargo test -p bt-platform` — where it runs
+# out of `target/debug/deps` — prints one line and exits, on every platform.
+[[test]]
+name = "macos_app_delegate"
+path = "tests/macos_app_delegate.rs"
+harness = false
+
 # **M2-2 adds no package either**, and it is worth saying because it looks like
 # it should: the process door (`src/handoff.rs`'s macOS arm) is `NSWorkspace`,
 # which is already on, and the trash (`src/macos_files.rs`) is `NSFileManager`,
@@ -261,6 +279,19 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSUserDefaults",
     "std",
 ] }
+
+# **The one dev-dependency this crate has ever had, and it is a test venue
+# rather than a dependency** (M3-1). `tests/macos_app_delegate.rs` proves that
+# four selectors added to `WinitApplicationDelegate` are delivered and that
+# every `ApplicationHandler` callback keeps arriving afterwards; there is no way
+# to state either claim without winit, because the class is winit's own and the
+# callbacks are winit's own. **It adds no package**: `=0.30.13` with the same
+# feature set is what the workspace already pins for `bt-app`, so `Cargo.lock`
+# and `THIRD-PARTY-NOTICES.md` gain nothing — and being a *dev*-dependency it is
+# not in the shipped graph at all, so §4.6's promise to a Linux server is
+# untouched.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+winit.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # One spelling of "a path as a `file:` URI", shared with every other place this
