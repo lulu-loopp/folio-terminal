@@ -27,8 +27,31 @@ publish.workspace = true
 # `objc2-foundation` features a class needs come with it (`NSWindow` asks for
 # `NSGeometry`, `NSDictionary` and the rest itself); the ones listed below are
 # the ones this crate's own code *names*.
+#
+# **M2-1 adds no package either**, and this one is worth saying out loud because
+# it names a crate that was not in the list before: `objc2-core-foundation`
+# 0.3.2 is **already in `Cargo.lock`** and already in `THIRD-PARTY-NOTICES.md` —
+# `objc2-foundation` pulls it in for `NSGeometry`, which is the same edge the
+# `objc2-core-foundation` *feature* of `objc2-app-kit` above came through. Naming
+# it directly moves nothing in the lock file; what it buys is the Core Foundation
+# types the FSEvents arm is written in (`src/macos_watch.rs`), with their retain
+# and release handled by `CFRetained` rather than by hand. FSEvents itself lives
+# in **CoreServices**, which has no binding in this family and no crate in the
+# lock file; its seven entry points are declared in that module, which is what
+# this crate is for.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    # The array of paths a stream is created over — one path, but the API takes
+    # an array — and the strings in it.
+    "CFArray",
+    "CFString",
+    # The watcher thread's own run loop: what the stream is scheduled on, the
+    # source the owner signals to stop it, and the default mode both are
+    # attached in.
+    "CFRunLoop",
+    "std",
+] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     # The appearance a window and the application wear — light or dark, read
     # for the theme and stated for the chrome (`set_window_dark_mode`,

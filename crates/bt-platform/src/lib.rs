@@ -9652,8 +9652,8 @@ mod portable_impl;
 
 #[cfg(not(windows))]
 pub use portable_impl::{
-    Compositor, CustomWindowFrame, DirChange, DirWatch, FilePickKind, FolderPicker, ImagePicker,
-    ImeSystemCaret, MathContextMenu, Notifier, ShellPickKind, Taskbar, adopt_parent_console,
+    Compositor, CustomWindowFrame, FilePickKind, FolderPicker, ImagePicker, ImeSystemCaret,
+    MathContextMenu, Notifier, ShellPickKind, Taskbar, adopt_parent_console,
     announce_explorer_menu_change, detach_console, directory_folds_case, flash_window,
     hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
     is_window_cloaked, leave_process, message_box, read_context_menu, recycle,
@@ -9661,6 +9661,15 @@ pub use portable_impl::{
     set_system_backdrop, silence_std_streams, system_backdrop_available, taskbar_is_auto_hidden,
     thread_mouse_capture, virtual_key_for_character, write_to_console,
 };
+
+/// **The watch doors, on a platform whose filesystem does not speak** (M2-1).
+///
+/// The two names [`macos_watch`] answers for a Mac and this module still refuses
+/// for anything else off Windows. Same shape as the window and screen split
+/// below and for the same reason — a door that gained a macOS arm and kept its
+/// portable one would be a duplicate definition there.
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub use portable_impl::{DirChange, DirWatch};
 
 /// **The window and the screen doors, on a platform that has neither** — the
 /// twenty-two names [`macos_impl`] answers for a Mac and this module still
@@ -9704,6 +9713,34 @@ pub use macos_impl::{
     take_keyboard_focus, top_level_window_at, virtual_screen_rect, wheel_scroll_amount,
     window_is_exposed, work_area_at,
 };
+
+/// **The directory watch, over FSEvents** (M2-1).
+///
+/// The macOS twin of `windows_impl`'s `DirWatch`, and the eighth unsafe boundary
+/// in this crate against an eighth thing: CoreServices, which is neither AppKit
+/// nor Core Foundation and has no binding in the `objc2` family, so the seven
+/// entry points it needs are declared in the module itself.
+///
+/// It is a module of its own rather than a section of [`macos_impl`] because the
+/// two have nothing in common but the platform: everything in `macos_impl` is
+/// AppKit and is the main thread's, and everything here is a stream on a thread
+/// this crate makes and owns. See the module's own header for why a run loop
+/// rather than a dispatch queue, and for what the shallow contract costs on a
+/// platform whose watcher cannot be told to stop at one level.
+#[cfg(target_os = "macos")]
+mod macos_watch;
+
+/// **The three watch contracts, on macOS** (M2-1).
+///
+/// A list of its own rather than two more names in the AppKit list above,
+/// because the split is a different one: the window and screen doors moved
+/// platform in M1-3 and left the portable module refusing for everything else,
+/// while these two names were `portable_impl`'s for **every** non-Windows target
+/// until this ticket and are now the portable module's for every non-Windows
+/// target *but* this one. `a_watch_door_has_one_arm_per_platform` walks the
+/// three files and holds the lists to each other.
+#[cfg(target_os = "macos")]
+pub use macos_watch::{DirChange, DirWatch};
 
 /// **The tail of a command-line argument, split at an ASCII offset, in the
 /// operating system's own encoding** (M1-1, for M1-10).
@@ -10935,6 +10972,280 @@ mod macos_window_backend_tests {
         assert!(
             MACOS.contains("addObserver_forKeyPath_options_context("),
             "nothing is observed, so nothing can arrive"
+        );
+    }
+}
+
+/// **The three watch contracts keep their contracts on every platform** (ticket
+/// M2-1).
+///
+/// Source pins, for `macos_window_backend_tests`' reason: the module they are
+/// about is the one this workstation does not compile, and what is being claimed
+/// is a fact about which door passes which depth — which is text, not a call. The
+/// behavioural twin runs on the Mac (`macos_watch::tests`), and the Windows arm's
+/// own twin is `dir_watch_tests` below.
+///
+/// The failure they exist to catch is the one the backend inventory warned about
+/// (`docs/plans/port/backend-inventory-2026-09-12.md` §6 ⑤): `WatchDepth` is not
+/// part of the public interface, so a port that "preserved the enum" and folded
+/// two of the three doors into one would compile everywhere and be wrong in
+/// exactly one place — a preview seat woken by a build it is not reading.
+#[cfg(test)]
+mod watch_contract_tests {
+    /// The three arms' own text.
+    const MACOS: &str = include_str!("macos_watch.rs");
+    const PORTABLE: &str = include_str!("portable_impl.rs");
+    const WHOLE_FILE: &str = include_str!("lib.rs");
+
+    /// **This file, up to where these pins begin.**
+    ///
+    /// Not a nicety. A pin that searched the whole of `lib.rs` for a line would
+    /// find that line **in its own assertion** and pass for a reason that has
+    /// nothing to do with the code — which is a green test that can never go
+    /// red, the one kind worse than no test at all. Everything these pins are
+    /// about is defined above them, so the file is cut here and the quotations
+    /// below name only real code.
+    fn above_the_pins() -> &'static str {
+        let at = WHOLE_FILE
+            .find("\nmod watch_contract_tests {")
+            .expect("these pins are in this file");
+        &WHOLE_FILE[..at]
+    }
+
+    /// The attributes between a doc comment and the item it is on.
+    fn attributes_above(source: &str, item: &str) -> String {
+        let at = source
+            .find(item)
+            .unwrap_or_else(|| panic!("`{item}` is defined in this arm"));
+        let before = &source[..at];
+        let doc_ends = before
+            .rfind("///")
+            .expect("every item here carries a doc comment");
+        let line_end = before[doc_ends..]
+            .find('\n')
+            .expect("a doc comment ends in a newline");
+        before[doc_ends + line_end..].to_owned()
+    }
+
+    /// The gate the portable arm's two watch names now stand behind — the same
+    /// one M1-3 put on the window and screen doors.
+    const NEITHER: &str = "#[cfg(not(any(windows, target_os = \"macos\")))]";
+
+    /// The three doors, and the depth each is required to pass.
+    const CONTRACTS: [(&str, &str); 3] = [
+        ("start", "WatchDepth::Tree"),
+        ("start_shallow", "WatchDepth::HereOnly"),
+        ("start_shallow_named", "WatchDepth::HereOnly"),
+    ];
+
+    /// The text of `impl DirWatch { … }` in one arm.
+    ///
+    /// The two arms are indented differently — the macOS one is a module of its
+    /// own and the Windows one lives inside `mod windows_impl` — so the block is
+    /// cut by the header it opens with and the line that closes it at that
+    /// header's own indentation. Crude on purpose: what is being read is which
+    /// depth a one-line body names, and a parser here would be a second thing to
+    /// be wrong.
+    fn text_between(source: &str, header: &str, closes_at: &str) -> String {
+        let at = source
+            .find(header)
+            .unwrap_or_else(|| panic!("this arm opens a `{}`", header.trim()));
+        let rest = &source[at + header.len()..];
+        let end = rest
+            .find(closes_at)
+            .expect("a block is closed at its own indentation");
+        rest[..end].to_owned()
+    }
+
+    /// The macOS arm's three doors.
+    fn macos_doors() -> String {
+        text_between(MACOS, "\nimpl DirWatch {\n", "\n}\n")
+    }
+
+    /// The Windows arm's three doors.
+    fn windows_doors() -> String {
+        text_between(above_the_pins(), "\n    impl DirWatch {\n", "\n    }\n")
+    }
+
+    /// The body of `pub fn NAME(`, which in all six cases is one expression
+    /// followed by a blank line.
+    fn body_of(doors: &str, name: &str) -> String {
+        let needle = format!("pub fn {name}(");
+        let at = doors
+            .find(&needle)
+            .unwrap_or_else(|| panic!("`{name}` is one of the three doors"));
+        let rest = &doors[at..];
+        let end = rest.find("\n\n").unwrap_or(rest.len());
+        rest[..end].to_owned()
+    }
+
+    /// RED — **three doors, and each passes the depth its contract is.**
+    ///
+    /// Asserted against both real arms at once, because "all three contracts" is
+    /// a claim about the pair: a macOS arm that passed `Tree` everywhere would be
+    /// a files column that woke for every object file a build wrote, and a
+    /// Windows arm that passed `HereOnly` to `start` would be a git page that
+    /// went quiet for every commit that touched a subdirectory.
+    ///
+    /// MUTATION: swap either depth in either file and this names the door.
+    #[test]
+    fn the_three_constructors_keep_their_contracts_on_every_platform() {
+        let arms = [("macOS", macos_doors()), ("Windows", windows_doors())];
+        for (door, depth) in CONTRACTS {
+            for (arm, source) in &arms {
+                let body = body_of(source, door);
+                assert!(
+                    body.contains(depth),
+                    "the {arm} arm's `{door}` does not pass `{depth}`, so that contract is not \
+                     the contract it says it is:\n{body}"
+                );
+            }
+        }
+        // And the difference between the two shallow doors, which is the whole
+        // of defect #186: one throws the names away at the door and one hands
+        // them to the caller.
+        for (arm, source) in &arms {
+            assert!(
+                body_of(source, "start_shallow").contains("move |_| wake()"),
+                "the {arm} arm's nameless shallow door now carries names into a callback that \
+                 does not take them"
+            );
+            assert!(
+                !body_of(source, "start_shallow_named").contains("move |_|"),
+                "the {arm} arm's named shallow door throws the names away, which is the whole of \
+                 what it exists for"
+            );
+        }
+    }
+
+    /// RED — **the depth is still not part of the interface, on either arm.**
+    ///
+    /// §6 ⑤ of the inventory, held as a rule rather than as a note: the contracts
+    /// are the doors. A `pub enum WatchDepth` in the macOS arm would be a fourth
+    /// way to ask for a watch and a second thing for a caller to get wrong.
+    #[test]
+    fn the_depth_is_not_a_door() {
+        assert!(
+            MACOS.contains("\nenum WatchDepth {"),
+            "the macOS arm names its depth"
+        );
+        assert!(
+            !MACOS.contains("pub enum WatchDepth"),
+            "the macOS arm exported its depth, which is a fourth contract nobody asked for"
+        );
+        // And the Windows arm's depth, which has been `pub` inside a private
+        // module since the day it was written, stays out of the crate root's own
+        // list — which is the sentence §6 ⑤ of the inventory is making.
+        let exported = text_between(above_the_pins(), "\npub use windows_impl::{\n", "\n};\n");
+        assert!(
+            !exported.contains("WatchDepth"),
+            "the crate root exports the depth, so the three doors are no longer the three \
+             contracts"
+        );
+    }
+
+    /// RED — **each watch door has exactly one arm per platform.**
+    ///
+    /// The twin of `a_window_or_screen_door_has_one_arm_per_platform`, and the
+    /// same two failures: a name that kept its portable arm and gained a macOS
+    /// one is a duplicate definition there, and one that lost its portable arm
+    /// without gaining a macOS one is a **Linux** build that stops compiling —
+    /// which §4.6 of the plan says must stay possible.
+    #[test]
+    fn a_watch_door_has_one_arm_per_platform() {
+        for name in ["\npub enum DirChange<'a> {", "\npub struct DirWatch {"] {
+            let attributes = attributes_above(PORTABLE, name);
+            assert!(
+                attributes.contains(NEITHER),
+                "`{name}` is still the portable arm's on macOS, where `macos_watch` also defines \
+                 it:\n{attributes}"
+            );
+            assert!(
+                MACOS.contains(name),
+                "`{name}` left the portable arm without arriving in the macOS one"
+            );
+        }
+        assert!(
+            PORTABLE.contains(&format!("{NEITHER}\nimpl DirWatch {{")),
+            "the portable arm's three refusals are gated with the type they belong to"
+        );
+        let root = above_the_pins();
+        assert!(
+            root.contains("#[cfg(all(not(windows), not(target_os = \"macos\")))]\npub use portable_impl::{DirChange, DirWatch};"),
+            "the portable re-export is the one a third platform still meets"
+        );
+        assert!(
+            root.contains(
+                "#[cfg(target_os = \"macos\")]\npub use macos_watch::{DirChange, DirWatch};"
+            ),
+            "and macOS takes its two names from the FSEvents arm"
+        );
+    }
+
+    /// RED — **the stream is torn down on the thread that scheduled it, and the
+    /// owner cannot reach it at all.**
+    ///
+    /// The hazard this arm is shaped around: `FSEventStreamInvalidate` from a
+    /// thread other than the scheduling one races the callback it is trying to
+    /// stop. The shape that makes it impossible is structural rather than
+    /// careful — `DirWatch` holds no stream pointer, so `drop` has nothing to
+    /// invalidate; it signals a run loop source and joins.
+    ///
+    /// MUTATION: put an `FSEventStreamStop` in `Drop::drop` and this names it.
+    #[test]
+    fn the_owner_never_touches_the_stream() {
+        let at = MACOS
+            .find("\nimpl Drop for DirWatch {")
+            .expect("the cancellation is a `Drop`");
+        let rest = &MACOS[at + 1..];
+        let end = rest
+            .find("\n}\n")
+            .expect("an impl is closed at column zero");
+        let body = &rest[..end];
+        for call in [
+            "FSEventStreamStop(",
+            "FSEventStreamInvalidate(",
+            "FSEventStreamRelease(",
+        ] {
+            assert!(
+                !body.contains(call),
+                "`drop` calls `{call}` from the owner's thread, which races the callback:\n{body}"
+            );
+        }
+        assert!(
+            body.contains("self.stopper.signal()") && body.contains("thread.join()"),
+            "`drop` is signal-and-join, or the cancellation is a flag somebody notices later:\n\
+             {body}"
+        );
+        let order = MACOS
+            .find("FSEventStreamStop(stream.as_ptr());\n        FSEventStreamInvalidate(stream.as_ptr());\n        FSEventStreamRelease(stream.as_ptr());");
+        assert!(
+            order.is_some(),
+            "the watcher thread's teardown is stop, then invalidate, then release — any other \
+             order leaves a callback running against a freed subscriber"
+        );
+    }
+
+    /// RED — **the four create flags the three contracts rest on.**
+    ///
+    /// `FileEvents` is what makes an event name an item rather than a directory,
+    /// and both shallow contracts are filters over that name; `UseCFTypes` is how
+    /// the names arrive; `NoDefer` is what keeps the first notification of a
+    /// burst as prompt as the Windows arm's; `WatchRoot` is the only way
+    /// `RootChanged` is ever set, which is the root-replacement answer.
+    #[test]
+    fn the_stream_is_created_with_the_flags_its_contracts_need() {
+        assert!(
+            MACOS.contains("USE_CF_TYPES | NO_DEFER | WATCH_ROOT | FILE_EVENTS"),
+            "a create flag went missing, and each of the four is a contract"
+        );
+        assert!(
+            MACOS.contains("const LATENCY_SECONDS: f64 = 0.300;"),
+            "the stream's latency is the portable debounce's own number and has moved"
+        );
+        assert!(
+            MACOS.contains("SINCE_NOW,"),
+            "the stream replays history, which every caller has already accounted for"
         );
     }
 }
