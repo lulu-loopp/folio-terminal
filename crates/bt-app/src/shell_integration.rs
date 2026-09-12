@@ -453,6 +453,11 @@ pub fn shell_command(
         environment,
         mine,
     ));
+    command.environment.extend(locale_declaration(
+        bt_platform::system_posix_locale(),
+        environment,
+        mine,
+    ));
     // **Across the boundary before the layering**, because what has to cross is
     // decided by the names this profile is about to set and `WSLENV` is itself
     // one of the names it could set — a reader who writes their own `WSLENV` row
@@ -803,6 +808,65 @@ fn hyperlink_declaration(
         && !answered
         && environment.var_os(FORCE_HYPERLINK).is_none())
     .then(|| (OsString::from(FORCE_HYPERLINK), OsString::from("1")))
+}
+
+/// The three variables that answer *which language and encoding a child works
+/// in*, in the order `setlocale` lets them overrule each other.
+///
+/// Any one of them being set means the question has been answered already —
+/// `LC_ALL` overrules everything, `LC_CTYPE` overrules `LANG` for the one
+/// category a terminal cares about, and `LANG` is the answer itself.
+const LOCALE_VARIABLES: [&str; 3] = ["LC_ALL", "LC_CTYPE", "LANG"];
+
+/// `LANG=<the system's locale>`, **for a pane that would otherwise have none**
+/// (M1-5, plan §8 Q8).
+///
+/// # Why this exists on one platform and not on the other
+///
+/// A Windows pane inherits a full environment from a logon session, and `LANG`
+/// is not part of how that platform tells a child its encoding, so
+/// [`bt_platform::system_posix_locale`] answers `None` there and this declares
+/// nothing — the Windows spawn is byte for byte what it was. An app launched from
+/// Finder inherits `launchd`'s environment instead, which sets `HOME`, `USER`,
+/// `SHELL`, `TMPDIR` and a bare `PATH` and **no `LC_*` at all**: a shell started
+/// in it runs in the `C` locale, where a UTF-8 filename lists as question marks.
+/// So the declaration is the platform's fact rather than a preference, and the
+/// value is the system's own setting rather than one this product picked — see
+/// that function for what it refuses to invent.
+///
+/// # The one rule
+///
+/// **Anything that has already answered wins, and nothing is layered on top of
+/// it.** A `LANG` this window inherited is the answer the launching environment
+/// gave; an `LC_ALL` or `LC_CTYPE` beside it outranks `LANG` anyway, so
+/// declaring one under either would put a variable in the record that changes
+/// nothing. A row of any of the three in the profile's own environment is the
+/// reader answering outright, which is [`hyperlink_declaration`]'s rule one
+/// function up and for its reason: the row would still win at the far end, and
+/// two contradictory entries in one list is a record that lies.
+///
+/// The reader's own file is the layer after this one and stays it: a `.zshrc`
+/// that exports `LANG` is read by the shell this declaration starts, so the
+/// person who set one keeps it.
+///
+/// **The Profiles page's ghost rows do not list this yet** — see
+/// [`declared_environment`], which answers from an integration alone and has no
+/// machine to ask. That page is drawn by a settings surface whose own port is a
+/// later ticket, and a ghost row that claimed a `LANG` for a window that had
+/// inherited one would be the page saying something the spawn does not.
+fn locale_declaration(
+    system: Option<&str>,
+    environment: &dyn ShellEnvironment,
+    mine: &[(String, String)],
+) -> Option<(OsString, OsString)> {
+    let locale = system?;
+    let answered = LOCALE_VARIABLES.iter().any(|name| {
+        environment
+            .var_os(name)
+            .is_some_and(|value| !value.is_empty())
+            || mine.iter().any(|(mine, _)| mine.eq_ignore_ascii_case(name))
+    });
+    (!answered).then(|| (OsString::from("LANG"), OsString::from(locale)))
 }
 
 /// **Whether a session of this profile is told this terminal renders links** —
@@ -1718,6 +1782,126 @@ mod tests {
             script_source_ps1().matches("$env:TERM_PROGRAM -eq").count(),
             1,
             "the script recognises this terminal in one place, not two"
+        );
+    }
+
+    /// PIN — **what a pane is told it is, is one answer for every platform**
+    /// (M1-5, plan §2 M1).
+    ///
+    /// `TERM`, `COLORTERM`, `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` are the
+    /// four declarations that tell a child what it is running inside, and the
+    /// port does not get to have an opinion about them: a zsh on a Mac must read
+    /// `TERM=xterm-256color` and `TERM_PROGRAM=Folio` exactly as a PowerShell on
+    /// Windows does, because every program that consults them — `less`, `vim`,
+    /// `git`, every CLI that gates hyperlinks — is the same program on both.
+    ///
+    /// They already were platform-free, and that is what this pins: they live in
+    /// one function of `bt_pty::PtyCommand` with no `cfg` in it, and neither this
+    /// module nor the profile table adds a fifth answer beside them. What *is*
+    /// platform-specific is one layer below and must be: matching an existing
+    /// name is case-insensitive on Windows and exact off it, which is a fact
+    /// about environment blocks rather than about what is declared.
+    ///
+    /// RED GATE: give the macOS spawn its own `TERM` — the shape this port would
+    /// take if somebody "fixed" a terminfo complaint at the platform arm — and
+    /// the second half fails naming the variable.
+    #[test]
+    fn the_term_variables_a_pane_is_given_are_the_same_on_every_platform() {
+        const DECLARED: [&str; 4] = ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION"];
+        // One function, in the crate that spawns, naming all four and no platform.
+        let region = crate::source_pin::code_of(crate::source_pin::source_region(
+            include_str!("../../bt-pty/src/lib.rs"),
+            "fn resolved_environment(&self)",
+        ));
+        for name in DECLARED {
+            assert!(
+                region.contains(&format!("\"{name}\"")),
+                "`resolved_environment` no longer declares {name}"
+            );
+        }
+        assert!(
+            !region.contains("cfg"),
+            "the four declarations took a platform arm: {region}"
+        );
+        assert_eq!(bt_pty::TERM_PROGRAM, "Folio");
+        // And this module leaves them alone: the floor profile is a row every
+        // platform has, and what it is handed here names none of the four.
+        let command = shell_command(
+            &row(profiles::fallback_profile_id()),
+            &[],
+            Scripts::default(),
+            &bare(),
+        );
+        for (name, _) in &command.environment {
+            for declared in DECLARED {
+                assert!(
+                    !environment_name_eq(name, OsStr::new(declared)),
+                    "the spawn path declared {declared} a second time, beside `bt-pty`'s"
+                );
+            }
+        }
+    }
+
+    /// PIN — **`LANG` is declared for a pane that would otherwise have none, and
+    /// only then** (M1-5, plan §8 Q8).
+    ///
+    /// A Finder-launched app inherits `launchd`'s environment, which sets no
+    /// `LC_*`, and a shell started in it runs in the `C` locale where a UTF-8
+    /// filename lists as question marks. Off macOS
+    /// `bt_platform::system_posix_locale` answers `None` and this declares
+    /// nothing at all, which is what keeps the Windows spawn byte for byte what
+    /// it was.
+    ///
+    /// RED GATE: declare it unconditionally and the second case puts a `LANG`
+    /// under an `LC_ALL` that outranks it — a variable in the record that
+    /// changes nothing — while the third overrules a reader who answered the
+    /// question themselves.
+    #[test]
+    fn a_pane_with_no_locale_at_all_is_told_the_systems_one() {
+        let none: &[(String, String)] = &[];
+        assert_eq!(
+            locale_declaration(Some("ja_JP.UTF-8"), &bare(), none),
+            Some((OsString::from("LANG"), OsString::from("ja_JP.UTF-8"))),
+            "nothing had answered, so the system's own setting does"
+        );
+        assert_eq!(
+            locale_declaration(None, &bare(), none),
+            None,
+            "a platform with no such setting declares nothing rather than a guess"
+        );
+        for answered in ["LANG", "LC_ALL", "LC_CTYPE"] {
+            assert_eq!(
+                locale_declaration(
+                    Some("ja_JP.UTF-8"),
+                    &Env(vec![(
+                        match answered {
+                            "LANG" => "LANG",
+                            "LC_ALL" => "LC_ALL",
+                            _ => "LC_CTYPE",
+                        },
+                        "de_DE.UTF-8"
+                    )]),
+                    none
+                ),
+                None,
+                "{answered} had answered the question already"
+            );
+        }
+        assert_eq!(
+            locale_declaration(
+                Some("ja_JP.UTF-8"),
+                &bare(),
+                &[("LANG".to_owned(), "de_DE.UTF-8".to_owned())]
+            ),
+            None,
+            "and a row of the reader's own is them answering outright"
+        );
+        // An inherited name with an empty value is the platform taking the
+        // variable away rather than setting it — see `layer_profile_environment`
+        // on what an empty value does to a child's block.
+        assert_eq!(
+            locale_declaration(Some("ja_JP.UTF-8"), &Env(vec![("LANG", "")]), none),
+            Some((OsString::from("LANG"), OsString::from("ja_JP.UTF-8")))
         );
     }
 
