@@ -3129,6 +3129,20 @@ pub mod attention_pipe;
 #[path = "attention_pipe_portable.rs"]
 pub mod attention_pipe;
 
+/// **Who is at the other end of a connected Unix socket** — the one question
+/// both Unix doors in this crate ask, in the one place the platforms spell it
+/// differently (T-CI-PORTABLE).
+///
+/// The doorbell above and the launch door below each refuse a peer whose uid is
+/// not this process's own, and the launch door asks one thing more, the peer's
+/// process id. `getpeereid` answers the first on Darwin and **does not exist on
+/// Linux**, where `getsockopt(SO_PEERCRED)` answers both at once; a copy of that
+/// difference in each door is two places for one platform fact to be wrong in,
+/// which is what this module is instead of.
+#[cfg(unix)]
+#[path = "peer_unix.rs"]
+pub(crate) mod peer;
+
 /// **The second launch's door into the first** — one well-known named pipe per data directory
 /// (`docs/DESIGN.md` §7.59).
 ///
@@ -17271,6 +17285,11 @@ mod macos_attention_signature_tests {
     /// doors rather than between two platforms.
     const LAUNCH_UNIX: &str = include_str!("launch_pipe_unix.rs");
 
+    /// **The module both Unix doors take their peer's credentials from**
+    /// (T-CI-PORTABLE) — the one place the kernel is asked who is at the other
+    /// end, and therefore the one place `getpeereid` is written.
+    const PEER: &str = include_str!("peer_unix.rs");
+
     /// The fields of a struct, with its documentation and its blank lines taken
     /// out — what a caller can actually name.
     fn fields(source: &str, item: &str) -> Vec<String> {
@@ -17439,19 +17458,36 @@ mod macos_attention_signature_tests {
     /// door next to it would refuse every real caller this one has — which is a
     /// failure that looks exactly like "hooks are not installed".
     ///
-    /// MUTATION: paste `vet_executable` into the attention arm and the second
-    /// assertion names it.
+    /// **The call itself moved and the claim did not** (T-CI-PORTABLE):
+    /// `getpeereid` is Darwin's and does not exist on Linux, so both doors now
+    /// take their peer off `crate::peer`, which has an arm for each. What the
+    /// doorbell asks that module for is still the *narrow* door — the uid alone
+    /// — because a door that asked the kernel for a process id it will never
+    /// look anything up about is a door whose next reader has every reason to
+    /// start using it.
+    ///
+    /// MUTATION: paste `vet_executable` into the attention arm, or point it at
+    /// `crate::peer::credentials`, and the last assertion names it.
     #[test]
     fn the_doorbell_asks_who_you_are_and_not_what_you_are_running() {
         assert!(
-            UNIX_ARM.contains("libc::getpeereid("),
+            UNIX_ARM.contains("crate::peer::uid(&stream)"),
             "the peer's user is asked of the kernel, not read out of a frame"
+        );
+        assert!(
+            PEER.contains("libc::getpeereid(") && PEER.contains("libc::SO_PEERCRED"),
+            "the shared door no longer asks both kernels for the user off the socket"
         );
         assert!(
             LAUNCH_UNIX.contains("fn vet_executable("),
             "the launch door still checks the image it is talking to"
         );
-        for absent in ["proc_pidpath", "current_exe", "LOCAL_PEERPID"] {
+        for absent in [
+            "proc_pidpath",
+            "current_exe",
+            "LOCAL_PEERPID",
+            "crate::peer::credentials",
+        ] {
             assert!(
                 !UNIX_ARM.contains(absent),
                 "the doorbell looked up its peer's image (`{absent}`), which would refuse \
