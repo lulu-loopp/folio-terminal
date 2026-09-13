@@ -67,8 +67,9 @@ use bt_render::{
     FOCUS_MINI_FILES_INDENT_LOGICAL_PX, FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX,
     FOCUS_MINI_GAP_LOGICAL_PX, FOCUS_MINI_PADDING_LOGICAL_PX, FOCUS_MINI_RADIUS_LOGICAL_PX,
     FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX,
-    FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, FOCUS_MINI_SEAM_LOGICAL_PX, OverlayQuad,
-    PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
+    FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, FOCUS_MINI_SEAM_LOGICAL_PX,
+    MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX, OverlayQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
+    PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
     PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
     RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX, RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX,
     RAIL_LABEL_PADDING_TOP_LOGICAL_PX, RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM,
@@ -87,7 +88,8 @@ use bt_render::{
     SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
     SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX, SeatViewport, WINDOW_CAPTION_BUTTON_LOGICAL_PX,
     WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX, WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX,
-    WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX, WINDOW_NEW_TAB_BOX_LOGICAL_PX,
+    WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX, WINDOW_CAPTION_GEAR_MARGIN_LOGICAL_PX,
+    WINDOW_NEW_TAB_BOX_LOGICAL_PX,
     WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX, WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX,
     WINDOW_NEW_TAB_GLYPH_LOGICAL_PX, WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX,
     WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX, WINDOW_NEW_TAB_RADIUS_LOGICAL_PX,
@@ -6488,8 +6490,22 @@ pub fn window_caption_boxes(
         // are: it is shorter than the bar and rides its middle. Read off the
         // band rather than off a constant, so the gear stands on the axis of
         // whatever is beside it on a window whose header is not Folio's own 40.
-        let side = (WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX * scale).round();
-        let top = ((title - side) / 2.0).round().max(0.0);
+        //
+        // **The margin is what is rounded, and the side follows from it**
+        // (T-MAC-GEAR-HOVER). The ruling states the box three ways at once — 34
+        // square, three points of margin, centre 20 — and on Folio's 40 those are
+        // the same statement. In *device* pixels they stop being the same as soon
+        // as the scale is fractional: `34 × 1.5` is 51, an odd side on an even
+        // 60-pixel band, and a box that cannot be centred on a whole pixel is a
+        // box whose centre is half a pixel off the mirror §13.48 ② derived. So
+        // the margin is taken first and the side is what is left of the band,
+        // which puts the ink's centre exactly on the ruling's at every scale and
+        // costs at most one physical pixel of the side.
+        let margin = ((title - WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX * scale) / 2.0)
+            .round()
+            .max(0.0);
+        let side = (title - 2.0 * margin).max(1.0);
+        let top = margin;
         // The ruling is about a *centre*, so the run is hung off one: the last
         // box's centre stands `WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX` in from the
         // trailing edge and the boxes abut leftward from there. On this window
@@ -11088,15 +11104,25 @@ fn window_chrome(
             // **The wash is the shape of the box, and the box says which shape
             // that is.** A caption box as tall as the bar is a slot in a run and
             // wears the run's own square wash — abutting slots are what makes a
-            // run read as a run. A box that is inset in the bar is a control
-            // standing in it, and every control inset in this bar wears the same
-            // rounded pill: the panel toggle's own note says why, and the `+` is
-            // the other one. So this is read off the rectangle rather than asked
-            // of the window a second time.
+            // run read as a run. A box that is inset in the bar is the one
+            // control that stands alone in the window's own corner, and **it
+            // takes the corner's curvature**: a rounded square at
+            // [`MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX`], the 12.1 points
+            // R-MAC-CORNERS measured off the shipping window (owner ruling
+            // 2026-09-13, T-MAC-GEAR-HOVER, §13.48 ⑩). §13.48 ③ had given it the
+            // strip's own 6-point pill on the argument that every control inset
+            // in this bar wears one, and named that as a judgement call for one
+            // line to overrule; the line overruled it, because the argument for
+            // the strip's pill is about a row of controls and this control is
+            // not in a row — it is in a corner, and Folio has no circular
+            // controls to make it a circle instead. Which of the two this is is
+            // still read off the rectangle rather than asked of the window a
+            // second time, and the rectangle is the very one the press is
+            // answered on, so the wash cannot be wider than what it lights up.
             if rect[3] - rect[1] < title {
                 sprites.push(ChromeSprite::new(
                     ChromeMark::ControlPill {
-                        radius_px: (WINDOW_NEW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0)
+                        radius_px: (MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX * scale).round().max(1.0)
                             as u32,
                     },
                     pixel_snapped(rect),
@@ -27516,15 +27542,24 @@ mod tests {",
     ///
     /// The gear is asserted beside the height because the two are one box. It is
     /// no longer a slot in a run — there is no run on this window — but a square
-    /// centred 16 points in from the trailing edge, mirroring the centre macOS
-    /// gives the close button at the leading one, and on the header's own centre
-    /// line. It stays inside the 46 the strip goes on reserving, which is what
-    /// keeps the drag band and the strip's own right edge where they were.
+    /// centred 20 points in from the trailing edge, mirroring the centre the red
+    /// light stands on at the leading one, and on the header's own centre line.
+    /// It stays inside the 46 the strip goes on reserving, which is what keeps
+    /// the drag band and the strip's own right edge where they were.
+    ///
+    /// **The square is 34 since T-MAC-GEAR-HOVER** (owner ruling 2026-09-13,
+    /// §13.48 ⑩), which widened the box so the hover wash could take the
+    /// window's own corner radius. The ruling's own arithmetic is asserted here
+    /// rather than assumed, because it is what makes the widening safe: the box
+    /// is the 40-point band less three points of margin at the top, at the foot
+    /// and at the window's trailing edge, and `34 / 2 + 3 = 20` — so §13.48 ②'s
+    /// mirror is exactly where it was and nothing about the ink moves.
     ///
     /// MUTATION: give a vertical layout the platform's 32 and the first
     /// assertion names it; hang the gear off the run's left edge again and its
     /// centre goes red at every scale; centre it on the window instead of on the
-    /// band and the next one does.
+    /// band and the next one does; round the box's side instead of its margin
+    /// and the 1.5x pass loses the centre by half a pixel.
     #[test]
     fn every_layout_wears_folios_own_header_and_the_gear_mirrors_the_leading_light() {
         let width = 1600.0_f32;
@@ -27562,11 +27597,36 @@ mod tests {",
                     folios / 2.0,
                     "and stands on the header's own centre line ({scale}x)"
                 );
-                let side = (WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX * scale).round();
+                // **The ruling's arithmetic, spelled out** (§13.48 ⑩): a margin
+                // of three points at the top, at the foot and at the trailing
+                // edge, leaving a 34 square — and `34 / 2 + 3 = 20`, which is the
+                // mirror the two assertions above just checked. The margin is
+                // the rounded quantity, so the side is what the band has left
+                // after it and the centre is exact at every scale; at 1.5x that
+                // is 50 physical pixels rather than the 51 a rounded side would
+                // have given, and 51 on a 60-pixel band cannot be centred.
+                let margin = ((folios - WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX * scale) / 2.0).round();
+                assert_eq!(
+                    margin,
+                    (WINDOW_CAPTION_GEAR_MARGIN_LOGICAL_PX * scale).round(),
+                    "the box is the band less three points, {what} ({scale}x)"
+                );
+                let side = folios - 2.0 * margin;
                 assert_eq!(
                     (gear[2] - gear[0], gear[3] - gear[1]),
                     (side, side),
                     "in a square, not a caption slot ({scale}x)"
+                );
+                assert_eq!(
+                    (gear[1], width - gear[2], folios - gear[3]),
+                    (margin, margin, margin),
+                    "and the same margin stands above it, behind it and below it \
+                     ({what}, {scale}x)"
+                );
+                assert_eq!(
+                    side / 2.0 + margin,
+                    WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX * scale,
+                    "which is the mirror said as `34 / 2 + 3 = 20` ({scale}x)"
                 );
                 assert!(
                     gear[0] >= width - WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale && gear[2] <= width,
@@ -27590,13 +27650,221 @@ mod tests {",
         }
     }
 
+    /// RED — **the gear in the corner wears the corner's own round, on exactly
+    /// the rectangle that answers the press** (owner ruling 2026-09-13,
+    /// T-MAC-GEAR-HOVER, §13.48 ⑩).
+    ///
+    /// §13.48 ③ left the shape of this wash as a judgement call — a
+    /// [`ChromeMark::ControlPill`] at the strip's own 6, on the argument that
+    /// every control inset in this bar wears one — and said in as many words
+    /// that one line from the owner would overrule it. The line came out of a
+    /// four-way mock, and it says: a rounded square at the **window's** corner
+    /// radius, because Folio has no circular controls of its own and a control
+    /// standing in the corner should share the corner's curvature. Both
+    /// rejected shapes are worth stating in a test, because each is a thing the
+    /// drawing could quietly become: a **circle** (`radius = side / 2`), and the
+    /// **12 on the old 28 box**, which is not concentric with the arc behind it.
+    ///
+    /// Three claims, and the third is the one that makes a hover honest:
+    ///
+    /// * the wash is a rounded square at
+    ///   [`MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX`] — 12.1 measured on the shipping
+    ///   window (R-MAC-CORNERS), drawn at 12;
+    /// * it is not a circle and not a round on a 28 box;
+    /// * **it is the hit target**, the same rectangle
+    ///   [`window_caption_boxes`] answers the press on, snapped to whole pixels
+    ///   for the fill. A wash wider than what can be clicked is a button that
+    ///   lights up where it does not work, which is precisely the failure the
+    ///   paint's own note says walking the boxes exists to prevent.
+    ///
+    /// MUTATION: leave the radius at the strip's 6 and the first assertion names
+    /// it; make it `side / 2` and the circle guard does; draw the wash on the
+    /// band's full height, or on the 28 the box used to be, and the rectangle
+    /// assertion goes red at every scale.
+    #[test]
+    fn the_corner_gear_washes_a_rounded_square_at_the_windows_own_radius() {
+        let palette = chrome_palette();
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let mac = mac_bar(scale);
+            let width = 960.0 * scale;
+            let titles = strip_titles(2);
+            let gear = window_caption_boxes(width, scale, mac, false)[0].1;
+            let radius = (MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
+
+            let (rest_quads, _, rest_sprites) = strip_chrome_on(mac, scale, &titles, 0, None);
+            assert!(
+                !rest_sprites
+                    .iter()
+                    .any(|sprite| sprite.rect == pixel_snapped(gear)),
+                "scale {scale}: the gear has no ground at all until the pointer arrives"
+            );
+            assert!(
+                !rest_quads
+                    .iter()
+                    .any(|quad| quad.rect == gear || quad.rect == pixel_snapped(gear)),
+                "scale {scale}: and no rectangle stands in for one"
+            );
+
+            let (hover_quads, _, hover_sprites) =
+                strip_chrome_on(mac, scale, &titles, 0, Some(ChromeTarget::Settings));
+            let grounds = hover_sprites
+                .iter()
+                .filter(|sprite| sprite.color == palette.caption_hover)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                grounds.len(),
+                1,
+                "scale {scale}: one control is hovered, so one control has a ground"
+            );
+            assert_eq!(
+                grounds[0].mark,
+                ChromeMark::ControlPill { radius_px: radius },
+                "scale {scale}: the wash takes the window's own corner radius"
+            );
+            assert_eq!(
+                grounds[0].rect,
+                pixel_snapped(gear),
+                "scale {scale}: and it is the hit target, not a shape beside it"
+            );
+            // The two rejected shapes, each named rather than merely excluded by
+            // the number above: a circle is `side / 2`, and the old 28 box would
+            // have left four points of flat on each side of a 12 round.
+            let side = gear[3] - gear[1];
+            assert!(
+                radius as f32 * 2.0 < side,
+                "scale {scale}: a circle was the shape the owner turned down"
+            );
+            assert_eq!(
+                side,
+                (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round()
+                    - 2.0 * (WINDOW_CAPTION_GEAR_MARGIN_LOGICAL_PX * scale).round(),
+                "scale {scale}: on the 34 the round is concentric with the corner; \
+                 on the old 28 it would have left flats"
+            );
+            assert!(
+                !hover_quads
+                    .iter()
+                    .any(|quad| quad.rect == gear || quad.rect == pixel_snapped(gear)),
+                "scale {scale}: a rectangle is what this ruling deletes from the corner"
+            );
+        }
+    }
+
+    /// PIN — **the window's corner radius and the strip's pill radius are two
+    /// numbers and may not converge** (T-MAC-GEAR-HOVER).
+    ///
+    /// The gear took the window's 12 because it stands in the window's corner.
+    /// Everything else inset in this bar — the `+`, the `˅`, the panel toggle —
+    /// stands in the *strip*, and keeps [`WINDOW_NEW_TAB_RADIUS_LOGICAL_PX`]'s
+    /// 6. The failure this pins is the tidy-up that notices two radii doing the
+    /// same job and makes them one: they are not the same job, and the day macOS
+    /// changes its corner exactly one of them moves.
+    ///
+    /// MUTATION: set either constant to the other's value and the first
+    /// assertion names it; give the `+` the corner's radius and the pills below
+    /// do.
+    #[test]
+    fn the_windows_corner_and_the_strips_pill_are_two_radii() {
+        assert_ne!(
+            MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX, WINDOW_NEW_TAB_RADIUS_LOGICAL_PX,
+            "the corner's round and the strip's round answer different questions"
+        );
+        let palette = chrome_palette();
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let mac = mac_bar(scale);
+            let strip_radius = (WINDOW_NEW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
+            let titles = strip_titles(2);
+            let geometry =
+                tab_strip_geometry(960.0 * scale, scale, mac, &resting(2), 0, 0.0);
+            for (what, target, rect) in [
+                ("the `+`", ChromeTarget::NewTab, geometry.new_tab),
+                ("the `˅`", ChromeTarget::NewTabMenu, geometry.new_tab_menu),
+            ] {
+                let (_, _, sprites) = strip_chrome_on(mac, scale, &titles, 0, Some(target));
+                let pill = sprites
+                    .iter()
+                    .find(|sprite| sprite.rect == pixel_snapped(rect))
+                    .unwrap_or_else(|| panic!("scale {scale}: {what} must fill its box on hover"));
+                assert_eq!(
+                    pill.mark,
+                    ChromeMark::ControlPill {
+                        radius_px: strip_radius
+                    },
+                    "scale {scale}: {what} keeps the strip's own 6 on the window the \
+                     gear took the corner's 12 on"
+                );
+                assert_eq!(pill.color, palette.caption_hover);
+            }
+        }
+    }
+
+    /// PIN — **Windows is the window it was: a 46x40 caption slot and a square
+    /// wash** (T-MAC-GEAR-HOVER).
+    ///
+    /// The ruling is about the control that stands in a *corner of macOS's own
+    /// shape*. On the window whose whole bar is Folio's the gear is the first
+    /// slot of a four-button run under Windows 11's own corner, it is as tall as
+    /// the bar, and its hover fill is the run's square — because abutting slots
+    /// are what makes a run read as a run, and a rounded wash inside one would
+    /// leave four gaps of bar between the four buttons.
+    ///
+    /// The platform decision is the existing capability read and no `cfg`: this
+    /// asks the same functions with the other `PlatformChrome` and gets the
+    /// other answer.
+    ///
+    /// MUTATION: widen the Windows gear to the mac box, or give its wash any
+    /// radius at all, and this names it at every scale.
+    #[test]
+    fn the_windows_gear_keeps_its_caption_slot_and_its_square_wash() {
+        let palette = chrome_palette();
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let width = 960.0 * scale;
+            let band = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+            let run = window_caption_boxes(width, scale, FOLIO_BAR, false);
+            assert_eq!(run.len(), 4, "scale {scale}: four buttons, as ever");
+            let gear = run[0].1;
+            assert_eq!(run[0].0, ChromeTarget::Settings);
+            assert_eq!(
+                (gear[1], gear[3]),
+                (0.0, band),
+                "scale {scale}: the slot is as tall as the bar"
+            );
+            assert_eq!(
+                gear[2] - gear[0],
+                WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale,
+                "scale {scale}: and 46 wide"
+            );
+
+            let titles = strip_titles(2);
+            let (quads, _, sprites) =
+                strip_chrome(scale, &titles, 0, Some(ChromeTarget::Settings), false);
+            assert!(
+                quads
+                    .iter()
+                    .any(|quad| quad.rect == gear && quad.color == palette.caption_hover),
+                "scale {scale}: the wash is the slot itself, with square corners"
+            );
+            assert!(
+                !sprites.iter().any(|sprite| matches!(
+                    sprite.mark,
+                    ChromeMark::ControlPill { .. }
+                ) && sprite.rect == pixel_snapped(gear)),
+                "scale {scale}: nothing rounds the Windows caption slot"
+            );
+        }
+    }
+
     /// RED — **on the header, every pixel that is not one of Folio's own boxes
     /// is a window-drag handle** (owner ruling 2026-09-13, §13.11 ⑥).
     ///
-    /// The ruling was made on the band §13.48 ③ left behind: the gear stands in
-    /// a 28-point square inside the 46 the strip still reserves, so sixteen
-    /// points of bar in front of it and six behind it answered nothing at all —
-    /// neither the gear's, nor the window's. §13.19 ⑤ had already named the same
+    /// The ruling was made on the band §13.48 ③ left behind: the gear stood in a
+    /// 28-point square inside the 46 the strip still reserves, so sixteen points
+    /// of bar in front of it and six behind it answered nothing at all —
+    /// neither the gear's, nor the window's. (§13.48 ⑩ has since widened that
+    /// square to 34, which narrows the same band without changing a word of
+    /// this: the boxes are asked of the functions that lay them out, so the
+    /// handle is whatever the complement of them happens to be.) §13.19 ⑤ had
+    /// already named the same
     /// gap on the other axis (the five points of strip above and below a pill)
     /// and left it for a ruling rather than a patch. This is that ruling, and it
     /// is one sentence for both axes and both hosts.
@@ -27972,9 +28240,10 @@ mod tests {",
                     "nor the gear's own box"
                 );
                 // **And the band the gear's box does not fill is the window's**
-                // (owner ruling 2026-09-13, §13.11 ⑥): the 28-point square
-                // stands inside the 46 the strip reserves, and both the strip of
-                // bar in front of it and the points behind it drag.
+                // (owner ruling 2026-09-13, §13.11 ⑥): the square stands inside
+                // the 46 the strip reserves — 34 of it since §13.48 ⑩, which is
+                // why neither pixel below is named as a number — and both the
+                // strip of bar in front of it and the points behind it drag.
                 assert!(
                     handle(gear[0] - 1.0, header / 2.0),
                     "the band in front of the gear's box ({scale}x)"
