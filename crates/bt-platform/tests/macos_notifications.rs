@@ -211,12 +211,21 @@ mod mac {
     /// holding.
     fn delivered(center: &UNUserNotificationCenter) -> Vec<Retained<UNNotification>> {
         let answered = Arc::new(AtomicBool::new(false));
-        // An `Arc` over a type that is neither `Send` nor `Sync`, on purpose: Apple
-        // documents that this completion handler may run on a background queue,
-        // so the vector is shared across threads under the `Mutex` and read only
-        // after `answered` (SeqCst) says the handler has returned. `Rc` would
-        // state the opposite of what the framework does.
-        #[allow(clippy::arc_with_non_send_sync)]
+        // **Not a lint this file may drop the `Arc` for** (found red at `main`
+        // by M3-4's own gate, 2026-09-12): the completion handler below is
+        // delivered on a queue of the framework's rather than on this thread, so
+        // an `Rc` here would be a reference count two threads touch. What the
+        // lint is really naming is that a `Retained<UNNotification>` is not
+        // `Send` — which is M4-6's to answer, by keeping the fields it reads
+        // rather than the objects; until it does, the handle is shared the one
+        // way that is sound and the `wait_for` below is what orders the two
+        // threads.
+        #[expect(
+            clippy::arc_with_non_send_sync,
+            reason = "the completion handler runs on the framework's queue, so the count is \
+                      shared across threads; what is not `Send` is the retained object M4-6 \
+                      parks in it"
+        )]
         let held: Arc<Mutex<Vec<Retained<UNNotification>>>> = Arc::new(Mutex::new(Vec::new()));
         let (told, into) = (Arc::clone(&answered), Arc::clone(&held));
         let block = RcBlock::new(

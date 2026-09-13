@@ -254,6 +254,31 @@ impl Quit {
         matches!(self.phase, Phase::Waiting { .. } | Phase::Leaving)
     }
 
+    /// **Whether the document has already landed, so that nothing this run does
+    /// from here on is a change a reader made** (M3-4, `docs/DESIGN.md` §13.34).
+    ///
+    /// [`QuitStep::Photograph`] takes every window's picture and
+    /// [`QuitStep::Write`] puts it on the disk; everything after that is the
+    /// application taking itself apart. A pane whose child has gone closes its
+    /// tab, a tab that was the last one closes its window, and each of those is
+    /// an ordinary edit that would ordinarily be recorded — so without this
+    /// question the teardown writes a *second* document over the one the
+    /// transaction just wrote, describing the windows as they are on the way out
+    /// rather than as the reader left them. Measured on the Mac 2026-09-12: a
+    /// window standing with three tabs was written with three, and the file on
+    /// the disk after the quit held none of them.
+    ///
+    /// It is `true` from [`Phase::Retiring`] on and never for
+    /// [`Phase::Abandoned`]: a quit that could not write is a quit the
+    /// application carries on past, and its session has everything still to say.
+    #[must_use]
+    pub fn document_is_written(&self) -> bool {
+        matches!(
+            self.phase,
+            Phase::Retiring | Phase::Waiting { .. } | Phase::Leaving
+        )
+    }
+
     /// What the card names.
     #[must_use]
     pub fn names(&self) -> &[String] {
@@ -567,5 +592,50 @@ mod tests {
             "the save is already running"
         );
         assert!(!quit.set_hover(Some(QuitTarget::Cancel)));
+    }
+
+    /// RED (M3-4) — **once the document has landed, the teardown has nothing to
+    /// say about it.**
+    ///
+    /// Measured on the Mac 2026-09-12 and it is why this question exists: a
+    /// window standing with three tabs was photographed with three, written with
+    /// three, and the file on the disk after the quit held **one** — the
+    /// unanswered restore row folded back, and not one live tab. What overwrote
+    /// it was the teardown itself: `Retire` tells every child to go, the loop is
+    /// still turning while it waits for the pages, each pane whose child has
+    /// gone closes its tab, and every one of those closes is an ordinary edit
+    /// that records the document again.
+    ///
+    /// Two claims, and the second is the one that keeps the application usable:
+    /// the answer is `false` for every phase up to and including the write, and
+    /// `false` again for a quit that **could not** write — that quit is
+    /// abandoned, the application carries on, and its session still has
+    /// everything to say.
+    ///
+    /// MUTATION: make it `true` from `Phase::Writing` and the document is frozen
+    /// one step early, before the step that assembles it has run; make it `true`
+    /// for `Abandoned` and an application that failed to quit stops recording
+    /// anything for the rest of the run.
+    #[test]
+    fn once_the_document_has_landed_the_teardown_cannot_write_over_it() {
+        let mut quit = Quit::begin(names());
+        assert!(!quit.document_is_written(), "with the card up");
+        assert_eq!(quit.answer(QuitAnswer::Discard), QuitStep::Discard);
+        assert!(!quit.document_is_written(), "while the changes are dropped");
+        assert_eq!(quit.discarded(), QuitStep::Photograph);
+        assert!(!quit.document_is_written(), "while the pictures are taken");
+        assert_eq!(quit.photographed(), QuitStep::Write);
+        assert!(!quit.document_is_written(), "while it is being written");
+        assert_eq!(quit.written(true), QuitStep::Retire);
+        assert!(quit.document_is_written(), "the moment it has landed");
+        assert_eq!(quit.retired(Instant::now()), QuitStep::WaitForPages);
+        assert!(quit.document_is_written(), "while the pages go");
+        let mut abandoned = Quit::begin(Vec::new());
+        assert_eq!(abandoned.photographed(), QuitStep::Write);
+        assert_eq!(abandoned.written(false), QuitStep::Abandon);
+        assert!(
+            !abandoned.document_is_written(),
+            "a quit that could not write leaves an application with everything still to say"
+        );
     }
 }

@@ -27,6 +27,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- **A quit keeps every tab a window was holding.** Quitting with a page still
+  closing down could write the session out again on the way out, with the tabs
+  that had already gone missing from it; the document a quit writes is the one
+  the next launch reads, so it is no longer written over by the teardown.
 - **The preview's bottom line appears only when it has something to say.** Every
   preview — a document, a Markdown page, a picture, a PDF, a recording, in a pane
   or in a window you have torn off — used to keep a strip along its bottom edge
