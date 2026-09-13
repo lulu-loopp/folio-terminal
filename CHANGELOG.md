@@ -24,6 +24,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **On a Mac, tabs now take the whole width of the title bar.** The tab strip was setting aside room for four window buttons on a window that carries one — macOS draws minimise, zoom and close at the other end of the bar — so the tabs were squeezed to their profile marks, their names hidden, with a wide empty band before the settings gear. Seven tabs in a 934-point window now stand 91 points wide with their names showing instead of 72 without.
+
 - Reuse unchanged Markdown prose measurements across caret moves and edits, and reset block scroll offsets after reparsing.
 
 - **While you type pinyin, the caret stands at the end of what you have typed.**

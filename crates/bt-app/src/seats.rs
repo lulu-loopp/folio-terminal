@@ -3277,8 +3277,32 @@ pub fn tab_strip_geometry(
     // other reader of it does.
     let title = window_band_px(scale, chrome);
     let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
-    let caption = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
-    let run_left = (width - 4.0 * caption).max(0.0);
+    // **What the caption run costs the strip is asked of the caption run**
+    // (owner report 2026-09-13, §13.48 ⑩). This used to be `width - 4 * 46`
+    // written out: the count of the run a Windows window carries, said as a
+    // number in the one place that never looks at which run this window has.
+    // On a window whose buttons are the platform's there is no run of four —
+    // [`caption_targets`] has already answered that it carries one box, the
+    // gear — so the strip was handing three slots of its own width, 138 points,
+    // to buttons that are not drawn, and seven tabs that should have stood in
+    // the Tight tier stood squeezed to their marks with a quarter of the bar
+    // empty behind them.
+    //
+    // [`caption_run_left`] is the function written off that list, so the
+    // reservation is now what the run actually takes: four slots where Folio
+    // draws the whole bar, one where the platform draws its own. **No fourth
+    // read of the capability**: the branch is `caption_targets`' and this is
+    // its answer, which is what `the_caption_run_is_decided_by_one_capability_read`
+    // holds this module to.
+    //
+    // `summoned` is `false` and not this window's own state, deliberately — the
+    // summoned terminal draws two of the four and the strip goes on reserving
+    // the resting run's width, which is the trade `caption_run_left`'s own note
+    // records: a tab-strip geometry that answered differently on one window is
+    // one more thing that can disagree between the paint and the hit test.
+    // Handing it the window's `summoned` would be that change, and it is not
+    // this one.
+    let run_left = caption_run_left(width, scale, chrome, false);
     // **The drag reserve** (user ruling 2026-09-09): the strip stops this far
     // short of the app's buttons and never crosses the line, so the band between
     // the two is `HTCAPTION` however many tabs are open. It is taken out here,
@@ -6439,12 +6463,19 @@ pub fn caption_targets(chrome: PlatformChrome, summoned: bool) -> &'static [Chro
 
 /// **Where the drawn caption run begins**, which is not where the *reserved* one does.
 ///
-/// The strip goes on reserving four slots on every window ([`tab_strip_geometry`]), and the
-/// summoned terminal draws two of them — so on that window there are two slots of title bar
-/// between the tab strip's own end and the gear. That is deliberate and it is the cheap half of
-/// the trade: those pixels are drag handle, which every short strip already leaves, and the
-/// alternative is a tab-strip geometry that answers differently on one window — one more thing
-/// that can disagree between the paint and the hit test, over 92 logical pixels.
+/// The strip reserves this same run ([`tab_strip_geometry`] calls it with `summoned: false`), and
+/// the summoned terminal draws two of the four slots a Windows window's run has — so on that
+/// window there are two slots of title bar between the tab strip's own end and the gear. That is
+/// deliberate and it is the cheap half of the trade: those pixels are drag handle, which every
+/// short strip already leaves, and the alternative is a tab-strip geometry that answers
+/// differently on one window — one more thing that can disagree between the paint and the hit
+/// test, over 92 logical pixels.
+///
+/// **What the strip reserves is the run this window has, and not always four** (owner report
+/// 2026-09-13, §13.48 ⑩). The count was written out as a literal `4` inside the solver while this
+/// function asked [`caption_targets`] for it, so on a window whose buttons are the platform's —
+/// one box up here, the gear — the strip paid for three slots nothing draws. It now asks here,
+/// which is why the two numbers cannot part again.
 #[must_use]
 pub fn caption_run_left(width: f32, scale: f32, chrome: PlatformChrome, summoned: bool) -> f32 {
     let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
@@ -10968,12 +10999,15 @@ fn window_chrome(
         palette.title_bar,
     ));
 
-    let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
-    // **Where the app's own content stops** is still four slots in from the edge on
-    // every window, because that is what the strip reserves — see
-    // `caption_run_left`, which is where the two runs differ and why they are
-    // allowed to.
-    let run_left = (width - 4.0 * button).max(0.0);
+    // **Where the app's own content stops** is where this window's caption run
+    // begins, asked of [`caption_run_left`] — the same sentence, from the same
+    // function, that [`tab_strip_geometry`] is given. It was the literal
+    // `width - 4 * 46` here too, and on a window carrying one box up here that
+    // cropped the program's name 138 points early against three slots nothing
+    // draws (owner report 2026-09-13, §13.48 ⑩). `summoned: false` for the
+    // solver's reason: the strip and the name stop at the resting run's edge on
+    // every window, so neither moves when a window is summoned.
+    let run_left = caption_run_left(width, scale, chrome, false);
     // The two layouts share this bar and split what stands in it. `.tabs-inline`
     // lives here only in the horizontal one; in the vertical one the tab list is
     // the rail, and what fills the space it left is the program's own name —
@@ -26673,9 +26707,10 @@ mod tests {",
         let (width, scale) = (960.0_f32, 1.0_f32);
         let rail = RailState::default();
         let reserve = WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX * scale;
-        // The gear leads the caption run, and the strip reserves that run's four
-        // slots on every window (see `caption_run_left`), so this is the edge the
-        // band is measured back from.
+        // The gear leads the caption run, and the strip reserves exactly that
+        // run — four slots on this window, which is the one whose whole bar is
+        // Folio's (see `caption_run_left`) — so this is the edge the band is
+        // measured back from.
         let gear_left = window_caption_boxes(width, scale, FOLIO_BAR, false)[0].1[0];
 
         // The dozen the report was made with — a strip pressed flat against the
@@ -26885,20 +26920,35 @@ mod tests {",
             );
 
             // The band is taken out of the run and not clamped onto the answers:
-            // the same window with no platform chrome draws wider tabs and ends
-            // its strip in the same place.
-            let folio = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(4), 0, 0.0);
+            // **the very same window with its lights withdrawn** draws wider
+            // tabs and ends its strip in the same place. The comparison is
+            // against this window in full screen and not against a
+            // `FOLIO_DRAWS_THE_WHOLE_BAR` one, because since §13.48 ⑩ the two
+            // windows no longer reserve the same caption run — one box against
+            // four — and a comparison that changed two things at once could not
+            // say which of them moved the tabs. Here only the lights differ.
+            let dark = tab_strip_geometry(
+                width,
+                scale,
+                PlatformChrome {
+                    strip_left_px: 0,
+                    ..mac
+                },
+                &resting(4),
+                0,
+                0.0,
+            );
             assert_eq!(
-                strip.viewport[1], folio.viewport[1],
+                strip.viewport[1], dark.viewport[1],
                 "the right edge is the caption run's and is not moved by the inset"
             );
             let body =
                 |geometry: &TabStripGeometry| geometry.tabs[0].body[2] - geometry.tabs[0].body[0];
             assert!(
-                body(&strip) < body(&folio),
+                body(&strip) < body(&dark),
                 "the inset comes out of the tabs' width: {} against {}",
                 body(&strip),
-                body(&folio)
+                body(&dark)
             );
 
             // And nothing in the strip answers a press inside the band.
@@ -26923,6 +26973,193 @@ mod tests {",
                 toggle[0] >= inset,
                 "the sidebar toggle stands at {} with the lights ending at {inset}",
                 toggle[0]
+            );
+        }
+    }
+
+    /// RED — **the strip is given every point the window's own caption run
+    /// leaves, and on a window whose buttons are the platform's that run is one
+    /// slot** (owner report 2026-09-13, §13.48 ⑩).
+    ///
+    /// The window the owner photographed: 934 logical points wide, seven tabs,
+    /// the lights ending at 73. The seven pills came out **71.57** points each
+    /// — under the 90 of `WINDOW_TAB_SQUEEZED_LOGICAL_PX`, so every one of them
+    /// was a bare profile mark with no word on it — and **246** points of bar
+    /// stood empty between the `˅` and the gear. The solver was reserving
+    /// `4 × 46` for a caption run this window does not have: three of those
+    /// slots are minimise, zoom and close, which AppKit draws at the *other* end
+    /// of this bar, and the 138 points came out of the tabs.
+    ///
+    /// Asked of the run instead: `934 − 46` leaves 888, the drag reserve takes
+    /// 96 down to 792, the lights and their twelve take 85, the `+`/`˅` pair
+    /// and its margin take 62 and the six gaps take 6 — so the seven tabs share
+    /// **639** and stand **91.29** wide, in the Tight tier, with their titles
+    /// back. What is left behind the `˅` is 108: the drag reserve, plus the air
+    /// the 28-point gear leaves inside the 46 §13.48 ③ keeps reserving for it.
+    /// Both halves are asserted, because a run that grew and a band that did
+    /// not shrink would mean the strip had simply been allowed to overrun the
+    /// gear.
+    ///
+    /// The three windows are compared against each other and not against struck
+    /// numbers, so a product that moves its lights or its reserve moves all
+    /// three together: this window, this window in full screen, and the window
+    /// whose whole bar is Folio's — which goes on reserving its four, and whose
+    /// share is exactly the number this one used to get.
+    ///
+    /// MUTATION: reserve four slots on a window whose buttons are the
+    /// platform's and the seven tabs fall back to 71.57 and Squeezed, which the
+    /// tier assertion and the title box name at both scales; reserve one on the
+    /// window that draws its own four and the Windows half names it; drop the
+    /// drag reserve on either and the band behind the `˅` names that.
+    #[test]
+    fn the_mac_strip_is_given_every_point_the_one_gear_leaves() {
+        const TABS: usize = 7;
+        for scale in [1.0_f32, 2.0] {
+            let width = 934.0 * scale;
+            let mac = mac_bar(scale);
+            // The very same window in full screen, which is the third of the
+            // three: macOS takes its buttons off it and leaves the header.
+            let dark = PlatformChrome {
+                strip_left_px: 0,
+                ..mac
+            };
+            let slot = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
+            let reserve = WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX * scale;
+            let lights = mac.strip_left_px as f32;
+            let after_lights = WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX * scale;
+            let skirt = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
+            // The pair at the end of the run: one margin and two boxes, which
+            // is what the solver takes out for them.
+            let controls = WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX * scale
+                + 2.0 * WINDOW_NEW_TAB_BOX_LOGICAL_PX * scale;
+            let gaps = WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX * scale * (TABS - 1) as f32;
+            // The whole solver, written out: what the caption run leaves, less
+            // the drag reserve, the platform's own band, the lead-in, the pair
+            // and the gaps — shared equally.
+            let share = |slots: f32, band: f32, lead_in: f32| {
+                (width - slots * slot - reserve - band - lead_in - controls - gaps) / TABS as f32
+            };
+            let close_enough = |got: f32, want: f32, what: &str| {
+                assert!(
+                    (got - want).abs() <= 0.01 * scale,
+                    "{what}: {got} against {want} ({scale}x)"
+                );
+            };
+
+            let strip = tab_strip_geometry(width, scale, mac, &resting(TABS), 0, 0.0);
+            // ① The run itself: one slot, not four.
+            close_enough(
+                caption_run_left(width, scale, mac, false),
+                width - slot,
+                "the caption run this window has is the gear's one slot",
+            );
+            close_enough(
+                strip.viewport[1],
+                width - slot - reserve,
+                "and the strip runs up to it, less the drag reserve",
+            );
+
+            // ② The tabs, which is what the owner was looking at.
+            let want = share(1.0, lights, after_lights);
+            for (index, tab) in strip.tabs.iter().enumerate() {
+                close_enough(
+                    tab.body[2] - tab.body[0],
+                    want,
+                    &format!("tab {index} takes its full share of the run"),
+                );
+                assert_eq!(
+                    tab.tier,
+                    TabWidthTier::Tight,
+                    "tab {index} is {} wide and the squeezed floor is {} ({scale}x)",
+                    tab.body[2] - tab.body[0],
+                    WINDOW_TAB_SQUEEZED_LOGICAL_PX * scale
+                );
+                assert!(
+                    tab_title_box(tab, 1, 0.0, scale).is_some(),
+                    "tab {index} has room for its own title again ({scale}x)"
+                );
+            }
+            // The mutation, stated as arithmetic rather than left to the
+            // mutant: the four-slot reservation is under the squeezed floor at
+            // this width, which is exactly what the owner saw.
+            assert!(
+                share(4.0, lights, after_lights) < WINDOW_TAB_SQUEEZED_LOGICAL_PX * scale,
+                "the four-slot reservation would squeeze them to {} ({scale}x)",
+                share(4.0, lights, after_lights)
+            );
+
+            // ③ Nothing is left over inside the strip: at this width the tabs
+            // are nowhere near the 200 cap, so the run ends on its own wall and
+            // the `˅` ends with it.
+            close_enough(
+                strip.new_tab_menu[2],
+                strip.viewport[1],
+                "the `˅` ends where the run does — no band inside the strip",
+            );
+            close_enough(strip.max_scroll, 0.0, "and nothing is scrolled out");
+
+            // ④ The band behind the `˅` is the drag reserve and the gear's own
+            // air, and not a point more. On the window that draws its own four
+            // the same band is the reserve alone, because there the run's boxes
+            // fill their slots.
+            let gear = window_caption_boxes(width, scale, mac, false)[0].1;
+            let side = (WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX * scale).round();
+            // Written from the constants and not from `gear[0]`, so this says
+            // something rather than restating its own operand: the slot is 46,
+            // the square in it is 28, and §13.48 ③ hangs that square's centre
+            // 20 in from the trailing edge — which leaves six points behind it
+            // and twelve in front, and those twelve are all the strip gives up
+            // beyond the drag reserve.
+            let air_in_front_of_the_gear =
+                slot - side - (WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX * scale - side / 2.0);
+            close_enough(
+                gear[0] - strip.viewport[1],
+                reserve + air_in_front_of_the_gear,
+                "the band behind the `˅` is the reserve plus the gear's own air",
+            );
+
+            // ⑤ The window whose whole bar is Folio's reserves its four, and
+            // its share is the very number this window used to be given.
+            let folio = tab_strip_geometry(width, scale, FOLIO_BAR, &resting(TABS), 0, 0.0);
+            close_enough(
+                caption_run_left(width, scale, FOLIO_BAR, false),
+                width - 4.0 * slot,
+                "the Windows run is still four slots wide",
+            );
+            for (index, tab) in folio.tabs.iter().enumerate() {
+                close_enough(
+                    tab.body[2] - tab.body[0],
+                    share(4.0, 0.0, skirt),
+                    &format!("Windows tab {index} is untouched"),
+                );
+            }
+            let windows_gear = window_caption_boxes(width, scale, FOLIO_BAR, false)[0].1;
+            close_enough(
+                windows_gear[0] - folio.viewport[1],
+                reserve,
+                "and the band in front of its run is the drag reserve alone",
+            );
+
+            // ⑥ Full screen shares the same run correctly: the lights and their
+            // twelve are gone, the skirt's lead-in is back, and every point of
+            // the difference lands on the seven tabs.
+            let full = tab_strip_geometry(width, scale, dark, &resting(TABS), 0, 0.0);
+            close_enough(
+                full.viewport[1],
+                strip.viewport[1],
+                "full screen moves the head of the run and not its end",
+            );
+            for (index, tab) in full.tabs.iter().enumerate() {
+                close_enough(
+                    tab.body[2] - tab.body[0],
+                    share(1.0, 0.0, skirt),
+                    &format!("full-screen tab {index} takes its full share"),
+                );
+            }
+            close_enough(
+                full.tabs[0].body[2] - full.tabs[0].body[0] - want,
+                (lights + after_lights - skirt) / TABS as f32,
+                "and what the lights gave back was shared out equally",
             );
         }
     }
