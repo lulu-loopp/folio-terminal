@@ -3703,71 +3703,41 @@ impl Text {
                 "还不在仓库里 —— git 没有盯着这些",
             ),
             // ── what a status is, in words (T-GIT-STATUS-WORDS) ────────────
-            // Every Chinese column in this family is the closest term already
-            // in use on this page, standing until the copywriter passes over
-            // it. The brief is the English beside it.
-            // zh: pending opus46 — the file's content changed.
             Self::GitStatusModified => pick(lang, "Modified", "已修改"),
-            // zh: pending opus46 — the file became a symlink, or stopped being
-            // one. git's `T`.
             Self::GitStatusTypeChanged => pick(lang, "Type changed", "类型已变"),
-            // zh: pending opus46 — the file is new to the repository and git
-            // has been told to remember it.
             Self::GitStatusAdded => pick(lang, "Added", "已添加"),
-            // zh: pending opus46 — the file is gone.
             Self::GitStatusDeleted => pick(lang, "Deleted", "已删除"),
-            // zh: pending opus46 — the same file under another name.
             Self::GitStatusRenamed => pick(lang, "Renamed", "已重命名"),
-            // zh: pending opus46 — a second file made from one git already had.
             Self::GitStatusCopied => pick(lang, "Copied", "已复制"),
-            // zh: pending opus46 — git has never been told about this file.
             Self::GitStatusUntracked => pick(lang, "Untracked", "未跟踪"),
-            // zh: pending opus46 — git was told to say nothing about this file.
             Self::GitStatusIgnored => pick(lang, "Ignored", "已忽略"),
-            // zh: pending opus46 — and it changed after that.
-            Self::GitStatusSinceModified => pick(lang, "modified since", "之后改动了"),
-            // zh: pending opus46 — and its type changed after that.
-            Self::GitStatusSinceTypeChanged => pick(lang, "type changed since", "之后类型变了"),
-            // zh: pending opus46 — and it was put there after that.
-            Self::GitStatusSinceAdded => pick(lang, "added since", "之后添加了"),
-            // zh: pending opus46 — and it was deleted after that.
+            Self::GitStatusSinceModified => pick(lang, "modified since", "之后又修改了"),
+            Self::GitStatusSinceTypeChanged => pick(lang, "type changed since", "之后类型又变了"),
+            Self::GitStatusSinceAdded => pick(lang, "added since", "之后又添加了"),
             Self::GitStatusSinceDeleted => pick(lang, "deleted since", "之后删除了"),
-            // zh: pending opus46 — and it was renamed after that.
             Self::GitStatusSinceRenamed => pick(lang, "renamed since", "之后重命名了"),
-            // zh: pending opus46 — and it was copied after that.
-            Self::GitStatusSinceCopied => pick(lang, "copied since", "之后复制了"),
-            // zh: pending opus46 — a merge left two versions of this file to
-            // reconcile, and the pair of letters does not say which kind.
-            Self::GitStatusConflict => pick(lang, "Conflict", "有冲突"),
-            // zh: pending opus46 — both sides of the merge changed this file.
+            Self::GitStatusSinceCopied => pick(lang, "copied since", "之后又复制了"),
+            Self::GitStatusConflict => pick(lang, "Conflict", "冲突"),
             Self::GitStatusConflictBothModified => {
-                pick(lang, "Conflict (both modified)", "有冲突（双方都改了）")
+                pick(lang, "Conflict (both modified)", "冲突（双方修改）")
             }
-            // zh: pending opus46 — both sides added a file of this name.
             Self::GitStatusConflictBothAdded => {
-                pick(lang, "Conflict (added by both)", "有冲突（双方都新增）")
+                pick(lang, "Conflict (added by both)", "冲突（双方添加）")
             }
-            // zh: pending opus46 — both sides deleted this file.
             Self::GitStatusConflictBothDeleted => {
-                pick(lang, "Conflict (deleted by both)", "有冲突（双方都删了）")
+                pick(lang, "Conflict (deleted by both)", "冲突（双方删除）")
             }
-            // zh: pending opus46 — this side added the file, the other side did
-            // not have it. git says "added by us".
             Self::GitStatusConflictAddedByYou => {
-                pick(lang, "Conflict (added by you)", "有冲突（你这边新增）")
+                pick(lang, "Conflict (added by you)", "冲突（你添加）")
             }
-            // zh: pending opus46 — the other side added the file.
             Self::GitStatusConflictAddedByThem => {
-                pick(lang, "Conflict (added by them)", "有冲突（对方新增）")
+                pick(lang, "Conflict (added by them)", "冲突（对方添加）")
             }
-            // zh: pending opus46 — this side deleted the file, the other side
-            // changed it. git says "deleted by us".
             Self::GitStatusConflictDeletedByYou => {
-                pick(lang, "Conflict (deleted by you)", "有冲突（你这边删了）")
+                pick(lang, "Conflict (deleted by you)", "冲突（你删除）")
             }
-            // zh: pending opus46 — the other side deleted the file.
             Self::GitStatusConflictDeletedByThem => {
-                pick(lang, "Conflict (deleted by them)", "有冲突（对方删了）")
+                pick(lang, "Conflict (deleted by them)", "冲突（对方删除）")
             }
             Self::GitBranchesHeading => pick(lang, "BRANCHES", "分支"),
             Self::GitRemotesHeading => pick(lang, "REMOTES", "远程"),
@@ -7176,7 +7146,6 @@ pub fn git_status_staged(word: &str) -> String {
 fn git_status_staged_in(lang: Lang, word: &str) -> String {
     match lang {
         Lang::English => format!("{word}, staged"),
-        // zh: pending opus46 — `<word>, and that is what is staged`.
         Lang::Chinese => format!("{word}，已暂存"),
     }
 }
@@ -7194,7 +7163,6 @@ pub fn git_status_since(staged: &str, since: &str) -> String {
 fn git_status_since_in(lang: Lang, staged: &str, since: &str) -> String {
     match lang {
         Lang::English => format!("{staged} — {since}"),
-        // zh: pending opus46 — `<staged half> —— <what happened after>`.
         Lang::Chinese => format!("{staged} —— {since}"),
     }
 }
