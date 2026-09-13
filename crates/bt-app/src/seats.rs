@@ -6274,7 +6274,11 @@ pub fn title_bar_folio_boxes(
         (right > left).then_some([left, rect[1], right, rect[3]])
     };
     boxes.extend(strip.tabs.iter().filter_map(|tab| cropped(tab.body)));
-    boxes.extend([strip.new_tab, strip.new_tab_menu].into_iter().filter_map(cropped));
+    boxes.extend(
+        [strip.new_tab, strip.new_tab_menu]
+            .into_iter()
+            .filter_map(cropped),
+    );
     boxes
 }
 
@@ -16236,7 +16240,43 @@ pub fn preview_rail_target(
     }
 }
 
-/// [`preview_rail_target`] read backwards: which of **this** seat's rail
+/// [`preview_rail_target`] read backwards — **which seat's rail control this
+/// target names**, if it names one at all.
+///
+/// The mapping with no seat handed in to check against, which is what a question
+/// about the *control* needs when the seat is part of the answer rather than
+/// part of the question. Two readers stand on it and neither could be written
+/// without it: [`preview_rail_hover`], which is this answer narrowed to one
+/// seat, and the window's own "which button is this popover hanging from"
+/// (`PopoverTrigger`), which has to name a button a torn-off window can be
+/// wearing too and therefore cannot start from a seat at all.
+///
+/// **Many-to-one on `Copy` alone**, exactly as [`preview_rail_target`] is
+/// one-to-many there: the glyph is one button whose sentence is a property of
+/// the row's kind, and a backwards reading that invented a kind to hand back
+/// would be inventing the one fact this direction does not carry.
+#[must_use]
+pub fn preview_rail_control(target: ChromeTarget) -> Option<(SeatId, PreviewRailPart)> {
+    let answer = match target {
+        ChromeTarget::PreviewBack(seat) => (seat, PreviewRailPart::Back),
+        ChromeTarget::PreviewForward(seat) => (seat, PreviewRailPart::Forward),
+        ChromeTarget::PreviewReload(seat) => (seat, PreviewRailPart::Reload),
+        ChromeTarget::PreviewBrowser(seat) => (seat, PreviewRailPart::Browser),
+        ChromeTarget::PreviewFlip(seat) => (seat, PreviewRailPart::Flip),
+        ChromeTarget::PreviewOpenWith(seat) => (seat, PreviewRailPart::OpenWith),
+        ChromeTarget::PreviewAddressCopy(seat) | ChromeTarget::PreviewPathCopy(seat) => {
+            (seat, PreviewRailPart::Copy)
+        }
+        ChromeTarget::PreviewAddress(seat) => (seat, PreviewRailPart::Address),
+        ChromeTarget::PreviewCrumbFold(seat) => (seat, PreviewRailPart::Fold),
+        ChromeTarget::PreviewCrumb { seat, depth } => (seat, PreviewRailPart::Crumb(depth)),
+        ChromeTarget::PreviewRail(seat) => (seat, PreviewRailPart::Band),
+        _ => return None,
+    };
+    Some(answer)
+}
+
+/// [`preview_rail_control`] narrowed to one seat: which of **this** seat's rail
 /// controls the window's hover is naming, if it is naming one at all.
 ///
 /// The paint needs it and the float is why it is a function. A docked rail lit
@@ -16245,25 +16285,8 @@ pub fn preview_rail_target(
 /// about the *part* — and then both hosts ask it the same way.
 #[must_use]
 pub fn preview_rail_hover(hover: Option<ChromeTarget>, seat: SeatId) -> Option<PreviewRailPart> {
-    let part = match hover? {
-        ChromeTarget::PreviewBack(at) if at == seat => PreviewRailPart::Back,
-        ChromeTarget::PreviewForward(at) if at == seat => PreviewRailPart::Forward,
-        ChromeTarget::PreviewReload(at) if at == seat => PreviewRailPart::Reload,
-        ChromeTarget::PreviewBrowser(at) if at == seat => PreviewRailPart::Browser,
-        ChromeTarget::PreviewFlip(at) if at == seat => PreviewRailPart::Flip,
-        ChromeTarget::PreviewOpenWith(at) if at == seat => PreviewRailPart::OpenWith,
-        ChromeTarget::PreviewAddressCopy(at) | ChromeTarget::PreviewPathCopy(at) if at == seat => {
-            PreviewRailPart::Copy
-        }
-        ChromeTarget::PreviewAddress(at) if at == seat => PreviewRailPart::Address,
-        ChromeTarget::PreviewCrumbFold(at) if at == seat => PreviewRailPart::Fold,
-        ChromeTarget::PreviewCrumb { seat: at, depth } if at == seat => {
-            PreviewRailPart::Crumb(depth)
-        }
-        ChromeTarget::PreviewRail(at) if at == seat => PreviewRailPart::Band,
-        _ => return None,
-    };
-    Some(part)
+    let (at, part) = preview_rail_control(hover?)?;
+    (at == seat).then_some(part)
 }
 
 /// Which of one preview rail's controls the pointer is on.
@@ -24422,7 +24445,33 @@ mod tests {
                     None,
                     "and it is this seat's control and not the pane next door's"
                 );
+                // And the reading with no seat handed in names the seat it came
+                // from. This is the half a popover's "closed by its own trigger"
+                // stands on: the window has to be able to say *which* rail
+                // control a press landed on without already knowing which pane
+                // to ask about.
+                assert_eq!(
+                    preview_rail_control(target),
+                    Some((seat, part)),
+                    "{part:?} read backwards names its own seat"
+                );
             }
+        }
+        // Nothing that is not a rail control is one. The trigger rule compares
+        // what a press landed on against what a popover hangs from, and a map
+        // that answered for the strip's `⌄` would make one button close another
+        // button's menu.
+        for target in [
+            ChromeTarget::NewTabMenu,
+            ChromeTarget::PaneMenu(seat),
+            ChromeTarget::PreviewName(seat),
+            ChromeTarget::PreviewOpenButton(seat),
+        ] {
+            assert_eq!(
+                preview_rail_control(target),
+                None,
+                "{target:?} is not a control of the rail"
+            );
         }
         // The `⧉` is the one glyph with a sentence for each row, so it is the
         // one place the trip out is not injective on the part alone — said out
@@ -26505,7 +26554,8 @@ mod tests {",
         };
         let horizontal = RailState::default();
         let (width, scale) = (960.0_f32, 1.0_f32);
-        let boxes = |tabs, rail| title_bar_folio_boxes(width, scale, FOLIO_BAR, tabs, 0.0, rail, false);
+        let boxes =
+            |tabs, rail| title_bar_folio_boxes(width, scale, FOLIO_BAR, tabs, 0.0, rail, false);
         let drags = |tabs, rail, x: f32, y: f32| {
             title_bar_drag_point(
                 width,
@@ -31280,7 +31330,15 @@ mod tests {",
     fn a_scrolling_strip_owns_its_whole_run_and_no_more() {
         let (scale, width) = (1.0_f32, 960.0_f32);
         let strip_boxes = |tabs| {
-            title_bar_folio_boxes(width, scale, FOLIO_BAR, tabs, 0.0, RailState::default(), false)
+            title_bar_folio_boxes(
+                width,
+                scale,
+                FOLIO_BAR,
+                tabs,
+                0.0,
+                RailState::default(),
+                false,
+            )
         };
         let last_edge = |tabs| {
             strip_boxes(tabs)

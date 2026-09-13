@@ -66,6 +66,32 @@
 //! from every focus state, and leaves a scoped row's chord to `keyDown:` — see
 //! `bt_app::menubar`, which is where that rule lives, because the scope is its
 //! table's and not this module's.
+//!
+//! # The second surface: the Dock tile's own menu (T-MAC-DOCKMENU)
+//!
+//! Right-clicking an application's Dock tile opens a menu AppKit builds — the
+//! window list, *Options*, *Show All Windows*, *Hide*, *Quit* — and an
+//! application may put rows of its own **above** those by answering
+//! `applicationDockMenu:`. Terminal.app does; Folio did not, which is the whole
+//! of the ticket.
+//!
+//! **It is the same plan, the same target and the same sender**, and that is a
+//! decision rather than a saving. The rows a Dock menu can carry are rows this
+//! application already has — a new window, a new tab — their titles are the same
+//! `bt_app::i18n` entries the bar reads, and a press on one arrives at AppKit on
+//! the same stack a bar press does. Two plans would be two places that decide
+//! what `New window` is called; two senders would be two inboxes with no order
+//! between them. So [`MenuPlan`] carries [`MenuPlan::dock`] beside the bar's
+//! menus, [`install`] and [`refresh`] carry it without a door of their own, and
+//! what tells the application which of the two a press came from is the
+//! [`MenuSurface`] the sender is handed beside the choice.
+//!
+//! **Nothing of the Dock menu is kept alive between right-clicks.** AppKit asks
+//! for it every time the reader opens it, so the `NSMenu` is built from the plan
+//! on the spot and handed over autoreleased. That is also the whole answer to
+//! "rebuild it when the language changes": there is no built menu to rebuild,
+//! only a plan, and [`refresh`] already carries a new language onto it on the
+//! turn the reader switches.
 
 /// **What a menu item asks for**, in the application's own vocabulary.
 ///
@@ -259,10 +285,40 @@ pub enum MenuRole {
     Windows,
 }
 
-/// **The whole bar**, in the order it is read left to right.
+/// **One row of the Dock tile's own menu** (T-MAC-DOCKMENU).
+///
+/// Smaller than [`MenuItem`] by three fields, and each absence is a ruling:
+///
+/// * **no [`MenuAction`]** — a Dock row is one of this application's own verbs
+///   and never one of AppKit's selectors. The responder chain a `Standard` row
+///   is answered by is the key window's, and a Dock menu is opened by a reader
+///   who is usually in *another application*; there is no first responder for
+///   `Copy` to mean anything to;
+/// * **no chord** — the menu is reached with the pointer and nothing else, and
+///   a key equivalent printed here would be a second place claiming a key that
+///   `keyDown:` and the bar have already settled between them;
+/// * **no enabled flag** — every row of it is in force whenever it is drawn.
+///   The two verbs it carries make a window or a tab, and the state a bar row
+///   greys itself for — no window open — is precisely the state a reader opens
+///   this menu *in*. See `docs/DESIGN.md` §13.50 ②.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DockRow {
+    pub title: &'static str,
+    pub choice: MenuChoice,
+}
+
+/// **The whole bar**, in the order it is read left to right, and the rows the
+/// Dock tile's menu carries above AppKit's own.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MenuPlan {
     pub menus: Vec<MenuList>,
+    /// **What Folio puts on its Dock menu** (T-MAC-DOCKMENU), in the order it
+    /// is read top to bottom, above the rows AppKit adds for every application.
+    ///
+    /// Empty is an answer and not a gap: an application that offers nothing of
+    /// its own answers `applicationDockMenu:` with nil, and the reader gets
+    /// AppKit's menu exactly as they did before this ticket.
+    pub dock: Vec<DockRow>,
 }
 
 impl MenuPlan {
@@ -284,6 +340,14 @@ impl MenuPlan {
 
     /// Whether two plans name the same rows in the same places — which is what
     /// makes one refreshable into the other.
+    ///
+    /// **[`Self::dock`] is not read here**, and that is not an omission. The
+    /// question this answers is whether the `NSMenuItem`s the platform is
+    /// holding can be carried onto the new plan, and the Dock menu has none: it
+    /// is built out of the plan on the right-click that asks for it and freed
+    /// when that menu closes. So a plan that changed only its Dock rows — the
+    /// reader switching language with the bar's shape untouched — is refreshed
+    /// like any other, and the next right-click reads the new words.
     #[must_use]
     pub fn same_shape_as(&self, other: &Self) -> bool {
         self.menus.len() == other.menus.len()
@@ -318,15 +382,43 @@ pub enum MenuChoice {
     Application(AppMenuAction),
 }
 
+/// **Which of this application's two menus a press came from**
+/// (T-MAC-DOCKMENU).
+///
+/// The choice is the same on both and the channel is the same on both; what
+/// differs is what the application may assume around the press, and it is a
+/// real difference rather than bookkeeping:
+///
+/// * [`Self::Bar`] — the reader is *in* Folio. The bar drew itself against the
+///   window that has the keyboard, and greyed every verb row when there is
+///   none, so a choice arriving from it names that window;
+/// * [`Self::Dock`] — the reader is usually in **another application**, there
+///   may be no key window at all, and there may be no window at all: Folio
+///   stays in the Dock after its last window closes (M3-1). So a Dock choice
+///   names the window the reader was last in, and makes one when there is none.
+///
+/// It is an argument to the sender rather than a second sender, for the reason
+/// [`AppDelegateOrigin::Menu`](crate::AppDelegateOrigin::Menu) gives about the
+/// channel: two inboxes for one kind of press would be two orders for two
+/// presses a millisecond apart.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MenuSurface {
+    /// The application menu bar (M3-2).
+    Bar,
+    /// The Dock tile's own menu (T-MAC-DOCKMENU).
+    Dock,
+}
+
 /// **Where a pressed row goes**, called on AppKit's own stack.
 ///
-/// It is handed the choice and nothing else, and it may do nothing but keep it
-/// and post one wake — see the module header. The one implementation wraps it in
-/// an [`AppDelegateEvent`](crate::AppDelegateEvent) and hands it to
+/// It is handed the surface and the choice and nothing else, and it may do
+/// nothing but keep them and post one wake — see the module header. The one
+/// implementation wraps them in an
+/// [`AppDelegateEvent`](crate::AppDelegateEvent) and hands it to
 /// [`AppDelegate::sender`](crate::AppDelegate::sender). A sender that turned the
 /// event loop would be turning it from inside AppKit's menu tracking, with
 /// winit's handler borrow still live.
-pub type MenuSender = Box<dyn Fn(MenuChoice) + Send + Sync + 'static>;
+pub type MenuSender = Box<dyn Fn(MenuSurface, MenuChoice) + Send + Sync + 'static>;
 
 // ── the door ───────────────────────────────────────────────────────────────
 
@@ -444,6 +536,7 @@ mod tests {
                 role: MenuRole::Plain,
                 entries,
             }],
+            dock: Vec::new(),
         }
     }
 
@@ -523,15 +616,73 @@ mod tests {
         assert!(!one.same_shape_as(&longer));
     }
 
+    /// PIN (T-MAC-DOCKMENU) — **a plan that changed only its Dock rows is
+    /// refreshable**, and it is still a change.
+    ///
+    /// The two halves are the whole of how a language switch reaches the Dock
+    /// tile with no door of its own: `refresh` notices the plan is not equal, so
+    /// it does not return early, and `same_shape_as` says the bar's own items
+    /// may be carried over, so the new plan — Dock rows and all — is stored
+    /// without rebuilding the bar. The next right-click reads it.
+    ///
+    /// MUTATION: compare `dock` in `same_shape_as` and every language switch
+    /// starts rebuilding the whole menu bar; drop `dock` from the derived
+    /// `PartialEq` and the switch never reaches the Dock at all.
+    #[test]
+    fn a_plan_that_changed_only_its_dock_rows_is_a_change_the_bar_can_carry() {
+        let english = MenuPlan {
+            dock: vec![DockRow {
+                title: "New window",
+                choice: MenuChoice::Verb("new-window"),
+            }],
+            ..plan(vec![row(MenuAction::Verb("one"))])
+        };
+        let chinese = MenuPlan {
+            dock: vec![DockRow {
+                title: "新建窗口",
+                choice: MenuChoice::Verb("new-window"),
+            }],
+            ..english.clone()
+        };
+        assert_ne!(english, chinese, "a retitled Dock row is a change");
+        assert!(
+            english.same_shape_as(&chinese),
+            "a Dock row's title is not a shape the bar's items are found by"
+        );
+        // And a row that names a different verb is still only a Dock change:
+        // there is no item to find again, so there is nothing to rebuild.
+        let other = MenuPlan {
+            dock: vec![DockRow {
+                title: "New tab",
+                choice: MenuChoice::Verb("new-tab"),
+            }],
+            ..english.clone()
+        };
+        assert!(english.same_shape_as(&other));
+        assert_eq!(
+            english.rows().count(),
+            1,
+            "the row walk is the bar's and the Dock is not on it"
+        );
+    }
+
     /// PIN — off macOS the inbox is empty and the two doors answer `Ok`.
     ///
     /// The claim is `portable_impl`'s class N: there is no menu bar to fail to
     /// install, so a launch on a platform without one is not carrying a fault.
+    /// A Dock tile is the same sentence one surface along: the rows travel in
+    /// the plan, and a platform with no Dock simply never asks for them.
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_platform_with_no_menu_bar_is_not_a_platform_with_a_broken_one() {
-        let plan = plan(vec![row(MenuAction::Verb("one"))]);
-        assert_eq!(install(&plan, Box::new(|_| {})), Ok(()));
+        let plan = MenuPlan {
+            dock: vec![DockRow {
+                title: "New window",
+                choice: MenuChoice::Verb("new-window"),
+            }],
+            ..plan(vec![row(MenuAction::Verb("one"))])
+        };
+        assert_eq!(install(&plan, Box::new(|_, _| {})), Ok(()));
         assert_eq!(refresh(&plan), Ok(()));
         assert!(!is_installed());
         assert_eq!(installed_plan(), None);

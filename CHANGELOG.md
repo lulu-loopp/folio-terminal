@@ -6,8 +6,33 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **On a Mac, Folio's Dock icon offers a new window and a new tab.** Press and
+  hold the icon — or right-click it — and `New window` and `New tab` stand above
+  the rows macOS puts there for every app. They work from another app and from
+  an empty desk: with every window closed, either one opens a window.
+
 ### Fixed
 
+- **On a Mac, a pane started from the Dock or Finder can read what you type in
+  your own language.** A shell started that way is handed no language setting at
+  all by macOS, and one without it treats every byte as a character: `天下为公`
+  typed at the prompt came back as `天` followed by highlighted `<008b>`, and a
+  filename outside ASCII listed as question marks. Folio already passed on your
+  own regional setting when this machine has a matching locale installed; when it
+  has none — a Chinese interface in the United States is an ordinary example — it
+  now says what it does know, that this window reads UTF-8, in the same two
+  variables Terminal.app uses for it. It still never picks a country for you, and
+  a setting you already have — inherited, or written into a profile — is left
+  alone.
+- **A menu closes when you press the button that opened it.** With the `Open ⌄`
+  menu up at the end of a preview's path row, pressing the pill again opened it
+  afresh instead of putting it away, and so did the `…` that stands in for the
+  folders a narrow row has no width to show. Every menu in this window that hangs
+  from a button now closes on a press on that button and does nothing else with
+  that press — including the commit graph's branch list inside a torn-off window,
+  which had the same fault and was not in the report.
 - **A formula that took a moment to typeset now appears when it is ready.** A
   page holding `$$\int_0^1 x\,dx$$` shows the formula as you wrote it until the
   picture is set, which is right — but if the picture arrived after the page had

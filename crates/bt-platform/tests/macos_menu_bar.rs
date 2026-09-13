@@ -51,15 +51,20 @@
 //! ⑥ **`⌘Q` is a choice on the channel and not `terminate:`** — the process is
 //!    still running on the next line;
 //! ⑦ a refresh re-greys a row **in place**: the same item objects, still
-//!    answering, with no rebuild.
+//!    answering, with no rebuild;
+//! ⑧ the plan's **Dock rows** (T-MAC-DOCKMENU) cross `install` and come back
+//!    out of `installed_plan` unchanged, and every press this file makes comes
+//!    back on `MenuSurface::Bar`. The Dock menu itself is built only when
+//!    AppKit asks the *application delegate* for it, which needs a winit event
+//!    loop and a bundle — `tests/macos_dock_menu.rs`.
 
 #[cfg(target_os = "macos")]
 mod mac {
     use std::sync::{Mutex, PoisonError};
 
     use bt_platform::menu::{
-        AppMenuAction, MenuAction, MenuChoice, MenuChord, MenuEntry, MenuItem, MenuKey, MenuList,
-        MenuPlan, MenuRole, StandardMenuAction,
+        AppMenuAction, DockRow, MenuAction, MenuChoice, MenuChord, MenuEntry, MenuItem, MenuKey,
+        MenuList, MenuPlan, MenuRole, MenuSurface, StandardMenuAction,
     };
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSMenu};
@@ -70,17 +75,27 @@ mod mac {
     /// The sender is what `bt-app`'s `menu_wire` is: it keeps the choice and
     /// posts a wake. Here it only keeps, because there is no loop to wake — the
     /// claim being checked is what AppKit hands over and when.
-    static SENT: Mutex<Vec<MenuChoice>> = Mutex::new(Vec::new());
+    static SENT: Mutex<Vec<(MenuSurface, MenuChoice)>> = Mutex::new(Vec::new());
 
-    fn keep(choice: MenuChoice) {
+    fn keep(surface: MenuSurface, choice: MenuChoice) {
         SENT.lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(choice);
+            .push((surface, choice));
     }
 
     /// Everything sent since this was last called.
     fn taken() -> Vec<MenuChoice> {
         std::mem::take(&mut *SENT.lock().unwrap_or_else(PoisonError::into_inner))
+            .into_iter()
+            .map(|(surface, choice)| {
+                assert_eq!(
+                    surface,
+                    MenuSurface::Bar,
+                    "a press on the bar came back as another surface's"
+                );
+                choice
+            })
+            .collect()
     }
 
     /// The owner's consent, and the main thread this file is written for.
@@ -181,6 +196,22 @@ mod mac {
                         chord: None,
                         enabled: true,
                     })],
+                },
+            ],
+            // **The Dock tile's rows travel in the same plan**
+            // (T-MAC-DOCKMENU). Nothing in this file builds a Dock menu —
+            // that needs the application delegate, and therefore winit, and
+            // therefore `tests/macos_dock_menu.rs`. What is checked here is
+            // that they cross `install` and come back unchanged, which is the
+            // half this target owns.
+            dock: vec![
+                DockRow {
+                    title: "New window",
+                    choice: MenuChoice::Verb("new-window"),
+                },
+                DockRow {
+                    title: "New tab",
+                    choice: MenuChoice::Verb("new-tab"),
                 },
             ],
         }
