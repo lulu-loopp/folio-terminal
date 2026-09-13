@@ -13,24 +13,27 @@
 # The application is the debug `folio` built by `m2-7-door.sh`, inside a
 # throwaway bundle with an identifier of its own and an **isolated HOME** —
 # through a `CFBundleExecutable` wrapper script, because `LSEnvironment` cannot
-# set `HOME` (DESIGN §13.31 ⑧(d)).
+# set `HOME` (DESIGN §13.31 ⑧(d)). The fixture folder is **under that HOME**,
+# so the `~` rule §13.32 ③ gave the breadcrumbs is on the page and can be read.
 #
 # How each row is driven, and why:
 #
 # * **the folder in the files column** — `folio <folder>` opens a terminal tab
 #   in that folder and no column (`cli.rs::resolve`), and the gesture that opens
 #   one cannot be posted: CGEvent keyboard injection into Folio produces nothing
-#   on this Mac (§13.34 ⑦). The column is therefore opened through the
-#   application's own door for a column that was open before — a seeded
-#   `session.json` at schema 15 whose tab is **pinned**, so the launch opens it
-#   straight away instead of raising the restore card (`main.rs`: "a window that
-#   held a pinned tab opens straight away").
+#   on this Mac (§13.34 ⑦). The column is opened through the application's own
+#   door for a column that was open before — a seeded `session.json` at schema
+#   15 whose tab is **pinned**, so the launch opens it straight away instead of
+#   raising the restore card (`main.rs`: "a window that held a pinned tab opens
+#   straight away").
 # * **"from a pane"** — the watcher cannot tell one writer from another, so the
 #   replacement and the subdirectory create are run from this script's own shell
-#   against the same folder. What is asserted is the *watch*.
-# * **the clicks** — CGEvent mouse posting at a window this session started is
-#   the one input that works here; the chrome dump and the mouse trace say
-#   whether it arrived.
+#   against the same folder. What is asserted is the *watch*, and the latency
+#   from the write to the frame that carries it is printed.
+# * **the clicks** — CGEvent mouse posting at a window this session started, at a
+#   point read out of the window's own chrome dump. The first-run card is
+#   dismissed by clicking its own button, which is both the honest way past it
+#   and the first evidence about whether a press reaches this window's content.
 # * **the typing rows** — not driven at all. They are written down as a hand
 #   procedure in DESIGN §13.40 for the owner.
 #
@@ -43,7 +46,7 @@ TARGET="$HOME/folio-port/target-m2-7"
 OUT="$WT/out-acc"
 APP="$OUT/FolioM27.app"
 ISO="$OUT/home"
-PAGES="$OUT/pages"
+PAGES="$ISO/pages"
 SHOTS="$OUT/shots"
 DUMP="$OUT/dump"
 BID="io.github.lulu-loopp.folio.m2-7-acc"
@@ -53,6 +56,7 @@ LAUNCHERS="$HOME/folio-port/launchers"
 FOLIO="$TARGET/debug/folio"
 PID=""
 WINID=""
+WINBOX=""
 
 if [ ! -x "$FOLIO" ]; then
   echo "MISSING $FOLIO"
@@ -139,9 +143,10 @@ SESSION
   echo "session.json for $1 parses: rc=$?"
 }
 
-# The pane's own shell runs this without a key being pressed: with no shell
-# integration installed `ZDOTDIR` is unset, so zsh reads `$HOME/.zshrc`, and
-# `$HOME` is this run's isolated one.
+# The pane's own shell runs this without a key being pressed: `folio.zsh` hands
+# `ZDOTDIR` back at the end of itself, so zsh then reads `$HOME/.zshrc`, and
+# `$HOME` is this run's isolated one. The digest it prints is the "before" the
+# owner's hand procedure for the save chord compares against.
 cat > "$ISO/.zshrc" <<ZSHRC
 export PS1='m2-7 %1~ %# '
 print -r -- "M27-PANE-READY"
@@ -188,82 +193,6 @@ swiftc -O -o "$OUT/winid" "$LAUNCHERS/winid.swift" 2>&1 | head -5
 swiftc -O -o "$OUT/click" "$LAUNCHERS/mac_lights_click.swift" 2>&1 | head -5
 ls -la "$OUT/winid" "$OUT/click" 2>&1
 
-cat > "$OUT/measure.py" <<'PY'
-"""Landmark reads off a window photograph.
-
-Numbers are physical pixels of the capture. `ink`, `mean` and `aa` are M2-5's
-three (DESIGN §13.22 ③) read the same way — the distance from the page's own
-ground on the encoded byte, because that is what a reader's eye meets — so this
-table and that one can be laid beside each other.
-"""
-import sys
-from PIL import Image
-
-
-def stats(px, box, ground):
-    x0, y0, x1, y1 = box
-    ink = 0
-    total = 0.0
-    aa = 0
-    peak = 0.0
-    for y in range(y0, y1):
-        for x in range(x0, x1):
-            r, g, b = px[x, y][:3]
-            d = max(abs(r - ground[0]), abs(g - ground[1]), abs(b - ground[2])) / 255.0
-            if d > 0.02:
-                ink += 1
-                total += d
-                peak = max(peak, d)
-                if 0.05 < d < 0.95:
-                    aa += 1
-    return ink, (total / ink if ink else 0.0), (aa / ink if ink else 0.0), peak
-
-
-def bands(counts, floor=1):
-    out, start = [], None
-    for i, n in enumerate(counts):
-        if n >= floor and start is None:
-            start = i
-        elif n < floor and start is not None:
-            out.append((start, i))
-            start = None
-    if start is not None:
-        out.append((start, len(counts)))
-    return out
-
-
-def profile(px, box, ground, axis):
-    x0, y0, x1, y1 = box
-    out = []
-    outer = range(y0, y1) if axis == "row" else range(x0, x1)
-    inner = range(x0, x1) if axis == "row" else range(y0, y1)
-    for a in outer:
-        n = 0
-        for b in inner:
-            r, g, bl = px[(b, a)][:3] if axis == "row" else px[(a, b)][:3]
-            if max(abs(r - ground[0]), abs(g - ground[1]), abs(bl - ground[2])) / 255.0 > 0.02:
-                n += 1
-        out.append(n)
-    return out
-
-
-if __name__ == "__main__":
-    img = Image.open(sys.argv[1]).convert("RGB")
-    px = img.load()
-    w, h = img.size
-    print("size", w, h)
-    ground = px[6, h - 6]
-    print("ground read at (6, h-6):", ground)
-    for arg in sys.argv[2:]:
-        name, rest = arg.split("=", 1)
-        box = tuple(int(v) for v in rest.split(","))
-        box = (max(0, box[0]), max(0, box[1]), min(w, box[2]), min(h, box[3]))
-        ink, mean, aa, peak = stats(px, box, ground)
-        print(f"{name} box={box} ink={ink} mean={mean:.4f} aa={aa:.4f} peak={peak:.4f}")
-        print(f"{name} rows={bands(profile(px, box, ground, 'row'))[:16]}")
-        print(f"{name} cols={bands(profile(px, box, ground, 'col'))[:16]}")
-PY
-
 # --------------------------------------------------------------------- helpers
 shot() {
   # `-o` drops the shadow, so pixel (0,0) is the window's own corner.
@@ -271,8 +200,14 @@ shot() {
   echo "shot $1 rc=$? bytes=$(stat -f %z "$SHOTS/$1.png" 2>/dev/null)"
 }
 
+frame() {
+  # The whole of the last chrome frame — quads, sprites and labels — so a
+  # rectangle whose owner is in doubt can be identified by what it stands among.
+  /usr/bin/awk '/^--- chrome frame/ { n = NR } { line[NR] = $0 } END { for (i = n; i <= NR; i++) print line[i] }' "$DUMP/chrome.dump" 2>/dev/null
+}
+
 last_labels() {
-  /usr/bin/awk '/^--- chrome frame/ { n = NR } { line[NR] = $0 } END { for (i = n; i <= NR; i++) if (line[i] ~ /^label/) print line[i] }' "$DUMP/chrome.dump" 2>/dev/null
+  frame | grep '^label'
 }
 
 launch() {
@@ -305,19 +240,75 @@ end_run() {
   PID=""
 }
 
+# A label's centre, in the global point space `CGEvent` posts into. `$1` is a
+# `grep -E` pattern the label line has to match; the line chosen is printed.
+point_of() {
+  /usr/sbin/screencapture -x -o -l"$WINID" "$OUT/scale.png" 2>/dev/null
+  # The frame goes to a file rather than down a pipe: this python's standard
+  # input is the here-document that carries the program, so a pipe into it
+  # reaches nothing.
+  frame > "$OUT/frame.txt"
+  /usr/bin/python3 - "$1" "$WINBOX" "$OUT/scale.png" "$OUT/frame.txt" <<'PY'
+import re, sys
+from PIL import Image
+pattern, box, shot, frame = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+lines = [l for l in open(frame, encoding="utf-8", errors="replace").read().splitlines()
+         if l.startswith("label") and re.search(pattern, l)]
+if not lines:
+    print("NO-LABEL")
+    sys.exit(0)
+line = lines[-1]
+print("LABEL-LINE", line.strip(), file=sys.stderr)
+rect = [float(v) for v in re.findall(r"-?\d+\.\d+|-?\d+", line.split("]")[0])[:4]]
+m = re.match(r"(-?\d+),(-?\d+) (\d+)x(\d+)", box)
+wx, wy, ww = (int(m.group(i)) for i in (1, 2, 3))
+# The rectangles are the window's own physical pixels and CGEvent speaks points,
+# so the scale is this window's photograph over this window's point width — read
+# rather than assumed, because the desk this runs on can change.
+scale = Image.open(shot).size[0] / ww
+print("SCALE", scale, file=sys.stderr)
+print("%.0f %.0f" % ((rect[0] + rect[2]) / 2 / scale + wx,
+                     (rect[1] + rect[3]) / 2 / scale + wy))
+PY
+}
+
+click_at() {
+  MOUSE_BEFORE=$(wc -l < "$DUMP/mouse.trace" 2>/dev/null || echo 0)
+  "$OUT/click" $1 $2
+  sleep 3
+  echo "--- the mouse-routing lines this press added ---"
+  tail -n +$((MOUSE_BEFORE + 1)) "$DUMP/mouse.trace" 2>/dev/null | head -20
+}
+
 # ============================================================ ROWS ① ② — the
 # folder is in the files column and the .md with a table and a CJK paragraph is
 # rendered in the preview.
 echo "=================================================== RUN A: table + CJK"
 write_session table-cjk.md
 launch || { echo "THE APPLICATION NEVER STARTED"; echo "ALL_DONE"; exit 1; }
+shot 00-clean-data-directory
+echo "--- the labels on the glass, clean data directory ---"
+last_labels | head -60
+
+# The first-run card stands over the reading surfaces on a clean data directory,
+# which is what "clean" means and not a defect. It is dismissed the way a reader
+# dismisses it: by pressing its own primary button, whose ink is the only
+# `#ffffff` label on the page.
+echo "--- dismissing the first-run card through its own button ---"
+CARD=$(point_of '#ffffff')
+echo "card button point: $CARD"
+case "$CARD" in
+  NO-LABEL|"") echo "no first-run card on the glass" ;;
+  *) click_at $CARD ;;
+esac
+sleep 4
 shot 01-md-table-cjk
-echo "--- the labels on the glass (chrome dump, last frame) ---"
-last_labels | head -80
-echo "--- the files column's foot and the preview rail's crumbs ---"
-last_labels | grep -E "pages|~|table-cjk|picture|math|sub" | head -40
+echo "--- the labels on the glass ---"
+last_labels | head -60
+echo "--- the whole last frame, the band under the document ---"
+frame | /usr/bin/awk '/^(quad|sprite|label)/ { if ($0 ~ /1[01][0-9][0-9]\.0|1[12][0-9][0-9]\.0/) print }' | head -30
 echo "--- preview trace ---"
-tail -20 "$DUMP/preview.trace" 2>/dev/null
+tail -12 "$DUMP/preview.trace" 2>/dev/null
 echo "--- the pane's own shell (pty dump) ---"
 for d in "$DUMP"/pty.dump*; do
   [ -f "$d" ] || continue
@@ -328,18 +319,16 @@ done
 # ==================================================== ROW ④ — the file is
 # replaced from outside the process and the preview follows with no click.
 echo "=================================================== ROW: replace, no click"
-# The document's own text is not chrome — a Markdown body goes to
-# `bt_render::PreviewBody`, not to a label — so what says the page was rebuilt
-# is `BT_PREVIEW_TRACE`'s `document bytes=…` station. `# other\n` is 8 bytes,
-# and the page it replaced is several hundred, so the number is the event.
+# A Markdown body goes to `bt_render::PreviewBody` and not to a label, so what
+# says the page was rebuilt is `BT_PREVIEW_TRACE`'s `document bytes=…` station.
+# `# other\n` is 8 bytes and the page it replaces is 362, so the number is the
+# event.
 /usr/bin/python3 - "$PAGES" "$DUMP/preview.trace" <<'PY'
 import os, subprocess, sys, time
 pages, trace = sys.argv[1], sys.argv[2]
 target = os.path.join(pages, "table-cjk.md")
 new = os.path.join(pages, "new")
 before = open(trace, "rb").read() if os.path.exists(trace) else b""
-print("preview.trace was", len(before), "bytes; last station:",
-      before.decode("utf-8", "replace").strip().splitlines()[-1:] )
 t0 = time.time()
 with open(new, "w", encoding="utf-8") as f:
     f.write("# other\n")
@@ -358,15 +347,10 @@ while time.time() - t0 < 25:
     time.sleep(0.02)
 print("REPLACE-LATENCY", ("%.3f" % found) if found is not None else "NOT SEEN in 25s")
 print("--- the stations this replacement added ---")
-try:
-    print(open(trace, "rb").read()[len(before):].decode("utf-8", "replace").strip())
-except OSError as error:
-    print("no trace:", error)
+print(open(trace, "rb").read()[len(before):].decode("utf-8", "replace").strip())
 PY
 sleep 2
 shot 02-md-replaced
-echo "--- labels after the replacement ---"
-last_labels | head -40
 
 # ==================================================== ROW ⑤ — a file created in
 # a subdirectory of the open folder shows in the tree.
@@ -381,23 +365,20 @@ with open(made, "w", encoding="utf-8") as f:
 found = None
 while time.time() - t0 < 25:
     try:
-        with open(dump, "rb") as f:
-            blob = f.read()
+        blob = open(dump, "rb").read()
     except OSError:
         blob = b""
     if b"made-by-the-sweep" in blob.rsplit(b"--- chrome frame", 3)[-1]:
         found = time.time() - t0
         break
     time.sleep(0.02)
-print("SUBDIR-TREE-LATENCY", "%.3f" % found if found is not None else "NOT SEEN in 25s")
+print("SUBDIR-TREE-LATENCY", ("%.3f" % found) if found is not None else "NOT SEEN in 25s")
 PY
 sleep 2
 shot 03-tree-subdir
 echo "--- the tree's own rows ---"
-last_labels | grep -E "sub|before.txt|made-by-the-sweep|picture|math|table" | head -30
+last_labels | grep -E "sub|before|made-by-the-sweep|picture|math|table|pages|~" | head -30
 
-# A control: the same create in the *root* of the open folder, which the
-# shallow watch is the one that must see.
 echo "--- control: a create in the watched root itself ---"
 /usr/bin/python3 - "$PAGES" "$DUMP/chrome.dump" <<'PY'
 import os, sys, time
@@ -409,63 +390,33 @@ with open(made, "w", encoding="utf-8") as f:
 found = None
 while time.time() - t0 < 25:
     try:
-        with open(dump, "rb") as f:
-            blob = f.read()
+        blob = open(dump, "rb").read()
     except OSError:
         blob = b""
     if b"root-level" in blob.rsplit(b"--- chrome frame", 3)[-1]:
         found = time.time() - t0
         break
     time.sleep(0.02)
-print("ROOT-TREE-LATENCY", "%.3f" % found if found is not None else "NOT SEEN in 25s")
+print("ROOT-TREE-LATENCY", ("%.3f" % found) if found is not None else "NOT SEEN in 25s")
 PY
 sleep 2
 shot 04-tree-root
 
 # ==================================================== ROW ⑥ — click a .png and
-# it shows. The point is read out of the window's own chrome dump.
+# it shows.
 echo "=================================================== ROW: click the .png"
-echo "--- the row's own rectangle, out of the last chrome frame ---"
-CLICKPT=$(/usr/bin/python3 - "$DUMP/chrome.dump" "$WINBOX" "$SHOTS/04-tree-root.png" <<'PY'
-import re, sys
-from PIL import Image
-dump, box, shot = sys.argv[1], sys.argv[2], sys.argv[3]
-blob = open(dump, "r", errors="replace").read()
-frame = blob.rsplit("--- chrome frame", 1)[-1]
-rect = None
-for line in frame.splitlines():
-    if line.startswith("label") and "picture.png" in line:
-        nums = re.findall(r"-?\d+\.\d+|-?\d+", line)
-        rect = [float(v) for v in nums[:4]]
-        print("LABEL-LINE", line.strip(), file=sys.stderr)
-        break
-if rect is None:
-    print("NO-ROW")
-    sys.exit(0)
-m = re.match(r"(-?\d+),(-?\d+) (\d+)x(\d+)", box)
-wx, wy, ww, wh = (int(m.group(i)) for i in (1, 2, 3, 4))
-img = Image.open(shot)
-scale = img.size[0] / ww
-cx = (rect[0] + rect[2]) / 2 / scale + wx
-cy = (rect[1] + rect[3]) / 2 / scale + wy
-print("%.0f %.0f" % (cx, cy))
-PY
-)
-echo "click point (global points): $CLICKPT"
-MOUSE_BEFORE=$(wc -l < "$DUMP/mouse.trace" 2>/dev/null || echo 0)
-case "$CLICKPT" in
-  NO-ROW|"") echo "the files column never drew a row for picture.png — no click posted" ;;
-  *) "$OUT/click" $CLICKPT; sleep 1; "$OUT/click" $CLICKPT ;;
+PNG=$(point_of 'picture\.png')
+echo "picture.png row point: $PNG"
+case "$PNG" in
+  NO-LABEL|"") echo "the files column never drew a row for picture.png" ;;
+  *) click_at $PNG; sleep 1; click_at $PNG ;;
 esac
 sleep 6
 shot 05-png-after-click
-echo "--- mouse trace, the lines this click added ---"
-tail -n +$((MOUSE_BEFORE + 1)) "$DUMP/mouse.trace" 2>/dev/null | head -30
 echo "--- preview trace ---"
-tail -6 "$DUMP/preview.trace" 2>/dev/null
-echo "--- labels now ---"
-last_labels | head -40
-
+tail -8 "$DUMP/preview.trace" 2>/dev/null
+echo "--- the preview head and rail now ---"
+last_labels | grep -E "picture|PNG|×" | head -10
 end_run
 
 # ==================================================== ROW ⑥′ — the picture,
@@ -476,9 +427,9 @@ write_session picture.png
 launch || { echo "RUN B NEVER STARTED"; echo "ALL_DONE"; exit 1; }
 shot 06-png
 echo "--- preview trace ---"
-tail -10 "$DUMP/preview.trace" 2>/dev/null
+tail -8 "$DUMP/preview.trace" 2>/dev/null
 echo "--- labels ---"
-last_labels | head -40
+last_labels | head -50
 end_run
 
 # ==================================================== ROW ⑦ — the integral is
@@ -488,32 +439,30 @@ rm -f "$DUMP/chrome.dump"
 write_session math.md
 launch || { echo "RUN C NEVER STARTED"; echo "ALL_DONE"; exit 1; }
 shot 07-math
-echo "--- labels: the source would be in here if it were printed as source ---"
-last_labels | head -60
-echo "--- does any label carry the raw delimiters? ---"
-last_labels | grep -c '\$\$'
+echo "--- labels ---"
+last_labels | head -50
 echo "--- preview trace ---"
-tail -10 "$DUMP/preview.trace" 2>/dev/null
+tail -8 "$DUMP/preview.trace" 2>/dev/null
 end_run
 
 # ------------------------------------------------------------------ the reads
 echo "=================================================== the pixel reads"
-# The files column's own width is in the seed (320 logical px); everything to
-# the right of it at this backing scale is the preview half. The reads are of
-# *line boxes*: how many bands of ink the page stands in and how tall each is,
-# which is what says a table has rows, a CJK paragraph has lines that do not
-# overlap, and an integral is taller than the prose beside it.
 /usr/bin/python3 - "$SHOTS" "$PAGES/picture.png" <<'PY'
-import os, sys
+import collections, os, sys
 from PIL import Image
 
 shots, source = sys.argv[1], sys.argv[2]
 
 
-def ground_of(img):
-    px = img.load()
-    w, h = img.size
-    return px[6, h - 6]
+def ground_of(px, x0, x1, y0, y1):
+    """The page's own ground: the commonest colour in the band, not a corner
+    pixel — a window whose corner is a rounded transparent one answers black to
+    that and then every pixel on the page counts as ink."""
+    counter = collections.Counter()
+    for y in range(y0, y1, 3):
+        for x in range(x0, x1, 3):
+            counter[px[x, y]] += 1
+    return counter.most_common(1)[0][0]
 
 
 def bands(counts, floor=1):
@@ -529,54 +478,57 @@ def bands(counts, floor=1):
     return out
 
 
-def read(name, left_fraction=0.34):
+def read(name):
     path = os.path.join(shots, name + ".png")
     if not os.path.exists(path):
         print(name, "NO SHOT")
-        return None
+        return
     img = Image.open(path).convert("RGB")
     px = img.load()
     w, h = img.size
-    ground = ground_of(img)
-    x0 = int(w * left_fraction)
-    rows = []
-    ink = 0
-    total = 0.0
-    aa = 0
-    for y in range(h):
+    # The seeded column is 320 logical px of a 1280-point window at scale 2, and
+    # the document starts after the pane's head and rail: x from 660, y from 200
+    # to the pane's floor.
+    x0, x1, y0, y1 = 660, w - 20, 200, 1120
+    ground = ground_of(px, x0, x1, y0, y1)
+    rows, ink, total, aa, peak = [], 0, 0.0, 0, 0.0
+    for y in range(y0, y1):
         n = 0
-        for x in range(x0, w):
+        for x in range(x0, x1):
             r, g, b = px[x, y]
             d = max(abs(r - ground[0]), abs(g - ground[1]), abs(b - ground[2])) / 255.0
             if d > 0.02:
                 n += 1
                 ink += 1
                 total += d
+                peak = max(peak, d)
                 if 0.05 < d < 0.95:
                     aa += 1
         rows.append(n)
     rb = bands(rows, floor=2)
-    print(f"{name}: size={w}x{h} ground={ground} preview half x>={x0}")
-    print(f"{name}: ink={ink} mean={(total/ink if ink else 0):.4f} aa={(aa/ink if ink else 0):.4f}")
-    print(f"{name}: {len(rb)} line boxes, tallest={max((b[2] for b in rb), default=0)}px")
-    print(f"{name}: boxes={rb[:18]}")
-    return img, x0, ground
+    print(f"{name}: size={w}x{h} document box=({x0},{y0})-({x1},{y1}) ground={ground}")
+    print(f"{name}: ink={ink} mean={(total / ink if ink else 0):.4f} "
+          f"aa={(aa / ink if ink else 0):.4f} peak={peak:.4f}")
+    print(f"{name}: {len(rb)} line boxes; tallest={max((b[2] for b in rb), default=0)}px; "
+          f"widest row={max(rows) if rows else 0}px of {x1 - x0}")
+    print(f"{name}: boxes(y+{y0})={[(b[0] + y0, b[1] + y0, b[2]) for b in rb][:20]}")
+    return img, px, (x0, y0, x1, y1), ground
 
 
-for name in ["01-md-table-cjk", "02-md-replaced", "03-tree-subdir",
-             "04-tree-root", "05-png-after-click", "06-png", "07-math"]:
+for name in ["00-clean-data-directory", "01-md-table-cjk", "02-md-replaced",
+             "03-tree-subdir", "04-tree-root", "05-png-after-click",
+             "06-png", "07-math"]:
     read(name)
     print()
 
-# The picture, against its own file: if what is on the glass is this picture, the
-# mean colour of the region it stands in follows the file's own mean colour.
+# The picture against its own file: what is on the glass follows the file's own
+# colour, and the aspect it is drawn at follows the file's own aspect.
 src = Image.open(source).convert("RGB")
 sw, sh = src.size
 spx = src.load()
-n = 0
-acc = [0, 0, 0]
-for y in range(0, sh, 4):
-    for x in range(0, sw, 4):
+acc, n = [0, 0, 0], 0
+for y in range(0, sh, 8):
+    for x in range(0, sw, 8):
         r, g, b = spx[x, y]
         acc[0] += r
         acc[1] += g
@@ -592,43 +544,50 @@ for name in ["06-png", "05-png-after-click"]:
     img = Image.open(path).convert("RGB")
     px = img.load()
     w, h = img.size
-    ground = ground_of(img)
-    x0 = int(w * 0.34)
-    # The largest run of rows in the preview half that is inked edge to edge is
-    # the picture: prose is inked in words, a photograph is inked all across.
+    x0, x1, y0, y1 = 660, w - 20, 200, 1120
+    ground = ground_of(px, x0, x1, y0, y1)
+    # A photograph is inked all the way across; prose is inked in words.
     wide = []
-    for y in range(h):
+    for y in range(y0, y1):
         n = 0
-        for x in range(x0, w):
+        for x in range(x0, x1):
             r, g, b = px[x, y]
             if max(abs(r - ground[0]), abs(g - ground[1]), abs(b - ground[2])) / 255.0 > 0.02:
                 n += 1
-        wide.append(n)
-    span = w - x0
-    solid = bands([1 if n > span * 0.55 else 0 for n in wide], floor=1)
-    solid.sort(key=lambda b: -b[2])
-    print(f"{name}: bands inked across more than half the preview: {solid[:4]}")
+        wide.append(1 if n > (x1 - x0) * 0.5 else 0)
+    solid = sorted(bands(wide), key=lambda b: -b[2])
+    print(f"{name}: bands inked across more than half the document: "
+          f"{[(b[0] + y0, b[1] + y0, b[2]) for b in solid[:4]]}")
     if solid:
-        y0, y1, _ = solid[0]
-        acc = [0, 0, 0]
-        n = 0
-        for y in range(y0, y1, 2):
-            for x in range(x0, w, 2):
+        by0, by1 = solid[0][0] + y0, solid[0][1] + y0
+        cols = []
+        for x in range(x0, x1):
+            n = 0
+            for y in range(by0, by1, 2):
+                r, g, b = px[x, y]
+                if max(abs(r - ground[0]), abs(g - ground[1]), abs(b - ground[2])) / 255.0 > 0.02:
+                    n += 1
+            cols.append(1 if n > (by1 - by0) * 0.25 else 0)
+        cb = sorted(bands(cols), key=lambda b: -b[2])
+        acc, n = [0, 0, 0], 0
+        for y in range(by0, by1, 2):
+            for x in range(x0, x1, 2):
                 r, g, b = px[x, y]
                 acc[0] += r
                 acc[1] += g
                 acc[2] += b
                 n += 1
-        print(f"{name}: that band is y={y0}..{y1} ({y1 - y0}px tall), mean rgb",
-              [round(c / n, 1) for c in acc])
+        width = cb[0][2] if cb else 0
+        print(f"{name}: the picture stands y={by0}..{by1} ({by1 - by0}px), "
+              f"x width {width}px, drawn aspect "
+              f"{(width / (by1 - by0)) if by1 > by0 else 0:.4f}, mean rgb "
+              f"{[round(c / n, 1) for c in acc]}")
 PY
 
 echo "=================================================== teardown"
 echo "chrome.dump: $(stat -f %z "$DUMP/chrome.dump" 2>/dev/null) bytes"
-echo "shots kept at $SHOTS for the transcript; they are deleted by m2-7-teardown.sh"
 "$LSREGISTER" -u "$APP"; echo "lsregister -u rc=$?"
-for id in "$BID"; do
-  rm -rf "$HOME/Library/WebKit/$id" "$HOME/Library/Caches/$id" "$HOME/Library/Saved Application State/$id.savedState"
-done
+rm -rf "$HOME/Library/WebKit/$BID" "$HOME/Library/Caches/$BID" \
+       "$HOME/Library/Saved Application State/$BID.savedState"
 echo "df: $(df -h "$HOME" | tail -1)"
 echo "ALL_DONE"

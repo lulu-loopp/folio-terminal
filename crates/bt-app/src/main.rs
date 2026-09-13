@@ -107349,8 +107349,23 @@ fn cwd_leaf(directory: &Path) -> Option<String> {
 /// `C:\` would otherwise yield an empty one. This function is not looking for
 /// anything; it is printing what the shell reported, and if the shell said `C:\`
 /// then `C:\` is where it is standing.
+///
+/// **"As this reader writes it" is the whole sentence, so off Windows the run
+/// above the home directory is `~`** (§13.32 ③ as extended by §13.40). The
+/// reading sweep photographed a window in which the breadcrumbs said `~ ›
+/// pages`, the files column's foot said `~/pages`, and this head — a hundred
+/// physical pixels below both — said
+/// `/Users/<owner>/folio-port/wt/m2-7/out-acc/home/pages`. That ruling's own
+/// words are that `~` "is the character the shell in the pane below prints for
+/// the same folder", and the pane below this head is that shell: its prompt
+/// says `~` while its head says the long form of the same place. One question
+/// one answer, through [`home_shortened_path`] — which is the breadcrumbs'
+/// rule, not a copy of it. Windows substitutes nothing and this function
+/// returns the string it always returned.
 fn cwd_whole(directory: &Path) -> Option<String> {
-    directory.to_str().map(ToOwned::to_owned)
+    directory
+        .to_str()
+        .map(|path| home_shortened_path(path).into_owned())
 }
 
 /// How one reader wants a session's folder written: the rendering, and the
@@ -148285,9 +148300,10 @@ mod tests {
             "an empty HOME is not a prefix of everything"
         );
         assert_eq!(
-            foot("/Users/alicia/notes.md", MacOs, Some(home)),
-            "/Users/alicia/notes.md",
-            "a home is a run of whole components, not a string prefix"
+            foot("/Users/alice/notes.md", MacOs, Some(Path::new("/Users/a"))),
+            "/Users/alice/notes.md",
+            "a home is a run of whole components, not a string prefix — `/Users/a` \
+             is a prefix of this path's characters and of none of its folders"
         );
 
         // Windows is the string it was, home or no home.
@@ -148314,6 +148330,72 @@ mod tests {
                 std::borrow::Cow::Borrowed(_)
             ),
             "the Windows arm allocates nothing: the string that went in comes out"
+        );
+    }
+
+    /// RED GATE (§13.40) — **a pane head writes its folder the way this reader
+    /// writes one.** The sweep photographed a Mac window in which three
+    /// surfaces named one place: the rail said `~ › pages`, the files column's
+    /// foot said `~/pages`, and the terminal pane's head, a hundred physical
+    /// pixels under both, said
+    /// `/Users/<owner>/folio-port/wt/m2-7/out-acc/home/pages` — while the shell
+    /// in that very pane printed `~` in its own prompt. §13.32 ③'s words for
+    /// `~` are "the character the shell in the pane below prints for the same
+    /// folder", and this head is the one directly above that shell.
+    ///
+    /// Two halves, and the Windows half is the one a Windows gate can hold
+    /// outright: **nothing is substituted here**, so a head prints the string
+    /// the shell reported, byte for byte, on this machine. The Mac half is the
+    /// rule's own pin above; what ties the two together is that the head goes
+    /// *through* that rule rather than having one of its own, which is what the
+    /// source pin asserts.
+    ///
+    /// MUTATIONS:
+    /// ① give `cwd_whole` its old `to_str()` body — the source pin goes red and
+    ///    a Mac head goes back to printing the whole run above home;
+    /// ② substitute on Windows too — the first assertion goes red on this host;
+    /// ③ point the head at a second renderer beside `CWD_AS_WHOLE_PATH` — the
+    ///    inventory that constant's doc keeps stops being the whole list, and
+    ///    the source pin names the function that got around it.
+    #[test]
+    fn a_pane_heads_folder_is_written_the_way_this_reader_writes_one() {
+        const SOURCE: &str = include_str!("main.rs");
+        let write = CWD_AS_WHOLE_PATH.write;
+        let home = profiles::home_directory(&bt_pty::SystemShellEnvironment)
+            .expect("the reader running this test has a home directory");
+        let under = home.join("notes");
+        assert_eq!(
+            write(&under).as_deref(),
+            under.to_str(),
+            "Windows knows no `~`, so a head prints what the shell reported"
+        );
+        assert_eq!(
+            write(Path::new("/nowhere/at/all")).as_deref(),
+            Some("/nowhere/at/all"),
+            "a folder under nobody's home is printed whole on either machine"
+        );
+        // The Mac's half of the same claim, read from here because the rule
+        // takes its platform and its home as values (§13.32 ③).
+        assert_eq!(
+            home_shortened_path_on(
+                "/Users/alice/pages",
+                bt_platform::HostPlatform::MacOs,
+                Some(Path::new("/Users/alice")),
+            ),
+            "~/pages",
+            "and a Mac's head says what a Mac's breadcrumbs say"
+        );
+        let body = SOURCE
+            .split_once("fn cwd_whole(directory: &Path) -> Option<String> {")
+            .expect("`cwd_whole` is still spelled this way")
+            .1
+            .split_once("\n}\n")
+            .expect("it still has an end")
+            .0;
+        assert!(
+            body.contains("home_shortened_path"),
+            "the head asks the breadcrumbs' own question rather than keeping a \
+             second opinion about where a path starts — body was: {body}"
         );
     }
 
