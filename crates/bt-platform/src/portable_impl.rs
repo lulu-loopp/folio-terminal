@@ -272,13 +272,14 @@ impl CustomWindowFrame {
     pub fn install(
         window: NativeWindow,
         geometry: crate::CustomFrameGeometry,
+        wake: Box<dyn Fn()>,
     ) -> Result<Self, String> {
         // **`geometry` is read now, and the field it is read for is the bar's
         // own height** (T-MAC-PILL). It was taken and dropped while this arm had
         // nothing in that band to agree with; the traffic lights are centred on
         // the strip Folio draws, and the height of that strip is the caller's
         // fact rather than AppKit's.
-        let adopted = adopt_platform_chrome(window, f64::from(geometry.title_bar_logical_px));
+        let adopted = adopt_platform_chrome(window, f64::from(geometry.title_bar_logical_px), wake);
         #[cfg(target_os = "macos")]
         let (chrome, buttons) = adopted;
         #[cfg(not(target_os = "macos"))]
@@ -293,8 +294,21 @@ impl CustomWindowFrame {
 
     /// **What the platform draws in this window's title bar** — the one read
     /// `bt-app` makes, and the reason it never asks which host it is on.
+    ///
+    /// **One answer per window *state*, not one for the window's life**
+    /// (§13.48). The measurement taken at `install` holds until macOS takes this
+    /// window's buttons away, which it does in full screen and undoes on the way
+    /// out; the watch is what hears those two transitions and re-measures, so on
+    /// a window that has one this accessor asks the watch rather than the copy
+    /// `install` bound. The field below is that copy, and it is the answer for
+    /// every window with no watch — which is every window on every other host,
+    /// and any window this crate could not measure.
     #[must_use]
     pub fn platform_chrome(&self) -> crate::PlatformChrome {
+        #[cfg(target_os = "macos")]
+        if let Some(buttons) = &self.buttons {
+            return buttons.chrome();
+        }
         self.chrome
     }
 
@@ -384,11 +398,12 @@ impl CustomWindowFrame {
 fn adopt_platform_chrome(
     window: NativeWindow,
     bar_logical_px: f64,
+    wake: Box<dyn Fn()>,
 ) -> (
     crate::PlatformChrome,
     Option<crate::macos_impl::WindowButtonsWatch>,
 ) {
-    match crate::macos_impl::adopt_window_chrome(window, bar_logical_px) {
+    match crate::macos_impl::adopt_window_chrome(window, bar_logical_px, wake) {
         Ok(adopted) => adopted,
         Err(reason) => {
             eprintln!("bt-platform: {reason}; the window keeps the title bar the system gave it");
@@ -398,8 +413,15 @@ fn adopt_platform_chrome(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn adopt_platform_chrome(window: NativeWindow, bar_logical_px: f64) -> crate::PlatformChrome {
-    let _ = (window, bar_logical_px);
+fn adopt_platform_chrome(
+    window: NativeWindow,
+    bar_logical_px: f64,
+    wake: Box<dyn Fn()>,
+) -> crate::PlatformChrome {
+    // The wake is dropped here rather than refused: a window whose bar the
+    // platform draws nothing in has nothing that can change about it, so there
+    // is nothing this host would ever ask a turn for.
+    let _ = (window, bar_logical_px, wake);
     crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR
 }
 
@@ -1542,6 +1564,7 @@ mod refusal_tests {
                     title_bar_logical_px: 40,
                     caption_button_logical_px: 46,
                 },
+                Box::new(|| {}),
             )
             .is_ok(),
             "the self-drawn frame"

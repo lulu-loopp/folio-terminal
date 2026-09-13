@@ -318,6 +318,9 @@ mod mac {
                 title_bar_logical_px: 40,
                 caption_button_logical_px: 46,
             },
+            // The wake this window will never fire: nothing here takes it into
+            // full screen, which is the one transition the frame asks a turn for.
+            Box::new(|| {}),
         )
         .expect("the frame installs");
         let chrome = frame.platform_chrome();
@@ -430,6 +433,9 @@ mod mac {
                 title_bar_logical_px: 40,
                 caption_button_logical_px: 46,
             },
+            // The wake this window will never fire: nothing here takes it into
+            // full screen, which is the one transition the frame asks a turn for.
+            Box::new(|| {}),
         )
         .expect("the frame installs");
         let before = window.frame();
