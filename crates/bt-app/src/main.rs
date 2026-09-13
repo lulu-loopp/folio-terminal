@@ -80105,21 +80105,23 @@ impl Runtime<'_> {
         lane_gone: bool,
     ) -> Result<()> {
         let mut changed = lane_gone;
-        // **A formula that lands under a glance card owes the *chrome* a frame,
-        // not the seats'** (user report, 2026-08-26).
+        // **A formula that lands owes a rebuild to whatever was standing on its
+        // source text** (user report, 2026-08-26; widened by M2-7, §13.40).
         //
-        // The card is an overlay layer, and `publish_frame` does not rebuild one:
-        // it presents what the last `refresh_overlay` composed. So a picture that
-        // arrived while the pointer rested still would be filed in the window's
-        // cache, tick the generation nothing was going to read, and leave the card
-        // standing on its source text until some unrelated gesture rebuilt the
-        // overlay. `complete_peek_page` says the same sentence about a page for
-        // the same reason.
+        // Neither surface is rebuilt by a publish. The card is an overlay layer
+        // and `publish_frame` presents what the last `refresh_overlay` composed;
+        // a docked pane's body is built by `refresh_preview_body`, which a
+        // resize, a scroll, an edit, an open and a palette change reach and a
+        // picture landing did not. Either way a picture that arrived after its
+        // reader had settled was filed in the window's cache, ticked the
+        // generation nothing was going to read, and left the block standing on
+        // its LaTeX until some unrelated gesture happened along.
+        // `complete_peek_page` says the same sentence about a page.
         //
         // Gathered across the drain and asked once at the end rather than per
         // completion: a page of forty formulas answers forty times, and forty
         // rebuilds of every layer in the window would be the cost of one card.
-        let mut card_owes_frame = false;
+        let mut picture_landed = false;
         for completion in answers_for(batch, |result| self.owns(result.owner())) {
             let leaf = completion.leaf.leaf;
             let target_index = self.window.tabs.iter().position(|tab| tab.id == leaf.tab);
@@ -80337,7 +80339,7 @@ impl Runtime<'_> {
                     // drawing exactly what it was drawing — the source the author
                     // wrote — so it owes nobody a frame, which is the same reason
                     // it does not tick the generation.
-                    card_owes_frame |= matches!(artifact, PreviewMathArtifact::Ready(_));
+                    picture_landed |= matches!(artifact, PreviewMathArtifact::Ready(_));
                     self.window.preview_math.land(*key, artifact);
                     true
                 }
@@ -80393,8 +80395,38 @@ impl Runtime<'_> {
         // Asked only while a card is actually up — `file_peek_subject` is the one
         // gate that says so, and asking it is what keeps a document nobody is
         // hovering from paying for an overlay rebuild per formula.
-        if card_owes_frame && self.file_peek_subject().is_some() && self.refresh_overlay() {
+        if picture_landed && self.file_peek_subject().is_some() && self.refresh_overlay() {
             self.present_chrome_change()?;
+        }
+        // **And the page in the pane, which is the same sentence one surface
+        // over** (M2-7; `docs/DESIGN.md` §13.40). The block above says "the card
+        // first, the picture when it comes" and arranges it for a *card*; a
+        // docked preview pane was left with only the publish below, and a
+        // publish is not a rebuild — it asks the window to draw again out of the
+        // bodies it is already holding, and the body that was built while the
+        // formula was still pending holds the author's LaTeX.
+        //
+        // `PreviewMathCache::generation` exists precisely to make the next
+        // rebuild find the picture, and nothing on this road was asking for that
+        // rebuild: `refresh_preview_body` is reached from a resize, a scroll, an
+        // edit, an open and a palette change, and a formula landing is none of
+        // those. So a page that had **settled** before its picture arrived stood
+        // on its source text for as long as the reader left it alone.
+        //
+        // It has always been a race and the port is what lost it: the Mac's
+        // first typesetting of a session takes about 1.7 s (the engine's font
+        // book is built on the worker thread before the first answer), while
+        // the startup's own layout passes are done inside 200 ms — so on that
+        // machine the answer *always* lands after the page has settled, and
+        // §M2's "the integral is typeset" row failed on every run. A slow first
+        // formula on any machine is the same defect.
+        //
+        // Gated on a picture rather than on `changed`, and on the same flag the
+        // card is: a refusal leaves the block drawing exactly what it was
+        // drawing, so it owes nobody a rebuild. Before the publish, so the frame
+        // that goes out carries the new body rather than the one after it.
+        if picture_landed {
+            self.refresh_preview_body();
         }
         if changed {
             self.publish_frame(FrameTrigger {
@@ -148425,6 +148457,77 @@ mod tests {
             body.contains("home_shortened_path"),
             "the head asks the breadcrumbs' own question rather than keeping a \
              second opinion about where a path starts — body was: {body}"
+        );
+    }
+
+    /// RED GATE (§13.40) — **a formula that lands rebuilds whatever was
+    /// standing on its source text**, the pane as well as the card.
+    ///
+    /// The Mac's reading sweep opened a page holding `$$\int_0^1 x\,dx$$` and
+    /// photographed `\int_0^1 x\,dx` printed where the integral belonged, on
+    /// every run, thirty seconds in and after a press. `BT_PREVIEW_TRACE` says
+    /// what happened: `math formulas=1 drawn=0 asked=1 worker=1` at 111 ms, the
+    /// page built at 175 ms, `math answered set=1` at **1684 ms** — and then no
+    /// `build` line ever again. The picture was set, it landed, and nothing
+    /// asked the page to be laid out a second time, so
+    /// `PreviewMathCache::generation` — which exists for exactly that next
+    /// layout — was read by nobody.
+    ///
+    /// This is a race and not a platform: `refresh_preview_body` is reached
+    /// from a resize, a scroll, an edit, an open and a palette change, and a
+    /// formula arriving is none of them, so the picture only ever reached the
+    /// glass because the page had not settled yet. The port is what lost the
+    /// race — a Mac's first typesetting of a session takes about 1.7 s against
+    /// a startup that settles inside 200 ms — and a slow first formula on any
+    /// machine is the same defect.
+    ///
+    /// A **source pin**, because the shape being asserted is a call in a method
+    /// that needs a window, a device and a worker to run at all, and the three
+    /// facts worth keeping are all in the text: that the rebuild is asked for,
+    /// that it is gated on a *picture* rather than on `changed` (a refusal
+    /// leaves the block drawing exactly what it was drawing), and that it
+    /// happens before the publish rather than after it.
+    ///
+    /// MUTATIONS:
+    /// ① drop the `refresh_preview_body` call — this goes red, and a page whose
+    ///    formula is slow stands on its LaTeX for as long as the reader leaves
+    ///    it alone;
+    /// ② gate it on `changed` instead — the flag assertion goes red, and every
+    ///    refusal costs a rebuild of every document in the window;
+    /// ③ move it below the publish — the order assertion goes red, and the
+    ///    frame that goes out is one behind the picture.
+    #[test]
+    fn a_formula_that_lands_rebuilds_the_page_that_was_standing_on_its_source() {
+        const SOURCE: &str = include_str!("main.rs");
+        let body = SOURCE
+            .split_once("fn apply_math_results(")
+            .expect("`apply_math_results` is still spelled this way")
+            .1
+            .split_once("\n    }\n")
+            .expect("it still has an end")
+            .0;
+        let rebuild = body
+            .find("self.refresh_preview_body();")
+            .expect("a landed picture asks the page to be laid out again");
+        let publish = body
+            .find("self.publish_frame(FrameTrigger {")
+            .expect("and the window still owes a frame after it");
+        assert!(
+            rebuild < publish,
+            "the rebuild goes before the publish, so the frame that goes out \
+             carries the new body rather than the one after it"
+        );
+        let guard = body[..rebuild]
+            .rfind("if picture_landed {")
+            .expect("the rebuild is gated on a picture");
+        assert!(
+            guard < rebuild && body[guard..rebuild].find("changed").is_none(),
+            "gated on a picture rather than on `changed`: a refusal leaves the \
+             block drawing exactly what it was drawing and owes no rebuild"
+        );
+        assert!(
+            body.contains("picture_landed |= matches!(artifact, PreviewMathArtifact::Ready(_));"),
+            "and the flag is set by a picture, never by a refusal"
         );
     }
 
