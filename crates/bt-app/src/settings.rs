@@ -203,6 +203,127 @@ const ROW_DESC_MARGIN_TOP_LOGICAL_PX: f32 = 1.0;
 /// test run rather than in a screenshot.
 const ROW_DESC_MAX_LINES: usize = 3;
 
+// ── the description column's copy budget (owner ruling 2026-09-13) ─────────
+//
+// [`ROW_DESC_MAX_LINES`] above is what the *layout* tolerates: three lines and
+// then an `…`. The constants below are what the *copy* is written to, and they
+// are a tighter line for a different reason: a settings row is scanned, not
+// read, and a sentence that needs three lines is a sentence that has stopped
+// saying one thing. Nothing draws them — they are `#[cfg(test)]` for
+// `SLIDER_TRACK_WIDTH_AT_THE_FLOOR_LOGICAL_PX`'s reason, that a constant the
+// product carried only so a pin could read it would be shipped weight.
+//
+// The seven rules the budget is the seventh of are written out in
+// `docs/plans/copy/user-facing-copy-guide.md` (English) and
+// `docs/plans/copy/zh-style-notes.md` (Chinese), and in `docs/DESIGN.md`
+// §7.1.6c-5.
+
+/// **How many lines of its column a row's sentence may fill** (owner ruling
+/// 2026-09-13).
+///
+/// Two, in either language. Held by
+/// [`tests::no_settings_sentence_needs_a_third_line`] over the English column
+/// and by [`tests::no_chinese_settings_sentence_needs_a_third_line_either`]
+/// over the Chinese one.
+#[cfg(test)]
+const SETTINGS_DESCRIPTION_MAX_LINES: usize = 2;
+
+/// **The row band at 1×**, in logical pixels — 502, and the column a *stacked*
+/// row writes its sentence in.
+///
+/// The same arithmetic [`StackMetrics::row_span`] does at scale 1, written out
+/// so the budgets below can be read without running anything:
+///
+/// ```text
+///   720   DIALOG_MAX_WIDTH_LOGICAL_PX          the dialog
+/// −   2   2 × FLOAT_WINDOW_BORDER_LOGICAL_PX   its own border
+/// − 168   NAV_WIDTH_LOGICAL_PX                 the category rail
+/// −  44   2 × CONTENT_PADDING_X_LOGICAL_PX     the page's gutters
+/// −   4   2 × ROW_PADDING_X_LOGICAL_PX         the row's own inset
+/// = 502
+/// ```
+///
+/// The border term carries no `.max(1.0)`: `f32::max` is not a `const fn`, and
+/// at scale 1 the floor is a no-op because the constant *is* 1.0.
+#[cfg(test)]
+const SETTINGS_ROW_SPAN_LOGICAL_PX: f32 = DIALOG_MAX_WIDTH_LOGICAL_PX
+    - 2.0 * FLOAT_WINDOW_BORDER_LOGICAL_PX
+    - (NAV_WIDTH_LOGICAL_PX + 2.0 * CONTENT_PADDING_X_LOGICAL_PX + 2.0 * ROW_PADDING_X_LOGICAL_PX);
+
+/// **The narrowest column a sentence is ever set in**, in logical pixels — 235.
+///
+/// **There is no single description column, and that is the whole of this
+/// constant.** `page_combo_width` makes the control column *the widest answer
+/// on the page*, so the sentence beside it is the band less that — 368 on a
+/// page whose pickers all sit at the 118px floor, and less on every page whose
+/// pickers have a long word to print. The budget is therefore the **narrowest**
+/// such column, and the narrowest is not a page's measurement at all:
+///
+/// ```text
+///   502   SETTINGS_ROW_SPAN_LOGICAL_PX
+/// − 251   the widest a control may be — row_span × COMBO_MAX_ROW_SHARE
+/// −  16   ROW_GAP_LOGICAL_PX
+/// = 235
+/// ```
+///
+/// **Which page sets it, and why it cannot be beaten.** `combo_width` clamps
+/// every picker at [`COMBO_MAX_ROW_SHARE`] of the row, so 235 is not the
+/// tightest column this build happens to draw — it is the tightest column this
+/// dialog *can* draw, on any page, on any machine, whatever the reader's fonts,
+/// schemes and profile names are called. Two pages already stand on it with
+/// nothing but words this build owns: **Summoned terminal**, whose `Restore`
+/// row offers `Tabs, folders, and a pinned tab's last command typed at its
+/// prompt`, and **General**, whose `Opens on launch` row offers `A tab in the
+/// window you used last`. The Chinese column reaches it on the Summoned
+/// terminal page for the same reason.
+///
+/// That is also what makes the budget survive
+/// `T-SETTINGS-PROFILE-MARKS`: the mark box that ticket adds to a marked row's
+/// button is spent on `Default profile` and on the summoned terminal's profile
+/// row, both of which are on pages *already* at the ceiling, and a width that
+/// is already clamped cannot be widened.
+///
+/// [`tests::the_description_budget_is_the_column_this_dialog_draws`] asserts all
+/// of this against the live geometry, so the arithmetic above and the dialog's
+/// own cannot drift apart.
+#[cfg(test)]
+const SETTINGS_DESCRIPTION_COLUMN_LOGICAL_PX: f32 =
+    SETTINGS_ROW_SPAN_LOGICAL_PX * (1.0 - COMBO_MAX_ROW_SHARE) - ROW_GAP_LOGICAL_PX;
+
+/// **How many English characters fit one line of that column** — 39.
+///
+/// `floor(235 / (12 × 0.5)) = floor(235 / 6) = 39`, where 12 is
+/// [`ROW_DESC_FONT_LOGICAL_PX`] and 0.5 em is [`tests::TEST_ADVANCE_PER_EM`] —
+/// this repository's own documented stand-in for the shaper's average advance,
+/// and the same number every width claim in this file is stated against. It is
+/// an approximation and is named as one: a budget stated against Segoe UI's
+/// real metrics would be re-stating the metrics of whichever face the machine
+/// has.
+///
+/// **A writer's number, and the strictest one.** It is what a row on the
+/// Summoned terminal or General page gets; a row on Rendered blocks, where
+/// every picker sits at the floor, gets 61, and one on Appearance gets 54. The
+/// gate does not use this number: it wraps each sentence in the column *its own
+/// page* draws, with the product's own wrapper, because English breaks at
+/// spaces and a 78-character sentence can still want a third line. Write to 39
+/// and no page can refuse the sentence.
+#[cfg(test)]
+const SETTINGS_DESCRIPTION_MAX_CHARS_ENGLISH: usize = 39;
+
+/// **How many Chinese characters fit one line of that column** — 19.
+///
+/// `floor(235 / 12) = 19`. A CJK face's advance is one em by the definition of
+/// every CJK font, so the character is [`ROW_DESC_FONT_LOGICAL_PX`] wide and no
+/// approximation is involved — which is why this half of the budget is exact
+/// where the English half is an estimate.
+///
+/// The same caution applies twice over: a Chinese line breaks at every
+/// ideograph boundary but a run of Han between two Latin words is one token to
+/// a space-only wrapper, so 38 characters is a ceiling and not a promise. See
+/// [`tests::a_chinese_settings_line_is_filled_before_it_breaks`].
+#[cfg(test)]
+const SETTINGS_DESCRIPTION_MAX_CHARS_CHINESE: usize = 19;
+
 // ── `.combo` ───────────────────────────────────────────────────────────────
 /// `.combo > button { min-width: 118px }` — **a floor, and since §7.1.6c-5 only
 /// a floor.**
@@ -15162,6 +15283,622 @@ mod tests {
         );
         // **And the walk really found the entries.** Every skip above is silent,
         // so a change that broke the lookup would leave this passing on nothing.
+        assert!(
+            measured >= 30,
+            "only {measured} rows were matched to an entry — the lookup is \
+             broken, not the copy"
+        );
+    }
+
+    /// **Every sentence this dialog can put under a row that the fixture above
+    /// does not select**, paired with the row whose column it is set in and the
+    /// machine it is read on.
+    ///
+    /// The walks that measure copy build one dialog out of
+    /// [`SettingsValues::sample`] and ask each row what it says, which is one
+    /// answer per row: the wrapping half of `Line wrapping`, the available half
+    /// of `Acrylic`, the Windows half of `Opens on launch`. The other halves are
+    /// sentences the product draws on a real desk and no length rule has ever
+    /// seen — the exact shape of a fault that ships, which is why
+    /// [`no_sentence_a_mac_reads_needs_a_fourth_line`] exists at all. This list
+    /// is that argument carried to every condition rather than only to the
+    /// platform.
+    ///
+    /// Named by hand and not swept, for that pin's reason: there is no map from
+    /// a row to its [`Text`], and the one the Chinese walk improvises — find the
+    /// entry whose English is the string this row just said — cannot reach a
+    /// string the row did not say.
+    ///
+    /// **Two sentences are deliberately outside it**, and both for the same
+    /// reason the picker column is: `psreadline::row_description`'s four
+    /// composed lines and `update::row_description`'s carry a version string
+    /// read off this machine, so their length is a fact about the machine rather
+    /// than about the copy. What is held here instead is the entry each of them
+    /// falls back to when there is no version to name.
+    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 23] = {
+        use bt_platform::HostPlatform::{MacOs, Windows};
+        [
+            // The other end of a value the fixture had to pick one end of.
+            (SettingsRow::LineWrapping, Text::DescLineWrappingOff, Windows),
+            // **The conditional row the fixture does not hold at all.**
+            // `every_row_of_the_dialog` pushes `Sidebar` only under a vertical
+            // tab strip and `flat_rows` is the horizontal window, so this
+            // sentence is on nobody's page in every walk in this file — the same
+            // silence `EDITOR_ROWS` was in until 2026-08-28.
+            (SettingsRow::Sidebar, Text::DescSidebar, Windows),
+            // The three rows whose sentence becomes the reason they are grey.
+            (
+                SettingsRow::BackgroundOpacity,
+                Text::DescBackgroundOpacityUnavailable,
+                Windows,
+            ),
+            (SettingsRow::Acrylic, Text::DescAcrylicUnavailable, Windows),
+            (SettingsRow::Acrylic, Text::DescAcrylicUnavailable, MacOs),
+            (SettingsRow::QuakeHeight, Text::DescQuakeHotkeyTaken, Windows),
+            (SettingsRow::QuakeHotkey, Text::DescQuakeHotkeyTaken, Windows),
+            // An intent recorded on the card and not yet written to a $PROFILE.
+            (
+                SettingsRow::PowerShellOffer,
+                Text::ShellIntegrationPending,
+                Windows,
+            ),
+            // What `attention_copilot::row_description` says about a machine
+            // this one is not.
+            (
+                SettingsRow::CopilotHooks,
+                Text::DescCopilotHooksTooOld,
+                Windows,
+            ),
+            (
+                SettingsRow::CopilotHooks,
+                Text::DescCopilotHooksDisabled,
+                Windows,
+            ),
+            // All six of `explorer_menu::description_for`'s answers, because the
+            // machine running the suite reaches exactly one of them.
+            (SettingsRow::ContextMenu, Text::DescExplorerMenu, Windows),
+            (
+                SettingsRow::ContextMenu,
+                Text::DescExplorerMenuNoFirstPage,
+                Windows,
+            ),
+            (
+                SettingsRow::ContextMenu,
+                Text::DescExplorerMenuNoPackage,
+                Windows,
+            ),
+            (
+                SettingsRow::ContextMenu,
+                Text::DescExplorerFirstPageElsewhere,
+                Windows,
+            ),
+            (
+                SettingsRow::ContextMenu,
+                Text::DescExplorerFirstPageUnreadable,
+                Windows,
+            ),
+            (
+                SettingsRow::ContextMenu,
+                Text::DescExplorerFirstPageAwaitingShell,
+                Windows,
+            ),
+            // The two PSReadLine states that are an entry rather than a composed
+            // line. See this constant's own note for the four that are not.
+            (SettingsRow::PsReadLine, Text::PsReadLineProbing, Windows),
+            (SettingsRow::PsReadLine, Text::PsReadLineRowGone, Windows),
+            // The sentence with no version in it, for the row above's reason.
+            (SettingsRow::UpdateCheck, Text::DescUpdateCheck, Windows),
+            // The Mac columns. `LaunchOpens`, `TurnEndNotifications`,
+            // `QuakeHotkey` and `OptionSendsAlt` are the rows whose sentence has
+            // one; `Acrylic`'s stands with the other refusals above.
+            (SettingsRow::LaunchOpens, Text::DescLaunchOpens, MacOs),
+            (
+                SettingsRow::TurnEndNotifications,
+                Text::DescTurnEndNotifications,
+                MacOs,
+            ),
+            (SettingsRow::QuakeHotkey, Text::DescQuakeHotkey, MacOs),
+            (SettingsRow::OptionSendsAlt, Text::DescOptionSendsAlt, MacOs),
+        ]
+    };
+
+    /// The ten sentences `profiles::capability_of_parts` can put under the
+    /// `Shell integration` row, which is one row with ten answers.
+    ///
+    /// Separate from [`OTHERWISE`] only because they share one row and one
+    /// platform, so the triple would be nine repetitions of the same two
+    /// members. They are in the budget for the same reason everything else is:
+    /// the editor's fixture stands on one of them and the dialog draws all ten.
+    const CAPABILITY_SENTENCES: [Text; 10] = [
+        Text::CapFull,
+        Text::CapFullNoLinks,
+        Text::CapPowerShell,
+        Text::CapPowerShellNoLinks,
+        Text::CapWslBash,
+        Text::CapWslBashNoLinks,
+        Text::CapCmd,
+        Text::CapCmdNoLinks,
+        Text::CapNoneLong,
+        Text::CapNoneLongNoLinks,
+    ];
+
+    /// **The sentences the owner has ruled out of the two-line budget**, named
+    /// one at a time (owner ruling 2026-09-13, the same day the budget was set).
+    ///
+    /// A length rule that anybody may quietly opt out of is not a rule, so this
+    /// list exists to make the opting-out **loud**: an exemption is an entry
+    /// written here, under a ruling, and never a sentence that happens to be
+    /// long. The gates skip exactly what is on it, in both languages and on both
+    /// platform columns, and nothing else.
+    ///
+    /// **`DescOptionSendsAlt` is on it because the owner put the sentence
+    /// back.** The rewrite this ticket made of it — `On, Option is a terminal's
+    /// Alt key. Off, Option types accents.` — fitted the budget by dropping the
+    /// two halves that are the row's whole reason for existing: *which* programs
+    /// want Option to be Alt, and that the characters it types otherwise are the
+    /// ones every other Mac app types. A reader whose `⌥a` has just done the
+    /// wrong thing is the reader this row was written for, and neither half is
+    /// spare to them. The owner restored the longer sentence and ruled the
+    /// budget off it rather than the sentence off the page.
+    ///
+    /// It still obeys the *layout*: `no_settings_sentence_needs_a_fourth_line`
+    /// and `no_sentence_a_mac_reads_needs_a_fourth_line` measure it like every
+    /// other line, and it fits their three. What it is excused from is the
+    /// tighter copy rule, and only that.
+    ///
+    /// [`the_description_budget_is_the_column_this_dialog_draws`] holds the
+    /// other half of the bargain: an entry here that no longer *needs* the
+    /// exemption is an exemption to delete, and it says so by name.
+    const OWNER_RULED_EXCEPTIONS: [(SettingsRow, Text); 1] =
+        [(SettingsRow::OptionSendsAlt, Text::DescOptionSendsAlt)];
+
+    /// Whether this sentence is one of them — asked of the string rather than of
+    /// the entry, because the page walk has a row and its words and no map back
+    /// to a [`Text`]. Both platform columns, so a future exception with two
+    /// still matches on the one the reader is being shown.
+    fn owner_ruled_exception(sentence: &str, lang: crate::i18n::Lang) -> bool {
+        use bt_platform::HostPlatform::{MacOs, Windows};
+        OWNER_RULED_EXCEPTIONS.into_iter().any(|(_, entry)| {
+            entry.on(lang, Windows) == sentence || entry.on(lang, MacOs) == sentence
+        })
+    }
+
+    /// **The rows whose picker prints something read off the machine**, and so
+    /// the rows a deterministic column cannot be measured with.
+    ///
+    /// A font family list, the scheme folder's contents and the profile table
+    /// are three answers this build does not own: the Appearance page's control
+    /// column is one width on a desk with `Cascadia Mono` installed and another
+    /// on one with a 40-character family name. That is
+    /// [`no_settings_sentence_needs_a_fourth_line`]'s argument, unchanged — a
+    /// page whose pickers have outgrown their words is a **geometry** fact about
+    /// the machine, and `ROW_DESC_MAX_LINES`' third line with its `…` is what
+    /// the layout already provides for it. What the copy is held to is the
+    /// column the page draws out of words this build ships.
+    ///
+    /// Leaving them out costs nothing on the two pages that matter: `Default
+    /// profile` and the summoned terminal's profile row are on pages already
+    /// standing at [`COMBO_MAX_ROW_SHARE`], where no label can widen anything.
+    const MACHINE_READ_PICKERS: [SettingsRow; 5] = [
+        SettingsRow::TerminalFont,
+        SettingsRow::LightScheme,
+        SettingsRow::DarkScheme,
+        SettingsRow::DefaultProfile,
+        SettingsRow::QuakeProfile,
+    ];
+
+    /// **The column one page writes its sentences in**, from the words this
+    /// build owns.
+    ///
+    /// `page_combo_width` is the product's own answer to "how wide is every
+    /// picker on this page", so this is the dialog's arithmetic and not a second
+    /// copy of it; the only thing done to it is [`MACHINE_READ_PICKERS`]'
+    /// removal, and the constant says why.
+    fn page_description_column(page: &[SettingsRow], span: f32) -> f32 {
+        let owned: Vec<SettingsRow> = page
+            .iter()
+            .copied()
+            .filter(|row| !MACHINE_READ_PICKERS.contains(row))
+            .collect();
+        let button = page_combo_width(
+            &owned,
+            1.0,
+            FLOAT_WINDOW_BORDER_LOGICAL_PX.max(1.0),
+            span,
+            &mut measure,
+        );
+        span - button - ROW_GAP_LOGICAL_PX
+    }
+
+    /// The pages a dialog holds, each with the rows it draws — one place for the
+    /// three walks below to agree about what a page is.
+    fn pages(
+        held: SettingsContent<'_>,
+        editing: SettingsContent<'_>,
+    ) -> Vec<(SettingsCategory, Vec<SettingsRow>)> {
+        SettingsCategory::ALL
+            .into_iter()
+            .map(|category| {
+                // The Profiles *list* has no sentences of its own — it is a
+                // table — so the page with the editor standing in it is not a
+                // second fixture, it is the only one that has rows.
+                let rows = if category == SettingsCategory::Profiles {
+                    editing.category_rows(category)
+                } else {
+                    held.category_rows(category)
+                };
+                (category, rows)
+            })
+            .collect()
+    }
+
+    /// **The budget the copy is written to is the narrowest column this dialog
+    /// can draw** (owner ruling 2026-09-13).
+    ///
+    /// Three claims, and the first is the one that makes the other two mean
+    /// anything.
+    ///
+    /// ① **There is no single description column.** `page_combo_width` makes the
+    /// control column the widest answer on the page, so the sentence column is
+    /// 368 on a page of short answers and less on every other. The budget is the
+    /// narrowest, and this asserts that no page's column is under it.
+    ///
+    /// ② **The narrowest is the [`COMBO_MAX_ROW_SHARE`] ceiling itself**, not a
+    /// page's measurement — which is why no machine's fonts, schemes or profile
+    /// names can go under it, and why the mark box `T-SETTINGS-PROFILE-MARKS`
+    /// adds to a marked row's button changes nothing: both rows that grow one
+    /// stand on pages that are already clamped. Asserted by naming those two
+    /// pages and showing they are at the ceiling.
+    ///
+    /// ③ The two character counts are **derived** here rather than written down
+    /// a second time, and the copy's cap is the tighter of the two line rules.
+    ///
+    /// MUTATION: move the rail, the gutters, the row inset or the picker's share
+    /// of the row and this names the difference before any sentence is measured
+    /// against a column the dialog no longer has.
+    #[test]
+    fn the_description_budget_is_the_column_this_dialog_draws() {
+        let metrics = StackMetrics::new(1.0);
+        let span = metrics.row_span(dialog_width());
+        assert_eq!(
+            span, SETTINGS_ROW_SPAN_LOGICAL_PX,
+            "the budget's arithmetic and the dialog's own are one band"
+        );
+        let rows = flat_rows();
+        let held = content(&rows, &[]);
+        let editing = editing_content(&rows, &[], editor_subject(true));
+        let dialog_pages = pages(held, editing);
+
+        // ① No page is narrower than the budget, and the budget is somebody's
+        // actual column rather than a number chosen to be safe.
+        let mut narrowest: Vec<SettingsCategory> = Vec::new();
+        for (category, page) in &dialog_pages {
+            let column = page_description_column(page, span);
+            assert!(
+                column >= SETTINGS_DESCRIPTION_COLUMN_LOGICAL_PX,
+                "{category:?} writes its sentences in {column}px, under the \
+                 {SETTINGS_DESCRIPTION_COLUMN_LOGICAL_PX}px the copy is written \
+                 to"
+            );
+            if column == SETTINGS_DESCRIPTION_COLUMN_LOGICAL_PX {
+                narrowest.push(*category);
+            }
+        }
+        // ② And these are the pages that stand on it — named, because a budget
+        // no page reaches is a budget nobody has to obey, and because the reason
+        // it cannot be beaten is that these two are at the ceiling.
+        assert!(
+            narrowest.contains(&SettingsCategory::General)
+                && narrowest.contains(&SettingsCategory::SummonedTerminal),
+            "General and Summoned terminal are the pages whose pickers take \
+             their half of the row; the narrowest column is drawn by {narrowest:?}"
+        );
+        for category in [
+            SettingsCategory::General,
+            SettingsCategory::SummonedTerminal,
+        ] {
+            let page = &dialog_pages
+                .iter()
+                .find(|(held, _)| *held == category)
+                .expect("every category is a page")
+                .1;
+            let column = page_description_column(page, span);
+            assert_eq!(
+                span - column - ROW_GAP_LOGICAL_PX,
+                span * COMBO_MAX_ROW_SHARE,
+                "{category:?}'s control column is at the share a picker may \
+                 take, so nothing added to a button on it can narrow the \
+                 sentence beside it"
+            );
+        }
+
+        // ③
+        assert_eq!(
+            SETTINGS_DESCRIPTION_MAX_CHARS_ENGLISH,
+            (SETTINGS_DESCRIPTION_COLUMN_LOGICAL_PX
+                / (ROW_DESC_FONT_LOGICAL_PX * TEST_ADVANCE_PER_EM)) as usize,
+            "the English budget is the column over the description font's \
+             average advance"
+        );
+        assert_eq!(
+            SETTINGS_DESCRIPTION_MAX_CHARS_CHINESE,
+            (SETTINGS_DESCRIPTION_COLUMN_LOGICAL_PX / ROW_DESC_FONT_LOGICAL_PX) as usize,
+            "the Chinese budget is the column over the em, which is what a CJK \
+             face advances"
+        );
+        assert!(
+            SETTINGS_DESCRIPTION_MAX_LINES < ROW_DESC_MAX_LINES,
+            "the copy is written to a shorter line than the layout tolerates"
+        );
+
+        // **And every exemption is still earning its place.** An entry on
+        // [`OWNER_RULED_EXCEPTIONS`] that would now pass the budget on its own
+        // is a hole in the rule that nobody would ever notice, because a gate
+        // does not complain about the thing it was told to skip. Whoever
+        // shortens one of these sentences is told here to take it off the list;
+        // whoever shortens the *column* it stands in is told the same.
+        for (row, entry) in OWNER_RULED_EXCEPTIONS {
+            let page = &dialog_pages
+                .iter()
+                .find(|(held, _)| *held == row.category())
+                .expect("every row is on a page")
+                .1;
+            let column = if row.stacked() {
+                span
+            } else {
+                page_description_column(page, span)
+            };
+            let sentence = entry.in_lang(crate::i18n::Lang::English);
+            let lines =
+                wrapped_description(sentence, column, ROW_DESC_FONT_LOGICAL_PX, &mut measure).len();
+            assert!(
+                lines > SETTINGS_DESCRIPTION_MAX_LINES,
+                "{entry:?} takes {lines} lines of {row:?}'s {column}px column and \
+                 is excused a budget it now meets — take it off \
+                 OWNER_RULED_EXCEPTIONS rather than leave a rule with a hole in \
+                 it: {sentence:?}"
+            );
+        }
+    }
+
+    /// PIN (owner ruling 2026-09-13) — **no sentence in this dialog needs a
+    /// third line.**
+    ///
+    /// The seventh of the seven rules the owner set for these descriptions, and
+    /// the only one a machine can hold: *every description fits two lines of the
+    /// description column at 1× in its language, and the budget is enforced by a
+    /// test rather than by eye.* The other six are readings and live in
+    /// `docs/plans/copy/user-facing-copy-guide.md` beside the checklist they
+    /// came from.
+    ///
+    /// It does **not** replace [`no_settings_sentence_needs_a_fourth_line`]:
+    /// that one is about the *layout*, and three lines is still what a machine
+    /// whose pickers have outgrown the 118px floor is allowed to draw. This one
+    /// is about the *copy*, at the floor, where the sentence is the only
+    /// variable left.
+    ///
+    /// **Both platform columns and both ends of every condition**, through
+    /// [`OTHERWISE`] and [`CAPABILITY_SENTENCES`] — see those constants for why
+    /// the fixture walk alone is not the whole set and which two sentences are
+    /// deliberately outside it.
+    ///
+    /// **Except what [`OWNER_RULED_EXCEPTIONS`] names**, which is one sentence
+    /// and is skipped by the string it says rather than by its row — a row draws
+    /// several sentences and only one of them was ruled on. The list's own note
+    /// carries the ruling; the budget test refuses to let an entry sit on it
+    /// after it stops needing to.
+    ///
+    /// MUTATION: put the pre-2026-09-13 `DescLaunchOpens`, `DescSidebar` or
+    /// `DescQuakeRestore` back and this names the row and the line count. (Not
+    /// `DescOptionSendsAlt`: its old sentence is the one standing, by ruling.)
+    #[test]
+    fn no_settings_sentence_needs_a_third_line() {
+        use crate::i18n::Lang;
+
+        let metrics = StackMetrics::new(1.0);
+        let span = metrics.row_span(dialog_width());
+        let rows = flat_rows();
+        let held = content(&rows, &[]);
+        let editing = editing_content(&rows, &[], editor_subject(true));
+        let dialog_pages = pages(held, editing);
+        // Every offender, not the first one — `no_settings_sentence_needs_a_
+        // fourth_line`'s reason: what the reader of this failure wants is the
+        // list of sentences to shorten.
+        let mut over: Vec<(SettingsRow, usize, String)> = Vec::new();
+        let mut measured: Vec<SettingsRow> = Vec::new();
+        // **The column this row's own page draws**, not the narrowest and not
+        // the floor: the budget constant is what the *writer* aims at, and a
+        // gate that held every page to it would demand cuts the glass never asks
+        // for. A stacked row's control leaves the column, so it keeps the band.
+        //
+        // The page's own wrapper, so this gate and the glass break the sentence
+        // the same way. It is capped at `ROW_DESC_MAX_LINES`, so a sentence that
+        // wanted five lines is reported as three — which is why the offending
+        // sentence is printed beside the count rather than only the number.
+        let count = |row: SettingsRow, sentence: &str| {
+            let page = &dialog_pages
+                .iter()
+                .find(|(category, _)| *category == row.category())
+                .expect("every row is on a page")
+                .1;
+            let column = if row.stacked() {
+                span
+            } else {
+                page_description_column(page, span)
+            };
+            wrapped_description(sentence, column, ROW_DESC_FONT_LOGICAL_PX, &mut measure).len()
+        };
+        for (_, page) in &dialog_pages {
+            for row in page {
+                measured.push(*row);
+                let sentence = row.description(&values());
+                if owner_ruled_exception(sentence, Lang::English) {
+                    continue;
+                }
+                let lines = count(*row, sentence);
+                if lines > SETTINGS_DESCRIPTION_MAX_LINES {
+                    over.push((*row, lines, sentence.to_owned()));
+                }
+            }
+        }
+        for (row, entry, platform) in OTHERWISE {
+            let sentence = entry.on(Lang::English, platform);
+            if owner_ruled_exception(sentence, Lang::English) {
+                continue;
+            }
+            let lines = count(row, sentence);
+            if lines > SETTINGS_DESCRIPTION_MAX_LINES {
+                over.push((row, lines, sentence.to_owned()));
+            }
+        }
+        for entry in CAPABILITY_SENTENCES {
+            let row = SettingsRow::ProfileIntegration;
+            let sentence = entry.in_lang(Lang::English);
+            let lines = count(row, sentence);
+            if lines > SETTINGS_DESCRIPTION_MAX_LINES {
+                over.push((row, lines, sentence.to_owned()));
+            }
+        }
+        assert!(
+            over.is_empty(),
+            "these sentences do not fit {SETTINGS_DESCRIPTION_MAX_LINES} lines \
+             of their own page's column (the narrowest is \
+             {SETTINGS_DESCRIPTION_COLUMN_LOGICAL_PX}px, about \
+             {SETTINGS_DESCRIPTION_MAX_CHARS_ENGLISH} characters a line), which \
+             is copy to shorten rather than a rule to change: {over:#?}"
+        );
+        // **And the walk really reached the sub-page**, which is the hole
+        // `no_settings_sentence_needs_a_fourth_line` fell into in 2026-08-28:
+        // `category_rows` folds `EDITOR_ROWS` in only while `editor` is `Some`.
+        for row in EDITOR_ROWS {
+            assert!(
+                measured.contains(&row),
+                "{row:?} is a row this dialog draws and its sentence was never \
+                 measured"
+            );
+        }
+    }
+
+    /// PIN (owner ruling 2026-09-13) — **the same two lines, held over the
+    /// Chinese column.**
+    ///
+    /// `#[ignore]`d, and the reason is the ticket's own division of labour:
+    /// stage 1 rewrote the English against the seven rules and this budget;
+    /// **stage 2 is the Chinese rewrite, and un-ignoring this test is what
+    /// finishes it.** The budget is not weakened to let the present Chinese
+    /// pass — that would make the gate agree with the copy instead of the other
+    /// way round, which is the one failure a length rule cannot survive.
+    ///
+    /// The measure, the lookup and their two caveats are
+    /// [`no_chinese_settings_sentence_needs_a_fourth_line_either`]'s, quoted
+    /// rather than re-argued: a CJK face advances one em per cluster, the entry
+    /// is found by the English string the row drew, and an English string two
+    /// entries share is skipped rather than guessed at.
+    ///
+    /// [`OWNER_RULED_EXCEPTIONS`] is skipped here as well as in the English
+    /// walk, and it has to be: the ruling excused the *entry* from the budget,
+    /// so a Chinese column held to two lines would be stage 2 being asked to
+    /// cut a sentence the owner had just put back.
+    ///
+    /// Run it with `cargo test -p bt-app -- --ignored
+    /// no_chinese_settings_sentence_needs_a_third_line_either` to see the list
+    /// of sentences stage 2 has left to shorten.
+    #[test]
+    fn no_chinese_settings_sentence_needs_a_third_line_either() {
+        use crate::i18n::{Lang, Text};
+        fn measure_in_a_cjk_face(text: &str, font_size_px: f32) -> f32 {
+            bt_unicode::graphemes(text)
+                .map(|cluster| bt_unicode::cluster_width(cluster) as f32)
+                .sum::<f32>()
+                * font_size_px
+                * TEST_ADVANCE_PER_EM
+        }
+        let metrics = StackMetrics::new(1.0);
+        let span = metrics.row_span(dialog_width());
+        let rows = flat_rows();
+        let held = content(&rows, &[]);
+        let editing = editing_content(&rows, &[], editor_subject(true));
+        let dialog_pages = pages(held, editing);
+        let mut over: Vec<(SettingsRow, Text, usize, String)> = Vec::new();
+        let mut measured = 0_usize;
+        // The English gate's rule, said about the Chinese column: this row's own
+        // page, the band for a stacked row. The page's control column is
+        // measured in the flat face rather than the CJK one on purpose — a
+        // picker's width is decided by the widest *option*, and the option
+        // labels this dialog owns are what `page_description_column` already
+        // measures for the other gate. One page width, two sentence measures.
+        let count = |row: SettingsRow, sentence: &str| {
+            let page = &dialog_pages
+                .iter()
+                .find(|(category, _)| *category == row.category())
+                .expect("every row is on a page")
+                .1;
+            let column = if row.stacked() {
+                span
+            } else {
+                page_description_column(page, span)
+            };
+            wrapped_description(
+                sentence,
+                column,
+                ROW_DESC_FONT_LOGICAL_PX,
+                &mut measure_in_a_cjk_face,
+            )
+            .len()
+        };
+        let hold = |row: SettingsRow,
+                    entry: Text,
+                    lines: usize,
+                    sentence: &str,
+                    over: &mut Vec<(SettingsRow, Text, usize, String)>| {
+            if lines > SETTINGS_DESCRIPTION_MAX_LINES {
+                over.push((row, entry, lines, sentence.to_owned()));
+            }
+        };
+        for (_, page) in &dialog_pages {
+            for row in page {
+                let english = row.description(&values());
+                if english.is_empty() {
+                    continue;
+                }
+                let mut saying = Text::ALL
+                    .into_iter()
+                    .filter(|entry| entry.in_lang(Lang::English) == english);
+                let Some(entry) = saying.next() else { continue };
+                if saying.next().is_some() {
+                    continue;
+                }
+                measured += 1;
+                let chinese = entry.in_lang(Lang::Chinese);
+                if owner_ruled_exception(chinese, Lang::Chinese) {
+                    continue;
+                }
+                let lines = count(*row, chinese);
+                hold(*row, entry, lines, chinese, &mut over);
+            }
+        }
+        for (row, entry, platform) in OTHERWISE {
+            let chinese = entry.on(Lang::Chinese, platform);
+            if owner_ruled_exception(chinese, Lang::Chinese) {
+                continue;
+            }
+            let lines = count(row, chinese);
+            hold(row, entry, lines, chinese, &mut over);
+        }
+        for entry in CAPABILITY_SENTENCES {
+            let row = SettingsRow::ProfileIntegration;
+            let chinese = entry.in_lang(Lang::Chinese);
+            let lines = count(row, chinese);
+            hold(row, entry, lines, chinese, &mut over);
+        }
+        assert!(
+            over.is_empty(),
+            "these Chinese sentences do not fit \
+             {SETTINGS_DESCRIPTION_MAX_LINES} lines of their own page's column \
+             (the narrowest is {SETTINGS_DESCRIPTION_COLUMN_LOGICAL_PX}px, about \
+             {SETTINGS_DESCRIPTION_MAX_CHARS_CHINESE} characters a line), which \
+             is copy to shorten rather than a rule to change: {over:#?}"
+        );
         assert!(
             measured >= 30,
             "only {measured} rows were matched to an entry — the lookup is \
