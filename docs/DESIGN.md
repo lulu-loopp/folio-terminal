@@ -5225,6 +5225,94 @@ quad  [18.0, 920.0, 614.0, 922.0]            ← 脚的横线
 
 **⑦ 没做的。** 文本卡的行数(理由见 ③);网络路径的卡仍旧一个字不说(不为一张卡去 stat 一个可能拨不通的共享,§7.1.3 的老规矩),文件已经不在的卡也一样——它们连带都不留,而不是留一条空带。
 
+
+#### ⑭ T-PEEK-FADE: the card appears the way the tip does — a fade, and nothing else (owner's ruling 2026-09-13; `crates/bt-app/src/{main,tooltip}.rs`, `crates/bt-render/src/lib.rs`)
+
+**The ruling.** The glance card had always arrived at full strength in a single
+frame: the pointer rests on a row, `file_peek::PEEK_INTENT_MS` (350 ms) runs out,
+and the card is simply *there*. Four candidates were mocked against each other —
+(A) leave it instant, (B) fade only, (C) fade plus a 4 px drop, (D) fade plus a
+scale — and the owner took **B**: `opacity 0 -> 1` over `tooltip::TOOLTIP_FADE`
+(= `bt_render::MOTION_FAST`, 90 ms) on the tip's own `ease`, **no travel, no
+scale**; leaving stays **instant**, with no fade-out at all; and under reduced
+motion it is instant both ways.
+
+**Why B and not C or D.** Two sentences, and they are the whole of it. First:
+**the card is summoned by holding still, so it must never look launched.** A
+drop and a scale are both entrance verbs — they say *opened*, which is the wrong
+word for a card that appeared because the reader stopped moving. What actually
+happened is that a thing already under the pointer became legible, and the only
+honest picture of that is ink arriving. Second: **everything this window raises
+on hover should obey one rule**, and the tooltip already did (§7.1.3, `.tip
+{ transition: opacity .09s ease }`). A card that arrived on a different curve, or
+on none, was the window speaking with two voices about one gesture.
+
+**The 350 ms is untouched.** The wait is the *question* — has this hand stopped?
+— and the fade is the *answer* arriving. Folding the two together (a shorter wait
+plus a longer fade, say) would trade a clean intent test for a card that starts
+appearing over rows the reader is only passing.
+
+**One rule, two epochs.** The curve is now a free function,
+`tooltip::hover_fade_opacity(since, motion)`, with `hover_fade_owes_frames` beside
+it; `TooltipHost::opacity` reads it and so does `Runtime::file_peek_opacity`. The
+two surfaces keep their **own** epochs — a tip and a card can be on screen at the
+same instant and neither is the other's clock — but there is exactly one curve
+and one span, so the day either moves, both move. No new constant was minted and
+none was needed: the span is `TOOLTIP_FADE`, already registered on the motion
+archive's fast rung (`archived("tooltip::TOOLTIP_FADE", …)`), and a second
+constant equal to it would have been precisely the drift that register exists to
+end.
+
+**The card's clock became one thing.** `FilePeek` carried `due: Option<Instant>`,
+where `None` meant "on screen". A fade needs the instant the card *appeared*, and
+a second `Option<Instant>` beside the first would have made two unrepresentable
+states representable — a card settling with a fade epoch, a card on screen
+without one. It is now `PeekClock`, `Settling(Instant) | Shown(Instant)`: "is it
+up?" and "when did it arrive?" are one question asked of one value, and there is
+deliberately **no third arm** for a card on its way out, which is what "leaving is
+instant" means in the type rather than in a comment.
+
+**The fade reaches every layer the card put down.** It is folded in
+`Runtime::file_peek_layer`, over the whole vector, rather than inside
+`file_peek::build`: the card's face, the scroll bar beside its document, the ▶ on
+a recording and that recording's control bar are one surface arriving, and a fade
+that reached only the face would have left a solid bar hanging in the air over a
+card that was not there yet. It is *multiplied* into whatever each layer already
+carried, never assigned over it.
+
+**And the document fades with the card**, which needed a fix one level down. A
+`bt_render::PreviewBody` has three channels — its fills, its letters and its
+pictures — and the layer's own `opacity` reached only the pictures
+(`faded_document_rasters`, mended 2026-08-26). A glance card is mostly document,
+so a fade that left the text solid would have been a frame arriving over ninety
+milliseconds around words that were already there. `preview_body_rect_instances`
+and `shape_preview_body` now take the carrier's alpha; the seat lane passes `1.0`,
+because a pane is the window rather than a thing laid over it, and the overlay
+lane passes its layer's. The undocked preview float's entrance is mended by the
+same line.
+
+**Frames.** The card owes the next frame exactly while its opacity is climbing —
+`Runtime::file_peek_deadline` reports the settle while one is armed and the fade's
+frames while one is running, and `advance_file_peek` asks the strip's own
+frame-debt question (`file_peek_drawn_opacity` against what should be painted) so
+that the frame the fade *lands* on is drawn. Once it has landed the card asks for
+nothing, which keeps §7.29's promise that a card standing still under a still
+pointer costs no wake-ups. Under reduced motion it owes none at any point.
+
+**Red gates.** `the_card_fades_in_over_the_tips_own_ninety_milliseconds`,
+`the_fade_owes_frames_while_it_climbs_and_the_card_leaves_at_once`,
+`stillness_skips_the_fade_and_owes_no_frames`,
+`a_settling_card_has_no_epoch_and_a_shown_card_waits_for_nothing`,
+`the_cards_fade_is_the_tips_rule_read_once_and_reaches_every_layer` (bt-app
+`file_peek_fade_tests`); `the_tip_and_the_glance_card_read_one_fade_and_not_two`
+(`tooltip`); `a_faded_layers_document_fills_are_faded_too` (bt-render). The
+mutations each one catches are written above it.
+
+**Both platforms**, because none of it is platform code: the clock, the curve and
+the fold are the same three functions on Windows and on macOS.
+
+*(本节英文,待中文文案改写。)*
+
 ### 7.30 半角标点后面紧跟一个汉字,那个标点就是名字的尽头:一个候选词的几种读法,从长到短问磁盘(裸路径不识别缺陷,2026-08-27 用户实证;**2026-08-28 复议:接缝从一张表改成一个类,反引号成为终止符,应用折断的下半截先切接缝再拼**;**2026-09-03 再补:接缝还有另一头——一个冒号前面站着别的文字,名字可以在它后面开口**;**2026-09-04 再补:`~` 是路径字符(8.3 短名里到处是它),只有名字开头那一个才是 home 展开**;**2026-09-05 再补:接缝的证人也可以是「后面什么都没有了」——token 尽头的 ASCII 句尾标点(句点在内)是接缝,第 16 行就地推翻**;**2026-09-07 再补:一格 pane 的壳不止一种绝对拼法——`/d/…`(MSYS)与 `/mnt/d/…`(WSL)按命名空间翻译后识别**;`crates/bt-transcript/src/paths.rs`、`crates/bt-term/src/session.rs`、`crates/bt-app/src/profiles.rs`、`crates/bt-app/src/main.rs`)
 
 **由头。** Claude Code 往终端里印这一行:
