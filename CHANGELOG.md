@@ -24,6 +24,15 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **On a Mac, `Edit ▸ Copy` and `Edit ▸ Paste` now act on the pane you are
+  looking at.** Over a terminal they did nothing at all — the selection never
+  reached the clipboard and the menu's Paste typed nothing — because macOS had
+  nothing to hand those rows to. They now copy the terminal's selection, or the
+  text you have selected in a file you are editing in a preview, and paste into
+  whichever of the two has the keyboard. A page in a web pane and a text field
+  in a dialog keep answering for themselves as before, and `⌘C` and `⌘V` are
+  unchanged.
+
 - Keep focus cards on the same content when resizing, and make Alt+wheel respond immediately when reversing at the oldest content.
 
 - Reuse unchanged Markdown prose measurements across caret moves and edits, and reset block scroll offsets after reparsing.

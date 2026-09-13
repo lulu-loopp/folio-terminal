@@ -95176,6 +95176,105 @@ impl Runtime<'_> {
         )
     }
 
+    /// **One row of the application menu that is this product's and has no row
+    /// in the shortcut table** (M3-2; the clipboard pair is
+    /// T-MAC-EDIT-CLIPBOARD, `docs/DESIGN.md` §13.26 ⑨).
+    ///
+    /// Help leaves through the same door every other address in this window
+    /// leaves through, and it is a **row** — pressed with a target of Folio's
+    /// own, like every verb row.
+    ///
+    /// The other two are not rows at all. They reach this window through the
+    /// application delegate's `copy:` / `paste:`, which is the **last** rung of
+    /// AppKit's responder chain — so everything that is a real text responder
+    /// has already had the press and kept it: the page in a web pane answers
+    /// with WebKit's own copy, a field in a sheet with the field's. What is left
+    /// is a surface AppKit has never heard of, which on this platform is every
+    /// pane Folio draws itself, and [`menubar::clipboard_seat`] is the one place
+    /// that decides which.
+    ///
+    /// **Each clipboard arm is the door the keystroke already uses**, never a
+    /// second one: a second copy path would be a second answer to what a
+    /// selection is worth on the pasteboard, and a second paste path would be a
+    /// second place for the sanitising, the bracketing and the multi-line policy
+    /// to be decided.
+    fn run_an_application_menu_verb(
+        &mut self,
+        action: bt_platform::menu::AppMenuAction,
+    ) -> Result<()> {
+        let copying = match action {
+            bt_platform::menu::AppMenuAction::Help => {
+                return self.hand_url_to_the_browser(update::RELEASES_PAGE);
+            }
+            bt_platform::menu::AppMenuAction::CopySelection => true,
+            bt_platform::menu::AppMenuAction::PasteIntoFocus => false,
+        };
+        match menubar::clipboard_seat(self.clipboard_focus()) {
+            // A surface of this window's is holding the keyboard and answers
+            // its own keys; see `ClipboardSeat::Nobody` for why doing nothing
+            // is the answer rather than the absence of one.
+            menubar::ClipboardSeat::Nobody => Ok(()),
+            menubar::ClipboardSeat::PreviewDocument => {
+                if copying {
+                    self.copy_preview_selection();
+                    Ok(())
+                } else {
+                    self.paste_into_preview()
+                }
+            }
+            menubar::ClipboardSeat::Terminal => {
+                if copying {
+                    self.copy_selection()
+                } else {
+                    self.paste_from_clipboard()
+                }
+            }
+        }
+    }
+
+    /// **What the window looks like to the Edit menu's clipboard rows**
+    /// (T-MAC-EDIT-CLIPBOARD).
+    ///
+    /// The two questions [`Runtime::keyboard_input`] asks before it lets a
+    /// `Cmd+C` reach the terminal, asked again in the same words — which is what
+    /// `every_surface_the_menu_defers_to_stands_above_the_clipboard_rung` holds
+    /// the two functions to.
+    fn clipboard_focus(&mut self) -> menubar::ClipboardFocus {
+        menubar::ClipboardFocus {
+            swallowing: self.a_surface_above_the_clipboard_rung_holds_the_keyboard(),
+            preview_edit: self.preview_edit_focus().is_some(),
+        }
+    }
+
+    /// **Every surface whose rung in [`Runtime::keyboard_input`] stands above
+    /// the clipboard's**, asked as one question (T-MAC-EDIT-CLIPBOARD).
+    ///
+    /// Four cards, the modal, the name editor and the five popups that own the
+    /// keyboard outright. None of them is an oversight to be filled in later: a
+    /// `Cmd+V` typed in any one of these states does not reach a shell either,
+    /// so a *menu* row that did would be the leak the ladder refuses arriving by
+    /// a second door.
+    ///
+    /// The three menus that are **not** here — the profile, root and preview
+    /// switchers, and the graph's branch filter — are not an omission either.
+    /// "A popup is not a modal, so it owns exactly one key: the one that puts it
+    /// away", and the ladder duly lets a clipboard chord past them to the pane
+    /// underneath. This answers the same way because it is the same sentence.
+    fn a_surface_above_the_clipboard_rung_holds_the_keyboard(&mut self) -> bool {
+        self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
+            || self.window.dirty_gate.is_open()
+            || self.window.first_run.is_open()
+            || self.window.psreadline_invite.is_open()
+            || self.settings_layout().is_some()
+            || self.window.rename.is_some()
+            || self.window.git_menu.is_some()
+            || self.window.term_menu.is_some()
+            || self.window.file_menu.is_some()
+            || self.window.pane_menu.is_some()
+            || self.window.tab_menu.is_some()
+            || self.window.palette.is_some()
+    }
+
     /// `Ctrl+V` / `Shift+Insert` — the keyboard's paste, into the shell the
     /// keyboard is in.
     fn paste_from_clipboard(&mut self) -> Result<()> {
@@ -106278,12 +106377,17 @@ impl FolioApp {
                     runtime.run_shortcut(action)?;
                 }
             }
-            // The one row of the bar that is this product's and has no row in
-            // the shortcut table. It leaves through the same door every other
-            // address in this window leaves through.
-            bt_platform::menu::MenuChoice::Application(bt_platform::menu::AppMenuAction::Help) => {
+            // **The verbs of this product's that have no row in the shortcut
+            // table**: Help, and — since T-MAC-EDIT-CLIPBOARD (§13.26 ⑨) — the
+            // Edit menu's Copy and Paste once AppKit's responder chain has
+            // declined them. Those two are not rows of the bar at all; they are
+            // AppKit's own selectors sent with no target, and they arrive here
+            // only after every real text responder in the key window has had
+            // them and refused. So the window is the one with the keyboard,
+            // exactly as it is for a verb row.
+            bt_platform::menu::MenuChoice::Application(action) => {
                 if let Some(mut runtime) = self.runtime(id) {
-                    runtime.hand_url_to_the_browser(update::RELEASES_PAGE)?;
+                    runtime.run_an_application_menu_verb(action)?;
                 }
             }
         }
@@ -162710,6 +162814,165 @@ mod palette_wiring_tests {
             assert!(
                 !PERSIST.contains(name),
                 "`{name}` has no business in what outlives the process"
+            );
+        }
+    }
+}
+
+/// **Edit ▸ Copy and Edit ▸ Paste, once AppKit's responder chain has declined
+/// them** (T-MAC-EDIT-CLIPBOARD, `docs/DESIGN.md` §13.26 ⑨).
+///
+/// The decision itself is pure and lives in [`menubar::clipboard_seat`], where
+/// it is checked state by state. What is checked here is the wiring on either
+/// side of it, which is exactly the half a value cannot carry: that the window
+/// facts the menu reads are the same facts the keyboard ladder reads, in the
+/// same order, and that each arm ends in the door a keystroke already uses.
+#[cfg(test)]
+mod edit_menu_clipboard_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// The keyboard's own ladder.
+    fn ladder() -> &'static str {
+        body("fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {")
+    }
+
+    /// PIN — **every surface the menu defers to has a rung above the clipboard
+    /// rung**, and the two lists are one list.
+    ///
+    /// The claim that makes `ClipboardSeat::Nobody` honest rather than lazy: a
+    /// `Cmd+V` typed with any one of these up does not reach a shell, so a menu
+    /// row that pasted into one would be the very leak
+    /// `nothing_leaks_past_the_palette_to_the_shell` refuses, arriving by a
+    /// second door. Read off the two function bodies because the agreement is
+    /// between two pieces of control flow and no value passes between them.
+    ///
+    /// MUTATIONS:
+    /// (1) drop a surface from `a_surface_above_the_clipboard_rung_holds_the_keyboard`
+    ///     — its first assertion goes red;
+    /// (2) move the clipboard rung in `keyboard_input` above any one of those
+    ///     rungs — the second goes red, and the ladder and the menu now
+    ///     disagree about who owns the keyboard.
+    #[test]
+    fn every_surface_the_menu_defers_to_stands_above_the_clipboard_rung() {
+        let ladder = ladder();
+        let defers = body(
+            "    fn a_surface_above_the_clipboard_rung_holds_the_keyboard(&mut self) -> bool {",
+        );
+        let rung = ladder
+            .find("self.copy_selection()?;")
+            .expect("the clipboard rung is still a way out of `keyboard_input`");
+        for surface in [
+            "self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)",
+            "self.window.dirty_gate.is_open()",
+            "self.window.first_run.is_open()",
+            "self.window.psreadline_invite.is_open()",
+            "self.settings_layout().is_some()",
+            "self.window.rename.is_some()",
+            "self.window.git_menu.is_some()",
+            "self.window.term_menu.is_some()",
+            "self.window.file_menu.is_some()",
+            "self.window.pane_menu.is_some()",
+            "self.window.tab_menu.is_some()",
+            "self.window.palette.is_some()",
+        ] {
+            assert!(
+                defers.contains(surface),
+                "`{surface}` owns the keyboard in the ladder and the menu does not defer to it"
+            );
+            let at = ladder.find(surface).unwrap_or_else(|| {
+                panic!("`{surface}` is no longer a rung of `keyboard_input` at all")
+            });
+            assert!(
+                at < rung,
+                "`{surface}` stands below the clipboard rung, so the menu defers to a surface \
+                 the keyboard does not"
+            );
+        }
+    }
+
+    /// PIN — **each arm is the door the keystroke already uses**, and the verb
+    /// reaches the clipboard through none of its own.
+    ///
+    /// A second copy path would be a second answer to what a selection is worth
+    /// on the pasteboard; a second paste path would be a second place for the
+    /// sanitising, the bracketing and the multi-line policy to be decided. The
+    /// four doors named here are the four the two key handlers name.
+    ///
+    /// MUTATION: read the pasteboard in `run_an_application_menu_verb` and
+    /// write the bytes itself — the last two assertions go red.
+    #[test]
+    fn the_edit_menus_clipboard_verbs_go_through_the_keystrokes_own_doors() {
+        let verb = body("    fn run_an_application_menu_verb(");
+        let editor = body("    fn preview_key(&mut self, event: &KeyEvent) -> Result<bool> {");
+        let ladder = ladder();
+        for (door, other, whose) in [
+            (
+                "self.copy_preview_selection()",
+                editor,
+                "the preview editor",
+            ),
+            ("self.paste_into_preview()", editor, "the preview editor"),
+            ("self.copy_selection()", ladder, "the terminal"),
+            ("self.paste_from_clipboard()", ladder, "the terminal"),
+        ] {
+            assert!(
+                verb.contains(door),
+                "the Edit menu does not reach `{door}`, which is {whose}'s own door"
+            );
+            assert!(
+                other.contains(door),
+                "`{door}` is no longer what {whose} answers its own chord with"
+            );
+        }
+        for its_own in [
+            "write_terminal_clipboard_text",
+            "bt_platform::clipboard_text",
+        ] {
+            assert!(
+                !verb.contains(its_own),
+                "the Edit menu touches the pasteboard itself through `{its_own}` instead of \
+                 going through the door the keystroke uses"
+            );
+        }
+    }
+
+    /// PIN — **a declined clipboard row runs on the window that has the
+    /// keyboard**, through the same landing every other menu press lands at.
+    ///
+    /// The two verbs arrive on M3-1's channel like any other choice, so nothing
+    /// about the window, the buffering or the ordering is theirs; what is theirs
+    /// is one arm inside the one verb runner. A second landing would be a second
+    /// answer to which window a menu press belongs to.
+    ///
+    /// MUTATION: answer either verb from the delegate's own stack instead of
+    /// the landing and the arm named here disappears.
+    #[test]
+    fn a_declined_clipboard_row_lands_where_every_other_menu_row_lands() {
+        let landing = body("    fn answer_a_menu_row(");
+        assert!(
+            landing.contains("runtime.run_an_application_menu_verb(action)?;"),
+            "the landing answers a menu verb somewhere other than the window's own runtime"
+        );
+        let verbs = body("    fn run_an_application_menu_verb(");
+        for verb in [
+            "AppMenuAction::Help",
+            "AppMenuAction::CopySelection",
+            "AppMenuAction::PasteIntoFocus",
+        ] {
+            assert!(
+                verbs.contains(verb),
+                "`{verb}` has no arm in the application menu's verb runner"
             );
         }
     }

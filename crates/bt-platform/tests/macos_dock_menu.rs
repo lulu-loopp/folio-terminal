@@ -286,6 +286,20 @@ mod mac {
                 delegate_answers_the_four_selectors(),
                 "the fifth selector displaced one of the four",
             );
+            // And the Edit menu's floor under the responder chain
+            // (T-MAC-EDIT-CLIPBOARD, `docs/DESIGN.md` §13.26 ⑨). It is read here
+            // rather than in a file of its own for the reason the line above is:
+            // this is the one target in the workspace that has a **live
+            // delegate** installed on a real `NSApplication`, and
+            // `respondsToSelector:` asked of that object is the same reading
+            // `-[NSApplication targetForAction:]` makes on the last rung of the
+            // chain. Without it, `Edit ▸ Copy` over a terminal reaches nobody.
+            self.report.claim(
+                "and it answers the Edit menu's copy: and paste:",
+                bt_platform::delegate_answers_the_edit_menus_clipboard_rows(),
+                "NSApp.delegate does not respond to them, so a nil-target copy: \
+                 reaches the end of the responder chain and stops",
+            );
 
             // ③ the menu is the plan.
             let english = a_plan(ENGLISH, true);
