@@ -1615,7 +1615,8 @@ mod visual_layer_tests {
     }
 }
 
-/// The Windows path one `file:` URI names, or nothing when it names none.
+/// The path one `file:` URI names **on this machine**, or nothing when it names
+/// none — [`file_uri_to_path_on`] for the platform this build is.
 ///
 /// # Why this is here and why it is pure
 ///
@@ -1632,35 +1633,100 @@ mod visual_layer_tests {
 ///
 /// It answers only what this machine could actually name. Nothing here checks
 /// that the path *exists*, and nothing here decides what to do with it: the
-/// caller's own policy — preview, Explorer, refuse — is a separate question and
+/// caller's own policy — preview, Finder, refuse — is a separate question and
 /// stays where the rest of that policy lives.
+#[must_use]
+pub fn file_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
+    file_uri_to_path_on(uri, host_platform())
+}
+
+/// **The same translation asked of a named platform** (T-MAC-FILEURI, §13.47).
 ///
-/// # The reading
+/// A value rather than two `cfg` bodies, for [`host_platform`]'s own reason: the
+/// whole function is a *string* question, so a workstation on either platform
+/// can pin both answers, and the one table that would otherwise exist twice —
+/// once per machine, each half only ever run on its own — is one table run
+/// everywhere.
+///
+/// # What both platforms read the same way
 ///
 /// * The scheme is matched case-insensitively; anything but `file` is not ours.
 /// * A fragment (`#…`) and a query (`?…`) are cut. They are URI syntax, not part
 ///   of any filename.
-/// * `file://<host>/…` with an empty host or `localhost` is this machine;
-///   any other host is the UNC share `\\<host>\…` it plainly means (RFC 8089
-///   §2). `file:/C:/…` and `file:C:/…`, which emitters do produce, are read as
-///   the same local path with no authority at all.
+/// * `file://<host>/…` with an empty host or `localhost` is this machine.
+///   `file:/…` and `file:…`, which emitters do produce, carry no authority at
+///   all and are read as this machine's too.
 /// * Percent-escapes decode to bytes and the bytes must be UTF-8 — which is what
 ///   `%E4%B8%AD` being a Chinese character rather than three broken ones depends
 ///   on. A `%` that is not followed by two hex digits makes the whole URI
 ///   unreadable rather than a literal percent: a filename holding a real `%` is
 ///   `%25` in a URI, and treating the malformed case as text is how a decoder
 ///   starts opening files nobody named.
-/// * Forward slashes become backslashes, and the leading slash in front of a
-///   drive letter goes away, so `file:///C:/a%20b.md` is `C:\a b.md`.
-/// * The result must be drive-rooted or UNC. A POSIX URI such as
-///   `file:///etc/passwd` names nothing on this machine and is refused rather
-///   than turned into a relative path that would resolve against whatever the
-///   process's current directory happens to be.
 /// * A NUL or an ASCII control character anywhere — before decoding or after —
 ///   is a refusal. Raw non-ASCII is kept as itself, which is the IRI a browser
 ///   would accept.
+/// * A trailing separator is kept: it is the emitter saying "directory", and
+///   every reader downstream reads it the same way an operating system does.
+///
+/// # An escape that decodes to a separator **is** a separator, on both
+///
+/// `file:///C:%5Ctmp%5Cx.md` is `C:\tmp\x.md` and `file:///Users/a%2Fb` is
+/// `/Users/a/b`, which is the lenient of the two readings RFC 3986 allows: read
+/// strictly, a percent-encoded octet is never a delimiter, so those would name a
+/// file whose *name* holds a separator.
+///
+/// It is lenient deliberately and the reason is that **no filesystem this
+/// product reaches can hold a separator inside a name**, so the strict reading
+/// refuses a spelling without ever reaching a file the lenient one would open
+/// wrongly. The two readings differ about how a path may be *written*, never
+/// about which file is named. `..` is not the difference and never was: it
+/// survives decoding under either reading, on either platform, exactly as an
+/// unescaped `..` does, and what may be done with a path carrying one is settled
+/// downstream by [`reveal_argument_form`] and
+/// `bt_transcript::paths::may_read_unasked`.
+///
+/// **`bt_transcript::paths::decode_file_uri` rules the other way, and that is
+/// not a disagreement.** That decoder splits the URI into segments *first* and
+/// decodes each one after, so an escape that yields a separator contradicts a
+/// boundary it has already drawn — which is a statement about its own algorithm.
+/// This function decodes the whole path in one pass and reads a path off the
+/// result, so there is no earlier split for an escape to contradict.
+///
+/// # Where they part
+///
+/// **Windows.** Forward slashes become backslashes and the leading slash in
+/// front of a drive letter goes away, so `file:///C:/a%20b.md` is `C:\a b.md`;
+/// any host but this machine's is the UNC share `\\<host>\…` it plainly means
+/// (RFC 8089 §2); and the result must be drive-rooted or a share. A POSIX URI
+/// such as `file:///etc/passwd` names nothing on that machine and is refused
+/// rather than turned into a relative path that would resolve against whatever
+/// the process's current directory happens to be.
+///
+/// **macOS and every other Unix.** The path is the URI's path, byte for byte
+/// after decoding: no separator is translated, because `\` is an ordinary
+/// character in a name here and a reader that turned one into a boundary would
+/// open a different file (`bt_transcript::paths::local_path_to_file_uri`'s
+/// POSIX arm encodes it `%5C` for exactly that reason, and this is the other
+/// half of that round trip). It must open with `/`, which is the whole of what
+/// "absolute" means on this filesystem, and `/` itself — `file:///` — is the
+/// root directory and a real place rather than "a root with no name".
+///
+/// **A host that is not this machine names nothing here.** There is no POSIX
+/// spelling for a file on another machine: what Windows writes `\\server\share`
+/// a Mac reaches through a mount point with a name of its own that no URI
+/// carries. So `file://server/share/notes.md` is refused rather than read as
+/// the local path `/share/notes.md`, which is a *different, existing* file this
+/// window would then open while the reader believed they had asked for a
+/// stranger's.
+///
+/// **A drive letter is not special here.** `file:///C:/x` is the ordinary
+/// absolute path `/C:/x` — a directory named `C:` at the root, which this
+/// filesystem is perfectly able to hold. Stripping the slash would be this
+/// function guessing at another platform's grammar, which is the defect
+/// §13.45 ⑥ found. A Windows-printed link opened on a Mac therefore names
+/// something that is not there, and the window says so, rather than pretending.
 #[must_use]
-pub fn file_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
+pub fn file_uri_to_path_on(uri: &str, platform: HostPlatform) -> Option<std::path::PathBuf> {
     let (scheme, rest) = uri.split_once(':')?;
     if !scheme.eq_ignore_ascii_case("file") {
         return None;
@@ -1675,10 +1741,19 @@ pub fn file_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
     {
         return None;
     }
+    // **Which characters end the authority is the platform's answer**, for the
+    // reason the body below never translates one on Unix: a backslash is a
+    // separator on Windows and a legal byte of a name everywhere else, so
+    // `file://host\share` is a host-and-a-path there and a host with no path
+    // here.
+    let authority_ends_at: &[char] = match platform {
+        HostPlatform::Windows => &['/', '\\'],
+        HostPlatform::MacOs | HostPlatform::OtherUnix => &['/'],
+    };
     let (host, path) = match rest.strip_prefix("//") {
         // The authority runs to the next separator; without one there is a host
         // and no path, which names a machine rather than a file on it.
-        Some(authority) => match authority.find(['/', '\\']) {
+        Some(authority) => match authority.find(authority_ends_at) {
             Some(cut) => (&authority[..cut], &authority[cut..]),
             None => return None,
         },
@@ -1690,6 +1765,33 @@ pub fn file_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
         return None;
     }
     let local = host.is_empty() || host.eq_ignore_ascii_case("localhost");
+    match platform {
+        HostPlatform::Windows => windows_path_of_file_uri(&host, path, local),
+        HostPlatform::MacOs | HostPlatform::OtherUnix => posix_path_of_file_uri(path, local),
+    }
+}
+
+/// The Unix half of [`file_uri_to_path_on`], over a decoded host and path.
+///
+/// Three questions and no grammar, which is the whole of the difference from the
+/// Windows half: this filesystem has one root, every byte but NUL is a legal
+/// byte of a name, and no spelling of a path names another machine.
+fn posix_path_of_file_uri(path: String, local: bool) -> Option<std::path::PathBuf> {
+    if !local {
+        return None;
+    }
+    if !path.starts_with('/') {
+        return None;
+    }
+    if path.contains('\0') || path.chars().any(|character| character.is_control()) {
+        return None;
+    }
+    Some(std::path::PathBuf::from(path))
+}
+
+/// The Windows half of [`file_uri_to_path_on`], over a decoded host and path —
+/// unchanged, byte for byte, from when it was the whole function.
+fn windows_path_of_file_uri(host: &str, path: String, local: bool) -> Option<std::path::PathBuf> {
     let mut text = if local {
         // `/C:/x` → `C:/x`. Only in front of a drive letter: a lone leading
         // slash anywhere else is a POSIX path, which the root check below
@@ -15145,8 +15247,22 @@ mod file_uri_tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn decoded(uri: &str) -> Option<String> {
-        file_uri_to_path(uri).map(|path| path.to_string_lossy().into_owned())
+    /// **The Windows answer, asked from whichever machine is running this**
+    /// (T-MAC-FILEURI, §13.47). It was `file_uri_to_path` until this ticket, back
+    /// when there was one answer; naming the platform is what lets the table
+    /// below go on being the Windows table when a Mac runs it.
+    fn on_windows(uri: &str) -> Option<String> {
+        file_uri_to_path_on(uri, HostPlatform::Windows)
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+
+    /// The Unix answer, asked the same way. `MacOs` and not `OtherUnix` because
+    /// the Mac is the port this ticket is for;
+    /// `the_two_unix_platforms_read_a_file_uri_identically` is what holds the
+    /// third variant to the same reading.
+    fn on_posix(uri: &str) -> Option<String> {
+        file_uri_to_path_on(uri, HostPlatform::MacOs)
+            .map(|path| path.to_string_lossy().into_owned())
     }
 
     /// PIN — **the URI a program printed becomes the path this machine names**,
@@ -15171,15 +15287,15 @@ mod file_uri_tests {
     #[test]
     fn a_file_uri_decodes_to_the_windows_path_it_names() {
         assert_eq!(
-            decoded("file:///C:/Users/me/phd-application-timeline.html").as_deref(),
+            on_windows("file:///C:/Users/me/phd-application-timeline.html").as_deref(),
             Some(r"C:\Users\me\phd-application-timeline.html")
         );
         assert_eq!(
-            decoded("file:///C:/My%20Documents/a%20file.md").as_deref(),
+            on_windows("file:///C:/My%20Documents/a%20file.md").as_deref(),
             Some(r"C:\My Documents\a file.md")
         );
         assert_eq!(
-            decoded("file:///D:/%E4%B8%AD%E6%96%87/%E7%AC%94%E8%AE%B0.md").as_deref(),
+            on_windows("file:///D:/%E4%B8%AD%E6%96%87/%E7%AC%94%E8%AE%B0.md").as_deref(),
             Some(r"D:\中文\笔记.md"),
             "three escapes are one character, not three"
         );
@@ -15187,20 +15303,20 @@ mod file_uri_tests {
         // rather than normalised: Windows does not care and rewriting it would
         // make the path this window shows differ from the one that was printed.
         assert_eq!(
-            decoded("file:///c:/tmp/x.md").as_deref(),
+            on_windows("file:///c:/tmp/x.md").as_deref(),
             Some(r"c:\tmp\x.md")
         );
         assert_eq!(
-            decoded("FILE:///C:/tmp/x.md").as_deref(),
+            on_windows("FILE:///C:/tmp/x.md").as_deref(),
             Some(r"C:\tmp\x.md")
         );
         // Both separators arrive in the wild, including as an escape.
         assert_eq!(
-            decoded(r"file:///C:\tmp\x.md").as_deref(),
+            on_windows(r"file:///C:\tmp\x.md").as_deref(),
             Some(r"C:\tmp\x.md")
         );
         assert_eq!(
-            decoded("file:///C:%5Ctmp%5Cx.md").as_deref(),
+            on_windows("file:///C:%5Ctmp%5Cx.md").as_deref(),
             Some(r"C:\tmp\x.md")
         );
     }
@@ -15214,27 +15330,30 @@ mod file_uri_tests {
     #[test]
     fn an_empty_host_and_localhost_are_this_machine_and_anything_else_is_a_share() {
         assert_eq!(
-            decoded("file:///C:/tmp/x.md").as_deref(),
+            on_windows("file:///C:/tmp/x.md").as_deref(),
             Some(r"C:\tmp\x.md")
         );
         assert_eq!(
-            decoded("file://localhost/C:/tmp/x.md").as_deref(),
+            on_windows("file://localhost/C:/tmp/x.md").as_deref(),
             Some(r"C:\tmp\x.md")
         );
         assert_eq!(
-            decoded("file://LocalHost/C:/tmp/x.md").as_deref(),
+            on_windows("file://LocalHost/C:/tmp/x.md").as_deref(),
             Some(r"C:\tmp\x.md")
         );
         assert_eq!(
-            decoded("file://server/share/notes.md").as_deref(),
+            on_windows("file://server/share/notes.md").as_deref(),
             Some(r"\\server\share\notes.md")
         );
         // The authority-less spellings emitters produce, read as the same path.
         assert_eq!(
-            decoded("file:/C:/tmp/x.md").as_deref(),
+            on_windows("file:/C:/tmp/x.md").as_deref(),
             Some(r"C:\tmp\x.md")
         );
-        assert_eq!(decoded("file:C:/tmp/x.md").as_deref(), Some(r"C:\tmp\x.md"));
+        assert_eq!(
+            on_windows("file:C:/tmp/x.md").as_deref(),
+            Some(r"C:\tmp\x.md")
+        );
     }
 
     /// PIN — **what names nothing on this machine is refused**, rather than
@@ -15247,28 +15366,28 @@ mod file_uri_tests {
     #[test]
     fn a_uri_that_names_no_windows_path_is_refused_rather_than_guessed() {
         assert_eq!(
-            decoded("file:///etc/passwd"),
+            on_windows("file:///etc/passwd"),
             None,
             "a POSIX path is not one"
         );
-        assert_eq!(decoded("file:///"), None, "a root with no name");
+        assert_eq!(on_windows("file:///"), None, "a root with no name");
         assert_eq!(
-            decoded("file://server"),
+            on_windows("file://server"),
             None,
             "a machine, not a file on it"
         );
-        assert_eq!(decoded("https://example.test/x"), None, "not our scheme");
-        assert_eq!(decoded("C:/tmp/x.md"), None, "not a URI at all");
+        assert_eq!(on_windows("https://example.test/x"), None, "not our scheme");
+        assert_eq!(on_windows("C:/tmp/x.md"), None, "not a URI at all");
         // A stray `%` is a malformed URI, not a literal percent: a filename with
         // a real one in it is `%25`, and reading the broken case as text is how
         // a decoder starts naming files nobody wrote down.
-        assert_eq!(decoded("file:///C:/100%/x.md"), None);
-        assert_eq!(decoded("file:///C:/%zz/x.md"), None);
-        assert_eq!(decoded("file:///C:/%E4%B8/x.md"), None, "not UTF-8");
+        assert_eq!(on_windows("file:///C:/100%/x.md"), None);
+        assert_eq!(on_windows("file:///C:/%zz/x.md"), None);
+        assert_eq!(on_windows("file:///C:/%E4%B8/x.md"), None, "not UTF-8");
         // Control characters and NUL, before decoding and after.
-        assert_eq!(decoded("file:///C:/a\nb.md"), None);
-        assert_eq!(decoded("file:///C:/a%00b.md"), None);
-        assert_eq!(decoded("file:///C:/a%0Ab.md"), None);
+        assert_eq!(on_windows("file:///C:/a\nb.md"), None);
+        assert_eq!(on_windows("file:///C:/a%00b.md"), None);
+        assert_eq!(on_windows("file:///C:/a%0Ab.md"), None);
     }
 
     /// PIN — a fragment and a query are URI syntax and never part of a filename,
@@ -15277,15 +15396,15 @@ mod file_uri_tests {
     #[test]
     fn a_fragment_and_a_query_are_cut_and_a_trailing_separator_is_kept() {
         assert_eq!(
-            decoded("file:///C:/docs/notes.md#heading").as_deref(),
+            on_windows("file:///C:/docs/notes.md#heading").as_deref(),
             Some(r"C:\docs\notes.md")
         );
         assert_eq!(
-            decoded("file:///C:/docs/notes.md?v=2").as_deref(),
+            on_windows("file:///C:/docs/notes.md?v=2").as_deref(),
             Some(r"C:\docs\notes.md")
         );
         assert_eq!(
-            file_uri_to_path("file:///C:/docs/"),
+            file_uri_to_path_on("file:///C:/docs/", HostPlatform::Windows),
             Some(PathBuf::from(r"C:\docs\"))
         );
     }
@@ -15313,17 +15432,251 @@ mod file_uri_tests {
     #[test]
     fn a_device_or_verbatim_uri_names_no_path() {
         assert_eq!(
-            decoded("file://./pipe/folio-probe"),
+            on_windows("file://./pipe/folio-probe"),
             None,
             "a device path is not a file a URI can name",
         );
-        assert_eq!(decoded("file://.//COM1"), None);
-        assert_eq!(decoded("file://%3F/C:/Users/alice/notes.md"), None);
+        assert_eq!(on_windows("file://.//COM1"), None);
+        assert_eq!(on_windows("file://%3F/C:/Users/alice/notes.md"), None);
         assert_eq!(
-            decoded("file://server/share/notes.md").as_deref(),
+            on_windows("file://server/share/notes.md").as_deref(),
             Some(r"\\server\share\notes.md"),
             "a share is still a path, and still refused one layer up",
         );
+    }
+
+    /// RED — **a `file:` URI names a path on a Mac too** (T-MAC-FILEURI, §13.47).
+    ///
+    /// RED EVIDENCE (§13.45 ⑥, measured on the machine 2026-09-13). This function
+    /// was a Windows path parser on every host and said so in its own comment, so
+    /// every `file:` reference printed into a pane on a Mac came out of here as
+    /// `None`. The trip's own trace, on a real OSC 8 link at a real folder:
+    ///
+    /// ```text
+    /// activate_hyperlink control=0 uri="file:///…/pages/sub" arm=None    path=unparsed
+    /// activate_hyperlink control=1 uri="file:///…/pages/sub" arm=Blocked path=unparsed
+    /// ```
+    ///
+    /// `path=unparsed` is this line answering `None`; `arm=None` and `arm=Blocked`
+    /// are the two halves of §7.1.5g's table with nothing under them. A plain
+    /// click opened nothing, `⌘`+click handed nothing over, and the hovered tag
+    /// drew the URI with no clause after it.
+    ///
+    /// MUTATIONS:
+    /// ① drop the leading-`/` check and `file:helpers/x` becomes the relative path
+    ///    `helpers/x`, which resolves against whatever directory the process is
+    ///    sitting in — the Windows half's own last paragraph, on this filesystem;
+    /// ② translate separators the Windows way and `\` stops being a byte of a
+    ///    name, so the backslash line goes red and a round trip through
+    ///    `bt_transcript::paths::local_path_to_file_uri`'s POSIX arm opens a
+    ///    different file;
+    /// ③ admit a foreign host and `file://server/share/notes.md` silently becomes
+    ///    the local `/share/notes.md`, which is the more dangerous of the two
+    ///    wrong answers because the file it names is usually there.
+    #[test]
+    fn a_file_uri_decodes_to_the_posix_path_it_names() {
+        assert_eq!(
+            on_posix("file:///Users/me/notes.md").as_deref(),
+            Some("/Users/me/notes.md")
+        );
+        // The two shapes the trip actually met: a space, and a name in Chinese.
+        assert_eq!(
+            on_posix("file:///Users/me/My%20Documents/a%20file.md").as_deref(),
+            Some("/Users/me/My Documents/a file.md")
+        );
+        assert_eq!(
+            on_posix("file:///Users/me/%E4%B8%AD%E6%96%87/%E7%AC%94%E8%AE%B0.md").as_deref(),
+            Some("/Users/me/中文/笔记.md"),
+            "three escapes are one character, not three"
+        );
+        // The three authority readings, and the third is this platform's own.
+        assert_eq!(
+            on_posix("file://localhost/Users/me/notes.md").as_deref(),
+            Some("/Users/me/notes.md")
+        );
+        assert_eq!(
+            on_posix("file://LocalHost/Users/me/notes.md").as_deref(),
+            Some("/Users/me/notes.md")
+        );
+        assert_eq!(
+            on_posix("file://server/share/notes.md"),
+            None,
+            "no POSIX spelling names a file on another machine",
+        );
+        // The authority-less spellings, read as the same path.
+        assert_eq!(
+            on_posix("file:/Users/me/notes.md").as_deref(),
+            Some("/Users/me/notes.md")
+        );
+        assert_eq!(on_posix("FILE:///etc/hosts").as_deref(), Some("/etc/hosts"));
+        // A backslash is a byte of a name here, raw or escaped, and neither is a
+        // boundary. The escaped form is what `local_path_to_file_uri`'s POSIX arm
+        // writes, so these two lines are the other half of that round trip.
+        assert_eq!(
+            on_posix(r"file:///Users/me/a\b.md").as_deref(),
+            Some(r"/Users/me/a\b.md")
+        );
+        assert_eq!(
+            on_posix("file:///Users/me/a%5Cb.md").as_deref(),
+            Some(r"/Users/me/a\b.md")
+        );
+        // The root is a real place, and a trailing separator is kept — the
+        // emitter saying "directory", which is the shape an OSC 8 folder link
+        // arrives in.
+        assert_eq!(on_posix("file:///").as_deref(), Some("/"));
+        assert_eq!(
+            file_uri_to_path_on("file:///Users/me/docs/", HostPlatform::MacOs),
+            Some(PathBuf::from("/Users/me/docs/"))
+        );
+        // A fragment and a query are URI syntax on either machine.
+        assert_eq!(
+            on_posix("file:///Users/me/notes.md#heading").as_deref(),
+            Some("/Users/me/notes.md")
+        );
+        assert_eq!(
+            on_posix("file:///Users/me/notes.md?v=2").as_deref(),
+            Some("/Users/me/notes.md")
+        );
+    }
+
+    /// PIN — **what names no path here is refused rather than guessed**, and the
+    /// malformed readings are refused for the same reasons on both machines.
+    ///
+    /// MUTATION: any of the four refusals below turned into an answer, and this
+    /// function starts naming files nobody printed.
+    #[test]
+    fn a_uri_that_names_no_posix_path_is_refused_rather_than_guessed() {
+        assert_eq!(
+            on_posix("file:helpers/x.md"),
+            None,
+            "relative is refused rather than resolved against this process's cwd",
+        );
+        assert_eq!(
+            on_posix("file://server"),
+            None,
+            "a machine, not a file on it"
+        );
+        assert_eq!(on_posix(r"file://server\share\x.md"), None, "still a host");
+        assert_eq!(on_posix("https://example.test/x"), None, "not our scheme");
+        assert_eq!(on_posix("/Users/me/notes.md"), None, "not a URI at all");
+        // The decoder is the shared one, and it is strict on both platforms.
+        assert_eq!(on_posix("file:///Users/me/100%/x.md"), None);
+        assert_eq!(on_posix("file:///Users/%zz/x.md"), None);
+        assert_eq!(on_posix("file:///Users/%E4%B8/x.md"), None, "not UTF-8");
+        assert_eq!(on_posix("file:///Users/a\nb.md"), None);
+        assert_eq!(on_posix("file:///Users/a%00b.md"), None);
+        assert_eq!(on_posix("file:///Users/a%0Ab.md"), None);
+    }
+
+    /// PIN — **an escape that decodes to a separator is a separator, on both
+    /// machines**, which is the lenient of RFC 3986's two readings and is taken
+    /// deliberately: no filesystem this product reaches can hold a separator
+    /// inside a name, so the strict reading refuses a spelling without ever
+    /// reaching a file the lenient one would open wrongly.
+    ///
+    /// The Windows line is the one that was already here, restated beside its
+    /// twin so that a later ticket cannot move one of them alone.
+    ///
+    /// MUTATION: refuse a decoded separator on one platform only, and one
+    /// function gives two answers about one question.
+    #[test]
+    fn an_escaped_separator_is_a_separator_on_both_platforms() {
+        assert_eq!(
+            on_windows("file:///C:%5Ctmp%5Cx.md").as_deref(),
+            Some(r"C:\tmp\x.md")
+        );
+        assert_eq!(
+            on_posix("file:///Users/a%2Fb/x.md").as_deref(),
+            Some("/Users/a/b/x.md")
+        );
+        // `..` is not the difference and never was: it survives decoding under
+        // either reading, exactly as an unescaped one does, and what may be done
+        // with a path carrying one is settled downstream.
+        assert_eq!(
+            on_posix("file:///Users/me/%2E%2E/x.md").as_deref(),
+            Some("/Users/me/../x.md")
+        );
+        assert_eq!(
+            on_posix("file:///Users/me/../x.md").as_deref(),
+            Some("/Users/me/../x.md")
+        );
+    }
+
+    /// PIN — **a drive letter is not special off Windows** (§13.47).
+    ///
+    /// The defect §13.45 ⑥ found was one platform's grammar answering for both,
+    /// and the repair is not the same grammar pointed the other way: on a Mac
+    /// `/C:/x` is the ordinary absolute path it looks like, a directory named
+    /// `C:` at the root, and the machine answers "no such file" the way it
+    /// answers for every other path that is not there.
+    ///
+    /// MUTATION: strip the slash in front of a drive letter on the Unix arm too,
+    /// and a Windows-printed link opens `C:/x` — a *relative* path there — or is
+    /// refused for a reason that has nothing to do with this filesystem.
+    #[test]
+    fn a_drive_letter_is_an_ordinary_name_on_a_unix_filesystem() {
+        assert_eq!(
+            on_posix("file:///C:/tmp/x.md").as_deref(),
+            Some("/C:/tmp/x.md")
+        );
+        assert_eq!(
+            on_posix("file:///etc/passwd").as_deref(),
+            Some("/etc/passwd"),
+            "the shape the Windows half refuses is the ordinary one here",
+        );
+        assert_eq!(
+            on_windows("file:///etc/passwd"),
+            None,
+            "and the ordinary Windows shape is still the Windows half's",
+        );
+    }
+
+    /// PIN — **the two Unix variants read a URI identically.** `OtherUnix` is a
+    /// Linux desktop, and nothing in this reading is Apple's: one root, one
+    /// separator, no spelling for another machine.
+    ///
+    /// MUTATION: match `MacOs` alone in either arm of `file_uri_to_path_on` and a
+    /// Linux build silently answers with the Windows grammar again, which is the
+    /// defect this ticket is about wearing a different `cfg`.
+    #[test]
+    fn the_two_unix_platforms_read_a_file_uri_identically() {
+        for uri in [
+            "file:///Users/me/notes.md",
+            "file://localhost/etc/hosts",
+            "file://server/share/x.md",
+            "file:///C:/tmp/x.md",
+            r"file:///home/me/a\b.md",
+            "file:helpers/x.md",
+            "file:///",
+        ] {
+            assert_eq!(
+                file_uri_to_path_on(uri, HostPlatform::MacOs),
+                file_uri_to_path_on(uri, HostPlatform::OtherUnix),
+                "{uri}",
+            );
+        }
+    }
+
+    /// PIN — **the door this window actually calls answers for the machine it is
+    /// running on**, which is the whole of what `file_uri_to_path` is now.
+    ///
+    /// MUTATION: pin `file_uri_to_path` to `HostPlatform::Windows` and every
+    /// assertion in this module still passes while the product goes back to
+    /// §13.45 ⑥'s defect — which is why this one test exists beside the tables.
+    #[test]
+    fn the_bare_door_answers_for_this_build() {
+        for uri in [
+            "file:///C:/tmp/x.md",
+            "file:///Users/me/notes.md",
+            "file://server/share/x.md",
+            "file:///",
+        ] {
+            assert_eq!(
+                file_uri_to_path(uri),
+                file_uri_to_path_on(uri, host_platform()),
+                "{uri}",
+            );
+        }
     }
 }
 
