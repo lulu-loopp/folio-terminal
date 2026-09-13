@@ -304,6 +304,18 @@ enum AppEvent {
     /// which is why it carries nothing itself. Windows told this window that
     /// *something* changed; the answer to *what* is the read on the next turn.
     SystemPreferencesChanged,
+    /// **What the platform draws in a window's title bar has moved**
+    /// (`bt_platform::CustomWindowFrame::install`'s wake, `docs/DESIGN.md`
+    /// §13.48).
+    ///
+    /// The same family as the one above it and the same reason in its strongest
+    /// form: a window going full screen has its window buttons taken away by the
+    /// platform, and that is a change to the bar Folio draws with nobody typing,
+    /// nothing printing and no pointer moving. The frame has already re-measured
+    /// itself by the time this arrives — it carries nothing because the answer
+    /// to *what* is the read on the next turn, which is
+    /// [`Runtime::platform_chrome`] and is where it has always been.
+    WindowChromeChanged,
     MathReady,
     /// A directory the files worker was asked about has been read.
     ///
@@ -568,6 +580,7 @@ impl AppEvent {
             | Self::SchemesChanged
             | Self::StorageChanged
             | Self::SystemPreferencesChanged
+            | Self::WindowChromeChanged
             | Self::NotificationClicked => Station::Chrome,
             Self::PtyOutput
             | Self::GitChanged
@@ -36496,6 +36509,16 @@ impl Runtime<'_> {
                 title_bar_logical_px: bt_render::WINDOW_TITLE_BAR_LOGICAL_PX as u32,
                 caption_button_logical_px: bt_render::WINDOW_CAPTION_BUTTON_LOGICAL_PX as u32,
             },
+            // **And how the frame asks for a turn when what it measured moves**
+            // (§13.48) — the shape `SystemSettingsWatch` already has, for its
+            // reason: a window whose platform takes its own buttons away has had
+            // nothing happen to it that this loop would otherwise notice.
+            {
+                let proxy = proxy.clone();
+                Box::new(move || {
+                    let _ = proxy.send_event(AppEvent::WindowChromeChanged);
+                })
+            },
         )
         .map_err(|error| anyhow!(error))
         .context("install self-drawn Win32 window frame")?;
@@ -37126,6 +37149,14 @@ impl Runtime<'_> {
             bt_platform::CustomFrameGeometry {
                 title_bar_logical_px: bt_render::WINDOW_TITLE_BAR_LOGICAL_PX as u32,
                 caption_button_logical_px: bt_render::WINDOW_CAPTION_BUTTON_LOGICAL_PX as u32,
+            },
+            // A second window asks for its turn the way the first one does —
+            // see that constructor's note (§13.48).
+            {
+                let proxy = app.event_proxy.clone();
+                Box::new(move || {
+                    let _ = proxy.send_event(AppEvent::WindowChromeChanged);
+                })
             },
         )
         .map_err(|error| anyhow!(error))
@@ -37782,6 +37813,14 @@ impl Runtime<'_> {
     /// that every window gets on Windows. `first_run`'s rows are ruled the same
     /// way (M3-6), and the pin is
     /// `the_caption_run_is_decided_by_one_capability_read`.
+    ///
+    /// **One answer per window *state*, not one for the window's life** (§13.48).
+    /// The measurement is still taken once at `install` and still asked of the
+    /// window afterwards; what changed is that macOS takes this window's buttons
+    /// off it in full screen and gives them back on the way out, so the frame
+    /// measures again on those two transitions. Nothing here has to know that —
+    /// the frame answers what it last measured — and the one thing that does is
+    /// [`App::adopt_platform_chrome`], which asks this and re-draws the bar.
     fn platform_chrome(&self) -> bt_platform::PlatformChrome {
         self.window.custom_window_frame.platform_chrome()
     }
@@ -38658,7 +38697,6 @@ impl Runtime<'_> {
                 seats::chrome_band_device_px(
                     seats::scale_ppm(self.window.renderer.metrics().dpi_milli().get()),
                     self.platform_chrome(),
-                    self.rail_posture(),
                 ),
             ),
             "the stage was laid out against a panel this window is not wearing"
@@ -86989,7 +87027,7 @@ impl Runtime<'_> {
             // helper and for [`seats::device_viewport`]'s own reason: a rim
             // measured one row above where the seats begin is a top-edge drop
             // zone aimed at the bar.
-            seats::chrome_band_device_px(scale_ppm, self.platform_chrome(), self.rail_posture()),
+            seats::chrome_band_device_px(scale_ppm, self.platform_chrome()),
         )
     }
 
@@ -90885,7 +90923,7 @@ impl Runtime<'_> {
     /// solved in, so the scale it was solved at is divided back out here.
     fn follow_the_window_band(&self) -> Result<()> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        let band = seats::window_band_px(scale, self.platform_chrome(), self.rail_posture());
+        let band = seats::window_band_px(scale, self.platform_chrome());
         self.window
             .custom_window_frame
             .set_window_band(band / scale)
@@ -91449,9 +91487,11 @@ impl Runtime<'_> {
         // but neither can invent the row you were on.
         self.window.rail_scroll = 0.0;
         // The other half of the posture, and therefore the other route into the
-        // band — see [`Self::set_rail_state`]'s own line. Focus mode takes the
-        // strip out of the bar in *either* tab layout, which is precisely the
-        // case `RailState::strip_stands_in_the_bar` is false for.
+        // band — see [`Self::set_rail_state`]'s own line. The band itself stopped
+        // turning on the layout with §13.48, and the door is still said here for
+        // the reason it was always a door: whoever decides what this window is
+        // wearing says so again, and a placement that is already right writes
+        // nothing.
         self.follow_the_window_band()?;
         let mut settings = self.app.settings_store.loaded().clone();
         settings.focus_mode = on;
@@ -92514,15 +92554,10 @@ impl Runtime<'_> {
         let width = f64::from(target.width_logical_px()) * scale;
         // The rail begins at the bar's lower edge, so a pointer up in the
         // caption run is not in the rail however far left it is. **Asked of the
-        // panel rather than of the constant** (T-MAC-LIGHTS): a window whose
-        // platform draws its own buttons wears that platform's shorter band, and
-        // a trigger measured from Folio's 40 would leave the top of the parked
-        // rail refusing to open.
-        let top = f64::from(seats::window_band_px(
-            scale as f32,
-            self.platform_chrome(),
-            target,
-        ));
+        // window rather than of the constant** (T-MAC-LIGHTS): the header is a
+        // fact about this window's chrome, and a trigger measured from anything
+        // else would leave the top of the parked rail refusing to open.
+        let top = f64::from(seats::window_band_px(scale as f32, self.platform_chrome()));
         // The peek is handed over as **the trigger it hangs from**, not as a
         // yes/no: only a peek hanging off a rail row is the rail's business, and
         // that is a question about identity that no boolean can carry. See
@@ -104590,6 +104625,42 @@ impl FolioApp {
         self.for_each_window(|runtime| runtime.os_theme_changed().map(|_| ()))
     }
 
+    /// **The platform has taken its own window buttons off a window, or given
+    /// them back** (owner ruling 2026-09-13, `docs/DESIGN.md` §13.48) — draw the
+    /// bar against what it is actually wearing now.
+    ///
+    /// **The fourth site of the one capability read, and the only one that is
+    /// not a birth.** M3-3 measured a window's chrome once, at `install`, and
+    /// every reader after that asked the window; that is still true of the
+    /// *measurement*, and what this adds is that a window has more than one
+    /// state. Full screen is the state macOS withdraws the three lights in, so
+    /// the run the strip leads in after is gone and comes back — and this asks
+    /// through [`Runtime::platform_chrome`] like every other reader, because a
+    /// second door onto the frame would be a second opinion about a window that
+    /// now has two answers instead of one.
+    ///
+    /// **Every window, on this family's standing reason.** The wake carries no
+    /// address: the frame that fired it knows which window it is, and a window
+    /// that has not changed answers "nothing moved" in the one comparison
+    /// [`Runtime::refresh_chrome`] already makes. That is cheaper than an
+    /// address would be and is the shape every broadcast in this loop has.
+    ///
+    /// **And it is a re-draw and not a re-solve.** Only the leading edge of the
+    /// bar moves: the band is the header's height and full screen does not
+    /// change it — macOS keeps the header and takes only the buttons — so the
+    /// stage's top edge, the rail's inset and every seat under them are the
+    /// numbers they were. What is owed is the bar itself, which is exactly what
+    /// `refresh_chrome` rebuilds and `present_chrome_change` puts on the glass.
+    fn adopt_platform_chrome(&mut self) -> Result<()> {
+        self.for_each_window(|runtime| {
+            if runtime.refresh_chrome() {
+                runtime.present_chrome_change()
+            } else {
+                Ok(())
+            }
+        })
+    }
+
     /// Take a window off the screen, and the process with it if it was the last.
     ///
     /// **The last window closing is the process exiting** — the semantics this
@@ -107321,6 +107392,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             AppEvent::SystemPreferencesChanged => self
                 .adopt_motion_preference()
                 .and_then(|()| self.adopt_system_canvas()),
+            AppEvent::WindowChromeChanged => self.adopt_platform_chrome(),
             AppEvent::NotificationClicked => self.route_clicked_notifications(),
             // Every window, on this family's standing reason: an answer carries
             // its own address and a window with no page finds nothing to read.
@@ -112394,7 +112466,7 @@ fn solve_seats(
         // And the same thing on the other axis: the bar this window wears,
         // through the one helper that converts it, so the row the seats begin on
         // and the row the pointer enters the layout on are one number.
-        seats::chrome_band_device_px(scale_ppm, chrome, rail),
+        seats::chrome_band_device_px(scale_ppm, chrome),
     );
     let (layout, overflow) = solve_tree(seats, viewport, &metrics, policy);
     // **The focused seat's body, which is what the renderer keeps this for.**
@@ -159226,20 +159298,34 @@ mod platform_gate_tests {
     /// **And more than one reader of the answer, since T-MAC-PILL** (owner
     /// ruling 2026-09-12 「就药丸」). The capability says more than one thing
     /// about this window, and they are not the same thing said twice:
-    /// `caption_targets` decides which buttons stand in the caption run, and
+    /// `caption_targets` decides which buttons stand in the caption run,
     /// `tab_strip_geometry` decides whether the tabs float as pills on the strip
-    /// or stand attached to its floor. Both are facts about the bar this window
-    /// has, both are answered off the same value, and neither is derivable from
-    /// the other. So what the pin holds is the *list* rather than the count:
-    /// every occurrence in the file is one of these, named and located, and a
-    /// reader that is on neither list — which is the shape of the ask a `cfg`
+    /// or stand attached to its floor, and — since §13.48 — `window_caption_boxes`
+    /// decides whether the one box left is a slot in a run or a control placed
+    /// by its own centre. All three are facts about the bar this window has, all
+    /// three are answered off the same value, and none is derivable from the
+    /// others. So what the pin holds is the *list* rather than the count: every
+    /// occurrence in the file is one of these, named and located, and a reader
+    /// that is on none of the lists — which is the shape of the ask a `cfg`
     /// would be the lazy answer to — fails here rather than spreading.
+    ///
+    /// **One read per window *state*, and the fourth site is the state change**
+    /// (owner ruling 2026-09-13, §13.48). The three reads above are the three
+    /// places a window's chrome is *reached for*, and they are still three. What
+    /// moved is that the answer is no longer settled for the window's life: full
+    /// screen is macOS taking its own three buttons off the window, so the frame
+    /// measures again and wakes the loop, and the loop asks the accessor. That
+    /// fourth site is `App::adopt_platform_chrome`, it is the only answer to
+    /// `AppEvent::WindowChromeChanged`, and it goes through
+    /// `Runtime::platform_chrome` rather than opening the frame a fourth time —
+    /// which is what the last two assertions hold.
     ///
     /// MUTATION: reach the frame for its chrome anywhere but those three and the
     /// first assertion names it; branch on `buttons_are_the_platforms` anywhere
-    /// in `seats.rs` but `caption_targets` and `tab_strip_geometry` and the
-    /// second does; put a `cfg!(target_os = …)` in `seats.rs` and the third
-    /// does.
+    /// in `seats.rs` but the three named functions and the second does; put a
+    /// `cfg!(target_os = …)` in `seats.rs` and the third does; answer the
+    /// chrome-changed wake anywhere but the one method, or answer it by reaching
+    /// past the accessor, and the last two do.
     #[test]
     fn the_caption_run_is_decided_by_one_capability_read() {
         const MAIN: &str = include_str!("main.rs");
@@ -159299,13 +159385,18 @@ mod platform_gate_tests {
         let readers = [
             ("caption_targets", body_of("pub fn caption_targets(")),
             ("tab_strip_geometry", body_of("pub fn tab_strip_geometry(")),
+            (
+                "window_caption_boxes",
+                body_of("pub fn window_caption_boxes("),
+            ),
         ];
         assert_eq!(
             decisions.len(),
             readers.len() + 1,
             "the capability is named {} times in `seats.rs`; it is read by \
-             `caption_targets` and by `tab_strip_geometry`, and constructed once by \
-             that module's own test helper — nothing else may branch on it",
+             `caption_targets`, by `tab_strip_geometry` and by `window_caption_boxes`, \
+             and constructed once by that module's own test helper — nothing else may \
+             branch on it",
             decisions.len()
         );
         // Matched by *containment* rather than by position, because the order
@@ -159327,6 +159418,36 @@ mod platform_gate_tests {
             SEATS[*helper..].starts_with("buttons_are_the_platforms: true"),
             "the occurrence outside the two readers is not the test helper that states \
              the other arm"
+        );
+
+        // **The fourth site: the state change** (§13.48). One answer to the
+        // wake, and it asks the accessor rather than the frame.
+        let answers: Vec<usize> = MAIN
+            .match_indices(concat!("AppEvent::WindowChromeChanged", " =>"))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            answers.len(),
+            1,
+            "the chrome-changed wake is answered {} times; the platform taking a \
+             window's own buttons away has one consequence and it is stated once",
+            answers.len()
+        );
+        let handler = "fn adopt_platform_chrome(&mut self) -> Result<()> {";
+        assert!(
+            MAIN[answers[0]..].starts_with(concat!(
+                "AppEvent::WindowChromeChanged",
+                " => self.adopt_platform_chrome(),"
+            )),
+            "and what it is answered with is `{handler}`"
+        );
+        let at = MAIN.find(handler).expect("the fourth site");
+        let body = &MAIN[at..at + MAIN[at..].find("\n    }\n").expect("its end")];
+        assert!(
+            !body.contains(DOOR),
+            "the fourth read goes through `Runtime::platform_chrome` like every other \
+             reader; reaching the frame here would be a second opinion about a window \
+             that now has more than one answer"
         );
 
         // And the module that draws and hit-tests the bar knows nothing about

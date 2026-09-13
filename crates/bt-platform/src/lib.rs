@@ -228,13 +228,23 @@ pub struct PlatformChrome {
     /// Physical pixels at the leading edge of the title bar that the platform's
     /// own window buttons stand in — the rectangle macOS's three traffic lights
     /// occupy, read off `standardWindowButton(…)`. `0` where the platform draws
-    /// none.
+    /// none, **and `0` where it has taken the ones it draws off the screen**
+    /// (§13.48): in full screen macOS withdraws the three lights and leaves the
+    /// header, so a window can have a band with nothing at its leading edge, and
+    /// what stands at that edge leads in the way it does on a window that never
+    /// had any.
     pub strip_left_px: i32,
     /// **How tall that run is** — physical pixels, the height of the band the
     /// platform's own buttons stand in (T-MAC-LIGHTS, owner ruling
-    /// 2026-09-12). `0` where the platform draws none, which is the same
-    /// window [`Self::strip_left_px`] answers `0` for: the two numbers are the
-    /// two sides of one rectangle and are struck together or not at all.
+    /// 2026-09-12). `0` where the platform draws none, which is a window
+    /// [`Self::strip_left_px`] also answers `0` for: the two numbers are the two
+    /// sides of one rectangle and a window with no rectangle has neither.
+    ///
+    /// **The converse is a state and not a contradiction** (§13.48): this one
+    /// does *not* go to `0` when the other does, because full screen takes the
+    /// buttons off the window and leaves the header they stood in. A run with a
+    /// height and no width is that window, and the band it names is still the
+    /// header Folio draws.
     ///
     /// The other field measures how much of the *leading edge* the platform has
     /// taken; this one measures how much of the *top*, and it is the height of
@@ -4437,7 +4447,14 @@ mod windows_impl {
         pub fn install(
             window: NativeWindow,
             geometry: CustomFrameGeometry,
+            wake: Box<dyn Fn()>,
         ) -> Result<Self, String> {
+            // **Taken and dropped** (§13.48). The wake is how a frame says its
+            // [`Self::platform_chrome`] has changed, and on this window it never
+            // can: the subclass below has handed the application the whole outer
+            // rectangle, so the platform draws nothing in this bar that could be
+            // taken away and given back.
+            let _ = wake;
             let hwnd = window.as_hwnd();
             let state = Box::new(CustomFrameState {
                 geometry,
@@ -12138,6 +12155,14 @@ mod macos_window_backend_tests {
     /// of this ticket and put Folio's tabs a few pixels into somebody's close
     /// button on the next macOS that moves them.
     ///
+    /// **The measurement moved out of the door and this pin moved with it**
+    /// (§13.48). A window's chrome is measured more than once now — macOS takes
+    /// its own buttons off the window in full screen and gives them back — so
+    /// the reading lives in `measure_window_chrome`, which the door calls at
+    /// install and the full-screen watch calls again. Both halves are held: the
+    /// door still does the four things the take-over *is*, and the reading is
+    /// still off the buttons AppKit drew rather than off a constant.
+    ///
     /// MUTATION: drop `FullSizeContentView` and Folio's first row of tabs is
     /// pushed below a title bar that is still reserving its own height; drop
     /// `titleVisibility` and the window shows two titles; turn
@@ -12146,23 +12171,34 @@ mod macos_window_backend_tests {
     /// names it.
     #[test]
     fn the_macos_title_bar_is_kept_and_emptied_rather_than_taken_away() {
+        let body_of = |needle: &str| {
+            let at = MACOS.find(needle).expect("a door this ticket names");
+            let rest = &MACOS[at + 1..];
+            let end = rest.find("\n}\n").expect("a door is closed at column zero");
+            &rest[..end]
+        };
         let needle = "\npub fn adopt_window_chrome(";
         let at = MACOS.find(needle).expect("M3-3's door");
-        let rest = &MACOS[at + 1..];
-        let end = rest.find("\n}\n").expect("a door is closed at column zero");
-        let body = &rest[..end];
+        let body = body_of(needle);
         for required in [
             "NSWindowStyleMask::FullSizeContentView",
             "setTitlebarAppearsTransparent(true)",
             "setTitleVisibility(NSWindowTitleVisibility::Hidden)",
             "setMovableByWindowBackground(false)",
-            "standardWindowButton(",
-            "backingScaleFactor()",
+            "measure_window_chrome(",
         ] {
             assert!(
                 body.contains(required),
                 "the chrome door does not `{required}`, so the owner's ruling is kept by \
                  something other than this door:\n{body}"
+            );
+        }
+        let measured = body_of("\nfn measure_window_chrome(");
+        for required in ["standardWindowButton(", "backingScaleFactor()"] {
+            assert!(
+                measured.contains(required),
+                "the measurement does not `{required}`, so what `bt-app` reads is not this \
+                 window's own buttons:\n{measured}"
             );
         }
         assert!(
