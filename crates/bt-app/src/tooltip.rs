@@ -844,33 +844,63 @@ impl TooltipHost {
     /// Whether the fade is still running, and therefore still owes frames.
     #[must_use]
     pub fn is_fading(&self, now: Instant, motion: Motion) -> bool {
-        if motion == Motion::Reduced {
-            return false;
-        }
         self.showing
-            .is_some_and(|(_, shown)| now.duration_since(shown) < TOOLTIP_FADE)
+            .is_some_and(|(_, shown)| hover_fade_owes_frames(now.duration_since(shown), motion))
     }
 
-    /// How solid the tip is drawn this frame — `opacity 0 -> 1` over
-    /// [`TOOLTIP_FADE`] on the mock-up's own `ease`.
-    ///
-    /// Reduced motion gets the end state immediately. The mock-up's own
-    /// reduced-motion block does not name `.tip`, but every other transition in
-    /// this window stands down when the system asks for stillness, and a tip is
-    /// the one popup you summon by *not moving* — a fade-in is exactly the kind
-    /// of unrequested motion the preference is about.
+    /// How solid the tip is drawn this frame — [`hover_fade_opacity`] read
+    /// against this host's own epoch, and `0` when there is no tip to draw.
     #[must_use]
     pub fn opacity(&self, now: Instant, motion: Motion) -> f32 {
         let Some((_, shown)) = self.showing else {
             return 0.0;
         };
-        if motion == Motion::Reduced {
-            return 1.0;
-        }
-        let elapsed = now.duration_since(shown).as_secs_f32();
-        let progress = (elapsed / TOOLTIP_FADE.as_secs_f32()).clamp(0.0, 1.0);
-        cubic_bezier(progress, EASE)
+        hover_fade_opacity(now.duration_since(shown), motion)
     }
+}
+
+/// **How solid a surface summoned by hovering is drawn**, `since` it appeared —
+/// `opacity 0 -> 1` over [`TOOLTIP_FADE`] on the mock-up's own `ease`.
+///
+/// A free function and not a method, because since 2026-09-13 two surfaces obey
+/// it: the tip ([`TooltipHost::opacity`]) and the glance card over a file row
+/// (`Runtime::file_peek_opacity`, owner's ruling — option **B** of the four-way
+/// motion mock, against a 4px drop and against a scale, both of which read as a
+/// card being *opened*). The two keep their own epochs, because a tip and a card
+/// can be on screen at the same instant and neither is the other's clock; what
+/// they must not keep twice is the **rule**, which is one curve over one span
+/// and is the whole of what "everything that appears on hover behaves the same
+/// way" means. A second copy of it is a second number to change on the day the
+/// span changes, and the one nobody remembers is the one that goes stale.
+///
+/// **Reduced motion gets the end state immediately.** The mock-up's own
+/// reduced-motion block does not name `.tip`, but every other transition in this
+/// window stands down when the system asks for stillness, and these are the
+/// popups you summon by *not moving* — a fade-in is exactly the kind of
+/// unrequested motion the preference is about.
+///
+/// There is deliberately no fade **out**: the mock-up's `.tip` transitions on the
+/// way in and simply loses `.show` on the way out, and a card that lingers after
+/// the pointer has left is a card answering a question nobody is asking any more.
+#[must_use]
+pub fn hover_fade_opacity(since: Duration, motion: Motion) -> f32 {
+    if motion == Motion::Reduced {
+        return 1.0;
+    }
+    let progress = (since.as_secs_f32() / TOOLTIP_FADE.as_secs_f32()).clamp(0.0, 1.0);
+    cubic_bezier(progress, EASE)
+}
+
+/// **Whether that fade is still running, and therefore still owes frames.**
+///
+/// [`hover_fade_opacity`]'s companion, and the reason it is written beside it
+/// rather than derived at each call site: a surface owes the next frame exactly
+/// while its opacity has not landed, and under reduced motion it lands on the
+/// frame it appeared. A surface that has landed owes nothing, which is what lets
+/// a card standing still under a still pointer cost no wake-ups at all.
+#[must_use]
+pub fn hover_fade_owes_frames(since: Duration, motion: Motion) -> bool {
+    motion != Motion::Reduced && since < TOOLTIP_FADE
 }
 
 /// A placed tip: the box, and the row each line of text sits in.
@@ -1917,6 +1947,63 @@ mod tests {
             None,
             "a still tip asks for no animation frames"
         );
+    }
+
+    /// RED — **one rule, read by everything this window summons with
+    /// stillness** (owner's ruling 2026-09-13).
+    ///
+    /// The host is no longer the author of the curve: it keeps an epoch and asks
+    /// [`hover_fade_opacity`], exactly as the glance card over a file row does
+    /// (`Runtime::file_peek_opacity`). This pins that the two readings are the
+    /// same reading — the same number for the same elapsed, the same landing
+    /// instant, the same silence under reduced motion.
+    ///
+    /// MUTATION: write the curve out again inside [`TooltipHost::opacity`] — a
+    /// `cubic_bezier` and a `TOOLTIP_FADE.as_secs_f32()` of its own — and this
+    /// passes today and drifts the day the span moves, which is the whole
+    /// failure the free function exists to make impossible. MUTATION: make
+    /// [`hover_fade_owes_frames`] `<=` rather than `<` and the last assertion
+    /// fails: a landed surface would owe a frame for ever.
+    #[test]
+    fn the_tip_and_the_glance_card_read_one_fade_and_not_two() {
+        let mut host = TooltipHost::default();
+        let start = Instant::now();
+        host.observe(Some((TooltipAnchorId::Settings, TipFace::Chrome)), start);
+        let shown = start + TOOLTIP_DELAY;
+        assert!(host.activate_if_due(shown));
+
+        for (elapsed, motion) in [
+            (Duration::ZERO, Motion::Full),
+            (Duration::from_millis(30), Motion::Full),
+            (TOOLTIP_FADE / 2, Motion::Full),
+            (TOOLTIP_FADE, Motion::Full),
+            (Duration::from_secs(9), Motion::Full),
+            (Duration::ZERO, Motion::Reduced),
+            (TOOLTIP_FADE / 2, Motion::Reduced),
+        ] {
+            assert_eq!(
+                host.opacity(shown + elapsed, motion),
+                hover_fade_opacity(elapsed, motion),
+                "the host paints what the rule says at {elapsed:?} under {motion:?}"
+            );
+            assert_eq!(
+                host.is_fading(shown + elapsed, motion),
+                hover_fade_owes_frames(elapsed, motion),
+                "and owes frames exactly while the rule is still running"
+            );
+        }
+
+        // And the rule's own two ends, read without a host at all — which is how
+        // the card reads it.
+        assert!(hover_fade_opacity(Duration::ZERO, Motion::Full).abs() < 0.001);
+        assert!((hover_fade_opacity(TOOLTIP_FADE, Motion::Full) - 1.0).abs() < 0.001);
+        assert!((hover_fade_opacity(Duration::ZERO, Motion::Reduced) - 1.0).abs() < 0.001);
+        assert!(hover_fade_owes_frames(
+            TOOLTIP_FADE - Duration::from_millis(1),
+            Motion::Full
+        ));
+        assert!(!hover_fade_owes_frames(TOOLTIP_FADE, Motion::Full));
+        assert!(!hover_fade_owes_frames(Duration::ZERO, Motion::Reduced));
     }
 
     #[test]
