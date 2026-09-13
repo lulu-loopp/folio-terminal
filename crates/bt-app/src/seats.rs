@@ -9101,6 +9101,31 @@ impl WindowChrome {
     }
 }
 
+/// **How tall the surface the chrome is painted on is, in physical pixels** —
+/// the bottom of the lowest pane the solver placed, never less than one.
+///
+/// This is the number the rail and the card column are *drawn* against, and it
+/// is deliberately not the swapchain's height: the panel stands beside the panes
+/// and a column solved taller than the tallest pane would paint over a band no
+/// pane is in. `Runtime::focus_rail_geometry_now` — the geometry the wheel's
+/// **aim** walks — is solved from the swapchain instead, and the two are the
+/// same number only while the last solve and the current surface agree.
+///
+/// A function rather than an expression inlined at the one call site, because
+/// `BT_MOUSE_TRACE` now prints this height beside the aim's own so that a reader
+/// can see at a glance whether they have parted company (§7.60). A trace that
+/// transcribed the arithmetic would be a second implementation of the very
+/// quantity it exists to compare.
+#[must_use]
+pub fn chrome_surface_height(layout: &SeatLayout) -> f32 {
+    layout
+        .rects
+        .iter()
+        .filter_map(|placement| placement.device_rect)
+        .map(|rect| rect.bottom as f32)
+        .fold(1.0, f32::max)
+}
+
 /// Build chrome for every runtime tab while the pane layer still follows the active tab's solve.
 pub fn build_chrome_for_tabs(
     seats: &Seats,
@@ -10482,12 +10507,7 @@ pub fn build_chrome_for_tabs(
     // so a pane head's caption still printed through the rail's face. It goes in
     // its own group instead — see [`WindowChrome`].
     let mut rail_group = ChromeGroup::default();
-    let surface_height = layout
-        .rects
-        .iter()
-        .filter_map(|placement| placement.device_rect)
-        .map(|rect| rect.bottom as f32)
-        .fold(1.0, f32::max);
+    let surface_height = chrome_surface_height(layout);
     // **One panel, two lists** (§7.1.6b′). The branch is here and only here: the
     // seat loop above it has already run and knows nothing about focus mode,
     // which is what "there is no focus branch in the stage's render" means in
