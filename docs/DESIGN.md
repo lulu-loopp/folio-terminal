@@ -9672,28 +9672,13 @@ io.github.lulu-loopp.folio 0.3.0
 
 ### 13.45 T-MAC-CMDCLICK: 指针上的 Ctrl 在 mac 上是 ⌘——Control+点留给右键(`crates/bt-app/src/{input,main,i18n}.rs`)
 
-**This is 13.45 and not 13.42.** 13.40 (M2-7) and 13.41 (M5-1) are on `main`;
-13.42, 13.43 and 13.44 are held by tickets of this port that were in flight
-beside this one. This section takes the next number no branch has claimed.
+**取 13.45。** 13.40(M2-7)和 13.41(M5-1)已在 `main` 上;13.42、13.43 和 13.44 由这次移植正在飞的几张票占着。本节取下一个没有分支认领过的号。
 
-**① One key, one function, six doors.** The clicking rule of this product is a
-user ruling of 2026-08-20 and it is one sentence: **点=留窗内,Ctrl+点=交出去** —
-a plain click asks for whatever this window can do with a reference, and the
-modified click hands the same reference to the system. `ClickIntent` is that
-sentence as a type, and the wheel over a hosted page borrows the same modifier
-for zoom (方案 §0's five extras). What none of those rulings says is *which* key
-it is, because on the machine they were written on there was only one candidate.
+**① 一个键,一个函数,六扇门。** 这个产品的点击规矩来自 2026-08-20 的一条用户裁决,是一句话:**点=留窗内,Ctrl+点=交出去**——裸点请求本窗对一个引用做得到的事,带修饰键的点把同一个引用交给系统。`ClickIntent` 是那句话的类型,网页上的滚轮也借同一个修饰键做缩放(方案 §0 的五项附加)。那些裁决都没说**是哪个键**,因为在写下它们的那台机器上只有一个候选。
 
-On a Mac there are two, and Control is not the one. That desk spends Control on
-the **secondary click**: it is how a trackpad and a one-button mouse raise a
-context menu, and it has been since before this product's oldest ruling. A build
-that also spent Control on "hand this reference over" would answer one press
-with two verbs, and the reader would get whichever arm of this file happened to
-be asked first. M5-6's sweep found the readings still standing — `Ctrl`+click and
-`Ctrl`+wheel were raw `control_key()` on that machine — and called it a live
-collision, which it is.
+Mac 上有两个,而 Control 不是对的那个。这台桌面把 Control 花在**右键**上:触控板和单键鼠标就是这样呼出上下文菜单的,这比本产品最早的裁决还要早。一个同时把 Control 花在「把引用交出去」上的构建,会用一次按下回答两个动词,读者拿到的是这个文件里先被问到的那条分支。M5-6 的扫描发现原来的读法还站着——`Ctrl`+点击和 `Ctrl`+滚轮在那台机器上读的是原始的 `control_key()`——并称之为活碰撞,确实是。
 
-So there is one function and the six doors ask it:
+所以有一个函数,六扇门来问它:
 
 ```rust
 pub(crate) fn pointer_chord_held_on(modifiers: ModifiersState, platform: HostPlatform) -> bool {
@@ -9701,370 +9686,141 @@ pub(crate) fn pointer_chord_held_on(modifiers: ModifiersState, platform: HostPla
 }
 ```
 
-**It delegates rather than matching `HostPlatform` a second time**, and that is
-the design and not a shortcut. The modifier these rulings spend is *this
-application's* — the one that means "I am talking to Folio and not to the
-program in the pane" — and M1-7 already decided which key that is on each
-keyboard (§13.13 ①). Two matches for one dialect is how a dialect comes to be
-two: a later ticket that moved one of them would leave a window whose clicks and
-whose chords disagreed about what Command means.
+**它委托而不是自己再匹配一次 `HostPlatform`**,这是设计而不是偷懒。这些裁决花的修饰键是**这个应用自己的**——意思是「我在和 Folio 说话,不是在和窗格里的程序说话」——而 M1-7 已经定了每个键盘上哪个键是那个键(§13.13 ①)。同一种方言匹配两次,方言就会变成两种:后来一张票挪了其中一个,留下的窗会在点击和和弦之间对 Command 的意思各执一词。
 
-The six, and what each spends the key on:
+六扇门,以及每扇门把那个键花在什么上:
 
-| door | the gesture |
+| 门 | 手势 |
 |---|---|
-| `press_preview_text` | a press on a rendered page — the drag carries what the press meant, and the link is answered when the press turns out not to have travelled |
-| `press_graph_row` | the compare gesture on a commit row (D6) |
-| `begin_local_selection` | a press in a pane, on an OSC 8 hyperlink **and** on an inline picture — two readings, now one |
-| `terminal_link_grasp` | the pointing finger over a terminal link |
-| `preview_link_grasp` | the same finger, on the other surface links are drawn on (§7.1.5g ⑦) |
-| `scroll_web_page` | `Ctrl`/`⌘`+wheel zooms a hosted page |
+| `press_preview_text` | 按在渲染页面上——拖拽承接按下的含义,链接在按下被判定为没有移动时作答 |
+| `press_graph_row` | 提交行上的比较手势(D6) |
+| `begin_local_selection` | 按在窗格里,落在 OSC 8 超链接**和**行内图片上——两个读法,现在合成一个 |
+| `terminal_link_grasp` | 终端链接上的指向手指 |
+| `preview_link_grasp` | 另一个画着链接的表面上的同一根手指(§7.1.5g ⑦) |
+| `scroll_web_page` | `Ctrl`/`⌘`+滚轮缩放网页 |
 
-**And they are struck against the hand.** What each is handed is
-`WindowRuntime::modifiers_held` and not `modifiers` — §13.33 ①'s ruling, said
-again one device along: a gesture composes no character, so a policy about what
-a key *types* has no business deciding what a click *does*. Today the two states
-carry the same Control and the same Command bit, because `effective_modifiers`
-takes out `Alt` and nothing else; this is written down as the reading rather
-than as a repair, so that the next key a text policy speaks for does not
-silently take six gestures with it.
+**而且它们对着的是手。** 每扇门拿到的是 `WindowRuntime::modifiers_held` 而不是 `modifiers`——§13.33 ① 的裁决,沿着设备链再说一遍:一个手势不组字符,所以关于一个键**打什么字**的策略没有资格决定一次点击**做什么**。今天两个状态里的 Control 和 Command 位一模一样,因为 `effective_modifiers` 只去掉了 `Alt`;这里把它作为读法记下而不是作为修复,好让下一个被文字策略管到的键不会悄悄带走六个手势。
 
-**Windows is unchanged byte for byte.** `pointer_chord_held_on` answers
-`control_key()` there, which is what each of the six read before. There is no
-CHANGELOG line, and that is the pin: nothing a reader on this platform can
-press behaves differently.
+**Windows 逐字节不变。** `pointer_chord_held_on` 在那里回答 `control_key()`,跟以前六扇门各自读的一模一样。没有 CHANGELOG 条目,这本身就是钉:这个平台上读者按得出的任何东西,行为都没有变。
 
-**② Control+click is the secondary click, and AppKit does not make it one for
-you.** The ticket asked whether winit reports a control-click as a right button.
-It does not, and the reason is in one line of the backend: winit reads the
-button off `NSEvent`'s `buttonNumber` (`macos/view.rs:1090`), a control-click is
-delivered to `mouseDown:` with `buttonNumber` 0, and so the window sees a plain
-left press with Control in the flags. AppKit's own contextual-menu machinery
-runs beside that, through `menuForEvent:` on a view that has a menu — and
-winit's view has none, and M1-7 took the default menu away besides (§13.13 ⑤).
+**② Control+点击是右键,而 AppKit 不替你做这件事。** 票问 winit 会不会把 control-click 报告成右键按下。不会,原因在后端一行代码里:winit 从 `NSEvent` 的 `buttonNumber`(`macos/view.rs:1090`)读按钮,一次 control-click 送进 `mouseDown:` 时 `buttonNumber` 是 0,所以窗口看见的是一次带 Control 标志的普通左键按下。AppKit 自己的上下文菜单机制走的是另一条路,通过视图的 `menuForEvent:`——但 winit 的视图没有菜单,M1-7 还把默认菜单也去掉了(§13.13 ⑤)。
 
-Measured on the machine, on this branch's own window (macOS 26.6.2, Apple M4,
-backing scale 2), by posting one `CGEvent` left press carrying `maskControl` at
-a pane:
+在这台机器上、本分支自己那扇窗里量到的(macOS 26.6.2,Apple M4,背衬缩放 2),往一个窗格投了一个带 `maskControl` 的 `CGEvent` 左键按下:
 
 ```
 mouse_input state=Pressed button=Left pointer=1200,1040 metrics_scale=2 ... route=none
 secondary_click state=Pressed reported=Left taken_as=Right
 ```
 
-The first line is winit's reading and the second is this window's, and the
-pane's own menu came up on the glass behind them — `复制` / `粘贴` / `全选` /
-`查找… Cmd+F` / `清屏` / `清除回滚…` / `重启 shell…` / `拆分并运行` /
-`在文件夹里新建终端…` / `复制窗格 Shift+Cmd+U` / `把窗格移到新窗口`, read out of
-the frame the window itself dumped. The release carried the flag too and was
-translated with it.
+第一行是 winit 的读法,第二行是本窗的读法,而窗格自己的菜单在它们背后出现在玻璃上——`复制` / `粘贴` / `全选` / `查找… Cmd+F` / `清屏` / `清除回滚…` / `重启 shell…` / `拆分并运行` / `在文件夹里新建终端…` / `复制窗格 Shift+Cmd+U` / `把窗格移到新窗口`,从窗口自己倒出来的帧上读的。抬起时同样带着那个标志被翻译。
 
-So the translation is this window's to make, and it is made **once**:
+所以翻译是本窗做的,做**一次**:
 
 ```rust
 pub(crate) fn pressed_button(reported, modifiers, platform) -> MouseButton
 ```
 
-— the platform's rule, held for the length of the gesture by
-`pressed_button_of_gesture` (below) — at `mouse_input`, above every router and
-below the trace's first station. Above every router because a second place that
-decided what a press was would be a second answer — `effective_modifiers`' argument, one device along. Below the
-station because the forensics have to record what the platform said, not what
-this window made of it; a line is written beside the translation whenever it
-fires, so `BT_MOUSE_TRACE` carries both readings.
+——平台的规矩,由 `pressed_button_of_gesture`(下面)保持到手势结束——在 `mouse_input` 处,高于每一个路由器、低于追踪的第一站。高于每一个路由器,因为第二个判定一次按下是什么的地方就是第二个答案——`effective_modifiers` 的论据,沿设备链再说一遍。低于那一站,因为取证记录的必须是平台说了什么,不是本窗怎么理解的;翻译发生时在旁边写一行,所以 `BT_MOUSE_TRACE` 里两个读法都有。
 
-**Nothing downstream is asked and nothing downstream changes.** The pane's menu,
-the tab's menu, the page's menu and the mouse-forwarding table all go on reading
-`MouseButton::Right`, which is the whole point: the two ways a Mac makes a
-secondary press become one press here, and this window's rule for it is written
-down once. That rule is `right_press_raises_terminal_menu` — the program's while
-it is tracking the mouse, ours otherwise — so **a control-click inside a `vim`
-is forwarded to `vim` as a right button**, where before this ticket it was
-forwarded as a left button with the Control bit set. That is a change and it is
-the intended one: a Mac makes its secondary press two ways and a terminal that
-told a child they were different presses would be telling it something no other
-application on the desk says.
+**下游既不被问也不改变。** 窗格的菜单、标签页的菜单、页面的菜单和鼠标转发表继续读 `MouseButton::Right`,这正是全部要点:Mac 产生右键按下的两种方式在这里变成一次按下,本窗关于它的规矩只写一遍。那条规矩是 `right_press_raises_terminal_menu`——程序在追踪鼠标时归程序,其余归本窗——所以**在 `vim` 里的 control-click 作为右键按下转发给 `vim`**,而在这张票之前它是作为带 Control 位的左键按下转发的。这是一个变化,也是有意的变化:Mac 用两种方式产生右键按下,一个终端如果告诉子进程它们是不同的按下,说的就是这台桌面上没有任何其他应用会说的话。
 
-**The release is latched, because Control is a key and a button is a button.**
-Nothing makes a reader lift them in order, and a hand that lets Control go first
-sends a plain `Left` release after a press this window took as `Right`. Most of
-the window does not care — every arm that answers a secondary press asks
-`state == Pressed`, and the one release arm that latches, a local selection
-drag, was never armed because the press that would have armed it was a right
-press. **The forwarding path does care.** `route_forwarded_mouse_button`'s
-release arm already states the rule — *the release is owed to the press that was
-forwarded, so it is spelled the way that press was spelled* — and spells the
-*encoding* off its own latch for exactly that reason; the button came from the
-argument, so a mouse-tracking program would have been handed a right press and a
-left release it could pair with nothing.
+**抬起被锁住,因为 Control 是一个键而按钮是一个按钮。** 没有任何东西让读者按顺序松开,而先松开 Control 的手在一次本窗当作 `Right` 的按下之后送出一次裸 `Left` 抬起。窗口的大部分不在意——每一条回答右键按下的分支都问 `state == Pressed`,而唯一锁住抬起的那条分支(本地选区拖拽)从来没被激活过,因为激活它的那次按下是一次右键按下。**转发路径在意。** `route_forwarded_mouse_button` 的抬起分支已经写着这条规矩——*抬起欠给做出来的那次按下,所以拼法跟着那次按下*——并从自己的锁里读**编码**,理由恰恰是这个;按钮当时来自参数,所以一个追踪鼠标的程序会收到一次右键按下和一次它配不上任何东西的左键抬起。
 
-So one `bool` travels with the hand — `WindowRuntime::secondary_press`, written
-and read only by `input::pressed_button_of_gesture` at the same one door — and
-it is this window's smallest statement of the sentence `MouseRoute` and
-`DragLatch` already make: a gesture belongs to the press that began it. Only the
-left button is ever latched, because it is the only one the platform rule can
-rewrite, so a middle-click in the middle of anything cannot disturb it; and on
-Windows every press writes `false` and every release reads `false`, which is
-what the whole function is on that platform: the identity.
+所以一个 `bool` 跟着手走——`WindowRuntime::secondary_press`,只由 `input::pressed_button_of_gesture` 在同一扇门里写和读——而它是 `MouseRoute` 和 `DragLatch` 已经在说的那句话的最小陈述:一个手势属于开始它的那次按下。只有左键被锁,因为只有它会被平台规矩改写,所以任何东西中间的一次中键点击不会打扰它;在 Windows 上每次按下写 `false`、每次抬起读 `false`,整个函数在那个平台上就是恒等。
 
-**③ The strings.** Two clauses ride on the hovered link's status tag and both
-name the gesture:
+**③ 字符串。** 两条从句挂在悬停链接的状态标签上,都点名手势:
 
 | | Windows | macOS |
 |---|---|---|
 | `HyperlinkControlOpensExternally` | ` · Ctrl+click opens in default app` | ` · ⌘+click opens in default app` |
 | `HyperlinkControlReveals` | ` · Ctrl+click shows it in Explorer` | ` · ⌘+click shows it in Finder` |
 
-The first had no platform column at all and takes one here. The second had one
-for the **program name only**, and §13.32 ② wrote down why the modifier stayed
-put: *a clause that said ⌘ would be this window describing a press it does not
-answer*. That reasoning is not overturned, it is satisfied — the press now
-answers ⌘, so the clause says ⌘. The rule was always "name the key the press
-reads", and this ticket moved the press.
+第一条以前完全没有平台列,这里加上。第二条以前只有**程序名**那一列是分的,§13.32 ② 写下了修饰键留着不动的理由:*一条写着 ⌘ 的从句,是本窗在描述一次它不回答的按下*。那条论证没有被推翻,而是被满足了——现在按下回答 ⌘,所以从句写 ⌘。规矩从来就是「点名按下读的那个键」,而本票挪动的是按下。
 
-`no_macos_column_promises_a_control_pointer_gesture` sweeps the whole table for
-`Ctrl+click`, `Ctrl+点击`, `Ctrl+wheel` and `Ctrl+滚轮` in either macOS column, so
-a third clause written later cannot arrive with the Windows spelling copied into
-it. There is no settings description to change: the one setting row that names a
-wheel gesture names `Alt+wheel` (§7.21, §13.33 ①), which is `⌥` on that keyboard
-and a different ticket's sentence.
+`no_macos_column_promises_a_control_pointer_gesture` 扫整张表,在 macOS 两列里找 `Ctrl+click`、`Ctrl+点击`、`Ctrl+wheel` 和 `Ctrl+滚轮`,好让以后写的第三条从句不会把 Windows 的拼法抄进去。没有设置描述要改:唯一点名滚轮手势的那行设置写的是 `Alt+wheel`(§7.21,§13.33 ①),在那个键盘上是 `⌥`,是另一张票的事。
 
-**Chinese.** Both macOS columns carry the English and are listed in
-`Text::CHINESE_PENDING`, per the copy ruling of 2026-09-07. What is owed is the
-same two clauses with `⌘` in them and 访达 in the second.
+**中文。** macOS 两列都写着英文,列在 `Text::CHINESE_PENDING` 里,按照 2026-09-07 的文案裁决。欠的是同样两条带 `⌘` 的从句,第二条里的 Explorer 换成访达。
 
-**④ What the ticket was told that is not so.** It named "the terminal's
-`Ctrl`+wheel zoom". There is no such gesture and there never has been: the only
-`Ctrl`+wheel in this window is `scroll_web_page`'s, which zooms a **hosted
-page**, and the comment standing over it says why it was free to take —
-*this product has no type-size zoom bound to a wheel at all; a picture zooms on
-the bare wheel*. The terminal's own type size is a settings row —
-`Appearance ▸ Font size` — with no chord and no gesture at all. Nothing was
-changed to make that true; it already was.
+**④ 票被告知的一件不成立的事。** 票说「终端的 `Ctrl`+滚轮缩放」。没有这个手势,从来没有过:本窗里唯一的 `Ctrl`+滚轮是 `scroll_web_page` 的,缩放的是**网页**,而它上面的注释说了为什么它是空闲的——*本产品根本没有绑在滚轮上的字号缩放;图片靠裸滚轮缩放*。终端自己的字号是一行设置——`Appearance ▸ Font size`——没有和弦,没有手势。不需要做任何改动来让这件事成立;它本来就是。
 
-**⑤ Two readings of Control that stay.** Neither is a pointer's.
+**⑤ 留下来的两个 Control 读法。** 都不是指针的。
 
-* **The mouse report's modifier bits** (`input::sgr_mouse_bytes`,
-  `input::mouse_bytes`). A forwarded press carries `4·shift + 8·alt +
-  16·control`, and that `control` is the **child's** Control — the same key
-  M1-7 ruled belongs to the program in the pane (§13.13 ①). A program that
-  draws a menu on `Ctrl`+click of its own must go on seeing Control there.
-* **The player's five transport keys** (`preview_browse_key`'s guard). It asks
-  whether Space and the arrows arrive bare, which is a question about a
-  keyboard.
+* **鼠标报告里的修饰位**(`input::sgr_mouse_bytes`、`input::mouse_bytes`)。一次被转发的按下带着 `4·shift + 8·alt + 16·control`,那里的 `control` 是**子进程的** Control——M1-7 裁定属于窗格里程序的那个键(§13.13 ①)。一个靠自己的 `Ctrl`+点击画菜单的程序必须继续在那里看到 Control。
+* **播放器的五个传输键**(`preview_browse_key` 的守卫)。它问 Space 和方向键是不是裸到的,这是关于键盘的问题。
 
-`no_other_door_reads_the_raw_control_key_for_a_gesture` names the survivors in
-`main.rs` one by one, so a seventh pointer door written the old way lands in that
-list and fails on a Windows workstation.
+`no_other_door_reads_the_raw_control_key_for_a_gesture` 在 `main.rs` 里逐个点名幸存者,好让第七扇用旧写法写的指针门落进那张表、在 Windows 工作站上失败。
 
-**⑥ The trip.**
+**⑥ 那趟运行。**
 
-macOS 26.6.2, Apple M4, a backing-scale-2 display; a debug build of this
-branch inside a throwaway bundle with an identifier of its own
-(`io.github.lulu-loopp.folio.cmdclick`) and an isolated `HOME` exported by a
-`CFBundleExecutable` wrapper script, because `LSEnvironment` cannot set `HOME`
-(§13.31 ⑧(d)). **Pointer only** — no key was posted and nothing was written to
-the pasteboard — and the fixture, an OSC 8 hyperlink naming a folder, was
-written to the pane's own tty by the shell's rc file for the same reason. The
-window was stood at `40,40 1180x740` through the seeded session, away from the
-panels §13.39 found in the middle of that desk, and the desk was asked what
-covered the point before anything was posted at it: `OVER … owner=FolioCC …
-rect=40,40 1180x740`, and nothing else.
+macOS 26.6.2,Apple M4,背衬缩放 2;本分支的 debug 构建装在一个一次性应用包里,标识符是它自己的(`io.github.lulu-loopp.folio.cmdclick`),`HOME` 由 `CFBundleExecutable` 包装脚本导出、做了隔离,因为 `LSEnvironment` 设不了 `HOME`(§13.31 ⑧(d))。**只用指针**——没有投键、也没有写剪贴板——夹具是一个 OSC 8 超链接,指向一个文件夹,由 shell 的 rc 文件写进窗格自己的 tty,原因相同。窗口通过播种的会话停在 `40,40 1180x740`,避开 §13.39 在那台桌面中间发现的面板,投出任何东西之前先问桌面那个点上盖着什么:`OVER … owner=FolioCC … rect=40,40 1180x740`,没有别的。
 
-The link's cell was solved out of the window's own grid: two plain presses each
-name a row and a column in the trace, which gives the cell — 20 × 10 points at
-this font — and the link's own row was then read off the window's photograph,
-because the origin the two presses implied was one row out.
+链接所在的单元格从窗口自己的网格里算出:两次裸按下各在追踪里点名一行一列,由此得出单元格——在这个字号下是 20 × 10 点——再从窗口的照片上读出链接自己的行,因为那两次按下隐含的原点差了一行。
 
-| # | posted at the link's cell | what the window wrote down |
+| # | 投在链接单元格上的 | 窗口记下的 |
 |---|---|---|
-| 1 | a bare left press | `begin_local_selection … origin=1,7 control=0 hyperlink=Some(HyperlinkHit { uri: "file:///…/pages/sub", … })`, then `activate_hyperlink control=0 … arm=None` |
-| 2 | the same press with `⌘` held | `begin_local_selection … origin=1,7 control=1 hyperlink=Some(…)`, then `activate_hyperlink control=1 … arm=Blocked` |
-| 3 | a left press on the pane with Control held | `secondary_click … reported=Left taken_as=Right` on the press **and on the release**, and the pane's own menu on the glass at the pointer — thirteen rows, `复制` through `把窗格移到新窗口`, with `Cmd+F` and `Shift+Cmd+U` beside two of them |
-| 4 | a bare left press off the menu | no `secondary_click` line, and the frame's labels are back to the tab's name alone |
+| 1 | 一次裸左键按下 | `begin_local_selection … origin=1,7 control=0 hyperlink=Some(HyperlinkHit { uri: "file:///…/pages/sub", … })`,然后 `activate_hyperlink control=0 … arm=None` |
+| 2 | 同一次按下,按住 `⌘` | `begin_local_selection … origin=1,7 control=1 hyperlink=Some(…)`,然后 `activate_hyperlink control=1 … arm=Blocked` |
+| 3 | 按住 Control 的左键按下,落在窗格上 | 按下**和抬起**都出现 `secondary_click … reported=Left taken_as=Right`,窗格自己的菜单在指针处出现在玻璃上——十三行,`复制` 到 `把窗格移到新窗口`,其中两行旁边带 `Cmd+F` 和 `Shift+Cmd+U` |
+| 4 | 菜单外的一次裸左键按下 | 没有 `secondary_click` 行,帧的标签回到只有标签页名 |
 
-**Rows 1 and 2 are the ticket, and they are one thing apart from nothing.** The
-same link, the same cell, and the only difference is the key under the hand:
-`control=0` bare and `control=1` under `⌘`. Before this ticket both of those
-read `0`, because the field they read is Control and no Mac keyboard was putting
-Control there.
+**第 1 行和第 2 行是票本身,差的只有一样东西。** 同一个链接,同一个单元格,唯一不同的是手下的键:`control=0` 是裸的,`control=1` 是 `⌘` 按着的。在这张票之前两次都读 `0`,因为那个字段读的是 Control 而 Mac 键盘没有把 Control 放在那里。
 
-**Row 3 is the collision, closed.** Before it, that press began a selection.
+**第 3 行是碰撞,关掉了。** 在这之前,那次按下开始的是一个选区。
 
-**What rows 1 and 2 do not show is a folder arriving in the Finder, and the
-reason is a defect this trip found rather than one it made.**
-`arm=Blocked` and `arm=None` are the two halves of §7.1.5g's table being taken —
-`Blocked` is what the System half answers about a target it will not hand over,
-`None` is the Here half's silence — so the modifier reached the table and split
-it, which is the whole of what changed here. Neither half then reached a disk:
-`path=unparsed` on both lines is `bt_platform::file_uri_to_path` answering
-`None`. That function is a **Windows path parser on every host**, and says so in
-its own comment; it admits a drive-rooted path or a UNC share and nothing else,
-so a `file:///Users/…` URI is refused. **Every `file:` reference in a pane is
-therefore inert on a Mac today, under both modifiers** — a plain click opens
-nothing, and the hovered tag draws the URI with no clause after it, which is the
-same fact one surface up (③'s strings could not be photographed for that
-reason). It is named here and not repaired here: what a POSIX `file:` URI may
-become, and what `may_read_unasked` and `validate_openable_path` should then say
-about it, is a port ticket of its own and not a line in a pointer's modifier.
+**第 1 行和第 2 行没有显示的是一个文件夹出现在访达里,原因是这趟运行发现而非制造的一个缺陷。** `arm=Blocked` 和 `arm=None` 是 §7.1.5g 的表的两半在被取走——`Blocked` 是 System 那半对一个它不交出去的目标的回答,`None` 是 Here 那半的沉默——所以修饰键到达了那张表并把它拆开,这就是变化的全部。两半都没有到达磁盘:`path=unparsed` 出现在两行上,是 `bt_platform::file_uri_to_path` 回答 `None`。那个函数**在每台宿主上都是 Windows 路径解析器**,函数自己的注释也这么说;它只接受带盘符的路径和 UNC 共享,所以一个 `file:///Users/…` URI 被拒掉了。**窗格里的每一个 `file:` 引用今天在 Mac 上因此都是死的,两个修饰键下都是**——裸点什么都不打开,悬停标签画的是 URI、后面没有从句,这是同一个事实在上一个表面的样子(③ 的字符串因此拍不到)。在这里点名而不在这里修:一个 POSIX 的 `file:` URI 可以变成什么,以及 `may_read_unasked` 和 `validate_openable_path` 应该对它说什么,是它自己的一张移植票,不是一个指针修饰键里的一行。
 
-**Two smaller things the trip is entitled to say.** The `⌘`-held hover raised
-the key-hint card (§7.1.5e′) with the **Mac** column on it — `Cmd T 新建标签`,
-`Cmd Q 退出`, `Cmd , 设置` — so M1-7's dialect is on the glass beside this
-ticket's gesture. And the Finder window count was `0` before the trip, `0` after
-every press and `0` at the end: nothing was left standing on the owner's desk,
-and every process ended was one this trip started, by the pid it wrote down.
+**这趟运行有资格说的两件更小的事。** 按住 `⌘` 的悬停弹出了按键提示卡(§7.1.5e′),上面是 **Mac** 那一列——`Cmd T 新建标签`、`Cmd Q 退出`、`Cmd , 设置`——M1-7 的方言就在玻璃上,挨着本票的手势。而访达的窗口数在运行前是 `0`,每次按下之后都是 `0`,结束时还是 `0`:所有者的桌面上没有留下任何东西,结束的每一个进程都是这趟运行自己按记下的 pid 启动的。
 
-**And `⌘`+wheel was not driven.** The one wheel gesture this modifier has is the
-hosted page's zoom, and the session document that would have put a page under
-the pointer — a split with a preview pane in it — was not restored: the window
-came up with its default single pane and its default rectangle instead. That is
-a second thing this trip found and did not chase. So that door is held by the
-Windows red gates and by its source pin, and by nothing on the machine.
+**而 `⌘`+滚轮没有被驱动。** 这个修饰键唯一的滚轮手势是网页缩放,而要在指针下面放一个页面的会话文档——一个带预览窗格的分割——没有被恢复:窗口以默认的单窗格和默认矩形出现。这是这趟运行发现而没有追下去的第二件事。所以那扇门靠 Windows 红门和它的源码钉来保,在那台机器上没有任何东西保它。
 
-**⑦ The red gates, and which machine each runs on.** All of them run on Windows,
-which is `host_platform()`'s whole argument for being a value.
+**⑦ 红门,以及每扇门在哪台机器上跑。** 全部在 Windows 上跑,这正是 `host_platform()` 有资格是一个值的全部论据。
 
-* `the_pointer_chord_is_control_here_and_command_on_a_mac` — both platforms,
-  both modifier states, and the bare and Shift readings beside them. Mutation:
-  answer `control_key()` unconditionally.
-* `the_pointer_and_the_keyboard_spell_the_applications_modifier_the_same_way` —
-  six modifier states on two platforms, holding the delegation.
-* `control_click_is_the_secondary_click_only_on_a_mac` — the translation on both
-  platforms, on the left button and on the four that are never rewritten.
-  Mutation: drop the platform guard and a Windows `Ctrl`+click stops handing a
-  link over and raises the pane's menu instead.
-* `a_release_is_spelled_the_way_its_own_press_was` — the latch, with Control
-  gone by the time the button comes up. Mutation: answer the platform rule again
-  on the release arm instead of reading the latch.
-* `one_field_remembers_which_press_is_under_the_hand` — one writer, one reader,
-  and both at the one door.
-* `every_pointer_door_reads_the_platforms_hand_over_modifier` and
-  `no_pointer_door_still_reads_control_by_name` — the six doors by signature,
-  read as text. Two asserts and not one, because a door can gain the call and
-  keep the old reading beside it, which is a door that answers twice.
-* `no_other_door_reads_the_raw_control_key_for_a_gesture` — the sweep ⑤ names.
-* `the_secondary_click_is_settled_once_and_above_every_router` — one call, above
-  the first `return`, below the trace station.
-* `the_hovered_links_clauses_name_the_platforms_own_modifier` and
-  `no_macos_column_promises_a_control_pointer_gesture` — ③.
-
-*(本节英文,待中文文案改写。)*
+* `the_pointer_chord_is_control_here_and_command_on_a_mac`——两个平台、两种修饰键状态,旁边带裸和 Shift 的读法。变异:无条件回答 `control_key()`。
+* `the_pointer_and_the_keyboard_spell_the_applications_modifier_the_same_way`——两个平台上六种修饰键状态,保住委托关系。
+* `control_click_is_the_secondary_click_only_on_a_mac`——两个平台上的翻译,对左键和四个永远不被改写的键。变异:去掉平台守卫,Windows 上的 `Ctrl`+点击就不再交出链接而是弹出窗格菜单。
+* `a_release_is_spelled_the_way_its_own_press_was`——锁,Control 在按钮抬起之前已经松了。变异:在抬起分支重新问平台规矩而不是读锁。
+* `one_field_remembers_which_press_is_under_the_hand`——一个写者,一个读者,都在同一扇门上。
+* `every_pointer_door_reads_the_platforms_hand_over_modifier` 和 `no_pointer_door_still_reads_control_by_name`——六扇门按签名,作为文本读。两根钉而不是一根,因为一扇门可以加上调用却留着旧读法,这是一扇回答两次的门。
+* `no_other_door_reads_the_raw_control_key_for_a_gesture`——⑤ 点名的那个扫描。
+* `the_secondary_click_is_settled_once_and_above_every_router`——一次调用,高于第一个 `return`,低于追踪站。
+* `the_hovered_links_clauses_name_the_platforms_own_modifier` 和 `no_macos_column_promises_a_control_pointer_gesture`——③。
 
 ### 13.46 M6-2: 干净机怎么来——一个新用户账户加一台 GitHub 的跑器,虚拟机写明不取(`docs/RELEASING.md`、`docs/plans/port/m6-1-checklist.md`(新)、`.github/workflows/release.yml`)
 
-**取 13.46。** §13.44 由在飞的 M5-6 占着,§13.45 归在飞的 T-MAC-CMDCLICK;本节取下一个
-还没被认领的号。
+**取 13.46。** §13.44 由在飞的 M5-6 占着,§13.45 归在飞的 T-MAC-CMDCLICK;本节取下一个还没被认领的号。
 
-**① The question this ticket was given, and the measurement that answers it.**
-M6-2 asks for clean-machine coverage — a VM or a snapshot, or the gap written
-down and accepted. Everything below was measured on the release Mac on
-2026-09-13 over a read-only session: nothing was installed, no account was made,
-no guest was created.
+**① 票收到的问题,以及回答它的那个测量。** M6-2 要的是干净机覆盖——一台虚拟机或一个快照,或者把缺口写下来并接受。下面全部在 2026-09-13 发布用的那台 Mac 上通过一次只读会话量到:没有安装任何东西,没有建账户,没有创建访客。
 
-The measurement that decides the whole thing is not about virtual machines at
-all. It is about which half of Gatekeeper belongs to an account and which half
-belongs to a machine. An account owns the data directory, the Downloads folder
-and the quarantine attribute on what lands in it, the privacy grants, the
-Services registration (`~/Library/Preferences/pbs.plist`) and the LaunchServices
-database. A machine owns `/var/db/SystemPolicyConfiguration`, one root-owned
-directory for every account on it, and two of the things in there are exactly
-what M6-1 is about: `ExecPolicy`, what this machine has already assessed and
-approved, and `Tickets`, the notarization tickets it has already fetched.
+决定整件事的那个测量根本不是关于虚拟机的。它是关于 Gatekeeper 哪一半属于账户、哪一半属于机器。账户拥有数据目录、Downloads 文件夹及落进去的东西上的隔离属性、隐私授权、Services 注册(`~/Library/Preferences/pbs.plist`)和 LaunchServices 数据库。机器拥有 `/var/db/SystemPolicyConfiguration`,每个账户一个 root 所有的目录,其中两样恰恰是 M6-1 要看的:`ExecPolicy`,这台机器已经评估并批准过什么;`Tickets`,它已经取回的公证票据。
 
-So a second account is a real clean-*user* venue with two orderings attached,
-and the orderings are cheap:
+所以第二个账户是一个真正干净的**用户**场地,附带两个排序,而排序的代价很低:
 
-- the first open of a release build has to happen **on the clean account**, before
-  anybody opens it anywhere else on that Mac, or the machine-wide approval is
-  already there and no panel appears;
-- the network has to be pulled **before** that first open, or an offline launch
-  cannot tell the ticket stapled into the file from the one this machine cached
-  when it first went and asked.
+- 一个 release 构建的首次打开必须在**干净账户上**进行,在这台 Mac 上的任何人打开它之前,否则全机批准已经在那里,不会弹出任何面板;
+- 网络必须在首次打开**之前**断开,否则离线启动分不清一个订在文件里的票据和这台机器首次去问时缓存下来的那个。
 
-Neither is an obstacle; both are steps in an order. The checklist is written in
-that order, and it spells out the weaker claim for the case where the second
-cannot be done.
+两者都不是障碍;都是顺序里的步骤。检查单就是按这个顺序写的,并且对做不到第二条的情况写出了更弱的主张。
 
-**② The virtual machine, and the numbers it is not taken on.**
-`Virtualization.framework` is present, `swiftc` is Swift 6.3.3 and Xcode is
-installed, so a guest *could* be written and run on this machine without a
-package manager. The restore image for the matching build is 19,772,231,540
-bytes — 18.4 GiB — and the link measured around 21 MB/s, about a quarter of an
-hour. The internal volume has 47 GiB free, against that image plus a guest disk
-Apple's own sample sizes at 64 GB; the volume with the room is the owner's media
-and is out of bounds. Memory is 16 GiB in total, shared with a production service
-that runs on this machine full time, at half free with nothing else going.
+**② 虚拟机,以及不取它的那些数字。** `Virtualization.framework` 在,`swiftc` 是 Swift 6.3.3,Xcode 也装了,所以一个访客**可以**不装包管理器就在这台机器上写出来并跑起来。对应构建的恢复映像是 19,772,231,540 字节——18.4 GiB——链路测到大约 21 MB/s,差不多一刻钟。内置卷剩 47 GiB,而那张映像加上 Apple 示例给的 64 GB 访客磁盘放不下;有空间的卷是所有者的媒体盘,不在范围内。内存总共 16 GiB,与一个全天候运行的生产服务共享,什么都不跑时大约一半空闲。
 
-The plan's 2026-09-12 note assumed **Tart or UTM**. Neither is on the machine and
-both are installations the venue refuses (`~/folio-port/README-agents.md` rule 3
-— no package manager, and this is the owner's server), so the route that installs
-nothing is a Swift program written against the framework and ad-hoc signed with
-the virtualization entitlement: a day of work before a guest first boots. That
-premise is the one thing in the plan this ticket contradicts.
+计划 2026-09-12 的注释假设 **Tart 或 UTM**。两个都没装,而这个场地拒绝安装它们(`~/folio-port/README-agents.md` 第 3 条——不装包管理器,这是所有者的服务器),所以不装任何东西的路线是一个用虚拟化授权 ad-hoc 签名的 Swift 程序,对着那个框架写:访客首次启动之前一天的工作量。这是计划里唯一被本票推翻的前提。
 
-And then the point of order, which would stand even if every number above were
-comfortable: **a guest's screen exists only inside an AppKit view, in a windowed
-application, in a logged-in graphical session.** The framework has no remote
-console. Every single thing M6 asks to *see* — the identified-developer panel,
-the drag to `/Applications`, the notification and Accessibility prompts, the
-Services menu — is drawn by the window server. A guest therefore still has to be
-driven by a person sitting at a Mac, which is exactly what the second account
-already costs, and it buys no unattended acceptance in exchange for the day.
+然后是那条程序性的意见,即使上面每个数字都宽裕它也成立:**一个访客的屏幕只存在于一个 AppKit 视图里,在一个窗口应用里,在一个登录着的图形会话里。** 这个框架没有远程控制台。M6 要**看到**的每一样东西——已识别开发者面板、拖到 `/Applications` 的操作、通知和辅助功能弹窗、Services 菜单——都由窗口服务器绘制。所以访客仍然需要一个人坐在 Mac 前驱动,而这正是第二个账户已经花掉的代价,拿一天工作量换不来任何无人值守的验收。
 
-**③ The half a person cannot do, on a machine that really is clean.**
-`release.yml` grows `macos-artifact`: `needs: macos`, a second `macos-14` runner,
-`actions/download-artifact` on the artifact the build job uploaded, then
-`shasum -a 256 -c SHA256SUMS.txt` — the file the release page invites a reader to
-check the download against — then the image mounted and asked what a download is
-asked: `spctl -t open --context context:primary-signature` on the image,
-`codesign --verify --deep --strict` and `spctl` on the application inside it,
-`xcrun stapler validate` on both. Both directions, like the build job: an ad-hoc
-run must be **refused** here too, or the job would pass a release that signed
-nothing.
+**③ 人做不了的那一半,在一台真正干净的机器上。** `release.yml` 长出 `macos-artifact`:`needs: macos`,第二台 `macos-14` 跑器,`actions/download-artifact` 取构建 job 上传的产物,然后 `shasum -a 256 -c SHA256SUMS.txt`——release 页面邀请读者用来校验下载的那个文件——然后把映像挂上、问一份下载被问的问题:对映像 `spctl -t open --context context:primary-signature`,对里面的应用 `codesign --verify --deep --strict` 和 `spctl`,对两者 `xcrun stapler validate`。跟构建 job 一样两个方向都断言:一次 ad-hoc 运行在这里也必须**被拒**,否则这个 job 会放过一次什么都没签的 release。
 
-Why a second runner rather than four more lines in the first: the build job
-verifies a directory on the machine that made it, minutes after making it, with
-the signing keychain still on the search list and the notary's answer still warm.
-That is the right check and it is a different check. This one is the bytes that
-came back out of the store a release is assembled from, on a machine that did not
-build them and has no history with them. It is about two minutes.
+用第二台跑器而不是在第一台上加四行的原因:构建 job 验证的是造它的那台机器上的一个目录,在造出来几分钟之后,签名钥匙串还在搜索表里、公证的回答还热着。那是对的检查,也是不同的检查。这里验证的是从组装 release 的那个存储里取回来的字节,在一台没有构建过它们、跟它们没有任何历史的机器上。大约两分钟。
 
-Three facts have to cross between the jobs, and `needs.<job>.outputs` is the only
-wire: the artifact's name, the image's name, and whether the run was signed. A
-step with `id: artifact` puts them there. The `-unsigned` suffix rule stays in
-the job that owns it — a second reader of that rule would be a second place for
-it to be wrong.
+三个事实必须在两个 job 之间传递,而 `needs.<job>.outputs` 是唯一的线:产物的名字、映像的名字、这次运行是否签了名。一个带 `id: artifact` 的步骤把它们放在那里。`-unsigned` 后缀规则留在拥有它的那个 job 里——第二个读者就是第二个出错的地方。
 
-What the runner cannot be is a person. There is no screen, and
-`download-artifact` restores bytes rather than extended attributes, so the
-quarantine attribute and every panel stay with the account half.
+跑器做不了的是人。没有屏幕,而 `download-artifact` 恢复的是字节而非扩展属性,所以隔离属性和每一个面板留在账户那一半。
 
-**④ The checklist, with the wrong answer beside each right one.**
-`docs/plans/port/m6-1-checklist.md` is M6-1's walk: the two orderings above as
-preconditions, the download in Safari and the attribute that makes it one, the
-mount, the drag, the first open, the M1 to M4 lines re-run from that account
-against that bundle, Services on a folder whose name has a space and a CJK
-character, and the two refusal paths — a byte-flipped image with its quarantine
-attribute put back by hand, and the `-unsigned` bundle the lane produces when it
-runs without secrets.
+**④ 检查单,每个正确答案旁边写着错误答案。** `docs/plans/port/m6-1-checklist.md` 是 M6-1 的那趟走:上面两个排序作为前提条件,在 Safari 里下载以及让它成为一次下载的那个属性,挂载,拖拽,首次打开,M1 到 M4 那几条线从那个账户对着那个应用包重跑,在名字里有空格和一个 CJK 字符的文件夹上试 Services,以及两条拒绝路径——一个翻转了一个字节的映像,用手把隔离属性放回去;以及车道在没有 secret 时产出的 `-unsigned` 应用包。
 
-Two things in it are worth naming here. **Never Control-click ▸ Open**: it is the
-reader's escape hatch, it approves the build for the whole machine, and one use
-of it ends the walk. And the ad-hoc refusal's *reason* line is written down
-rather than checked against a string — the wording has moved between macOS
-releases, what is being asserted is the refusal, and that is exactly what the
-lane asserts and no more.
+里面有两样值得在这里点名。**绝不要 Control-click ▸ Open**:那是读者的逃生门,它为整台机器批准这个构建,用一次就结束整趟走。还有 ad-hoc 拒绝的**原因**行是记下来而不是拿去比字符串的——措辞在不同 macOS 版本之间变过,被断言的是那次拒绝本身,而这恰恰也是车道断言的那么多、不多一点。
 
-**⑤ What is not covered, and that this is the accepted gap.** A machine that has
-never had this build, a Rust toolchain or an Xcode on it, driven by a person. The
-runner gives the first half without the person; the account gives the person
-without the machine. The one acceptance line that falls in the hole is the
-offline launch, and only in the case where the network could not be pulled before
-the first open — the checklist records the weaker claim when that happens.
-Revisit when the machine changes, or when a defect arrives that a development
-install would have masked.
+**⑤ 没有覆盖到的,以及这就是被接受的缺口。** 一台从来没装过这个构建、Rust 工具链或 Xcode 的机器,由一个人驱动。跑器给了前半段但没有人;账户给了人但没有机器。唯一落在洞里的那条验收线是离线启动,并且只在网络没法在首次打开之前断开的情况下——检查单在那种情况下记下更弱的主张。机器更换时或者一个开发安装本会掩盖的缺陷到来时,重新审视。
 
+<<<<<<< HEAD
 `docs/RELEASING.md` ▸ macOS ▸ *Clean-machine coverage* is where all of this is
 one paragraph for a person making a release. It is written against that section
 as `main` has it; when M5-6's `feature/macos-docs` lands, it belongs between
@@ -10335,3 +10091,6 @@ body moved into a function of its own, byte for byte, and nothing a reader on
 that platform can press behaves differently.
 
 *(本节英文,待中文文案改写。)*
+=======
+`docs/RELEASING.md` ▸ macOS ▸ *Clean-machine coverage* 是上面这些对一个做 release 的人变成一段话的地方。它是对着 `main` 上的那一节写的;M5-6 的 `feature/macos-docs` 落地时,它应该放在 *What must be seen before the tag is published*——以干净用户通过为结尾——和 *What is kept beside the artifact* 之间,文件里它上面的一条注释这么说了。
+>>>>>>> feature/zh-design-45-46
