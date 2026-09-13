@@ -12163,8 +12163,47 @@ mod macos_dialog_backend_tests {
         );
         assert_eq!(
             body.matches("say_to_stderr(title, text)").count(),
-            2,
-            "both refusals write the two lines the portable arm writes"
+            3,
+            "every refusal writes the two lines the portable arm writes — the two questions \
+             above and M4-11's third one"
+        );
+    }
+
+    /// RED (M4-11, `docs/DESIGN.md` §13.31) — **a modal box is raised only when
+    /// there is somebody to raise it at.**
+    ///
+    /// `runModal` does not return until the button is pressed, so everything
+    /// after it in the panic hook — the run footer, `leave_process` — waits
+    /// behind the box (§13.23 measured a bundle launch whose log has no footer
+    /// for exactly that reason). A box in a process that is neither frontmost
+    /// nor showing a window is a crash nobody sees in a process that will not
+    /// leave.
+    ///
+    /// `isVisible` and not AppKit's `hasVisibleWindows`: X-4 measured that the
+    /// latter is YES for a minimised window and YES for a hidden one.
+    ///
+    /// MUTATIONS: raise the alert without the question and the first assertion
+    /// goes red; ask it after `runModal` and the second does; read
+    /// `hasVisibleWindows` and the last names it.
+    #[test]
+    fn a_modal_box_is_raised_only_when_this_application_is_on_the_screen() {
+        let body = item(MACOS, "\npub fn message_box(");
+        let asks = body
+            .find("if !an_alert_would_be_seen(mtm) {")
+            .expect("the third question is asked");
+        let runs_at = body.find("alert.runModal();").expect("it raises the alert");
+        assert!(
+            asks < runs_at,
+            "the question is asked after the modal is already running:\n{body}"
+        );
+        let rule = item(MACOS, "\nfn an_alert_would_be_seen(");
+        assert!(
+            rule.contains("application.isActive()"),
+            "frontmost is half of the rule:\n{rule}"
+        );
+        assert!(
+            rule.contains("window.isVisible()") && !rule.contains("hasVisibleWindows"),
+            "and a window a reader can see is the other half, read off the window:\n{rule}"
         );
     }
 

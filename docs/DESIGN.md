@@ -9651,3 +9651,261 @@ certificate store, the proxy configuration and the ATS policy are all only
 exercised by a real request. The cost is stated rather than hidden: `cargo test
 -p bt-platform` on a macOS machine with no network has three red cases, and they
 are red for the reason a reader would guess.
+
+### 13.31 M4-11: 活性握手、panic 钩子在 Finder 启动下不再站住、系统崩溃报告被下一次启动点名(`crates/bt-platform/src/{hang,macos_dialogs,lib}.rs`、`crates/bt-platform/Cargo.toml`、`crates/bt-app/src/diagnostics.rs`)
+
+**The number is claimed, not counted.** §13.19–§13.27 are on `main`; §13.26,
+§13.28, §13.29 and §13.30 are held by tickets in flight the same night. This one
+takes **13.31** so that two sections cannot land on one number.
+
+**① The watchdog's last-resort question is the ticket, and there were two things
+it could have measured.** `hang_watch` convicts nothing on arithmetic alone: past
+the threshold it *asks*, and a thread that answers is alive whatever its own loop
+is doing. Off Windows that question has been answering `NoWindow` since the file
+was written — and `NoWindow` is not `Answered`, so
+`a_start_with_no_window_to_ask_is_convicted_on_its_own_grace` is exactly the
+shape every idle Mac Folio was in: five seconds of an indefinite park, one
+question that could not be put, one hang report about a window nobody had
+touched. The port's crash story starts by giving that question a real answer.
+
+Two candidates, and they are not the same measurement:
+
+* **A user event through the event-loop proxy `bt-app` already holds.** It is
+  answered by `bt-app`'s own handler — the same machinery whose silence raised
+  the suspicion. A last-resort question only the suspect can answer is not
+  evidence, and the heartbeat already measures that thing: a turn of the loop.
+* **`CFRunLoopPerformBlock` on the main run loop, in `kCFRunLoopCommonModes`,
+  followed by `CFRunLoopWakeUp`.** The block is performed by Core Foundation at
+  the top of the loop, before anything of ours is consulted.
+
+The second is the one the Windows arm is. `SendMessageTimeout(WM_NULL)` is
+dispatched by USER32 below every line this program wrote, which is why that arm's
+own note says a thread inside a modal drag or a tracked menu answers it and is
+correctly excused. `kCFRunLoopCommonModes` is what keeps that property here:
+AppKit puts `NSEventTrackingRunLoopMode` and `NSModalPanelRunLoopMode` into the
+common set, so a window being dragged, a menu being tracked or a sheet being
+answered still performs the block. `kCFRunLoopDefaultMode` was the other spelling
+and it is the wrong one — it reports every drag as a hang. The wake is not
+optional either: a run loop asleep in `mach_msg` would otherwise perform the
+block whenever the reader next moved the mouse, which measures the reader.
+
+**The bound is a `sync_channel` of one and a `recv_timeout`**, because the one
+thing a watchdog may never do is block on the thread it is watching. A `Silent`
+answer leaves the block queued on a loop that is not turning; if that loop comes
+back the block runs, sends into a receiver that is gone, and is released. That is
+one block per threshold on a process that is already hung, and none at all on one
+that is not.
+
+**② Which thread is being asked, on a platform with one loop anybody drives.**
+The signature is still `ask_thread_to_answer(thread_id, timeout)` and the id is
+still spent. `current_thread_id` answers
+`pthread_mach_thread_np(pthread_self())` — the `GetCurrentThreadId` of this
+platform: already a `u32`, unique in the task, stable for the thread's life, and
+borrowing no send right the caller would owe a `mach_port_deallocate` (which
+`mach_thread_self` does). Nothing in Mach maps a port back to *is this the main
+thread* from another thread, so the answer is recorded at the one moment a caller
+is in a position to give it: **the main thread asking for its own id**, which is
+exactly what the window thread does at startup to hand it to the watchdog. Every
+other thread records nothing, and an id that is not the recorded one is
+`NoWindow` — "this thread owned no window to ask" is literally true of every
+other thread in a Cocoa process. The three sentences `Answer::phrase` prints are
+unchanged.
+
+**③ The sample is not ported, and that is the inventory's decision rather than a
+gap.** `capture_thread_stack` is class **X**. Suspending a thread of one's own
+process and reading its stack is a Windows facility this module gets to use
+because Win32 hands out `SuspendThread` and `ReadProcessMemory` and documents
+what may be called between them; the Mach twins exist, and reaching for them
+would be this program writing a debugger against itself on a platform that
+**writes the report for it**. So the macOS half of the crash story is ⑤, not a
+second-rate copy of a stack the system already took. A hang report on a Mac
+carries `note : stack capture is a Windows facility` where the stack would be,
+and every other field in it is real.
+
+**④ The panic hook keeps §7.43's order and gains a third question before the
+box.** §13.23 measured a bundle launch whose `diagnostics.log` has no run footer
+and said so as documented behaviour rather than a defect: `announce_panic` raises
+`NSAlert.runModal` on the thread that panicked, and `runModal` does not return
+until somebody presses the button — so the footer and `leave_process` wait behind
+it. That is right when a reader is looking at the box and wrong when nobody can
+see it, which on a Finder launch is the ordinary case: `stderr` is already the log
+file, so the box is the only thing that reaches anybody, and a box in a
+background process with no window on the screen reaches nobody while keeping the
+process from leaving.
+
+**The rule: the alert is raised only when this application is frontmost or has a
+window a reader can see; otherwise the two lines go where the run's diagnostics
+already go and the caller carries on to its own exit.** Both halves are needed —
+`-[NSApplication isActive]` is the crash that happens while somebody is looking
+at Folio, and a visible window is the one that happens while they are in another
+application, where the Dock and `Command`-`Tab` still reach the box.
+`-[NSWindow isVisible]` and not AppKit's `hasVisibleWindows`, because X-4
+measured the latter YES for a minimised window and YES for one hidden with
+`-[NSApplication hide:]` (§13.21's note on `Reopen`), and neither of those is a
+window anybody can see. The question is asked **inside `message_box`**, beside
+the two that were already there (§13.17 ⑤), because the fact it decides is the
+same kind of fact those two decide: whether raising a modal is a thing this
+process can usefully do at all. It is deliberately not a rule about which thread
+panicked or about how the process was launched — a launch shape is only ever a
+proxy for those three readings. Nothing calls `terminate:` from inside a handler;
+the hook still leaves through `leave_process(101)` (M3-1's rule, §13.21).
+
+**⑤ The next launch names the report the system already wrote.** macOS files a
+complete `.ips` — every thread's backtrace, the register file, the loaded images
+— into `~/Library/Logs/DiagnosticReports/` for every process of the user that
+dies of a signal. Nobody who is not looking for it will ever find it. So
+`bt_app::diagnostics`, under this run's own header, names the newest report for
+this program that is **newer than the last thing the previous run wrote**.
+
+Three decisions in that sentence:
+
+* **The moment is the log's own modification time**, read before this run touches
+  the file and before the rotation renames it. It is "the last launch the log
+  recorded" said in the one unit the filesystem keeps for free, and it
+  self-clears: this run's header moves the stamp past every report there will
+  ever be, so a report is named once and never again.
+* **The name is the running program's own**, off `current_exe`, not the literal
+  `folio`. The shipped binary is `folio` and a development build is `bt-app`, and
+  the system names the report after whichever one died; a hard-coded product name
+  would make the facility work for exactly the builds nobody debugs. The
+  separator is part of the rule — `folioscope-….ips` is not ours, and a launch
+  that told a reader *the previous run crashed* about another program's fault is
+  worse served than one told nothing.
+* **The directory comes from the account record and not from `$HOME`.** The
+  report is not written by this process; it is written by a system service that
+  knows the account. A Folio handed a different `HOME` — which is how every probe
+  in this workspace isolates itself — would otherwise look in a directory
+  `ReportCrash` never writes to and quietly find nothing, on exactly the runs
+  anybody measures.
+
+**It names and does not copy**, and that is the Windows arm's user-facing
+behaviour rather than a shortcut. Nothing in this product has ever written a
+crash dump of its own: the minidumps §7.1.3u is argued from were taken by hand
+with a debugger, and what the previous run's fate costs a user on Windows is one
+line off the sentinel — `BT_PERSIST previous session did not reach its clean-exit
+path`. This is that sentence with the evidence's address in it, and the two now
+stand next to each other in the file. A copy beside the log would be a second
+copy of a file the system already keeps, already rotates, and already opens in
+Console.app when a reader double-clicks the path.
+
+**⑥ Symbolication: what the shipped image carries and what M5 owes.**
+`[profile.release]` says `debug = "line-tables-only"` and **deliberately no
+`strip`** — both measured and written down in `Cargo.toml`, and this ticket
+changes neither. What that means here is not what it means on the other platform:
+
+* **Function names are in the image.** Nothing strips the Mach-O, so its symbol
+  table survives the link and the system's own reporter resolves Folio's frames
+  without any side file at all. Measured on the debug build: **every frame of
+  every thread in the `.ips` carried a symbol name, 361 of 361**, including
+  `objc2_app_kit::…::NSWindow::contentView` and
+  `winit::platform_impl::macos::window_delegate::WindowDelegate::view`. Rust's
+  mangling is in the file rather than demangled, which `rustfilt` or a reader
+  undoes.
+* **File and line are not, and inlined frames are not.** On Apple targets the
+  debug information `line-tables-only` emits stays in the object files and the
+  linked image only carries a debug map pointing at them; nothing under `target/`
+  is shipped, and there was **no `.dSYM` beside the built binary** — `dsymutil`
+  is a separate step nothing in this workspace runs yet.
+* **What M5 must ship is a `.dSYM`**, produced by `dsymutil` from the linked
+  binary and those object files, **archived beside the notarization log and not
+  inside the DMG**. It is keyed to the image's UUID, it is the only artefact that
+  turns a released build's report into file and line, and it exists only on the
+  machine that linked the binary — a release lane that does not keep it has
+  thrown the evidence away at the moment it was made. This ticket books the
+  requirement; it does not touch the profile.
+
+**⑦ Tests.**
+
+*Windows, where none of the macOS arms compile.* Source pins in `hang.rs`'s own
+test module —
+`the_macos_liveness_question_is_put_to_the_run_loop_in_the_common_modes` (the
+mode, the wake, the bound, the identity guard, and that neither arm names the
+event-loop proxy), `the_stack_sample_is_still_refused_on_every_platform_but_windows`
+and `the_system_crash_reports_are_looked_for_in_the_accounts_own_home` — plus
+`bt_platform`'s `a_modal_box_is_raised_only_when_this_application_is_on_the_screen`
+beside the two questions §13.17's pin already holds. **A source pin that reads the
+whole file finds its own assertions**: the first of these refused its own text
+until it was narrowed to the two arm bodies, which is worth saying because it is
+the failure mode of every `include_str!` gate. The crash-report lookup is
+deliberately **not** pinned as source — it is a function over a directory listing,
+so `a_crash_report_is_this_programs_only_when_the_name_is_followed_by_a_separator`
+and `the_newest_report_after_the_previous_runs_last_word_is_the_one_named` drive
+it with a temporary directory and stamped files, and they run on both machines.
+
+*The Mac.* `hang.rs`'s `macos_handshake_tests` builds the thing the arm is about:
+a second thread with a live run loop. **A run loop with no input source is not a
+run loop that waits** — `CFRunLoopRun` returns immediately when nothing is
+attached to it — so the turning thread is given one source whose only property is
+existing, which is the state the real main thread is in with AppKit's own event
+source under it. `a_run_loop_that_is_turning_answers_inside_the_bound`,
+`a_run_loop_that_never_turns_is_silent_and_does_not_hold_the_asker` (which asserts
+the asker came back on its own clock, because a watchdog that blocked would be the
+fault it exists to report) and
+`a_thread_that_is_not_the_main_one_registers_nothing_and_owns_no_window`.
+
+**⑧ Measured on the Mac mini** — macOS 26.6.2 (25G83), Apple M4, the debug build
+at `b4fd9a9029`, each launch against an isolated `HOME` under the ticket's own
+worktree, the binary copied to `folio-m4-11` so that every report it leaves in the
+account's directory is unmistakably the probe's.
+
+**(a) The crash, in both launch shapes.** A terminal launch under a real pty came
+up with a window, was aborted by the pid its own log header carries, and the next
+launch wrote, under its own header and above the sentinel's line:
+
+```
+── Folio 0.3.0 (b4fd9a9029) — run started 2026-09-13T00:50:47.314Z, pid 28503 ──
+Folio: the previous run ended in a crash the system recorded — ~/Library/Logs/DiagnosticReports/folio-m4-11-2026-09-12-205042.ips
+BT_PERSIST previous session did not reach its clean-exit path
+```
+
+A Finder launch — `open -n` on a throwaway bundle — did the same at
+`00:53:14.286Z`, naming `folio-m4-11-2026-09-12-205309.ips`, and **a third launch
+named nothing**, which is the once-and-never-again half of ⑤'s first decision. The
+report is `EXC_CRASH` / `SIGABRT`, `Abort trap: 6`.
+
+**How long the system takes is worth writing down**, because a probe that waits
+fifteen seconds concludes the opposite: `ReportCrash` took **about five seconds**
+for one of these aborts and **about a hundred and fifteen** for the next, on a
+233 MB debug image with 482 032 symbols in it. The wait is not bounded by anything
+this program does.
+
+**(b) The handshake, on the real application.** `BT_HANG_SELFTEST=12` holds the
+window thread, which on this platform is the thread the main run loop is on, so
+the block cannot be performed. The watchdog wrote:
+
+```
+process        : pid 29319, ui thread 259
+pump silent for: 5.028s (threshold 5.000s)
+parking        : it was holding control, not parked
+when asked     : the window was asked and did not answer
+last station   : BT_HANG_SELFTEST (the last one entered, not necessarily the one it is in)
+ui thread stack
+  note   : stack capture is a Windows facility
+healed         : the pump came back after 12.065s at BT_HANG_SELFTEST
+```
+
+Three things in that are the ticket. `ui thread 259` is a real Mach port, so
+`current_thread_id` answered. **`the window was asked and did not answer` is
+`Silent` and not `NoWindow`** — which is the whole proof that the question
+reached the main run loop, because a registration that had failed would have read
+the other sentence and filed the same report for the wrong reason. And the
+`healed` line says the watchdog reported and did not intervene.
+
+**(c) The other half, which is an absence.** A window left idle for fifty
+seconds, ten times the threshold, has **no `hang-reports` directory at all** — the
+watchdog asked, the run loop answered, and `Excused` says nothing out loud. On the
+arm this ticket replaces that same fifty seconds files a report, which is what ①
+is about.
+
+**(d) A venue fact the next Mac ticket needs: `LSEnvironment` cannot set `HOME`.**
+The first pass of this probe put `HOME` in a bundle's `LSEnvironment`
+dictionary. The dictionary *is* applied — `BT_PTY_DUMP` arrived — but the
+session's own `HOME` is written over it, so the bundle came up on the account's
+real data directory. What works is a two-line `CFBundleExecutable` that exports
+the isolated `HOME` and `exec`s the real binary; the process keeps the name the
+image has, which is the name the crash report is filed under. **And the same pass
+showed what §M4-7 is for**: two Folios on one data directory did not hand over to
+each other, because the attention endpoint that arranges that on Windows has no
+macOS arm yet.
+
+*(本节英文,待中文文案改写。)*

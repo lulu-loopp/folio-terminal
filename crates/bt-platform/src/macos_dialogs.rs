@@ -104,8 +104,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertStyle, NSEvent, NSMenu, NSMenuItem, NSModalResponse, NSModalResponseCancel,
-    NSModalResponseOK, NSOpenPanel, NSView, NSWindow,
+    NSAlert, NSAlertStyle, NSApplication, NSEvent, NSMenu, NSMenuItem, NSModalResponse,
+    NSModalResponseCancel, NSModalResponseOK, NSOpenPanel, NSView, NSWindow,
 };
 use objc2_foundation::{NSArray, NSObjectNSDelayedPerforming, NSString, NSURL, ns_string};
 use objc2_uniform_type_identifiers::UTType;
@@ -720,6 +720,33 @@ unsafe extern "C" {
 /// hook of ours is consulted (X-2 measured exactly that). The sheet is also not
 /// a modal loop to begin with: `beginSheetModalForWindow:` returns immediately
 /// and the block runs from the ordinary run loop.
+///
+/// **And a third question, which is M4-11's** (`docs/DESIGN.md` §13.31). The
+/// two above ask whether a box *can* be raised. This one asks whether raising
+/// it would reach anybody, and it exists because of what the box does once it
+/// is up: `runModal` does not return until somebody presses the button, so the
+/// panic hook's last two statements — the footer and `leave_process` — wait
+/// behind it. §13.23 measured exactly that on a bundle launch: the run's file
+/// has no footer, because the box was still standing when the probe ended the
+/// process by its pid.
+///
+/// A box in front of a reader is that reader's news and is worth the wait. A
+/// box in a process that is **not the foreground application and has no window
+/// on the screen** shows nothing to anybody and keeps the process from leaving
+/// — which on a Finder launch, where `stderr` is already the log file, is a
+/// Folio that has crashed and simply stands there.
+///
+/// So the rule, in one sentence: **the alert is raised only when this
+/// application is frontmost or has a window a reader can see; otherwise the
+/// same two lines go where the run's diagnostics already go and the caller
+/// carries on to its own exit.** Both halves are needed — `isActive` is the
+/// crash that happens while somebody is looking at Folio, and a visible window
+/// is the one that happens while they are in another application, where the
+/// Dock and `Command`-`Tab` still reach the box.
+///
+/// It is deliberately **not** a rule about which thread panicked or about how
+/// the process was launched: those three readings are what decide whether there
+/// is a reader, and a launch shape is only ever a proxy for them.
 pub fn message_box(title: &str, text: &str) {
     let Some(mtm) = MainThreadMarker::new() else {
         return say_to_stderr(title, text);
@@ -727,6 +754,9 @@ pub fn message_box(title: &str, text: &str) {
     // SAFETY: AppKit's own global, read on the main thread — which is the only
     // thread that writes it — as a pointer and nothing more.
     if unsafe { NSApp }.is_null() {
+        return say_to_stderr(title, text);
+    }
+    if !an_alert_would_be_seen(mtm) {
         return say_to_stderr(title, text);
     }
     let alert = NSAlert::new(mtm);
@@ -738,6 +768,28 @@ pub fn message_box(title: &str, text: &str) {
     // what an `addButtonWithTitle:` of a literal `"OK"` would take away.
     alert.setAlertStyle(NSAlertStyle::Informational);
     alert.runModal();
+}
+
+/// **Is there a reader for a modal box right now?** (M4-11)
+///
+/// The rule stated in [`message_box`]'s note, read off the three things AppKit
+/// will answer about itself. `sharedApplication` rather than the `NSApp` global
+/// is safe *here* and only here: the caller has already found that global
+/// non-null, so the application exists and asking for it returns the one that
+/// is already there rather than making one.
+///
+/// `-[NSWindow isVisible]` and not `hasVisibleWindows`: X-4 measured that
+/// AppKit's flag is YES for a minimised window and YES for one hidden with
+/// `-[NSApplication hide:]` (`app_delegate::AppDelegateEventKind::Reopen`), and
+/// neither of those is a window a reader can see. A window's own `isVisible` is
+/// NO for both, which is the reading this rule wants.
+fn an_alert_would_be_seen(mtm: MainThreadMarker) -> bool {
+    let application = NSApplication::sharedApplication(mtm);
+    application.isActive()
+        || application
+            .windows()
+            .iter()
+            .any(|window| window.isVisible())
 }
 
 /// The two lines, when there is no alert to raise them in.
