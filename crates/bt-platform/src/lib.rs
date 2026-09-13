@@ -15560,7 +15560,7 @@ mod file_uri_tests {
         assert_eq!(on_posix("https://example.test/x"), None, "not our scheme");
         assert_eq!(on_posix("/Users/me/notes.md"), None, "not a URI at all");
         // The decoder is the shared one, and it is strict on both platforms.
-        assert_eq!(on_posix("file:///Users/100%/x.md"), None);
+        assert_eq!(on_posix("file:///Users/me/100%/x.md"), None);
         assert_eq!(on_posix("file:///Users/%zz/x.md"), None);
         assert_eq!(on_posix("file:///Users/%E4%B8/x.md"), None, "not UTF-8");
         assert_eq!(on_posix("file:///Users/a\nb.md"), None);

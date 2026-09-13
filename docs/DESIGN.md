@@ -9792,3 +9792,256 @@ pass — and *What is kept beside the artifact*, and a comment above it in the f
 says so.
 
 *(本节英文,待中文文案改写。)*
+
+### 13.47 T-MAC-FILEURI: 窗格里的 file: 引用在 POSIX 上也活了;那份分屏会话文档在第一个字段上就被拒了(`crates/bt-platform/src/lib.rs`)
+
+**This is 13.47 and not 13.46.** 13.45 (T-MAC-CMDCLICK) and 13.46 (M6-2) are
+both on `main`. This section takes the next number no branch has claimed.
+
+**① One platform's path grammar was answering for both.** `file_uri_to_path`
+turns the target of an OSC 8 hyperlink into something the rest of this window
+can open, and until this ticket it was a **Windows path parser on every host** —
+it said so in its own comment, admitted a drive-rooted path or a UNC share, and
+refused everything else. A Mac prints `file:///Users/…`, so it refused every
+`file:` reference a pane could carry. §13.45 ⑥ caught it on the machine, on a
+real OSC 8 link at a real folder:
+
+```text
+activate_hyperlink control=0 uri="file:///…/pages/sub" arm=None    path=unparsed
+activate_hyperlink control=1 uri="file:///…/pages/sub" arm=Blocked path=unparsed
+```
+
+`path=unparsed` is this function answering `None`. Both halves of §7.1.5g's
+table were reached and both came up empty: a plain click opened nothing, the
+modified click handed nothing over, and the hovered tag drew the URI with no
+clause after it, because the clause is derived from the arm
+(`ControlClickHint::of`) and there was no arm.
+
+**The repair is not the same grammar pointed the other way.** The reading now
+takes the platform as a value — `file_uri_to_path_on(uri, platform)`, with the
+bare door asking `host_platform()` — for the reason `home_variable_for` and
+`an_application_outlives_its_last_window` take one: the whole function is a
+*string* question, so a workstation on either platform can pin both answers, and
+the table that would otherwise exist twice, each half only ever run on its own
+machine, is one table run everywhere. **`bt-app` names no platform**; it goes on
+calling the bare door.
+
+**② What both halves read the same way, and where they part.** The scheme, the
+fragment, the query, the strict percent-decoder, the refusal of a control
+character before or after decoding, and the trailing separator that is the
+emitter saying "directory" are one shared prelude and unchanged. What is the
+platform's:
+
+| | Windows | macOS and every other Unix |
+|---|---|---|
+| what ends the authority | `/` or `\` | `/` only — a backslash is a byte of a name here |
+| a host that is not this machine | the UNC share `\\<host>\…` it plainly means (RFC 8089 §2) | **refused** |
+| separators in the body | every `/` becomes `\` | nothing is translated |
+| a drive letter | `/C:/x` becomes `C:\x` | `/C:/x`, an ordinary absolute path |
+| what is admitted | drive-rooted, or a share | opens with `/` |
+| `file:///` | nothing — a root with no name | `/`, the root directory |
+
+**A host that is not this machine names nothing on a Unix filesystem**, and that
+is a refusal rather than an omission: what Windows writes `\\server\share` a Mac
+reaches through a mount point with a name of its own that no URI carries. Read
+as the local `/share/notes.md` it would name a *different, existing* file, which
+is the more dangerous of the two wrong answers because that file is usually
+there.
+
+**A drive letter is not special off Windows**, for ①'s own reason: stripping the
+slash in front of one would be this function guessing at another platform's
+grammar. So a Windows-printed link opened on a Mac names something that is not
+there, and the window says so rather than pretending.
+
+**③ An escaped separator is a separator, on both machines.**
+`file:///C:%5Ctmp%5Cx.md` is `C:\tmp\x.md` and `file:///Users/a%2Fb` is
+`/Users/a/b` — the lenient of the two readings RFC 3986 allows, since read
+strictly a percent-encoded octet is never a delimiter and those would name a
+file whose *name* holds a separator.
+
+It is lenient deliberately and the argument is that **no filesystem this product
+reaches can hold a separator inside a name**, so the strict reading refuses a
+spelling without ever reaching a file the lenient one would open wrongly. The
+two differ about how a path may be written, never about which file is named.
+`..` is not the difference and never was: it survives decoding under either
+reading, on either platform, exactly as an unescaped `..` does, and what may be
+done with a path carrying one is settled downstream by `reveal_argument_form`
+and `bt_transcript::paths::may_read_unasked`.
+
+**`bt_transcript::paths::decode_file_uri` rules the other way and that is not a
+disagreement.** That decoder splits the URI into segments *first* and decodes
+each one after, so an escape that yields a separator contradicts a boundary it
+has already drawn — a statement about its own algorithm. This one decodes the
+whole path in a single pass and reads a path off the result, so there is no
+earlier split for an escape to contradict.
+
+**④ Nothing downstream changed, and that is the finding rather than the work.**
+The ticket asked for every consumer to be made to answer the way it does on
+Windows. Every one of them already did, and the sweep is worth writing down
+because it is the argument that this defect was one line deep:
+
+* `hyperlink_activation` is a pure table over the URI's scheme and the path this
+  function returns, and `ControlClickHint::of` is *derived from it* rather than
+  written beside it — so the hovered clause came back the moment the arm did.
+* `bt_transcript::paths::may_read_unasked` has had a `#[cfg(not(windows))]` arm
+  since it was written: one root, one machine, `is_local_absolute_path`.
+  `bt_app::preview::is_readable_unasked` is its name inside the preview and asks
+  it rather than spelling a second reading.
+* `validate_openable_path` is **not** on this path off Windows and does not need
+  a POSIX arm: it is `handoff`'s Win32 gate, reached only by `windows_handoff`'s
+  own doors, while the macOS arm keeps `openable_unix_path` beside
+  `opening_it_would_run_it` (`macos_handoff`). The ticket asked for it to accept
+  a POSIX path that exists; the honest answer is that it is never asked one.
+* `PrintedPathLocation::from_uri` reads a `#L12C4` fragment and knows nothing
+  about paths at all.
+
+**⑤ The split session was never a restore defect. The document was refused at
+its first field.** §13.45 ⑥'s second finding was that a seeded two-pane
+`session.json` — a `col` split with a preview pane — came back as one pane at the
+default rectangle, while a single-leaf document restored. That is not a partial
+restore; it is **`SessionV1` falling back to its defaults**, which is what a
+window at `960×600` holding one `term` leaf *is*. The launch says so out loud and
+keeps the bytes:
+
+```text
+BT_PERSIST session.json fell back to defaults: ParseError("unknown variant `Url`,
+  expected `file` or `url` at line 25 column 150")
+  kept=Some(".../session.json.rejected-20260913-082526")
+```
+
+Line 25 column 150 is `"cur_source": "Url"`. `PreviewSourceV1` carries
+`#[serde(rename_all = "lowercase")]`, so the wire spelling is `url`, and **no
+writer in this product has ever produced `Url`** — the seed was written by hand.
+Measured as an A/B over two isolated homes differing in that one letter, same
+bundle, same minute:
+
+| the seed | the window that came up |
+|---|---|
+| `"cur_source": "Url"` | `515,167 960×600` — the default rectangle, one `term` leaf, and `session.json.rejected-…` beside the document |
+| `"cur_source": "url"` | `65,40 1180×740` — the seeded rectangle, the `col` split, the preview pane |
+
+**So there was nothing to fix, and the product's own document is the proof**
+(⑥). What this section owes is the shape, written down, so that the next hand
+that seeds one does not have to discover it: a preview row is
+`{ "leaf": "leaf-N", "cur": <path or URL> }` and `cur_source` is **omitted** for
+a file, because `File` is the default and is `skip_serializing_if`. A document
+that names a page writes `"cur_source": "url"`, lowercase. Nothing else in that
+seed was wrong.
+
+**⑥ The trip.** macOS 26.6.2, Apple M4, a backing-scale-2 display; a debug build
+of this branch inside a throwaway bundle with an identifier of its own
+(`io.github.lulu-loopp.folio.fileuri`) and an isolated `HOME` exported by a
+`CFBundleExecutable` wrapper script, because `LSEnvironment` cannot set `HOME`
+(§13.31 ⑧(d)). **Pointer only** — no key was posted and nothing was written to
+the pasteboard — and the fixture was written to the pane's own tty by the
+shell's rc file for the same reason: six rows carrying an OSC 8 target at a
+folder, then six carrying one at `my notes 中文.txt`, a name with a space and CJK
+in it whose URI is therefore
+`file:///…/my%20notes%20%E4%B8%AD%E6%96%87.txt`. The window stood at
+`65,40 1180×740` through a seeded single-leaf session, away from §13.39's
+panels, and the desk was asked what covered each cell before anything was posted
+at it — `OVER … owner=FolioFU … rect=65,40 1180x740`, and the Dock's own
+full-screen backing window, which stands under everything.
+
+**The cell is solved by the window and not guessed at.** Two calibration presses
+in the empty columns to the right of every link run gave `origin=3,69` and
+`origin=26,99` — the trace spells a cell `ROW,COLUMN` — which is a cell of
+`10 × 21.74` points with cell (0,0) centred at `70,83.9`. The row is then
+**closed-looped**: a press in those same empty columns on the row that is wanted
+says which row it actually hit, and the aim is corrected until the window says
+the row that was asked for. Two corrections each time, and no press landed on a
+link until the aim had been proved.
+
+| # | posted at the link's cell | what the window wrote down |
+|---|---|---|
+| 1 | the pointer resting on the folder link | the status tag reads `file:///…/pages/sub · Ctrl+点击在访达中显示`, and the folder's glance card stands under it — `SUB`, `inside.txt`, `~/pages/sub` |
+| 2 | a bare left press on it | `activate_hyperlink control=0 … arm=FilesColumn("/…/pages/sub") path=/…/pages/sub exists=1 dir=1`, then `show_folder_in_files_column leave=seated SeatId(2)` |
+| 3 | the same press with the hand-over chord held | `activate_hyperlink control=1 … arm=Reveal("/…/pages/sub") path=… exists=1 dir=1`, and **one** Finder window, named `sub`, at `933,115 920x464` (§13.33 D) |
+| 4 | the pointer resting on the file link | the file's glance card, headed `my notes 中文.txt`, carrying the file's own first line and `46 B` |
+| 5 | a bare left press on it | `activate_hyperlink control=0 uri="file:///…/my%20notes%20%E4%B8%AD%E6%96%87.txt" arm=Preview("/…/my notes 中文.txt", None) path=/…/my notes 中文.txt exists=1 dir=0`, then `open_preview_file leave=opened surface=Seat(… SeatId(2))` |
+
+**Every one of those lines carries a `path=`**, which is the whole of what
+changed: before this ticket all of them read `path=unparsed`.
+
+**Row 4 is the percent-decoder answering in bytes rather than in characters**,
+and it is proved by a card rather than by an assertion: the card is headed with
+the decoded name and filled with the file's own first line, which means the path
+reached a disk, and it rose at all only because
+`bt_transcript::paths::may_read_unasked` admitted a POSIX path (④).
+
+**Row 4 draws no clause and row 1 does**, and that is `status_text_in`'s own rule
+rather than a gap: the aside is printed only when the whole address is already on
+the line. The grid is 118 columns, the folder's URI is 73 of them and its clause
+27; the file's URI is 105, so the clause that would cost the address its head is
+dropped whole. Both halves of that rule are on the glass in one trip.
+
+**Then the same run answered ⑤ from the other side.** Row 5 left the window a
+`row` split with a `term` leaf and a `preview` leaf — the very shape §13.45's
+seed was reaching for, written by the product rather than by hand. Quit through
+`osascript` on this bundle's own identifier, relaunched, and the document the
+second quit wrote is **byte for byte** the document the first one wrote, down to
+the rectangle; the photograph of the restored window is two panes with
+`my notes 中文.txt` open in the right one and a `2` on the tab. A second run of
+the same shape through the plain click of row 2 — a `row` split with a `files`
+leaf — round-tripped the same way.
+
+**⑦ Two things this trip is entitled to say and one it is not.**
+
+* **The chord in a pane is still `Ctrl` on this branch, and that is `main`'s
+  state rather than a regression.** §13.45's *section* is on `main`; its **code**
+  is not, because `feature/macos-command-click` has not merged — so
+  `begin_local_selection` still reads `self.window.modifiers.control_key()` and
+  the macOS clause still says `Ctrl+点击`. Row 3 above was therefore driven with
+  `maskControl`. When that branch lands, the same row is `⌘` and the same clause
+  says `⌘`; nothing in this section has to move, because everything here is
+  downstream of the modifier and reads whatever `hyperlink_activation` is handed.
+* **A restored window's x drifts by a few points while its y and its size do
+  not.** Asked for `40,40 1180×740`, the process's own instrument reports
+  `BT_DPI stage=create … rect=80,80,2440,1560` — logical `40,40 1180×740`, exact
+  at scale 2 — while `CGWindowBounds` reads `65,40` on one launch and `71,40` on
+  another. The size, the y and the whole tree are exact, and the next quit writes
+  back whatever the desk reported, so a document restored twice settles rather
+  than drifting further. It is a placement question and not a persistence one; it
+  belongs to a ticket of its own with `NSWindow`'s own frame in hand, and it is
+  named here because two Mac tickets have now measured a restored rectangle.
+* **What this trip cannot say is anything about a second backing scale**, which
+  is §13.34 ⑦(a)'s standing debt: this desk still has one.
+
+**⑧ The red gates, and which machine each runs on.** All of them run on Windows,
+which is `host_platform()`'s whole argument for being a value.
+
+* `a_file_uri_decodes_to_the_windows_path_it_names`,
+  `an_empty_host_and_localhost_are_this_machine_and_anything_else_is_a_share`,
+  `a_uri_that_names_no_windows_path_is_refused_rather_than_guessed`,
+  `a_fragment_and_a_query_are_cut_and_a_trailing_separator_is_kept` and
+  `a_device_or_verbatim_uri_names_no_path` — the Windows table, unchanged except
+  that it now names its platform instead of asking for "this machine".
+* `a_file_uri_decodes_to_the_posix_path_it_names` — the new table: a space, a
+  name in Chinese, the three authority readings, a backslash raw and escaped, the
+  root, a trailing separator, a fragment and a query. Mutations: drop the
+  leading-`/` check and `file:helpers/x` resolves against the process's working
+  directory; translate separators and a backslash stops being a byte of a name;
+  admit a foreign host and `file://server/share/notes.md` silently becomes the
+  local `/share/notes.md`.
+* `a_uri_that_names_no_posix_path_is_refused_rather_than_guessed` — relative, a
+  bare host, a host with a backslash after it, another scheme, a bare path, and
+  the four malformed decodes.
+* `an_escaped_separator_is_a_separator_on_both_platforms` — ③, with the Windows
+  line restated beside its twin so that a later ticket cannot move one of them
+  alone.
+* `a_drive_letter_is_an_ordinary_name_on_a_unix_filesystem` — the spelling each
+  platform refuses of the other.
+* `the_two_unix_platforms_read_a_file_uri_identically` — seven URIs asked of
+  `MacOs` and of `OtherUnix`. Mutation: match `MacOs` alone in either arm and a
+  Linux build answers with the Windows grammar again, which is this ticket's
+  defect wearing a different `cfg`.
+* `the_bare_door_answers_for_this_build` — `file_uri_to_path` against
+  `file_uri_to_path_on(uri, host_platform())`. Mutation: pin the bare door to
+  `Windows` and every other assertion in the module still passes while the
+  product goes back to ① — which is why this one test stands beside the tables.
+
+**There is no CHANGELOG line**, and that is the pin: the Windows arm is the old
+body moved into a function of its own, byte for byte, and nothing a reader on
+that platform can press behaves differently.
+
+*(本节英文,待中文文案改写。)*
