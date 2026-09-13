@@ -23,6 +23,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- **Badges in a Markdown preview now stand in a row instead of one under
+  another.** Folio does not fetch pictures from the web, and it used to say so
+  in a full-width card three lines tall for every one of them — so the four
+  badges at the top of a README became four cards and pushed the document itself
+  off the screen. A web picture written in a line with anything else on it is
+  now a small rounded chip on that line, carrying its alt text (or the last part
+  of its address where there is no alt), wrapping like a word among the words.
+  Resting on one says why there is no picture and shows the address; pressing it
+  opens the address, as before. A picture written alone in its own paragraph
+  still gets the card, and pictures on your disk are unchanged.
 - **On a Mac, the Appearance page no longer offers Acrylic.** Folio does not
   blur what sits behind a window on macOS, and the row said so on a line of its
   own while its picker stood greyed at `Off` — a row about something there is
