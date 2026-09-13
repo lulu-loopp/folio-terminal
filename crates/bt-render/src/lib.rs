@@ -764,6 +764,13 @@ fn overlay_preedit_cells(frame: &mut ViewportFrame, preedit: &Preedit) {
 
         if let Some(drawn) = drawn_at(column) {
             let index = row * columns + drawn;
+            let spacer_index = if width == 2 {
+                drawn_at(column + 1).map(|spacer_at| row * columns + spacer_at)
+            } else {
+                None
+            };
+            release_half_covered_wide_cells(&mut frame.cells, columns, [Some(index), spacer_index]);
+
             let mut cell = CapturedCell::plain(cluster.to_owned());
             cell.style.flags.insert(CellFlags::UNDERLINE);
             if width == 2 {
@@ -772,13 +779,11 @@ fn overlay_preedit_cells(frame: &mut ViewportFrame, preedit: &Preedit) {
             frame.cells[index] = cell;
             previous_lead = Some(index);
 
-            if width == 2
-                && let Some(spacer_at) = drawn_at(column + 1)
-            {
+            if let Some(spacer_index) = spacer_index {
                 let mut spacer = CapturedCell::plain("");
                 spacer.wide_spacer = true;
                 spacer.style.flags.insert(CellFlags::UNDERLINE);
-                frame.cells[row * columns + spacer_at] = spacer;
+                frame.cells[spacer_index] = spacer;
             }
         }
         column += width;
@@ -787,6 +792,68 @@ fn overlay_preedit_cells(frame: &mut ViewportFrame, preedit: &Preedit) {
             column %= columns;
         }
     }
+}
+
+/// Let go of every wide character the composition is about to cover half of.
+///
+/// The overlay writes into a clone of the terminal's cells, and it writes *cells*, not
+/// characters: a narrow preedit letter landing on a wide character's lead replaces the lead and
+/// leaves that character's trailing spacer standing. In this grid a spacer means "the cell to my
+/// left is twice as wide", so that leftover is a lie about a cell the composition has already
+/// taken — and it is a lie told at exactly the place the caret ends, one column past the last
+/// letter typed. That is the 2026-09-13 short bar (`docs/DESIGN.md` §7.1.5a‴).
+///
+/// So the pair is broken here, at the moment one of its halves is covered, in both directions:
+/// a covered lead releases its spacer, and a covered spacer releases its lead. A half the
+/// composition is about to write itself is not released — it is not an orphan, it is the next
+/// thing written.
+fn release_half_covered_wide_cells(
+    cells: &mut [CapturedCell],
+    columns: usize,
+    covered: [Option<usize>; 2],
+) {
+    let partners = [
+        covered[0].and_then(|index| wide_partner_of(cells, columns, index)),
+        covered[1].and_then(|index| wide_partner_of(cells, columns, index)),
+    ];
+    for partner in partners.into_iter().flatten() {
+        if covered.contains(&Some(partner)) {
+            continue;
+        }
+        blank_wide_half(&mut cells[partner]);
+    }
+}
+
+/// The other half of the wide character at `index`, when the grid still holds that pair intact.
+///
+/// Intact is the whole question: a lead's partner is the spacer immediately after it *in the same
+/// row*, a spacer's is the wide lead immediately before it. A cell whose partner has already been
+/// released — or one the horizontal scroll cut in half at the viewport's edge — has none.
+fn wide_partner_of(cells: &[CapturedCell], columns: usize, index: usize) -> Option<usize> {
+    let cell = cells.get(index)?;
+    if cell.style.flags.contains(CellFlags::WIDE_CHAR) {
+        let spacer = index + 1;
+        if spacer % columns != 0 && cells.get(spacer).is_some_and(|cell| cell.wide_spacer) {
+            return Some(spacer);
+        }
+    } else if cell.wide_spacer
+        && index % columns != 0
+        && cells[index - 1].style.flags.contains(CellFlags::WIDE_CHAR)
+    {
+        return Some(index - 1);
+    }
+    None
+}
+
+/// What stands where half a wide character stood: the cell keeps its colours and loses the
+/// character, because half a glyph is not a glyph. It is what the terminal itself does when a
+/// write lands on one half of a wide cell, and it leaves a cell the caret can read plainly —
+/// neither a lead promising a second column nor a spacer pointing at one.
+fn blank_wide_half(cell: &mut CapturedCell) {
+    cell.text.clear();
+    cell.style.flags.remove(CellFlags::WIDE_CHAR);
+    cell.wide_spacer = false;
+    cell.hyperlink = None;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -12241,6 +12308,14 @@ fn ime_cursor_area_for_metrics(metrics: CellMetrics, frame: &ViewportFrame) -> I
     }
 }
 
+/// Which column the caret's cell begins at, and how many columns that cell covers.
+///
+/// A caret reported in the *second* half of a wide character belongs at the character's own left
+/// edge — that is one cell, whichever half the grid names. But it only belongs there when there
+/// really is a wide character to belong to: a spacer is believed about its neighbour only when
+/// that neighbour is still a wide lead. An orphan spacer — one whose lead something has written
+/// over — is just a cell, and the caret standing on it stands where it says it stands, not one
+/// column to the left of it (`docs/DESIGN.md` §7.1.5a‴).
 fn cursor_cell_span(frame: &ViewportFrame) -> (usize, usize) {
     let columns = frame.columns.get() as usize;
     let row = frame.cursor.row as usize;
@@ -12251,7 +12326,7 @@ fn cursor_cell_span(frame: &ViewportFrame) -> (usize, usize) {
     };
     if cell.style.flags.contains(CellFlags::WIDE_CHAR) {
         (column, 2.min(columns.saturating_sub(column)))
-    } else if cell.wide_spacer && column > 0 {
+    } else if cell.wide_spacer && wide_partner_of(&frame.cells, columns, index).is_some() {
         (column - 1, 2)
     } else {
         (column, 1)
@@ -18939,6 +19014,208 @@ mod tests {
         );
         assert_eq!(composed.frame.cells[4].text, "中");
         assert!(composed.frame.cells[5].wide_spacer);
+    }
+
+    /// One row of blank cells, `columns` wide, caret in its first column, read
+    /// through the same metrics every caret-geometry test reads its pixels
+    /// through.
+    fn blank_row_cursor_frame(metrics: CellMetrics, columns: u32) -> ViewportFrame {
+        ViewportFrame {
+            columns: NonZeroU32::new(columns).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(columns),
+            cells: vec![CapturedCell::plain(""); columns as usize],
+            cell_anchors: test_cell_anchors(columns as usize),
+            layout_key: bt_doc_layout_key(columns),
+            ..single_cell_cursor_frame(metrics)
+        }
+    }
+
+    /// A valid wide character — lead plus its spacer — at `column`.
+    fn seat_a_wide_pair(frame: &mut ViewportFrame, column: usize) {
+        let mut lead = CapturedCell::plain("中");
+        lead.style.flags.insert(CellFlags::WIDE_CHAR);
+        frame.cells[column] = lead;
+        let mut spacer = CapturedCell::plain("");
+        spacer.wide_spacer = true;
+        frame.cells[column + 1] = spacer;
+    }
+
+    /// PIN — the bar that ends a composition stands at the end of the last
+    /// letter's **grid allocation**, even when the composition was typed over a
+    /// wide character.
+    ///
+    /// The owner reported this twice, last on 2026-09-13 (Windows, Microsoft
+    /// Pinyin): composing `hai'you` drew the bar between `o` and `u`, and `bin`
+    /// between `i` and `n` — one cell short, while the underline spanned the
+    /// whole composition. The caret number was right all along; the drawing was
+    /// wrong. A narrow preedit letter replaced a wide character's lead cell and
+    /// left its trailing spacer standing one column past the composition, and a
+    /// caret whose cell is a spacer used to be moved back a column.
+    ///
+    /// MUTATION — remove either the pair repair in `overlay_preedit_cells` or
+    /// the partner check in `cursor_cell_span` (both, and both numbers come
+    /// back) and this fails at exactly what the owner saw: `bin` 20 px where 28
+    /// is right, `hai'you` 52 px where 60 is right.
+    #[test]
+    fn preedit_end_bar_does_not_snap_to_an_overwritten_wide_lead() {
+        let metrics = cursor_test_metrics(1.0);
+
+        for text in ["bin", "hai'you"] {
+            for cursor_byte in [Some(text.len()), None] {
+                let mut frame = blank_row_cursor_frame(metrics, 16);
+                let last = text.len() - 1;
+                seat_a_wide_pair(&mut frame, last);
+
+                let composed = compose_preedit(
+                    &frame,
+                    Some(&Preedit {
+                        text: text.to_owned(),
+                        cursor_byte,
+                    }),
+                )
+                .unwrap();
+
+                assert_eq!(
+                    composed.ime_caret.column,
+                    text.len() as u32,
+                    "the caret of {text:?} belongs one column past its last letter"
+                );
+
+                let bar = cursor_pixel_bounds_for_style(
+                    metrics,
+                    &composed.frame,
+                    true,
+                    CursorStyle::Bar,
+                );
+                let last_letter = frame_cell_bounds_px(metrics, &composed.frame, 0, last);
+                assert_eq!(bar.len(), 1);
+                assert_eq!(
+                    bar[0][0],
+                    last_letter[2].round(),
+                    "the bar ending {text:?} (caret byte {cursor_byte:?}) must stand at the \
+                     end of the last letter's cell, not inside it"
+                );
+            }
+        }
+    }
+
+    /// PIN — a composition that covers half a wide character takes the whole
+    /// character with it: no spacer is left pointing at a lead the composition
+    /// replaced, and no lead is left promising a column the composition took.
+    /// The terminal's own frame is never touched — the overlay is a clone.
+    #[test]
+    fn preedit_releases_the_wide_character_it_half_covers() {
+        let metrics = cursor_test_metrics(1.0);
+
+        // A narrow letter lands on the lead: the spacer past the composition goes.
+        let mut frame = blank_row_cursor_frame(metrics, 16);
+        seat_a_wide_pair(&mut frame, 2);
+        let composed = compose_preedit(
+            &frame,
+            Some(&Preedit {
+                text: "bin".to_owned(),
+                cursor_byte: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(composed.frame.cells[2].text, "n");
+        assert!(
+            !composed.frame.cells[3].wide_spacer,
+            "the spacer of a wide character the composition wrote over is not a spacer any more"
+        );
+        assert_eq!(composed.frame.cells[3].text, "");
+        assert!(frame.cells[3].wide_spacer, "source terminal frame untouched");
+
+        // A narrow letter lands on the spacer: the lead before the composition goes.
+        let mut frame = blank_row_cursor_frame(metrics, 16);
+        seat_a_wide_pair(&mut frame, 0);
+        frame.cursor.column = 1;
+        let composed = compose_preedit(
+            &frame,
+            Some(&Preedit {
+                text: "bin".to_owned(),
+                cursor_byte: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(composed.frame.cells[1].text, "b");
+        assert_eq!(
+            composed.frame.cells[0].text,
+            "",
+            "half a glyph is not a glyph"
+        );
+        assert!(
+            !composed.frame.cells[0]
+                .style
+                .flags
+                .contains(CellFlags::WIDE_CHAR)
+        );
+        assert_eq!(frame.cells[0].text, "中", "source terminal frame untouched");
+
+        // The composition's own spacer lands on a lead: that lead's spacer goes,
+        // while the composition keeps both of its own halves.
+        let mut frame = blank_row_cursor_frame(metrics, 16);
+        seat_a_wide_pair(&mut frame, 3);
+        frame.cursor.column = 2;
+        let composed = compose_preedit(
+            &frame,
+            Some(&Preedit {
+                text: "好".to_owned(),
+                cursor_byte: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(composed.frame.cells[2].text, "好");
+        assert!(
+            composed.frame.cells[2]
+                .style
+                .flags
+                .contains(CellFlags::WIDE_CHAR)
+        );
+        assert!(
+            composed.frame.cells[3].wide_spacer,
+            "the composition's own spacer is not an orphan"
+        );
+        assert!(
+            !composed.frame.cells[4].wide_spacer,
+            "the covered lead's spacer is"
+        );
+    }
+
+    /// PIN — the caret believes a spacer about its neighbour only when that
+    /// neighbour is still a wide lead. A real wide character still takes the
+    /// caret to its own left edge from either half; an orphan spacer leaves it
+    /// where it stands, so the defensive check cannot be undone by restoring
+    /// the old unconditional snap.
+    #[test]
+    fn an_orphan_spacer_keeps_the_caret_in_its_own_column() {
+        let metrics = cursor_test_metrics(1.0);
+
+        let mut frame = blank_row_cursor_frame(metrics, 16);
+        seat_a_wide_pair(&mut frame, 2);
+        frame.cursor.column = 3;
+        assert_eq!(
+            cursor_cell_span(&frame),
+            (2, 2),
+            "a caret in the second half of a real wide character belongs to its lead"
+        );
+        assert_eq!(
+            cursor_pixel_bounds_for_style(metrics, &frame, true, CursorStyle::Bar)[0][0],
+            frame_cell_bounds_px(metrics, &frame, 0, 2)[0],
+            "and its bar stands at that character's left edge"
+        );
+
+        // The same spacer, with the lead replaced by an ordinary letter.
+        frame.cells[2] = CapturedCell::plain("n");
+        assert_eq!(
+            cursor_cell_span(&frame),
+            (3, 1),
+            "an orphan spacer speaks only for itself"
+        );
+        assert_eq!(
+            cursor_pixel_bounds_for_style(metrics, &frame, true, CursorStyle::Bar)[0][0],
+            frame_cell_bounds_px(metrics, &frame, 0, 3)[0]
+        );
     }
 
     #[test]
