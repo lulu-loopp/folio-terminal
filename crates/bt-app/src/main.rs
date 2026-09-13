@@ -8354,9 +8354,9 @@ struct FileMenuTarget {
     /// The folded levels this menu is a list of, **deepest first** — empty on
     /// every face but the `…` chip's (user ruling 2026-08-25).
     crumbs: Vec<FoldedLevel>,
-    /// The preview rail whose `Open ⌄` raised it, or `None` on every other door
-    /// — see [`FileMenuState::rail`], whose field this fills in.
-    rail: Option<PreviewSurface>,
+    /// The control this menu was raised *from*, or `None` on the doors that have
+    /// none — see [`FileMenuState::trigger`], whose field this fills in.
+    trigger: Option<PopoverTrigger>,
 }
 
 /// **One level a folded breadcrumb is standing in for** — a row of the `…`
@@ -8418,21 +8418,48 @@ struct FileMenuState {
     /// under a hand already moving down it.
     crumbs: Vec<FoldedLevel>,
     hover: Option<profiles::FileMenuRow>,
-    /// **Which preview rail's `Open ⌄` this menu belongs to**, or `None` when it
-    /// was raised by anything else (user ruling 2026-09-10).
+    /// **Which control raised this menu**, or `None` when it was raised by a
+    /// gesture rather than by a button (user ruling 2026-09-10 for the pill,
+    /// owner's report 2026-09-13 for the rest of it).
     ///
-    /// [`PaneMenuState::seat`]'s field, one menu over and for its reason: the
-    /// hover clock has to be able to tell "the menu that is up is *this* pill's"
-    /// from "some other menu is up", and the two answers are the difference
-    /// between a hand resting on a pill doing nothing and a hand resting on a
-    /// pill that is owed a menu. A window can show two preview rails at once — a
-    /// split, or a float over a docked pane — so "the document menu is up"
-    /// cannot stand in for it.
+    /// [`PaneMenuState::seat`]'s field, one menu over and for its reason, and
+    /// two readers depend on it. The hover clock has to be able to tell "the
+    /// menu that is up is *this* pill's" from "some other menu is up", and the
+    /// two answers are the difference between a hand resting on a pill doing
+    /// nothing and a hand resting on a pill that is owed a menu; a window can
+    /// show two preview rails at once — a split, or a float over a docked pane —
+    /// so "the document menu is up" cannot stand in for it. And the press router
+    /// has to be able to tell a press that is this menu's own close from a press
+    /// that is somewhere else ([`press_spends_itself_closing`]).
     ///
-    /// A surface and not a rectangle, because the rectangle moves: a divider
+    /// **It was `Option<PreviewSurface>` until 2026-09-13** and answered for the
+    /// pill alone, which is why the `…` chip beside it could not be shut by
+    /// pressing it again: the chip raises this very menu and had nowhere to say
+    /// so. A control and not a surface, so that every door onto this menu can
+    /// name what it came from — [`FileMenuState::rail`] is the pill's half of it,
+    /// derived rather than stored beside it, because two fields that must agree
+    /// are two fields that can disagree.
+    ///
+    /// A control and not a rectangle, because the rectangle moves: a divider
     /// dragged while the menu is up puts the pill somewhere else, and the menu is
     /// still that pill's.
-    rail: Option<PreviewSurface>,
+    trigger: Option<PopoverTrigger>,
+}
+
+impl FileMenuState {
+    /// **Which preview rail's `Open ⌄` this menu belongs to**, or `None` when it
+    /// belongs to anything else — the hover clock's question (user ruling
+    /// 2026-09-10), asked of [`Self::trigger`].
+    ///
+    /// The `…` chip is deliberately not an answer here even though it is a
+    /// trigger and stands on the same band: its list is the folded path's, and
+    /// the hover rule the pill is under is written against the pill's own box.
+    fn rail(&self) -> Option<PreviewSurface> {
+        match self.trigger {
+            Some(PopoverTrigger::Rail(surface, seats::PreviewRailPart::OpenWith)) => Some(surface),
+            _ => None,
+        }
+    }
 }
 
 /// The pane head's context menu, and the head it was raised on (user ruling,
@@ -31986,6 +32013,132 @@ impl Popup {
     /// the statement about what mutual exclusion covers.
     fn others(self) -> impl Iterator<Item = Self> {
         Self::ALL.into_iter().filter(move |other| *other != self)
+    }
+}
+
+/// **What a raised popover hangs from — the one control whose press put it up**
+/// (owner's report 2026-09-13; DESIGN.md §7.1.6e‴).
+///
+/// A name for a *button*, not for a menu, and it exists because the window has
+/// to be able to ask one question at the moment a press arrives: **is this press
+/// landing on the very thing that raised what is already open?** Six popups in
+/// this window hang from a button. Five of them used to answer that question for
+/// themselves, in their own dismissal arm, with their own hand-written
+/// `!matches!(chrome_target_at(…), …)`; the sixth — which is what **both** of
+/// the preview rail's popover controls raise, the `Open ⌄` pill and the
+/// breadcrumb's `…` chip — never got one, and that is the defect the owner
+/// photographed: a press dismissed the menu *and* reached the button, which
+/// opened it again, so neither could be shut by pressing it a second time.
+///
+/// **Two hosts, one name.** A docked control is a [`seats::ChromeTarget`], which
+/// carries a seat; the same control inside a torn-off window is a
+/// [`float::FloatPart`], which carries none. A trigger that were only the first
+/// of those would leave a float's pill and a float's branch filter answering the
+/// old way — which they did, and which is why `Rail` and `GraphTool` name a
+/// [`PreviewSurface`] instead of a seat. Everything else in the chrome exists on
+/// one host only and wears its own target.
+///
+/// The variants are **canonical**: [`Runtime::popover_trigger_at`] is the one
+/// place a point becomes one of these, so a docked rail control is always
+/// `Rail` and never `Chrome(ChromeTarget::PreviewOpenWith(..))`. Two spellings
+/// of one button would be two buttons as far as `==` is concerned, and `==` is
+/// the whole of the rule.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PopoverTrigger {
+    /// A control of this window's own chrome, named exactly as
+    /// [`Runtime::chrome_target_at`] names it — the strip's `⌄`, a pane head's
+    /// `⌄`, a files column's root, a preview head's name.
+    Chrome(seats::ChromeTarget),
+    /// **One control of a preview rail, on whichever host drew it.** The
+    /// `Open ⌄` pill and the breadcrumb's `…` chip are the same two buttons in a
+    /// pane and in a window, which is [`float::FloatPart::Rail`]'s own reason
+    /// for carrying [`seats::PreviewRailPart`].
+    Rail(PreviewSurface, seats::PreviewRailPart),
+    /// **One control of a commit graph's toolbar, on whichever host drew it** —
+    /// `All branches` is the one of the four that raises a popover, and a graph
+    /// is drawn in a float as readily as in a pane.
+    GraphTool(PreviewSurface, git_graph::GraphTool),
+}
+
+/// **What one raised popup hangs from, and whether that control is asked the
+/// press that closes it** (owner's report 2026-09-13).
+///
+/// Two facts and not one, because the window has two kinds of trigger and the
+/// difference decides who answers a press. Almost every one of them is a button
+/// and the popup is the whole of what it means: `Open ⌄`, the `…` chip, a pane
+/// head's `⌄`, the strip's `⌄`, a column's root, `All branches`. One is not —
+/// see [`Self::keeps_the_press`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OwnTrigger {
+    control: PopoverTrigger,
+    /// **Whether the control is still asked the press once the popup has been
+    /// put away.**
+    ///
+    /// `false` for a plain button, which is the rule: closing is all the press
+    /// does, so handing it on is handing it to the one handler that would open
+    /// the popup again.
+    ///
+    /// `true` for the preview head's **name**, which is a trigger the way a
+    /// title is a trigger — it is also the pane's drag handle and the rename
+    /// door, and P136 rules that the *second* click of a pair opens the editor
+    /// over a switcher the first click raised. A press spent at the dismissal
+    /// would never reach the chain that counts those two clicks, so the editor
+    /// would stop opening on a pane with more than one buffer. This control
+    /// answers the whole press and closes the popup as part of doing so.
+    keeps_the_press: bool,
+}
+
+/// What the router must do with one press, as far as one raised popup is
+/// concerned — [`Runtime::press_on_its_own_trigger`]'s answer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OwnPress {
+    /// The press landed somewhere else. Put the popup away and go on being the
+    /// press it always was — including a second right press, which is how a
+    /// context menu is moved from one row to another.
+    Elsewhere,
+    /// **The press landed on the popup's own trigger, and that is all it does.**
+    /// Put the popup away and stop: the trigger does not see it.
+    Spent,
+    /// The press landed on a trigger that has a verb of its own. Leave the popup
+    /// alone here — the control is about to be asked, and closing is part of
+    /// what it will do.
+    Handed,
+}
+
+impl OwnPress {
+    /// Whether this arm is the one that puts the popup away.
+    fn dismisses(self) -> bool {
+        self != Self::Handed
+    }
+}
+
+/// **Closed by its own trigger** (owner's report 2026-09-13) — the rule itself,
+/// with no window around it.
+///
+/// `raised` is what the open popup hangs from and `pressed` is what the press
+/// landed on. When they are the same control the press has already done its work
+/// by putting the popup away, and it must go no further: letting it travel on is
+/// the second handler that re-opens what the first one just shut.
+///
+/// **A popup with no trigger is never spent this way.** A context menu is raised
+/// by a gesture and not by a button, so there is no press that can be "its own"
+/// — every press outside it dismisses it and then goes on being the press it
+/// was. That is the whole content of the `None` arm, and it is why the argument
+/// is an `Option` rather than a caller-side `if`.
+fn press_spends_itself_closing(
+    raised: Option<OwnTrigger>,
+    pressed: Option<PopoverTrigger>,
+) -> OwnPress {
+    let Some(raised) = raised else {
+        return OwnPress::Elsewhere;
+    };
+    if Some(raised.control) != pressed {
+        return OwnPress::Elsewhere;
+    }
+    if raised.keeps_the_press {
+        OwnPress::Handed
+    } else {
+        OwnPress::Spent
     }
 }
 
@@ -55746,10 +55899,14 @@ impl Runtime<'_> {
                     levels: crumbs.len(),
                 },
                 crumbs,
-                // The `…` chip is the pill's neighbour and not the pill: its
-                // list is the folded path's, and the hover rule the pill is
-                // under is written against the pill's own box.
-                rail: None,
+                // **The chip is a trigger of its own** (owner's report
+                // 2026-09-13): it raises this menu, so a press on it while its
+                // menu is up is that menu's close and goes no further. It is the
+                // pill's neighbour and not the pill — its list is the folded
+                // path's, and the hover rule the pill is under is written
+                // against the pill's own box, which is what
+                // [`FileMenuState::rail`] answers `None` for here.
+                trigger: Some(PopoverTrigger::Rail(surface, seats::PreviewRailPart::Fold)),
             },
             [chip[0], chip[3]],
         )
@@ -55790,10 +55947,13 @@ impl Runtime<'_> {
                 activation: RowActivation::DefaultApp(path),
                 subject: profiles::FileMenuSubject::Document,
                 crumbs: Vec::new(),
-                // **Whose menu this is**, for the hover clock — the one door
-                // that fills this in, because it is the one control the clock is
-                // about.
-                rail: Some(surface),
+                // **Whose menu this is** — for the hover clock, which is about
+                // this one control, and for the press router, which spends a
+                // second press on the pill closing what the first one opened.
+                trigger: Some(PopoverTrigger::Rail(
+                    surface,
+                    seats::PreviewRailPart::OpenWith,
+                )),
             },
             [pill[0], pill[3]],
         )
@@ -70794,7 +70954,7 @@ impl Runtime<'_> {
             subject: target.subject,
             crumbs: target.crumbs,
             hover: None,
-            rail: target.rail,
+            trigger: target.trigger,
         });
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -70848,7 +71008,7 @@ impl Runtime<'_> {
                 activation: files_row_activation(&root, key),
                 subject,
                 crumbs: Vec::new(),
-                rail: None,
+                trigger: None,
             },
             [rect[0], rect[3]],
         )
@@ -70869,7 +71029,7 @@ impl Runtime<'_> {
     /// on every file in the tree.
     ///
     /// **A float's claim is terminal** (adversarial review 2026-09-11, row D1),
-    /// which is [`Self::preview_open_pill_at`]'s rule said about this door. A
+    /// which is [`Self::popover_trigger_at`]'s rule said about this door. A
     /// float is opaque: when the topmost window answers the point at all, the
     /// answer is that window's own applicable target or nothing, and never the
     /// docked chrome behind it. It used to be terminal for one part only —
@@ -70906,7 +71066,7 @@ impl Runtime<'_> {
                     activation: files_row_activation(&files.files.root, &row.key),
                     subject,
                     crumbs: Vec::new(),
-                    rail: None,
+                    trigger: None,
                 });
             }
             // Every other part of a float — its head, its foot, its rail, its
@@ -70958,7 +71118,7 @@ impl Runtime<'_> {
             }),
             subject,
             crumbs: Vec::new(),
-            rail: None,
+            trigger: None,
         })
     }
 
@@ -71012,7 +71172,7 @@ impl Runtime<'_> {
             activation: files_row_activation(&root, ""),
             subject: profiles::FileMenuSubject::Root,
             crumbs: Vec::new(),
-            rail: None,
+            trigger: None,
         })
     }
 
@@ -74261,7 +74421,17 @@ impl Runtime<'_> {
         }
         let profile_open = self.window.profile_menu.is_open();
         let pane_open = self.window.pane_menu.is_some();
-        let target = position.and_then(|position| self.chrome_target_at(position));
+        // **One walk of the hit test for all three clocks**, and it is the very
+        // walk the press router makes: what the pointer is standing on is asked
+        // as a *trigger* ([`PopoverTrigger`]), so a rest on the `Open ⌄` and a
+        // press on the `Open ⌄` cannot come to disagree about which button that
+        // is. The two clocks below want a plain chrome target, which is the
+        // `Chrome` arm of the same answer; the rail's wants the pill.
+        let standing_on = position.and_then(|position| self.popover_trigger_at(position));
+        let target = match standing_on {
+            Some(PopoverTrigger::Chrome(target)) => Some(target),
+            _ => None,
+        };
         let on_profile_button = matches!(target, Some(seats::ChromeTarget::NewTabMenu));
         let pane_seat = self.window.pane_menu.as_ref().map(|menu| menu.seat);
         // A rest on *any* pane head's chevron arms that head's menu — including
@@ -74330,10 +74500,12 @@ impl Runtime<'_> {
         // [`profiles::file_menu_hit`] answering at all is the whole of "the hand
         // is still on the menu" — no safety triangle, because there is no child
         // to cut a corner towards.
-        let rail_menu = self.window.file_menu.as_ref().and_then(|menu| menu.rail);
+        let rail_menu = self.window.file_menu.as_ref().and_then(FileMenuState::rail);
         let rail_open = rail_menu.is_some();
-        let on_rail_pill =
-            position.and_then(|position| self.preview_open_pill_at(position, target));
+        let on_rail_pill = match standing_on {
+            Some(PopoverTrigger::Rail(surface, seats::PreviewRailPart::OpenWith)) => Some(surface),
+            _ => None,
+        };
         let rail_on_surface = rail_open
             && position.is_some_and(|position| {
                 self.file_menu_layout().is_some_and(|layout| {
@@ -74353,35 +74525,171 @@ impl Runtime<'_> {
         );
     }
 
-    /// **Which preview rail's `Open ⌄` the pointer is standing on**, if it is
-    /// standing on one (user ruling 2026-09-10).
+    /// **Which trigger the pointer is standing on**, if it is standing on one
+    /// (owner's report 2026-09-13; user ruling 2026-09-10 for the pill it grew
+    /// out of).
     ///
-    /// Both hosts, floats first, on [`Self::file_row_under`]'s own order: a
-    /// window is drawn over the panes, so a point inside a float belongs to the
-    /// float — and a float that covers a docked pill without offering one of its
-    /// own is an answer of "no pill", not a fall-through to the pane underneath.
+    /// The one place a point becomes a [`PopoverTrigger`], which is what makes
+    /// the comparison the rule is built on a comparison of like with like: a
+    /// button the hover clock is watching and a button a press lands on are read
+    /// off the same walk, and the canonical spelling of each control is decided
+    /// here and nowhere else.
     ///
-    /// The docked answer is the [`seats::ChromeTarget`] the caller has already
-    /// paid for rather than a second walk of the tree; the float sweep is only
-    /// entered when there is a float to sweep, because [`Self::float_hit_at`]
-    /// measures two captions before it looks at anything.
-    fn preview_open_pill_at(
+    /// Both hosts through [`Self::pointer_target_at`], which already keeps
+    /// [`Self::file_row_under`]'s order: a window is drawn over the panes, so a
+    /// point inside a float belongs to the float — and a float that covers a
+    /// docked pill without offering one of its own is an answer of "no pill",
+    /// not a fall-through to the pane underneath.
+    ///
+    /// **A float answers for two controls and no more.** The rail's band and the
+    /// graph's toolbar are the only furniture a torn-off window draws that can
+    /// raise a popover; the rest of its chassis — its head, its grip, its `DOCK`
+    /// — raises none, and naming them here would be inventing triggers for
+    /// popovers that do not exist.
+    fn popover_trigger_at(&mut self, position: PhysicalPosition<f64>) -> Option<PopoverTrigger> {
+        match self.pointer_target_at(position)? {
+            PointerTarget::Float(id, part) => {
+                let surface = PreviewSurface::Float(id);
+                match part {
+                    float::FloatPart::Rail(part) => Some(PopoverTrigger::Rail(surface, part)),
+                    float::FloatPart::GraphTool(tool) => {
+                        Some(PopoverTrigger::GraphTool(surface, tool))
+                    }
+                    _ => None,
+                }
+            }
+            PointerTarget::Chrome(target) => Some(self.docked_popover_trigger(target)),
+        }
+    }
+
+    /// One docked chrome target, spelled the way a trigger is spelled.
+    ///
+    /// The two controls a float can also wear are named by surface and part, so
+    /// that one button has one name whichever host drew it; everything else in
+    /// the chrome exists on one host only and wears its own target. See
+    /// [`PopoverTrigger`] for why a second spelling would be a second button.
+    fn docked_popover_trigger(&self, target: seats::ChromeTarget) -> PopoverTrigger {
+        if let Some((seat, part)) = seats::preview_rail_control(target) {
+            return PopoverTrigger::Rail(self.preview_here(seat), part);
+        }
+        if let seats::ChromeTarget::GitGraphTool { seat, tool } = target {
+            return PopoverTrigger::GraphTool(self.preview_here(seat), tool);
+        }
+        PopoverTrigger::Chrome(target)
+    }
+
+    /// **What one popup hangs from** — the register, and the only place any of
+    /// these six answers is written down (owner's report 2026-09-13).
+    ///
+    /// A `match` over [`Popup`] rather than a field on each state, so that a
+    /// popup added to that list has to say here whether it has a trigger: the
+    /// compiler asks the question, which is the whole reason the register is
+    /// shaped like this and not like six `if let`s in the router.
+    ///
+    /// **`None` is a real answer and the commonest one.** Four of the ten are
+    /// raised by a gesture — a right press on a row, on a pane, on a tab — or by
+    /// a chord, and a popover with no button cannot be closed by pressing its
+    /// button. Every press outside those four dismisses them and then goes on
+    /// being the press it was, which is how a second right press moves a context
+    /// menu from one row to another.
+    fn popup_trigger(&self, popup: Popup) -> Option<OwnTrigger> {
+        let button = |control| {
+            Some(OwnTrigger {
+                control,
+                keeps_the_press: false,
+            })
+        };
+        match popup {
+            Popup::Profile => self
+                .window
+                .profile_menu
+                .is_open()
+                .then_some(PopoverTrigger::Chrome(seats::ChromeTarget::NewTabMenu))
+                .and_then(button),
+            Popup::Root => self
+                .window
+                .root_menu
+                .seat()
+                .map(|seat| PopoverTrigger::Chrome(seats::ChromeTarget::FilesRoot(seat)))
+                .and_then(button),
+            Popup::File => self
+                .window
+                .file_menu
+                .as_ref()
+                .and_then(|menu| menu.trigger)
+                .and_then(button),
+            Popup::Pane => self
+                .window
+                .pane_menu
+                .as_ref()
+                .map(|menu| PopoverTrigger::Chrome(seats::ChromeTarget::PaneMenu(menu.seat)))
+                .and_then(button),
+            Popup::GraphFilter => self
+                .window
+                .graph_filter_menu
+                .as_ref()
+                .map(|menu| PopoverTrigger::GraphTool(menu.surface, git_graph::GraphTool::Filter))
+                .and_then(button),
+            // **The one control that keeps its press** — see
+            // [`OwnTrigger::keeps_the_press`]. The head's name is a title, a drag
+            // handle and the rename door as well as this menu's button, and the
+            // second click of a pair belongs to the editor (P136).
+            Popup::Preview => self.preview_menu_seat().map(|seat| OwnTrigger {
+                control: PopoverTrigger::Chrome(seats::ChromeTarget::PreviewName(seat)),
+                keeps_the_press: true,
+            }),
+            // Raised by a gesture or by a chord, and therefore by no button.
+            Popup::GitMenu | Popup::TermMenu | Popup::Tab | Popup::Palette => None,
+        }
+    }
+
+    /// **Closed by its own trigger** (owner's report 2026-09-13; DESIGN.md
+    /// §7.1.6e‴) — the one question every popup's dismissal arm asks, and the one
+    /// place the answer is worked out.
+    ///
+    /// A press that dismisses a popover and lands on that popover's own trigger
+    /// is **consumed by the dismissal**: the trigger does not see it. Without
+    /// that, one press is answered twice — the arm puts the menu away and the
+    /// very same press then reaches the button, which opens it again — and the
+    /// button becomes one that cannot shut what it opened. That is what the
+    /// owner photographed on the `Open ⌄` pill and on the breadcrumb's `…`.
+    ///
+    /// **It is the rule and not an exemption.** Five of the six triggered popups
+    /// used to spare their own opener here and let it toggle for itself, which
+    /// worked only where the opener was a docked `ChromeTarget` and the toggle
+    /// was written: a float's branch filter matched neither and re-opened on
+    /// every press, exactly as the pill did. Spending the press at the dismissal
+    /// makes the trigger's own handler a plain opener again — it is only ever
+    /// reached with nothing of its own up.
+    ///
+    /// Asked **before** the popup is closed, because the answer is about what is
+    /// up now; the caller dismisses on [`OwnPress::dismisses`] and then returns
+    /// on [`OwnPress::Spent`].
+    fn press_on_its_own_trigger(
         &mut self,
+        popup: Popup,
         position: PhysicalPosition<f64>,
-        docked: Option<seats::ChromeTarget>,
-    ) -> Option<PreviewSurface> {
-        let any_float = self.window.float.hit_order().next().is_some();
-        if any_float && let Some((id, part)) = self.float_hit_at(position) {
-            return matches!(
-                part,
-                float::FloatPart::Rail(seats::PreviewRailPart::OpenWith)
-            )
-            .then_some(PreviewSurface::Float(id));
+    ) -> OwnPress {
+        let raised = self.popup_trigger(popup);
+        let pressed = self.popover_trigger_at(position);
+        let verdict = press_spends_itself_closing(raised, pressed);
+        if verdict == OwnPress::Spent {
+            // **A press on a button is a button press wherever it is answered**
+            // (`.files-foot`'s rule). The trigger's own arm breaks these two
+            // chains on its way past and is not reached now, so the break is
+            // made here: two presses on a `⌄` are two button presses and never
+            // half a rename of the tab or the row underneath it.
+            self.window.tab_clicks.interrupt();
+            self.window.files_row_clicks.interrupt();
         }
-        match docked {
-            Some(seats::ChromeTarget::PreviewOpenWith(seat)) => Some(self.preview_here(seat)),
-            _ => None,
+        if verdict != OwnPress::Elsewhere {
+            self.mouse_trace(|| {
+                format!(
+                    "popover_own_trigger popup={popup:?} verdict={verdict:?} trigger={raised:?}"
+                )
+            });
         }
+        verdict
     }
 
     /// **The three hover-open clocks, matured** — the one place any of these
@@ -74433,11 +74741,11 @@ impl Runtime<'_> {
                     // the pane head's reason one arm up — and through the very
                     // door a press on it goes through, so the menu a rest raises
                     // and the menu a click raises are one menu in one place.
-                    if let Some(position) = self.window.pointer_position {
-                        let docked = self.chrome_target_at(position);
-                        if let Some(surface) = self.preview_open_pill_at(position, docked) {
-                            self.open_preview_rail_menu(surface)?;
-                        }
+                    if let Some(position) = self.window.pointer_position
+                        && let Some(PopoverTrigger::Rail(surface, seats::PreviewRailPart::OpenWith)) =
+                            self.popover_trigger_at(position)
+                    {
+                        self.open_preview_rail_menu(surface)?;
                     }
                 }
                 // **Only the menu a pill raised is closed by a pill's grace.**
@@ -74450,7 +74758,7 @@ impl Runtime<'_> {
                         .window
                         .file_menu
                         .as_ref()
-                        .is_some_and(|menu| menu.rail.is_some())
+                        .is_some_and(|menu| menu.rail().is_some())
                     {
                         self.close_file_menu()?;
                     }
@@ -85322,7 +85630,7 @@ impl Runtime<'_> {
     /// panes behind it are not asked.
     ///
     /// The sweep is entered only when there is a window to sweep, on
-    /// [`Self::preview_open_pill_at`]'s note: `float_hit_at` measures two
+    /// [`Self::popover_trigger_at`]'s note: `float_hit_at` measures two
     /// captions before it looks at anything, and a window with nothing floating
     /// should pay none of it.
     fn pointer_target_at(&mut self, position: PhysicalPosition<f64>) -> Option<PointerTarget> {
@@ -89563,8 +89871,23 @@ impl Runtime<'_> {
                     // which is how a context menu is moved from one row to
                     // another everywhere else, and which the raise below then
                     // completes.
+                    //
+                    // **Unless it landed on the control that raised it**
+                    // (owner's report 2026-09-13), in which case putting it away
+                    // is the whole of what the press does. This is the menu the
+                    // preview rail's `Open ⌄` pill and its breadcrumb's `…` chip
+                    // both raise, and until the rule was written neither could be
+                    // shut by pressing it again: the arm closed the menu and the
+                    // same press went on to the button, which opened it back up.
+                    // See [`Self::press_on_its_own_trigger`].
                     if state == ElementState::Pressed {
-                        self.close_file_menu()?;
+                        let own = self.press_on_its_own_trigger(Popup::File, position);
+                        if own.dismisses() {
+                            self.close_file_menu()?;
+                        }
+                        if own == OwnPress::Spent {
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -89575,9 +89898,12 @@ impl Runtime<'_> {
         // was — including a second right press, which is how a context menu is
         // moved from one head to another.
         //
-        // **Except the `⌄` itself**, which is not "outside": a press there is the
-        // toggle's close, and letting this arm consume it would shut the menu
-        // and then let `press_pane_head` open it again on the same press.
+        // **Except the `⌄` itself**, which is not "outside": a press there is
+        // this menu's close and is spent being it — the one rule every triggered
+        // popover in this window is under since 2026-09-13. It used to be spelled
+        // here as "leave the press alone and let the button toggle for itself",
+        // which said the same thing about this menu only, and said nothing at all
+        // about the two menus that had no toggle to fall back on.
         if let (Some(layout), Some(position)) =
             (self.pane_menu_layout(), self.window.pointer_position)
         {
@@ -89605,14 +89931,15 @@ impl Runtime<'_> {
                     return Ok(());
                 }
                 None => {
-                    if state == ElementState::Pressed
-                        && !matches!(
-                            self.chrome_target_at(position),
-                            Some(seats::ChromeTarget::PaneMenu(_))
-                        )
-                    {
-                        self.window.chevrons.clear();
-                        self.close_pane_menu()?;
+                    if state == ElementState::Pressed {
+                        let own = self.press_on_its_own_trigger(Popup::Pane, position);
+                        if own.dismisses() {
+                            self.window.chevrons.clear();
+                            self.close_pane_menu()?;
+                        }
+                        if own == OwnPress::Spent {
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -89709,25 +90036,26 @@ impl Runtime<'_> {
                 }
                 None => {
                     // **A press on the button that opened it is not an outside
-                    // press** (user report, 2026-08-19), which is the exception
-                    // the pane menu and the preview menu above already make for
-                    // their own openers. Without it the second press was two
-                    // acts in one turn of the loop: this line put the menu away,
-                    // and the same press then reached the toolbar and found no
-                    // menu open to toggle — so `All branches` re-opened under
-                    // the pointer every time it was pressed and could not be
-                    // shut by pressing it again. The opener owns the toggle;
-                    // this arm is only for the rest of the window.
-                    if state == ElementState::Pressed
-                        && !matches!(
-                            self.chrome_target_at(position),
-                            Some(seats::ChromeTarget::GitGraphTool {
-                                tool: git_graph::GraphTool::Filter,
-                                ..
-                            })
-                        )
-                    {
-                        self.close_graph_filter_menu()?;
+                    // press** (user report, 2026-08-19). Without it the second
+                    // press was two acts in one turn of the loop: this line put
+                    // the menu away, and the same press then reached the toolbar
+                    // and found no menu open to toggle — so `All branches`
+                    // re-opened under the pointer every time it was pressed and
+                    // could not be shut by pressing it again.
+                    //
+                    // The 2026-08-19 fix spared the press instead of spending it,
+                    // and named the button by [`seats::ChromeTarget`] — which a
+                    // graph drawn in a torn-off window has none of, so the report
+                    // stayed true there for another three weeks. The rule is the
+                    // window's now and names the tool on either host.
+                    if state == ElementState::Pressed {
+                        let own = self.press_on_its_own_trigger(Popup::GraphFilter, position);
+                        if own.dismisses() {
+                            self.close_graph_filter_menu()?;
+                        }
+                        if own == OwnPress::Spent {
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -89932,13 +90260,14 @@ impl Runtime<'_> {
                     return Ok(());
                 }
                 None => {
-                    if state == ElementState::Pressed
-                        && !matches!(
-                            self.chrome_target_at(position),
-                            Some(seats::ChromeTarget::NewTabMenu)
-                        )
-                    {
-                        self.close_profile_menu()?;
+                    if state == ElementState::Pressed {
+                        let own = self.press_on_its_own_trigger(Popup::Profile, position);
+                        if own.dismisses() {
+                            self.close_profile_menu()?;
+                        }
+                        if own == OwnPress::Spent {
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -90003,23 +90332,25 @@ impl Runtime<'_> {
                 None => {
                     // A press outside puts it away and then goes on to be the
                     // press it always was — except on the button that opened it,
-                    // which toggles for itself and would otherwise be shut here
-                    // and re-opened one line later.
-                    if state == ElementState::Pressed
-                        && !matches!(
-                            self.chrome_target_at(position),
-                            Some(seats::ChromeTarget::FilesRoot(_))
-                        )
-                    {
-                        self.close_root_menu()?;
+                    // where putting it away is all the press does and it would
+                    // otherwise be shut here and re-opened one line later.
+                    if state == ElementState::Pressed {
+                        let own = self.press_on_its_own_trigger(Popup::Root, position);
+                        if own.dismisses() {
+                            self.close_root_menu()?;
+                        }
+                        if own == OwnPress::Spent {
+                            return Ok(());
+                        }
                     }
                 }
             }
         }
         // The preview's switcher, on exactly the terms the two menus above take
-        // their press. Its "except the button that opened it" is the name, which
-        // toggles for itself (P136) and would otherwise be shut here and
-        // re-opened one line later.
+        // their press. Its "except the button that opened it" is the name (P136),
+        // which would otherwise be shut here and re-opened one line later — and
+        // which is also half of a double click, so the press is spent on the
+        // close and the chain the name keeps is left alone.
         if let Some(seat) = self.preview_menu_seat()
             && let (Some(layout), Some(position)) =
                 (self.preview_menu_layout(), self.window.pointer_position)
@@ -90049,13 +90380,14 @@ impl Runtime<'_> {
                     return Ok(());
                 }
                 None => {
-                    if state == ElementState::Pressed
-                        && !matches!(
-                            self.chrome_target_at(position),
-                            Some(seats::ChromeTarget::PreviewName(_))
-                        )
-                    {
-                        self.close_preview_menu()?;
+                    if state == ElementState::Pressed {
+                        let own = self.press_on_its_own_trigger(Popup::Preview, position);
+                        if own.dismisses() {
+                            self.close_preview_menu()?;
+                        }
+                        if own == OwnPress::Spent {
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -98641,6 +98973,266 @@ fn most_recently_active_window<K: Copy + Eq>(
 /// shape of the four functions that do it: which door each reaches for, and in
 /// what order. That is `key_hint_spend_tests`' own device and it is used for its
 /// reason: every one of these calls is a promise the ruling made.
+/// **Closed by its own trigger** (owner's report 2026-09-13; DESIGN.md §7.1.6e‴).
+///
+/// The owner photographed two popovers in a preview rail that could not be shut
+/// by pressing the control that opened them — the `Open ⌄` pill and the
+/// breadcrumb's `…` chip. One press was being answered twice: the router's
+/// dismissal arm put the menu away, and the very same press then reached the
+/// button, which opened it again. Windows (Win32 and WinUI menus, every
+/// drop-down) and macOS (`NSPopUpButton`, a menu on a toolbar button) both close
+/// and stop there, and so does this window now.
+///
+/// The rule lives in [`press_spends_itself_closing`] and the register of what
+/// each popup hangs from lives in [`Runtime::popup_trigger`]; these cases are
+/// about both, plus a pin that every dismissal arm actually asks.
+#[cfg(test)]
+mod popover_trigger_tests {
+    use super::*;
+
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's — the
+    /// same reader the rest of this file's source pins use.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    fn router() -> &'static str {
+        body(
+            "    fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
+        )
+    }
+
+    fn docked(seat: u64) -> PreviewSurface {
+        PreviewSurface::Seat(LeafId {
+            tab: TabId(1),
+            seat: SeatId(seat),
+        })
+    }
+
+    /// A plain button: the popup is the whole of what it means.
+    fn button(control: PopoverTrigger) -> Option<OwnTrigger> {
+        Some(OwnTrigger {
+            control,
+            keeps_the_press: false,
+        })
+    }
+
+    /// RED — **a press on the control a popover hangs from is spent closing it**
+    /// (owner's report 2026-09-13).
+    ///
+    /// Every kind of trigger this window has, on both hosts: the rail's two
+    /// popover buttons in a pane and in a torn-off window, the three chrome
+    /// chevrons, and the commit graph's `All branches` on either surface.
+    ///
+    /// RED GATE: make [`press_spends_itself_closing`] answer
+    /// [`OwnPress::Elsewhere`] for a press that matches the trigger — which is
+    /// the state `main` was in for the `Open ⌄` pill and the `…` chip — and
+    /// every case here goes red. That is the mutation, and it is exactly the
+    /// defect: the arm closes the menu, the press travels on to the button, and
+    /// the button opens it again.
+    #[test]
+    fn a_press_on_a_popovers_own_trigger_is_spent_closing_it() {
+        for control in [
+            PopoverTrigger::Rail(docked(1), seats::PreviewRailPart::OpenWith),
+            PopoverTrigger::Rail(docked(1), seats::PreviewRailPart::Fold),
+            PopoverTrigger::Rail(PreviewSurface::Float(3), seats::PreviewRailPart::OpenWith),
+            PopoverTrigger::Rail(PreviewSurface::Float(3), seats::PreviewRailPart::Fold),
+            PopoverTrigger::Chrome(seats::ChromeTarget::PaneMenu(SeatId(2))),
+            PopoverTrigger::Chrome(seats::ChromeTarget::NewTabMenu),
+            PopoverTrigger::Chrome(seats::ChromeTarget::FilesRoot(SeatId(2))),
+            PopoverTrigger::GraphTool(docked(1), git_graph::GraphTool::Filter),
+            PopoverTrigger::GraphTool(PreviewSurface::Float(3), git_graph::GraphTool::Filter),
+        ] {
+            assert_eq!(
+                press_spends_itself_closing(button(control), Some(control)),
+                OwnPress::Spent,
+                "a second press on {control:?} closes its popover and goes no further"
+            );
+        }
+    }
+
+    /// **A press on some *other* control is not that popover's close** — which
+    /// is what keeps a hand able to walk a menu across a split, or from a docked
+    /// pill to a floating one, without clicking twice.
+    ///
+    /// RED GATE: compare only the *kind* of trigger instead of the whole of it
+    /// (drop the surface, or the part) and pressing the `…` chip beside an open
+    /// `Open ⌄` would shut the menu and stop, instead of moving it to the chip.
+    #[test]
+    fn a_press_on_another_control_still_travels() {
+        let pill = PopoverTrigger::Rail(docked(1), seats::PreviewRailPart::OpenWith);
+        for (raised, pressed) in [
+            // The chip is the pill's neighbour on the same band, not the pill.
+            (
+                pill,
+                PopoverTrigger::Rail(docked(1), seats::PreviewRailPart::Fold),
+            ),
+            // The pane next door's pill.
+            (
+                pill,
+                PopoverTrigger::Rail(docked(2), seats::PreviewRailPart::OpenWith),
+            ),
+            // A float's pill standing over a docked one — two rails, one window.
+            (
+                pill,
+                PopoverTrigger::Rail(PreviewSurface::Float(3), seats::PreviewRailPart::OpenWith),
+            ),
+            // Walking a pane menu across a split.
+            (
+                PopoverTrigger::Chrome(seats::ChromeTarget::PaneMenu(SeatId(1))),
+                PopoverTrigger::Chrome(seats::ChromeTarget::PaneMenu(SeatId(2))),
+            ),
+            (
+                PopoverTrigger::GraphTool(docked(1), git_graph::GraphTool::Filter),
+                PopoverTrigger::GraphTool(PreviewSurface::Float(3), git_graph::GraphTool::Filter),
+            ),
+            (
+                PopoverTrigger::Chrome(seats::ChromeTarget::NewTabMenu),
+                PopoverTrigger::Chrome(seats::ChromeTarget::Settings),
+            ),
+        ] {
+            assert_eq!(
+                press_spends_itself_closing(button(raised), Some(pressed)),
+                OwnPress::Elsewhere,
+                "{pressed:?} is not what {raised:?} raised"
+            );
+        }
+        assert_eq!(
+            press_spends_itself_closing(
+                button(PopoverTrigger::Chrome(seats::ChromeTarget::NewTabMenu)),
+                None,
+            ),
+            OwnPress::Elsewhere,
+            "a press on no control at all is an outside press"
+        );
+    }
+
+    /// **A popover with no trigger is unaffected.** The context menus are raised
+    /// by a gesture, so no press can be "their own": every press outside them
+    /// dismisses them and then goes on being the press it was, which is how a
+    /// second right press moves one from row to row.
+    ///
+    /// RED GATE: drop the `None` guard from [`press_spends_itself_closing`] and
+    /// a right press meant to move a context menu would be eaten instead.
+    #[test]
+    fn a_popover_with_no_trigger_is_closed_by_every_press() {
+        for pressed in [
+            None,
+            Some(PopoverTrigger::Chrome(seats::ChromeTarget::NewTabMenu)),
+            Some(PopoverTrigger::Rail(
+                docked(1),
+                seats::PreviewRailPart::OpenWith,
+            )),
+        ] {
+            assert_eq!(
+                press_spends_itself_closing(None, pressed),
+                OwnPress::Elsewhere,
+                "nothing is the close of a popover that hangs from no button"
+            );
+        }
+    }
+
+    /// **The one control that keeps its press** — the preview head's name, which
+    /// is the pane's title, its drag handle and the rename door as well as the
+    /// switcher's button (P136: the second click of a pair opens the editor).
+    ///
+    /// RED GATE: set `keeps_the_press: false` for [`Popup::Preview`] in the
+    /// register and this goes red — and on the machine the editor stops opening
+    /// on a pane with more than one buffer, because the second click is spent at
+    /// the dismissal and never reaches the chain that counts it.
+    #[test]
+    fn the_trigger_that_is_also_a_verb_keeps_its_press() {
+        let control = PopoverTrigger::Chrome(seats::ChromeTarget::PreviewName(SeatId(1)));
+        let raised = Some(OwnTrigger {
+            control,
+            keeps_the_press: true,
+        });
+        assert_eq!(
+            press_spends_itself_closing(raised, Some(control)),
+            OwnPress::Handed,
+            "the head's name answers the whole press and closes the switcher itself"
+        );
+        assert!(
+            !OwnPress::Handed.dismisses(),
+            "a handed press is not put away twice"
+        );
+        assert!(OwnPress::Spent.dismisses() && OwnPress::Elsewhere.dismisses());
+    }
+
+    /// RED — **every dismissal arm asks the one rule, and none of them answers
+    /// it for itself.**
+    ///
+    /// This is the half that was really missing. Five of the six popups used to
+    /// spell their own exemption into the router as
+    /// `!matches!(self.chrome_target_at(position), …)` and let the button toggle
+    /// for itself; the file menu — which is what both of the rail's popover
+    /// controls raise — never got one, and a float's `All branches` matched no
+    /// `ChromeTarget` at all, so it re-opened on every press too.
+    ///
+    /// RED GATE: delete any one of the six calls and that popover goes back to
+    /// being re-opened by the press that closed it. Delete the `return` and the
+    /// press closes the popover and then opens it again on the way past.
+    #[test]
+    fn every_dismissal_arm_asks_the_one_rule() {
+        let router = router();
+        for popup in [
+            "Popup::File",
+            "Popup::Pane",
+            "Popup::GraphFilter",
+            "Popup::Profile",
+            "Popup::Root",
+            "Popup::Preview",
+        ] {
+            let call = format!("self.press_on_its_own_trigger({popup}, position)");
+            assert!(
+                router.contains(call.as_str()),
+                "the dismissal arm for {popup} does not ask whether the press is its own close"
+            );
+        }
+        assert_eq!(
+            router.matches("own.dismisses()").count(),
+            6,
+            "six popups have a trigger, and each one's arm dismisses on the verdict"
+        );
+        assert_eq!(
+            router.matches("if own == OwnPress::Spent {").count(),
+            6,
+            "and each one stops there when the press was its own close"
+        );
+        // Assembled rather than written out: a literal spelled in full here is
+        // itself a line of `main.rs`, and the scan would find its own needle.
+        let stale = ["!matches!(self.", "chrome_target_at(position)"].concat();
+        assert!(
+            !router.contains(stale.as_str()),
+            "a popup is answering the trigger question for itself again"
+        );
+    }
+
+    /// PIN — **the register has an answer for every popup on the list.**
+    ///
+    /// The `match` is exhaustive, so the compiler already asks; what this holds
+    /// is that the list itself did not quietly grow a popup whose trigger nobody
+    /// thought about.
+    #[test]
+    fn the_register_names_every_popup() {
+        let register = body("    fn popup_trigger(");
+        for popup in Popup::ALL {
+            let name = format!("Popup::{popup:?}");
+            assert!(
+                register.contains(name.as_str()),
+                "{name} is on the popup list and says nothing about what it hangs from"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod launch_landing_tests {
     /// This file, read as text.
@@ -148157,15 +148749,16 @@ mod tests {
                 "mouse_wheel",
                 "pointer_target_at",
                 "press_float",
-                "preview_open_pill_at",
                 "scroll_float_git_page",
                 "scroll_float_tree",
             ],
             "a float is asked about a pointer *target* in one place — the \
              router — and everywhere else only about its own gestures: which \
              window the peek is, the window's own hover, its press, its wheel, \
-             the two scrollers that move rows under a still hand, and its rail's \
-             own pill, which names a part no `ChromeTarget` could stand for"
+             and the two scrollers that move rows under a still hand. The rail's \
+             own pill was the eighth name here until 2026-09-13: it needed a \
+             part no `ChromeTarget` could stand for, and `PopoverTrigger` is \
+             that part with a name, read off the router like everything else"
         );
         let ladder = ladder_call();
         assert_eq!(
