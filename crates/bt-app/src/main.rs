@@ -95,6 +95,7 @@ mod preview_trace;
 #[cfg(test)]
 mod preview_typing;
 mod preview_undo;
+mod preview_viewport;
 mod preview_watch;
 mod preview_wrap;
 mod profiles;
@@ -1670,7 +1671,7 @@ enum PreviewDocument {
         /// [`MarkdownBlockIntrinsic`].
         intrinsic: Vec<MarkdownBlockIntrinsic>,
         /// One entry per block, measured against the pane it will wrap in.
-        layout: Vec<MarkdownBlockLayout>,
+        layout: preview_viewport::Layout,
         /// Disposable reuse lease and the environment of these measurements.
         wrap: Arc<preview_wrap::Document>,
         /// The formulas that were in hand when this layout was made.
@@ -1951,6 +1952,7 @@ const PREVIEW_INTRINSIC_CACHE_ENTRIES: usize = 512;
 /// value that is four zeroes.
 #[derive(Debug, Default)]
 struct MarkdownIntrinsicCache {
+    environment: Option<(u32, u64)>,
     entries: std::collections::HashMap<MarkdownIntrinsicKey, (MarkdownBlockIntrinsic, u64)>,
     /// Ticks once per pass, which is what "least recently used" is counted in —
     /// [`PreviewMathCache::tick`]'s own note: two documents measured in one
@@ -1965,6 +1967,13 @@ struct MarkdownIntrinsicCache {
 }
 
 impl MarkdownIntrinsicCache {
+    fn ensure_environment(&mut self, environment: (u32, u64)) {
+        if self.environment != Some(environment) {
+            self.entries.clear();
+            self.environment = Some(environment);
+        }
+    }
+
     /// Open a pass: nothing is evicted until it ends, so a document whose
     /// blocks outnumber the budget still finds every one of its own.
     ///
@@ -2518,9 +2527,10 @@ impl PictureReach {
 /// With nothing of the page on screen the answer is still a band and not an
 /// empty one: the picture *about* to come into view is the one worth having, so
 /// the count of pictures entirely above the viewport names the middle of it.
+#[cfg(test)]
 fn markdown_picture_reach(
     blocks: &[preview::MarkdownBlock],
-    layout: &[MarkdownBlockLayout],
+    layout: &preview_viewport::Layout,
     scroll_y: f32,
     height: f32,
 ) -> PictureReach {
@@ -3837,9 +3847,11 @@ impl PreviewPane {
     /// that could not survive being typed next to, which is the one thing an
     /// editor may not do. See [`Reparse`] for how the two are told apart.
     fn show_document(&mut self, doc: PreviewDocument, reparse: Reparse) {
+        self.md_block_scroll = match &doc {
+            PreviewDocument::Markdown { wrap, .. } => wrap.viewport.offsets(&self.md_block_scroll),
+            _ => Vec::new(),
+        };
         self.doc = doc;
-        // Block positions belong to the discarded parse, including our edits.
-        self.md_block_scroll.clear();
         // **The boxes go whatever happened.** They are where the *last* document
         // was drawn — a geometry, not a mark — and this one has not been drawn
         // yet.
@@ -5608,7 +5620,7 @@ struct MarkdownLive<'a> {
 struct MarkdownPage<'a> {
     blocks: &'a [preview::MarkdownBlock],
     intrinsic: &'a [MarkdownBlockIntrinsic],
-    layout: &'a [MarkdownBlockLayout],
+    layout: &'a preview_viewport::Layout,
     live: MarkdownLive<'a>,
 }
 
@@ -5684,7 +5696,12 @@ fn build_preview_markdown_body(
     // one list of *all* of them — and a document scrolled past its first table
     // would draw every indicator against the wrong block.
     let mut scrollers: Vec<(bt_render::PreviewBlock, (usize, f32, f32))> = Vec::new();
-    for (index, (block, placed)) in blocks.iter().zip(layout).enumerate() {
+    for index in layout.visible(
+        scroll[1] - metrics.padding_y,
+        scroll[1] - metrics.padding_y + body[3] - body[1],
+    ) {
+        let block = &blocks[index];
+        let placed = layout.get(index).expect("visible block");
         let top = origin + placed.top;
         let height = placed.height;
         if top + height <= body[1] || top >= body[3] {
@@ -6042,7 +6059,7 @@ fn build_preview_markdown_body(
                     },
                     rows,
                     alignments,
-                    placed,
+                    &placed,
                     [left, top],
                     MarkdownStyle {
                         metrics,
@@ -7541,15 +7558,17 @@ fn preview_wide_blocks<'a>(
     body: [f32; 4],
     metrics: seats::PreviewMarkdownMetrics,
     scroll: [f32; 2],
-    (blocks, layout): (&'a [preview::MarkdownBlock], &'a [MarkdownBlockLayout]),
+    (_blocks, layout): (&'a [preview::MarkdownBlock], &'a preview_viewport::Layout),
 ) -> impl Iterator<Item = (usize, [f32; 4], f32)> + 'a {
     let (left, right) = preview::markdown_measure_box(body, metrics);
     let origin = body[1] + metrics.padding_y - scroll[1];
-    blocks
-        .iter()
-        .zip(layout)
-        .enumerate()
-        .filter_map(move |(index, (_, placed))| {
+    layout
+        .visible(
+            scroll[1] - metrics.padding_y,
+            scroll[1] - metrics.padding_y + body[3] - body[1],
+        )
+        .filter_map(move |index| {
+            let placed = layout.get(index)?;
             let top = origin + placed.top;
             let bottom = top + placed.height;
             (placed.width > right - left && bottom > body[1] && top < body[3]).then_some((
@@ -7578,7 +7597,7 @@ fn preview_block_wheel(
     metrics: seats::PreviewMarkdownMetrics,
     scroll: [f32; 2],
     block_scroll: &[f32],
-    document: (&[preview::MarkdownBlock], &[MarkdownBlockLayout]),
+    document: (&[preview::MarkdownBlock], &preview_viewport::Layout),
     at: [f32; 2],
     travel: f32,
 ) -> Option<(usize, f32)> {
@@ -7603,7 +7622,7 @@ fn preview_block_bar_at(
     metrics: seats::PreviewMarkdownMetrics,
     scroll: [f32; 2],
     block_scroll: &[f32],
-    document: (&[preview::MarkdownBlock], &[MarkdownBlockLayout]),
+    document: (&[preview::MarkdownBlock], &preview_viewport::Layout),
     scale: f32,
     at: [f32; 2],
 ) -> Option<(usize, preview::ScrollBar)> {
@@ -57821,7 +57840,7 @@ impl Runtime<'_> {
         &self,
         surface: PreviewSurface,
         scale: f32,
-    ) -> Option<([f32; 4], &MarkdownCaretBlock, &MarkdownBlockLayout)> {
+    ) -> Option<([f32; 4], &MarkdownCaretBlock, MarkdownBlockLayout)> {
         let body = self.preview_surface_body_rect(surface, scale)?;
         let metrics = seats::preview_markdown_metrics(scale);
         let (left, right) = preview::markdown_measure_box(body, metrics);
@@ -59852,7 +59871,9 @@ impl Runtime<'_> {
         // the caret's line number says nothing about where on the glass it is.
         // The block's own box does, and that is what the other reading uses.
         if self.preview_shows_live_markdown(surface) {
+            self.prepare_markdown_caret_view(surface, body, scale);
             self.reveal_live_markdown_caret(surface, body, scale);
+            self.ensure_markdown_viewport(surface, body, scale);
             return;
         }
         let Some((line, column)) = self.preview_caret_position(surface) else {
@@ -60481,10 +60502,11 @@ impl Runtime<'_> {
         let Some(pane) = self.preview_pane(surface) else {
             return PictureReach::from_the_top();
         };
-        let PreviewDocument::Markdown { blocks, layout, .. } = &pane.doc else {
+        let PreviewDocument::Markdown { wrap, layout, .. } = &pane.doc else {
             return PictureReach::from_the_top();
         };
-        markdown_picture_reach(blocks, layout, pane.scroll[1], body[3] - body[1])
+        wrap.viewport
+            .picture_reach(layout, pane.scroll[1], body[3] - body[1])
     }
 
     /// Re-derive the parsed body if what it was parsed from has changed.
@@ -60542,13 +60564,44 @@ impl Runtime<'_> {
         if let Some(key) = key.as_mut() {
             key.font_environment_epoch = self.app.gpu.font_environment_epoch();
         }
-        if key == self.preview_pane_mut(surface).doc_key {
+        let exact_frame = {
+            let metrics = seats::preview_markdown_metrics(scale);
+            let (left, right) = preview::markdown_measure_box(body, metrics);
+            let frame = preview_wrap::Frame::new(
+                right - left,
+                scale,
+                self.app.gpu.font_environment_epoch(),
+            );
+            self.preview_pane(surface)
+                .is_none_or(|pane| match &pane.doc {
+                    PreviewDocument::Markdown { wrap, .. } => wrap.frame == Some(frame),
+                    _ => true,
+                })
+        };
+        if exact_frame && key == self.preview_pane_mut(surface).doc_key {
+            self.ensure_markdown_viewport(surface, body, scale);
             return;
         }
-        let metrics = seats::preview_markdown_metrics(scale);
-        let (left, right) = preview::markdown_measure_box(body, metrics);
-        let frame =
-            preview_wrap::Frame::new(right - left, scale, self.app.gpu.font_environment_epoch());
+        let reach_only = exact_frame
+            && key
+                .as_ref()
+                .zip(self.preview_pane(surface).and_then(|p| p.doc_key.as_ref()))
+                .is_some_and(|(new, old)| {
+                    let mut old = old.clone();
+                    old.art.picture_reach = new.art.picture_reach;
+                    old == *new
+                });
+        if reach_only {
+            self.update_markdown_picture_reach(
+                surface,
+                body,
+                scale,
+                document.as_deref(),
+                picture_reach,
+            );
+            self.preview_pane_mut(surface).doc_key = key;
+            return;
+        }
         let same_document = key
             .as_ref()
             .zip(
@@ -60556,14 +60609,16 @@ impl Runtime<'_> {
                     .and_then(|pane| pane.doc_key.as_ref()),
             )
             .is_some_and(|(new, old)| new.parse.source == old.parse.source);
-        let mut wrap_pass = self.window.markdown_wraps.prepare(
-            &self
-                .preview_pane(surface)
-                .expect("preview surface exists")
-                .doc,
-            same_document,
-            frame,
-        );
+        let viewport_edits = if same_document {
+            self.preview_pane(surface)
+                .and_then(|p| p.doc_key.as_ref())
+                .and_then(|old| {
+                    self.preview_buffer_on(surface)?
+                        .viewport_edits_since(old.parse.revision)
+                })
+        } else {
+            None
+        };
         // **What this page has already been told about its art**, taken before
         // the document it is written in is replaced. It is the ledger that makes
         // an answer an answer when a bounded cache has let the pixels go — see
@@ -60601,104 +60656,94 @@ impl Runtime<'_> {
         // changed with the parse standing still — and it is rare (once per
         // picture, not once per pixel of a drag), which is exactly why it can
         // afford the pass a resize cannot.
-        let math_changed = key
-            .as_ref()
-            .map(|key| (key.art.math_generation, key.art.body_ink))
-            != pane
-                .doc_key
-                .as_ref()
-                .map(|key| (key.art.math_generation, key.art.body_ink));
+        let art_changed = key.as_ref().map(|key| {
+            (
+                key.art.math_generation,
+                key.art.body_ink,
+                key.art.picture_generation,
+            )
+        }) != pane.doc_key.as_ref().map(|key| {
+            (
+                key.art.math_generation,
+                key.art.body_ink,
+                key.art.picture_generation,
+            )
+        });
         pane.doc_key = key;
-        if reflow_only
-            && let PreviewDocument::Markdown {
+        if reflow_only && matches!(pane.doc, PreviewDocument::Markdown { .. }) {
+            let old = std::mem::take(&mut pane.doc);
+            let PreviewDocument::Markdown {
                 blocks,
                 ranges,
                 maps,
-                source: _,
-                intrinsic,
-                layout,
-                math: _,
-                pictures: _,
-                wrap: _,
-            } = std::mem::take(&mut pane.doc)
-        {
+                ..
+            } = &old
+            else {
+                unreachable!()
+            };
             let metrics = seats::preview_markdown_metrics(scale);
-            // **The width blocks are laid out in is the measure box's**, not the
-            // pane's: past `PREVIEW_PROSE_MEASURE_EM` the two differ, and a
-            // paragraph wrapped to the pane and painted into the column would
-            // reserve fewer rows than it draws.
-            let (measure_left, measure_right) = preview::markdown_measure_box(body, metrics);
-            let width = (measure_right - measure_left).max(1.0);
-            let _ = layout;
-            // **The caret's block is re-cut here and not carried over**
-            // (§7.1.3q). This is the path a caret crossing a block boundary
-            // takes — the parse stands, one block stops being prose and another
-            // becomes it — so the block the last layout was drawn against is
-            // exactly what must not be reused.
+            let (left, right) = preview::markdown_measure_box(body, metrics);
             let source =
-                self.markdown_caret_block(surface, standing_source.as_ref(), &blocks, scale);
-
+                self.markdown_caret_block(surface, standing_source.as_ref(), blocks, scale);
             let math = self.resolve_document_math(
-                &blocks,
+                blocks,
                 metrics,
                 &bt_render::chrome_palette(),
                 &standing_math,
             );
             let pictures = self.resolve_document_pictures(
-                &blocks,
+                blocks,
                 document.as_deref(),
-                width,
+                right - left,
                 picture_reach,
                 &standing_pictures,
             );
-            let intrinsic = if math_changed {
-                let content = self
-                    .preview_buffer_on(surface)
-                    .and_then(|buffer| buffer.content.clone())
-                    .unwrap_or_default();
-                self.measure_markdown_intrinsics(
-                    &blocks,
-                    MarkdownSourceBytes {
+            let content = self
+                .preview_buffer_on(surface)
+                .and_then(|b| b.content.clone())
+                .unwrap_or_default();
+            let (layout, intrinsic, wrap) = self.rebuild_markdown_geometry(
+                surface,
+                body,
+                scale,
+                &old,
+                preview_viewport::Build {
+                    blocks,
+                    maps,
+                    bytes: MarkdownSourceBytes {
                         content: &content,
-                        ranges: &ranges,
+                        ranges,
                     },
-                    IntrinsicPass {
-                        metrics,
+                    source: source.as_deref(),
+                    art: PageArt {
                         math: &math,
-                        palette: &bt_render::chrome_palette(),
-                        scale_ppm: scale_ppm(scale),
-                        math_generation,
+                        pictures: &pictures,
+                        theme,
                     },
-                )
-            } else {
-                intrinsic
-            };
-            let layout = self.lay_markdown_out(
-                &blocks,
-                &intrinsic,
-                source.as_deref(),
-                &mut wrap_pass,
-                PageArt {
-                    math: &math,
-                    pictures: &pictures,
-                    theme,
+                    edits: viewport_edits.as_deref(),
+                    art_changed,
                 },
             );
+            let PreviewDocument::Markdown {
+                blocks,
+                ranges,
+                maps,
+                ..
+            } = old
+            else {
+                unreachable!()
+            };
             self.preview_pane_mut(surface)
                 .reflow_document(PreviewDocument::Markdown {
                     blocks,
                     ranges,
-                    // **The parse stands, so the maps stand with it.** They
-                    // describe the bytes these very blocks were made of; a
-                    // re-flow is a width changing and a width changes nothing
-                    // about where a letter came from.
                     maps,
                     source,
                     intrinsic,
                     layout,
                     math,
                     pictures,
-                    wrap: wrap_pass.document(),
+                    wrap,
                 });
             return;
         }
@@ -60828,33 +60873,31 @@ impl Runtime<'_> {
                     &standing_pictures,
                 );
                 let clock = clock.map(|_| Instant::now());
-                let intrinsic = self.measure_markdown_intrinsics(
-                    &blocks,
-                    MarkdownSourceBytes {
-                        content: &content,
-                        ranges: &ranges,
-                    },
-                    IntrinsicPass {
-                        metrics,
-                        math: &math,
-                        palette: &bt_render::chrome_palette(),
-                        scale_ppm: scale_ppm(scale),
-                        math_generation,
-                    },
-                );
-                let measured = clock.map(|clock| clock.elapsed());
-                let clock = clock.map(|_| Instant::now());
-                let layout = self.lay_markdown_out(
-                    &blocks,
-                    &intrinsic,
-                    source.as_deref(),
-                    &mut wrap_pass,
-                    PageArt {
-                        math: &math,
-                        pictures: &pictures,
-                        theme,
+                let old = std::mem::take(&mut self.preview_pane_mut(surface).doc);
+                let (layout, intrinsic, wrap) = self.rebuild_markdown_geometry(
+                    surface,
+                    body,
+                    scale,
+                    &old,
+                    preview_viewport::Build {
+                        blocks: &blocks,
+                        maps: &maps,
+                        bytes: MarkdownSourceBytes {
+                            content: &content,
+                            ranges: &ranges,
+                        },
+                        source: source.as_deref(),
+                        art: PageArt {
+                            math: &math,
+                            pictures: &pictures,
+                            theme,
+                        },
+                        edits: viewport_edits.as_deref(),
+                        art_changed,
                     },
                 );
+                // Lazy intrinsics are included in this viewport layout batch.
+                let measured = clock.map(|_| std::time::Duration::ZERO);
                 if let Some((((parsed, measured), laid), trace)) = parsed
                     .zip(measured)
                     .zip(clock.map(|clock| clock.elapsed()))
@@ -60883,7 +60926,7 @@ impl Runtime<'_> {
                     layout,
                     math,
                     pictures,
-                    wrap: wrap_pass.document(),
+                    wrap,
                 }
             }
             // **The graph's body is empty on purpose**, and it is the one place
@@ -61294,42 +61337,6 @@ impl Runtime<'_> {
             },
         );
     }
-
-    fn measure_markdown_intrinsics(
-        &mut self,
-        blocks: &[preview::MarkdownBlock],
-        source: MarkdownSourceBytes<'_>,
-        pass: IntrinsicPass<'_>,
-    ) -> Vec<MarkdownBlockIntrinsic> {
-        // Three disjoint fields of the runtime, taken together because the
-        // measurer borrows two of them for as long as the pass runs.
-        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-        let cache = &mut self.window.markdown_intrinsics;
-        let mut measure = |runs: &[bt_render::PreviewRun], font: f32, line: f32| {
-            renderer.measure_preview_paragraph_width(gpu, runs, font, line)
-        };
-        measure_markdown_intrinsics(blocks, source, pass, cache, &mut measure)
-    }
-
-    /// Stack the blocks down the page at this width, collapsing their margins.
-    ///
-    /// **The per-width pass, and all of it.** What it still asks the shaper is
-    /// only the question that genuinely has a different answer at every width:
-    /// how many lines a block that reflows takes.
-    fn lay_markdown_out(
-        &mut self,
-        blocks: &[preview::MarkdownBlock],
-        intrinsic: &[MarkdownBlockIntrinsic],
-        source: Option<&MarkdownCaretBlock>,
-        pass: &mut preview_wrap::Pass,
-        art: PageArt<'_>,
-    ) -> Vec<MarkdownBlockLayout> {
-        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-        let mut wrapped = |runs: &[bt_render::PreviewRun], width: f32, font: f32, line: f32| {
-            renderer.measure_preview_paragraph(gpu, runs, width, font, line)
-        };
-        preview_wrap::lay_markdown_out_cached(blocks, intrinsic, source, art, pass, &mut wrapped)
-    }
 }
 
 /// How many pixels tall a run of styled text is when wrapped into a width.
@@ -61506,7 +61513,7 @@ fn lay_markdown_out(
     metrics: seats::PreviewMarkdownMetrics,
     art: PageArt<'_>,
     measure: &mut WrapMeasure<'_>,
-) -> Vec<MarkdownBlockLayout> {
+) -> preview_viewport::Layout {
     {
         let mut layout = Vec::with_capacity(blocks.len());
         let mut top = 0.0_f32;
@@ -61547,7 +61554,7 @@ fn lay_markdown_out(
             previous = Some(block);
             layout.push(measured);
         }
-        layout
+        layout.into()
     }
 }
 
@@ -62346,6 +62353,10 @@ impl Runtime<'_> {
         let (index, paragraphs) = {
             match self.markdown_caret_box(surface, scale) {
                 Some((box_of_block, block, placed)) if block.prose().is_some() => {
+                    let body = self.preview_surface_body_rect(surface, scale)?;
+                    if box_of_block[3] <= body[1] || box_of_block[1] >= body[3] {
+                        return None;
+                    }
                     let prose = block.prose()?;
                     (
                         Some(prose.index),
@@ -139563,7 +139574,8 @@ mod tests {
         let blocks = preview::parse_markdown("- one\n- two\n- three\n");
         let gap = metrics.list_item_gap;
         let heights = vec![line, gap + line * 3.0, gap + line * 2.0];
-        let layout = vec![MarkdownBlockLayout::rows(heights.clone(), 0.0)];
+        let layout: preview_viewport::Layout =
+            vec![MarkdownBlockLayout::rows(heights.clone(), 0.0)].into();
         let built = markdown_body(
             body,
             metrics,
@@ -139613,10 +139625,11 @@ mod tests {
         // now written.
         let quoted = preview::parse_markdown("> a\n>\n> b\n");
         let quote_rows = vec![line * 2.0, line];
-        let quote_layout = vec![MarkdownBlockLayout::rows(
+        let quote_layout: preview_viewport::Layout = vec![MarkdownBlockLayout::rows(
             quote_rows.clone(),
             metrics.quote_padding_y * 2.0,
-        )];
+        )]
+        .into();
         let built = markdown_body(
             body,
             metrics,
@@ -140310,7 +140323,7 @@ mod tests {
             ranges: Vec::new(),
             maps: Vec::new(),
             source: None,
-            layout: prose_only,
+            layout: prose_only.into(),
             math: DocumentMath::default(),
             pictures: DocumentPictures::default(),
             wrap: Arc::default(),
@@ -140341,7 +140354,8 @@ mod tests {
                     width: wide,
                     ..MarkdownBlockLayout::solid(metrics.line_height * 4.0)
                 },
-            ],
+            ]
+            .into(),
             math: DocumentMath::default(),
             pictures: DocumentPictures::default(),
             wrap: Arc::default(),
@@ -140385,14 +140399,15 @@ mod tests {
                 text: "a very long line".to_owned(),
             },
         ];
-        let layout = vec![
+        let layout: preview_viewport::Layout = vec![
             MarkdownBlockLayout::solid(metrics.line_height),
             MarkdownBlockLayout {
                 width: wide,
                 top: metrics.line_height + metrics.paragraph_gap,
                 ..MarkdownBlockLayout::solid(metrics.line_height * 3.0)
             },
-        ];
+        ]
+        .into();
         let overflow = wide - page;
         let prose_left = |offsets: &[f32]| {
             let built = markdown_body(
@@ -140447,14 +140462,15 @@ mod tests {
         //    indicator, and the pair must be the same pair — the version that
         //    re-derived the list and zipped it drew every indicator one block out
         //    as soon as anything above had scrolled off the top.
-        let tall = vec![
+        let tall: preview_viewport::Layout = vec![
             MarkdownBlockLayout::solid(1000.0),
             MarkdownBlockLayout {
                 width: wide,
                 top: 1000.0,
                 ..MarkdownBlockLayout::solid(metrics.line_height * 3.0)
             },
-        ];
+        ]
+        .into();
         let built = markdown_body(
             body,
             metrics,
@@ -140537,14 +140553,15 @@ mod tests {
         assert!(matches!(blocks[1], preview::MarkdownBlock::Table { .. }));
         let wide = 3000.0;
         let table_top = metrics.line_height + metrics.paragraph_gap;
-        let layout = vec![
+        let layout: preview_viewport::Layout = vec![
             MarkdownBlockLayout::solid(metrics.line_height),
             MarkdownBlockLayout {
                 width: wide,
                 top: table_top,
                 ..MarkdownBlockLayout::solid(metrics.line_height * 3.0)
             },
-        ];
+        ]
+        .into();
         let (left, right) = preview::markdown_measure_box(body, metrics);
         let overflow = wide - (right - left);
         assert!(overflow > 0.0, "a table this wide has to scroll");
@@ -140623,10 +140640,11 @@ mod tests {
         let blocks = preview::parse_markdown("| a | b |\n|---|---|\n| 1 | 2 |\n");
         assert_eq!(blocks.len(), 1, "a table and nothing else");
         let wide = 3000.0;
-        let layout = vec![MarkdownBlockLayout {
+        let layout: preview_viewport::Layout = vec![MarkdownBlockLayout {
             width: wide,
             ..MarkdownBlockLayout::solid(metrics.line_height * 3.0)
-        }];
+        }]
+        .into();
         let box_of = |body: [f32; 4]| {
             let built = markdown_body(
                 body,
@@ -140714,17 +140732,18 @@ mod tests {
                 text: "a very long line".to_owned(),
             },
         ];
-        let layout = [
+        let layout: preview_viewport::Layout = [
             MarkdownBlockLayout::solid(metrics.line_height),
             MarkdownBlockLayout {
                 width: wide,
                 top: metrics.line_height + metrics.paragraph_gap,
                 ..MarkdownBlockLayout::solid(metrics.line_height * 3.0)
             },
-        ];
+        ]
+        .into();
         let overflow = wide - page;
         let offsets = [0.0, 0.0];
-        let document = (&blocks[..], &layout[..]);
+        let document = (&blocks[..], &layout);
         let bar_at = |at: [f32; 2]| {
             preview_block_bar_at(body, metrics, [0.0, 0.0], &offsets, document, SCALE, at)
         };
@@ -140912,10 +140931,11 @@ mod tests {
             metrics.font_size,
             (120, 30, 20.0),
         );
-        let layout = [MarkdownBlockLayout {
+        let layout: preview_viewport::Layout = [MarkdownBlockLayout {
             width: 120.0,
             ..MarkdownBlockLayout::solid(30.0)
-        }];
+        }]
+        .into();
         let rendered = build_preview_markdown_body(
             body,
             metrics,
@@ -141534,7 +141554,7 @@ mod tests {
                 maps: Vec::new(),
                 source: None,
                 intrinsic: Vec::new(),
-                layout: Vec::new(),
+                layout: preview_viewport::Layout::default(),
                 math: DocumentMath::default(),
                 pictures,
                 wrap: Arc::default(),
@@ -142390,7 +142410,7 @@ mod tests {
             MarkdownPage {
                 blocks: &blocks,
                 intrinsic: &[],
-                layout: &[MarkdownBlockLayout::solid(20.0)],
+                layout: &preview_viewport::Layout::from([MarkdownBlockLayout::solid(20.0)]),
                 live: MarkdownLive::default(),
             },
             &bt_render::chrome_palette(),
@@ -142455,7 +142475,7 @@ mod tests {
         let blocks = preview::parse_markdown(&source);
         // A hundred pixels a picture, and a viewport a thousand tall standing at
         // the top: the first ten are on screen.
-        let layout: Vec<MarkdownBlockLayout> = blocks
+        let layout: preview_viewport::Layout = blocks
             .iter()
             .enumerate()
             .map(|(index, _)| {
@@ -142553,7 +142573,9 @@ mod tests {
             MarkdownPage {
                 blocks: &blocks,
                 intrinsic: &[],
-                layout: &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
+                layout: &preview_viewport::Layout::from([MarkdownBlockLayout::solid(
+                    metrics.line_height * 3.0,
+                )]),
                 live: MarkdownLive::default(),
             },
             &bt_render::chrome_palette(),
@@ -142612,7 +142634,9 @@ mod tests {
             MarkdownPage {
                 blocks: &blocks,
                 intrinsic: &[],
-                layout: &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
+                layout: &preview_viewport::Layout::from([MarkdownBlockLayout::solid(
+                    metrics.line_height * 3.0,
+                )]),
                 live: MarkdownLive::default(),
             },
             &bt_render::chrome_palette(),
@@ -142650,7 +142674,9 @@ mod tests {
             MarkdownPage {
                 blocks: &blocks,
                 intrinsic: &[],
-                layout: &[MarkdownBlockLayout::solid(metrics.line_height * 3.0)],
+                layout: &preview_viewport::Layout::from([MarkdownBlockLayout::solid(
+                    metrics.line_height * 3.0,
+                )]),
                 live: MarkdownLive::default(),
             },
             &bt_render::chrome_palette(),
@@ -143041,7 +143067,7 @@ mod tests {
         );
         // Placed by hand so the cut is the thing under test and not the stacking:
         // the first formula well inside the card, the second below its bottom.
-        let layout = [
+        let layout: preview_viewport::Layout = [
             MarkdownBlockLayout::solid(24.0),
             MarkdownBlockLayout {
                 width: 120.0,
@@ -143053,7 +143079,8 @@ mod tests {
                 top: card[3] + 10.0,
                 ..MarkdownBlockLayout::solid(30.0)
             },
-        ];
+        ]
+        .into();
         let rendered = build_preview_markdown_body(
             card,
             metrics,
@@ -143147,13 +143174,14 @@ mod tests {
                 items: vec![vec![preview::Span::link("a note", "notes.md")]],
             },
         ];
-        let layout = [
+        let layout: preview_viewport::Layout = [
             MarkdownBlockLayout::solid(metrics.line_height),
             MarkdownBlockLayout {
                 top: metrics.line_height + metrics.paragraph_gap,
                 ..MarkdownBlockLayout::rows(vec![metrics.line_height], 0.0)
             },
-        ];
+        ]
+        .into();
         let rendered = build_preview_markdown_body(
             body,
             metrics,
@@ -143248,7 +143276,7 @@ mod tests {
             },
         ];
         let row = metrics.line_height;
-        let layout: Vec<MarkdownBlockLayout> = vec![
+        let layout: preview_viewport::Layout = vec![
             MarkdownBlockLayout {
                 top: 0.0,
                 ..MarkdownBlockLayout::solid(row)
@@ -143283,7 +143311,8 @@ mod tests {
                         + 2.0 * metrics.code_line_height,
                 )
             },
-        ];
+        ]
+        .into();
         let rendered = build_preview_markdown_body(
             body,
             metrics,
@@ -143610,7 +143639,7 @@ mod tests {
             maps: Vec::new(),
             source: None,
             intrinsic: Vec::new(),
-            layout: Vec::new(),
+            layout: preview_viewport::Layout::default(),
             math: DocumentMath::default(),
             pictures: DocumentPictures::default(),
             wrap: Arc::default(),
@@ -143915,7 +143944,7 @@ mod tests {
                 maps,
                 source: None,
                 intrinsic: Vec::new(),
-                layout: Vec::new(),
+                layout: preview_viewport::Layout::default(),
                 math: DocumentMath::default(),
                 pictures: DocumentPictures::default(),
                 wrap: Arc::default(),
@@ -144409,7 +144438,7 @@ mod tests {
         ];
         let fence_height =
             metrics.code_border * 2.0 + metrics.code_padding_y * 2.0 + metrics.line_height;
-        let layout = [
+        let layout: preview_viewport::Layout = [
             MarkdownBlockLayout {
                 width: wide,
                 ..MarkdownBlockLayout::solid(fence_height)
@@ -144423,7 +144452,8 @@ mod tests {
                     metrics.table_border,
                 )
             },
-        ];
+        ]
+        .into();
         let render = |offsets: &[f32]| {
             markdown_body(
                 body,
@@ -144622,6 +144652,7 @@ mod tests {
             previous_block = Some(block);
             layout.push(measured);
         }
+        let layout: preview_viewport::Layout = layout.into();
         let widest = layout.iter().map(|b| b.width).fold(0.0_f32, f32::max);
         assert!(
             widest > (body[2] - body[0]) * 2.0,
@@ -145537,7 +145568,7 @@ mod tests {
             maps: Vec::new(),
             source: None,
             intrinsic: Vec::new(),
-            layout: Vec::new(),
+            layout: preview_viewport::Layout::default(),
             math: DocumentMath::default(),
             pictures: DocumentPictures::default(),
             wrap: Arc::default(),
@@ -147532,7 +147563,7 @@ mod tests {
         metrics: seats::PreviewMarkdownMetrics,
         scroll: [f32; 2],
         bars: BlockScrollPaint<'_>,
-        document: (&[preview::MarkdownBlock], &[MarkdownBlockLayout]),
+        document: (&[preview::MarkdownBlock], &preview_viewport::Layout),
         palette: &bt_render::ChromePalette,
     ) -> bt_render::PreviewBody {
         // The intrinsics are the fences' highlighting and nothing else here, so
@@ -147620,7 +147651,8 @@ mod tests {
         let palette = bt_render::chrome_palette();
         let metrics = seats::preview_markdown_metrics(1.0);
         let blocks = preview::parse_markdown("Prose enough to have an edge.\n");
-        let layout = vec![MarkdownBlockLayout::solid(metrics.line_height)];
+        let layout: preview_viewport::Layout =
+            vec![MarkdownBlockLayout::solid(metrics.line_height)].into();
         let column = |body: [f32; 4]| {
             let built = markdown_body(
                 body,
@@ -147678,6 +147710,7 @@ mod tests {
             });
             top += height + metrics.heading_margin_bottom;
         }
+        let layout: preview_viewport::Layout = layout.into();
         let built = markdown_body(
             body,
             metrics,
@@ -147741,10 +147774,11 @@ mod tests {
         let metrics = seats::preview_markdown_metrics(1.0);
         let body = [0.0, 0.0, 600.0, 600.0];
         let blocks = preview::parse_markdown("> quoted **strongly** with `code` in it\n");
-        let layout = vec![MarkdownBlockLayout::rows(
+        let layout: preview_viewport::Layout = vec![MarkdownBlockLayout::rows(
             vec![metrics.line_height],
             metrics.quote_padding_y * 2.0,
-        )];
+        )]
+        .into();
         let built = markdown_body(
             body,
             metrics,
@@ -147804,11 +147838,12 @@ mod tests {
         let body = [0.0, 0.0, 600.0, 600.0];
         let blocks = preview::parse_markdown("```\nfn a() {}\nfn b() {}\n```\n");
         let rows = 2.0;
-        let layout = vec![MarkdownBlockLayout::solid(
+        let layout: preview_viewport::Layout = vec![MarkdownBlockLayout::solid(
             metrics.code_border * 2.0
                 + metrics.code_padding_y * 2.0
                 + metrics.code_line_height * rows,
-        )];
+        )]
+        .into();
         let built = markdown_body(
             body,
             metrics,
@@ -147856,11 +147891,11 @@ mod tests {
             rested_bars(&[]),
             (
                 &blocks,
-                &[MarkdownBlockLayout {
+                &preview_viewport::Layout::from([MarkdownBlockLayout {
                     top: 0.0,
                     height,
                     ..MarkdownBlockLayout::default()
-                }],
+                }]),
             ),
             &palette,
         );
@@ -148434,7 +148469,7 @@ mod tests {
             maps: Vec::new(),
             source: None,
             intrinsic: Vec::new(),
-            layout,
+            layout: layout.into(),
             math: DocumentMath::default(),
             pictures: DocumentPictures::default(),
             wrap: Arc::default(),
@@ -158138,13 +158173,14 @@ mod tests {
             .collect();
         let fence_height =
             metrics.line_height + (metrics.code_border + metrics.code_padding_y) * 2.0;
-        let layout = [
+        let layout: preview_viewport::Layout = [
             MarkdownBlockLayout::solid(fence_height),
             MarkdownBlockLayout {
                 top: fence_height + metrics.code_margin,
                 ..MarkdownBlockLayout::solid(fence_height)
             },
-        ];
+        ]
+        .into();
         let rendered = build_preview_markdown_body(
             body,
             metrics,

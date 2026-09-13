@@ -123,7 +123,7 @@ impl RunKey {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Frame {
     width: f32,
     scale: f32,
@@ -137,7 +137,17 @@ impl Frame {
             font_environment_epoch,
         }
     }
-    fn metrics(self) -> seats::PreviewMarkdownMetrics {
+    pub(super) fn intrinsic_environment(self) -> (u32, u64) {
+        (bits(self.scale), self.font_environment_epoch)
+    }
+    pub(super) fn width(self) -> f32 {
+        self.width
+    }
+    pub(super) fn intrinsic_eq(self, other: Self) -> bool {
+        bits(self.scale) == bits(other.scale)
+            && self.font_environment_epoch == other.font_environment_epoch
+    }
+    pub(super) fn metrics(self) -> seats::PreviewMarkdownMetrics {
         seats::preview_markdown_metrics(self.scale)
     }
 }
@@ -152,6 +162,8 @@ fn recipe(
     frame: Frame,
     art: PageArt<'_>,
 ) -> Option<BlockWrapKey> {
+    #[cfg(test)]
+    crate::preview_typing::count("wrap recipes", 1);
     let representation = match source {
         Some(MarkdownCaretBlock::Prose(_)) => Representation::RawProse,
         Some(MarkdownCaretBlock::Mono(_)) => return None,
@@ -419,6 +431,18 @@ impl WindowCache {
             previous,
             owner,
             frame,
+            current: HashMap::new(),
+        }
+    }
+    pub(super) fn resume(&self, doc: &Document) -> Pass {
+        Pass {
+            previous: HashMap::new(),
+            current: HashMap::new(),
+            owner: doc
+                .owner
+                .clone()
+                .expect("realized document has a cache lease"),
+            frame: doc.frame.expect("realized document has a frame"),
         }
     }
 }
@@ -434,56 +458,28 @@ impl Drop for Owner {
         }
     }
 }
-/// Only a lease and the old frame's recipe environment persist beside the
-/// parsed document. Its existing layout is the compact current measurement
-/// record. Full keys for current reuse are reconstructed transiently from that
-/// SAME parse; no index-keyed state is ever attached to a new parse.
+/// The pane's lease, measurement environment and occurrence validity ledger.
+/// Viewport realization retains compact boxes and remaps them through edits;
+/// it never reconstructs recipes from the old parse. `current` is populated
+/// only by the eager test oracle, including its zero-history-budget checks.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Document {
     owner: Option<Arc<Owner>>,
-    frame: Option<Frame>,
+    pub(super) frame: Option<Frame>,
+    current: HashMap<BlockWrapKey, Measurement>,
+    pub(super) viewport: crate::preview_viewport::State,
 }
 
 fn standing(doc: &PreviewDocument) -> HashMap<BlockWrapKey, Measurement> {
-    let PreviewDocument::Markdown {
-        blocks,
-        source,
-        layout,
-        math,
-        pictures,
-        wrap,
-        ..
-    } = doc
-    else {
-        return HashMap::new();
-    };
-    let Some(frame) = wrap.frame else {
-        return HashMap::new();
-    };
-    let art = PageArt {
-        math,
-        pictures,
-        theme: bt_render::Theme::Dark,
-    };
-    blocks
-        .iter()
-        .zip(layout)
-        .enumerate()
-        .filter_map(|(index, (block, placed))| {
-            let source = source.as_deref().filter(|s| s.index() == index);
-            Some((
-                recipe(block, source, frame, art)?,
-                Measurement {
-                    height: placed.height,
-                    rows: placed.rows.clone(),
-                },
-            ))
-        })
-        .collect()
+    match doc {
+        PreviewDocument::Markdown { wrap, .. } => wrap.current.clone(),
+        _ => HashMap::new(),
+    }
 }
 
 pub(super) struct Pass {
     previous: HashMap<BlockWrapKey, Measurement>,
+    current: HashMap<BlockWrapKey, Measurement>,
     owner: Arc<Owner>,
     frame: Frame,
 }
@@ -492,6 +488,8 @@ impl Pass {
         Arc::new(Document {
             owner: Some(self.owner.clone()),
             frame: Some(self.frame),
+            current: self.current.clone(),
+            viewport: crate::preview_viewport::State::default(),
         })
     }
     fn measure(&mut self, key: BlockWrapKey, measure: &mut WrapMeasure<'_>) -> MarkdownBlockLayout {
@@ -518,6 +516,90 @@ impl Pass {
     }
 }
 
+impl Pass {
+    pub(super) fn frame(&self) -> Frame {
+        self.frame
+    }
+    pub(super) fn block(
+        &mut self,
+        block: &preview::MarkdownBlock,
+        intrinsic: &MarkdownBlockIntrinsic,
+        source: Option<&MarkdownCaretBlock>,
+        art: PageArt<'_>,
+        measure: &mut WrapMeasure<'_>,
+    ) -> MarkdownBlockLayout {
+        if let Some(key) = recipe(block, source, self.frame, art) {
+            self.measure(key, measure)
+        } else {
+            measure_markdown_local(
+                block,
+                intrinsic,
+                source,
+                self.frame.width,
+                self.frame.metrics(),
+                art,
+                measure,
+            )
+        }
+    }
+
+    pub(super) fn paragraphs(
+        &self,
+        block: &preview::MarkdownBlock,
+        source: Option<&MarkdownCaretBlock>,
+        placed: &MarkdownBlockLayout,
+        art: PageArt<'_>,
+    ) -> Vec<bt_render::PreviewParagraph> {
+        anchor_paragraphs(block, source, placed, self.frame, art)
+    }
+}
+
+/// Replay the exact local recipe as paragraphs for text/affinity anchoring.
+/// These are ephemeral and confined to the single visible anchor block.
+pub(super) fn anchor_paragraphs(
+    block: &preview::MarkdownBlock,
+    source: Option<&MarkdownCaretBlock>,
+    placed: &MarkdownBlockLayout,
+    frame: Frame,
+    art: PageArt<'_>,
+) -> Vec<bt_render::PreviewParagraph> {
+    let Some(key) = recipe(block, source, frame, art) else {
+        return Vec::new();
+    };
+    let mut top = if source.is_none() && matches!(block, preview::MarkdownBlock::Quote(_)) {
+        frame.metrics().quote_padding_y
+    } else {
+        0.0
+    };
+    key.paragraphs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let gap = f32::from_bits(p.preceding_row_gap_px_bits);
+            let height = placed.rows.get(i).copied().unwrap_or(placed.height);
+            let paragraph = bt_render::PreviewParagraph {
+                runs: p.runs.iter().map(RunKey::run).collect(),
+                rect: [
+                    0.0,
+                    top + gap,
+                    f32::from_bits(p.effective_width_px_bits),
+                    top + height,
+                ],
+                font_size_px: f32::from_bits(p.font_size_px_bits),
+                line_height_px: f32::from_bits(p.line_height_px_bits),
+                wrap: true,
+                letter_spacing_em: 0.0,
+                align_right: false,
+                align_center: false,
+                cell_advance: None,
+            };
+            top += height;
+            paragraph
+        })
+        .collect()
+}
+
+#[cfg(test)]
 /// Same eager traversal and margin accumulation as before, with local reuse.
 /// Width-independent table/code measurements and arithmetic mono wraps stay on
 /// their existing paths; only rendered prose and raw proportional lines cache.
@@ -528,7 +610,7 @@ pub(super) fn lay_markdown_out_cached(
     art: PageArt<'_>,
     pass: &mut Pass,
     measure: &mut WrapMeasure<'_>,
-) -> Vec<MarkdownBlockLayout> {
+) -> crate::preview_viewport::Layout {
     let metrics = pass.frame.metrics();
     let mut top = 0.0_f32;
     let mut previous_bottom = 0.0_f32;
@@ -540,7 +622,15 @@ pub(super) fn lay_markdown_out_cached(
         .map(|(index, (block, intrinsic))| {
             let source = source.filter(|s| s.index() == index);
             let mut measured = if let Some(key) = recipe(block, source, pass.frame, art) {
-                pass.measure(key, measure)
+                let measured = pass.measure(key.clone(), measure);
+                pass.current.insert(
+                    key,
+                    Measurement {
+                        height: measured.height,
+                        rows: measured.rows.clone(),
+                    },
+                );
+                measured
             } else {
                 measure_markdown_local(
                     block,

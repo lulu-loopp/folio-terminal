@@ -15,6 +15,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- Realize large Markdown documents around the viewport and preserve the reading position while estimated heights change.
+
 - Reduce typing and caret-movement delays in large Markdown documents.
 
 - **The card that appears when you rest on a file now fades in.** It used to
