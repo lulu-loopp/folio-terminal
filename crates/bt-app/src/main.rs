@@ -90,7 +90,10 @@ mod preview_edit;
 mod preview_live;
 mod preview_provenance;
 mod preview_select;
+mod preview_text;
 mod preview_trace;
+#[cfg(test)]
+mod preview_typing;
 mod preview_undo;
 mod preview_watch;
 mod preview_wrap;
@@ -3398,36 +3401,11 @@ struct PreviewDocumentKey {
 /// rather than the other because it is not a live-drag quantity — it changes when
 /// a window crosses monitors, which is exactly the moment a re-measure is owed.
 ///
-/// # What one keystroke costs, measured (ticket T4, 2026-09-10)
-///
-/// [`Self::revision`] moves on every edit, so **one keystroke re-parses the
-/// whole document**. Research open question 5 asked whether that survives a live
-/// preview and answered "measure first, and do not build an incremental parser
-/// on a guess". It was measured, on this repository's own `docs/UI-UX.md`, in
-/// the test profile, by
-/// `a_one_character_edit_rebuilds_a_document_inside_the_frame_budget`:
-///
-/// | document | blocks | parse | intrinsics | layout | total |
-/// |---|---|---|---|---|---|
-/// | 64 KiB | 200 | 1.01 ms | 8 µs | 0.37 ms | **1.39 ms** |
-/// | 1.1 MiB | 3 164 | 15.4 ms | 121 µs | 2.8 ms | **18.3 ms** |
-///
-/// Two things follow, and the second is a ticket this one did not open. **At 64
-/// KiB the whole-document re-parse stands**: a keystroke costs a tenth of a
-/// frame, and the two passes the research expected to dominate — the intrinsics
-/// and the fence highlighting — now cost eight microseconds instead of
-/// milliseconds, because they are keyed per block content
-/// ([`MarkdownIntrinsicKey`]) rather than thrown away on every edit. **At a
-/// megabyte the parse alone is over a frame**, which is past the ~4 ms the
-/// ticket set as the line: an incremental parser is owed there and it is its own
-/// ticket, not a corner of this one. Nothing in this design blocks it — the
-/// ranges are already per block (§7.1.3o), which is the input such a parser
-/// needs.
-///
-/// (The shaper is stubbed in that measurement, because a real one wants a GPU;
-/// what is timed is everything a keystroke re-derives *except* the proportional
-/// shaping, which this ticket did not change and which is already paid per
-/// visible block.)
+/// Revision changes invalidate the parsed page; caret moves inside its current
+/// block do not. T-MD-TYPING-PATH measures the production CPU path with the
+/// ignored `preview_typing::md_typing_path_benchmark`, including actual font
+/// shaping. See DESIGN.md section 7.1.3x for phase timings and remaining work.
+/// Normal regression tests count work rather than impose a wall-clock budget.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PreviewParseKey {
     source: preview::PreviewSource,
@@ -58517,9 +58495,9 @@ impl Runtime<'_> {
             .preview_buffer_on(surface)
             .and_then(|buffer| buffer.content.as_deref())?;
         let offset = self.preview_offset_at(surface, body, scale, position)?;
-        let starts = preview_edit::line_starts(content);
-        let line_index = preview_edit::line_index(&starts, offset);
-        let (from, to) = preview_edit::line_bounds(content, &starts, line_index);
+        let starts = self.preview_buffer_on(surface)?.line_starts();
+        let line_index = preview_edit::line_index(starts, offset);
+        let (from, to) = preview_edit::line_bounds(content, starts, line_index);
         let line = &content[from..to];
         let token = hex_peek::hex_token_at(line, offset.saturating_sub(from))?;
 
@@ -59074,10 +59052,10 @@ impl Runtime<'_> {
             // file the preview was opened in.
             preview_edit::EditCommand::Tab => self.insert_into_preview("\t")?,
             preview_edit::EditCommand::Backspace => {
-                self.edit_preview(preview_edit::backspace)?;
+                self.edit_preview(|content, caret| preview_edit::backspace(content, caret))?;
             }
             preview_edit::EditCommand::Delete => {
-                self.edit_preview(preview_edit::delete_forward)?;
+                self.edit_preview(|content, caret| preview_edit::delete_forward(content, caret))?;
             }
             preview_edit::EditCommand::Move { motion, extend } => {
                 self.move_preview_caret(motion, extend)?;
@@ -59578,7 +59556,7 @@ impl Runtime<'_> {
     /// why the two live in different places and move together here.
     fn edit_preview(
         &mut self,
-        edit: impl FnOnce(&mut String, &mut preview_edit::EditCaret) -> bool,
+        edit: impl FnOnce(&mut preview_text::EditText<'_>, &mut preview_edit::EditCaret) -> bool,
     ) -> Result<()> {
         let Some(surface) = self.preview_keyboard_surface() else {
             return Ok(());
@@ -59613,14 +59591,14 @@ impl Runtime<'_> {
         let Some(surface) = self.preview_keyboard_surface() else {
             return Ok(());
         };
-        let Some(content) = self
-            .preview_buffer_on(surface)
-            .and_then(|buffer| buffer.content.clone())
-        else {
+        let Some(buffer) = self.preview_buffer_on(surface) else {
+            return Ok(());
+        };
+        let Some(content) = buffer.content.as_deref() else {
             return Ok(());
         };
         let rows = self.preview_page_rows(surface);
-        let mut caret = self.preview_pane_mut(surface).caret;
+        let mut caret = self.preview_pane(surface).expect("preview pane").caret;
         // **Up and Down walk visual rows; Home and End walk the logical line.**
         // The `<textarea>` convention, and the one a reader expects: on a
         // wrapped line, Down that jumped the whole paragraph would skip most of
@@ -59642,7 +59620,7 @@ impl Runtime<'_> {
                 Some((box_of_block, source)) => {
                     let wrap = source.wrap((box_of_block[2] - box_of_block[0]).max(1.0));
                     preview_live::step_by_row(
-                        &content,
+                        content,
                         Some(preview_live::CaretRows::Mono(preview_live::BlockRows {
                             text: &source.text,
                             start: source.range.start,
@@ -59659,7 +59637,7 @@ impl Runtime<'_> {
                 // has no block to walk either way: the gap's empty line is one
                 // place, and the way out of it is the file's own lines.
                 None => preview_live::step_by_row(
-                    &content,
+                    content,
                     prose.map(preview_live::CaretRows::Prose),
                     &mut caret,
                     motion,
@@ -59670,12 +59648,17 @@ impl Runtime<'_> {
         } else {
             self.preview_wrap(surface)
                 .filter(|wrap| wrap.wraps())
-                .and_then(|wrap| {
-                    step_preview_caret_by_row(&content, &mut caret, motion, wrap, rows)
-                })
+                .and_then(|wrap| step_preview_caret_by_row(content, &mut caret, motion, wrap, rows))
         };
         if stepped.is_none() {
-            preview_edit::move_caret(&content, &mut caret, motion, extend, rows);
+            preview_edit::move_caret_indexed(
+                content,
+                buffer.line_starts(),
+                &mut caret,
+                motion,
+                extend,
+                rows,
+            );
         } else if !extend {
             caret.anchor = caret.caret;
         }
@@ -59980,11 +59963,11 @@ impl Runtime<'_> {
             .preview_buffer_on(surface)
             .and_then(|buffer| buffer.content.as_deref())?;
         let caret = self.preview_pane(surface)?.caret;
-        let starts = preview_edit::line_starts(content);
+        let starts = self.preview_buffer_on(surface)?.line_starts();
         let caret = preview_edit::normalize(content, caret.caret);
-        let line = preview_edit::line_index(&starts, caret);
-        let (start, _) = preview_edit::line_bounds(content, &starts, line);
-        let text = preview_edit::line_text(content, &starts, line);
+        let line = preview_edit::line_index(starts, caret);
+        let (start, _) = preview_edit::line_bounds(content, starts, line);
+        let text = preview_edit::line_text(content, starts, line);
         Some((line, preview_edit::column_of(text, caret - start)))
     }
 
@@ -61979,9 +61962,7 @@ impl Runtime<'_> {
                 .preview_pane(surface)
                 .map_or([0.0, 0.0], |pane| pane.scroll);
             let buffer = self.preview_buffer_on(surface);
-            let bytes = buffer.map_or(0, |buffer| {
-                buffer.content.as_ref().map_or(0, std::string::String::len)
-            });
+            let bytes = buffer.map_or(0, |buffer| buffer.content.as_deref().map_or(0, str::len));
             let owed = buffer.is_some_and(preview::PreviewBuffer::awaiting_head_read);
             format!(
                 "build {surface:?} scale={scale} body=[{},{},{},{}] scroll=[{},{}] bytes={bytes} owed={}",
@@ -62538,7 +62519,7 @@ impl Runtime<'_> {
         }
         let buffer = self.preview_buffer_on(surface)?;
         let content = buffer.content.as_deref()?;
-        let starts = preview_edit::line_starts(content);
+        let starts = self.preview_buffer_on(surface)?.line_starts();
         let range = visible_range(
             geometry.line_rect(0)[1],
             geometry.line_height,
@@ -62550,7 +62531,7 @@ impl Runtime<'_> {
         // *line*, and a wrapped line is several rows: a band drawn once for the
         // whole line would start on the first row and run off its right edge
         // instead of turning the corner with the text it is under.
-        let bands = preview_edit_bands(content, &starts, &selection, wrap, range);
+        let bands = preview_edit_bands(content, starts, &selection, wrap, range);
         // The caret belongs to the *focus*, not to the buffer: a body you have
         // clicked away from keeps its selection, greyed, the way a text field
         // does, but it has no caret because nothing is going to land there.
@@ -64839,7 +64820,7 @@ impl Runtime<'_> {
         &mut self,
         index: usize,
         source: &preview::PreviewSource,
-        content: Option<String>,
+        content: Option<preview_text::Text>,
         carded: bool,
     ) -> bool {
         let showing = surfaces_reading(
@@ -146826,75 +146807,12 @@ mod tests {
         }
     }
 
-    /// **What a one-character edit costs, measured** (research open question 5;
-    /// §7.1.3q).
-    ///
-    /// The question the research refused to guess at: does the whole-document
-    /// re-parse survive a keystroke, or is an incremental parser owed? The
-    /// numbers are printed rather than only asserted, because the ruling was
-    /// "measure first" and a number nobody can read is not a measurement — run
-    /// it with `--nocapture`.
-    ///
-    /// **What is in the clock and what is not.** The parse is real, the fence
-    /// highlighting is real (syntect, the half the research expected to
-    /// dominate), and the layout arithmetic is real; the *shaper* is the stub
-    /// above, because a real one needs a GPU and a window. So this is the cost
-    /// of everything a keystroke re-derives except the proportional shaping,
-    /// which is unchanged by this ticket and already paid per visible block.
-    ///
-    /// **What it said** (2026-09-10, `docs/UI-UX.md` as the fixture): 64 KiB /
-    /// 200 blocks — parse 1.01 ms, intrinsics 8 µs, layout 0.37 ms, **total 1.39
-    /// ms**; 1.1 MiB / 3 164 blocks — parse 15.4 ms, intrinsics 121 µs, layout
-    /// 2.8 ms, **total 18.3 ms**. So the whole-document re-parse stands at 64
-    /// KiB and the parse alone is over a frame at a megabyte — see
-    /// [`PreviewParseKey`] for what that rules and what it leaves owed.
-    ///
-    /// The budget is **one frame**, asserted on the 64 KiB document alone, on
-    /// the ticket's own terms. It is a whole frame rather than the 1.39 ms
-    /// measured because the measurement is of a machine: this runs on whatever
-    /// CI happens to be, and a budget tight enough to catch a slow machine is a
-    /// budget that fails on one. What it does catch is the thing worth catching
-    /// — a change that puts the *shape* of the cost back, an un-keyed intrinsic
-    /// pass or a re-highlight per keystroke, which is an order of magnitude and
-    /// not a percentage.
+    /// Mutation: lose intrinsic/wrapped reuse or parse the body twice per edit.
+    /// Counts survive scheduler load; wall-clock measurements live in the ignored
+    /// production-path benchmark in preview_typing (T-MD-TYPING-PATH).
     #[test]
-    fn a_one_character_edit_rebuilds_a_document_inside_the_frame_budget() {
-        let one = include_str!("../../../docs/UI-UX.md");
-        let cut = one[..64 * 1024].rfind('\n').unwrap_or(one.len());
-        let sixty_four = &one[..cut];
-        let mut mega = String::new();
-        while mega.len() < 1024 * 1024 {
-            mega.push_str(one);
-            mega.push_str("\n\n");
-        }
-
-        for (name, document) in [("64 KiB", sixty_four.to_owned()), ("1 MiB", mega)] {
-            let mut cache = MarkdownIntrinsicCache::default();
-            rebuild_cost(&document, &mut cache);
-            let mut typed = document.clone();
-            let at = typed.len() / 2;
-            let at = typed[..at].rfind('\n').map_or(0, |line| line + 1);
-            typed.insert(at, 'x');
-            let (blocks, parse, intrinsics, laid) = rebuild_cost(&typed, &mut cache);
-            let total = parse + intrinsics + laid;
-            println!(
-                "{name}: {} bytes, {blocks} blocks — parse {:?}, intrinsics {:?}, \
-                 layout {:?}, total {:?}",
-                typed.len(),
-                parse,
-                intrinsics,
-                laid,
-                total,
-            );
-            if name == "64 KiB" {
-                assert!(
-                    total < std::time::Duration::from_millis(16),
-                    "a keystroke in a 64 KiB document has to fit in a frame, and \
-                     this one took {total:?} (parse {parse:?}, intrinsics \
-                     {intrinsics:?}, layout {laid:?})",
-                );
-            }
-        }
+    fn a_one_character_edit_reuses_unmodified_document_work() {
+        preview_typing::assert_one_character_edit_reuses_work();
     }
 
     /// **One rebuild of a whole document, in three clocks** — the harness both
@@ -146906,7 +146824,7 @@ mod tests {
     /// with its maps dropped and the window builds the maps on every parse. The
     /// fence highlighting is real (syntect, the half the research expected to
     /// dominate), and the layout arithmetic is real; the *shaper* is the stub
-    /// below, because a real one needs a GPU and a window. So this is the cost of
+    /// below, for this legacy arithmetic-only probe. So this is the cost of
     /// everything a rebuild re-derives except the proportional shaping.
     ///
     /// The three constructions above the clocks are outside all of them, which is

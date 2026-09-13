@@ -105,6 +105,8 @@ impl Change {
     /// a change, however loudly it returned `true`.
     #[must_use]
     pub fn between(was: &str, now: &str, before: EditCaret, after: EditCaret) -> Option<Self> {
+        #[cfg(test)]
+        crate::preview_typing::count("undo compared bytes", was.len() + now.len());
         let head = common_head(was, now);
         let tail = common_tail(was, now, head);
         let removed = was[head..was.len() - tail].to_owned();
@@ -319,10 +321,13 @@ impl UndoLog {
 
     /// Put the newest entry's bytes back, and answer with the caret of whoever
     /// typed it.
-    pub fn undo(&mut self, content: &mut String) -> Option<EditCaret> {
+    pub fn undo(
+        &mut self,
+        content: &mut impl crate::preview_text::EditTarget,
+    ) -> Option<EditCaret> {
         let index = self.cursor.checked_sub(1)?;
         let entry = self.entries.get(index)?;
-        content.replace_range(entry.at..entry.at + entry.inserted.len(), &entry.removed);
+        content.replace(entry.at..entry.at + entry.inserted.len(), &entry.removed);
         let mut caret = entry.before;
         self.cursor = index;
         self.open = false;
@@ -331,9 +336,12 @@ impl UndoLog {
     }
 
     /// Play the next entry forward again.
-    pub fn redo(&mut self, content: &mut String) -> Option<EditCaret> {
+    pub fn redo(
+        &mut self,
+        content: &mut impl crate::preview_text::EditTarget,
+    ) -> Option<EditCaret> {
         let entry = self.entries.get(self.cursor)?;
-        content.replace_range(entry.at..entry.at + entry.removed.len(), &entry.inserted);
+        content.replace(entry.at..entry.at + entry.removed.len(), &entry.inserted);
         let mut caret = entry.after;
         self.cursor += 1;
         self.open = false;

@@ -34,6 +34,7 @@ All notable changes to Folio are recorded here. The format follows
   the window's own corner.** The wash used to be a smaller pill; it is now the
   same shape and the same curve as the corner it sits in, and the gear itself
   has not moved.
+- Reduce typing and caret-movement delays in large Markdown documents.
 
 - **The card that appears when you rest on a file now fades in.** It used to
   arrive solid in a single frame; it now takes the same ninety milliseconds the
