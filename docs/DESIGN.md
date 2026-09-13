@@ -9636,156 +9636,36 @@ io.github.lulu-loopp.folio 0.3.0
 **取 13.43。** §13.41 是 M5-1 的四个脚本,§13.42 由同一批在飞的票占着;本节取下
 一个还没被认领的号。
 
-**① What this job is, and the one thing it is not.** `release.yml` grows a
-second job. It builds `bt-app` on a macOS runner, assembles the bundle, signs
-it, notarizes it where it can, writes the disk image, keeps the debug
-information, hashes what it made and then starts the thing it built and asks it
-what it is. What it does **not** do is attach any of that to a release, and the
-paragraph at the top of that file is the whole reason: a release is signed on
-the machine that can sign, so that machine is the only place a release is made
-from. The ticket for this work asked for an upload "to the same release the
-Windows job creates" — there is no such release, by a decision taken after 0.2.1
-shipped one button away from publishing an unsigned draft. So the macOS lane
-leaves workflow artifacts exactly as the Windows one does, and
-`docs/RELEASING.md` is still the whole of how a release is made.
+**① 这个 job 是什么,以及它唯一不是的那样东西。** `release.yml` 长出第二个 job。它在一台 macOS 跑器上建 `bt-app`、装出应用包、签它、能公证的时候公证它、写出磁盘映像、留下调试信息、给做出来的东西算哈希,然后启动它建出来的那样东西、问它是什么。它**不**做的是把这里面任何一样挂到一个 release 上,而那个文件顶上那一段就是全部理由:一个 release 是在签得了的那台机器上签的,所以那台机器是唯一做得出 release 的地方。这件事的票要求上传「到 Windows job 建的那同一个 release」——没有那么一个 release,这是 0.2.1 发完、它离发出一份未签名草稿只差一个按钮之后作出的决定。所以 macOS 这条车道跟 Windows 那条一样,留下的是 workflow 产物,而一个 release 怎么做,仍然全写在 `docs/RELEASING.md` 里。
 
-**② `macos-14`, and the deployment target is the whole reason.**
-`packaging/macos/README.md` fixes the minimum at macOS 14.0, stated rather than
-inherited. Both runner labels are arm64 — the other half of what this job needs,
-and the only architecture this preview ships — so what separates them is the SDK
-and the libraries the build links against. Building on the oldest system the
-product claims to run on is what stops a symbol introduced after it from being
-linked in silently, to be found by a user on 14 rather than by this job.
+**② `macos-14`,而部署目标就是全部理由。** `packaging/macos/README.md` 把最低版本定在 macOS 14.0,是写明的而不是继承的。两个跑器标签都是 arm64——这个 job 要的另一半,也是这个预览版唯一发的架构——所以分开它们的是 SDK 和构建所链的那些库。在产品声称跑得动的最老那个系统上构建,挡住的是一个它之后才引入的符号被悄悄链进来、然后被一个 14 上的用户而不是被这个 job 发现。
 
-**③ Three states of the credential, and no fourth.** The four secrets and the
-two variables are named once, in `docs/RELEASING.md` ▸ macOS, and this job reads
-exactly those names. With none of them set it signs ad-hoc — `codesign`'s own
-`-`, a real signature over the real bytes with nobody behind it — and the
-artifact is called `folio-macos-<version>-unsigned`. With all of them set it
-imports the `.p12` into a keychain made in `RUNNER_TEMP` for the length of the
-job, signs with the Developer ID identity, notarizes and staples both the
-application and the image, and the artifact drops the suffix. With *some* of
-them set it stops there and says which are missing: a certificate with no notary
-key produces a build every Mac in the world refuses, and finding that out at
-`spctl` ten minutes later names the wrong thing.
+**③ 凭据的三种状态,没有第四种。** 那四个 secret 和两个变量只点名一次,在 `docs/RELEASING.md` ▸ macOS 里,而这个 job 读的恰好是那几个名字。一个都没设时它签 ad-hoc——`codesign` 自己那个 `-`,一个对着真实字节、背后没有人的真签名——而产物叫 `folio-macos-<version>-unsigned`。全设了时它把那个 `.p12` 导进一个在 `RUNNER_TEMP` 里、只活这个 job 那么长的钥匙串,用 Developer ID 身份签名,给应用和映像都公证并钉票,而产物去掉那个后缀。设了**一部分**时它停在那里,并说出缺的是哪几个:一份有证书没有公证钥匙的构建,世界上每一台 Mac 都会拒,而十分钟之后在 `spctl` 上才发现这件事,点的是错的那样东西。
 
-A fork has no secrets and a run started from one has none, which is why the
-ad-hoc branch is not a courtesy. A lane that could only run with a credential is
-a lane nobody exercises — the same bargain `package.ps1`'s `-Sign` note already
-makes on Windows, and the same reason the four scripts default `--identity` to
-`-`.
+一个 fork 没有 secret,而一次从 fork 起的运行也没有,这正是 ad-hoc 那条分支不是一份客气的原因。一条只有拿着凭据才跑得了的车道,是一条没有人走过的车道——跟 `package.ps1` 的 `-Sign` 那条注在 Windows 上已经做的是同一笔交易,也是那四个脚本把 `--identity` 默认成 `-` 的同一个理由。
 
-What is carried between the steps is the certificate's SHA-1 rather than its
-subject. It is unambiguous when a keychain holds more than one identity, and it
-is why the team id — which the plan keeps out of this repository on purpose —
-never reaches a log that anybody who can read the run can read.
+在步骤之间传的是证书的 SHA-1 而不是它的主体名。一个钥匙串里不止一个身份时它没有歧义,而这也是那个 team id——计划特意把它挡在这个仓外面——从不进入一份任何看得到这次运行的人都读得到的日志的原因。
 
-**④ The keychain is deleted in a step that runs whatever happened.** It holds
-the owner's private key and a runner is a machine this job does not own; the
-`.p12` and the `.p8` are removed in the same step, the keychain is taken off the
-search list before it is deleted, and `set-keychain-settings -lut 300` means a
-job that dies between the import and the cleanup leaves a locked one.
+**④ 那个钥匙串在一个无论出了什么事都会跑的步骤里被删掉。** 它攥着用户的私钥,而一台跑器是这个 job 并不拥有的机器;那个 `.p12` 和那个 `.p8` 在同一步里被删掉,那个钥匙串在被删之前先从搜索表里拿下来,而 `set-keychain-settings -lut 300` 意味着一个在导入和清理之间死掉的 job 留下的是一个锁着的钥匙串。
 
-**⑤ Gatekeeper is asserted in both directions.** An ad-hoc bundle **must** be
-refused: a lane that only checked for an acceptance would pass a run that signed
-nothing at all, which is precisely the run this design makes possible. A
-notarized one must be accepted, and accepted with `source=Notarized Developer
-ID` rather than with any other source, which is the string the plan's M5
-acceptance line names. The image is asked a different question from the
-application's — `-t open` against the primary signature, which is the assessment
-a double-clicked download actually gets — and `stapler validate` is asked of
-both, because a stapled image holding an unstapled application is a download
-that works until the reader is offline.
+**⑤ Gatekeeper 是两个方向都断言的。** 一个 ad-hoc 的应用包**必须**被拒:一条只查通过的车道,会放过一次什么都没签的运行,而那恰恰是这个设计使之可能的那次运行。一个已公证的必须被接受,而且要带着 `source=Notarized Developer ID` 被接受,而不是别的什么来源,那是计划 M5 验收那条线点名的字符串。映像被问的是跟应用不同的问题——`-t open` 对着主签名,也就是一次被双击的下载真正受到的那个评估——而 `stapler validate` 两个都问,因为一个钉了票的映像里装着一个没钉票的应用,是一份在读者离线之前都好用的下载。
 
-`sign.sh` is given `--no-spctl`, and that is an ordering rather than a weakened
-check. A Developer ID signature that has not been notarized *yet* is refused,
-and that script treats the refusal as its own failure — correctly, because from
-inside it there is nothing left to try. Here there is: notarization is the next
-step. So the question is asked once, at the end, of the artefact in the state it
-is shipped in.
+`sign.sh` 收到 `--no-spctl`,而那是一次排序而不是一次放松。一个**还没**公证的 Developer ID 签名会被拒,而那个脚本把这次拒绝当成自己的失败——这是对的,因为从它里面看已经没什么可试的了。这里有:公证就是下一步。所以这个问题只问一次,在最后,对着那件已经处在它发货状态的产物。
 
-**⑥ What is kept beside the release and never inside it.** `bundle.sh` runs
-`dsymutil` into `Folio.app.dSYM` beside the bundle; this job moves that, and the
-notarization log of each submission, into a directory of their own and uploads
-them as a separate artifact. §13.31 ⑥ is the requirement and this is where it is
-discharged: on Apple targets the release profile's line-tables-only debug
-information stays in the object files, the linked image carries only a debug map
-pointing at them, and the `.dSYM` is the only thing that turns a crash report
-from a shipped build back into file names and line numbers. It pairs with the
-binary by UUID and exists only on the machine that linked it, so a lane that
-does not keep it throws the evidence away at the moment it is made. It is also
-several times the size of the download and would be signed for no reason, which
-is why it is beside and not inside.
+**⑥ 留在 release 旁边、从不留在它里面的东西。** `bundle.sh` 把 `dsymutil` 跑进应用包旁边的 `Folio.app.dSYM`;这个 job 把它、连同每次提交的公证日志,挪进一个它们自己的目录,再作为一份单独的产物上传。§13.31 ⑥ 是那条要求,而这里是它被履行的地方:在苹果目标上,release profile 那份只有行表的调试信息留在对象文件里,链出来的映像只带一张指着它们的调试映射表,而那份 `.dSYM` 是唯一能把一份出自已发布构建的崩溃报告变回文件名和行号的东西。它按 UUID 和二进制配对,而且只存在于链接它的那台机器上,所以一条不留它的车道,是在证据被做出来的那一刻把它扔掉。它还比那份下载大好几倍,而且会被白签一次,这就是它在旁边而不在里面的原因。
 
-**⑦ `SHA256SUMS.txt` is a second file, not a longer one.** The two lanes run on
-two machines and neither can see the other's output. What this one writes is
-byte-for-byte the shape `package.ps1` writes — lower-case hex, two spaces, the
-bare name, LF, sorted by name, a final newline — because `shasum -a 256` prints
-exactly that line and nothing here formats one by hand. The 0.2.5 and 0.3.0
-releases shipped a `SHA256SUMS.txt` with CRLF that `sha256sum -c` could not read;
-that is not a mistake this lane can repeat, because it never builds the line.
+**⑦ `SHA256SUMS.txt` 是第二个文件,不是一个更长的文件。** 两条车道在两台机器上跑,而哪一台都看不见另一台的产物。这一条写出来的东西,逐字节就是 `package.ps1` 写出来的那个形状——小写十六进制、两个空格、光名字、LF、按名字排序、末尾一个换行——因为 `shasum -a 256` 印的恰好就是那一行,而这里没有任何东西去手工拼一行。0.2.5 和 0.3.0 两次发布发出去的 `SHA256SUMS.txt` 是 CRLF 的,`sha256sum -c` 读不了;这条车道重不了那个错,因为它根本不造那一行。
 
-**⑧ The bill of materials takes the triple it filters by.** `sbom.ps1` had
-`x86_64-pc-windows-msvc` written into it, and `--filter-platform` is the whole
-reason the document describes the thing shipped rather than the lock file. A
-macOS bill listing `windows-sys` would describe a build that does not exist as
-surely as a Windows one listing `nix` would. So the triple is a parameter with
-the Windows value as its default, and the macOS lane passes its own: measured on
-this branch, 447 components for the Windows target and 457 for
-`aarch64-apple-darwin`, the second carrying `objc2`, `core-graphics` and
-`dispatch2` and no `windows-sys`, the first the other way round. The script runs
-on the runner's own `pwsh`, which the GitHub macOS image carries; it reads
-`cargo metadata` and nothing else.
+**⑧ 物料清单收下它据以过滤的那个三元组。** `sbom.ps1` 里写死着 `x86_64-pc-windows-msvc`,而 `--filter-platform` 正是它描述发出去的那样东西、而不是描述锁文件的全部理由。一份列着 `windows-sys` 的 macOS 清单,和一份列着 `nix` 的 Windows 清单一样,描述的是一个并不存在的构建。所以那个三元组成了一个参数,默认值是 Windows 那个,而 macOS 这条车道传它自己的:在本分支上量到,Windows 目标 447 个组件,`aarch64-apple-darwin` 457 个,后者带着 `objc2`、`core-graphics` 和 `dispatch2` 而没有 `windows-sys`,前者反过来。这个脚本跑在跑器自己的 `pwsh` 上,GitHub 的 macOS 镜像带着它;它读 `cargo metadata`,别的什么都不读。
 
-**⑨ The tag and the manifest are one claim, read once.** That rule — and its
-`-preview` clause, and its "a manual run claims nothing" clause — was a step
-inside the Windows job. Two jobs whose artefact names both carry a version
-cannot each keep their own reading of that line, so it moved into
-`.github/actions/claimed-version` and both jobs come through it, the way both
-come through `.github/actions/toolchain`. Referenced by path, so it is this
-repository's own file at the same commit as the workflow calling it.
+**⑨ 那个 tag 和那份 manifest 是一次主张,只读一次。** 那条规矩——连同它的 `-preview` 分句,以及它的「一次手动运行什么都不主张」分句——本来是 Windows job 里面的一步。两个产物名都带版本的 job 不可能各留一份对那一行的读法,所以它挪进了 `.github/actions/claimed-version`,两个 job 都从那里过,就像两个都从 `.github/actions/toolchain` 过一样。按路径引用,所以它是这个仓自己的文件,而且跟调用它的那个 workflow 在同一个提交上。
 
-**⑩ The rename is the lane's, and deliberately not the script's.** `dmg.sh`
-writes `Folio.dmg`; a script that wrote the long name would be a second reader
-of the version line. This job renames it to
-`Folio-<version>-macos-arm64.dmg` on the way to the artifact — the tag and the
-asset are one claim, and an Intel Mac has to be able to tell from the name that
-this build is not for it.
+**⑩ 那次改名是车道的,而且是刻意不放在脚本里的。** `dmg.sh` 写出 `Folio.dmg`;一个写出那个长名字的脚本,会是版本那一行的第二个读者。这个 job 在去产物的路上把它改成 `Folio-<version>-macos-arm64.dmg`——那个 tag 和那件资产是一次主张,而一台 Intel Mac 得能从名字上看出这份构建不是给它的。
 
-**⑪ What was proven without pushing a tag.** `act` is not available and
-starting a workflow by hand needs an account this session does not have, so the
-job's shell steps were run on the Mac mini, in a worktree at this branch's
-commit, with `--identity -`: the whole ad-hoc branch, step for step, in the
-job's own order. `sh -n` passed on all four scripts; the release build linked;
-`bundle.sh` produced a 69,976,064-byte `Folio.app` and a 211,181,568-byte
-`Folio.app.dSYM` whose UUID is the binary's, read back from `dwarfdump` on both;
-`sign.sh --no-spctl` left `flags=0x10002(adhoc,runtime)` with every entitlement
-`false`; `dmg.sh --skip-notarize` wrote a 39,900,615-byte image, and the rename
-made it `Folio-0.3.0-macos-arm64.dmg`. `SHA256SUMS.txt` came out 183 bytes of
-ASCII ending in one `0a`, and `shasum -a 256 -c` read it back and said `OK`
-twice. The bundle then answered `Folio 0.3.0 (34880a804b)` — the manifest's
-version and this commit's short hash — `codesign --verify --deep --strict`
-passed, and `spctl` said `rejected` for the application and `rejected` (exit 3)
-for the image. Both refusals are what the ad-hoc branch asserts, and the step
-said so and exited 0.
+**⑪ 没推 tag 的情况下证明了什么。** `act` 用不了,而手动起一个 workflow 需要一个本会话没有的账号,所以这个 job 的 shell 步骤是在 Mac mini 上、在一个停在本分支这个提交上的 worktree 里、用 `--identity -` 跑的:整条 ad-hoc 分支,一步一步,按这个 job 自己的顺序。四个脚本 `sh -n` 全过;release 构建链上了;`bundle.sh` 产出一个 69,976,064 字节的 `Folio.app` 和一个 211,181,568 字节的 `Folio.app.dSYM`,而它的 UUID 就是那个二进制的,两边都用 `dwarfdump` 读回来对过;`sign.sh --no-spctl` 留下 `flags=0x10002(adhoc,runtime)`,每一项授权都是 `false`;`dmg.sh --skip-notarize` 写出一个 39,900,615 字节的映像,而那次改名把它变成 `Folio-0.3.0-macos-arm64.dmg`。`SHA256SUMS.txt` 出来是 183 字节 ASCII,以一个 `0a` 结尾,而 `shasum -a 256 -c` 把它读回来,说了两次 `OK`。那个应用包随后答 `Folio 0.3.0 (34880a804b)`——manifest 的版本和这个提交的短哈希——`codesign --verify --deep --strict` 过了,而 `spctl` 对应用说 `rejected`、对映像说 `rejected`(退出 3)。这两次拒绝正是 ad-hoc 那条分支断言的东西,而那一步这么说了,然后退出 0。
 
-⑫ What a hand-run on that machine cannot reach: the `pwsh` half — the
-version step and the bill of materials — because there is no PowerShell
-installed on it, so both were exercised on Windows instead, `sbom.ps1` for each
-triple as ⑧ records; and every line that needs a certificate, which is the whole
-signed branch and its Gatekeeper acceptance. Those are the lines a tag will
-exercise first, and they are also the ones the owner's own release sequence in
-`docs/RELEASING.md` walks by hand.
+⑫ 在那台机器上手跑够不到的东西:`pwsh` 那一半——版本那一步和物料清单——因为它上面没装 PowerShell,所以两样都改在 Windows 上跑了,`sbom.ps1` 按 ⑧ 记的对每个三元组各跑一次;以及每一条需要证书的行,也就是整条签名分支和它那次 Gatekeeper 通过。那些是一个 tag 最先会走到的行,也是用户自己在 `docs/RELEASING.md` 里那串发布步骤手工走的那些。
 
-One thing the run turned up that is not this lane's: `dsymutil` warns `unable to
-open object file` for one `psm` object inside the release `deps` directory. The
-`.dSYM` is produced and its UUID matches, so it is a hole in one crate's debug
-map rather than a failed step; it is `bundle.sh`'s to look at.
+那次运行带出一样不属于这条车道的东西:`dsymutil` 对 release `deps` 目录里的一个 `psm` 对象报 `unable to open object file`。那份 `.dSYM` 产出来了,UUID 也对得上,所以这是一个 crate 的调试映射表上的一个洞,不是一个失败的步骤;这是 `bundle.sh` 该看的事。
 
-**⑬ `ci.yml` parses the four scripts on every push.** `core-macos` is the only
-job in that file on the platform they run on, `sh -n` reads the grammar and runs
-nothing, and it costs a second. Without it a syntax error in a release script is
-found by a tag — which is the failure mode the comment at the top of
-`release.yml` was written about.
-
-*(本节英文,待中文文案改写。)*
+**⑬ `ci.yml` 每次推送都解析这四个脚本。** `core-macos` 是那个文件里唯一在它们所跑的那个平台上的 job,`sh -n` 读语法、什么都不跑,而它花一秒钟。没有它,一个发布脚本里的语法错误就要由一个 tag 来发现——而那正是 `release.yml` 顶上那条注释所针对的失败方式。
