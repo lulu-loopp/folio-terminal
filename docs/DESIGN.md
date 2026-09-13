@@ -10082,6 +10082,8 @@ which is `host_platform()`'s whole argument for being a value.
 body moved into a function of its own, byte for byte, and nothing a reader on
 that platform can press behaves differently.
 
+*(本节英文,待中文文案改写。)*
+
 ### 13.48 T-MAC-STRIP-ENDS: 红灯站到圆角的对角线上,齿轮镜像它,全屏时灯走了留白也走,头带一律 40,`+` 与 `˅` 上药丸的轴(`crates/bt-app/src/{seats,main}.rs`、`crates/bt-render/src/theme.rs`、`crates/bt-platform/src/{lib,macos_impl,portable_impl}.rs`)
 
 **① The number is claimed, not counted.** §13.47 is T-MAC-FILEURI's and was in flight while this was written, so this section takes **13.48** rather than the next free-looking one. The five rulings below are the owner's of 2026-09-13, all five made from the running build: two about the two ends of the header, two — arriving while the first two were being built — about the header itself and about the pair of buttons at the end of the tab run, and a last one that moved the three traffic lights sideways and took the first with it.
