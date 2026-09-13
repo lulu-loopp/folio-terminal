@@ -86,8 +86,14 @@
 //! `codex`, `node`, `copilot`, and, where a hook is spelled as a shell command,
 //! `sh` and whatever it spawned. An executable check at this door would refuse
 //! every real caller it has. So what is asked is the one question that means
-//! something: `getpeereid`, and the uid must be this process's own. A pid out
-//! of a frame would be a number the peer chose; this comes from the kernel.
+//! something: [`crate::peer::uid`], and the uid must be this process's own. A
+//! pid out of a frame would be a number the peer chose; this comes from the
+//! kernel.
+//!
+//! **And the uid is the whole of what is asked for.** That module has a second
+//! door which also answers the peer's process id, and this one deliberately
+//! does not take it: the launch wire wants a pid in order to look an executable
+//! up, and this door does not look one up.
 //!
 //! A peer of another uid is closed on without a byte read and **without a
 //! count**, which is [`PipeCounts`]'s shape kept honest: on Windows such a
@@ -540,7 +546,7 @@ fn admit(stream: UnixStream) -> Option<Client> {
     if stream.set_nonblocking(true).is_err() {
         return None;
     }
-    if !peer_is_this_user(peer_uid(&stream).ok()?) {
+    if !peer_is_this_user(crate::peer::uid(&stream).ok()?) {
         return None;
     }
     Some(Client {
@@ -726,24 +732,6 @@ fn vetted_endpoint(path: &Path) -> io::Result<()> {
         return refuse("the attention endpoint is reachable by somebody who is not its owner");
     }
     Ok(())
-}
-
-/// The uid of the peer, from the kernel.
-///
-/// `getpeereid` and not a credential frame, because a frame is something the
-/// peer writes. The pid is deliberately **not** asked for: the launch wire wants
-/// it in order to look an executable up, and this door does not look one up —
-/// see the module header for why an executable check would refuse every real
-/// caller it has.
-fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
-    let mut uid: libc::uid_t = 0;
-    let mut gid: libc::gid_t = 0;
-    // SAFETY: the descriptor is the borrowed stream's and both outputs are live
-    // locals of this frame.
-    if unsafe { libc::getpeereid(stream.as_raw_fd(), &raw mut uid, &raw mut gid) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(uid)
 }
 
 /// **Whether a uid is the one this endpoint serves** — the whole of the
@@ -937,7 +925,7 @@ mod tests {
     /// is exercised by every other case here — each is a peer whose uid really
     /// is this process's own, and each is served.
     ///
-    /// MUTATION: drop the `getpeereid` check out of `admit` and the second
+    /// MUTATION: drop the peer's-user check out of `admit` and the second
     /// assertion stays green while the first stops meaning anything, which is
     /// why the source pin in `lib.rs` stands beside this.
     #[test]
