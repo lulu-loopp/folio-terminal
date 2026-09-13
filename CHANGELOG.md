@@ -24,6 +24,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A table on a focus card lines up again.** A card showing a box-drawing table whose cells hold Chinese text drew its borders in a different place on every row, while the same table in the pane beside it was square. A card's rows are now laid out column by column, as the pane's own grid is, so a wide character takes exactly two columns and a border stands in the same place on every row.
+
 - Keep focus cards on the same content when resizing, and make Alt+wheel respond immediately when reversing at the oldest content.
 
 - Reuse unchanged Markdown prose measurements across caret moves and edits, and reset block scroll offsets after reparsing.
