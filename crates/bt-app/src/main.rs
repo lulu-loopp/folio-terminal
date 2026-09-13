@@ -8735,13 +8735,7 @@ fn crumb_segments_on(
     if platform == bt_platform::HostPlatform::Windows {
         return segments;
     }
-    let rooted = |home: &&Path| {
-        matches!(
-            home.components().next(),
-            Some(std::path::Component::RootDir | std::path::Component::Prefix(_))
-        )
-    };
-    match home.filter(|home| rooted(home) && path.starts_with(home)) {
+    match home_crumb_for(path, platform, home) {
         Some(home) => {
             segments.drain(..crumb_segments_rooted(home).len());
             segments.insert(
@@ -8759,6 +8753,80 @@ fn crumb_segments_on(
         }
     }
     segments
+}
+
+/// **The one question either surface asks about `~`, asked in one place**
+/// (owner ruling 2026-09-12, §13.32 ③; the feet joined the rail at §13.40).
+///
+/// Answers with the home directory when this path is the reader's home or
+/// stands under it *and* the platform is one that writes `~` for it, and with
+/// `None` otherwise. Windows leaves every path alone, because `%USERPROFILE%`
+/// is not a word Explorer says and a drive is a place a reader navigates to.
+///
+/// `home` is ignored unless it is **rooted**: an empty `HOME` is a prefix of
+/// every path, and a rail answering `~ › / › Applications` to it — or a foot
+/// answering `~/Applications` — would be worse than the row this replaced.
+/// Rooted is asked of the first component rather than through
+/// [`Path::is_absolute`], which answers by the *running* host's rules and would
+/// make the Mac shape unreadable from a Windows workstation.
+fn home_crumb_for<'a>(
+    path: &Path,
+    platform: bt_platform::HostPlatform,
+    home: Option<&'a Path>,
+) -> Option<&'a Path> {
+    if platform == bt_platform::HostPlatform::Windows {
+        return None;
+    }
+    home.filter(|home| {
+        matches!(
+            home.components().next(),
+            Some(std::path::Component::RootDir | std::path::Component::Prefix(_))
+        ) && path.starts_with(home)
+    })
+}
+
+/// **A foot spells the path its rail's crumbs spell** (§13.40).
+///
+/// The files column and a torn-out files tree both print their root along the
+/// bottom of the surface, and both printed it whole: a Mac read
+/// `/Users/alice/folio-port/repo` in the foot of a window whose breadcrumbs
+/// read `~ › folio-port › repo`. Two spellings of one place in one window is
+/// the fault §13.32 ③ was about, and the foot is the same reader's same
+/// question — so it asks [`home_crumb_for`], which is the rail's own rule.
+///
+/// The separator between `~` and what stands below it is **taken from the
+/// string the filesystem handed over**, never invented: this function therefore
+/// never has to know which character the *running* host writes, and a Windows
+/// workstation can read what a Mac's foot says. On Windows nothing is
+/// substituted and the borrowed string is the string that went in.
+fn home_shortened_path_on<'a>(
+    path: &'a str,
+    platform: bt_platform::HostPlatform,
+    home: Option<&Path>,
+) -> std::borrow::Cow<'a, str> {
+    let Some(home) = home_crumb_for(Path::new(path), platform, home) else {
+        return std::borrow::Cow::Borrowed(path);
+    };
+    let below = Path::new(path)
+        .strip_prefix(home)
+        .map_or(0, |rest| rest.as_os_str().len());
+    if below == 0 {
+        return std::borrow::Cow::Owned(seats::PREVIEW_CRUMB_HOME.to_owned());
+    }
+    std::borrow::Cow::Owned(format!(
+        "{}{}",
+        seats::PREVIEW_CRUMB_HOME,
+        &path[path.len() - below - 1..]
+    ))
+}
+
+/// [`home_shortened_path_on`] for the reader this process is serving.
+fn home_shortened_path(path: &str) -> std::borrow::Cow<'_, str> {
+    home_shortened_path_on(
+        path,
+        bt_platform::host_platform(),
+        profiles::home_directory(&bt_pty::SystemShellEnvironment).as_deref(),
+    )
 }
 
 /// The walk itself — every component a segment, the root folded into whatever
@@ -66818,7 +66886,12 @@ impl Runtime<'_> {
             );
             tree.foot_revealed = said.is_some();
             tree.foot_dissolved = dissolved;
-            let text = said.unwrap_or(root);
+            // A receipt is a sentence, not a path; only the root is spelled the
+            // way the rail above it spells one (§13.40).
+            let text = match said.as_deref() {
+                Some(said) => std::borrow::Cow::Borrowed(said),
+                None => home_shortened_path(&root),
+            };
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
             tree.foot_path = settings::ellipsized_left(&text, room, font, &mut measure);
@@ -77715,7 +77788,12 @@ impl Runtime<'_> {
             now,
         );
         let revealed = said.is_some();
-        let root = said.unwrap_or(root);
+        // The torn-out tree's foot is the docked column's foot in a window of
+        // its own, so it spells a root the same way (§13.40).
+        let root = match said.as_deref() {
+            Some(said) => std::borrow::Cow::Borrowed(said),
+            None => home_shortened_path(&root),
+        };
         let (name, path) = {
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -148141,6 +148219,101 @@ mod tests {
                 ".zcompdump".to_owned(),
             ],
             "the Windows shape keeps its root crumb and knows no `~`"
+        );
+    }
+
+    /// RED GATE (§13.40) — **a foot spells a root the way the rail above it
+    /// spells one.** The reading sweep opened a folder under the owner's home
+    /// on the Mac and read two spellings of one place in one window: the
+    /// breadcrumbs said `~ › folio-port › repo` and the files column's foot,
+    /// two hundred physical pixels below them, said
+    /// `/Users/<owner>/folio-port/repo`. The rule is not copied here — the foot
+    /// asks [`home_crumb_for`], which is the rail's own question.
+    ///
+    /// The separator is never invented: it is the byte the filesystem put
+    /// between the home run and what stands below it, which is why a Windows
+    /// workstation can assert what a Mac's foot says.
+    ///
+    /// MUTATIONS:
+    /// ① give the Windows arm the substitution too — the last case grows a `~`
+    ///    in front of a drive path and goes red;
+    /// ② join with `MAIN_SEPARATOR_STR` instead of slicing the original — every
+    ///    Mac case reads `~\folio-port` when this test is run on Windows;
+    /// ③ drop the `below == 0` guard — the home directory itself reads `~e`,
+    ///    the tail of its own last component;
+    /// ④ drop the rooted guard — the empty-`HOME` case swallows the whole path.
+    #[test]
+    fn a_files_foot_prints_the_root_its_breadcrumbs_would_print() {
+        use bt_platform::HostPlatform::{MacOs, Windows};
+
+        let home = Path::new("/Users/alice");
+        let foot =
+            |path: &str, platform, home| home_shortened_path_on(path, platform, home).into_owned();
+        // The rail and the foot, side by side, on the run that found this.
+        let deep = "/Users/alice/folio-port/repo";
+        assert_eq!(
+            crumb_segments_on(Path::new(deep), MacOs, Some(home))
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join("/"),
+            foot(deep, MacOs, Some(home)),
+            "the two surfaces of one window say one thing"
+        );
+        assert_eq!(foot(deep, MacOs, Some(home)), "~/folio-port/repo");
+        assert_eq!(
+            foot("/Users/alice", MacOs, Some(home)),
+            seats::PREVIEW_CRUMB_HOME,
+            "the home directory itself is `~` and nothing after it"
+        );
+        assert_eq!(
+            foot("/Users/alice/中文 folder", MacOs, Some(home)),
+            "~/中文 folder",
+            "the cut falls on the separator, not inside a character"
+        );
+
+        // Outside home, and a machine that never said where home is: the path
+        // the filesystem handed over, unaltered.
+        assert_eq!(
+            foot("/Applications/Utilities", MacOs, Some(home)),
+            "/Applications/Utilities"
+        );
+        assert_eq!(foot("/etc/hosts", MacOs, None), "/etc/hosts");
+        assert_eq!(
+            foot("/etc/hosts", MacOs, Some(Path::new(""))),
+            "/etc/hosts",
+            "an empty HOME is not a prefix of everything"
+        );
+        assert_eq!(
+            foot("/Users/alicia/notes.md", MacOs, Some(home)),
+            "/Users/alicia/notes.md",
+            "a home is a run of whole components, not a string prefix"
+        );
+
+        // Windows is the string it was, home or no home.
+        assert_eq!(
+            foot(r"D:\work\repo", Windows, Some(Path::new(r"C:\Users\alice"))),
+            r"D:\work\repo"
+        );
+        assert_eq!(
+            foot(
+                r"C:\Users\alice\notes",
+                Windows,
+                Some(Path::new(r"C:\Users\alice"))
+            ),
+            r"C:\Users\alice\notes",
+            "Explorer does not say `~`, so neither does this foot"
+        );
+        assert!(
+            matches!(
+                home_shortened_path_on(
+                    r"C:\Users\alice",
+                    Windows,
+                    Some(Path::new(r"C:\Users\alice"))
+                ),
+                std::borrow::Cow::Borrowed(_)
+            ),
+            "the Windows arm allocates nothing: the string that went in comes out"
         );
     }
 
