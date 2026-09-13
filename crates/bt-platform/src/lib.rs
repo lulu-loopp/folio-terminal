@@ -2357,6 +2357,34 @@ impl HostPlatform {
     }
 }
 
+/// **The variable that names this user's home directory on `platform`.**
+///
+/// `USERPROFILE` on Windows and `HOME` everywhere else, and the reason it is a
+/// door in this crate rather than a `cfg` in three files of `bt-app` is
+/// M2-6's audit finding: `attention_hooks::config_dir` and
+/// `attention_codex::config_dir` **compose** another program's configuration
+/// directory out of `%USERPROFILE%` with no `HOME` arm at all, so on a Mac they
+/// answer `None` and the three hook installers report "not installed" on a
+/// machine where the hooks are installed. That is §7.1.6j's own lesson — ask
+/// the program, do not assemble the path — reaching the one half of the path it
+/// cannot ask for.
+///
+/// Pure and taking the platform as a value, so that a test on a Windows
+/// workstation can ask what a Mac reads (`host_platform`'s own reason).
+#[must_use]
+pub const fn home_variable_for(platform: HostPlatform) -> &'static str {
+    match platform {
+        HostPlatform::Windows => "USERPROFILE",
+        HostPlatform::MacOs | HostPlatform::OtherUnix => "HOME",
+    }
+}
+
+/// The same variable, for the platform this build is.
+#[must_use]
+pub const fn home_variable() -> &'static str {
+    home_variable_for(host_platform())
+}
+
 /// The platform this executable was built for.
 #[must_use]
 pub const fn host_platform() -> HostPlatform {
@@ -2724,8 +2752,23 @@ pub mod menu;
 #[cfg(windows)]
 pub mod attention_pipe;
 
-/// The same endpoint, on a platform whose sockets M4-7 has not written yet.
-#[cfg(not(windows))]
+/// **The same doorbell, where the kernel names doors with paths** (M4-7, DESIGN
+/// §13.37).
+///
+/// A third arm rather than a second, on [`http`]'s footing (§13.27) and beside
+/// [`launch_pipe`]'s: the two real ones are two transports — a named pipe and a
+/// Unix socket — and the third is neither. The contract §10.6 fixes is the
+/// product's and is identical across the two real arms; the name, the framing
+/// and **the boundary** are the transport's and are not. That last one is the
+/// reason this ticket is not a substitution: a descriptor names a logon
+/// session and a mode bit names a user, and the module's own header says so
+/// rather than calling `0600` the same thing.
+#[cfg(unix)]
+#[path = "attention_pipe_unix.rs"]
+pub mod attention_pipe;
+
+/// The same doorbell on a platform with neither a pipe namespace nor a socket.
+#[cfg(all(not(windows), not(unix)))]
 #[path = "attention_pipe_portable.rs"]
 pub mod attention_pipe;
 
@@ -16380,5 +16423,254 @@ mod macos_video_signature_tests {
                  left undefined"
             );
         }
+    }
+}
+
+/// **The three attention arms, compared on the one machine where only one of
+/// them compiles** (M4-7).
+///
+/// `bt_app::attention_wire` names `AttentionPipe`, `send_line`,
+/// `unguessable_bits` and the two bounds with no `cfg` at all, so an arm that
+/// took an extra argument, widened a return type or renamed a counter would
+/// compile on its own machine and break in `bt-app` rather than in the crate
+/// that changed. The Windows workstation is where all three files exist as
+/// *text* even though only one of them exists as code, so the comparison is
+/// made there, on the text — `macos_video_signature_tests`' instrument, and it
+/// borrows that module's `signature` rather than writing a third one.
+///
+/// **And one claim that is not a signature at all**: the boundary. The
+/// difference between a descriptor naming a logon session and a mode bit naming
+/// a user is the whole of this ticket (`docs/plans/port/macos-plan-2026-09-12.md`
+/// §R6); it is stated in prose because prose is what it is, and a file that
+/// stopped stating it would be a file that had quietly substituted `0600` for
+/// the thing it is not.
+#[cfg(test)]
+mod macos_attention_signature_tests {
+    use super::macos_process_door_tests::signature;
+
+    /// The named pipe's arm, the Unix socket's arm, and the honest refusal a
+    /// third platform still meets.
+    const WINDOWS_ARM: &str = include_str!("attention_pipe.rs");
+    const UNIX_ARM: &str = include_str!("attention_pipe_unix.rs");
+    const NEITHER: &str = include_str!("attention_pipe_portable.rs");
+
+    /// The launch door's Unix arm, for the one comparison that is between two
+    /// doors rather than between two platforms.
+    const LAUNCH_UNIX: &str = include_str!("launch_pipe_unix.rs");
+
+    /// The fields of a struct, with its documentation and its blank lines taken
+    /// out — what a caller can actually name.
+    fn fields(source: &str, item: &str) -> Vec<String> {
+        let at = source
+            .find(item)
+            .unwrap_or_else(|| panic!("`{item}` is defined in this arm"));
+        let body = &source[at + item.len()..];
+        let end = body.find("\n}").expect("a struct is closed at column zero");
+        body[..end]
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// One door's signature with rustfmt's own line breaking folded out.
+    ///
+    /// `signature` already joins whitespace, which is what makes a declaration
+    /// on one line and a wrapped one comparable at all; what it cannot know is
+    /// that rustfmt leaves a **trailing comma** behind when it wraps a parameter
+    /// list and does not when it keeps one on a line. Two arms whose parameters
+    /// are identical would otherwise differ by a comma nobody typed, and the
+    /// same argument list is the same door however wide the file it is in.
+    fn door(source: &str, name: &str) -> String {
+        signature(source, name)
+            .replace("( ", "(")
+            .replace(", )", ")")
+    }
+
+    /// RED — **each of the endpoint's doors has the same signature on every
+    /// machine.**
+    ///
+    /// `start` is the one that moved: the Unix endpoint is a file a crash leaves
+    /// behind, so its name has to be one the next holder of the data
+    /// directory's lock can compute, and the directory is where that name comes
+    /// from. The parameter is spare on the other two arms and stays in the
+    /// signature, which is §4.4 ②'s rule and `handoff`'s precedent for the
+    /// window `NSWorkspace` has nothing to be given.
+    ///
+    /// MUTATION: take `directory` back out of the Windows arm, or give the
+    /// portable arm an `Option` where the others have a `Result`, and this names
+    /// the door.
+    #[test]
+    fn every_attention_door_keeps_its_signature_on_every_machine() {
+        for door in ["start", "name", "counts", "send_line", "unguessable_bits"] {
+            let windows = self::door(WINDOWS_ARM, door);
+            let unix = self::door(UNIX_ARM, door);
+            let neither = self::door(NEITHER, door);
+            assert_eq!(windows, unix, "`{door}` is two different doors");
+            assert_eq!(
+                windows, neither,
+                "`{door}` refuses with a different shape than it answers with"
+            );
+        }
+    }
+
+    /// RED — **the counters are the same type on all three machines, field for
+    /// field, and the two bounds are the same numbers.**
+    ///
+    /// The conservation law lives in these five names — every client that
+    /// attaches becomes exactly one of four — and a sixth counter on one arm
+    /// would be a law that means something different depending on which machine
+    /// is answering. The bounds are product policy and not transport: a frame
+    /// limit that differed by platform would be a hook that works on one of a
+    /// person's two computers.
+    #[test]
+    fn the_counters_and_the_bounds_are_the_same_on_all_three_machines() {
+        let windows = fields(WINDOWS_ARM, "pub struct PipeCounts {");
+        assert_eq!(
+            windows,
+            fields(UNIX_ARM, "pub struct PipeCounts {"),
+            "the counters have drifted between the pipe and the socket"
+        );
+        assert_eq!(
+            windows,
+            fields(NEITHER, "pub struct PipeCounts {"),
+            "the counters have drifted between the pipe and the refusal"
+        );
+        for (arm, source) in [
+            ("Windows", WINDOWS_ARM),
+            ("Unix", UNIX_ARM),
+            ("neither", NEITHER),
+        ] {
+            for bound in [
+                "pub const MAX_MESSAGE_BYTES: usize = 4096;",
+                "pub const MAX_FRAMES_PER_SECOND: u32 = 512;",
+            ] {
+                assert!(
+                    source.contains(bound),
+                    "the {arm} arm no longer carries `{bound}`"
+                );
+            }
+            assert!(
+                source.contains(
+                    "#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]\npub struct PipeCounts {"
+                ),
+                "the {arm} counters no longer derive what a caller compares them with"
+            );
+        }
+    }
+
+    /// RED — **the boundary is stated, in the file, in the words that say what
+    /// changed.**
+    ///
+    /// The one thing this ticket owes that no signature can hold
+    /// (`docs/plans/port/macos-plan-2026-09-12.md` §R6): the Windows descriptor
+    /// names a **logon session**, on purpose, and a Unix mode bit names a
+    /// **user**, so a second login of the same person is inside this door and
+    /// was outside the other one. A module that dropped these sentences would
+    /// have substituted `0600` for the thing it is not, silently, and the only
+    /// gate that can notice is one that reads the prose.
+    ///
+    /// MUTATION: delete the "wider principal" paragraph from the Unix header and
+    /// this goes red on the workstation, where the arm itself cannot be built.
+    #[test]
+    fn the_unix_arm_says_which_principal_it_is_naming() {
+        let prose = prose_of(UNIX_ARM);
+        for needle in [
+            "the principal in it is the **logon session**",
+            "file permissions name a user",
+            "a *wider* principal than the Windows door",
+            "per user and per boot, not per session",
+            "not a defence against a hostile process running as you",
+        ] {
+            assert!(
+                prose.contains(needle),
+                "the Unix arm no longer says `{needle}`, which is the decision M4-7 owed"
+            );
+        }
+    }
+
+    /// **One file's prose, with its comment markers and its line breaks taken
+    /// out.**
+    ///
+    /// A sentence in a header is wrapped wherever the eightieth column falls,
+    /// and where that is has nothing to do with what the sentence says. A gate
+    /// that searched the raw bytes would therefore hold the claim only until
+    /// somebody added a word earlier in the paragraph — which is a gate that
+    /// goes red for the one reason nobody should have to think about, and green
+    /// again for the wrong one. So the markers go and the runs of whitespace
+    /// become single spaces, and what is left is the sentence.
+    fn prose_of(source: &str) -> String {
+        source
+            .lines()
+            .map(str::trim)
+            .map(|line| {
+                line.strip_prefix("//!")
+                    .or_else(|| line.strip_prefix("///"))
+                    .unwrap_or(line)
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// RED — **this door asks its peer's user and deliberately not its
+    /// executable, and the difference from the launch door is written down.**
+    ///
+    /// The two Unix sockets in one runtime directory take opposite decisions
+    /// here and both are right: the only thing that ever speaks the launch wire
+    /// is a second Folio, and the things that speak this one are `claude`,
+    /// `codex`, `node` and a shell. An executable check copied across from the
+    /// door next to it would refuse every real caller this one has — which is a
+    /// failure that looks exactly like "hooks are not installed".
+    ///
+    /// MUTATION: paste `vet_executable` into the attention arm and the second
+    /// assertion names it.
+    #[test]
+    fn the_doorbell_asks_who_you_are_and_not_what_you_are_running() {
+        assert!(
+            UNIX_ARM.contains("libc::getpeereid("),
+            "the peer's user is asked of the kernel, not read out of a frame"
+        );
+        assert!(
+            LAUNCH_UNIX.contains("fn vet_executable("),
+            "the launch door still checks the image it is talking to"
+        );
+        for absent in ["proc_pidpath", "current_exe", "LOCAL_PEERPID"] {
+            assert!(
+                !UNIX_ARM.contains(absent),
+                "the doorbell looked up its peer's image (`{absent}`), which would refuse \
+                 `claude`, `codex` and every other program that legitimately rings it"
+            );
+        }
+    }
+
+    /// RED — **`USERPROFILE` on Windows and `HOME` everywhere else, and the
+    /// question is asked of this crate rather than of a `cfg` in `bt-app`.**
+    ///
+    /// M2-6's audit finding: three hook installers composed another program's
+    /// configuration directory out of `%USERPROFILE%` with no `HOME` arm, so on
+    /// a Mac they answer `None` and report "not installed" on a machine where
+    /// the hooks are installed. `bt-app`'s own
+    /// `only_the_named_files_decide_what_platform_this_is` is why the fix is a
+    /// value here and not a gate there.
+    #[test]
+    fn the_home_variable_is_this_platforms_and_is_asked_for() {
+        assert_eq!(
+            super::home_variable_for(super::HostPlatform::Windows),
+            "USERPROFILE"
+        );
+        assert_eq!(super::home_variable_for(super::HostPlatform::MacOs), "HOME");
+        assert_eq!(
+            super::home_variable_for(super::HostPlatform::OtherUnix),
+            "HOME"
+        );
+        assert_eq!(
+            super::home_variable(),
+            super::home_variable_for(super::host_platform()),
+            "the build's own answer is the table's answer for the build's own platform"
+        );
     }
 }

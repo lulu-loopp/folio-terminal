@@ -42,16 +42,21 @@
 //! anchors what it is given ("anchored as `^(?:PATTERN)$`"), so the value written is the bare
 //! subtype name and the anchoring is upstream's.
 //!
-//! **Only the `powershell` column is written.** Upstream's field table is `bash` "Shell command for
-//! Unix" and `powershell` "Shell command for Windows"; Folio is a Windows program, so a `bash`
-//! entry naming a Windows path would be a line that can only fail, written into somebody's
-//! configuration for the look of completeness.
+//! **One column is written, and it is this machine's** (M4-7). Upstream's field table is `bash`
+//! "Shell command for Unix" and `powershell` "Shell command for Windows", and it runs the one that
+//! matches the machine. The first draft of this module wrote `powershell` and said why — *Folio is
+//! a Windows program, so a `bash` entry naming a Windows path would be a line that can only fail* —
+//! and that reason expired the day there was a Mac build. Writing the wrong column is not a
+//! degraded install: it is a file that parses, validates, sits in the right directory and never
+//! fires, which from the reader's chair is identical to not having installed at all. See
+//! [`column_for`]; the choice is a value out of `bt-platform` rather than a `cfg`, so that a
+//! Windows runner can read the shape a Mac installs.
 //!
 //! **`timeoutSec` is small and deliberately not the default.** The default is 30, and a
 //! `notification` hook is fire-and-forget — a timeout is "logged and skipped" — so the number is
 //! only the length of time upstream might wait on a machine where this build has wedged. Five.
 //!
-//! **No payload is passed**, [`attention_hooks::command_for`](crate::attention_hooks)'s rule for
+//! **No payload is passed**, [`attention_hooks::command_for_on`](crate::attention_hooks)'s rule for
 //! its reason: no row of this family declares an identifier, the two subtypes are told apart by the
 //! matcher rather than by reading the message, and a command line that interpolated a hook payload
 //! would be a command line an upstream could put a quote character into. The verbatim
@@ -74,6 +79,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use bt_platform::HostPlatform;
 use serde_json::{Map, Value};
 
 use crate::attention::MappingRow;
@@ -202,21 +208,29 @@ pub(crate) enum State {
 pub(crate) fn config_dir() -> Option<PathBuf> {
     config_dir_from(
         std::env::var_os(HOME_VARIABLE),
-        std::env::var_os("USERPROFILE"),
+        std::env::var_os(bt_platform::home_variable()),
     )
 }
 
 /// The same decision, with the environment handed in.
 ///
+/// **`home` is `%USERPROFILE%` on Windows and `$HOME` everywhere else**, and it is
+/// [`bt_platform::home_variable`] that decides which — M2-6's audit finding and M4-7's to fix: a
+/// path composed out of `%USERPROFILE%` alone is `None` on a Mac, so this whole module answered
+/// "not installed" on every machine where the hooks were installed. The question is asked of
+/// `bt-platform` rather than of a `cfg` here, which is the rule
+/// `only_the_named_files_decide_what_platform_this_is` keeps and the reason this file is not on
+/// that list.
+///
 /// Split out for [`attention_hooks`](crate::attention_hooks)'s reason: a process-wide variable
 /// changed from a test is changed for every other test running beside it, and this crate refuses
 /// `unsafe`, which is what `set_var` now is.
 #[must_use]
-fn config_dir_from(named: Option<OsString>, profile: Option<OsString>) -> Option<PathBuf> {
+fn config_dir_from(named: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     if let Some(named) = named.filter(|named| !named.is_empty()) {
         return Some(PathBuf::from(named));
     }
-    Some(PathBuf::from(profile.filter(|profile| !profile.is_empty())?).join(DEFAULT_DIRECTORY))
+    Some(PathBuf::from(home.filter(|home| !home.is_empty())?).join(DEFAULT_DIRECTORY))
 }
 
 /// The hook file this module writes. **The only file it ever writes.**
@@ -231,18 +245,18 @@ pub(crate) fn hooks_path() -> Option<PathBuf> {
 pub(crate) fn hooks_path_shown() -> String {
     hooks_path_shown_from(
         std::env::var_os(HOME_VARIABLE),
-        std::env::var_os("USERPROFILE"),
+        std::env::var_os(bt_platform::home_variable()),
     )
 }
 
 /// The same decision, with the environment handed in.
 #[must_use]
-fn hooks_path_shown_from(named: Option<OsString>, profile: Option<OsString>) -> String {
+fn hooks_path_shown_from(named: Option<OsString>, home: Option<OsString>) -> String {
     let default = || format!("~/{DEFAULT_DIRECTORY}/{HOOKS_DIRECTORY}/{HOOKS_FILE}");
     if named.as_ref().is_none_or(|named| named.is_empty()) {
         return default();
     }
-    config_dir_from(named, profile)
+    config_dir_from(named, home)
         .map(|dir| {
             dir.join(HOOKS_DIRECTORY)
                 .join(HOOKS_FILE)
@@ -381,23 +395,63 @@ pub(crate) fn rows_to_install() -> Vec<MappingRow> {
     attention_map::installed_rows(attention_map::ROWS, COPILOT, |_| true)
 }
 
-/// One `powershell` command line.
+/// **Which of upstream's two columns this machine's line goes in** (M4-7).
 ///
-/// `&` because a path with a space in it is a string to PowerShell and not a command; single quotes
-/// because the alternative expands `$` out of somebody's folder name, and doubled inside for the
-/// one character that could close them early.
+/// Upstream's field table is `bash` "Shell command for Unix" and `powershell` "Shell command for
+/// Windows", and it runs the one that matches the machine. Writing the wrong one is not a
+/// half-install that degrades: it is a file that parses, validates, sits in the right directory and
+/// **never fires**, which is indistinguishable from not having installed at all. The module header
+/// said "only the `powershell` column is written" and gave the reason — *Folio is a Windows
+/// program* — and the moment that stopped being true this had to stop being true with it.
 #[must_use]
-pub(crate) fn command_for(exe: &Path, event: &str) -> String {
-    let quoted = exe.display().to_string().replace('\'', "''");
-    format!(
-        "& '{quoted}' {} {COPILOT}:{event}",
-        crate::cli::ATTENTION_VERB
-    )
+pub(crate) fn column_for(platform: HostPlatform) -> &'static str {
+    match platform {
+        HostPlatform::Windows => "powershell",
+        HostPlatform::MacOs | HostPlatform::OtherUnix => "bash",
+    }
+}
+
+/// One command line, in the flavour of the shell that will run it.
+///
+/// **PowerShell**: `&` because a path with a space in it is a string to PowerShell and not a
+/// command; single quotes because the alternative expands `$` out of somebody's folder name, and
+/// doubled inside for the one character that could close them early.
+///
+/// **`/bin/sh`**: no `&` — a quoted word at the start of a line is already the command — and the
+/// single quotes are sh's, so the escape is sh's too (close, escape, reopen), which is
+/// [`crate::attention_hooks::quoted_program`]'s and is shared with it rather than written twice.
+///
+/// **The endpoint is in neither of them.** The hook is this executable and it reads
+/// `FOLIO_ATTENTION_PIPE` out of the environment the pane's shell gave it — see
+/// `attention_hooks::command_for_on` for why a socket path travels that way exactly as a pipe name
+/// did, and why there is no `nc -U` stub on the Unix side.
+///
+/// `platform` is handed in rather than asked for, so that a Windows runner can read the line a
+/// Mac installs and the other way round — `document_for_on`'s reason, one layer down.
+#[must_use]
+pub(crate) fn command_for_on(exe: &Path, event: &str, platform: HostPlatform) -> String {
+    let verb = crate::cli::ATTENTION_VERB;
+    match platform {
+        HostPlatform::Windows => {
+            let quoted = exe.display().to_string().replace('\'', "''");
+            format!("& '{quoted}' {verb} {COPILOT}:{event}")
+        }
+        HostPlatform::MacOs | HostPlatform::OtherUnix => format!(
+            "{} {verb} {COPILOT}:{event}",
+            crate::attention_hooks::quoted_program(exe, platform)
+        ),
+    }
 }
 
 /// **The whole document one install writes**, given where this build lives.
 #[must_use]
 pub(crate) fn document_for(exe: &Path) -> Value {
+    document_for_on(exe, bt_platform::host_platform())
+}
+
+/// The same document, for a named platform.
+#[must_use]
+pub(crate) fn document_for_on(exe: &Path, platform: HostPlatform) -> Value {
     let mut hooks = Map::new();
     for row in rows_to_install() {
         let (event, matcher) = match row.event.split_once('.') {
@@ -408,7 +462,10 @@ pub(crate) fn document_for(exe: &Path) -> Value {
         if let Some(matcher) = matcher {
             entry.insert("matcher".to_owned(), matcher.into());
         }
-        entry.insert("powershell".to_owned(), command_for(exe, row.event).into());
+        entry.insert(
+            column_for(platform).to_owned(),
+            command_for_on(exe, row.event, platform).into(),
+        );
         entry.insert("timeoutSec".to_owned(), TIMEOUT_SECONDS.into());
         // Upstream defaults this to `"command"` when it is omitted. Written anyway, because a
         // default is a thing that can change and this file has to keep meaning one thing.
@@ -812,8 +869,11 @@ mod tests {
     #[test]
     fn the_file_this_installs_is_this() {
         assert_eq!(
-            serde_json::to_string_pretty(&document_for(Path::new(r"C:\folio\folio.exe")))
-                .expect("render"),
+            serde_json::to_string_pretty(&document_for_on(
+                Path::new(r"C:\folio\folio.exe"),
+                HostPlatform::Windows
+            ))
+            .expect("render"),
             EXPECTED_FILE.trim_end()
         );
     }
@@ -871,7 +931,7 @@ mod tests {
     /// **Every command names its family and its event, and none carries a payload.**
     #[test]
     fn every_command_says_which_upstream_it_speaks_for_and_hands_over_nothing() {
-        let document = document_for(&exe());
+        let document = document_for_on(&exe(), HostPlatform::Windows);
         let mut seen = 0;
         for entries in document["hooks"].as_object().expect("hooks").values() {
             for entry in entries.as_array().expect("array") {
@@ -905,8 +965,83 @@ mod tests {
         assert_eq!(document["version"], Value::from(SCHEMA_VERSION));
         // A path with a quote in it closes the string it is in unless it is doubled.
         assert_eq!(
-            command_for(Path::new(r"C:\it's here\folio.exe"), "agentStop"),
+            command_for_on(
+                Path::new(r"C:\it's here\folio.exe"),
+                "agentStop",
+                HostPlatform::Windows
+            ),
             r"& 'C:\it''s here\folio.exe' attention copilot:agentStop"
+        );
+    }
+
+    /// **RED — on a Mac the line goes in the `bash` column and is quoted for `sh`** (M4-7).
+    ///
+    /// Upstream's field table is `bash` "Shell command for Unix" and `powershell` "Shell command
+    /// for Windows", and it runs the one that matches the machine. This module wrote `powershell`
+    /// because Folio was a Windows program, and the day that stopped being true the wrong column
+    /// became a file that parses, validates, lands in the right directory and **never fires** —
+    /// which from the reader's chair is exactly "the hooks are not installed".
+    ///
+    /// The rest of the document does not move: same events, same matchers, same `timeoutSec`, same
+    /// mark, and no endpoint in the line — `folio attention` reads `FOLIO_ATTENTION_PIPE` out of
+    /// the environment its pane's shell gave it, on both machines.
+    ///
+    /// MUTATION: return `"powershell"` from `column_for` for every platform and the first
+    /// assertion names it; hand the PowerShell quoting to the Mac arm and the last one does.
+    #[test]
+    fn a_mac_install_writes_the_bash_column_quoted_for_sh() {
+        assert_eq!(column_for(HostPlatform::Windows), "powershell");
+        assert_eq!(column_for(HostPlatform::MacOs), "bash");
+        assert_eq!(column_for(HostPlatform::OtherUnix), "bash");
+
+        let exe = Path::new("/Applications/Folio.app/Contents/MacOS/folio");
+        let windows = document_for_on(exe, HostPlatform::Windows);
+        let mac = document_for_on(exe, HostPlatform::MacOs);
+        assert_eq!(
+            windows["hooks"]
+                .as_object()
+                .expect("hooks")
+                .keys()
+                .collect::<Vec<_>>(),
+            mac["hooks"]
+                .as_object()
+                .expect("hooks")
+                .keys()
+                .collect::<Vec<_>>(),
+            "the two machines install the same events"
+        );
+        let mut seen = 0;
+        for entries in mac["hooks"].as_object().expect("hooks").values() {
+            for entry in entries.as_array().expect("array") {
+                seen += 1;
+                assert_eq!(
+                    entry.get("powershell"),
+                    None,
+                    "the powershell column is for Windows, and a Unix path there is a line that \
+                     can only fail"
+                );
+                let line = entry["bash"].as_str().expect("a command");
+                assert!(line.contains(MARK), "{line}");
+                assert!(
+                    line.starts_with("'/Applications/Folio.app/Contents/MacOS/folio' attention "),
+                    "an sh line is single-quoted and has no `&` in front of it: {line}"
+                );
+                assert_eq!(
+                    entry.get("timeoutSec"),
+                    Some(&Value::from(TIMEOUT_SECONDS)),
+                    "the timeout is policy and not platform"
+                );
+            }
+        }
+        assert_eq!(seen, rows_to_install().len());
+        // The one character that ends an sh single-quoted word early, escaped the way sh spells it.
+        assert_eq!(
+            command_for_on(
+                Path::new("/Users/someone/it's here/folio"),
+                "agentStop",
+                HostPlatform::MacOs
+            ),
+            r"'/Users/someone/it'\''s here/folio' attention copilot:agentStop"
         );
     }
 

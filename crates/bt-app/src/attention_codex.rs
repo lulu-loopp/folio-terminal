@@ -102,21 +102,29 @@ pub(crate) enum State {
 pub(crate) fn config_dir() -> Option<PathBuf> {
     config_dir_from(
         std::env::var_os(HOME_VARIABLE),
-        std::env::var_os("USERPROFILE"),
+        std::env::var_os(bt_platform::home_variable()),
     )
 }
 
 /// The same decision, with the environment handed in.
 ///
+/// **`home` is `%USERPROFILE%` on Windows and `$HOME` everywhere else**, and it is
+/// [`bt_platform::home_variable`] that decides which — M2-6's audit finding and M4-7's to fix: a
+/// path composed out of `%USERPROFILE%` alone is `None` on a Mac, so this whole module answered
+/// "not installed" on every machine where the hooks were installed. The question is asked of
+/// `bt-platform` rather than of a `cfg` here, which is the rule
+/// `only_the_named_files_decide_what_platform_this_is` keeps and the reason this file is not on
+/// that list.
+///
 /// Split out for [`attention_hooks`](crate::attention_hooks)'s reason: a process-wide variable
 /// changed from a test is changed for every other test running beside it, and this crate refuses
 /// `unsafe`, which is what `set_var` now is.
 #[must_use]
-fn config_dir_from(named: Option<OsString>, profile: Option<OsString>) -> Option<PathBuf> {
+fn config_dir_from(named: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     if let Some(named) = named.filter(|named| !named.is_empty()) {
         return Some(PathBuf::from(named));
     }
-    Some(PathBuf::from(profile.filter(|profile| !profile.is_empty())?).join(DEFAULT_DIRECTORY))
+    Some(PathBuf::from(home.filter(|home| !home.is_empty())?).join(DEFAULT_DIRECTORY))
 }
 
 /// The user-level configuration file. **The only file this module ever writes.**
@@ -131,18 +139,18 @@ pub(crate) fn config_path() -> Option<PathBuf> {
 pub(crate) fn config_path_shown() -> String {
     config_path_shown_from(
         std::env::var_os(HOME_VARIABLE),
-        std::env::var_os("USERPROFILE"),
+        std::env::var_os(bt_platform::home_variable()),
     )
 }
 
 /// The same decision, with the environment handed in.
 #[must_use]
-fn config_path_shown_from(named: Option<OsString>, profile: Option<OsString>) -> String {
+fn config_path_shown_from(named: Option<OsString>, home: Option<OsString>) -> String {
     let default = || format!("~/{DEFAULT_DIRECTORY}/{CONFIG_FILE}");
     if named.as_ref().is_none_or(|named| named.is_empty()) {
         return default();
     }
-    config_dir_from(named, profile)
+    config_dir_from(named, home)
         .map(|dir| dir.join(CONFIG_FILE).display().to_string())
         .unwrap_or_else(default)
 }

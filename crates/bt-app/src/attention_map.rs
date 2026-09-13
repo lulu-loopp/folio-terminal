@@ -593,7 +593,7 @@ pub(crate) enum Words {
 
 impl Words {
     /// Whether this row has anywhere to look — which is also whether its hook needs a payload at
-    /// all, and therefore what the installer's command line says (`attention_hooks::command_for`).
+    /// all, and therefore what the installer's command line says (`attention_hooks::command_for_on`).
     #[must_use]
     pub(crate) fn are_somewhere(self) -> bool {
         !matches!(self, Self::None)
