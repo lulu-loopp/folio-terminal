@@ -24,6 +24,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- Reuse unchanged Markdown prose measurements across caret moves and edits, and reset block scroll offsets after reparsing.
+
 - **While you type pinyin, the caret stands at the end of what you have typed.**
   Composing over the terminal, the upright caret sometimes stood one character
   short of the end — `hai'you` drew it between `o` and `u`, `bin` between `i`
