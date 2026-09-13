@@ -1,5 +1,5 @@
 use bt_platform::HostPlatform;
-use winit::event::ElementState;
+use winit::event::{ElementState, MouseButton};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 // ── The routing rule, and the one sentence it is (M1-7, probe X-3 §4) ───────
@@ -90,6 +90,133 @@ pub(crate) fn is_command_chord_alone(modifiers: ModifiersState) -> bool {
 #[must_use]
 pub(crate) fn types_a_character(modifiers: ModifiersState) -> bool {
     !modifiers.control_key() && !modifiers.super_key()
+}
+
+// ── The same rule, said about the pointer (T-MAC-CMDCLICK, §13.45) ──────────
+
+/// **Whether the hand is holding the modifier that hands a pointer gesture
+/// over** — `Ctrl` here, `⌘` on a Mac.
+///
+/// This is M1-7's sentence stated about the other input device, and it is the
+/// same sentence rather than a second one: the rulings of 2026-08-20 spend a
+/// modifier on a click (`点=留窗内,Ctrl+点=交出去`) and on a notch, and the
+/// modifier they spend is *this application's* — the one that means "I am
+/// talking to Folio" — which is why the answer is read off
+/// [`is_command_chord_on`] instead of being matched a second time. Two matches
+/// on `HostPlatform` for one dialect is how a dialect comes to be two.
+///
+/// **It has to be Command on a Mac, and not merely by symmetry.** Control-click
+/// *is* the secondary click on that platform: AppKit gives a one-button mouse
+/// its context menu that way, winit hands it on as a plain left press with
+/// Control in the flags ([`pressed_button`] is the other half of this ticket),
+/// and a build that also spent Control on "hand this link to the system" would
+/// be answering one press with two verbs.
+///
+/// # It is asked of the hand
+///
+/// The state to hand this is `WindowRuntime::modifiers_held` and not
+/// `modifiers` — §13.33 ①'s ruling, and for its reason: a gesture composes no
+/// character, so a policy about what a key *types* has no business deciding
+/// what a click *does*. The two states carry the same Control and the same
+/// Command bit today, because [`effective_modifiers`] takes out `Alt` and
+/// nothing else; the reading is the hand's all the same, so that the next key
+/// a text policy speaks for does not silently take a gesture with it.
+#[must_use]
+pub(crate) fn pointer_chord_held(modifiers: ModifiersState) -> bool {
+    pointer_chord_held_on(modifiers, bt_platform::host_platform())
+}
+
+/// The same on a named platform, so a test on either machine can ask about the
+/// other. See [`is_command_chord_on`].
+#[must_use]
+pub(crate) fn pointer_chord_held_on(modifiers: ModifiersState, platform: HostPlatform) -> bool {
+    is_command_chord_on(modifiers, platform)
+}
+
+/// **What button this press is**, once the platform's own secondary-click
+/// convention has been applied to what winit reported.
+///
+/// On a Mac, Control+click is the secondary click — it is how a trackpad and a
+/// one-button mouse raise a context menu, and every application on that desk
+/// answers it. AppKit does not turn it into a right-button event on the way:
+/// `mouseDown:` is delivered with `buttonNumber` 0 and the Control flag set, and
+/// winit's `mouse_button` reads that number and nothing else
+/// (`macos/view.rs:1090`), so a window that does not make the translation itself
+/// sees a plain left press and the desk's oldest gesture does nothing.
+///
+/// It is made **once**, at the one door every button event in this process comes
+/// through, for [`effective_modifiers`]'s reason: a second place that decided
+/// what a press was would be a second answer. Downstream nothing is asked and
+/// nothing changes — the pane's menu, the tab's menu, the page's menu and the
+/// forwarding table all go on reading `MouseButton::Right`, which is the whole
+/// point: the two ways a Mac makes a secondary press are one press here, and
+/// this window's rule for it (`right_press_raises_terminal_menu`: the program's
+/// while it is tracking the mouse, ours otherwise) is written down once.
+///
+/// Off macOS it is the identity function and says so: a Control+click on a
+/// Windows mouse is a Control+click, and this product spends it on handing
+/// references to the system.
+#[must_use]
+pub(crate) fn pressed_button(
+    reported: MouseButton,
+    modifiers: ModifiersState,
+    platform: HostPlatform,
+) -> MouseButton {
+    if platform == HostPlatform::MacOs && reported == MouseButton::Left && modifiers.control_key() {
+        MouseButton::Right
+    } else {
+        reported
+    }
+}
+
+/// [`pressed_button`] **held for the length of the gesture**, which is what the
+/// one door actually asks.
+///
+/// The press decides and the release is owed the press's answer. Control is a
+/// key and a button is a button, so a hand can let one go before the other: lift
+/// Control first and the platform reports a plain left release after a press
+/// this window took as the secondary one. That release is not harmless. It
+/// reaches `route_forwarded_mouse_button`, whose own comment already states the
+/// rule this obeys — *the release is owed to the press that was forwarded, so it
+/// is spelled the way that press was spelled* — and which spells the encoding
+/// off its latch for exactly that reason; the button has to come from the same
+/// place, or a mouse-tracking program is handed a right press and a left
+/// release it can pair with nothing.
+///
+/// So one `bool` travels with the hand, and it is this window's smallest
+/// possible statement of "a gesture belongs to the press that began it" — the
+/// same sentence `MouseRoute` makes about where a drag goes and `DragLatch`
+/// makes about whether it has travelled.
+///
+/// **Only the left button is ever latched**, because it is the only one the
+/// platform rule can rewrite; a right, middle or back button passes through
+/// with the latch untouched, so a middle-click tab close in the middle of
+/// anything cannot disturb it. On Windows the latch is written `false` by every
+/// press and read back `false`, which is the identity this function is there
+/// on that platform.
+#[must_use]
+pub(crate) fn pressed_button_of_gesture(
+    secondary: &mut bool,
+    reported: MouseButton,
+    state: ElementState,
+    modifiers: ModifiersState,
+    platform: HostPlatform,
+) -> MouseButton {
+    if reported != MouseButton::Left {
+        return reported;
+    }
+    let secondary = match state {
+        ElementState::Pressed => {
+            *secondary = pressed_button(reported, modifiers, platform) == MouseButton::Right;
+            *secondary
+        }
+        ElementState::Released => std::mem::take(secondary),
+    };
+    if secondary {
+        MouseButton::Right
+    } else {
+        MouseButton::Left
+    }
 }
 
 /// **The modifiers as this window means them**, which on one platform is not
@@ -1304,6 +1431,191 @@ mod tests {
         assert!(is_command_chord_on(CMD, MAC));
         assert!(!is_command_chord_on(ModifiersState::CONTROL, MAC));
         assert!(is_terminal_chord_on(ModifiersState::CONTROL, MAC));
+    }
+
+    /// RED (T-MAC-CMDCLICK, §13.45 ①) — **the pointer's hand-over modifier is
+    /// `Ctrl` here and `⌘` on a Mac**, both platforms and both states.
+    ///
+    /// The whole of the ticket in four asserts. A build that answered
+    /// `control_key()` on both sides compiles, passes every Windows test in
+    /// this workspace, and spends the Mac's secondary click on handing a link
+    /// to the system — two verbs on one press, and the one the reader gets is
+    /// whichever arm this file happens to ask first.
+    ///
+    /// MUTATION: return `modifiers.control_key()` unconditionally.
+    #[test]
+    fn the_pointer_chord_is_control_here_and_command_on_a_mac() {
+        assert!(pointer_chord_held_on(ModifiersState::CONTROL, WINDOWS));
+        assert!(!pointer_chord_held_on(CMD, WINDOWS));
+
+        assert!(pointer_chord_held_on(CMD, MAC));
+        assert!(
+            !pointer_chord_held_on(ModifiersState::CONTROL, MAC),
+            "Control is the secondary click on that desk and cannot also hand a \
+             reference over"
+        );
+
+        for platform in [WINDOWS, MAC] {
+            assert!(
+                !pointer_chord_held_on(ModifiersState::empty(), platform),
+                "a bare click is never a hand-over on {platform:?}"
+            );
+            assert!(
+                !pointer_chord_held_on(ModifiersState::SHIFT, platform),
+                "Shift is the selection's on {platform:?}, not the system's"
+            );
+        }
+    }
+
+    /// PIN (T-MAC-CMDCLICK, §13.45 ①) — **one dialect, not two.**
+    ///
+    /// A pointer's hand-over modifier and a keyboard's application chord are
+    /// the same key on each platform, which is why the pointer's door is read
+    /// off the keyboard's rather than matching `HostPlatform` a second time.
+    /// Two matches for one sentence is how a sentence comes to be two.
+    #[test]
+    fn the_pointer_and_the_keyboard_spell_the_applications_modifier_the_same_way() {
+        for platform in [WINDOWS, MAC] {
+            for modifiers in [
+                ModifiersState::empty(),
+                ModifiersState::CONTROL,
+                CMD,
+                ModifiersState::SHIFT,
+                ModifiersState::ALT,
+                CMD.union(ModifiersState::CONTROL),
+            ] {
+                assert_eq!(
+                    pointer_chord_held_on(modifiers, platform),
+                    is_command_chord_on(modifiers, platform),
+                    "{modifiers:?} on {platform:?}"
+                );
+            }
+        }
+    }
+
+    /// RED (T-MAC-CMDCLICK, §13.45 ②) — **Control+click is the secondary click
+    /// on a Mac, and nowhere else.**
+    ///
+    /// winit reads the button off `NSEvent`'s `buttonNumber`, which is 0 for a
+    /// control-click, so the translation is this window's to make. Measured on
+    /// the machine: the trace's first station reports `button=Left` for a
+    /// Control-flagged `CGEvent` press, and the pane's menu comes up.
+    ///
+    /// MUTATION: drop the `platform == MacOs` guard and a Windows Control+click
+    /// stops handing a link to the system and raises the pane's menu instead.
+    #[test]
+    fn control_click_is_the_secondary_click_only_on_a_mac() {
+        assert_eq!(
+            pressed_button(MouseButton::Left, ModifiersState::CONTROL, MAC),
+            MouseButton::Right,
+            "a control-click on that desk is how a one-button mouse asks for a menu"
+        );
+        assert_eq!(
+            pressed_button(MouseButton::Left, ModifiersState::CONTROL, WINDOWS),
+            MouseButton::Left,
+            "here Control+click hands a reference to the system and is not a menu"
+        );
+        assert_eq!(
+            pressed_button(MouseButton::Left, ModifiersState::empty(), MAC),
+            MouseButton::Left
+        );
+        assert_eq!(
+            pressed_button(MouseButton::Left, CMD, MAC),
+            MouseButton::Left,
+            "the hand-over modifier is not the secondary click"
+        );
+        // The other buttons are the platform's own report and are never
+        // rewritten — a right press wearing Control is already a right press,
+        // and a middle click closes a tab on both desks.
+        for button in [
+            MouseButton::Right,
+            MouseButton::Middle,
+            MouseButton::Back,
+            MouseButton::Forward,
+        ] {
+            for platform in [WINDOWS, MAC] {
+                assert_eq!(
+                    pressed_button(button, ModifiersState::CONTROL, platform),
+                    button,
+                    "{button:?} on {platform:?}"
+                );
+            }
+        }
+    }
+
+    /// RED (T-MAC-CMDCLICK, §13.45 ②) — **a release is spelled the way its own
+    /// press was spelled**, even when the hand let Control go first.
+    ///
+    /// Control is a key and a button is a button, and nothing makes a reader
+    /// lift them in order. Without the latch the platform reports a plain left
+    /// release after a press this window took as the secondary one, and that
+    /// release travels: `route_forwarded_mouse_button` spells its release off
+    /// the argument, so a mouse-tracking program would be handed a right press
+    /// and a left release it can pair with nothing.
+    ///
+    /// MUTATION: answer `pressed_button(reported, modifiers, platform)` on the
+    /// release arm instead of the latch, and the third assert goes red.
+    #[test]
+    fn a_release_is_spelled_the_way_its_own_press_was() {
+        let mut held = false;
+        assert_eq!(
+            pressed_button_of_gesture(
+                &mut held,
+                MouseButton::Left,
+                ElementState::Pressed,
+                ModifiersState::CONTROL,
+                MAC
+            ),
+            MouseButton::Right
+        );
+        assert!(held, "the gesture is the secondary one until it comes up");
+        assert_eq!(
+            pressed_button_of_gesture(
+                &mut held,
+                MouseButton::Left,
+                ElementState::Released,
+                // Control is gone by now, and the press does not stop being
+                // what it was.
+                ModifiersState::empty(),
+                MAC
+            ),
+            MouseButton::Right
+        );
+        assert!(!held, "and the latch is spent by the release that read it");
+
+        // The ordinary gesture never sets it, and neither platform's other
+        // buttons disturb it.
+        assert_eq!(
+            pressed_button_of_gesture(
+                &mut held,
+                MouseButton::Left,
+                ElementState::Pressed,
+                ModifiersState::CONTROL,
+                WINDOWS
+            ),
+            MouseButton::Left
+        );
+        assert!(
+            !held,
+            "Windows never latches: the rule is the identity there"
+        );
+        for platform in [WINDOWS, MAC] {
+            let mut standing = true;
+            assert_eq!(
+                pressed_button_of_gesture(
+                    &mut standing,
+                    MouseButton::Middle,
+                    ElementState::Pressed,
+                    ModifiersState::CONTROL,
+                    platform
+                ),
+                MouseButton::Middle
+            );
+            assert!(
+                standing,
+                "a middle click in the middle of a gesture is not that gesture"
+            );
+        }
     }
 
     /// RED (M1-7, X-3 §4 ②) — **the clipboard pair speaks the platform's
