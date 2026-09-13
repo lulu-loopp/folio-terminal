@@ -4523,13 +4523,18 @@ mod keyboard_tests {
                 "{named:?} is known to one of the two tables and not the other"
             );
             // The numbers themselves can only be compared where one currency is
-            // in use, which is the platform whose numbers both tables hold.
-            #[cfg(windows)]
-            assert_eq!(
-                page,
-                summon.and_then(bt_platform::hotkey::summon_key_code),
-                "{named:?} is two different keys depending on which door asks"
-            );
+            // in use, which is the platform whose numbers both tables hold —
+            // asked of the host at run time, bt-app's one platform decision.
+            if matches!(
+                bt_platform::host_platform(),
+                bt_platform::HostPlatform::Windows
+            ) {
+                assert_eq!(
+                    page,
+                    summon.and_then(bt_platform::hotkey::summon_key_code),
+                    "{named:?} is two different keys depending on which door asks"
+                );
+            }
         }
         // A key neither table has a number for is refused by both, and refused
         // rather than guessed.

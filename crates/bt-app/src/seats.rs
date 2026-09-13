@@ -69,27 +69,26 @@ use bt_render::{
     FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX,
     FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, FOCUS_MINI_SEAM_LOGICAL_PX,
     MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX, OverlayQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
-    PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
-    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
-    RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX, RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX,
-    RAIL_LABEL_PADDING_TOP_LOGICAL_PX, RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM,
-    RAIL_NEW_CHEVRON_BOX_LOGICAL_PX, RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX,
-    RAIL_NEW_MARGIN_TOP_LOGICAL_PX, RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX,
-    RAIL_PADDING_TOP_LOGICAL_PX, RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX,
-    RAIL_SEAM_INSET_X_LOGICAL_PX, RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX,
-    RAIL_SHADE_WIDTH_LOGICAL_PX, RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX,
-    RAIL_TAB_HEIGHT_LOGICAL_PX, RAIL_TAB_PADDING_LEFT_LOGICAL_PX,
-    RAIL_TAB_PADDING_RIGHT_LOGICAL_PX, RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX,
-    RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX,
-    SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX, SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX,
-    SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX,
+    PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX,
+    RAIL_GAP_LOGICAL_PX, RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX,
+    RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX, RAIL_LABEL_PADDING_TOP_LOGICAL_PX,
+    RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM, RAIL_NEW_CHEVRON_BOX_LOGICAL_PX,
+    RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX, RAIL_NEW_MARGIN_TOP_LOGICAL_PX,
+    RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX, RAIL_PADDING_TOP_LOGICAL_PX,
+    RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX, RAIL_SEAM_INSET_X_LOGICAL_PX,
+    RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX, RAIL_SHADE_WIDTH_LOGICAL_PX,
+    RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX, RAIL_TAB_HEIGHT_LOGICAL_PX,
+    RAIL_TAB_PADDING_LEFT_LOGICAL_PX, RAIL_TAB_PADDING_RIGHT_LOGICAL_PX,
+    RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX, RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX,
+    SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX,
     SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX, SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX,
     SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX,
     SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
     SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX, SeatViewport, WINDOW_CAPTION_BUTTON_LOGICAL_PX,
     WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX, WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX,
-    WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX, WINDOW_CAPTION_GEAR_MARGIN_LOGICAL_PX,
-    WINDOW_NEW_TAB_BOX_LOGICAL_PX,
+    WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX, WINDOW_NEW_TAB_BOX_LOGICAL_PX,
     WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX, WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX,
     WINDOW_NEW_TAB_GLYPH_LOGICAL_PX, WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX,
     WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX, WINDOW_NEW_TAB_RADIUS_LOGICAL_PX,
@@ -11176,8 +11175,9 @@ fn window_chrome(
             if rect[3] - rect[1] < title {
                 sprites.push(ChromeSprite::new(
                     ChromeMark::ControlPill {
-                        radius_px: (MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX * scale).round().max(1.0)
-                            as u32,
+                        radius_px: (MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX * scale)
+                            .round()
+                            .max(1.0) as u32,
                     },
                     pixel_snapped(rect),
                     wash,
@@ -27946,7 +27946,9 @@ mod tests {",
             let width = 960.0 * scale;
             let titles = strip_titles(2);
             let gear = window_caption_boxes(width, scale, mac, false)[0].1;
-            let radius = (MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
+            let radius = (MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX * scale)
+                .round()
+                .max(1.0) as u32;
 
             let (rest_quads, _, rest_sprites) = strip_chrome_on(mac, scale, &titles, 0, None);
             assert!(
@@ -28031,8 +28033,7 @@ mod tests {",
             let mac = mac_bar(scale);
             let strip_radius = (WINDOW_NEW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
             let titles = strip_titles(2);
-            let geometry =
-                tab_strip_geometry(960.0 * scale, scale, mac, &resting(2), 0, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, mac, &resting(2), 0, 0.0);
             for (what, target, rect) in [
                 ("the `+`", ChromeTarget::NewTab, geometry.new_tab),
                 ("the `˅`", ChromeTarget::NewTabMenu, geometry.new_tab_menu),
@@ -28102,10 +28103,10 @@ mod tests {",
                 "scale {scale}: the wash is the slot itself, with square corners"
             );
             assert!(
-                !sprites.iter().any(|sprite| matches!(
-                    sprite.mark,
-                    ChromeMark::ControlPill { .. }
-                ) && sprite.rect == pixel_snapped(gear)),
+                !sprites.iter().any(
+                    |sprite| matches!(sprite.mark, ChromeMark::ControlPill { .. })
+                        && sprite.rect == pixel_snapped(gear)
+                ),
                 "scale {scale}: nothing rounds the Windows caption slot"
             );
         }

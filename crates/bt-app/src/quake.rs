@@ -1103,11 +1103,14 @@ mod tests {
         let (modifiers, _) = registration_bits(as_hotkey(&windows, 0xc0))
             .expect("the shipped Windows summon is a chord RegisterHotKey will be asked for");
         assert_eq!(modifiers, 0x4000 | 0x0008, "MOD_NOREPEAT | MOD_WIN");
-        #[cfg(windows)]
-        assert!(
-            hotkey_for(&windows).is_some_and(|hotkey| hotkey.virtual_key != 0),
-            "and on this machine the layout has a key for it"
-        );
+        // Asked of the host at run time and not of a `cfg`: bt-app's one
+        // platform decision is `host_platform()` (§4.3 of the port plan).
+        if matches!(bt_platform::host_platform(), HostPlatform::Windows) {
+            assert!(
+                hotkey_for(&windows).is_some_and(|hotkey| hotkey.virtual_key != 0),
+                "and on this machine the layout has a key for it"
+            );
+        }
     }
 
     /// RED (§7.54) — **a chord that has not moved is not re-asked for.**
