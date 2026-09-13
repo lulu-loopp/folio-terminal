@@ -98,6 +98,26 @@
 //! failure is `NSURLSession: {what Foundation called it}` where the twin is
 //! `WinHttpSendRequest: {error}`. Neither is anything a caller matches on —
 //! `bt_app::update` turns every `Err` into the same silence.
+//!
+//! # Where the answers this module is asked about come from
+//!
+//! **A server on this machine's own loopback, and never `api.github.com`**
+//! (T-CI-PORTABLE). Three of the cases below used to put their questions to the
+//! real releases API, which made them a statement about somebody else's rate
+//! limit: a shared CI runner is one of a great many machines behind one address,
+//! GitHub's unauthenticated limit is per address, and the three answered `403`
+//! there and `200` on a developer's Mac for two days. Each now binds a
+//! `TcpListener` on `127.0.0.1`, serves one canned HTTP/1.1 response and points
+//! the transport at it.
+//!
+//! The door itself cannot be pointed anywhere but `https://{host}{path}` — that
+//! is `address`'s whole job and two cases below pin it — so the exchange is
+//! split at the seam it already had: `address` answers *where to send it* and
+//! `fetch` does the sending, and it is `fetch` that the loopback cases drive.
+//! App Transport Security has nothing to say about a plaintext request to an IP
+//! literal, which is what makes that possible at all; `ask_this_machine` in this
+//! file's own tests carries what was measured, and what would name itself if it
+//! ever changed.
 
 use std::{
     ptr,
@@ -454,8 +474,21 @@ fn address(host: &str, path: &str) -> Result<Retained<NSURL>, String> {
 /// Returns the reason as a sentence whenever the body of a `200` response did
 /// not arrive whole.
 pub fn https_get(request: &HttpsGet<'_>) -> Result<String, String> {
-    let url = address(request.host, request.path)?;
+    fetch(&address(request.host, request.path)?, request)
+}
 
+/// **The whole of the exchange, once the address is settled** — the session,
+/// the delegate, the task, the wait and the answer.
+///
+/// Split from [`https_get`] at exactly the seam the two halves already were:
+/// *where to send it* is [`address`]'s question and is asked of the caller's
+/// strings, and *sending it* is this, which is asked of a URL. Nothing is
+/// relaxed by the split — `https_get` is still the only door out of this module
+/// and it still composes the only address it will build — and what the seam buys
+/// is that this half can be put to a server on this machine's own loopback,
+/// which is how the delegate's three decisions are proved without the public
+/// internet answering for them. See this module's own tests.
+fn fetch(url: &NSURL, request: &HttpsGet<'_>) -> Result<String, String> {
     let exchange = Arc::new(Exchange::new(request.cap));
     let transport = Transport::new(Arc::clone(&exchange));
 
@@ -482,7 +515,7 @@ pub fn https_get(request: &HttpsGet<'_>) -> Result<String, String> {
     };
 
     let http = NSMutableURLRequest::requestWithURL_cachePolicy_timeoutInterval(
-        &url,
+        url,
         NSURLRequestCachePolicy::ReloadIgnoringLocalCacheData,
         request.phase_timeout.as_secs_f64(),
     );
@@ -508,9 +541,15 @@ pub fn https_get(request: &HttpsGet<'_>) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        time::{Duration, Instant},
+    };
 
-    use super::{HttpsGet, https_get};
+    use objc2_foundation::{NSString, NSURL};
+
+    use super::{HttpsGet, fetch, https_get};
 
     /// The product's own numbers, so that what these cases exercise is what
     /// `bt_app::update` exercises.
@@ -529,25 +568,121 @@ mod tests {
         })
     }
 
-    /// **The real request the product makes**, against the real releases API.
+    /// **One canned HTTP/1.1 response, from a server on this machine** — bound
+    /// on a loopback port of the kernel's choosing, answering the first request
+    /// that arrives and then closing.
     ///
-    /// This one needs the network, and says so rather than hiding behind a
-    /// switch: M4's acceptance ⑦ is "the update check reports the current
-    /// release from a pane-visible settings row", and a transport that is only
-    /// ever asked questions it can answer offline has not been shown to do
-    /// that. `NSURLSession` is also where this machine's certificate store, its
-    /// proxy configuration and its ATS policy are, and none of the three can be
-    /// exercised by a fixture.
+    /// **The three cases below used to ask `api.github.com`, and that is why CI
+    /// was red for two days**: a shared runner is one of a great many machines
+    /// behind one address, and GitHub's unauthenticated rate limit is per
+    /// address — so the three came back `403` there and `200` on a developer's
+    /// Mac. A test that passes or fails according to how busy somebody else's
+    /// service is has stopped being a statement about this code.
     ///
-    /// MUTATION: drop the `User-Agent` header and GitHub answers `403`, which
-    /// is the failure this case exists to have caught before a release does.
+    /// The head is read before the answer is written, because a server that
+    /// answers and closes while the client is still writing hands some stacks a
+    /// reset in place of a response.
+    fn answering(response: Vec<u8>) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let port = listener
+            .local_addr()
+            .expect("the port the kernel chose")
+            .port();
+        std::thread::spawn(move || {
+            let Ok((mut connection, _)) = listener.accept() else {
+                return;
+            };
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                if connection.read(&mut byte).unwrap_or(0) != 1 {
+                    return;
+                }
+                head.push(byte[0]);
+            }
+            // The client of a body longer than its cap cancels mid-transfer, so
+            // the far end going away here is one of the outcomes rather than a
+            // failure of the server.
+            let _ = connection.write_all(&response);
+            let _ = connection.flush();
+        });
+        port
+    }
+
+    /// The least HTTP/1.1 the client needs: a status line, a length, and a
+    /// connection that closes so the end of the body is not a guess.
+    fn response(status: u16, reason: &str, body: &str) -> Vec<u8> {
+        let mut out = format!(
+            "HTTP/1.1 {status} {reason}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(body.as_bytes());
+        out
+    }
+
+    /// **The product's own transport, put to that server.**
+    ///
+    /// [`super::fetch`] and not [`https_get`], because the door composes
+    /// `https://{host}{path}` and refuses anything else — a port is not part of
+    /// a host and a scheme cannot be smuggled through one, which is what
+    /// `a_port_in_the_host_is_refused_before_the_network` and
+    /// `a_plain_http_address_is_refused_without_a_round_trip` below pin, and
+    /// what makes a loopback port unreachable *through* the door. So the two
+    /// halves are asked separately: those two cases are about the address, and
+    /// these three are about everything the session and its delegate do once
+    /// there is one.
+    ///
+    /// **App Transport Security does not stand in the way, and the reason is
+    /// worth writing down rather than discovering twice.** ATS reads
+    /// `NSAppTransportSecurity` out of the *main bundle's* `Info.plist`, and a
+    /// `cargo test` binary has no bundle at all — so no exception could be
+    /// declared from here even if one were wanted. It is not wanted: ATS's rules
+    /// are about connections to a **domain name**, and it does not apply to a
+    /// host that is an IP literal (which is the gap `NSAllowsLocalNetworking`
+    /// exists to cover for names like `localhost` and `*.local`). The address
+    /// below is `127.0.0.1`, so a plaintext request to it is not a request ATS
+    /// has anything to say about. If that ever stops being true, these three
+    /// fail together with `NSURLSession: … App Transport Security policy
+    /// requires the use of a secure connection`, which names itself.
+    fn ask_this_machine(port: u16, path: &str, cap: usize) -> Result<String, String> {
+        let composed = format!("http://127.0.0.1:{port}{path}");
+        let url = NSURL::URLWithString(&NSString::from_str(&composed))
+            .expect("a loopback address this system can read");
+        fetch(
+            &url,
+            &HttpsGet {
+                host: "127.0.0.1",
+                path,
+                user_agent: "Folio",
+                phase_timeout: PHASE,
+                budget: BUDGET,
+                cap,
+            },
+        )
+    }
+
+    /// **A releases list, fetched and handed back whole** — the `Ok` path, and
+    /// the only case here that runs the delegate all the way to a body.
+    ///
+    /// The response is the shape `bt_app::update::GitHubReleases` parses: a JSON
+    /// array, served with a length and a close. What it proves is that a `200`
+    /// is allowed to proceed, that every chunk the delegate is handed reaches
+    /// the caller in order, and that the bytes become a `String` — which is the
+    /// whole of what this transport owes the update check.
+    ///
+    /// MUTATION: cancel on a `200` in `didReceiveResponse:`, or drop a chunk in
+    /// `didReceiveData:`, and this stops being a JSON array.
     #[test]
     fn the_releases_list_comes_back_as_json() {
-        let body = ask(
-            "api.github.com",
-            "/repos/lulu-loopp/folio-terminal/releases",
-        )
-        .expect("the releases list");
+        const RELEASES: &str = r#"[{"tag_name":"v0.3.0","name":"Folio 0.3.0","draft":false}]"#;
+        let port = answering(response(200, "OK", RELEASES));
+        let body = ask_this_machine(port, "/repos/lulu-loopp/folio-terminal/releases", CAP)
+            .expect("the releases list");
+        assert_eq!(body, RELEASES, "the body arrived whole and in order");
         assert!(
             body.trim_start().starts_with('['),
             "the release list is a JSON array: {}",
@@ -640,35 +775,44 @@ mod tests {
         );
     }
 
-    /// **The cap is a refusal and not a truncation**, measured against the real
-    /// releases list with a cap small enough that one packet passes it.
+    /// **The cap is a refusal and not a truncation**, against a body served
+    /// with a cap small enough that the first chunk passes it.
+    ///
+    /// The `200` is the point: the server allows the transfer, the delegate
+    /// starts it, and the decision is taken **while it is still running** —
+    /// which is why the cap is checked in `didReceiveData:` and not after the
+    /// body has arrived. The sentence is the Windows arm's word for word.
     ///
     /// MUTATION: turn the cap check in `didReceiveData:` into a truncation and
     /// this comes back `Ok` with a short body.
     #[test]
     fn a_body_longer_than_the_cap_is_an_error() {
-        let refusal = https_get(&HttpsGet {
-            host: "api.github.com",
-            path: "/repos/lulu-loopp/folio-terminal/releases",
-            user_agent: "Folio",
-            phase_timeout: PHASE,
-            budget: BUDGET,
-            cap: 64,
-        })
-        .expect_err("64 bytes is not a release list");
+        let long = format!("[{}]", "\"v0.3.0\",".repeat(40));
+        assert!(long.len() > 64, "the body has to be longer than the cap");
+        let port = answering(response(200, "OK", &long));
+        let refusal = ask_this_machine(port, "/repos/lulu-loopp/folio-terminal/releases", 64)
+            .expect_err("64 bytes is not a release list");
         assert_eq!(refusal, "the body is longer than 64 bytes");
     }
 
     /// **A status that is not `200` is carried as the number**, in the sentence
     /// the Windows arm uses.
     ///
-    /// GitHub answers `404` for a repository that is not there, which is the
-    /// cheapest real non-`200` this machine can be shown.
+    /// `404` is what a repository that is not there answers with, and the two
+    /// things worth having proved are both about what happens *after* the
+    /// number: the delegate cancels rather than reading a body it has no use
+    /// for, and the cancellation that causes does not become the sentence the
+    /// caller sees — the server's number outranks it (see [`super::outcome`]).
+    ///
+    /// MUTATION: let `outcome` prefer the refusal and this comes back
+    /// `NSURLSession: cancelled`.
     #[test]
     fn a_status_that_is_not_200_comes_back_as_the_number() {
-        let refusal = ask(
-            "api.github.com",
+        let port = answering(response(404, "Not Found", r#"{"message":"Not Found"}"#));
+        let refusal = ask_this_machine(
+            port,
             "/repos/lulu-loopp/folio-terminal-not-a-repo/releases",
+            CAP,
         )
         .expect_err("there is no such repository");
         assert_eq!(refusal, "the server answered 404");

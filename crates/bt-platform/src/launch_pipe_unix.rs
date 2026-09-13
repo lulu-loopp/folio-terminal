@@ -40,10 +40,12 @@
 //! on this platform both ends can ask:
 //!
 //! * **The server** takes the peer's credentials off the connected socket —
-//!   `getpeereid` for the uid, `LOCAL_PEERPID` for the pid — and refuses a peer
-//!   whose uid is not its own or whose executable is not the same file as its
-//!   own. A pid out of a frame would be a number the peer chose; these come
-//!   from the kernel.
+//!   [`crate::peer::credentials`], which is the uid and the pid this kernel
+//!   recorded when that peer connected — and refuses a peer whose uid is not its
+//!   own or whose executable is not the same file as its own. A pid out of a
+//!   frame would be a number the peer chose; these come from the kernel. (The
+//!   two calls that answer it are not the same two on the two Unixes this
+//!   workspace compiles, which is what that module is for.)
 //! * **The client** reads the endpoint's own file before it connects — a
 //!   socket, not a link, owned by this user, mode `0600` — and then asks the
 //!   same two questions of the connected peer, before a byte of the command
@@ -492,20 +494,20 @@ fn vetted_endpoint(path: &Path) -> io::Result<()> {
 /// is a mode bit on a file, which says who could have *created* the door rather
 /// than who is standing at it — so the server asks too.
 fn vetted_peer(stream: &UnixStream) -> io::Result<u32> {
-    let (uid, pid) = peer_credentials(stream)?;
+    let peer = crate::peer::credentials(stream)?;
     // SAFETY: `geteuid` reads this process's own credentials and cannot fail.
-    if uid != unsafe { libc::geteuid() } {
+    if peer.uid != unsafe { libc::geteuid() } {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "the other end of the launch endpoint is running as another user",
         ));
     }
-    if pid == 0 {
+    let Some(pid) = peer.pid else {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "the launch endpoint named a process id that is not a process",
         ));
-    }
+    };
     vet_executable(&peer_executable(pid)?)?;
     Ok(pid)
 }
@@ -536,68 +538,6 @@ fn vet_executable(theirs: &Path) -> io::Result<()> {
         io::ErrorKind::PermissionDenied,
         "the launch endpoint is held by a process that is not this program",
     ))
-}
-
-/// The uid and pid of the peer, from the kernel.
-///
-/// `getpeereid` is the portable half and `LOCAL_PEERPID` is Darwin's name for
-/// the other; a `getsockopt` rather than a credential frame, because a frame is
-/// something the peer writes.
-#[cfg(target_os = "macos")]
-fn peer_credentials(stream: &UnixStream) -> io::Result<(u32, u32)> {
-    /// `<sys/un.h>`: the option level for a `AF_UNIX` socket's own options.
-    const SOL_LOCAL: libc::c_int = 0;
-    /// `<sys/un.h>`: the pid of the peer, as the kernel recorded it at connect.
-    const LOCAL_PEERPID: libc::c_int = 2;
-
-    let mut uid: libc::uid_t = 0;
-    let mut gid: libc::gid_t = 0;
-    // SAFETY: the descriptor is the borrowed stream's and both outputs are live
-    // locals of this frame.
-    if unsafe { libc::getpeereid(stream.as_raw_fd(), &raw mut uid, &raw mut gid) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut pid: libc::pid_t = 0;
-    let mut length = u32::try_from(std::mem::size_of::<libc::pid_t>()).unwrap_or(0);
-    // SAFETY: `pid` is a live local and `length` describes it exactly.
-    let read = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            SOL_LOCAL,
-            LOCAL_PEERPID,
-            (&raw mut pid).cast(),
-            &raw mut length,
-        )
-    };
-    if read != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok((uid, u32::try_from(pid).unwrap_or(0)))
-}
-
-/// The same two numbers where the kernel hands over all three at once.
-#[cfg(not(target_os = "macos"))]
-fn peer_credentials(stream: &UnixStream) -> io::Result<(u32, u32)> {
-    let mut credentials = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut length = libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>()).unwrap_or(0);
-    // SAFETY: `credentials` is a live local and `length` describes it exactly.
-    let read = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&raw mut credentials).cast(),
-            &raw mut length,
-        )
-    };
-    if read != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok((credentials.uid, u32::try_from(credentials.pid).unwrap_or(0)))
 }
 
 /// The executable one pid is running, from the kernel.
