@@ -2098,12 +2098,16 @@ pub enum Text {
     /// `Option types text` would name the state the row is in when it is off,
     /// which is the one thing a switch's label must never do.
     RowOptionSendsAlt,
-    /// Its sentence: what each side costs, in the reader's own keyboard.
+    /// Its sentence: what the key does in each of the row's two states.
     ///
-    /// It names a character rather than a policy — `⌥a` is either an `å` or an
-    /// `ESC a`, and that is the entire decision — because a reader who has come
-    /// to this row has come from a key that did the wrong thing and is looking
-    /// for the sentence with their own keypress in it.
+    /// **Two states and no example** (owner ruling 2026-09-13). The sentence
+    /// this row carried until then spelled a keypress and the character it
+    /// produces, on the argument that a reader arrives here from a press that
+    /// went wrong; what the owner read instead was a line of glyphs that says
+    /// nothing to a reader who has not already worked out which side is which.
+    /// So the sentence says what each side *is* — the characters macOS gives
+    /// the key, or the modifier a terminal program reads — and leaves the
+    /// keycaps to the keyboard.
     DescOptionSendsAlt,
     // ── the tree row's menu, completed (user ruling 2026-08-25) ────────────
     //
@@ -3932,15 +3936,19 @@ impl Text {
             ),
             // **The two keycaps stand in both columns** (2026-09-07 copy
             // ruling). `Option` and `Alt` are the letters printed on the keys
-            // the sentence is about — Apple's own Chinese leaves them in Latin
-            // — and a reader who has just been caught out by a press is looking
-            // for the press, so ⌥a, å and ESC a are the same characters in
-            // Chinese as in English.
-            Self::RowOptionSendsAlt => pick(lang, "Option key sends Alt", "Option 键发送 Alt"),
+            // the sentence is about, and Apple's own Chinese leaves them in
+            // Latin.
+            //
+            // **The example is gone** (owner ruling 2026-09-13): the sentence
+            // states the two states and what each one means for the shell, and
+            // no keypress is spelled out in either column. The title says what
+            // the row does to the key rather than what the key sends, because
+            // the sentence under it is about the key and not about a press.
+            Self::RowOptionSendsAlt => pick(lang, "Option key sends Alt", "Option 键当作 Alt"),
             Self::DescOptionSendsAlt => pick(
                 lang,
-                "Off, Option composes characters: ⌥a types å. On, it is the Alt a terminal means: ⌥a sends ESC a.",
-                "关闭时 Option 用来组字：⌥a 打出 å。打开时它就是终端所说的 Alt：⌥a 发送 ESC a。",
+                "Off: Option types the accented characters macOS gives it, as in other apps. On: Option is the Alt key terminal programs expect, so Option with a letter is an Alt chord to the shell.",
+                "关闭时，Option 和在其他应用里一样，打出 macOS 给它的重音字符。打开时，Option 就是终端程序要的 Alt 键，Option 加上字母就是送到 shell 的 Alt 组合键。",
             ),
             // ── the tree row's menu, completed (user ruling 2026-08-25) ────
             //
@@ -4480,8 +4488,7 @@ impl Text {
                 " · Ctrl+click opens in default app",
                 " · Ctrl+点击用默认程序打开",
                 " · ⌘+click opens in default app",
-                // zh: pending opus46
-                " · ⌘+click opens in default app",
+                " · ⌘+点击用默认程序打开",
             ),
             // **`Ctrl` on Windows and `⌘` on a Mac** (§13.45 ②), which is the
             // reverse of what §13.32 ② ruled here — and for the reason §13.32 ②
@@ -4496,8 +4503,7 @@ impl Text {
                 " · Ctrl+click shows it in Explorer",
                 " · Ctrl+点击在资源管理器中显示",
                 " · ⌘+click shows it in Finder",
-                // zh: pending opus46
-                " · ⌘+click shows it in Finder",
+                " · ⌘+点击在访达中显示",
             ),
             Self::RowCopyOnSelect => pick(lang, "Copy on select", "选中即复制"),
 
@@ -5523,20 +5529,18 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 3] = [
+    const CHINESE_PENDING: [(Self, HostPlatform); 1] = [
         // zh: pending opus46 — the macOS column of the card a local file raises
         // when the engine would not take this window's rules (M4-3, §13.38 ②).
         // The Windows column beside it has had its Chinese since W2; what is
         // owed is the same sentence about an engine that has no version to be
         // behind.
         (Self::WebFailGuardsSay, HostPlatform::MacOs),
-        // zh: pending opus46 — the macOS columns of the hovered link's two
-        // clauses (T-MAC-CMDCLICK, §13.45 ②). Both Windows columns keep the
-        // Chinese they have had since the overlay was written; what is owed is
-        // the same two clauses with `⌘` in them, and the Finder's own name in
-        // the second.
-        (Self::HyperlinkControlOpensExternally, HostPlatform::MacOs),
-        (Self::HyperlinkControlReveals, HostPlatform::MacOs),
+        // The hovered link's two macOS clauses (T-MAC-CMDCLICK, §13.45 ②) were
+        // written on 2026-09-13 and left this table then. Their Windows columns
+        // had carried Chinese since the overlay was written; what was owed was
+        // the same two clauses with `⌘` in them and the Finder's own name in
+        // the second, and that is what they say.
     ];
 }
 
@@ -8150,10 +8154,15 @@ mod tests {
                 "{entry:?} on Windows spends Control, which is what the press \
                  reads there: {windows:?}"
             );
-            for lang in [Lang::English, Lang::Chinese] {
+            // **The verb is each column's own since the Chinese was written**
+            // (2026-09-13). Both columns were the English sentence while the
+            // Chinese was owed, so one spelling covered them; the Chinese says
+            // 点击 now, and the half of the clause this pin is about is the
+            // keycap in front of it.
+            for (lang, press) in [(Lang::English, "⌘+click"), (Lang::Chinese, "⌘+点击")] {
                 let mac = entry.on(lang, HostPlatform::MacOs);
                 assert!(
-                    mac.contains("⌘+click"),
+                    mac.contains(press),
                     "{entry:?} on macOS must name the key `pointer_chord_held` \
                      answers there: {mac:?}"
                 );
