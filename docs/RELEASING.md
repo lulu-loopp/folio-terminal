@@ -732,3 +732,69 @@ refuses them at the place they would land: the `.p8` App Store Connect key and
 any exported `.p12` identity. The key id and issuer id are identifiers rather
 than secrets and live in `~/.appstoreconnect/folio-notary.env`, which is the one
 home-directory path any of these scripts reads.
+
+<!--
+  M6-2. Written against this section as `main` has it. When `feature/macos-docs`
+  (M5-6) lands, this subsection belongs between *What must be seen before the tag
+  is published* — which ends on "the clean-user pass" — and *What is kept beside
+  the artifact*, unchanged except that its first paragraph can then say "the pass
+  above" instead of naming it.
+-->
+
+### Clean-machine coverage
+
+The clean-user pass — a second macOS account, the image fetched over the network
+— is what the release actually gets, and `docs/plans/port/m6-1-checklist.md` is
+the walk. It is **not** a clean machine, and the difference is not a formality:
+an account is the unit of the data directory, the Downloads folder and the
+quarantine attribute, of the privacy grants, of the Services registration and of
+the LaunchServices database, but it is **not** the unit of Gatekeeper. One
+directory, `/var/db/SystemPolicyConfiguration`, belongs to the whole machine, and
+two of the things in it are exactly what this pass is about: `ExecPolicy`, what
+this machine has already assessed and approved, and `Tickets`, the notarization
+tickets it has already fetched. So a second account can be shown the
+identified-developer panel only for a build the machine as a whole has never
+opened, and an offline launch tells a stapled ticket from a cached one only if
+nothing on the machine went online with that build first. Both are orderings
+rather than obstacles, and the checklist is written in that order — first open on
+the clean account, first open offline — with the weaker claim spelled out for the
+case where the second is not possible.
+
+What no account on one Mac can cover: that Folio needs nothing the development
+machine happens to have. Folio installs no kernel extension and no system
+service, so that class is nearly empty, but "nearly" is not "empty", and the
+release lane covers the rest of it on a machine that is genuinely clean and
+genuinely not ours. `.github/workflows/release.yml`'s `macos-artifact` job
+downloads the artifact the build job uploaded, on a second runner that did not
+build it, checks it against the `SHA256SUMS.txt` the release page publishes, and
+then asks the downloaded bytes the questions a download is asked: `spctl` on the
+image with `-t open --context context:primary-signature`, the application inside
+the mounted image through `codesign --verify --deep --strict`, `spctl` again on
+that, and `xcrun stapler validate` on both. A runner has no screen, and
+`download-artifact` restores bytes rather than extended attributes, so what it
+cannot do is the quarantine attribute and every panel — which is the half the
+account covers. Between the two, everything in § M6's acceptance is exercised
+except one thing, named below.
+
+**A virtual machine is not taken for 0.4, and these are the numbers.** Measured
+on the release Mac, 2026-09-13, without installing anything:
+
+| | |
+| --- | --- |
+| `Virtualization.framework` | present; the machine is Apple silicon on macOS 26.6.2, and `swiftc` (Swift 6.3.3) and Xcode are installed, so a guest could be written and run without a package manager |
+| The restore image | 19,772,231,540 bytes — 18.4 GiB — for the matching build; the link measured at about 21 MB/s, so roughly a quarter of an hour to fetch |
+| Free space | 47 GiB on the internal volume, against that image plus a guest disk which Apple's own sample sizes at 64 GB and a macOS install fills about half of. It does not fit with room to work; the external volume has the space and is the owner's media, out of bounds |
+| Memory | 16 GiB in total, shared with a production service that runs on this machine full time, at half free with nothing else running. A guest sized for a graphical macOS takes half the machine |
+| Tooling | no Tart, no UTM, no package manager. The plan's 2026-09-12 note assumed one of the first two; both are installations this machine does not take, so the route that installs nothing is a Swift program against the framework, ad-hoc signed with the virtualization entitlement — a day of work before the first guest boots |
+| **The display** | **the point of order.** A guest's screen exists only inside an AppKit view in a windowed application in a logged-in graphical session. There is no remote console in the framework, and every single thing § M6 asks to *see* — the identified-developer panel, the drag to `/Applications`, the notification and Accessibility prompts, the Services menu — is drawn by the window server. A guest therefore still has to be driven by a person sitting at a Mac, which is precisely what the second account already costs, and it does not buy an unattended acceptance |
+
+What that leaves uncovered, written down rather than closed: **a machine that has
+never had this build, a Rust toolchain, or Xcode on it, driven by a person.** The
+runner gives the first half without a person; the second account gives the person
+without the machine. The one acceptance line that falls in the gap is the offline
+launch, and only in the case where the network could not be pulled before the
+first open. Nothing else in § M6 depends on it.
+
+Revisit when the machine changes — more memory, or a second Mac — or when a
+defect arrives that a development install would have masked. Until then the gap
+is the accepted one, and it is this paragraph.

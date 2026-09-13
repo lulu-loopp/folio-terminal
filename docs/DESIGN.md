@@ -10502,3 +10502,126 @@ found by a tag — which is the failure mode the comment at the top of
 `release.yml` was written about.
 
 *(本节英文,待中文文案改写。)*
+
+### 13.46 M6-2: 干净机怎么来——一个新用户账户加一台 GitHub 的跑器,虚拟机写明不取(`docs/RELEASING.md`、`docs/plans/port/m6-1-checklist.md`(新)、`.github/workflows/release.yml`)
+
+**取 13.46。** §13.44 由在飞的 M5-6 占着,§13.45 归在飞的 T-MAC-CMDCLICK;本节取下一个
+还没被认领的号。
+
+**① The question this ticket was given, and the measurement that answers it.**
+M6-2 asks for clean-machine coverage — a VM or a snapshot, or the gap written
+down and accepted. Everything below was measured on the release Mac on
+2026-09-13 over a read-only session: nothing was installed, no account was made,
+no guest was created.
+
+The measurement that decides the whole thing is not about virtual machines at
+all. It is about which half of Gatekeeper belongs to an account and which half
+belongs to a machine. An account owns the data directory, the Downloads folder
+and the quarantine attribute on what lands in it, the privacy grants, the
+Services registration (`~/Library/Preferences/pbs.plist`) and the LaunchServices
+database. A machine owns `/var/db/SystemPolicyConfiguration`, one root-owned
+directory for every account on it, and two of the things in there are exactly
+what M6-1 is about: `ExecPolicy`, what this machine has already assessed and
+approved, and `Tickets`, the notarization tickets it has already fetched.
+
+So a second account is a real clean-*user* venue with two orderings attached,
+and the orderings are cheap:
+
+- the first open of a release build has to happen **on the clean account**, before
+  anybody opens it anywhere else on that Mac, or the machine-wide approval is
+  already there and no panel appears;
+- the network has to be pulled **before** that first open, or an offline launch
+  cannot tell the ticket stapled into the file from the one this machine cached
+  when it first went and asked.
+
+Neither is an obstacle; both are steps in an order. The checklist is written in
+that order, and it spells out the weaker claim for the case where the second
+cannot be done.
+
+**② The virtual machine, and the numbers it is not taken on.**
+`Virtualization.framework` is present, `swiftc` is Swift 6.3.3 and Xcode is
+installed, so a guest *could* be written and run on this machine without a
+package manager. The restore image for the matching build is 19,772,231,540
+bytes — 18.4 GiB — and the link measured around 21 MB/s, about a quarter of an
+hour. The internal volume has 47 GiB free, against that image plus a guest disk
+Apple's own sample sizes at 64 GB; the volume with the room is the owner's media
+and is out of bounds. Memory is 16 GiB in total, shared with a production service
+that runs on this machine full time, at half free with nothing else going.
+
+The plan's 2026-09-12 note assumed **Tart or UTM**. Neither is on the machine and
+both are installations the venue refuses (`~/folio-port/README-agents.md` rule 3
+— no package manager, and this is the owner's server), so the route that installs
+nothing is a Swift program written against the framework and ad-hoc signed with
+the virtualization entitlement: a day of work before a guest first boots. That
+premise is the one thing in the plan this ticket contradicts.
+
+And then the point of order, which would stand even if every number above were
+comfortable: **a guest's screen exists only inside an AppKit view, in a windowed
+application, in a logged-in graphical session.** The framework has no remote
+console. Every single thing M6 asks to *see* — the identified-developer panel,
+the drag to `/Applications`, the notification and Accessibility prompts, the
+Services menu — is drawn by the window server. A guest therefore still has to be
+driven by a person sitting at a Mac, which is exactly what the second account
+already costs, and it buys no unattended acceptance in exchange for the day.
+
+**③ The half a person cannot do, on a machine that really is clean.**
+`release.yml` grows `macos-artifact`: `needs: macos`, a second `macos-14` runner,
+`actions/download-artifact` on the artifact the build job uploaded, then
+`shasum -a 256 -c SHA256SUMS.txt` — the file the release page invites a reader to
+check the download against — then the image mounted and asked what a download is
+asked: `spctl -t open --context context:primary-signature` on the image,
+`codesign --verify --deep --strict` and `spctl` on the application inside it,
+`xcrun stapler validate` on both. Both directions, like the build job: an ad-hoc
+run must be **refused** here too, or the job would pass a release that signed
+nothing.
+
+Why a second runner rather than four more lines in the first: the build job
+verifies a directory on the machine that made it, minutes after making it, with
+the signing keychain still on the search list and the notary's answer still warm.
+That is the right check and it is a different check. This one is the bytes that
+came back out of the store a release is assembled from, on a machine that did not
+build them and has no history with them. It is about two minutes.
+
+Three facts have to cross between the jobs, and `needs.<job>.outputs` is the only
+wire: the artifact's name, the image's name, and whether the run was signed. A
+step with `id: artifact` puts them there. The `-unsigned` suffix rule stays in
+the job that owns it — a second reader of that rule would be a second place for
+it to be wrong.
+
+What the runner cannot be is a person. There is no screen, and
+`download-artifact` restores bytes rather than extended attributes, so the
+quarantine attribute and every panel stay with the account half.
+
+**④ The checklist, with the wrong answer beside each right one.**
+`docs/plans/port/m6-1-checklist.md` is M6-1's walk: the two orderings above as
+preconditions, the download in Safari and the attribute that makes it one, the
+mount, the drag, the first open, the M1 to M4 lines re-run from that account
+against that bundle, Services on a folder whose name has a space and a CJK
+character, and the two refusal paths — a byte-flipped image with its quarantine
+attribute put back by hand, and the `-unsigned` bundle the lane produces when it
+runs without secrets.
+
+Two things in it are worth naming here. **Never Control-click ▸ Open**: it is the
+reader's escape hatch, it approves the build for the whole machine, and one use
+of it ends the walk. And the ad-hoc refusal's *reason* line is written down
+rather than checked against a string — the wording has moved between macOS
+releases, what is being asserted is the refusal, and that is exactly what the
+lane asserts and no more.
+
+**⑤ What is not covered, and that this is the accepted gap.** A machine that has
+never had this build, a Rust toolchain or an Xcode on it, driven by a person. The
+runner gives the first half without the person; the account gives the person
+without the machine. The one acceptance line that falls in the hole is the
+offline launch, and only in the case where the network could not be pulled before
+the first open — the checklist records the weaker claim when that happens.
+Revisit when the machine changes, or when a defect arrives that a development
+install would have masked.
+
+`docs/RELEASING.md` ▸ macOS ▸ *Clean-machine coverage* is where all of this is
+one paragraph for a person making a release. It is written against that section
+as `main` has it; when M5-6's `feature/macos-docs` lands, it belongs between
+*What must be seen before the tag is published* — which ends on the clean-user
+pass — and *What is kept beside the artifact*, and a comment above it in the file
+says so.
+
+*(本节英文,待中文文案改写。)*
