@@ -10311,3 +10311,162 @@ the file, rather than an upload that fails three network hops away.
 land; nothing in this tree ever opens the key, it hands `notarytool` the path.
 
 *(本节英文,待中文文案改写。)*
+
+### 13.43 M5-4: 发布线的 mac 车道——有证书就真签,没有就 ad-hoc 也出包(`.github/workflows/release.yml`、`.github/workflows/ci.yml`、`.github/actions/claimed-version/action.yml`(新)、`scripts/release/sbom.ps1`)
+
+**取 13.43。** §13.41 是 M5-1 的四个脚本,§13.42 由同一批在飞的票占着;本节取下
+一个还没被认领的号。
+
+**① What this job is, and the one thing it is not.** `release.yml` grows a
+second job. It builds `bt-app` on a macOS runner, assembles the bundle, signs
+it, notarizes it where it can, writes the disk image, keeps the debug
+information, hashes what it made and then starts the thing it built and asks it
+what it is. What it does **not** do is attach any of that to a release, and the
+paragraph at the top of that file is the whole reason: a release is signed on
+the machine that can sign, so that machine is the only place a release is made
+from. The ticket for this work asked for an upload "to the same release the
+Windows job creates" — there is no such release, by a decision taken after 0.2.1
+shipped one button away from publishing an unsigned draft. So the macOS lane
+leaves workflow artifacts exactly as the Windows one does, and
+`docs/RELEASING.md` is still the whole of how a release is made.
+
+**② `macos-14`, and the deployment target is the whole reason.**
+`packaging/macos/README.md` fixes the minimum at macOS 14.0, stated rather than
+inherited. Both runner labels are arm64 — the other half of what this job needs,
+and the only architecture this preview ships — so what separates them is the SDK
+and the libraries the build links against. Building on the oldest system the
+product claims to run on is what stops a symbol introduced after it from being
+linked in silently, to be found by a user on 14 rather than by this job.
+
+**③ Three states of the credential, and no fourth.** The four secrets and the
+two variables are named once, in `docs/RELEASING.md` ▸ macOS, and this job reads
+exactly those names. With none of them set it signs ad-hoc — `codesign`'s own
+`-`, a real signature over the real bytes with nobody behind it — and the
+artifact is called `folio-macos-<version>-unsigned`. With all of them set it
+imports the `.p12` into a keychain made in `RUNNER_TEMP` for the length of the
+job, signs with the Developer ID identity, notarizes and staples both the
+application and the image, and the artifact drops the suffix. With *some* of
+them set it stops there and says which are missing: a certificate with no notary
+key produces a build every Mac in the world refuses, and finding that out at
+`spctl` ten minutes later names the wrong thing.
+
+A fork has no secrets and a run started from one has none, which is why the
+ad-hoc branch is not a courtesy. A lane that could only run with a credential is
+a lane nobody exercises — the same bargain `package.ps1`'s `-Sign` note already
+makes on Windows, and the same reason the four scripts default `--identity` to
+`-`.
+
+What is carried between the steps is the certificate's SHA-1 rather than its
+subject. It is unambiguous when a keychain holds more than one identity, and it
+is why the team id — which the plan keeps out of this repository on purpose —
+never reaches a log that anybody who can read the run can read.
+
+**④ The keychain is deleted in a step that runs whatever happened.** It holds
+the owner's private key and a runner is a machine this job does not own; the
+`.p12` and the `.p8` are removed in the same step, the keychain is taken off the
+search list before it is deleted, and `set-keychain-settings -lut 300` means a
+job that dies between the import and the cleanup leaves a locked one.
+
+**⑤ Gatekeeper is asserted in both directions.** An ad-hoc bundle **must** be
+refused: a lane that only checked for an acceptance would pass a run that signed
+nothing at all, which is precisely the run this design makes possible. A
+notarized one must be accepted, and accepted with `source=Notarized Developer
+ID` rather than with any other source, which is the string the plan's M5
+acceptance line names. The image is asked a different question from the
+application's — `-t open` against the primary signature, which is the assessment
+a double-clicked download actually gets — and `stapler validate` is asked of
+both, because a stapled image holding an unstapled application is a download
+that works until the reader is offline.
+
+`sign.sh` is given `--no-spctl`, and that is an ordering rather than a weakened
+check. A Developer ID signature that has not been notarized *yet* is refused,
+and that script treats the refusal as its own failure — correctly, because from
+inside it there is nothing left to try. Here there is: notarization is the next
+step. So the question is asked once, at the end, of the artefact in the state it
+is shipped in.
+
+**⑥ What is kept beside the release and never inside it.** `bundle.sh` runs
+`dsymutil` into `Folio.app.dSYM` beside the bundle; this job moves that, and the
+notarization log of each submission, into a directory of their own and uploads
+them as a separate artifact. §13.31 ⑥ is the requirement and this is where it is
+discharged: on Apple targets the release profile's line-tables-only debug
+information stays in the object files, the linked image carries only a debug map
+pointing at them, and the `.dSYM` is the only thing that turns a crash report
+from a shipped build back into file names and line numbers. It pairs with the
+binary by UUID and exists only on the machine that linked it, so a lane that
+does not keep it throws the evidence away at the moment it is made. It is also
+several times the size of the download and would be signed for no reason, which
+is why it is beside and not inside.
+
+**⑦ `SHA256SUMS.txt` is a second file, not a longer one.** The two lanes run on
+two machines and neither can see the other's output. What this one writes is
+byte-for-byte the shape `package.ps1` writes — lower-case hex, two spaces, the
+bare name, LF, sorted by name, a final newline — because `shasum -a 256` prints
+exactly that line and nothing here formats one by hand. The 0.2.5 and 0.3.0
+releases shipped a `SHA256SUMS.txt` with CRLF that `sha256sum -c` could not read;
+that is not a mistake this lane can repeat, because it never builds the line.
+
+**⑧ The bill of materials takes the triple it filters by.** `sbom.ps1` had
+`x86_64-pc-windows-msvc` written into it, and `--filter-platform` is the whole
+reason the document describes the thing shipped rather than the lock file. A
+macOS bill listing `windows-sys` would describe a build that does not exist as
+surely as a Windows one listing `nix` would. So the triple is a parameter with
+the Windows value as its default, and the macOS lane passes its own: measured on
+this branch, 447 components for the Windows target and 457 for
+`aarch64-apple-darwin`, the second carrying `objc2`, `core-graphics` and
+`dispatch2` and no `windows-sys`, the first the other way round. The script runs
+on the runner's own `pwsh`, which the GitHub macOS image carries; it reads
+`cargo metadata` and nothing else.
+
+**⑨ The tag and the manifest are one claim, read once.** That rule — and its
+`-preview` clause, and its "a manual run claims nothing" clause — was a step
+inside the Windows job. Two jobs whose artefact names both carry a version
+cannot each keep their own reading of that line, so it moved into
+`.github/actions/claimed-version` and both jobs come through it, the way both
+come through `.github/actions/toolchain`. Referenced by path, so it is this
+repository's own file at the same commit as the workflow calling it.
+
+**⑩ The rename is the lane's, and deliberately not the script's.** `dmg.sh`
+writes `Folio.dmg`; a script that wrote the long name would be a second reader
+of the version line. This job renames it to
+`Folio-<version>-macos-arm64.dmg` on the way to the artifact — the tag and the
+asset are one claim, and an Intel Mac has to be able to tell from the name that
+this build is not for it.
+
+**⑪ What was proven without pushing a tag.** `act` is not available and
+starting a workflow by hand needs an account this session does not have, so the
+job's shell steps were run on the Mac mini, in a worktree at this branch's
+commit, with `--identity -`: the whole ad-hoc branch, step for step, in the
+job's own order. `sh -n` passed on all four scripts; the release build linked;
+`bundle.sh` produced a 69,976,064-byte `Folio.app` and a 211,181,568-byte
+`Folio.app.dSYM` whose UUID is the binary's, read back from `dwarfdump` on both;
+`sign.sh --no-spctl` left `flags=0x10002(adhoc,runtime)` with every entitlement
+`false`; `dmg.sh --skip-notarize` wrote a 39,900,615-byte image, and the rename
+made it `Folio-0.3.0-macos-arm64.dmg`. `SHA256SUMS.txt` came out 183 bytes of
+ASCII ending in one `0a`, and `shasum -a 256 -c` read it back and said `OK`
+twice. The bundle then answered `Folio 0.3.0 (34880a804b)` — the manifest's
+version and this commit's short hash — `codesign --verify --deep --strict`
+passed, and `spctl` said `rejected` for the application and `rejected` (exit 3)
+for the image. Both refusals are what the ad-hoc branch asserts, and the step
+said so and exited 0.
+
+⑫ What a hand-run on that machine cannot reach: the `pwsh` half — the
+version step and the bill of materials — because there is no PowerShell
+installed on it, so both were exercised on Windows instead, `sbom.ps1` for each
+triple as ⑧ records; and every line that needs a certificate, which is the whole
+signed branch and its Gatekeeper acceptance. Those are the lines a tag will
+exercise first, and they are also the ones the owner's own release sequence in
+`docs/RELEASING.md` walks by hand.
+
+One thing the run turned up that is not this lane's: `dsymutil` warns `unable to
+open object file` for one `psm` object inside the release `deps` directory. The
+`.dSYM` is produced and its UUID matches, so it is a hole in one crate's debug
+map rather than a failed step; it is `bundle.sh`'s to look at.
+
+**⑬ `ci.yml` parses the four scripts on every push.** `core-macos` is the only
+job in that file on the platform they run on, `sh -n` reads the grammar and runs
+nothing, and it costs a second. Without it a syntax error in a release script is
+found by a tag — which is the failure mode the comment at the top of
+`release.yml` was written about.
+
+*(本节英文,待中文文案改写。)*

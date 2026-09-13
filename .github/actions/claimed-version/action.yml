@@ -1,0 +1,61 @@
+name: claimed-version
+description: >
+  Read `[workspace.package] version` out of the manifest, check the tag this run
+  claims against it, and export it as `VERSION` for the rest of the job.
+
+  One copy, because the two release jobs make the same claim about the same
+  line. A Windows archive named `folio-0.3.0-windows-x64.zip` and a disk image
+  named `Folio-0.3.0-macos-arm64.dmg` are one release or they are a bug, and two
+  jobs each carrying their own reading of the manifest is exactly how the two
+  names come apart. This action is referenced by path, so it is this
+  repository's own file at the same commit as the workflow calling it.
+
+runs:
+  using: composite
+  steps:
+    # **The tag and the manifest are one claim or this stops here.** `v0.1.0`
+    # over a tree that says `0.1.1` would produce an archive whose name, whose
+    # `folio --version` and whose Properties page disagree — and the first two
+    # are the only ones most people ever read.
+    #
+    # **`-preview` is a release channel and not a different claim.** Every
+    # release so far has been tagged `v<version>-preview` over a manifest that
+    # says `<version>`: `v0.1.0-preview` over `0.1.0`, `v0.1.1-preview` over
+    # `0.1.1`. The suffix says who the build is for, not what it is — the
+    # archive is still `folio-<version>-windows-x64.zip` and the executable
+    # still answers `<version>`, so the tag and the manifest still say the one
+    # thing. Both spellings are accepted and nothing else is; a tag naming a
+    # version the tree does not carry is still where this stops.
+    #
+    # What is being claimed comes from the ref when a tag was pushed, and from
+    # the input when a person started the run by hand. A manual run with the
+    # input left empty claims nothing, and the version is simply read out of
+    # the manifest so the rest of the job has one — it names the artifact and
+    # nothing else.
+    #
+    # `pwsh` and not `bash`, on a mac runner as much as on a Windows one: the
+    # GitHub macOS images carry PowerShell 7, and one script that runs on both
+    # is the whole point of the paragraph above.
+    - shell: pwsh
+      env:
+        CLAIMED_TAG: ${{ github.ref_type == 'tag' && github.ref_name || github.event.inputs.tag }}
+      run: |
+        $manifest = Get-Content -LiteralPath Cargo.toml -Raw
+        if ($manifest -notmatch '(?ms)^\[workspace\.package\](.*?)^\[') {
+          throw "Cargo.toml has no [workspace.package] table"
+        }
+        if ($Matches[1] -notmatch '(?m)^\s*version\s*=\s*"([^"]+)"') {
+          throw "[workspace.package] declares no version"
+        }
+        $version = $Matches[1]
+        "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        $tag = $env:CLAIMED_TAG
+        if ([string]::IsNullOrWhiteSpace($tag)) {
+          Write-Host "no tag is claimed: this is a rehearsal of $version from ${{ github.ref_name }}"
+        } else {
+          $accepted = @("v$version", "v$version-preview")
+          if ($accepted -notcontains $tag) {
+            throw "the tag is $tag and the workspace version is $version; the tag has to be $($accepted -join ' or ')"
+          }
+          Write-Host "building $tag"
+        }

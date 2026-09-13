@@ -26,13 +26,30 @@
     document's serial number is derived from them, so two runs over the same
     lock file produce the same identity for the same set of parts.
 
+.PARAMETER Target
+    The target triple the bill is *for*. Defaults to the Windows archive's,
+    which is the release this script was written for.
+
+    It is a parameter rather than a constant because there are two lanes now.
+    `--filter-platform` is the whole reason this document describes the thing
+    actually shipped rather than the lock file, so a second platform's build
+    has to ask for its own: `release.yml`'s macOS job passes
+    `aarch64-apple-darwin`, and a macOS bill listing `windows-sys` would
+    describe a build that does not exist as surely as a Windows one listing
+    `nix` would.
+
 .PARAMETER Output
     Where to write the document. Defaults to
     `target/release-package/folio-<version>.cdx.json`.
+
+    A lane that is not the Windows one passes this: the default is a Windows
+    path, and the two documents would otherwise be one file with the second
+    lane's version of it on top.
 #>
 
 [CmdletBinding()]
 param(
+    [string] $Target = 'x86_64-pc-windows-msvc',
     [string] $Output
 )
 
@@ -40,7 +57,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
-$target = 'x86_64-pc-windows-msvc'
+$target = $Target
 
 # The diagnostics go to a file rather than into the pipeline: cargo writes a
 # resolver warning about the vendored member on stderr every time, and `2>&1`

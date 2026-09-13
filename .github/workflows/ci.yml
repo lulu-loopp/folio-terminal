@@ -457,6 +457,20 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # **The release lane's four shell scripts, parsed on every push.** They
+      # are `#!/bin/sh`, they are what `release.yml`'s macOS job is made of, and
+      # a syntax error in one of them is otherwise found by a tag: this job is
+      # the only one in this file that is on the platform they run on, and the
+      # check costs a second. It parses them and runs none of them — `sh -n`
+      # reads the grammar and executes nothing.
+      - name: the macOS release scripts parse
+        run: |
+          set -eu
+          for script in scripts/release/macos/*.sh; do
+            sh -n "$script"
+            echo "parsed: $script"
+          done
       # The same composite action every other job comes through. It reads the
       # channel out of rust-toolchain.toml and, off Windows, installs that
       # version against this runner's own host triple — the pin is the version,

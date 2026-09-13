@@ -4,7 +4,7 @@ name: Release
 # downloads has to be traceable to one commit that somebody named, which a
 # workflow that also ran on every push could not promise.
 #
-# **Nothing this job produces is ever attached to a release, on a tag or
+# **Nothing either job here produces is ever attached to a release, on a tag or
 # otherwise.** It used to be: on a tag this workflow drafted the release and
 # uploaded what it had just built into it — unsigned files, under exactly the
 # names the signed ones carry. On 0.2.1 that draft was one button away from being
@@ -65,49 +65,11 @@ jobs:
         with:
           cache: false
 
-      # **The tag and the manifest are one claim or this stops here.** `v0.1.0`
-      # over a tree that says `0.1.1` would produce an archive whose name, whose
-      # `folio.exe --version` and whose Properties page disagree — and the first
-      # two are the only ones most people ever read.
-      #
-      # **`-preview` is a release channel and not a different claim.** Every
-      # release so far has been tagged `v<version>-preview` over a manifest that
-      # says `<version>`: `v0.1.0-preview` over `0.1.0`, `v0.1.1-preview` over
-      # `0.1.1`. The suffix says who the build is for, not what it is — the
-      # archive is still `folio-<version>-windows-x64.zip` and the executable
-      # still answers `<version>`, so the tag and the manifest still say the one
-      # thing. Both spellings are accepted and nothing else is; a tag naming a
-      # version the tree does not carry is still where this stops.
-      #
-      # What is being claimed comes from the ref when a tag was pushed, and from
-      # the input when a person started the run by hand. A manual run with the
-      # input left empty claims nothing, and the version is simply read out of
-      # the manifest so the rest of the job has one — it names the artifact and
-      # nothing else.
-      - name: the tag names the version in the manifest
-        shell: pwsh
-        env:
-          CLAIMED_TAG: ${{ github.ref_type == 'tag' && github.ref_name || github.event.inputs.tag }}
-        run: |
-          $manifest = Get-Content -LiteralPath Cargo.toml -Raw
-          if ($manifest -notmatch '(?ms)^\[workspace\.package\](.*?)^\[') {
-            throw "Cargo.toml has no [workspace.package] table"
-          }
-          if ($Matches[1] -notmatch '(?m)^\s*version\s*=\s*"([^"]+)"') {
-            throw "[workspace.package] declares no version"
-          }
-          $version = $Matches[1]
-          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          $tag = $env:CLAIMED_TAG
-          if ([string]::IsNullOrWhiteSpace($tag)) {
-            Write-Host "no tag is claimed: this is a rehearsal of $version from ${{ github.ref_name }}"
-          } else {
-            $accepted = @("v$version", "v$version-preview")
-            if ($accepted -notcontains $tag) {
-              throw "the tag is $tag and the workspace version is $version; the tag has to be $($accepted -join ' or ')"
-            }
-            Write-Host "building $tag"
-          }
+      # The manifest's version, and the tag checked against it. The whole of
+      # that rule is `.github/actions/claimed-version`, which the macOS job
+      # below comes through too — one reading of one line, so that the two
+      # jobs' artefacts cannot come out of a tag they disagree about.
+      - uses: ./.github/actions/claimed-version
 
       # **Before the build, because that is the only thing this step buys.**
       # `package.ps1` packs `folio.msix` with `makeappx.exe`, which comes out of
@@ -205,3 +167,428 @@ jobs:
       # and the five signed assets on it — is made by hand from the machine that
       # signed them, with `gh release create`. `docs/RELEASING.md` has the
       # command. Nothing above this line is part of it.
+
+  # ── the macOS lane ─────────────────────────────────────────────────────────
+  #
+  # The same bargain the job above makes, made for a second platform: build what
+  # a person would download, put it through every step a real release goes
+  # through, and leave it where nobody can mistake it for a download.
+  # `docs/RELEASING.md` is still the whole of how a release is made, and it is
+  # still made from the machine that holds the key.
+  #
+  # **It signs for real when this run has a certificate, and ad-hoc when it does
+  # not, and it produces a bundle either way.** A fork has no secrets, a run
+  # started from one has none, and a rehearsal on a branch may have none either;
+  # a lane that could only run with a credential would be a lane nobody
+  # exercises, which is the bargain `package.ps1`'s `-Sign` note already makes
+  # on Windows. What tells the two apart is the name of the artifact —
+  # `folio-macos-<version>-unsigned` against `folio-macos-<version>` — and the
+  # Gatekeeper assertion below, which demands a *refusal* of the ad-hoc build as
+  # firmly as it demands an acceptance of the notarized one.
+  #
+  # **`macos-14` and not `macos-15`.** `packaging/macos/README.md` fixes the
+  # deployment target at macOS 14.0, and the runner whose SDK and libraries are
+  # that version is the one that cannot quietly link a symbol introduced after
+  # it. Both labels are arm64, which is the other half of what this job needs
+  # and the only architecture this preview ships, so the choice between them is
+  # entirely the deployment target's.
+  #
+  # The four scripts are M5-1's and this job does not restate a line of what
+  # they do; `docs/RELEASING.md` ▸ macOS and `packaging/macos/README.md` are
+  # where the sequence and the flags are written down, and the names of the
+  # secrets below are fixed in the first of those.
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 90
+    # No `contents: write` here either, for the reason the top of this file
+    # gives at length.
+    env:
+      # **The deployment target is not restated here.** It is
+      # `LSMinimumSystemVersion` in `packaging/macos/Info.plist.in`, stated
+      # once; a `MACOSX_DEPLOYMENT_TARGET` in this file would be a second
+      # literal 14.0, agreeing with the first right up until one of them moved.
+      # What this job contributes to the same claim is the runner label above.
+      #
+      # Where the pieces go, and the one distinction that matters among them:
+      # `macos-package` is the release page's shape — every file in it is hashed
+      # into `SHA256SUMS.txt` and uploaded together — and `macos-symbols` is
+      # deliberately not that. It holds the `.dSYM` and the notarization logs,
+      # which are kept *beside* a release and never inside it.
+      FOLIO_STAGE: target/macos
+      FOLIO_APP: target/macos/Folio.app
+      FOLIO_PACKAGE: target/macos-package
+      FOLIO_SYMBOLS: target/macos-symbols
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # The same composite action every job in this repository comes through.
+      # Off Windows it takes the *version* out of `rust-toolchain.toml`'s pinned
+      # channel and installs it against this runner's own host triple —
+      # `1.94.1-aarch64-apple-darwin` here — and exports `RUSTUP_TOOLCHAIN`, so
+      # that no later cargo reads the Windows channel back out of that file.
+      # `cache: false` for the reason the job above gives: what is produced here
+      # is the artefact people would run.
+      - uses: ./.github/actions/toolchain
+        with:
+          cache: false
+
+      - uses: ./.github/actions/claimed-version
+
+      # **Before the build, for the reason the `makeappx` probe above is before
+      # the build**: this lane is four shell scripts, and a syntax error in one
+      # of them would otherwise be found after a ten-minute release compile.
+      # `sh -n` and not `bash -n`, because `#!/bin/sh` is what they claim to be
+      # and the claim is worth checking.
+      - name: the lane's own scripts parse
+        run: |
+          set -eu
+          for script in scripts/release/macos/*.sh; do
+            sh -n "$script"
+            echo "parsed: $script"
+          done
+
+      # `-p bt-app` and not the workspace: the product is the one binary, and
+      # the whole-workspace build above is a Windows job's reason — it also
+      # builds the two `examples/` probes that name DirectComposition.
+      - name: build
+        run: cargo build --release --locked -p bt-app
+
+      # `bundle.sh` assembles `Folio.app` around that binary — the plist from
+      # `render-info-plist`, the icon resampled from `assets/app-icon/`,
+      # `PkgInfo` — and runs `dsymutil` into `Folio.app.dSYM` beside it.
+      # Nothing in it signs.
+      - name: the bundle
+        run: scripts/release/macos/bundle.sh --out "$FOLIO_STAGE"
+
+      # **The identity this run signs with, and what a log is allowed to carry
+      # about it.** The four secrets and the two variables are named in
+      # `docs/RELEASING.md` ▸ macOS ▸ *The lane, and its four secrets*, which is
+      # the one place they are agreed on; a secret is the one kind of
+      # configuration nobody can read back, so this step spells each name once
+      # and says which of them was missing rather than failing later with a
+      # message about a certificate.
+      #
+      # Three states and no fourth. All six present: a real Developer ID
+      # signature, notarized and stapled. None present: ad-hoc — `codesign`'s
+      # own `-` — which is a real signature over the real bytes with nobody
+      # behind it, and which Gatekeeper refuses, as this lane goes on to check.
+      # Some present: this stops here, because a certificate with no notary key
+      # produces a build that every Mac in the world refuses, and finding that
+      # out at `spctl` ten minutes later names the wrong thing.
+      #
+      # The keychain is this run's own, in `RUNNER_TEMP`, unlocked with the
+      # password the owner set as a secret; the login keychain is not touched,
+      # and `set-key-partition-list` is what stops `codesign` waiting for a
+      # permission nobody can give it on a machine with no screen. What is
+      # carried forward is the certificate's SHA-1 rather than its subject: it
+      # is unambiguous when a keychain holds more than one identity, and it is
+      # why the team id — which the plan keeps out of this repository on purpose
+      # — does not reach this log.
+      - name: the signing identity, if this run was given one
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+          MACOS_NOTARY_KEY_P8: ${{ secrets.MACOS_NOTARY_KEY_P8 }}
+          MACOS_NOTARY_KEY_ID: ${{ vars.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ vars.MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          set -eu
+          missing=""
+          present=""
+          for name in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD \
+            MACOS_KEYCHAIN_PASSWORD MACOS_NOTARY_KEY_P8 \
+            MACOS_NOTARY_KEY_ID MACOS_NOTARY_ISSUER_ID; do
+            eval "value=\${$name:-}"
+            if [ -z "$value" ]; then
+              missing="$missing $name"
+            else
+              present="$present $name"
+            fi
+          done
+
+          if [ -z "$present" ]; then
+            echo "this run was given no signing configuration: the bundle is signed ad-hoc"
+            echo "FOLIO_IDENTITY=-" >> "$GITHUB_ENV"
+            echo "FOLIO_SIGNED=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if [ -n "$missing" ]; then
+            echo "a half-configured signing lane signs a build every Mac refuses." >&2
+            echo "set:$missing" >&2
+            echo "the four secrets and the two variables are listed in docs/RELEASING.md" >&2
+            exit 1
+          fi
+
+          notary="$RUNNER_TEMP/appstoreconnect"
+          mkdir -p "$notary/private_keys"
+          chmod 700 "$notary" "$notary/private_keys"
+          printf 'KEY_ID=%s\nISSUER_ID=%s\n' \
+            "$MACOS_NOTARY_KEY_ID" "$MACOS_NOTARY_ISSUER_ID" > "$notary/folio-notary.env"
+          printf '%s' "$MACOS_NOTARY_KEY_P8" | base64 --decode \
+            > "$notary/private_keys/AuthKey_$MACOS_NOTARY_KEY_ID.p8"
+          chmod 600 "$notary/private_keys/AuthKey_$MACOS_NOTARY_KEY_ID.p8"
+
+          keychain="$RUNNER_TEMP/folio-release.keychain-db"
+          security create-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$keychain"
+          # Locked again after five minutes idle, so a job that dies between
+          # here and the cleanup step leaves a locked keychain behind it.
+          security set-keychain-settings -lut 300 "$keychain"
+          security unlock-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$keychain"
+          certificate="$RUNNER_TEMP/folio-signing.p12"
+          umask 077
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode > "$certificate"
+          security import "$certificate" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -f pkcs12 -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$certificate"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$MACOS_KEYCHAIN_PASSWORD" "$keychain" > /dev/null
+          # On the search list and in front of what was there: `codesign` looks
+          # through the search list rather than at a path.
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity=$(security find-identity -v -p codesigning "$keychain" |
+            awk '/Developer ID Application/ { print $2; exit }')
+          if [ -z "$identity" ]; then
+            echo "the .p12 imported and brought no Developer ID Application identity with it." >&2
+            echo "an export taken from Certificates rather than My Certificates has no private key." >&2
+            security find-identity -v -p codesigning "$keychain" >&2
+            exit 1
+          fi
+          echo "signing with $identity"
+          echo "FOLIO_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "FOLIO_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          echo "FOLIO_NOTARY_DIR=$notary" >> "$GITHUB_ENV"
+          echo "FOLIO_SIGNED=true" >> "$GITHUB_ENV"
+
+      # Hardened runtime, secure time stamp, the entitlements, the inside-out
+      # order — all of it is `sign.sh`'s, which is what M5-1 exists to get right
+      # and what this lane deliberately does not restate.
+      #
+      # **`--no-spctl`, and the reason is the order of a release rather than a
+      # weakened check.** A Developer ID signature that has not been notarized
+      # yet is refused by Gatekeeper — `source=Unnotarized Developer ID` — and
+      # `sign.sh` treats that refusal as its own failure, correctly, because
+      # from inside that script there is nothing left to try. Here there is:
+      # notarization is the next step. So the Gatekeeper question is asked once,
+      # at the end, of the artefact in the state it is actually shipped in.
+      - name: sign
+        run: scripts/release/macos/sign.sh --app "$FOLIO_APP" --identity "$FOLIO_IDENTITY" --no-spctl
+
+      # The application's own submission. The image gets its own, from inside
+      # `dmg.sh`, because a stapled image holding an unstapled application is a
+      # download that works until the reader is offline.
+      #
+      # The log goes straight to the kept directory rather than beside the
+      # bundle: it is the only record of what the notary service actually looked
+      # at, and it is nobody's download.
+      - name: notarize and staple the application
+        if: env.FOLIO_SIGNED == 'true'
+        run: |
+          set -eu
+          mkdir -p "$FOLIO_SYMBOLS"
+          scripts/release/macos/notarize.sh --path "$FOLIO_APP" \
+            --notary-dir "$FOLIO_NOTARY_DIR" \
+            --log "$FOLIO_SYMBOLS/Folio.app.notarylog.json"
+
+      # `dmg.sh` stages the stapled application beside a link to `/Applications`,
+      # writes the compressed read-only image, signs it, and — unless there is
+      # nothing to notarize with — notarizes and staples that too, then asks
+      # Gatekeeper the question a download actually gets.
+      #
+      # It writes `Folio.dmg`, deliberately: a script that built the long name
+      # would be a second reader of the version line. **The rename is this
+      # lane's**, and it is where the version and the architecture join the name
+      # — the tag and the asset are one claim, and an Intel Mac has to be able
+      # to tell from the name that this build is not for it.
+      - name: the disk image
+        run: |
+          set -eu
+          mkdir -p "$FOLIO_PACKAGE"
+          if [ "${FOLIO_SIGNED:-false}" = "true" ]; then
+            scripts/release/macos/dmg.sh --app "$FOLIO_APP" --out "$FOLIO_STAGE" \
+              --identity "$FOLIO_IDENTITY" --notary-dir "$FOLIO_NOTARY_DIR"
+          else
+            scripts/release/macos/dmg.sh --app "$FOLIO_APP" --out "$FOLIO_STAGE" \
+              --identity "$FOLIO_IDENTITY" --skip-notarize
+          fi
+          mv "$FOLIO_STAGE/Folio.dmg" "$FOLIO_PACKAGE/Folio-$VERSION-macos-arm64.dmg"
+          if [ -f "$FOLIO_STAGE/Folio.dmg.notarylog.json" ]; then
+            mv "$FOLIO_STAGE/Folio.dmg.notarylog.json" "$FOLIO_SYMBOLS/Folio.dmg.notarylog.json"
+          fi
+          ls -l "$FOLIO_PACKAGE"
+
+      # **The `.dSYM`, which exists only on the machine that linked the binary.**
+      # On Apple targets the release profile's line-tables-only debug
+      # information stays in the object files and the linked image carries a
+      # debug map pointing at them, so nothing beside `folio` can turn a crash
+      # report from a shipped build back into file names and line numbers until
+      # `dsymutil` has walked that map — which `bundle.sh` did. It pairs with
+      # the image by UUID, it is kept beside the notarization logs, and it goes
+      # nowhere near the disk image: several times the download, signed for no
+      # reason, and a release lane that does not keep it throws the evidence
+      # away at the moment it is made.
+      - name: the debug symbols
+        run: |
+          set -eu
+          mkdir -p "$FOLIO_SYMBOLS"
+          dwarfdump --uuid "$FOLIO_APP/Contents/MacOS/folio"
+          dwarfdump --uuid "$FOLIO_STAGE/Folio.app.dSYM"
+          rm -rf "$FOLIO_SYMBOLS/Folio.app.dSYM"
+          mv "$FOLIO_STAGE/Folio.app.dSYM" "$FOLIO_SYMBOLS/Folio.app.dSYM"
+
+      # **An ad-hoc run's bundle leaves under a name that says what it is.** The
+      # disk image keeps the name a signed one would carry, for the reason the
+      # top of this file gives — where a file is, is what tells it from the real
+      # thing — but a `.app` anybody could have made is worth naming outright,
+      # and it is the artefact a fork or a rehearsal is actually after.
+      - name: the unsigned bundle, under a name that says so
+        if: env.FOLIO_SIGNED != 'true'
+        run: ditto -c -k --sequesterRsrc --keepParent "$FOLIO_APP" "$FOLIO_PACKAGE/Folio-unsigned.app.zip"
+
+      # The same bill of materials the Windows archive carries, for the crates
+      # *this* build is made of. `--filter-platform` is what makes it a bill for
+      # the thing shipped, so this lane passes its own triple: a macOS build
+      # that listed `windows-sys` would be describing a build that does not
+      # exist. `pwsh` is on the GitHub macOS image, and the script is the same
+      # file the Windows job runs — it reads `cargo metadata` and nothing else.
+      - name: bill of materials
+        run: >
+          pwsh -NoLogo -NoProfile -File scripts/release/sbom.ps1
+          -Target aarch64-apple-darwin
+          -Output "$FOLIO_PACKAGE/folio-$VERSION-macos-arm64.cdx.json"
+
+      # Every asset this lane produces, in the format `sha256sum -c` reads and
+      # in the shape `package.ps1` writes: lower-case hex, two spaces, the bare
+      # file name, LF, sorted by name, a final newline. `shasum` prints exactly
+      # that line, which is why nothing here formats one by hand.
+      #
+      # A second file rather than a line appended to the Windows one — the two
+      # lanes run on two machines and neither can see the other's output — and
+      # `docs/RELEASING.md` is where the two are put on one page.
+      - name: the checksums
+        run: |
+          set -eu
+          cd "$FOLIO_PACKAGE"
+          rm -f SHA256SUMS.txt
+          names=$(ls -1 | LC_ALL=C sort)
+          printf '%s\n' "$names" | while IFS= read -r file; do
+            [ -f "$file" ] && shasum -a 256 "$file"
+          done > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # **What was built, started, and asked what it is.** The Windows lane runs
+      # `smoke.ps1` against the executable it just built; this asks the bundle
+      # the same question, plus the two only a signature can be asked.
+      #
+      # `--version` is answered on stdout before any window exists — `cli::parse`
+      # refuses it above `EventLoop::build` — so this is the real binary
+      # starting on a runner with no screen. What it must print is the workspace
+      # version and the commit this run checked out: one sentence,
+      # `bt_app::version::banner`, the same one the diagnostics header and the
+      # panic log carry.
+      #
+      # **Gatekeeper is asserted in both directions.** An ad-hoc bundle *must*
+      # be refused — a lane that only looked for an acceptance would pass a run
+      # that signed nothing — and a notarized one must be accepted, and accepted
+      # with `source=Notarized Developer ID` rather than with any other source,
+      # which is the string the plan's M5 acceptance line names. The image is
+      # asked the question a download is asked, which is a different question
+      # from the application's: `-t open` and the primary signature, because
+      # `-t exec` on a disk image answers something nobody asks.
+      - name: start what was built
+        run: |
+          set -eu
+          exe="$FOLIO_APP/Contents/MacOS/folio"
+          dmg="$FOLIO_PACKAGE/Folio-$VERSION-macos-arm64.dmg"
+          line=$("$exe" --version)
+          expected="Folio $VERSION ($(git rev-parse --short=10 HEAD))"
+          echo "--version: $line"
+          if [ "$line" != "$expected" ]; then
+            echo "the bundle answers '$line'; this run built '$expected'" >&2
+            exit 1
+          fi
+
+          codesign --verify --deep --strict --verbose=2 "$FOLIO_APP"
+          codesign -dv --verbose=4 "$FOLIO_APP" 2> "$RUNNER_TEMP/codesign.txt" || true
+          cat "$RUNNER_TEMP/codesign.txt"
+
+          assessment="$RUNNER_TEMP/spctl.txt"
+          set +e
+          spctl -a -vvv "$FOLIO_APP" > "$assessment" 2>&1
+          accepted=$?
+          set -e
+          cat "$assessment"
+
+          if [ "${FOLIO_SIGNED:-false}" != "true" ]; then
+            if ! grep -q "Signature=adhoc" "$RUNNER_TEMP/codesign.txt"; then
+              echo "this run signed ad-hoc and the bundle does not say so" >&2
+              exit 1
+            fi
+            if [ "$accepted" = "0" ]; then
+              echo "Gatekeeper accepted an ad-hoc bundle, which cannot be right" >&2
+              exit 1
+            fi
+            echo "ad-hoc: the signature verifies, and Gatekeeper refuses it. Both are this branch passing."
+            exit 0
+          fi
+
+          if ! grep -q "Authority=Developer ID Application" "$RUNNER_TEMP/codesign.txt"; then
+            echo "this run had a certificate and the bundle is not signed by a Developer ID" >&2
+            exit 1
+          fi
+          if [ "$accepted" != "0" ]; then
+            echo "a notarized bundle was refused by Gatekeeper" >&2
+            exit 1
+          fi
+          if ! grep -q "source=Notarized Developer ID" "$assessment"; then
+            echo "accepted, but not as a notarized Developer ID build, which is a different claim" >&2
+            exit 1
+          fi
+          spctl -a -vvv -t open --context context:primary-signature "$dmg"
+          xcrun stapler validate "$FOLIO_APP"
+          xcrun stapler validate "$dmg"
+          echo "signed, notarized, stapled, and accepted — both the application and the image."
+
+      # **The keychain and the key go, whatever happened above.** They are the
+      # owner's, and a runner is a machine this job does not own.
+      - name: the credentials this job made go
+        if: always()
+        run: |
+          set -u
+          rm -rf "$RUNNER_TEMP/appstoreconnect"
+          rm -f "$RUNNER_TEMP/folio-signing.p12"
+          if [ -n "${FOLIO_KEYCHAIN:-}" ] && [ -f "${FOLIO_KEYCHAIN}" ]; then
+            remaining=$(security list-keychains -d user | tr -d '" ' | grep -v -F "$FOLIO_KEYCHAIN" || true)
+            if [ -n "$remaining" ]; then
+              security list-keychains -d user -s $remaining
+            fi
+            security delete-keychain "$FOLIO_KEYCHAIN"
+            echo "deleted $FOLIO_KEYCHAIN"
+          else
+            echo "this run made no keychain"
+          fi
+
+      # Two names, because which of the two this is, is the first thing a person
+      # downloading it needs to know.
+      - if: env.FOLIO_SIGNED == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: folio-macos-${{ env.VERSION }}
+          path: target/macos-package
+          if-no-files-found: error
+
+      - if: env.FOLIO_SIGNED != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: folio-macos-${{ env.VERSION }}-unsigned
+          path: target/macos-package
+          if-no-files-found: error
+
+      # The `.dSYM` and the two notarization logs, kept and kept apart: the
+      # files that are archived beside a release and never inside it.
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: folio-macos-${{ env.VERSION }}-symbols
+          path: target/macos-symbols
+          if-no-files-found: warn
