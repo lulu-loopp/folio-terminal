@@ -9310,363 +9310,131 @@ Mac 上跑九只用例,而且别处跑不了:一行跨过去,到达的是同一�
 
 ### 13.38 M4-3: 网页策略对齐 X-2 的矩阵——每一行都在真机上驱动过,给不了的保证写进产品(`crates/bt-app/src/{webnav,webhost,i18n,main}.rs`、`crates/bt-platform/src/{webview,macos_compose,lib,portable_impl}.rs`、`crates/bt-platform/tests/macos_webview.rs`、`crates/bt-render/src/lib.rs`、`docs/PRIVACY.md`)
 
-**① Forty rows, on the machine, and none of them left as a reading.** X-2's matrix
-was twenty requirements measured against a *probe*; M4-2 drove the ten of them a
-local seat can be asked without a socket, against the product's own host. This
-ticket drives **everything else**, in the same `harness = false` bundle (§13.17,
-§13.29 ⑫), against two HTTP origins the test serves out of its own process on
-`127.0.0.1` — because a document and its subresources have to be two origins for
-a cross-origin row to mean anything, and because **the far socket is the only
-witness a request nobody was told about has**.
+**① 四十行,在真机上,没有一行是读出来的。** X-2 那张矩阵是二十条要求对着一个**探针**量的;M4-2 驱动了其中一个本地 seat 不用套接字就问得出的十条,对着产品自己的宿主。本票驱动**其余全部**,在同一个 `harness = false` 包里(§13.17、§13.29 ⑫),对着测试自己进程在 `127.0.0.1` 上开出的两个 HTTP 源——因为一份文档和它的子资源必须是两个源,一条跨源的行才有意义,也因为**一次没人被告知过的请求,唯一的见证人就是那个远端套接字**。
 
-| Row | What was asked | Verdict, measured |
+| 行 | 问的是什么 | 判定,量出来的 |
 |---|---|---|
-| ⑪ | a browsing seat is built and its three gates stand | PASS — `script_dialogs`, `frame_navigation`, `resource_requests` all true |
-| ⑫ | a picture, a stylesheet, a script and a `fetch()` to a second origin | PASS — **all four reach the far socket; the delegate is told about one thing on the page, and it is the iframe** |
-| ⑬ | the same document with the second origin in the compiled rule list | PASS — nothing reaches the socket, the page sees `blocked`, and **Folio is told about 0 of them** |
-| ⑭ | a 302 → 302 → page chain | PASS — the gate is asked about `/redirect1`, `/redirect2` and `/doc2.html` |
-| ⑮ | an iframe to the other origin | PASS — one `decidePolicyForNavigationAction:` with `isMainFrame == false`, routed to the request gate |
-| ⑯ | a `data:` iframe | PASS — what the document already holds, and it loads |
-| ⑰ | `401` with `WWW-Authenticate: Basic` | PASS — no box, the 401 body drawn, the seat still on the address |
-| ⑱ | permissions, one capability at a time | PASS — see ⑥ below |
-| ⑲ | a `download=` link | PASS — `shouldPerformDownload`, cancelled, `DownloadStarting` queued |
-| ⑳ | `target=_blank`, and `window.open` with no gesture behind it | PASS — nothing opens, the seat does not move, the page is answered `null` |
-| ㉑ | a form `POST` | PASS — a navigation the gate is asked about, `Origin` and body arriving at the server |
-| ㉒ | a `blob:` location | PASS — offered to the gate with its whole URL and cancelled |
-| ㉓ | a `file:` URL **inside the other seat's mint**, named from an `http` page | PASS — refused, and the report names which door: **the engine's, before any callback** |
-| ㉔ | a `Worker`'s own `fetch`, and a `ServiceWorker` registration | PASS — see ⑤ below |
-| ㉕ | the pointer | PASS — see ④ below |
+| ⑪ | 一个浏览 seat 建得起来,它那三道门都站得住 | PASS——`script_dialogs`、`frame_navigation`、`resource_requests` 全为真 |
+| ⑫ | 一张图、一份样式表、一个脚本,和一次到第二个源的 `fetch()` | PASS——**四样都到了远端套接字;委托被告知的只有页面上的一样东西,而那是 iframe** |
+| ⑬ | 同一份文档,第二个源在编译好的规则表里 | PASS——什么都到不了套接字,页面看到 `blocked`,而 **Folio 被告知了其中的 0 个** |
+| ⑭ | 一条 302 → 302 → 页面的链 | PASS——门被问了 `/redirect1`、`/redirect2` 和 `/doc2.html` |
+| ⑮ | 一个指向另一个源的 iframe | PASS——一次 `decidePolicyForNavigationAction:`,`isMainFrame == false`,路由到请求那道门 |
+| ⑯ | 一个 `data:` iframe | PASS——文档本来就攥着的东西,而它加载了 |
+| ⑰ | `401` 带 `WWW-Authenticate: Basic` | PASS——没有弹框,401 的正文画出来,seat 仍停在那个地址上 |
+| ⑱ | 权限,一次一项能力 | PASS——见下面 ⑥ |
+| ⑲ | 一个带 `download=` 的链接 | PASS——`shouldPerformDownload`,取消,`DownloadStarting` 入队 |
+| ⑳ | `target=_blank`,以及背后没有手势的 `window.open` | PASS——什么都没开,seat 没动,页面收到的答复是 `null` |
+| ㉑ | 一次表单 `POST` | PASS——一次门被问到的导航,`Origin` 和正文都到了服务器 |
+| ㉒ | 一个 `blob:` 位置 | PASS——带着整条 URL 交给门,然后取消 |
+| ㉓ | 一个 `file:` URL,**在另一个 seat 的 mint 里面**,由一个 `http` 页面点名 | PASS——被拒,而且报告点了是哪扇门:**引擎那扇,在任何回调之前** |
+| ㉔ | 一个 `Worker` 自己的 `fetch`,以及一次 `ServiceWorker` 注册 | PASS——见下面 ⑤ |
+| ㉕ | 指针 | PASS——见下面 ④ |
 
-Every row prints its own verdict, its own evidence and, where the answer is a
-*finding* rather than a claim, the finding. `failures=0` over the whole
-matrix — the ten M4-2 rows and these fifteen — on macOS 26.6.2, ad-hoc signed,
-started with `open`, ended by the pid it printed as its first line.
+每一行印出它自己的判定、它自己的证据,而当答案是一个**发现**而不是一句主张时,印出那个发现。整张矩阵 `failures=0`——M4-2 那十行加这十五行——在 macOS 26.6.2 上,ad-hoc 签名,用 `open` 启动,由它印在第一行的那个 pid 结束。
 
-**② What the product says it cannot do.** X-2's "what Q5's reduced set gives up"
-is seven sentences (§13.29 ⑩) and the ticket's question was which of them a
-*string* promises. The honest answer is: **almost none of them, because the
-product never promised the mechanism** — there is no settings row, no first-run
-line and no notice about how a page's contents are policed. Two places did
-promise something the other machine cannot give, and both are fixed here.
+**② 产品说自己做不到的那些事。** X-2 里「Q5 那套削减集放弃了什么」是七句话(§13.29 ⑩),而本票的问题是其中哪几句被一条**字符串**许诺过。老实的答案是:**几乎一句都没有,因为产品从来没有许诺过那套机制**——没有一行设置、没有一句首启文案,也没有一条关于一个页面的内容怎么被管束的告示。有两处确实许诺了另一台机器给不了的东西,两处都在这里改了。
 
-* **`Text::WebFailGuardsSay`** — the card a local file raises when this host could
-  not be given the gates. Its English read *"This version of the web engine
-  cannot enforce this window's rules for a page"*, and on Windows that is the
-  fact a reader can act on: an Evergreen runtime too old to carry an event is a
-  runtime that can be updated. A Mac's engine is the system's and has no version
-  to be behind — what can fail there is the rule list refusing to compile — so a
-  line blaming *this version* would send a reader after an update that does not
-  exist. It takes a platform column through `pick_platform` (§13.32 ②), and the
-  promise, which is the half that must not move, is identical in both:
-  `the_web_engine_card_states_one_promise_and_names_one_engine`.
-* **`WebGuards::missing()`** — the *detail line* under that card, which was three
-  WebView2 event names on both machines. It is the same three questions on both
-  engines, which is why one struct carries them, and only the name of the thing
-  that answers differs: `ScriptDialogOpening` / `WKUIDelegate runJavaScript…Panel`,
-  `FrameNavigationStarting` / `decidePolicyForNavigationAction:`,
-  `WebResourceRequested` / `WKContentRuleList`. Read from
-  `host_platform()` rather than behind a `cfg`, so a Windows runner can read the
-  other column — which is what
-  `the_missing_gates_are_named_as_the_readers_own_engine_names_them` does. It is
-  M4-2's own ruling about `WebSetting::api` applied one line up.
+* **`Text::WebFailGuardsSay`**——一个本地文件在这个宿主拿不到那几道门时抬起来的那张卡。它的英文是 *「This version of the web engine cannot enforce this window's rules for a page」*,而在 Windows 上这是读者据以行动的事实:一个旧到带不动某个事件的 Evergreen 运行时,是一个可以更新的运行时。Mac 的引擎是系统的,没有一个版本可以落后——那里会失败的是规则表编译不过——所以一句怪罪*这个版本*的话,会把读者打发去找一个并不存在的更新。它经 `pick_platform`(§13.32 ②)取一列平台文案,而那句许诺、也就是不许动的那一半,两边一个字不差:`the_web_engine_card_states_one_promise_and_names_one_engine`。
+* **`WebGuards::missing()`**——那张卡底下的**明细行**,两台机器上本来都是三个 WebView2 事件名。两个引擎上是同样三个问题,这正是一个结构体装得下它们的原因,而不同的只是回答它的那样东西叫什么:`ScriptDialogOpening` / `WKUIDelegate runJavaScript…Panel`、`FrameNavigationStarting` / `decidePolicyForNavigationAction:`、`WebResourceRequested` / `WKContentRuleList`。它从 `host_platform()` 读而不是藏在一个 `cfg` 后面,所以一台 Windows 跑器读得到另一列——`the_missing_gates_are_named_as_the_readers_own_engine_names_them` 干的就是这件事。这是 M4-2 自己关于 `WebSetting::api` 的那条裁决,往上挪了一行。
 
-And one card that is **correct and unreachable**: `WebFailRuntimeSay` names a
-Microsoft product because on Windows that is the thing to install, and
-`webview2_runtime_version` answers `Ok` off Windows always, so `RuntimeMissing`
-is a card no Mac can raise. It goes on `WINDOWS_ONLY_SURFACES` with its verb, and
-`WebView2` joins the words
-`no_string_a_mac_reader_meets_names_a_windows_program` refuses — a gate that was
-not there to catch it.
+还有一张**正确而够不着**的卡:`WebFailRuntimeSay` 点了一个微软产品的名,因为在 Windows 上那就是该去装的东西,而 `webview2_runtime_version` 在 Windows 之外永远答 `Ok`,所以 `RuntimeMissing` 是一张任何 Mac 都抬不起来的卡。它带着它那个动词上了 `WINDOWS_ONLY_SURFACES`,而 `WebView2` 进了 `no_string_a_mac_reader_meets_names_a_windows_program` 拒绝的那张词表——一道当时不在场、因而没接住它的门。
 
-`docs/PRIVACY.md` said two things that are now false on a Mac and one of them is
-this ticket's: the page in the web preview is *"fetched by the WebView2 engine
-that Windows provides"*. It is fetched by the engine the operating system
-provides, and which one that is is named. The profile section stops being a
-Windows path with a paragraph under it and becomes a two-row table — where the
-browsing data is on each machine, and, on the Mac row, that the compiled page
-rules under `~/Library/Application Support/Folio/WebKit` are **not** browsing
-data. The autofill sentence is one sentence for both and two reasons: on Windows
-the engine's autofill and password saving are switched off rather than left at
-their defaults; on macOS the engine has neither feature to switch off, because
-form autofill and the keychain belong to Safari and not to the view Folio hosts
-(`WEB_SETTINGS`' two autofill rows stand on this arm for exactly that reason —
-§13.29's `configure`). **The update-check half of that file is M5-6's and is
-untouched here**; the two tickets meet at the sentence boundary.
+`docs/PRIVACY.md` 里有两句话在 Mac 上现在是假的,其中一句是本票的:网页预览里的页面是*「由 Windows 提供的 WebView2 引擎取回的」*。它是由操作系统提供的那个引擎取回的,而那是哪一个,写出来。配置那一节不再是一条 Windows 路径底下挂一段话,而变成一张两行的表——浏览数据在每台机器上的位置,以及在 Mac 那一行上,`~/Library/Application Support/Folio/WebKit` 底下那些编译好的页面规则**不是**浏览数据。自动填充那句话是两台机器共用的一句,理由有两个:Windows 上引擎的自动填充和密码保存是被关掉的,而不是留在默认值上;macOS 上引擎根本没有这两样功能可关,因为表单自动填充和钥匙串属于 Safari,不属于 Folio 宿主的那个视图(`WEB_SETTINGS` 里那两行自动填充停在这条臂上,理由分毫不差就是这个——§13.29 的 `configure`)。**那份文件里更新检查的那一半是 M5-6 的,这里没动**;两张票在句子的边界上交接。
 
-**③ A local page is shown as a path again, on both machines** — §13.29 ⑬'s
-carry-forward, and it was two roots rather than one bug. M4-2 taught the
-*encoder* that an absolute path spells its root in one of two ways —
-`D:\report.html` carries none and `/Users/somebody/report.html` is nothing but
-one — and left the **reader** assuming the first.
-`Mint::path_and_tail_of_file_url` turned every `/` into `\` and then asked
-`Path::is_absolute`, so a Mac's own mint read back as `\Users\somebody\…`, which
-is absolute nowhere, and `local_path_form` answered `None` for every local page a
-Mac ever opened.
+**③ 一个本地页面重新按路径显示出来,两台机器上都是**——§13.29 ⑬ 的挂账,而它是两个根而不是一个缺陷。M4-2 教会了**编码器**:一条绝对路径拼它的根有两种写法——`D:\report.html` 一个都不带,而 `/Users/somebody/report.html` 除了根什么都不是——却把**读的那一半**留在了假定第一种上。`Mint::path_and_tail_of_file_url` 把每个 `/` 换成 `\` 再去问 `Path::is_absolute`,所以一个 Mac 自己的 mint 读回来是 `\Users\somebody\…`,那在哪儿都不是绝对路径,于是 `local_path_form` 对一个 Mac 开过的每一个本地页面都答 `None`。
 
-The root is now read **off the string**, where both spellings of it already are:
-a body beginning `X:/` is the drive-rooted form and its separators are `\`; a
-body beginning with anything else is the slash-rooted form, whose one leading
-separator the `file:///` prefix already ate. Asking the *host's* rules was the
-mistake — `Path::is_absolute` answers about the machine doing the reading rather
-than about the machine the path is for, and a session file written on one and
-read on the other is exactly the case that has to come back with the same answer
-on both. `a_file_url_reads_back_rooted_the_way_it_was_minted` asks both spellings
-of both machines on one machine, for that reason.
+现在那个根是**从字符串上**读的,两种写法本来就都在字符串上:正文以 `X:/` 开头的是盘符根那一种,它的分隔符是 `\`;以别的东西开头的是斜杠根那一种,它那唯一一个前导分隔符已经被 `file:///` 前缀吃掉了。去问**宿主**的规矩才是那个错——`Path::is_absolute` 回答的是正在读的这台机器,而不是这条路径要去的那台机器,而一份在一台上写、在另一台上读的会话文件,恰恰是必须在两边拿回同一个答案的那种情形。`a_file_url_reads_back_rooted_the_way_it_was_minted` 在一台机器上把两台机器的两种写法都问一遍,就是为这个。
 
-**It is the absolute path and not the `~`-relative crumb** §13.32 ③ gives the
-files column's breadcrumb row, and that is a ruling rather than an omission: this
-string is not only shown, it *seeds the address field*, and what that field hands
-back goes through `file_url_of_local_path`, which takes an absolute path and
-nothing else. A row that displayed `~/notes.html` would be a field whose own
-content it refuses. The breadcrumb row is not reached from here at all — a page's
-rail is its address and never crumbs (「网页不长面包屑」, §7.7) — so the two
-surfaces do not disagree; they are answering about different objects.
+**是那条绝对路径,而不是 §13.32 ③ 给文件列面包屑行的那个 `~` 短写**,而这是一条裁决而不是一处遗漏:这条字符串不只是被显示,它还**给地址栏播种**,而那个栏交回来的东西要过 `file_url_of_local_path`,它只收绝对路径。一行显示 `~/notes.html` 的地址栏,会是一个连自己的内容都不认的栏。面包屑那一行从这里根本到不了——一个页面的那条栏是它的地址,从不长面包屑(「网页不长面包屑」,§7.7)——所以这两块表面并不矛盾;它们回答的是两样不同的东西。
 
-One corner left standing and written down rather than smuggled: `Mint::file`
-turns every `\` into `/`, which is right for a separator and wrong for a
-filename, so a file whose *name* contains a backslash — legal on the machine with
-slash-rooted paths and impossible on the other — does not round-trip. Fixing it
-means the encoder asking which machine it is on, which is the one thing this
-module does not do.
+留下一个角,写下来而不是糊过去:`Mint::file` 把每个 `\` 换成 `/`,对一个分隔符来说这是对的,对一个文件名来说是错的,所以一个**名字**里带反斜杠的文件——在用斜杠根路径的那台机器上合法,在另一台上不可能——过不了一次往返。修它意味着编码器要去问自己在哪台机器上,而那恰恰是这个模块唯一不做的事。
 
-**④ The pointer, decided and implemented** — §13.29 ⑩'s last sentence, and the
-one thing M4-1 and M4-2 both left open.
+**④ 指针,裁了,也做了**——§13.29 ⑩ 最后那句话,也是 M4-1 和 M4-2 都留着没关的那一件。
 
-The measurement first. A press inside a page's rectangle **is** routed to the
-`WKWebView` and the page answers it: AppKit hands the point to the frontmost view
-whose `hitTest:` claims it, Folio's own surface view answers nil by design
-(§13.24, `macos_impl`), the page's slot answers its subviews' answer, and the
-page claims its own presses. So far so right. The other half is wrong, and the
-window already knew it: **Folio goes on drawing its own surfaces across that
-rectangle**. The in-pane search capsule stands inside the pane below its head
-(`search_capsule_host` measures it against the seat's *whole* rectangle, not its
-body), a `⌄` menu drops down over the body it was opened from, and a floated
-pane's own face is painted straight back over the hole its page is seen through —
-`a_floated_pages_hole_is_punched_above_the_float_that_carries_it` says so in
-as many words. Every one of those would be chrome nothing could press.
+先说量到的。一次落在页面矩形里的按下**确实**路由到了 `WKWebView`,而页面答了它:AppKit 把那个点交给 `hitTest:` 认领它的最前面那个视图,Folio 自己那个表面视图按设计答 nil(§13.24,`macos_impl`),页面那个槽答的是它子视图的答案,而页面认领它自己的按下。到这里都对。另一半是错的,而那扇窗自己早就知道:**Folio 照样在那片矩形上画它自己的表面。** pane 内搜索胶囊立在 pane 里、它那个头的下面(`search_capsule_host` 是拿 seat 的**整个**矩形而不是它的正文去量的),一个 `⌄` 菜单从它被打开的那片正文上落下来,而一个浮起 pane 自己的脸,直接盖回到它的页面被看见的那个洞上——`a_floated_pages_hole_is_punched_above_the_float_that_carries_it` 就是这么说的。这里每一样,都会是一块按不动的窗饰。
 
-None of it is a question on Windows, and the reason is what the two engines
-*are*: a WebView2 composed into a visual is in no hit-test order at all, so every
-press in the window arrives at Folio and Folio forwards to the page the ones that
-were the page's (`WebHost::send_mouse`). The question this platform asks is
-already answered there by the mechanism that delivers the press.
+在 Windows 上这些一个都不是问题,而理由是这两个引擎**是什么**:一个合成进 visual 的 WebView2 根本不在任何命中测试顺序里,所以窗口里的每一次按下都到 Folio,再由 Folio 把该是页面的那些转给页面(`WebHost::send_mouse`)。这个平台问的这个问题,在那边已经被投递按下的那套机制答过了。
 
-So the window says where it is standing, and the slot lets those rectangles
-through: `Compositor::set_page_cover(page, rects)` is a door on **every** arm —
-`bt-app` names no platform — which the macOS arm stores on the slot and the
-Windows and portable arms drop in one line that says why. The slot's `hitTest:`
-answers nil inside a cover, and the containment test is `NSPointInRect`'s own
-half-open rule so that two adjacent covers cannot both claim the seam.
+所以由那扇窗说出它站在哪儿,而那个槽把那些矩形放过去:`Compositor::set_page_cover(page, rects)` 是**每条臂**上都有的一扇门——`bt-app` 不点任何平台的名——macOS 那条臂把它存在槽上,Windows 和可移植那两条一行丢掉并写明为什么。槽的 `hitTest:` 在一块遮盖里面答 nil,而包含判定用的是 `NSPointInRect` 自己那条半开区间的规矩,好让两块相邻的遮盖不会都去认领那条缝。
 
-**The window is the only thing that can say it**, and what it says is one reading
-of a fact the frame already settled. `WebHole::above` is where a page's hole is
-punched in the overlay stack: the layers at and below it are drawn *under* the
-page and the ones after it are drawn *over* it. `None` is a docked page, whose
-hole stands under the whole stack — every layer covers it; `Some(level)` is a
-floated page, whose hole is punched above its own float's face precisely so that
-the pane it lives in does not. `chrome_over` skips to `level + 1` and keeps the
-layers that overlap the page's own rectangle, and
-`OverlayLayer::opaque_bounds` is where a layer's box comes from — grounds, fills
-with alpha, and a preview body, and not the words on them, because every surface
-in this window that a press can land on is drawn as a ground or a fill first and
-lettered afterwards. A layer faded to nothing is not a surface and does not
-cover.
+**只有那扇窗说得出这件事**,而它说的是帧那边早就定下的一个事实的一种读法。`WebHole::above` 是一个页面的洞在覆盖层栈里被打在哪儿:在它和它以下的层画在页面**底下**,它之后的画在页面**上面**。`None` 是一个停靠的页面,它的洞立在整个栈底下——每一层都盖着它;`Some(level)` 是一个浮起的页面,它的洞恰恰打在它自己那片浮层的脸之上,好让它所在的那个 pane 不盖它。`chrome_over` 跳到 `level + 1`,留下与页面自己那个矩形相交的那些层,而一层的框从哪儿来是 `OverlayLayer::opaque_bounds` 的事——底、带 alpha 的填充,以及一片预览正文,而不是上面的字,因为这扇窗里每一块按得下去的表面都是先画成一块底或一块填充、随后才刻字的。一层淡到没有的层不是一块表面,也不盖任何东西。
 
-**One frame behind, and that is the honest reading of it.** `overlay_bounds` is
-recorded where the stack is published, which is the one place its order is
-settled, and read by the next placement pass: it says where the window last
-*drew*, which is what a reader is pressing on. A menu that opened on this frame
-is a menu nobody has aimed at yet.
+**慢一帧,而那就是它老实的读法。** `overlay_bounds` 记在那个栈被发布的地方,也就是它的顺序唯一定下来的那个地方,再由下一趟布置读走:它说的是这扇窗上一次**画**在哪儿,而那正是读者正按着的东西。一个这一帧才打开的菜单,是一个还没有人瞄过的菜单。
 
-Pinned twice. `a_page_answers_for_every_part_of_itself_nothing_is_standing_on`
-holds the rule over five cases on Windows; row ㉕ of the `.app` matrix holds the
-delivery on the machine — a press inside the page reaches
-`NSKVONotifying_WKWebView` and the page's own `onclick` reports it, a window that
-page asks for **on that real gesture** is still refused, a press where a cover
-stands routes to the window instead and the page never hears it, and the same
-point is the page's again the moment the cover comes down. The press is delivered
-through `-[NSWindow sendEvent:]`, which is the method the application's own event
-loop calls for a real click, rather than through `CGEventPost`: posting into the
-session's event tap is gated by the Accessibility permission on a current macOS,
-and a run that raised a TCC prompt on somebody's desk would have broken a harder
-rule than it kept.
+钉了两次。`a_page_answers_for_every_part_of_itself_nothing_is_standing_on` 在 Windows 上用五个用例按住这条规矩;`.app` 那张矩阵的第 ㉕ 行在真机上按住投递——一次落在页面里的按下到达 `NSKVONotifying_WKWebView`,页面自己的 `onclick` 报告了它;页面**在那次真实手势上**要的一扇窗照样被拒;一次落在有遮盖处的按下改路由给窗口,页面根本没听见;而遮盖一撤,同一个点当场又是页面的了。那次按下是经 `-[NSWindow sendEvent:]` 投递的,也就是应用自己的事件循环为一次真实点击调的那个方法,而不是经 `CGEventPost`:往会话的事件 tap 里投,在当前 macOS 上被辅助功能授权卡着,而一次在别人桌面上弹出 TCC 提示的运行,破的规矩比它守的那条还硬。
 
-**⑤ X-2's row 20, answered.** Requests a worker makes on a page's behalf were
-"unknown rather than covered" — the Windows arm filters them on purpose
-(`SOURCE_KINDS_ALL`) and nobody had measured this engine. Measured now, both
-ways round: a `Worker` fetching the second origin **reaches that socket**, with
-`Sec-Fetch-Mode: cors` and the page's own `Origin`, and **no delegate is told
-anything at all** — the same silence as the document's own subresources. With the
-compiled rule list standing, the socket is **not reached** and the worker reports
-`blocked`. So the third door does reach inside a worker: the reduced mechanism
-covers the case, and what was unknown is now one of the things a pattern can say.
+**⑤ X-2 的第 20 行,答了。** 一个 worker 代页面发出的请求当时是「不知道,而不是被覆盖了」——Windows 那条臂是特意过滤它们的(`SOURCE_KINDS_ALL`),而没有人量过这个引擎。现在量了,而且正反两遍:一个 `Worker` 去取第二个源,**到了那个套接字**,带着 `Sec-Fetch-Mode: cors` 和页面自己的 `Origin`,而且**没有任何委托被告知任何事**——跟文档自己的子资源一样安静。编译好的规则表立着时,那个套接字**到不了**,而那个 worker 报告 `blocked`。所以第三扇门确实伸进了一个 worker 里面:那套削减过的机制覆盖了这种情形,而当时不知道的那件事,现在是一条模式说得出的东西之一。
 
-A `ServiceWorker` **registers** on this seat — `127.0.0.1` is a potentially
-trustworthy origin, the script is fetched, and `register()` resolves. That is
-worth knowing for what it implies rather than for itself: a registration is
-persisted against the website data store, which on this platform is the
-*application's* (§13.29 ⑥), so a page a reader previews can leave a worker behind
-in Folio's own store exactly as it can leave a cookie. Nothing here changes that
-— it is the persistent-profile cost `PRIVACY.md` already records on both machines
-— but it is a fact that was not written down before. The interception path (a
-`fetch` served *by* a registered worker) is not driven here and is not claimed.
+一个 `ServiceWorker` 在这个 seat 上**注册得上**——`127.0.0.1` 是一个潜在可信源,脚本被取回,`register()` 兑现。这件事值得知道,是为它推出的东西而不是为它本身:一次注册是对着网站数据仓持久化的,而在这个平台上那个仓是**应用的**(§13.29 ⑥),所以一个读者预览过的页面,可以在 Folio 自己的仓里留下一个 worker,就像它可以留下一个 cookie 一样。这里没有任何东西改变这件事——那是 `PRIVACY.md` 两台机器上都已记着的、持久配置的代价——但它是一个以前没有写下来的事实。拦截那条路(一次**由**已注册 worker 应答的 `fetch`)这里没有驱动,也没有主张。
 
-**⑥ Permissions: the ones this host refuses by name, and the one it does not.**
-Apple's rule is that an unimplemented permission method is **not** a denial — the
-capability then arrives with WebKit's own default, which for capture is a panel
-on somebody's screen — so "which capabilities does Folio refuse" is a question
-about the delegate's *method list*, and the runtime answers it exactly. Asked
-with `respondsToSelector:` on the object standing as the page's UI delegate:
+**⑥ 权限:这个宿主按名字拒掉的那些,和它拒不掉的那一个。** 苹果的规矩是,一个没实现的权限方法**不是**一次拒绝——那项能力随后会带着 WebKit 自己的默认值到来,而对捕获来说那个默认值是别人屏幕上的一块面板——所以「Folio 拒掉哪些能力」是一个关于委托的**方法表**的问题,而运行时把它答得一字不差。拿 `respondsToSelector:` 去问那个当着页面 UI 委托的对象:
 
-* `webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:` — **yes**, the camera and the microphone;
-* `webView:requestDeviceOrientationAndMotionPermissionForOrigin:initiatedByFrame:decisionHandler:` — **yes**;
-* `webView:requestGeolocationPermissionForOrigin:initiatedByFrame:decisionHandler:` — **no, and there is no such method to implement**;
-* `_webView:requestGeolocationPermissionForOrigin:initiatedByFrame:decisionHandler:` — **no**, not even under WebKit's private spelling on this build.
+* `webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:`——**有**,摄像头和麦克风;
+* `webView:requestDeviceOrientationAndMotionPermissionForOrigin:initiatedByFrame:decisionHandler:`——**有**;
+* `webView:requestGeolocationPermissionForOrigin:initiatedByFrame:decisionHandler:`——**没有,而且根本没有这么一个方法可实现**;
+* `_webView:requestGeolocationPermissionForOrigin:initiatedByFrame:decisionHandler:`——**没有**,在这个构建上连 WebKit 那个私有拼法都没有。
 
-**Geolocation is therefore not a capability this host can refuse at all**, and
-what stands between a previewed page and CoreLocation is the *bundle*: an
-application with no `NSLocation…UsageDescription` cannot be authorised, so the
-request cannot be granted and no prompt can be raised. That is a packaging fact
-rather than a policy one, and it is the reason M5 must never add one of those
-keys to Folio's `Info.plist` for some unrelated feature without coming back to
-this paragraph. The matrix's own bundle carries no usage description of any kind
-and its launcher greps for that before it signs.
+**所以定位根本不是这个宿主拒得掉的一项能力**,而挡在一个被预览的页面和 CoreLocation 之间的是那个**应用包**:一个没有 `NSLocation…UsageDescription` 的应用授权不了,所以这个请求批不下来,也就抬不起任何提示。这是一个打包的事实而不是一条策略,而这正是 M5 绝不可以为了某个不相干的功能往 Folio 的 `Info.plist` 里加一个那种键、却不回来读这一段的原因。矩阵自己那个应用包不带任何一种用途说明,而它的启动脚本在签名之前先 grep 这件事。
 
-The page's own attempt says something else worth recording: on a plain-`http`
-origin WebKit does not expose `navigator.mediaDevices` at all (`camera=noapi`,
-`microphone=noapi`) and `getCurrentPosition` reports nothing back, so a fixture
-without TLS cannot reach the delegate through the *page*. The delegate row above
-is the measurement that does not depend on the origin, which is why it is the one
-the proof asserts and the page's attempt is reported as a finding beside it.
+页面自己那次尝试说出了另一件值得记下的事:在一个纯 `http` 源上,WebKit 根本不暴露 `navigator.mediaDevices`(`camera=noapi`、`microphone=noapi`),而 `getCurrentPosition` 什么也没报回来,所以一个不带 TLS 的夹具经**页面**够不到那个委托。上面那一行委托的读数是不依赖源的那次测量,这正是证明断言的是它、而页面那次尝试作为一个发现记在它旁边的原因。
 
-**⑦ Three defects in the instrument, none of them in the host** — worth the
-paragraph because the first run failed ten rows and every one of them was the
-proof and not the product.
+**⑦ 仪器上的三个缺陷,一个都不在宿主里**——值得占一段,因为第一趟跑挂了十行,而每一行挂的都是证明而不是产品。
 
-* **`settle` turns the run loop; it does not drain the host.** Six rows ran a
-  script, settled, and then read a slice of an event list nothing had appended
-  to. `catch_up` is `until` with nothing wanted: it turns the loop *and* reads.
-* **A wait that was satisfied by history.** `go` waited for "a
-  `NavigationCompleted` in the list", which every list has from the second
-  navigation onwards, so every row after the first read a page that had not
-  loaded. It takes a mark before the call and reads only past it — the same
-  discipline the rows themselves keep with `before = net.len()`.
-* **Points and pixels.** `place_web_visual` is given *physical* pixels and a
-  document's coordinates are points, so a clip of 700×520 on a 2× display is a
-  viewport 350×260 CSS pixels tall and the buttons the pointer rows aim at, at
-  260 and 340, were outside the page. Every press fell through to the window and
-  the rows read as a routing defect that was not there. The clip is points times
-  the backing scale now, and the conversion from a document point to a window
-  point is asked of AppKit — `convertPoint:toView:` twice and `isFlipped` once —
-  rather than assumed, because a test window's content view is not winit's and
-  does not share its origin.
+* **`settle` 转的是 run loop,它不抽宿主。** 有六行跑了一段脚本、settle 一下,然后去读一张没有任何东西往里追加过的事件表的一段。`catch_up` 是不指望任何东西的 `until`:它**既**转那个循环**也**读。
+* **一次被历史满足掉的等待。** `go` 等的是「表里有一次 `NavigationCompleted`」,而从第二次导航起每张表都有,所以第一行之后的每一行读的都是一个还没加载完的页面。改成调用前先取一个标记、只读它之后的——跟那些行自己拿 `before = net.len()` 守的是同一条纪律。
+* **点和像素。** `place_web_visual` 收的是**物理**像素,而一份文档的坐标是点,所以在一块 2× 屏上 700×520 的裁剪是一个 350×260 CSS 像素高的视口,而指针那几行瞄的按钮在 260 和 340,落在页面外面。每一次按下都穿过去到了窗口,那几行读起来就成了一个并不存在的路由缺陷。现在裁剪是点乘以背衬缩放,而从一个文档点到一个窗口点的换算是去问 AppKit 的——`convertPoint:toView:` 两次、`isFlipped` 一次——而不是假定,因为一个测试窗口的内容视图不是 winit 那个,也不跟它共用原点。
 
-*(本节英文,待中文文案改写。)*
 ### 13.39 T-MAC-POINTER: 按下根本没到 Folio——另一个进程的浮动面板盖在那片桌面上,悬停跟得住不等于按下落得下,标题栏视图是冤枉的(`crates/bt-platform/tests/macos_pointer_route.rs`(新)、`crates/bt-platform/Cargo.toml`)
 
-**This is 13.39 and not 13.38.** 13.38 is M4-3's and was in flight while this
-ran; the numbers are taken in the order the tickets started, not in the order
-they land.
+**这是 13.39 而不是 13.38。** 13.38 是 M4-3 的,本票跑的时候它还在飞;号是按票开工的顺序取的,不是按落地的顺序。
 
-**① The finding this ticket was given, and the one sentence of it that was
-wrong.** §13.34 ⑦(d) reported a press on the restore card's accent button that
-produced **no `WindowEvent::MouseInput` at all**, while the same button hovered
-correctly — its accent lifted by exactly the brightness the card draws a hovered
-primary with — and while a press on the same window's tab strip, in the same run,
-arrived and routed. It recorded that the window was `z0` in the window server's
-front-to-back order immediately before and immediately after the press, and
-concluded: *"it is **not** occlusion … a press lands on that window's title bar
-and does not land on its content"*.
+**① 本票收到的那个发现,以及其中错了的那一句。** §13.34 ⑦(d) 报告过一次按在恢复卡强调按钮上的按下,**根本没有产生任何 `WindowEvent::MouseInput`**,而同一个按钮的悬停是对的——它的强调色恰好被抬起了那张卡画一个被悬停的主按钮所用的那点亮度——而同一趟运行里,按在同一扇窗标签条上的一次按下到了,也路由了。它记下了在那次按下之前和之后,那扇窗在窗口服务器的前后顺序里都是 `z0`,并得出结论:*「这**不是**遮挡……一次按下落在那扇窗的标题栏上,而落不到它的内容上」*。
 
-**It was occlusion.** The press was never delivered to the application at all —
-not to the title bar, not to any view, not to the process. What stood over the
-button was another application's floating window, and the instrument that
-reported `z0` could not see it because it had been written to skip exactly the
-kind of window it was.
+**那就是遮挡。** 那次按下根本没有被投递给这个应用——不是给标题栏,不是给任何视图,是根本没到这个进程。立在那个按钮上面的是另一个应用的一扇浮动窗口,而报告 `z0` 的那件仪器看不见它,因为它当初就是照着「跳过这一类窗口」写的,而那正是它这一类。
 
-**② Two roads, and they are not the same road.** This is the whole of why the
-picture was so convincing, and it is worth writing down for every later ticket
-that drives this product with a pointer.
+**② 两条路,而它们不是同一条路。** 这就是那幅画面为什么那么有说服力的全部,而它值得为以后每一张用指针驱动这个产品的票写下来。
 
-* **`mouseDown:` is routed by the window server** to the frontmost window at that
-  point, whichever application owns it. A window in front takes the press and the
-  one behind never hears of it.
-* **`mouseMoved:` is delivered to the application that is *active*,** for the
-  whole screen, and AppKit sends it on through the window's responder chain. It
-  is not gated by who is frontmost under the cursor.
+* **`mouseDown:` 由窗口服务器路由**给那个点上最前面的那扇窗,不管它属于哪个应用。前面那扇窗拿走这次按下,后面那扇从头到尾不知道有这回事。
+* **`mouseMoved:` 投给当前*活跃*的那个应用**,整块屏幕都算,再由 AppKit 经那扇窗的响应链发下去。它不看光标底下最前面的是谁。
 
-So an active Folio with something parked over its middle **still tracks the
-pointer across the occluder** — `pointer_position` follows, `first_run::hit`
-answers, the button lifts, the picture is right — and every press in that patch
-goes somewhere else. Hovering is not evidence that a press can land there, and
-after this ticket nothing in this repository may treat it as such.
+所以一个活跃的 Folio,中间停着别的东西时,**照样跨过那个遮挡物跟着指针**——`pointer_position` 跟得住,`first_run::hit` 答得出,按钮抬起来,画面是对的——而落在那片地方的每一次按下都去了别处。悬停不是按下落得下去的证据,而这张票之后,这个仓里任何东西都不许再把它当证据。
 
-The measurement that says it in one line is the probe's, taken on the move that
-preceded the failing press:
+一句话说完这件事的那次测量是探针的,取自失败那次按下之前的那次移动:
 
 ```
 event kind=NSEventType(5) at=1163.5,548.0 window=none app_active=true
 ```
 
-(`5` is the raw discriminant of `NSEventTypeMouseMoved`; the probe prints what
-`-[NSEvent type]` answered rather than a name it looked up.)
+(`5` 是 `NSEventTypeMouseMoved` 的原始判别值;探针印的是 `-[NSEvent type]` 答的东西,而不是一个它查表查来的名字。)
 
-`window=none` is `-[NSEvent window]` answering `nil`, and a mouse event with no
-window carries its location in **screen** coordinates rather than window ones —
-`1163.5,548` is AppKit's bottom-left reading of the same point on this 1080-point
-screen that the window-relative moves report as `648.5,235`. The application was
-handed a move over a point that belongs to none of its windows. The
-`NSEventTypeLeftMouseDown` that followed it was never handed over at all.
+`window=none` 是 `-[NSEvent window]` 答了 `nil`,而一个不带窗口的鼠标事件,它的位置是**屏幕**坐标而不是窗口坐标——`1163.5,548` 是 AppKit 以左下为原点,对这块 1080 点高的屏幕上同一个点的读数,而按窗口算的那些移动把它报成 `648.5,235`。这个应用被交了一次落在它任何一扇窗都不属于的点上的移动。跟在它后面的那次 `NSEventTypeLeftMouseDown` 根本没被交过来。
 
-**③ What was standing there.** Read with `CGWindowListCopyWindowInfo` over the
-whole on-screen list at **every** layer, at the moment of the press:
+**③ 立在那儿的是什么。** 在按下的那一刻,用 `CGWindowListCopyWindowInfo` 把整张屏上的表在**每一层**上读一遍:
 
 | | | |
 |---|---|---|
 | `CoreServicesUIAgent` | `kCGWindowLayer` **8** | `1129,509 260×192` |
 | `CoreServicesUIAgent` | 8 | `1063,443 260×192` |
 | `CoreServicesUIAgent` | 8 | `997,377 260×192` |
-| Folio's own window | **0** | `515,167 960×600` |
+| Folio 自己那扇窗 | **0** | `515,167 960×600` |
 
-The accent button stood at `1163,532`, which is inside **all three** of those —
-they cascade and therefore overlap — and the press went to the first. The card's
-own body, 80 points higher, is clear of the lowest of them and under the other
-two. Sixteen of these windows were on the desk, all `260×192`, cascading in steps
-of 66 points across the middle of the screen and then piling up against its
-trailing edge. **What they are was not established and does not have to be**:
-they belong to another process, they stand above every ordinary window, and they
-take the press. (`CoreServicesUIAgent` is the agent the system puts its own small
-windows up through, and this port has launched a throwaway bundle several dozen
-times; that is a plausible account of where sixteen of them came from and not a
-measurement.) Above them again, and over everything, the Dock's own full-screen
-window (layer 20) and the menu bar (24) — which stood over every press of this
-run, the ones that arrived included.
+那个强调按钮站在 `1163,532`,而它落在那三扇的**每一扇**里面——它们层叠因而互相重叠——而那次按下去了第一扇。那张卡自己的正文高 80 点,躲开了最低的那一扇,而压在另外两扇底下。桌面上有十六扇这样的窗口,全是 `260×192`,以 66 点为步长横穿屏幕中间层叠下来,然后在它的后沿上堆起来。**它们是什么没有查清,也不必查清**:它们属于另一个进程,它们立在每一扇普通窗口之上,而且它们拿走那次按下。(`CoreServicesUIAgent` 是系统用来放它自己那些小窗口的代理,而这次移植启动过几十次一次性应用包;这是一个关于那十六扇从哪儿来的合理说法,不是一次测量。)再往上、压在一切之上的,是程序坞自己那扇全屏窗口(第 20 层)和菜单栏(24)——它们立在这趟运行的每一次按下之上,到达了的那些也算。
 
-**④ One window, one card, two presses — the controlled experiment.** macOS
-26.6.2, Apple M4, one 4K at backing scale 2, a debug bundle of this branch with a
-bundle identifier of its own and a `HOME` of its own under the worktree, driven by
-the pointer only. Every number is in points unless it says otherwise.
+**④ 一扇窗、一张卡、两次按下——那次受控实验。** macOS 26.6.2、Apple M4、一块 4K 背衬缩放 2,一个本分支的 debug 应用包,带自己的包标识符和一个在 worktree 底下自己的 `HOME`,只用指针驱动。除非注明,每个数都是点。
 
-**The card is the first-run one and not §13.34's restore prompt**, because a
-`HOME` with nothing in it is the cheaper way to get one of §2.7's cards centred
-on a fresh window — and it is the same question, one accent-filled primary drawn
-by Folio on the Metal layer in the middle of the surface, answered by a press or
-not at all.
+**那张卡是首启卡而不是 §13.34 那张恢复提示**,因为一个里面什么都没有的 `HOME`,是让 §2.7 的一张卡居中出现在一扇新窗上的更便宜的办法——而它是同一个问题:Folio 在 Metal 层上、在表面正中画的一个强调填充的主按钮,要么被一次按下答了,要么根本没有。
 
-| # | what was done | what was measured |
+| # | 做了什么 | 量到什么 |
 | --- | --- | --- |
-| 1 | launch on an empty data directory | one window at `515,167 960×600`, the first-run card up; its accent button at `1242,701..1353,759` in the window's own capture — `648.5,365` in the window's points, `1163.5,532` on the screen |
-| 2 | the pointer parked off the card, then standing on the button | the button reads `122,165,255`, then `132,175,255` — the hover lift, over that rectangle and nothing else (§13.34 measured the restore card's own pair, `122,153,255` → `131,164,255`) |
-| 3 | **press the button** | one `mouseMoved` with `window=none`; **no `LeftMouseDown` in the application**; no `mouse_input` line; the card still up |
-| 4 | press-and-drag the header's empty part at `1015,183` | `LeftMouseDown` at `500,584` in window coordinates → `WinitView` → `mouse_input … pointer=1000,32 route=none` → `press_title_bar` → twenty `LeftMouseDragged` → the window stands at **`40,430 960×600`**, the rectangle the hand asked for |
-| 5 | **press the same button again**, now at `688.5,795` with nothing over it but the Dock's own window | `LeftMouseDown` → `WinitView` → `mouse_input state=Pressed … pointer=1297,730`; the card is **answered** — no accent-filled run left in the window's capture, and `settings.json` on the disk |
+| 1 | 在一个空数据目录上启动 | 一扇 `515,167 960×600` 的窗,首启卡在上面;它的强调按钮在那扇窗自己的截图里是 `1242,701..1353,759`——按那扇窗的点算是 `648.5,365`,按屏幕算是 `1163.5,532` |
+| 2 | 指针先停在卡外面,再站到按钮上 | 按钮读数从 `122,165,255` 变成 `132,175,255`——那次悬停抬色,只在那片矩形上,别处没有(§13.34 量的是恢复卡自己那一对,`122,153,255` → `131,164,255`) |
+| 3 | **按那个按钮** | 一次 `window=none` 的 `mouseMoved`;应用里**没有 `LeftMouseDown`**;没有 `mouse_input` 行;卡还在 |
+| 4 | 按住并拖那个头的空白处,在 `1015,183` | `LeftMouseDown` 按窗口坐标在 `500,584` → `WinitView` → `mouse_input … pointer=1000,32 route=none` → `press_title_bar` → 二十次 `LeftMouseDragged` → 那扇窗停在 **`40,430 960×600`**,正是那只手要的矩形 |
+| 5 | **再按同一个按钮**,这次它在 `688.5,795`,上面除了程序坞自己那扇窗什么都没有 | `LeftMouseDown` → `WinitView` → `mouse_input state=Pressed … pointer=1297,730`;那张卡**被答了**——窗口截图里没有强调填充的连通块了,而 `settings.json` 在盘上 |
 
-Steps 3 and 5 are the same button of the same card in the same process, a few
-seconds apart, pressed by the same three posted events. The only thing that
-changed between them is which patch of desk the button was standing on.
+第 3 步和第 5 步是同一个进程里同一张卡的同一个按钮,相隔几秒,由同样三个投出去的事件按下。它们之间唯一变了的,是那个按钮当时站在哪片桌面上。
 
-**⑤ And the title bar never took a press.** The hierarchy, read inside the press
-rather than reasoned about:
+**⑤ 而标题栏从来没拿走过一次按下。** 那套层级是在按下里面读的,不是推出来的:
 
 ```
 frame_view      = NSKVONotifying_NSThemeFrame[0,0 960x600 flipped=false]
@@ -9676,131 +9444,49 @@ content         = WinitView[0,0 960x600 flipped=true]
 content_subviews= [FolioSurfaceView[0,0 960x600 flipped=false]]
 ```
 
-`subviews` runs back to front, so `NSTitlebarContainerView` is the **frontmost**
-subview of the frame view and it stands over the whole 32-point band M3-3 and
-T-MAC-LIGHTS put Folio's header in. It would be entirely within AppKit's rights
-to claim that band, and if it did, the sidebar toggle, the tab strip, the gear
-and the drag rule of §13.20 would all be dead letters. **It does not.** At
-`500,584` — inside the container's own rectangle — the frame view's own
-`hitTest:` answers `WinitView`, and the press arrives at winit's `mouseDown:`
-like any other. `titlebarAppearsTransparent` is a fact about hit testing and not
-only about paint.
+`subviews` 是从后往前排的,所以 `NSTitlebarContainerView` 是那个框视图**最前面**的子视图,而它立在 M3-3 和 T-MAC-LIGHTS 把 Folio 的头放进去的那整条 32 点带子上。AppKit 完全有权认领那条带子,而它要是认领了,侧栏开关、标签条、齿轮和 §13.20 那条拖动规矩就全是空文。**它不认领。** 在 `500,584`——那个容器自己的矩形里面——框视图自己的 `hitTest:` 答的是 `WinitView`,而那次按下像别的按下一样到了 winit 的 `mouseDown:`。`titlebarAppearsTransparent` 是一个关于命中测试的事实,不只是关于涂色的。
 
-So the door M3-3 already holds is the right one and there was nothing to open:
-the application decides inside the press whether that point is the band's empty
-part (`title_bar_drag_point`) and says so through `press_title_bar`, and AppKit
-has already handed it the press to decide with. **Nothing in the product moves
-for this ticket, on either platform.**
+所以 M3-3 早就把着的那扇门是对的那扇,而没有什么要开的:应用在按下里面判定那个点是不是那条带子的空白部分(`title_bar_drag_point`),并经 `press_title_bar` 说出来,而 AppKit 早已把那次按下交给它去判定了。**本票在任何一个平台上都不动产品里的任何东西。**
 
-**⑥ The instrument that missed it, named so that nobody writes it twice.** The
-z-order check that §13.34 ⑦(d) rests on read the on-screen list and dropped
-every row whose `kCGWindowLayer` was not zero:
+**⑥ 漏掉它的那件仪器,点名,好让没有人再写第二遍。** §13.34 ⑦(d) 靠着的那次 z 序检查,读了屏上那张表,然后丢掉每一行 `kCGWindowLayer` 不为零的:
 
 ```swift
 let layer = w[kCGWindowLayer as String] as? Int ?? -1
 if layer != 0 { continue }
 ```
 
-Every window that can stand over an ordinary window *without being an ordinary
-window* — a floating panel, a menu, a sheet of another process, an agent's alert
-— lives above layer 0. The filter removed the entire class of answers and left a
-list in which Folio's window was, truthfully and uselessly, first. Reading the
-list at every layer is not an extra check; it is the check.
+每一扇能立在一扇普通窗口之上、**而自己不是一扇普通窗口**的窗口——一块浮动面板、一个菜单、另一个进程的一张 sheet、一个代理的警告框——都住在第 0 层之上。那个过滤器把整整一类答案删掉了,留下一张 Folio 那扇窗如实而无用地排第一的表。在每一层上读那张表不是一次额外的检查;它就是那次检查。
 
-The second half of the instrument is the one this ticket had to write: **an
-`NSEvent` local monitor**, which is the only place from which "did the
-application receive this press at all" can be answered.
-`addLocalMonitorForEventsMatchingMask:handler:` sees every event `NSApp` is about
-to dispatch, before any window or view has had it, and reporting four things off
-each one settles the question in a single line — the event's type, its
-`window` (nil is the whole answer), whether the application is active, and what
-the frame view's own `hitTest:` claims that point for. `BT_MOUSE_TRACE`'s first
-station is `Runtime::mouse_input`, which is *after* winit has decided there is an
-event to hand over; an absent line there means only that nothing arrived, never
-that something was swallowed.
+这件仪器的第二半是本票不得不写的那一半:**一个 `NSEvent` 本地监视器**,而「这个应用到底收没收到这次按下」只有从那里答得出来。`addLocalMonitorForEventsMatchingMask:handler:` 看得见 `NSApp` 将要分发的每一个事件,在任何窗口或视图拿到它之前,而从每个事件上报四样东西,一行就把这个问题结掉——事件的类型、它的 `window`(nil 就是全部答案)、应用活不活跃,以及框视图自己的 `hitTest:` 把那个点判给谁。`BT_MOUSE_TRACE` 的第一站是 `Runtime::mouse_input`,那是**在** winit 判定有一个事件要交过来**之后**;那里缺一行,只说明什么都没到,绝不说明有什么被吞了。
 
-**⑦ What is in the tree, and why it is three cases and not a fix.**
-`crates/bt-platform/tests/macos_pointer_route.rs` is a `harness = false` target
-for `macos_sheet`'s reason — AppKit is the main thread's and libtest does not
-hand a case that thread.
+**⑦ 树里有什么,以及为什么是三个用例而不是一次修复。** `crates/bt-platform/tests/macos_pointer_route.rs` 是一个 `harness = false` 目标,理由跟 `macos_sheet` 一样——AppKit 是主线程的,而 libtest 不把那条线程交给一个用例。
 
-* `the_transparent_title_bar_does_not_take_a_press_for_the_content_view` builds a
-  window shaped like Folio's — titled, `FullSizeContentView`, and a content view
-  that takes `mouseDown:` itself, which is what makes winit's answer `NO` to
-  `mouseDownCanMoveWindow` and what `press_title_bar`'s note is written against
-  — installs the real `CustomWindowFrame`, and then puts the band to the frame
-  view's own `hitTest:`. It asserts the claim is **not vacuous** first: that the
-  frontmost subview of the frame view really is the title bar's, and that its
-  rectangle really is as tall as the band this window wears. Then the three
-  traffic lights, at their own centres, must be claimed by something that is not
-  the content view; and every other point of the band, and everything below it,
-  must be the content view's. A later SDK that changes this is caught here
-  rather than by a reader whose header stopped answering.
-* `the_windows_own_drag_door_refuses_when_there_is_no_press_in_hand` holds the
-  other half of the same rule: `press_title_bar` reads `NSApp.currentEvent` and
-  refuses anything that is not a left mouse down, so a drag can only ever begin
-  inside a press the reader made, and a refused one leaves the window where it
-  was.
-* `a_press_that_never_arrived_is_named_by_what_stands_over_it_at_every_layer` is
-  arithmetic and runs on **every** platform, always — `stands_over` walks the
-  window server's own front-to-back order, stops at the window that wanted the
-  press, and answers every row ahead of it that covers the point. It is pinned
-  against the desk of 2026-09-13 above: the two occluded points answer the panels
-  that took them, the point after the move answers nothing, and the layer-0-only
-  reading is pinned too, as the mistake — it reports a clear desk over an
-  occluded press and makes the occluded window `z0`. **It fired before it was
-  trusted**, which is the only way a case like this earns its place: written with
-  one occluder expected where the desk had three, it went red and named them —
-  `left: [4852, 4459, 4425]`, `right: [4852]` — because the panels cascade in
-  steps of 66 and a `260×192` window therefore overlaps the two behind it.
+* `the_transparent_title_bar_does_not_take_a_press_for_the_content_view` 建一扇形状跟 Folio 一样的窗——带标题、`FullSizeContentView`,内容视图自己吃 `mouseDown:`,而这正是 winit 对 `mouseDownCanMoveWindow` 答 `NO` 的原因,也是 `press_title_bar` 那条注所针对的东西——装上真的 `CustomWindowFrame`,然后把那条带子交给框视图自己的 `hitTest:`。它先断言这条主张**不是空的**:框视图最前面的子视图真的是标题栏那个,而它的矩形真的跟这扇窗戴的这条带子一样高。然后是那三盏灯,在它们自己的中心上,必须被一个不是内容视图的东西认领;而那条带子上其余每一个点,以及它以下的一切,都必须是内容视图的。以后哪个 SDK 改了这件事,在这里被接住,而不是被一个发现自己的头不答应了的读者接住。
+* `the_windows_own_drag_door_refuses_when_there_is_no_press_in_hand` 把住同一条规矩的另一半:`press_title_bar` 读 `NSApp.currentEvent`,拒掉任何不是左键按下的东西,所以一次拖动只可能在读者做出的一次按下里面开始,而被拒的那次把窗留在原处。
+* `a_press_that_never_arrived_is_named_by_what_stands_over_it_at_every_layer` 是算术,在**每个**平台上永远跑——`stands_over` 走窗口服务器自己的前后顺序,停在想要那次按下的那扇窗上,然后答出它前面每一行盖住那个点的窗口。它钉的是上面 2026-09-13 那张桌面:两个被遮的点答出拿走它们的那些面板,移动之后的那个点什么也答不出,而只读第 0 层的那种读法也钉着,当作那个错误——它在一次被遮的按下上报告一张干净的桌面,并把被遮的那扇窗算成 `z0`。**它是先红过才被信的**,而这是这么一个用例挣到它位置的唯一方式:写的时候以为桌面上有一个遮挡物,而那里有三个,于是它红了,并把它们点了名——`left: [4852, 4459, 4425]`、`right: [4852]`——因为那些面板以 66 点层叠,所以一扇 `260×192` 的窗口会压着它后面的两扇。
 
-**The three on the venue machine**, `BT_MAC_GUI=1` against a real window, the
-same M4 and the same 4K at backing scale 2:
+**在场地那台机器上跑的那三只**,`BT_MAC_GUI=1` 对着一扇真窗,同一块 M4、同一块背衬缩放 2 的 4K:
 
 ```
 a_press_that_never_arrived_is_named_by_what_stands_over_it_at_every_layer: ok
-  — three points, and the layer-0 reading that missed two of them
+  —— 三个点,以及漏掉其中两个的那次只读第 0 层的读法
 the_transparent_title_bar_does_not_take_a_press_for_the_content_view: ok
-  — band 32 pt over `NSTitlebarContainerView`, lights to 69 pt,
-    110 points walked and every one of them the content view's
+  —— 带子 32 pt 压着 `NSTitlebarContainerView`,灯到 69 pt,
+    走了 110 个点,每一个都是内容视图的
 the_windows_own_drag_door_refuses_when_there_is_no_press_in_hand: ok
-  — a press on the window's own title bar: there is no event in hand to answer
+  —— 一次按在窗口自己标题栏上的按下:手里没有事件可答
 ```
 
-The **32** and the **69** are §13.20 ⑦'s own numbers arrived at from the other
-end — that ticket read them off a capture of the pixels, and this one reads them
-off the window's views — and the 110 points are where a press would have gone if
-the pixels and the hit test had disagreed.
+那个 **32** 和那个 **69** 是 §13.20 ⑦ 自己的数,从另一头到达的——那张票是从一张像素截图上读出来的,这张是从那扇窗的视图上读出来的——而那 110 个点,是像素和命中测试要是不一致时,一次按下会去的地方。
 
-**Nothing else changes, and one thing deliberately does not.** No `BT_…` name is
-added: the monitor of ⑥ is a diagnostic a reader writes in eight lines when they
-need it, and a permanent door in the product for a defect the product does not
-have would be surface bought with nothing. `Cargo.lock`,
-`THIRD-PARTY-NOTICES.md` and the crate's dependency features are untouched — the
-new target names no class this crate did not already name. **Windows is byte for
-byte what it was**, and not by a pin — no file under `crates/*/src/` is touched
-at all. The one new file is a test, the only `cfg` this ticket writes is in it,
-and what a Windows runner executes there is the arithmetic case.
+**别的什么都没变,而有一样是刻意不做的。** 没有加任何 `BT_…` 名字:⑥ 那个监视器是读者需要时八行就写得出来的一件诊断工具,而为一个产品并没有的缺陷在产品里开一扇常设的门,是拿什么都没换来的表面。`Cargo.lock`、`THIRD-PARTY-NOTICES.md` 和这个 crate 的依赖 feature 都没动——那个新目标没有点这个 crate 本来没点过名的类。**Windows 逐字节还是原来那样**,而且不是靠一根钉——`crates/*/src/` 底下根本没有任何文件被碰过。唯一的新文件是一只测试,本票写的唯一一个 `cfg` 在它里面,而一台 Windows 跑器在那里执行的是那个算术用例。
 
-**⑧ The venue rule this leaves behind**, for the next ticket that drives Folio
-with a posted pointer:
+**⑧ 本票留下的场地规矩**,给下一张用投出去的指针驱动 Folio 的票:
 
-1. **Read the whole on-screen list, at every layer**, before believing anything
-   about a press — and after it, because a press that activated somebody else
-   rearranges the list.
-2. **A press that produced no `mouse_input` line is not a swallowed press** until
-   a local monitor has said the application received the event. Until then the
-   likelier reading is that it went to another window.
-3. **A window capture proves nothing about occlusion.**
-   `CGWindowListCreateImage` over a single window composites that window alone,
-   so every picture this port has taken of Folio is a picture of a Folio with
-   nothing in front of it, whatever is really there. That is why nothing in the
-   whole of this port had seen these panels.
-4. **Park the window on clear ground before driving it.** Sixteen floating
-   windows of another process were standing across the middle of this desk, and
-   the shape they cover is the shape a centred card is drawn in.
-
-*(本节英文,待中文文案改写。)*
+1. **在相信关于一次按下的任何事情之前,把整张屏上的表在每一层上读一遍**——之后也读一遍,因为一次激活了别人的按下会重排那张表。
+2. **一次没有产生 `mouse_input` 行的按下不是一次被吞掉的按下**,除非一个本地监视器说过这个应用收到了那个事件。在那之前更可能的读法是它去了另一扇窗。
+3. **一张窗口截图关于遮挡什么都证明不了。** `CGWindowListCreateImage` 对单独一扇窗合成的只有那一扇,所以这次移植给 Folio 拍的每一张照片,都是一张前面什么都没有的 Folio 的照片,不管那里实际立着什么。这就是整次移植里没有任何东西见过这些面板的原因。
+4. **驱动之前先把窗停到干净地面上。** 另一个进程的十六扇浮动窗口横在这张桌面的中间,而它们盖住的形状,正是一张居中的卡被画出来的形状。
 
 ### 13.40 M2-7: 阅读面验收扫——每一行在真机上过了一遍,过不了的写成手上的步骤(`crates/bt-app/src/{main,preview_trace}.rs`、`crates/bt-math/tests/acceptance_display_integral.rs`、`docs/plans/port/m2-7/`)
 
