@@ -9120,862 +9120,198 @@ modifiers reported=ModifiersState(ALT) effective=ModifiersState(0x0) option_send
 
 ### 13.35 M4-5: 视频播放走 AVPlayer——帧从 AVPlayerItemVideoOutput 拉、声音走它自己的口、结束留最后一帧(`crates/bt-platform/src/macos_player.rs`(新)、`crates/bt-platform/src/{video_portable,macos_video,lib}.rs`、`crates/bt-platform/tests/video_playback.rs`(新)、`crates/bt-platform/Cargo.toml`、`tests/assets/folio-video-sound-test.mp4`(新)、`tests/assets/PROVENANCE.md`)
 
-**① The ticket is not "play a video", it is "keep answering the same
-question".** §13.25 gave a Mac one *frame* out of a file; off Windows
-`Engine::open` still answered `EngineError::Unsupported`, so a reader who pressed
-▶ on a recording got the line §7.44 draws under a black rectangle. What replaces
-it is `AVPlayer`, and every decision in it is settled by a sentence §7.42 already
-wrote about Media Foundation rather than by what AVFoundation happens to make
-easy: the same verbs, the same `EngineState`, the same straight-BGRA8 `Frame`,
-the same two poll intervals, the same open budget, the same bounded shutdown, the
-same process ledger. `bt-app` names `Engine`, `EngineError`, `EngineState` and
-the three ledger doors with no `cfg` at all, and this ticket adds none.
+**① 这张票不是「播一个视频」,是「一直答同一个问题」。** §13.25 给了 Mac 一份文件里的一**帧**;而在 Windows 之外 `Engine::open` 仍然答 `EngineError::Unsupported`,所以一个在一份录像上按下 ▶ 的读者拿到的是 §7.44 画在一个黑矩形底下的那一行字。取代它的是 `AVPlayer`,而其中每一个决定都由 §7.42 早就为 Media Foundation 写下的一句话定下,而不是由 AVFoundation 碰巧让什么变得容易来定:同样的动词、同样的 `EngineState`、同样的直通 BGRA8 `Frame`、同样两个轮询间隔、同样的打开预算、同样有界的停机、同样那本进程账。`bt-app` 点 `Engine`、`EngineError`、`EngineState` 和那三扇账门的名时一个 `cfg` 都没有,而本票也不加。
 
-**② `AVPlayer` is `<video>`, which is the sentence §7.42 wrote about
-`IMFMediaEngine`.** That slice's whole case for leaving the browser was that
-Media Foundation's media engine *is* the HTML5 media element in COM form, so what
-is lost by leaving is the chrome and not the player. The same is true here and it
-is why this arm is short: `play`, `pause`, `seekToTime:`, `rate`, `muted`,
-`volume`, `duration`, `currentTime`, and an item that posts a notification when
-it has played to its end. One verb for one verb.
+**② `AVPlayer` 就是 `<video>`,而那正是 §7.42 关于 `IMFMediaEngine` 写下的那句话。** 那一片离开浏览器的全部理由就是:Media Foundation 的媒体引擎**就是** COM 形式的 HTML5 媒体元素,所以离开时丢掉的是那层外壳而不是那个播放器。这里同样成立,而这也是这条臂很短的原因:`play`、`pause`、`seekToTime:`、`rate`、`muted`、`volume`、`duration`、`currentTime`,以及一个播到头会发一条通知的 item。一个动词换一个动词。
 
-**Audio is the half the port's spike never costed, and on this platform it costs
-nothing at all.** An `AVPlayer` has an audio output of its own: the sound is
-playing the instant `play` is answered, `set_volume` is its `volume` and
-`set_muted` is its `isMuted`. Nothing in this file opens a device, mixes a buffer
-or names a sample rate. `set_rate` is `defaultRate` plus `rate`, with
-`audioTimePitchAlgorithm` named as `AVAudioTimePitchAlgorithmTimeDomain` so that
-one-and-a-half speed keeps a voice a voice — which is what `SetPlaybackRate` does
-on the other platform, and which macOS 12 and later already default to. A default
-is not a decision anybody wrote down, so it is written down.
+**声音是这次移植的探针从来没估过价的那一半,而在这个平台上它一分钱都不花。** 一个 `AVPlayer` 有它自己的音频输出:`play` 一被答下声音就在响,`set_volume` 就是它的 `volume`,`set_muted` 就是它的 `isMuted`。这个文件里没有任何东西去打开一个设备、混一个缓冲或者点一个采样率的名。`set_rate` 是 `defaultRate` 加 `rate`,并把 `audioTimePitchAlgorithm` 点名为 `AVAudioTimePitchAlgorithmTimeDomain`,好让一点五倍速下人声还是人声——那正是另一个平台上 `SetPlaybackRate` 做的事,也是 macOS 12 及之后本来就默认的。一个默认不是任何人写下来的决定,所以把它写下来。
 
-**③ The pictures come out of a second object, on purpose and on Apple's
-advice.** An `AVPlayer` on its own draws through an `AVPlayerLayer`, which would
-put a second compositor inside a window that already has one — the refusal §7.42
-② made of Media Foundation's *rendering mode*, word for word. What replaces it is
-the same third shape: a **pull**. `AVPlayerItemVideoOutput` is added to the item,
-asked `hasNewPixelBufferForItemTime:` and, when it says yes,
-`copyPixelBufferForItemTime:`; *where* and *when* the picture is drawn stay on
-this side of the call.
+**③ 画面从第二个对象里出来,是故意的,而且是照 Apple 的建议。** 一个 `AVPlayer` 自己是经一块 `AVPlayerLayer` 画的,那会往一扇本来就有一个合成器的窗里再塞第二个——正是 §7.42 ② 对 Media Foundation 那个*渲染模式*作出的拒绝,一字不差。取代它的是同样的第三种形状:一次**拉取**。`AVPlayerItemVideoOutput` 被加到那个 item 上,先问 `hasNewPixelBufferForItemTime:`,它说有的时候再 `copyPixelBufferForItemTime:`;画面**在哪里**画、**什么时候**画,留在这次调用的这一侧。
 
-The output is asked for **`kCVPixelFormatType_32BGRA`** — B, G, R, A in memory,
-in that order — which is `Frame`'s promise and the byte order the swapchain this
-window presents through already uses, so nothing in this lane reorders a channel
-either. The format is then **checked rather than trusted** on every buffer: a
-planar `420v` from a decoder that had refused the request would be read as if its
-rows were four bytes a pixel, which is a picture of noise rather than a wrong
-colour.
+那个输出要的是 **`kCVPixelFormatType_32BGRA`**——内存里 B、G、R、A,就这个顺序——也就是 `Frame` 的承诺,以及这扇窗呈现所用的那条交换链本来就在用的字节序,所以这条道上也没有任何东西去重排一个通道。那个格式随后在每一个缓冲上都是**被核而不是被信**的:一个从拒绝了这次请求的解码器那里来的平面 `420v`,会被当成每像素四字节的行来读,而那是一张噪声的图而不是一个错的颜色。
 
-**The stride is read back rather than assumed**, which is the same discipline
-§13.25 applied to the bitmap context's row width and the Windows arm applies to
-its media type. A `CVPixelBuffer`'s `bytesPerRow` is padded to whatever alignment
-the decoder wanted and nothing promises it is `width * 4`; `Frame::bgra` is
-packed at `width * 4` with no padding, because a pitch is a fact about somebody's
-memory and not about a picture. So the copy walks the rows, and a copy that
-walked the store contiguously would shear every row one notch further than the
-one above it.
+**stride 是读回来的而不是假定的**,这跟 §13.25 对位图上下文行宽用的、以及 Windows 那条臂对它的媒体类型用的是同一套规矩。一个 `CVPixelBuffer` 的 `bytesPerRow` 被补齐到解码器想要的任何对齐上,而没有任何东西保证它是 `width * 4`;`Frame::bgra` 是按 `width * 4` 紧凑打包、没有补齐的,因为 pitch 是关于某个人那块内存的事实,而不是关于一张图的事实。所以那次拷贝是逐行走的,而一次连续走完那块存储的拷贝,会把每一行都比它上面那一行多切一格。
 
-**Whether a particular file's buffer is padded is not observable from outside
-that copy, and that is exactly why the copy is a function with tests of its
-own.** `copy_tight` is the whole behaviour, and its three cases state it on a
-padded buffer, on a tight one, and on a stride too narrow to describe the picture
-it claims to — none of which needs a Mac, a video or a decoder that happens to
-pad today.
+**某一份特定文件的缓冲到底有没有补齐,从那次拷贝外面是看不出来的,而这恰恰是那次拷贝要做成一个带自己测试的函数的原因。** `copy_tight` 就是这整套行为,而它那三只用例把它陈述在一个有补齐的缓冲上、一个紧凑的缓冲上,以及一个窄到描述不了它自称那张图的 stride 上——这里面没有一样需要一台 Mac、一个视频,或者一个今天碰巧会补齐的解码器。
 
-**The time asked for is the player's own `currentTime`**, not a host time turned
-into an item time. Apple's sample does the latter because a `CADisplayLink` hands
-it the timestamp of a vertical blank that has not happened yet; this module has
-no such timestamp and no such clock — it is asked for the picture that is due
-*now*, and `currentTime` is what now means on the item's own timeline. It is also
-what makes a seek on a **paused** player produce a frame: the playhead moved, so
-the question changed.
+**要的那个时间是播放器自己的 `currentTime`**,不是一个被转成 item 时间的宿主时间。Apple 的示例用后者,是因为一个 `CADisplayLink` 递给它的是一次还没发生的垂直消隐的时间戳;这个模块没有那样一个时间戳、也没有那样一个钟——它被要的是**现在**该出的那张画,而 `currentTime` 就是「现在」在那个 item 自己时间线上的意思。这也是让一次在**暂停**的播放器上的跳转产出一帧的东西:播放头动了,所以那个问题变了。
 
-**④ The brief said there is no main-thread requirement here. There are two, they
-are different from each other, and neither is the one the brief had in mind.**
-The first is an *annotation* and this arm steps around it with evidence; the
-second is a *run loop* and this arm cannot step around it at all, because it is
-not this arm's to step around. Both were measured on the venue machine on
-2026-09-12 and both are new facts for the port.
+**④ 简报说这里没有主线程要求。有两个,它们彼此不同,而且没有一个是简报心里想的那一个。** 第一个是一条**标注**,而这条臂带着证据绕过它;第二个是一个 **run loop**,而这条臂根本绕不过去,因为那不归这条臂绕。两个都是 2026-09-12 在场地机器上量的,而且对这次移植都是新事实。
 
-**④a The annotation.** In the macOS 26.6 SDK:
+**④a 那条标注。** 在 macOS 26.6 SDK 里:
 
-| header | `@interface` line carries |
+| 头文件 | `@interface` 那一行带着 |
 |---|---|
 | `AVFoundation/AVPlayer.h` | **`NS_SWIFT_UI_ACTOR`** |
 | `AVFoundation/AVPlayerItem.h` | **`NS_SWIFT_UI_ACTOR`** |
-| `AVFoundation/AVPlayerItemOutput.h` | nothing |
+| `AVFoundation/AVPlayerItemOutput.h` | 没有 |
 
-`NS_SWIFT_UI_ACTOR` is Apple's spelling of `@MainActor`, and `objc2`'s header
-translator turns it into `#[thread_kind = MainThreadOnly]` — which is why
-`AVPlayer::playerWithURL`, `AVPlayerItem::playerItemWithAsset` and every other
-constructor of those two classes takes a `MainThreadMarker`, and why both types
-are `!Send + !Sync`. `AVPlayerItemVideoOutput` carries no such annotation and is
-`Send + Sync` in the same bindings.
+`NS_SWIFT_UI_ACTOR` 是 Apple 对 `@MainActor` 的拼法,而 `objc2` 的头文件翻译器把它变成 `#[thread_kind = MainThreadOnly]`——这正是 `AVPlayer::playerWithURL`、`AVPlayerItem::playerItemWithAsset` 和那两个类其他每一个构造器都收一个 `MainThreadMarker` 的原因,也是两个类型都是 `!Send + !Sync` 的原因。`AVPlayerItemVideoOutput` 不带这样的标注,而且在同一套绑定里是 `Send + Sync`。
 
-**This file makes both objects on the engine's own thread anyway**, through
-`alloc_off_the_window_thread` — a raw `alloc` message to the class, which is the
-one call the marker guards. Four things carry that, and none of them is
-convenience:
+**这个文件仍然在引擎自己那条线程上造这两个对象**,经 `alloc_off_the_window_thread`——一条发给类的裸 `alloc` 消息,而那正是那个 marker 守着的那一次调用。有四件事撑着它,而没有一件是图方便:
 
-1. **`NS_SWIFT_UI_ACTOR` is a Swift concurrency annotation, not an Objective-C
-   threading contract.** Apple's Objective-C reference for `AVPlayer` states no
-   thread requirement, and the *Thread Safety Summary* — the list §13.18 and
-   §13.25 ⑥ both cite — does not name it among the classes that are the main
-   thread's, saying of everything it does not list that "in most cases, you can
-   use these classes from any thread as long as you use them from only one thread
-   at a time". **One thread at a time is exactly what this module is**: §7.42 ④
-   put the whole Media Foundation conversation on a thread of its own, and this
-   arm inherits that shape rather than adopting it — the player, the item and the
-   output are born on the engine thread, live in a struct that is deliberately
-   not `Send`, and die on it.
-2. **The one sentence in those headers that does name a queue names a *process*
-   and not a caller.** Both files say the class "serializes notifications of
-   changes that occur dynamically during playback on a dispatch queue. By
-   default, this queue is the main queue." ④b measures that this constrains the
-   process rather than the thread the verbs are said on — it is why the *tests*
-   own the main thread and why the *product* needs its run loop — and it says
-   nothing at all about which thread may send `play`. The two constraints are
-   different and this file meets both.
-3. **The pull path Apple documents is not on the main thread.**
-   `AVPlayerItemVideoOutput`'s own reference says to call
-   `copyPixelBufferForItemTime:` "in response to a `CADisplayLink` delegate
-   invocation", which is a display-link thread. A player whose frames may only be
-   taken off the main thread and whose pictures must be taken off a display link
-   would be a contradiction Apple published.
-4. **The measurement.** The player, the item and the output really are built and
-   driven from the engine's thread in `tests/video_playback.rs`, and that file
-   is green on the Mac; ⑥ is what it printed. Nothing in it is on the process's
-   first thread except the waiting.
+1. **`NS_SWIFT_UI_ACTOR` 是一条 Swift 并发标注,不是一份 Objective-C 的线程契约。** Apple 给 `AVPlayer` 的 Objective-C 参考没写任何线程要求,而 *Thread Safety Summary*——§13.18 和 §13.25 ⑥ 都引过的那份名单——没有把它列进属于主线程的那些类,并且对它没有列到的一切说:「多数情况下,只要一次只从一个线程使用,就可以从任何线程使用这些类。」**一次一条线程恰恰就是这个模块的样子**:§7.42 ④ 把整场 Media Foundation 的对话放到了一条自己的线程上,而这条臂是继承了那个形状而不是采纳了它——播放器、item 和输出都出生在引擎线程上,住在一个特意不是 `Send` 的结构体里,也死在那条线程上。
+2. **那两个头文件里唯一一句点名了队列的话,点的是一个*进程*而不是一个调用方。** 两个文件都说这个类「把播放期间动态发生的变化通知序列化到一条派发队列上。默认情况下,这条队列是主队列。」④b 量到这一条约束的是那个进程,而不是那些动词被说出来的那条线程——这正是**测试**要占住主线程、而**产品**需要它那个 run loop 的原因——而它对哪条线程可以发 `play` 一个字都没说。这是两条不同的约束,而这个文件两条都满足。
+3. **Apple 写明的那条拉取路径不在主线程上。** `AVPlayerItemVideoOutput` 自己的参考说,要「在一次 `CADisplayLink` 委托调用的响应里」调 `copyPixelBufferForItemTime:`,而那是一条显示链接的线程。一个帧只能在主线程上取、而画面必须在一条显示链接上取的播放器,会是 Apple 自己发表的一个自相矛盾。
+4. **那次测量。** 播放器、item 和输出在 `tests/video_playback.rs` 里真的是从引擎那条线程上建出来和驱动的,而那个文件在 Mac 上是绿的;⑥ 就是它打出来的东西。里面除了等待之外没有一样在这个进程的第一条线程上。
 
-What this arm will **not** do is claim the marker away. Nothing here builds a
-main-thread marker, checked or unchecked, because that would be a lie about
-*which thread this is* rather than a statement about what the class needs — and a
-marker made on a worker makes every main-thread-only door in AppKit reachable
-from it. `alloc` on a class object is the narrowest step there is: one message,
-to one class, in one function, with the reason on it, and
-`the_player_is_allocated_without_claiming_the_window_thread` is the source gate
-that keeps it there.
+这条臂**不会**做的是把那个 marker 赖掉。这里没有任何东西去造一个主线程 marker,不管是查过的还是没查的,因为那会是一句关于**这是哪条线程**的假话,而不是一句关于这个类需要什么的陈述——而一个在工作线程上造出来的 marker,会让 AppKit 里每一扇只限主线程的门从那里都够得到。对一个类对象发 `alloc` 是最窄的一步:一条消息、一个类、一个函数,带着理由,而 `the_player_is_allocated_without_claiming_the_window_thread` 就是把它按在那里的那道源码门。
 
-**④b The run loop, which is the one this ticket got wrong and the one that
-matters.** `AVPlayer`'s and `AVPlayerItem`'s headers both say the class
-"serializes notifications of changes that occur dynamically during playback on a
-dispatch queue. By default, this queue is the main queue." That sentence reads
-like a statement about *delivery*. **It is a statement about the object.**
-Measured under libtest, where nothing on the process ever services the main
-queue:
+**④b 那个 run loop,也就是本票一开始弄错了的、而且是要紧的那一个。** `AVPlayer` 和 `AVPlayerItem` 的头文件都说这个类「把播放期间动态发生的变化通知序列化到一条派发队列上。默认情况下,这条队列是主队列。」这句话读起来像是一句关于**投递**的陈述。**它是一句关于这个对象的陈述。** 在 libtest 底下量的,那里进程上没有任何东西去服务主队列:
 
-| what was asked | what came back |
+| 问了什么 | 回来什么 |
 |---|---|
-| `AVPlayerItem.status`, for fifteen seconds | `AVPlayerItemStatusUnknown` |
-| `player.play()` | taken — `rate` became 1.0 |
-| `player.currentTime()`, for fifteen seconds | `0.000` |
-| pictures pulled in fifteen seconds | **0** |
-| everything read off the `AVURLAsset` | correct: 160×120, 5.000 s, has video, has audio |
+| `AVPlayerItem.status`,问十五秒 | `AVPlayerItemStatusUnknown` |
+| `player.play()` | 收下了——`rate` 变成 1.0 |
+| `player.currentTime()`,问十五秒 | `0.000` |
+| 十五秒里拉到的画面 | **0** |
+| 从 `AVURLAsset` 上读到的一切 | 都对:160×120,5.000 s,有视频,有音频 |
 
-An item whose readiness transition is dispatched to a queue nobody drains never
-becomes ready, and a player whose item is not ready sets its rate and plays
-nothing. **So a process that plays a video with `AVPlayer` must have a live main
-run loop.** Folio always does — it is winit's, and it drains the main queue in
-`kCFRunLoopCommonModes`, which includes the event-tracking mode a popped `NSMenu`
-runs in (§13.17 ②), so a context menu does not stall a video. A `#[test]` never
-does: §13.17 measured that libtest runs each case on a thread it spawned, and
-libtest's own main thread is parked in a join.
+一个就绪转换被派发到一条没人排空的队列上的 item 永远不会就绪,而一个 item 没就绪的播放器会把它的速率设上、什么也不播。**所以一个拿 `AVPlayer` 播视频的进程必须有一个活着的主 run loop。** Folio 总是有——那是 winit 的,而且它在 `kCFRunLoopCommonModes` 里排空主队列,那里面包括一个弹出的 `NSMenu` 所跑的事件跟踪模式(§13.17 ②),所以一个右键菜单不会把一个视频卡住。一个 `#[test]` 从来没有:§13.17 量过 libtest 把每只用例跑在它自己开出来的线程上,而 libtest 自己的主线程停在一次 join 里。
 
-That is why `tests/video_playback.rs` is `harness = false` — **the first target
-in this crate to own the process's main thread for a reason that is not
-AppKit's**, and the only one with no environment gate, because it opens no
-window and asks the machine for no permission. Its `pump` is its `sleep`:
-`CFRunLoopRunInMode(kCFRunLoopDefaultMode, …)` on macOS and an ordinary sleep
-everywhere else. Running from one `main` bought a second thing libtest had been
-taking away — the cases run in order and one at a time, so the process-wide
-engine ledger is a statement about one case rather than about eight.
+这正是 `tests/video_playback.rs` 是 `harness = false` 的原因——**这个 crate 里第一个为了一个不是 AppKit 的理由去占住进程主线程的目标**,而且是唯一一个不带环境闸的,因为它不开窗、也不向这台机器要任何权限。它的 `pump` 就是它的 `sleep`:macOS 上是 `CFRunLoopRunInMode(kCFRunLoopDefaultMode, …)`,别处是一次普通的 sleep。从一个 `main` 跑还白买到 libtest 一直在拿走的第二样东西——那些用例按顺序、一次一只地跑,所以那本进程级的引擎账是一句关于一只用例的陈述而不是关于八只的。
 
-**What it costs the product is a sentence rather than a defect, and the sentence
-is worth writing down.** §7.42 ④ moved the whole Media Foundation conversation
-off the window's thread precisely so that a busy window could not stall a video.
-This arm keeps the *decode* and the *frame copy* off it — those are the engine
-thread's and the output's, and they are the expensive halves — but the player's
-own state machine now turns on the main queue, so a main thread blocked for
-hundreds of milliseconds is a video that stalls for hundreds of milliseconds.
-The way out, if that is ever measured to matter, is not this API at all:
-`AVSampleBufferRenderSynchronizer` with an `AVSampleBufferAudioRenderer` and an
-`AVAssetReader` carries no main-actor annotation and no notification queue — and
-it is a player written by hand, with its own demux, its own A/V sync, its own
-seek and its own rate. That is a ticket, not a paragraph, and it is in ⑬.
+**它让产品付的是一句话而不是一个缺陷,而这句话值得写下来。** §7.42 ④ 把整场 Media Foundation 的对话挪出窗口那条线程,正是为了让一扇忙着的窗卡不住一个视频。这条臂把**解码**和**帧拷贝**留在它外面——那是引擎线程的和那个输出的,也是贵的那两半——但播放器自己那台状态机现在是在主队列上转的,所以一条阻塞了几百毫秒的主线程就是一个卡了几百毫秒的视频。真要有一天量出这件事要紧,出路根本不是这套 API:`AVSampleBufferRenderSynchronizer` 加一个 `AVSampleBufferAudioRenderer` 加一个 `AVAssetReader`,既不带主 actor 标注也不带通知队列——而它是一个手写的播放器,自带解复用、自带音画同步、自带跳转、自带变速。那是一张票而不是一段话,它在 ⑬ 里。
 
-**⑤ Events wake the loop; the player answers the questions — with one exception,
-and it is a different exception from the other arm's.** §7.42 ④'s rule is kept:
-the one notification this module registers for —
-`AVPlayerItemDidPlayToEndTimeNotification`, scoped to **this engine's own item**,
-because a process playing a video on three surfaces would otherwise end all three
-when one of them finished — arrives on whatever thread AVFoundation posted from,
-and the only thing it does there is push a `Command` down the same channel the
-verbs use. It is `IMFMediaEngineNotify` with a notification centre where the COM
-callback was: nothing touches a window, a layout or a renderer from inside it,
-and there is nothing there that could — the observer's whole world is a `Sender`.
+**⑤ 事件叫醒循环;问题由播放器来答——只有一个例外,而它跟另一条臂的那个例外不是同一个。** §7.42 ④ 那条规矩守着:这个模块注册的唯一一条通知——`AVPlayerItemDidPlayToEndTimeNotification`,收口到**这个引擎自己的 item** 上,因为一个在三个表面上播视频的进程否则会在其中一个播完时把三个都结束掉——是在 AVFoundation 发出它的那条线程上到达的,而它在那里做的唯一一件事是把一个 `Command` 塞进那些动词用的同一条通道。它就是把 COM 回调换成一个通知中心的 `IMFMediaEngineNotify`:没有任何东西从它里面去碰一扇窗、一次布局或者一个渲染器,而那里也没有什么能碰——这个观察者的整个世界就是一个 `Sender`。
 
-The other arm re-reads everything off the engine and records only the error code,
-because an `IMFMediaError` is gone by the time anybody asks again. **This arm
-records the end instead**, and for a reason rather than by symmetry: "the playhead
-is at the end" cannot be spelled as a comparison here. A five-second file whose
-last picture is at 4.8 s leaves `currentTime` short of `duration` by a frame
-nobody knows the length of, and `rate == 0` is the same reading a pause gives.
-The item's own notification is the platform saying it. Like
-`HTMLMediaElement.ended` — which is what both arms are — it is cleared by a seek
-back into the file and by a play that restarts one, and a ▶ on an ended video
-seeks to zero and plays rather than doing nothing.
+另一条臂把一切从引擎上重读一遍、只记下错误码,因为一个 `IMFMediaError` 等谁再去问的时候已经没了。**这条臂记下的是那个「结束」**,而且是有理由的而不是出于对称:「播放头在末尾」在这里没法写成一次比较。一份五秒的文件,最后一张画在 4.8 s,会让 `currentTime` 比 `duration` 少一帧,而那一帧多长没人知道;而 `rate == 0` 跟一次暂停读到的是同一个数。那个 item 自己的通知就是这个平台把这件事说出来。跟 `HTMLMediaElement.ended` 一样——两条臂就是它——它被一次跳回文件里的 seek 和一次重新开始的 play 清掉,而在一个已结束的视频上按 ▶ 是跳到零再播,而不是什么都不做。
 
-**The error has the same shape as the end and it is refused for a different
-reason.** `AVPlayerItem.status == Failed` with its `NSError` is the platform's
-way of saying a file went wrong, and ④b means that answer only arrives in a
-process whose main queue turns — which the product's does. What does **not**
-depend on it is the case that matters most and arrives soonest: an asset with no
-video track and no audio track is refused at `build`, synchronously, before an
-item is ever made. A text file with a `.mp4` on the end of its name is that case,
-and `nothing_that_is_not_a_video_plays` is green on both machines and in a
-process with no run loop at all.
+**错误和结束是同样的形状,而它被拒的理由不同。** `AVPlayerItem.status == Failed` 带着它的 `NSError`,是这个平台说一份文件出了问题的方式,而 ④b 意味着那个答案只在一个主队列会转的进程里到达——而产品的主队列会转。**不**依赖它的,是最要紧也最早到的那种情形:一个既没有视频轨也没有音频轨的 asset 在 `build` 时就被拒绝,同步地,在一个 item 被造出来之前。一个名字后面挂着 `.mp4` 的文本文件就是那种情形,而 `nothing_that_is_not_a_video_plays` 在两台机器上、以及在一个根本没有 run loop 的进程里都是绿的。
 
-**`ready` is spelled as the size and not as the status, and ④b is why.** The
-Windows arm writes `ready` as "the native size is answerable, or there is
-audio" — the metadata has arrived and a layout can be solved — and the first
-draft of this arm wrote it as `AVPlayerItem.status == ReadyToPlay`, which looks
-like the same sentence in this platform's own words. It is not: that property is
-one of the "changes that occur dynamically during playback" ④b measured, so a
-process whose main queue is not being drained would see `ready: false` for ever
-on a file it can answer every question about. Both facts `ready` is *for* come
-off the **`AVURLAsset`**, which `macos_video.rs` already reads synchronously and
-which is correct from the engine's first published state. Spelling `ready` as the
-status would have made a flag about the file into a flag about the caller's run
-loop.
+**`ready` 是拼成尺寸而不是拼成状态的,而 ④b 就是原因。** Windows 那条臂把 `ready` 写作「原生尺寸答得出来,或者有音频」——元数据到了,一次布局解得出来——而这条臂的初稿把它写成 `AVPlayerItem.status == ReadyToPlay`,看着像是同一句话用这个平台自己的词说出来。它不是:那个属性正是 ④b 量到的那些「播放期间动态发生的变化」之一,所以一个主队列没被排空的进程,会对一份它每个问题都答得出的文件永远看到 `ready: false`。`ready` **所为**的那两个事实都从 **`AVURLAsset`** 上来,而 `macos_video.rs` 本来就同步读它,而且从引擎第一次发布状态起它就是对的。把 `ready` 拼成那个状态,会把一个关于这份文件的标志变成一个关于调用方 run loop 的标志。
 
-**And one number really is computed differently on the two machines, which is
-why it is the only one this module keeps a copy of.** `AVPlayer.rate` is the
-pause control as well as the speed — `pause` is `rate = 0` — while
-`IMFMediaEngine`'s `SetPlaybackRate` is a separate property from `Pause`. A build
-that reported `AVPlayer.rate` as `EngineState::rate` would draw **0×** on the bar
-of every paused video. So `wanted_rate` is what a reader asked for, `defaultRate`
-is what a later `play` will use, and `rate` is written only while the clock is
-already running — because "faster" is not "play".
-`a_rate_set_on_a_paused_video_is_a_rate_and_not_a_play` is both halves.
+**而确实有一个数在两台机器上是按不同方式算出来的,这也是这个模块唯一留了一份副本的那个数。** `AVPlayer.rate` 既是速度也是暂停开关——`pause` 就是 `rate = 0`——而 `IMFMediaEngine` 的 `SetPlaybackRate` 是和 `Pause` 分开的属性。一个把 `AVPlayer.rate` 当作 `EngineState::rate` 报出去的构建,会在每一个暂停的视频的条上画 **0×**。所以 `wanted_rate` 是读者要的那个,`defaultRate` 是之后一次 `play` 会用的那个,而 `rate` 只在钟已经在跑的时候才写——因为「快一点」不是「播」。`a_rate_set_on_a_paused_video_is_a_rate_and_not_a_play` 把两半都按住。
 
-**⑥ What the two machines actually did, out of the same files.**
+**⑥ 两台机器从同样的文件里实际做了什么。**
 
-Both machines ran `tests/video_playback.rs` — the same ten cases, the same three
-recordings — on 2026-09-12: Windows 11 26200 on this workstation, macOS 26.6.2 on
-an Apple M4.
+两台机器都跑了 `tests/video_playback.rs`——同样十只用例、同样三份录像——在 2026-09-12:这台工作站上的 Windows 11 26200,以及一台 Apple M4 上的 macOS 26.6.2。
 
-| what was asked | Windows (Media Foundation) | Mac (AVFoundation) |
+| 问了什么 | Windows(Media Foundation) | Mac(AVFoundation) |
 |---|---|---|
-| declared length, `.mp4` / `.mov` | 5.000 s / 3.000 s | 5.000 s / 3.000 s |
-| native size, both | 160×120 | 160×120 |
-| clock after three pictures, `.mp4` / `.mov` | 0.416 s / 0.405 s | 0.407 s / 0.406 s |
-| a seek to **1.500 s** landed at | **1.500 s** | **1.500 s** |
-| a paused clock came to rest at | 0.116 s | 0.105 s |
-| at the end of the 3 s `.mov`: position, pictures | 3.006 s, **15** | 3.000 s, **15** |
-| `has_audio`, the five silent files / the sixth | `false` / `true` | `false` / `true` |
-| a text file named `.mp4` | an error and no picture | an error and no picture |
-| an engine dropped mid-play | `engines_outstanding` back to zero | back to zero |
+| 声明时长,`.mp4` / `.mov` | 5.000 s / 3.000 s | 5.000 s / 3.000 s |
+| 原生尺寸,两者 | 160×120 | 160×120 |
+| 三张画之后的钟,`.mp4` / `.mov` | 0.416 s / 0.405 s | 0.407 s / 0.406 s |
+| 跳到 **1.500 s** 落在 | **1.500 s** | **1.500 s** |
+| 暂停的钟停在 | 0.116 s | 0.105 s |
+| 3 s 的 `.mov` 结束时:位置、画面数 | 3.006 s,**15** | 3.000 s,**15** |
+| `has_audio`,五份无声文件 / 第六份 | `false` / `true` | `false` / `true` |
+| 一个叫 `.mp4` 的文本文件 | 一个错误,没有画面 | 一个错误,没有画面 |
+| 播到一半被 drop 的引擎 | `engines_outstanding` 回到零 | 回到零 |
 
-**One frame's crossing**, which is §7.42 ③'s table asked again on the other
-platform. The three spans are the same three fields and they name different
-calls, so what is comparable is the total. These are envelopes over three runs of
-the suite on each machine, in a debug build, on a machine that was doing other
-things:
+**一帧的跨越**,也就是 §7.42 ③ 那张表在另一个平台上再问一遍。那三段是同样三个字段,而它们点的是不同的调用,所以可比的是总数。这些是每台机器上把整套跑三遍的包络,debug 构建,机器上还在干别的事:
 
-| span | Windows | Mac |
+| 段 | Windows | Mac |
 |---|---|---|
-| `transfer` | 538–968 µs (`TransferVideoFrame`, on the GPU) | 54–93 µs (`copyPixelBufferForItemTime:`) |
-| `readback` | 1.09–1.59 ms (`CopyResource` + the `Map` that waits) | 5.9–8.0 µs (`CVPixelBufferLockBaseAddress`) |
-| `copy` | 19–22 µs (row-wise `memcpy`) | 22–63 µs (the same `memcpy`) |
-| **total** | 1.84–2.15 ms | **84–157 µs** |
+| `transfer` | 538–968 µs(`TransferVideoFrame`,在 GPU 上) | 54–93 µs(`copyPixelBufferForItemTime:`) |
+| `readback` | 1.09–1.59 ms(`CopyResource` 加那次要等的 `Map`) | 5.9–8.0 µs(`CVPixelBufferLockBaseAddress`) |
+| `copy` | 19–22 µs(逐行 `memcpy`) | 22–63 µs(同一个 `memcpy`) |
+| **总计** | 1.84–2.15 ms | **84–157 µs** |
 
-**The read-back §7.42 ③ weighed does not exist on this platform, and that is the
-one number in this ticket that is a surprise.** That slice gave up a shared
-texture for a structural reason and wrote down what system memory cost it: a
-`CopyResource` into a staging texture, a `Map` that waits for the GPU — "where a
-read-back's stall actually is" — and a row-wise `memcpy`. Here the player's
-output hands over a `CVPixelBuffer` that is **already addressable by the CPU**,
-so the lock costs a few microseconds and there is no GPU synchronisation to wait
-for at all. A frame crosses in **twelve to twenty-five times less** than it costs on the
-other machine. The honest qualifier is that this was measured on an Apple-silicon part
-whose memory is unified, so the number is about that architecture as much as
-about AVFoundation; what is not in doubt is that the `memcpy` — the one span that
-is the same work on both machines — is tens of microseconds on each.
+**§7.42 ③ 掂量过的那次读回在这个平台上根本不存在,而这是本票里唯一一个算意外的数。** 那一片出于结构原因放弃了一块共享纹理,并写下了系统内存为此花掉的东西:一次进暂存纹理的 `CopyResource`、一次要等 GPU 的 `Map`——「一次读回的停顿真正在的地方」——加一次逐行 `memcpy`。这里播放器的输出交过来的是一个**CPU 本来就寻址得了的** `CVPixelBuffer`,所以那次加锁花几微秒,而且根本没有 GPU 同步要等。一帧跨过去所花的比另一台机器上**少十二到二十五倍**。老实的限定是:这是在一块内存统一的 Apple 芯片上量的,所以这个数既是关于 AVFoundation 的也是关于那套架构的;不存疑的是那次 `memcpy`——两台机器上是同样活儿的唯一那一段——在两边都是几十微秒。
 
-What that buys is nothing today and one decision closed: §7.42 ⑪ ⓒ left "should
-the frame be shared rather than copied" for a later slice, to be decided off that
-cost table. On this platform the table answers it — there is nothing to buy.
+它买到的今天是零,以及一个被关掉的决定:§7.42 ⑪ ⓒ 把「这一帧到底该共享还是该拷贝」留给了后面某一片,按那张开销表来定。在这个平台上那张表答了它——没有什么可买的。
 
-**⑦ The colour, and the question §7.42 ⑤ left open.** That slice made the still
-and the first played frame share a **rectangle**, because a reader who presses ▶
-and sees the picture change size is watching this window contradict itself. The
-same sentence is true of colour and had never been asserted — and on this
-platform it is a real question rather than a formality, because the two pictures
-reach a caller by two different roads *on one machine*: §13.25's still is drawn
-through a `CGBitmapContext` that **names sRGB** and is colour-matched into it,
-and the playing frame comes out of the player's own `32BGRA` output.
-`the_still_and_the_playing_picture_are_the_same_colour` is the gate and its
-tolerance is **40** per channel. **The answer is not the one §13.25 would have
-predicted, and it is the more interesting one.** Out of the same two files on the
-same Mac:
+**⑦ 颜色,以及 §7.42 ⑤ 留下的那个问题。** 那一片让静帧和第一张播放帧共用一个**矩形**,因为一个按下 ▶ 就看见画面换了尺寸的读者,看见的是这扇窗自相矛盾。同一句话对颜色也成立,而且从来没被断言过——而在这个平台上它是一个真问题而不是一件形式活,因为那两张画是**在同一台机器上**经两条不同的路到达调用方的:§13.25 那张静帧是经一个**点名了 sRGB**、并且被色彩匹配进去的 `CGBitmapContext` 画的,而播放那一帧是从播放器自己的 `32BGRA` 输出里出来的。`the_still_and_the_playing_picture_are_the_same_colour` 是那道门,而它的容差是每通道 **40**。**答案不是 §13.25 会预测的那一个,而且是更有意思的那一个。** 同一台 Mac 上从同样两份文件里:
 
-| fixture | authored | Mac still (sRGB-matched) | Mac **playing** | Windows still | Windows playing |
+| 夹具 | 作者写的 | Mac 静帧(sRGB 匹配过) | Mac **播放** | Windows 静帧 | Windows 播放 |
 |---|---|---|---|---|---|
 | `folio-video-test.mp4` | (224,122,47) | (223,136,53) | **(224,123,48)** | (224,122,48) | (224,123,48) |
 | `folio-video-test.mov` | (47,122,224) | (67,135,228) | **(48,122,224)** | (48,122,225) | (48,122,225) |
 
-**The playing frame is the untagged conversion, not the colorimetric one — and
-the two platforms' *playing* frames agree to within one count.** An
-`AVPlayerItemVideoOutput` asked for `32BGRA` and nothing else does the same thing
-Media Foundation's video processor does: it converts YUV to RGB with the stream's
-own matrix and hands the bytes over. So `(224,123,48)` on a Mac against
-`(224,123,48)` on Windows, and `(48,122,224)` against `(48,122,225)` — the two
-engines are the same picture. §13.25's ≤20 belongs to the **still** and to the
-bitmap context that names sRGB, and on this evidence it is the still that is the
-odd one out: the largest gap this gate sees anywhere is **19**, and it is between
-one Mac picture and the other Mac picture — the `.mov`'s red, 67 stilled against
-48 playing.
+**播放那一帧是不带标记的那次转换,不是比色学的那一次——而两个平台的*播放*帧相差不超过一个计数。** 一个被要了 `32BGRA` 而别的什么都没要的 `AVPlayerItemVideoOutput`,做的事跟 Media Foundation 的视频处理器一样:它用流自己的矩阵把 YUV 转成 RGB,再把字节交出来。于是 Mac 上的 `(224,123,48)` 对 Windows 上的 `(224,123,48)`,`(48,122,224)` 对 `(48,122,225)`——两个引擎是同一张画。§13.25 那个 ≤20 属于**静帧**、属于那个点名了 sRGB 的位图上下文,而照这份证据,反倒是静帧才是那个异类:这道门在任何地方看到的最大差距是 **19**,而它是在一张 Mac 的画和另一张 Mac 的画之间——`.mov` 的红通道,静帧 67 对播放 48。
 
-That is a difference a reader could in principle see — a hover card and the pane
-under it showing the same frame a shade apart — and it is left as it is rather
-than papered over, for two reasons. It is **smaller than the difference between
-the two platforms' stills was already**, which §13.25 shipped; and closing it
-would mean either dropping the colour management from the still (a first frame
-that ignores a file's own primaries) or adding `AVVideoColorPropertiesKey` to the
-output (a per-frame conversion on the playback path, for a shade). Neither is
-worth paying at this magnitude, and now that the gate exists the number will
-announce itself if a macOS release moves it. No gamma is applied anywhere in
-Rust.
+那是一个读者原则上看得见的差别——一张悬停卡和它底下的 pane 显示的同一帧差一点点色——而它被留在那里而不是被糊过去,有两个理由。它**比两个平台的静帧之间本来就有的那个差别还小**,而后者 §13.25 已经发货了;而要把它合上,要么得把色彩管理从静帧上拿掉(一个不理会文件自己原色的首帧),要么得往那个输出上加 `AVVideoColorPropertiesKey`(为了一点色差,在播放路径上做逐帧转换)。在这个量级上哪一样都不值得付,而现在这道门在了,哪天一个 macOS 版本挪动这个数,它自己会吱声。Rust 里任何地方都没有加任何 gamma。
 
-**⑧ Everything given back, in the reverse order it was taken.** The observer
-first, because a notification centre holds its observers **unretained** and one
-left behind is a pointer to a freed object the next time anything posts; then the
-output, because an item that still has one keeps a decoder attached; then the
-player is paused and emptied, which releases the item and the asset behind it.
-`Engine::shutdown` on the pane that closes and `Drop` for everything else
-including a panic, both ending in the same place, with the same
-`SHUTDOWN_BUDGET` over the join for §7.42's review row R2-19 reason: a pane closes
-on the window's own thread and an unbounded join would hand that thread a wait
-with no ending.
+**⑧ 一切都按取的相反顺序还回去。** 先是观察者,因为一个通知中心对它的观察者是**不持有**的,而留下一个就是下一次有任何东西发通知时指向一块已释放对象的指针;然后是那个输出,因为一个还挂着输出的 item 会一直连着一个解码器;然后播放器被暂停并清空,这会放掉那个 item 和它背后那个 asset。关掉的那个 pane 走 `Engine::shutdown`,别的一切包括一次 panic 走 `Drop`,两者都结束在同一个地方,join 上罩着同一个 `SHUTDOWN_BUDGET`,理由是 §7.42 审计表 R2-19 那一条:一个 pane 是在窗口自己的线程上关的,而一次无界的 join 就是给那条线程一场没有尽头的等待。
 
-**One belt this arm needs that the other does not.** `Machinery` has a `Drop` of
-its own that calls the same idempotent teardown, because the unretained observer
-has no reference count to protect it: an engine thread that unwound past its pump
-without that would leave the default notification centre pointing at freed
-memory, and the crash would land on the next `AVPlayerItemDidPlayToEndTime` posted
-**anywhere in the process** — which is to say inside a different video's engine.
-On Windows the equivalent object is a COM callback the engine itself holds a
-reference to, so releasing the engine unhooks it and there is nothing to write.
+**这条臂需要一条另一条不需要的腰带。** `Machinery` 有它自己的 `Drop`,调的是同一套幂等的拆除,因为那个不被持有的观察者没有引用计数保护它:一条不带这个就从它的泵那里展开出去的引擎线程,会把默认通知中心留着指向已释放的内存,而那次崩溃会落在**这个进程里任何地方**发出的下一条 `AVPlayerItemDidPlayToEndTime` 上——也就是落在另一个视频的引擎里面。Windows 上对应的那个对象是一个引擎自己持有引用的 COM 回调,所以释放引擎就把它摘下来了,没有什么要写。
 
-The ledger is the Windows arm's `LedgerEntry` rather than a `fetch_add`, and it
-is worth saying why a portable file has one: the promise is that
-`engines_outstanding()` is zero at every moment no engine is alive, and everything
-between "a player exists" and "something will stop it" is fallible — a value that
-closes itself on drop is what makes a failure there take its own count off.
-`an_engine_dropped_while_it_plays_leaves_nothing_behind` is the gate, with no
-`shutdown` call anywhere in its scope.
+那本账是 Windows 那条臂的 `LedgerEntry` 而不是一次 `fetch_add`,而一个可移植文件里为什么要有这东西值得说:承诺是 `engines_outstanding()` 在任何一个没有引擎活着的时刻都是零,而「一个播放器存在」到「有东西会停下它」之间的每一步都可能失败——一个在 drop 时自己合上的值,才是让那里的一次失败把它自己那一份计数带走的东西。`an_engine_dropped_while_it_plays_leaves_nothing_behind` 是那道门,而它的作用域里任何地方都没有一次 `shutdown` 调用。
 
-**⑨ A sixth recording, because the other five are silent.** Nothing needed that
-until now. §M4 acceptance ③ asks a reader to *hear* a video and
-`EngineState::has_audio` reports whether there is anything to hear, and neither
-claim can be made against a file with no audio track: all five shipped recordings
-answer `has_audio: false` on both platforms, so a build whose audio path had been
-deleted outright would pass every assertion made with them.
-`tests/assets/folio-video-sound-test.mp4` is the same two-colour picture with one
-AAC track of a 440 Hz `lavfi` tone under it — synthetic to its last byte like the
-other five, recipe in `tests/assets/PROVENANCE.md` — and it is the file the
-acceptance line should be performed with. **§M4 ③ as written names
-`folio-video-test.mp4`, which is silent; that line wants this file instead.**
+**⑨ 第六份录像,因为另外五份是无声的。** 在这之前没有任何东西需要它。§M4 验收 ③ 要读者**听见**一个视频,而 `EngineState::has_audio` 报告有没有东西可听,而这两条主张拿一份没有音频轨的文件都做不出来:已发货的那五份录像在两个平台上都答 `has_audio: false`,所以一个把音频路径整个删掉的构建,拿它们做的每一条断言都会通过。`tests/assets/folio-video-sound-test.mp4` 是同样那张两色的画,底下压着一条 440 Hz `lavfi` 音的 AAC 轨——跟另外五份一样从头到尾是合成的,配方在 `tests/assets/PROVENANCE.md` 里——而它才是验收那句话该拿来做的那份文件。**§M4 ③ 现在写的是 `folio-video-test.mp4`,而那是无声的;那句话要的是这份文件。**
 
-**What an agent cannot assert is said rather than skipped.** Whether a speaker
-made a noise is not a thing a test process can read back, and a case that claimed
-it would pass on a machine with the volume at zero, no output device, or the
-audio path deleted. What is asserted is everything up to the speaker — the file
-has an audio track and the engine says so, the two knobs are read back off the
-player rather than off a copy this crate keeps, and a muted video still runs its
-clock and its pictures. **Every engine in that file is muted before it is
-played**, because the suite runs on the owner's own machine while the owner is
-working.
+**一个 agent 断言不了的东西是说出来而不是跳过。** 一只喇叭有没有响不是一个测试进程读得回来的东西,而一只声称它响了的用例,在一台音量为零、没有输出设备、或者音频路径被删掉的机器上照样通过。被断言的是一直到喇叭之前的一切——这份文件有一条音频轨而引擎这么说、那两个旋钮是从播放器上读回来的而不是从这个 crate 留的一份副本上读的,以及一个被静音的视频照样跑它的钟和它的画面。**那个文件里每一个引擎在被播放之前都先静音**,因为这套测试是在用户自己的机器上、在用户正在工作的时候跑的。
 
-**⑩ One package named, already in the lock file, and it moves one line in the
-notices.** `objc2-core-video` 0.3.2 has been in `Cargo.lock` since §13.25 under
-*In the lock file, not in any resolved build*, because CoreMedia declares it
-optional and nothing turned it on. This ticket turns it on — 534 resolved
-packages become 535 and the 38 unreached become 37 — and what it buys is the six
-accessors a decoded frame is read through: the lock and unlock that make a
-buffer's base address legal to read, the width, the height, the **row stride**,
-and the pixel format. `objc2-av-foundation` gains five features (`AVPlayer`,
-`AVPlayerItem`, `AVPlayerItemOutput`, `AVAudioProcessingSettings`, `AVError`) and
-`objc2-core-video` as a feature of its own, which is what generates
-`copyPixelBufferForItemTime:itemTimeForDisplay:` at all. **No new package**, which
-is §8's bar; the two lines `Cargo.lock` gains are the crate's name appearing in
-two dependency lists. The alternative was hand-declaring six CoreVideo entry
-points, a lock-flags type and a pixel-format constant against a framework this
-crate does not own.
+**⑩ 点名一个包,它本来就在锁文件里,而它在声明文件里挪一行。** `objc2-core-video` 0.3.2 自 §13.25 起就在 `Cargo.lock` 里、归在*在锁文件里,不在任何已解析的构建里*那一节,因为 CoreMedia 把它声明为可选而没有东西打开它。本票把它打开——534 个已解析的包变成 535,而 38 个没被够到的变成 37——而它买到的是一帧解码出来的画被读过的那六个访问器:让一个缓冲的基地址可以合法读取的那对加锁与解锁、宽、高、**行 stride**,以及像素格式。`objc2-av-foundation` 多五个 feature(`AVPlayer`、`AVPlayerItem`、`AVPlayerItemOutput`、`AVAudioProcessingSettings`、`AVError`)加上 `objc2-core-video` 自己这一个 feature,而后者正是让 `copyPixelBufferForItemTime:itemTimeForDisplay:` 被生成出来的那一个。**不加新包**,那是 §8 的门槛;`Cargo.lock` 多的那两行是这个 crate 的名字出现在两份依赖列表里。另一个选择是对着一个这个 crate 并不拥有的框架,手写六个 CoreVideo 入口点、一个锁标志类型和一个像素格式常量。
 
-**⑪ Where the file is cut, and the one thing a reader would otherwise have to
-discover.** §4.3 of the port plan says a `#[cfg(windows)] pub mod` becomes a plain
-`pub mod` with `win`/`mac`/`neither` bodies; §13.25 ⑤ took the first-frame half
-and said M4-5 was when the engine's half arrived. It has. `video/mod.rs` and
-`video/engine.rs` are untouched Media Foundation; `video_portable.rs`'s `engine`
-module holds everything that is not a player — the four timing constants, the
-error, the state, the frame, the cost breakdown and the ledger — and the player
-itself is `macos_player.rs` beside `macos_video.rs`, with a `no_player` arm for a
-platform that has neither.
+**⑪ 这个文件是在哪里切的,以及一个读者否则得自己发现的那件事。** 移植计划 §4.3 说一个 `#[cfg(windows)] pub mod` 要变成一个普通 `pub mod`,带 `win`/`mac`/`neither` 三份函数体;§13.25 ⑤ 取了首帧那一半,并说引擎那一半到来时是 M4-5。它到了。`video/mod.rs` 和 `video/engine.rs` 还是原封不动的 Media Foundation;`video_portable.rs` 的 `engine` 模块装着每一样不是播放器的东西——四个时间常量、错误、状态、帧、开销明细和那本账——而播放器本身是 `macos_video.rs` 旁边的 `macos_player.rs`,外加一条给两者都没有的平台用的 `no_player` 臂。
 
-`macos_player.rs` is a **sibling** of `macos_video.rs` rather than a module
-inside `engine`, and that is a language fact rather than a taste: a `#[path]` on a
-module declared inside an inline module block resolves against that block's own
-directory, so `engine`'s arm would have had to live in `src/video/engine/` —
-which is the Windows arm's folder. Declared at the file's top level it is
-`src/macos_player.rs`, and `engine` re-exports the one name out of it that
-anybody may see.
+`macos_player.rs` 是 `macos_video.rs` 的**同级**而不是 `engine` 里面的一个模块,而这是一件语言事实而不是一种口味:一个声明在内联模块块里面的模块上的 `#[path]` 是对着那个块自己的目录解析的,所以 `engine` 那条臂就得住在 `src/video/engine/` 里面——而那是 Windows 那条臂的文件夹。声明在文件顶层,它就是 `src/macos_player.rs`,而 `engine` 把里面唯一一个别人该看见的名字再导出一次。
 
-**§13.25 ⑤'s open question is still open and is still not taken.** `VideoFrame`
-is written twice and so now are `Frame`, `EngineState`, `EngineError` and
-`FrameCost`. There are now two real implementations of both halves, which is the
-moment that note said would come — but gathering them means moving five types out
-of two files that are otherwise Media Foundation from their first line to their
-last, and the thing that would hold the two copies together afterwards is exactly
-what holds them together today: `macos_player_signature_tests` compares the two
-arms as **text** on the Windows workstation, where only one of them compiles.
-That module is new here and it is the instrument §13.25 ⑨ describes, one ticket
-on: the fourteen verbs' signatures, the three ledger doors, `Frame`'s,
-`EngineState`'s and `FrameCost`'s fields, the four timing constants, and the
-`alloc` that carries ④.
+**§13.25 ⑤ 那个悬着的问题仍然悬着,而且仍然不接。** `VideoFrame` 写了两遍,而现在 `Frame`、`EngineState`、`EngineError` 和 `FrameCost` 也是。两半现在都有两份真实现,而那正是那条注说会来的那一刻——但把它们收拢意味着从两个从第一行到最后一行都是 Media Foundation 的文件里搬走五个类型,而之后把这两份拷贝拴在一起的东西,恰恰就是今天拴着它们的那样东西:`macos_player_signature_tests` 在 Windows 工作站上把两条臂当**文本**比,而那里只有一条编得过。那个模块在这里是新的,而它就是 §13.25 ⑨ 描述的那件仪器,晚了一张票:十四个动词的签名、三扇账门、`Frame` 与 `EngineState` 与 `FrameCost` 的字段、四个时间常量,以及带着 ④ 的那次 `alloc`。
 
-**⑫ Three instruments, because no one of them can hold the claim.**
-`tests/video_playback.rs` runs one set of assertions against whichever engine the
-machine has and is the only place *behaviour* is checked; it is green on both
-machines and it is what ⑥ is measured with. `macos_player_signature_tests` in
-`lib.rs` compares the two arms as text where only one of them compiles. And
-`cargo check`/`cargo clippy -p bt-platform --target aarch64-apple-darwin
---all-targets` on the Windows machine is what says the macOS arm compiles and
-lints before it is ever pushed.
+**⑫ 三件仪器,因为没有哪一件单独撑得住这个主张。** `tests/video_playback.rs` 对着这台机器手上那个引擎跑同一套断言,而且是唯一核**行为**的地方;它在两台机器上都绿,⑥ 就是拿它量的。`lib.rs` 里的 `macos_player_signature_tests` 在只有一条编得过的地方把两条臂当文本比。而 Windows 机器上的 `cargo check`/`cargo clippy -p bt-platform --target aarch64-apple-darwin --all-targets`,是在 macOS 那条臂被推上去之前说它编得过、也过得了 lint 的那个东西。
 
-**Red gates.** `bt-platform`, run on both machines:
-`a_video_plays_and_its_clock_runs_on_either_machine` (pictures **and** clock,
-plus the cost line), `the_still_and_the_playing_picture_are_the_same_colour`
-(⑦), `a_seek_moves_the_playhead_and_the_next_picture_comes_from_there`,
-`a_pause_stops_the_clock_and_the_pictures_and_a_play_starts_them_again`,
-`a_video_that_ends_says_so_and_keeps_its_last_picture` (§M4 ③'s "ends without a
-stuck frame"), `a_recording_with_a_soundtrack_answers_for_its_own_audio` (⑨),
-`a_rate_set_on_a_paused_video_is_a_rate_and_not_a_play` (⑤),
-`nothing_that_is_not_a_video_plays`,
-`an_engine_dropped_while_it_plays_leaves_nothing_behind` (⑧). On the Windows
-workstation only: `every_engine_verb_keeps_its_signature_on_every_machine`,
-`the_leak_ledger_is_the_same_three_doors_on_every_machine`,
-`the_frame_the_state_and_the_cost_are_the_same_types_on_both_machines`,
-`both_arms_poll_open_and_shut_down_on_the_same_clock`,
-`the_player_is_allocated_without_claiming_the_window_thread`. In
-`macos_player.rs` itself, needing neither a Mac nor a video:
-`a_padded_row_is_copied_by_its_width_and_not_by_its_stride`,
-`a_row_with_no_padding_at_all_is_still_the_same_picture`,
-`a_stride_narrower_than_a_row_is_refused`.
+**红门。** `bt-platform`,两台机器上都跑:`a_video_plays_and_its_clock_runs_on_either_machine`(画面**和**钟,加那行开销)、`the_still_and_the_playing_picture_are_the_same_colour`(⑦)、`a_seek_moves_the_playhead_and_the_next_picture_comes_from_there`、`a_pause_stops_the_clock_and_the_pictures_and_a_play_starts_them_again`、`a_video_that_ends_says_so_and_keeps_its_last_picture`(§M4 ③ 那句「结束时不卡住一帧」)、`a_recording_with_a_soundtrack_answers_for_its_own_audio`(⑨)、`a_rate_set_on_a_paused_video_is_a_rate_and_not_a_play`(⑤)、`nothing_that_is_not_a_video_plays`、`an_engine_dropped_while_it_plays_leaves_nothing_behind`(⑧)。只在 Windows 工作站上:`every_engine_verb_keeps_its_signature_on_every_machine`、`the_leak_ledger_is_the_same_three_doors_on_every_machine`、`the_frame_the_state_and_the_cost_are_the_same_types_on_both_machines`、`both_arms_poll_open_and_shut_down_on_the_same_clock`、`the_player_is_allocated_without_claiming_the_window_thread`。在 `macos_player.rs` 自己里面,既不需要 Mac 也不需要视频:`a_padded_row_is_copied_by_its_width_and_not_by_its_stride`、`a_row_with_no_padding_at_all_is_still_the_same_picture`、`a_stride_narrower_than_a_row_is_refused`。
 
-**One assertion in this ticket was wrong before it shipped, and the way it was
-wrong is worth keeping.** The pause case first asserted that the clock does not
-move at all once `playing` has gone false. It passed alone and failed in a full
-parallel run: on the Windows arm `IsPaused` answers the **request** and the
-pipeline behind it takes a moment to actually stop, which on a loaded machine is
-a few hundred milliseconds of clock after the flag has already changed. That is
-not a defect — a player that reported "still playing" until its pipeline had wound
-down would leave a pressed pause button lit — but the honest claim is "the clock
-**comes to rest**", which is what `at_rest` measures and what the case asserts
-now. An assertion that passes alone and fails in a full run is the worst kind to
-ship.
+**本票里有一条断言在发出去之前是错的,而它错的方式值得留着。** 暂停那只用例一开始断言的是:一旦 `playing` 变成假,钟就完全不动。它单跑通过,在一次满并行的运行里失败:Windows 那条臂上 `IsPaused` 答的是那个**请求**,而它后面那条管线要过一会儿才真停下来,在一台负载中的机器上那就是标志已经变了之后还有几百毫秒的钟。那不是缺陷——一个直到管线收完才报告「还在播」的播放器,会让一个被按下的暂停按钮一直亮着——但老实的主张是「钟**停下来**」,而那正是 `at_rest` 量的东西,也是那只用例现在断言的东西。一条单跑通过、满跑失败的断言是最糟的那一种。
 
-**⑬ 挂账.** ⓐ **`can_play_types` has no macOS arm** and `bt-app` has no caller
-for it, so §7.42 ⑧'s matrix is still a Windows report; the port inventory classes
-it **R** with no caller and it is not on this ticket. ⓑ **`Adapter` and
-`open_on` have no twin and deliberately none**: they name D3D11 against WARP,
-which is not a question on a platform where the frame never touches a Direct3D
-device. The signature gate lists them as excluded rather than leaving them
-unremarked. ⓒ **`frame_cost`'s three spans mean different things on the two
-machines** — `transfer` is the pull rather than a GPU composite, `readback` is a
-buffer lock rather than a `CopyResource` — and ⑥ prints both so that the shapes
-can be compared rather than the names. ⓓ **§M4 acceptance ③ names a silent
-file**; see ⑨. ⓔ **The main queue carries the player's state machine** (④b): if
-a blocked main thread is ever measured to stall a video in a way a reader
-notices, the way out is `AVSampleBufferRenderSynchronizer` with an
-`AVSampleBufferAudioRenderer` and an `AVAssetReader` — no main-actor annotation
-and no notification queue, and a player written by hand. That is a ticket of its
-own and nothing here is built in a way that blocks it: the seat, the bar and
-`bt-app` see `Engine` and would not know. ⓕ **The colour gap between the Mac's
-still and the Mac's playing frame is 19 at its widest** and is left standing;
-⑦ says why and the gate says when it moves.
-
-*(本节英文,待中文文案改写。)*
+**⑬ 挂账。** ⓐ **`can_play_types` 没有 macOS 臂**,而 `bt-app` 也没有调用方要它,所以 §7.42 ⑧ 那张矩阵仍然是一份 Windows 的报告;移植清单把它归为 **R**、没有调用方,而它不在本票上。ⓑ **`Adapter` 和 `open_on` 没有孪生,而且特意没有**:它们点的是 D3D11 对 WARP,而在一个帧从不碰 Direct3D 设备的平台上那不是一个问题。那道签名门把它们列为排除项,而不是不加说明地放着。ⓒ **`frame_cost` 那三段在两台机器上意思不同**——`transfer` 是那次拉取而不是一次 GPU 合成,`readback` 是一次缓冲加锁而不是一次 `CopyResource`——而 ⑥ 把两边都打出来,好让人比的是形状而不是名字。ⓓ **§M4 验收 ③ 点的是一份无声文件**;见 ⑨。ⓔ **主队列上驮着播放器的状态机**(④b):要是哪天真量出一条被阻塞的主线程会以读者察觉得到的方式卡住一个视频,出路是 `AVSampleBufferRenderSynchronizer` 加一个 `AVSampleBufferAudioRenderer` 加一个 `AVAssetReader`——既没有主 actor 标注也没有通知队列,而且是一个手写的播放器。那是一张自己的票,而这里没有任何东西是以挡着它的方式建的:那个座、那条栏和 `bt-app` 看见的是 `Engine`,而且不会知道有这回事。ⓕ **Mac 的静帧和 Mac 的播放帧之间那个色差最宽处是 19**,而它被留着;⑦ 说了为什么,而那道门会说它什么时候动了。
 
 ### 13.36 M4-9: 访达的「在 Folio 中打开」——Services 提供者对象、冷热投递都走代理通道(`crates/bt-platform/src/macos_services.rs`(新)、`crates/bt-platform/src/{app_delegate,macos_app,lib}.rs`、`crates/bt-platform/tests/macos_services.rs`(新)、`crates/bt-platform/Cargo.toml`、`crates/bt-winres/src/plist.rs`、`packaging/macos/Info.plist.in`、`crates/bt-app/src/main.rs`)
 
-**① Two halves, in two files, and neither one is the feature.** A Service is not
-one dictionary — that is the correction §8 Q3 makes to the plan's first draft,
-and it is why this is a `bt-platform` ticket rather than a plist edit.
-`packaging/macos/Info.plist.in` grew an `NSServices` array, which is what decides
-whether the row is *drawn*; `macos_services.rs` registers an object with
-`-[NSApplication setServicesProvider:]`, and AppKit sends the method `NSMessage`
-names **to that object** when the row is *pressed*. Either half alone is a row
-that does nothing or an object nobody calls, and nothing in either file fails to
-build when the two disagree. `NSMessage` is also the **first word of the selector
-only** — AppKit appends `:userData:error:` itself — which is the plausible
-mistake and is a row that draws, is pressed, and reports a failed Service to the
-reader. So the join is pinned by a test that reads both files as text,
-`the_service_this_bundle_declares_is_the_one_the_provider_answers`, and it runs
-on a Windows workstation.
+**① 两半,在两个文件里,而哪一半都不是这个功能。** 一个服务不是一份字典——那是 §8 Q3 对计划初稿作出的纠正,也是这件事是一张 `bt-platform` 的票而不是一次 plist 编辑的原因。`packaging/macos/Info.plist.in` 长出一个 `NSServices` 数组,而决定那一行**画不画**出来的是它;`macos_services.rs` 用 `-[NSApplication setServicesProvider:]` 注册一个对象,而那一行**被按下**时 AppKit 把 `NSMessage` 点名的那个方法发**给那个对象**。单有其中一半,就是一行什么也不做的行,或者一个没人调的对象,而两者说法不一时两个文件都照样编得过。`NSMessage` 还**只是选择子的第一个词**——`:userData:error:` 是 AppKit 自己接上去的——而那是最容易犯的错,结果是一行画得出来、按得下去、然后给读者报告一次失败的服务。所以这处接缝由一只把两个文件都当文本读的测试钉住,`the_service_this_bundle_declares_is_the_one_the_provider_answers`,而它跑在一台 Windows 工作站上。
 
-**② It is the third door into M3-1's channel, and it needed nothing new there.**
-A Service never touches the application delegate — X-4 registered a provider and
-read `NSApp.servicesProvider` back to confirm it — but it arrives the way
-everything on that channel arrives: on the main thread, inside a framework
-callback, with a frame underneath it that this program does not own. So the
-method does what the four selectors do and no more — read the pasteboard, post,
-return. What it posts is `AppDelegateEventKind::OpenPaths`, which is what
-`AppDelegateOrigin`'s own documentation said a Service would post before this
-ticket existed, with an origin of its own. The **cold** case is the part that was
-already built: LaunchServices starts the application when nothing has its
-Services port open, and the delivery then arrives before `resumed` — X-4 timed
-t=222 ms against a `resumed` at 247 ms, with no window in existence. `Outbox`
-holds it and releases it at `AppDelegate::ready`; this file has no buffer of its
-own, because a second one would be a second answer to the same question.
+**② 它是通往 M3-1 那条通道的第三扇门,而它在那边什么新东西都不需要。** 一个服务从不碰应用代理——X-4 注册过一个提供者,再把 `NSApp.servicesProvider` 读回来确认——但它到达的方式和那条通道上的一切一样:在主线程上,在一个框架回调里面,底下垫着一个这个程序并不拥有的栈帧。所以这个方法做的事跟那四个选择子一样、不多做——读剪贴板、发出去、返回。它发的是 `AppDelegateEventKind::OpenPaths`,也就是在本票存在之前 `AppDelegateOrigin` 自己的文档就说一个服务会发的那个,带着一个它自己的来源。**冷**的那种情形是本来就建好了的那一部分:在没有任何东西开着它的服务端口时 LaunchServices 启动这个应用,而那次投递随后在 `resumed` 之前到达——X-4 量到 t=222 ms 对 `resumed` 的 247 ms,那时一扇窗都不存在。`Outbox` 把它存着,在 `AppDelegate::ready` 时放行;这个文件没有自己的缓冲,因为第二个就是同一个问题的第二个答案。
 
-**③ The origin is not bookkeeping: one list of paths is landed two ways.**
-`application:openURLs:` is *open this document* — `open -a Folio notes.md`, a
-file dropped on the Dock tile — so a folder opens a tab standing in it and a file
-opens a **preview pane**, because the file is the thing the reader named.
-*Services ▸ Open in Folio* is *open Folio **here***, the same verb Explorer's
-first-page row is on the other platform, so a file opens a tab in **its folder**.
-That rule is `bt_app::explorer_menu::folder_for` — a folder is the folder, a file
-is its folder, a name with nothing at it opens nothing — and it is **called**
-rather than restated, so the two rows cannot come to disagree about what a
-clicked file means. `a_service_opens_the_folder_and_a_document_opens_itself` is
-the pin, and it goes red the moment a Service is answered through the document
-door.
+**③ 来源不是记账:同一份路径清单有两种落位方式。** `application:openURLs:` 是*打开这份文档*——`open -a Folio notes.md`,一个被拖到程序坞图标上的文件——所以一个文件夹开出一个站在它里面的标签,而一个文件开在一个**预览 pane** 上,因为那个文件就是读者点名的那样东西。*服务 ▸ 在 Folio 中打开*是*在**这里**打开 Folio*,也就是另一个平台上资源管理器第一页那一行所在的同一个动词,所以一个文件开出一个在**它所在文件夹**里的标签。那条规矩是 `bt_app::explorer_menu::folder_for`——一个文件夹就是那个文件夹,一个文件是它的文件夹,一个什么都不在的名字什么也不开——而它是被**调用**而不是被重述的,所以那两行不可能对「点中一个文件意味着什么」产生分歧。`a_service_opens_the_folder_and_a_document_opens_itself` 是那根钉,而一个服务一旦经文档那扇门作答,它就红。
 
-**④ Why the folder rule is at the landing and not in the provider.** The ticket
-asked whether the provider should validate that each URL names a folder. It does
-not, for three reasons that are each about the provider rather than about
-tidiness: the rule is the *product's* and lives in one place already (③'s
-sentence about a second answer); answering it **needs the disk**, and a `stat`
-per selected file inside a Services callback is exactly the work X-4's first rule
-says does not happen on that stack; and the disk can move between the gesture and
-the turn that lands it, so the judgement has to be taken where the tab is opened
-in any case. What crosses the door is what the reader selected, decoded, in
-order.
+**④ 文件夹那条规矩为什么在落位处而不在提供者里。** 这张票问过提供者该不该校验每个 URL 点的是不是一个文件夹。它不校验,三个理由每一个都是关于提供者而不是关于整洁的:那条规矩是**产品的**,而且已经住在一个地方(③ 里那句关于第二个答案的话);要回答它**需要磁盘**,而在一个服务回调里对每个被选中的文件做一次 `stat`,恰恰是 X-4 第一条规矩说那个栈上不做的那种活儿;而磁盘可以在那个手势和落位那一轮之间发生变化,所以这个判断无论如何都得在标签被打开的地方作出。跨过这扇门的是读者选中的东西,解过码,按顺序。
 
-**⑤ The paths are read by class and decoded as bytes.** `-[NSPasteboard
-readObjectsForClasses:options:]` with `[NSURL class]`, rather than the probe's
-walk over `pasteboardItems` and `stringForType:`: it is the same read with AppKit
-doing the conversion, and it covers the legacy `NSFilenamesPboardType` a sender
-older than the pasteboard-item API might write, without this file having to know
-that type exists. `NSSendTypes` advertises the one type Finder writes. Each URL
-is then taken through `absoluteString` and `path_from_file_url` — M3-1's decoder,
-**not** `-[NSURL path]` — for §13.18 ①'s reason: a path is not required to be
-text, the percent escapes in the URL are the file system representation's own
-bytes, and an `NSString` round trip past them hands back a different file. The
-spaces and the CJK in the acceptance sentence are that decoder's, already held by
-cases on a machine with no AppKit.
+**⑤ 路径是按类读的,并且当字节解码。** 用 `-[NSPasteboard readObjectsForClasses:options:]` 配 `[NSURL class]`,而不是探针那种在 `pasteboardItems` 上遍历加 `stringForType:`:那是同一次读取,只是转换交给 AppKit 做,而且它顺带覆盖一个比 pasteboard-item API 更老的发送方可能写下的旧式 `NSFilenamesPboardType`,而这个文件不必知道那个类型存在。`NSSendTypes` 只宣告访达会写的那一种类型。随后每一个 URL 都经 `absoluteString` 和 `path_from_file_url` 处理——那是 M3-1 的解码器,**不是** `-[NSURL path]`——理由是 §13.18 ① 那一条:一条路径不必是文本,URL 里那些百分号转义就是文件系统表示自己的字节,而一趟经 `NSString` 的往返会交回另一个文件。验收那句话里的空格和中文是那个解码器的事,而它们早就由一台没有 AppKit 的机器上的用例按着。
 
-**⑥ `NSUpdateDynamicServices`, and it is not cosmetic.** LaunchServices caches
-the Services table. A bundle that has just been built, downloaded or moved is one
-the cache has never read, and without this call the row appears after a logout
-rather than now — which for a first run is the difference between a feature and a
-feature nobody finds. One call, once, after the provider is registered.
+**⑥ `NSUpdateDynamicServices`,而它不是装饰。** LaunchServices 缓存服务表。一个刚刚被建出来、被下载或者被挪过的 bundle,是缓存从来没读过的那一个,而没有这次调用,那一行要等一次注销之后才出现,而不是现在——对一次首次运行来说,那是一个功能和一个没人找得到的功能之间的差别。一次调用,一次,在提供者注册之后。
 
-**⑦ A second Folio cannot receive a Service, and that is M3-5's doing rather than
-this ticket's.** The ticket asked what happens when the process a Service reaches
-is not the writer of record: the paths would have to go over the launch socket
-exactly as a second `folio <folder>` does. **The state does not arise.** `main`'s
-"if I am not the writer, hand this over and leave" (§13.28 ⑧) stands *above*
-`EventLoop::build`, so a non-writer process leaves before winit's delegate class
-exists, before `AppDelegate::install`, and therefore before any provider is
-registered — it never has a Services port for LaunchServices to deliver to. Warm,
-the delivery goes to the running writer, which is the process that opened the
-port; cold, the process LaunchServices starts is the only one and is the writer.
-The handover is upstream of this door rather than beside it, and a second route
-through the socket here would be a path with no caller and no case that could
-reach it.
+**⑦ 第二个 Folio 收不到服务,而这是 M3-5 干的而不是本票干的。** 这张票问过:当一个服务够到的那个进程不是记录在案的那个写者时会怎样——那些路径就得像第二个 `folio <folder>` 那样走启动套接字。**这种状态不会出现。** `main` 里那句「如果我不是写者,把这个交出去然后走」(§13.28 ⑧)站在 `EventLoop::build` **之上**,所以一个非写者进程在 winit 的代理类存在之前、在 `AppDelegate::install` 之前就走了,因而也在任何提供者被注册之前就走了——它从来没有一个服务端口可以让 LaunchServices 投递。热的时候,投递去到那个跑着的写者,也就是打开了那个端口的进程;冷的时候,LaunchServices 启动的那个进程是唯一的一个,而且就是写者。交接在这扇门的上游而不是在它旁边,而在这里再开一条经套接字的路线,会是一条没有调用方、也没有用例够得到的路。
 
-**⑧ The provider object is owned by the process, and the reason is one line in a
-header.** `-[NSApplication setServicesProvider:]` does not retain its argument.
-So the `Retained` is parked in a `static`, which is never dropped — the same
-shape and the same reason as `macos_app`'s `OUTBOX`, and out of the same
-underlying fact: what reaches this object is AppKit, which holds nothing of this
-program's and can ask at any moment. The cell is written once from the main
-thread and read by nobody, which is what the two `unsafe impl`s beside it say.
+**⑧ 提供者对象归这个进程所有,而理由是一个头文件里的一行。** `-[NSApplication setServicesProvider:]` 不持有它的参数。所以那个 `Retained` 被停在一个 `static` 里,而静态从不被 drop——跟 `macos_app` 的 `OUTBOX` 是同一个形状、同一个理由,出自同一个底层事实:够到这个对象的是 AppKit,而它不持有这个程序的任何东西,而且随时可能来问。这个格子从主线程写一次,没有人读,而这就是它旁边那两个 `unsafe impl` 说的话。
 
-**⑨ The `error` out-parameter is left as AppKit set it.** Writing through it puts
-a system alert in front of the reader, and the only state that would fill it — a
-pasteboard with no file URL on it — is one `NSSendTypes` says Finder does not
-build. A selection this method could not read is said on the diagnostic channel,
-where `application:openURLs:` says the same thing. That is `explorer_command`'s
-own discipline at a second door: refuse where there is somebody to refuse to, and
-do not invent an alert about a gesture that cannot happen.
+**⑨ 那个 `error` 出参就按 AppKit 设的样子留着。** 往里写会在读者面前放一个系统弹窗,而唯一会填它的那种状态——一个上面没有文件 URL 的剪贴板——正是 `NSSendTypes` 说访达不会造的那一种。一次这个方法读不出来的选中,是在诊断通道上说出来的,而 `application:openURLs:` 也在那里说同一件事。那就是 `explorer_command` 自己那套规矩在第二扇门上:有人可拒的时候才拒,而不要为一个不可能发生的手势编一个弹窗。
 
-**⑩ The row's words are English, and the Chinese is not missing by accident.**
-`在 Folio 中打开` exists in the string table as `Text::ExplorerCommandVerb`'s
-Chinese side and is what Explorer's row says on Windows. A localized Services
-item is a `Resources/<lang>.lproj/` inside the bundle, and this bundle has no
-localized resources at all — `CFBundleDevelopmentRegion` is not set and nothing
-else in it is translated. One localized string in an otherwise unlocalized bundle
-is a Chinese row in an English menu bar. Bundle localization is its own ticket
-and this row joins it there; the note is in the template beside the array, where
-somebody adding a `.lproj` will read it.
+**⑩ 那一行的字是英文的,而中文不是不小心漏的。** `在 Folio 中打开` 在字符串表里作为 `Text::ExplorerCommandVerb` 的中文那一侧存在着,也是资源管理器那一行在 Windows 上说的话。一个本地化的服务项是 bundle 里面的一个 `Resources/<lang>.lproj/`,而这个 bundle 根本没有任何本地化资源——`CFBundleDevelopmentRegion` 没设,里面别的东西一样也没译。一个在其余部分都没本地化的 bundle 里的一条本地化字符串,就是一条英文菜单栏里的中文行。Bundle 本地化是它自己的一张票,而这一行跟着它一起归到那里;那条注写在模板里那个数组旁边,给将来添 `.lproj` 的人读。
 
-**⑪ What a Windows runner holds, and what only a Mac can.** Four claims run on
-the workstation: the plist-to-selector join in ①; that a Service is `OpenPaths`
-from the `Services` origin and waits behind the ready gate; that the shipped
-template's `NSServices` block survives the version render whole
-(`the_rendered_bundle_declares_the_finder_service`, in `bt-winres`, where the
-renderer is); and the landing pin in ③. Six cases can only run on a Mac and are
-`tests/macos_services.rs`: the provider AppKit holds answering the selector, a
-**cold** delivery with nothing crossing before `ready`, a plain folder, a folder
-with a space and a CJK character, a multi-selection of three in the reader's own
-order, and a file. The file case asserts the **door** delivers the file's own
-path; that the landing then opens its folder is ③'s pin, because `bt-platform`
-has no `bt-app` to ask.
+**⑪ 一台 Windows 跑器按得住什么,以及只有 Mac 能按住什么。** 工作站上跑四条主张:① 里那处 plist 到选择子的接缝;一个服务是来自 `Services` 来源的 `OpenPaths`、并且在那道就绪闸后面等着;发货模板里那个 `NSServices` 块完整地挺过版本渲染(`the_rendered_bundle_declares_the_finder_service`,在 `bt-winres` 里,渲染器在那里);以及 ③ 里那根落位钉。有六只用例只能在 Mac 上跑,它们在 `tests/macos_services.rs` 里:AppKit 攥着的那个提供者答那个选择子、一次在 `ready` 之前什么都不跨过来的**冷**投递、一个普通文件夹、一个带空格和一个汉字的文件夹、三个按读者自己顺序排的多选,以及一个文件。文件那只断言的是**那扇门**投的是那个文件自己的路径;而落位随后打开它的文件夹是 ③ 那根钉的事,因为 `bt-platform` 手里没有一个 `bt-app` 可问。
 
-**⑫ The exercise is driven programmatically, and it needs two bundles.** X-4
-measured that a Service sent from the receiving application's own executable is
-refused — *"never opened its Services port before the timeout"*, a self-collision
-rather than a defect — so the sender is a second `.app` with an identifier of its
-own, and one binary is both halves (`--send-service`). The pasteboard is
-`+[NSPasteboard pasteboardWithUniqueName]` and **never the general one**: Finder
-uses the general pasteboard, and the machine this runs on synchronises the
-owner's clipboard between computers, so a case that wrote there would put its
-fixtures into a person's paste buffer on another machine. `NSPerformService`
-needs no Automation or Accessibility grant, which X-4 measured and which this run
-confirmed by never being asked for one. `docs/plans/port/m4-9/` carries the two
-launchers and the transcript: the six cases above, and the acceptance sentence on
-`debug/folio` — one Service cold on `中文 folder` and one warm on a plain one,
-with each tab's shell standing in the folder its Service named, read off the
-process's own working directory and off the `OSC 7` it wrote into the pane.
+**⑫ 这次演练是程序化驱动的,而它需要两个 bundle。** X-4 量到从接收方应用自己的可执行文件发出去的服务会被拒绝——*「在超时之前从未打开它的服务端口」*,一次自碰撞而不是一个缺陷——所以发送方是第二个带自己标识符的 `.app`,而一个二进制同时是两半(`--send-service`)。剪贴板用的是 `+[NSPasteboard pasteboardWithUniqueName]`,**绝不用那个通用的**:访达用通用剪贴板,而跑这套东西的这台机器会在几台电脑之间同步用户的剪贴板,所以一只往那里写的用例会把它的夹具放进另一台机器上一个人的粘贴缓冲里。`NSPerformService` 不需要自动化或辅助功能授权,这是 X-4 量过的,而这一趟从来没被要过一次授权,也确认了这件事。`docs/plans/port/m4-9/` 里带着那两个启动脚本和记录:上面那六只用例,以及在 `debug/folio` 上做的验收那句话——一次冷的服务对着 `中文 folder`,一次热的对着一个普通文件夹,而每个标签的 shell 都站在它那次服务点名的那个文件夹里,这是从进程自己的工作目录上、以及从它写进那个 pane 的 `OSC 7` 上读出来的。
 
 ### 13.37 M4-7: 注意力端点走 Unix socket——边界从登录会话变成用户,写明而不是含糊(`crates/bt-platform/src/attention_pipe_unix.rs`(新)、`crates/bt-platform/src/{attention_pipe,attention_pipe_portable,instance,lib}.rs`、`crates/bt-app/src/{attention_wire,attention_hooks,attention_codex,attention_copilot,main}.rs`)
 
-**① The one thing this ticket owes is a sentence, and it is not `0600`.** The
-Windows endpoint carries a security descriptor written by hand,
-`D:P(A;;GA;;;<logon sid>)` — protected so no inherited ACE can arrive, exactly
-one entry, and the principal in it is the **logon session**. §7.1.5m says why
-in its own words: "边界是登录会话而不是用户,所以同一用户的另一个会话(服务、
-另一个桌面)在外面". A Unix socket carries file permissions, and **file
-permissions name a user**. So `0600` inside a `0700` runtime directory is a
-*wider* principal than the door it replaces, and the plan's §R6 is the
-instruction not to paper over that: a second `ssh` login, a `launchd` agent and a
-fast-user-switched second console of the same person **can** post attention to
-this Folio, where on Windows they could not. That is written down here, in the
-module's own header, and in a test that reads the header
-(`the_unix_arm_says_which_principal_it_is_naming`) — because it is prose, the
-only gate that can hold it is one that reads prose, and a file that quietly
-dropped those paragraphs would have made the substitution this ticket exists to
-refuse.
+**① 本票欠的唯一一样东西是一句话,而它不是 `0600`。** Windows 那个端点带着一份手写的安全描述符,`D:P(A;;GA;;;<logon sid>)`——protected,所以没有任何继承来的 ACE 能进来,恰好一条条目,而里面那个主体是**登录会话**。§7.1.5m 用它自己的话说过理由:「边界是登录会话而不是用户,所以同一用户的另一个会话(服务、另一个桌面)在外面」。一个 Unix 套接字带的是文件权限,而**文件权限点的是一个用户**。所以一个 `0700` 运行目录里的 `0600` 是一个比它所取代的那扇门**更宽**的主体,而计划的 §R6 就是那条「不许把这件事糊过去」的指示:第二次 `ssh` 登录、一个 `launchd` agent,以及同一个人快速用户切换出来的第二个控制台,**能**给这个 Folio 发注意力,而在 Windows 上它们不能。这件事写在这里、写在这个模块自己的头注里,也写在一只读那个头注的测试里(`the_unix_arm_says_which_principal_it_is_naming`)——因为它是散文,唯一按得住它的门就是一道读散文的门,而一个悄悄把那几段删掉的文件,就完成了本票存在要拒绝的那次偷换。
 
-**What the runtime directory buys, and what it does not.** It is `0700`, it is
-per-uid, and on macOS `$TMPDIR` is already `/var/folders/<xx>/<digest>/T/`.
-Measured rather than assumed: that directory is **per user and per boot, not per
-session** — every login session of one account is handed the same one — so it
-adds *nothing at all* to the session question, and claiming it did would be the
-same substitution wearing a different hat. What it does buy is against a
-different *user*: the directory somebody else would have to reach is both
-unguessable and unreadable, so the socket's own `0600` is the second of two locks
-on that gate rather than the only one.
+**那个运行目录买到了什么,没买到什么。** 它是 `0700`、按 uid 分的,而在 macOS 上 `$TMPDIR` 本来就是 `/var/folders/<xx>/<digest>/T/`。这是量出来而不是假定的:那个目录是**按用户按启动分的,不是按会话分的**——一个账户的每一次登录会话拿到的都是同一个——所以它对会话那个问题**一点都没加**,而声称它加了就是同一次偷换换了顶帽子。它真正买到的是对另一个**用户**的:别人要够到的那个目录既猜不出来也读不了,所以套接字自己那个 `0600` 是那道闸上两把锁里的第二把,而不是唯一一把。
 
-**And the sentence the Windows module ends on is unchanged**, because it is the
-one that actually bounds this endpoint on either platform: **this is not a
-defence against a hostile process running as you.** A capability travels in a
-child's environment and anything that can read that environment has it. What is
-bounded is the blast radius — the worst a stolen capability buys is one pane's
-attention bit, raised or lowered. It cannot type, cannot open a pane, cannot read
-a transcript and cannot name a different pane, because the message format has no
-pane coordinate in it at all.
+**而 Windows 那个模块收尾的那句话没变**,因为在两个平台上真正框住这个端点的就是它:**这不是对一个以你的身份运行的敌意进程的防御。** 一份能力是在一个子进程的环境里走的,而任何读得到那个环境的东西就有它。被框住的是波及面——一份被偷的能力最多买到一个 pane 的注意力位,抬起来或者放下去。它不能打字、不能开一个 pane、不能读一份记录,也不能点名另一个 pane,因为消息格式里根本没有 pane 坐标。
 
-**② The name is the data directory's, and that is a consequence of the endpoint
-being a file.** The Windows name is `folio-attention-<logon tag>-<pid>-<128-bit
-nonce>`: three segments answering *which session*, *which window* and *which
-run*, the last because Windows reuses a process id the moment a process exits. A
-socket is not a name in a kernel namespace, it is a **file**, and a file outlives
-the process that bound it. So the name has to be one the **next holder of the
-data directory's claim can compute**, in order to unlink it — which a nonce makes
-impossible by construction. The Unix endpoint is therefore
-`$TMPDIR/folio-<uid>/<directory digest>.attn.sock`, one folding and now three
-names built out of it (§13.28 ②'s promise with one more name in it): the lock,
-the launch socket and the doorbell. What the nonce was buying is bought by the
-claim instead — the socket is opened only by the process holding that `flock`,
-and a stale file at that name is removed under that lock before a new one is
-bound.
+**② 那个名字是数据目录的,而这是端点是一个文件带来的后果。** Windows 那个名字是 `folio-attention-<logon tag>-<pid>-<128 位 nonce>`:三段分别回答*哪次会话*、*哪扇窗*和*哪趟运行*,最后一段是因为 Windows 在一个进程退出的那一刻就会重用它的进程号。一个套接字不是一个内核命名空间里的名字,它是一个**文件**,而一个文件活得比绑它的那个进程久。所以这个名字必须是**下一个持有这个数据目录认领的人算得出来的**,好去 unlink 它——而一个 nonce 在构造上就让这件事不可能。所以 Unix 那个端点是 `$TMPDIR/folio-<uid>/<目录摘要>.attn.sock`,一次折叠,现在从它造出三个名字(§13.28 ② 那个承诺里多了一个名字):那把锁、那个启动套接字,和这个门铃。nonce 买的东西改由那次认领来买——这个套接字只被握着那把 `flock` 的进程打开,而那个名字上一个陈旧文件,在一个新的被绑上去之前就在那把锁底下被移掉了。
 
-The length promise moves with it. `SOCKET_PATH_LIMIT` is 104 and the doorbell's
-suffix is ten characters where the launch socket's is five, so the doorbell is
-now the longer of the two names and therefore the one the promise is really
-about; `the_launch_socket_fits_a_sockaddr_un_however_long_the_data_directory_is`
-measures both against a three-thousand-character data directory.
+那条长度承诺跟着挪。`SOCKET_PATH_LIMIT` 是 104,而门铃的后缀是十个字符、启动套接字的是五个,所以门铃现在是两个名字里长的那一个,因而也是那条承诺真正说的那一个;`the_launch_socket_fits_a_sockaddr_un_however_long_the_data_directory_is` 拿一个三千字符的数据目录把两个都量一遍。
 
-**③ `start` grew a parameter, and it grew it on every arm.** The directory is
-where that name comes from, so the Unix arm needs it; the Windows arm does not,
-and takes it anyway. That is §4.4 ②'s rule and `handoff`'s precedent for the
-`NativeWindow` `NSWorkspace` has nothing to be given — a door in `bt-platform`
-has one signature on every platform, consumed with `let _ = directory;` at the
-top of the body so that a reader meets the fact rather than deducing it. The
-result is that `bt_app::attention_wire::open` names it with no `cfg` anywhere
-near, and `main` hands it `persist::storage_dir()` — the same value
-`launch_wire::open` is already given, two lines below.
+**③ `start` 长出一个参数,而且是在每一条臂上长的。** 那个名字是从那个目录来的,所以 Unix 那条臂需要它;Windows 那条臂不需要,但照样收下。那是 §4.4 ② 的规矩,以及 `handoff` 为 `NSWorkspace` 没什么可拿的那个 `NativeWindow` 立下的先例——`bt-platform` 里一扇门在每个平台上只有一个签名,在函数体最上头用 `let _ = directory;` 消费掉,好让读者是撞见这个事实而不是推出这个事实。结果是 `bt_app::attention_wire::open` 点它的名时附近一个 `cfg` 都没有,而 `main` 递给它 `persist::storage_dir()`——也就是两行之下 `launch_wire::open` 已经拿到的那同一个值。
 
-**④ The frame is the connection, and it is not the launch wire's header.**
-`PIPE_TYPE_MESSAGE` made "one frame" a kernel fact; a `SOCK_STREAM` socket has
-none. §13.28 ⑤ answered that at the launch door with four bytes of big-endian
-length, and this door deliberately does **not** borrow it: that one is a
-five-step conversation on a single socket and needs to know where each step ends,
-while this one is *connect, write one line, close*, with no reply channel to keep
-the connection open for. So the peer's half-close is the terminator, bytes are
-accumulated until it arrives, and a connection carrying more than
-`MAX_MESSAGE_BYTES` is refused **whole** rather than truncated and parsed — which
-is the property message mode was buying, because a half-read line is exactly the
-kind of thing a parser should never be handed.
+**④ 帧就是那次连接,而它不是启动那条线的帧头。** `PIPE_TYPE_MESSAGE` 让「一帧」成了一个内核事实;一个 `SOCK_STREAM` 套接字没有这回事。§13.28 ⑤ 在启动那扇门上用四个字节的大端长度答了这件事,而这扇门特意**不**借用它:那一边是同一个套接字上一场五步的对话,需要知道每一步在哪里结束,而这一边是*连上、写一行、关掉*,没有回复通道要把连接留着。所以对端的半关闭就是终止符,字节一直攒到它到达,而一次带着超过 `MAX_MESSAGE_BYTES` 的连接是**整个**被拒绝而不是被截断再解析——而那正是消息模式买到的那个性质,因为一条读了一半的行恰恰是最不该递给一个解析器的东西。
 
-Everything above the transport is the product's and does not move: the same
-4096-byte bound, the same token bucket over one second, the same quarter-second a
-caller has to say its line, the same `PipeCounts` with the same five fields, and
-the same conservation law — **every client that attaches becomes exactly one of
-delivered, oversize, throttled or silent**. `every_client_that_attaches_is_accounted_for`
-asserts it here in the same words it is asserted there.
+传输之上的一切都是产品的,不动:同样的 4096 字节界、同样一秒一桶的令牌、同样四分之一秒的说话时限、同样五个字段的 `PipeCounts`,以及同样那条守恒律——**每一个连上来的客户端恰好成为 delivered、oversize、throttled、silent 四者之一**。`every_client_that_attaches_is_accounted_for` 在这里用跟那边一模一样的话断言它。
 
-**The pool survives for half of its reason.** Four pipe instances existed on
-Windows for two reasons, and only one of them crosses: a caller that attaches and
-says nothing must cost **its own** slot for the read deadline rather than the
-endpoint's whole attention. The other reason — that an instance begins listening
-when `CreateNamedPipeW` returns rather than when `ConnectNamedPipe` is called,
-which is the defect `accepted` was added to name — has no counterpart at all
-here, because a listener's backlog holds a caller the kernel already took in for
-it. So `poll` watches the listener, a self-pipe and up to four accepted
-connections, and the listener leaves the set while the pool is full so that a
-fifth caller waits in the backlog rather than in a slot that does not exist.
+**那个池活下来了一半的理由。** Windows 上有四个管道实例是为两个理由,而只有一个跨得过来:一个连上来却什么也不说的调用方,必须花掉**它自己**那个槽位去等那个读取截止时间,而不是花掉整个端点的注意力。另一个理由——一个实例是在 `CreateNamedPipeW` 返回时而不是在 `ConnectNamedPipe` 被调时开始监听的,而那正是 `accepted` 被加上去要点名的那个缺陷——在这里根本没有对应物,因为一个监听器的 backlog 替它把内核已经收下的调用方攥着。所以 `poll` 盯着监听器、一条自管道,以及至多四条已接受的连接,而池满的时候监听器离开那个集合,好让第五个调用方在 backlog 里等,而不是在一个并不存在的槽位里等。
 
-**⑤ The peer is asked who it is and deliberately not what it is running.** This
-is the one place where the two Unix sockets in one runtime directory take
-opposite decisions, and both are right. `launch_pipe` refuses a peer whose
-executable is not the same file as its own (§13.28 ⑥), because the only thing
-that ever speaks the launch wire is a second Folio. **Nothing of the sort is true
-here.** The programs on the other end of the doorbell are other people's —
-`claude`, `codex`, `node`, `copilot`, and a shell where a hook is spelled as a
-shell command — so an executable check copied across from the door next to it
-would refuse every real caller this one has, and the failure would look exactly
-like "the hooks are not installed". What is asked is `getpeereid`, and the uid
-must be this process's own; a pid out of a frame would be a number the peer
-chose, and this comes from the kernel.
-`the_doorbell_asks_who_you_are_and_not_what_you_are_running` pins the absence as
-well as the presence, because an absence is the half somebody tidies up.
+**⑤ 对端被问的是你是谁,而特意不问你在跑什么。** 这是同一个运行目录里那两个 Unix 套接字作出相反决定的唯一一处,而两个都对。`launch_pipe` 拒绝一个可执行文件跟自己不是同一个文件的对端(§13.28 ⑥),因为会说启动那条线的从来只有第二个 Folio。**这里完全不是这么回事。** 门铃另一头的那些程序是别人的——`claude`、`codex`、`node`、`copilot`,以及一个把钩子写成一条 shell 命令的 shell——所以从隔壁那扇门抄一次可执行文件检查过来,会把这扇门每一个真实的调用方都拒掉,而那次失败看起来会跟「钩子没装」一模一样。这里问的是 `getpeereid`,而那个 uid 必须是这个进程自己的;一个从帧里读出来的 pid 是对端自己挑的一个数,而这个是内核给的。`the_doorbell_asks_who_you_are_and_not_what_you_are_running` 把「不在」和「在」都钉住,因为「不在」正是有人会去顺手收拾掉的那一半。
 
-A peer of another uid is closed on **without a byte read and without a count**.
-That keeps `PipeCounts` honest across the two arms: on Windows such a caller is
-refused by the descriptor and never attaches at all, so it is in none of the five
-numbers, and it is in none of them here either. The client half asks the same
-question of the file before it connects — a socket, not a link, this user's, mode
-`0600` — which is `launch_pipe`'s `vetted_endpoint` at the second door for the
-same reason: a link standing where the endpoint should be is somebody
-redirecting a capability line, and following it to find out where would be taking
-their word for it.
+一个别的 uid 的对端**一个字节都不读、也不计一次数**地被关掉。这让 `PipeCounts` 在两条臂之间保持老实:Windows 上这样一个调用方是被描述符拒掉的、根本没有连上,所以它不在那五个数里的任何一个里,而在这里它同样不在任何一个里。客户端那一半在连接之前对那个文件问同样的问题——是套接字、不是链接、属于这个用户、模式 `0600`——那是 `launch_pipe` 的 `vetted_endpoint` 在第二扇门上、出于同一个理由:一个立在端点该在的位置上的链接,就是有人在改道一条能力线,而跟着它去看看通向哪里,就是信了他的话。
 
-**⑥ The stale doorbell is cleaned up under the same lock, in the same statement.**
-`claim_data_directory` already unlinked the launch socket on the line after
-`flock` succeeded and nowhere else (§R5, §13.28 ⑦); it now unlinks both names in
-one loop. A cleanup that took only the first would leave a doorbell standing that
-every hook connects to and no listener answers — **quieter than the failure it
-half fixes**, because `folio attention` would go on exiting zero while nothing
-ever reached a window. The source pin in `instance.rs` asserts both names are in
-that statement as well as asserting that `flock` precedes the unlink.
+**⑥ 陈旧的门铃在同一把锁底下、同一条语句里被清掉。** `claim_data_directory` 本来就在 `flock` 成功之后那一行、别处没有地 unlink 那个启动套接字(§R5、§13.28 ⑦);它现在在一个循环里把两个名字都 unlink。一次只取第一个的清理,会留下一个门铃立在那里,每一个钩子都连上去而没有监听器作答——**比它修好的那一半还安静**,因为 `folio attention` 会照样退出零,而什么也到不了一扇窗。`instance.rs` 里那根源码钉既断言两个名字都在那条语句里,也断言 `flock` 排在 unlink 之前。
 
-**⑦ The hooks learn nothing new, and that is the finding.** The ticket asked for
-the socket path to be written into a hook script, and the shape of `#!/bin/sh` +
-`nc -U` was costed. It is not what this build does and it should not be: **the
-hook is this executable**, on both platforms. `folio attention` reads
-`FOLIO_ATTENTION_PIPE` and `FOLIO_ATTENTION` out of the environment it was
-started with, the pane's shell has both, and `claude`, `codex` and `copilot` are
-that shell's children — so the address travels the way it has always travelled,
-and a socket path travels it exactly as a pipe name did. Writing the endpoint
-into the file instead would pin a configuration file on disk to one *run* of one
-window, which is the thing the environment exists not to do; and an `nc -U` stub
-would be a second implementation of this wire, one that could not apply the frame
-bound and would be a second thing to keep in step.
+**⑦ 钩子什么新东西都没学到,而那就是这次的发现。** 这张票要求把套接字路径写进一个钩子脚本里,而 `#!/bin/sh` + `nc -U` 那种形状也估了价。这不是这个构建做的事,也不该是:**钩子就是这个可执行文件**,两个平台上都是。`folio attention` 从它被启动时的那份环境里读 `FOLIO_ATTENTION_PIPE` 和 `FOLIO_ATTENTION`,而那个 pane 的 shell 两个都有,而 `claude`、`codex` 和 `copilot` 是那把 shell 的子进程——所以地址是按它历来走的方式走的,而一条套接字路径走得跟一个管道名字一模一样。改成把端点写进那个文件,会把磁盘上一份配置文件钉死到一扇窗的一**趟运行**上,而那正是环境变量存在要避免的事;而一个 `nc -U` 的桩,会是这条线的第二份实现,一份施加不了那条帧界、而且要多一样东西去跟着同步。
 
-What did have to change off Windows is two smaller things, and both were real
-defects rather than ports:
+在 Windows 之外确实必须改的是两件小一点的事,而两件都是真缺陷而不是移植:
 
-* **`%USERPROFILE%` with no `HOME` arm** (M2-6's audit finding). All three
-  installers *compose* the other program's configuration directory out of
-  `%USERPROFILE%` when its own variable says nothing, so on a Mac
-  `config_dir_from` returns `None` and every one of the three rows reports **"not
-  installed" on a machine where the hooks are installed** — §7.1.6j's own lesson,
-  which cost a week once already, reaching the one half of the path that cannot
-  be asked for. The fix is a value out of `bt-platform`,
-  `home_variable_for(HostPlatform)`, rather than a `cfg` in `bt-app`:
-  `attention_hooks.rs` and `attention_codex.rs` are not on
-  `FILES_THAT_MAY_NAME_A_PLATFORM` and are not joining it for this.
-* **The `powershell` column, and the quoting.** `attention_copilot`'s header said
-  "only the `powershell` column is written" and gave the reason — *Folio is a
-  Windows program* — and that reason expired the day there was a Mac build.
-  Upstream runs the column that matches the machine, so the wrong one is a file
-  that parses, validates, sits in the right directory and **never fires**: from
-  the reader's chair, identical to not having installed at all. The Claude Code
-  line has the same problem one layer down: it is handed to `/bin/sh`, where a
-  double-quoted word is **still expanded** — `$`, a backtick and a backslash all
-  survive it — so a home directory with a `$` in it would give a hook that ran
-  the wrong program or none, silently, on the one machine nobody tests the
-  installer on. Single quotes, with sh's own escape for the one character that
-  ends them (close, escape, reopen). `codex` needed neither: its `notify` is a
-  TOML argument vector and no shell ever sees it.
+* **`%USERPROFILE%` 没有 `HOME` 那条臂**(M2-6 的审计发现)。三个安装器在另一个程序自己那个变量什么都没说的时候,都是拿 `%USERPROFILE%` **拼**出它的配置目录,所以在一台 Mac 上 `config_dir_from` 返回 `None`,而那三行每一行都在**一台钩子装好了的机器上报告「未安装」**——§7.1.6j 自己那条教训,曾经花掉过一周,去够路径里唯一那一半不能靠拼的部分。修法是一个从 `bt-platform` 出来的值,`home_variable_for(HostPlatform)`,而不是 `bt-app` 里的一个 `cfg`:`attention_hooks.rs` 和 `attention_codex.rs` 不在 `FILES_THAT_MAY_NAME_A_PLATFORM` 上,也不为这件事加进去。
+* **那个 `powershell` 列,以及引号。** `attention_copilot` 的头注写着「只写 `powershell` 那一列」,并给了理由——*Folio 是一个 Windows 程序*——而那个理由在有了 Mac 构建那天就过期了。上游跑的是与机器匹配的那一列,所以写错的那一列就是一个解析得了、校验得过、放在正确目录里、而且**永远不触发**的文件:从读者的椅子上看,跟根本没装一模一样。Claude Code 那一行下面一层有同样的问题:它是递给 `/bin/sh` 的,而那里一个双引号括起来的词**仍然会被展开**——`$`、反引号和反斜杠都挺得过去——所以一个名字里带 `$` 的家目录,会给出一个跑错程序或者什么都不跑的钩子,悄无声息,而且恰好在那台没人测安装器的机器上。改用单引号,并用 sh 自己对那个会结束它的字符的转义法(关、转义、再开)。`codex` 两样都不需要:它的 `notify` 是一个 TOML 的参数向量,任何 shell 都看不到它。
 
-**⑧ What a Windows runner holds, and what only a Mac can.** Five pins run on the
-workstation, in `lib.rs`'s `macos_attention_signature_tests` beside the video
-one's instrument: each of `start`, `name`, `counts`, `send_line` and
-`unguessable_bits` has one signature across all three arms; `PipeCounts` is the
-same type field for field and the two bounds are the same numbers; the Unix
-header still says which principal it is naming; the doorbell asks `getpeereid`
-and names no `proc_pidpath`, `current_exe` or `LOCAL_PEERPID`; and
-`home_variable_for` answers `USERPROFILE` and `HOME` in the right places. Two
-more run there as rendering: the Claude Code block and the copilot document, both
-platforms' shapes, asserted as bytes because what is being written is *not ours*
-— it lands in a file the user owns, that another program reads, and that nobody
-will look at again.
+**⑧ 一台 Windows 跑器按得住什么,以及只有 Mac 能按住什么。** 工作站上跑五根钉,在 `lib.rs` 的 `macos_attention_signature_tests` 里、挨着视频那张票的那件仪器:`start`、`name`、`counts`、`send_line` 和 `unguessable_bits` 每一个在三条臂上都是一个签名;`PipeCounts` 逐字段是同一个类型,而那两个界是同样的数;Unix 那个头注仍然说着它点的是哪个主体;门铃问 `getpeereid`,而且不点 `proc_pidpath`、`current_exe` 或 `LOCAL_PEERPID` 的名;以及 `home_variable_for` 在对的地方分别答 `USERPROFILE` 和 `HOME`。那里还跑两根渲染的:Claude Code 那个块和 copilot 那份文档,两个平台的形状,按字节断言,因为写出来的东西**不是我们的**——它落在一份用户拥有的、另一个程序去读的、而且再没有人会去看的文件里。
 
-Nine cases run on the Mac and cannot run anywhere else: a line crosses and the
-same value arrives; the conservation law over a silent caller and an oversized
-one; the endpoint `0600` inside a `0700` directory and gone when its listener is;
-a stale socket cleared by the next holder of the claim and bound over; a name
-outside this user's runtime directory refused before a socket is touched; a
-regular file and a symlink standing at the path refused before a capability is
-written to them; an oversized message refused before it leaves the process; two
-spellings of one data directory addressing one doorbell; and the peer predicate
-answering yes to this process's own uid and no to the next one.
+Mac 上跑九只用例,而且别处跑不了:一行跨过去,到达的是同一个值;守恒律,对一个不说话的调用方和一个超大的;端点在一个 `0700` 目录里是 `0600`,而它的监听器没了它也没了;一个陈旧套接字被下一个持有认领的人清掉并绑过去;一个在这个用户运行目录之外的名字,在碰套接字之前就被拒;一个普通文件和一个符号链接立在那条路径上,在能力被写给它们之前就被拒;一条超大的消息在离开进程之前就被拒;一个数据目录的两种拼法指向同一个门铃;以及那个对端谓词对本进程自己的 uid 答是、对下一个答否。
 
-**The one thing neither holds is a connection from a peer of another uid.** It is
-tested at the predicate — `peer_is_this_user` says yes to this process and no to
-the next uid — and the connected half is tested only in the direction that
-passes, because every case above is a peer whose uid *is* this process's own. A
-refusal end to end would need a second account and a second process running as
-it. That is §13.28's own written-down gap at the other door of this directory,
-kept in the same words rather than quietly widened.
+**两者都不按的那一件事,是一个别的 uid 的对端发来的连接。** 它在谓词上被测过——`peer_is_this_user` 对这个进程答是、对下一个 uid 答否——而连上的那一半只在通过的方向上被测,因为上面每一只用例的对端 uid **就是**这个进程自己的。一次端到端的拒绝需要第二个账户和一个以它身份运行的第二个进程。那就是 §13.28 在这个目录另一扇门上自己写下的那个缺口,用同样的话留着,而不是被悄悄放宽。
 
-**⑨ The acceptance sentence, on the real binary.** `docs/plans/port/m4-7/`
-carries the two launchers and the transcript. One isolated `$HOME` on the Mac
-mini, `debug/folio` built from this branch, and the pane's three variables
-leaving the pane through that `$HOME`'s own shell startup files — no key
-injection and no pasteboard. `$TMPDIR` measured there is
-`/var/folders/yh/…/T/`, and the `ssh` session is handed the **same** one the
-console session has, which is the measurement ① rests on. One data directory
-produced three files off one digest — `30f97d9a9d6858a3.lock`, `.sock` and
-`.attn.sock` — the doorbell `srw-------` inside a `drwx------`, its whole path
-**85 bytes** of the 104 `sun_path` has. The hook script is one line,
-`'…/folio' attention claude-code:PermissionRequest`, single-quoted with no
-endpoint in it, and running it wrote **`mint … src=pipe` → `admit` → `toast …
-reach=marks` → `claim … now=Awaiting`**: every link from a shell command to a
-mark on a tab, over a Unix socket. A forged capability was *delivered* and
-refused by the grammar (the verb exited 0 and no second episode was minted); a
-name outside this user's runtime directory exited non-zero without a socket
-being touched. Both names were **still standing after the process ended** —
-⑥'s point made by the product, because `bt-app` parks both endpoints in statics
-— and a second Folio on the same data directory cleared them under the claim,
-bound over them (the listing's own timestamps move by a minute) and answered a
-hook, which nothing behind an unbound name could have done. Both pids were written down when they were started and only
-those two were ever ended.
-
-*(本节英文,待中文文案改写。)*
+**⑨ 验收那句话,在真二进制上。** `docs/plans/port/m4-7/` 里带着那两个启动脚本和记录。Mac mini 上一个隔离的 `$HOME`,这条分支建出来的 `debug/folio`,而那个 pane 的三个变量是经那个 `$HOME` 自己的 shell 启动文件离开 pane 的——没有按键注入,也没有剪贴板。那里量到的 `$TMPDIR` 是 `/var/folders/yh/…/T/`,而 `ssh` 会话拿到的和控制台会话拿到的是**同一个**,那正是 ① 所依据的那次测量。一个数据目录从一个摘要产出三个文件——`30f97d9a9d6858a3.lock`、`.sock` 和 `.attn.sock`——门铃是 `drwx------` 里面的 `srw-------`,它整条路径占 `sun_path` 那 104 个字节里的 **85 个**。钩子脚本只有一行,`'…/folio' attention claude-code:PermissionRequest`,单引号括起来、里面没有端点,而跑它写下了 **`mint … src=pipe` → `admit` → `toast … reach=marks` → `claim … now=Awaiting`**:从一条 shell 命令到一个标签上的标记,每一环,经一个 Unix 套接字。一份伪造的能力被**投递到了**而被文法拒掉(那个动词退出 0,而没有第二个事件被铸出来);一个在这个用户运行目录之外的名字非零退出,而没有碰到任何套接字。两个名字在**进程结束之后都还立着**——这是 ⑥ 那个要点由产品本身说出来,因为 `bt-app` 把两个端点都停在静态里——而同一个数据目录上的第二个 Folio 在那次认领底下把它们清掉、绑了过去(列表自己的时间戳挪了一分钟),并答了一次钩子,而那是任何一个名字没被绑住的东西都做不到的。两个 pid 在它们被起来的时候就记下来了,而被结束的从头到尾只有这两个。
