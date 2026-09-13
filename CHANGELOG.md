@@ -22,6 +22,10 @@ All notable changes to Folio are recorded here. The format follows
   changes on Windows, where the row still stands and still reports when a
   version of Windows has no blur to offer; and your settings file keeps the
   value either way, so a Windows machine sharing that file reads it as before.
+- **On a Mac, resting on the settings gear lights a rounded square that matches
+  the window's own corner.** The wash used to be a smaller pill; it is now the
+  same shape and the same curve as the corner it sits in, and the gear itself
+  has not moved.
 
 - **The card that appears when you rest on a file now fades in.** It used to
   arrive solid in a single frame; it now takes the same ninety milliseconds the
