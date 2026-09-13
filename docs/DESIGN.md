@@ -9310,363 +9310,131 @@ Mac 上跑九只用例,而且别处跑不了:一行跨过去,到达的是同一�
 
 ### 13.38 M4-3: 网页策略对齐 X-2 的矩阵——每一行都在真机上驱动过,给不了的保证写进产品(`crates/bt-app/src/{webnav,webhost,i18n,main}.rs`、`crates/bt-platform/src/{webview,macos_compose,lib,portable_impl}.rs`、`crates/bt-platform/tests/macos_webview.rs`、`crates/bt-render/src/lib.rs`、`docs/PRIVACY.md`)
 
-**① Forty rows, on the machine, and none of them left as a reading.** X-2's matrix
-was twenty requirements measured against a *probe*; M4-2 drove the ten of them a
-local seat can be asked without a socket, against the product's own host. This
-ticket drives **everything else**, in the same `harness = false` bundle (§13.17,
-§13.29 ⑫), against two HTTP origins the test serves out of its own process on
-`127.0.0.1` — because a document and its subresources have to be two origins for
-a cross-origin row to mean anything, and because **the far socket is the only
-witness a request nobody was told about has**.
+**① 四十行,在真机上,没有一行是读出来的。** X-2 那张矩阵是二十条要求对着一个**探针**量的;M4-2 驱动了其中一个本地 seat 不用套接字就问得出的十条,对着产品自己的宿主。本票驱动**其余全部**,在同一个 `harness = false` 包里(§13.17、§13.29 ⑫),对着测试自己进程在 `127.0.0.1` 上开出的两个 HTTP 源——因为一份文档和它的子资源必须是两个源,一条跨源的行才有意义,也因为**一次没人被告知过的请求,唯一的见证人就是那个远端套接字**。
 
-| Row | What was asked | Verdict, measured |
+| 行 | 问的是什么 | 判定,量出来的 |
 |---|---|---|
-| ⑪ | a browsing seat is built and its three gates stand | PASS — `script_dialogs`, `frame_navigation`, `resource_requests` all true |
-| ⑫ | a picture, a stylesheet, a script and a `fetch()` to a second origin | PASS — **all four reach the far socket; the delegate is told about one thing on the page, and it is the iframe** |
-| ⑬ | the same document with the second origin in the compiled rule list | PASS — nothing reaches the socket, the page sees `blocked`, and **Folio is told about 0 of them** |
-| ⑭ | a 302 → 302 → page chain | PASS — the gate is asked about `/redirect1`, `/redirect2` and `/doc2.html` |
-| ⑮ | an iframe to the other origin | PASS — one `decidePolicyForNavigationAction:` with `isMainFrame == false`, routed to the request gate |
-| ⑯ | a `data:` iframe | PASS — what the document already holds, and it loads |
-| ⑰ | `401` with `WWW-Authenticate: Basic` | PASS — no box, the 401 body drawn, the seat still on the address |
-| ⑱ | permissions, one capability at a time | PASS — see ⑥ below |
-| ⑲ | a `download=` link | PASS — `shouldPerformDownload`, cancelled, `DownloadStarting` queued |
-| ⑳ | `target=_blank`, and `window.open` with no gesture behind it | PASS — nothing opens, the seat does not move, the page is answered `null` |
-| ㉑ | a form `POST` | PASS — a navigation the gate is asked about, `Origin` and body arriving at the server |
-| ㉒ | a `blob:` location | PASS — offered to the gate with its whole URL and cancelled |
-| ㉓ | a `file:` URL **inside the other seat's mint**, named from an `http` page | PASS — refused, and the report names which door: **the engine's, before any callback** |
-| ㉔ | a `Worker`'s own `fetch`, and a `ServiceWorker` registration | PASS — see ⑤ below |
-| ㉕ | the pointer | PASS — see ④ below |
+| ⑪ | 一个浏览 seat 建得起来,它那三道门都站得住 | PASS——`script_dialogs`、`frame_navigation`、`resource_requests` 全为真 |
+| ⑫ | 一张图、一份样式表、一个脚本,和一次到第二个源的 `fetch()` | PASS——**四样都到了远端套接字;委托被告知的只有页面上的一样东西,而那是 iframe** |
+| ⑬ | 同一份文档,第二个源在编译好的规则表里 | PASS——什么都到不了套接字,页面看到 `blocked`,而 **Folio 被告知了其中的 0 个** |
+| ⑭ | 一条 302 → 302 → 页面的链 | PASS——门被问了 `/redirect1`、`/redirect2` 和 `/doc2.html` |
+| ⑮ | 一个指向另一个源的 iframe | PASS——一次 `decidePolicyForNavigationAction:`,`isMainFrame == false`,路由到请求那道门 |
+| ⑯ | 一个 `data:` iframe | PASS——文档本来就攥着的东西,而它加载了 |
+| ⑰ | `401` 带 `WWW-Authenticate: Basic` | PASS——没有弹框,401 的正文画出来,seat 仍停在那个地址上 |
+| ⑱ | 权限,一次一项能力 | PASS——见下面 ⑥ |
+| ⑲ | 一个带 `download=` 的链接 | PASS——`shouldPerformDownload`,取消,`DownloadStarting` 入队 |
+| ⑳ | `target=_blank`,以及背后没有手势的 `window.open` | PASS——什么都没开,seat 没动,页面收到的答复是 `null` |
+| ㉑ | 一次表单 `POST` | PASS——一次门被问到的导航,`Origin` 和正文都到了服务器 |
+| ㉒ | 一个 `blob:` 位置 | PASS——带着整条 URL 交给门,然后取消 |
+| ㉓ | 一个 `file:` URL,**在另一个 seat 的 mint 里面**,由一个 `http` 页面点名 | PASS——被拒,而且报告点了是哪扇门:**引擎那扇,在任何回调之前** |
+| ㉔ | 一个 `Worker` 自己的 `fetch`,以及一次 `ServiceWorker` 注册 | PASS——见下面 ⑤ |
+| ㉕ | 指针 | PASS——见下面 ④ |
 
-Every row prints its own verdict, its own evidence and, where the answer is a
-*finding* rather than a claim, the finding. `failures=0` over the whole
-matrix — the ten M4-2 rows and these fifteen — on macOS 26.6.2, ad-hoc signed,
-started with `open`, ended by the pid it printed as its first line.
+每一行印出它自己的判定、它自己的证据,而当答案是一个**发现**而不是一句主张时,印出那个发现。整张矩阵 `failures=0`——M4-2 那十行加这十五行——在 macOS 26.6.2 上,ad-hoc 签名,用 `open` 启动,由它印在第一行的那个 pid 结束。
 
-**② What the product says it cannot do.** X-2's "what Q5's reduced set gives up"
-is seven sentences (§13.29 ⑩) and the ticket's question was which of them a
-*string* promises. The honest answer is: **almost none of them, because the
-product never promised the mechanism** — there is no settings row, no first-run
-line and no notice about how a page's contents are policed. Two places did
-promise something the other machine cannot give, and both are fixed here.
+**② 产品说自己做不到的那些事。** X-2 里「Q5 那套削减集放弃了什么」是七句话(§13.29 ⑩),而本票的问题是其中哪几句被一条**字符串**许诺过。老实的答案是:**几乎一句都没有,因为产品从来没有许诺过那套机制**——没有一行设置、没有一句首启文案,也没有一条关于一个页面的内容怎么被管束的告示。有两处确实许诺了另一台机器给不了的东西,两处都在这里改了。
 
-* **`Text::WebFailGuardsSay`** — the card a local file raises when this host could
-  not be given the gates. Its English read *"This version of the web engine
-  cannot enforce this window's rules for a page"*, and on Windows that is the
-  fact a reader can act on: an Evergreen runtime too old to carry an event is a
-  runtime that can be updated. A Mac's engine is the system's and has no version
-  to be behind — what can fail there is the rule list refusing to compile — so a
-  line blaming *this version* would send a reader after an update that does not
-  exist. It takes a platform column through `pick_platform` (§13.32 ②), and the
-  promise, which is the half that must not move, is identical in both:
-  `the_web_engine_card_states_one_promise_and_names_one_engine`.
-* **`WebGuards::missing()`** — the *detail line* under that card, which was three
-  WebView2 event names on both machines. It is the same three questions on both
-  engines, which is why one struct carries them, and only the name of the thing
-  that answers differs: `ScriptDialogOpening` / `WKUIDelegate runJavaScript…Panel`,
-  `FrameNavigationStarting` / `decidePolicyForNavigationAction:`,
-  `WebResourceRequested` / `WKContentRuleList`. Read from
-  `host_platform()` rather than behind a `cfg`, so a Windows runner can read the
-  other column — which is what
-  `the_missing_gates_are_named_as_the_readers_own_engine_names_them` does. It is
-  M4-2's own ruling about `WebSetting::api` applied one line up.
+* **`Text::WebFailGuardsSay`**——一个本地文件在这个宿主拿不到那几道门时抬起来的那张卡。它的英文是 *「This version of the web engine cannot enforce this window's rules for a page」*,而在 Windows 上这是读者据以行动的事实:一个旧到带不动某个事件的 Evergreen 运行时,是一个可以更新的运行时。Mac 的引擎是系统的,没有一个版本可以落后——那里会失败的是规则表编译不过——所以一句怪罪*这个版本*的话,会把读者打发去找一个并不存在的更新。它经 `pick_platform`(§13.32 ②)取一列平台文案,而那句许诺、也就是不许动的那一半,两边一个字不差:`the_web_engine_card_states_one_promise_and_names_one_engine`。
+* **`WebGuards::missing()`**——那张卡底下的**明细行**,两台机器上本来都是三个 WebView2 事件名。两个引擎上是同样三个问题,这正是一个结构体装得下它们的原因,而不同的只是回答它的那样东西叫什么:`ScriptDialogOpening` / `WKUIDelegate runJavaScript…Panel`、`FrameNavigationStarting` / `decidePolicyForNavigationAction:`、`WebResourceRequested` / `WKContentRuleList`。它从 `host_platform()` 读而不是藏在一个 `cfg` 后面,所以一台 Windows 跑器读得到另一列——`the_missing_gates_are_named_as_the_readers_own_engine_names_them` 干的就是这件事。这是 M4-2 自己关于 `WebSetting::api` 的那条裁决,往上挪了一行。
 
-And one card that is **correct and unreachable**: `WebFailRuntimeSay` names a
-Microsoft product because on Windows that is the thing to install, and
-`webview2_runtime_version` answers `Ok` off Windows always, so `RuntimeMissing`
-is a card no Mac can raise. It goes on `WINDOWS_ONLY_SURFACES` with its verb, and
-`WebView2` joins the words
-`no_string_a_mac_reader_meets_names_a_windows_program` refuses — a gate that was
-not there to catch it.
+还有一张**正确而够不着**的卡:`WebFailRuntimeSay` 点了一个微软产品的名,因为在 Windows 上那就是该去装的东西,而 `webview2_runtime_version` 在 Windows 之外永远答 `Ok`,所以 `RuntimeMissing` 是一张任何 Mac 都抬不起来的卡。它带着它那个动词上了 `WINDOWS_ONLY_SURFACES`,而 `WebView2` 进了 `no_string_a_mac_reader_meets_names_a_windows_program` 拒绝的那张词表——一道当时不在场、因而没接住它的门。
 
-`docs/PRIVACY.md` said two things that are now false on a Mac and one of them is
-this ticket's: the page in the web preview is *"fetched by the WebView2 engine
-that Windows provides"*. It is fetched by the engine the operating system
-provides, and which one that is is named. The profile section stops being a
-Windows path with a paragraph under it and becomes a two-row table — where the
-browsing data is on each machine, and, on the Mac row, that the compiled page
-rules under `~/Library/Application Support/Folio/WebKit` are **not** browsing
-data. The autofill sentence is one sentence for both and two reasons: on Windows
-the engine's autofill and password saving are switched off rather than left at
-their defaults; on macOS the engine has neither feature to switch off, because
-form autofill and the keychain belong to Safari and not to the view Folio hosts
-(`WEB_SETTINGS`' two autofill rows stand on this arm for exactly that reason —
-§13.29's `configure`). **The update-check half of that file is M5-6's and is
-untouched here**; the two tickets meet at the sentence boundary.
+`docs/PRIVACY.md` 里有两句话在 Mac 上现在是假的,其中一句是本票的:网页预览里的页面是*「由 Windows 提供的 WebView2 引擎取回的」*。它是由操作系统提供的那个引擎取回的,而那是哪一个,写出来。配置那一节不再是一条 Windows 路径底下挂一段话,而变成一张两行的表——浏览数据在每台机器上的位置,以及在 Mac 那一行上,`~/Library/Application Support/Folio/WebKit` 底下那些编译好的页面规则**不是**浏览数据。自动填充那句话是两台机器共用的一句,理由有两个:Windows 上引擎的自动填充和密码保存是被关掉的,而不是留在默认值上;macOS 上引擎根本没有这两样功能可关,因为表单自动填充和钥匙串属于 Safari,不属于 Folio 宿主的那个视图(`WEB_SETTINGS` 里那两行自动填充停在这条臂上,理由分毫不差就是这个——§13.29 的 `configure`)。**那份文件里更新检查的那一半是 M5-6 的,这里没动**;两张票在句子的边界上交接。
 
-**③ A local page is shown as a path again, on both machines** — §13.29 ⑬'s
-carry-forward, and it was two roots rather than one bug. M4-2 taught the
-*encoder* that an absolute path spells its root in one of two ways —
-`D:\report.html` carries none and `/Users/somebody/report.html` is nothing but
-one — and left the **reader** assuming the first.
-`Mint::path_and_tail_of_file_url` turned every `/` into `\` and then asked
-`Path::is_absolute`, so a Mac's own mint read back as `\Users\somebody\…`, which
-is absolute nowhere, and `local_path_form` answered `None` for every local page a
-Mac ever opened.
+**③ 一个本地页面重新按路径显示出来,两台机器上都是**——§13.29 ⑬ 的挂账,而它是两个根而不是一个缺陷。M4-2 教会了**编码器**:一条绝对路径拼它的根有两种写法——`D:\report.html` 一个都不带,而 `/Users/somebody/report.html` 除了根什么都不是——却把**读的那一半**留在了假定第一种上。`Mint::path_and_tail_of_file_url` 把每个 `/` 换成 `\` 再去问 `Path::is_absolute`,所以一个 Mac 自己的 mint 读回来是 `\Users\somebody\…`,那在哪儿都不是绝对路径,于是 `local_path_form` 对一个 Mac 开过的每一个本地页面都答 `None`。
 
-The root is now read **off the string**, where both spellings of it already are:
-a body beginning `X:/` is the drive-rooted form and its separators are `\`; a
-body beginning with anything else is the slash-rooted form, whose one leading
-separator the `file:///` prefix already ate. Asking the *host's* rules was the
-mistake — `Path::is_absolute` answers about the machine doing the reading rather
-than about the machine the path is for, and a session file written on one and
-read on the other is exactly the case that has to come back with the same answer
-on both. `a_file_url_reads_back_rooted_the_way_it_was_minted` asks both spellings
-of both machines on one machine, for that reason.
+现在那个根是**从字符串上**读的,两种写法本来就都在字符串上:正文以 `X:/` 开头的是盘符根那一种,它的分隔符是 `\`;以别的东西开头的是斜杠根那一种,它那唯一一个前导分隔符已经被 `file:///` 前缀吃掉了。去问**宿主**的规矩才是那个错——`Path::is_absolute` 回答的是正在读的这台机器,而不是这条路径要去的那台机器,而一份在一台上写、在另一台上读的会话文件,恰恰是必须在两边拿回同一个答案的那种情形。`a_file_url_reads_back_rooted_the_way_it_was_minted` 在一台机器上把两台机器的两种写法都问一遍,就是为这个。
 
-**It is the absolute path and not the `~`-relative crumb** §13.32 ③ gives the
-files column's breadcrumb row, and that is a ruling rather than an omission: this
-string is not only shown, it *seeds the address field*, and what that field hands
-back goes through `file_url_of_local_path`, which takes an absolute path and
-nothing else. A row that displayed `~/notes.html` would be a field whose own
-content it refuses. The breadcrumb row is not reached from here at all — a page's
-rail is its address and never crumbs (「网页不长面包屑」, §7.7) — so the two
-surfaces do not disagree; they are answering about different objects.
+**是那条绝对路径,而不是 §13.32 ③ 给文件列面包屑行的那个 `~` 短写**,而这是一条裁决而不是一处遗漏:这条字符串不只是被显示,它还**给地址栏播种**,而那个栏交回来的东西要过 `file_url_of_local_path`,它只收绝对路径。一行显示 `~/notes.html` 的地址栏,会是一个连自己的内容都不认的栏。面包屑那一行从这里根本到不了——一个页面的那条栏是它的地址,从不长面包屑(「网页不长面包屑」,§7.7)——所以这两块表面并不矛盾;它们回答的是两样不同的东西。
 
-One corner left standing and written down rather than smuggled: `Mint::file`
-turns every `\` into `/`, which is right for a separator and wrong for a
-filename, so a file whose *name* contains a backslash — legal on the machine with
-slash-rooted paths and impossible on the other — does not round-trip. Fixing it
-means the encoder asking which machine it is on, which is the one thing this
-module does not do.
+留下一个角,写下来而不是糊过去:`Mint::file` 把每个 `\` 换成 `/`,对一个分隔符来说这是对的,对一个文件名来说是错的,所以一个**名字**里带反斜杠的文件——在用斜杠根路径的那台机器上合法,在另一台上不可能——过不了一次往返。修它意味着编码器要去问自己在哪台机器上,而那恰恰是这个模块唯一不做的事。
 
-**④ The pointer, decided and implemented** — §13.29 ⑩'s last sentence, and the
-one thing M4-1 and M4-2 both left open.
+**④ 指针,裁了,也做了**——§13.29 ⑩ 最后那句话,也是 M4-1 和 M4-2 都留着没关的那一件。
 
-The measurement first. A press inside a page's rectangle **is** routed to the
-`WKWebView` and the page answers it: AppKit hands the point to the frontmost view
-whose `hitTest:` claims it, Folio's own surface view answers nil by design
-(§13.24, `macos_impl`), the page's slot answers its subviews' answer, and the
-page claims its own presses. So far so right. The other half is wrong, and the
-window already knew it: **Folio goes on drawing its own surfaces across that
-rectangle**. The in-pane search capsule stands inside the pane below its head
-(`search_capsule_host` measures it against the seat's *whole* rectangle, not its
-body), a `⌄` menu drops down over the body it was opened from, and a floated
-pane's own face is painted straight back over the hole its page is seen through —
-`a_floated_pages_hole_is_punched_above_the_float_that_carries_it` says so in
-as many words. Every one of those would be chrome nothing could press.
+先说量到的。一次落在页面矩形里的按下**确实**路由到了 `WKWebView`,而页面答了它:AppKit 把那个点交给 `hitTest:` 认领它的最前面那个视图,Folio 自己那个表面视图按设计答 nil(§13.24,`macos_impl`),页面那个槽答的是它子视图的答案,而页面认领它自己的按下。到这里都对。另一半是错的,而那扇窗自己早就知道:**Folio 照样在那片矩形上画它自己的表面。** pane 内搜索胶囊立在 pane 里、它那个头的下面(`search_capsule_host` 是拿 seat 的**整个**矩形而不是它的正文去量的),一个 `⌄` 菜单从它被打开的那片正文上落下来,而一个浮起 pane 自己的脸,直接盖回到它的页面被看见的那个洞上——`a_floated_pages_hole_is_punched_above_the_float_that_carries_it` 就是这么说的。这里每一样,都会是一块按不动的窗饰。
 
-None of it is a question on Windows, and the reason is what the two engines
-*are*: a WebView2 composed into a visual is in no hit-test order at all, so every
-press in the window arrives at Folio and Folio forwards to the page the ones that
-were the page's (`WebHost::send_mouse`). The question this platform asks is
-already answered there by the mechanism that delivers the press.
+在 Windows 上这些一个都不是问题,而理由是这两个引擎**是什么**:一个合成进 visual 的 WebView2 根本不在任何命中测试顺序里,所以窗口里的每一次按下都到 Folio,再由 Folio 把该是页面的那些转给页面(`WebHost::send_mouse`)。这个平台问的这个问题,在那边已经被投递按下的那套机制答过了。
 
-So the window says where it is standing, and the slot lets those rectangles
-through: `Compositor::set_page_cover(page, rects)` is a door on **every** arm —
-`bt-app` names no platform — which the macOS arm stores on the slot and the
-Windows and portable arms drop in one line that says why. The slot's `hitTest:`
-answers nil inside a cover, and the containment test is `NSPointInRect`'s own
-half-open rule so that two adjacent covers cannot both claim the seam.
+所以由那扇窗说出它站在哪儿,而那个槽把那些矩形放过去:`Compositor::set_page_cover(page, rects)` 是**每条臂**上都有的一扇门——`bt-app` 不点任何平台的名——macOS 那条臂把它存在槽上,Windows 和可移植那两条一行丢掉并写明为什么。槽的 `hitTest:` 在一块遮盖里面答 nil,而包含判定用的是 `NSPointInRect` 自己那条半开区间的规矩,好让两块相邻的遮盖不会都去认领那条缝。
 
-**The window is the only thing that can say it**, and what it says is one reading
-of a fact the frame already settled. `WebHole::above` is where a page's hole is
-punched in the overlay stack: the layers at and below it are drawn *under* the
-page and the ones after it are drawn *over* it. `None` is a docked page, whose
-hole stands under the whole stack — every layer covers it; `Some(level)` is a
-floated page, whose hole is punched above its own float's face precisely so that
-the pane it lives in does not. `chrome_over` skips to `level + 1` and keeps the
-layers that overlap the page's own rectangle, and
-`OverlayLayer::opaque_bounds` is where a layer's box comes from — grounds, fills
-with alpha, and a preview body, and not the words on them, because every surface
-in this window that a press can land on is drawn as a ground or a fill first and
-lettered afterwards. A layer faded to nothing is not a surface and does not
-cover.
+**只有那扇窗说得出这件事**,而它说的是帧那边早就定下的一个事实的一种读法。`WebHole::above` 是一个页面的洞在覆盖层栈里被打在哪儿:在它和它以下的层画在页面**底下**,它之后的画在页面**上面**。`None` 是一个停靠的页面,它的洞立在整个栈底下——每一层都盖着它;`Some(level)` 是一个浮起的页面,它的洞恰恰打在它自己那片浮层的脸之上,好让它所在的那个 pane 不盖它。`chrome_over` 跳到 `level + 1`,留下与页面自己那个矩形相交的那些层,而一层的框从哪儿来是 `OverlayLayer::opaque_bounds` 的事——底、带 alpha 的填充,以及一片预览正文,而不是上面的字,因为这扇窗里每一块按得下去的表面都是先画成一块底或一块填充、随后才刻字的。一层淡到没有的层不是一块表面,也不盖任何东西。
 
-**One frame behind, and that is the honest reading of it.** `overlay_bounds` is
-recorded where the stack is published, which is the one place its order is
-settled, and read by the next placement pass: it says where the window last
-*drew*, which is what a reader is pressing on. A menu that opened on this frame
-is a menu nobody has aimed at yet.
+**慢一帧,而那就是它老实的读法。** `overlay_bounds` 记在那个栈被发布的地方,也就是它的顺序唯一定下来的那个地方,再由下一趟布置读走:它说的是这扇窗上一次**画**在哪儿,而那正是读者正按着的东西。一个这一帧才打开的菜单,是一个还没有人瞄过的菜单。
 
-Pinned twice. `a_page_answers_for_every_part_of_itself_nothing_is_standing_on`
-holds the rule over five cases on Windows; row ㉕ of the `.app` matrix holds the
-delivery on the machine — a press inside the page reaches
-`NSKVONotifying_WKWebView` and the page's own `onclick` reports it, a window that
-page asks for **on that real gesture** is still refused, a press where a cover
-stands routes to the window instead and the page never hears it, and the same
-point is the page's again the moment the cover comes down. The press is delivered
-through `-[NSWindow sendEvent:]`, which is the method the application's own event
-loop calls for a real click, rather than through `CGEventPost`: posting into the
-session's event tap is gated by the Accessibility permission on a current macOS,
-and a run that raised a TCC prompt on somebody's desk would have broken a harder
-rule than it kept.
+钉了两次。`a_page_answers_for_every_part_of_itself_nothing_is_standing_on` 在 Windows 上用五个用例按住这条规矩;`.app` 那张矩阵的第 ㉕ 行在真机上按住投递——一次落在页面里的按下到达 `NSKVONotifying_WKWebView`,页面自己的 `onclick` 报告了它;页面**在那次真实手势上**要的一扇窗照样被拒;一次落在有遮盖处的按下改路由给窗口,页面根本没听见;而遮盖一撤,同一个点当场又是页面的了。那次按下是经 `-[NSWindow sendEvent:]` 投递的,也就是应用自己的事件循环为一次真实点击调的那个方法,而不是经 `CGEventPost`:往会话的事件 tap 里投,在当前 macOS 上被辅助功能授权卡着,而一次在别人桌面上弹出 TCC 提示的运行,破的规矩比它守的那条还硬。
 
-**⑤ X-2's row 20, answered.** Requests a worker makes on a page's behalf were
-"unknown rather than covered" — the Windows arm filters them on purpose
-(`SOURCE_KINDS_ALL`) and nobody had measured this engine. Measured now, both
-ways round: a `Worker` fetching the second origin **reaches that socket**, with
-`Sec-Fetch-Mode: cors` and the page's own `Origin`, and **no delegate is told
-anything at all** — the same silence as the document's own subresources. With the
-compiled rule list standing, the socket is **not reached** and the worker reports
-`blocked`. So the third door does reach inside a worker: the reduced mechanism
-covers the case, and what was unknown is now one of the things a pattern can say.
+**⑤ X-2 的第 20 行,答了。** 一个 worker 代页面发出的请求当时是「不知道,而不是被覆盖了」——Windows 那条臂是特意过滤它们的(`SOURCE_KINDS_ALL`),而没有人量过这个引擎。现在量了,而且正反两遍:一个 `Worker` 去取第二个源,**到了那个套接字**,带着 `Sec-Fetch-Mode: cors` 和页面自己的 `Origin`,而且**没有任何委托被告知任何事**——跟文档自己的子资源一样安静。编译好的规则表立着时,那个套接字**到不了**,而那个 worker 报告 `blocked`。所以第三扇门确实伸进了一个 worker 里面:那套削减过的机制覆盖了这种情形,而当时不知道的那件事,现在是一条模式说得出的东西之一。
 
-A `ServiceWorker` **registers** on this seat — `127.0.0.1` is a potentially
-trustworthy origin, the script is fetched, and `register()` resolves. That is
-worth knowing for what it implies rather than for itself: a registration is
-persisted against the website data store, which on this platform is the
-*application's* (§13.29 ⑥), so a page a reader previews can leave a worker behind
-in Folio's own store exactly as it can leave a cookie. Nothing here changes that
-— it is the persistent-profile cost `PRIVACY.md` already records on both machines
-— but it is a fact that was not written down before. The interception path (a
-`fetch` served *by* a registered worker) is not driven here and is not claimed.
+一个 `ServiceWorker` 在这个 seat 上**注册得上**——`127.0.0.1` 是一个潜在可信源,脚本被取回,`register()` 兑现。这件事值得知道,是为它推出的东西而不是为它本身:一次注册是对着网站数据仓持久化的,而在这个平台上那个仓是**应用的**(§13.29 ⑥),所以一个读者预览过的页面,可以在 Folio 自己的仓里留下一个 worker,就像它可以留下一个 cookie 一样。这里没有任何东西改变这件事——那是 `PRIVACY.md` 两台机器上都已记着的、持久配置的代价——但它是一个以前没有写下来的事实。拦截那条路(一次**由**已注册 worker 应答的 `fetch`)这里没有驱动,也没有主张。
 
-**⑥ Permissions: the ones this host refuses by name, and the one it does not.**
-Apple's rule is that an unimplemented permission method is **not** a denial — the
-capability then arrives with WebKit's own default, which for capture is a panel
-on somebody's screen — so "which capabilities does Folio refuse" is a question
-about the delegate's *method list*, and the runtime answers it exactly. Asked
-with `respondsToSelector:` on the object standing as the page's UI delegate:
+**⑥ 权限:这个宿主按名字拒掉的那些,和它拒不掉的那一个。** 苹果的规矩是,一个没实现的权限方法**不是**一次拒绝——那项能力随后会带着 WebKit 自己的默认值到来,而对捕获来说那个默认值是别人屏幕上的一块面板——所以「Folio 拒掉哪些能力」是一个关于委托的**方法表**的问题,而运行时把它答得一字不差。拿 `respondsToSelector:` 去问那个当着页面 UI 委托的对象:
 
-* `webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:` — **yes**, the camera and the microphone;
-* `webView:requestDeviceOrientationAndMotionPermissionForOrigin:initiatedByFrame:decisionHandler:` — **yes**;
-* `webView:requestGeolocationPermissionForOrigin:initiatedByFrame:decisionHandler:` — **no, and there is no such method to implement**;
-* `_webView:requestGeolocationPermissionForOrigin:initiatedByFrame:decisionHandler:` — **no**, not even under WebKit's private spelling on this build.
+* `webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:`——**有**,摄像头和麦克风;
+* `webView:requestDeviceOrientationAndMotionPermissionForOrigin:initiatedByFrame:decisionHandler:`——**有**;
+* `webView:requestGeolocationPermissionForOrigin:initiatedByFrame:decisionHandler:`——**没有,而且根本没有这么一个方法可实现**;
+* `_webView:requestGeolocationPermissionForOrigin:initiatedByFrame:decisionHandler:`——**没有**,在这个构建上连 WebKit 那个私有拼法都没有。
 
-**Geolocation is therefore not a capability this host can refuse at all**, and
-what stands between a previewed page and CoreLocation is the *bundle*: an
-application with no `NSLocation…UsageDescription` cannot be authorised, so the
-request cannot be granted and no prompt can be raised. That is a packaging fact
-rather than a policy one, and it is the reason M5 must never add one of those
-keys to Folio's `Info.plist` for some unrelated feature without coming back to
-this paragraph. The matrix's own bundle carries no usage description of any kind
-and its launcher greps for that before it signs.
+**所以定位根本不是这个宿主拒得掉的一项能力**,而挡在一个被预览的页面和 CoreLocation 之间的是那个**应用包**:一个没有 `NSLocation…UsageDescription` 的应用授权不了,所以这个请求批不下来,也就抬不起任何提示。这是一个打包的事实而不是一条策略,而这正是 M5 绝不可以为了某个不相干的功能往 Folio 的 `Info.plist` 里加一个那种键、却不回来读这一段的原因。矩阵自己那个应用包不带任何一种用途说明,而它的启动脚本在签名之前先 grep 这件事。
 
-The page's own attempt says something else worth recording: on a plain-`http`
-origin WebKit does not expose `navigator.mediaDevices` at all (`camera=noapi`,
-`microphone=noapi`) and `getCurrentPosition` reports nothing back, so a fixture
-without TLS cannot reach the delegate through the *page*. The delegate row above
-is the measurement that does not depend on the origin, which is why it is the one
-the proof asserts and the page's attempt is reported as a finding beside it.
+页面自己那次尝试说出了另一件值得记下的事:在一个纯 `http` 源上,WebKit 根本不暴露 `navigator.mediaDevices`(`camera=noapi`、`microphone=noapi`),而 `getCurrentPosition` 什么也没报回来,所以一个不带 TLS 的夹具经**页面**够不到那个委托。上面那一行委托的读数是不依赖源的那次测量,这正是证明断言的是它、而页面那次尝试作为一个发现记在它旁边的原因。
 
-**⑦ Three defects in the instrument, none of them in the host** — worth the
-paragraph because the first run failed ten rows and every one of them was the
-proof and not the product.
+**⑦ 仪器上的三个缺陷,一个都不在宿主里**——值得占一段,因为第一趟跑挂了十行,而每一行挂的都是证明而不是产品。
 
-* **`settle` turns the run loop; it does not drain the host.** Six rows ran a
-  script, settled, and then read a slice of an event list nothing had appended
-  to. `catch_up` is `until` with nothing wanted: it turns the loop *and* reads.
-* **A wait that was satisfied by history.** `go` waited for "a
-  `NavigationCompleted` in the list", which every list has from the second
-  navigation onwards, so every row after the first read a page that had not
-  loaded. It takes a mark before the call and reads only past it — the same
-  discipline the rows themselves keep with `before = net.len()`.
-* **Points and pixels.** `place_web_visual` is given *physical* pixels and a
-  document's coordinates are points, so a clip of 700×520 on a 2× display is a
-  viewport 350×260 CSS pixels tall and the buttons the pointer rows aim at, at
-  260 and 340, were outside the page. Every press fell through to the window and
-  the rows read as a routing defect that was not there. The clip is points times
-  the backing scale now, and the conversion from a document point to a window
-  point is asked of AppKit — `convertPoint:toView:` twice and `isFlipped` once —
-  rather than assumed, because a test window's content view is not winit's and
-  does not share its origin.
+* **`settle` 转的是 run loop,它不抽宿主。** 有六行跑了一段脚本、settle 一下,然后去读一张没有任何东西往里追加过的事件表的一段。`catch_up` 是不指望任何东西的 `until`:它**既**转那个循环**也**读。
+* **一次被历史满足掉的等待。** `go` 等的是「表里有一次 `NavigationCompleted`」,而从第二次导航起每张表都有,所以第一行之后的每一行读的都是一个还没加载完的页面。改成调用前先取一个标记、只读它之后的——跟那些行自己拿 `before = net.len()` 守的是同一条纪律。
+* **点和像素。** `place_web_visual` 收的是**物理**像素,而一份文档的坐标是点,所以在一块 2× 屏上 700×520 的裁剪是一个 350×260 CSS 像素高的视口,而指针那几行瞄的按钮在 260 和 340,落在页面外面。每一次按下都穿过去到了窗口,那几行读起来就成了一个并不存在的路由缺陷。现在裁剪是点乘以背衬缩放,而从一个文档点到一个窗口点的换算是去问 AppKit 的——`convertPoint:toView:` 两次、`isFlipped` 一次——而不是假定,因为一个测试窗口的内容视图不是 winit 那个,也不跟它共用原点。
 
-*(本节英文,待中文文案改写。)*
 ### 13.39 T-MAC-POINTER: 按下根本没到 Folio——另一个进程的浮动面板盖在那片桌面上,悬停跟得住不等于按下落得下,标题栏视图是冤枉的(`crates/bt-platform/tests/macos_pointer_route.rs`(新)、`crates/bt-platform/Cargo.toml`)
 
-**This is 13.39 and not 13.38.** 13.38 is M4-3's and was in flight while this
-ran; the numbers are taken in the order the tickets started, not in the order
-they land.
+**这是 13.39 而不是 13.38。** 13.38 是 M4-3 的,本票跑的时候它还在飞;号是按票开工的顺序取的,不是按落地的顺序。
 
-**① The finding this ticket was given, and the one sentence of it that was
-wrong.** §13.34 ⑦(d) reported a press on the restore card's accent button that
-produced **no `WindowEvent::MouseInput` at all**, while the same button hovered
-correctly — its accent lifted by exactly the brightness the card draws a hovered
-primary with — and while a press on the same window's tab strip, in the same run,
-arrived and routed. It recorded that the window was `z0` in the window server's
-front-to-back order immediately before and immediately after the press, and
-concluded: *"it is **not** occlusion … a press lands on that window's title bar
-and does not land on its content"*.
+**① 本票收到的那个发现,以及其中错了的那一句。** §13.34 ⑦(d) 报告过一次按在恢复卡强调按钮上的按下,**根本没有产生任何 `WindowEvent::MouseInput`**,而同一个按钮的悬停是对的——它的强调色恰好被抬起了那张卡画一个被悬停的主按钮所用的那点亮度——而同一趟运行里,按在同一扇窗标签条上的一次按下到了,也路由了。它记下了在那次按下之前和之后,那扇窗在窗口服务器的前后顺序里都是 `z0`,并得出结论:*「这**不是**遮挡……一次按下落在那扇窗的标题栏上,而落不到它的内容上」*。
 
-**It was occlusion.** The press was never delivered to the application at all —
-not to the title bar, not to any view, not to the process. What stood over the
-button was another application's floating window, and the instrument that
-reported `z0` could not see it because it had been written to skip exactly the
-kind of window it was.
+**那就是遮挡。** 那次按下根本没有被投递给这个应用——不是给标题栏,不是给任何视图,是根本没到这个进程。立在那个按钮上面的是另一个应用的一扇浮动窗口,而报告 `z0` 的那件仪器看不见它,因为它当初就是照着「跳过这一类窗口」写的,而那正是它这一类。
 
-**② Two roads, and they are not the same road.** This is the whole of why the
-picture was so convincing, and it is worth writing down for every later ticket
-that drives this product with a pointer.
+**② 两条路,而它们不是同一条路。** 这就是那幅画面为什么那么有说服力的全部,而它值得为以后每一张用指针驱动这个产品的票写下来。
 
-* **`mouseDown:` is routed by the window server** to the frontmost window at that
-  point, whichever application owns it. A window in front takes the press and the
-  one behind never hears of it.
-* **`mouseMoved:` is delivered to the application that is *active*,** for the
-  whole screen, and AppKit sends it on through the window's responder chain. It
-  is not gated by who is frontmost under the cursor.
+* **`mouseDown:` 由窗口服务器路由**给那个点上最前面的那扇窗,不管它属于哪个应用。前面那扇窗拿走这次按下,后面那扇从头到尾不知道有这回事。
+* **`mouseMoved:` 投给当前*活跃*的那个应用**,整块屏幕都算,再由 AppKit 经那扇窗的响应链发下去。它不看光标底下最前面的是谁。
 
-So an active Folio with something parked over its middle **still tracks the
-pointer across the occluder** — `pointer_position` follows, `first_run::hit`
-answers, the button lifts, the picture is right — and every press in that patch
-goes somewhere else. Hovering is not evidence that a press can land there, and
-after this ticket nothing in this repository may treat it as such.
+所以一个活跃的 Folio,中间停着别的东西时,**照样跨过那个遮挡物跟着指针**——`pointer_position` 跟得住,`first_run::hit` 答得出,按钮抬起来,画面是对的——而落在那片地方的每一次按下都去了别处。悬停不是按下落得下去的证据,而这张票之后,这个仓里任何东西都不许再把它当证据。
 
-The measurement that says it in one line is the probe's, taken on the move that
-preceded the failing press:
+一句话说完这件事的那次测量是探针的,取自失败那次按下之前的那次移动:
 
 ```
 event kind=NSEventType(5) at=1163.5,548.0 window=none app_active=true
 ```
 
-(`5` is the raw discriminant of `NSEventTypeMouseMoved`; the probe prints what
-`-[NSEvent type]` answered rather than a name it looked up.)
+(`5` 是 `NSEventTypeMouseMoved` 的原始判别值;探针印的是 `-[NSEvent type]` 答的东西,而不是一个它查表查来的名字。)
 
-`window=none` is `-[NSEvent window]` answering `nil`, and a mouse event with no
-window carries its location in **screen** coordinates rather than window ones —
-`1163.5,548` is AppKit's bottom-left reading of the same point on this 1080-point
-screen that the window-relative moves report as `648.5,235`. The application was
-handed a move over a point that belongs to none of its windows. The
-`NSEventTypeLeftMouseDown` that followed it was never handed over at all.
+`window=none` 是 `-[NSEvent window]` 答了 `nil`,而一个不带窗口的鼠标事件,它的位置是**屏幕**坐标而不是窗口坐标——`1163.5,548` 是 AppKit 以左下为原点,对这块 1080 点高的屏幕上同一个点的读数,而按窗口算的那些移动把它报成 `648.5,235`。这个应用被交了一次落在它任何一扇窗都不属于的点上的移动。跟在它后面的那次 `NSEventTypeLeftMouseDown` 根本没被交过来。
 
-**③ What was standing there.** Read with `CGWindowListCopyWindowInfo` over the
-whole on-screen list at **every** layer, at the moment of the press:
+**③ 立在那儿的是什么。** 在按下的那一刻,用 `CGWindowListCopyWindowInfo` 把整张屏上的表在**每一层**上读一遍:
 
 | | | |
 |---|---|---|
 | `CoreServicesUIAgent` | `kCGWindowLayer` **8** | `1129,509 260×192` |
 | `CoreServicesUIAgent` | 8 | `1063,443 260×192` |
 | `CoreServicesUIAgent` | 8 | `997,377 260×192` |
-| Folio's own window | **0** | `515,167 960×600` |
+| Folio 自己那扇窗 | **0** | `515,167 960×600` |
 
-The accent button stood at `1163,532`, which is inside **all three** of those —
-they cascade and therefore overlap — and the press went to the first. The card's
-own body, 80 points higher, is clear of the lowest of them and under the other
-two. Sixteen of these windows were on the desk, all `260×192`, cascading in steps
-of 66 points across the middle of the screen and then piling up against its
-trailing edge. **What they are was not established and does not have to be**:
-they belong to another process, they stand above every ordinary window, and they
-take the press. (`CoreServicesUIAgent` is the agent the system puts its own small
-windows up through, and this port has launched a throwaway bundle several dozen
-times; that is a plausible account of where sixteen of them came from and not a
-measurement.) Above them again, and over everything, the Dock's own full-screen
-window (layer 20) and the menu bar (24) — which stood over every press of this
-run, the ones that arrived included.
+那个强调按钮站在 `1163,532`,而它落在那三扇的**每一扇**里面——它们层叠因而互相重叠——而那次按下去了第一扇。那张卡自己的正文高 80 点,躲开了最低的那一扇,而压在另外两扇底下。桌面上有十六扇这样的窗口,全是 `260×192`,以 66 点为步长横穿屏幕中间层叠下来,然后在它的后沿上堆起来。**它们是什么没有查清,也不必查清**:它们属于另一个进程,它们立在每一扇普通窗口之上,而且它们拿走那次按下。(`CoreServicesUIAgent` 是系统用来放它自己那些小窗口的代理,而这次移植启动过几十次一次性应用包;这是一个关于那十六扇从哪儿来的合理说法,不是一次测量。)再往上、压在一切之上的,是程序坞自己那扇全屏窗口(第 20 层)和菜单栏(24)——它们立在这趟运行的每一次按下之上,到达了的那些也算。
 
-**④ One window, one card, two presses — the controlled experiment.** macOS
-26.6.2, Apple M4, one 4K at backing scale 2, a debug bundle of this branch with a
-bundle identifier of its own and a `HOME` of its own under the worktree, driven by
-the pointer only. Every number is in points unless it says otherwise.
+**④ 一扇窗、一张卡、两次按下——那次受控实验。** macOS 26.6.2、Apple M4、一块 4K 背衬缩放 2,一个本分支的 debug 应用包,带自己的包标识符和一个在 worktree 底下自己的 `HOME`,只用指针驱动。除非注明,每个数都是点。
 
-**The card is the first-run one and not §13.34's restore prompt**, because a
-`HOME` with nothing in it is the cheaper way to get one of §2.7's cards centred
-on a fresh window — and it is the same question, one accent-filled primary drawn
-by Folio on the Metal layer in the middle of the surface, answered by a press or
-not at all.
+**那张卡是首启卡而不是 §13.34 那张恢复提示**,因为一个里面什么都没有的 `HOME`,是让 §2.7 的一张卡居中出现在一扇新窗上的更便宜的办法——而它是同一个问题:Folio 在 Metal 层上、在表面正中画的一个强调填充的主按钮,要么被一次按下答了,要么根本没有。
 
-| # | what was done | what was measured |
+| # | 做了什么 | 量到什么 |
 | --- | --- | --- |
-| 1 | launch on an empty data directory | one window at `515,167 960×600`, the first-run card up; its accent button at `1242,701..1353,759` in the window's own capture — `648.5,365` in the window's points, `1163.5,532` on the screen |
-| 2 | the pointer parked off the card, then standing on the button | the button reads `122,165,255`, then `132,175,255` — the hover lift, over that rectangle and nothing else (§13.34 measured the restore card's own pair, `122,153,255` → `131,164,255`) |
-| 3 | **press the button** | one `mouseMoved` with `window=none`; **no `LeftMouseDown` in the application**; no `mouse_input` line; the card still up |
-| 4 | press-and-drag the header's empty part at `1015,183` | `LeftMouseDown` at `500,584` in window coordinates → `WinitView` → `mouse_input … pointer=1000,32 route=none` → `press_title_bar` → twenty `LeftMouseDragged` → the window stands at **`40,430 960×600`**, the rectangle the hand asked for |
-| 5 | **press the same button again**, now at `688.5,795` with nothing over it but the Dock's own window | `LeftMouseDown` → `WinitView` → `mouse_input state=Pressed … pointer=1297,730`; the card is **answered** — no accent-filled run left in the window's capture, and `settings.json` on the disk |
+| 1 | 在一个空数据目录上启动 | 一扇 `515,167 960×600` 的窗,首启卡在上面;它的强调按钮在那扇窗自己的截图里是 `1242,701..1353,759`——按那扇窗的点算是 `648.5,365`,按屏幕算是 `1163.5,532` |
+| 2 | 指针先停在卡外面,再站到按钮上 | 按钮读数从 `122,165,255` 变成 `132,175,255`——那次悬停抬色,只在那片矩形上,别处没有(§13.34 量的是恢复卡自己那一对,`122,153,255` → `131,164,255`) |
+| 3 | **按那个按钮** | 一次 `window=none` 的 `mouseMoved`;应用里**没有 `LeftMouseDown`**;没有 `mouse_input` 行;卡还在 |
+| 4 | 按住并拖那个头的空白处,在 `1015,183` | `LeftMouseDown` 按窗口坐标在 `500,584` → `WinitView` → `mouse_input … pointer=1000,32 route=none` → `press_title_bar` → 二十次 `LeftMouseDragged` → 那扇窗停在 **`40,430 960×600`**,正是那只手要的矩形 |
+| 5 | **再按同一个按钮**,这次它在 `688.5,795`,上面除了程序坞自己那扇窗什么都没有 | `LeftMouseDown` → `WinitView` → `mouse_input state=Pressed … pointer=1297,730`;那张卡**被答了**——窗口截图里没有强调填充的连通块了,而 `settings.json` 在盘上 |
 
-Steps 3 and 5 are the same button of the same card in the same process, a few
-seconds apart, pressed by the same three posted events. The only thing that
-changed between them is which patch of desk the button was standing on.
+第 3 步和第 5 步是同一个进程里同一张卡的同一个按钮,相隔几秒,由同样三个投出去的事件按下。它们之间唯一变了的,是那个按钮当时站在哪片桌面上。
 
-**⑤ And the title bar never took a press.** The hierarchy, read inside the press
-rather than reasoned about:
+**⑤ 而标题栏从来没拿走过一次按下。** 那套层级是在按下里面读的,不是推出来的:
 
 ```
 frame_view      = NSKVONotifying_NSThemeFrame[0,0 960x600 flipped=false]
@@ -9676,249 +9444,83 @@ content         = WinitView[0,0 960x600 flipped=true]
 content_subviews= [FolioSurfaceView[0,0 960x600 flipped=false]]
 ```
 
-`subviews` runs back to front, so `NSTitlebarContainerView` is the **frontmost**
-subview of the frame view and it stands over the whole 32-point band M3-3 and
-T-MAC-LIGHTS put Folio's header in. It would be entirely within AppKit's rights
-to claim that band, and if it did, the sidebar toggle, the tab strip, the gear
-and the drag rule of §13.20 would all be dead letters. **It does not.** At
-`500,584` — inside the container's own rectangle — the frame view's own
-`hitTest:` answers `WinitView`, and the press arrives at winit's `mouseDown:`
-like any other. `titlebarAppearsTransparent` is a fact about hit testing and not
-only about paint.
+`subviews` 是从后往前排的,所以 `NSTitlebarContainerView` 是那个框视图**最前面**的子视图,而它立在 M3-3 和 T-MAC-LIGHTS 把 Folio 的头放进去的那整条 32 点带子上。AppKit 完全有权认领那条带子,而它要是认领了,侧栏开关、标签条、齿轮和 §13.20 那条拖动规矩就全是空文。**它不认领。** 在 `500,584`——那个容器自己的矩形里面——框视图自己的 `hitTest:` 答的是 `WinitView`,而那次按下像别的按下一样到了 winit 的 `mouseDown:`。`titlebarAppearsTransparent` 是一个关于命中测试的事实,不只是关于涂色的。
 
-So the door M3-3 already holds is the right one and there was nothing to open:
-the application decides inside the press whether that point is the band's empty
-part (`title_bar_drag_point`) and says so through `press_title_bar`, and AppKit
-has already handed it the press to decide with. **Nothing in the product moves
-for this ticket, on either platform.**
+所以 M3-3 早就把着的那扇门是对的那扇,而没有什么要开的:应用在按下里面判定那个点是不是那条带子的空白部分(`title_bar_drag_point`),并经 `press_title_bar` 说出来,而 AppKit 早已把那次按下交给它去判定了。**本票在任何一个平台上都不动产品里的任何东西。**
 
-**⑥ The instrument that missed it, named so that nobody writes it twice.** The
-z-order check that §13.34 ⑦(d) rests on read the on-screen list and dropped
-every row whose `kCGWindowLayer` was not zero:
+**⑥ 漏掉它的那件仪器,点名,好让没有人再写第二遍。** §13.34 ⑦(d) 靠着的那次 z 序检查,读了屏上那张表,然后丢掉每一行 `kCGWindowLayer` 不为零的:
 
 ```swift
 let layer = w[kCGWindowLayer as String] as? Int ?? -1
 if layer != 0 { continue }
 ```
 
-Every window that can stand over an ordinary window *without being an ordinary
-window* — a floating panel, a menu, a sheet of another process, an agent's alert
-— lives above layer 0. The filter removed the entire class of answers and left a
-list in which Folio's window was, truthfully and uselessly, first. Reading the
-list at every layer is not an extra check; it is the check.
+每一扇能立在一扇普通窗口之上、**而自己不是一扇普通窗口**的窗口——一块浮动面板、一个菜单、另一个进程的一张 sheet、一个代理的警告框——都住在第 0 层之上。那个过滤器把整整一类答案删掉了,留下一张 Folio 那扇窗如实而无用地排第一的表。在每一层上读那张表不是一次额外的检查;它就是那次检查。
 
-The second half of the instrument is the one this ticket had to write: **an
-`NSEvent` local monitor**, which is the only place from which "did the
-application receive this press at all" can be answered.
-`addLocalMonitorForEventsMatchingMask:handler:` sees every event `NSApp` is about
-to dispatch, before any window or view has had it, and reporting four things off
-each one settles the question in a single line — the event's type, its
-`window` (nil is the whole answer), whether the application is active, and what
-the frame view's own `hitTest:` claims that point for. `BT_MOUSE_TRACE`'s first
-station is `Runtime::mouse_input`, which is *after* winit has decided there is an
-event to hand over; an absent line there means only that nothing arrived, never
-that something was swallowed.
+这件仪器的第二半是本票不得不写的那一半:**一个 `NSEvent` 本地监视器**,而「这个应用到底收没收到这次按下」只有从那里答得出来。`addLocalMonitorForEventsMatchingMask:handler:` 看得见 `NSApp` 将要分发的每一个事件,在任何窗口或视图拿到它之前,而从每个事件上报四样东西,一行就把这个问题结掉——事件的类型、它的 `window`(nil 就是全部答案)、应用活不活跃,以及框视图自己的 `hitTest:` 把那个点判给谁。`BT_MOUSE_TRACE` 的第一站是 `Runtime::mouse_input`,那是**在** winit 判定有一个事件要交过来**之后**;那里缺一行,只说明什么都没到,绝不说明有什么被吞了。
 
-**⑦ What is in the tree, and why it is three cases and not a fix.**
-`crates/bt-platform/tests/macos_pointer_route.rs` is a `harness = false` target
-for `macos_sheet`'s reason — AppKit is the main thread's and libtest does not
-hand a case that thread.
+**⑦ 树里有什么,以及为什么是三个用例而不是一次修复。** `crates/bt-platform/tests/macos_pointer_route.rs` 是一个 `harness = false` 目标,理由跟 `macos_sheet` 一样——AppKit 是主线程的,而 libtest 不把那条线程交给一个用例。
 
-* `the_transparent_title_bar_does_not_take_a_press_for_the_content_view` builds a
-  window shaped like Folio's — titled, `FullSizeContentView`, and a content view
-  that takes `mouseDown:` itself, which is what makes winit's answer `NO` to
-  `mouseDownCanMoveWindow` and what `press_title_bar`'s note is written against
-  — installs the real `CustomWindowFrame`, and then puts the band to the frame
-  view's own `hitTest:`. It asserts the claim is **not vacuous** first: that the
-  frontmost subview of the frame view really is the title bar's, and that its
-  rectangle really is as tall as the band this window wears. Then the three
-  traffic lights, at their own centres, must be claimed by something that is not
-  the content view; and every other point of the band, and everything below it,
-  must be the content view's. A later SDK that changes this is caught here
-  rather than by a reader whose header stopped answering.
-* `the_windows_own_drag_door_refuses_when_there_is_no_press_in_hand` holds the
-  other half of the same rule: `press_title_bar` reads `NSApp.currentEvent` and
-  refuses anything that is not a left mouse down, so a drag can only ever begin
-  inside a press the reader made, and a refused one leaves the window where it
-  was.
-* `a_press_that_never_arrived_is_named_by_what_stands_over_it_at_every_layer` is
-  arithmetic and runs on **every** platform, always — `stands_over` walks the
-  window server's own front-to-back order, stops at the window that wanted the
-  press, and answers every row ahead of it that covers the point. It is pinned
-  against the desk of 2026-09-13 above: the two occluded points answer the panels
-  that took them, the point after the move answers nothing, and the layer-0-only
-  reading is pinned too, as the mistake — it reports a clear desk over an
-  occluded press and makes the occluded window `z0`. **It fired before it was
-  trusted**, which is the only way a case like this earns its place: written with
-  one occluder expected where the desk had three, it went red and named them —
-  `left: [4852, 4459, 4425]`, `right: [4852]` — because the panels cascade in
-  steps of 66 and a `260×192` window therefore overlaps the two behind it.
+* `the_transparent_title_bar_does_not_take_a_press_for_the_content_view` 建一扇形状跟 Folio 一样的窗——带标题、`FullSizeContentView`,内容视图自己吃 `mouseDown:`,而这正是 winit 对 `mouseDownCanMoveWindow` 答 `NO` 的原因,也是 `press_title_bar` 那条注所针对的东西——装上真的 `CustomWindowFrame`,然后把那条带子交给框视图自己的 `hitTest:`。它先断言这条主张**不是空的**:框视图最前面的子视图真的是标题栏那个,而它的矩形真的跟这扇窗戴的这条带子一样高。然后是那三盏灯,在它们自己的中心上,必须被一个不是内容视图的东西认领;而那条带子上其余每一个点,以及它以下的一切,都必须是内容视图的。以后哪个 SDK 改了这件事,在这里被接住,而不是被一个发现自己的头不答应了的读者接住。
+* `the_windows_own_drag_door_refuses_when_there_is_no_press_in_hand` 把住同一条规矩的另一半:`press_title_bar` 读 `NSApp.currentEvent`,拒掉任何不是左键按下的东西,所以一次拖动只可能在读者做出的一次按下里面开始,而被拒的那次把窗留在原处。
+* `a_press_that_never_arrived_is_named_by_what_stands_over_it_at_every_layer` 是算术,在**每个**平台上永远跑——`stands_over` 走窗口服务器自己的前后顺序,停在想要那次按下的那扇窗上,然后答出它前面每一行盖住那个点的窗口。它钉的是上面 2026-09-13 那张桌面:两个被遮的点答出拿走它们的那些面板,移动之后的那个点什么也答不出,而只读第 0 层的那种读法也钉着,当作那个错误——它在一次被遮的按下上报告一张干净的桌面,并把被遮的那扇窗算成 `z0`。**它是先红过才被信的**,而这是这么一个用例挣到它位置的唯一方式:写的时候以为桌面上有一个遮挡物,而那里有三个,于是它红了,并把它们点了名——`left: [4852, 4459, 4425]`、`right: [4852]`——因为那些面板以 66 点层叠,所以一扇 `260×192` 的窗口会压着它后面的两扇。
 
-**The three on the venue machine**, `BT_MAC_GUI=1` against a real window, the
-same M4 and the same 4K at backing scale 2:
+**在场地那台机器上跑的那三只**,`BT_MAC_GUI=1` 对着一扇真窗,同一块 M4、同一块背衬缩放 2 的 4K:
 
 ```
 a_press_that_never_arrived_is_named_by_what_stands_over_it_at_every_layer: ok
-  — three points, and the layer-0 reading that missed two of them
+  —— 三个点,以及漏掉其中两个的那次只读第 0 层的读法
 the_transparent_title_bar_does_not_take_a_press_for_the_content_view: ok
-  — band 32 pt over `NSTitlebarContainerView`, lights to 69 pt,
-    110 points walked and every one of them the content view's
+  —— 带子 32 pt 压着 `NSTitlebarContainerView`,灯到 69 pt,
+    走了 110 个点,每一个都是内容视图的
 the_windows_own_drag_door_refuses_when_there_is_no_press_in_hand: ok
-  — a press on the window's own title bar: there is no event in hand to answer
+  —— 一次按在窗口自己标题栏上的按下:手里没有事件可答
 ```
 
-The **32** and the **69** are §13.20 ⑦'s own numbers arrived at from the other
-end — that ticket read them off a capture of the pixels, and this one reads them
-off the window's views — and the 110 points are where a press would have gone if
-the pixels and the hit test had disagreed.
+那个 **32** 和那个 **69** 是 §13.20 ⑦ 自己的数,从另一头到达的——那张票是从一张像素截图上读出来的,这张是从那扇窗的视图上读出来的——而那 110 个点,是像素和命中测试要是不一致时,一次按下会去的地方。
 
-**Nothing else changes, and one thing deliberately does not.** No `BT_…` name is
-added: the monitor of ⑥ is a diagnostic a reader writes in eight lines when they
-need it, and a permanent door in the product for a defect the product does not
-have would be surface bought with nothing. `Cargo.lock`,
-`THIRD-PARTY-NOTICES.md` and the crate's dependency features are untouched — the
-new target names no class this crate did not already name. **Windows is byte for
-byte what it was**, and not by a pin — no file under `crates/*/src/` is touched
-at all. The one new file is a test, the only `cfg` this ticket writes is in it,
-and what a Windows runner executes there is the arithmetic case.
+**别的什么都没变,而有一样是刻意不做的。** 没有加任何 `BT_…` 名字:⑥ 那个监视器是读者需要时八行就写得出来的一件诊断工具,而为一个产品并没有的缺陷在产品里开一扇常设的门,是拿什么都没换来的表面。`Cargo.lock`、`THIRD-PARTY-NOTICES.md` 和这个 crate 的依赖 feature 都没动——那个新目标没有点这个 crate 本来没点过名的类。**Windows 逐字节还是原来那样**,而且不是靠一根钉——`crates/*/src/` 底下根本没有任何文件被碰过。唯一的新文件是一只测试,本票写的唯一一个 `cfg` 在它里面,而一台 Windows 跑器在那里执行的是那个算术用例。
 
-**⑧ The venue rule this leaves behind**, for the next ticket that drives Folio
-with a posted pointer:
+**⑧ 本票留下的场地规矩**,给下一张用投出去的指针驱动 Folio 的票:
 
-1. **Read the whole on-screen list, at every layer**, before believing anything
-   about a press — and after it, because a press that activated somebody else
-   rearranges the list.
-2. **A press that produced no `mouse_input` line is not a swallowed press** until
-   a local monitor has said the application received the event. Until then the
-   likelier reading is that it went to another window.
-3. **A window capture proves nothing about occlusion.**
-   `CGWindowListCreateImage` over a single window composites that window alone,
-   so every picture this port has taken of Folio is a picture of a Folio with
-   nothing in front of it, whatever is really there. That is why nothing in the
-   whole of this port had seen these panels.
-4. **Park the window on clear ground before driving it.** Sixteen floating
-   windows of another process were standing across the middle of this desk, and
-   the shape they cover is the shape a centred card is drawn in.
-
-*(本节英文,待中文文案改写。)*
+1. **在相信关于一次按下的任何事情之前,把整张屏上的表在每一层上读一遍**——之后也读一遍,因为一次激活了别人的按下会重排那张表。
+2. **一次没有产生 `mouse_input` 行的按下不是一次被吞掉的按下**,除非一个本地监视器说过这个应用收到了那个事件。在那之前更可能的读法是它去了另一扇窗。
+3. **一张窗口截图关于遮挡什么都证明不了。** `CGWindowListCreateImage` 对单独一扇窗合成的只有那一扇,所以这次移植给 Folio 拍的每一张照片,都是一张前面什么都没有的 Folio 的照片,不管那里实际立着什么。这就是整次移植里没有任何东西见过这些面板的原因。
+4. **驱动之前先把窗停到干净地面上。** 另一个进程的十六扇浮动窗口横在这张桌面的中间,而它们盖住的形状,正是一张居中的卡被画出来的形状。
 
 ### 13.40 M2-7: 阅读面验收扫——每一行在真机上过了一遍,过不了的写成手上的步骤(`crates/bt-app/src/{main,preview_trace}.rs`、`crates/bt-math/tests/acceptance_display_integral.rs`、`docs/plans/port/m2-7/`)
 
-**Taken as 13.40.** 13.19–13.37 were merged when this ticket started and 13.38
-(M4-3) and 13.39 (T-MAC-POINTER) were in flight beside it; both have landed
-since, which is why ① and ⑧ below cite 13.39 rather than reopening the question
-it settled. This section takes the next number nothing has claimed.
+**取 13.40。** 本票开工时 13.19–13.37 已经合了,而 13.38(M4-3)和 13.39(T-MAC-POINTER)正在旁边飞;两张后来都落了地,这就是下面 ① 和 ⑧ 引 13.39 而不是重开它已经结掉的那个问题的原因。本节取下一个还没被认领的号。
 
-**① Three doors, because §M2's line is seven sentences and every one begins with
-a gesture.** Two of the gestures can be posted at a window this session started
-and one cannot, so the sweep is written around exactly that split rather than
-around what would have been convenient.
+**① 三扇门,因为 §M2 那条线是七句话,而每一句都以一个手势开头。** 那些手势里有两个可以对着本会话启动的一扇窗投出去,有一个不行,所以这次扫描是照着这个分法写的,而不是照着什么方便写的。
 
-* **The folder in the files column** is opened through the application's own
-  door for a column that was open a moment ago: a seeded `session.json` at
-  schema 15 whose tab is **pinned**. `folio <folder>` does not do it —
-  `cli::resolve` turns a directory argument into a terminal seat's `cwd` and
-  `Seats::lone_terminal` has no files leaf in it — and the gesture that does
-  cannot be posted, because CGEvent keyboard injection into Folio produces
-  nothing on this Mac (§13.34 ⑦). The pin is the whole of why this opens with
-  nothing standing over it: `App::restore_question` collects the tabs that were
-  **not** pinned, and the one card is raised only when that list is not empty.
-* **"From a pane"** is a second shell in the ssh session against the same
-  folder. The watcher cannot tell one writer from another and is not supposed
-  to; what those two rows assert is the **watch**. The pane is real and running
-  all the same — `folio.zsh` hands `ZDOTDIR` back at the end of itself, so the
-  pane's shell reads the isolated `HOME`'s own `.zshrc` and prints what that file
-  says without a key being pressed. That is how the `md5` the owner's hand
-  procedure compares against gets onto the glass.
-* **The clicks** are CGEvents posted at this session's own window, at points read
-  out of that window's own `BT_CHROME_DUMP` frame. They land: the first-run card
-  was dismissed by pressing its own button, and a press on a tree row arrives and
-  routes — `chrome_mouse_input taken=1 at=press-routed … target=FilesRow { seat:
-  SeatId(1), index: 4 }`. That is this sweep corroborating §13.39 rather than
-  discovering anything: a press is routed by the window server to whatever is
-  frontmost at that point, so what §13.34 ⑦(d) photographed was a patch of desk
-  with another application's panel parked over it, and a window with nothing over
-  its rows takes every press aimed at them.
+* **文件列里的那个文件夹**是经应用自己那扇「一列刚才还开着」的门打开的:一份播好种的 `session.json`,schema 15,它那个标签是**钉住的**。`folio <folder>` 做不到这件事——`cli::resolve` 把一个目录参数变成一个终端 seat 的 `cwd`,而 `Seats::lone_terminal` 里没有文件叶子——而做得到的那个手势投不出去,因为往 Folio 里做 CGEvent 键盘注入在这台 Mac 上什么都不产生(§13.34 ⑦)。那个钉住,正是这一开就没有任何东西立在上面的全部原因:`App::restore_question` 收的是**没有**被钉住的那些标签,而那张卡只在那张表不空时才抬起来。
+* **「从一个 pane」**是同一个 ssh 会话里对着同一个文件夹的第二个 shell。监视器分不出哪个写者是哪个,也不该分;那两行断言的是那次**监视**。那个 pane 照样是真的、跑着的——`folio.zsh` 在它自己末尾把 `ZDOTDIR` 交回去,所以那个 pane 的 shell 读的是那个隔离 `HOME` 自己的 `.zshrc`,并在一个键都没按的情况下印出那个文件说的话。用户手上那套步骤要比对的那个 `md5`,就是这么上到玻璃上的。
+* **那些点击**是对着本会话自己那扇窗投出去的 CGEvent,点位是从那扇窗自己的 `BT_CHROME_DUMP` 帧上读出来的。它们落得下去:首启卡是按它自己那个按钮消掉的,而一次按在一行树上的按下到了、也路由了——`chrome_mouse_input taken=1 at=press-routed … target=FilesRow { seat: SeatId(1), index: 4 }`。这是这次扫描给 §13.39 作旁证,而不是发现了什么新东西:一次按下由窗口服务器路由给那个点上最前面的东西,所以 §13.34 ⑦(d) 拍到的是一片停着另一个应用面板的桌面,而一扇行上什么都没压着的窗,瞄着那些行的每一次按下都拿得到。
 
-**② A clean data directory has a card on it, and that is the row rather than an
-obstacle.** The first launch of this bundle draws the first-run card over the
-reading surfaces, because that is what a clean data directory is. It is
-dismissed the way a reader dismisses it, by pressing `完成`, and the frames
-before and after are both photographed. Nothing is suppressed and no
-`settings.json` is written by hand: a sweep that wrote its way past the card
-would be testing a state no first run is ever in.
+**② 一个干净的数据目录上会有一张卡,而那是一行而不是一个障碍。** 这个应用包的第一次启动会在阅读表面上画出首启卡,因为一个干净的数据目录就是这样。它是按读者消它的方式消掉的,按 `完成`,而之前和之后的帧都拍下来。什么都没被压住,`settings.json` 也没有被手写过:一次自己写过卡去的扫描,测的会是一个任何首次运行都不处在的状态。
 
-**③ The table.** Venue: Apple M4, macOS 26.6.2, one 4K panel presented at
-1920×1080 points, **backing scale 2**; the window at `100,100` `1280×800` points,
-`2560×1600` physical. The application is the debug `folio` of this branch inside
-a throwaway bundle with an identifier of its own and an isolated `HOME` (§13.31
-⑧(d)), with `BT_PTY_DUMP`, `BT_CHROME_DUMP`, `BT_MOUSE_TRACE` and
-`BT_PREVIEW_TRACE` all naming files under the run's own directory. Rectangles are
-that window's physical pixels; the document band read below is `(660,200)`–
-`(2540,1120)`, which is the pane's page with its head and rail above it and its
-foot below.
+**③ 那张表。** 场地:Apple M4、macOS 26.6.2,一块 4K 面板按 1920×1080 点呈现,**背衬缩放 2**;那扇窗在 `100,100`,`1280×800` 点、`2560×1600` 物理。应用是本分支的 debug `folio`,装在一个带自己标识符的一次性应用包里,`HOME` 是隔离的(§13.31 ⑧(d)),`BT_PTY_DUMP`、`BT_CHROME_DUMP`、`BT_MOUSE_TRACE` 和 `BT_PREVIEW_TRACE` 都指着这趟运行自己目录下的文件。矩形是那扇窗的物理像素;下面读的那条文档带是 `(660,200)`–`(2540,1120)`,也就是那个 pane 的页面,上面去掉头和栏、下面去掉脚。
 
-| row of §M2 | driven by | verdict | measured |
+| §M2 的行 | 由什么驱动 | 判定 | 量到的 |
 |---|---|---|---|
-| open a folder in the files column | a seeded `session.json` (schema 15, tab **pinned**) | **PASS** | the column draws `sub ▸ before.txt`, `math.md`, `picture.png`, `table-cjk.md`; its head says `pages` and its foot `~/pages` |
-| click a `.md` with a table and a CJK paragraph, and the preview renders it | the seed for the content; the press itself is proved on the `.png` row below | **PASS** | `document bytes=362 blocks=3 parse_us=71 intrinsic_us=4 layout_us=1440`, 11 paragraphs and 18 quads on the glass; five line boxes in the document band, the table 192 px of them over three columns; ink 72267, mean 0.2788, aa 0.9919 |
-| change a heading in place, press the save chord, `md5 <file>` in a pane shows bytes that changed | **nothing** — no key can be posted at this window (§13.34 ⑦) | **NOT-CHECKABLE** | the pane prints `M27-MD5-BEFORE e4ce946198203a728f2de986ffd341dc` at startup, which is the digest the owner's procedure in ⑦ compares against |
-| replace the file from a pane and the preview updates without a click | a second shell against the same folder | **PASS** | `document bytes=8 blocks=1` arrives **0.33 / 0.62 / 0.63 / 0.61 / 0.62 s** after `os.replace`, one figure per run; the document band drops from five line boxes to two |
-| create a file in a *subdirectory* of the open folder and the tree shows it | the same shell | **PASS** | `made-by-the-sweep.txt` is a row of the next chrome frame **0.31 / 0.64 / 0.63 / 0.63 / 0.63 s** after the write; the control — the same create at the **watched root** — is **0.33 / 0.34 / 0.33 / 0.34 / 0.32 s**, every run |
-| click a `.png` and it shows | CGEvent, a real pair inside `MULTI_CLICK_INTERVAL` | **PASS** | one press routes and selects (`press-routed … FilesRow { index: 4 }`) and raises the glance card; the pair opens it — `open_preview_image enter path=…/picture.png`, `preview_landing_surface seat=SeatId(2) reused=1`, `leave=opened` — and the head then reads `picture.png — 3200×3240` |
-| open a file containing `$$\int_0^1 x\,dx$$` and the integral is typeset, not printed as source | the seed | **FAIL on the build this sweep opened with; PASS on the fix — see ⑤** | before: the page printed `\int_0^1 x\,dx`, centred, on every run — at 14 s, at 30 s and after a press — in a band **23 px** tall, which is a line of text beside a 28 px line of prose. After: the band is **69 px**, and `math answered set=1` at 1558.027 ms is followed by `math formulas=1 drawn=1 asked=0` at 1558.142 ms |
+| 在文件列里打开一个文件夹 | 一份播好种的 `session.json`(schema 15,标签**钉住**) | **PASS** | 那一列画出 `sub ▸ before.txt`、`math.md`、`picture.png`、`table-cjk.md`;它的头说 `pages`,脚说 `~/pages` |
+| 点一个带表格和中文段落的 `.md`,预览把它渲出来 | 内容由播种来;按下本身由下面 `.png` 那一行证明 | **PASS** | `document bytes=362 blocks=3 parse_us=71 intrinsic_us=4 layout_us=1440`,玻璃上 11 个段落 18 个四边形;文档带里五个行框,表格占其中 192 px、跨三列;墨 72267,均值 0.2788,aa 0.9919 |
+| 就地改一个标题,按保存和弦,在一个 pane 里 `md5 <file>` 显示字节变了 | **没有**——没有键投得到这扇窗(§13.34 ⑦) | **NOT-CHECKABLE** | 那个 pane 在启动时印出 `M27-MD5-BEFORE e4ce946198203a728f2de986ffd341dc`,也就是 ⑦ 里用户那套步骤要比对的那个摘要 |
+| 从一个 pane 替换那个文件,预览不用点就更新 | 对着同一个文件夹的第二个 shell | **PASS** | `document bytes=8 blocks=1` 在 `os.replace` 之后 **0.33 / 0.62 / 0.63 / 0.61 / 0.62 s** 到达,每趟一个数;文档带从五个行框掉到两个 |
+| 在打开的文件夹的一个**子目录**里建一个文件,树上出现它 | 同一个 shell | **PASS** | `made-by-the-sweep.txt` 在写入之后 **0.31 / 0.64 / 0.63 / 0.63 / 0.63 s** 成为下一帧窗饰里的一行;对照组——同样的创建,但在**被监视的根**上——是 **0.33 / 0.34 / 0.33 / 0.34 / 0.32 s**,每趟都是 |
+| 点一个 `.png`,它显示出来 | CGEvent,一对落在 `MULTI_CLICK_INTERVAL` 里面的真按下 | **PASS** | 一次按下路由并选中(`press-routed … FilesRow { index: 4 }`),抬起一张速览卡;那一对把它打开——`open_preview_image enter path=…/picture.png`、`preview_landing_surface seat=SeatId(2) reused=1`、`leave=opened`——随后那个头读作 `picture.png — 3200×3240` |
+| 打开一个含 `$$\int_0^1 x\,dx$$` 的文件,那个积分是排出来的,不是按源码印出来的 | 播种 | **在这次扫描开场用的那个构建上 FAIL;在修好之后 PASS——见 ⑤** | 修之前:页面把 `\int_0^1 x\,dx` 居中印出来,每一趟都是——14 s 时、30 s 时,以及按过一次之后——那条带 **23 px** 高,也就是一行文字,而它旁边一行正文是 28 px。修之后:那条带是 **69 px**,而 1558.027 ms 的 `math answered set=1` 之后跟着 1558.142 ms 的 `math formulas=1 drawn=1 asked=0` |
 
-**The FSEvents latency, read out of those two rows.** The stream's own window is
-0.300 s (`watch_clock::WATCH_QUIET`, §13.12 ②), and every number above is one or
-two of it. A single `open`-write-`close` at the watched root is **one** window,
-every time, and 0.33 s is that window plus the poll that reads it. The other two
-writes are a create and a rename (`printf > new && mv`) and a create and a write,
-which are two arrivals a few milliseconds apart; when the second falls inside the
-first's quiet window the debounce restarts and the answer costs 0.63 s. Both are
-the policy working: nothing was dropped on any run, and the tree and the page
-were correct in the frame that followed.
+**从那两行读出来的 FSEvents 时延。** 那条流自己的窗口是 0.300 s(`watch_clock::WATCH_QUIET`,§13.12 ②),而上面每一个数都是它的一倍或两倍。一次在被监视的根上的 `open`-写-`close` 每次都是**一个**窗口,而 0.33 s 是那个窗口加上读它的那次轮询。另外两次写是一次创建加一次改名(`printf > new && mv`)、以及一次创建加一次写入,也就是相隔几毫秒的两次到达;第二次落在第一次的静默窗口里时防抖重新开始,答案就要 0.63 s。两者都是策略在起作用:任何一趟都没有东西被丢掉,而下一帧里树和页面都是对的。
 
-**④ Three surfaces of one window disagreed about where the reader was.** The
-ticket named one and the sweep found the other two. §13.32 ③ gave the
-breadcrumbs the `~` rule and stopped there, so a Mac window with a folder open
-under the reader's home said three things at once: the rail said `~ › pages`, the
-files column's foot said
-`/Users/<owner>/folio-port/wt/m2-7/out-acc/home/pages`, and the terminal pane's
-head said the same long thing again — **while the shell in that very pane printed
-`m2-7 pages %`**, having written the same run as `~` itself.
+**④ 一扇窗的三块表面对读者在哪儿说法不一。** 票里点了一个,扫描找出了另外两个。§13.32 ③ 给了面包屑那条 `~` 规矩就停下了,所以一扇在读者家目录底下开着一个文件夹的 Mac 窗同时说三种话:那条栏说 `~ › pages`,文件列的脚说 `/Users/<owner>/folio-port/wt/m2-7/out-acc/home/pages`,而终端 pane 的头又把那句长的说了一遍——**而那个 pane 里的 shell 印的是 `m2-7 pages %`**,它把同一趟运行写成了 `~` 本身。
 
-The rule is asked once. `home_crumb_for` is the decision §13.32 ③ already made —
-"is this path under a home this reader's machine writes `~` for" — lifted out of
-`crumb_segments_on` so the feet and the head ask it rather than keeping opinions
-of their own. `home_shortened_path_on` is that answer spelled for a surface which
-prints a path rather than a row of crumbs, and it **takes the separator from the
-string the filesystem handed over** instead of inventing one, which is what lets
-a Windows workstation assert what a Mac's foot says. Windows substitutes nothing
-anywhere — `home_crumb_for` answers `None` for that platform outright — so each
-of these surfaces prints the string it always printed there, borrowed rather than
-rebuilt.
+这条规矩只问一次。`home_crumb_for` 就是 §13.32 ③ 已经做过的那个判断——「这条路径在不在一个这位读者的机器会写成 `~` 的家目录底下」——从 `crumb_segments_on` 里提出来,好让那些脚和那个头去问它,而不是各自留着自己的看法。`home_shortened_path_on` 是那个答案为一块印路径而不是印一行面包屑的表面拼出来的写法,而它**从文件系统交过来的那条字符串上取分隔符**,而不是自己造一个,这正是一台 Windows 工作站断言得了一个 Mac 的脚说什么的原因。Windows 上哪儿都不替换——`home_crumb_for` 对那个平台直接答 `None`——所以这几块表面在那里印的还是它们一直印的那条字符串,是借来的而不是重造的。
 
-Three surfaces and two functions, because the third was already right: the
-docked files column's foot and a torn-out files tree's foot are one call apiece
-(`dress_files_feet`, the float builder), and the pane head is `cwd_whole`, whose
-own doc already said it renders "the folder as this reader writes it". The pins
-are `a_files_foot_prints_the_root_its_breadcrumbs_would_print` and
-`a_pane_heads_folder_is_written_the_way_this_reader_writes_one`; the second
-carries a source pin as well, because what has to stay true is not only that a
-head prints `~` on a Mac but that it reaches that answer **through the rail's own
-function**.
+三块表面两个函数,因为第三块本来就是对的:停靠的文件列的脚和一棵撕出来的文件树的脚各是一次调用(`dress_files_feet`,那个浮窗构造器),而 pane 的头是 `cwd_whole`,它自己的文档早就说它渲的是「这位读者会怎么写这个文件夹」。钉是 `a_files_foot_prints_the_root_its_breadcrumbs_would_print` 和 `a_pane_heads_folder_is_written_the_way_this_reader_writes_one`;第二根还带一根源码钉,因为必须一直成立的不只是一个头在 Mac 上印 `~`,而是它**经那条栏自己的函数**到达那个答案。
 
-**⑤ The integral was not typeset, the engine was not why, and the port only lost
-a race it had always been running.** The page drew `\int_0^1 x\,dx` — the
-delimiters stripped and the run centred, so the block *was* recognised as display
-mathematics and it was the picture that never came. A page standing on its source
-text is the right behaviour for a formula that is pending **and** for one the
-engine refused, which is what made this unreadable from outside: the two draw the
-identical thing, and the worker thread's own stack is parked in `recv` either
-way. So `BT_PREVIEW_TRACE` grew the station that tells them apart — `math
-formulas=<n> drawn=<n> asked=<n> worker=<0|1>` for one page's pass and `math
-answered set=<0|1> …` for one answer coming back — and the run then said the
-whole thing in four lines:
+**⑤ 那个积分没有被排出来,引擎不是原因,而这次移植只是输掉了一场它一直在跑的赛跑。** 页面画的是 `\int_0^1 x\,dx`——定界符被剥掉了、那一串居中,所以那个块**确实**被认成了行间数学,是那张图从来没来。一个停在自己源文本上的页面,对一个还在等的公式**和**一个被引擎拒了的公式来说都是对的行为,而这正是这件事从外面读不出来的原因:两者画出来的东西一模一样,而工作线程自己的栈两种情况下都停在 `recv` 里。所以 `BT_PREVIEW_TRACE` 长出了分开它们的那一站——一趟页面走完印 `math formulas=<n> drawn=<n> asked=<n> worker=<0|1>`,一个答案回来印 `math answered set=<0|1> …`——而那趟运行随后用四行把整件事说完了:
 
 ```
 110.867 build … bytes=143 owed=0
@@ -9927,303 +9529,80 @@ whole thing in four lines:
 1684.536 math answered set=1 mode=Display em_milli=26000 chars=14
 ```
 
-and never another `build` line, through thirty seconds and a press. The picture
-was **set** and it **landed**; nothing asked the page to be laid out a second
-time, so `PreviewMathCache::generation` — which exists for exactly that next
-layout — was read by nobody.
+而且再没有第二行 `build`,三十秒和一次按下都没有。那张图**设进去了**,也**落了地**;没有任何东西要求这个页面被重新布置一次,所以 `PreviewMathCache::generation`——它存在恰恰就是为了下一次布置——没有人读过。
 
-`apply_math_results` publishes a frame, and a publish is not a rebuild: it asks
-the window to draw again out of the bodies it is already holding, and the body
-built while the formula was pending holds the author's LaTeX.
-`refresh_preview_body` is reached from a resize, a scroll, an edit, an open and a
-palette change, and a formula arriving is none of them. The glance card had
-already been given this exact sentence in 2026-08-26's report — "the card first,
-the picture when it comes" — and a **docked pane** had not, so that half of the
-fix has been missing ever since. It is a race rather than a platform, and the
-port is what lost it: this Mac's first typesetting of a session costs about
-1.7 s (the engine's font book is built on the worker thread before the first
-answer) against a startup that settles inside 200 ms, so on this machine the
-answer *always* arrives too late. A slow first formula on any machine is the same
-defect, which is why this one is in the changelog and the flag it is gated on now
-says what it means (`picture_landed`, set by a picture and never by a refusal —
-a refused block draws exactly what it was drawing and owes no rebuild).
+`apply_math_results` 发布一帧,而一次发布不是一次重建:它要求那扇窗拿它已经攥着的那些正文再画一遍,而那份在公式还等着的时候建出来的正文,攥着的是作者的 LaTeX。`refresh_preview_body` 是从一次改变大小、一次滚动、一次编辑、一次打开和一次配色改变到达的,而一个公式到来不是其中任何一个。速览卡在 2026-08-26 的报告里就已经收到了一模一样的这句话——「先卡片,图来了再说」——而一个**停靠的 pane** 没有收到,所以这一半的修从那时起就一直缺着。这是一场赛跑而不是一个平台,而输掉它的是这次移植:这台 Mac 一次会话里的第一次排版大约要 1.7 s(引擎的字体册是在工作线程上、在第一个答案之前建起来的),而启动在 200 ms 之内就稳定了,所以在这台机器上那个答案**永远**来得太晚。任何机器上一个慢的首个公式都是同一个缺陷,这正是这一条进 changelog、而它所依赖的那个标志现在说出了它自己意思的原因(`picture_landed`,由一张图置位,绝不由一次拒绝置位——一个被拒的块画的就是它本来在画的东西,不欠任何重建)。
 
-**And the same run afterwards**, which is the whole of what a fix is entitled to
-claim: `math answered set=1` at 1558.027 ms, `math formulas=1 drawn=1 asked=0` at
-**1558.142 ms** — the page resolved again 115 microseconds later — and the
-integral on the glass in the frame that followed, standing in a band 69 px tall
-where the source had stood in one of 23.
+**而同一趟运行在修之后**,这也是一次修复有资格主张的全部:1558.027 ms 的 `math answered set=1`、**1558.142 ms** 的 `math formulas=1 drawn=1 asked=0`——页面在 115 微秒之后又解了一遍——而下一帧玻璃上就是那个积分,立在一条 69 px 高的带里,而源码当初立在一条 23 px 的带里。
 
-**⑥ What a Windows reference could settle, and what it could not.**
-`crates/bt-math/tests/acceptance_display_integral.rs` sets the acceptance line's
-own formula offscreen — no window, no GPU, no swapchain — and prints what came
-out. Run on a Windows workstation and on the Mac mini it prints, to the
-character:
+**⑥ 一份 Windows 参照能结掉什么,不能结掉什么。** `crates/bt-math/tests/acceptance_display_integral.rs` 把验收那条线自己的公式在离屏上排一遍——没有窗、没有 GPU、没有交换链——然后印出结果。在一台 Windows 工作站上和在 Mac mini 上跑,印出来逐字符相同:
 
 ```
 M27-INTEGRAL source=\int_0^1 x\,dx width=297 height=227 content_height=227 ascent=134.802 descent=92.198 baseline=134.802 groups=5 alpha_fnv1a=b3a820340f682400
 M27-INTEGRAL group heights: [(4, 81, 208), (91, 114, 40), (140, 184, 38), (204, 246, 60), (250, 293, 38)]
 ```
 
-Identical on both machines down to the digest of the alpha plane, which is the
-whole of what a portable crate is entitled to promise and exactly the fact ⑤
-needed: the engine is not the defect. The operator's group is 208 px tall against
-38 for the letters beside it, and that is the number that says "set" rather than
-"printed" — a line of source is one band of glyphs all of a height. The test
-asserts that ratio rather than the digest, so a typst upgrade moves the printed
-numbers without turning the gate red for the wrong reason.
+两台机器上一直相同到 alpha 平面的摘要,而这就是一个可移植 crate 有资格许诺的全部,也恰恰是 ⑤ 需要的那个事实:引擎不是那个缺陷。那个算符的组高 208 px,而它旁边那些字母是 38,这个数说的是「排出来的」而不是「印出来的」——一行源码是一整条同样高的字形。测试断言的是那个比例而不是那个摘要,好让一次 typst 升级只挪动印出来的数,而不是因为一个不相干的理由把门弄红。
 
-The other two subjects are read against references of their own rather than
-against a second rendering, because a second rendering would restate M2-5. **The
-picture**: the file's own decoded pixels are the same bytes on both machines, and
-what the Mac drew follows them — `picture.png` is 3200×3240, aspect 0.9877, and
-the band it stands in on the glass is 675×684 px, aspect **0.9868**, mean
-coverage 0.8692 against the page's own ground. **The prose and the table**: every
-byte of the parse and the layout is portable code that
-`scripts/check-portable-core.ps1` keeps portable, so the only place a difference
-can live is the glyph raster — which §13.22 ③ already measured offscreen on both
-machines and found agreeing to within 0.06 of mean coverage band for band, on two
-different faces.
+另外两个主题是各自对着自己的参照读的,而不是对着第二次渲染,因为第二次渲染会是把 M2-5 重说一遍。**那张图**:文件自己解码出来的像素在两台机器上是同样的字节,而 Mac 画出来的东西跟着它们——`picture.png` 是 3200×3240,长宽比 0.9877,而它在玻璃上立的那片带是 675×684 px,长宽比 **0.9868**,相对页面自己那块底的平均覆盖 0.8692。**正文和表格**:解析和布置的每一个字节都是可移植代码,由 `scripts/check-portable-core.ps1` 保着它可移植,所以差异唯一住得下的地方是字形光栅——而 §13.22 ③ 已经在两台机器上离屏量过,在两种字体上逐带吻合到平均覆盖 0.06 以内。
 
-**⑦ The hand procedure for the row an agent cannot drive.** Nothing here can be
-posted: CGEvent keyboard injection into Folio produces nothing on this Mac, so
-"change a heading in place" and "press the save chord" are the owner's, and this
-is written for their hand rather than left as a gap.
+**⑦ 一个 agent 驱动不了的那一行,交给手的步骤。** 这里没有东西投得出去:往 Folio 里做 CGEvent 键盘注入在这台 Mac 上什么都不产生,所以「就地改一个标题」和「按保存和弦」是用户的,而这写成了给他的手用的步骤,不是留成一个缺口。
 
-In a Folio built from this branch, open `tests/assets/preview-samples/` in the
-files column — `sample.md` there is a heading, a table and a CJK paragraph, which
-is the page this row is about — click it into a preview pane, and split a
-terminal pane under it. Then, in order:
+在一个从本分支建出来的 Folio 里,在文件列打开 `tests/assets/preview-samples/`——那里的 `sample.md` 是一个标题、一张表和一个中文段落,正是这一行说的那个页面——把它点进一个预览 pane,再在它下面分出一个终端 pane。然后,按顺序:
 
-1. **Click once in the heading.** A caret appears inside the heading's own text.
-   *Wrong:* nothing happens (the press did not route — read `BT_MOUSE_TRACE`);
-   the whole page turns into a source view (the flip was hit instead of the
-   block).
-2. **Type a word at the end of the heading.** It arrives at heading size and the
-   rest of the page does not move. *Wrong:* the characters arrive at body size —
-   the block fell back to prose; the letters land in the terminal pane below —
-   the keyboard is routed to the wrong seat (§13.13 ①); the page re-flows and the
-   scroll jumps — the intrinsic cache missed on a block that did not change.
-3. **Look at the pane's head.** It carries the unsaved mark. *Wrong:* no mark, or
-   a mark that was already there before the edit.
-4. **Press the save chord — `⌘S` on this machine**, because Command is the
-   application's and Control is the terminal's (§13.13 ①). The mark clears.
-   *Wrong:* nothing happens and the mark stays — the chord did not reach the
-   application, and the thing to try next is the menu bar's own `File ▸ Save`,
-   which AppKit answers **before** the responder chain and which therefore
-   separates "the chord is not bound" from "the key never arrived" (§13.26).
-5. **In the terminal pane, run `md5 <file>`.** The digest differs from the
-   `M27-MD5-BEFORE …` the pane printed at startup — or, outside the sweep's
-   fixture, from the one you took before step 2. *Wrong:* the same digest (the
-   save wrote nothing), or a file whose timestamp moved while its digest did not.
-6. **Watch the page while step 4 lands.** It must not flash, reload or scroll:
-   Folio's own save is a write the watcher hears, and what the reader is looking
-   at is already the new bytes. *Wrong:* the page redraws from the top, or the
-   news line says the file changed on disk under you.
+1. **在标题里点一下。** 一个光标出现在标题自己的文字里。*不对的样子:*什么都没发生(按下没有路由——读 `BT_MOUSE_TRACE`);整个页面变成了源码视图(按到的是那个翻面,不是那个块)。
+2. **在标题末尾打一个词。** 它以标题字号到达,而页面其余部分不动。*不对的样子:*字符以正文字号到达——那个块退回成了正文;字母落到下面那个终端 pane 里——键盘路由到了错的 seat(§13.13 ①);页面重排、滚动跳了——一个没有变过的块上固有尺寸缓存没命中。
+3. **看那个 pane 的头。** 它带着未保存记号。*不对的样子:*没有记号,或者一个在这次编辑之前就已经在那儿的记号。
+4. **按保存和弦——在这台机器上是 `⌘S`**,因为 Command 是应用的、Control 是终端的(§13.13 ①)。记号消失。*不对的样子:*什么都没发生而记号还在——那个和弦没到应用,而接下来该试的是菜单栏自己的 `File ▸ Save`,AppKit 在响应链**之前**就答它,因而它把「和弦没绑」和「键根本没到」分开(§13.26)。
+5. **在终端 pane 里跑 `md5 <file>`。** 那个摘要和这个 pane 启动时印的那条 `M27-MD5-BEFORE …` 不同——或者在这次扫描的夹具之外,和你在第 2 步之前取的那个不同。*不对的样子:*摘要一样(保存什么都没写),或者一个时间戳动了而摘要没动的文件。
+6. **在第 4 步落地时看着那个页面。** 它不许闪、不许重载、不许滚动:Folio 自己的保存是一次监视器听得见的写入,而读者正看着的已经是新的字节了。*不对的样子:*页面从顶上重画,或者消息行说这个文件在你底下变了。
 
-**⑧ Three things that are not defects, and one that is somebody else's.**
+**⑧ 三件不是缺陷的事,和一件是别人的。**
 
-* **The card over the reading surfaces on a first run** is the first run, and ②
-  is why the sweep presses it rather than writing past it.
-* **A newline between two CJK characters becomes a space.** The fixture's
-  paragraph reads `…读起来是 同一份文档,and…` on the glass where the file has a
-  line break. That is CommonMark's soft break rendered as CommonMark defines it,
-  through portable code that says the same thing on Windows, so it is not
-  anything this port did. Whether a CJK page should drop that space is a question
-  about typography and it wants an owner's ruling, not a platform's.
-* **The terminal pane printed `$$\int_0^1 x\,dx$$` as source too**, and that is
-  *not* a second sighting of ⑤. The pane's own display mathematics is found in a
-  finished command's region, and this line was written by a startup file before
-  the first prompt existed — it was never a block the detector was offered. It is
-  recorded here only so the next agent does not read it as evidence.
-* **§13.39's rule has a second witness here, one layer up.** A press is taken by
-  whatever is frontmost at that point, and in this window that was sometimes
-  Folio's own first-run card: the run that had not dismissed it recorded
-  `mouse_input … route=none` for a press aimed at a tree row, and the run that
-  had recorded `taken=1 at=press-routed … FilesRow` for the same point. A modal
-  of one's own occludes exactly as another application's panel does, which is
-  worth a line in any later ticket that drives this product with a pointer.
+* **首次运行时压在阅读表面上的那张卡**就是首次运行,而 ② 是这次扫描按它而不是写过它去的原因。
+* **两个汉字之间的一个换行变成了一个空格。** 夹具那一段在玻璃上读作 `…读起来是 同一份文档,and…`,而文件里那儿是一个换行。那是 CommonMark 的软换行按 CommonMark 自己的定义渲出来的,经的是在 Windows 上说同样话的可移植代码,所以不是这次移植做的任何事。一个中文页面该不该丢掉那个空格,是一个关于排版的问题,它要的是一次用户裁决,不是一个平台的。
+* **终端 pane 也把 `$$\int_0^1 x\,dx$$` 按源码印了出来**,而那**不是** ⑤ 的第二次现身。pane 自己的行间数学是在一条跑完的命令的区域里找的,而这一行是一个启动文件在第一个输入行存在之前写下的——它从来就不是一个被交给检测器的块。记在这里,只是为了让下一个 agent 不要把它读成证据。
+* **§13.39 那条规矩在这里有第二个见证,高一层。** 一次按下被那个点上最前面的东西拿走,而在这扇窗里那有时候是 Folio 自己的首启卡:没有消掉它的那趟,对着一行树的一次按下记下的是 `mouse_input … route=none`,而消掉了的那趟对同一个点记下的是 `taken=1 at=press-routed … FilesRow`。自己的一张模态卡和另一个应用的一块面板遮得一模一样,这值得写进以后每一张用指针驱动这个产品的票里一行。
 
-**⑨ The run.** Five runs of `docs/plans/port/m2-7/m2-7-acceptance.sh` on the Mac
-mini, each from a clean `out-acc` and its own isolated `HOME`; the build is
-`m2-7-door.sh` in lane `m2-7` with its own target directory. `cargo build -p
-bt-app -j 4` green; `cargo test -p bt-platform -j 4` green; `cargo test -p
-bt-math -j 4` **7 passed, 0 failed**, including this ticket's own. Every pid the
-sweep started was written down and only those were ended; the bundle was
-unregistered and the identifier's three library folders removed at the end of
-each run, and `df -h ~` never fell below 38 GiB.
+**⑨ 那几趟运行。** `docs/plans/port/m2-7/m2-7-acceptance.sh` 在 Mac mini 上跑了五趟,每趟从一个干净的 `out-acc` 和它自己隔离的 `HOME` 开始;构建是 `m2-7` 车道里的 `m2-7-door.sh`,带它自己的 target 目录。`cargo build -p bt-app -j 4` 绿;`cargo test -p bt-platform -j 4` 绿;`cargo test -p bt-math -j 4` **7 passed, 0 failed**,包括本票自己那只。这次扫描起的每一个 pid 都记了下来,结束的只有那些;每趟结束时那个应用包被注销、那个标识符的三个库文件夹被删掉,而 `df -h ~` 从来没低于 38 GiB。
 
 ### 13.41 M5-1: 包由脚本装、签名按嵌套顺序、公证与 DMG 的脚本备好——真身份那一步留给用户开着的会话(`scripts/release/macos/{bundle,sign,notarize,dmg}.sh`(新)、`crates/bt-winres/src/plist.rs`、`packaging/macos/README.md`、`docs/RELEASING.md`)
 
-**This is 13.41 and not 13.40.** 13.40 is M2-7's and was in flight while this
-ran; the numbers are taken in the order the tickets started, not in the order
-they land.
+**这是 13.41 而不是 13.40。** 13.40 是 M2-7 的,本票跑的时候它还在飞;号是按票开工的顺序取的,不是按落地的顺序。
 
-**① What this ticket could prove and what it could not, decided by a keychain.**
-Everything M5 is about splits cleanly along one line: whether a step needs the
-Developer ID *private key*. Assembling a bundle does not. Signing with the
-hardened runtime, a secure time stamp and an entitlements file does not need a
-*particular* key — `codesign -s -` makes an ad-hoc signature with no certificate
-behind it and every flag behaves the same way. Notarization does not need a
-keychain at all; it authenticates with an App Store Connect API key file.
-**Exactly one thing needs the owner:** a signature a stranger's Mac will accept,
-because that is the thing a certificate *is*. Measured at P-3 and again here: an
-ssh session does not have the login keychain open, and `codesign -s "Developer
-ID Application: …"` from one answers `errSecInternalComponent`. So this ticket
-wrote four scripts and proved three of them on the Mac with `-`, and wrote the
-fourth step out as a command sequence for a session the owner opens.
+**① 本票证明得了什么、证明不了什么,由一个钥匙串裁定。** M5 要做的一切沿着一条线干净地分开:一个步骤需不需要 Developer ID 的那把**私钥**。装一个应用包不需要。用强化运行时、一个安全时间戳和一份授权文件签名,不需要一把**特定的**钥匙——`codesign -s -` 做出一个背后没有证书的 ad-hoc 签名,而每一个开关的行为都一样。公证根本不需要钥匙串;它用一个 App Store Connect API 钥匙文件认证。**恰好有一样东西需要用户:**一个陌生人的 Mac 会接受的签名,因为那正是一份证书**是什么**。在 P-3 量过,这里又量了一次:一个 ssh 会话没有打开登录钥匙串,而从那里 `codesign -s "Developer ID Application: …"` 答 `errSecInternalComponent`。所以本票写了四个脚本,在 Mac 上用 `-` 证明了其中三个,并把第四步写成一串命令,留给用户自己打开的会话。
 
-That division is not a compromise — it is what the scripts are shaped around.
-`--identity` is a flag with a default rather than a constant; `sign.sh` exits 0
-when Gatekeeper rejects an *ad-hoc* signature and non-zero when it rejects a real
-one, because those are two different facts wearing the same word; `notarize.sh`
-and `dmg.sh` take `--dry-run` and print every command with the real paths filled
-in. The one thing none of them does is pretend: an ad-hoc run says out loud that
-it proves the shape of a signature and not its publisher.
+那种分法不是一次妥协——那几个脚本就是照着它的形状造的。`--identity` 是一个带默认值的开关而不是一个常量;`sign.sh` 在 Gatekeeper 拒掉一个 **ad-hoc** 签名时退出 0,在它拒掉一个真签名时退出非零,因为那是两个穿着同一个词的不同事实;`notarize.sh` 和 `dmg.sh` 收 `--dry-run`,把每一条命令连同填好的真实路径印出来。它们一件都不做的事是装:一次 ad-hoc 的运行会大声说出它证明的是一个签名的形状,不是它的签发者。
 
-**② The bundle is assembled by `bundle.sh`, and the version is not read in it.**
-`Contents/Info.plist` comes from `cargo run -q -p bt-winres --bin
-render-info-plist` — P-2's renderer, filling `@VERSION@` from the crate's own
-`CARGO_PKG_VERSION`, which is the `[workspace.package]` line. A `grep` of
-`Cargo.toml` in a shell script would have been the fifth reader of that line and
-therefore the fifth thing to be wrong at a release; M5-5 extends
-`the_version_is_the_manifests_and_nothing_elses` over the two generated fields
-and this script is what that gate is about. `set -e` plus the renderer's non-zero
-exit is what stands between an unfilled placeholder and a signed bundle carrying
-it.
+**② 应用包由 `bundle.sh` 装起来,而版本不是在它里面读的。** `Contents/Info.plist` 来自 `cargo run -q -p bt-winres --bin render-info-plist`——P-2 那个渲染器,用 crate 自己的 `CARGO_PKG_VERSION` 填 `@VERSION@`,而那就是 `[workspace.package]` 那一行。在一个 shell 脚本里 `grep` 一下 `Cargo.toml`,会是那一行的第五个读者,因而也是发布时第五个会出错的东西;M5-5 把 `the_version_is_the_manifests_and_nothing_elses` 扩到那两个生成字段上,而这个脚本正是那道门说的事。`set -e` 加上渲染器的非零退出,就是挡在一个没填的占位符和一个装着它的已签名应用包之间的东西。
 
-The rest is `Contents/MacOS/folio`, `Contents/Resources/Folio.icns`, and a
-`PkgInfo` of eight constant bytes. Nothing else — in particular no
-`Resources/<lang>.lproj/`, which is §13.36 ⑩'s statement read from the packaging
-side: this bundle has no localized resources, the Finder Services row is
-therefore English, and the first `.lproj` to arrive is its own ticket and will
-have to bring that row with it.
+其余是 `Contents/MacOS/folio`、`Contents/Resources/Folio.icns`,以及一个八个常量字节的 `PkgInfo`。别的什么都没有——尤其没有 `Resources/<lang>.lproj/`,而这是 §13.36 ⑩ 那句话从打包这一侧读出来的:这个应用包没有本地化资源,访达那一行因而是英文的,而第一份 `.lproj` 到来时是它自己的一张票,并且得把那一行一起带上。
 
-**③ The icon, and the two things `sips` decides that are invisible in the
-result.** The mark is `assets/app-icon/folio.ico`, drawn from geometry in code.
-The tools a stock Mac has are `sips` and `iconutil`, both in `/usr/bin` and
-neither needing Xcode. `sips` reads an `.ico` as **its largest entry only** —
-256×256 here — so the iconset's small slots are resampled from the 256 rather
-than taken from the hand-drawn 16, 20, 24, 32, 40, 48 and 64 entries that are
-also in that file (they are DIB payloads, which `sips` will not address one by
-one). And because the source has no pixels above 256, `icon_256x256@2x`,
-`icon_512x512` and `icon_512x512@2x` are **not generated**: upscaling to fill
-them would put a blurred 256 exactly where Finder's largest preview looks, and
-with the slot absent the system scales the 256 itself and every reader gets the
-same picture. A 1024 PNG drawn from the same geometry closes both, and that is an
-icon-source ticket rather than a packaging one — `make-folio-ico.py` renders any
-size and needs Pillow, which a stock Mac does not have. The script already
-prefers the largest PNG under `assets/app-icon/` over the `.ico`, so the day that
-file exists nothing here changes.
+**③ 图标,以及 `sips` 替人做的两个在结果里看不见的决定。** 那个标记是 `assets/app-icon/folio.ico`,由代码里的几何画出来。一台原装 Mac 手上的工具是 `sips` 和 `iconutil`,两个都在 `/usr/bin`,两个都不要 Xcode。`sips` 读一个 `.ico` **只读它最大的那一条**——这里是 256×256——所以图标集里那些小槽是从 256 重采样出来的,而不是取自同一个文件里那些手画的 16、20、24、32、40、48 和 64 条目(它们是 DIB 负载,`sips` 不会一条一条去寻址)。而因为源里没有 256 以上的像素,`icon_256x256@2x`、`icon_512x512` 和 `icon_512x512@2x` **不会生成**:放大去填满它们,会把一张糊掉的 256 恰好摆在访达最大那张预览要看的地方,而槽位缺着时系统自己缩放那张 256,每个读者拿到的是同一张图。一张从同样几何画出来的 1024 PNG 把两件事都关掉,而那是一张图标源的票而不是一张打包的票——`make-folio-ico.py` 渲得出任何尺寸,而它要 Pillow,一台原装 Mac 上没有。脚本本来就优先取 `assets/app-icon/` 底下最大的那个 PNG 而不是那个 `.ico`,所以那个文件存在的那天,这里什么都不用改。
 
-**④ `dsymutil` runs and its output stays outside the bundle.** §13.31 ⑥ put this
-on account: the release profile is `debug = "line-tables-only"`, on Apple targets
-that leaves the debug information in the object files with a debug map in the
-image, and the `.dSYM` is the only artifact that turns a report from a shipped
-build back into file names and line numbers. It is built here into
-`Folio.app.dSYM` **beside** `Folio.app` — archived with the notarization log, not
-carried in the DMG, where it would be three times the download and signed for
-nothing. Measured on the ad-hoc run: the bundle is 70 000 640 bytes and the
-`.dSYM` is 211 173 376, which is the whole of the argument. `dwarfdump --uuid`
-prints `4355C6E3-D0DE-3177-9263-4CBEB98FF17A (arm64)`, which is the pairing a
-crash report is matched by.
+**④ `dsymutil` 会跑,而它的产物留在应用包外面。** §13.31 ⑥ 把这件事挂了账:release profile 是 `debug = "line-tables-only"`,在苹果目标上那把调试信息留在对象文件里、映像里放一张调试映射表,而那份 `.dSYM` 是唯一能把一份出自已发布构建的报告变回文件名和行号的产物。它在这里被建成 `Folio.app.dSYM`,**挨着** `Folio.app`——跟公证日志一起归档,不装进 DMG,在那里它会让下载大三倍,而且白签一次。在那次 ad-hoc 运行上量的:应用包是 70 000 640 字节,`.dSYM` 是 211 173 376,而这就是整个论据。`dwarfdump --uuid` 印出 `4355C6E3-D0DE-3177-9263-4CBEB98FF17A (arm64)`,而一份崩溃报告就是按这个配对的。
 
-One expected warning: `dsymutil` reports one object of the `psm` crate as
-missing, because rustc leaves that hand-written assembly stub in the temporary
-link directory, which is gone by then. An assembly stub carries no line tables,
-so what the warning names is debug information that never existed; every Rust
-object is found.
+一个预料之中的警告:`dsymutil` 报告 `psm` 这个 crate 的一个对象打不开,因为 rustc 把那个手写的汇编桩留在临时链接目录里,而那时它已经没了。一个汇编桩不带行表,所以这个警告点的是一份从来不存在的调试信息;每一个 Rust 对象都找得到。
 
-**⑤ The nested-code order, written down before there is any nested code.**
-`codesign` seals a bundle by hashing what is inside it, so anything inside that
-carries its own signature must already carry its **final** one when the bundle is
-sealed — otherwise the seal covers a signature about to be replaced and
-`--verify --deep` reports the bundle as modified. The order is therefore fixed
-and inside out: nested code deepest path first (frameworks, XPC services,
-plug-ins, login items, helper applications, and any loose Mach-O that is not the
-main executable); then the main executable; then the bundle, which receives the
-entitlements.
+**⑤ 嵌套代码的顺序,在还没有任何嵌套代码的时候先写下来。** `codesign` 封一个应用包的方式是给它里面的东西算哈希,所以里面任何一样自带签名的东西,在这个包被封的时候必须已经带着它的**最终**签名——否则那个封覆盖的是一个即将被换掉的签名,而 `--verify --deep` 会报这个包被改过。所以顺序是定死的,由里往外:嵌套代码按路径最深的先来(框架、XPC 服务、插件、登录项、辅助应用,以及任何一个不是主可执行文件的散装 Mach-O);然后是主可执行文件;然后是这个包,授权文件加在它身上。
 
-**Folio has no nested code today** — one executable with every Rust crate linked
-into it, an `.icns`, an `Info.plist` and a `PkgInfo`, and an `otool -L` naming
-only `/System/Library/Frameworks` and `/usr/lib` — and `sign.sh` prints that at
-every run rather than staying
-silent, because the day it stops being true is the day this order starts
-mattering and nobody would otherwise notice. Two consequences of the rule are
-worth separating from it. The middle step is not a separate command *here*:
-`Contents/MacOS/folio` is what `CFBundleExecutable` names and signing the bundle
-is what signs it; the step exists for the case that makes it one, a **second**
-binary in `Contents/MacOS/`, which is nested code by the first clause whatever it
-is called. And nested code is signed **without this bundle's entitlements**:
-entitlements are a property of a process, a framework is not one, and a helper
-that *is* one brings its own file. Guessing that the application's entitlements
-are also a helper's is how a helper ends up holding something nobody reviewed for
-it.
+**Folio 今天没有嵌套代码**——一个可执行文件,每个 Rust crate 都链进去了,一个 `.icns`、一份 `Info.plist` 和一个 `PkgInfo`,而 `otool -L` 只点了 `/System/Library/Frameworks` 和 `/usr/lib`——而 `sign.sh` 每趟都把这件事印出来而不是闷着,因为它不再成立的那天,正是这个顺序开始要紧的那天,而否则没有人会注意到。这条规矩有两个后果值得跟它分开说。中间那一步在**这里**不是一条单独的命令:`Contents/MacOS/folio` 就是 `CFBundleExecutable` 点名的那个,而签这个包就是签它;这一步存在,是为了那种让它成为一步的情形——`Contents/MacOS/` 里的**第二个**二进制,而按第一条它无论叫什么都是嵌套代码。而嵌套代码签的时候**不带这个包的授权**:授权是一个进程的属性,一个框架不是一个进程,而一个**是**进程的辅助程序自带它自己的文件。以为应用的授权也是辅助程序的授权,正是一个辅助程序最后攥着一份没有人为它审过的东西的过程。
 
-That is also why `--deep` appears only in the verification. `codesign --deep -s`
-signs everything it finds with one set of options and one set of entitlements,
-which is precisely that guess; Apple's own guidance is that it is for repairing
-somebody else's bundle. For *verification* it is the right flag and the plan's
-acceptance line names it.
+这也是 `--deep` 只出现在验证里的原因。`codesign --deep -s` 用一套选项和一套授权去签它找到的一切,而那恰恰是上面那种想当然;苹果自己的指引是它用来修别人的包。用来**验证**时它是对的开关,而计划的验收那条线点的就是它。
 
-**⑥ The entitlements audit, against what M1–M4 actually built.** P-2's file is a
-hardened-runtime baseline with every exception spelled `false` rather than left
-absent, so that the answer is on the page. Re-asked here, feature by feature, and
-nothing moved:
+**⑥ 授权审计,对着 M1–M4 实际建出来的东西。** P-2 那份文件是一条强化运行时基线,每一个例外都写成 `false` 而不是留空,好让答案写在纸面上。这里逐个功能重问一遍,一条都没动:
 
-* **`com.apple.security.cs.disable-library-validation` — false.** Everything in
-  this process is either the statically linked executable or a system framework
-  loaded by name: AppKit, Metal, WebKit, AVFoundation, CoreText,
-  UserNotifications (§13.10 through §13.35). Nothing loads a plug-in, a scripting
-  addition or a user-supplied dylib. Turning validation off is how a signed
-  application becomes a host for code nobody signed, and there is no loader here
-  to need it.
-* **`com.apple.security.cs.allow-jit` and
-  `…allow-unsigned-executable-memory` — false.** Folio has no interpreter. The
-  one thing that looks like a JIT is WebKit's, and it is not in this process:
-  `WKWebView` runs JavaScript in its own `com.apple.WebKit.WebContent` process
-  with Apple's entitlements, which is exactly why §13.29 hosts a view rather than
-  linking an engine. wgpu's Metal path compiles shaders through the system
-  compiler and does not map executable pages itself.
-* **`com.apple.security.cs.allow-dyld-environment-variables` — false, and the
-  question was asked rather than inherited.** It is wanted by a process that has
-  to be launched with `DYLD_INSERT_LIBRARIES` or `DYLD_LIBRARY_PATH` set, and
-  nothing in this product is: the shell integration writes *shell* startup files
-  (§13.10's `ZDOTDIR` arrangement), and a child's environment is the child's, not
-  this process's.
-* **`com.apple.security.get-task-allow` and `…cs.debugger` — false.** A shipped
-  build is not attached to and does not attach. `get-task-allow` true is also a
-  notarization refusal in its own right.
-* **`com.apple.security.cs.disable-executable-page-protection` — false.**
-  Nothing rewrites its own text.
-* **`com.apple.security.network.client` — absent, and absent is correct.**
-  Network entitlements are an **App Sandbox** vocabulary: they are what a
-  sandboxed process asks for in order to be allowed out. This application is not
-  sandboxed — `com.apple.security.app-sandbox` is false, which is the Developer
-  ID distribution decision P-2 recorded — so the update check's `NSURLSession`
-  (§13.27) and `WKWebView`'s own traffic (§13.29) reach the network with no
-  entitlement at all. Adding the key would be a line that grants nothing and
-  implies a sandbox that is not there.
-* **No `NS…UsageDescription` of any kind**, which is §13.38's constraint arriving
-  as a packaging rule. M4-3 measured that WebKit on this system exposes **no**
-  delegate method for geolocation, under either the public or the private
-  spelling, so the web host cannot refuse that capability — what refuses it is
-  the bundle, because an application with no location purpose string cannot be
-  authorised and the request therefore cannot be granted. The camera and the
-  microphone the delegate *does* refuse, and this is the second lock on them.
+* **`com.apple.security.cs.disable-library-validation`——false。** 这个进程里的一切,要么是那个静态链接的可执行文件,要么是一个按名字加载的系统框架:AppKit、Metal、WebKit、AVFoundation、CoreText、UserNotifications(§13.10 到 §13.35)。没有任何东西加载插件、脚本附加件或者用户提供的 dylib。把校验关掉,是一个已签名应用变成一个谁都没签的代码的宿主的方式,而这里根本没有一个加载器需要它。
+* **`com.apple.security.cs.allow-jit` 和 `…allow-unsigned-executable-memory`——false。** Folio 没有解释器。唯一看着像 JIT 的那样东西是 WebKit 的,而它不在这个进程里:`WKWebView` 在它自己的 `com.apple.WebKit.WebContent` 进程里跑 JavaScript,用苹果的授权,而这恰恰是 §13.29 宿主一个视图而不是链进一个引擎的原因。wgpu 的 Metal 路线经系统编译器编着色器,自己不映射可执行页。
+* **`com.apple.security.cs.allow-dyld-environment-variables`——false,而这个问题是问过的,不是继承来的。** 它是一个必须带着 `DYLD_INSERT_LIBRARIES` 或 `DYLD_LIBRARY_PATH` 启动的进程要的,而这个产品里没有这样的进程:shell 集成写的是 **shell** 的启动文件(§13.10 那套 `ZDOTDIR` 安排),而一个子进程的环境是那个子进程的,不是这个进程的。
+* **`com.apple.security.get-task-allow` 和 `…cs.debugger`——false。** 一个已发布的构建不被附加,也不去附加。`get-task-allow` 为真本身就是一条公证拒绝理由。
+* **`com.apple.security.cs.disable-executable-page-protection`——false。** 没有任何东西改写自己的正文段。
+* **`com.apple.security.network.client`——不在,而不在是对的。** 网络授权是 **App 沙盒**的词汇:它们是一个被沙盒的进程为了被放出去而申请的东西。这个应用没有被沙盒——`com.apple.security.app-sandbox` 是 false,那是 P-2 记下的 Developer ID 分发决定——所以更新检查那个 `NSURLSession`(§13.27)和 `WKWebView` 自己的流量(§13.29),不带任何授权就够得到网络。加上那个键,会是一行什么都不给、却暗示着一个并不存在的沙盒的话。
+* **任何一种 `NS…UsageDescription` 都没有**,而这是 §13.38 那条约束以一条打包规矩的形式到来。M4-3 量到,这个系统上的 WebKit 对定位**没有**暴露任何委托方法,公开拼法和私有拼法都没有,所以网页宿主拒不掉那项能力——拒掉它的是那个应用包,因为一个没有定位用途说明的应用授权不了,请求因而批不下来。委托**确实**拒得掉的摄像头和麦克风,这是它们身上的第二把锁。
 
-That last one is now a test rather than a paragraph:
-`bt_winres::plist::tests::the_rendered_bundle_asks_the_reader_for_nothing`
-renders the shipped template and asserts that **no key it declares ends in
-`UsageDescription`** — a rule about every key rather than a list of three,
-because the key a future feature would add is one nobody has typed yet. It reads
-declared keys only, so the template's own comment can go on explaining at length
-why these keys are absent; a test that refused the explanation along with the key
-would be a test against writing it down.
+最后那一条现在是一只测试而不是一段话:`bt_winres::plist::tests::the_rendered_bundle_asks_the_reader_for_nothing` 渲出发货模板,断言它声明的**没有一个键以 `UsageDescription` 结尾**——一条关于每一个键的规矩,而不是一张三个的名单,因为将来某个功能会加的那个键,还没有人打出来过。它只读声明出来的键,所以模板自己那条注释可以继续长篇解释这些键为什么不在;一只连解释带键一起拒掉的测试,会是一只反对把它写下来的测试。
 
-**⑦ What the ad-hoc run on the Mac actually said.** A release build of `bt-app`
-at `e1d2f070` (394.6 s wall, 5.55 GB peak, alone on the machine as the venue
-requires), then the three scripts:
+**⑦ Mac 上那次 ad-hoc 运行实际说了什么。** 在 `e1d2f070` 上一次 `bt-app` 的 release 构建(墙上 394.6 s,峰值 5.55 GB,按场地要求独占那台机器),然后是那三个脚本:
 
 ```
 Folio.app/Contents/Info.plist                  7250
@@ -10233,275 +9612,63 @@ Folio.app/Contents/Resources/Folio.icns       18304
 io.github.lulu-loopp.folio 0.3.0
 ```
 
-`codesign --verify --deep --strict --verbose=2` → `valid on disk`, `satisfies its
-Designated Requirement`. `codesign -dv --verbose=4` →
-`flags=0x10002(adhoc,runtime)`, `Runtime Version=26.5.0`, `Sealed Resources
-version=2 rules=13 files=1`, `Info.plist entries=15`, `TeamIdentifier=not set`.
-The entitlements read back off the signature are the eight false keys, in order.
-`spctl -a -vvv` → `rejected`, exit 3, and `sign.sh` exits **0** on that, which is
-①'s rule about two facts wearing one word.
+`codesign --verify --deep --strict --verbose=2` → `valid on disk`、`satisfies its Designated Requirement`。`codesign -dv --verbose=4` → `flags=0x10002(adhoc,runtime)`、`Runtime Version=26.5.0`、`Sealed Resources version=2 rules=13 files=1`、`Info.plist entries=15`、`TeamIdentifier=not set`。从签名上读回来的授权是那八个 false 的键,顺序一致。`spctl -a -vvv` → `rejected`,退出 3,而 `sign.sh` 在这上面退出 **0**,那就是 ① 里关于两个事实穿着一个词的那条规矩。
 
-Two smaller measurements came out of the same run. `codesign -d --entitlements
-:-` — the spelling the plan's acceptance line uses — still works on Xcode 26 and
-prints `warning: Specifying ':' in the path is deprecated and will not work in a
-future release`; `sign.sh` runs `--entitlements - --xml`, which is the same
-document with no colon and no warning. And the Mach-O's own `VersionMin` is 11.0,
-the Rust target's floor, while `LSMinimumSystemVersion` says 14.0: Launch
-Services enforces the plist and the plist is the product's claim, so the two
-disagreeing is not a defect — but the binary would run on 11.0 if anything ever
-started it without going through Launch Services, and 14.0 is the number every
-macOS decision in §13 was measured against.
+同一趟运行还带出两个小一点的测量。`codesign -d --entitlements :-`——计划验收那条线用的拼法——在 Xcode 26 上还能用,并印出 `warning: Specifying ':' in the path is deprecated and will not work in a future release`;`sign.sh` 跑的是 `--entitlements - --xml`,同一份文档,没有冒号也没有警告。还有 Mach-O 自己的 `VersionMin` 是 11.0,也就是 Rust 目标的下限,而 `LSMinimumSystemVersion` 说的是 14.0:Launch Services 施行的是 plist,而 plist 是产品的主张,所以这两个不一致不是一个缺陷——但要是有什么东西绕开 Launch Services 启动它,这个二进制在 11.0 上确实跑得起来,而 14.0 是 §13 里每一个 macOS 决定所对着量的那个数。
 
-**⑧ `notarize.sh` and `dmg.sh` are M5-2's and M5-3's, written here and not run
-against Apple.** Both dry-ran end to end on the Mac, printing the real command
-lines with the real paths. Four decisions in them are worth having in this
-section rather than only in the scripts:
+**⑧ `notarize.sh` 和 `dmg.sh` 是 M5-2 和 M5-3 的,在这里写出来,没有对着苹果跑过。** 两个都在 Mac 上从头到尾 dry-run 过,把带着真实路径的真实命令行印了出来。它们里面有四个决定值得放进本节而不是只留在脚本里:
 
-* **The application goes up inside a `ditto` zip and the disk image does not.**
-  `notarytool submit` takes one *file* and a `.app` is a directory. `ditto -c -k
-  --sequesterRsrc --keepParent` rather than `zip`, because a signed bundle is its
-  contents *and* their extended attributes. The zip is a transport: the ticket
-  comes back stapled to the bundle, and the zip is deleted.
-* **The log is an artifact, not a diagnostic.** `notarytool log` is the only
-  place the service says *why*, and it is fetched on acceptance as well as on
-  rejection and written beside the artifact. A log fetched only when something
-  went wrong is a log nobody has when the question is asked a month later. The
-  plan's M5 acceptance asks for exactly this.
-* **The disk image is two entries and no Finder scripting.** `Folio.app` and a
-  symbolic link to `/Applications`; the drag is the whole interface. No
-  background picture and no window layout, because those are set by mounting the
-  image read-write and driving the Finder through Apple events — Automation
-  permission, a window server, a logged-in session — which on a release machine
-  is a step that fails into an image that merely looks unfinished. `UDZO`, so the
-  image is compressed and **read-only**: a read-write image can be changed after
-  it is signed while the signature stays valid for the container it was made of.
-  The image gets `--timestamp` and does **not** get `--options runtime` or
-  entitlements: those describe how a process runs and a disk image is not one.
-* **The last Gatekeeper question is a different question.** `spctl -a -vvv` on
-  the application asks whether it may execute; `spctl -a -vvv -t open --context
-  context:primary-signature` on the image asks whether this *document* may be
-  opened, which is the assessment a double-clicked download actually gets.
+* **应用装在一个 `ditto` 的 zip 里上去,而磁盘映像不是。** `notarytool submit` 收一个**文件**,而一个 `.app` 是一个目录。用 `ditto -c -k --sequesterRsrc --keepParent` 而不是 `zip`,因为一个已签名的应用包是它的内容**加上**它们的扩展属性。那个 zip 是一趟运输:票回来是钉在应用包上的,而那个 zip 被删掉。
+* **那份日志是一件产物,不是一条诊断。** `notarytool log` 是这项服务唯一说出**为什么**的地方,而它在通过时和在被拒时一样被取下来,写在产物旁边。一份只在出事时才取的日志,是一个月之后有人问起时谁手里都没有的日志。计划的 M5 验收要的正是这个。
+* **那个磁盘映像是两个条目,没有访达脚本。** `Folio.app` 和一个指向 `/Applications` 的符号链接;那次拖拽就是全部界面。没有背景图、没有窗口布局,因为那些要把映像挂成可读写、再经 Apple 事件驱动访达才设得了——自动化授权、一个窗口服务器、一个登录着的会话——而在一台发布机上那是一个失败之后只留下一个看着没做完的映像的步骤。用 `UDZO`,所以映像是压缩的、**只读**的:一个可读写的映像在签完之后还能被改,而签名对它被做出来时的那个容器仍然有效。映像拿 `--timestamp`,而**不**拿 `--options runtime` 或授权:那些描述的是一个进程怎么跑,而一个磁盘映像不是一个进程。
+* **最后那个 Gatekeeper 问题是另一个问题。** 对应用问 `spctl -a -vvv`,问的是它可不可以执行;对映像问 `spctl -a -vvv -t open --context context:primary-signature`,问的是这份**文档**可不可以被打开,而那才是一次被双击的下载真正受到的评估。
 
-**⑨ The owner's sequence, and the two ways it goes wrong quietly.** It lives in
-`packaging/macos/README.md` — one place, beside the scripts — and
-`docs/RELEASING.md`'s macOS section points at it rather than repeating it. In
-order: `security find-identity -v -p codesigning`; `cargo build --release
---locked -p bt-app`; `bundle.sh --out dist/macos`; `sign.sh --app
-dist/macos/Folio.app --identity "Developer ID Application: <name> (<TEAMID>)"`;
-`notarize.sh --path dist/macos/Folio.app`; `spctl -a -vvv dist/macos/Folio.app`,
-which is where `accepted` and `source=Notarized Developer ID` are supposed to
-appear; `dmg.sh --app dist/macos/Folio.app --out dist/macos --identity "…"`.
+**⑨ 用户那串步骤,以及它悄无声息出错的两种方式。** 它住在 `packaging/macos/README.md`——一处地方,挨着那些脚本——而 `docs/RELEASING.md` 的 macOS 一节指向它,不重复它。按顺序:`security find-identity -v -p codesigning`;`cargo build --release --locked -p bt-app`;`bundle.sh --out dist/macos`;`sign.sh --app dist/macos/Folio.app --identity "Developer ID Application: <name> (<TEAMID>)"`;`notarize.sh --path dist/macos/Folio.app`;`spctl -a -vvv dist/macos/Folio.app`,那里应该出现 `accepted` 和 `source=Notarized Developer ID`;`dmg.sh --app dist/macos/Folio.app --out dist/macos --identity "…"`。
 
-The two quiet failures: **the session must have the login keychain open**, or
-`codesign` answers `errSecInternalComponent` and retrying changes nothing; and
-**nothing is re-signed after stapling**, because the ticket lives inside the
-signed artifact and a second `codesign` throws it away, so `stapler validate`
-fails on a build that was notarized ten minutes earlier. Three of the four files
-that come out of `dist/macos/` are archived rather than published: the `.dSYM`
-and the two notarization logs.
+那两种悄无声息的失败:**这个会话必须开着登录钥匙串**,否则 `codesign` 答 `errSecInternalComponent`,而重试改变不了任何事;以及**钉票之后不许再签一次**,因为那张票住在已签名的产物里面,而第二次 `codesign` 会把它扔掉,于是 `stapler validate` 在一个十分钟前刚公证过的构建上失败。`dist/macos/` 里出来的四个文件有三个是归档而不是发布的:那份 `.dSYM` 和两份公证日志。
 
-**⑩ Runnable from a runner, which is M5-4's half of this.** No path is assumed
-except `~/.appstoreconnect`, which is where Apple's own documentation puts the
-notarization credential and which `--notary-dir` moves. Everything else is
-`--out`, `--app`, `--binary`, `--identity`, `--entitlements`, or is resolved from
-the script's own location, so a checkout at any path works. The `.p8` and the
-`.env` are read **only if present** and their absence is a clean refusal naming
-the file, rather than an upload that fails three network hops away.
-`packaging/macos/.gitignore` refuses `*.p8` and `*.p12` at the place they would
-land; nothing in this tree ever opens the key, it hands `notarytool` the path.
+**⑩ 从一台跑器上跑得起来,而这是 M5-4 在这件事里的那一半。** 除了 `~/.appstoreconnect` 没有假定任何路径,那是苹果自己的文档放公证凭据的地方,而 `--notary-dir` 挪得动它。其余全是 `--out`、`--app`、`--binary`、`--identity`、`--entitlements`,或者从脚本自己的位置解出来,所以一份签出在任何路径上都能用。那个 `.p8` 和那个 `.env` **只在存在时才读**,而它们不在时是一次点名那个文件的干净拒绝,而不是一次在三跳网络之外才失败的上传。`packaging/macos/.gitignore` 在 `*.p8` 和 `*.p12` 会落地的那个地方拒掉它们;这棵树里没有任何东西打开过那把钥匙,它把路径递给 `notarytool`。
 
-**⑪ The icon source — ③'s two facts closed, by drawing the mark at 1024 rather
-than enlarging it.** `make-folio-ico.py` states the mark in units of the square,
-which is why the 16 and the 256 in `folio.ico` are one drawing and not two that
-resemble each other, so the size an icon set wants was never a new picture — only
-that statement resolved once more: `--png` calls the same `render` at 1024 and
-writes `assets/app-icon/folio-1024.png`, and the `.ico` is left alone (rebuilt
-from the edited generator it comes back byte for byte, all 46 316 of them). Size
-reaches the drawing at exactly two points — the fold is widened below 84 pixels
-so a coarse grid cannot swallow it, and the page dot is withheld below 48 — so
-from 84 upwards the 1024 and the 256 are one drawing at two resolutions, and
-box-averaging the 1024 back down to 256 puts 1 524 of 65 536 pixels a level or
-more away from the `.ico`'s own 256, every one of them on an edge (the tile's
-corner arc, the sheet border, the fold, the dot rim) and not one in a flat field
-— which is what a finer coverage estimate looks like and not what a moved
-geometry looks like. `bundle.sh` reads that file because it is the largest PNG in
-the directory, which was already ③'s rule, and 1024 being `icon_512x512@2x`
-every one of the ten slots `iconutil` names is now generated and none is an
-upscale: on the Mac the icon set came out ten files, `Folio.icns` 85 562 bytes
-against the 18 304 of ⑦, and the `icon_512x512@2x` extracted back out of it
-reads 1024 × 1024 with alpha. The `.ico` route is kept rather than deleted,
-because the day the PNG is missing is not the day to find out it stopped working
-— `--icon-fallback` takes it on a tree where the PNG is present, which is the
-only way it will ever be run again, and it still produces the seven slots and
-exactly the 18 304 bytes ⑦ recorded. Both were measured without building
-anything, because the icon step is now a function and `--icons-only <path.icns>`
-is the whole of it: no binary, no plist, no cargo. What holds the file to what
-the script expects is a Windows test —
-`bt_winres::tests::the_macos_icon_source_is_the_1024_square_the_bundle_script_picks`,
-which reads the PNG's own header for 1024 × 1024 and colour type 6, reads the
-directory to check this is the largest PNG in it, and reads the script for the
-glob that finds it.
-
-*(本节英文,待中文文案改写。)*
+**⑪ 图标源——③ 那两件事关掉了,靠把标记画在 1024 上而不是把它放大。** `make-folio-ico.py` 把那个标记表述成正方形的单位,这正是 `folio.ico` 里的 16 和 256 是同一张画、而不是两张互相像的画的原因,所以一个图标集要的那个尺寸从来就不是一张新图——只是把那份表述再解一次:`--png` 在 1024 上调同一个 `render`,写出 `assets/app-icon/folio-1024.png`,而那个 `.ico` 一个字节没动(从改过的生成器重建出来,它逐字节还是原样,全部 46 316 个)。尺寸只在两个点上够得到那张画——在 84 像素以下把折角加宽,好让一张粗网格咽不掉它;在 48 像素以下把页面上那个点收掉——所以从 84 往上,1024 和 256 是同一张画的两个分辨率,而把 1024 按盒平均降回 256,65 536 个像素里有 1 524 个跟那个 `.ico` 自己的 256 差出一级或更多,而它们每一个都在一条边上(方块的圆角、纸张的边、折角、点的边缘),没有一个在平坦区域里——这是一次更细的覆盖估计该有的样子,不是几何被挪动过的样子。`bundle.sh` 读那个文件,因为它是那个目录里最大的 PNG,而那本来就是 ③ 的规矩;而 1024 就是 `icon_512x512@2x`,所以 `iconutil` 点名的那十个槽现在每一个都生成了,而且没有一个是放大来的:在 Mac 上那个图标集出来是十个文件,`Folio.icns` 85 562 字节,对着 ⑦ 里的 18 304,而从里面抽回来的 `icon_512x512@2x` 读作 1024 × 1024 带 alpha。那条 `.ico` 路线是留着而不是删掉的,因为那个 PNG 缺了的那天,不是去发现它已经不能用了的那天——`--icon-fallback` 在一棵 PNG 在场的树上走那条路,而那是它以后唯一还会被跑到的方式,而它照样产出那七个槽,以及 ⑦ 记下的整整 18 304 字节。两件事都是在什么都不构建的情况下量的,因为图标那一步现在是一个函数,而 `--icons-only <path.icns>` 就是它的全部:不建二进制、不渲 plist、不动 cargo。把这个文件拴在脚本所期望的东西上的是一只 Windows 测试——`bt_winres::tests::the_macos_icon_source_is_the_1024_square_the_bundle_script_picks`,它读那个 PNG 自己的头看 1024 × 1024 和颜色类型 6,读那个目录确认这是里面最大的 PNG,并读那个脚本找到它用的那个 glob。
 
 ### 13.43 M5-4: 发布线的 mac 车道——有证书就真签,没有就 ad-hoc 也出包(`.github/workflows/release.yml`、`.github/workflows/ci.yml`、`.github/actions/claimed-version/action.yml`(新)、`scripts/release/sbom.ps1`)
 
 **取 13.43。** §13.41 是 M5-1 的四个脚本,§13.42 由同一批在飞的票占着;本节取下
 一个还没被认领的号。
 
-**① What this job is, and the one thing it is not.** `release.yml` grows a
-second job. It builds `bt-app` on a macOS runner, assembles the bundle, signs
-it, notarizes it where it can, writes the disk image, keeps the debug
-information, hashes what it made and then starts the thing it built and asks it
-what it is. What it does **not** do is attach any of that to a release, and the
-paragraph at the top of that file is the whole reason: a release is signed on
-the machine that can sign, so that machine is the only place a release is made
-from. The ticket for this work asked for an upload "to the same release the
-Windows job creates" — there is no such release, by a decision taken after 0.2.1
-shipped one button away from publishing an unsigned draft. So the macOS lane
-leaves workflow artifacts exactly as the Windows one does, and
-`docs/RELEASING.md` is still the whole of how a release is made.
+**① 这个 job 是什么,以及它唯一不是的那样东西。** `release.yml` 长出第二个 job。它在一台 macOS 跑器上建 `bt-app`、装出应用包、签它、能公证的时候公证它、写出磁盘映像、留下调试信息、给做出来的东西算哈希,然后启动它建出来的那样东西、问它是什么。它**不**做的是把这里面任何一样挂到一个 release 上,而那个文件顶上那一段就是全部理由:一个 release 是在签得了的那台机器上签的,所以那台机器是唯一做得出 release 的地方。这件事的票要求上传「到 Windows job 建的那同一个 release」——没有那么一个 release,这是 0.2.1 发完、它离发出一份未签名草稿只差一个按钮之后作出的决定。所以 macOS 这条车道跟 Windows 那条一样,留下的是 workflow 产物,而一个 release 怎么做,仍然全写在 `docs/RELEASING.md` 里。
 
-**② `macos-14`, and the deployment target is the whole reason.**
-`packaging/macos/README.md` fixes the minimum at macOS 14.0, stated rather than
-inherited. Both runner labels are arm64 — the other half of what this job needs,
-and the only architecture this preview ships — so what separates them is the SDK
-and the libraries the build links against. Building on the oldest system the
-product claims to run on is what stops a symbol introduced after it from being
-linked in silently, to be found by a user on 14 rather than by this job.
+**② `macos-14`,而部署目标就是全部理由。** `packaging/macos/README.md` 把最低版本定在 macOS 14.0,是写明的而不是继承的。两个跑器标签都是 arm64——这个 job 要的另一半,也是这个预览版唯一发的架构——所以分开它们的是 SDK 和构建所链的那些库。在产品声称跑得动的最老那个系统上构建,挡住的是一个它之后才引入的符号被悄悄链进来、然后被一个 14 上的用户而不是被这个 job 发现。
 
-**③ Three states of the credential, and no fourth.** The four secrets and the
-two variables are named once, in `docs/RELEASING.md` ▸ macOS, and this job reads
-exactly those names. With none of them set it signs ad-hoc — `codesign`'s own
-`-`, a real signature over the real bytes with nobody behind it — and the
-artifact is called `folio-macos-<version>-unsigned`. With all of them set it
-imports the `.p12` into a keychain made in `RUNNER_TEMP` for the length of the
-job, signs with the Developer ID identity, notarizes and staples both the
-application and the image, and the artifact drops the suffix. With *some* of
-them set it stops there and says which are missing: a certificate with no notary
-key produces a build every Mac in the world refuses, and finding that out at
-`spctl` ten minutes later names the wrong thing.
+**③ 凭据的三种状态,没有第四种。** 那四个 secret 和两个变量只点名一次,在 `docs/RELEASING.md` ▸ macOS 里,而这个 job 读的恰好是那几个名字。一个都没设时它签 ad-hoc——`codesign` 自己那个 `-`,一个对着真实字节、背后没有人的真签名——而产物叫 `folio-macos-<version>-unsigned`。全设了时它把那个 `.p12` 导进一个在 `RUNNER_TEMP` 里、只活这个 job 那么长的钥匙串,用 Developer ID 身份签名,给应用和映像都公证并钉票,而产物去掉那个后缀。设了**一部分**时它停在那里,并说出缺的是哪几个:一份有证书没有公证钥匙的构建,世界上每一台 Mac 都会拒,而十分钟之后在 `spctl` 上才发现这件事,点的是错的那样东西。
 
-A fork has no secrets and a run started from one has none, which is why the
-ad-hoc branch is not a courtesy. A lane that could only run with a credential is
-a lane nobody exercises — the same bargain `package.ps1`'s `-Sign` note already
-makes on Windows, and the same reason the four scripts default `--identity` to
-`-`.
+一个 fork 没有 secret,而一次从 fork 起的运行也没有,这正是 ad-hoc 那条分支不是一份客气的原因。一条只有拿着凭据才跑得了的车道,是一条没有人走过的车道——跟 `package.ps1` 的 `-Sign` 那条注在 Windows 上已经做的是同一笔交易,也是那四个脚本把 `--identity` 默认成 `-` 的同一个理由。
 
-What is carried between the steps is the certificate's SHA-1 rather than its
-subject. It is unambiguous when a keychain holds more than one identity, and it
-is why the team id — which the plan keeps out of this repository on purpose —
-never reaches a log that anybody who can read the run can read.
+在步骤之间传的是证书的 SHA-1 而不是它的主体名。一个钥匙串里不止一个身份时它没有歧义,而这也是那个 team id——计划特意把它挡在这个仓外面——从不进入一份任何看得到这次运行的人都读得到的日志的原因。
 
-**④ The keychain is deleted in a step that runs whatever happened.** It holds
-the owner's private key and a runner is a machine this job does not own; the
-`.p12` and the `.p8` are removed in the same step, the keychain is taken off the
-search list before it is deleted, and `set-keychain-settings -lut 300` means a
-job that dies between the import and the cleanup leaves a locked one.
+**④ 那个钥匙串在一个无论出了什么事都会跑的步骤里被删掉。** 它攥着用户的私钥,而一台跑器是这个 job 并不拥有的机器;那个 `.p12` 和那个 `.p8` 在同一步里被删掉,那个钥匙串在被删之前先从搜索表里拿下来,而 `set-keychain-settings -lut 300` 意味着一个在导入和清理之间死掉的 job 留下的是一个锁着的钥匙串。
 
-**⑤ Gatekeeper is asserted in both directions.** An ad-hoc bundle **must** be
-refused: a lane that only checked for an acceptance would pass a run that signed
-nothing at all, which is precisely the run this design makes possible. A
-notarized one must be accepted, and accepted with `source=Notarized Developer
-ID` rather than with any other source, which is the string the plan's M5
-acceptance line names. The image is asked a different question from the
-application's — `-t open` against the primary signature, which is the assessment
-a double-clicked download actually gets — and `stapler validate` is asked of
-both, because a stapled image holding an unstapled application is a download
-that works until the reader is offline.
+**⑤ Gatekeeper 是两个方向都断言的。** 一个 ad-hoc 的应用包**必须**被拒:一条只查通过的车道,会放过一次什么都没签的运行,而那恰恰是这个设计使之可能的那次运行。一个已公证的必须被接受,而且要带着 `source=Notarized Developer ID` 被接受,而不是别的什么来源,那是计划 M5 验收那条线点名的字符串。映像被问的是跟应用不同的问题——`-t open` 对着主签名,也就是一次被双击的下载真正受到的那个评估——而 `stapler validate` 两个都问,因为一个钉了票的映像里装着一个没钉票的应用,是一份在读者离线之前都好用的下载。
 
-`sign.sh` is given `--no-spctl`, and that is an ordering rather than a weakened
-check. A Developer ID signature that has not been notarized *yet* is refused,
-and that script treats the refusal as its own failure — correctly, because from
-inside it there is nothing left to try. Here there is: notarization is the next
-step. So the question is asked once, at the end, of the artefact in the state it
-is shipped in.
+`sign.sh` 收到 `--no-spctl`,而那是一次排序而不是一次放松。一个**还没**公证的 Developer ID 签名会被拒,而那个脚本把这次拒绝当成自己的失败——这是对的,因为从它里面看已经没什么可试的了。这里有:公证就是下一步。所以这个问题只问一次,在最后,对着那件已经处在它发货状态的产物。
 
-**⑥ What is kept beside the release and never inside it.** `bundle.sh` runs
-`dsymutil` into `Folio.app.dSYM` beside the bundle; this job moves that, and the
-notarization log of each submission, into a directory of their own and uploads
-them as a separate artifact. §13.31 ⑥ is the requirement and this is where it is
-discharged: on Apple targets the release profile's line-tables-only debug
-information stays in the object files, the linked image carries only a debug map
-pointing at them, and the `.dSYM` is the only thing that turns a crash report
-from a shipped build back into file names and line numbers. It pairs with the
-binary by UUID and exists only on the machine that linked it, so a lane that
-does not keep it throws the evidence away at the moment it is made. It is also
-several times the size of the download and would be signed for no reason, which
-is why it is beside and not inside.
+**⑥ 留在 release 旁边、从不留在它里面的东西。** `bundle.sh` 把 `dsymutil` 跑进应用包旁边的 `Folio.app.dSYM`;这个 job 把它、连同每次提交的公证日志,挪进一个它们自己的目录,再作为一份单独的产物上传。§13.31 ⑥ 是那条要求,而这里是它被履行的地方:在苹果目标上,release profile 那份只有行表的调试信息留在对象文件里,链出来的映像只带一张指着它们的调试映射表,而那份 `.dSYM` 是唯一能把一份出自已发布构建的崩溃报告变回文件名和行号的东西。它按 UUID 和二进制配对,而且只存在于链接它的那台机器上,所以一条不留它的车道,是在证据被做出来的那一刻把它扔掉。它还比那份下载大好几倍,而且会被白签一次,这就是它在旁边而不在里面的原因。
 
-**⑦ `SHA256SUMS.txt` is a second file, not a longer one.** The two lanes run on
-two machines and neither can see the other's output. What this one writes is
-byte-for-byte the shape `package.ps1` writes — lower-case hex, two spaces, the
-bare name, LF, sorted by name, a final newline — because `shasum -a 256` prints
-exactly that line and nothing here formats one by hand. The 0.2.5 and 0.3.0
-releases shipped a `SHA256SUMS.txt` with CRLF that `sha256sum -c` could not read;
-that is not a mistake this lane can repeat, because it never builds the line.
+**⑦ `SHA256SUMS.txt` 是第二个文件,不是一个更长的文件。** 两条车道在两台机器上跑,而哪一台都看不见另一台的产物。这一条写出来的东西,逐字节就是 `package.ps1` 写出来的那个形状——小写十六进制、两个空格、光名字、LF、按名字排序、末尾一个换行——因为 `shasum -a 256` 印的恰好就是那一行,而这里没有任何东西去手工拼一行。0.2.5 和 0.3.0 两次发布发出去的 `SHA256SUMS.txt` 是 CRLF 的,`sha256sum -c` 读不了;这条车道重不了那个错,因为它根本不造那一行。
 
-**⑧ The bill of materials takes the triple it filters by.** `sbom.ps1` had
-`x86_64-pc-windows-msvc` written into it, and `--filter-platform` is the whole
-reason the document describes the thing shipped rather than the lock file. A
-macOS bill listing `windows-sys` would describe a build that does not exist as
-surely as a Windows one listing `nix` would. So the triple is a parameter with
-the Windows value as its default, and the macOS lane passes its own: measured on
-this branch, 447 components for the Windows target and 457 for
-`aarch64-apple-darwin`, the second carrying `objc2`, `core-graphics` and
-`dispatch2` and no `windows-sys`, the first the other way round. The script runs
-on the runner's own `pwsh`, which the GitHub macOS image carries; it reads
-`cargo metadata` and nothing else.
+**⑧ 物料清单收下它据以过滤的那个三元组。** `sbom.ps1` 里写死着 `x86_64-pc-windows-msvc`,而 `--filter-platform` 正是它描述发出去的那样东西、而不是描述锁文件的全部理由。一份列着 `windows-sys` 的 macOS 清单,和一份列着 `nix` 的 Windows 清单一样,描述的是一个并不存在的构建。所以那个三元组成了一个参数,默认值是 Windows 那个,而 macOS 这条车道传它自己的:在本分支上量到,Windows 目标 447 个组件,`aarch64-apple-darwin` 457 个,后者带着 `objc2`、`core-graphics` 和 `dispatch2` 而没有 `windows-sys`,前者反过来。这个脚本跑在跑器自己的 `pwsh` 上,GitHub 的 macOS 镜像带着它;它读 `cargo metadata`,别的什么都不读。
 
-**⑨ The tag and the manifest are one claim, read once.** That rule — and its
-`-preview` clause, and its "a manual run claims nothing" clause — was a step
-inside the Windows job. Two jobs whose artefact names both carry a version
-cannot each keep their own reading of that line, so it moved into
-`.github/actions/claimed-version` and both jobs come through it, the way both
-come through `.github/actions/toolchain`. Referenced by path, so it is this
-repository's own file at the same commit as the workflow calling it.
+**⑨ 那个 tag 和那份 manifest 是一次主张,只读一次。** 那条规矩——连同它的 `-preview` 分句,以及它的「一次手动运行什么都不主张」分句——本来是 Windows job 里面的一步。两个产物名都带版本的 job 不可能各留一份对那一行的读法,所以它挪进了 `.github/actions/claimed-version`,两个 job 都从那里过,就像两个都从 `.github/actions/toolchain` 过一样。按路径引用,所以它是这个仓自己的文件,而且跟调用它的那个 workflow 在同一个提交上。
 
-**⑩ The rename is the lane's, and deliberately not the script's.** `dmg.sh`
-writes `Folio.dmg`; a script that wrote the long name would be a second reader
-of the version line. This job renames it to
-`Folio-<version>-macos-arm64.dmg` on the way to the artifact — the tag and the
-asset are one claim, and an Intel Mac has to be able to tell from the name that
-this build is not for it.
+**⑩ 那次改名是车道的,而且是刻意不放在脚本里的。** `dmg.sh` 写出 `Folio.dmg`;一个写出那个长名字的脚本,会是版本那一行的第二个读者。这个 job 在去产物的路上把它改成 `Folio-<version>-macos-arm64.dmg`——那个 tag 和那件资产是一次主张,而一台 Intel Mac 得能从名字上看出这份构建不是给它的。
 
-**⑪ What was proven without pushing a tag.** `act` is not available and
-starting a workflow by hand needs an account this session does not have, so the
-job's shell steps were run on the Mac mini, in a worktree at this branch's
-commit, with `--identity -`: the whole ad-hoc branch, step for step, in the
-job's own order. `sh -n` passed on all four scripts; the release build linked;
-`bundle.sh` produced a 69,976,064-byte `Folio.app` and a 211,181,568-byte
-`Folio.app.dSYM` whose UUID is the binary's, read back from `dwarfdump` on both;
-`sign.sh --no-spctl` left `flags=0x10002(adhoc,runtime)` with every entitlement
-`false`; `dmg.sh --skip-notarize` wrote a 39,900,615-byte image, and the rename
-made it `Folio-0.3.0-macos-arm64.dmg`. `SHA256SUMS.txt` came out 183 bytes of
-ASCII ending in one `0a`, and `shasum -a 256 -c` read it back and said `OK`
-twice. The bundle then answered `Folio 0.3.0 (34880a804b)` — the manifest's
-version and this commit's short hash — `codesign --verify --deep --strict`
-passed, and `spctl` said `rejected` for the application and `rejected` (exit 3)
-for the image. Both refusals are what the ad-hoc branch asserts, and the step
-said so and exited 0.
+**⑪ 没推 tag 的情况下证明了什么。** `act` 用不了,而手动起一个 workflow 需要一个本会话没有的账号,所以这个 job 的 shell 步骤是在 Mac mini 上、在一个停在本分支这个提交上的 worktree 里、用 `--identity -` 跑的:整条 ad-hoc 分支,一步一步,按这个 job 自己的顺序。四个脚本 `sh -n` 全过;release 构建链上了;`bundle.sh` 产出一个 69,976,064 字节的 `Folio.app` 和一个 211,181,568 字节的 `Folio.app.dSYM`,而它的 UUID 就是那个二进制的,两边都用 `dwarfdump` 读回来对过;`sign.sh --no-spctl` 留下 `flags=0x10002(adhoc,runtime)`,每一项授权都是 `false`;`dmg.sh --skip-notarize` 写出一个 39,900,615 字节的映像,而那次改名把它变成 `Folio-0.3.0-macos-arm64.dmg`。`SHA256SUMS.txt` 出来是 183 字节 ASCII,以一个 `0a` 结尾,而 `shasum -a 256 -c` 把它读回来,说了两次 `OK`。那个应用包随后答 `Folio 0.3.0 (34880a804b)`——manifest 的版本和这个提交的短哈希——`codesign --verify --deep --strict` 过了,而 `spctl` 对应用说 `rejected`、对映像说 `rejected`(退出 3)。这两次拒绝正是 ad-hoc 那条分支断言的东西,而那一步这么说了,然后退出 0。
 
-⑫ What a hand-run on that machine cannot reach: the `pwsh` half — the
-version step and the bill of materials — because there is no PowerShell
-installed on it, so both were exercised on Windows instead, `sbom.ps1` for each
-triple as ⑧ records; and every line that needs a certificate, which is the whole
-signed branch and its Gatekeeper acceptance. Those are the lines a tag will
-exercise first, and they are also the ones the owner's own release sequence in
-`docs/RELEASING.md` walks by hand.
+⑫ 在那台机器上手跑够不到的东西:`pwsh` 那一半——版本那一步和物料清单——因为它上面没装 PowerShell,所以两样都改在 Windows 上跑了,`sbom.ps1` 按 ⑧ 记的对每个三元组各跑一次;以及每一条需要证书的行,也就是整条签名分支和它那次 Gatekeeper 通过。那些是一个 tag 最先会走到的行,也是用户自己在 `docs/RELEASING.md` 里那串发布步骤手工走的那些。
 
-One thing the run turned up that is not this lane's: `dsymutil` warns `unable to
-open object file` for one `psm` object inside the release `deps` directory. The
-`.dSYM` is produced and its UUID matches, so it is a hole in one crate's debug
-map rather than a failed step; it is `bundle.sh`'s to look at.
+那次运行带出一样不属于这条车道的东西:`dsymutil` 对 release `deps` 目录里的一个 `psm` 对象报 `unable to open object file`。那份 `.dSYM` 产出来了,UUID 也对得上,所以这是一个 crate 的调试映射表上的一个洞,不是一个失败的步骤;这是 `bundle.sh` 该看的事。
 
-**⑬ `ci.yml` parses the four scripts on every push.** `core-macos` is the only
-job in that file on the platform they run on, `sh -n` reads the grammar and runs
-nothing, and it costs a second. Without it a syntax error in a release script is
-found by a tag — which is the failure mode the comment at the top of
-`release.yml` was written about.
-
-*(本节英文,待中文文案改写。)*
+**⑬ `ci.yml` 每次推送都解析这四个脚本。** `core-macos` 是那个文件里唯一在它们所跑的那个平台上的 job,`sh -n` 读语法、什么都不跑,而它花一秒钟。没有它,一个发布脚本里的语法错误就要由一个 tag 来发现——而那正是 `release.yml` 顶上那条注释所针对的失败方式。
 
 ### 13.46 M6-2: 干净机怎么来——一个新用户账户加一台 GitHub 的跑器,虚拟机写明不取(`docs/RELEASING.md`、`docs/plans/port/m6-1-checklist.md`(新)、`.github/workflows/release.yml`)
 
