@@ -2684,8 +2684,21 @@ pub mod attention_pipe;
 #[cfg(windows)]
 pub mod launch_pipe;
 
-/// The same door, on a platform whose sockets M3-5 has not written yet.
-#[cfg(not(windows))]
+/// **The same door, where the kernel names doors with paths** (M3-5, DESIGN
+/// §13.28).
+///
+/// A third arm rather than a second, on `http`'s own footing (§13.27): the two
+/// real ones are two transports — a named pipe and a Unix socket — and the
+/// third is neither, which is what `launch_pipe_portable.rs` says honestly for
+/// a platform that has no sockets to bind. The conversation §7.59b fixes is the
+/// product's and is identical across the two real arms; the name, the boundary
+/// and the framing are the transport's and are not.
+#[cfg(unix)]
+#[path = "launch_pipe_unix.rs"]
+pub mod launch_pipe;
+
+/// The same door on a platform with neither a pipe namespace nor a socket.
+#[cfg(all(not(windows), not(unix)))]
 #[path = "launch_pipe_portable.rs"]
 pub mod launch_pipe;
 
@@ -2758,11 +2771,14 @@ pub mod explorer_command;
 pub mod explorer_command;
 
 /// **One data directory, one writer** — the claim two Folio processes settle
-/// which of them owns `%APPDATA%\Folio\` with (review row R4-5).
+/// which of them owns `%APPDATA%\Folio\`, or `~/Library/Application
+/// Support/Folio`, with (review row R4-5; M3-5, DESIGN §13.28).
 ///
 /// Not a boundary in the sense the modules above are: what is impure in it is
-/// one `CreateMutexW` and the `CloseHandle` that answers it, and the part worth
-/// testing — which directories claim the same name — is a string function.
+/// one `CreateMutexW` and the `CloseHandle` that answers it on Windows, and one
+/// `flock` on a descriptor held for the life of the process off it. The part
+/// worth testing on either platform — which directories claim the same name —
+/// is a function of a path.
 pub mod instance;
 
 mod webview;
