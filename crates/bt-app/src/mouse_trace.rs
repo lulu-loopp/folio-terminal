@@ -206,8 +206,7 @@ impl WheelRail<'_> {
             u8::from(self.contains),
             point_word(Some(self.point)),
             self.rail_scroll,
-            self.strip_rail
-                .map_or_else(|| "none".to_owned(), rect_word),
+            self.strip_rail.map_or_else(|| "none".to_owned(), rect_word),
             column_words("aim", self.aim_height, self.aim),
             column_words("paint", self.paint_height, self.paint),
             u8::from(self.aim == self.paint),
@@ -244,9 +243,8 @@ pub struct WheelAim {
 impl WheelAim {
     #[must_use]
     pub fn line(&self) -> String {
-        let carry = |delta: Option<MouseScrollDelta>| {
-            delta.map_or_else(|| "none".to_owned(), delta_word)
-        };
+        let carry =
+            |delta: Option<MouseScrollDelta>| delta.map_or_else(|| "none".to_owned(), delta_word);
         format!(
             "wheel_aim leave={} index={} tab={} seat={} at_before={} carried_before={} \
              steps={} carried_after={} card_skip_before={} card_skip_after={}",

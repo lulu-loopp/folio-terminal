@@ -91172,10 +91172,31 @@ impl Runtime<'_> {
     /// [`Self::strip_guests`] for the one door both this and the hit test read
     /// the guest off.
     fn focus_rail_geometry_now(&self, now: Instant) -> Option<seats::FocusRailGeometry> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
         let (_, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        self.focus_rail_geometry_at(now, height as f32)
+    }
+
+    /// **The same column, solved against a surface height somebody names**
+    /// (`BT_MOUSE_TRACE`, §7.60).
+    ///
+    /// [`Self::focus_rail_geometry_now`] is this with the swapchain's height put
+    /// in, and it is the only caller that belongs in the product. The other is
+    /// [`Self::wheel_rail_trace`], which puts in the height the chrome was
+    /// **painted** against ([`seats::chrome_surface_height`]) so that the two
+    /// can be compared — and that comparison is worth nothing unless the height
+    /// is the *only* thing that differs between them. Hence a parameter rather
+    /// than a second call to the solver: everything else — the scale, the
+    /// platform's band, the tab count, how many slots a dragged card holds open
+    /// (缺陷 #189, which is one door and stays one door), the scroll and the
+    /// rail's sampled posture — is read here once and reaches both.
+    fn focus_rail_geometry_at(
+        &self,
+        now: Instant,
+        height: f32,
+    ) -> Option<seats::FocusRailGeometry> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         seats::focus_rail_geometry(
-            height as f32,
+            height,
             scale,
             self.platform_chrome(),
             self.window.tabs.len(),
@@ -93452,7 +93473,6 @@ impl Runtime<'_> {
     /// load and nothing else.
     fn wheel_rail_trace(&self, now: Instant, position: PhysicalPosition<f64>, contains: bool) {
         self.mouse_trace(|| {
-            let scale = self.window.renderer.metrics().scale_factor as f32;
             let aim_height = self
                 .window
                 .renderer
@@ -93460,16 +93480,11 @@ impl Runtime<'_> {
                 .swapchain_size
                 .1 as f32;
             let paint_height = seats::chrome_surface_height(&self.seat_layout);
-            let aim = self.focus_rail_geometry_now(now);
-            let paint = seats::focus_rail_geometry(
-                paint_height,
-                scale,
-                self.platform_chrome(),
-                self.window.tabs.len(),
-                self.strip_guests(),
-                self.window.rail_scroll,
-                self.sampled_rail(now),
-            );
+            // **The same solver twice, with one number changed.** Anything else
+            // would be two columns differing in more than the quantity under
+            // investigation, and `agree` would stop meaning what it says.
+            let aim = self.focus_rail_geometry_at(now, aim_height);
+            let paint = self.focus_rail_geometry_at(now, paint_height);
             mouse_trace::WheelRail {
                 contains,
                 point: (position.x, position.y),
@@ -93878,7 +93893,9 @@ impl Runtime<'_> {
                 image_px,
                 [position.x as f32, position.y as f32],
             );
-            self.mouse_trace(|| format!("wheel_route taken=pane at=image-zoom surface={surface:?}"));
+            self.mouse_trace(|| {
+                format!("wheel_route taken=pane at=image-zoom surface={surface:?}")
+            });
             self.set_preview_image_zoom(surface, zoom)?;
             return Ok(());
         }
@@ -100282,7 +100299,10 @@ mod mouse_trace_station_tests {
     fn the_wheel_route_words_are_the_declared_ones() {
         let needle = concat!("wheel_route ", "taken", "=");
         let mut seen = 0;
-        for at in SOURCE.match_indices(needle).map(|(at, _)| at + needle.len()) {
+        for at in SOURCE
+            .match_indices(needle)
+            .map(|(at, _)| at + needle.len())
+        {
             let word: String = SOURCE[at..]
                 .chars()
                 .take_while(|char| char.is_ascii_alphanumeric() || *char == '-')
@@ -100300,12 +100320,7 @@ mod mouse_trace_station_tests {
         }
         assert!(seen > 0, "the route line is written somewhere in this file");
         let wheel = body("    fn mouse_wheel(");
-        for word in [
-            "terminal-pane",
-            "focused-leaf-fallback",
-            "pty",
-            "nobody",
-        ] {
+        for word in ["terminal-pane", "focused-leaf-fallback", "pty", "nobody"] {
             assert!(
                 crate::mouse_trace::WHEEL_ROUTES.contains(&word),
                 "`{word}` is declared"
