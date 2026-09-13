@@ -200,6 +200,14 @@ jobs:
   macos:
     runs-on: macos-14
     timeout-minutes: 90
+    # **What the job after this one is allowed to know.** `VERSION` and
+    # `FOLIO_SIGNED` are written into this job's environment while it runs, and
+    # a second job can read neither: `needs.<job>.outputs` is the only wire
+    # between two jobs, and only a step can put anything on it.
+    outputs:
+      artifact: ${{ steps.artifact.outputs.name }}
+      dmg: ${{ steps.artifact.outputs.dmg }}
+      signed: ${{ steps.artifact.outputs.signed }}
     # No `contents: write` here either, for the reason the top of this file
     # gives at length.
     env:
@@ -568,6 +576,26 @@ jobs:
             echo "this run made no keychain"
           fi
 
+      # The same three facts the two uploads below are spelled out of, said
+      # once where a later job can read them. The name is built here rather than
+      # in `macos-artifact`'s `with:` because the rule that puts `-unsigned` on
+      # the end of one of them is this job's, and a second reader of it would be
+      # a second place for it to be wrong.
+      - id: artifact
+        run: |
+          set -eu
+          signed="${FOLIO_SIGNED:-false}"
+          if [ "$signed" = "true" ]; then
+            name="folio-macos-$VERSION"
+          else
+            name="folio-macos-$VERSION-unsigned"
+          fi
+          {
+            echo "name=$name"
+            echo "dmg=Folio-$VERSION-macos-arm64.dmg"
+            echo "signed=$signed"
+          } >> "$GITHUB_OUTPUT"
+
       # Two names, because which of the two this is, is the first thing a person
       # downloading it needs to know.
       - if: env.FOLIO_SIGNED == 'true'
@@ -592,3 +620,113 @@ jobs:
           name: folio-macos-${{ env.VERSION }}-symbols
           path: target/macos-symbols
           if-no-files-found: warn
+
+  # **The bytes a stranger receives, asked the questions on a machine that did
+  # not make them.** The job above verifies a directory on the machine that
+  # built it, minutes after building it, with the signing keychain still on the
+  # search list and the notary service's answer still warm. That is the right
+  # check and it is not the same check as this one. This job takes the artifact
+  # back out of the store the release is assembled from, on a runner that did
+  # not build it, and puts the questions to *those* bytes: the checksum file the
+  # release page publishes, the assessment a downloaded image gets, the
+  # application inside the image, and the ticket in both.
+  #
+  # It is also M6-2's clean-*machine* half. A runner is genuinely one — no trust
+  # history, no development install, nothing of ours on it — and it is genuinely
+  # not ours. What it cannot be is a person: there is no screen, and
+  # `download-artifact` restores bytes rather than extended attributes, so the
+  # quarantine attribute and every panel belong to the clean-user walk in
+  # `docs/plans/port/m6-1-checklist.md`. `docs/RELEASING.md` ▸ macOS ▸
+  # *Clean-machine coverage* is where the two halves are put on one page.
+  #
+  # `needs: macos` and nothing else: if the lane did not produce an artifact,
+  # there is nothing here to ask.
+  macos-artifact:
+    needs: macos
+    runs-on: macos-14
+    timeout-minutes: 20
+    env:
+      FOLIO_DMG: ${{ needs.macos.outputs.dmg }}
+      FOLIO_SIGNED: ${{ needs.macos.outputs.signed }}
+      FOLIO_MOUNT: folio-image
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.macos.outputs.artifact }}
+          path: downloaded
+
+      # `shasum -c` and not a hash compared by eye: the file being checked here
+      # is the one a reader is invited to check the download against, so the
+      # thing worth proving is that it still describes the bytes after they have
+      # been through the artifact store.
+      - name: the checksums the release page publishes
+        run: |
+          set -eu
+          cd downloaded
+          ls -l
+          shasum -a 256 -c SHA256SUMS.txt
+
+      - name: mount the image
+        run: |
+          set -eu
+          mount="$RUNNER_TEMP/$FOLIO_MOUNT"
+          rm -rf "$mount"
+          mkdir -p "$mount"
+          hdiutil attach "downloaded/$FOLIO_DMG" -nobrowse -readonly -noautoopen \
+            -mountpoint "$mount"
+          ls -l "$mount"
+
+      # Both directions, the same way the build job asserts them: an ad-hoc run
+      # must be *refused* here too, or this job would pass a release that signed
+      # nothing. `-t open` and the primary signature on the image, because that
+      # is the question a download gets and `-t exec` on a disk image answers one
+      # nobody asks.
+      - name: what the download is asked
+        run: |
+          set -eu
+          app="$RUNNER_TEMP/$FOLIO_MOUNT/Folio.app"
+          dmg="downloaded/$FOLIO_DMG"
+
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          set +e
+          spctl -a -vvv -t open --context context:primary-signature "$dmg" \
+            > "$RUNNER_TEMP/image.txt" 2>&1
+          image=$?
+          spctl -a -vvv "$app" > "$RUNNER_TEMP/app.txt" 2>&1
+          bundle=$?
+          set -e
+          cat "$RUNNER_TEMP/image.txt" "$RUNNER_TEMP/app.txt"
+
+          if [ "$FOLIO_SIGNED" != "true" ]; then
+            if [ "$image" = "0" ] || [ "$bundle" = "0" ]; then
+              echo "Gatekeeper accepted an ad-hoc build, which cannot be right" >&2
+              exit 1
+            fi
+            echo "ad-hoc: the download verifies as a signature and is refused as a download. Both are this branch passing."
+            exit 0
+          fi
+
+          if [ "$image" != "0" ] || [ "$bundle" != "0" ]; then
+            echo "a notarized download was refused by Gatekeeper" >&2
+            exit 1
+          fi
+          if ! grep -q "source=Notarized Developer ID" "$RUNNER_TEMP/app.txt"; then
+            echo "accepted, but not as a notarized Developer ID build, which is a different claim" >&2
+            exit 1
+          fi
+          xcrun stapler validate "$app"
+          xcrun stapler validate "$dmg"
+          echo "the uploaded artifact, downloaded again: accepted, notarized and stapled, image and application both."
+
+      # Whatever happened above. A mounted image outlives the step that mounted
+      # it, and a runner that ends with one attached is a runner this job left
+      # untidy.
+      - name: unmount
+        if: always()
+        run: |
+          set -u
+          mount="$RUNNER_TEMP/$FOLIO_MOUNT"
+          if [ -d "$mount" ]; then
+            hdiutil detach "$mount" -quiet || hdiutil detach "$mount" -force || true
+          fi
