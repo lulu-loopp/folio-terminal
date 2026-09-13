@@ -8985,490 +8985,138 @@ agent 安装那几行(`Claude Code hooks` 和它的两个邻居)读的是 `atten
 
 ### 13.33 T-MAC-LIVE: 第一次真机验收的四桩——⌥+滚轮、标记栏刷新、保存后的弹窗、访达只带一扇窗出来(`crates/bt-app/src/{main,input,seats}.rs`、`crates/bt-platform/src/{handoff,lib}.rs`)
 
-The owner's first acceptance pass on a Mac build of `main` (2026-09-12,
-`~/folio-port/Folio-next.app` at `a9a1b3ca`) came back with four sentences. Two
-of them are defects and are fixed here. One is this repository drawing exactly
-what the owner ruled the same morning, held against a Windows build that
-predates the ruling. One did not reproduce at all, and the measurement that says
-so is worth as much as the two that did.
+用户在一个 `main` 的 Mac 构建上跑的第一趟验收(2026-09-12,`~/folio-port/Folio-next.app`,`a9a1b3ca`)回来四句话。其中两句是缺陷,在这里修掉。一句是这个仓库画的恰好就是用户当天上午裁的东西,而拿来对照的那个 Windows 构建早于那条裁决。还有一句根本复现不出来,而说明这一点的那次测量,和真复现出来的那两桩一样值钱。
 
-**① `⌥`+wheel was dead on every Mac, because one door was answering a question
-nobody had asked it.** The gesture is `column_notch` (user ruling 2026-08-21,
-§7.1.6b′): a bare notch over the card column scrolls the column, a notch with
-`Alt` held aims the seat under the pointer. It was handed
-`WindowRuntime::modifiers`, and on a Mac that field has had `Alt` taken out of
-it — M1-7 ruled that `Option` is text, so `input::effective_modifiers` removes
-the bit at the one door every modifier state in this process comes through
-(§13.13 ③). The aim was therefore unreachable on that machine from the day the
-port landed, and no setting the reader could find would have revealed it: the
-setting they would have had to change is `Option key sends Alt`, which is about
-what `⌥a` **types**.
+**① `⌥`+滚轮在每一台 Mac 上都是死的,因为有一扇门在回答一个没人问它的问题。** 这个手势是 `column_notch`(用户裁决 2026-08-21,§7.1.6b′):在卡片列上一记裸滚格滚这一列,按着 `Alt` 的一记滚格瞄指针底下那个 seat。它拿到的是 `WindowRuntime::modifiers`,而在 Mac 上那个字段里的 `Alt` 已经被摘掉了——M1-7 裁定 `Option` 是文字,所以 `input::effective_modifiers` 在这个进程每一份修饰键状态都要经过的那唯一一扇门上把那个位去掉(§13.13 ③)。所以从移植落地那天起,那次瞄准在那台机器上就够不着了,而且读者找得到的任何设置都不会把它露出来:他要改的那个设置是 `Option key sends Alt`,而那是关于 `⌥a` **打出来什么**的。
 
-Measured on the Mac (Apple M4, macOS 26.6.2, a debug build in an isolated
-`HOME`, one Option-flagged `CGEvent` scroll notch posted at this ticket's own
-window, the two states printed side by side at the door that writes them):
+Mac 上量到的(Apple M4,macOS 26.6.2,一个跑在隔离 `HOME` 里的 debug 构建,对着本票自己那扇窗发一记带 Option 标志的 `CGEvent` 滚格,在写下这两个状态的那扇门上把它们并排打出来):
 
 ```
 modifiers reported=ModifiersState(ALT) effective=ModifiersState(0x0) option_sends_alt=false
 ```
 
-Both halves of that line are correct, and that is the whole of the defect: the
-first is winit's answer about the hand, the second is Folio's policy about text.
-winit 0.30.13's `event_mods` sets `ModifiersState::ALT` from
-`NSEventModifierFlagOption` **unconditionally** (`macos/event.rs:323`) and never
-consults `OptionAsAlt`, which is read in exactly one place — `replace_event`, on
-the `keyDown:`/`insertText:` path (`macos/view.rs:458`, `:504`, `:1109`). So the
-setting cannot be what a gesture reads, however it is set.
+这一行的两半都是对的,而这就是缺陷的全部:第一个是 winit 关于手的回答,第二个是 Folio 关于文字的政策。winit 0.30.13 的 `event_mods` **无条件**从 `NSEventModifierFlagOption` 置上 `ModifiersState::ALT`(`macos/event.rs:323`),从不去问 `OptionAsAlt`,而后者只在一个地方被读——`replace_event`,在 `keyDown:`/`insertText:` 那条路上(`macos/view.rs:458`、`:504`、`:1109`)。所以不管那个设置怎么设,它都不可能是一个手势读到的东西。
 
-The other half of the question is settled in the same file.
-`WindowEvent::MouseWheel` carries `device_id`, `delta` and `phase` and **no
-modifiers** (`macos/view.rs:695`), so a wheel handler has nothing to read but
-the last `ModifiersChanged` — while `scrollWheel:` itself calls
-`update_modifiers(event, false)` one line earlier (`:693`), which queues a
-`ModifiersChanged` off the scroll event's own flags whenever they differ. The
-pointer event's modifiers and the key event's are the same value arriving
-through the same door; there is no second reading to be had, on this platform or
-the other one.
+这个问题的另一半在同一个文件里定下来。`WindowEvent::MouseWheel` 带的是 `device_id`、`delta` 和 `phase`,**不带修饰键**(`macos/view.rs:695`),所以一个滚轮 handler 除了最后一次 `ModifiersChanged` 之外没什么可读的——而 `scrollWheel:` 自己在上一行就调了 `update_modifiers(event, false)`(`:693`),它在滚动事件自己的标志和当前不同时排一条 `ModifiersChanged`。指针事件的修饰键和键事件的修饰键是同一个值经同一扇门到达的;不管在这个平台还是另一个,都没有第二次读数可拿。
 
-**The repair is a second field, not a second policy.** `window.modifiers` keeps
-its meaning exactly — what the keyboard means, with M1-7's ruling applied — and
-`window.modifiers_held` is what the platform reported, written at the same one
-door, one statement earlier. `column_notch` reads the held state and nothing
-else does; `one_door_writes_both_readings_of_the_modifiers` is what keeps it one
-door, and `the_column_reads_what_the_hand_is_holding` is the red gate — put
-`modifiers` back in that call and it goes red while every keyboard test in the
-file stays green, which is the exact shape of a defect no key test could have
-caught. **Windows is byte for byte unchanged**: `effective_modifiers` is the
-identity there, so the two fields are one value.
+**修法是第二个字段,不是第二条政策。** `window.modifiers` 的含义原封不动——键盘的意思,加上 M1-7 那条裁决——而 `window.modifiers_held` 是平台报告的那个,写在同一扇门上、早一条语句。`column_notch` 读那个「握着」的状态,别的没人读;`one_door_writes_both_readings_of_the_modifiers` 是保住它只有一扇门的那根钉,而 `the_column_reads_what_the_hand_is_holding` 是那道红门——把 `modifiers` 放回那次调用里它就红,而文件里每一只键盘测试照样绿,那正是一个任何键盘测试都抓不到的缺陷的形状。**Windows 逐字节没动**:`effective_modifiers` 在那边是恒等,所以这两个字段是同一个值。
 
-One thing the repair settles on the way past. `adopt_option_as_alt` struck the
-effective state against itself, which is a one-way street: the `Alt` taken out
-while the setting was off could not come back when it was switched on under a
-hand still holding `Option`. It now recomputes from the reported state, which is
-the only value in the pair that is not already a consequence of the setting.
+修的时候顺手定下一件事。`adopt_option_as_alt` 过去是拿 effective 状态对着它自己改的,而那是一条单行道:设置关着的时候被摘掉的那个 `Alt`,在一只还按着 `Option` 的手底下把设置打开时回不来。它现在从报告的那个状态重算,而那是这一对里唯一一个本身不是那个设置的后果的值。
 
-**What this ticket was told and what turned out to be true**: there is no
-`⌥`+wheel row in `BINDINGS` or `docs/shortcuts.md` to correct. That table is
-keys — generated from `BINDINGS`, gated by `scripts/check-shortcuts-table.ps1` —
-and a wheel notch is a gesture, which this product deliberately keeps out of it:
-§7.21 ruled that the gesture's one discoverable sentence is `Appearance ▸ Focus
-card height`'s third clause, and that sentence says `Alt+wheel` in a string both
-dialects share. Nothing was added there.
+**本票被告知的和实际成立的**:`BINDINGS` 和 `docs/shortcuts.md` 里没有一行 `⌥`+滚轮要改。那张表是键——从 `BINDINGS` 生成,由 `scripts/check-shortcuts-table.ps1` 把着——而一记滚格是一个手势,这个产品特意把它挡在表外:§7.21 裁定这个手势唯一那句能被发现的话是 `Appearance ▸ Focus card height` 的第三个分句,而那句话在两种方言共用的一个字符串里写着 `Alt+wheel`。那里什么都没加。
 
-**② The command-marks rail stood still for as long as the reader did, and the
-platform had nothing to do with it.** The rail is an overlay layer. Overlay
-layers are built by `refresh_overlay`, which is called by event handlers and by
-animation clocks — and, until this ticket, **by nothing that knew the ledger had
-moved**. A frame published for pty output presents the *retained* overlay, so a
-tick that appeared, or turned red, was drawn whenever something else next
-happened to ask.
+**② 命令标记那条栏在读者不动的时候就一直不动,而这和平台一点关系都没有。** 那条栏是一个 overlay 层。overlay 层由 `refresh_overlay` 建出来,而调它的是各个事件 handler 和各个动画时钟——而在本票之前,**没有任何知道那本账动了的东西调它**。一帧为 pty 输出发布出去时呈现的是**留存**的那份 overlay,所以一个新出现的、或者变红了的勾,是等到别的什么东西下一次碰巧去要的时候才被画出来。
 
-Measured on the Mac, with the `OSC 133` bytes written onto the pane's own tty so
-that the marks land at instants this ticket chose and nothing at all is typed:
+在 Mac 上量的,`OSC 133` 那些字节是写到那个 pane 自己的 tty 上的,好让标记落在本票挑的那些瞬间上、而且完全不敲任何键:
 
-| | the mark landed | the rail was rebuilt | late by |
+| | 标记落下 | 栏被重建 | 迟了 |
 |---|---|---|---|
-| before | `1789260048.561` | `1789260061.502` | **12.94 s**, and only because the pointer was then moved |
-| after | `1789260234.822` | `1789260234.824` | **2 ms** |
+| 之前 | `1789260048.561` | `1789260061.502` | **12.94 s**,而且还是因为那时指针被挪了一下 |
+| 之后 | `1789260234.822` | `1789260234.824` | **2 ms** |
 
-On the glass, from captures of this ticket's own window: before the fix the rail
-at `+2.0 s`, `+4.1 s` … `+12.6 s` after the marks landed was one red dash at
-y 638–641 — the tick belonging to the *previous* command — and the new one
-appeared only in the capture taken after the pointer moved, by which time the
-red dash had shifted up to 629–632 with a grey dash at 647–650 beside it. After
-the fix the capture at `+2.0 s` already carries both.
+在玻璃上,从本票自己那扇窗的截图看:修之前,标记落下之后 `+2.0 s`、`+4.1 s` …… `+12.6 s` 的那条栏上是 y 638–641 处的一道红短线——属于**上一条**命令的那个勾——而新的那个只在指针挪过之后拍的那张里出现,那时红短线已经上移到 629–632,旁边多了一道 647–650 的灰短线。修之后,`+2.0 s` 那张里两个都已经在了。
 
-**Why it reads as intermittent, and why the first attempt to reproduce it
-failed.** An `OSC 133;C` starts the tab mark's breath, and while that runs the
-overlay is rebuilt every twenty milliseconds. A `D` that arrives while the
-command is still visibly running is therefore drawn at once — the first
-measurement here caught one at 25 ms and proved nothing. The marks that are late
-are the ones that land when nothing is animating, which is every `A` and `B` a
-prompt writes *after* the breath has stopped: the newest tick on the rail, every
-time, for as long as the reader keeps still.
+**为什么它读起来是时有时无,以及第一次复现为什么失败。** 一条 `OSC 133;C` 会开始标签标记的呼吸,而那东西跑着的时候 overlay 每二十毫秒重建一次。所以一条在命令还明显跑着的时候到达的 `D` 会当场被画出来——这里第一次测量就抓到了一个 25 ms 的,什么也没证明。迟到的那些标记是在什么都没在动画的时候落下的那些,也就是呼吸停下**之后**一个提示写出的每一条 `A` 和 `B`:栏上最新的那个勾,每一次都是,而且读者只要一直不动它就一直迟。
 
-**The repair is two `u64`s.** `command_marks_watermark` sums
-`DualPlaneSession::command_marks_revision` over the seats of the tab on screen —
-the seats `command_rail_layers` lays a rail out for — and `drain_pty` compares
-it across the drain, beside the name change that already asks for the chrome on
-the same terms. A revision bumps on ledger changes and on nothing else and never
-falls, so a sum over one set of seats moves if and only if one of its terms did;
-there is no allocation and no list. **This is visible on Windows too**, and
-CHANGELOG carries a line for it: the defect was never platform-specific, it was
-only ever found by somebody watching a rail on a machine where they were not
-also typing.
+**修法是两个 `u64`。** `command_marks_watermark` 把上着屏那个标签的各个 seat 的 `DualPlaneSession::command_marks_revision` 加起来——也就是 `command_rail_layers` 为之铺一条栏的那些 seat——而 `drain_pty` 在一次排空的前后比较它,挨着那个本来就按同样方式去要 chrome 的名字变更。一个 revision 只在账变了的时候加、别的时候不加,而且从不下降,所以一个在同一组 seat 上求的和,当且仅当其中一项动了时才动;这里没有分配,也没有名单。**这件事在 Windows 上一样看得见**,CHANGELOG 为它留了一行:这个缺陷从来不是平台专属的,它只不过是被一个在一台自己没在打字的机器上盯着一条栏看的人找出来的。
 
-**③ The "popup" after `⌘S` is this window's own news pill, at the size this
-repository draws it, and the build it was compared against predates the size.**
-The screenshot is the pill: 12 px inside each edge of the preview's body, 28
-tall, `r6`, the menu surface let down to `.92`, with the one-pixel ring a menu
-wears. Every one of those numbers is a constant declared beside
-`seats::news_pill_box`, and that function took a body and a scale and **nothing
-else** — no string, no font, no measurement that could come back differently on
-a machine with a different font list. The full width was written over that door
-as though it were the ruling: *it differs in spanning the body's width rather
-than hugging its words, because this one carries verbs at its right hand and a
-pill that grew and shrank around a sentence would move the button under the
-pointer.* Those are not the owner's words. They are that door's first author
-reading the mock's `.notice { left: 12px; right: 12px }` as a decision and
-supplying a reason for it — and the reason does not survive being asked, which
-is what ticket T-NEWS-PILL settled (see below). The ring is a separate question
-and it is unchanged: `notice::lay_out` draws it as the outer of two rounded
-fills, "exactly as a `border: 1px solid` border-box is", off
-`palette.menu_border` — the same ring the corner toast wears through
-`push_float_window` — with no platform arm anywhere on the path.
+**③ `⌘S` 之后那个「弹窗」就是这扇窗自己的消息药丸,按这个仓库现在画它的尺寸,而拿来对照的那个构建早于这个尺寸。** 截图里就是那个药丸:离预览正文每条边内缩 12 px,高 28,`r6`,菜单表面压到 `.92`,带着一个菜单该有的一像素环。这些数每一个都是在 `seats::news_pill_box` 旁边声明的常量,而那个函数收一个正文和一个缩放、**别的什么都不收**——没有字符串,没有字体,没有任何一次在字体名单不同的机器上会答出别的结果的测量。那个满宽被写在那扇门上,写得就像它是一条裁决:*它和别的药丸不同之处在于横跨正文的宽度而不是贴着自己的字,因为这一个右手边带着动词,而一个围着一句话长大缩小的药丸会把指针底下的按钮挪走。*那不是用户的话。那是那扇门第一位作者把小样里的 `.notice { left: 12px; right: 12px }` 读成一个决定,并为它补了一个理由——而那个理由经不住被问,这正是票 T-NEWS-PILL 定下来的事(见下)。那个环是另一个问题,而且它没动:`notice::lay_out` 把它画成两层圆角填充里的外面那一层,「正如一个 `border: 1px solid` 的 border-box 那样」,颜色取自 `palette.menu_border`——也就是角落那条 toast 经 `push_float_window` 穿着的同一个环——而整条路上任何地方都没有平台臂。
 
-What makes it read as new is the calendar. `news_pill_box` arrived in `297cd631`
-("the preview's bottom line appears only when it has something to say",
-2026-09-12 13:15 -0400). `v0.3.0-preview` is `9acd482`, 2026-09-12 06:47Z, and
-`git show 9acd482:crates/bt-app/src/seats.rs` does not contain the name at all.
-So the Mac build is showing T-PREVIEW-FOOT's pill and the Windows build it was
-being held against is still showing what came before it.
+让它读起来像是新东西的是日历。`news_pill_box` 是在 `297cd631` 里到的(「预览的底行只在它有话要说时才出现」,2026-09-12 13:15 -0400)。`v0.3.0-preview` 是 `9acd482`,2026-09-12 06:47Z,而 `git show 9acd482:crates/bt-app/src/seats.rs` 里根本没有这个名字。所以 Mac 那个构建显示的是 T-PREVIEW-FOOT 的药丸,而被拿来对照的那个 Windows 构建显示的还是它之前的东西。
 
-**Nothing was changed for this at the time**, because changing it would have
-been reversing a ruling seven hours old that is Windows-visible as well, and the
-question it left open — whether a pill should after all be allowed to hug its
-words — was the owner's to answer.
+**当时没有为这件事改任何东西**,因为改它就是在推翻一条七小时前的、而且在 Windows 上一样看得见的裁决,而它留下的那个问题——一个药丸到底该不该被允许贴着自己的字——是用户来答的。
 
-**The owner answered it the same day and the answer is yes, for every pill and
-not only the verbless ones** (ticket T-NEWS-PILL): the pill hugs its content and
-stands at the left of the body's bottom edge; it does not span the body. So
-`news_pill_box` takes a content width now — `notice::pill_content_width`, which
-is `notice::lay_out`'s own arithmetic and not a second measurement of the row —
-and answers a box of that plus its two paddings, clamped to the body less its
-two insets. The pointer concern the old door was defended with is moot: the
-sentence in a standing pill does not change, because a pill that changes its
-sentence is a different notice. `the_news_pill_takes_the_bodys_width_and_not_the_sentences`
-is gone and `the_news_pill_hugs_its_content_and_stands_at_the_left` stands in its
-place, with `a_pill_sized_for_its_words_holds_every_one_of_them` beside it in
-`notice.rs` pinning the one thing a two-reading box can get wrong: a third of a
-pixel of disagreement between the measurement that sizes the pill and the layout
-that fills it is a verb that is not offered at all. See §7.1.3x ②.
+**用户当天就答了,而答案是可以,对每一个药丸而不只是那些不带动词的**(票 T-NEWS-PILL):药丸贴着它的内容,站在正文下沿的左端;它不横跨正文。所以 `news_pill_box` 现在收一个内容宽度——`notice::pill_content_width`,那是 `notice::lay_out` 自己的算术,而不是对那一行的第二次测量——并答出那个宽度加它两边内边距的一个框,再夹在正文减去两边内缩的范围里。旧那扇门用来自辩的那个指针顾虑不成立:一个立着的药丸里那句话不会变,因为一个换了句子的药丸就是另一条消息。`the_news_pill_takes_the_bodys_width_and_not_the_sentences` 没有了,取而代之立着的是 `the_news_pill_hugs_its_content_and_stands_at_the_left`,旁边 `notice.rs` 里的 `a_pill_sized_for_its_words_holds_every_one_of_them` 钉住一个两次读数的框唯一会弄错的那件事:给药丸定尺寸的那次测量和往里填东西的那次布局差三分之一个像素,就是一个根本没被提供出来的动词。见 §7.1.3x ②。
 
-**④ "Reveal in Finder brings every open Finder window forward" did not
-reproduce — and the call this ticket named is not the one that button makes.**
-The folder button at the foot of the files column reveals a *root*, which is a
-directory, and §13.18's door sends a directory to `openURL:`: *a folder is
-opened, not selected in its parent*. `activateFileViewerSelectingURLs:` is the
-other branch, the one a file takes.
+**④ 「在访达中显示会把每一扇打开的访达窗都带到前面」根本复现不出来——而且本票点名的那次调用不是那个按钮发出的那一次。** 文件列脚上那个文件夹按钮显示的是一个**根**,那是一个目录,而 §13.18 那扇门把目录送给 `openURL:`:*一个文件夹是被打开,而不是在它的父层里被选中*。`activateFileViewerSelectingURLs:` 是另一条分支,文件走的那一条。
 
-Measured on the Mac with nine Finder windows already on the desk, a reference
-window of this ticket's own genuinely frontmost before each trial, and the
-front-to-back order read out of `CGWindowListCopyWindowInfo` before and after
-(each row run twice, same answer both times):
+在 Mac 上量的,桌面上已经有九扇访达窗,每次试验之前都先让本票自己的一扇参照窗真正处在最前,而前后顺序是从 `CGWindowListCopyWindowInfo` 里在前后各读一次的(每一行跑两遍,两遍答案一样):
 
-| the door | Finder windows above the reference, before → after | which rose |
+| 那扇门 | 参照窗之上的访达窗数,之前 → 之后 | 升起来的是 |
 |---|---|---|
-| `openURL:` on the folder — as it shipped | 0 → **2** | the folder's own window, **and** the window Finder had been holding |
-| `openURLs:withApplicationAtURL:configuration:` with `activates = false`, then `activate` with the default option set | 0 → **1** | the folder's own window |
-| `activateFileViewerSelectingURLs:` on a file — as it shipped | 0 → **1** | the file's own window |
-| the same, followed by an explicit `activate` with the default option set | 0 → **1** | the file's own window |
+| 对文件夹发 `openURL:`——发货时的样子 | 0 → **2** | 那个文件夹自己的窗,**外加**访达原来攥着的那一扇 |
+| `openURLs:withApplicationAtURL:configuration:` 带 `activates = false`,再拿默认选项集 `activate` | 0 → **1** | 那个文件夹自己的窗 |
+| 对文件发 `activateFileViewerSelectingURLs:`——发货时的样子 | 0 → **1** | 那个文件自己的窗 |
+| 同上,后面再跟一次拿默认选项集的显式 `activate` | 0 → **1** | 那个文件自己的窗 |
 
-So **no branch of this door brings every Finder window forward** on macOS
-26.6.2: the eight windows standing behind the reference stayed behind it in
-every trial. The premise that "activation with all windows is macOS's default
-for that call" is not true on this machine, and the file branch — the one the
-ticket named — was already raising exactly one.
+所以在 macOS 26.6.2 上**这扇门没有一条分支会把每一扇访达窗都带到前面**:立在参照窗后面的那八扇在每一次试验里都留在它后面。「带上所有窗口的激活是 macOS 对那次调用的默认」这个前提在这台机器上不成立,而文件那条分支——票点名的那一条——本来就只升起一扇。
 
-There was still one window rising that nobody asked for, and it is the folder
-branch's. `openURL:` does two things in one call: it opens the folder's window
-*and* it activates Finder, and activating an application brings its **key**
-window forward with it. A reader who asks a terminal to show them a folder did
-not ask for the other one. So the two halves are separated:
-`NSWorkspaceOpenConfiguration` with `activates = false` opens the window and
-leaves the front where it was, and `NSRunningApplication::activate` with **no
-options** then brings Finder forward — Apple documents the default option set as
-main-and-key only, and `NSApplicationActivateAllWindows` is the flag that would
-do what the single call was doing. The same measurement then reads one.
+仍然有一扇没人要的窗升起来,而它是文件夹那条分支的。`openURL:` 一次调用做两件事:它打开那个文件夹的窗,**并且**激活访达,而激活一个应用会把它的 **key** 窗一起带到前面。一个让终端把一个文件夹显示给他看的读者,并没有要另外那一扇。所以这两半被分开:一个 `activates = false` 的 `NSWorkspaceOpenConfiguration` 打开那扇窗、把前台留在原处,随后**不带任何选项**的 `NSRunningApplication::activate` 把访达带到前面——Apple 写明默认选项集只管 main 和 key,而 `NSApplicationActivateAllWindows` 才是那个会做出单次调用所做的事的标志。同一次测量随后读到的是一。
 
-**The `Result` is still answered before the call, which is this module's habit
-rather than a new rule** (§13.18 ①: the disk is asked first because
-`activateFileViewerSelectingURLs:` cannot answer). The configuration form
-answers in a block, and a door that returned `Ok` and discovered otherwise
-afterwards would be lying to a caller that has already drawn a foot — so the
-question asked synchronously here is the one the call actually depends on, *is
-there a Finder on this machine*, through
-`URLForApplicationWithBundleIdentifier:`, exactly as `open_system_fonts_page`
-asks it about Font Book. The completion handler is then nothing this door needs
-for its answer, and the activation rides in it because that is where the running
-application is handed over; `NSRunningApplication` is documented thread-safe in
-the same paragraph of Apple's *Thread Safety Summary* that §13.18 quotes for
-`NSWorkspace`. The shape is held by
-`a_revealed_folder_brings_up_its_own_window_and_no_other`, a source pin for
-`macos_process_door_tests`' reason: the claim is about what another application
-does with an activation, which no assertion on a Windows workstation can run.
+**那个 `Result` 仍然在调用之前就答出来,而这是这个模块的习惯而不是一条新规矩**(§13.18 ①:先问磁盘,因为 `activateFileViewerSelectingURLs:` 答不了)。带配置的那个形式是在一个 block 里作答的,而一扇答了 `Ok` 随后才发现不是那么回事的门,是在骗一个已经画了一只脚的调用方——所以这里同步问的那个问题,就是这次调用真正依赖的那一个,*这台机器上有没有访达*,经 `URLForApplicationWithBundleIdentifier:`,跟 `open_system_fonts_page` 问 Font Book 的方式一模一样。于是那个 completion handler 对这扇门的答案而言没有任何用处,而那次激活搭在里面,是因为正在跑的那个应用是在那里被交过来的;Apple 的 *Thread Safety Summary* 在 §13.18 为 `NSWorkspace` 引用的那同一段里,写明 `NSRunningApplication` 是线程安全的。这个形状由 `a_revealed_folder_brings_up_its_own_window_and_no_other` 按着,一根源码钉,理由是 `macos_process_door_tests` 那一条:这个主张是关于另一个应用拿一次激活会做什么的,而那件事 Windows 工作站上没有任何断言跑得了。
 
-**What the probes were allowed to do, and what they left behind.** Everything
-ran under an isolated `HOME` against a bundle carrying an identifier of this
-ticket's own (`io.github.lulu-loopp.folioprobe`) so that LaunchServices could
-never answer with the owner's running Folio; every process was ended by a pid
-this ticket wrote down. The marks were written onto the pane's own tty rather
-than typed, the one keyboard-free way to put `OSC 133` on a screen at a chosen
-instant. Nothing was put on the pasteboard. The Finder trials leave their
-windows open, which is `a_reveal_asks_the_disk_before_it_asks_finder`'s own
-standing note — closing them would mean driving Finder, and driving another
-application is a consent prompt this venue does not spend.
-
-*(本节英文,待中文文案改写。)*
+**那些探针被允许做什么,以及它们留下了什么。** 一切都跑在一个隔离的 `HOME` 下、对着一个带本票自己标识符(`io.github.lulu-loopp.folioprobe`)的 bundle,好让 LaunchServices 绝不会拿用户正跑着的 Folio 来作答;每一个进程都是按本票记下的 pid 结束的。那些标记是写到那个 pane 自己的 tty 上的,而不是敲出来的,那是唯一一种不用键盘、在选定的瞬间把 `OSC 133` 放上屏幕的办法。什么都没被放到剪贴板上。访达那几次试验把它们的窗留着,那是 `a_reveal_asks_the_disk_before_it_asks_finder` 自己那条常驻注——关掉它们就意味着去驱动访达,而驱动另一个应用是一道这个场地不会去花的同意提问。
 
 ### 13.34 M3-4: 多窗恢复——显示器按 UUID 认,frame 往返恒等,缺屏落主屏(`crates/bt-platform/src/{macos_impl,lib}.rs`、`crates/bt-platform/Cargo.toml`、`crates/bt-platform/tests/macos_window_restore.rs`、`crates/bt-app/src/{main,quit}.rs`)
 
-**① A `CGDirectDisplayID` is a handle, and M1-3 filed a reader's arrangement
-under one.** The door that names a display for the session document answered the
-display number's decimal spelling, on the ground — written into its own doc
-comment — that Apple derives that number from the panel's own vendor, model and
-serial and that it therefore survives a reboot and a replug. That is true of the
-*ingredients* and not of the number. Apple's header says what a
-`CGDirectDisplayID` names: **"a framebuffer, a colour correction table, and
-possibly an attached monitor"**. The window server hands them out per session, and
-unplugging a display and plugging it back in can return a different one for the
-same panel. A file keyed on it is a file whose rows stop matching the day a cable
-is moved — and the rows in question are §7.54's, the rectangle a reader arranged
-the summoned terminal at *on that screen*.
+**① 一个 `CGDirectDisplayID` 是一个句柄,而 M1-3 把一位读者的摆法归档到了一个句柄底下。** 那扇为会话文档给显示器起名的门,答的是显示器编号的十进制拼法,理由——写在它自己的文档注里——是 Apple 从面板自己的厂商、型号和序列号推出这个号,所以它挺得过一次重启和一次重新插拔。这对那些**配料**是真的,对那个号不是。Apple 的头文件写明一个 `CGDirectDisplayID` 点的是什么:**「一个 framebuffer、一张色彩校正表,以及可能连着的一台显示器」**。窗口服务器是按会话发放它们的,而把一台显示器拔下来再插回去,同一块面板可能拿到另一个号。一份按它做键的文件,就是一份在有人挪了根线那天各行就不再对上的文件——而这里的那些行是 §7.54 的,也就是读者**在那块屏上**给被召唤出来的终端摆的那个矩形。
 
-**The stable key is the display's UUID**, `CGDisplayCreateUUIDFromDisplayID`, and
-it is the key **winit already identifies its own monitors by**: its macOS
-`MonitorHandle` *is* a `CFUUID`, with a comment that says the same thing this
-ticket arrived at from the other end. So `monitor_id_at` now answers `CFUUID`'s
-canonical spelling — `8-4-4-4-12` upper-case hexadecimal, measured on the Mac as
-`3AFA8068-B697-47BB-9923-BE510A7D9EA4` — which cannot be read as a display number
-and cannot be confused with the other platform's `\\.\DISPLAY1` either. Nothing
-about the promise moves: it is still §3.1's best effort, still stable across a
-restart, still not guaranteed across a driver change, and every reader still
-degrades to a computed answer rather than trusting it.
+**稳定的键是显示器的 UUID**,`CGDisplayCreateUUIDFromDisplayID`,而它正是 **winit 本来就在用来标识它自己那些显示器的**键:它的 macOS `MonitorHandle` **就是**一个 `CFUUID`,带着一条注,说的正是本票从另一头走到的这件事。所以 `monitor_id_at` 现在答 `CFUUID` 的规范拼法——`8-4-4-4-12` 的大写十六进制,Mac 上量到的是 `3AFA8068-B697-47BB-9923-BE510A7D9EA4`——它不可能被读成一个显示器编号,也不可能和另一个平台的 `\\.\DISPLAY1` 混起来。承诺一点没动:它仍然是 §3.1 的尽力而为、仍然挺得过一次重启、仍然不保证挺得过一次驱动更换,而且每一个读者仍然退化到一个算出来的答案而不是信它。
 
-**Two facts that make the change cost nothing.** The symbol is taken from
-`ApplicationServices` and not from `CoreGraphics`, which is winit's own choice for
-its own reason — it lives in `ColorSync`, a framework of its own only since macOS
-10.13 and a sub-framework of the umbrella since always. And it adds **no
-package**: `objc2-core-graphics` and `objc2-core-foundation` are direct
-dependencies of this crate already, and what is new is two features
-(`CGDirectDisplay`, `CFUUID`) and one declared symbol, because
-`objc2-core-graphics` 0.3.2 does not generate this call. `Cargo.lock` and
-`THIRD-PARTY-NOTICES.md` do not move.
+**有两个事实让这次改动一分钱不花。** 那个符号是从 `ApplicationServices` 而不是从 `CoreGraphics` 取的,那是 winit 自己的选择、自己的理由——它住在 `ColorSync` 里,那东西直到 macOS 10.13 才成为一个独立框架,而一直以来都是这把伞下的一个子框架。而且它**不加包**:`objc2-core-graphics` 和 `objc2-core-foundation` 本来就是这个 crate 的直接依赖,新的是两个 feature(`CGDirectDisplay`、`CFUUID`)和一个声明出来的符号,因为 `objc2-core-graphics` 0.3.2 不生成这次调用。`Cargo.lock` 和 `THIRD-PARTY-NOTICES.md` 都不动。
 
-**The Windows arm is untouched, and that is pinned rather than promised.**
-`a_display_is_named_by_its_uuid_on_macos_and_by_its_adapter_on_windows` reads both
-arms' text: macOS's door must reach the UUID door and must not spell a number, the
-UUID door must be CoreGraphics' key in CoreFoundation's spelling against the
-umbrella framework, and the Windows door must still be `MONITORINFOEXW.szDevice`
-with no UUID anywhere in it. The ids in a Windows reader's `session.json` mean
-today exactly what they meant before this ticket.
+**Windows 那条臂没动,而这是钉住的而不是许诺的。** `a_display_is_named_by_its_uuid_on_macos_and_by_its_adapter_on_windows` 读两条臂的文本:macOS 那扇门必须够到 UUID 那扇门、而且不许拼一个数;UUID 那扇门必须是 CoreGraphics 的那个键、用 CoreFoundation 的拼法、对着那把伞框架;而 Windows 那扇门必须仍然是 `MONITORINFOEXW.szDevice`,里面任何地方都没有 UUID。一位 Windows 读者 `session.json` 里那些 id 今天的含义,和本票之前一模一样。
 
-**② The store → load round trip is the identity, and the unit is the point.**
-§13.10 ① said the round trip is exact; this ticket measured it on a real *titled*
-window — Folio's shape on this platform, and the shape AppKit has opinions about
-— at backing scale 2, and found the one thing it had not said. **A window's frame
-is integral in points.** Asked for `343,260 961x600` physical, the window came
-back at `342,260 962x600`: AppKit floored the origin to the whole point and grew
-the size to keep the far edge. At scale 2 that means no window can stand at an odd
-physical coordinate.
+**② 存→取那趟往返是恒等的,而单位才是要点。** §13.10 ① 说过那趟往返是精确的;本票在一扇真正**带标题栏**的窗上量了它——Folio 在这个平台上的形状,也是 AppKit 有主张的那种形状——在 backing scale 2 下,查出了它当初没说的那一件事。**一扇窗的 frame 在点上是整数的。** 要它 `343,260 961x600` 物理像素,窗口回来的是 `342,260 962x600`:AppKit 把原点向下取整到整点,再把尺寸放大好保住远端那条边。在缩放 2 下,这意味着没有一扇窗能站在一个奇数的物理坐标上。
 
-That is not a defect and nothing in this product can ask for it. The session
-document's unit is the **logical** pixel, which on this platform is the point:
-`persisted_window_bounds` divides by the window's scale and records whole logical
-pixels, `startup_window_rect` multiplies them back, and a summon's rectangle comes
-off a work area, which is a display's own points. So the round trip is the
-identity for every rectangle the file can hold, at both parities of the logical
-coordinate — measured at scale 2 on 2026-09-12, and stated and read back through
-the same two doors `bt-app` uses.
+那不是一个缺陷,而这个产品里也没有任何东西会去要它。会话文档的单位是**逻辑**像素,而在这个平台上那就是点:`persisted_window_bounds` 除以这扇窗的缩放、记下整数逻辑像素,`startup_window_rect` 再乘回来,而一次召唤的矩形是从一块工作区上来的,那是一台显示器自己的点。所以对这份文件装得下的每一个矩形,那趟往返都是恒等的,逻辑坐标奇偶两种情况都是——2026-09-12 在缩放 2 下量的,经 `bt-app` 用的同样那两扇门陈述并读回。
 
-**What the half-point rectangle does prove is the division of labour between
-those doors**, and it is why the case is kept. `set_window_outer_rect` stated it
-and answered `Ok` while the window stood somewhere else; `stand_window_at` read
-it back and answered `Err` naming where the window really is. A restore that
-believed the first door would write a rectangle back into the file that no window
-was ever standing at.
+**那个半点的矩形真正证明的是那两扇门之间的分工**,而那正是这只用例被留下来的原因。`set_window_outer_rect` 陈述了它并答 `Ok`,而那时窗口站在别的地方;`stand_window_at` 把它读回来,答 `Err` 并点名窗口真正在哪里。一次相信第一扇门的恢复,会把一个从来没有窗站在上面的矩形写回文件里。
 
-**The other rectangle no window may have is one whose title bar would stand under
-the menu bar**, and `constrainFrameRect:toScreen:` moves a titled window before
-it places it. Asked for a top of `-140` physical, the window stood at **60** — the
-work area's own top, to the pixel. **And the restore rule already produces exactly
-that rectangle**: `reachable_top` clamps a restored top into
-`[work.top, work.bottom − title bar]` of the monitor the window lands on, and that
-work area is `NSScreen.visibleFrame`, which begins under the menu bar. The
-Windows rule and AppKit's constraint agree, so the restore path never hands AppKit
-a rectangle it will move. Sideways there is no constraint at all: a window parked
-half off the right edge is taken verbatim, which is the shape
-`choose_restored_placement` deliberately preserves.
+**另一个没有窗可以拥有的矩形,是标题栏会站到菜单栏底下的那个**,而 `constrainFrameRect:toScreen:` 会在摆放一扇带标题栏的窗之前先挪它。要一个 `-140` 物理像素的上沿,窗口站在了 **60**——工作区自己的上沿,精确到像素。**而恢复那条规矩本来就产出恰好那个矩形**:`reachable_top` 把一个恢复出来的上沿夹进这扇窗落到的那台显示器的 `[work.top, work.bottom − 标题栏]`,而那块工作区是 `NSScreen.visibleFrame`,它是从菜单栏底下开始的。Windows 那条规矩和 AppKit 的那条约束一致,所以恢复那条路从不会递给 AppKit 一个它会去挪的矩形。横向上根本没有约束:一扇停在右边缘外面一半的窗被原样收下,而那正是 `choose_restored_placement` 特意保住的那个形状。
 
-**And the backing-scale seam costs this path nothing, which is worth saying
-because on Windows it costs the summon three statements.** `startup_window_rect`
-multiplies a logical rectangle by the window's current scale and
-`set_window_outer_rect` divides by that same number, so what reaches AppKit is the
-rectangle in points — and a point is the same length on every display. The seam
-`stand_window_at` exists for is the *other* direction, where a rectangle is
-computed in physical pixels off one display's work area and stated on another.
+**而那道 backing scale 的缝在这条路上一分钱不花,这件事值得说,因为在 Windows 上它让召唤花掉三条语句。** `startup_window_rect` 把一个逻辑矩形乘以这扇窗当前的缩放,而 `set_window_outer_rect` 除以同一个数,所以到达 AppKit 的是按点算的那个矩形——而一个点在每一台显示器上都是同样的长度。`stand_window_at` 为之存在的那道缝在**另一个**方向上,也就是一个矩形按一台显示器的工作区以物理像素算出来、却陈述在另一台上。
 
-**③ A monitor's work area is never another monitor's.** `restore_monitors` asks
-`work_area_at` for a **point** — the centre of each monitor winit reports — and a
-point names a display only in a space where no two displays claim the same
-coordinate. Windows' space is such a space and always has been. **macOS's is
-not**, and `macos_impl`'s own module header says so: every rectangle there is a
-display's points multiplied by *that* display's backing scale, so a 1× panel
-standing beside a 2× panel occupies physical coordinates the 2× panel also
-occupies, and a point inside the small one resolves — legitimately, first match
-wins — to the large one. What comes back is then another display's work area, and
-dividing it by *this* monitor's scale gives a rectangle that is neither: on a desk
-with a 1280-point panel beside a 4K at 2× it is 3840 logical pixels wide, parked
-over its neighbour, and every window restored onto that panel is fitted and
-clamped against it.
+**③ 一台显示器的工作区绝不是另一台的。** `restore_monitors` 拿一个**点**去问 `work_area_at`——winit 报告的每一台显示器的中心——而一个点只有在没有两台显示器认领同一个坐标的空间里才点得出一台显示器。Windows 的空间一直是这样一个空间。**macOS 的不是**,而 `macos_impl` 自己的模块头就这么写着:那里每一个矩形都是一台显示器的点乘以**那台**显示器的 backing scale,所以一块 1× 的面板挨着一块 2× 的面板站着时,它占的物理坐标那块 2× 面板也占着,而一个落在小的那块里面的点会解析——合法地,先中者胜——到大的那块上。回来的于是是另一台显示器的工作区,再拿**这台**显示器的缩放去除它,得到的矩形哪一台都不是:在一张 1280 点的面板挨着一台 2× 的 4K 的桌子上,它有 3840 个逻辑像素宽、停在它邻居身上,而每一扇恢复到那块面板上的窗都是对着它去适配和夹取的。
 
-The invariant that catches it is the definition: a work area is the monitor minus
-the strips the system reserves, so it lies **inside** the monitor. An answer that
-does not is an answer about a different display, and the honest rectangle for this
-one is then the monitor itself — which is the rectangle the refusal path has
-always used. `monitor_work_area` is that one question, and it is a pure function
-with a case of its own (`a_monitors_work_area_is_never_another_monitors`) whose
-first two rows are Windows: a taskbar strip and a display with no strip both come
-back exactly as the platform said them, so **nothing about a Windows restore
-moves**. The guard cannot fire there: winit's monitor rectangle on Windows is
-`rcMonitor` and the answer is that monitor's `rcWork`, which is inside it by
-construction.
+抓住它的那条不变量就是定义:一块工作区是显示器减去系统保留的那些条带,所以它落在显示器**里面**。一个不落在里面的答案是一个关于另一台显示器的答案,而这台显示器老实的那个矩形就是显示器本身——也就是拒绝那条路历来用的那个矩形。`monitor_work_area` 就是这一个问题,而且它是一个纯函数,有自己的用例(`a_monitors_work_area_is_never_another_monitors`),它头两行是 Windows:一条任务栏带和一台没有带的显示器,回来的都跟平台说的分毫不差,所以**Windows 的恢复没有任何东西挪动**。那道守卫在那边不可能触发:winit 在 Windows 上的显示器矩形是 `rcMonitor`,而答案是那台显示器的 `rcWork`,它在构造上就在里面。
 
-**④ The band is put on before the window is on the glass, and both doors do it.**
-A restored window opens through one of the two constructors, and a window whose
-band were set after it reached the glass would show one frame with the traffic
-lights on the wrong axis (§13.20 ⑧). Both constructors go through
-`dress_new_window`, `dress_new_window` is where `follow_the_window_band` is said,
-and `show_new_window` is a *different function* — so the order is structural
-rather than two lines that could be swapped.
-`every_window_this_process_opens_wears_its_band_before_it_is_shown` holds all
-three. It is a source pin because on Windows there is nothing to get wrong —
-`FOLIO_DRAWS_THE_WHOLE_BAR` is a run of no width and no height — so what can fail
-is a line moving rather than a value changing.
+**④ 那条带子是在窗上玻璃之前就穿上的,而两扇门都这么做。** 一扇恢复出来的窗是经那两个构造器之一打开的,而一扇在够到玻璃之后才设带子的窗,会有一帧的红黄绿站在错的轴上(§13.20 ⑧)。两个构造器都走 `dress_new_window`,而 `dress_new_window` 就是 `follow_the_window_band` 被说出来的地方,而 `show_new_window` 是**另一个函数**——所以这个次序是结构性的,而不是两行可以对调的代码。`every_window_this_process_opens_wears_its_band_before_it_is_shown` 把这三处都按住。它是一根源码钉,因为 Windows 上根本没有什么可弄错的——`FOLIO_DRAWS_THE_WHOLE_BAR` 是一条既没有宽也没有高的 run——所以会坏掉的是一行被挪走,而不是一个值变了。
 
-**⑤ What the acceptance run found, and it was not about monitors at all: the
-teardown wrote a second document over the one the quit had just written.**
+**⑤ 那趟验收查出了什么,而它根本不是关于显示器的:拆除阶段在退出刚写下的那份文档上面又写了第二份。**
 
-The quit is a four-phase transaction (§2.9): photograph every window, write the
-document, retire the windows, leave. Measured on the Mac with three tabs standing
-on the screen — `home`, `alpha`, `beta` — `session.json` held all three **while
-the run was alive**, and held **one** after the quit: the unanswered restore row
-folded back, and not one live tab. The two that had a place of their own were in
-`recent`, filed there one at a time.
+退出是一笔四阶段的事务(§2.9):给每一扇窗拍照、写文档、退役各扇窗、离开。在 Mac 上量的,屏幕上立着三个标签——`home`、`alpha`、`beta`——`session.json` 在**运行还活着的时候**装着三个,退出之后装着**一个**:那行没被回答的恢复折了回去,一个活着的标签都没有。有自己位置的那两个进了 `recent`,一个一个归进去的。
 
-The teardown is what did it. `Retire` tells every page and every child to go, the
-loop keeps turning while it waits for the pages, each pane whose child has gone
-closes its tab, and **every one of those closes is an ordinary edit that records
-the document again** — so `SessionStore::close`'s final flush put the windows on
-the disk as they were on the way out rather than as the reader left them. Nothing
-about it is macOS-specific in the source; what macOS supplies is a child that is
-reaped promptly enough for the loop to see it before the loop stops.
+干这件事的是拆除。`Retire` 告诉每一个页面和每一个子进程走人,循环在等那些页面的时候还在转,每一个子进程走掉了的 pane 关掉它的标签,而**那些关闭里的每一次都是一次普通的编辑,会把文档再记录一遍**——所以 `SessionStore::close` 最后那次刷写,把那些窗按它们出门时的样子而不是按读者留下的样子写到了磁盘上。源码里没有一处是 macOS 专属的;macOS 提供的是一个被收割得足够快、让循环在停下之前就看得见的子进程。
 
-**And the rule it breaks was already written down**, which is what makes this a
-defect rather than a new policy: the `Retire` arm's own comment says a child that
-refuses to die "changes nothing about the picture, **which is already on the
-disk**" (方案 ④, 「PTY teardown 任一报错不影响已写的照片」). It was true of the
-*error* path and false of the ordinary one.
+**而它破坏的那条规矩本来就写下来了**,这正是这件事是一个缺陷而不是一条新政策的原因:`Retire` 那条臂自己的注写着一个拒绝去死的子进程「不改变那张画的任何东西,**那张画已经在磁盘上了**」(方案 ④,「PTY teardown 任一报错不影响已写的照片」)。那句话对**错误**那条路是真的,对普通那条路是假的。
 
-The fix is one question asked in one place. `Quit::document_is_written` is true
-from the moment the write lands and false for a quit that could not write — that
-one is abandoned, the application carries on, and its session still has everything
-to say — and `App::record_session`, the single door every writer goes through
-(§2.7: 整份文件只在一处被组装), returns without recording when it is true. Not at
-the forty call sites of `mark_session_dirty`, any one of which could be added
-tomorrow by an author who never learns that a quit is in progress.
-`once_the_document_has_landed_the_teardown_cannot_write_over_it` walks the phases,
-and `the_document_a_quit_wrote_is_not_written_over_by_the_teardown` holds the
-guard at the door and ahead of the write it prevents.
+修法是在一个地方问一个问题。`Quit::document_is_written` 从写入落地那一刻起为真,而对一次写不出来的退出为假——那一次是被放弃的,应用继续跑,而它的会话仍然有全部的话要说——而 `App::record_session`,每一个写者都要经过的那一扇门(§2.7:整份文件只在一处被组装),在它为真时直接返回、不去记录。不是在 `mark_session_dirty` 那四十个调用点上,因为它们中的任何一个都可能明天被一位从来不知道有一次退出正在进行的作者加上去。`once_the_document_has_landed_the_teardown_cannot_write_over_it` 走一遍那些阶段,而 `the_document_a_quit_wrote_is_not_written_over_by_the_teardown` 把那道守卫按在门上、按在它所阻止的那次写入之前。
 
-**⑥ The run.** macOS 26.6.2, Apple M4, one 4K at backing scale 2 (see ⑦ for why
-one), a debug bundle of this branch with a bundle identifier of its own
-(`io.github.lulu-loopp.folio.m34probe`) and a `HOME` of its own under the
-worktree, exported by a `CFBundleExecutable` wrapper because `LSEnvironment`
-cannot set it (§13.31 ⑧(d)). **Driven by the pointer only** — no key was posted
-and nothing was written to the pasteboard — and every rectangle below is in
-points, read out of `CGWindowListCopyWindowInfo` for this run's own pid.
+**⑥ 那一趟。** macOS 26.6.2,Apple M4,一台 backing scale 2 的 4K(为什么只有一台见 ⑦),这条分支的一个 debug bundle,带着它自己的 bundle 标识符(`io.github.lulu-loopp.folio.m34probe`)和 worktree 底下一个自己的 `HOME`,由一个 `CFBundleExecutable` 包装脚本导出,因为 `LSEnvironment` 设不了它(§13.31 ⑧(d))。**只靠指针驱动**——没有发过任何键,也没有往剪贴板写过任何东西——而下面每一个矩形都按点算,从 `CGWindowListCopyWindowInfo` 里按这趟运行自己的 pid 读出来。
 
-| # | what was done | what was measured |
+| # | 做了什么 | 量到什么 |
 | --- | --- | --- |
-| 1 | a launch on an empty session | window **A** at `515,167 960×600` |
-| 2 | `open` the bundle at a folder | `application:openURLs:` lands, A takes a second tab standing in it |
-| 3 | **File ▸ New Window, by the pointer** | window **B** at `512,167 960×600` |
-| 4 | `open` the bundle at another folder | B takes its own second tab: A is `[home, alpha]`, B is `[home, beta]` |
-| 5 | a press in B's strip at `1212,187`, twenty steps, release | B stands at `692,314 960×600` |
-| 6 | `osascript -e 'tell application id "…m34probe" to quit'` | the process ends; the document holds **window 0 `{515,167 960×600}` `[home, alpha]`** and **window 1 `{692,314 960×600}` `[home, beta]`** |
-| 7 | `terminal_font_size` changed in `settings.json` **with nothing running** (18 → 15 on the run transcribed here) | — |
-| 8 | relaunch | the window the process opens with stands at `515,167 960×600` — `BT_DPI stage=create … rect=1030,334,2950,1534`, that rectangle at scale 2 to the pixel — the changed `terminal_font_size` is the one in force, and the one restore card names all four tabs of both windows |
-| 9 | quit again | the document is what it was: the same two windows, the same two tab sets, the same two rectangles |
+| 1 | 在一个空会话上启动一次 | 窗口 **A** 在 `515,167 960×600` |
+| 2 | 对着一个文件夹 `open` 这个 bundle | `application:openURLs:` 落位,A 多出一个站在那里的第二个标签 |
+| 3 | **用指针走 File ▸ New Window** | 窗口 **B** 在 `512,167 960×600` |
+| 4 | 对着另一个文件夹 `open` 这个 bundle | B 多出它自己的第二个标签:A 是 `[home, alpha]`,B 是 `[home, beta]` |
+| 5 | 在 B 的标签条上 `1212,187` 处按下,走二十步,抬起 | B 站在 `692,314 960×600` |
+| 6 | `osascript -e 'tell application id "…m34probe" to quit'` | 进程结束;文档里装着**窗口 0 `{515,167 960×600}` `[home, alpha]`** 和**窗口 1 `{692,314 960×600}` `[home, beta]`** |
+| 7 | **什么都没在跑**的时候改 `settings.json` 里的 `terminal_font_size`(这里记录的这一趟是 18 → 15) | — |
+| 8 | 重新启动 | 进程开出来的那扇窗站在 `515,167 960×600`——`BT_DPI stage=create … rect=1030,334,2950,1534`,那个矩形在缩放 2 下精确到像素——生效的是改过的那个 `terminal_font_size`,而那一张恢复卡点名两扇窗的全部四个标签 |
+| 9 | 再退出一次 | 文档还是原来的样子:同样两扇窗、同样两组标签、同样两个矩形 |
 
-**The menu row was pressed rather than keyed**, and how is worth writing down
-because the next Mac ticket that needs an application-level verb will want it:
-the bar is walked by **clicking** each title, the menu that opens is captured
-(it is this process's own window, so no grant is involved), and the File menu is
-recognised by its own shape — `menubar.rs`'s `BAR` read back off the screen.
-Apple's menu reads as twelve bands and seven rules, the application's as seven
-and nine, and **File as seven and two**, which is its five rows plus the menu's
-own rounded top and bottom edges; the Help menu corroborates the +2 (one row of
-ours, AppKit's search field, its rule → four and one). Row index 2 is then
-*New Window*, pressed at `161,72`.
+**那个菜单行是被点的而不是被按键的**,而怎么点值得写下来,因为下一张需要一个应用级动词的 Mac 票会想要它:那条栏是靠**点击**每一个标题走过来的,打开的那个菜单被拍下来(那是这个进程自己的窗,所以不涉及任何授权),而 File 菜单是靠它自己的形状认出来的——`menubar.rs` 的 `BAR` 从屏幕上读回来。苹果菜单读出来是十二段加七条分隔线,应用那个是七加九,而 **File 是七加二**,也就是它那五行加上菜单自己的圆角上下沿;帮助菜单佐证了那个 +2(我们的一行、AppKit 的搜索框、它那条分隔线 → 四加一)。于是索引为 2 的那一行就是 *New Window*,在 `161,72` 处按下。
 
-**Step 6 is the one that was red before ⑤.** On the same procedure against the
-commit this branch started from, the file the quit wrote held **one** tab and
-window B's move had not landed; with the guard it holds both windows, both tab
-sets and the rectangle the hand left B at.
+**第 6 步就是 ⑤ 之前红着的那一步。** 在这条分支起点的那个提交上跑同样的流程,退出写下的那份文件装着**一个**标签,而窗口 B 的那次挪动没有落地;带上那道守卫,它装着两扇窗、两组标签,以及那只手把 B 留在的那个矩形。
 
-**⑦ What could not be checked, and the venue facts the next Mac ticket needs.**
+**⑦ 核不到的东西,以及下一张 Mac 票需要的场地事实。**
 
-**(a) The mixed-scale desk does not exist yet.** The plan's §9 note says the
-owner will attach a second display for M3 and that *it must run at a different
-backing scale, or it proves nothing*. Both displays on the machine today are
-3840×2160 presented as 1920×1080 and **mirrored**, so `NSScreen.screens` has one
-entry and the desk has exactly one backing scale. ②'s scale-1 arm and the whole
-of ③ are therefore argued and unit-tested against a screen list a test writes
-down, not measured. What is owed is one action by the owner: un-mirror them and
-give them different scales.
+**(a) 混合缩放的桌子还不存在。** 计划 §9 那条注写着用户会为 M3 接第二台显示器,而且*它必须跑在一个不同的 backing scale 上,否则什么也证明不了*。今天这台机器上两台显示器都是 3840×2160 以 1920×1080 呈现,而且是**镜像**的,所以 `NSScreen.screens` 只有一条,而这张桌子恰好只有一个 backing scale。所以 ② 那条缩放为 1 的臂和整个 ③ 都是对着一份测试自己写下来的屏幕列表论证并做单元测试的,不是量出来的。欠着的是用户的一个动作:把镜像解掉,给它们不同的缩放。
 
-**(b) `CGWindowListCreateImage` is obsoleted in macOS 15, and the Xcode 26.6 SDK
-refuses to compile a call to it.** The venue's existing Swift probes
-(`launchers/m18shot.swift`, `launchers/pill_shot.swift`) therefore no longer
-build. The symbol is still exported and still answers for a window of a process
-this session started, so `@_silgen_name("CGWindowListCreateImage")` is the
-declaration that gets past the SDK — ScreenCaptureKit would want a Screen
-Recording grant no agent can ask for. `objc2`'s Rust bindings never enforced the
-availability, which is why `tests/macos_compose.rs` is untouched by this.
+**(b) `CGWindowListCreateImage` 在 macOS 15 里被淘汰,而 Xcode 26.6 的 SDK 拒绝编译一次对它的调用。** 这个场地现有的那些 Swift 探针(`launchers/m18shot.swift`、`launchers/pill_shot.swift`)因此不再编得出来。那个符号仍然导出、也仍然对一个由这次会话起来的进程的窗作答,所以 `@_silgen_name("CGWindowListCreateImage")` 是那个绕得过 SDK 的声明——ScreenCaptureKit 会要一个 agent 问不到的屏幕录制授权。`objc2` 的 Rust 绑定从来不强制那个可用性,这正是 `tests/macos_compose.rs` 不受这件事影响的原因。
 
-**(c) A synthetic `mouseMoved` does not drive AppKit's menu tracking.** Posted to
-the HID tap it moves the pointer and nothing else: with the Apple menu open, the
-pointer was walked the whole width of the bar and the same menu stayed up.
-Clicking each title is the gesture that switches menus.
+**(c) 一次合成的 `mouseMoved` 驱动不了 AppKit 的菜单跟踪。** 发到 HID tap 上,它挪动指针,别的什么也不做:苹果菜单开着的时候,指针被走过整条栏的宽度,而同一个菜单一直开着。点击每一个标题才是那个换菜单的手势。
 
-**(d) The last step of the acceptance line — the restore prompt answered — is
-NOT-CHECKABLE by this agent's instruments, and what was measured is written down
-here rather than guessed at.** §2.7's ruling ① is that a window holding no pinned
-tab does not open until the one card is answered, so "both windows return *on the
-screen*" needs that press. It did not happen, through four attempts in each of
-five runs:
+**(d) 验收那句话的最后一步——那张恢复提示被回答——用这个 agent 的仪器是 NOT-CHECKABLE 的,而量到的东西写在这里而不是靠猜。** §2.7 的裁决 ① 是:一扇不带任何钉住标签的窗要等那一张卡被回答才打开,所以「两扇窗都回到**屏幕上**」需要那一按。它没有发生,五趟运行里每趟试了四次:
 
-* the prompt's primary answer is **found**, in the window's own capture, as the
-  one accent-filled run of pixels — `1202,807..1313,865` physical in the run
-  above, which is the button `restore.rs` draws hard against the dialog's
-  trailing edge;
-* the prompt **sees the pointer**: parked away, the button measures
-  `122,153,255`; with the pointer standing on it, `131,164,255`, which is
-  `BUTTON_PRIMARY_HOVER_BRIGHTNESS` (1.07) exactly, and the difference covers
-  that rectangle and nothing else. So `Runtime::restore_layout` is `Some`,
-  `restore::hit` answers `Restore`, and `pointer_position` is right;
-* the press at the same point produces **no `WindowEvent::MouseInput` at all** —
-  `BT_MOUSE_TRACE` prints one line per press and there is none — while a press on
-  the **tab strip** of the same window, in the same run, arrives and routes
-  (`mouse_input state=Pressed … pointer=602,42 … route=none`, then
-  `chrome_mouse_input taken=1 at=press-routed … target=NewTab`, and the tab count
-  in `session.json` goes 1 → 2);
-* it is **not occlusion**: the whole on-screen list, in the window server's own
-  front-to-back order, has this run's window at **z0** immediately before and
-  immediately after the press. (The desk is nonetheless busy — the owner's own
-  Folio at `497,177 1189×794` and a cascade of Finder windows — which is why the
-  list was read at all, and reading it is worth the next agent's minute.)
+* 那张提示的主答案是在窗口自己的截图里**找到**的,就是那一片用强调色填满的像素——上面那一趟里是物理 `1202,807..1313,865`,也就是 `restore.rs` 紧贴着对话框后缘画的那个按钮;
+* 那张提示**看得见指针**:指针停在别处时,那个按钮量到 `122,153,255`;指针站在它上面时,`131,164,255`,正好是 `BUTTON_PRIMARY_HOVER_BRIGHTNESS`(1.07),而这个差别覆盖那个矩形、不覆盖别的。所以 `Runtime::restore_layout` 是 `Some`,`restore::hit` 答 `Restore`,而 `pointer_position` 是对的;
+* 在同一个点上按下**根本产生不了 `WindowEvent::MouseInput`**——`BT_MOUSE_TRACE` 每一次按下打一行,而一行都没有——而同一趟运行里,在同一扇窗的**标签条**上按一下会到达并被路由(`mouse_input state=Pressed … pointer=602,42 … route=none`,然后 `chrome_mouse_input taken=1 at=press-routed … target=NewTab`,而 `session.json` 里的标签数从 1 变成 2);
+* 它**不是遮挡**:按照窗口服务器自己的前后顺序,整张上屏列表在那次按下的紧前和紧后,这趟运行的窗都在 **z0**。(这张桌子仍然很挤——用户自己那个在 `497,177 1189×794` 的 Folio 加一串访达窗——这正是那张列表被读出来的原因,而读它值得下一个 agent 花一分钟。)
 
-So a press lands on that window's title bar and does not land on its content, the
-content is drawing and hit-testing correctly, and where the press goes instead was
-not established. **That is a finding about the pointer's route into a Folio window
-on this platform, not about multi-window restore**, and it wants its own ticket
-with `BT_MOUSE_TRACE` and the view hierarchy in hand. Everything the acceptance
-line asks about *this* ticket's subject is measured in ⑥ and none of it depends on
-that press.
+所以一次按下落在那扇窗的标题栏上、落不到它的内容上,而内容在画、命中测试也是对的,至于那次按下跑到哪里去了没有查清。**那是一条关于指针在这个平台上进入一扇 Folio 窗的路线的发现,而不是关于多窗恢复的**,它要一张自己的票,手里拿着 `BT_MOUSE_TRACE` 和视图层级。验收那句话里关于**本票**主题的每一样东西都在 ⑥ 里量到了,而其中没有一样依赖那一按。
 
 ### 13.35 M4-5: 视频播放走 AVPlayer——帧从 AVPlayerItemVideoOutput 拉、声音走它自己的口、结束留最后一帧(`crates/bt-platform/src/macos_player.rs`(新)、`crates/bt-platform/src/{video_portable,macos_video,lib}.rs`、`crates/bt-platform/tests/video_playback.rs`(新)、`crates/bt-platform/Cargo.toml`、`tests/assets/folio-video-sound-test.mp4`(新)、`tests/assets/PROVENANCE.md`)
 
