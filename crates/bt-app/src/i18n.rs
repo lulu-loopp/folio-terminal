@@ -1389,6 +1389,62 @@ pub enum Text {
     GitGroupStagedTip,
     GitGroupChangesTip,
     GitGroupUntrackedTip,
+
+    // ── what a status is, in words (T-GIT-STATUS-WORDS) ────────────────────
+    /// **One word per letter of git's alphabet** (owner's report 2026-09-13: a
+    /// row wore `UU` and the owner had to ask what it meant).
+    ///
+    /// The row draws git's letters, because two letters in a 17-pixel chip is
+    /// the whole signal a 240-pixel column has room for. These are what the
+    /// tooltip says instead — the same fact as a word a reader can act on. Each
+    /// one is the *event*, not the column it happened in: where it happened is
+    /// the clause `git_status_staged` fits around it.
+    GitStatusModified,
+    GitStatusTypeChanged,
+    GitStatusAdded,
+    GitStatusDeleted,
+    GitStatusRenamed,
+    GitStatusCopied,
+    /// `??` and `!!`. **Their own entries and not the UNTRACKED heading's**:
+    /// the heading is upper case at the source (N4) and a sentence is not, and
+    /// case is content in this table rather than a style a painter applies.
+    GitStatusUntracked,
+    GitStatusIgnored,
+    /// **The working tree's half, when the index has a half too** — the second
+    /// clause of `MM`, `AD`, `RM` and the rest.
+    ///
+    /// A second vocabulary and not the words above with a lower-case letter:
+    /// what the first clause says is what git was told to remember, and what
+    /// this one says is what happened to the file *afterwards*, which is a
+    /// different sentence in both languages and a word with no case at all in
+    /// one of them.
+    GitStatusSinceModified,
+    GitStatusSinceTypeChanged,
+    GitStatusSinceAdded,
+    GitStatusSinceDeleted,
+    GitStatusSinceRenamed,
+    GitStatusSinceCopied,
+    /// **The seven unmerged pairs git names, and the word for an eighth nobody
+    /// has seen.**
+    ///
+    /// git's own table (`git status`, the short format's legend) spells a
+    /// conflict as a *pair* — `UU`, `AA`, `DD`, `AU`, `UA`, `DU`, `UD` — and
+    /// the pair is the meaning: `AA` is two additions that are a disagreement,
+    /// and neither letter says so on its own. So these are seven entries rather
+    /// than a composition of two halves.
+    ///
+    /// **`us` is `you`.** git says "added by us" and this window may not: the
+    /// window is not a party to the merge, and `no_string_in_the_window_speaks_in_the_first_person`
+    /// holds that line for every sentence in this table.
+    GitStatusConflict,
+    GitStatusConflictBothModified,
+    GitStatusConflictBothAdded,
+    GitStatusConflictBothDeleted,
+    GitStatusConflictAddedByYou,
+    GitStatusConflictAddedByThem,
+    GitStatusConflictDeletedByYou,
+    GitStatusConflictDeletedByThem,
+
     GitBranchesHeading,
     GitRemotesHeading,
     GitRemotesTipShut,
@@ -3646,6 +3702,43 @@ impl Text {
                 "Not in the repository yet. git does not track these",
                 "还不在仓库里 —— git 没有盯着这些",
             ),
+            // ── what a status is, in words (T-GIT-STATUS-WORDS) ────────────
+            Self::GitStatusModified => pick(lang, "Modified", "已修改"),
+            Self::GitStatusTypeChanged => pick(lang, "Type changed", "类型已变"),
+            Self::GitStatusAdded => pick(lang, "Added", "已添加"),
+            Self::GitStatusDeleted => pick(lang, "Deleted", "已删除"),
+            Self::GitStatusRenamed => pick(lang, "Renamed", "已重命名"),
+            Self::GitStatusCopied => pick(lang, "Copied", "已复制"),
+            Self::GitStatusUntracked => pick(lang, "Untracked", "未跟踪"),
+            Self::GitStatusIgnored => pick(lang, "Ignored", "已忽略"),
+            Self::GitStatusSinceModified => pick(lang, "modified since", "之后又修改了"),
+            Self::GitStatusSinceTypeChanged => pick(lang, "type changed since", "之后类型又变了"),
+            Self::GitStatusSinceAdded => pick(lang, "added since", "之后又添加了"),
+            Self::GitStatusSinceDeleted => pick(lang, "deleted since", "之后删除了"),
+            Self::GitStatusSinceRenamed => pick(lang, "renamed since", "之后重命名了"),
+            Self::GitStatusSinceCopied => pick(lang, "copied since", "之后又复制了"),
+            Self::GitStatusConflict => pick(lang, "Conflict", "冲突"),
+            Self::GitStatusConflictBothModified => {
+                pick(lang, "Conflict (both modified)", "冲突（双方修改）")
+            }
+            Self::GitStatusConflictBothAdded => {
+                pick(lang, "Conflict (added by both)", "冲突（双方添加）")
+            }
+            Self::GitStatusConflictBothDeleted => {
+                pick(lang, "Conflict (deleted by both)", "冲突（双方删除）")
+            }
+            Self::GitStatusConflictAddedByYou => {
+                pick(lang, "Conflict (added by you)", "冲突（你添加）")
+            }
+            Self::GitStatusConflictAddedByThem => {
+                pick(lang, "Conflict (added by them)", "冲突（对方添加）")
+            }
+            Self::GitStatusConflictDeletedByYou => {
+                pick(lang, "Conflict (deleted by you)", "冲突（你删除）")
+            }
+            Self::GitStatusConflictDeletedByThem => {
+                pick(lang, "Conflict (deleted by them)", "冲突（对方删除）")
+            }
             Self::GitBranchesHeading => pick(lang, "BRANCHES", "分支"),
             Self::GitRemotesHeading => pick(lang, "REMOTES", "远程"),
             Self::GitRemotesTipShut => pick(
@@ -4756,7 +4849,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 638] = [
+    pub const ALL: [Self; 660] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -5104,6 +5197,28 @@ impl Text {
         Self::GitGroupStagedTip,
         Self::GitGroupChangesTip,
         Self::GitGroupUntrackedTip,
+        Self::GitStatusModified,
+        Self::GitStatusTypeChanged,
+        Self::GitStatusAdded,
+        Self::GitStatusDeleted,
+        Self::GitStatusRenamed,
+        Self::GitStatusCopied,
+        Self::GitStatusUntracked,
+        Self::GitStatusIgnored,
+        Self::GitStatusSinceModified,
+        Self::GitStatusSinceTypeChanged,
+        Self::GitStatusSinceAdded,
+        Self::GitStatusSinceDeleted,
+        Self::GitStatusSinceRenamed,
+        Self::GitStatusSinceCopied,
+        Self::GitStatusConflict,
+        Self::GitStatusConflictBothModified,
+        Self::GitStatusConflictBothAdded,
+        Self::GitStatusConflictBothDeleted,
+        Self::GitStatusConflictAddedByYou,
+        Self::GitStatusConflictAddedByThem,
+        Self::GitStatusConflictDeletedByYou,
+        Self::GitStatusConflictDeletedByThem,
         Self::GitBranchesHeading,
         Self::GitRemotesHeading,
         Self::GitRemotesTipShut,
@@ -7014,6 +7129,41 @@ fn git_renamed_from_in(lang: Lang, path: &str, from: &str) -> String {
     match lang {
         Lang::English => format!("{path} — renamed from {from}"),
         Lang::Chinese => format!("{path} —— 从 {from} 重命名而来"),
+    }
+}
+
+/// **Where a change stands, fitted around what the change is**
+/// (T-GIT-STATUS-WORDS) — `Modified` becomes `Modified, staged`.
+///
+/// A clause and not two more entries per letter: the index's column says *this
+/// is what git was told to remember*, and it says it the same way about every
+/// one of the six letters that can stand there.
+#[must_use]
+pub fn git_status_staged(word: &str) -> String {
+    git_status_staged_in(current(), word)
+}
+
+fn git_status_staged_in(lang: Lang, word: &str) -> String {
+    match lang {
+        Lang::English => format!("{word}, staged"),
+        Lang::Chinese => format!("{word}，已暂存"),
+    }
+}
+
+/// **The two halves of a file that is in the index and changed again since**
+/// (T-GIT-STATUS-WORDS) — `MM`, `AD`, `RM` and the rest of git's pairs.
+///
+/// The dash is [`git_renamed_from`]'s, which is the one this window already
+/// spends on "and here is the other half of that fact".
+#[must_use]
+pub fn git_status_since(staged: &str, since: &str) -> String {
+    git_status_since_in(current(), staged, since)
+}
+
+fn git_status_since_in(lang: Lang, staged: &str, since: &str) -> String {
+    match lang {
+        Lang::English => format!("{staged} — {since}"),
+        Lang::Chinese => format!("{staged} —— {since}"),
     }
 }
 
@@ -8998,6 +9148,18 @@ mod tests {
                 (
                     "git_renamed_from",
                     git_renamed_from_in(lang, "b.rs", "a.rs"),
+                ),
+                (
+                    "git_status_staged",
+                    git_status_staged_in(lang, Text::GitStatusModified.in_lang(lang)),
+                ),
+                (
+                    "git_status_since",
+                    git_status_since_in(
+                        lang,
+                        &git_status_staged_in(lang, Text::GitStatusAdded.in_lang(lang)),
+                        Text::GitStatusSinceDeleted.in_lang(lang),
+                    ),
                 ),
                 (
                     "git_branch_remote_tip",

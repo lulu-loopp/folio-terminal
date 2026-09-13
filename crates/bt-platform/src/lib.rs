@@ -11000,6 +11000,18 @@ pub use macos_app::delegate_answers_the_four_selectors;
 #[cfg(target_os = "macos")]
 pub use macos_app::{delegate_answers_the_dock_menu, winit_delegate_already_answers_the_dock_menu};
 
+/// **Whether AppKit's delegate answers the Edit menu's two clipboard rows**
+/// (T-MAC-EDIT-CLIPBOARD).
+///
+/// On [`delegate_answers_the_dock_menu`]' footing, for the same proof and
+/// against the same object. `copy:` and `paste:` are sent with **no target**,
+/// so `-[NSApplication targetForAction:]` walks the responder chain and tries
+/// this object last; a delegate that does not answer them is an `Edit ▸ Copy`
+/// over a terminal pane that reaches nobody, which is exactly the defect this
+/// ticket was raised for.
+#[cfg(target_os = "macos")]
+pub use macos_app::delegate_answers_the_edit_menus_clipboard_rows;
+
 /// **The Services provider object — Finder's *Services ▸ Open in Folio***
 /// (M4-9).
 ///

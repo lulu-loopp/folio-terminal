@@ -4788,6 +4788,50 @@ pub fn rounded_overlay_fill(
         .collect()
 }
 
+/// [`rounded_overlay_fill`]'s twin **inside a preview body**, where a fill has
+/// no alpha to carry: the same exact coverage, composited on the way out.
+///
+/// A [`PreviewQuad`] is opaque by construction — the body's fills are a code
+/// fence's ground, a table's grid and a diff's tints, and every one of them is a
+/// design token already mixed over the ground it stands on. So a rounded corner
+/// here cannot be spent as coverage; it is spent as *colour*, by mixing `color`
+/// into `under` by each pixel's coverage. That is available exactly because the
+/// flyout's own is not: the surface beneath a fill in a preview body is known —
+/// it is the body itself — where a floating window has no known surface under
+/// it at all (`peek_box_fills` says so where it mixes the flyout's own).
+///
+/// `under` must therefore be the colour actually behind `rect`, and a caller
+/// that hands it the wrong ground draws a halo rather than a curve.
+#[must_use]
+pub fn rounded_preview_fill(
+    rect: [f32; 4],
+    radius_px: f32,
+    color: [u8; 3],
+    under: [u8; 3],
+) -> Vec<PreviewQuad> {
+    rounded_rect_coverage(rect, radius_px)
+        .into_iter()
+        .map(|entry| {
+            // The mix lands between two `u8` ends and is rounded, so the cast is
+            // exact rather than merely narrow.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let mix = |over: u8, below: u8| {
+                let over = f32::from(over);
+                let below = f32::from(below);
+                (below + (over - below) * entry.coverage.clamp(0.0, 1.0)).round() as u8
+            };
+            PreviewQuad {
+                rect: entry.rect,
+                color: [
+                    mix(color[0], under[0]),
+                    mix(color[1], under[1]),
+                    mix(color[2], under[2]),
+                ],
+            }
+        })
+        .collect()
+}
+
 /// The ring between a rounded rectangle and the same rectangle grown by
 /// `extent_px` on every side — a floating surface's lift, with the hole a
 /// browser's own `box-shadow` leaves under the box it lifts.
@@ -23003,6 +23047,57 @@ mod tests {
         assert!(halo.iter().any(|quad| quad.rect[1] >= frame[3]), "below");
         assert!(halo.iter().any(|quad| quad.rect[2] <= frame[0]), "left");
         assert!(halo.iter().any(|quad| quad.rect[0] >= frame[2]), "right");
+    }
+
+    /// RED GATE (§7.1.3k ⑬, the chip's pill) — **a rounded fill inside a preview
+    /// body is spent as colour, because a body's fill has no alpha to spend it
+    /// as.**
+    ///
+    /// The same analytic coverage the overlay's own corners are cut from, mixed
+    /// into the ground the caller says is behind it: a whole pixel comes out the
+    /// fill's own colour, a pixel the curve half covers comes out between the
+    /// two, and nothing comes out darker than the darker end or lighter than the
+    /// lighter one. That last clause is the one that matters on a live page —
+    /// a chip whose corners over-shot would wear a halo of some colour that is
+    /// in neither the palette nor the document.
+    ///
+    /// MUTATION: drop the `clamp` and a coverage the decomposition rounded a
+    /// hair over one comes back past the fill's own colour; hand it the wrong
+    /// ground and the corners fade to a colour that is not there.
+    #[test]
+    fn a_rounded_fill_in_a_preview_body_is_mixed_into_its_own_ground() {
+        let under = [0x10, 0x10, 0x10];
+        let color = [0xf0, 0xf0, 0xf0];
+        let quads = rounded_preview_fill([20.0, 10.0, 120.0, 34.0], 4.0, color, under);
+        assert!(!quads.is_empty());
+        assert!(
+            quads.iter().any(|quad| quad.color == color),
+            "the straight middle is the fill's own colour: {quads:?}"
+        );
+        assert!(
+            quads
+                .iter()
+                .any(|quad| quad.color[0] > under[0] && quad.color[0] < color[0]),
+            "and a corner's own pixels stand between the two: {quads:?}"
+        );
+        for quad in &quads {
+            assert!(
+                quad.color
+                    .iter()
+                    .all(|channel| (under[0]..=color[0]).contains(channel)),
+                "no pixel may leave the two ends it is mixed from: {quad:?}"
+            );
+        }
+        // A radius of nothing is the rectangle itself, undimmed — the caller's
+        // own ground never reaches a pixel the shape covers whole.
+        let square = rounded_preview_fill([20.0, 10.0, 120.0, 34.0], 0.0, color, under);
+        assert_eq!(
+            square,
+            vec![PreviewQuad {
+                rect: [20.0, 10.0, 120.0, 34.0],
+                color,
+            }]
+        );
     }
 
     /// PIN — **a floating surface's lift is one soft shadow, not a set of rings**

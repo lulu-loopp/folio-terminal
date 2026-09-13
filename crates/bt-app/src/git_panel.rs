@@ -698,6 +698,182 @@ impl GitBadgeInk {
     }
 }
 
+// ── the badge alphabet, in words (T-GIT-STATUS-WORDS) ──────────────────────
+//
+// **A two-letter code is not a sentence a reader can act on** (owner's report,
+// 2026-09-13: a row wore `UU` and the owner asked what it meant). `UU` is git's
+// spelling of *unmerged, both modified* — a conflict — and until this slice the
+// page spelled it git's way and nowhere else.
+//
+// **The letters stay on the row and the words go in the tooltip**, and that is
+// arithmetic rather than taste. The row is the column less `.git-view`'s ten a
+// side and the section's four: 212 logical pixels at the design's 240. Of that,
+// `.grow`'s padding takes seven at each end, the badge takes seventeen (two
+// badges, thirty-seven), and the row's own gap takes eight — which leaves 173
+// pixels for the path, or 153 when a file is in both groups at once. A path is
+// most often longer than that at 12.5px and is already being cut; a word in
+// front of it would be a row that says `Conflict (both mod…` and never names
+// the file. So the badge keeps the pixels and the tooltip — which the row has
+// carried since the group headings gave theirs up — says the whole of it.
+//
+// **git's own two characters stay beside the words**, as the third thing the
+// tooltip says. The reader who wants to match a row against the `git status` in
+// the pane three inches away needs the code, and the reader who has just
+// learned what `UU` means learns it by seeing the two next to each other.
+
+/// What one letter of git's alphabet says, as a word.
+///
+/// **The event and not the column it happened in.** `M` is `Modified` whether
+/// it stands in the index's column or the working tree's; where it stands is
+/// the clause [`crate::i18n::git_status_staged`] fits around it. One word per
+/// letter is what keeps a row under STAGED and the same file's row under
+/// CHANGES from being two unrelated vocabularies.
+#[must_use]
+pub fn status_word(code: StatusCode) -> &'static str {
+    match code {
+        StatusCode::Modified => Text::GitStatusModified,
+        StatusCode::Typechange => Text::GitStatusTypeChanged,
+        StatusCode::Added => Text::GitStatusAdded,
+        StatusCode::Deleted => Text::GitStatusDeleted,
+        StatusCode::Renamed => Text::GitStatusRenamed,
+        StatusCode::Copied => Text::GitStatusCopied,
+        // A `U` alone is not a status git ever prints — it is half of one of the
+        // seven pairs [`conflict_word`] names — and the honest word for it on
+        // its own is still the one those seven all begin with.
+        StatusCode::Unmerged => Text::GitStatusConflict,
+        StatusCode::Untracked => Text::GitStatusUntracked,
+        StatusCode::Ignored => Text::GitStatusIgnored,
+    }
+    .text()
+}
+
+/// The same letter in the working tree's column, said as what happened *after*
+/// the index was told.
+///
+/// Only reached for the pairs where both columns carry a letter, which is why
+/// the last three arms are the words above rather than a clause: `?`, `!` and
+/// `U` are spelled `??`, `!!` and the conflict pairs by porcelain, and all
+/// three are answered by [`status_phrase`] before it gets here. An arm that
+/// cannot be reached is still not allowed to say something untrue.
+fn status_since(code: StatusCode) -> &'static str {
+    match code {
+        StatusCode::Modified => Text::GitStatusSinceModified,
+        StatusCode::Typechange => Text::GitStatusSinceTypeChanged,
+        StatusCode::Added => Text::GitStatusSinceAdded,
+        StatusCode::Deleted => Text::GitStatusSinceDeleted,
+        StatusCode::Renamed => Text::GitStatusSinceRenamed,
+        StatusCode::Copied => Text::GitStatusSinceCopied,
+        StatusCode::Unmerged => Text::GitStatusConflict,
+        StatusCode::Untracked => Text::GitStatusUntracked,
+        StatusCode::Ignored => Text::GitStatusIgnored,
+    }
+    .text()
+}
+
+/// Which conflict a pair of letters is — git's own unmerged table, in words.
+///
+/// **Keyed on the pair and not on either letter**, because the pair is the
+/// meaning: `AA` is two additions that are a disagreement and `DD` two
+/// deletions that are one, and neither letter says so by itself. The eighth
+/// answer is for a `U` in one column beside something git's table does not pair
+/// it with — porcelain prints no such line, and if it ever did, "this file is a
+/// conflict" is the whole of what could honestly be said about it.
+fn conflict_word(staged: Option<StatusCode>, unstaged: Option<StatusCode>) -> &'static str {
+    use StatusCode::{Added, Deleted, Unmerged};
+    match (staged, unstaged) {
+        (Some(Unmerged), Some(Unmerged)) => Text::GitStatusConflictBothModified,
+        (Some(Added), Some(Added)) => Text::GitStatusConflictBothAdded,
+        (Some(Deleted), Some(Deleted)) => Text::GitStatusConflictBothDeleted,
+        (Some(Added), Some(Unmerged)) => Text::GitStatusConflictAddedByYou,
+        (Some(Unmerged), Some(Added)) => Text::GitStatusConflictAddedByThem,
+        (Some(Deleted), Some(Unmerged)) => Text::GitStatusConflictDeletedByYou,
+        (Some(Unmerged), Some(Deleted)) => Text::GitStatusConflictDeletedByThem,
+        _ => Text::GitStatusConflict,
+    }
+    .text()
+}
+
+/// **The whole of what one porcelain line says, in words** — the sentence the
+/// row's tooltip carries in place of the two letters it draws.
+///
+/// The order of the questions is porcelain's own grammar rather than a
+/// convenience:
+///
+/// 1. **A conflict first**, because it outranks its letters exactly as it does
+///    in the ink (R29): `AA` is two additions and it is not green, and it is
+///    not "Added" either. The question is [`GitStatusEntry::is_conflict`] — git's
+///    rule, asked in the one place that holds it.
+/// 2. **`??` and `!!` next**, because they occupy both columns without being two
+///    claims. A file git has never seen has no index side to disagree with its
+///    working-tree side, which is `badges_of`'s reason for drawing one badge and
+///    the same reason this says one word.
+/// 3. **Then the two columns**, each of which may be empty, and the empty one is
+///    what makes `Modified, staged` a different sentence from `Modified`.
+///
+/// `None` is a line with neither column set. Porcelain never prints one — that
+/// would be a file it has nothing to say about — and it is an absence rather
+/// than a state, which is [`StatusCode::from_letter`]'s own answer to the same
+/// question about a space.
+#[must_use]
+pub fn status_phrase(entry: &GitStatusEntry) -> Option<String> {
+    if entry.is_conflict() {
+        return Some(conflict_word(entry.staged, entry.unstaged).to_owned());
+    }
+    for (code, word) in [
+        (StatusCode::Untracked, Text::GitStatusUntracked),
+        (StatusCode::Ignored, Text::GitStatusIgnored),
+    ] {
+        if entry.staged == Some(code) || entry.unstaged == Some(code) {
+            return Some(word.text().to_owned());
+        }
+    }
+    match (entry.staged, entry.unstaged) {
+        (None, None) => None,
+        (None, Some(unstaged)) => Some(status_word(unstaged).to_owned()),
+        (Some(staged), None) => Some(crate::i18n::git_status_staged(status_word(staged))),
+        (Some(staged), Some(unstaged)) => Some(crate::i18n::git_status_since(
+            &crate::i18n::git_status_staged(status_word(staged)),
+            status_since(unstaged),
+        )),
+    }
+}
+
+/// git's own two columns, spelled the way `git status --short` spells them.
+///
+/// **A space for a column that says nothing**, which is git's notation and not a
+/// gap this page left: a reader matching a row against the output of a
+/// `git status` in the pane beside it is matching two characters, and ` M` and
+/// `M ` are the two different lines that this whole slice is about.
+#[must_use]
+pub fn status_code(entry: &GitStatusEntry) -> String {
+    [entry.staged, entry.unstaged]
+        .into_iter()
+        .map(|code| code.map_or(' ', StatusCode::letter))
+        .collect()
+}
+
+/// The words, and then git's own letters for the reader who wants to match the
+/// row against a `git status` in the pane beside it.
+///
+/// The middle dot is this window's own "and also" — the separator it already
+/// spends between two facts that are one line.
+fn with_code(phrase: &str, code: &str) -> String {
+    format!("{phrase} · {code}")
+}
+
+/// What a changed row says about its own status: the words, then `XY`.
+fn status_sentence(entry: &GitStatusEntry) -> Option<String> {
+    let phrase = status_phrase(entry)?;
+    Some(with_code(&phrase, &status_code(entry)))
+}
+
+/// The same line for a file under an expanded commit (R15), which has **one**
+/// letter and not two: a commit is a single point and has one story about each
+/// file it touched.
+fn commit_file_sentence(code: StatusCode) -> String {
+    with_code(status_word(code), &code.letter().to_string())
+}
+
 // ── what one frame of the page is ──────────────────────────────────────────
 
 /// The masthead's words and their measured widths.
@@ -1015,11 +1191,46 @@ impl GitRow {
     #[must_use]
     fn ground_lit(&self, hovered: bool) -> bool {
         match self {
-            _ if self.is_furniture() => false,
+            _ if !self.wears_ground() => false,
             Self::Branch(branch) => hovered && !branch.current,
             Self::Commit(commit) => hovered || commit.expanded,
             _ => hovered,
         }
+    }
+
+    /// Whether a ground — *either* ground — may be drawn under this row at all
+    /// (user report, 2026-09-14).
+    ///
+    /// **A ground is the picture of an item in a list, and a header is not an
+    /// item.** The 2026-08-25 ruling said that once already and said it with
+    /// [`Self::is_furniture`], and it was the right sentence aimed at three of
+    /// the four kinds that wear a heading's clothes. [`Self::Remotes`] was
+    /// deliberately left out of `is_furniture` — and rightly, because that
+    /// predicate is also what the two hosts' press handlers read, and this row
+    /// *is* a control that answers a press. What it was not is a row that should
+    /// wear a card.
+    ///
+    /// The report was a screenshot of `REMOTES (5)` carrying a full-width
+    /// rounded wash with the pointer nowhere near it, and the wash had two
+    /// sources — the same two the 2026-08-25 report had:
+    ///
+    /// 1. **The keyboard's.** [`crate::Runtime::press_git_row`] puts the
+    ///    selection on the row under the hand before it asks what the press
+    ///    *means*, so opening the sub-group selected it; and a selection is a
+    ///    number that outlives the gesture, so the block stayed after the
+    ///    pointer had gone. That is the picture the reader photographed.
+    /// 2. **The pointer's**, which can land on the wrong row: the hover is an
+    ///    index into a list this window rebuilds under a still pointer. See
+    ///    [`crate::Runtime::heal_git_hover`], which is where that half is
+    ///    answered.
+    ///
+    /// Closing one would have left the other, so this predicate is asked of both
+    /// — and what a header says instead is ink: it brightens under the pointer
+    /// and under the keyboard, the way the `Files | Git` switch above the column
+    /// brightens. See [`push_remotes_heading`].
+    #[must_use]
+    pub fn wears_ground(&self) -> bool {
+        !self.is_furniture() && !matches!(self, Self::Remotes { .. })
     }
 
     /// Whether this row is the page's own **furniture** rather than an item in
@@ -1045,6 +1256,8 @@ impl GitRow {
     ///
     /// [`Self::Remotes`] is not here either, and that is the same distinction
     /// its own doc draws: it wears a heading's clothes and it is a *control*.
+    /// It is a control that wears **no ground**, which is a different question
+    /// and has its own predicate — [`Self::wears_ground`], 2026-09-14.
     #[must_use]
     pub fn is_furniture(&self) -> bool {
         matches!(
@@ -1715,10 +1928,16 @@ fn push_expansion(rows: &mut Vec<GitRow>, cache: &GitCache, hash: &str) {
 fn commit_file_row(file: &GitCommitFile, hash: &str) -> GitRow {
     GitRow::CommitFile(GitCommitFileRow {
         hash: hash.to_owned(),
-        tooltip: match &file.renamed_from {
-            Some(from) => crate::i18n::git_renamed_from(&file.path, from),
-            None => file.path.clone(),
-        },
+        // The change row's two lines with the group's taken out — a commit has
+        // no index and no working tree for a row to be standing in.
+        tooltip: format!(
+            "{}\n{}",
+            match &file.renamed_from {
+                Some(from) => crate::i18n::git_renamed_from(&file.path, from),
+                None => file.path.clone(),
+            },
+            commit_file_sentence(file.code)
+        ),
         path: file.path.clone(),
         renamed_from: file.renamed_from.clone(),
         badge: GitBadge {
@@ -1918,21 +2137,28 @@ fn group_act(group: GitGroup) -> Option<GitAct> {
 fn change_row(entry: &GitStatusEntry, group: GitGroup, cache: &GitCache) -> GitChangeRow {
     let untracked = group == GitGroup::Untracked;
     let badges = badges_of(entry);
+    // **The row's own name, then what happened to it, then what the group it is
+    // standing in means** (user report, 2026-08-25; owner's report 2026-09-13
+    // for the middle line) — the grammar the branch rows have always used,
+    // taken over from the heading that used to hold the last of it. A row under
+    // STAGED and the identical path under CHANGES are two different claims
+    // about one file (R11), and this is where the page says which of them the
+    // pointer is on.
+    //
+    // The middle line is the whole porcelain pair in words, not the half this
+    // group shows: `MM` is one fact about one file, and a reader whose pointer
+    // is on the STAGED row is entitled to know that the file has moved on
+    // since. `status_sentence` answers `None` only for a line with neither
+    // column set, which porcelain does not print and no group would have
+    // accepted.
+    let mut lines = vec![match &entry.renamed_from {
+        Some(from) => crate::i18n::git_renamed_from(&entry.path, from),
+        None => entry.path.clone(),
+    }];
+    lines.extend(status_sentence(entry));
+    lines.push(group_tooltip(group).to_owned());
     GitChangeRow {
-        // **The row's own name, and then what it is** (user report,
-        // 2026-08-25) — the grammar the branch rows have always used, taken over
-        // from the heading that used to hold the second half. A row under
-        // STAGED and the identical path under CHANGES are two different claims
-        // about one file (R11), and this is where the page now says which of
-        // them the pointer is on.
-        tooltip: format!(
-            "{}\n{}",
-            match &entry.renamed_from {
-                Some(from) => crate::i18n::git_renamed_from(&entry.path, from),
-                None => entry.path.clone(),
-            },
-            group_tooltip(group)
-        ),
+        tooltip: lines.join("\n"),
         pending: cache.write_pending(&entry.path),
         fade: pending_fade(cache.write_pending(&entry.path)),
         path: entry.path.clone(),
@@ -2865,6 +3091,7 @@ pub fn push_git_panel(
         // three kinds had none at all — and the keyboard can stand on all nine
         // (焦点跟随可见视图, 2026-08-19), so a selection on a heading or on the
         // masthead would have been a selection you cannot see.
+        let selected = content.selected == Some(index);
         let lit = row.ground_lit(hovered);
         push_row_ground(
             rect,
@@ -2874,7 +3101,12 @@ pub fn push_git_panel(
             // keeps the selection off this page's furniture; this is the paint
             // saying the same thing in its own voice, so that no stale index
             // from either host can put a filled block under a heading.
-            content.selected == Some(index) && !row.is_furniture(),
+            //
+            // [`GitRow::wears_ground`] and no longer `!is_furniture()`, because
+            // the 2026-09-14 report was the one row that answered `true` to both
+            // (`REMOTES (5)`): a control that wears a heading's clothes wears the
+            // heading's *states* too, which are ink and not a card.
+            selected && row.wears_ground(),
             scale,
             palette,
             sprites,
@@ -2915,6 +3147,11 @@ pub fn push_git_panel(
                     *count,
                     *open,
                     rect,
+                    // **The header's whole lit state** (user ruling,
+                    // 2026-09-14): no ground, so the pointer and the keyboard
+                    // both say where they are in the one way a header has —
+                    // its own ink.
+                    hovered || selected,
                     scale,
                     palette,
                     (labels, sprites),
@@ -3351,17 +3588,40 @@ fn push_heading(
 /// It does not animate here and that is not a shortcut: a files row's triangle
 /// turns because the row's children slide in under it, and this list has no
 /// motion of its own to be in step with.
+///
+/// **`lit` is the header's hover, and it is ink** (user ruling, 2026-09-14).
+/// The reported picture was this row under a full-width rounded wash — see
+/// [`GitRow::wears_ground`] for where that came from and what took it away —
+/// and the ruling that replaced it names the control this window already has
+/// for "a word you may press": the `Files | Git` switch at the top of the same
+/// column ([`crate::seats::push_files_seg`]). That switch says its three states
+/// in three inks and nothing else, and these are the first two of them,
+/// **the same two tokens**: [`ChromePalette::git_head_muted`] at rest,
+/// [`ChromePalette::files_row_text`] under the hand. Its third — `git_head_text`
+/// at 600 with two accent pixels under it — is the page you are *on*, which is
+/// not a state a sub-group has; what this header has instead of an underline is
+/// a triangle that has turned.
+///
+/// The triangle brightens with the word because they are one control and half a
+/// control lighting up is a header that looks broken.
 #[allow(clippy::too_many_arguments)]
 fn push_remotes_heading(
     count: usize,
     open: bool,
     rect: [f32; 4],
+    lit: bool,
     scale: f32,
     palette: &ChromePalette,
     out: (&mut Vec<ChromeLabel>, &mut Vec<ChromeSprite>),
     crop: &dyn Fn([f32; 4]) -> [f32; 4],
 ) {
     let (labels, sprites) = out;
+    // One ink for the word and the triangle, chosen once.
+    let ink = if lit {
+        palette.files_row_text
+    } else {
+        palette.git_head_muted
+    };
     let line = (GIT_LABEL_LINE_LOGICAL_PX * scale).round();
     let bottom_pad = (GIT_LABEL_PADDING_BOTTOM_LOGICAL_PX * scale).round();
     let mark = (GIT_REMOTES_MARK_LOGICAL_PX * scale).round().max(1.0);
@@ -3372,7 +3632,7 @@ fn push_remotes_heading(
     sprites.push(ChromeSprite::new(
         crate::marks::tree_disclosure(if open { 1.0 } else { 0.0 }),
         crop(mark_rect),
-        palette.git_head_muted,
+        ink,
     ));
     let text_rect = [
         mark_rect[2] + gap,
@@ -3385,7 +3645,7 @@ fn push_remotes_heading(
         text: format!("{} ({count})", git_remotes_heading()),
         rect: text_rect,
         font_size_px: GIT_LABEL_FONT_LOGICAL_PX * scale,
-        color: palette.git_head_muted,
+        color: ink,
         align_right: false,
         align_center: false,
         letter_spacing_em: GIT_LABEL_TRACKING_EM,
@@ -6528,6 +6788,10 @@ mod tests {
     /// They are not: the selection does not go there any more, so the ground
     /// does not either — and the ground is refused by *row kind* rather than by
     /// trusting the number, which is what makes this half of it checkable.
+    ///
+    /// The predicate is [`GitRow::wears_ground`] since 2026-09-14, which is the
+    /// same sentence with one more row inside it: a sub-group header is a
+    /// control and not furniture, and it wears no ground either.
     #[test]
     fn exactly_the_selected_row_wears_the_selected_ground() {
         let palette = bt_render::chrome_palette();
@@ -6545,7 +6809,7 @@ mod tests {
         for index in 0..content.rows.len() {
             let mut standing = content.clone();
             standing.selected = Some(index);
-            let wanted = usize::from(!content.rows[index].is_furniture());
+            let wanted = usize::from(content.rows[index].wears_ground());
             assert_eq!(
                 grounds(&standing),
                 wanted,
@@ -6730,6 +6994,340 @@ mod tests {
         );
     }
 
+    // ── a header's hover is ink (user report + ruling, 2026-09-14) ──────────
+
+    /// A page with somebody else's branches on it, so the `REMOTES (2)` row is
+    /// drawn — the one header on this page that is also a control.
+    fn with_remotes() -> GitPanelContent {
+        rows_of(&with_branches(
+            answered(PORCELAIN, vec![commit("aaaaaaa", "first", 1)], false),
+            vec![
+                branch("main", true, 0, 0),
+                reference(crate::git::GitRefKind::Remote, "origin/main", false, 0, 0),
+                reference(crate::git::GitRefKind::Remote, "origin/side", false, 0, 0),
+            ],
+        ))
+    }
+
+    fn remotes_row(content: &GitPanelContent) -> usize {
+        content
+            .rows
+            .iter()
+            .position(|row| matches!(row, GitRow::Remotes { .. }))
+            .expect("a repository with remotes gets the sub-group row")
+    }
+
+    /// The word the sub-group's header is drawn with, at this fixture's count.
+    fn remotes_word() -> String {
+        format!("{} (2)", git_remotes_heading())
+    }
+
+    /// **The two inks the column's own `Files | Git` switch says its states in**
+    /// — asked of the switch itself rather than copied out of it, which is the
+    /// whole of "the two agree": a palette change or a redesign that moves the
+    /// switch moves the header with it, and a header that drifted would fail
+    /// here rather than on a reader's screen.
+    ///
+    /// The `Files` half is read while the column is on `Git`, so the two answers
+    /// are the switch's *inactive* pair — at rest and under the pointer. Its
+    /// third ink is for the page you are on, and a sub-group is not a page.
+    fn seg_inks(palette: &ChromePalette) -> ([u8; 3], [u8; 3]) {
+        let geometry = crate::seats::files_seg_geometry([0.0, 0.0, 240.0, 28.0], [30.0, 18.0], 1.0);
+        let ink = |hovered: Option<crate::seats::FilesView>| {
+            let mut quads = Vec::new();
+            let mut labels = Vec::new();
+            let mut sprites = Vec::new();
+            crate::seats::push_files_seg(
+                &geometry,
+                crate::seats::FilesView::Git,
+                hovered,
+                1.0,
+                palette,
+                (&mut quads, &mut labels, &mut sprites),
+            );
+            labels
+                .iter()
+                .find(|label| label.text == crate::seats::FilesView::Files.label())
+                .expect("the switch draws both of its words")
+                .color
+        };
+        (ink(None), ink(Some(crate::seats::FilesView::Files)))
+    }
+
+    /// What one label was drawn in.
+    fn ink_of(painted: &Painted, text: &str) -> [u8; 3] {
+        painted
+            .labels
+            .iter()
+            .find(|label| label.text == text)
+            .unwrap_or_else(|| panic!("`{text}` was drawn"))
+            .color
+    }
+
+    /// The disclosure triangle drawn inside one row, by its mark.
+    fn chevron_in(painted: &Painted, rect: [f32; 4]) -> &ChromeSprite {
+        painted
+            .sprites
+            .iter()
+            .find(|sprite| {
+                matches!(sprite.mark, ChromeMark::TreeDisclosure { .. })
+                    && sprite.rect[1] >= rect[1]
+                    && sprite.rect[3] <= rect[3]
+            })
+            .expect("the sub-group's triangle is drawn in its own row")
+    }
+
+    /// **A group header's hover is its ink and never a ground** (user ruling,
+    /// 2026-09-14).
+    ///
+    /// The report was a screenshot of `REMOTES (5)` under a full-width rounded
+    /// wash with the pointer elsewhere, and the ruling on the look is that the
+    /// wash was never the right picture in the first place: a header that can be
+    /// pressed says so the way the `Files | Git` switch at the top of the same
+    /// column says it — dim at rest, the foreground ink under the hand, and no
+    /// quad at all. The chevron goes with the word, because half a control
+    /// lighting up is a header that looks broken.
+    ///
+    /// The inks are read out of [`crate::seats::push_files_seg`] itself rather
+    /// than named here, so "the two agree" is a fact this test keeps rather than
+    /// a sentence a comment claims.
+    #[test]
+    fn a_group_headers_hover_is_ink_and_paints_no_ground() {
+        let palette = bt_render::chrome_palette();
+        let (at_rest, under_the_hand) = seg_inks(&palette);
+        assert_ne!(
+            at_rest, under_the_hand,
+            "a switch whose two inks were equal would make this test vacuous"
+        );
+        let content = with_remotes();
+        let index = remotes_row(&content);
+        let body = [0.0, 0.0, 240.0, 4_000.0];
+        let rect = git_panel_geometry(body, &content, 1.0).row_rect(index);
+        let word = remotes_word();
+
+        let resting = painted_at(&content, 240.0, body[3], GitHover::default());
+        assert_eq!(
+            ink_of(&resting, &word),
+            at_rest,
+            "at rest the header wears the switch's dim ink"
+        );
+        assert_eq!(
+            chevron_in(&resting, rect).color,
+            at_rest,
+            "and so does its triangle"
+        );
+
+        let lit = painted_at(
+            &content,
+            240.0,
+            body[3],
+            GitHover {
+                row: Some(index),
+                act: None,
+            },
+        );
+        assert_eq!(
+            ink_of(&lit, &word),
+            under_the_hand,
+            "under the pointer it brightens to the switch's hovered ink"
+        );
+        assert_eq!(
+            chevron_in(&lit, rect).color,
+            under_the_hand,
+            "and the triangle brightens with the word it belongs to"
+        );
+
+        // And no quad, under either hand or keyboard — the half of the ruling
+        // that is about what is *not* drawn.
+        let grounds = [palette.git_row_hover, palette.git_row_selected];
+        let mut page = content.clone();
+        page.selected = Some(index);
+        for glass in [
+            lit,
+            painted_at(
+                &page,
+                240.0,
+                body[3],
+                GitHover {
+                    row: Some(index),
+                    act: None,
+                },
+            ),
+        ] {
+            for sprite in &glass.sprites {
+                assert!(
+                    !(grounds.contains(&sprite.color)
+                        && sprite.rect[1] < rect[3]
+                        && sprite.rect[3] > rect[1]),
+                    "the header wears a ground at {:?}",
+                    sprite.rect
+                );
+            }
+        }
+    }
+
+    /// **The cause: the keyboard's own ground was what stayed** (user report,
+    /// 2026-09-14).
+    ///
+    /// `press_git_row` puts the selection on the row under the hand before it
+    /// asks what the press *means*, so opening the sub-group selected it — and a
+    /// selection is a number that outlives the gesture. The wash the reader
+    /// photographed with the pointer elsewhere was therefore never a hover at
+    /// all, and clearing hovers more often would not have touched it.
+    ///
+    /// The selection is still *there* — `Enter` on this row toggles the
+    /// sub-group, so the keyboard must be able to stand on it — and what it
+    /// looks like is the header's lit ink, which is also what the pointer's
+    /// hover looks like. One state, one picture.
+    #[test]
+    fn the_keyboard_standing_on_a_header_lights_its_ink_and_lays_no_card() {
+        let palette = bt_render::chrome_palette();
+        let (at_rest, under_the_hand) = seg_inks(&palette);
+        let mut content = with_remotes();
+        let index = remotes_row(&content);
+        let body = [0.0, 0.0, 240.0, 4_000.0];
+        let rect = git_panel_geometry(body, &content, 1.0).row_rect(index);
+
+        assert!(
+            !content.rows[index].wears_ground(),
+            "the sub-group header is a control that wears no ground"
+        );
+        assert!(
+            !content.rows[index].is_furniture(),
+            "and it is still a control: a press on it must reach the toggle"
+        );
+        assert_eq!(
+            clamp_git_selection(&content.rows, Some(index)),
+            Some(index),
+            "the keyboard may still stand on it, so `Enter` can open it"
+        );
+
+        content.selected = Some(index);
+        let glass = painted_at(&content, 240.0, body[3], GitHover::default());
+        assert_eq!(
+            ink_of(&glass, &remotes_word()),
+            under_the_hand,
+            "the row the keyboard is on is lit, with the pointer nowhere"
+        );
+        for sprite in &glass.sprites {
+            assert!(
+                !(sprite.color == palette.git_row_selected
+                    && sprite.rect[1] < rect[3]
+                    && sprite.rect[3] > rect[1]),
+                "the selection laid a card under a header at {:?}",
+                sprite.rect
+            );
+        }
+
+        // And a selection somewhere else leaves this header dim, so the lit ink
+        // means *this row* and not "the page has a selection".
+        let a_file = content
+            .rows
+            .iter()
+            .position(|row| matches!(row, GitRow::Change(_)));
+        let elsewhere = clamp_git_selection(&content.rows, a_file);
+        assert!(elsewhere.is_some(), "the fixture has changed files");
+        content.selected = elsewhere;
+        assert_eq!(
+            ink_of(
+                &painted_at(&content, 240.0, body[3], GitHover::default()),
+                &remotes_word()
+            ),
+            at_rest,
+            "a header nobody is on is dim"
+        );
+    }
+
+    /// **The pointer leaving takes the header's ink with it** — the paint's half
+    /// of "the hover cleared".
+    ///
+    /// `GitHover::default()` is what the page is handed when the pointer is on
+    /// no row of it: it has left the panel, or it is standing on another row.
+    /// Both are asked here, because the reported picture was a header that
+    /// stayed lit in exactly those two situations.
+    ///
+    /// The state's half — that the window really does stop naming this row when
+    /// the rows move under a still pointer — is
+    /// `seats::tests::the_git_pages_hover_is_asked_of_the_page_that_is_drawn`
+    /// and `main::tests::the_git_pages_hover_is_healed_against_the_page_it_is_drawn_from`.
+    #[test]
+    fn a_header_goes_dim_when_the_pointer_leaves_it() {
+        let palette = bt_render::chrome_palette();
+        let (at_rest, _) = seg_inks(&palette);
+        let content = with_remotes();
+        let index = remotes_row(&content);
+        let body = [0.0, 0.0, 240.0, 4_000.0];
+        let rect = git_panel_geometry(body, &content, 1.0).row_rect(index);
+        let elsewhere = content
+            .rows
+            .iter()
+            .position(|row| matches!(row, GitRow::Branch(_)))
+            .expect("the fixture has branch rows");
+        assert_ne!(elsewhere, index);
+
+        for hover in [
+            GitHover::default(),
+            GitHover {
+                row: Some(elsewhere),
+                act: None,
+            },
+        ] {
+            let glass = painted_at(&content, 240.0, body[3], hover);
+            assert_eq!(
+                ink_of(&glass, &remotes_word()),
+                at_rest,
+                "the header is lit with the pointer at {hover:?}"
+            );
+            assert_eq!(
+                chevron_in(&glass, rect).color,
+                at_rest,
+                "the triangle is lit with the pointer at {hover:?}"
+            );
+        }
+    }
+
+    /// **Why the hover has to be healed and not merely cleared** (the cause,
+    /// 2026-09-14).
+    ///
+    /// The window keeps the hover as a row *index*, and this page's rows are
+    /// rebuilt from the repository on every pass. Opening the sub-group is the
+    /// smallest possible demonstration: the number that named `origin/main`'s
+    /// place a moment ago names a different row now, and nothing about the
+    /// pointer moved. `GitRowPeek` refuses to be keyed by an index for this very
+    /// reason and says so in its own doc; the hover had no such guard, which is
+    /// what [`crate::Runtime::heal_git_hover`] supplies.
+    #[test]
+    fn a_row_index_does_not_survive_the_list_changing_under_it() {
+        let cache = with_branches(
+            answered(PORCELAIN, vec![commit("aaaaaaa", "first", 1)], false),
+            vec![
+                branch("main", true, 0, 0),
+                reference(crate::git::GitRefKind::Remote, "origin/main", false, 0, 0),
+                reference(crate::git::GitRefKind::Remote, "origin/side", false, 0, 0),
+            ],
+        );
+        let shut = rows_of(&cache);
+        let open = rows_with_remotes_open(&cache);
+        let header = remotes_row(&shut);
+        assert_eq!(
+            remotes_row(&open),
+            header,
+            "the header itself does not move — what is under it does"
+        );
+        let below = header + 1;
+        assert!(
+            below < shut.rows.len() && below < open.rows.len(),
+            "both pages have a row under the sub-group"
+        );
+        assert_ne!(
+            std::mem::discriminant(&shut.rows[below]),
+            std::mem::discriminant(&open.rows[below]),
+            "one number, two rows: {:?} became {:?}",
+            shut.rows[below],
+            open.rows[below]
+        );
+    }
+
     /// **The keyboard walks the page's rows and steps over its furniture.**
     ///
     /// This supersedes the half of 焦点跟随可见视图 (2026-08-19) that read *every
@@ -6879,5 +7477,252 @@ mod tests {
                 "and the group's sentence follows it: {tip:?}"
             );
         }
+    }
+
+    /// **Every two-letter status git can print, and the words it is said in**
+    /// (T-GIT-STATUS-WORDS) — transcribed from git's own short-format legend
+    /// (`git status`, *Short Format*), which is the only authority on which
+    /// pairs exist.
+    ///
+    /// Written out rather than generated from the nine letters, and that is the
+    /// point of it: eighty-one pairs are expressible and thirty-seven are
+    /// printable, so a generated table would be proving that this file agrees
+    /// with itself. This one is a second reading of git's documentation, and it
+    /// goes red if the mapping ever stops saying what git says.
+    const GIT_STATUS_MATRIX: [(&str, &str); 37] = [
+        // Not updated — the index has nothing, the working tree has a story.
+        (" M", "Modified"),
+        (" T", "Type changed"),
+        (" D", "Deleted"),
+        (" R", "Renamed"),
+        (" C", "Copied"),
+        // Updated in the index, and what happened to the file afterwards.
+        ("M ", "Modified, staged"),
+        ("MM", "Modified, staged — modified since"),
+        ("MT", "Modified, staged — type changed since"),
+        ("MD", "Modified, staged — deleted since"),
+        ("T ", "Type changed, staged"),
+        ("TM", "Type changed, staged — modified since"),
+        ("TT", "Type changed, staged — type changed since"),
+        ("TD", "Type changed, staged — deleted since"),
+        ("A ", "Added, staged"),
+        ("AM", "Added, staged — modified since"),
+        ("AT", "Added, staged — type changed since"),
+        ("AD", "Added, staged — deleted since"),
+        ("D ", "Deleted, staged"),
+        ("DR", "Deleted, staged — renamed since"),
+        ("DC", "Deleted, staged — copied since"),
+        ("R ", "Renamed, staged"),
+        ("RM", "Renamed, staged — modified since"),
+        ("RT", "Renamed, staged — type changed since"),
+        ("RD", "Renamed, staged — deleted since"),
+        ("C ", "Copied, staged"),
+        ("CM", "Copied, staged — modified since"),
+        ("CT", "Copied, staged — type changed since"),
+        ("CD", "Copied, staged — deleted since"),
+        // Unmerged — git's seven, and the owner's `UU` among them.
+        ("DD", "Conflict (deleted by both)"),
+        ("AU", "Conflict (added by you)"),
+        ("UD", "Conflict (deleted by them)"),
+        ("UA", "Conflict (added by them)"),
+        ("DU", "Conflict (deleted by you)"),
+        ("AA", "Conflict (added by both)"),
+        ("UU", "Conflict (both modified)"),
+        // And the two that occupy both columns without being two claims.
+        ("??", "Untracked"),
+        ("!!", "Ignored"),
+    ];
+
+    /// One porcelain line, through the parser the real page reads.
+    ///
+    /// A rename and a copy spend a second record on where the file came from,
+    /// so the fixture spends it too: a status built by hand could be a shape
+    /// `parse_status` never produces, and half of what this pins is that git's
+    /// pairs survive the parse with both columns intact.
+    fn status_of(code: &str) -> GitStatusEntry {
+        let mut record = format!("{code} now.txt\0");
+        if code.contains('R') || code.contains('C') {
+            record.push_str("then.txt\0");
+        }
+        let mut status = parse_status(record.as_bytes());
+        assert_eq!(status.entries.len(), 1, "{code:?} is one line");
+        status.entries.remove(0)
+    }
+
+    /// RED GATE (T-GIT-STATUS-WORDS, owner's report 2026-09-13) — **every status
+    /// git can print is said in words, and none of them is said in git's
+    /// letters.**
+    ///
+    /// The report was one row wearing `UU` and one question: what does that
+    /// mean. `UU` is *unmerged, both modified*, and there is no way to learn
+    /// that from a row that only ever spells it `UU`.
+    ///
+    /// Three claims, and the third is the one the report is about: the pair
+    /// round-trips through the parser, the phrase is exactly the line of the
+    /// table above, and **no phrase is spellable in git's own alphabet** — a
+    /// mapping that quietly answered with the code for a pair nobody thought of
+    /// would pass the first two.
+    ///
+    /// MUTATION: answer any pair with `status_code(entry)` and this goes red on
+    /// that pair, naming it.
+    #[test]
+    fn every_status_git_can_print_is_a_phrase_and_not_two_letters() {
+        for (code, phrase) in GIT_STATUS_MATRIX {
+            let entry = status_of(code);
+            assert_eq!(
+                status_code(&entry),
+                code,
+                "the pair survives the parse, space and all"
+            );
+            let said = status_phrase(&entry)
+                .unwrap_or_else(|| panic!("{code:?} is a status and has something to say"));
+            assert_eq!(said, phrase, "{code:?}");
+            assert!(
+                !said
+                    .chars()
+                    .all(|letter| "MTADRCU?! ".contains(letter) || letter == '\u{2014}'),
+                "{code:?} is answered in git's own letters — {said:?}"
+            );
+            assert!(
+                !said.contains(code.trim()) || code.trim().len() < 2,
+                "{code:?} is answered with the code it is supposed to explain — {said:?}"
+            );
+        }
+    }
+
+    /// PIN (T-GIT-STATUS-WORDS) — **the staged half and the unstaged half of one
+    /// letter are two different sentences**, and the nine letters are nine
+    /// words.
+    ///
+    /// `M ` and ` M` are the pair this whole slice turns on: they are the same
+    /// letter in two columns and two different facts about a file, which is
+    /// R11's reason for two badges said in words.
+    #[test]
+    fn a_staged_letter_and_an_unstaged_one_are_not_the_same_sentence() {
+        for letter in ['M', 'T', 'A', 'D', 'R', 'C'] {
+            let staged = status_of(&format!("{letter} "));
+            let unstaged = status_of(&format!(" {letter}"));
+            let code = StatusCode::from_letter(letter).expect("git's own alphabet");
+            assert_eq!(status_phrase(&unstaged), Some(status_word(code).to_owned()));
+            assert_ne!(
+                status_phrase(&staged),
+                status_phrase(&unstaged),
+                "{letter} says where it stands"
+            );
+        }
+        let mut words: Vec<&str> = [
+            StatusCode::Modified,
+            StatusCode::Typechange,
+            StatusCode::Added,
+            StatusCode::Deleted,
+            StatusCode::Renamed,
+            StatusCode::Copied,
+            StatusCode::Unmerged,
+            StatusCode::Untracked,
+            StatusCode::Ignored,
+        ]
+        .into_iter()
+        .map(status_word)
+        .collect();
+        words.sort_unstable();
+        let spoken = words.len();
+        words.dedup();
+        assert_eq!(words.len(), spoken, "one word per letter — {words:?}");
+    }
+
+    /// PIN (T-GIT-STATUS-WORDS) — **a conflict is recognised by the pair, and by
+    /// the same rule the ink is.**
+    ///
+    /// `AA` and `DD` are conflicts whose letters say nothing about it, which is
+    /// why [`GitStatusEntry::is_conflict`] exists and why this asks git's own
+    /// question rather than looking for a `U`.
+    #[test]
+    fn every_unmerged_pair_is_answered_as_a_conflict_and_nothing_else_is() {
+        for (code, phrase) in GIT_STATUS_MATRIX {
+            let entry = status_of(code);
+            assert_eq!(
+                entry.is_conflict(),
+                phrase.starts_with("Conflict"),
+                "{code:?} is a conflict exactly when git says it is — {phrase:?}"
+            );
+        }
+    }
+
+    /// PIN (T-GIT-STATUS-WORDS) — **the row says the path, then what happened to
+    /// the file, then what the group it stands in means**, and git's two letters
+    /// stand beside the words.
+    ///
+    /// The whole pair and not this group's half: `MM` puts one file under two
+    /// headings (R11), and a reader whose pointer is on the STAGED row is
+    /// entitled to know the file has moved on since.
+    #[test]
+    fn a_changed_rows_tooltip_says_the_status_in_words_beside_gits_letters() {
+        let cache = answered(b"## main\0MM both.txt\0UU clash.txt\0", Vec::new(), false);
+        let content = rows_of(&cache);
+        let tips: Vec<String> = content
+            .rows
+            .iter()
+            .filter(|row| matches!(row, GitRow::Change(_)))
+            .map(|row| row_tooltip(row).expect("a change row says what it is"))
+            .collect();
+        // `MM` is one file in two groups, so it is two rows and both say the
+        // whole of it.
+        let staged = tips
+            .iter()
+            .filter(|tip| tip.starts_with("both.txt"))
+            .collect::<Vec<_>>();
+        assert_eq!(staged.len(), 2, "{tips:#?}");
+        for tip in staged {
+            let lines: Vec<&str> = tip.lines().collect();
+            assert_eq!(lines.len(), 3, "{tip:?}");
+            assert_eq!(lines[0], "both.txt");
+            assert_eq!(lines[1], "Modified, staged — modified since · MM");
+        }
+        let clash = tips
+            .iter()
+            .find(|tip| tip.starts_with("clash.txt"))
+            .expect("the conflicted file is on the page");
+        assert!(
+            clash.contains("Conflict (both modified) · UU"),
+            "the word the owner had to ask for, beside the code they were shown \
+             — {clash:?}"
+        );
+    }
+
+    /// PIN (T-GIT-STATUS-WORDS) — **a file under an expanded commit says its one
+    /// letter in words too.**
+    ///
+    /// One letter and not two: a commit is a single point and has one story
+    /// about each file it touched (R15), so the line has no staged clause to
+    /// carry.
+    #[test]
+    fn a_commit_files_row_says_its_letter_in_words_beside_the_letter() {
+        let hash = commit("aaaaaaa", "newest", 1).hash;
+        let mut cache = answered(b"## main\0", vec![commit("aaaaaaa", "newest", 1)], false);
+        assert!(cache.begin_commit_files(&hash).is_some());
+        assert!(cache.accept(GitAnswer::CommitFiles {
+            root: PathBuf::from(ROOT),
+            hash: hash.clone(),
+            outcome: Ok(vec![crate::git::GitCommitFile {
+                path: "src/main.rs".to_owned(),
+                code: StatusCode::Renamed,
+                renamed_from: Some("src/old.rs".to_owned()),
+                stat: None,
+            }]),
+        }));
+        let opened = build(&cache, look(&hash), 1.0, TEST_COLUMN_PX, &mut ruler);
+        let row = opened
+            .rows
+            .iter()
+            .find(|row| matches!(row, GitRow::CommitFile(_)))
+            .expect("the commit's file is drawn");
+        let tip = row_tooltip(row).expect("a commit's file says what it is");
+        let lines: Vec<&str> = tip.lines().collect();
+        assert_eq!(lines.len(), 2, "{tip:?}");
+        assert_eq!(
+            lines[0],
+            crate::i18n::git_renamed_from("src/main.rs", "src/old.rs")
+        );
+        assert_eq!(lines[1], "Renamed · R");
     }
 }

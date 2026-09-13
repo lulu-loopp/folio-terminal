@@ -515,6 +515,19 @@ pub enum TooltipAnchorId {
     /// edit that moves the token does change the offset, and that is correct:
     /// the text under the pointer is then a different piece of text.
     PreviewHex(crate::PreviewSurface, usize),
+    /// **A remote picture's chip in a rendered markdown page** (§7.1.3k ⑬) —
+    /// the second anchor registered inside a preview's body, and the first one
+    /// registered inside a *rendered* one.
+    ///
+    /// It carries where the chip stands in the page rather than which chip of
+    /// this frame's list it is, for [`Self::PreviewHex`]'s own reason: an index
+    /// renumbers under a hand that has not moved, and a run's address in the
+    /// page does not until the document itself changes.
+    ///
+    /// What it says is the two facts the block card prints — why there is no
+    /// picture, and the address — which a chip has no room to print and no
+    /// business inventing a second wording for (`main::markdown_chip_tip`).
+    PreviewImageChip(crate::PreviewSurface, crate::PreviewChipAt),
     /// One row of the first-run card (§7.56, v4, user ruling 2026-09-06).
     ///
     /// **The whole row and not its switch**, which is what the card fills with
