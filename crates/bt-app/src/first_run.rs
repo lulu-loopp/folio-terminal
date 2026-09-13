@@ -101,6 +101,17 @@ impl RowKind {
 /// **What a row needs of the platform**, which is a different question from what
 /// it needs of the machine.
 ///
+/// **Two surfaces read this table, not one** (owner ruling 2026-09-12, §13.32
+/// ①). It was written for the first-run card, and the Settings dialog turned
+/// out to be asking the identical question — a `PSReadLine 补丁` row on a Mac is
+/// the card's “a row nobody could have asked for” one page along, and answering
+/// it twice would be two tables to keep in step. So the type stays here, where
+/// it was argued for, and [`crate::settings::visible_rows_for`] reads it. Four
+/// rows of that dialog declare a facility and two of them name one the card
+/// never had a row for: [`Self::PsReadLineModule`] and [`Self::OptionKey`].
+/// What each surface still owns is what it *does* with the answer — the card
+/// drops the question, the page drops the row.
+///
 /// [`Machine`] answers "is the thing this row installs already here, and is the
 /// program it is about on this path" — a fact about one computer, read off the
 /// registry and off the agents' own files. This answers the question one layer
@@ -161,6 +172,31 @@ pub enum Capability {
     /// and is its own ticket — until then the card would be asking about tools
     /// it cannot see.
     AgentDiscovery,
+    /// Replacing the readline module one shell loads.
+    ///
+    /// Windows only, and the narrowest of the six: the thing installed is a
+    /// `.psm1` for `Windows PowerShell 5.1`, written under the account's
+    /// `Documents` folder, to work around a redraw fault in the module that
+    /// edition ships. There is no shell off Windows that loads it and no fault
+    /// there to repair.
+    ///
+    /// **No first-run row, and that is not an omission**: the card asks about
+    /// writes into other people's files that Folio would make *on its own*, and
+    /// this one is only ever made by a reader pressing the row. The facility is
+    /// in this table because the Settings row has to ask the same question the
+    /// other three ask.
+    PsReadLineModule,
+    /// A key on the keyboard that is Alt to a terminal and an accent composer to
+    /// the text system.
+    ///
+    /// **The one entry here that is macOS and not Windows**, which is the whole
+    /// reason this is a table of facilities rather than a `windows` flag: the
+    /// question a row asks is "does this platform have the thing I am about",
+    /// and the answers do not all point the same way. M1-7 put the row on the
+    /// General page behind exactly this question, written as an `if` at the one
+    /// call site; it is here now so that every row on that page is filtered by
+    /// one rule instead of one rule and one exception.
+    OptionKey,
 }
 
 impl Capability {
@@ -176,9 +212,11 @@ impl Capability {
     pub const fn on(self, platform: HostPlatform) -> bool {
         match self {
             Self::UpdateCheck => true,
-            Self::ExplorerMenu | Self::PowerShellProfile | Self::AgentDiscovery => {
-                matches!(platform, HostPlatform::Windows)
-            }
+            Self::ExplorerMenu
+            | Self::PowerShellProfile
+            | Self::AgentDiscovery
+            | Self::PsReadLineModule => matches!(platform, HostPlatform::Windows),
+            Self::OptionKey => matches!(platform, HostPlatform::MacOs),
         }
     }
 }

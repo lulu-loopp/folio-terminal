@@ -8378,36 +8378,29 @@ silhouette the row it lands in actually wears, and the rail's rows are closed
 boxes. A pill is the strip's row wearing the rail's silhouette, so the mark that
 was made for the rail is the mark for this.
 
-**④ The hairline is the only thing separating `#FFFFFF` from `#F7F7F5`.** An
-attached tab needs no edge — it is the pane's surface, and the join is the whole
-silhouette. A pill floats, and on the light canvas its fill and the strip under
-it are three levels apart. The owner struck the line: `rgba(0,0,0,.14)`, half a
-point. It is a named palette entry (`tab_pill_edge` / `tab_pill_edge_alpha`)
-derived exactly the way `menu_border` is — the canvas's own hairline *shade*
-(black on paper, white on night) at the canvas's own alpha for this mark — and
-carried as colour *and* alpha rather than pre-composited, which is `menu_border`'s
-reason said about a different surface: the ring is drawn over a fill that is
-still fading in (`TAB_ACTIVATION`), so the ground under it is a mix rather than a
-known colour, and the honest hairline is the one the renderer blends at draw
-time. It fades in with the fill it edges, because an outline at full strength
-around a silhouette that is half there is the outline of a tab that is not yet
-the active one.
+**④ The hairline this section struck is gone, and §13.32 ④ is where that was
+ruled.** It went in on one argument — an attached tab needs no edge because it is
+the pane's surface, while a pill floats, and on the light canvas its fill and the
+strip under it are three levels apart, so without a line the active tab is a
+smudge rather than a shape. The owner struck the value (`rgba(0,0,0,.14)`, half a
+point), night's was derived from it (`94 × 140 / 88`), it was carried as colour
+*and* alpha rather than pre-composited so the renderer could blend it over a fill
+still fading in, and it was drawn inside the pill's box rather than spread outside
+it so that the ink stayed 30 points tall.
 
-**The dark value is derived and the derivation is written down.** The owner set
-`.14` on the light canvas and said nothing about the dark one. Night takes the
-same multiple of *its own* hairline alpha that paper's does of its —
-`94 × 140 / 88 = 149.5`, so `pill_edge` is 150 on night against 140 on paper —
-which is the relation the two canvases already carry on both existing hairlines
-(`border` 94 against 88, `border_soft` 60 against 55). The reason those two run
-that way is `thumb`'s own: a white line laid on night covers less ground per unit
-of alpha than a black one laid on paper.
-
-**And it is drawn *inside* the pill's edge, not spread outside it.** CSS's
-`box-shadow: 0 0 0 .5px` is an outset ring, which would make the ink 31 points
-tall and start it at 4.5. The ruling gives the pill 30 points and a top at 5.
-Half a logical pixel is one device pixel at the backing scale this window is
-drawn at, so the line the reader sees is the same line either way and the box
-stays the box.
+Then the window was built and the owner looked at it, and asked whether the tab
+needed the edging at all. **It does not, and the reason is one this product had
+already written down elsewhere**: the vertical rail's rows are this same pill, at
+this same radius, on a strip of the same panel shade, and they carry no ring on
+either canvas. A ring here would have made the horizontal tab the one pill in the
+window that is outlined — which is a difference a reader notices without being
+able to name, and none of it was ever about the platform. So the sprite, the
+palette pair (`tab_pill_edge` / `tab_pill_edge_alpha`), the `Canvas::pill_edge`
+thousandths both canvases carried and `WINDOW_TAB_FLOAT_EDGE_LOGICAL_PX` are all
+out; nothing else read any of them. The fill and the silhouette are untouched,
+and the pin that held the ring now holds its absence —
+`the_active_pill_is_a_closed_fill_with_no_ring_and_the_attached_tab_is_a_skirt`,
+which asserts it of both windows rather than of one.
 
 **⑤ The five points of strip above and below a pill are not the tab.** The hit
 test reads `tab.body` and the geometry moved, so this needed no code at all — but
@@ -10388,6 +10381,224 @@ image has, which is the name the crash report is filed under. **And the same pas
 showed what §M4-7 is for**: two Folios on one data directory did not hand over to
 each other, because the attention endpoint that arranges that on Windows has no
 macOS arm yet.
+
+### 13.32 T-MAC-FIT: 说这台机器的话——设置行按能力隐、字符串按平台挑、路径从 ~ 起、药丸不描边(`crates/bt-app/src/{settings,i18n,first_run,main,seats}.rs`、`crates/bt-render/src/{theme,scheme,lib}.rs`)
+
+**Taken as 13.32.** 13.19–13.25 and 13.27 are merged; 13.26 and 13.28–13.31 are
+in flight on other branches of this port. This section takes the next number
+nothing has claimed.
+
+This is the first acceptance pass the owner ran on a built Mac (2026-09-12), read
+as one ticket. Four things came out of it, and only the last is about paint: a
+settings page offering rows about mechanisms macOS has not got, a window saying
+`Explorer` and `taskbar` and `folio.exe` to a reader who has none of those, a
+breadcrumb beginning at a folder called `/`, and a tab wearing an outline the rest
+of the window does not wear. What they have in common is that each one was
+*correct on Windows* and nobody had ever asked it the other question.
+
+**① A row is not a row where the platform has not got the mechanism.** The
+General page offered `Explorer context menu`, and the Terminal page offered
+`PSReadLine patch` and `Offer PowerShell integration`. All three are switches over
+a Windows shell extension, a Windows PowerShell module and a Windows startup
+file; none of them is a question a Mac could answer, and the reader who presses
+one has been taught a word for nothing. They are dropped by the rule M3-6 already
+wrote for the first-run card (§7.56 ⑬): each row says what facility it is about
+(`SettingsRow::needs() -> Option<first_run::Capability>`), the facility says which
+platforms have it (`Capability::on(platform)`), and `visible_rows_for(platform,
+tab_layout)` filters the list once at the end.
+
+**The same `Capability` and not a second table.** Two of the four facilities
+these rows name are ones that card already asks about, and a second table would
+be a second place to remember which platforms have them. What each surface still
+owns is what it *does* with the answer — the card drops the question, the page
+drops the row. `Capability` grew two values for
+this: `PsReadLineModule`, which the card never had a row for because the card asks
+about writes Folio would make on its own and that one is only ever made by a
+reader pressing the row; and `OptionKey`, which is the one entry in that table
+pointing at macOS rather than at Windows and is the reason it is a table of
+*facilities* and not a `windows` flag. `Option key sends Alt` was M1-7's `if
+bt_platform::host_platform() == MacOs` at the one call site, and it is now the
+fourth row under the one rule — a rule with an exception in it is a rule the next
+reader skips.
+
+**The list is built whole and filtered once**, rather than each push being
+conditional, because the order of that list is itself a ruling and every comment
+in it is part of that ruling; a row that came and went inside the run would make
+the order unreadable. `visible_rows` is the ambient reader and
+`visible_rows_for` takes the platform as a value, for `rows_for`'s own reason: a
+Windows workstation has to be able to read out what a Mac's General page contains,
+or "a Mac is not offered a PSReadLine row" stays a claim nobody can check until
+somebody opens the window on a Mac — which is exactly how these three rows got
+onto that page.
+
+**No page is left with a heading and nothing under it.** General keeps six
+unconditional rows and Terminal keeps four, so the heading derivation that walks
+the list never meets an empty run and the advanced disclosure is untouched. That
+is asserted rather than reasoned: `no_page_is_left_with_a_heading_and_no_rows`.
+
+**And a row the *machine* cannot honour is still a different thing.** `Acrylic`
+on a machine with no backdrop, a built-in profile's colour, an unavailable
+PSReadLine — those are greyed *with the reason in the sentence*, because the
+reason is what the reader came for. A facility the platform has not got leaves
+nothing to explain, and a sentence explaining it would be this page teaching a
+reader a Windows word on a Mac.
+
+**② A string that names a program names the one on this machine.** The rows above
+are the half that disappears; this is the half that stays and has to be true.
+`Reveal in Explorer` over a folder, `Revealed in File Explorer` in a toast,
+`· Ctrl+click shows it in Explorer` under a link, `from the taskbar, a shortcut or
+folio.exe`, `Flashes the taskbar`, `Windows would not take it`, `Windows keeps
+some combinations for itself`, `A desktop-wide key needs Ctrl, Alt or Win`,
+`git.exe was not found. Install Git for Windows`, `This version of Windows does
+not offer the blur`, and the Chinese half of the summon key's sentence, which says
+the key is registered with Windows where the English never said so. Eleven
+entries, and each one is a sentence a Mac reader can reach.
+
+**One mechanism, in the table, beside the words.** `pick_platform(lang, platform,
+en_win, zh_win, en_mac, zh_mac)` is `pick` with the platform choosing the pair
+before the language chooses the string, and `Text::on(lang, platform)` is the
+whole table with both axes exposed. `Text::in_lang` asks `host_platform()` once
+and every surface in the window keeps the signature it had. The alternative — an
+`if` wherever somebody noticed — would give this window as many answers to "what
+platform am I on" as it has sentences, and the ones nobody noticed would keep the
+Windows word forever.
+
+**What the Mac column says, and what it does not.** Finder where the program is
+Finder; the Dock where the taskbar was, because the platform's own way of calling
+a reader back to an application is a Dock icon bouncing (the call itself is
+`bt_platform::flash_window`, whose macOS arm is M4-6); `macOS` where the refusal
+named the system; `Control, Option or Command` where three keycaps were named,
+because `Win` is not a key on that keyboard; the Xcode command line tools where
+`Git for Windows` was. Two entries are deliberately *not* translations. The launch
+row's second sentence named Explorer's verb and `folio-here.cmd` — two Windows
+shell extensions with no Mac counterpart — so it is dropped rather than invented,
+and the Mac reader is told the three ways they actually start this program. And
+the greyed `Acrylic` row reads `Folio does not draw this blur on macOS`, because
+that system *has* the blur and this product has not drawn it: a line saying `this
+version of macOS does not offer the blur` would be the window blaming the machine
+for its own omission.
+
+**`Ctrl` stays `Ctrl` in the link hint**, and only the program's name moves. The
+press that hint promises is read off `window.modifiers.control_key()`, which is
+the same key on either keyboard; a hint that said `⌘` would describe a press this
+window does not answer. That the chord *should* be Command on a Mac is M1-7's
+question about routing and not this ticket's about wording — noted, not taken.
+
+**Windows is byte for byte what it was**, and the strings that belong to a Windows
+surface are untouched: the Explorer registration's own toasts, the PSReadLine
+repair, the `$PROFILE` offer (whose probe answers `None` off Windows, so the strip
+never rises there), the first-run rows that card does not list. Those are named in
+`Text::WINDOWS_ONLY_SURFACES`, which is the exemption list of a red gate rather
+than a comment: `no_string_a_mac_reader_meets_names_a_windows_program` reads every
+entry of the table, in both languages, on the Mac column, against the vocabulary
+of the other machine. A string that leaves one of those surfaces and lands
+somewhere a Mac reader can see it has to come off the list, and taking it off is
+what makes the gate ask about it.
+
+**The Chinese is owed and the debt is per column.** `CHINESE_PENDING` was a list
+of entries; it is now a list of `(entry, column)` pairs, because `Reveal in
+Explorer` has had its Chinese since the file tree was written and `Reveal in
+Finder` has not. A list that named the entry would have taken the Windows half out
+of every completeness check in order to excuse the Mac half — which is how a
+translated sentence quietly stops being checked. The two completeness pins
+(`no_entry_ships_the_english_word_as_its_own_translation`,
+`every_chinese_entry_carries_at_least_one_han_character`) now walk the platform
+axis too, so the Mac column is checked the way the Windows one always was. The
+source marker on each pending literal is `// zh: pending opus46`; the copywriter
+greps for it, and this list is how the build refuses to forget. Fifteen pairs
+stand there: the eleven above, and `Option key sends Alt` and its sentence —
+M1-7's, English in both languages — listed on both platform columns, because the
+table answers for a platform that never draws that row.
+
+**`OtherUnix` reads the Mac column.** There is no third build and no third
+vocabulary, and of the two columns the one written for a machine with `$HOME`, no
+drive letters and no Explorer is the one that is less wrong there — the same
+choice `profiles::home_variable` already makes for the same reason. That the table
+really has two columns and not three is itself asserted
+(`the_platform_table_has_exactly_two_columns`), because everything else walks
+`Text::PLATFORM_COLUMNS`, which is two values where `HostPlatform` has three.
+
+**③ A path starts where the reader's machine says a path starts.** The owner's
+preview rail read `/ › Users › alice › .zcompdump`: four crumbs, the first a
+folder called `/` that no Mac shows anybody, and two more that every path on that
+machine repeats. The ruling is Finder's path bar with the volume dropped, and it
+is two shapes:
+
+* a path **under the reader's home** starts at one `~` crumb standing for the
+  whole run above it — `~ › .zcompdump`, `~ › folio-port › repo › …`;
+* a path **outside it** starts at its own first component, with no root crumb in
+  front — `Applications › Utilities › …`.
+
+Windows is the row it was: `C: › Users › …`, drive first, because a drive is a
+place a reader of that machine navigates to and `%USERPROFILE%` is not a word
+Explorer says.
+
+**`~` is a crumb like every other crumb.** The place it points at is the home
+directory itself, so a press on it stands the files column there and the tip under
+it prints the path in full; nothing downstream learns a special case, because the
+fold, the tips, the double-click and the width measurement all read the same
+`(name, target)` pairs they always did. It is not a translated string — it is the
+character the shell in the pane below prints for the same folder, in either
+language.
+
+**The platform and the home directory are both arguments.** `crumb_segments` is
+the ambient reader and `crumb_segments_on(path, platform, home)` is the rule, for
+`rows_for`'s reason one more time: `a_mac_breadcrumb_starts_at_the_home_crumb_or_
+at_a_name` asserts what a Mac draws and runs on a Windows workstation, and it can,
+because `Path::components` reads `/` as a separator on either host. `home` is
+ignored unless it is **rooted** — an empty `HOME` is a prefix of every path, and a
+row answering `~ › / › Applications` to it would be worse than the row this
+ruling replaced. Rooted is asked of the first component rather than through
+`Path::is_absolute`, which answers by the *running* host's rules: `/Users/…` is
+absolute on a Mac and not absolute on Windows, so that method would have made the
+Mac shape unreadable from the machine this was written on — the platform is a
+value in the signature and then a `cfg` in the body, which is the fault the
+signature exists to prevent.
+
+**④ The active pill has no edging.** The owner asked whether the tab needed it;
+it does not. §13.19 ④ gave the floating pill a half-point ring on the argument
+that `#FFFFFF` on `#F7F7F5` is a smudge without one, and what that argument left
+out is that this window already fills this exact silhouette without a ring
+everywhere else: the vertical rail's rows are the same pill, at the same radius,
+on the same panel shade, ringless on both canvases. A ring on the horizontal tab
+would have made it the one pill in the window that is outlined — a difference a
+reader notices without being able to name.
+
+So the sprite goes, and with it the two palette entries (`tab_pill_edge`,
+`tab_pill_edge_alpha`), the `Canvas::pill_edge` thousandths both canvases carried,
+and `WINDOW_TAB_FLOAT_EDGE_LOGICAL_PX`. Nothing else read any of them, which is
+the test for whether a palette entry was a colour or a decision. The fill, the
+silhouette, the hover ground and the attached tab's skirt are untouched.
+`the_active_pill_is_closed_and_hairlined_and_the_attached_tab_is_not` is renamed
+to `the_active_pill_is_a_closed_fill_with_no_ring_and_the_attached_tab_is_a_skirt`
+and its middle assertion runs the other way, on both windows rather than one.
+
+**⑤ What this ticket found and did not fix.** Four things, each its own ticket
+and each named here so that the next acceptance pass is not the first to hear of
+them.
+
+**`no_profile_title_has_been_pulled_into_the_language_table` reads almost
+nothing**, and it was found by moving a `#[cfg(test)]` constant around `i18n.rs`.
+That gate reads the file's own source *as far as the first `#[cfg(test)]`* and
+hunts the five profile titles in it; the first `#[cfg(test)]` in the file is
+`Lang::ALL`'s, a hundred lines in, so the half it has always scanned is the
+module header and none of the table. Widening the cut to where its own comment
+says it is (`mod tests`) is two lines, and it goes red on two strings that are
+arguably fine: `ProfilesIntegrationCmd` says `Command Prompt` as the name of an
+*integration* rather than as a profile title, and a `CliText` fixture spells
+`WSL` as a sample value. Whether the needles or those two strings are the wrong
+ones is a ruling about that gate's subject and not a port ticket's to take, so
+what this ticket changed is the comment, which now says what the code does. The agent installer rows (`Claude Code hooks` and its two neighbours) read
+`attention_hooks::config_dir`, which asks `%USERPROFILE%` and nothing else, so on
+a Mac they report a file they cannot find — those rows are *not* hidden, because
+their subject is `~/.claude/settings.json`, which that machine has; the discovery
+is what is missing, and `Capability::AgentDiscovery` already says whose ticket
+that is. `Ctrl+click` hands a link to the system on either platform, where a Mac
+reader's `⌘` is the chord M1-7 gave every other application verb. And the
+summoned terminal is M4-8's: `hotkey::register`'s non-Windows arm refuses with
+`the global summon key is not on this platform yet`, so that whole page describes
+a window a Mac cannot call up. Its Chinese no longer names Windows, which is all
+this ticket owed it.
 
 ### 13.33 T-MAC-LIVE: 第一次真机验收的四桩——⌥+滚轮、标记栏刷新、保存后的弹窗、访达只带一扇窗出来(`crates/bt-app/src/{main,input,seats}.rs`、`crates/bt-platform/src/{handoff,lib}.rs`)
 
