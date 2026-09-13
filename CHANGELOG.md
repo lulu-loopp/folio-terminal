@@ -34,7 +34,15 @@ All notable changes to Folio are recorded here. The format follows
   the window's own corner.** The wash used to be a smaller pill; it is now the
   same shape and the same curve as the corner it sits in, and the gear itself
   has not moved.
-- Reduce typing and caret-movement delays in large Markdown documents.
+- **Moving the caret and typing in a very large Markdown document no longer
+  waits on the whole document.** Each keystroke used to copy the text, rescan
+  every line for the widest one and rebuild the caret's map of lines from
+  scratch; on a three-megabyte document that was a visible pause on every key.
+  The document is now shared rather than copied, undo is derived from the edit
+  itself, and the line index and widths are kept up to date incrementally. On
+  that same document a caret move inside a paragraph went from a few
+  milliseconds to nothing measurable; opening it is still slow, and that is the
+  next change.
 
 - **The card that appears when you rest on a file now fades in.** It used to
   arrive solid in a single frame; it now takes the same ninety milliseconds the
