@@ -8810,417 +8810,98 @@ Mac 上跑八只用例,而且别处跑不了:同一个规范目录上的两次�
 
 ### 13.30 M4-6: 通知走 UNUserNotificationCenter,Dock 图标的注意标记(`crates/bt-platform/src/macos_notify.rs`(新)、`crates/bt-platform/src/{lib,portable_impl}.rs`、`crates/bt-platform/tests/macos_notifications.rs`(新)、`crates/bt-platform/Cargo.toml`)
 
-**① Four doors, one file, and the reason is that on this platform they are one
-object.** `Notifier`, `Taskbar`, `flash_window` and `taskbar_is_auto_hidden` are
-the four names the portable module refused with `M4-6` in the sentence, and on
-Windows they are four different subsystems — WinRT's notification platform,
-`ITaskbarList3` on an `HWND`, `FlashWindowEx` on an `HWND`, and
-`SHAppBarMessage` about the shell's bar. Here they are all the **Dock icon**: a
-notification is filed under the application's bundle identifier, the badge is
-drawn on the application's tile, the bounce is the application's, and the
-preference that decides whether any of it is on screen is the Dock's own. So the
-four are `macos_notify.rs` rather than four more doors in `macos_impl.rs`, whose
-subject is a window and not a process.
+**① 四扇门,一个文件,理由是在这个平台上它们是同一个对象。** `Notifier`、`Taskbar`、`flash_window` 和 `taskbar_is_auto_hidden` 是可移植模块用一句带 `M4-6` 的话拒掉的那四个名字,而在 Windows 上它们是四个不同的子系统——WinRT 的通知平台、一个 `HWND` 上的 `ITaskbarList3`、一个 `HWND` 上的 `FlashWindowEx`,以及关于 shell 那条栏的 `SHAppBarMessage`。在这里它们全是**程序坞图标**:一条通知按应用的 bundle 标识符归档,标记画在应用的图标上,弹跳是应用的,而决定这些东西上不上屏的那个偏好是程序坞自己的。所以这四个归 `macos_notify.rs`,而不是在 `macos_impl.rs` 里再开四扇门——后者的主题是一扇窗而不是一个进程。
 
-That difference is visible in two signatures and is stated rather than papered
-over: **`Taskbar::new` takes a window and does not read it, and `flash_window`
-takes one and does not read it either.** The doors stay one door on both
-platforms because `bt-app` calls them per window on both; what changes is that
-two windows share one tile, so the last reading written is the one the reader
-sees — and `Taskbar` therefore remembers which object wrote the badge it is
-showing and takes it down on the way out only if it is still that one. Without
-that, a window closed mid-build leaves `40%` on the Dock for the life of the
-process.
+这个差别在两个签名上看得见,而且是写出来而不是糊过去的:**`Taskbar::new` 收一扇窗但不读它,`flash_window` 也收一扇窗、也不读它。** 这些门在两个平台上都还是一扇门,因为 `bt-app` 在两个平台上都是按窗调它们的;变的是两扇窗共用一个图标,所以最后写下的那个读数就是读者看到的那个——因此 `Taskbar` 记着它正显示的那个标记是哪个对象写的,只有还是那个对象时才在出门路上把它撤掉。没有这一条,一扇在构建中途被关掉的窗会把 `40%` 留在程序坞上,留到进程结束。
 
-**② The bundle identifier is read first, and it is read because the framework
-raises rather than answers.** `+[UNUserNotificationCenter
-currentNotificationCenter]` throws an Objective-C exception in a process with no
-bundle, and an exception through a Rust frame is not an `Err`, it is the end of
-the process — X-2 measured that a panic inside an Objective-C frame ends the
-process before any hook of this program's is consulted, and a raise is worse.
-So `Notifier::new` asks `NSBundle` **before** it asks for the centre and before
-it even proves its thread, and a process without one is refused with a sentence
-naming the reason. That is the case of `cargo run` out of `target/debug/folio`,
-and it is why §4.5 of the port plan builds the bundle from M1 rather than from
-M5. `the_macos_notifier_reads_the_bundle_before_it_touches_the_centre` pins the
-order from a Windows runner, where neither call compiles.
+**② bundle 标识符是先读的,而它之所以被读,是因为这个框架掀异常而不是作答。** 在一个没有 bundle 的进程里,`+[UNUserNotificationCenter currentNotificationCenter]` 会掀一个 Objective-C 异常,而一个穿过 Rust 栈帧的异常不是一个 `Err`,它是进程的终点——X-2 量过,一个 Objective-C 栈帧里的 panic 会在这个程序的任何钩子被问到之前结束进程,而一次 raise 更糟。所以 `Notifier::new` 在要那个中心之前、甚至在证明自己线程之前,先问 `NSBundle`,而一个没有 bundle 的进程被拒绝,带着一句点名理由的话。那就是从 `target/debug/folio` 里 `cargo run` 的情形,也是移植计划 §4.5 从 M1 而不是从 M5 就开始建这个 bundle 的原因。`the_macos_notifier_reads_the_bundle_before_it_touches_the_centre` 从一台 Windows 跑器上钉住这个次序,而那里这两次调用都编不出来。
 
-**③ Authorization is asked on the first notification and never at launch, and a
-denial is remembered by the desk that already remembers refusals.** The ask is a
-system prompt, so it happens where the Windows arm's registry write happens — on
-the first message this process actually raises, not on the first frame. What
-comes back arrives on the platform's own thread some time later and is recorded
-as one of three states; a **denied** answer is what turns the next `show` into
-an `Err`, which `bt_app`'s `NotificationDesk` latches exactly as it latches
-WinRT's refusal: one line of stderr, one card in the window, and nothing
-afterwards. The honest cost is stated where it lives: **on a fresh machine the
-very first notification may be lost**, because the prompt is in front of the
-reader at the moment it is posted. It happens once per machine, and the
-alternative is a permission prompt during the first run of a terminal that may
-never notify anybody.
+**③ 授权是在第一条通知上要的、绝不在启动时要,而一次拒绝由本来就记着拒绝的那张台子记着。** 这一问是一个系统提问,所以它发生在 Windows 那条臂写注册表的地方——在这个进程真正掀起的第一条消息上,而不是在第一帧上。回来的东西过一会儿在平台自己的线程上到达,被记成三种状态之一;一个**拒绝**的答案就是把下一次 `show` 变成 `Err` 的那个东西,而 `bt_app` 的 `NotificationDesk` 闩住它的方式,跟它闩住 WinRT 那次拒绝的方式一模一样:一行 stderr、窗里一张卡,之后什么都没有。老实的代价写在它所在的地方:**在一台新机器上,第一条通知很可能丢掉**,因为它被发出的那一刻,提问正杵在读者面前。这件事每台机器只发生一次,而另一个选择是在一个也许从来不通知任何人的终端第一次运行时弹一个权限提问。
 
-There is a second kind of refusal this platform has and Windows does not.
-`-[UNUserNotificationCenter addNotificationRequest:withCompletionHandler:]`
-reports its failure to a **block**, so the `show` that failed has already
-answered `Ok` by the time the sentence exists. It is parked and taken by the
-*next* `show`, which is one message late and is the whole of the difference: the
-desk still hears the sentence once and still costs one line.
+这个平台还有第二种 Windows 没有的拒绝。`-[UNUserNotificationCenter addNotificationRequest:withCompletionHandler:]` 把它的失败报告给一个 **block**,所以那次失败的 `show` 在那句话存在的时候早就答过 `Ok` 了。它被停下来,由**下一次** `show` 取走,也就是晚一条消息,而差别就这么多:那张台子照样只听一次那句话,照样只花一行。
 
-**④ The delegate presents, and it does not decide.** `willPresentNotification:`
-exists because the platform's own answer for a foreground application is *show
-nothing* — it assumes an application that is in front can say it in its own
-window. Folio can, and that is exactly what the tab's marks are; but the
-decision has already been taken before anything reaches this file.
-`bt_app::notify::desktop_reach` is the ladder, a pane whose tab is on screen in
-a focused window answers `Reach::Nothing`, and `show` is never called for it. So
-everything that arrives here has already been ruled owed and is presented
-(banner, list and the system sound). A second gate here would be the thing red
-line 12 forbids: a decision about one moment re-taken at a later one, from facts
-this side of the door cannot see.
+**④ 那个委托负责呈现,而它不做决定。** `willPresentNotification:` 存在,是因为这个平台对一个前台应用自己的回答是*什么都不显示*——它假定一个在前台的应用能在自己的窗里说这件事。Folio 能,而标签上的那些标记正是这件事;但决定在任何东西到达这个文件之前就已经做完了。`bt_app::notify::desktop_reach` 是那道梯子,一个标签在一扇聚焦窗里上着屏的 pane 答 `Reach::Nothing`,而 `show` 从来不会为它被调用。所以到这里来的每一样都已经被裁定为欠着的,都会被呈现(横幅、列表和系统提示音)。在这里再设一道闸就是红线 12 禁的那件事:一个关于某一刻的决定,在更晚的另一刻、拿门这一侧看不见的事实,又做了一遍。
 
-`didReceiveNotificationResponse:` turns a **click** into an activation and a
-dismissal into nothing — `UNNotificationDefaultActionIdentifier` against
-`UNNotificationDismissActionIdentifier`, which is the same split the Windows arm
-makes by listening to `Activated` and not to `Dismissed`. Sending somebody who
-swept a banner away to the pane it named would be answering a question they did
-not ask.
+`didReceiveNotificationResponse:` 把一次**点击**变成一次激活,把一次划掉变成什么都没有——`UNNotificationDefaultActionIdentifier` 对 `UNNotificationDismissActionIdentifier`,也就是 Windows 那条臂靠只听 `Activated` 而不听 `Dismissed` 划的同一刀。把一个把横幅扫掉的人送到它点名的那个 pane 去,就是在回答一个他没问的问题。
 
-**⑤ Where a cold click goes: nowhere, and that is the ruling.** M3-1's
-`AppDelegate` buffer holds a delivery that arrives before `resumed` and releases
-it when the application is up, and the obvious move was to route an activation
-through it as a fifth event kind. It is **not** routed there, for two reasons
-that agree:
+**⑤ 一次冷启动的点击去哪里:哪儿也不去,而这是裁决。** M3-1 的 `AppDelegate` 缓冲会把一次在 `resumed` 之前到达的投递存着、等应用起来再放行,而最顺手的一手是把一次激活当第五种事件走那条路。它**没有**走那条路,理由有两条而且互相印证:
 
-* the buffer exists for a cold `application:openURLs:`, which names a **path** —
-  a thing a launched application can still act on. A notification click names
-  `w=…&t=…&s=…`: a window, a tab and a pane **of the process that has exited**.
-  `notify::NotificationRoute` already says what happens to a route naming
-  something that is gone — it resolves to nothing and the click does nothing —
-  and the Windows arm gives cold activation up in the same words, because
-  without a COM server there is nothing for the click to launch;
-* this delegate is set at first need, which is after launch, so a response
-  delivered to a cold launch reaches no delegate at all. Nothing in the file
-  tries to catch it.
+* 那个缓冲是为一次冷的 `application:openURLs:` 而存在的,那种事件点的是一条**路径**——一个刚起来的应用还动得了的东西。一次通知点击点的是 `w=…&t=…&s=…`:**一个已经退出了的进程**的一扇窗、一个标签和一个 pane。`notify::NotificationRoute` 早就说过一条点名着一样已经不在的东西的路由会怎样——它解析成没有,而那次点击什么也不做——而 Windows 那条臂用同样的话放弃冷激活,因为没有一个 COM 服务器,那次点击就没有什么可启动;
+* 这个委托是在第一次需要时才设的,也就是在启动之后,所以一个投给冷启动的响应根本到不了任何委托。文件里没有任何东西试图去接它。
 
-What remains is a click while the process is alive, and it is parked in the
-notifier's own queue — one lock and one wake — until `take_activations` is
-called on the event loop's own turn. That is where the Windows arm parks it, and
-`NotificationDesk` above the door cannot tell the two platforms apart.
+剩下的就是进程活着时的一次点击,而它被停在通知器自己的队列里——一把锁一次叫醒——直到 `take_activations` 在事件循环自己那一轮上被调用。那正是 Windows 那条臂把它停下的地方,而门上面的 `NotificationDesk` 分不出这两个平台。
 
-**⑥ The identifier is a counter and not the route, and that is the opposite of
-the obvious.** An identifier is what the notification centre *replaces* by:
-posting a second request under an identifier that is already delivered removes
-the first. The launch string names a pane, so using it would give two bells from
-one pane one identifier — and a shell that rang twice would leave **one**
-notification here and **two** on Windows, where `toast_xml` writes no `tag` and
-no `group` and every toast is its own. A difference that large has to be a
-decision somebody took; the decision is that the two platforms say the same
-thing, so each request carries `folio.notification.{n}` and the route travels in
-`userInfo` under `folio.launch`.
+**⑥ 标识符是一个计数器而不是那条路由,而这跟顺手的做法正好相反。** 标识符是通知中心用来**替换**的依据:拿一个已经投递过的标识符再发一个请求,会把第一个移掉。而那个启动串点的是一个 pane,所以拿它来做标识符,会让同一个 pane 的两次铃声共用一个标识符——于是一把响了两次的 shell 在这里留下**一条**通知,在 Windows 上留下**两条**,那边 `toast_xml` 既不写 `tag` 也不写 `group`,每一条 toast 都是它自己。这么大的差别必须是有人做的一个决定;而这个决定是两个平台说同样的话,所以每个请求带着 `folio.notification.{n}`,而路由在 `userInfo` 里以 `folio.launch` 为键跟着走。
 
-**⑦ The Dock tile's badge is the taskbar button's bar, in the only ink a tile
-has.** `dock_badge_label` is pure, lives in `lib.rs` beside `toast_xml` for the
-same reason, and is three rules: no bar, no badge; a bar with a number reads as
-that number (`40%`); a bar with **no** number reads as `…`, because
-`TBPF_INDETERMINATE` means something is running and nobody has said how far, and
-dropping it to no badge would make "a build is going" and "nothing is going" the
-same picture. **What does not cross is the colour**: `TBPF_ERROR` and
-`TBPF_PAUSED` are a red and an amber bar at the value they carry, a badge has
-one appearance, and so a failure at 40% and a pause at 40% both read `40%` here
-— the difference stays where it is also drawn, on the tab. Inventing a second
-mark for it would be putting a thing on the Dock that the Windows arm does not
-put on the taskbar. The arithmetic is general rather than written to the fold
-that feeds it (`(percent, 100)`), and `dock_badge_tests` walks a total of zero,
-a total of `u64::MAX` and a `completed` past its `total`.
+**⑦ 程序坞图标上的标记就是任务栏按钮上那条进度条,用一个图标唯一有的那种墨。** `dock_badge_label` 是纯函数,跟 `toast_xml` 一起住在 `lib.rs` 里、理由相同,而它是三条规矩:没有进度条就没有标记;一条带数字的进度条读作那个数字(`40%`);一条**没有**数字的进度条读作 `…`,因为 `TBPF_INDETERMINATE` 的意思是有东西在跑而没人说到哪儿了,而把它降成没有标记,会让「一次构建在进行」和「什么都没在进行」成为同一张画。**过不去的是颜色**:`TBPF_ERROR` 和 `TBPF_PAUSED` 是在它们所带的值上的一条红条和一条琥珀条,而一个标记只有一种外观,所以 40% 上的一次失败和 40% 上的一次暂停在这里都读作 `40%`——那个差别留在它同样被画出来的地方,也就是标签上。为它发明第二个标记,就是往程序坞上放一样 Windows 那条臂不往任务栏上放的东西。那套算术是通用的,而不是照着喂它的那个折叠写的(`(percent, 100)`),而 `dock_badge_tests` 走一遍总量为零、总量为 `u64::MAX`,以及一个 `completed` 超过它 `total` 的情形。
 
-**⑧ The bounce is critical, and the Dock's own preference is read on every
-delivery.** `FLASHW_TRAY | FLASHW_TIMERNOFG` flashes until the window comes to
-the foreground; `NSCriticalRequest` bounces until the application is activated.
-`NSInformationalRequest` bounces once, which is a different promise about a
-reader who is away from the machine, so the critical one is the faithful
-translation and `the_dock_bounce_lasts_as_long_as_the_taskbar_flash_does` pins
-both halves. The request's own number is dropped: it is the handle
-`cancelUserAttentionRequest:` takes, and this door cancels nothing, exactly as
-the Windows arm acts on nothing `FlashWindowEx` returns.
+**⑧ 那次弹跳是 critical 的,而程序坞自己那个偏好每一次投递都要读一遍。** `FLASHW_TRAY | FLASHW_TIMERNOFG` 一直闪到窗口到前台为止;`NSCriticalRequest` 一直弹到应用被激活为止。`NSInformationalRequest` 只弹一次,而那是关于一个离开了机器的读者的另一种承诺,所以 critical 那个才是忠实的翻译,而 `the_dock_bounce_lasts_as_long_as_the_taskbar_flash_does` 把两半都钉住。这个请求自己那个号被丢掉:它是 `cancelUserAttentionRequest:` 收的那个句柄,而这扇门什么也不取消,正如 Windows 那条臂对 `FlashWindowEx` 的返回值什么也不做。
 
-`taskbar_is_auto_hidden` is the fact `desktop_reach`'s fourth row reads, and it
-matters here for the reason §7.6 gives on the other platform: a bounce is "a mark
-you can glance at", and that sentence has a premise — the icon is on screen. With
-the Dock set to hide itself it is not, so the middle tier collapses and the
-desktop is what is left. There is no public API for "is the Dock hidden"; the
-preference is `com.apple.dock`'s `autohide`, read through
-`-[NSUserDefaults persistentDomainForName:]`, which is the supported way to read
-another domain of the same user. **Read on every delivery and never cached**, for
-§7.6's own reason: the reader can change it between one wait and the next and
-nothing tells this process when they do. A domain that cannot be read, or a key
-that is not there, answers `false` — the Dock's own default, and the direction
-`taskbar_auto_hidden_from_state` argues for.
+`taskbar_is_auto_hidden` 是 `desktop_reach` 第四行读的那个事实,而它在这里要紧的理由就是 §7.6 在另一个平台上给的那一条:一次闪动是「一个你瞥一眼就能看见的标记」,而这句话有一个前提——那个图标在屏幕上。把程序坞设成自动隐藏之后它就不在了,于是中间那一级塌掉,剩下的就是桌面。「程序坞是不是隐藏了」没有公开 API;那个偏好是 `com.apple.dock` 的 `autohide`,经 `-[NSUserDefaults persistentDomainForName:]` 读出来,那是读同一个用户另一个域的受支持办法。**每次投递都读、从不缓存**,理由是 §7.6 自己那一条:读者可以在一次等待和下一次之间把它改掉,而没有任何东西会在他改的时候告诉这个进程。一个读不到的域、或者一个不在那里的键,答 `false`——那是程序坞自己的默认,也是 `taskbar_auto_hidden_from_state` 论证的那个方向。
 
-**⑨ One package, and it was already in the lock file.**
-`objc2-user-notifications` 0.3.2 is the same family and the same release as the
-crates this crate already names, and it is **already in `Cargo.lock`** as an
-optional dependency of `objc2-ui-kit` — so what this edge moves is one line in
-`THIRD-PARTY-NOTICES.md`: a crate that resolved into the lock file and into no
-build now resolves into this one. It pulls nothing new of its own
-(`objc2-core-location`, its other optional edge, stays off), and the AppKit half
-is free: `NSDockTile` is a feature of a crate that has been here since M1-9. The
-alternative was hand-declaring a class-level accessor, a protocol with two
-block-taking methods and a class built against it — unchecked selectors and two
-block signatures written by hand, for the one API in this port whose mistakes are
-raises rather than wrong answers.
+**⑨ 一个包,而它本来就在锁文件里。** `objc2-user-notifications` 0.3.2 跟这个 crate 已经点过名的那些 crate 同一族、同一个 release,而且它**本来就在 `Cargo.lock` 里**,作为 `objc2-ui-kit` 的一个可选依赖——所以这条边挪动的是 `THIRD-PARTY-NOTICES.md` 里的一行:一个解析进了锁文件却没进任何构建的 crate,现在解析进了这个构建。它自己不再拉进任何新东西(`objc2-core-location`,它另一条可选边,还是关着的),而 AppKit 那一半是白送的:`NSDockTile` 是一个自 M1-9 起就在这里的 crate 的一个 feature。另一个选择是手写一个类级访问器、一个带两个收 block 的方法的协议,以及一个照着它建出来的类——没被校验的选择子加两份手写的 block 签名,而这是整次移植里唯一一个错法是掀异常而不是答错的 API。
 
-**⑩ What is proved where, and the one thing only a person can do.** Three
-venues, because the claims are of three kinds.
+**⑩ 什么在哪里被证明,以及那唯一一件只有人能做的事。** 三个场地,因为这些主张分三种。
 
-* **A Windows runner** reads the three arms as text —
-  `macos_notification_backend_tests` — and pins that the portable arm is off on
-  macOS for all four names, that `Notifier`'s and `Taskbar`'s five doors have one
-  signature in all three arms, the bundle-before-centre order of ②, the click
-  against the dismissal and the counter against the route of ④ and ⑥, the
-  critical request of ⑧, and that every door in the macOS arm that touches AppKit
-  proves its thread first. `dock_badge_tests` runs the pure half everywhere.
-* **`cargo test -p bt-platform` on the Mac** runs out of `target/debug/deps`,
-  which is a process with no bundle, which is exactly the shape ② is about:
-  `a_process_with_no_bundle_is_refused_by_name` asks for a `Notifier` there and
-  reads the refusal back. **It raises no prompt of any kind**, because the
-  refusal happens before the framework is touched.
-* **`tests/macos_notifications.rs`**, `harness = false`, gated on being inside a
-  `.app` rather than on an environment variable (`open` passes none — M3-1's
-  finding). It proves the bundle identifier, that the Dock tile really carries
-  `40%`, then `…`, then nothing once the `Taskbar` is dropped, and — **only when
-  the authorization answer already exists** — that `Notifier::new` sets a
-  delegate, that `show` is accepted, and that the notification comes back out of
-  `getDeliveredNotifications` carrying the launch string under `folio.launch`,
-  after which it removes what it posted. If the status is `notDetermined` it
-  prints `SKIPPED` and asks nothing: a notification-authorization prompt is a
-  system prompt on the owner's screen, and an agent may not put one there. **On
-  2026-09-12 that is what it printed**, and the gap is worth stating rather than
-  hiding: the throwaway bundle had never asked, and a bundle that has never
-  asked is not listed in System Settings either, so there is no way to grant it
-  from the outside. Getting the notification half to run once is a person's —
-  open the probe app and answer the prompt, after which every later run of that
-  case is unattended. What did run that day, on the real machine, is the bundle
-  identifier and all three Dock-tile readings: `40%`, `…`, and nothing at all
-  once the `Taskbar` was dropped.
+* **一台 Windows 跑器**把三条臂当文本读——`macos_notification_backend_tests`——并钉住:可移植那条臂在 macOS 上对这四个名字都是关的;`Notifier` 与 `Taskbar` 那五扇门在三条臂里是同一个签名;② 那个「先 bundle 后中心」的次序;④ 那个点击对划掉和 ⑥ 那个计数器对路由;⑧ 那个 critical 请求;以及 macOS 那条臂里每一扇碰 AppKit 的门都先证明自己的线程。`dock_badge_tests` 在哪儿都跑纯的那一半。
+* **Mac 上的 `cargo test -p bt-platform`** 是从 `target/debug/deps` 里跑的,那是一个没有 bundle 的进程,而那恰恰就是 ② 所说的那个形状:`a_process_with_no_bundle_is_refused_by_name` 在那里要一个 `Notifier`,再把那次拒绝读回来。**它不掀任何提问**,因为拒绝发生在框架被碰到之前。
+* **`tests/macos_notifications.rs`**,`harness = false`,闸在「人在一个 `.app` 里面」而不是一个环境变量上(`open` 一个都不传——M3-1 的发现)。它证明 bundle 标识符、程序坞图标确实带着 `40%`、随后是 `…`、`Taskbar` 被 drop 之后什么都没有,而且——**只在授权答案已经存在时**——证明 `Notifier::new` 设了一个委托、`show` 被接受,而那条通知带着 `folio.launch` 下面的启动串从 `getDeliveredNotifications` 里出来,之后它把自己发的那条移掉。如果状态是 `notDetermined`,它打 `SKIPPED` 并且什么都不问:一个通知授权提问是一个出现在用户屏幕上的系统提问,而一个 agent 不许往那里放一个。**2026-09-12 它打的就是这个**,而这个缺口值得说出来而不是藏起来:那个用完即弃的 bundle 从来没问过,而一个从来没问过的 bundle 也不会出现在系统设置里,所以没有办法从外面给它授权。让通知那一半跑通一次是人的活儿——打开那个探针应用、回答那个提问,之后那只用例的每一次运行都不用人守着。那天在真机上真的跑起来的,是 bundle 标识符和程序坞图标那三次读数:`40%`、`…`,以及 `Taskbar` 被 drop 之后的什么都没有。
 
-**The click is NOT-CHECKABLE by an agent** — clicking a banner needs `System
-Events`, and therefore Accessibility *and* Automation, which X-4 measured as a
-TCC prompt nobody in an ssh session can reach. So §M4 acceptance ① is a person's,
-and the procedure is this:
+**那次点击对 agent 而言是 NOT-CHECKABLE**——点一条横幅需要 `System Events`,因而既要辅助功能**又**要自动化,而 X-4 量到那是一道 ssh 会话里没人够得到的 TCC 提问。所以 §M4 验收 ① 是人的活儿,步骤是这样:
 
-1. In Folio, open a second tab and leave the first one in view. In the
-   background tab run `sleep 5; printf '\a'`.
-2. **Put the window out of sight** — minimise it, or switch to another Space, or
-   set the Dock to hide itself and cover Folio with another application. This
-   step is the one the acceptance line under-specifies and it is worth saying
-   plainly: a window that is merely *covered* on a desktop whose Dock is visible
-   answers `Reach::Flash`, and a flash on this platform is a **Dock bounce** and
-   not a notification. That is `desktop_reach`'s ladder working, on both
-   platforms, and it is the same thing a covered window gets on Windows.
-3. A Folio notification arrives naming that tab. Click it: the window comes
-   forward and **that tab** is the one in view.
-4. Now bring the tab into view in a focused window and run the same command. No
-   notification arrives, and nothing bounces.
+1. 在 Folio 里开第二个标签,把第一个留在视野里。在后台那个标签里跑 `sleep 5; printf '\a'`。
+2. **把窗口弄到看不见的地方**——最小化它、或者切到另一个 Space、或者把程序坞设成自动隐藏再用另一个应用盖住 Folio。这一步是验收那句话没说清的一步,值得直说:一扇只是被**盖住**、而桌面的程序坞还看得见的窗答的是 `Reach::Flash`,而这个平台上的一次闪动是一次**程序坞弹跳**而不是一条通知。那是 `desktop_reach` 那道梯子在两个平台上都在正常工作,也正是一扇被盖住的窗在 Windows 上得到的同一样东西。
+3. 一条点名那个标签的 Folio 通知到了。点它:窗口到前面来,而**那个标签**就是视野里的那一个。
+4. 现在把那个标签弄到一扇聚焦窗的视野里,跑同一条命令。没有通知到达,也没有任何东西弹跳。
 
 ### 13.31 M4-11: 活性握手、panic 钩子在 Finder 启动下不再站住、系统崩溃报告被下一次启动点名(`crates/bt-platform/src/{hang,macos_dialogs,lib}.rs`、`crates/bt-platform/Cargo.toml`、`crates/bt-app/src/diagnostics.rs`)
 
-**The number is claimed, not counted.** §13.19–§13.27 are on `main`; §13.26,
-§13.28, §13.29 and §13.30 are held by tickets in flight the same night. This one
-takes **13.31** so that two sections cannot land on one number.
+**这个号是认下来的,不是数出来的。** §13.19–§13.27 已经在 `main` 上;§13.26、§13.28、§13.29 和 §13.30 由同一晚在飞的几张票占着。本节取 **13.31**,免得两节落到同一个号上。
 
-**① The watchdog's last-resort question is the ticket, and there were two things
-it could have measured.** `hang_watch` convicts nothing on arithmetic alone: past
-the threshold it *asks*, and a thread that answers is alive whatever its own loop
-is doing. Off Windows that question has been answering `NoWindow` since the file
-was written — and `NoWindow` is not `Answered`, so
-`a_start_with_no_window_to_ask_is_convicted_on_its_own_grace` is exactly the
-shape every idle Mac Folio was in: five seconds of an indefinite park, one
-question that could not be put, one hang report about a window nobody had
-touched. The port's crash story starts by giving that question a real answer.
+**① 看门狗那个最后一问就是这张票,而它本来有两样东西可以量。** `hang_watch` 不靠算术给谁定罪:过了阈值它会**问**,而一条答得出的线程不管它自己的循环在干什么都是活的。在 Windows 之外,那个问题自这个文件写下来起答的一直是 `NoWindow`——而 `NoWindow` 不是 `Answered`,所以 `a_start_with_no_window_to_ask_is_convicted_on_its_own_grace` 恰好就是每一个闲着的 Mac 上的 Folio 所处的形状:无限期驻留的五秒钟、一个问不出去的问题、一份关于一扇没人碰过的窗的挂起报告。这次移植的崩溃故事,是从给那个问题一个真答案开始的。
 
-Two candidates, and they are not the same measurement:
+两个候选,而它们不是同一次测量:
 
-* **A user event through the event-loop proxy `bt-app` already holds.** It is
-  answered by `bt-app`'s own handler — the same machinery whose silence raised
-  the suspicion. A last-resort question only the suspect can answer is not
-  evidence, and the heartbeat already measures that thing: a turn of the loop.
-* **`CFRunLoopPerformBlock` on the main run loop, in `kCFRunLoopCommonModes`,
-  followed by `CFRunLoopWakeUp`.** The block is performed by Core Foundation at
-  the top of the loop, before anything of ours is consulted.
+* **经 `bt-app` 本来就握着的那个事件循环 proxy 发一个用户事件。** 它由 `bt-app` 自己的 handler 作答——也就是它的沉默引起了怀疑的那套机器。一个只有嫌疑人自己答得了的最后一问不是证据,而心跳本来就在量那样东西:循环转了一圈。
+* **在主 run loop 上、在 `kCFRunLoopCommonModes` 里做 `CFRunLoopPerformBlock`,后面跟一次 `CFRunLoopWakeUp`。** 那个 block 由 Core Foundation 在循环的最上头执行,在我们的任何东西被问到之前。
 
-The second is the one the Windows arm is. `SendMessageTimeout(WM_NULL)` is
-dispatched by USER32 below every line this program wrote, which is why that arm's
-own note says a thread inside a modal drag or a tracked menu answers it and is
-correctly excused. `kCFRunLoopCommonModes` is what keeps that property here:
-AppKit puts `NSEventTrackingRunLoopMode` and `NSModalPanelRunLoopMode` into the
-common set, so a window being dragged, a menu being tracked or a sheet being
-answered still performs the block. `kCFRunLoopDefaultMode` was the other spelling
-and it is the wrong one — it reports every drag as a hang. The wake is not
-optional either: a run loop asleep in `mach_msg` would otherwise perform the
-block whenever the reader next moved the mouse, which measures the reader.
+第二个才是 Windows 那条臂的那一个。`SendMessageTimeout(WM_NULL)` 是由 USER32 在这个程序写的每一行下面派发的,这正是那条臂自己的注里说「一条处在模态拖拽或跟踪菜单里的线程答得出它,并且被正确地免责」的原因。`kCFRunLoopCommonModes` 就是在这里保住这个性质的东西:AppKit 把 `NSEventTrackingRunLoopMode` 和 `NSModalPanelRunLoopMode` 放进 common 集,所以一扇正被拖的窗、一个正被跟踪的菜单或者一张正在被回答的 sheet 照样执行那个 block。`kCFRunLoopDefaultMode` 是另一种拼法,而它是错的那一种——它会把每一次拖拽都报成一次挂起。那次唤醒也不是可选的:一个睡在 `mach_msg` 里的 run loop,否则要等读者下一次动鼠标才会执行那个 block,而那量的是读者。
 
-**The bound is a `sync_channel` of one and a `recv_timeout`**, because the one
-thing a watchdog may never do is block on the thread it is watching. A `Silent`
-answer leaves the block queued on a loop that is not turning; if that loop comes
-back the block runs, sends into a receiver that is gone, and is released. That is
-one block per threshold on a process that is already hung, and none at all on one
-that is not.
+**那道界是一个容量为一的 `sync_channel` 加一次 `recv_timeout`**,因为一个看门狗绝不许做的一件事就是在它所看守的那条线程上阻塞。一个 `Silent` 的答案会把那个 block 留在一个不转的循环上排着;要是那个循环回来了,block 就跑,往一个已经没了的接收端发一下,然后被释放。那是在一个已经挂了的进程上每个阈值一个 block,而在一个没挂的进程上一个都没有。
 
-**② Which thread is being asked, on a platform with one loop anybody drives.**
-The signature is still `ask_thread_to_answer(thread_id, timeout)` and the id is
-still spent. `current_thread_id` answers
-`pthread_mach_thread_np(pthread_self())` — the `GetCurrentThreadId` of this
-platform: already a `u32`, unique in the task, stable for the thread's life, and
-borrowing no send right the caller would owe a `mach_port_deallocate` (which
-`mach_thread_self` does). Nothing in Mach maps a port back to *is this the main
-thread* from another thread, so the answer is recorded at the one moment a caller
-is in a position to give it: **the main thread asking for its own id**, which is
-exactly what the window thread does at startup to hand it to the watchdog. Every
-other thread records nothing, and an id that is not the recorded one is
-`NoWindow` — "this thread owned no window to ask" is literally true of every
-other thread in a Cocoa process. The three sentences `Answer::phrase` prints are
-unchanged.
+**② 被问的是哪条线程,在一个谁都能驱动的、只有一个循环的平台上。** 签名还是 `ask_thread_to_answer(thread_id, timeout)`,那个 id 还是被消费掉。`current_thread_id` 答的是 `pthread_mach_thread_np(pthread_self())`——这个平台的 `GetCurrentThreadId`:本来就是一个 `u32`、在这个 task 里唯一、在这条线程的一生里稳定,而且不借走任何一个调用方欠着一次 `mach_port_deallocate` 的发送权(`mach_thread_self` 会借)。Mach 里没有任何东西能从另一条线程把一个端口映射回*这是不是主线程*,所以这个答案是在唯一一个调用方有资格给出它的时刻记下来的:**主线程问它自己的 id**,而那正是窗口线程在启动时做的事,再把它交给看门狗。别的每一条线程什么也不记,而一个不是被记下的那个 id 就是 `NoWindow`——「这条线程没有窗可问」对一个 Cocoa 进程里其余每一条线程都是字面意义上的真话。`Answer::phrase` 打印的那三句话没变。
 
-**③ The sample is not ported, and that is the inventory's decision rather than a
-gap.** `capture_thread_stack` is class **X**. Suspending a thread of one's own
-process and reading its stack is a Windows facility this module gets to use
-because Win32 hands out `SuspendThread` and `ReadProcessMemory` and documents
-what may be called between them; the Mach twins exist, and reaching for them
-would be this program writing a debugger against itself on a platform that
-**writes the report for it**. So the macOS half of the crash story is ⑤, not a
-second-rate copy of a stack the system already took. A hang report on a Mac
-carries `note : stack capture is a Windows facility` where the stack would be,
-and every other field in it is real.
+**③ 那次取样没有移植,而这是清单的决定而不是一个缺口。** `capture_thread_stack` 是 **X** 类。挂起本进程的一条线程再去读它的栈,是一件 Windows 的便利设施,这个模块用得上它是因为 Win32 把 `SuspendThread` 和 `ReadProcessMemory` 交出来了,还写明了两者之间什么可以调;Mach 的孪生也存在,而去够它们就是这个程序在一个**替它写报告**的平台上给自己写调试器。所以 macOS 那一半的崩溃故事是 ⑤,而不是一份二流的、抄一个系统已经取好的栈。Mac 上的一份挂起报告在栈本该在的地方写着 `note : stack capture is a Windows facility`,而它里面别的每一个字段都是真的。
 
-**④ The panic hook keeps §7.43's order and gains a third question before the
-box.** §13.23 measured a bundle launch whose `diagnostics.log` has no run footer
-and said so as documented behaviour rather than a defect: `announce_panic` raises
-`NSAlert.runModal` on the thread that panicked, and `runModal` does not return
-until somebody presses the button — so the footer and `leave_process` wait behind
-it. That is right when a reader is looking at the box and wrong when nobody can
-see it, which on a Finder launch is the ordinary case: `stderr` is already the log
-file, so the box is the only thing that reaches anybody, and a box in a
-background process with no window on the screen reaches nobody while keeping the
-process from leaving.
+**④ panic 钩子守着 §7.43 的次序,并在那个框之前多长出第三个问题。** §13.23 量到一次 bundle 启动的 `diagnostics.log` 里没有运行收尾,并把它说成写明的行为而不是一个缺陷:`announce_panic` 在 panic 的那条线程上升起 `NSAlert.runModal`,而 `runModal` 要等有人按了按钮才返回——所以收尾和 `leave_process` 在它后面等着。当一个读者正看着那个框时这是对的,而当没人看得见它时这是错的,而在一次访达启动里后者是常态:`stderr` 本来就是那份日志文件,所以那个框是唯一够得到人的东西,而一个屏幕上没有窗的后台进程里的一个框够不到任何人,同时还拦着这个进程不让它走。
 
-**The rule: the alert is raised only when this application is frontmost or has a
-window a reader can see; otherwise the two lines go where the run's diagnostics
-already go and the caller carries on to its own exit.** Both halves are needed —
-`-[NSApplication isActive]` is the crash that happens while somebody is looking
-at Folio, and a visible window is the one that happens while they are in another
-application, where the Dock and `Command`-`Tab` still reach the box.
-`-[NSWindow isVisible]` and not AppKit's `hasVisibleWindows`, because X-4
-measured the latter YES for a minimised window and YES for one hidden with
-`-[NSApplication hide:]` (§13.21's note on `Reopen`), and neither of those is a
-window anybody can see. The question is asked **inside `message_box`**, beside
-the two that were already there (§13.17 ⑤), because the fact it decides is the
-same kind of fact those two decide: whether raising a modal is a thing this
-process can usefully do at all. It is deliberately not a rule about which thread
-panicked or about how the process was launched — a launch shape is only ever a
-proxy for those three readings. Nothing calls `terminate:` from inside a handler;
-the hook still leaves through `leave_process(101)` (M3-1's rule, §13.21).
+**规矩是:只有在这个应用处于最前、或者有一扇读者看得见的窗时才升起那个弹窗;否则那两行去这趟运行的诊断本来就去的地方,而调用方继续走向它自己的退出。** 两半都需要——`-[NSApplication isActive]` 是有人正看着 Folio 时发生的那次崩溃,而一扇可见的窗是他们在另一个应用里时发生的那一次,那时程序坞和 `Command`-`Tab` 仍然够得到那个框。用 `-[NSWindow isVisible]` 而不是 AppKit 的 `hasVisibleWindows`,因为 X-4 量到后者对一扇最小化的窗答 YES、对一扇被 `-[NSApplication hide:]` 藏起来的窗也答 YES(§13.21 关于 `Reopen` 的那条注),而这两种都不是一扇谁看得见的窗。这个问题是**在 `message_box` 里面**问的,挨着本来就在那里的那两个(§13.17 ⑤),因为它所决定的那个事实和那两个决定的是同一种事实:升起一个模态对这个进程到底有没有用。它特意不是一条关于哪条线程 panic 了、或者这个进程是怎么被启动的规矩——一种启动形状永远只是那三次读数的一个替身。没有任何东西在一个 handler 里面调 `terminate:`;这个钩子仍然经 `leave_process(101)` 离开(M3-1 的规矩,§13.21)。
 
-**⑤ The next launch names the report the system already wrote.** macOS files a
-complete `.ips` — every thread's backtrace, the register file, the loaded images
-— into `~/Library/Logs/DiagnosticReports/` for every process of the user that
-dies of a signal. Nobody who is not looking for it will ever find it. So
-`bt_app::diagnostics`, under this run's own header, names the newest report for
-this program that is **newer than the last thing the previous run wrote**.
+**⑤ 下一次启动点名系统早就写好的那份报告。** 对这个用户每一个死于信号的进程,macOS 都会往 `~/Library/Logs/DiagnosticReports/` 里归一份完整的 `.ips`——每条线程的回溯、寄存器、加载的镜像。不去找它的人永远不会发现它。所以 `bt_app::diagnostics` 在这趟运行自己的头底下,点名这个程序**比上一趟运行写下的最后一样东西更新**的那份最新报告。
 
-Three decisions in that sentence:
+那句话里有三个决定:
 
-* **The moment is the log's own modification time**, read before this run touches
-  the file and before the rotation renames it. It is "the last launch the log
-  recorded" said in the one unit the filesystem keeps for free, and it
-  self-clears: this run's header moves the stamp past every report there will
-  ever be, so a report is named once and never again.
-* **The name is the running program's own**, off `current_exe`, not the literal
-  `folio`. The shipped binary is `folio` and a development build is `bt-app`, and
-  the system names the report after whichever one died; a hard-coded product name
-  would make the facility work for exactly the builds nobody debugs. The
-  separator is part of the rule — `folioscope-….ips` is not ours, and a launch
-  that told a reader *the previous run crashed* about another program's fault is
-  worse served than one told nothing.
-* **The directory comes from the account record and not from `$HOME`.** The
-  report is not written by this process; it is written by a system service that
-  knows the account. A Folio handed a different `HOME` — which is how every probe
-  in this workspace isolates itself — would otherwise look in a directory
-  `ReportCrash` never writes to and quietly find nothing, on exactly the runs
-  anybody measures.
+* **那个时刻是日志自己的修改时间**,在这趟运行碰这个文件之前、在轮转把它改名之前读的。它是「日志记下的最后一次启动」用文件系统白送的那个单位说出来,而且它自清:这趟运行的头把那个时间戳推到了将来会有的每一份报告之后,所以一份报告被点名一次,再也不会有第二次。
+* **那个名字是正在跑的这个程序自己的**,从 `current_exe` 上取,而不是字面的 `folio`。发货的二进制叫 `folio`,而一个开发构建叫 `bt-app`,而系统是照死掉的那一个给报告起名的;一个写死的产品名会让这套设施恰好只在没人调试的那些构建上管用。分隔符是这条规矩的一部分——`folioscope-….ips` 不是我们的,而一次拿别的程序的故障去告诉读者*上一趟运行崩溃了*的启动,比一次什么都没告诉他的启动还糟。
+* **那个目录来自账户记录而不是来自 `$HOME`。** 这份报告不是这个进程写的;它是一个知道这个账户的系统服务写的。而一个被递了另一个 `HOME` 的 Folio——这个工作区里每一个探针都是这么隔离自己的——否则会去一个 `ReportCrash` 从不写的目录里找,然后悄无声息地什么也找不到,而且恰好是在任何人拿来测量的那些运行上。
 
-**It names and does not copy**, and that is the Windows arm's user-facing
-behaviour rather than a shortcut. Nothing in this product has ever written a
-crash dump of its own: the minidumps §7.1.3u is argued from were taken by hand
-with a debugger, and what the previous run's fate costs a user on Windows is one
-line off the sentinel — `BT_PERSIST previous session did not reach its clean-exit
-path`. This is that sentence with the evidence's address in it, and the two now
-stand next to each other in the file. A copy beside the log would be a second
-copy of a file the system already keeps, already rotates, and already opens in
-Console.app when a reader double-clicks the path.
+**它点名而不拷贝**,而这是 Windows 那条臂面向用户的行为而不是一条捷径。这个产品从来没有写过它自己的崩溃转储:§7.1.3u 据以论证的那些 minidump 是有人拿调试器手取的,而在 Windows 上「上一趟运行的下场」让一个用户花的是从哨兵上出来的一行——`BT_PERSIST previous session did not reach its clean-exit path`。这就是那句话加上证据的地址,而现在两者在文件里并排站着。在日志旁边放一份拷贝,就是给一份系统已经留着、已经轮转着、而且读者一双击路径就在 Console.app 里打开的文件再存一份。
 
-**⑥ Symbolication: what the shipped image carries and what M5 owes.**
-`[profile.release]` says `debug = "line-tables-only"` and **deliberately no
-`strip`** — both measured and written down in `Cargo.toml`, and this ticket
-changes neither. What that means here is not what it means on the other platform:
+**⑥ 符号化:发货的镜像里带着什么,以及 M5 欠着什么。** `[profile.release]` 写着 `debug = "line-tables-only"`,而且**特意不 `strip`**——两条都量过、都写在 `Cargo.toml` 里,而本票两条都不改。它在这里的含义和在另一个平台上不一样:
 
-* **Function names are in the image.** Nothing strips the Mach-O, so its symbol
-  table survives the link and the system's own reporter resolves Folio's frames
-  without any side file at all. Measured on the debug build: **every frame of
-  every thread in the `.ips` carried a symbol name, 361 of 361**, including
-  `objc2_app_kit::…::NSWindow::contentView` and
-  `winit::platform_impl::macos::window_delegate::WindowDelegate::view`. Rust's
-  mangling is in the file rather than demangled, which `rustfilt` or a reader
-  undoes.
-* **File and line are not, and inlined frames are not.** On Apple targets the
-  debug information `line-tables-only` emits stays in the object files and the
-  linked image only carries a debug map pointing at them; nothing under `target/`
-  is shipped, and there was **no `.dSYM` beside the built binary** — `dsymutil`
-  is a separate step nothing in this workspace runs yet.
-* **What M5 must ship is a `.dSYM`**, produced by `dsymutil` from the linked
-  binary and those object files, **archived beside the notarization log and not
-  inside the DMG**. It is keyed to the image's UUID, it is the only artefact that
-  turns a released build's report into file and line, and it exists only on the
-  machine that linked the binary — a release lane that does not keep it has
-  thrown the evidence away at the moment it was made. This ticket books the
-  requirement; it does not touch the profile.
+* **函数名在镜像里。** 没有任何东西 strip 那个 Mach-O,所以它的符号表挺过了链接,而系统自己的报告器不需要任何旁文件就能解出 Folio 的栈帧。在 debug 构建上量到的:**`.ips` 里每一条线程的每一个栈帧都带着一个符号名,361 个里 361 个**,包括 `objc2_app_kit::…::NSWindow::contentView` 和 `winit::platform_impl::macos::window_delegate::WindowDelegate::view`。Rust 的名字修饰在文件里是没解开的,读者或者 `rustfilt` 去解。
+* **文件和行号不在,内联出来的栈帧也不在。** 在 Apple 目标上,`line-tables-only` 产出的调试信息留在目标文件里,而链接出来的镜像只带一张指着它们的 debug map;`target/` 底下没有任何东西发货,而且**建出来的二进制旁边没有 `.dSYM`**——`dsymutil` 是一个单独的步骤,这个工作区里还没有任何东西跑它。
+* **M5 必须发的是一份 `.dSYM`**,由 `dsymutil` 从链接好的二进制和那些目标文件产出,**和公证日志一起归档,而不是放进 DMG 里**。它按镜像的 UUID 配对,是唯一一样能把一份发布构建的报告变成文件和行号的产物,而且它只存在于链接那个二进制的那台机器上——一条不留着它的发布道,在它被造出来的那一刻就把证据扔了。本票把这个要求挂上账;它不动那份 profile。
 
-**⑦ Tests.**
+**⑦ 测试。**
 
-*Windows, where none of the macOS arms compile.* Source pins in `hang.rs`'s own
-test module —
-`the_macos_liveness_question_is_put_to_the_run_loop_in_the_common_modes` (the
-mode, the wake, the bound, the identity guard, and that neither arm names the
-event-loop proxy), `the_stack_sample_is_still_refused_on_every_platform_but_windows`
-and `the_system_crash_reports_are_looked_for_in_the_accounts_own_home` — plus
-`bt_platform`'s `a_modal_box_is_raised_only_when_this_application_is_on_the_screen`
-beside the two questions §13.17's pin already holds. **A source pin that reads the
-whole file finds its own assertions**: the first of these refused its own text
-until it was narrowed to the two arm bodies, which is worth saying because it is
-the failure mode of every `include_str!` gate. The crash-report lookup is
-deliberately **not** pinned as source — it is a function over a directory listing,
-so `a_crash_report_is_this_programs_only_when_the_name_is_followed_by_a_separator`
-and `the_newest_report_after_the_previous_runs_last_word_is_the_one_named` drive
-it with a temporary directory and stamped files, and they run on both machines.
+*Windows,那里 macOS 的那些臂一条都编不过。* `hang.rs` 自己测试模块里的源码钉——`the_macos_liveness_question_is_put_to_the_run_loop_in_the_common_modes`(模式、唤醒、那道界、身份守卫,以及两条臂都不点那个事件循环 proxy 的名)、`the_stack_sample_is_still_refused_on_every_platform_but_windows` 和 `the_system_crash_reports_are_looked_for_in_the_accounts_own_home`——外加 `bt_platform` 的 `a_modal_box_is_raised_only_when_this_application_is_on_the_screen`,挨着 §13.17 那根钉已经按住的那两个问题。**一根读整个文件的源码钉会找到它自己写的断言**:这几根里的第一根一直拒绝它自己的文本,直到它被收窄到那两条臂的函数体上,这件事值得说,因为它是每一道 `include_str!` 门的失败模式。崩溃报告那次查找特意**不**做成源码钉——它是一个作用在目录列表上的函数,所以 `a_crash_report_is_this_programs_only_when_the_name_is_followed_by_a_separator` 和 `the_newest_report_after_the_previous_runs_last_word_is_the_one_named` 拿一个临时目录和一批打了时间戳的文件去驱动它,而它们在两台机器上都跑。
 
-*The Mac.* `hang.rs`'s `macos_handshake_tests` builds the thing the arm is about:
-a second thread with a live run loop. **A run loop with no input source is not a
-run loop that waits** — `CFRunLoopRun` returns immediately when nothing is
-attached to it — so the turning thread is given one source whose only property is
-existing, which is the state the real main thread is in with AppKit's own event
-source under it. `a_run_loop_that_is_turning_answers_inside_the_bound`,
-`a_run_loop_that_never_turns_is_silent_and_does_not_hold_the_asker` (which asserts
-the asker came back on its own clock, because a watchdog that blocked would be the
-fault it exists to report) and
-`a_thread_that_is_not_the_main_one_registers_nothing_and_owns_no_window`.
+*Mac。* `hang.rs` 的 `macos_handshake_tests` 把这条臂所说的那样东西建出来:一条带着活 run loop 的第二线程。**一个没有输入源的 run loop 不是一个会等的 run loop**——什么都没挂上去时 `CFRunLoopRun` 立刻返回——所以那条转着的线程被给了一个唯一性质就是「存在」的 source,而那正是真正的主线程在底下垫着 AppKit 自己的事件源时所处的状态。`a_run_loop_that_is_turning_answers_inside_the_bound`、`a_run_loop_that_never_turns_is_silent_and_does_not_hold_the_asker`(它断言问的那一方是按自己的钟回来的,因为一个会阻塞的看门狗就是它存在要报告的那个毛病)和 `a_thread_that_is_not_the_main_one_registers_nothing_and_owns_no_window`。
 
-**⑧ Measured on the Mac mini** — macOS 26.6.2 (25G83), Apple M4, the debug build
-at `b4fd9a9029`, each launch against an isolated `HOME` under the ticket's own
-worktree, the binary copied to `folio-m4-11` so that every report it leaves in the
-account's directory is unmistakably the probe's.
+**⑧ Mac mini 上量到的**——macOS 26.6.2(25G83),Apple M4,`b4fd9a9029` 的 debug 构建,每次启动都对着本票自己 worktree 下一个隔离的 `HOME`,二进制拷成 `folio-m4-11`,好让它留在账户目录里的每一份报告都无疑是这个探针的。
 
-**(a) The crash, in both launch shapes.** A terminal launch under a real pty came
-up with a window, was aborted by the pid its own log header carries, and the next
-launch wrote, under its own header and above the sentinel's line:
+**(a) 那次崩溃,两种启动形状各一次。** 一次终端启动、底下是真 pty,起来带着一扇窗,被它自己日志头里带的那个 pid 中止掉,而下一次启动在它自己的头底下、在哨兵那一行之上写下:
 
 ```
 ── Folio 0.3.0 (b4fd9a9029) — run started 2026-09-13T00:50:47.314Z, pid 28503 ──
@@ -9228,20 +8909,11 @@ Folio: the previous run ended in a crash the system recorded — ~/Library/Logs/
 BT_PERSIST previous session did not reach its clean-exit path
 ```
 
-A Finder launch — `open -n` on a throwaway bundle — did the same at
-`00:53:14.286Z`, naming `folio-m4-11-2026-09-12-205309.ips`, and **a third launch
-named nothing**, which is the once-and-never-again half of ⑤'s first decision. The
-report is `EXC_CRASH` / `SIGABRT`, `Abort trap: 6`.
+一次访达启动——对一个用完即弃的 bundle 发 `open -n`——在 `00:53:14.286Z` 做了同样的事,点名 `folio-m4-11-2026-09-12-205309.ips`,而**第三次启动什么也没点名**,那就是 ⑤ 第一个决定里「一次,再不会有第二次」的那一半。报告是 `EXC_CRASH` / `SIGABRT`,`Abort trap: 6`。
 
-**How long the system takes is worth writing down**, because a probe that waits
-fifteen seconds concludes the opposite: `ReportCrash` took **about five seconds**
-for one of these aborts and **about a hundred and fifteen** for the next, on a
-233 MB debug image with 482 032 symbols in it. The wait is not bounded by anything
-this program does.
+**系统要花多久值得写下来**,因为一个只等十五秒的探针会得出相反的结论:在一个 233 MB、里面有 482 032 个符号的 debug 镜像上,`ReportCrash` 对这两次中止里的一次花了**大约五秒**,对下一次花了**大约一百一十五秒**。这个等待不受这个程序做的任何事约束。
 
-**(b) The handshake, on the real application.** `BT_HANG_SELFTEST=12` holds the
-window thread, which on this platform is the thread the main run loop is on, so
-the block cannot be performed. The watchdog wrote:
+**(b) 那次握手,在真应用上。** `BT_HANG_SELFTEST=12` 把窗口线程按住,而在这个平台上那就是主 run loop 所在的那条线程,所以那个 block 执行不了。看门狗写下:
 
 ```
 process        : pid 29319, ui thread 259
@@ -9254,247 +8926,62 @@ ui thread stack
 healed         : the pump came back after 12.065s at BT_HANG_SELFTEST
 ```
 
-Three things in that are the ticket. `ui thread 259` is a real Mach port, so
-`current_thread_id` answered. **`the window was asked and did not answer` is
-`Silent` and not `NoWindow`** — which is the whole proof that the question
-reached the main run loop, because a registration that had failed would have read
-the other sentence and filed the same report for the wrong reason. And the
-`healed` line says the watchdog reported and did not intervene.
+这里面有三件事就是这张票。`ui thread 259` 是一个真的 Mach 端口,所以 `current_thread_id` 答上来了。**`the window was asked and did not answer` 是 `Silent` 而不是 `NoWindow`**——那就是「这个问题到达了主 run loop」的全部证明,因为一次失败的注册会读出另一句话,并且为了一个错的理由归出同一份报告。而 `healed` 那一行说的是看门狗报告了,而没有插手。
 
-**(c) The other half, which is an absence.** A window left idle for fifty
-seconds, ten times the threshold, has **no `hang-reports` directory at all** — the
-watchdog asked, the run loop answered, and `Excused` says nothing out loud. On the
-arm this ticket replaces that same fifty seconds files a report, which is what ①
-is about.
+**(c) 另一半,它是一次缺席。** 一扇闲了五十秒、也就是阈值十倍的窗,**根本没有 `hang-reports` 目录**——看门狗问了,run loop 答了,而 `Excused` 什么也不出声。在本票所取代的那条臂上,同样这五十秒会归出一份报告,而 ① 说的就是这件事。
 
-**(d) A venue fact the next Mac ticket needs: `LSEnvironment` cannot set `HOME`.**
-The first pass of this probe put `HOME` in a bundle's `LSEnvironment`
-dictionary. The dictionary *is* applied — `BT_PTY_DUMP` arrived — but the
-session's own `HOME` is written over it, so the bundle came up on the account's
-real data directory. What works is a two-line `CFBundleExecutable` that exports
-the isolated `HOME` and `exec`s the real binary; the process keeps the name the
-image has, which is the name the crash report is filed under. **And the same pass
-showed what §M4-7 is for**: two Folios on one data directory did not hand over to
-each other, because the attention endpoint that arranges that on Windows has no
-macOS arm yet.
+**(d) 一条下一张 macOS 票要用的场地事实:`LSEnvironment` 设不了 `HOME`。** 这个探针的第一趟把 `HOME` 放进了一个 bundle 的 `LSEnvironment` 字典。那个字典**确实**被应用了——`BT_PTY_DUMP` 到了——但会话自己的 `HOME` 会盖在它上面,所以那个 bundle 起来时用的是账户真正的数据目录。管用的是一个两行的 `CFBundleExecutable`,它导出那个隔离的 `HOME` 再 `exec` 真二进制;进程保留镜像所带的那个名字,而那正是崩溃报告归档时用的名字。**而同一趟还显出了 §M4-7 是为什么而存在的**:同一个数据目录上的两个 Folio 没有互相交接,因为在 Windows 上安排这件事的那个注意力端点还没有 macOS 臂。
 
 ### 13.32 T-MAC-FIT: 说这台机器的话——设置行按能力隐、字符串按平台挑、路径从 ~ 起、药丸不描边(`crates/bt-app/src/{settings,i18n,first_run,main,seats}.rs`、`crates/bt-render/src/{theme,scheme,lib}.rs`)
 
-**Taken as 13.32.** 13.19–13.25 and 13.27 are merged; 13.26 and 13.28–13.31 are
-in flight on other branches of this port. This section takes the next number
-nothing has claimed.
+**取 13.32。** 13.19–13.25 和 13.27 已经合入;13.26 与 13.28–13.31 在这次移植的别的分支上飞着。本节取下一个还没被认领的号。
 
-This is the first acceptance pass the owner ran on a built Mac (2026-09-12), read
-as one ticket. Four things came out of it, and only the last is about paint: a
-settings page offering rows about mechanisms macOS has not got, a window saying
-`Explorer` and `taskbar` and `folio.exe` to a reader who has none of those, a
-breadcrumb beginning at a folder called `/`, and a tab wearing an outline the rest
-of the window does not wear. What they have in common is that each one was
-*correct on Windows* and nobody had ever asked it the other question.
+这是用户在一台建出来的 Mac 上跑的第一趟验收(2026-09-12),当作一张票来读。里面出来四件事,而只有最后一件是关于画的:一页设置提供着关于 macOS 并没有的机制的行;一扇窗对着一个既没有资源管理器也没有任务栏也没有 `folio.exe` 的读者说 `Explorer`、`taskbar` 和 `folio.exe`;一条从一个叫 `/` 的文件夹开始的路径条;以及一个标签穿着一圈这扇窗其余部分都不穿的描边。它们的共同点是每一件在 Windows 上都是**对的**,而从来没有人拿另一个问题问过它。
 
-**① A row is not a row where the platform has not got the mechanism.** The
-General page offered `Explorer context menu`, and the Terminal page offered
-`PSReadLine patch` and `Offer PowerShell integration`. All three are switches over
-a Windows shell extension, a Windows PowerShell module and a Windows startup
-file; none of them is a question a Mac could answer, and the reader who presses
-one has been taught a word for nothing. They are dropped by the rule M3-6 already
-wrote for the first-run card (§7.56 ⑬): each row says what facility it is about
-(`SettingsRow::needs() -> Option<first_run::Capability>`), the facility says which
-platforms have it (`Capability::on(platform)`), and `visible_rows_for(platform,
-tab_layout)` filters the list once at the end.
+**① 一个平台没有那套机制的地方,一行就不是一行。** General 页提供 `Explorer context menu`,Terminal 页提供 `PSReadLine patch` 和 `Offer PowerShell integration`。这三个都是罩在一个 Windows shell 扩展、一个 Windows PowerShell 模块和一个 Windows 启动文件上的开关;没有一个是一台 Mac 答得出的问题,而按下其中一个的读者被教会了一个什么也不指的词。它们按 M3-6 早就为首启卡写下的那条规矩被去掉(§7.56 ⑬):每一行说出它是关于哪样设施的(`SettingsRow::needs() -> Option<first_run::Capability>`),那样设施说出哪些平台有它(`Capability::on(platform)`),而 `visible_rows_for(platform, tab_layout)` 在最后把名单过滤一次。
 
-**The same `Capability` and not a second table.** Two of the four facilities
-these rows name are ones that card already asks about, and a second table would
-be a second place to remember which platforms have them. What each surface still
-owns is what it *does* with the answer — the card drops the question, the page
-drops the row. `Capability` grew two values for
-this: `PsReadLineModule`, which the card never had a row for because the card asks
-about writes Folio would make on its own and that one is only ever made by a
-reader pressing the row; and `OptionKey`, which is the one entry in that table
-pointing at macOS rather than at Windows and is the reason it is a table of
-*facilities* and not a `windows` flag. `Option key sends Alt` was M1-7's `if
-bt_platform::host_platform() == MacOs` at the one call site, and it is now the
-fourth row under the one rule — a rule with an exception in it is a rule the next
-reader skips.
+**同一个 `Capability`,不是第二张表。** 这些行点名的四样设施里有两样是那张卡本来就在问的,而第二张表就是第二个要记住哪些平台有它们的地方。每个表面仍然拥有的是它拿那个答案**做什么**——卡去掉那个提问,页去掉那一行。`Capability` 为此长出两个值:`PsReadLineModule`,那张卡从来没有为它设过一行,因为卡问的是 Folio 自己会做的那些写入,而这一次写入只有读者按下那一行才会发生;以及 `OptionKey`,它是那张表里唯一一个指着 macOS 而不是指着 Windows 的条目,也是它是一张**设施**表而不是一个 `windows` 标志的原因。`Option key sends Alt` 原来是 M1-7 在那唯一一个调用点上的 `if bt_platform::host_platform() == MacOs`,现在它是同一条规矩底下的第四行——一条里面带着例外的规矩,就是下一个读者会跳过的规矩。
 
-**The list is built whole and filtered once**, rather than each push being
-conditional, because the order of that list is itself a ruling and every comment
-in it is part of that ruling; a row that came and went inside the run would make
-the order unreadable. `visible_rows` is the ambient reader and
-`visible_rows_for` takes the platform as a value, for `rows_for`'s own reason: a
-Windows workstation has to be able to read out what a Mac's General page contains,
-or "a Mac is not offered a PSReadLine row" stays a claim nobody can check until
-somebody opens the window on a Mac — which is exactly how these three rows got
-onto that page.
+**名单是整份建出来、过滤一次的**,而不是每一次 push 都带条件,因为那份名单的顺序本身就是一条裁决,而里面每一条注都是那条裁决的一部分;一行在运行里来了又走会让那个顺序读不出来。`visible_rows` 是那个环境读者,而 `visible_rows_for` 把平台当值收下,理由还是 `rows_for` 自己那一条:一台 Windows 工作站必须能读出一台 Mac 的 General 页里有什么,否则「一台 Mac 不会被提供一行 PSReadLine」就是一句在有人在 Mac 上打开那扇窗之前谁也核不了的主张——而那三行正是这么跑到那一页上的。
 
-**No page is left with a heading and nothing under it.** General keeps six
-unconditional rows and Terminal keeps four, so the heading derivation that walks
-the list never meets an empty run and the advanced disclosure is untouched. That
-is asserted rather than reasoned: `no_page_is_left_with_a_heading_and_no_rows`.
+**没有哪一页被留下一个标题底下空无一行。** General 留着六个无条件的行,Terminal 留着四个,所以那套走名单的标题推导从不会遇到一段空的 run,而高级折叠一笔没动。这件事是被断言的而不是被推理的:`no_page_is_left_with_a_heading_and_no_rows`。
 
-**And a row the *machine* cannot honour is still a different thing.** `Acrylic`
-on a machine with no backdrop, a built-in profile's colour, an unavailable
-PSReadLine — those are greyed *with the reason in the sentence*, because the
-reason is what the reader came for. A facility the platform has not got leaves
-nothing to explain, and a sentence explaining it would be this page teaching a
-reader a Windows word on a Mac.
+**而一行**机器**办不到的行仍然是另一回事。** 一台没有背景模糊的机器上的 `Acrylic`、一份内置配置的颜色、一个不可用的 PSReadLine——那些是**把理由写在句子里**地置灰,因为读者来找这一行就是为了那个理由。一样平台压根没有的设施没有什么可解释,而一句解释它的话就是这一页在一台 Mac 上教读者一个 Windows 的词。
 
-**② A string that names a program names the one on this machine.** The rows above
-are the half that disappears; this is the half that stays and has to be true.
-`Reveal in Explorer` over a folder, `Revealed in File Explorer` in a toast,
-`· Ctrl+click shows it in Explorer` under a link, `from the taskbar, a shortcut or
-folio.exe`, `Flashes the taskbar`, `Windows would not take it`, `Windows keeps
-some combinations for itself`, `A desktop-wide key needs Ctrl, Alt or Win`,
-`git.exe was not found. Install Git for Windows`, `This version of Windows does
-not offer the blur`, and the Chinese half of the summon key's sentence, which says
-the key is registered with Windows where the English never said so. Eleven
-entries, and each one is a sentence a Mac reader can reach.
+**② 一个点着某个程序名字的字符串,点的是这台机器上的那一个。** 上面那些行是消失的那一半;这是留下来、而且必须是真话的那一半。文件夹上的 `Reveal in Explorer`、一条 toast 里的 `Revealed in File Explorer`、链接底下的 `· Ctrl+click shows it in Explorer`、`from the taskbar, a shortcut or folio.exe`、`Flashes the taskbar`、`Windows would not take it`、`Windows keeps some combinations for itself`、`A desktop-wide key needs Ctrl, Alt or Win`、`git.exe was not found. Install Git for Windows`、`This version of Windows does not offer the blur`,以及召唤键那句话的中文一半——它说这个键是向 Windows 注册的,而英文从来没这么说。十一条,而每一条都是一个 Mac 读者够得到的句子。
 
-**One mechanism, in the table, beside the words.** `pick_platform(lang, platform,
-en_win, zh_win, en_mac, zh_mac)` is `pick` with the platform choosing the pair
-before the language chooses the string, and `Text::on(lang, platform)` is the
-whole table with both axes exposed. `Text::in_lang` asks `host_platform()` once
-and every surface in the window keeps the signature it had. The alternative — an
-`if` wherever somebody noticed — would give this window as many answers to "what
-platform am I on" as it has sentences, and the ones nobody noticed would keep the
-Windows word forever.
+**一套机制,写在表里,挨着那些词。** `pick_platform(lang, platform, en_win, zh_win, en_mac, zh_mac)` 就是 `pick`,只是平台先挑出那一对、语言再挑出那个串,而 `Text::on(lang, platform)` 是把两根轴都露出来的整张表。`Text::in_lang` 问一次 `host_platform()`,而窗里每一个表面保留它原来的签名。另一个办法——谁注意到了就在哪儿写一个 `if`——会让这扇窗对「我在哪个平台上」有多少个句子就有多少个答案,而没人注意到的那些会永远留着 Windows 的词。
 
-**What the Mac column says, and what it does not.** Finder where the program is
-Finder; the Dock where the taskbar was, because the platform's own way of calling
-a reader back to an application is a Dock icon bouncing (the call itself is
-`bt_platform::flash_window`, whose macOS arm is M4-6); `macOS` where the refusal
-named the system; `Control, Option or Command` where three keycaps were named,
-because `Win` is not a key on that keyboard; the Xcode command line tools where
-`Git for Windows` was. Two entries are deliberately *not* translations. The launch
-row's second sentence named Explorer's verb and `folio-here.cmd` — two Windows
-shell extensions with no Mac counterpart — so it is dropped rather than invented,
-and the Mac reader is told the three ways they actually start this program. And
-the greyed `Acrylic` row reads `Folio does not draw this blur on macOS`, because
-that system *has* the blur and this product has not drawn it: a line saying `this
-version of macOS does not offer the blur` would be the window blaming the machine
-for its own omission.
+**Mac 那一列说什么,以及不说什么。** 程序是访达的地方写访达;任务栏原来在的地方写程序坞,因为这个平台自己把读者叫回一个应用的方式就是一个弹跳的程序坞图标(这次叫唤本身是 `bt_platform::flash_window`,它的 macOS 臂是 M4-6);拒绝里点名系统的地方写 `macOS`;点名三个键帽的地方写 `Control、Option 或 Command`,因为那块键盘上没有 `Win` 这个键;原来写 `Git for Windows` 的地方写 Xcode 命令行工具。有两条特意**不是**翻译。启动那一行的第二句点的是资源管理器的那个动词和 `folio-here.cmd`——两个没有 Mac 对应物的 Windows shell 扩展——所以它是被去掉而不是被编出来,而 Mac 读者被告知的是他们实际启动这个程序的那三种方式。而置灰的 `Acrylic` 那一行写的是 `Folio does not draw this blur on macOS`,因为那个系统**有**这种模糊,而这个产品没有画它:一句 `this version of macOS does not offer the blur` 会是这扇窗把自己的省略怪到机器头上。
 
-**`Ctrl` stays `Ctrl` in the link hint**, and only the program's name moves. The
-press that hint promises is read off `window.modifiers.control_key()`, which is
-the same key on either keyboard; a hint that said `⌘` would describe a press this
-window does not answer. That the chord *should* be Command on a Mac is M1-7's
-question about routing and not this ticket's about wording — noted, not taken.
+**链接提示里 `Ctrl` 还是 `Ctrl`**,挪的只有那个程序的名字。那条提示所承诺的那一按是从 `window.modifiers.control_key()` 上读的,而那在两块键盘上是同一个键;一条写着 `⌘` 的提示描述的是一次这扇窗并不作答的按下。这个和弦在 Mac 上**该不该**是 Command,是 M1-7 关于路由的问题而不是本票关于措辞的问题——点名,不动手。
 
-**Windows is byte for byte what it was**, and the strings that belong to a Windows
-surface are untouched: the Explorer registration's own toasts, the PSReadLine
-repair, the `$PROFILE` offer (whose probe answers `None` off Windows, so the strip
-never rises there), the first-run rows that card does not list. Those are named in
-`Text::WINDOWS_ONLY_SURFACES`, which is the exemption list of a red gate rather
-than a comment: `no_string_a_mac_reader_meets_names_a_windows_program` reads every
-entry of the table, in both languages, on the Mac column, against the vocabulary
-of the other machine. A string that leaves one of those surfaces and lands
-somewhere a Mac reader can see it has to come off the list, and taking it off is
-what makes the gate ask about it.
+**Windows 逐字节还是原来的样子**,而属于 Windows 表面的那些字符串一笔没动:资源管理器注册自己那些 toast、PSReadLine 修复、`$PROFILE` 那个提议(它的探针在 Windows 之外答 `None`,所以那条提示带在那里根本不会升起)、那张卡并不列出的首启行。那些被点名在 `Text::WINDOWS_ONLY_SURFACES` 里,而那是一道红门的豁免名单而不是一条注释:`no_string_a_mac_reader_meets_names_a_windows_program` 读这张表的每一条,两种语言,在 Mac 那一列上,对着另一台机器的词汇核。一个离开了那些表面、落到一个 Mac 读者看得见的地方的字符串,必须从名单上下来,而把它拿下来正是让这道门去问它的那件事。
 
-**The Chinese is owed and the debt is per column.** `CHINESE_PENDING` was a list
-of entries; it is now a list of `(entry, column)` pairs, because `Reveal in
-Explorer` has had its Chinese since the file tree was written and `Reveal in
-Finder` has not. A list that named the entry would have taken the Windows half out
-of every completeness check in order to excuse the Mac half — which is how a
-translated sentence quietly stops being checked. The two completeness pins
-(`no_entry_ships_the_english_word_as_its_own_translation`,
-`every_chinese_entry_carries_at_least_one_han_character`) now walk the platform
-axis too, so the Mac column is checked the way the Windows one always was. The
-source marker on each pending literal is `// zh: pending opus46`; the copywriter
-greps for it, and this list is how the build refuses to forget. Fifteen pairs
-stand there: the eleven above, and `Option key sends Alt` and its sentence —
-M1-7's, English in both languages — listed on both platform columns, because the
-table answers for a platform that never draws that row.
+**中文欠着,而这笔账是按列记的。** `CHINESE_PENDING` 过去是一份条目名单;现在它是一份 `(条目, 列)` 对的名单,因为 `Reveal in Explorer` 自文件树写下来起就有它的中文,而 `Reveal in Finder` 没有。一份只点条目的名单,会为了给 Mac 那一半开脱而把 Windows 那一半从每一次完整性检查里拿走——而那正是一个已经译好的句子悄悄不再被检查的方式。那两根完整性钉(`no_entry_ships_the_english_word_as_its_own_translation`、`every_chinese_entry_carries_at_least_one_han_character`)现在也走平台那根轴,所以 Mac 那一列跟 Windows 那一列历来受的检查一样。每一处待译字面量上的源码标记是 `// zh: pending opus46`;文案写手 grep 它,而这份名单就是构建拒绝忘事的方式。那里立着十五对:上面那十一条,加上 `Option key sends Alt` 和它那句话——M1-7 的,两种语言里都是英文——在两个平台列上都列着,因为这张表要为一个从不画那一行的平台作答。
 
-**`OtherUnix` reads the Mac column.** There is no third build and no third
-vocabulary, and of the two columns the one written for a machine with `$HOME`, no
-drive letters and no Explorer is the one that is less wrong there — the same
-choice `profiles::home_variable` already makes for the same reason. That the table
-really has two columns and not three is itself asserted
-(`the_platform_table_has_exactly_two_columns`), because everything else walks
-`Text::PLATFORM_COLUMNS`, which is two values where `HostPlatform` has three.
+**`OtherUnix` 读 Mac 那一列。** 没有第三份构建,也没有第三套词汇,而两列之中,为一台有 `$HOME`、没有盘符、没有资源管理器的机器写的那一列,是在那里错得比较少的那一列——`profiles::home_variable` 早就为同一个理由做了同一个选择。这张表真的只有两列而不是三列,这件事本身也被断言(`the_platform_table_has_exactly_two_columns`),因为别的一切都走 `Text::PLATFORM_COLUMNS`,而它是两个值,`HostPlatform` 是三个。
 
-**③ A path starts where the reader's machine says a path starts.** The owner's
-preview rail read `/ › Users › alice › .zcompdump`: four crumbs, the first a
-folder called `/` that no Mac shows anybody, and two more that every path on that
-machine repeats. The ruling is Finder's path bar with the volume dropped, and it
-is two shapes:
+**③ 一条路径从读者这台机器说路径开始的地方开始。** 用户的预览条读出来是 `/ › Users › alice › .zcompdump`:四块面包屑,第一块是一个叫 `/` 的文件夹,而那是任何一台 Mac 都不会给谁看的,后面两块是那台机器上每一条路径都会重复的。裁决是访达的路径栏去掉卷,而它有两种形状:
 
-* a path **under the reader's home** starts at one `~` crumb standing for the
-  whole run above it — `~ › .zcompdump`, `~ › folio-port › repo › …`;
-* a path **outside it** starts at its own first component, with no root crumb in
-  front — `Applications › Utilities › …`.
+* 一条**在读者家目录底下**的路径从一块 `~` 面包屑开始,那一块代表它上面的整段——`~ › .zcompdump`、`~ › folio-port › repo › …`;
+* 一条**在家目录之外**的路径从它自己第一个组件开始,前面不加根那一块——`Applications › Utilities › …`。
 
-Windows is the row it was: `C: › Users › …`, drive first, because a drive is a
-place a reader of that machine navigates to and `%USERPROFILE%` is not a word
-Explorer says.
+Windows 还是原来那一行:`C: › Users › …`,盘符在先,因为一个盘符是那台机器的读者会去导航的一个地方,而 `%USERPROFILE%` 不是资源管理器说的词。
 
-**`~` is a crumb like every other crumb.** The place it points at is the home
-directory itself, so a press on it stands the files column there and the tip under
-it prints the path in full; nothing downstream learns a special case, because the
-fold, the tips, the double-click and the width measurement all read the same
-`(name, target)` pairs they always did. It is not a translated string — it is the
-character the shell in the pane below prints for the same folder, in either
-language.
+**`~` 跟别的每一块面包屑一样是一块面包屑。** 它指的地方就是家目录本身,所以按一下它会把文件列站到那里,而它底下的提示把完整路径打出来;下游没有任何东西学到一个特例,因为折叠、提示、双击和宽度测量读的都是它们历来读的同一组 `(名字, 目标)` 对。它不是一个被翻译的字符串——它就是底下那个 pane 里的 shell 为同一个文件夹打出来的那个字符,两种语言里都是。
 
-**The platform and the home directory are both arguments.** `crumb_segments` is
-the ambient reader and `crumb_segments_on(path, platform, home)` is the rule, for
-`rows_for`'s reason one more time: `a_mac_breadcrumb_starts_at_the_home_crumb_or_
-at_a_name` asserts what a Mac draws and runs on a Windows workstation, and it can,
-because `Path::components` reads `/` as a separator on either host. `home` is
-ignored unless it is **rooted** — an empty `HOME` is a prefix of every path, and a
-row answering `~ › / › Applications` to it would be worse than the row this
-ruling replaced. Rooted is asked of the first component rather than through
-`Path::is_absolute`, which answers by the *running* host's rules: `/Users/…` is
-absolute on a Mac and not absolute on Windows, so that method would have made the
-Mac shape unreadable from the machine this was written on — the platform is a
-value in the signature and then a `cfg` in the body, which is the fault the
-signature exists to prevent.
+**平台和家目录都是参数。** `crumb_segments` 是那个环境读者,而 `crumb_segments_on(path, platform, home)` 是那条规矩,还是 `rows_for` 那个理由再来一次:`a_mac_breadcrumb_starts_at_the_home_crumb_or_at_a_name` 断言一台 Mac 画出来的东西,而它跑在一台 Windows 工作站上,而它做得到,因为 `Path::components` 在两种宿主上都把 `/` 读成分隔符。`home` 除非是**有根的**,否则被忽略——一个空的 `HOME` 是每一条路径的前缀,而一行对它答 `~ › / › Applications` 会比这条裁决所取代的那一行还糟。有没有根是问第一个组件的,而不是经 `Path::is_absolute`,后者是按**正在跑的**宿主的规矩作答的:`/Users/…` 在 Mac 上是绝对路径、在 Windows 上不是,所以那个方法会让 Mac 那种形状在写下这段话的那台机器上读不出来——签名里是一个值、函数体里却是一个 `cfg`,那正是这个签名存在要防的那个毛病。
 
-**④ The active pill has no edging.** The owner asked whether the tab needed it;
-it does not. §13.19 ④ gave the floating pill a half-point ring on the argument
-that `#FFFFFF` on `#F7F7F5` is a smudge without one, and what that argument left
-out is that this window already fills this exact silhouette without a ring
-everywhere else: the vertical rail's rows are the same pill, at the same radius,
-on the same panel shade, ringless on both canvases. A ring on the horizontal tab
-would have made it the one pill in the window that is outlined — a difference a
-reader notices without being able to name.
+**④ 活动的药丸不描边。** 用户问这个标签到底需不需要它;它不需要。§13.19 ④ 给浮动药丸配了一道半点的环,理由是 `#F7F7F5` 上的 `#FFFFFF` 没有它就是一团污迹,而那条论证漏掉的是:这扇窗在别的每一处都已经在不带环地填充这个一模一样的剪影——竖排那条栏的行就是同一个药丸、同一个圆角、同一种面板底色,两种画布上都不带环。在水平标签上加一个环,会让它成为整扇窗里唯一被描了边的药丸——那是一种读者能察觉却说不出名字的差别。
 
-So the sprite goes, and with it the two palette entries (`tab_pill_edge`,
-`tab_pill_edge_alpha`), the `Canvas::pill_edge` thousandths both canvases carried,
-and `WINDOW_TAB_FLOAT_EDGE_LOGICAL_PX`. Nothing else read any of them, which is
-the test for whether a palette entry was a colour or a decision. The fill, the
-silhouette, the hover ground and the attached tab's skirt are untouched.
-`the_active_pill_is_closed_and_hairlined_and_the_attached_tab_is_not` is renamed
-to `the_active_pill_is_a_closed_fill_with_no_ring_and_the_attached_tab_is_a_skirt`
-and its middle assertion runs the other way, on both windows rather than one.
+所以那个 sprite 走掉,跟着走的还有那两个调色项(`tab_pill_edge`、`tab_pill_edge_alpha`)、两种画布都带着的 `Canvas::pill_edge` 千分数,以及 `WINDOW_TAB_FLOAT_EDGE_LOGICAL_PX`。再没有别的地方读过它们中的任何一个,而那正是判断一个调色项到底是一个颜色还是一个决定的试金石。填充、剪影、悬停底和贴着式标签的裙边一笔没动。`the_active_pill_is_closed_and_hairlined_and_the_attached_tab_is_not` 改名为 `the_active_pill_is_a_closed_fill_with_no_ring_and_the_attached_tab_is_a_skirt`,它中间那条断言反过来跑,而且是对两种窗口跑而不是对一种。
 
-**⑤ What this ticket found and did not fix.** Four things, each its own ticket
-and each named here so that the next acceptance pass is not the first to hear of
-them.
+**⑤ 本票查出来而没有修的东西。** 四件,每一件都是它自己的一张票,而且都在这里点名,免得下一趟验收是第一次听说它们。
 
-**`no_profile_title_has_been_pulled_into_the_language_table` reads almost
-nothing**, and it was found by moving a `#[cfg(test)]` constant around `i18n.rs`.
-That gate reads the file's own source *as far as the first `#[cfg(test)]`* and
-hunts the five profile titles in it; the first `#[cfg(test)]` in the file is
-`Lang::ALL`'s, a hundred lines in, so the half it has always scanned is the
-module header and none of the table. Widening the cut to where its own comment
-says it is (`mod tests`) is two lines, and it goes red on two strings that are
-arguably fine: `ProfilesIntegrationCmd` says `Command Prompt` as the name of an
-*integration* rather than as a profile title, and a `CliText` fixture spells
-`WSL` as a sample value. Whether the needles or those two strings are the wrong
-ones is a ruling about that gate's subject and not a port ticket's to take, so
-what this ticket changed is the comment, which now says what the code does. The agent installer rows (`Claude Code hooks` and its two neighbours) read
-`attention_hooks::config_dir`, which asks `%USERPROFILE%` and nothing else, so on
-a Mac they report a file they cannot find — those rows are *not* hidden, because
-their subject is `~/.claude/settings.json`, which that machine has; the discovery
-is what is missing, and `Capability::AgentDiscovery` already says whose ticket
-that is. `Ctrl+click` hands a link to the system on either platform, where a Mac
-reader's `⌘` is the chord M1-7 gave every other application verb. And the
-summoned terminal is M4-8's: `hotkey::register`'s non-Windows arm refuses with
-`the global summon key is not on this platform yet`, so that whole page describes
-a window a Mac cannot call up. Its Chinese no longer names Windows, which is all
-this ticket owed it.
+**`no_profile_title_has_been_pulled_into_the_language_table` 几乎什么也没读**,而这是靠在 `i18n.rs` 里挪一个 `#[cfg(test)]` 常量查出来的。那道门读这个文件自己的源码*读到第一个 `#[cfg(test)]` 为止*,在里面找那五个配置标题;而这个文件里第一个 `#[cfg(test)]` 是 `Lang::ALL` 的,在一百行处,所以它历来扫的那一半是模块头,一点表都没扫到。把那一刀放宽到它自己的注所说的地方(`mod tests`)是两行,而它会红在两个可以争论说本来就没问题的字符串上:`ProfilesIntegrationCmd` 里的 `Command Prompt` 是一个**集成**的名字而不是一个配置标题,而一个 `CliText` 夹具把 `WSL` 当作一个样例值拼出来。到底是那些查找词错了还是那两个字符串错了,是一条关于那道门主题的裁决,不是一张移植票该做的,所以本票改的是那条注,而它现在说的是这段代码实际在做的事。
+
+agent 安装那几行(`Claude Code hooks` 和它的两个邻居)读的是 `attention_hooks::config_dir`,它只问 `%USERPROFILE%`,所以在一台 Mac 上它们报告一个它们找不到的文件——那几行**不**隐藏,因为它们的主题是 `~/.claude/settings.json`,而那台机器有这个东西;缺的是那次发现,而 `Capability::AgentDiscovery` 已经说了那归哪张票。`Ctrl+click` 在两个平台上都把一个链接交给系统,而一个 Mac 读者的 `⌘` 是 M1-7 给别的每一个应用动词的那个和弦。而被召唤出来的那个终端归 M4-8:`hotkey::register` 的非 Windows 臂带着 `the global summon key is not on this platform yet` 拒绝,所以那整一页描述的是一扇 Mac 召不出来的窗。它的中文不再点 Windows 的名,而那是本票欠它的全部。
 
 ### 13.33 T-MAC-LIVE: 第一次真机验收的四桩——⌥+滚轮、标记栏刷新、保存后的弹窗、访达只带一扇窗出来(`crates/bt-app/src/{main,input,seats}.rs`、`crates/bt-platform/src/{handoff,lib}.rs`)
 
