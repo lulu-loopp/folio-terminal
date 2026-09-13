@@ -382,14 +382,23 @@ static OVERFLOWED: Mutex<u64> = Mutex::new(0);
 ///
 /// `wake` is called on the listener thread and must do nothing but nudge the loop.
 ///
+/// `directory` is the data directory this process holds the claim on — the same one
+/// `launch_wire::open` is given, and for a reason that is the transport's rather than this layer's:
+/// where the endpoint is a **file** it outlives a crash, so its name has to be one the next holder
+/// of that directory's lock can compute in order to clear it. On Windows the parameter is spare and
+/// stays in the signature, which is why there is no `cfg` here (`docs/DESIGN.md` §13.37).
+///
 /// A failure here is not fatal and is not reported to the user: an endpoint that would not open
 /// means hooks cannot reach this window, which is the same situation as a machine where nobody has
 /// installed any — the terminal works, and the attention queue stays as empty as it was before this
 /// slice existed. The one thing it must never do is fall back to a weaker endpoint.
-pub(crate) fn open(wake: impl Fn() + Send + Sync + 'static) -> Option<&'static AttentionPipe> {
+pub(crate) fn open(
+    directory: &std::path::Path,
+    wake: impl Fn() + Send + Sync + 'static,
+) -> Option<&'static AttentionPipe> {
     ENDPOINT
         .get_or_init(|| {
-            AttentionPipe::start(move |line| {
+            AttentionPipe::start(directory, move |line| {
                 park(line);
                 wake();
             })
@@ -1088,7 +1097,13 @@ mod tests {
         use std::sync::mpsc;
 
         let (sender, lines) = mpsc::channel();
-        let endpoint = AttentionPipe::start(move |line| {
+        // A data directory of this test's own: where the endpoint is a socket
+        // its name comes from this, and two tests sharing one name would be two
+        // listeners fighting over one path.
+        let data =
+            std::env::temp_dir().join(format!("bt-app-attention-wire-{}", std::process::id()));
+        std::fs::create_dir_all(&data).expect("make the data directory");
+        let endpoint = AttentionPipe::start(&data, move |line| {
             let _ = sender.send(line);
         })
         .expect("open an endpoint");

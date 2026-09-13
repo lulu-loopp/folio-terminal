@@ -258,8 +258,10 @@ pub fn canonical_path(directory: &Path) -> PathBuf {
 ///
 /// Nothing here is at risk of reaching it: [`socket_path_in`] puts a sixteen
 /// character digest and a five character suffix under `$TMPDIR/folio-<uid>/`,
-/// **whatever the data directory's own path length is**. That is the other half
-/// of why the name is a digest.
+/// **whatever the data directory's own path length is**, and
+/// [`attention_socket_path_in`] — the longer of the two, and therefore the one
+/// the promise is really about — puts the same digest and a ten character
+/// suffix there. That is the other half of why the name is a digest.
 pub const SOCKET_PATH_LIMIT: usize = 104;
 
 /// The launch endpoint's file name, inside a runtime directory.
@@ -269,6 +271,26 @@ pub const SOCKET_PATH_LIMIT: usize = 104;
 #[must_use]
 pub fn socket_path_in(runtime: &Path, tag: &str) -> PathBuf {
     runtime.join(format!("{tag}.sock"))
+}
+
+/// **The attention endpoint's suffix**, and the whole of what tells the two
+/// doors of one data directory apart (M4-7, `docs/DESIGN.md` §13.37).
+///
+/// A suffix on the same digest rather than a second digest: the two names have
+/// to fold identically, because a run under an isolated data directory must
+/// miss the reader's everyday Folio at *both* doors and two spellings of one
+/// directory must find each other at both — which is §13.28 ②'s promise, now
+/// made of three names instead of two.
+pub const ATTENTION_SOCKET_SUFFIX: &str = ".attn.sock";
+
+/// The attention endpoint's file name, inside a runtime directory.
+///
+/// Pure and not gated, for [`socket_path_in`]'s reason: the length promise
+/// above is a claim a Windows runner can check rather than one only a Mac
+/// could, and this is the longer of the two names that has to keep it.
+#[must_use]
+pub fn attention_socket_path_in(runtime: &Path, tag: &str) -> PathBuf {
+    runtime.join(format!("{tag}{ATTENTION_SOCKET_SUFFIX}"))
 }
 
 /// **Whether a socket path and its terminator fit in `sun_path`.**
@@ -413,6 +435,20 @@ pub fn launch_socket_path(directory: &Path) -> PathBuf {
     socket_path_in(&runtime_directory(), &directory_tag(directory))
 }
 
+/// **The attention endpoint's path for one data directory** — the second door
+/// of the same runtime directory (M4-7).
+///
+/// One folding and now three names built out of it, which is [`claim_name`]'s
+/// own note with one more name in it: the claim, the launch endpoint and the
+/// doorbell a hook rings are one directory's three files, so a run under an
+/// isolated data directory misses the reader's everyday Folio at all three and
+/// two spellings of one directory find each other at all three.
+#[cfg(unix)]
+#[must_use]
+pub fn attention_socket_path(directory: &Path) -> PathBuf {
+    attention_socket_path_in(&runtime_directory(), &directory_tag(directory))
+}
+
 /// A claim on one data directory, released when this value is dropped or when
 /// the process ends, whichever comes first — **the Unix arm, where the guarantee
 /// is built rather than preserved** (`docs/plans/port/macos-plan-2026-09-12.md`
@@ -477,9 +513,20 @@ pub fn claim_data_directory(directory: &Path) -> Option<DataDirectoryClaim> {
     if !taken {
         return None;
     }
-    let endpoint = socket_path_in(&runtime, &tag);
-    if std::fs::symlink_metadata(&endpoint).is_ok() {
-        let _ = std::fs::remove_file(&endpoint);
+    // **Both doors, and for one reason** (M4-7). The launch endpoint and the
+    // attention endpoint are two socket files bound by this one process on the
+    // strength of this one lock, so they go stale together and they are safe to
+    // unlink on exactly the same condition. A cleanup that took only the first
+    // would leave a doorbell standing that every hook connects to and no
+    // listener answers — a failure quieter than the one it half fixed, because
+    // `folio attention` would keep exiting zero.
+    for endpoint in [
+        socket_path_in(&runtime, &tag),
+        attention_socket_path_in(&runtime, &tag),
+    ] {
+        if std::fs::symlink_metadata(&endpoint).is_ok() {
+            let _ = std::fs::remove_file(&endpoint);
+        }
     }
     Some(DataDirectoryClaim { lock })
 }
@@ -573,6 +620,23 @@ mod tests {
              {SOCKET_PATH_LIMIT} bytes of sun_path: {}",
             socket.display()
         );
+        // **The attention endpoint is the longer of the two names** (M4-7), so
+        // it is the one the promise is really about: five characters of suffix
+        // became ten, and a length claim that only ever measured the shorter
+        // name would be a claim that goes quiet exactly when it starts to
+        // matter.
+        let doorbell = attention_socket_path_in(&runtime, &tag);
+        let bytes = doorbell.as_os_str().as_encoded_bytes().len();
+        assert!(
+            fits_a_socket_path(&doorbell),
+            "a {bytes}-byte doorbell path plus its terminator does not fit \
+             {SOCKET_PATH_LIMIT} bytes of sun_path: {}",
+            doorbell.display()
+        );
+        assert_ne!(
+            socket, doorbell,
+            "the two doors of one directory are two names"
+        );
         assert_eq!(
             SOCKET_PATH_LIMIT, 104,
             "macOS is the smaller of the two limits and is the one written down"
@@ -623,6 +687,20 @@ mod tests {
             take.find("flock").unwrap_or(usize::MAX) < take.find("remove_file").unwrap_or(0),
             "the stale endpoint is unlinked under the ownership lock and never before it (§R5)"
         );
+        // **Both doors, or the cleanup is a half fix** (M4-7). A stale attention
+        // socket that nobody unlinks is a doorbell every hook connects to and no
+        // listener answers, which is quieter than the failure it half fixes:
+        // `folio attention` keeps exiting zero.
+        for door in [
+            "socket_path_in(&runtime, &tag)",
+            "attention_socket_path_in(&runtime, &tag)",
+        ] {
+            assert!(
+                take.contains(door),
+                "the claim clears one of this directory's two endpoints and leaves the other: \
+                 {door} is not in {take}"
+            );
+        }
 
         let prepare = source
             .split("fn prepare_runtime_directory()")

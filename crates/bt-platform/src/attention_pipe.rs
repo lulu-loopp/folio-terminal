@@ -413,7 +413,25 @@ impl AttentionPipe {
     /// there is no pane coordinate to check, because there is none in the format — a caller says
     /// which pane it means by presenting that pane's capability, and a capability it does not hold
     /// is a capability it cannot name.
-    pub fn start(deliver: impl Fn(String) + Send + 'static) -> io::Result<Self> {
+    ///
+    /// # The data directory is spare here and stays in the signature
+    ///
+    /// `directory` is the data directory whose claim the caller holds, and this arm has nothing to
+    /// do with it: a pipe lives in a kernel namespace that needs no cleaning up, and the name below
+    /// is already unique per logon session, per process and per run. The Unix arm's endpoint is a
+    /// **file**, which a crash leaves behind, so its name has to be one the next holder of that
+    /// directory's lock can compute in order to unlink it — and the directory is where that name
+    /// comes from (`docs/DESIGN.md` §13.37).
+    ///
+    /// The parameter stays because **a door in this crate has one signature on every platform**
+    /// (`docs/plans/port/macos-plan-2026-09-12.md` §4.4 ②, and [`crate::handoff`]'s own rule for
+    /// the window `NSWorkspace` has nothing to be given), and it is consumed with `let _ =` at the
+    /// top of the body so that a reader meets the fact rather than deducing it.
+    pub fn start(
+        directory: &std::path::Path,
+        deliver: impl Fn(String) + Send + 'static,
+    ) -> io::Result<Self> {
+        let _ = directory;
         let Some(logon) = logon_sid() else {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -1354,6 +1372,16 @@ pub(crate) fn win32_of(error: &windows::core::Error) -> u32 {
 mod tests {
     use super::*;
 
+    /// **A data directory, for a parameter this arm does not read.**
+    ///
+    /// `AttentionPipe::start` takes one so that the door has one signature on
+    /// every platform (see its own note); the Unix arm's endpoint name is built
+    /// out of it and this one's is not. A test that passed a different path each
+    /// time would be implying a difference that does not exist here.
+    fn any_data_directory() -> std::path::PathBuf {
+        std::env::temp_dir().join("bt-platform-attention")
+    }
+
     /// **The descriptor is written, and it says one thing.**
     ///
     /// The red form of this is the whole module's reason to exist: an endpoint created with `None`
@@ -1426,7 +1454,7 @@ mod tests {
     #[test]
     fn a_line_written_the_instant_the_endpoint_opens_arrives_whole() {
         let (sender, lines) = mpsc::channel();
-        let pipe = AttentionPipe::start(move |line| {
+        let pipe = AttentionPipe::start(&any_data_directory(), move |line| {
             let _ = sender.send(line);
         })
         .expect("open the endpoint");
@@ -1454,7 +1482,7 @@ mod tests {
     fn a_whole_turn_of_hooks_arrives_with_none_of_them_lost() {
         const FRAMES: usize = 8;
         let (sender, lines) = mpsc::channel();
-        let pipe = AttentionPipe::start(move |line| {
+        let pipe = AttentionPipe::start(&any_data_directory(), move |line| {
             let _ = sender.send(line);
         })
         .expect("open the endpoint");
@@ -1496,7 +1524,7 @@ mod tests {
     fn a_flood_far_past_any_real_producer_still_loses_nothing() {
         const FRAMES: usize = 40;
         let (sender, lines) = mpsc::channel();
-        let pipe = AttentionPipe::start(move |line| {
+        let pipe = AttentionPipe::start(&any_data_directory(), move |line| {
             let _ = sender.send(line);
         })
         .expect("open the endpoint");
@@ -1530,7 +1558,7 @@ mod tests {
     #[test]
     fn every_client_that_attaches_is_accounted_for() {
         let (sender, lines) = mpsc::channel();
-        let pipe = AttentionPipe::start(move |line| {
+        let pipe = AttentionPipe::start(&any_data_directory(), move |line| {
             let _ = sender.send(line);
         })
         .expect("open the endpoint");
@@ -1608,7 +1636,7 @@ mod tests {
     #[test]
     fn an_oversized_frame_is_dropped_and_counted() {
         let (sender, lines) = mpsc::channel();
-        let pipe = AttentionPipe::start(move |line| {
+        let pipe = AttentionPipe::start(&any_data_directory(), move |line| {
             let _ = sender.send(line);
         })
         .expect("open the endpoint");
@@ -1690,7 +1718,8 @@ mod tests {
     #[test]
     fn a_closed_endpoint_stops_answering() {
         let name = {
-            let pipe = AttentionPipe::start(|_| {}).expect("open the endpoint");
+            let pipe =
+                AttentionPipe::start(&any_data_directory(), |_| {}).expect("open the endpoint");
             let name = pipe.name().to_owned();
             send_line(&name, "before").expect("the endpoint is open");
             name

@@ -211,6 +211,12 @@ mod mac {
     /// holding.
     fn delivered(center: &UNUserNotificationCenter) -> Vec<Retained<UNNotification>> {
         let answered = Arc::new(AtomicBool::new(false));
+        // An `Arc` over a type that is neither `Send` nor `Sync`, on purpose: Apple
+        // documents that this completion handler may run on a background queue,
+        // so the vector is shared across threads under the `Mutex` and read only
+        // after `answered` (SeqCst) says the handler has returned. `Rc` would
+        // state the opposite of what the framework does.
+        #[allow(clippy::arc_with_non_send_sync)]
         let held: Arc<Mutex<Vec<Retained<UNNotification>>>> = Arc::new(Mutex::new(Vec::new()));
         let (told, into) = (Arc::clone(&answered), Arc::clone(&held));
         let block = RcBlock::new(

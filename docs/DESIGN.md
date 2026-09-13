@@ -10813,3 +10813,232 @@ standing note — closing them would mean driving Finder, and driving another
 application is a consent prompt this venue does not spend.
 
 *(本节英文,待中文文案改写。)*
+
+### 13.37 M4-7: 注意力端点走 Unix socket——边界从登录会话变成用户,写明而不是含糊(`crates/bt-platform/src/attention_pipe_unix.rs`(新)、`crates/bt-platform/src/{attention_pipe,attention_pipe_portable,instance,lib}.rs`、`crates/bt-app/src/{attention_wire,attention_hooks,attention_codex,attention_copilot,main}.rs`)
+
+**① The one thing this ticket owes is a sentence, and it is not `0600`.** The
+Windows endpoint carries a security descriptor written by hand,
+`D:P(A;;GA;;;<logon sid>)` — protected so no inherited ACE can arrive, exactly
+one entry, and the principal in it is the **logon session**. §7.1.5m says why
+in its own words: "边界是登录会话而不是用户,所以同一用户的另一个会话(服务、
+另一个桌面)在外面". A Unix socket carries file permissions, and **file
+permissions name a user**. So `0600` inside a `0700` runtime directory is a
+*wider* principal than the door it replaces, and the plan's §R6 is the
+instruction not to paper over that: a second `ssh` login, a `launchd` agent and a
+fast-user-switched second console of the same person **can** post attention to
+this Folio, where on Windows they could not. That is written down here, in the
+module's own header, and in a test that reads the header
+(`the_unix_arm_says_which_principal_it_is_naming`) — because it is prose, the
+only gate that can hold it is one that reads prose, and a file that quietly
+dropped those paragraphs would have made the substitution this ticket exists to
+refuse.
+
+**What the runtime directory buys, and what it does not.** It is `0700`, it is
+per-uid, and on macOS `$TMPDIR` is already `/var/folders/<xx>/<digest>/T/`.
+Measured rather than assumed: that directory is **per user and per boot, not per
+session** — every login session of one account is handed the same one — so it
+adds *nothing at all* to the session question, and claiming it did would be the
+same substitution wearing a different hat. What it does buy is against a
+different *user*: the directory somebody else would have to reach is both
+unguessable and unreadable, so the socket's own `0600` is the second of two locks
+on that gate rather than the only one.
+
+**And the sentence the Windows module ends on is unchanged**, because it is the
+one that actually bounds this endpoint on either platform: **this is not a
+defence against a hostile process running as you.** A capability travels in a
+child's environment and anything that can read that environment has it. What is
+bounded is the blast radius — the worst a stolen capability buys is one pane's
+attention bit, raised or lowered. It cannot type, cannot open a pane, cannot read
+a transcript and cannot name a different pane, because the message format has no
+pane coordinate in it at all.
+
+**② The name is the data directory's, and that is a consequence of the endpoint
+being a file.** The Windows name is `folio-attention-<logon tag>-<pid>-<128-bit
+nonce>`: three segments answering *which session*, *which window* and *which
+run*, the last because Windows reuses a process id the moment a process exits. A
+socket is not a name in a kernel namespace, it is a **file**, and a file outlives
+the process that bound it. So the name has to be one the **next holder of the
+data directory's claim can compute**, in order to unlink it — which a nonce makes
+impossible by construction. The Unix endpoint is therefore
+`$TMPDIR/folio-<uid>/<directory digest>.attn.sock`, one folding and now three
+names built out of it (§13.28 ②'s promise with one more name in it): the lock,
+the launch socket and the doorbell. What the nonce was buying is bought by the
+claim instead — the socket is opened only by the process holding that `flock`,
+and a stale file at that name is removed under that lock before a new one is
+bound.
+
+The length promise moves with it. `SOCKET_PATH_LIMIT` is 104 and the doorbell's
+suffix is ten characters where the launch socket's is five, so the doorbell is
+now the longer of the two names and therefore the one the promise is really
+about; `the_launch_socket_fits_a_sockaddr_un_however_long_the_data_directory_is`
+measures both against a three-thousand-character data directory.
+
+**③ `start` grew a parameter, and it grew it on every arm.** The directory is
+where that name comes from, so the Unix arm needs it; the Windows arm does not,
+and takes it anyway. That is §4.4 ②'s rule and `handoff`'s precedent for the
+`NativeWindow` `NSWorkspace` has nothing to be given — a door in `bt-platform`
+has one signature on every platform, consumed with `let _ = directory;` at the
+top of the body so that a reader meets the fact rather than deducing it. The
+result is that `bt_app::attention_wire::open` names it with no `cfg` anywhere
+near, and `main` hands it `persist::storage_dir()` — the same value
+`launch_wire::open` is already given, two lines below.
+
+**④ The frame is the connection, and it is not the launch wire's header.**
+`PIPE_TYPE_MESSAGE` made "one frame" a kernel fact; a `SOCK_STREAM` socket has
+none. §13.28 ⑤ answered that at the launch door with four bytes of big-endian
+length, and this door deliberately does **not** borrow it: that one is a
+five-step conversation on a single socket and needs to know where each step ends,
+while this one is *connect, write one line, close*, with no reply channel to keep
+the connection open for. So the peer's half-close is the terminator, bytes are
+accumulated until it arrives, and a connection carrying more than
+`MAX_MESSAGE_BYTES` is refused **whole** rather than truncated and parsed — which
+is the property message mode was buying, because a half-read line is exactly the
+kind of thing a parser should never be handed.
+
+Everything above the transport is the product's and does not move: the same
+4096-byte bound, the same token bucket over one second, the same quarter-second a
+caller has to say its line, the same `PipeCounts` with the same five fields, and
+the same conservation law — **every client that attaches becomes exactly one of
+delivered, oversize, throttled or silent**. `every_client_that_attaches_is_accounted_for`
+asserts it here in the same words it is asserted there.
+
+**The pool survives for half of its reason.** Four pipe instances existed on
+Windows for two reasons, and only one of them crosses: a caller that attaches and
+says nothing must cost **its own** slot for the read deadline rather than the
+endpoint's whole attention. The other reason — that an instance begins listening
+when `CreateNamedPipeW` returns rather than when `ConnectNamedPipe` is called,
+which is the defect `accepted` was added to name — has no counterpart at all
+here, because a listener's backlog holds a caller the kernel already took in for
+it. So `poll` watches the listener, a self-pipe and up to four accepted
+connections, and the listener leaves the set while the pool is full so that a
+fifth caller waits in the backlog rather than in a slot that does not exist.
+
+**⑤ The peer is asked who it is and deliberately not what it is running.** This
+is the one place where the two Unix sockets in one runtime directory take
+opposite decisions, and both are right. `launch_pipe` refuses a peer whose
+executable is not the same file as its own (§13.28 ⑥), because the only thing
+that ever speaks the launch wire is a second Folio. **Nothing of the sort is true
+here.** The programs on the other end of the doorbell are other people's —
+`claude`, `codex`, `node`, `copilot`, and a shell where a hook is spelled as a
+shell command — so an executable check copied across from the door next to it
+would refuse every real caller this one has, and the failure would look exactly
+like "the hooks are not installed". What is asked is `getpeereid`, and the uid
+must be this process's own; a pid out of a frame would be a number the peer
+chose, and this comes from the kernel.
+`the_doorbell_asks_who_you_are_and_not_what_you_are_running` pins the absence as
+well as the presence, because an absence is the half somebody tidies up.
+
+A peer of another uid is closed on **without a byte read and without a count**.
+That keeps `PipeCounts` honest across the two arms: on Windows such a caller is
+refused by the descriptor and never attaches at all, so it is in none of the five
+numbers, and it is in none of them here either. The client half asks the same
+question of the file before it connects — a socket, not a link, this user's, mode
+`0600` — which is `launch_pipe`'s `vetted_endpoint` at the second door for the
+same reason: a link standing where the endpoint should be is somebody
+redirecting a capability line, and following it to find out where would be taking
+their word for it.
+
+**⑥ The stale doorbell is cleaned up under the same lock, in the same statement.**
+`claim_data_directory` already unlinked the launch socket on the line after
+`flock` succeeded and nowhere else (§R5, §13.28 ⑦); it now unlinks both names in
+one loop. A cleanup that took only the first would leave a doorbell standing that
+every hook connects to and no listener answers — **quieter than the failure it
+half fixes**, because `folio attention` would go on exiting zero while nothing
+ever reached a window. The source pin in `instance.rs` asserts both names are in
+that statement as well as asserting that `flock` precedes the unlink.
+
+**⑦ The hooks learn nothing new, and that is the finding.** The ticket asked for
+the socket path to be written into a hook script, and the shape of `#!/bin/sh` +
+`nc -U` was costed. It is not what this build does and it should not be: **the
+hook is this executable**, on both platforms. `folio attention` reads
+`FOLIO_ATTENTION_PIPE` and `FOLIO_ATTENTION` out of the environment it was
+started with, the pane's shell has both, and `claude`, `codex` and `copilot` are
+that shell's children — so the address travels the way it has always travelled,
+and a socket path travels it exactly as a pipe name did. Writing the endpoint
+into the file instead would pin a configuration file on disk to one *run* of one
+window, which is the thing the environment exists not to do; and an `nc -U` stub
+would be a second implementation of this wire, one that could not apply the frame
+bound and would be a second thing to keep in step.
+
+What did have to change off Windows is two smaller things, and both were real
+defects rather than ports:
+
+* **`%USERPROFILE%` with no `HOME` arm** (M2-6's audit finding). All three
+  installers *compose* the other program's configuration directory out of
+  `%USERPROFILE%` when its own variable says nothing, so on a Mac
+  `config_dir_from` returns `None` and every one of the three rows reports **"not
+  installed" on a machine where the hooks are installed** — §7.1.6j's own lesson,
+  which cost a week once already, reaching the one half of the path that cannot
+  be asked for. The fix is a value out of `bt-platform`,
+  `home_variable_for(HostPlatform)`, rather than a `cfg` in `bt-app`:
+  `attention_hooks.rs` and `attention_codex.rs` are not on
+  `FILES_THAT_MAY_NAME_A_PLATFORM` and are not joining it for this.
+* **The `powershell` column, and the quoting.** `attention_copilot`'s header said
+  "only the `powershell` column is written" and gave the reason — *Folio is a
+  Windows program* — and that reason expired the day there was a Mac build.
+  Upstream runs the column that matches the machine, so the wrong one is a file
+  that parses, validates, sits in the right directory and **never fires**: from
+  the reader's chair, identical to not having installed at all. The Claude Code
+  line has the same problem one layer down: it is handed to `/bin/sh`, where a
+  double-quoted word is **still expanded** — `$`, a backtick and a backslash all
+  survive it — so a home directory with a `$` in it would give a hook that ran
+  the wrong program or none, silently, on the one machine nobody tests the
+  installer on. Single quotes, with sh's own escape for the one character that
+  ends them (close, escape, reopen). `codex` needed neither: its `notify` is a
+  TOML argument vector and no shell ever sees it.
+
+**⑧ What a Windows runner holds, and what only a Mac can.** Five pins run on the
+workstation, in `lib.rs`'s `macos_attention_signature_tests` beside the video
+one's instrument: each of `start`, `name`, `counts`, `send_line` and
+`unguessable_bits` has one signature across all three arms; `PipeCounts` is the
+same type field for field and the two bounds are the same numbers; the Unix
+header still says which principal it is naming; the doorbell asks `getpeereid`
+and names no `proc_pidpath`, `current_exe` or `LOCAL_PEERPID`; and
+`home_variable_for` answers `USERPROFILE` and `HOME` in the right places. Two
+more run there as rendering: the Claude Code block and the copilot document, both
+platforms' shapes, asserted as bytes because what is being written is *not ours*
+— it lands in a file the user owns, that another program reads, and that nobody
+will look at again.
+
+Nine cases run on the Mac and cannot run anywhere else: a line crosses and the
+same value arrives; the conservation law over a silent caller and an oversized
+one; the endpoint `0600` inside a `0700` directory and gone when its listener is;
+a stale socket cleared by the next holder of the claim and bound over; a name
+outside this user's runtime directory refused before a socket is touched; a
+regular file and a symlink standing at the path refused before a capability is
+written to them; an oversized message refused before it leaves the process; two
+spellings of one data directory addressing one doorbell; and the peer predicate
+answering yes to this process's own uid and no to the next one.
+
+**The one thing neither holds is a connection from a peer of another uid.** It is
+tested at the predicate — `peer_is_this_user` says yes to this process and no to
+the next uid — and the connected half is tested only in the direction that
+passes, because every case above is a peer whose uid *is* this process's own. A
+refusal end to end would need a second account and a second process running as
+it. That is §13.28's own written-down gap at the other door of this directory,
+kept in the same words rather than quietly widened.
+
+**⑨ The acceptance sentence, on the real binary.** `docs/plans/port/m4-7/`
+carries the two launchers and the transcript. One isolated `$HOME` on the Mac
+mini, `debug/folio` built from this branch, and the pane's three variables
+leaving the pane through that `$HOME`'s own shell startup files — no key
+injection and no pasteboard. `$TMPDIR` measured there is
+`/var/folders/yh/…/T/`, and the `ssh` session is handed the **same** one the
+console session has, which is the measurement ① rests on. One data directory
+produced three files off one digest — `30f97d9a9d6858a3.lock`, `.sock` and
+`.attn.sock` — the doorbell `srw-------` inside a `drwx------`, its whole path
+**85 bytes** of the 104 `sun_path` has. The hook script is one line,
+`'…/folio' attention claude-code:PermissionRequest`, single-quoted with no
+endpoint in it, and running it wrote **`mint … src=pipe` → `admit` → `toast …
+reach=marks` → `claim … now=Awaiting`**: every link from a shell command to a
+mark on a tab, over a Unix socket. A forged capability was *delivered* and
+refused by the grammar (the verb exited 0 and no second episode was minted); a
+name outside this user's runtime directory exited non-zero without a socket
+being touched. Both names were **still standing after the process ended** —
+⑥'s point made by the product, because `bt-app` parks both endpoints in statics
+— and a second Folio on the same data directory cleared them under the claim,
+bound over them (the listing's own timestamps move by a minute) and answered a
+hook, which nothing behind an unbound name could have done. Both pids were written down when they were started and only
+those two were ever ended.
+
+*(本节英文,待中文文案改写。)*

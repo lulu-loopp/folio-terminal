@@ -1,17 +1,24 @@
-//! **The attention endpoint, before it is a Unix socket** (M4-7).
+//! **The attention endpoint on a platform with neither a pipe namespace nor a
+//! socket to bind** (M4-7).
 //!
-//! A named pipe with a security descriptor of our own on Windows; a socket in a
-//! private runtime directory here. M4-7 owns the port, and the thing it owes
-//! that a `0600` substitution would hide is stated in R6 of the plan: the
-//! Windows descriptor names the **logon session**, deliberately, "so a second
-//! session of the same user (a service, another desktop) is outside it", and
-//! Unix owner permissions identify a **user**. That is a change of meaning and
-//! M4-7 states it rather than calling the two equivalent.
+//! A third arm rather than a second, on [`crate::http`]'s footing (§13.27) and
+//! `launch_pipe_portable.rs`'s: the two real ones are two transports — a named
+//! pipe with a descriptor of our own, and a Unix socket in a private runtime
+//! directory — and this is neither, which is what it says honestly rather than
+//! quietly.
 //!
-//! Until then the channel is absent and says so. The three doors `bt-app`
-//! writes are the server (`AttentionPipe::start`), the client (`send_line`) and
-//! the nonce (`unguessable_bits`); the first two refuse and the third is real,
-//! because a random number is not a platform question.
+//! The change of meaning between the two real arms is stated where both of them
+//! can be read: the Windows descriptor names the **logon session**,
+//! deliberately, "so a second session of the same user (a service, another
+//! desktop) is outside it", and Unix owner permissions identify a **user**. See
+//! `attention_pipe_unix.rs`'s header and `docs/DESIGN.md` §13.37, which write
+//! that down as a decision rather than substituting `0600` and calling the two
+//! equivalent.
+//!
+//! Here the channel is absent and says so. The three doors `bt-app` writes are
+//! the server (`AttentionPipe::start`), the client (`send_line`) and the nonce
+//! (`unguessable_bits`); the first two refuse and the third is real, because a
+//! random number is not a platform question.
 
 use std::io;
 
@@ -51,9 +58,13 @@ pub struct AttentionPipe {
 }
 
 impl AttentionPipe {
-    /// Open the endpoint. Refused; M4-7.
-    pub fn start(deliver: impl Fn(String) + Send + 'static) -> io::Result<Self> {
-        let _ = deliver;
+    /// Open the endpoint for `directory`. Refused, because this platform has
+    /// neither a pipe namespace nor a socket to put one in.
+    pub fn start(
+        directory: &std::path::Path,
+        deliver: impl Fn(String) + Send + 'static,
+    ) -> io::Result<Self> {
+        let _ = (directory, deliver);
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "the attention endpoint is not on this platform yet",

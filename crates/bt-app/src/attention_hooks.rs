@@ -38,6 +38,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use bt_platform::HostPlatform;
 use serde_json::{Map, Value};
 
 use crate::attention::MappingRow;
@@ -78,22 +79,30 @@ pub(crate) enum State {
 pub(crate) fn config_dir() -> Option<PathBuf> {
     config_dir_from(
         std::env::var_os(CONFIG_DIR_VARIABLE),
-        std::env::var_os("USERPROFILE"),
+        std::env::var_os(bt_platform::home_variable()),
     )
 }
 
 /// The same decision, with the environment handed in.
+///
+/// **`home` is `%USERPROFILE%` on Windows and `$HOME` everywhere else**, and it is
+/// [`bt_platform::home_variable`] that decides which — M2-6's audit finding and M4-7's to fix: a
+/// path composed out of `%USERPROFILE%` alone is `None` on a Mac, so this whole module answered
+/// "not installed" on every machine where the hooks were installed. The question is asked of
+/// `bt-platform` rather than of a `cfg` here, which is the rule
+/// `only_the_named_files_decide_what_platform_this_is` keeps and the reason this file is not on
+/// that list.
 ///
 /// Split out so the rule can be pinned by a test that sets nothing: a process-wide variable changed
 /// from a test is changed for every other test running beside it, and this crate refuses `unsafe`,
 /// which is what `set_var` now is. The one impure input is named instead — the shape `cli::resolve`
 /// uses for the filesystem, and for the same reason.
 #[must_use]
-fn config_dir_from(named: Option<OsString>, profile: Option<OsString>) -> Option<PathBuf> {
+fn config_dir_from(named: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     if let Some(named) = named.filter(|named| !named.is_empty()) {
         return Some(PathBuf::from(named));
     }
-    Some(PathBuf::from(profile.filter(|profile| !profile.is_empty())?).join(DEFAULT_DIRECTORY))
+    Some(PathBuf::from(home.filter(|home| !home.is_empty())?).join(DEFAULT_DIRECTORY))
 }
 
 /// The user-level settings file. **The only file this module ever writes.**
@@ -114,7 +123,7 @@ pub(crate) fn settings_path() -> Option<PathBuf> {
 pub(crate) fn settings_path_shown() -> String {
     settings_path_shown_from(
         std::env::var_os(CONFIG_DIR_VARIABLE),
-        std::env::var_os("USERPROFILE"),
+        std::env::var_os(bt_platform::home_variable()),
     )
 }
 
@@ -122,12 +131,12 @@ pub(crate) fn settings_path_shown() -> String {
 /// reason, and it is what lets a test pin both halves without touching a
 /// process-wide variable.
 #[must_use]
-fn settings_path_shown_from(named: Option<OsString>, profile: Option<OsString>) -> String {
+fn settings_path_shown_from(named: Option<OsString>, home: Option<OsString>) -> String {
     let default = || format!("~/{DEFAULT_DIRECTORY}/{SETTINGS_FILE}");
     if named.as_ref().is_none_or(|named| named.is_empty()) {
         return default();
     }
-    config_dir_from(named, profile)
+    config_dir_from(named, home)
         .map(|dir| dir.join(SETTINGS_FILE).display().to_string())
         .unwrap_or_else(default)
 }
@@ -246,14 +255,63 @@ pub(crate) fn rows_to_install() -> Vec<MappingRow> {
 ///
 /// It is said only for a row that has somewhere to look ([`attention_map::Words`]). Every other
 /// event's hook is spawned with nothing to read and reads nothing, which is what it did before.
+///
+/// # **What the hook is told, and what it is not** (M4-7)
+///
+/// The hook is **this executable**, on both platforms, and the endpoint it speaks to is nowhere in
+/// this line. That is not an omission: `folio attention` reads `FOLIO_ATTENTION_PIPE` and
+/// `FOLIO_ATTENTION` out of the environment it was started with, the pane's shell had both, and
+/// `claude` is that shell's child — so the address travels the way it has always travelled and a
+/// socket path travels it exactly as a pipe name did. Writing the endpoint into the line instead
+/// would pin a configuration file on disk to one *run* of one window, which is the thing the
+/// environment exists not to do.
+///
+/// So there is **no shell script and no `nc -U`** on the Unix side. A `#!/bin/sh` stub that piped
+/// a line into `nc` would be a second implementation of this wire — one that could not apply the
+/// frame bound, could not read the capability out of its own environment without re-deriving the
+/// grammar, and would be a second thing to keep in step with `bt_platform::attention_pipe`. What
+/// does change off Windows is only the **quoting**, below: the string is handed to `/bin/sh`, and
+/// a double-quoted word there is still expanded — a person whose home directory contains a `$` or
+/// a backtick would get a hook that ran the wrong program, or none.
+///
+/// `platform` is handed in rather than asked for, so that a Windows runner can read the line a
+/// Mac installs and the other way round — `install_into_on`'s reason, one layer down.
 #[must_use]
-pub(crate) fn command_for(exe: &Path, event: &str) -> String {
-    let mut command = format!("\"{}\" attention {CLAUDE_CODE}:{event}", exe.display());
+pub(crate) fn command_for_on(exe: &Path, event: &str, platform: HostPlatform) -> String {
+    let mut command = format!(
+        "{} attention {CLAUDE_CODE}:{event}",
+        quoted_program(exe, platform)
+    );
     if attention_map::turn_end_row(CLAUDE_CODE, event).is_some_and(|row| row.words.are_somewhere())
     {
         command.push_str(&format!(" --json {}", crate::cli::STDIN_PAYLOAD));
     }
     command
+}
+
+/// **A program's path, quoted for the shell that is going to run this line.**
+///
+/// Two shells and two rules, and the second is the one this ticket added:
+///
+/// * Windows hands the string to `cmd`, where a double-quoted word is literal and the only
+///   character that could end it early is another double quote — which a Windows path cannot
+///   contain.
+/// * Everywhere else it is handed to `/bin/sh`, where a double-quoted word is **still expanded**:
+///   `$`, a backtick and a backslash all survive the quotes. A single-quoted word is the only
+///   literal one sh has, and the one character that ends it early is escaped the way sh spells it
+///   — close the quote, escape the quote, open it again.
+///
+/// Shared with [`crate::attention_copilot`]'s `bash` column, which is the same sentence to the same
+/// shell, so that one file's fix cannot leave the other's behind.
+#[must_use]
+pub(crate) fn quoted_program(exe: &Path, platform: HostPlatform) -> String {
+    let path = exe.display().to_string();
+    match platform {
+        HostPlatform::Windows => format!("\"{path}\""),
+        HostPlatform::MacOs | HostPlatform::OtherUnix => {
+            format!("'{}'", path.replace('\'', r"'\''"))
+        }
+    }
 }
 
 /// Write Folio's hooks into a settings value, replacing any it had before.
@@ -264,6 +322,12 @@ pub(crate) fn command_for(exe: &Path, event: &str) -> String {
 /// **Everything that is not ours is preserved**, including hook entries under the same event names:
 /// the removal below is by mark, and the insertion appends a group rather than replacing the array.
 pub(crate) fn install_into(settings: &mut Value, exe: &Path) -> bool {
+    install_into_on(settings, exe, bt_platform::host_platform())
+}
+
+/// The same write, for a named platform — the shell that will run these lines is the machine's, so
+/// a Windows runner can read the block a Mac installs and the other way round (M4-7).
+pub(crate) fn install_into_on(settings: &mut Value, exe: &Path, platform: HostPlatform) -> bool {
     let before = settings.clone();
     remove_from(settings);
     let object = match settings {
@@ -296,7 +360,10 @@ pub(crate) fn install_into(settings: &mut Value, exe: &Path) -> bool {
         }
         let mut hook = Map::new();
         hook.insert("type".to_owned(), "command".into());
-        hook.insert("command".to_owned(), command_for(exe, row.event).into());
+        hook.insert(
+            "command".to_owned(),
+            command_for_on(exe, row.event, platform).into(),
+        );
         // **Every one of these is asynchronous**, and it is not an optimisation (plan §10.4.3).
         // `PermissionRequest` is a *synchronous decision gate* with a ten-minute timeout: a signal
         // hook that made it wait would put this program between the user and every approval Claude
@@ -787,7 +854,7 @@ mod tests {
             stop[1]["hooks"][0]["command"]
                 .as_str()
                 .expect("our command"),
-            command_for(&exe(), "Stop")
+            command_for_on(&exe(), "Stop", HostPlatform::Windows)
         );
         assert!(
             stop[1]["hooks"][0]["command"]
@@ -862,7 +929,7 @@ mod tests {
     #[test]
     fn every_command_says_which_upstream_it_speaks_for() {
         for row in rows_to_install() {
-            let command = command_for(&exe(), row.event);
+            let command = command_for_on(&exe(), row.event, HostPlatform::Windows);
             assert!(command.contains(MARK), "{command}");
             assert!(
                 command.contains(&format!("{CLAUDE_CODE}:{}", row.event)),
@@ -887,7 +954,7 @@ mod tests {
         // The one row this is about today, named, so that a table edit that silently drops it is a
         // failure here rather than a notification that quietly goes back to saying nothing.
         assert!(
-            command_for(&exe(), "Stop").ends_with(" --json -"),
+            command_for_on(&exe(), "Stop", HostPlatform::Windows).ends_with(" --json -"),
             "`Stop` is the event whose payload names the transcript"
         );
     }
@@ -906,14 +973,85 @@ mod tests {
     #[test]
     fn the_block_this_installs_is_this() {
         let mut settings = Value::Object(Map::new());
-        assert!(install_into(
+        assert!(install_into_on(
             &mut settings,
-            Path::new(r"C:\folio\folio.exe")
+            Path::new(r"C:\folio\folio.exe"),
+            HostPlatform::Windows
         ));
         assert_eq!(
             serde_json::to_string_pretty(&settings).expect("render"),
             EXPECTED_BLOCK.trim_end()
         );
+    }
+
+    /// **RED — the same block on a Mac, and the only thing that moves is the quoting** (M4-7).
+    ///
+    /// The hook is this executable on both machines and the endpoint is in neither line: `folio
+    /// attention` reads `FOLIO_ATTENTION_PIPE` out of the environment the pane's shell gave it, and
+    /// a socket path travels that way exactly as a pipe name does. So there is no second document
+    /// to keep in step — one event list, one `async` on every row, one matcher where a matcher
+    /// belongs — and the one difference is the shell that will run the string.
+    ///
+    /// **`sh` is why it has to be a difference at all.** A double-quoted word in `sh` is still
+    /// expanded: `$`, a backtick and a backslash all survive it. A home directory with a `$` in it,
+    /// inside double quotes, is a hook that runs the wrong program or none — silently, on the one
+    /// machine nobody tests the installer on.
+    ///
+    /// MUTATION: hand the Windows quoting to the Mac arm and the last two assertions name it.
+    #[test]
+    fn the_block_a_mac_installs_is_the_same_block_quoted_for_sh() {
+        let exe = Path::new("/Applications/Folio.app/Contents/MacOS/folio");
+        let mut windows = Value::Object(Map::new());
+        let mut mac = Value::Object(Map::new());
+        assert!(install_into_on(&mut windows, exe, HostPlatform::Windows));
+        assert!(install_into_on(&mut mac, exe, HostPlatform::MacOs));
+        assert_eq!(
+            windows["hooks"]
+                .as_object()
+                .expect("hooks")
+                .keys()
+                .collect::<Vec<_>>(),
+            mac["hooks"]
+                .as_object()
+                .expect("hooks")
+                .keys()
+                .collect::<Vec<_>>(),
+            "the two machines install the same events"
+        );
+        for command in commands_of(&mac) {
+            assert!(command.contains(MARK), "{command}");
+            assert!(
+                command.starts_with("'/Applications/Folio.app/Contents/MacOS/folio' attention "),
+                "a Mac line is single-quoted, because sh expands a double-quoted word: {command}"
+            );
+            assert!(
+                !command.contains('"'),
+                "a double quote in an sh line is the expansion this avoids: {command}"
+            );
+        }
+        // The one character that ends an sh single-quoted word early, escaped the way sh spells it:
+        // close the quote, escape the quote, open it again.
+        assert_eq!(
+            command_for_on(
+                Path::new("/Users/someone/it's here/folio"),
+                "Stop",
+                HostPlatform::MacOs
+            ),
+            r"'/Users/someone/it'\''s here/folio' attention claude-code:Stop --json -"
+        );
+    }
+
+    /// Every command line one install wrote, whatever event it hangs on.
+    fn commands_of(settings: &Value) -> Vec<String> {
+        let mut found = Vec::new();
+        for groups in settings["hooks"].as_object().expect("hooks").values() {
+            for group in groups.as_array().expect("array") {
+                for hook in group["hooks"].as_array().expect("array") {
+                    found.push(hook["command"].as_str().expect("a command").to_owned());
+                }
+            }
+        }
+        found
     }
 
     /// See [`the_block_this_installs_is_this`].

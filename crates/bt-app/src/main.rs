@@ -36002,7 +36002,7 @@ impl Runtime<'_> {
         // is never a reason to open something weaker.
         {
             let proxy = proxy.clone();
-            attention_wire::open(move || {
+            attention_wire::open(&persist::storage_dir(), move || {
                 let _ = proxy.send_event(AppEvent::AttentionSpoke);
             });
         }
