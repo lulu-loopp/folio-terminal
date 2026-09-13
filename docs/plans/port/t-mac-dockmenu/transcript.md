@@ -1,7 +1,7 @@
 # T-MAC-DOCKMENU — the trip
 
 macOS 26.6.2 (25G83), Apple M4, 2026-09-13. A debug build of
-`feature/macos-dock-menu` at `5cc88d1b` (this branch merged with `main` at
+`feature/macos-dock-menu` at `b933f468` (this branch merged with `main` at
 `e1acfa19`), in a worktree of its own at `~/folio-port/wt/dockmenu` so that no
 other ticket's checkout under `~/folio-port` was touched;
 `CARGO_TARGET_DIR=~/folio-port/target-dock`, `-j 2`, `nice -n 10`.
@@ -52,32 +52,31 @@ A throwaway ad-hoc-signed `FolioDockMenu.app` with an identifier of its own
 cannot reach the window server a winit event loop needs.
 
 ```text
-[      0ms] pid=98769 bundle=/Users/…/out-dockmenu/FolioDockMenu.app
+[      0ms] pid=99250 bundle=/Users/.../out-dockmenu/FolioDockMenu.app
 [      0ms] MEASURED class_getInstanceMethod(WinitApplicationDelegate, applicationDockMenu:) before the event loop: None
-[    140ms] MEASURED the same reading after EventLoop::new: Some(false)
-[    140ms] PASS winit does not implement applicationDockMenu: itself
-[    140ms] PASS the application delegate installed onto winit's own class
-[    424ms] PASS the delegate AppKit holds answers applicationDockMenu:
-[    424ms] PASS and it still answers M3-1's four
-[    426ms] PASS the menu bar installed
-[    426ms] MEASURED the Dock menu carries ["New window", "New tab"]
-[    426ms] PASS the Dock menu is the plan's rows, in the plan's order
-[    426ms] PASS the Dock menu decides its own rows rather than asking a responder chain
-[    426ms] PASS every Dock row is in force
-[    426ms] PASS no Dock row prints a key equivalent
-[    461ms] MEASURED ⌘N on the bar: [(Bar, Verb("new-window"))]
-[    461ms] PASS the bar's own row sends one choice, from the bar
-[    461ms] MEASURED the first Dock row: [(Dock, Verb("new-window"))]
-[    461ms] PASS the first Dock row sends the same verb, from the Dock
-[    461ms] MEASURED the second Dock row: [(Dock, Verb("new-tab"))]
-[    461ms] PASS the second Dock row is the new tab
-[    461ms] PASS the bar took the second language
-[    461ms] MEASURED after the language switch: ["新建窗口", "新建标签"]
-[    461ms] PASS a refresh reaches the Dock tile with no door of its own
-[    470ms] PASS a plan with no Dock rows answers nil, and AppKit's own menu is untouched
-[    471ms] 0 failed
-[    471ms] ALL_DONE
-[    484ms] run_app returned Ok
+[     55ms] MEASURED the same reading after EventLoop::new: Some(false)
+[     55ms] PASS winit does not implement applicationDockMenu: itself
+[     55ms] PASS the application delegate installed onto winit's own class
+[    106ms] PASS the delegate AppKit holds answers applicationDockMenu:
+[    106ms] PASS and it still answers M3-1's four
+[    107ms] PASS the menu bar installed
+[    107ms] MEASURED the Dock menu carries ["New window", "New tab"]
+[    107ms] PASS the Dock menu is the plan's rows, in the plan's order
+[    107ms] PASS the Dock menu decides its own rows rather than asking a responder chain
+[    107ms] PASS every Dock row is in force
+[    107ms] PASS no Dock row prints a key equivalent
+[    117ms] MEASURED ⌘N on the bar: [(Bar, Verb("new-window"))]
+[    117ms] PASS the bar's own row sends one choice, from the bar
+[    117ms] MEASURED the first Dock row: [(Dock, Verb("new-window"))]
+[    117ms] PASS the first Dock row sends the same verb, from the Dock
+[    118ms] MEASURED the second Dock row: [(Dock, Verb("new-tab"))]
+[    118ms] PASS the second Dock row is the new tab
+[    118ms] PASS the bar took the second language
+[    118ms] MEASURED after the language switch: ["新建窗口", "新建标签"]
+[    118ms] PASS a refresh reaches the Dock tile with no door of its own
+[    119ms] PASS a plan with no Dock rows answers nil, and AppKit's own menu is untouched
+[    119ms] 0 failed
+[    119ms] ALL_DONE
 ```
 
 The two readings worth keeping out of that list:

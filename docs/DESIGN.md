@@ -10286,7 +10286,7 @@ MEASURED after the language switch: ["新建窗口", "新建标签"]
 
 The trip: macOS 26.6.2 (25G83), Apple M4, a debug build of this branch;
 `cargo test --locked -p bt-platform -j 2` beside it, and every claim above
-answered in 484 ms with **0 failed**. One unit test of this ticket's own was
+answered in 119 ms with **0 failed**. One unit test of this ticket's own was
 measured failing first and is worth the line: `the_dock_menu_is_handed_over_autoreleased`
 reads this module's source text for the spelling that hands the menu over, and
 its needles were written as plain literals — which are in the test itself, so the
