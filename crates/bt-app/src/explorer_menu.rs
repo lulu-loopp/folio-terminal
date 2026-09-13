@@ -1714,9 +1714,13 @@ mod tests {
             no_package.contains("folio.msix is missing from this folder"),
             "{no_package:?}"
         );
+        // A Windows 11 with the package beside the executable: one switch means
+        // both registrations, so the line names the package it registers and
+        // not the pages (裁决八, 2026-09-13 — the written register; the
+        // earlier line named `first page` and `Show more options` in turn).
         let both = description_for(true, true, false, false, false).in_lang(Lang::English);
-        assert!(both.contains("first page"), "{both:?}");
-        assert!(both.contains("Show more options"), "{both:?}");
+        assert!(both.contains("registers folio.msix"), "{both:?}");
+        assert!(!both.contains("missing"), "{both:?}");
     }
 
     /// PIN — **the icon is the executable's own first, and the words are the
