@@ -2565,9 +2565,9 @@ pub enum Text {
     // AppKit answers by itself, and the two rows that are Folio's and have no
     // chord.
     //
-    // The Chinese column of every one of them is the English string, filed in
-    // `CHINESE_PENDING` with the copy ruling of 2026-09-07 behind it: the words
-    // are a Mac's menu bar and the person who writes them writes Chinese.
+    // The Chinese column of every one of them is the wording a Chinese macOS
+    // already puts in the same place, which is the whole of the rule for a menu
+    // bar: the reader's other applications set the words, not this one.
     /// The bar's second menu.
     MenuBarFile,
     /// The bar's third.
@@ -2917,7 +2917,7 @@ impl Text {
                 "This version of Windows does not offer the blur.",
                 "这个版本的 Windows 不提供这种模糊。",
                 "Folio does not draw this blur on macOS.",
-                "Folio does not draw this blur on macOS.", // zh: pending opus46
+                "Folio 在 macOS 上不画这种模糊。",
             ),
             Self::DescBackgroundOpacityUnavailable => pick(
                 lang,
@@ -3085,7 +3085,7 @@ impl Text {
                 "Revealed in File Explorer",
                 "已在文件资源管理器中显示",
                 "Revealed in Finder",
-                "Revealed in Finder", // zh: pending opus46
+                "已在访达中显示",
             ),
 
             // ── the preview pane ───────────────────────────────────────────
@@ -3611,7 +3611,7 @@ impl Text {
                 "A desktop-wide key needs Ctrl, Alt or Win",
                 "全局快捷键需要 Ctrl、Alt 或 Win",
                 "A desktop-wide key needs Control, Option or Command",
-                "A desktop-wide key needs Control, Option or Command", // zh: pending opus46
+                "全局快捷键需要 Control、Option 或 Command",
             ),
 
             // ── the Git page ───────────────────────────────────────────────
@@ -3683,7 +3683,7 @@ impl Text {
                 "git.exe was not found. Install Git for Windows to use this page",
                 "这台机器上找不到 git.exe —— 装上 Git for Windows 才能用这个页面",
                 "git was not found. Install the Xcode command line tools to use this page",
-                "git was not found. Install the Xcode command line tools to use this page", // zh: pending opus46
+                "这台机器上找不到 git —— 装上 Xcode 命令行工具才能用这个页面",
             ),
 
             // ── the commit graph ───────────────────────────────────────────
@@ -3787,7 +3787,7 @@ impl Text {
                 "Reveal in Explorer",
                 "在资源管理器中显示",
                 "Reveal in Finder",
-                "Reveal in Finder", // zh: pending opus46
+                "在访达中显示",
             ),
             Self::GitMenuCopyHash => pick(lang, "Copy hash", "复制哈希"),
             Self::GitMenuCopySubject => pick(lang, "Copy subject", "复制标题"),
@@ -3930,19 +3930,17 @@ impl Text {
                 "Hold a modifier for a moment and this window lists the shortcuts that start with it.",
                 "按住修饰键片刻，窗口列出以该键开头的快捷键。列表不截走按键。",
             ),
-            // **English in both columns until somebody writes the Chinese**
-            // (2026-09-07 copy ruling; the pair is filed in `CHINESE_PENDING`).
-            // A machine translation of a sentence about two keycaps is the kind
-            // of line that reads as a product nobody proofread.
-            Self::RowOptionSendsAlt => pick(
-                lang,
-                "Option key sends Alt",
-                "Option key sends Alt", // zh: pending opus46
-            ),
+            // **The two keycaps stand in both columns** (2026-09-07 copy
+            // ruling). `Option` and `Alt` are the letters printed on the keys
+            // the sentence is about — Apple's own Chinese leaves them in Latin
+            // — and a reader who has just been caught out by a press is looking
+            // for the press, so ⌥a, å and ESC a are the same characters in
+            // Chinese as in English.
+            Self::RowOptionSendsAlt => pick(lang, "Option key sends Alt", "Option 键发送 Alt"),
             Self::DescOptionSendsAlt => pick(
                 lang,
                 "Off, Option composes characters: ⌥a types å. On, it is the Alt a terminal means: ⌥a sends ESC a.",
-                "Off, Option composes characters: ⌥a types å. On, it is the Alt a terminal means: ⌥a sends ESC a.", // zh: pending opus46
+                "关闭时 Option 用来组字：⌥a 打出 å。打开时它就是终端所说的 Alt：⌥a 发送 ESC a。",
             ),
             // ── the tree row's menu, completed (user ruling 2026-08-25) ────
             //
@@ -4127,7 +4125,7 @@ impl Text {
                 "Flashes the taskbar when an agent finishes a turn and the window is out of sight, or sends a desktop message if it is minimised.",
                 "回合结束时同样提醒，即使 agent 并非在等待输入：窗口不在你看得见的地方时闪烁任务栏按钮；窗口最小化或任务栏自动隐藏时发送系统通知。关闭后仅在等待输入时提醒。",
                 "Bounces the Dock icon when an agent finishes a turn and the window is out of sight, or sends a desktop message if it is minimised.",
-                "Bounces the Dock icon when an agent finishes a turn and the window is out of sight, or sends a desktop message if it is minimised.", // zh: pending opus46
+                "回合结束时同样提醒，即使 agent 并非在等待输入：窗口不在你看得见的地方时让程序坞图标跳动；窗口最小化时发送系统通知。关闭后仅在等待输入时提醒。",
             ),
             Self::ToastTurnFinished => pick(lang, "Turn finished", "回合结束"),
             Self::ToastWaitingForYou => pick(lang, "Waiting for you", "正在等你回答"),
@@ -4142,7 +4140,7 @@ impl Text {
                 "Windows would not take it. Tab marks still work.",
                 "Windows 没有接收这条通知。窗内的记号不受影响。",
                 "macOS would not take it. Tab marks still work.",
-                "macOS would not take it. Tab marks still work.", // zh: pending opus46
+                "macOS 没有接收这条通知。窗内的记号不受影响。",
             ),
             // ── the PowerShell integration notice ──────────────────────────
             // Two sentences and no third: what is missing, and what it is used
@@ -4455,7 +4453,7 @@ impl Text {
                 "Windows keeps some combinations for itself. One that never reaches Folio cannot be recorded.",
                 "Windows 会自己截走一部分组合键；始终到不了框里的，这里录不到",
                 "macOS keeps some combinations for itself. One that never reaches Folio cannot be recorded.",
-                "macOS keeps some combinations for itself. One that never reaches Folio cannot be recorded.", // zh: pending opus46
+                "macOS 会自己截走一部分组合键；始终到不了框里的，这里录不到",
             ),
             Self::HyperlinkControlOpensExternally => pick(
                 lang,
@@ -4473,7 +4471,7 @@ impl Text {
                 " · Ctrl+click shows it in Explorer",
                 " · Ctrl+点击在资源管理器中显示",
                 " · Ctrl+click shows it in Finder",
-                " · Ctrl+click shows it in Finder", // zh: pending opus46
+                " · Ctrl+点击在访达中显示",
             ),
             Self::RowCopyOnSelect => pick(lang, "Copy on select", "选中即复制"),
 
@@ -4525,7 +4523,7 @@ impl Text {
                 "What starting Folio opens while one is already running — from the taskbar, a shortcut or folio.exe. Explorer's menu and folio-here.cmd always open a tab.",
                 "Folio 已在运行时，从任务栏、快捷方式或 folio.exe 启动会打开什么。资源管理器菜单和 folio-here.cmd 始终打开标签页。",
                 "What starting Folio opens while one is already running — from the Dock, from Spotlight, or from the Applications folder.",
-                "What starting Folio opens while one is already running — from the Dock, from Spotlight, or from the Applications folder.", // zh: pending opus46
+                "Folio 已在运行时，从程序坞、聚焦或应用程序文件夹启动会打开什么。",
             ),
             Self::OptionLaunchNewWindow => pick(lang, "A new window", "新窗口"),
             Self::OptionLaunchTabInLastWindow => pick(
@@ -4564,7 +4562,7 @@ impl Text {
                 "Shows and hides the summoned terminal, from inside any other program.",
                 "唤出终端的快捷键。向 Windows 注册为全局快捷键，其他程序拿着焦点时也生效。",
                 "Shows and hides the summoned terminal, from inside any other program.",
-                "Shows and hides the summoned terminal, from inside any other program.", // zh: pending opus46
+                "唤出终端的快捷键。其他程序拿着焦点时也生效。",
             ),
             Self::RowQuakeProfile => pick(lang, "Profile", "新标签页的配置"),
             Self::DescQuakeProfile => pick(
@@ -4680,28 +4678,35 @@ impl Text {
             // The English is the platform's own vocabulary, title case, because
             // a menu bar is read beside every other application's and a row
             // spelled Folio's way would be the one row a reader has to stop at.
-            // zh: pending opus46 — all twenty-one, filed in `CHINESE_PENDING`.
-            Self::MenuBarFile => pick(lang, "File", "File"),
-            Self::MenuBarEdit => pick(lang, "Edit", "Edit"),
-            Self::MenuBarView => pick(lang, "View", "View"),
-            Self::MenuBarWindow => pick(lang, "Window", "Window"),
-            Self::MenuBarHelp => pick(lang, "Help", "Help"),
-            Self::MenuAboutFolio => pick(lang, "About Folio", "About Folio"),
-            Self::MenuServices => pick(lang, "Services", "Services"),
-            Self::MenuHideFolio => pick(lang, "Hide Folio", "Hide Folio"),
-            Self::MenuHideOthers => pick(lang, "Hide Others", "Hide Others"),
-            Self::MenuShowAll => pick(lang, "Show All", "Show All"),
-            Self::MenuQuitFolio => pick(lang, "Quit Folio", "Quit Folio"),
-            Self::MenuCloseWindow => pick(lang, "Close Window", "Close Window"),
-            Self::MenuUndo => pick(lang, "Undo", "Undo"),
-            Self::MenuRedo => pick(lang, "Redo", "Redo"),
-            Self::MenuCut => pick(lang, "Cut", "Cut"),
-            Self::MenuCopy => pick(lang, "Copy", "Copy"),
-            Self::MenuPaste => pick(lang, "Paste", "Paste"),
-            Self::MenuSelectAll => pick(lang, "Select All", "Select All"),
-            Self::MenuZoomWindow => pick(lang, "Zoom", "Zoom"),
-            Self::MenuBringAllToFront => pick(lang, "Bring All to Front", "Bring All to Front"),
-            Self::MenuFolioHelp => pick(lang, "Folio Help", "Folio Help"),
+            //
+            // **The Chinese column is macOS's own Chinese, word for word**, for
+            // the same reason the English is the platform's: a Chinese Mac
+            // draws 文件 编辑 显示 窗口 帮助 across every other bar on the
+            // machine, and 拷贝 is what that machine calls Copy even though a
+            // Windows reader would have written 复制. The rows AppKit builds
+            // itself are the ones this is most load-bearing for — a reader
+            // reaches for 隐藏其他 or 前置全部窗口 by habit and not by reading.
+            Self::MenuBarFile => pick(lang, "File", "文件"),
+            Self::MenuBarEdit => pick(lang, "Edit", "编辑"),
+            Self::MenuBarView => pick(lang, "View", "显示"),
+            Self::MenuBarWindow => pick(lang, "Window", "窗口"),
+            Self::MenuBarHelp => pick(lang, "Help", "帮助"),
+            Self::MenuAboutFolio => pick(lang, "About Folio", "关于 Folio"),
+            Self::MenuServices => pick(lang, "Services", "服务"),
+            Self::MenuHideFolio => pick(lang, "Hide Folio", "隐藏 Folio"),
+            Self::MenuHideOthers => pick(lang, "Hide Others", "隐藏其他"),
+            Self::MenuShowAll => pick(lang, "Show All", "全部显示"),
+            Self::MenuQuitFolio => pick(lang, "Quit Folio", "退出 Folio"),
+            Self::MenuCloseWindow => pick(lang, "Close Window", "关闭窗口"),
+            Self::MenuUndo => pick(lang, "Undo", "撤销"),
+            Self::MenuRedo => pick(lang, "Redo", "重做"),
+            Self::MenuCut => pick(lang, "Cut", "剪切"),
+            Self::MenuCopy => pick(lang, "Copy", "拷贝"),
+            Self::MenuPaste => pick(lang, "Paste", "粘贴"),
+            Self::MenuSelectAll => pick(lang, "Select All", "全选"),
+            Self::MenuZoomWindow => pick(lang, "Zoom", "缩放"),
+            Self::MenuBringAllToFront => pick(lang, "Bring All to Front", "前置全部窗口"),
+            Self::MenuFolioHelp => pick(lang, "Folio Help", "Folio 帮助"),
         }
     }
 
@@ -5484,79 +5489,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 57] = [
-        // zh: pending — the General page's macOS row and its sentence (M1-7,
-        // 2026-09-12). English in both columns of both platforms, because the
-        // row is about a key on a keyboard and the copy ruling of 2026-09-07
-        // says who writes the Chinese. Listed on Windows too because the table
-        // answers for a platform that never shows the row.
-        (Self::RowOptionSendsAlt, HostPlatform::Windows),
-        (Self::RowOptionSendsAlt, HostPlatform::MacOs),
-        (Self::DescOptionSendsAlt, HostPlatform::Windows),
-        (Self::DescOptionSendsAlt, HostPlatform::MacOs),
-        // zh: pending — the eleven Mac columns this port's first acceptance pass
-        // produced (owner ruling 2026-09-12, §13.32 ②). Every one of them has a
-        // written, checked Chinese sentence on the Windows column beside it;
-        // what is owed is the same sentence about Finder, the Dock, a Mac
-        // keyboard's three modifier keys, and the two ways this product is not
-        // installed the way it is on Windows.
-        (Self::MenuRevealInExplorer, HostPlatform::MacOs),
-        (Self::FilesRevealed, HostPlatform::MacOs),
-        (Self::HyperlinkControlReveals, HostPlatform::MacOs),
-        (Self::DescLaunchOpens, HostPlatform::MacOs),
-        (Self::DescTurnEndNotifications, HostPlatform::MacOs),
-        (Self::NotifyRefusedBody, HostPlatform::MacOs),
-        (Self::ShortcutUndelivered, HostPlatform::MacOs),
-        (Self::ShortcutHintGlobalNeedsModifier, HostPlatform::MacOs),
-        (Self::GitNotFound, HostPlatform::MacOs),
-        (Self::DescAcrylicUnavailable, HostPlatform::MacOs),
-        (Self::DescQuakeHotkey, HostPlatform::MacOs),
-        // zh: pending opus46 — the twenty-one words the macOS menu bar adds
-        // (M3-2, 2026-09-12): the five menus' names, the rows AppKit answers by
-        // itself, and Help's one row. One column, so both platforms are listed.
-        (Self::MenuBarFile, HostPlatform::Windows),
-        (Self::MenuBarFile, HostPlatform::MacOs),
-        (Self::MenuBarEdit, HostPlatform::Windows),
-        (Self::MenuBarEdit, HostPlatform::MacOs),
-        (Self::MenuBarView, HostPlatform::Windows),
-        (Self::MenuBarView, HostPlatform::MacOs),
-        (Self::MenuBarWindow, HostPlatform::Windows),
-        (Self::MenuBarWindow, HostPlatform::MacOs),
-        (Self::MenuBarHelp, HostPlatform::Windows),
-        (Self::MenuBarHelp, HostPlatform::MacOs),
-        (Self::MenuAboutFolio, HostPlatform::Windows),
-        (Self::MenuAboutFolio, HostPlatform::MacOs),
-        (Self::MenuServices, HostPlatform::Windows),
-        (Self::MenuServices, HostPlatform::MacOs),
-        (Self::MenuHideFolio, HostPlatform::Windows),
-        (Self::MenuHideFolio, HostPlatform::MacOs),
-        (Self::MenuHideOthers, HostPlatform::Windows),
-        (Self::MenuHideOthers, HostPlatform::MacOs),
-        (Self::MenuShowAll, HostPlatform::Windows),
-        (Self::MenuShowAll, HostPlatform::MacOs),
-        (Self::MenuQuitFolio, HostPlatform::Windows),
-        (Self::MenuQuitFolio, HostPlatform::MacOs),
-        (Self::MenuCloseWindow, HostPlatform::Windows),
-        (Self::MenuCloseWindow, HostPlatform::MacOs),
-        (Self::MenuUndo, HostPlatform::Windows),
-        (Self::MenuUndo, HostPlatform::MacOs),
-        (Self::MenuRedo, HostPlatform::Windows),
-        (Self::MenuRedo, HostPlatform::MacOs),
-        (Self::MenuCut, HostPlatform::Windows),
-        (Self::MenuCut, HostPlatform::MacOs),
-        (Self::MenuCopy, HostPlatform::Windows),
-        (Self::MenuCopy, HostPlatform::MacOs),
-        (Self::MenuPaste, HostPlatform::Windows),
-        (Self::MenuPaste, HostPlatform::MacOs),
-        (Self::MenuSelectAll, HostPlatform::Windows),
-        (Self::MenuSelectAll, HostPlatform::MacOs),
-        (Self::MenuZoomWindow, HostPlatform::Windows),
-        (Self::MenuZoomWindow, HostPlatform::MacOs),
-        (Self::MenuBringAllToFront, HostPlatform::Windows),
-        (Self::MenuBringAllToFront, HostPlatform::MacOs),
-        (Self::MenuFolioHelp, HostPlatform::Windows),
-        (Self::MenuFolioHelp, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
