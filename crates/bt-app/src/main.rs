@@ -93,6 +93,7 @@ mod preview_select;
 mod preview_trace;
 mod preview_undo;
 mod preview_watch;
+mod preview_wrap;
 mod profiles;
 mod psreadline;
 mod quake;
@@ -1667,6 +1668,8 @@ enum PreviewDocument {
         intrinsic: Vec<MarkdownBlockIntrinsic>,
         /// One entry per block, measured against the pane it will wrap in.
         layout: Vec<MarkdownBlockLayout>,
+        /// Disposable reuse lease and the environment of these measurements.
+        wrap: Arc<preview_wrap::Document>,
         /// The formulas that were in hand when this layout was made.
         ///
         /// **Carried rather than re-asked at paint time, and that is the point:
@@ -3346,7 +3349,10 @@ struct DiffRow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PreviewDocumentKey {
     parse: PreviewParseKey,
+    /// Exact float bits: a fractional resize changes the shaper input too.
     body_width_px: u32,
+    scale_factor_bits: u32,
+    font_environment_epoch: u64,
     /// **What the window has handed this page, and what it would set it in** —
     /// see [`PageArtKey`].
     ///
@@ -3854,6 +3860,8 @@ impl PreviewPane {
     /// editor may not do. See [`Reparse`] for how the two are told apart.
     fn show_document(&mut self, doc: PreviewDocument, reparse: Reparse) {
         self.doc = doc;
+        // Block positions belong to the discarded parse, including our edits.
+        self.md_block_scroll.clear();
         // **The boxes go whatever happened.** They are where the *last* document
         // was drawn — a geometry, not a mark — and this one has not been drawn
         // yet.
@@ -4285,7 +4293,9 @@ fn preview_document_key(
             revision: buffer.revision,
             scale_ppm: scale_ppm(scale),
         },
-        body_width_px: body_width_px.max(0.0).round() as u32,
+        body_width_px: body_width_px.max(0.0).to_bits(),
+        scale_factor_bits: scale.to_bits(),
+        font_environment_epoch: 0,
         art,
         source,
     }
@@ -12398,6 +12408,8 @@ struct WindowRuntime {
     /// [`PreviewMathCache`]'s reason a third time: the key is content, and the
     /// same fence in two tabs is one walk of one grammar.
     markdown_intrinsics: MarkdownIntrinsicCache,
+    /// Byte-bounded historical prose measurements, leased by live documents.
+    markdown_wraps: preview_wrap::WindowCache,
     /// **The pictures the markdown pages in this window are showing** — see
     /// [`MarkdownPictures`]. One per window for [`PreviewMathCache`]'s reason:
     /// two panes showing one README are looking at one set of screenshots.
@@ -35886,6 +35898,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         peek_cache: PeekCache::with_budget(MAX_PEEK_CACHE_BYTES),
         preview_math: PreviewMathCache::default(),
         markdown_intrinsics: MarkdownIntrinsicCache::default(),
+        markdown_wraps: preview_wrap::WindowCache::default(),
         markdown_pictures: MarkdownPictures::default(),
         peek_thumbnail: None,
         peek_thumbnail_pending: None,
@@ -60546,7 +60559,7 @@ impl Runtime<'_> {
         // parse that follows fills the true one in.
         let live_caret = self.preview_live_caret(surface);
         let standing_source = self.standing_source_block(surface, live_caret);
-        let key = self.preview_buffer_on(surface).map(|buffer| {
+        let mut key = self.preview_buffer_on(surface).map(|buffer| {
             preview_document_key(
                 buffer,
                 md_source,
@@ -60556,9 +60569,31 @@ impl Runtime<'_> {
                 standing_source.clone(),
             )
         });
+        if let Some(key) = key.as_mut() {
+            key.font_environment_epoch = self.app.gpu.font_environment_epoch();
+        }
         if key == self.preview_pane_mut(surface).doc_key {
             return;
         }
+        let metrics = seats::preview_markdown_metrics(scale);
+        let (left, right) = preview::markdown_measure_box(body, metrics);
+        let frame =
+            preview_wrap::Frame::new(right - left, scale, self.app.gpu.font_environment_epoch());
+        let same_document = key
+            .as_ref()
+            .zip(
+                self.preview_pane(surface)
+                    .and_then(|pane| pane.doc_key.as_ref()),
+            )
+            .is_some_and(|(new, old)| new.parse.source == old.parse.source);
+        let mut wrap_pass = self.window.markdown_wraps.prepare(
+            &self
+                .preview_pane(surface)
+                .expect("preview surface exists")
+                .doc,
+            same_document,
+            frame,
+        );
         // **What this page has already been told about its art**, taken before
         // the document it is written in is replaced. It is the ledger that makes
         // an answer an answer when a bounded cache has let the pixels go — see
@@ -60614,6 +60649,7 @@ impl Runtime<'_> {
                 layout,
                 math: _,
                 pictures: _,
+                wrap: _,
             } = std::mem::take(&mut pane.doc)
         {
             let metrics = seats::preview_markdown_metrics(scale);
@@ -60671,8 +60707,7 @@ impl Runtime<'_> {
                 &blocks,
                 &intrinsic,
                 source.as_deref(),
-                width,
-                metrics,
+                &mut wrap_pass,
                 PageArt {
                     math: &math,
                     pictures: &pictures,
@@ -60693,6 +60728,7 @@ impl Runtime<'_> {
                     layout,
                     math,
                     pictures,
+                    wrap: wrap_pass.document(),
                 });
             return;
         }
@@ -60842,8 +60878,7 @@ impl Runtime<'_> {
                     &blocks,
                     &intrinsic,
                     source.as_deref(),
-                    width,
-                    metrics,
+                    &mut wrap_pass,
                     PageArt {
                         math: &math,
                         pictures: &pictures,
@@ -60878,6 +60913,7 @@ impl Runtime<'_> {
                     layout,
                     math,
                     pictures,
+                    wrap: wrap_pass.document(),
                 }
             }
             // **The graph's body is empty on purpose**, and it is the one place
@@ -60917,6 +60953,19 @@ impl Runtime<'_> {
         };
         if let Some(key) = self.preview_pane_mut(surface).doc_key.as_mut() {
             key.source = parsed_source;
+        }
+        // Drag and hover identities are positional too; a new parse retires them.
+        if self
+            .preview_block_drag
+            .is_some_and(|drag| drag.surface == surface)
+        {
+            self.preview_block_drag = None;
+        }
+        if self
+            .preview_block_hover
+            .is_some_and(|(over, _)| over == surface)
+        {
+            self.preview_block_hover = None;
         }
         self.preview_pane_mut(surface).show_document(doc, reparse);
     }
@@ -61302,15 +61351,14 @@ impl Runtime<'_> {
         blocks: &[preview::MarkdownBlock],
         intrinsic: &[MarkdownBlockIntrinsic],
         source: Option<&MarkdownCaretBlock>,
-        width: f32,
-        metrics: seats::PreviewMarkdownMetrics,
+        pass: &mut preview_wrap::Pass,
         art: PageArt<'_>,
     ) -> Vec<MarkdownBlockLayout> {
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut wrapped = |runs: &[bt_render::PreviewRun], width: f32, font: f32, line: f32| {
             renderer.measure_preview_paragraph(gpu, runs, width, font, line)
         };
-        lay_markdown_out(blocks, intrinsic, source, width, metrics, art, &mut wrapped)
+        preview_wrap::lay_markdown_out_cached(blocks, intrinsic, source, art, pass, &mut wrapped)
     }
 }
 
@@ -61479,6 +61527,7 @@ fn measure_markdown_intrinsics(
 /// assertable **by counting the calls** rather than by timing a window: the
 /// measurer is the expensive thing, and a test that owns it can say exactly how
 /// often it was asked and about what.
+#[cfg(test)]
 fn lay_markdown_out(
     blocks: &[preview::MarkdownBlock],
     intrinsic: &[MarkdownBlockIntrinsic],
@@ -61500,36 +61549,15 @@ fn lay_markdown_out(
             // what it was worth rendered. The shaper is not asked — a monospace
             // line's height is a fact, and asking would be asking a proportional
             // question about a monospace body.
-            let mut measured = match source.filter(|source| source.index() == index) {
-                Some(MarkdownCaretBlock::Mono(source)) => {
-                    let rows = source.wrap(width).rows().max(1);
-                    MarkdownBlockLayout::rows(vec![source.line_height; rows], 0.0)
-                }
-                // **And a prose block is as tall as its own lines fold to**
-                // (§7.1.3w). The shaper *is* asked, because this face is the
-                // proportional one and how many rows a line of it takes is the
-                // one question only a shaper answers — the same question every
-                // paragraph on the page asks, over the block's own bytes instead
-                // of its rendered ones.
-                Some(MarkdownCaretBlock::Prose(prose)) => {
-                    let palette = bt_render::chrome_palette();
-                    let rows: Vec<f32> = (0..prose.lines.len())
-                        .map(|line| {
-                            // **Without the composition**, deliberately: a
-                            // caret is not a block and must not push the
-                            // document around (§7.1.3q), and letters that are
-                            // not in the file may not decide how tall the one
-                            // holding them is. The composition is drawn into the
-                            // room the block already has, exactly as it is on
-                            // the monospace face and in the terminal.
-                            let runs = markdown_prose_runs(prose, line, None, &palette);
-                            measure(&runs, width, prose.font_size, prose.line_height)
-                        })
-                        .collect();
-                    MarkdownBlockLayout::rows(rows, 0.0)
-                }
-                None => measure_markdown_block(block, intrinsic, width, metrics, art, measure),
-            };
+            let mut measured = measure_markdown_local(
+                block,
+                intrinsic,
+                source.filter(|source| source.index() == index),
+                width,
+                metrics,
+                art,
+                measure,
+            );
             // **Asymmetric since 2026-08-16**: github.css gives a heading more
             // air above it than below (`margin: 24px 0 16px`), which is what
             // binds a heading to the paragraph it introduces instead of to the
@@ -61550,6 +61578,49 @@ fn lay_markdown_out(
             layout.push(measured);
         }
         layout
+    }
+}
+
+/// The local measurement path shared by the recipe recorder and uncached layout.
+/// IME preedit is deliberately absent: it paints inside committed geometry.
+fn measure_markdown_local(
+    block: &preview::MarkdownBlock,
+    intrinsic: &MarkdownBlockIntrinsic,
+    source: Option<&MarkdownCaretBlock>,
+    width: f32,
+    metrics: seats::PreviewMarkdownMetrics,
+    art: PageArt<'_>,
+    measure: &mut WrapMeasure<'_>,
+) -> MarkdownBlockLayout {
+    match source {
+        Some(MarkdownCaretBlock::Mono(source)) => {
+            let rows = source.wrap(width).rows().max(1);
+            MarkdownBlockLayout::rows(vec![source.line_height; rows], 0.0)
+        }
+        // **And a prose block is as tall as its own lines fold to**
+        // (§7.1.3w). The shaper *is* asked, because this face is the
+        // proportional one and how many rows a line of it takes is the
+        // one question only a shaper answers — the same question every
+        // paragraph on the page asks, over the block's own bytes instead
+        // of its rendered ones.
+        Some(MarkdownCaretBlock::Prose(prose)) => {
+            let palette = bt_render::chrome_palette();
+            let rows: Vec<f32> = (0..prose.lines.len())
+                .map(|line| {
+                    // **Without the composition**, deliberately: a
+                    // caret is not a block and must not push the
+                    // document around (§7.1.3q), and letters that are
+                    // not in the file may not decide how tall the one
+                    // holding them is. The composition is drawn into the
+                    // room the block already has, exactly as it is on
+                    // the monospace face and in the terminal.
+                    let runs = markdown_prose_runs(prose, line, None, &palette);
+                    measure(&runs, width, prose.font_size, prose.line_height)
+                })
+                .collect();
+            MarkdownBlockLayout::rows(rows, 0.0)
+        }
+        None => measure_markdown_block(block, intrinsic, width, metrics, art, measure),
     }
 }
 
@@ -62016,6 +62087,7 @@ impl Runtime<'_> {
                 // came from is the press's question and the highlight's, both of
                 // which are answered off the pane rather than in here.
                 maps: _,
+                wrap: _,
             } => {
                 let rendered = build_preview_markdown_body(
                     body,
@@ -139598,6 +139670,7 @@ mod tests {
             layout: prose_only,
             math: DocumentMath::default(),
             pictures: DocumentPictures::default(),
+            wrap: Arc::default(),
         };
         let max = preview_document_max_scroll(&document, pane, 1.0, 8.0, 0.0, 0);
         assert_eq!(
@@ -139628,6 +139701,7 @@ mod tests {
             ],
             math: DocumentMath::default(),
             pictures: DocumentPictures::default(),
+            wrap: Arc::default(),
         };
         let max = preview_document_max_scroll(&with_a_fence, pane, 1.0, 8.0, 0.0, 0);
         assert_eq!(
@@ -140820,6 +140894,7 @@ mod tests {
                 layout: Vec::new(),
                 math: DocumentMath::default(),
                 pictures,
+                wrap: Arc::default(),
             },
             ..PreviewPane::default()
         }
@@ -142895,6 +142970,7 @@ mod tests {
             layout: Vec::new(),
             math: DocumentMath::default(),
             pictures: DocumentPictures::default(),
+            wrap: Arc::default(),
         };
 
         let mut disk = marked();
@@ -143199,6 +143275,7 @@ mod tests {
                 layout: Vec::new(),
                 math: DocumentMath::default(),
                 pictures: DocumentPictures::default(),
+                wrap: Arc::default(),
             }
         };
         let empty = page("");
@@ -143919,6 +143996,7 @@ mod tests {
             layout: layout.clone(),
             math: DocumentMath::default(),
             pictures: DocumentPictures::default(),
+            wrap: Arc::default(),
         };
         let max = preview_document_max_scroll(&document, body, 1.0, cell, 0.0, 0);
         assert_eq!(max[0], 0.0, "the page has no horizontal axis of its own");
@@ -144819,6 +144897,7 @@ mod tests {
             layout: Vec::new(),
             math: DocumentMath::default(),
             pictures: DocumentPictures::default(),
+            wrap: Arc::default(),
         };
         assert_eq!(
             markdown_empty_page_offset(&empty, body, 200.0, 200.0),
@@ -147778,6 +147857,7 @@ mod tests {
             layout,
             math: DocumentMath::default(),
             pictures: DocumentPictures::default(),
+            wrap: Arc::default(),
         };
         let max = preview_document_max_scroll(&markdown, body, scale, 8.0, 0.0, 0);
         assert!(max[1] > 0.0, "a document taller than its pane can scroll");
