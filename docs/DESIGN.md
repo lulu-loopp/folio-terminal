@@ -10144,9 +10144,9 @@ The chain: `WindowButtonsWatch` already subscribed to `NSWindowDidEnterFullScree
 
 ### 13.50 T-MAC-DOCKMENU: Dock 图标上的右键菜单——上面两行是 Folio 自己的,底下那些照旧归 AppKit(`crates/bt-platform/src/{menu,macos_menu,macos_app,app_delegate,lib}.rs`、`crates/bt-app/src/{menubar,main}.rs`、`crates/bt-platform/tests/{macos_dock_menu,macos_menu_bar}.rs`)
 
-**This is 13.50 and not 13.48.** 13.48 (T-MAC-STRIP-ENDS) and 13.49
-(T-MAC-LOCALE) are both in flight on branches of their own. This section takes
-the next number no branch has claimed.
+**This is 13.50 and not 13.49.** 13.48 (T-MAC-STRIP-ENDS) reached `main` while
+this ticket was being written, and 13.49 (T-MAC-LOCALE) is in flight on a branch
+of its own. This section takes the next number no branch has claimed.
 
 **① What the owner saw.** Right-clicking Folio's Dock tile showed the window
 list, *Options*, *Show All Windows*, *Hide* and *Quit* — every one of them
