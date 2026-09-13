@@ -16697,3 +16697,231 @@ mod macos_attention_signature_tests {
         );
     }
 }
+
+/// **The two playback arms, compared on the one machine where only one of them
+/// compiles** (M4-5).
+///
+/// `macos_video_signature_tests`'s instrument one ticket later, and it exists
+/// for exactly the failure that module exists for: `bt-app` names `Engine`,
+/// `EngineError`, `EngineState` and the three ledger doors with no `cfg` at all,
+/// and an arm that took an extra argument, widened a return type, renamed a
+/// field or drifted a constant would compile on its own machine, break on the
+/// other, and break in `bt-app` rather than in the crate that changed. The
+/// Windows workstation is where both files exist as *text* even though only one
+/// of them exists as code.
+///
+/// What it cannot hold is the behaviour, and that is
+/// `crates/bt-platform/tests/video_playback.rs`'s: one file of assertions run
+/// against whichever engine the machine built.
+#[cfg(test)]
+mod macos_player_signature_tests {
+    /// Media Foundation's engine, AVFoundation's, and the file that holds
+    /// everything off Windows which is neither.
+    const WINDOWS_ARM: &str = include_str!("video/engine.rs");
+    const MACOS_ARM: &str = include_str!("macos_player.rs");
+    const OFF_WINDOWS: &str = include_str!("video_portable.rs");
+
+    /// One method of `Engine`, with its documentation and its whitespace taken
+    /// out — what a caller can actually write.
+    ///
+    /// `pub fn` rather than `fn`, so a private helper of the same name is not
+    /// mistaken for the door; and the search starts at `impl Engine` so that a
+    /// `pub fn open` on some other type in the same file cannot answer for it.
+    fn verb(source: &str, name: &str) -> String {
+        let at = source
+            .find("impl Engine {")
+            .unwrap_or_else(|| panic!("this arm has an `Engine`"));
+        let body = &source[at..];
+        let needle = format!("pub fn {name}(");
+        let found = body
+            .find(&needle)
+            .unwrap_or_else(|| panic!("`{name}` is a door of this arm's `Engine`"));
+        let rest = &body[found..];
+        let end = rest
+            .find(" {")
+            .expect("a function signature ends at its brace");
+        rest[..end]
+            .replace("std::path::", "")
+            .replace("super::", "")
+            .replace("crate::", "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The fields of a struct, with its documentation and its blank lines taken
+    /// out — `macos_video_signature_tests`'s own helper, indented one level
+    /// further because the off-Windows arm writes these inside `pub mod
+    /// engine`.
+    fn fields(source: &str, item: &str) -> Vec<String> {
+        let at = source
+            .find(item)
+            .unwrap_or_else(|| panic!("`{item}` is defined in this arm"));
+        let body = &source[at + item.len()..];
+        // Whichever closing brace comes **first**: the Windows arm writes these
+        // at column zero and the off-Windows arm writes them inside `pub mod
+        // engine`, and taking one spelling over the other would run past the
+        // struct and gather half the file.
+        let end = [body.find("\n}"), body.find("\n    }")]
+            .into_iter()
+            .flatten()
+            .min()
+            .expect("a struct is closed");
+        body[..end]
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// RED — **every verb `bt-app` reaches for has the same signature on every
+    /// machine.**
+    ///
+    /// The thirteen doors `video_seat.rs` and `main.rs` actually call, plus the
+    /// three the tests do. `Adapter` and `open_on` are deliberately **not** on
+    /// this list: the port's backend inventory (§2.5) classes `Adapter` as the
+    /// one type that does not survive — it names D3D11 against WARP, which has
+    /// no twin on a platform where the frame never touches a Direct3D device —
+    /// and `bt-app` names neither.
+    ///
+    /// MUTATION: give the macOS `seek` a `Result`, or drop the `&mut` from its
+    /// `frame`, and this names the door.
+    #[test]
+    fn every_engine_verb_keeps_its_signature_on_every_machine() {
+        for door in [
+            "open",
+            "source",
+            "state",
+            "frame",
+            "standing_frame",
+            "frame_cost",
+            "play",
+            "pause",
+            "seek",
+            "set_rate",
+            "set_muted",
+            "set_volume",
+            "wait_for_metadata",
+            "shutdown",
+        ] {
+            let windows = verb(WINDOWS_ARM, door);
+            let macos = verb(MACOS_ARM, door);
+            assert_eq!(windows, macos, "`{door}` is two different doors");
+        }
+    }
+
+    /// RED — **the three ledger doors are the same three on every machine.**
+    ///
+    /// `main.rs`'s own tests read all three to say that a closed pane leaves no
+    /// engine behind, and they read them with no `cfg`.
+    ///
+    /// MUTATION: rename one in either arm and this names it.
+    #[test]
+    fn the_leak_ledger_is_the_same_three_doors_on_every_machine() {
+        for door in [
+            "engines_started",
+            "engines_shut_down",
+            "engines_outstanding",
+        ] {
+            for (arm, source) in [("Windows", WINDOWS_ARM), ("off Windows", OFF_WINDOWS)] {
+                assert!(
+                    source.contains(&format!("pub fn {door}() -> u64 {{")),
+                    "the {arm} arm no longer answers `{door}`"
+                );
+            }
+        }
+    }
+
+    /// RED — **a frame, a state and a cost are the same types on both machines,
+    /// field for field.**
+    ///
+    /// The claim M4-5's title makes, reduced to the part a text comparison can
+    /// hold: the same fields in the same order with the same types, so that an
+    /// `EngineState` crossing into `bt-app` is the same value whichever engine
+    /// filled it, and a `Frame` is the same bytes in the same order.
+    ///
+    /// The *bytes* are the other half and no source pin can state them;
+    /// `tests/video_playback.rs` measures those out of real files on both
+    /// machines.
+    ///
+    /// MUTATION: reorder `width` and `height` in either `Frame`, or add a field
+    /// to one `EngineState`, and this names it.
+    #[test]
+    fn the_frame_the_state_and_the_cost_are_the_same_types_on_both_machines() {
+        for item in [
+            "pub struct Frame {",
+            "pub struct EngineState {",
+            "pub struct FrameCost {",
+        ] {
+            assert_eq!(
+                fields(WINDOWS_ARM, item),
+                fields(OFF_WINDOWS, item),
+                "`{item}` has drifted between the two arms"
+            );
+        }
+        assert!(
+            WINDOWS_ARM.contains("pub bgra: Arc<[u8]>,")
+                && OFF_WINDOWS.contains("pub bgra: Arc<[u8]>,"),
+            "a frame is no longer straight BGRA8 on both machines"
+        );
+    }
+
+    /// RED — **both arms poll at the same two intervals, open on the same
+    /// budget and give a shutdown the same two seconds.**
+    ///
+    /// Four numbers that are policy rather than platform, and each one is a
+    /// different product if the two machines disagree: a video that is a quarter
+    /// of a frame staler on one machine, a pane that gives up at a different
+    /// time, and a window that waits twice as long on a wedged decoder.
+    ///
+    /// MUTATION: change any one of them in one file and this names it.
+    #[test]
+    fn both_arms_poll_open_and_shut_down_on_the_same_clock() {
+        for line in [
+            "pub const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(4);",
+            "pub const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);",
+            "pub const OPEN_BUDGET: Duration = Duration::from_secs(5);",
+            "pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);",
+        ] {
+            for (arm, source) in [("Windows", WINDOWS_ARM), ("off Windows", OFF_WINDOWS)] {
+                assert!(
+                    source.contains(line),
+                    "the {arm} arm no longer says `{line}`"
+                );
+            }
+        }
+    }
+
+    /// RED — **the macOS arm never claims to be on the main thread.**
+    ///
+    /// The source gate over §13.35's one real decision. `AVPlayer` and
+    /// `AVPlayerItem` are `MainThreadOnly` in these bindings because Apple
+    /// annotates them `NS_SWIFT_UI_ACTOR`, and this file steps around that with
+    /// a raw `alloc` and four paragraphs of evidence — which is a different
+    /// thing from `MainThreadMarker::new_unchecked()`, a claim about *which
+    /// thread this is* that would be false here and would make every
+    /// `MainThreadOnly` door in AppKit reachable from a worker.
+    ///
+    /// MUTATION: claim the thread instead of the class and this names it.
+    #[test]
+    fn the_player_is_allocated_without_claiming_the_window_thread() {
+        assert!(
+            !MACOS_ARM.contains("new_unchecked"),
+            "the player arm now asserts which thread it is on instead of stating what the class \
+             needs — a false claim there makes every `MainThreadOnly` door in AppKit reachable \
+             from a worker"
+        );
+        assert!(
+            MACOS_ARM.contains("msg_send![T::class(), alloc]"),
+            "the one call that steps around the `MainThreadOnly` marker is gone; if the bindings \
+             stopped needing it, delete `alloc_off_the_window_thread` and this assertion together"
+        );
+        for class in ["AVPlayer", "AVPlayerItem"] {
+            assert!(
+                MACOS_ARM.contains(&format!("alloc_off_the_window_thread::<{class}>()")),
+                "`{class}` is allocated somewhere other than the one door that carries the reason"
+            );
+        }
+    }
+}

@@ -129,6 +129,20 @@ impl FirstFrameCost {
 #[path = "macos_video.rs"]
 mod macos_video;
 
+/// **The AVFoundation arm of [`engine`]** — everything M4-5 wrote, and nothing
+/// that is not AVFoundation. See its own header.
+///
+/// It sits beside `macos_video` rather than inside [`engine`] for one reason a
+/// reader would otherwise have to discover: a `#[path]` on a module declared
+/// inside an inline module block is resolved against that block's own directory,
+/// so `engine`'s arm would have to live in `src/video/engine/`, which is the
+/// Windows arm's folder. Declared here it is `src/macos_player.rs`, beside the
+/// file it shares a platform with, and [`engine`] re-exports the one name out of
+/// it that anybody may see.
+#[cfg(target_os = "macos")]
+#[path = "macos_player.rs"]
+mod macos_player;
+
 /// **The three first-frame doors, on a Mac.**
 #[cfg(target_os = "macos")]
 pub use macos_video::{decode_first_frame, decode_first_frame_measured, first_frame};
@@ -240,10 +254,19 @@ pub fn prewarm() {}
 /// The other half of [`prewarm`], and a no-op for the same reason.
 pub fn shutdown_media_session() {}
 
-/// **Playback** (M4-5: `AVPlayer`, with the audio the spike never costed).
+/// **Playback: `AVPlayer` on a Mac, and a refusal on a platform with no
+/// decoder at all** (M4-5; `docs/DESIGN.md` §13.35).
+///
+/// The shape of [`super`] one level down. What is in *this* module is everything
+/// that is not a player — the four timing constants, the error, the state, the
+/// frame, the cost breakdown and the process ledger — because none of that is
+/// AVFoundation and all of it is the same sentence on a Mac and on a machine
+/// with neither backend. What is in `macos_player.rs` is the AVFoundation
+/// conversation and nothing else, and [`no_player`] is the third platform's
+/// silence.
 pub mod engine {
-    use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
     /// How often a playing pane asks for a new frame.
@@ -309,110 +332,222 @@ pub mod engine {
         pub generation: u64,
     }
 
-    /// **A video being played, before there is anything to play it with.**
+    /// **Where one frame's microseconds went**, segment by segment — the twin of
+    /// the Windows arm's `FrameCost`, with the same four fields for the same
+    /// four reasons.
     ///
-    /// Refuses at `open`, which is where the video pane already has somewhere
-    /// to put a reason: a line under a black rectangle naming the error, which
-    /// is a different product from a pane that shows nothing.
-    pub struct Engine {
-        /// Never constructed: [`Engine::open`] refuses.
-        _never: std::convert::Infallible,
+    /// The names are Media Foundation's shape because that is the arm that
+    /// measured the problem first and because a caller that matched on one name
+    /// here and another there would be two callers. What each one *means* on
+    /// AVFoundation is written on it. Nothing in this module reads these back or
+    /// decides anything by them.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct FrameCost {
+        /// `copyPixelBufferForItemTime:` — the player handing over the picture
+        /// that is due, which is where its own decode is waited for.
+        pub transfer: Duration,
+        /// `CVPixelBufferLockBaseAddress` — the wait for a buffer the GPU may
+        /// still be writing, which is where a read-back's stall actually is.
+        pub readback: Duration,
+        /// The row-wise `memcpy` out of the locked rows into a `Vec`, with the
+        /// buffer's padding left where it is.
+        pub copy: Duration,
+        /// How many frames the three spans above are the *last* of.
+        pub frames: u64,
     }
 
-    impl Engine {
-        /// Open a source. Refused; M4-5.
-        pub fn open(path: &Path) -> Result<Self, EngineError> {
-            let _ = path;
-            Err(EngineError::Unsupported)
-        }
-
-        /// Unreachable: there is no value of this type.
+    impl FrameCost {
+        /// The three spans added up — the length of one frame's whole crossing.
         #[must_use]
-        pub fn source(&self) -> &Path {
-            match self._never {}
+        pub fn total(self) -> Duration {
+            self.transfer + self.readback + self.copy
+        }
+    }
+
+    /// **The AVFoundation arm** — `AVPlayer` for the sound and the clock,
+    /// `AVPlayerItemVideoOutput` for the pictures. See its own header.
+    #[cfg(target_os = "macos")]
+    pub use super::macos_player::Engine;
+
+    /// **The arm for a platform with no player to ask** — still the one refusal.
+    #[cfg(not(target_os = "macos"))]
+    pub use no_player::Engine;
+
+    /// **A video being played, on a platform that has nothing to play it with.**
+    ///
+    /// Linux today, and the 0.5 remote server's host tomorrow. It refuses at
+    /// `open`, which is where the video pane already has somewhere to put a
+    /// reason: a line under a black rectangle naming the error, which is a
+    /// different product from a pane that shows nothing.
+    #[cfg(not(target_os = "macos"))]
+    mod no_player {
+        use std::path::Path;
+        use std::time::Duration;
+
+        use super::{EngineError, EngineState, Frame, FrameCost};
+
+        /// Refuses at [`Self::open`]; every other door is unreachable, because
+        /// there is no value of this type.
+        pub struct Engine {
+            /// Never constructed: [`Engine::open`] refuses.
+            _never: std::convert::Infallible,
         }
 
-        /// Unreachable.
-        #[must_use]
-        pub fn state(&self) -> EngineState {
-            match self._never {}
-        }
+        impl Engine {
+            /// Open a source. Refused: this machine has no decoder.
+            pub fn open(path: &Path) -> Result<Self, EngineError> {
+                let _ = path;
+                Err(EngineError::Unsupported)
+            }
 
-        /// Unreachable.
-        pub fn frame(&mut self) -> Option<Frame> {
-            match self._never {}
-        }
+            /// Unreachable: there is no value of this type.
+            #[must_use]
+            pub fn source(&self) -> &Path {
+                match self._never {}
+            }
 
-        /// Unreachable.
-        pub fn play(&self) {
-            match self._never {}
-        }
+            /// Unreachable.
+            #[must_use]
+            pub fn state(&self) -> EngineState {
+                match self._never {}
+            }
 
-        /// Unreachable.
-        pub fn pause(&self) {
-            match self._never {}
-        }
+            /// Unreachable.
+            pub fn frame(&mut self) -> Option<Frame> {
+                match self._never {}
+            }
 
-        /// Unreachable.
-        pub fn seek(&self, secs: f64) {
-            let _ = secs;
-            match self._never {}
-        }
+            /// Unreachable.
+            #[must_use]
+            pub fn standing_frame(&self) -> Option<Frame> {
+                match self._never {}
+            }
 
-        /// Unreachable.
-        pub fn set_rate(&self, rate: f64) {
-            let _ = rate;
-            match self._never {}
-        }
+            /// Unreachable.
+            #[must_use]
+            pub fn frame_cost(&self) -> FrameCost {
+                match self._never {}
+            }
 
-        /// Unreachable.
-        pub fn set_muted(&self, muted: bool) {
-            let _ = muted;
-            match self._never {}
-        }
+            /// Unreachable.
+            pub fn play(&self) {
+                match self._never {}
+            }
 
-        /// Unreachable.
-        pub fn set_volume(&self, volume: f64) {
-            let _ = volume;
-            match self._never {}
-        }
+            /// Unreachable.
+            pub fn pause(&self) {
+                match self._never {}
+            }
 
-        /// Unreachable.
-        pub fn shutdown(&mut self) {
-            match self._never {}
-        }
+            /// Unreachable.
+            pub fn seek(&self, secs: f64) {
+                let _ = secs;
+                match self._never {}
+            }
 
-        /// The path this engine was opened on, as an owned value — unreachable.
-        #[must_use]
-        pub fn source_path(&self) -> PathBuf {
-            match self._never {}
+            /// Unreachable.
+            pub fn set_rate(&self, rate: f64) {
+                let _ = rate;
+                match self._never {}
+            }
+
+            /// Unreachable.
+            pub fn set_muted(&self, muted: bool) {
+                let _ = muted;
+                match self._never {}
+            }
+
+            /// Unreachable.
+            pub fn set_volume(&self, volume: f64) {
+                let _ = volume;
+                match self._never {}
+            }
+
+            /// Unreachable.
+            pub fn wait_for_metadata(&self, budget: Duration) -> bool {
+                let _ = budget;
+                match self._never {}
+            }
+
+            /// Unreachable.
+            pub fn shutdown(&mut self) {
+                match self._never {}
+            }
         }
     }
 
     /// **The leak ledger**, and it is real on every platform.
     ///
-    /// Three atomics and nothing else — the Windows arm's own counters are the
-    /// same three — so `main.rs`'s tests that a closed pane leaves no engine
-    /// behind mean the same thing here: zero started, zero shut down, zero
-    /// outstanding is a true reading of a platform that opens none.
-    static STARTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    static SHUT_DOWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    /// Two atomics and nothing else — the Windows arm's own counters are the
+    /// same two — so `main.rs`'s tests that a closed pane leaves no engine
+    /// behind mean the same thing here. On a platform that opens none, zero
+    /// started and zero shut down is a true reading rather than an unwritten
+    /// one.
+    static STARTED: AtomicU64 = AtomicU64::new(0);
+    static SHUT_DOWN: AtomicU64 = AtomicU64::new(0);
 
     /// How many engines this process has started.
     #[must_use]
     pub fn engines_started() -> u64 {
-        STARTED.load(std::sync::atomic::Ordering::Relaxed)
+        STARTED.load(Ordering::Relaxed)
     }
 
     /// How many it has shut down.
     #[must_use]
     pub fn engines_shut_down() -> u64 {
-        SHUT_DOWN.load(std::sync::atomic::Ordering::Relaxed)
+        SHUT_DOWN.load(Ordering::Relaxed)
     }
 
-    /// How many are still open. Zero, always, because none is ever started.
+    /// How many are still open. **Zero is the only value this may have when the
+    /// process leaves**, which is what the structural gate reads.
     #[must_use]
     pub fn engines_outstanding() -> u64 {
         engines_started().saturating_sub(engines_shut_down())
+    }
+
+    /// One engine has been given back — called by the player's own thread as
+    /// the last thing it does.
+    #[cfg(target_os = "macos")]
+    pub(super) fn note_engine_shut_down() {
+        SHUT_DOWN.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// **One engine's place on the process ledger, opened where the engine comes
+    /// into being and closed by whoever ends up owning it.**
+    ///
+    /// The Windows arm's `LedgerEntry`, for the defect that arm's review row
+    /// R2-19 found: the ledger's whole promise is that [`engines_outstanding`]
+    /// is zero at every moment no engine is alive, and a bare `fetch_add` cannot
+    /// keep it, because everything between the constructor that makes a player
+    /// and the machinery that will one day stop it is fallible and a failure
+    /// there adds a count nothing will ever take off. So the entry is a value.
+    /// [`Self::kept`] hands it to the machinery, and dropping it any other way
+    /// closes it here, including on an unwind.
+    #[cfg(target_os = "macos")]
+    pub(super) struct LedgerEntry {
+        kept: bool,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl LedgerEntry {
+        /// A player exists. Counted from here.
+        pub(super) fn opened() -> Self {
+            STARTED.fetch_add(1, Ordering::Relaxed);
+            Self { kept: false }
+        }
+
+        /// The player reached the machinery, which is what will shut it down.
+        pub(super) fn kept(mut self) {
+            self.kept = true;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for LedgerEntry {
+        fn drop(&mut self) {
+            if !self.kept {
+                SHUT_DOWN.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 }

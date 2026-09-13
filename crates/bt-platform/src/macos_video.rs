@@ -377,7 +377,7 @@ fn valid_length(duration: CMTime) -> bool {
 /// transform, which for the identity is the stored size and for a quarter turn
 /// is the stored size with its axes swapped — so the raster and the fact line
 /// agree however the file was written.
-fn displayed_size(stored: CGSize, turn: CGAffineTransform) -> Option<(u32, u32)> {
+pub(super) fn displayed_size(stored: CGSize, turn: CGAffineTransform) -> Option<(u32, u32)> {
     // The components are used as they come. `CGFloat` *is* this arithmetic's
     // type on every Apple target this crate is built for, so wrapping each one
     // in `f64::from` converts a value to the type it already has —

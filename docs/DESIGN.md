@@ -10814,6 +10814,495 @@ application is a consent prompt this venue does not spend.
 
 *(本节英文,待中文文案改写。)*
 
+### 13.35 M4-5: 视频播放走 AVPlayer——帧从 AVPlayerItemVideoOutput 拉、声音走它自己的口、结束留最后一帧(`crates/bt-platform/src/macos_player.rs`(新)、`crates/bt-platform/src/{video_portable,macos_video,lib}.rs`、`crates/bt-platform/tests/video_playback.rs`(新)、`crates/bt-platform/Cargo.toml`、`tests/assets/folio-video-sound-test.mp4`(新)、`tests/assets/PROVENANCE.md`)
+
+**① The ticket is not "play a video", it is "keep answering the same
+question".** §13.25 gave a Mac one *frame* out of a file; off Windows
+`Engine::open` still answered `EngineError::Unsupported`, so a reader who pressed
+▶ on a recording got the line §7.44 draws under a black rectangle. What replaces
+it is `AVPlayer`, and every decision in it is settled by a sentence §7.42 already
+wrote about Media Foundation rather than by what AVFoundation happens to make
+easy: the same verbs, the same `EngineState`, the same straight-BGRA8 `Frame`,
+the same two poll intervals, the same open budget, the same bounded shutdown, the
+same process ledger. `bt-app` names `Engine`, `EngineError`, `EngineState` and
+the three ledger doors with no `cfg` at all, and this ticket adds none.
+
+**② `AVPlayer` is `<video>`, which is the sentence §7.42 wrote about
+`IMFMediaEngine`.** That slice's whole case for leaving the browser was that
+Media Foundation's media engine *is* the HTML5 media element in COM form, so what
+is lost by leaving is the chrome and not the player. The same is true here and it
+is why this arm is short: `play`, `pause`, `seekToTime:`, `rate`, `muted`,
+`volume`, `duration`, `currentTime`, and an item that posts a notification when
+it has played to its end. One verb for one verb.
+
+**Audio is the half the port's spike never costed, and on this platform it costs
+nothing at all.** An `AVPlayer` has an audio output of its own: the sound is
+playing the instant `play` is answered, `set_volume` is its `volume` and
+`set_muted` is its `isMuted`. Nothing in this file opens a device, mixes a buffer
+or names a sample rate. `set_rate` is `defaultRate` plus `rate`, with
+`audioTimePitchAlgorithm` named as `AVAudioTimePitchAlgorithmTimeDomain` so that
+one-and-a-half speed keeps a voice a voice — which is what `SetPlaybackRate` does
+on the other platform, and which macOS 12 and later already default to. A default
+is not a decision anybody wrote down, so it is written down.
+
+**③ The pictures come out of a second object, on purpose and on Apple's
+advice.** An `AVPlayer` on its own draws through an `AVPlayerLayer`, which would
+put a second compositor inside a window that already has one — the refusal §7.42
+② made of Media Foundation's *rendering mode*, word for word. What replaces it is
+the same third shape: a **pull**. `AVPlayerItemVideoOutput` is added to the item,
+asked `hasNewPixelBufferForItemTime:` and, when it says yes,
+`copyPixelBufferForItemTime:`; *where* and *when* the picture is drawn stay on
+this side of the call.
+
+The output is asked for **`kCVPixelFormatType_32BGRA`** — B, G, R, A in memory,
+in that order — which is `Frame`'s promise and the byte order the swapchain this
+window presents through already uses, so nothing in this lane reorders a channel
+either. The format is then **checked rather than trusted** on every buffer: a
+planar `420v` from a decoder that had refused the request would be read as if its
+rows were four bytes a pixel, which is a picture of noise rather than a wrong
+colour.
+
+**The stride is read back rather than assumed**, which is the same discipline
+§13.25 applied to the bitmap context's row width and the Windows arm applies to
+its media type. A `CVPixelBuffer`'s `bytesPerRow` is padded to whatever alignment
+the decoder wanted and nothing promises it is `width * 4`; `Frame::bgra` is
+packed at `width * 4` with no padding, because a pitch is a fact about somebody's
+memory and not about a picture. So the copy walks the rows, and a copy that
+walked the store contiguously would shear every row one notch further than the
+one above it.
+
+**Whether a particular file's buffer is padded is not observable from outside
+that copy, and that is exactly why the copy is a function with tests of its
+own.** `copy_tight` is the whole behaviour, and its three cases state it on a
+padded buffer, on a tight one, and on a stride too narrow to describe the picture
+it claims to — none of which needs a Mac, a video or a decoder that happens to
+pad today.
+
+**The time asked for is the player's own `currentTime`**, not a host time turned
+into an item time. Apple's sample does the latter because a `CADisplayLink` hands
+it the timestamp of a vertical blank that has not happened yet; this module has
+no such timestamp and no such clock — it is asked for the picture that is due
+*now*, and `currentTime` is what now means on the item's own timeline. It is also
+what makes a seek on a **paused** player produce a frame: the playhead moved, so
+the question changed.
+
+**④ The brief said there is no main-thread requirement here. There are two, they
+are different from each other, and neither is the one the brief had in mind.**
+The first is an *annotation* and this arm steps around it with evidence; the
+second is a *run loop* and this arm cannot step around it at all, because it is
+not this arm's to step around. Both were measured on the venue machine on
+2026-09-12 and both are new facts for the port.
+
+**④a The annotation.** In the macOS 26.6 SDK:
+
+| header | `@interface` line carries |
+|---|---|
+| `AVFoundation/AVPlayer.h` | **`NS_SWIFT_UI_ACTOR`** |
+| `AVFoundation/AVPlayerItem.h` | **`NS_SWIFT_UI_ACTOR`** |
+| `AVFoundation/AVPlayerItemOutput.h` | nothing |
+
+`NS_SWIFT_UI_ACTOR` is Apple's spelling of `@MainActor`, and `objc2`'s header
+translator turns it into `#[thread_kind = MainThreadOnly]` — which is why
+`AVPlayer::playerWithURL`, `AVPlayerItem::playerItemWithAsset` and every other
+constructor of those two classes takes a `MainThreadMarker`, and why both types
+are `!Send + !Sync`. `AVPlayerItemVideoOutput` carries no such annotation and is
+`Send + Sync` in the same bindings.
+
+**This file makes both objects on the engine's own thread anyway**, through
+`alloc_off_the_window_thread` — a raw `alloc` message to the class, which is the
+one call the marker guards. Four things carry that, and none of them is
+convenience:
+
+1. **`NS_SWIFT_UI_ACTOR` is a Swift concurrency annotation, not an Objective-C
+   threading contract.** Apple's Objective-C reference for `AVPlayer` states no
+   thread requirement, and the *Thread Safety Summary* — the list §13.18 and
+   §13.25 ⑥ both cite — does not name it among the classes that are the main
+   thread's, saying of everything it does not list that "in most cases, you can
+   use these classes from any thread as long as you use them from only one thread
+   at a time". **One thread at a time is exactly what this module is**: §7.42 ④
+   put the whole Media Foundation conversation on a thread of its own, and this
+   arm inherits that shape rather than adopting it — the player, the item and the
+   output are born on the engine thread, live in a struct that is deliberately
+   not `Send`, and die on it.
+2. **The one sentence in those headers that does name a queue names a *process*
+   and not a caller.** Both files say the class "serializes notifications of
+   changes that occur dynamically during playback on a dispatch queue. By
+   default, this queue is the main queue." ④b measures that this constrains the
+   process rather than the thread the verbs are said on — it is why the *tests*
+   own the main thread and why the *product* needs its run loop — and it says
+   nothing at all about which thread may send `play`. The two constraints are
+   different and this file meets both.
+3. **The pull path Apple documents is not on the main thread.**
+   `AVPlayerItemVideoOutput`'s own reference says to call
+   `copyPixelBufferForItemTime:` "in response to a `CADisplayLink` delegate
+   invocation", which is a display-link thread. A player whose frames may only be
+   taken off the main thread and whose pictures must be taken off a display link
+   would be a contradiction Apple published.
+4. **The measurement.** The player, the item and the output really are built and
+   driven from the engine's thread in `tests/video_playback.rs`, and that file
+   is green on the Mac; ⑥ is what it printed. Nothing in it is on the process's
+   first thread except the waiting.
+
+What this arm will **not** do is claim the marker away. Nothing here builds a
+main-thread marker, checked or unchecked, because that would be a lie about
+*which thread this is* rather than a statement about what the class needs — and a
+marker made on a worker makes every main-thread-only door in AppKit reachable
+from it. `alloc` on a class object is the narrowest step there is: one message,
+to one class, in one function, with the reason on it, and
+`the_player_is_allocated_without_claiming_the_window_thread` is the source gate
+that keeps it there.
+
+**④b The run loop, which is the one this ticket got wrong and the one that
+matters.** `AVPlayer`'s and `AVPlayerItem`'s headers both say the class
+"serializes notifications of changes that occur dynamically during playback on a
+dispatch queue. By default, this queue is the main queue." That sentence reads
+like a statement about *delivery*. **It is a statement about the object.**
+Measured under libtest, where nothing on the process ever services the main
+queue:
+
+| what was asked | what came back |
+|---|---|
+| `AVPlayerItem.status`, for fifteen seconds | `AVPlayerItemStatusUnknown` |
+| `player.play()` | taken — `rate` became 1.0 |
+| `player.currentTime()`, for fifteen seconds | `0.000` |
+| pictures pulled in fifteen seconds | **0** |
+| everything read off the `AVURLAsset` | correct: 160×120, 5.000 s, has video, has audio |
+
+An item whose readiness transition is dispatched to a queue nobody drains never
+becomes ready, and a player whose item is not ready sets its rate and plays
+nothing. **So a process that plays a video with `AVPlayer` must have a live main
+run loop.** Folio always does — it is winit's, and it drains the main queue in
+`kCFRunLoopCommonModes`, which includes the event-tracking mode a popped `NSMenu`
+runs in (§13.17 ②), so a context menu does not stall a video. A `#[test]` never
+does: §13.17 measured that libtest runs each case on a thread it spawned, and
+libtest's own main thread is parked in a join.
+
+That is why `tests/video_playback.rs` is `harness = false` — **the first target
+in this crate to own the process's main thread for a reason that is not
+AppKit's**, and the only one with no environment gate, because it opens no
+window and asks the machine for no permission. Its `pump` is its `sleep`:
+`CFRunLoopRunInMode(kCFRunLoopDefaultMode, …)` on macOS and an ordinary sleep
+everywhere else. Running from one `main` bought a second thing libtest had been
+taking away — the cases run in order and one at a time, so the process-wide
+engine ledger is a statement about one case rather than about eight.
+
+**What it costs the product is a sentence rather than a defect, and the sentence
+is worth writing down.** §7.42 ④ moved the whole Media Foundation conversation
+off the window's thread precisely so that a busy window could not stall a video.
+This arm keeps the *decode* and the *frame copy* off it — those are the engine
+thread's and the output's, and they are the expensive halves — but the player's
+own state machine now turns on the main queue, so a main thread blocked for
+hundreds of milliseconds is a video that stalls for hundreds of milliseconds.
+The way out, if that is ever measured to matter, is not this API at all:
+`AVSampleBufferRenderSynchronizer` with an `AVSampleBufferAudioRenderer` and an
+`AVAssetReader` carries no main-actor annotation and no notification queue — and
+it is a player written by hand, with its own demux, its own A/V sync, its own
+seek and its own rate. That is a ticket, not a paragraph, and it is in ⑬.
+
+**⑤ Events wake the loop; the player answers the questions — with one exception,
+and it is a different exception from the other arm's.** §7.42 ④'s rule is kept:
+the one notification this module registers for —
+`AVPlayerItemDidPlayToEndTimeNotification`, scoped to **this engine's own item**,
+because a process playing a video on three surfaces would otherwise end all three
+when one of them finished — arrives on whatever thread AVFoundation posted from,
+and the only thing it does there is push a `Command` down the same channel the
+verbs use. It is `IMFMediaEngineNotify` with a notification centre where the COM
+callback was: nothing touches a window, a layout or a renderer from inside it,
+and there is nothing there that could — the observer's whole world is a `Sender`.
+
+The other arm re-reads everything off the engine and records only the error code,
+because an `IMFMediaError` is gone by the time anybody asks again. **This arm
+records the end instead**, and for a reason rather than by symmetry: "the playhead
+is at the end" cannot be spelled as a comparison here. A five-second file whose
+last picture is at 4.8 s leaves `currentTime` short of `duration` by a frame
+nobody knows the length of, and `rate == 0` is the same reading a pause gives.
+The item's own notification is the platform saying it. Like
+`HTMLMediaElement.ended` — which is what both arms are — it is cleared by a seek
+back into the file and by a play that restarts one, and a ▶ on an ended video
+seeks to zero and plays rather than doing nothing.
+
+**The error has the same shape as the end and it is refused for a different
+reason.** `AVPlayerItem.status == Failed` with its `NSError` is the platform's
+way of saying a file went wrong, and ④b means that answer only arrives in a
+process whose main queue turns — which the product's does. What does **not**
+depend on it is the case that matters most and arrives soonest: an asset with no
+video track and no audio track is refused at `build`, synchronously, before an
+item is ever made. A text file with a `.mp4` on the end of its name is that case,
+and `nothing_that_is_not_a_video_plays` is green on both machines and in a
+process with no run loop at all.
+
+**`ready` is spelled as the size and not as the status, and ④b is why.** The
+Windows arm writes `ready` as "the native size is answerable, or there is
+audio" — the metadata has arrived and a layout can be solved — and the first
+draft of this arm wrote it as `AVPlayerItem.status == ReadyToPlay`, which looks
+like the same sentence in this platform's own words. It is not: that property is
+one of the "changes that occur dynamically during playback" ④b measured, so a
+process whose main queue is not being drained would see `ready: false` for ever
+on a file it can answer every question about. Both facts `ready` is *for* come
+off the **`AVURLAsset`**, which `macos_video.rs` already reads synchronously and
+which is correct from the engine's first published state. Spelling `ready` as the
+status would have made a flag about the file into a flag about the caller's run
+loop.
+
+**And one number really is computed differently on the two machines, which is
+why it is the only one this module keeps a copy of.** `AVPlayer.rate` is the
+pause control as well as the speed — `pause` is `rate = 0` — while
+`IMFMediaEngine`'s `SetPlaybackRate` is a separate property from `Pause`. A build
+that reported `AVPlayer.rate` as `EngineState::rate` would draw **0×** on the bar
+of every paused video. So `wanted_rate` is what a reader asked for, `defaultRate`
+is what a later `play` will use, and `rate` is written only while the clock is
+already running — because "faster" is not "play".
+`a_rate_set_on_a_paused_video_is_a_rate_and_not_a_play` is both halves.
+
+**⑥ What the two machines actually did, out of the same files.**
+
+Both machines ran `tests/video_playback.rs` — the same ten cases, the same three
+recordings — on 2026-09-12: Windows 11 26200 on this workstation, macOS 26.6.2 on
+an Apple M4.
+
+| what was asked | Windows (Media Foundation) | Mac (AVFoundation) |
+|---|---|---|
+| declared length, `.mp4` / `.mov` | 5.000 s / 3.000 s | 5.000 s / 3.000 s |
+| native size, both | 160×120 | 160×120 |
+| clock after three pictures, `.mp4` / `.mov` | 0.416 s / 0.405 s | 0.407 s / 0.406 s |
+| a seek to **1.500 s** landed at | **1.500 s** | **1.500 s** |
+| a paused clock came to rest at | 0.116 s | 0.105 s |
+| at the end of the 3 s `.mov`: position, pictures | 3.006 s, **15** | 3.000 s, **15** |
+| `has_audio`, the five silent files / the sixth | `false` / `true` | `false` / `true` |
+| a text file named `.mp4` | an error and no picture | an error and no picture |
+| an engine dropped mid-play | `engines_outstanding` back to zero | back to zero |
+
+**One frame's crossing**, which is §7.42 ③'s table asked again on the other
+platform. The three spans are the same three fields and they name different
+calls, so what is comparable is the total. These are envelopes over three runs of
+the suite on each machine, in a debug build, on a machine that was doing other
+things:
+
+| span | Windows | Mac |
+|---|---|---|
+| `transfer` | 538–968 µs (`TransferVideoFrame`, on the GPU) | 54–93 µs (`copyPixelBufferForItemTime:`) |
+| `readback` | 1.09–1.59 ms (`CopyResource` + the `Map` that waits) | 5.9–8.0 µs (`CVPixelBufferLockBaseAddress`) |
+| `copy` | 19–22 µs (row-wise `memcpy`) | 22–63 µs (the same `memcpy`) |
+| **total** | 1.84–2.15 ms | **84–157 µs** |
+
+**The read-back §7.42 ③ weighed does not exist on this platform, and that is the
+one number in this ticket that is a surprise.** That slice gave up a shared
+texture for a structural reason and wrote down what system memory cost it: a
+`CopyResource` into a staging texture, a `Map` that waits for the GPU — "where a
+read-back's stall actually is" — and a row-wise `memcpy`. Here the player's
+output hands over a `CVPixelBuffer` that is **already addressable by the CPU**,
+so the lock costs a few microseconds and there is no GPU synchronisation to wait
+for at all. A frame crosses in **twelve to twenty-five times less** than it costs on the
+other machine. The honest qualifier is that this was measured on an Apple-silicon part
+whose memory is unified, so the number is about that architecture as much as
+about AVFoundation; what is not in doubt is that the `memcpy` — the one span that
+is the same work on both machines — is tens of microseconds on each.
+
+What that buys is nothing today and one decision closed: §7.42 ⑪ ⓒ left "should
+the frame be shared rather than copied" for a later slice, to be decided off that
+cost table. On this platform the table answers it — there is nothing to buy.
+
+**⑦ The colour, and the question §7.42 ⑤ left open.** That slice made the still
+and the first played frame share a **rectangle**, because a reader who presses ▶
+and sees the picture change size is watching this window contradict itself. The
+same sentence is true of colour and had never been asserted — and on this
+platform it is a real question rather than a formality, because the two pictures
+reach a caller by two different roads *on one machine*: §13.25's still is drawn
+through a `CGBitmapContext` that **names sRGB** and is colour-matched into it,
+and the playing frame comes out of the player's own `32BGRA` output.
+`the_still_and_the_playing_picture_are_the_same_colour` is the gate and its
+tolerance is **40** per channel. **The answer is not the one §13.25 would have
+predicted, and it is the more interesting one.** Out of the same two files on the
+same Mac:
+
+| fixture | authored | Mac still (sRGB-matched) | Mac **playing** | Windows still | Windows playing |
+|---|---|---|---|---|---|
+| `folio-video-test.mp4` | (224,122,47) | (223,136,53) | **(224,123,48)** | (224,122,48) | (224,123,48) |
+| `folio-video-test.mov` | (47,122,224) | (67,135,228) | **(48,122,224)** | (48,122,225) | (48,122,225) |
+
+**The playing frame is the untagged conversion, not the colorimetric one — and
+the two platforms' *playing* frames agree to within one count.** An
+`AVPlayerItemVideoOutput` asked for `32BGRA` and nothing else does the same thing
+Media Foundation's video processor does: it converts YUV to RGB with the stream's
+own matrix and hands the bytes over. So `(224,123,48)` on a Mac against
+`(224,123,48)` on Windows, and `(48,122,224)` against `(48,122,225)` — the two
+engines are the same picture. §13.25's ≤20 belongs to the **still** and to the
+bitmap context that names sRGB, and on this evidence it is the still that is the
+odd one out: the largest gap this gate sees anywhere is **19**, and it is between
+one Mac picture and the other Mac picture — the `.mov`'s red, 67 stilled against
+48 playing.
+
+That is a difference a reader could in principle see — a hover card and the pane
+under it showing the same frame a shade apart — and it is left as it is rather
+than papered over, for two reasons. It is **smaller than the difference between
+the two platforms' stills was already**, which §13.25 shipped; and closing it
+would mean either dropping the colour management from the still (a first frame
+that ignores a file's own primaries) or adding `AVVideoColorPropertiesKey` to the
+output (a per-frame conversion on the playback path, for a shade). Neither is
+worth paying at this magnitude, and now that the gate exists the number will
+announce itself if a macOS release moves it. No gamma is applied anywhere in
+Rust.
+
+**⑧ Everything given back, in the reverse order it was taken.** The observer
+first, because a notification centre holds its observers **unretained** and one
+left behind is a pointer to a freed object the next time anything posts; then the
+output, because an item that still has one keeps a decoder attached; then the
+player is paused and emptied, which releases the item and the asset behind it.
+`Engine::shutdown` on the pane that closes and `Drop` for everything else
+including a panic, both ending in the same place, with the same
+`SHUTDOWN_BUDGET` over the join for §7.42's review row R2-19 reason: a pane closes
+on the window's own thread and an unbounded join would hand that thread a wait
+with no ending.
+
+**One belt this arm needs that the other does not.** `Machinery` has a `Drop` of
+its own that calls the same idempotent teardown, because the unretained observer
+has no reference count to protect it: an engine thread that unwound past its pump
+without that would leave the default notification centre pointing at freed
+memory, and the crash would land on the next `AVPlayerItemDidPlayToEndTime` posted
+**anywhere in the process** — which is to say inside a different video's engine.
+On Windows the equivalent object is a COM callback the engine itself holds a
+reference to, so releasing the engine unhooks it and there is nothing to write.
+
+The ledger is the Windows arm's `LedgerEntry` rather than a `fetch_add`, and it
+is worth saying why a portable file has one: the promise is that
+`engines_outstanding()` is zero at every moment no engine is alive, and everything
+between "a player exists" and "something will stop it" is fallible — a value that
+closes itself on drop is what makes a failure there take its own count off.
+`an_engine_dropped_while_it_plays_leaves_nothing_behind` is the gate, with no
+`shutdown` call anywhere in its scope.
+
+**⑨ A sixth recording, because the other five are silent.** Nothing needed that
+until now. §M4 acceptance ③ asks a reader to *hear* a video and
+`EngineState::has_audio` reports whether there is anything to hear, and neither
+claim can be made against a file with no audio track: all five shipped recordings
+answer `has_audio: false` on both platforms, so a build whose audio path had been
+deleted outright would pass every assertion made with them.
+`tests/assets/folio-video-sound-test.mp4` is the same two-colour picture with one
+AAC track of a 440 Hz `lavfi` tone under it — synthetic to its last byte like the
+other five, recipe in `tests/assets/PROVENANCE.md` — and it is the file the
+acceptance line should be performed with. **§M4 ③ as written names
+`folio-video-test.mp4`, which is silent; that line wants this file instead.**
+
+**What an agent cannot assert is said rather than skipped.** Whether a speaker
+made a noise is not a thing a test process can read back, and a case that claimed
+it would pass on a machine with the volume at zero, no output device, or the
+audio path deleted. What is asserted is everything up to the speaker — the file
+has an audio track and the engine says so, the two knobs are read back off the
+player rather than off a copy this crate keeps, and a muted video still runs its
+clock and its pictures. **Every engine in that file is muted before it is
+played**, because the suite runs on the owner's own machine while the owner is
+working.
+
+**⑩ One package named, already in the lock file, and it moves one line in the
+notices.** `objc2-core-video` 0.3.2 has been in `Cargo.lock` since §13.25 under
+*In the lock file, not in any resolved build*, because CoreMedia declares it
+optional and nothing turned it on. This ticket turns it on — 534 resolved
+packages become 535 and the 38 unreached become 37 — and what it buys is the six
+accessors a decoded frame is read through: the lock and unlock that make a
+buffer's base address legal to read, the width, the height, the **row stride**,
+and the pixel format. `objc2-av-foundation` gains five features (`AVPlayer`,
+`AVPlayerItem`, `AVPlayerItemOutput`, `AVAudioProcessingSettings`, `AVError`) and
+`objc2-core-video` as a feature of its own, which is what generates
+`copyPixelBufferForItemTime:itemTimeForDisplay:` at all. **No new package**, which
+is §8's bar; the two lines `Cargo.lock` gains are the crate's name appearing in
+two dependency lists. The alternative was hand-declaring six CoreVideo entry
+points, a lock-flags type and a pixel-format constant against a framework this
+crate does not own.
+
+**⑪ Where the file is cut, and the one thing a reader would otherwise have to
+discover.** §4.3 of the port plan says a `#[cfg(windows)] pub mod` becomes a plain
+`pub mod` with `win`/`mac`/`neither` bodies; §13.25 ⑤ took the first-frame half
+and said M4-5 was when the engine's half arrived. It has. `video/mod.rs` and
+`video/engine.rs` are untouched Media Foundation; `video_portable.rs`'s `engine`
+module holds everything that is not a player — the four timing constants, the
+error, the state, the frame, the cost breakdown and the ledger — and the player
+itself is `macos_player.rs` beside `macos_video.rs`, with a `no_player` arm for a
+platform that has neither.
+
+`macos_player.rs` is a **sibling** of `macos_video.rs` rather than a module
+inside `engine`, and that is a language fact rather than a taste: a `#[path]` on a
+module declared inside an inline module block resolves against that block's own
+directory, so `engine`'s arm would have had to live in `src/video/engine/` —
+which is the Windows arm's folder. Declared at the file's top level it is
+`src/macos_player.rs`, and `engine` re-exports the one name out of it that
+anybody may see.
+
+**§13.25 ⑤'s open question is still open and is still not taken.** `VideoFrame`
+is written twice and so now are `Frame`, `EngineState`, `EngineError` and
+`FrameCost`. There are now two real implementations of both halves, which is the
+moment that note said would come — but gathering them means moving five types out
+of two files that are otherwise Media Foundation from their first line to their
+last, and the thing that would hold the two copies together afterwards is exactly
+what holds them together today: `macos_player_signature_tests` compares the two
+arms as **text** on the Windows workstation, where only one of them compiles.
+That module is new here and it is the instrument §13.25 ⑨ describes, one ticket
+on: the fourteen verbs' signatures, the three ledger doors, `Frame`'s,
+`EngineState`'s and `FrameCost`'s fields, the four timing constants, and the
+`alloc` that carries ④.
+
+**⑫ Three instruments, because no one of them can hold the claim.**
+`tests/video_playback.rs` runs one set of assertions against whichever engine the
+machine has and is the only place *behaviour* is checked; it is green on both
+machines and it is what ⑥ is measured with. `macos_player_signature_tests` in
+`lib.rs` compares the two arms as text where only one of them compiles. And
+`cargo check`/`cargo clippy -p bt-platform --target aarch64-apple-darwin
+--all-targets` on the Windows machine is what says the macOS arm compiles and
+lints before it is ever pushed.
+
+**Red gates.** `bt-platform`, run on both machines:
+`a_video_plays_and_its_clock_runs_on_either_machine` (pictures **and** clock,
+plus the cost line), `the_still_and_the_playing_picture_are_the_same_colour`
+(⑦), `a_seek_moves_the_playhead_and_the_next_picture_comes_from_there`,
+`a_pause_stops_the_clock_and_the_pictures_and_a_play_starts_them_again`,
+`a_video_that_ends_says_so_and_keeps_its_last_picture` (§M4 ③'s "ends without a
+stuck frame"), `a_recording_with_a_soundtrack_answers_for_its_own_audio` (⑨),
+`a_rate_set_on_a_paused_video_is_a_rate_and_not_a_play` (⑤),
+`nothing_that_is_not_a_video_plays`,
+`an_engine_dropped_while_it_plays_leaves_nothing_behind` (⑧). On the Windows
+workstation only: `every_engine_verb_keeps_its_signature_on_every_machine`,
+`the_leak_ledger_is_the_same_three_doors_on_every_machine`,
+`the_frame_the_state_and_the_cost_are_the_same_types_on_both_machines`,
+`both_arms_poll_open_and_shut_down_on_the_same_clock`,
+`the_player_is_allocated_without_claiming_the_window_thread`. In
+`macos_player.rs` itself, needing neither a Mac nor a video:
+`a_padded_row_is_copied_by_its_width_and_not_by_its_stride`,
+`a_row_with_no_padding_at_all_is_still_the_same_picture`,
+`a_stride_narrower_than_a_row_is_refused`.
+
+**One assertion in this ticket was wrong before it shipped, and the way it was
+wrong is worth keeping.** The pause case first asserted that the clock does not
+move at all once `playing` has gone false. It passed alone and failed in a full
+parallel run: on the Windows arm `IsPaused` answers the **request** and the
+pipeline behind it takes a moment to actually stop, which on a loaded machine is
+a few hundred milliseconds of clock after the flag has already changed. That is
+not a defect — a player that reported "still playing" until its pipeline had wound
+down would leave a pressed pause button lit — but the honest claim is "the clock
+**comes to rest**", which is what `at_rest` measures and what the case asserts
+now. An assertion that passes alone and fails in a full run is the worst kind to
+ship.
+
+**⑬ 挂账.** ⓐ **`can_play_types` has no macOS arm** and `bt-app` has no caller
+for it, so §7.42 ⑧'s matrix is still a Windows report; the port inventory classes
+it **R** with no caller and it is not on this ticket. ⓑ **`Adapter` and
+`open_on` have no twin and deliberately none**: they name D3D11 against WARP,
+which is not a question on a platform where the frame never touches a Direct3D
+device. The signature gate lists them as excluded rather than leaving them
+unremarked. ⓒ **`frame_cost`'s three spans mean different things on the two
+machines** — `transfer` is the pull rather than a GPU composite, `readback` is a
+buffer lock rather than a `CopyResource` — and ⑥ prints both so that the shapes
+can be compared rather than the names. ⓓ **§M4 acceptance ③ names a silent
+file**; see ⑨. ⓔ **The main queue carries the player's state machine** (④b): if
+a blocked main thread is ever measured to stall a video in a way a reader
+notices, the way out is `AVSampleBufferRenderSynchronizer` with an
+`AVSampleBufferAudioRenderer` and an `AVAssetReader` — no main-actor annotation
+and no notification queue, and a player written by hand. That is a ticket of its
+own and nothing here is built in a way that blocks it: the seat, the bar and
+`bt-app` see `Engine` and would not know. ⓕ **The colour gap between the Mac's
+still and the Mac's playing frame is 19 at its widest** and is left standing;
+⑦ says why and the gate says when it moves.
+
+*(本节英文,待中文文案改写。)*
+
 ### 13.36 M4-9: 访达的「在 Folio 中打开」——Services 提供者对象、冷热投递都走代理通道(`crates/bt-platform/src/macos_services.rs`(新)、`crates/bt-platform/src/{app_delegate,macos_app,lib}.rs`、`crates/bt-platform/tests/macos_services.rs`(新)、`crates/bt-platform/Cargo.toml`、`crates/bt-winres/src/plist.rs`、`packaging/macos/Info.plist.in`、`crates/bt-app/src/main.rs`)
 
 **① Two halves, in two files, and neither one is the feature.** A Service is not
