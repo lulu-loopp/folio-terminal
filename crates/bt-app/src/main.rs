@@ -60731,6 +60731,7 @@ impl Runtime<'_> {
         let foreground_rgb = palette.files_row_text;
         self.window.preview_math.tick = self.window.preview_math.tick.saturating_add(1);
         let mut document = DocumentMath::default();
+        let (mut formulas, mut drawn, mut asked) = (0_usize, 0_usize, 0_usize);
         for (source, mode, em_px) in document_formulas(blocks, metrics) {
             let key = PreviewMathKey {
                 source,
@@ -60745,15 +60746,29 @@ impl Runtime<'_> {
                 &key,
                 &mut needs_typesetting,
             );
+            formulas += 1;
             if let Some(picture) = answer {
+                drawn += 1;
                 document.insert(&key, picture);
             }
             // Spent the moment the borrow above ends: the door wants the whole
             // runtime and that wants one of its caches — [`answer_one_picture`]'s
             // arrangement, for its reason.
             if needs_typesetting {
+                asked += 1;
                 self.request_preview_math(key);
             }
+        }
+        // **Why a page is standing on its source text** (M2-7, §13.40). A
+        // formula that has not been typeset yet and one the engine refused draw
+        // the identical thing — the author's own LaTeX — and from outside the
+        // window the two are one picture. This is the line that tells them
+        // apart, and it is silent unless a page has a formula in it at all.
+        if formulas > 0 {
+            let worker = u8::from(self.app.math_worker_running);
+            preview_trace::emit(preview_trace::global(), || {
+                format!("math formulas={formulas} drawn={drawn} asked={asked} worker={worker}")
+            });
         }
         document
     }
@@ -80294,6 +80309,20 @@ impl Runtime<'_> {
                 // standing on its source text now has a picture to draw and
                 // nothing else will ask for a frame.
                 DecorationWorkerCompletion::PreviewMath { key, result } => {
+                    // The other half of the `math` station (§13.40): one line
+                    // per answer, so "the picture is late" and "the engine
+                    // refused it" stop being the same picture on the glass.
+                    let (set, mode, em_milli, chars) = (
+                        u8::from(result.is_ok()),
+                        key.mode,
+                        key.em_milli_px,
+                        key.source.chars().count(),
+                    );
+                    preview_trace::emit(preview_trace::global(), || {
+                        format!(
+                            "math answered set={set} mode={mode:?} em_milli={em_milli} chars={chars}"
+                        )
+                    });
                     let artifact = match result {
                         Ok(raster) => PreviewMathArtifact::Ready(PreviewMathPicture {
                             key: key.texture_key(),

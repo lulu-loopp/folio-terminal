@@ -199,7 +199,52 @@ PLIST
 # ------------------------------------------------------------------- the tools
 swiftc -O -o "$OUT/winid" "$LAUNCHERS/winid.swift" 2>&1 | head -5
 swiftc -O -o "$OUT/click" "$LAUNCHERS/mac_lights_click.swift" 2>&1 | head -5
-ls -la "$OUT/winid" "$OUT/click" 2>&1
+# **A pair, and not two singles.** A second press on a file row is the verb that
+# opens it (`press_files_row`, K156), and `FilesRowClicks::register` pairs two
+# presses only inside `MULTI_CLICK_INTERVAL` — 500 ms. Two runs of the
+# single-click probe are four seconds apart and are two first presses, which is
+# a selection and a glance card and no open at all.
+cat > "$OUT/dclick.swift" <<'SWIFT'
+// One double click at one point: down, up, down, up, with the click state
+// AppKit reads for a pair, inside Folio's own 500 ms window.
+import CoreGraphics
+import Foundation
+
+let argv = CommandLine.arguments
+guard argv.count >= 3, let x = Double(argv[1]), let y = Double(argv[2]) else {
+    print("usage: dclick <x> <y>")
+    exit(2)
+}
+let at = CGPoint(x: x, y: y)
+let source = CGEventSource(stateID: .hidSystemState)
+
+func post(_ type: CGEventType, _ clicks: Int64) {
+    guard let event = CGEvent(
+        mouseEventSource: source,
+        mouseType: type,
+        mouseCursorPosition: at,
+        mouseButton: .left
+    ) else {
+        print("could not build \(type.rawValue)")
+        return
+    }
+    event.setIntegerValueField(.mouseEventClickState, value: clicks)
+    event.post(tap: .cghidEventTap)
+}
+
+post(.mouseMoved, 0)
+usleep(150_000)
+post(.leftMouseDown, 1)
+usleep(60_000)
+post(.leftMouseUp, 1)
+usleep(80_000)
+post(.leftMouseDown, 2)
+usleep(60_000)
+post(.leftMouseUp, 2)
+print("DOUBLE CLICK at \(x),\(y)")
+SWIFT
+swiftc -O -o "$OUT/dclick" "$OUT/dclick.swift" 2>&1 | head -5
+ls -la "$OUT/winid" "$OUT/click" "$OUT/dclick" 2>&1
 
 # --------------------------------------------------------------------- helpers
 shot() {
@@ -417,7 +462,17 @@ PNG=$(point_of 'picture\.png')
 echo "picture.png row point: $PNG"
 case "$PNG" in
   NO-LABEL|"") echo "the files column never drew a row for picture.png" ;;
-  *) click_at $PNG; sleep 1; click_at $PNG ;;
+  *)
+    echo "--- one press: the row is selected and glanced at, and that is all ---"
+    click_at $PNG
+    shot 05a-png-one-press
+    echo "--- the pair, which is the verb ---"
+    MOUSE_BEFORE=$(wc -l < "$DUMP/mouse.trace" 2>/dev/null || echo 0)
+    "$OUT/dclick" $PNG
+    sleep 4
+    echo "--- the mouse-routing lines the pair added ---"
+    tail -n +$((MOUSE_BEFORE + 1)) "$DUMP/mouse.trace" 2>/dev/null | head -20
+    ;;
 esac
 sleep 6
 shot 05-png-after-click
@@ -549,8 +604,9 @@ def read(name):
 
 
 for name in ["00-clean-data-directory", "01-md-table-cjk", "02-md-replaced",
-             "03-tree-subdir", "04-tree-root", "05-png-after-click",
-             "06-png", "07-math", "08-math-after-30s", "09-math-after-a-press"]:
+             "03-tree-subdir", "04-tree-root", "05a-png-one-press",
+             "05-png-after-click", "06-png", "07-math", "08-math-after-30s",
+             "09-math-after-a-press"]:
     read(name)
     print()
 

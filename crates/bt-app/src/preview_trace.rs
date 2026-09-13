@@ -29,6 +29,18 @@
 //!   intrinsic_us=<n> layout_us=<n> total_us=<n> hits=<n> misses=<n>` — what one
 //!   markdown document cost to build, split three ways (ticket T4). This is the
 //!   station a keystroke is measured with: see [`DocumentBuild`].
+//! * `math formulas=<n> drawn=<n> asked=<n> worker=<0|1>` and
+//!   `math answered set=<0|1> mode=<Display|Inline> em_milli=<n> chars=<n>` —
+//!   **why a page is standing on its source text** (M2-7, §13.40). A formula
+//!   that has not been typeset yet and one the engine refused draw the identical
+//!   thing, which is the author's own LaTeX, and that is the right behaviour and
+//!   an unreadable one to diagnose: the reading sweep photographed a Mac window
+//!   printing `\int_0^1 x\,dx` where the integral belonged and no instrument in
+//!   this workspace could say whether the picture was late, refused, or never
+//!   asked for. `formulas` is how many the page has, `drawn` how many it had
+//!   pictures for, `asked` how many questions this pass sent, and `worker`
+//!   whether the thread that answers them is still running. The second line is
+//!   one answer coming back.
 //!
 //! **The frame station writes on a change and never otherwise**, which is
 //! [`crate::attention_trace`]'s rule and for its reason exactly: a preview pane
