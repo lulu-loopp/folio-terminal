@@ -8522,108 +8522,27 @@ Mac 上的 `cargo test --locked -j 4 -p bt-platform -p bt-app`:⑥ 的四只和 
 
 ### 13.23 M3-7: 标准流——终端启动留在 tty 上,Finder 启动进日志,leave_process 真的退出(`crates/bt-platform/src/portable_impl.rs`、`crates/bt-platform/src/{lib.rs,Cargo.toml}`、`crates/bt-app/src/diagnostics.rs`)
 
-**① Five doors, and they split two ways — on who reads the answer, not on how
-hard they are.** `adopt_parent_console`, `detach_console`,
-`redirect_std_streams_to_file`, `silence_std_streams` and `leave_process` are
-one group in the backend inventory and are not one group here. The line between
-them is the plan's §4.4 ③: a door whose `bool` decides something has to really
-do the thing, and a door whose answer reaches no branch may be what the kernel
-already did. `bt_app::diagnostics` picks `Channel::Log` or `Channel::Nowhere`
-off the redirect's `bool` and calls the silence in the `else`, so those two are
-real on every platform now. The two console doors are called for their effect
-and their answers are dropped, so on a Unix they are nothing — and the licence
-for that is a fact about the *caller*, which is why it is pinned at the caller
-(`nothing_branches_on_the_two_console_no_ops` reads both call sites and requires
-each name to appear exactly once, as a statement) rather than asserted at the
-arm.
+**① 五扇门,它们分成两拨——分界在谁读那个答案,不在它们有多难。** `adopt_parent_console`、`detach_console`、`redirect_std_streams_to_file`、`silence_std_streams` 和 `leave_process` 在后端清单里是一组,在这里不是一组。它们之间的线是计划 §4.4 ③:一扇它的 `bool` 决定着什么的门必须真去做那件事,而一扇答案到不了任何分支的门,可以就是内核已经做过的事。`bt_app::diagnostics` 照重定向那个 `bool` 挑 `Channel::Log` 还是 `Channel::Nowhere`,并在 `else` 里调那次静音,所以这两扇现在在每个平台上都是真的。两扇控制台门是为效果被调的、答案被丢掉,所以在 Unix 上它们什么也不是——而这件事的许可是一个关于**调用方**的事实,所以它钉在调用方那边(`nothing_branches_on_the_two_console_no_ops` 读两个调用点,要求每个名字作为一条语句恰好出现一次),而不是在那条臂上断言。
 
-A Unix process is handed its parent's stdio by the kernel before its first
-instruction, so there is nothing to adopt; it joins no console group, so there is
-nothing to leave. What `AttachConsole` and `SetStdHandle` spend two calls
-reaching on the other platform is the state this one starts in.
+一个 Unix 进程在它第一条指令之前就被内核交了父进程的 stdio,所以没有什么可认领的;它不加入任何控制台组,所以没有什么可离开的。`AttachConsole` 和 `SetStdHandle` 在另一个平台上花两次调用够到的那个状态,正是这个平台起步时就在的状态。
 
-**② The port is `dup2`, and four things in it are decisions rather than
-translation.** The log is opened **append-only**, which is the kernel's own
-append — every write lands at the end whichever thread issues it, with no seek of
-its own to race — and is what `FILE_APPEND_DATA` buys on the other platform. It
-is created **`0o600`**, because a `diagnostics.log` carries window titles, file
-paths and shell output and the directory it lives in is a home directory; a file
-that already exists keeps the mode it has, because changing the permissions of a
-file somebody deliberately opened up is not this call's business. **Both**
-descriptors move, because a `println!` left on the terminal is half the fault the
-channel was written for. And the descriptor is **never closed, on any path**: on
-the path that works it *is* the process's diagnostic stream and lives exactly as
-long as the process, which is word for word what the Windows arm says of its
-handle; on the path that does not, closing it would be a call that has just
-refused to move anything reaching for a descriptor `open` may have been handed
-*as* descriptor 1 — the state of a process started with its standard streams
-closed — and taking out the stream it was asked to move.
+**② 移植过来就是 `dup2`,而其中有四件事是决定而不是翻译。** 日志是**只追加**打开的,那就是内核自己的追加——不管哪条线程发起,每一次写都落到末尾,自己不做会赛跑的 seek——也就是另一个平台上 `FILE_APPEND_DATA` 买到的东西。它以 **`0o600`** 创建,因为一份 `diagnostics.log` 里带着窗口标题、文件路径和 shell 输出,而它所在的目录是一个家目录;一份已经存在的文件保留它现有的模式,因为去改一份别人特意放开了权限的文件,不是这次调用该管的事。**两个**描述符都挪,因为一条留在终端上的 `println!` 就是这条通道要治的毛病的一半。而这个描述符**在任何一条路上都不关**:在成事的那条路上它**就是**这个进程的诊断流,活得和进程一样长,这跟 Windows 那条臂说它那个句柄的话一字不差;在不成事的那条路上,关掉它就是一次刚刚拒绝挪动任何东西的调用,伸手去够一个 `open` 可能**当作**描述符 1 交给它的描述符——一个标准流被关着起来的进程就是这个状态——并把它被要求挪动的那条流给拆了。
 
-**A refusal leaves both descriptors where they were, and that is what makes the
-caller's `else` mean anything.** The duplicate the first stream is put back from
-is taken before anything moves, with `F_DUPFD_CLOEXEC` and a floor of 3 rather
-than with `dup`, for two reasons that are both about which number comes back:
-`dup` answers the lowest free descriptor, which on a process whose standard error
-is closed is 2 — the descriptor the next line is about to write — and it does not
-set close-on-exec, which would put a spare copy of somebody's terminal into every
-shell this window opens. `a_refused_redirect_moves_nothing` reads the device and
-inode behind both descriptors before and after a refused call and requires them
-unchanged.
+**一次拒绝把两个描述符留在原处,而这正是调用方那个 `else` 有意义的原因。** 第一条流用来还原的那份副本,是在任何东西动之前取的,用的是 `F_DUPFD_CLOEXEC` 加一个下限 3 而不是 `dup`,两个理由都是关于回来的是哪个号:`dup` 答的是最小的空闲描述符,在一个标准错误被关掉的进程上那就是 2——下一行正要往上写的那个描述符——而且它不设 close-on-exec,那会把别人终端的一份备份塞进这扇窗开的每一把 shell 里。`a_refused_redirect_moves_nothing` 在一次被拒的调用前后读两个描述符背后的设备号和 inode,要求它们没变。
 
-**One line in `Cargo.lock` and no package.** `libc` 0.2.186 is already there
-through winit, wgpu and `portable-pty`, and already in `THIRD-PARTY-NOTICES.md`;
-Rust's standard library owns descriptors and never renumbers one, so there is no
-`std` spelling of this. It is declared `cfg(unix)` and not
-`cfg(target_os = "macos")` because `dup`, `dup2` and `close` are POSIX and are
-the same two sentences on the Linux server §4.6 keeps possible. `nix` was the
-other candidate and was not taken: its `dup2` is typed in `OwnedFd`/`BorrowedFd`,
-so this crate would be constructing an `OwnedFd` for descriptor 1 — a value whose
-`Drop` closes the process's own standard output — to hand to a call that is
-defined as not taking ownership of it.
+**`Cargo.lock` 多一行,不多一个包。** `libc` 0.2.186 已经经 winit、wgpu 和 `portable-pty` 在里面了,也已经在 `THIRD-PARTY-NOTICES.md` 里;Rust 的标准库拥有描述符,而且从不给一个描述符改号,所以这件事没有 `std` 的拼法。它声明成 `cfg(unix)` 而不是 `cfg(target_os = "macos")`,因为 `dup`、`dup2` 和 `close` 是 POSIX 的,在 §4.6 留着可能的那台 Linux 服务器上是同样这两句话。另一个候选是 `nix`,没有选:它的 `dup2` 是按 `OwnedFd`/`BorrowedFd` 定型的,于是这个 crate 就得为描述符 1 造一个 `OwnedFd`——一个 `Drop` 会关掉这个进程自己标准输出的值——再交给一次按定义并不接管它的调用。
 
-**③ `leave_process` really terminates, and the flush is written here rather than
-inherited.** `std::process::exit` and not the Windows arm's `TerminateProcess`:
-that call exists for one measured reason and the reason is a tenant — a process
-that has loaded the Edge WebView2 client DLL cannot walk out through the loader's
-`DLL_PROCESS_DETACH` (§7.35) — and nothing on this platform is that tenant today,
-so the ordinary exit is both the honest door and the better one, because it runs
-the `atexit` chain. The two flush lines are not redundant with what that function
-already does on its own: they make the flush a property of `leave_process` rather
-than of which exit primitive an arm happens to call, so that the day a
-`WKWebView` in the process forces the faster door — `_exit`, which the backend
-inventory's own row anticipates — the run's footer does not leave with it.
-Nothing else on the way out depended on a Windows-only order: `bt_pty`'s
-recording writes through an unbuffered `File` and publishes with `sync_data` on
-its own thread, the session document and its sentinel are written inside the loop
-above every caller, and the footer is an `eprintln!`, which Rust does not buffer.
-The sixteen steps are the same sixteen steps.
+**③ `leave_process` 真的终止,而那次刷写是写在这里而不是继承来的。** 用 `std::process::exit`,不用 Windows 那条臂的 `TerminateProcess`:那次调用的存在只有一个量出来的理由,而理由是一个租户——一个加载过 Edge WebView2 客户端 DLL 的进程走不出加载器的 `DLL_PROCESS_DETACH`(§7.35)——而今天这个平台上没有任何东西是那个租户,所以普通的退出既是老实的那扇门也是更好的那扇,因为它会跑 `atexit` 链。那两行刷写和那个函数自己已经做的事并不重复:它们让刷写成为 `leave_process` 的性质,而不是某条臂碰巧调了哪个退出原语的性质,这样哪天进程里的一个 `WKWebView` 逼出更快的那扇门——`_exit`,后端清单自己那一行就预告了它——这趟运行的收尾不会跟着一起走掉。出门路上没有别的东西依赖一个只有 Windows 才有的次序:`bt_pty` 的录制经一个不带缓冲的 `File` 写,在它自己的线程上用 `sync_data` 发布;会话文档和它的哨兵是在每一个调用方上面那个循环里写的;而收尾是一句 `eprintln!`,Rust 不给它缓冲。那十六步还是那十六步。
 
-**④ The two launches, measured on the Mac mini** — macOS 26.6.2, Apple M4, the
-debug build at `74a3ef21`, each against an isolated `HOME` under the ticket's own
-worktree.
+**④ 两种启动,在 Mac mini 上量的**——macOS 26.6.2,Apple M4,`74a3ef21` 的 debug 构建,每一次都对着本票自己 worktree 下一个隔离的 `HOME`。
 
-**(a) A direct exec from a terminal**, under a real pty. Three runs, one rule,
-and the rule is the one the other platform already has.
+**(a) 从终端直接 exec**,底下是一条真 pty。三趟,一条规矩,而这条规矩就是另一个平台已经有的那条。
 
-* A refused flag is answered on the terminal and nothing is written:
-  `folio --m3-7-not-a-flag` put `There is no --m3-7-not-a-flag option.` and the
-  usage block on the tty, exited 2, and the log path did not exist afterwards.
-  The front door is still the front door.
-* The same binary with no arguments wrote **four bytes** to the tty — the pty's
-  own end-of-file echo, and not one byte of Folio's — while the file took the
-  banner and the whole of the run: 1371 bytes, one run header, and under it the
-  startup's `BT_DPI` lines and the window thread's first-turn report.
-* With `BT_STARTUP_TRACE=1` the same launch talked to the terminal for the whole
-  run — its first line there is
-  `BT_STARTUP_TRACE: from here Folio talks to the console that started it` — and
-  the log **did not grow**: 1371 bytes before and 1371 after, still exactly one
-  run header. A run that names the console keeps it, which is the rule and not an
-  exception to it.
+* 一个被拒的 flag 在终端上答,而且什么也不写:`folio --m3-7-not-a-flag` 把 `There is no --m3-7-not-a-flag option.` 和用法块放在 tty 上,退出码 2,事后那条日志路径不存在。前门还是前门。
+* 同一个二进制不带参数,往 tty 写了**四个字节**——是 pty 自己那端的 EOF 回显,Folio 一个字节也没写——而文件收下了横幅和整趟运行:1371 字节,一个运行头,底下是启动的 `BT_DPI` 各行和窗口线程第一轮的报告。
+* 带上 `BT_STARTUP_TRACE=1`,同一次启动整趟都对着终端说话——它在那里的第一行是 `BT_STARTUP_TRACE: from here Folio talks to the console that started it`——而日志**没有长**:之前 1371 字节,之后还是 1371,仍然恰好一个运行头。一趟点名了控制台的运行就留着它,这是规矩,不是规矩的例外。
 
-**(b) `open -a` on a bundle**, which is what Finder, the Dock and LaunchServices
-all do. The bundle's executable is a wrapper that records its own three
-descriptors and then `exec`s Folio, so the pid and every descriptor belong to the
-launched process and not to the wrapper:
+**(b) 对一个 bundle 发 `open -a`**,而访达、程序坞和 LaunchServices 做的都是这件事。这个 bundle 的可执行文件是一个包装脚本,它先记下自己那三个描述符再 `exec` Folio,所以 pid 和每一个描述符都属于被起来的那个进程而不属于包装脚本:
 
 ```
 COMMAND  PID     USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
@@ -8632,494 +8551,155 @@ bash    4899 <user>      1u   CHR    3,2      0t0  336 /dev/null
 bash    4899 <user>      2u   CHR    3,2      0t0  336 /dev/null
 ```
 
-and the first line of the file that run wrote is
+而那趟运行写下的那份文件的第一行是
 
 ```
 ── Folio 0.3.0 (74a3ef21e7) — run started 2026-09-12T22:29:19.590Z, pid 4899 ──
 ```
 
-— the same pid, and the banner is the file's first line, so nothing between
-launchd's `/dev/null` and it was lost. 1455 bytes followed. **Before this ticket
-that file did not exist and those 1455 bytes were discarded by the kernel, one
-`write` at a time, while the channel reported `Nowhere`.**
+——同一个 pid,而横幅就是文件的第一行,所以从 launchd 的 `/dev/null` 到它之间没有丢任何东西。后面跟着 1455 字节。**本票之前那份文件根本不存在,那 1455 个字节被内核一次 `write` 一次 `write` 地丢掉,而通道报着 `Nowhere`。**
 
-**The panic hook reaches it too, in a process with no screen at all.** A second
-bundle launch carrying `BT_PANIC_SELFTEST=4` — the debug-build one-shot §7.43
-already has, so nothing test-only was added for this — put the fault in the same
-file:
+**panic 钩子也够得到它,在一个屏幕上什么都没有的进程里。** 第二次 bundle 启动带着 `BT_PANIC_SELFTEST=4`——也就是 §7.43 本来就有的那个 debug 构建一次性开关,所以这里没有为它加任何只为测试而存在的东西——把那次故障放进了同一份文件:
 
 ```
 thread 'main' (11203438) panicked at crates/bt-app/src/main.rs:110709:5:
 BT_PANIC_SELFTEST: faulting the window thread on purpose
 ```
 
-with the hook's own report beside it in that run's temporary directory
-(`folio-panic.log`, opening with the build stamp, the thread and the backtrace).
-**What follows the alert does not follow it here**, and that is the hook's
-documented order rather than a defect: `announce_panic` raises `NSAlert.runModal`
-on the thread that panicked, which is the window thread, so the footer and
-`leave_process` are reached when the box is dismissed. The probe ended that run
-by the pid the log's own header carries instead of dismissing it, so its file has
-no footer. Whether a crash on this platform should stand still behind a modal box
-is M4-11's question; the half this ticket owed — that the words reach the file —
-is measured.
+而钩子自己的报告在那趟运行的临时目录里(`folio-panic.log`,开头是构建戳、线程和回溯)。**弹窗之后那些东西在这里不跟着来**,而这是钩子写明的次序而不是一个缺陷:`announce_panic` 在 panic 的那条线程上升起 `NSAlert.runModal`,而那是窗口线程,所以收尾和 `leave_process` 要等那个框被点掉才够得到。探针是照日志自己头里带的那个 pid 结束那趟运行的,没有去点掉它,所以它那份文件没有收尾。这个平台上一次崩溃该不该杵在一个模态框后面不动,是 M4-11 的问题;本票欠的那一半——那些字够得到文件——量到了。
 
-**⑤ What this ticket did not close, and it is one door.**
-`install_console_ctrl_handler` still answers `false`. The Unix half of the fault
-the Windows arm exists for is real — a process started from a shell is in that
-shell's foreground process group, so a `Ctrl+C` typed there is delivered here —
-but what the two signals should *do* is a decision and not a translation.
-`SIGINT` is the one the Windows arm refuses and refusing it here is the same
-sentence; `SIGTERM` is not, and on this platform it is how the system asks an
-application to go away at logout and at shutdown, so a handler for it is a path
-that has to write the session document and leave through `leave_process` — which
-is M3-1's application delegate and M3-5's single writer, neither of which exists
-yet. The door is booked here rather than guessed at.
+**⑤ 本票没有合上的东西,而它是一扇门。** `install_console_ctrl_handler` 仍然答 `false`。Windows 那条臂为之存在的那个毛病,Unix 这一半是真的——一个从 shell 起来的进程在那把 shell 的前台进程组里,所以在那里敲的 `Ctrl+C` 会投到这里——但这两个信号**该做什么**是一个决定而不是一次翻译。`SIGINT` 是 Windows 那条臂拒绝的那一个,在这里拒绝它是同一句话;`SIGTERM` 不是,而在这个平台上它正是系统在注销和关机时请求一个应用离开的方式,所以给它装一个处理器,就是一条必须写会话文档、并经 `leave_process` 离开的路——那是 M3-1 的应用代理和 M3-5 的单一写者,两者当时都还不存在。这扇门在这里挂账,而不是在这里猜。
 
-**⑥ Tests.** Source pins on the Windows workstation, where the arm is not
-compiled at all: `bt_platform::macos_stdio_tests`' four —
-`the_redirect_moves_both_descriptors_onto_an_appended_private_file`,
-`the_silence_points_both_descriptors_at_the_null_device`,
-`the_two_console_doors_stay_the_no_ops_their_class_says_they_are` and
-`the_process_flushes_what_it_wrote_before_it_leaves` — plus `bt_app`'s own
-`nothing_branches_on_the_two_console_no_ops`, which is ①'s claim read off the two
-call sites. Behaviour on the Mac: `portable_impl::stream_tests`' two, which
-really renumber this process's own descriptors and put them back from a duplicate
-taken before the call, so a failed assertion still prints where `cargo test` is
-reading. **They are written against the handles and not against the macros, and
-that is not a stylistic choice**: `print!` and `eprint!` both go through
-`std::io::print_to`, which hands the bytes to libtest's per-test capture buffer
-rather than to the descriptor, so the first draft of the behavioural case failed
-on the Mac with an empty file and both of its lines sitting in the harness's
-capture. A case written with the macros would have passed against a completely
-empty implementation of the door.
+**⑥ 测试。** 在 Windows 工作站上是源码钉,那条臂在那边根本不编译:`bt_platform::macos_stdio_tests` 的四根——`the_redirect_moves_both_descriptors_onto_an_appended_private_file`、`the_silence_points_both_descriptors_at_the_null_device`、`the_two_console_doors_stay_the_no_ops_their_class_says_they_are` 和 `the_process_flushes_what_it_wrote_before_it_leaves`——外加 `bt_app` 自己的 `nothing_branches_on_the_two_console_no_ops`,那是 ① 那句主张从两个调用点上读出来。Mac 上是行为:`portable_impl::stream_tests` 的两只,它们真的给这个进程自己的描述符改号,再从调用之前取的一份副本上还原,所以一次断言失败照样打在 `cargo test` 正在读的地方。**它们是对着句柄写的而不是对着宏写的,而这不是一个风格选择**:`print!` 和 `eprint!` 都走 `std::io::print_to`,它把字节交给 libtest 的每测试捕获缓冲而不是交给描述符,所以那只行为用例的初稿在 Mac 上以一份空文件失败,而它那两行都坐在测试框架的捕获里。一只用宏写的用例,对着一个完全空的门实现也会通过。
+
 ### 13.24 M4-1: CALayer 合成——页面槽在 Metal 层下面,洞里露出来 (`crates/bt-platform/src/macos_compose.rs`、`crates/bt-platform/src/{macos_impl,portable_impl,lib}.rs`、`crates/bt-platform/tests/macos_compose.rs`)
 
-**① The tree is not a tree, and that is the whole shape.** On Windows a window
-presents through a DirectComposition tree: a target bound to the `HWND`, a root,
-the visual the swapchain hangs off, and one visual per hosted page underneath it.
-X-1 measured that macOS needs none of it. The arrangement is **two sibling
-subviews in one window** — a plain `NSView` for the page, added *below* the view
-wgpu hangs its `CAMetalLayer` on — and a transparent pixel in Folio's frame is
-then a pixel of the page. So `macos_compose::Compositor` owns a **page slot** per
-seat and nothing else: no target, no root, no ground surface, no second
-swapchain.
+**① 这棵树不是一棵树,而这就是它形状的全部。** Windows 上一扇窗经一棵 DirectComposition 树呈现:一个绑在 `HWND` 上的 target、一个 root、交换链挂着的那个 visual,再往下每一个寄宿页面各一个 visual。X-1 量到 macOS 一样都不需要。这里的安排是**同一扇窗里的两个同级子 view**——页面用一个普通 `NSView`,加在 wgpu 挂 `CAMetalLayer` 的那个 view **下面**——于是 Folio 帧里的一个透明像素就是页面的一个像素。所以 `macos_compose::Compositor` 每个 seat 只拥有一个**页面槽**,别的什么都没有:没有 target、没有 root、没有底面 surface、没有第二条交换链。
 
-`Compositor::new` reaches the surface view through `macos_impl`'s one door, which
-M1-4 already had and which this ticket split in two: `folios_surface_view` makes
-it (or finds it again, by class) and `surface_view` is that function with the
-pointer taken out of it. **One creator and two callers**, because the composition
-has to order every slot under the *same* object `bt-app`'s
-`window_surface_target` hands to wgpu, and a second walk of the hierarchy would
-be a second answer to "which view is Folio's" on the day the two disagreed.
-`gpu_visual_ptr` therefore costs nothing and cannot fail: the view was made in
-the constructor, which is why that signature has room for no refusal — exactly as
-the Windows one does not.
+`Compositor::new` 经 `macos_impl` 那一扇门够到 surface view,那扇门 M1-4 就有,而本票把它劈成两个:`folios_surface_view` 造它(或者按类再找到它),而 `surface_view` 就是那个函数把指针取出来。**一个创建者,两个调用方**,因为合成必须把每一个槽排到 `bt-app` 的 `window_surface_target` 交给 wgpu 的**同一个**对象底下,而第二次遍历层级,就是「哪个 view 是 Folio 的」在两者说法不一那天的第二个答案。所以 `gpu_visual_ptr` 一分钱不花而且不可能失败:那个 view 是在构造器里造的,这正是那个签名里没有拒绝的位置的原因——跟 Windows 那个一样没有。
 
-**② `VisualLayer` travels and its `bool` does not.** The enum's two variants say
-which end of the stack is meant and they survive the crossing; the number
-`insert_above_with_null_reference` produces does not. It is `AddVisual`'s
-`insertAbove` and its value is a fact about DirectComposition's child list, which
-is painted front to back — so `TRUE` with a NULL reference asks for the
-*beginning*, which is the bottom. `NSView.subviews` runs the other way, back to
-front, and `addSubview:positioned:relativeTo:` takes an ordering mode rather than
-a boolean: with a nil reference `NSWindowBelow` is behind every sibling and
-`NSWindowAbove` is in front of every one. A reader who carried the `true` across
-would be spelling `NSWindowAbove`, whose value is `1` — Folio's page on top of
-Folio's frame, which is the failure the W0' probe photographed on Windows
-arriving on the other platform through a constant that happens to be the same
-shape. `ordering_for` is the one place the translation is made,
-`the_macos_arm_orders_by_the_enum_and_never_by_the_boolean` refuses the boolean
-anywhere in that file, and the slot goes to the bottom in exactly one call.
+**② `VisualLayer` 过得去,而它的 `bool` 过不去。** 这个枚举的两个变体说的是堆栈的哪一端,它们过得去;`insert_above_with_null_reference` 产出的那个数过不去。它是 `AddVisual` 的 `insertAbove`,而它的值是一个关于 DirectComposition 子列表的事实,那张列表是从前往后画的——所以 `TRUE` 配一个 NULL 引用要的是**开头**,也就是最底下。`NSView.subviews` 是反着来的,从后往前,而 `addSubview:positioned:relativeTo:` 收的是一个排序模式而不是一个布尔:引用为 nil 时,`NSWindowBelow` 在每个同级后面,`NSWindowAbove` 在每个同级前面。一个把那个 `true` 直接搬过来的读者拼出来的是 `NSWindowAbove`,它的值是 `1`——Folio 的页面压在 Folio 的帧上,也就是 W0′ 探针在 Windows 上拍到的那次失败,经一个碰巧形状相同的常量到了另一个平台。`ordering_for` 是这次翻译唯一发生的地方,`the_macos_arm_orders_by_the_enum_and_never_by_the_boolean` 在那个文件里任何地方都拒绝那个布尔,而槽在恰好一次调用里去到最底下。
 
-**③ The floor is a layer's background colour, and the colour is un-multiplied on
-the way there.** §7.14's floor exists because a pane's hole is cut on the pane's
-clock and the page paints on the browser's; between the two, anything that is not
-a floor is the desktop. Windows spends two visuals and a 1×1 premultiplied
-surface on it. A slot is a view and a view has a layer, so here the floor *is*
-that layer's `backgroundColor` — which means the floor and the page cannot be
-placed apart, because they are one object.
+**③ 地板是一个 layer 的背景色,而颜色在过去的路上被除掉了预乘。** §7.14 那块地板存在,是因为一个 pane 的洞是按 pane 的钟切的,而页面是按浏览器的钟画的;两者之间,不是地板的东西就是桌面。Windows 为它花掉两个 visual 和一块 1×1 的预乘 surface。一个槽是一个 view,而一个 view 有一个 layer,所以在这里地板**就是**那个 layer 的 `backgroundColor`——也就是说地板和页面没法分开摆,因为它们是同一个对象。
 
-`set_page_ground_color` keeps its signature and its contract: four numbers,
-**premultiplied and sRGB-encoded**, because that is what the swapchain leaves in
-its own bytes and the two have to match to the byte. A `CGColor` is the opposite
-representation — its components are straight by definition and CoreAnimation
-multiplies them by the alpha itself when it composites — so `straight_srgb`
-divides them back out, once. A floor that passed the numbers through would land
-at `a²`: a 60 % ground reading at 36 %, the same silent translucency defect
-§7.1.6c-4b names and one nobody sees in a screenshot without already knowing the
-number. And the colour is made **in sRGB by name**, `CGColorCreateSRGB`, because
-X-1 measured that CoreAnimation blends on the encoded bytes rather than in linear
-light: the numbers `bt-render` computed have to arrive in the space they were
-computed in, and a generic or device space would be a second encoding of the same
-colour. That is also where a reader looking for "where is the alpha of an
-anti-aliased edge judged" should start — the edge arithmetic itself is M2-5's.
+`set_page_ground_color` 保留它的签名和它的契约:四个数,**预乘并且按 sRGB 编码**,因为交换链在它自己的字节里留下的就是这个,而两者必须字节级吻合。一个 `CGColor` 是相反的表示——它的分量按定义是直通的,而 CoreAnimation 合成时自己去乘那个 alpha——所以 `straight_srgb` 把它们除回去,只除一次。一块把这些数原样传过去的地板会落在 `a²` 上:一个 60% 的底读成 36%,正是 §7.1.6c-4b 点名的那种安静的半透明缺陷,而且不先知道那个数的人在截图里看不出来。而这个颜色是**按名字在 sRGB 里**造的,`CGColorCreateSRGB`,因为 X-1 量到 CoreAnimation 是在编码后的字节上混合而不是在线性光里:`bt-render` 算出来的那些数必须到达它们被算出来的那个空间,而一个通用空间或设备空间就是同一个颜色的第二次编码。一个要找「一条抗锯齿边沿的 alpha 是在哪里判的」的读者也该从这里起步——边沿自己的算术归 M2-5。
 
-**④ The skirt keeps its two clocks and places nothing.** On Windows the two bands
-are the part of the window the *swapchain* does not cover: a swapchain visual is
-exactly the size of its buffer, a resize grows the window several milliseconds
-before the buffer follows, and a tree bound `topmost = true` over a
-per-pixel-alpha `HWND` shows the desktop in the difference. A `CAMetalLayer` is
-not sized to its drawable — `raw-window-metal` keeps it on the **view**, which
-autoresizes with the window — so there is no moment at which the layer is smaller
-than the window, and CoreAnimation stretches the last drawable across it instead.
-Measured twice already: X-1 resized 1800×1200 → 1360×1500 with every sample
-unchanged, and M1-4 dragged a real window's corner with the frame unchanged
-(§13.14 ⑤). A band placed over a region that *is* being painted would be the
-doubled translucency §7.1.6c-4b forbids, arriving on the platform that did not
-have the defect.
+**④ 那圈裙边留着它的两个钟,而它什么也不摆。** Windows 上那两条带子是窗口里**交换链**没盖到的那部分:一个交换链 visual 的尺寸恰好是它缓冲的尺寸,一次缩放会在缓冲跟上来之前把窗口放大好几毫秒,而一棵 `topmost = true` 绑在逐像素 alpha 的 `HWND` 上的树,会在那点差里露出桌面。一块 `CAMetalLayer` 的尺寸不是按它的 drawable 定的——`raw-window-metal` 把它留在 **view** 上,而 view 跟着窗口自动缩放——所以不存在 layer 比窗口小的那一刻,CoreAnimation 会把上一个 drawable 拉伸铺满它。这件事已经量过两次:X-1 把 1800×1200 缩到 1360×1500,每一个采样点都没变;M1-4 拖过一扇真窗的角,frame 没变(§13.14 ⑤)。把一条带子摆在一块**正在**被画的区域上,就是 §7.1.6c-4b 禁的那种加倍半透明,到了一个本来没有这个缺陷的平台上。
 
-So `set_window_size`, `set_covered_size` and `skirt_covers_anything` are the same
-three sentences as on Windows, the lag in the middle one included, and what they
-drive is nothing. `skirt_covers_anything` still buys the present that settles a
-resize, which is the half of its contract that is about the caller's loop rather
-than about a band.
+所以 `set_window_size`、`set_covered_size` 和 `skirt_covers_anything` 还是跟 Windows 上一样的那三句话,连中间那句里的滞后也一样,而它们驱动的是「没有」。`skirt_covers_anything` 仍然买下那次让缩放安定下来的 present,那是它契约里关于调用方循环而不是关于一条带子的那一半。
 
-**⑤ The handle travels the other way, so there is one door Windows has no twin
-for.** WebView2 composes into a visual **the host makes**: `windows_impl` builds
-the page's visual and `Compositor::web_visual` hands it to
-`ICoreWebView2CompositionController` as its root visual target. WebKit makes its
-**own** view; a `WKWebView` is an `NSView` and the only thing left to decide is
-where in the hierarchy it stands. `attach_page_view(page, NativeWindow)` is that
-decision and it is the one public name the two arms do not share —
-`the_two_compositors_answer_the_same_doors` holds the difference at exactly one,
-because `bt-app` names `Compositor` in thirty-odd places and none of them is
-inside a platform gate. The handle is a `NativeWindow` for the reason that type
-exists: on this platform it already *is* an `NSView` pointer, and a second opaque
-wrapper for the same pointer would be a second thing a caller can get wrong.
+**⑤ 句柄走的是反方向,所以这里有一扇 Windows 没有孪生的门。** WebView2 合成进一个**宿主造的** visual:`windows_impl` 建出页面的 visual,而 `Compositor::web_visual` 把它当作根 visual target 交给 `ICoreWebView2CompositionController`。WebKit 造**它自己的** view;一个 `WKWebView` 就是一个 `NSView`,剩下要决定的只有它站在层级的什么位置。`attach_page_view(page, NativeWindow)` 就是这个决定,也是两条臂唯一不共享的那个公开名字——`the_two_compositors_answer_the_same_doors` 把这个差别按在恰好一个上,因为 `bt-app` 在三十来处点 `Compositor` 的名,而没有一处在平台闸里面。那个句柄是一个 `NativeWindow`,理由就是这个类型存在的理由:在这个平台上它**本来就是**一个 `NSView` 指针,而给同一个指针再套一层不透明包装,就是又多一样调用方能弄错的东西。
 
-`attach_web_visual` keeps the portable signature and mints the slot; the page's
-own view is a separate call because the two arrive on two clocks and neither is
-allowed to decide whether the other is possible. That is the same split
-`ensure_page_ground` made on Windows and for the same measured reason.
+`attach_web_visual` 保留可移植的签名并铸出那个槽;页面自己的 view 是另一次调用,因为两者按两个钟到达,而谁也不许替对方决定它是否可能。这就是 `ensure_page_ground` 在 Windows 上做的那一刀,理由也是同一条量出来的。
 
-**⑥ A slot is a place for a page to stand and never a place a click lands.** The
-slot lies over Folio's surface in the pane's rectangle and AppKit routes a press
-to the frontmost view whose `hitTest:` claims the point, so a slot left alone
-would swallow every click in a pane whose page had not loaded — a defect no
-picture of the pixels can see. `FolioPageSlotView` answers **its subviews'
-answer, and nil for its own**: a point inside the page goes to the page, and a
-point the page does not want falls through to winit's view, which is the view
-this program has always answered presses from. It is `FolioSurfaceView`'s rule
-one level down (§13.14 ③). What is deliberately *not* settled here is the rest of
-the routing — a press over Folio's own chrome where that chrome overlaps a page
-is M4-2's, and the slot's frame being the pane's rectangle is the only part of it
-M4-1 owns.
+**⑥ 一个槽是页面站的地方,永远不是点击落下的地方。** 槽盖在 Folio 的 surface 之上、在 pane 的矩形里,而 AppKit 把一次按下路由给最前面那个 `hitTest:` 认领这个点的 view,所以一个放着不管的槽,会把一个页面还没加载的 pane 里的每一次点击都吞掉——一个再怎么看像素也看不出来的缺陷。`FolioPageSlotView` 答的是**它子 view 的答案,而对它自己答 nil**:一个落在页面里的点给页面,一个页面不要的点落穿到 winit 的 view,而那正是这个程序历来处理按下的那个 view。它是 `FolioSurfaceView` 那条规矩往下一层(§13.14 ③)。这里特意**没有**定下来的是路由的其余部分——一次按在 Folio 自己 chrome 上、而那块 chrome 又压着一个页面,那归 M4-2;槽的 frame 就是 pane 的矩形,是其中 M4-1 拥有的唯一一部分。
 
-**⑦ Nothing animates, and that is a transaction rather than a habit.** Every
-animatable property of a layer-backed view has a default CoreAnimation *action*:
-a pane whose rectangle moved would slide there over a quarter of a second, on
-every frame that moved one, while the picture Folio drew for it was already in
-place. `setDisableActions:` is the switch and a `CATransaction` is its only
-scope, so the two are written together in `without_animation` and nowhere else;
-`nothing_in_the_macos_composition_animates` reads the file and refuses a mutation
-outside one.
+**⑦ 什么都不动画,而这是一个事务而不是一个习惯。** 一个 layer-backed 的 view 上每一个可动画属性都有一个默认的 CoreAnimation **action**:一个矩形挪了位的 pane 会用四分之一秒滑过去,每一帧挪它的时候都滑一次,而 Folio 为它画的那张画早就到位了。`setDisableActions:` 是那个开关,而一个 `CATransaction` 是它唯一的作用域,所以两者一起写在 `without_animation` 里、别处没有;`nothing_in_the_macos_composition_animates` 读这个文件,拒绝任何一次在它之外的改动。
 
-`commit` keeps its door and has an empty body, which is a different thing from
-having no door. DirectComposition's tree is only on the glass once somebody calls
-`Commit` and wgpu's dx12 backend deliberately does not, so on Windows that call
-is the whole of whether the picture ever moves again. CoreAnimation has no such
-handle: every change made on the main thread joins the implicit transaction the
-run loop opens for that turn, and every change this type makes is additionally
-inside an explicit one that is committed in the call that opened it.
+`commit` 保留它那扇门,而函数体是空的,这跟没有这扇门是两回事。DirectComposition 那棵树要有人调 `Commit` 才上玻璃,而 wgpu 的 dx12 后端特意不调,所以 Windows 上那次调用就是「这张画以后还动不动」的全部。CoreAnimation 没有这样一个把手:每一次在主线程上做的改动都加入 run loop 为那一轮打开的隐式事务,而这个类型做的每一次改动还额外处在一个显式事务里面,而那个事务在打开它的那次调用里就被提交了。
 
-**⑧ A rebuild cannot reach a slot, and that is structural.** A dropped
-`wgpu::Surface` leaves its `CAMetalLayer` on the view, so `clear_surface_layers`
-empties that view's layer before every reconstruction — and *empties* is the
-word, `setSublayers:nil` takes everything. If a slot lived under that layer a
-device loss would take every open page out of the window and nothing would put it
-back. It cannot: a slot is a **subview of the content view**, one level up and on
-the other side of the hierarchy from the surface view's own layer. Nothing had to
-be added to pin it and nothing has to be remembered; what a pin can do is refuse
-the arrangement that would break it, which is
-`a_surface_rebuild_cannot_reach_a_page_slot`, and what a measurement can do is
-clear a real window and look.
+**⑧ 一次重建够不到一个槽,而这是结构性的。** 一个被 drop 的 `wgpu::Surface` 把它的 `CAMetalLayer` 留在 view 上,所以 `clear_surface_layers` 在每次重构之前把那个 view 的 layer 清空——而**清空**就是字面意思,`setSublayers:nil` 什么都拿走。要是有一个槽住在那个 layer 底下,一次设备丢失会把每一个打开的页面从窗口里拿走,而且没有任何东西会把它放回去。它不可能:一个槽是**内容 view 的子 view**,高一层,而且在层级上处于 surface view 自己那个 layer 的另一侧。钉住它不需要加任何东西,也不需要记住任何东西;一根钉能做的是拒绝那种会把它弄坏的安排,那就是 `a_surface_rebuild_cannot_reach_a_page_slot`;而一次测量能做的是把一扇真窗清一遍再看看。
 
-**⑨ The coordinate rule, and why it is a question rather than an assumption.**
-Everything `bt-layout` produces is in physical pixels from the top-left of the
-client area; AppKit's default origin is the bottom-left. winit's content view
-answers `isFlipped` **true** — its own comment says "winit uses the upper-left
-corner as the origin" — so for the window this product opens the conversion is a
-division by the backing scale and nothing else. `in_content` reads `isFlipped`
-anyway, because a rule about *who made the window* is not a rule about what the
-window is, and the flipped branch is what any content view this crate is handed
-from somewhere else would need. Both branches are measured: the capture proof
-runs on a flipped content view, which is the one `bt-app` has, and
-`the_unflipped_branch_of_the_placement_is_a_flip` places a pane on AppKit's own
-`NSView` and checks the frame that came out.
+**⑨ 坐标那条规矩,以及它为什么是一个提问而不是一个假定。** `bt-layout` 产出的一切都是从客户区左上角起算的物理像素;AppKit 的默认原点在左下角。winit 的内容 view 对 `isFlipped` 答 **true**——它自己的注写着「winit 以左上角为原点」——所以对这个产品开的窗来说,换算就是除以一次 backing scale,再没有别的。`in_content` 仍然去读 `isFlipped`,因为一条关于**谁造了这扇窗**的规矩不是一条关于这扇窗是什么的规矩,而翻转那条分支正是这个 crate 从别处拿到的任何一个内容 view 会需要的。两条分支都量过:那次截图证明跑在一个翻转的内容 view 上,也就是 `bt-app` 手里的那一个;而 `the_unflipped_branch_of_the_placement_is_a_flip` 把一个 pane 摆到 AppKit 自己的 `NSView` 上,再核出来的那个 frame。
 
-**⑩ Measured on the Mac** (Apple M4, macOS 26.6.2, a borderless 600×400 point
-window on the display whose backing scale is 2, read back with
-`CGWindowListCreateImage` over the process's own window —
-`crates/bt-platform/tests/macos_compose.rs`, five captures). The capture came
-back **1200×800** for a 600×400 point window, so every number below is a
-physical pixel and the readback is pixel for pixel with the glass.
+**⑩ Mac 上量到的**(Apple M4,macOS 26.6.2,一扇无边框的 600×400 点的窗,开在 backing scale 为 2 的那台显示器上,经 `CGWindowListCreateImage` 对着本进程自己的窗口读回——`crates/bt-platform/tests/macos_compose.rs`,五次截图)。一扇 600×400 点的窗截回来是 **1200×800**,所以下面每一个数都是物理像素,而这次读回和玻璃是逐像素对应的。
 
-The window was asked for four colours: its own ground `rgb(60,60,60)`, a frame
-of `rgb(0,0,255)`, a floor of `rgb(255,255,0)` and a page of `rgb(0,255,0)`. The
-window's backing store carries the display's profile, so what arrives is
-`(53,53,53)`, `(52,0,250)`, `(249,255,47)` and `(33,252,36)` — and the page's
-`#00ff00` arriving as **`(33,252,36)`** is X-1's own number, to the byte, from a
-`CALayer` this time rather than from a `WKWebView`.
+这扇窗被要了四个颜色:它自己的底 `rgb(60,60,60)`、帧 `rgb(0,0,255)`、地板 `rgb(255,255,0)`、页面 `rgb(0,255,0)`。窗口的后备存储带着显示器的配置文件,所以到手的是 `(53,53,53)`、`(52,0,250)`、`(249,255,47)` 和 `(33,252,36)`——而页面的 `#00ff00` 到达时是 **`(33,252,36)`**,正是 X-1 自己那个数,精确到字节,只是这次来自一个 `CALayer` 而不是一个 `WKWebView`。
 
-| Sample, in physical pixels | no page yet | page attached | resized | rebuilt |
+| 采样点,物理像素 | 还没有页面 | 页面接上 | 缩放后 | 重建后 |
 |---|---|---|---|---|
-| frame, left band | 52,0,250 | 52,0,250 | 52,0,250 | 52,0,250 |
-| frame, right band | 52,0,250 | 52,0,250 | 52,0,250 | 52,0,250 |
-| **the gap, over the pane** | **249,255,47** | **33,252,36** | **33,252,36** | **33,252,36** |
-| the gap, above the pane | 53,53,53 | 53,53,53 | 53,53,53 | 53,53,53 |
-| the gap, below the pane | 53,53,53 | 53,53,53 | 53,53,53 | 53,53,53 |
-| half alpha, over the pane | 151,128,149 | 42,126,143 | 42,126,143 | 42,126,143 |
-| half alpha, over the window | 52,27,152 | 52,27,152 | 52,27,152 | 52,27,152 |
+| 帧,左带 | 52,0,250 | 52,0,250 | 52,0,250 | 52,0,250 |
+| 帧,右带 | 52,0,250 | 52,0,250 | 52,0,250 | 52,0,250 |
+| **那个洞,在 pane 上** | **249,255,47** | **33,252,36** | **33,252,36** | **33,252,36** |
+| 那个洞,在 pane 上方 | 53,53,53 | 53,53,53 | 53,53,53 | 53,53,53 |
+| 那个洞,在 pane 下方 | 53,53,53 | 53,53,53 | 53,53,53 | 53,53,53 |
+| 半 alpha,在 pane 上 | 151,128,149 | 42,126,143 | 42,126,143 | 42,126,143 |
+| 半 alpha,在窗口上 | 52,27,152 | 52,27,152 | 52,27,152 | 52,27,152 |
 
-In words: a field of frame colour with a gap cut in it, the pane showing through
-the gap and **only where the pane stands** — the two samples above and below it
-are the window's own ground and not the pane's — and the floor standing in the
-pane's rectangle for as long as the page's own view has not arrived.
+说成话:一片帧色,中间切了一个洞,pane 从洞里透出来而且**只在 pane 站的地方**透出来——它上方和下方那两个采样点是窗口自己的底而不是 pane 的——而在页面自己的 view 还没到之前,地板一直站在 pane 的矩形里。
 
-**The half-alpha panel is premultiplied arithmetic on encoded sRGB bytes**, and
-the prediction is made from this run's own endpoints so that the display's
-profile cancels: `0.5·(52,0,250) + 0.5·(33,252,36) = (43,126,143)` against a
-measured `(42,126,143)`, worst channel **1**; over the window's ground,
-`0.5·(52,0,250) + 0.5·(53,53,53) = (53,27,152)` against `(52,27,152)`, worst
-channel **1**. Straight alpha would have answered the frame's colour
-unattenuated — X-1's rectangle A — which is nowhere near either number.
+**那块半 alpha 的板是编码 sRGB 字节上的预乘算术**,而预测是拿这一趟自己的两端算的,好让显示器的配置文件抵消掉:`0.5·(52,0,250) + 0.5·(33,252,36) = (43,126,143)`,量到 `(42,126,143)`,最差通道差 **1**;压在窗口的底上,`0.5·(52,0,250) + 0.5·(53,53,53) = (53,27,152)`,量到 `(52,27,152)`,最差通道差 **1**。直通 alpha 答出来的会是不衰减的帧色——X-1 的矩形 A——那跟这两个数差得远。
 
-**The resize**: 600×400 → 700×500 points, the pane re-placed at
-`x 200..800, y 260..760` physical, capture back at **1400×1000**, every sample
-unchanged.
+**那次缩放**:600×400 → 700×500 点,pane 重新摆在物理 `x 200..800, y 260..760`,截图回来 **1400×1000**,每一个采样点都没变。
 
-**The rebuild**: `clear_surface_layers` answered **`cleared=1`** — one stale
-layer, the number the product's own log line carries — and the capture taken
-with nothing over the surface view read the pane's `(33,252,36)` where the pane
-stands. The slot was the **same object** afterwards, not a new one, and the
-frame rebuilt on the emptied view read identically to the frame before it, every
-sample. Taking the page out of the window left the content view holding one
-subview: Folio's own.
+**那次重建**:`clear_surface_layers` 答 **`cleared=1`**——一层陈旧 layer,也就是产品自己那行日志带的那个数——而在 surface view 上什么都没有的时候拍的那张,在 pane 站的地方读到的是 pane 的 `(33,252,36)`。之后那个槽是**同一个对象**,不是一个新的;而在被清空的 view 上重建出来的帧,和它之前那一帧逐个采样点读下来完全一致。把页面从窗口里拿走之后,内容 view 手里只剩一个子 view:Folio 自己的。
 
-**The other branch**, without a capture: a pane at `(300,120)` physical, 600×440
-physical, on an `NSView` with AppKit's own bottom-left origin at backing scale 2,
-landed at origin `(150,120)` points, size `300×220` — which is
-`400 − 60 − 220 = 120`, the flip, exactly.
+**另一条分支**,没有截图:一个 pane 在物理 `(300,120)`、600×440 物理像素,放在一个 backing scale 2、用 AppKit 自己左下角原点的 `NSView` 上,落在原点 `(150,120)` 点、尺寸 `300×220`——也就是 `400 − 60 − 220 = 120`,那次翻转,分毫不差。
 
-**⑪ What the proof is not.** The frame the capture composites over the slot is a
-`CALayer` and not wgpu's. `bt-platform` has no wgpu dependency and must not gain
-one — a dev-dependency on the renderer would put three hundred crates into
-`cargo check -p bt-platform --target aarch64-apple-darwin --all-targets`, a gate
-every later ticket would pay for — so the stand-in is a layer added **exactly
-where wgpu adds its `CAMetalLayer`**, as a sublayer of Folio's own surface view's
-layer, carrying opaque bands with a gap between them and one half-alpha panel
-across the gap. What that measures is CoreAnimation's composition of a non-opaque
-layer on that view over the slot beneath it, which is M4-1's claim. What it does
-not re-measure is that wgpu's layer is such a layer: X-1 measured that with real
-wgpu on this machine, and M1-4 measured it again in the product (§13.14 ④).
-
-*(本节英文,待中文文案改写。)*
+**⑪ 这次证明不是什么。** 截图里合成在槽之上的那一帧是一个 `CALayer`,不是 wgpu 的。`bt-platform` 不依赖 wgpu,也不许开始依赖——对渲染器加一个 dev-dependency 会把三百个 crate 塞进 `cargo check -p bt-platform --target aarch64-apple-darwin --all-targets`,那是一道后面每一张票都要为之买单的门——所以替身是一个加在 **wgpu 加它 `CAMetalLayer` 的同一个位置**的 layer,也就是作为 Folio 自己那个 surface view 的 layer 的 sublayer,身上带着中间留洞的两条不透明带子,以及横跨这个洞的一块半 alpha 的板。它量的是 CoreAnimation 把那个 view 上一个非不透明 layer 合成在它底下那个槽之上,而那正是 M4-1 的主张。它没有重新量的是「wgpu 那个 layer 就是这样一个 layer」:X-1 在这台机器上拿真 wgpu 量过这件事,而 M1-4 在产品里又量了一遍(§13.14 ④)。
 
 ### 13.25 M4-4: 视频首帧走 AVAssetImageGenerator,像素布局和 Windows 臂一个字不差(`crates/bt-platform/src/macos_video.rs`(新)、`crates/bt-platform/src/{video_portable,lib}.rs`、`crates/bt-platform/tests/video_first_frame.rs`(新)、`crates/bt-platform/Cargo.toml`)
 
-**① The ticket is not "decode a video", it is "hand over the same bytes".**
-`first_frame` had no body off Windows, so a hover over a recording in the files
-column showed the file's name and no picture — §7.23's refusal reached by absence
-rather than by failure. What replaces it is eight calls to AVFoundation and Core
-Graphics, and every decision in them is settled by a sentence §7.23 already wrote
-about Media Foundation rather than by what AVFoundation happens to make easy.
-**Straight — not premultiplied — RGBA8, row-major from the top row down, packed
-at `width * 4` bytes a row, every alpha byte `255`, in sRGB.** That is the
-contract the hover card, the preview seat and `bt-render`'s picture channel
-already read, and the point of this ticket is that none of the three learns which
-machine it is on.
+**① 这张票不是「解一个视频」,是「交出同样的字节」。** `first_frame` 在 Windows 之外没有函数体,所以在文件列里悬停一份录像,出来的是文件名而没有画面——§7.23 那次拒绝是靠缺席而不是靠失败到达的。取代它的是八次 AVFoundation 与 Core Graphics 调用,而其中每一个决定都由 §7.23 早就为 Media Foundation 写下的一句话定下,而不是由 AVFoundation 碰巧让什么变得容易来定。**直通——不是预乘——的 RGBA8,从最上面一行往下按行主序排,每行紧凑打包成 `width * 4` 字节,每一个 alpha 字节都是 `255`,在 sRGB 里。** 这就是悬停卡、预览座和 `bt-render` 的图片通道本来就在读的那份契约,而这张票的要点是这三者没有一个会知道自己在哪台机器上。
 
-Three of those five are things Core Graphics settles the same way Media
-Foundation does, once it is asked properly. A 32-bit RGB bitmap context has **no
-straight-alpha form at all** — the supported layouts are premultiplied or
-skipped — so the context is asked for `kCGImageAlphaNoneSkipLast` with a
-big-endian 32-bit order, which is R, G, B and one byte the drawing leaves alone,
-and the copy writes `255` over that byte. That is exactly what the Windows arm
-does with Media Foundation's BGR**X**, and
-`both_arms_take_the_same_tenth_the_same_budget_and_the_same_opaque_alpha` pins
-the `out[3] = 255;` in both files — a frame that copied the decoder's undefined
-fourth byte through is drawn fully transparent on the day that byte happens to be
-zero, and correct on every day before it.
+这五条里有三条是 Core Graphics 一旦被正确地问,就会和 Media Foundation 给出同样答案的东西。一个 32 位 RGB 位图上下文**根本没有直通 alpha 的形式**——支持的布局要么预乘要么跳过——所以这个上下文要的是 `kCGImageAlphaNoneSkipLast` 加大端 32 位顺序,也就是 R、G、B 加一个绘制不去碰的字节,而拷贝把 `255` 写到那个字节上。这跟 Windows 那条臂对 Media Foundation 的 BGR**X** 做的事一模一样,而 `both_arms_take_the_same_tenth_the_same_budget_and_the_same_opaque_alpha` 在两个文件里都钉住那句 `out[3] = 255;`——一帧把解码器那个未定义的第四字节原样传过去的画,在那个字节碰巧是零的那天会被画成全透明,而在那之前的每一天都是对的。
 
-A `CGBitmapContext`'s backing store runs from the top row down and
-`CGContextDrawImage` with the identity transform puts the image's top row in it,
-so **nothing is flipped**: the Windows arm's negative-pitch branch, which exists
-because RGB-32 is bottom-up in that platform's DIB heritage, has no twin here.
-The row width is still **read back** rather than assumed, for the reason the
-other arm reads its media type back — a stride that is not the one that was asked
-for shears every row after the first.
+一个 `CGBitmapContext` 的后备存储是从最上面一行往下排的,而 `CGContextDrawImage` 配恒等变换会把图像最上面那一行放进去,所以**什么都不翻**:Windows 那条臂的负 pitch 分支——它存在是因为 RGB-32 在那个平台的 DIB 血统里是自下而上的——在这里没有孪生。行宽仍然是**读回来的**而不是假定的,理由跟另一条臂读回它的媒体类型一样——一个不是当初所要的 stride,会把第一行之后的每一行都切错。
 
-**② The frame is not frame zero, and that was decided in August about content
-rather than about an API.** `SEEK_FRACTION` is a tenth because a great many
-videos open on black, and a thumbnail lane that took frame zero answers a hover
-over half a folder of screen captures with half a folder of identical black
-rectangles. The macOS arm inherits the constant rather than choosing one, because
-a card that showed a different picture depending on the machine would be two
-products.
+**② 取的不是第零帧,而这是八月里关于内容而不是关于 API 定的。** `SEEK_FRACTION` 取十分之一,是因为非常多的视频开头是黑的,而一条取第零帧的缩略图道,对着半个文件夹的屏幕录制悬停一遍,答的是半个文件夹一模一样的黑矩形。macOS 这条臂继承这个常量而不是自己挑一个,因为一张随机器不同显示不同画面的卡片就是两个产品。
 
-**The ask is exact, and then it is not.** Both `requestedTimeToleranceBefore` and
-`requestedTimeToleranceAfter` are zero, which makes the generator decode forward
-from the key frame before the target rather than hand back the key frame itself.
-When that exact ask fails — a container with an edit list, whose media timeline
-and presentation timeline are not the same line; a sample table with nothing at
-that instant — the tolerances are opened to infinity and **the same time** is
-asked for again. That is not a fallback to a different picture: it is the same
-request at the precision the file could meet, and it is the behaviour
-`IMFSourceReader::SetCurrentPosition` has by default, which is why the Windows
-arm never had to ask for it. Two attempts, like `request_rgb32`'s two.
+**要得精确,然后就不精确了。** `requestedTimeToleranceBefore` 和 `requestedTimeToleranceAfter` 都是零,这让生成器从目标之前那个关键帧往前解,而不是把那个关键帧本身交回来。当这次精确的要求失败时——一个带 edit list 的容器,它的媒体时间线和呈现时间线不是同一条线;一张在那个瞬间什么也没有的采样表——容差被放开到无穷,**同一个时间**再要一次。那不是退回到另一张画面:那是同一个请求,按这份文件满足得了的精度提出来,而这正是 `IMFSourceReader::SetCurrentPosition` 默认就有的行为,也是 Windows 那条臂从来不必去要它的原因。两次尝试,跟 `request_rgb32` 那两次一样。
 
-**③ What the two machines actually produced, out of the same two files**
-(2026-09-12; `tests/assets/PROVENANCE.md` records what is in them: 160×120, a
-fifth of a second of black and then one solid colour). The mean is over every
-pixel of the returned frame, and the whole frame is that one colour.
+**③ 两台机器从同样两份文件里实际产出的东西**(2026-09-12;`tests/assets/PROVENANCE.md` 记着里面是什么:160×120,五分之一秒的黑,然后一整块纯色)。均值是对返回帧的每一个像素取的,而整帧就是那一个颜色。
 
-| fixture | authored | Media Foundation (Windows) | AVFoundation (Mac mini, macOS 26.6.2) |
+| 夹具 | 作者写的 | Media Foundation(Windows) | AVFoundation(Mac mini,macOS 26.6.2) |
 |---|---|---|---|
 | `folio-video-test.mp4` | `E0 7A 2F` = (224,122,47) | **(224,122,48)** | **(223,136,53)** |
 | `folio-video-test.mov` | `2F 7A E0` = (47,122,224) | **(48,122,225)** | **(67,135,228)** |
 
-Both arms return a 160×120 raster, both report a native size of 160×120, and both
-read the declared length back exactly — 5000 ms and 3000 ms.
+两条臂都回一张 160×120 的位图,都报原生尺寸 160×120,也都把声明的时长精确读回来——5000 ms 与 3000 ms。
 
-**The two arms are not bit-identical, and the reason is stated rather than
-averaged away.** Media Foundation's video processor converts YUV to RGB with the
-stream's own matrix and hands the result over **untagged**, which the renderer
-then treats as sRGB; it lands within **1** of the colour ffmpeg was given. Core
-Graphics is handed a frame that carries a colour space and **colour-matches it
-into the sRGB the context declares**, which for an SD clip whose primaries are
-not sRGB's is a real conversion; it lands within **20**, the largest single
-channel being the `.mov`'s red at +20. Neither is a defect: the Windows number is
-the raw round trip and the macOS number is the colorimetric one, and at this
-magnitude the card shows the same picture. **Naming the space is the honest
-spelling of the assumption the other arm makes silently**, and the alternative —
-a bitmap context with no colour management — is not a thing Core Graphics offers.
+**两条臂不是逐位相同的,而理由是写出来而不是求个平均糊过去。** Media Foundation 的视频处理器用流自己的矩阵把 YUV 转成 RGB,交出来时**不带标记**,渲染器随后把它当 sRGB;它落在 ffmpeg 收到的那个颜色的 **1** 以内。Core Graphics 拿到的是一帧带着色彩空间的画,它会**把它色彩匹配到上下文声明的那个 sRGB 里**,而对一段原色不是 sRGB 的 SD 片子来说那是一次真的转换;它落在 **20** 以内,最大的单通道是 `.mov` 的红通道 +20。两个都不是缺陷:Windows 那个数是原样的一趟往返,macOS 那个数是比色学上的那一个,而在这个量级上卡片显示的是同一张画。**把空间的名字写出来,才是另一条臂默默做的那个假设的老实拼法**,而另一个选项——一个不做色彩管理的位图上下文——Core Graphics 根本不提供。
 
-`video_first_frame.rs`'s `TOLERANCE` is **32**: that measured 20, with room for a
-macOS release whose matching moves a little, and still nowhere near the defects
-the assertion exists for. A red and blue swapped on the way out is ~180 off; a
-frame taken at time zero rather than a tenth in is the whole distance to black.
+`video_first_frame.rs` 的 `TOLERANCE` 是 **32**:量到的是 20,留出一点余地给某个匹配稍有移动的 macOS 版本,而且离这条断言为之存在的那些缺陷还远得很。出门路上红蓝互换是差 ~180;一帧取在时间零而不是十分之一处,差的是到黑色的整段距离。
 
-**④ The cap is a cap, and the two platforms really do answer it differently.**
-Both arms compute the fitted size themselves — `contain`, which keeps the shape
-and **never enlarges** — and hand it down as a request. Asked for 80×80 with this
-160×120 clip, `AVAssetImageGenerator` returns **80×60** and Media Foundation
-returns **160×120**: its video processor refused the smaller output type for this
-file, and `request_rgb32`'s second attempt settled for RGB-32 at native size,
-which is the case that function's own header says it exists for. Neither is
-visible, because the window's sampler fits whichever it is given into the same
-box, so `a_frame_asked_for_smaller_keeps_its_proportions` asserts the two things
-that are true either way: nothing comes back larger than the file, and whatever
-comes back has the file's shape.
+**④ 那个上限是个上限,而两个平台确实答得不一样。** 两条臂都自己算合适的尺寸——`contain`,保形而且**绝不放大**——再把它当一个请求传下去。拿这段 160×120 的片子要 80×80,`AVAssetImageGenerator` 回 **80×60**,而 Media Foundation 回 **160×120**:它的视频处理器对这份文件拒绝了更小的输出类型,而 `request_rgb32` 的第二次尝试退而求其次拿了原生尺寸的 RGB-32,那正是那个函数自己的头注说它为之存在的情形。哪一种都看不出来,因为窗口的采样器会把拿到的那一种装进同一个框,所以 `a_frame_asked_for_smaller_keeps_its_proportions` 断言的是两边都成立的那两件事:回来的东西不会比文件大,而且回来的东西带着文件的形状。
 
-**⑤ Where the file is cut, and why the portable file kept its name.** §4.3 of the
-port plan says a `#[cfg(windows)] pub mod` becomes a plain `pub mod` with
-`win`/`mac`/`neither` bodies. This ticket takes the half of that which is M4-4's:
-`video/mod.rs` and `video/engine.rs` are untouched Media Foundation, and
-`video_portable.rs` — the whole of `video` off Windows — grows a macOS body in
-`macos_video.rs` and a `no_decoder` one beside it, with a `cfg` on the arms and
-none on the call sites. It is `handoff.rs`'s shape exactly, where `macos_handoff`
-sits beside `portable_handoff`.
+**⑤ 这个文件是在哪里切的,以及可移植那个文件为什么留着它的名字。** 移植计划 §4.3 说一个 `#[cfg(windows)] pub mod` 要变成一个普通 `pub mod`,带 `win`/`mac`/`neither` 三份函数体。本票取的是其中属于 M4-4 的那一半:`video/mod.rs` 和 `video/engine.rs` 还是原封不动的 Media Foundation,而 `video_portable.rs`——Windows 之外整个 `video`——在 `macos_video.rs` 里长出一份 macOS 函数体,旁边配一份 `no_decoder`,`cfg` 在臂上、调用点上一个都没有。这就是 `handoff.rs` 的形状,那里 `macos_handoff` 挨着 `portable_handoff` 坐着。
 
-What stayed in the shared file is everything that is **not** a decoder: the
-frame's shape, the two timing constants, the cost breakdown, `contain` and
-`within_budget`. What did not move is `VideoFrame` itself, and that is a refusal
-rather than an oversight. There are now two real implementations of the *first
-frame* and still only one of the engine, so gathering `VideoFrame` into a shared
-file today would take it out from beside `Frame`, `EngineError` and
-`EngineState`, which would still be written twice — **one definition shared and
-three copied reads worse than four copied.** M4-5 is when that moment arrives.
+留在共享文件里的是每一样**不是**解码器的东西:帧的形状、两个时间常量、开销明细、`contain` 与 `within_budget`。没有挪的是 `VideoFrame` 本身,而那是一次拒绝而不是一次疏忽。现在**首帧**有两份真实现,而引擎仍然只有一份,所以今天把 `VideoFrame` 收进一个共享文件,会把它从 `Frame`、`EngineError` 和 `EngineState` 旁边拿走,而那三个仍然要写两遍——**一个定义共享加三个拷贝,比四个拷贝更难读。** 那一刻到来时是 M4-5。
 
-**⑥ No main thread, and therefore no second `harness = false` target.** Nothing
-in this file touches AppKit, so there is no `window_thread()` at the top of any
-door the way `macos_impl.rs` opens every one of its own. The citation is the one
-§13.18 already gave for `NSWorkspace`: Apple's *Thread Safety Summary* lists the
-classes that are the main thread's — `NSView`, `NSWindow` and `NSApplication`
-each say so in their own reference — and says of everything it does not list,
-"In most cases, you can use these classes from any thread as long as you use them
-from only one thread at a time." `AVAsset`, `AVAssetImageGenerator` and
-`CGBitmapContext` are on neither list, and none of their references states a
-thread requirement.
+**⑥ 没有主线程,所以也没有第二个 `harness = false` 的目标。** 这个文件里没有任何东西碰 AppKit,所以任何一扇门开头都没有 `macos_impl.rs` 给自己每一扇门都开的那句 `window_thread()`。依据就是 §13.18 已经为 `NSWorkspace` 给过的那一条:Apple 的 *Thread Safety Summary* 列出属于主线程的那些类——`NSView`、`NSWindow` 和 `NSApplication` 各自的参考里都写着——并对它没有列到的东西说:「多数情况下,只要一次只从一个线程使用,就可以从任何线程使用这些类。」`AVAsset`、`AVAssetImageGenerator` 和 `CGBitmapContext` 两张表都不在,而它们的参考都没写任何线程要求。
 
-There is stronger evidence than an absence, in two places.
-`AVAssetImageGenerator`'s own asynchronous form documents that it calls its
-handler back on a queue **AVFoundation owns** rather than on the main queue, and
-a class that required the main thread could not offer that. And this repository
-produces its own: every case in `tests/video_first_frame.rs` runs on a thread
-libtest spawned — §13.17 measured that `MainThreadMarker::new()` is `None` there
-even under `--test-threads=1`, which is why the sheet cases needed a target of
-their own — and those cases are green on the Mac. **A green run of that file is
-the statement.** §13.17's pattern is for code that must own the process's first
-thread; this is not that code.
+比「没有记载」更强的证据有两处。`AVAssetImageGenerator` 自己的异步形式写明它在**AVFoundation 拥有的**一条队列上回调,而不是在主队列上,而一个要求主线程的类提供不了这件事。而这个仓库自己也产出了一份:`tests/video_first_frame.rs` 里每一只用例都跑在 libtest 开出来的线程上——§13.17 量过,即使加 `--test-threads=1`,那里的 `MainThreadMarker::new()` 也是 `None`,那正是 sheet 那几只用例需要一个自己的目标的原因——而那些用例在 Mac 上是绿的。**那个文件跑绿本身就是那句陈述。** §13.17 那套做法是给必须占住进程第一条线程的代码用的;这不是那种代码。
 
-What `first_frame` does need is to be off the thread that *draws*, and it takes
-the Windows arm's answer: a thread of its own with `FIRST_FRAME_BUDGET` over it.
-Apple's own note on `copyCGImageAtTime:` says the generator "may have to block
-the calling thread", and a file nothing can decode would otherwise be three
-seconds of frozen window.
+`first_frame` 真正需要的是离开**画画**的那条线程,而它取的是 Windows 那条臂的答案:一条自己的线程,上面罩着 `FIRST_FRAME_BUDGET`。Apple 自己在 `copyCGImageAtTime:` 上的注写着这个生成器「可能不得不阻塞调用线程」,而一份什么都解不出来的文件否则就是三秒钟的死窗。
 
-**⑦ Two deprecated calls, on purpose.** `copyCGImageAtTime:actualTime:error:` and
-`tracksWithMediaType:` are both marked deprecated since macOS 13 in favour of
-forms that take a completion handler. Those forms exist because the synchronous
-ones block, and **blocking is what this lane is built to do**: it already owns a
-thread and a budget, so the asynchronous shape would buy a `block2` closure, a
-channel, and an answer arriving after the budget had given up — the bargain
-§13.18 refused for `openURL:`. Neither call is removed and neither is unavailable
-at this product's deployment target.
+**⑦ 两个废弃的调用,是故意的。** `copyCGImageAtTime:actualTime:error:` 和 `tracksWithMediaType:` 都标着自 macOS 13 起废弃,建议改用带 completion handler 的形式。那些形式存在是因为同步的这些会阻塞,而**阻塞正是这条道被建出来要做的事**:它本来就有一条自己的线程和一份预算,所以异步的形状换来的是一个 `block2` 闭包、一条通道,以及一个在预算已经放弃之后才到的答案——也就是 §13.18 为 `openURL:` 拒掉的那笔买卖。两个调用都没被删掉,而且在这个产品的部署目标上都不是不可用的。
 
-**⑧ Two packages compiled, five lines in the lock file, and both numbers are in
-`Cargo.toml`.** `objc2-av-foundation` 0.3.2 and `objc2-core-media` 0.3.2 are
-linked; `objc2-core-graphics` 0.3.2 was already in the lock file through wgpu's
-Metal backend and is only named now. `objc2-core-audio`, `objc2-core-audio-types`
-and `objc2-core-video` resolve into `Cargo.lock` and into nothing else — CoreMedia
-declares all three optional and no feature here turns any of them on — so they
-appear under *In the lock file, not in any resolved build* in
-`THIRD-PARTY-NOTICES.md`, the section that exists so the two counts a reader might
-compare are reconciled. All five are the same repository and the same release as
-the objc2 crates this crate already carries. The alternative was hand-declaring
-three selectors and a struct layout against classes this crate does not own.
+**⑧ 编进去两个包,锁文件里五行,而两个数都在 `Cargo.toml` 里。** `objc2-av-foundation` 0.3.2 与 `objc2-core-media` 0.3.2 被链接进来;`objc2-core-graphics` 0.3.2 经 wgpu 的 Metal 后端本来就在锁文件里,现在才被点名。`objc2-core-audio`、`objc2-core-audio-types` 和 `objc2-core-video` 解析进 `Cargo.lock`,别的什么都没进去——CoreMedia 把这三个都声明为可选,而这里没有一个 feature 打开它们中的任何一个——所以它们出现在 `THIRD-PARTY-NOTICES.md` 的*在锁文件里,不在任何已解析的构建里*那一节,那一节存在就是为了把读者可能拿来对照的那两个计数对上。这五个都跟这个 crate 已经带着的那些 objc2 crate 出自同一个仓库、同一个 release。另一个选项是对着这个 crate 并不拥有的类手写三个选择子和一份结构体布局。
 
-**⑨ Three instruments, because no one of them can hold the claim.**
-`tests/video_first_frame.rs` runs one set of assertions against whichever decoder
-the machine has and is the only place the *bytes* are checked; it is green on
-both machines and it is what ③ and ④ are measured with.
-`macos_video_signature_tests` in `lib.rs` compares the two arms as **text** on the
-Windows workstation, where only one of them compiles: the three doors'
-signatures, `VideoFrame`'s and `FirstFrameCost`'s fields and derives, the two
-constants, and the opaque alpha. And `cargo check -p bt-platform --target
-aarch64-apple-darwin --all-targets` on the Windows machine is what says the macOS
-arm compiles before it is ever pushed.
-### 13.26 M3-2: 菜单栏——键等价物从 BINDINGS 生成，菜单项和快捷键走同一个动词（`crates/bt-app/src/{menubar,main}.rs`、`crates/bt-platform/src/{menu,macos_menu,app_delegate,lib}.rs`、`crates/bt-platform/tests/macos_menu_bar.rs`）
+**⑨ 三件仪器,因为没有哪一件单独撑得住这个主张。** `tests/video_first_frame.rs` 对着这台机器手上那个解码器跑同一套断言,而且是唯一核**字节**的地方;它在两台机器上都绿,③ 和 ④ 就是拿它量的。`lib.rs` 里的 `macos_video_signature_tests` 在 Windows 工作站上把两条臂当**文本**比,而那里只有一条编得过:三扇门的签名、`VideoFrame` 与 `FirstFrameCost` 的字段和 derive、两个常量,以及那个不透明的 alpha。而 Windows 机器上的 `cargo check -p bt-platform --target aarch64-apple-darwin --all-targets`,是在 macOS 那条臂被推上去之前说它编得过的那个东西。
 
-**① The bar is a value, and the one place it is decided is the crate that already decides what `Cmd+T` does.** M1-7 turned winit's own menu off (§13.13 ⑤) because that menu's `Quit` sent `terminate:` and quit *past* [`quit`] — the session document unwritten, no window in Recent. The menu coming back must not bring a second decider with it. So `bt-app` owns **what the bar is** and `bt-platform` owns **the `NSMenu`**, and the thing that crosses between them is a plain data structure: `bt_platform::menu::MenuPlan`, five menus of rows, with no Objective-C in it and no opinion of its own. A row of the bar names a verb by the **stable id `BINDINGS` already calls it by** (`"new-tab"`, `"quit"`), and its title and its chord are read back out of that row — never written a second time in `menubar.rs`. That is `Shortcuts::accelerator`'s rule one surface up: the menu and the hint card introduce a reader to the same verb, and two names would make it two verbs. `every_chord_on_the_bar_is_the_tables_mac_column` and `every_mac_chord_is_on_the_bar_or_named_here` hold the constant to the table from both ends, and both run on a Windows workstation because `Shortcuts::defaults_for(HostPlatform::MacOs)` is a value.
+### 13.26 M3-2: 菜单栏——键等价物从 BINDINGS 生成,菜单项和快捷键走同一个动词(`crates/bt-app/src/{menubar,main}.rs`、`crates/bt-platform/src/{menu,macos_menu,app_delegate,lib}.rs`、`crates/bt-platform/tests/macos_menu_bar.rs`)
 
-**② A key equivalent cannot be scoped, and the Mac is what said so.** AppKit answers a menu key equivalent in `performKeyEquivalent:`, **before** `keyDown:`. That is what this ticket was wanted for — §13.16 ⑤ recorded that a chord pressed into a live composition never reaches this application, because winit hands the key to `interpretKeyEvents:` — and it is also a claim on that chord from every other surface on the screen, the terminal's child included.
+**① 这条栏是一个值,而决定它的那一处就是已经在决定 `Cmd+T` 做什么的那个 crate。** M1-7 把 winit 自己的菜单关掉了(§13.13 ⑤),因为那个菜单的 `Quit` 发的是 `terminate:`、**绕过** `quit` 退出——会话文档没写,没有一扇窗进 Recent。菜单回来时不许带第二个决定者一起回来。所以 `bt-app` 拥有**这条栏是什么**,`bt-platform` 拥有**那个 `NSMenu`**,而在两者之间跨过去的是一份纯数据结构:`bt_platform::menu::MenuPlan`,五个菜单若干行,里面没有 Objective-C,也没有它自己的主张。栏上的一行按**`BINDINGS` 已经在用的那个稳定 id** 点一个动词的名(`"new-tab"`、`"quit"`),而它的标题和它的和弦都是从那一行上读回来的——在 `menubar.rs` 里绝不第二次写。那是 `Shortcuts::accelerator` 那条规矩往上一个面:菜单和键位提示卡把读者引见给同一个动词,而两个名字会让它变成两个动词。`every_chord_on_the_bar_is_the_tables_mac_column` 与 `every_mac_chord_is_on_the_bar_or_named_here` 从两头把这个常量按在表上,而且两只都在 Windows 工作站上跑,因为 `Shortcuts::defaults_for(HostPlatform::MacOs)` 是一个值。
 
-The first draft made the claim conditional with the enabled flag: grey the row out of scope, and AppKit declines the key so the press falls through. **That is not what happens.** Measured on the Mac, 2026-09-12, by the case this ticket ships (`tests/macos_menu_bar.rs`, and the control beside it is a chord no row carries, which answers `NO` as expected): a greyed row does **not** run its verb — and `performKeyEquivalent:` still answers `YES`, so the press is **swallowed**. A `Cmd+S` printed beside a greyed `Save` would be a `Cmd+S` that reaches neither the preview nor the shell.
+**② 一个键等价物没法限定作用域,而这是 Mac 说出来的。** AppKit 在 `performKeyEquivalent:` 里答一个菜单键等价物,那在 `keyDown:` **之前**。这正是这张票被要来做的事——§13.16 ⑤ 记过一个按进活着的组合里的和弦根本到不了这个应用,因为 winit 把那个键交给了 `interpretKeyEvents:`——而它同时也是对屏幕上其他每一个表面、包括终端的子进程,提出的一次对这个和弦的主张。
 
-So the rule is the one that does not rest on it: **a row prints its key only when it is in force from every focus state** (`Scope::Window`). Every other row — `save-preview`, the two search rows, the page's address and its tools, the two command marks — is on the bar, and clickable, and greyed when it cannot act, but its **chord is left to `keyDown:` and `Shortcuts::lookup`**, which is where a scope has always been decided and is the one place that can decide it. Nothing regresses: those chords behave exactly as they did before the bar existed, and ruling 9's sentence about `Ctrl+S` is untouched. What the bar buys is §13.16 ⑤'s win for every row that is in force everywhere, which is most of them — `Cmd+T`, `Cmd+N`, `Cmd+W`, `Cmd+Q`, the tab walk, the splits, the palette — and those now answer over a live composition.
+初稿拿 enabled 标志把这次主张做成有条件的:不在作用域内就把这一行置灰,于是 AppKit 谢绝这个键,按下落穿过去。**实际不是这样。** 2026-09-12 在 Mac 上由本票发出的那只用例量到(`tests/macos_menu_bar.rs`,旁边的对照是一个没有任何行带着的和弦,它如预期答 `NO`):一行被置灰的行确实**不跑**它的动词——而 `performKeyEquivalent:` 仍然答 `YES`,所以那次按下被**吞掉**。一个印在置灰的 `Save` 旁边的 `Cmd+S`,就是一个既到不了预览也到不了 shell 的 `Cmd+S`。
 
-The enabled flag stays, and it is still `Scope::holds` asked of the window that has the keyboard. What it means is now exactly what it says: a row a reader can see cannot act, and — measured — one that will not act if pressed. `autoenablesItems` is off on every menu because this product's answer to *is this row in force* is a scope, and a scope is not a question any responder can be asked.
+所以规矩取的是不依赖这一条的那一条:**一行只在它从每一种焦点状态下都生效时才印出它的键**(`Scope::Window`)。其余每一行——`save-preview`、两行搜索、页面的地址与它的工具、两个命令标记——都在栏上、都能点、不能动作时置灰,但它的**和弦留给 `keyDown:` 与 `Shortcuts::lookup`**,而作用域历来就是在那里决定的,也是唯一能决定它的地方。没有任何东西退步:那些和弦的行为跟这条栏存在之前一模一样,而裁决 9 里关于 `Ctrl+S` 的那句话一笔没动。这条栏买到的是 §13.16 ⑤ 那个好处,给每一行处处生效的行——而那是其中的大多数——`Cmd+T`、`Cmd+N`、`Cmd+W`、`Cmd+Q`、标签走位、分屏、命令面板——它们现在能压在一段活着的组合之上作答。
 
-**③ A press is a choice on M3-1's channel, and nothing runs where it is heard.** X-4's rule, and **the same channel rather than a second one beside it**: `bt-app` wraps the choice in an `AppDelegateEvent` with a new `AppDelegateOrigin::Menu` and hands it to `AppDelegate::sender`, so a menu press is parked in the same inbox as a Finder reopen, buffered by the same rule, released in the same order and drained by the same statement (`settle_app_delegate_events`). What the two have in common is everything that gave that channel its shape — the gesture arrives at **AppKit** rather than at any window of ours, on the main thread, inside a callback with a framework frame underneath it (for a menu, AppKit's own tracking loop) — so §13.21's rule ① covers this door word for word. Two channels would also be two orderings: a reopen and the `New window` row a reader pressed a millisecond later would arrive in two inboxes with nothing between them. The AppKit action does one thing — hand the choice to the sender — and the sender does two: park, and post one `AppDelegateSpoke`. Everything else happens on the loop's own turn, where there is an `ActiveEventLoop` and every window at once. **A verb reaches `Runtime::run_shortcut`, which is the very function the chord reaches**; the whole of what the menu adds is the id of the row that was pressed. `Quit` is one of those ids and not `terminate:`, and `macos_menu`'s own case refuses the selector by name so that the thing M1-7 turned off cannot come back through the thing that replaced it. The drain is already **before** the window door and the quit on that chain, which is what the verbs it runs need: `New window` queues a plan and `Quit` sets the bit, exactly as their chords do, and both are spent two statements later.
+enabled 标志留着,而且仍然是拿着键盘的那扇窗被问的 `Scope::holds`。它现在的含义正是它字面上的意思:一行读者看得见的行不能动作,而且——量过——按下去也不会动作。每一个菜单的 `autoenablesItems` 都是关的,因为这个产品对*这一行生不生效*的回答是一个作用域,而作用域不是任何一个响应者答得出的问题。
 
-**④ The Edit menu's six rows are AppKit's, they carry no chord, and one half of that is a carry-forward.** Cut, Copy, Paste and Select All are not rows of `BINDINGS` at all: the clipboard pair is `input.rs`'s two predicates, which §4.7 of the port plan names as the thing the table does not cover. There is therefore no mac column to generate a key equivalent from — and writing `Cmd+C` by hand would not merely break this section's own pin, it would **take the chord off the terminal**, because a key equivalent is answered before `keyDown:` and `should_copy_selection` would stop being reached the day it shipped. Undo and Redo are the same decision from the other side: the table has `undo-preview` and `redo-preview`, but those are the preview **buffer's** undo, and the Edit menu's Undo is whatever holds the keyboard — a field in a sheet, a form on a page. So all six are sent as AppKit's own selectors with **no target**, and the responder chain answers them.
+**③ 一次按下是 M3-1 那条通道上的一个选择,而它被听到的地方什么也不跑。** X-4 的规矩,而且是**同一条通道而不是它旁边再开一条**:`bt-app` 把这个选择裹进一个带新的 `AppDelegateOrigin::Menu` 的 `AppDelegateEvent`,交给 `AppDelegate::sender`,于是一次菜单按下停在跟一次访达重开同一个收件箱里,按同一条规矩缓冲,按同一个顺序放行,由同一条语句排空(`settle_app_delegate_events`)。两者共通的正是给那条通道定了形的全部东西——这个手势到达的是 **AppKit** 而不是我们的任何一扇窗,在主线程上,在一个底下垫着框架栈帧的回调里(对菜单来说是 AppKit 自己的跟踪循环)——所以 §13.21 的规矩 ① 一字不差地覆盖这扇门。两条通道同时也是两种次序:一次重开和读者一毫秒之后按下的 `New window` 行,会到达两个收件箱,而两者之间什么都没有。AppKit 那个 action 只做一件事——把选择交给发送方——而发送方做两件:停下,再发一条 `AppDelegateSpoke`。别的一切都发生在循环自己那一轮上,那里有一个 `ActiveEventLoop`,也一次就有了每一扇窗。**一个动词到达 `Runtime::run_shortcut`,而那正是和弦到达的那同一个函数**;菜单加的全部就是被按下那一行的 id。`Quit` 是其中一个 id 而不是 `terminate:`,而 `macos_menu` 自己那只用例按名字拒绝这个选择子,好让 M1-7 关掉的那样东西没法经取代它的那样东西回来。排空本来就排在那条链上窗口门和退出之**前**,而那正是它所跑的那些动词需要的:`New window` 排一个计划,`Quit` 置那个位,跟它们的和弦做的一模一样,而两者都在两条语句之后被消费掉。
 
-What that costs, stated rather than hidden: **Edit ▸ Copy with the keyboard on a terminal does nothing**, because nothing in the responder chain under winit's view implements `copy:`. The chord still copies — M1-7 is untouched — but the menu row is inert there. The seat for Folio's own answer is a responder at the end of that chain, which is the application delegate's object, and that object is M3-1's. **Carry-forward:** when M3-1 lands, the four clipboard selectors get an implementation on it that sends the same kind of choice this bar already sends; and the ticket that moves the clipboard pair into `BINDINGS` is the one that can then give those rows a chord. Until both, the six are the named exclusion and the bar prints no key beside them.
+**④ 编辑菜单那六行是 AppKit 的,它们不带和弦,而这里面有一半是挂账。** 剪切、拷贝、粘贴和全选根本不是 `BINDINGS` 的行:剪贴板那一对是 `input.rs` 的两个谓词,而移植计划 §4.7 正是把它点名为那张表没有覆盖的东西。所以根本没有一个 mac 列可以从中生成键等价物——而手写一个 `Cmd+C` 不只会弄红本节自己那根钉,它会**把这个和弦从终端手里拿走**,因为一个键等价物在 `keyDown:` 之前作答,而 `should_copy_selection` 会在它发出去那天起就不再被够到。撤销与重做是同一个决定的另一面:表里有 `undo-preview` 和 `redo-preview`,但那些是预览**缓冲**的撤销,而编辑菜单的撤销是给不管谁攥着键盘用的——一张 sheet 里的一个框,一个页面上的一份表单。所以这六个都是作为 AppKit 自己的选择子、**不带 target** 发出去的,由响应链来答它们。
 
-**⑤ What is deliberately not on the bar.** `NOT_ON_THE_BAR` lists it by hand with a reason each, and a row that grows a macOS chord and reaches neither the bar nor that list turns a test red. Ten rows today: the **nine tab ordinals**, which are one folded family everywhere else a reader meets them and would otherwise stand as nine numbered lines directly above the Window menu's real list of open windows — which is AppKit's, handed over with `setWindowsMenu:`, and is the answer those nine lines look like they are giving; and **`close-search`**, whose key is Escape. Escape may not be claimed from a menu bar at all: §7.1.5's ladder answers that press long before the shortcut table is asked, and a key equivalent on it would be a second claim on the one key every rung of that ladder and every input method uses, held off only by an enabled flag staying perfectly in step.
+代价说出来而不是藏起来:**在一个终端上用键盘走「编辑 ▸ 拷贝」什么也不做**,因为 winit 那个 view 底下的响应链里没有任何东西实现 `copy:`。和弦照样拷贝——M1-7 一笔没动——但菜单那一行在那里是死的。给 Folio 自己那个答案留的位子,是那条链末尾的一个响应者,也就是应用代理那个对象,而那个对象是 M3-1 的。**挂账:**M3-1 落地时,那四个剪贴板选择子在它上面得到一份实现,发出跟这条栏已经在发的同一种选择;而把剪贴板那一对搬进 `BINDINGS` 的那张票,就是随后能给这些行配上和弦的那一张。在两者都到之前,这六个是点名的例外,栏上不在它们旁边印任何键。
 
-**⑥ The bar is reconciled every turn rather than hooked at three places.** Three things move under it and none of them announces itself: the language (a process-wide switch, `Settings ▸ Language`), a rebound chord (the recorder, a hand-edited `keybindings.json`, `Restore all defaults` — the same three doors `settle_quake` reconciles against), and the keyboard landing where a scoped row is not in force. `refresh_main_menu` runs at the end of the settle chain and costs nothing when there is nothing to carry: `menu::is_installed` is a constant `false` off macOS, so the walk of the table never happens there, and on a Mac a plan equal to the one on the screen is one comparison and no AppKit. A plan that kept its rows is written onto the items in place; a plan that moved one is built again — `MenuPlan::same_shape_as` is that rule, and it is what lets `refresh` find an item by its position in the plan's own walk instead of guessing.
+**⑤ 特意不上栏的那些。** `NOT_ON_THE_BAR` 一条一条手写出来,每一条带一个理由,而一行长出了 macOS 和弦却既不上栏也不进那份名单,就会让一只测试变红。今天有十行:**九个标签序号**,读者在别处遇到它们时它们是一个折起来的族,否则会作为九条编号的行直接站在窗口菜单那份真的已开窗口列表上面——那份列表是 AppKit 的,经 `setWindowsMenu:` 交过去,而那九行看起来正像是在给出那个答案;还有 **`close-search`**,它的键是 Escape。Escape 根本不许从菜单栏上被认领:§7.1.5 那道梯子在快捷键表被问到之前很久就答了那一按,而在它上面挂一个键等价物,就是对那条梯子每一级和每一种输入法都在用的那唯一一个键提出第二次主张,而拦着它的只是一个 enabled 标志一步不差地跟着。
 
-**⑦ What the `.app` case proves, and why it is a target of its own.** §13.17 ③'s finding again: libtest does not hand a case the main thread, and `menu::install` refuses exactly there by design, so a `#[test]` could only ever assert its own refusal. `crates/bt-platform/tests/macos_menu_bar.rs` is `harness = false`, gated on `BT_MAC_GUI`, and it **opens no window and posts no key** — a menu bar is the application's, and a press is delivered by handing `-[NSMenu performKeyEquivalent:]` an `NSEvent` the file makes, which is what `NSWindow` itself does one layer up. It walks `NSApp.mainMenu` against the plan (menus, titles, row counts, `autoenablesItems` off), checks that the Services submenu and the Window menu are the ones AppKit was handed, compares every key equivalent and mask item by item, and then presses three chords: `⌘T` answers `YES` and sends exactly one `Verb("new-tab")` and then nothing; `⌘S` on a **greyed** Save answers `NO` and sends nothing, which is the claim the whole enabled-flag design rests on; and `⌘Q` sends this product's own quit row, with the process still running on the next line.
+**⑥ 这条栏每一轮都对一遍账,而不是在三个地方各挂一个钩子。** 它底下有三样东西会动,而且没有一样会自己吱声:语言(一个进程级的开关,`Settings ▸ Language`)、一个被改绑的和弦(录制器、手改的 `keybindings.json`、`Restore all defaults`——也就是 `settle_quake` 对着的同样那三扇门),以及键盘落在一个有作用域的行不生效的地方。`refresh_main_menu` 跑在 settle 链的末尾,没有东西要带时一分钱不花:`menu::is_installed` 在 macOS 之外是常量 `false`,所以那里根本不会去走那张表;而在 Mac 上,一份和屏幕上那份相等的计划,只花一次比较、一点 AppKit 都不用。一份保住了它那些行的计划被就地写到各个 item 上;一份挪了其中一行的计划重建一次——`MenuPlan::same_shape_as` 就是这条规矩,而它正是让 `refresh` 能按一个 item 在计划自己那趟遍历里的位置找到它、而不用去猜的东西。
 
-**⑦′ What the Mac added to two of the menus, measured rather than assumed (2026-09-12).** The first run of that case went red on an assertion that the Edit menu had the one row the plan gave it: it had **eight**. AppKit appends rows of its own to a menu **titled `Edit`** — Writing Tools, AutoFill, Emoji & Symbols, Start Dictation and the rules between them — and to the menu it is handed as `windowsMenu`, where the list of open windows goes. Both are the system's half of those menus and this product does not ask for either to stop: the Info.plist keys that would (`NSDisabledCharacterPaletteMenuItem`, `NSDisabledDictationMenuItem`) would be taking an emoji picker and a dictation key off a reader who expects every application on the platform to have them. So what the plan promises is its **own** rows, in its own order, **at the front**, and the case asserts that and prints what AppKit added rather than pretending it did not. `refresh` is untouched by any of it, and that is the second half of why it walks the items this module retained rather than the live menu: a menu whose length the system may change is a menu an index into it cannot address.
+**⑦ 那只 `.app` 用例证明了什么,以及它为什么是一个自己的目标。** §13.17 ③ 那条发现再来一遍:libtest 不把主线程交给任何一个用例,而 `menu::install` 按设计恰好在那里拒绝,所以一个 `#[test]` 顶多只能断言它自己被拒绝了。`crates/bt-platform/tests/macos_menu_bar.rs` 是 `harness = false`,闸在 `BT_MAC_GUI` 上,而且它**不开窗也不发键**——菜单栏是应用的,而一次按下是靠给 `-[NSMenu performKeyEquivalent:]` 递一个这个文件自己造的 `NSEvent` 投过去的,那正是 `NSWindow` 自己在上一层做的事。它拿 `NSApp.mainMenu` 对着计划走一遍(菜单、标题、行数、`autoenablesItems` 是关的),核 Services 子菜单和窗口菜单就是交给 AppKit 的那两个,逐项比较每一个键等价物和修饰键掩码,然后按三个和弦:`⌘T` 答 `YES`,恰好发出一条 `Verb("new-tab")` 然后再没有别的;压在一行**置灰**的 Save 上的 `⌘S` 答 `NO` 并且什么也不发,那正是整套 enabled 标志设计所依赖的那个主张;而 `⌘Q` 发出的是这个产品自己的退出行,下一行上进程还在跑。
 
-**⑦″ And the Mac keys one of them, too.** The same case then went red on Minimize prints a key: the plan writes **no** key equivalent on that row and the bar came back with ⌘M on it. The menu handed over as windowsMenu is the system's to manage, and performMiniaturize: is one of the selectors it manages — so ⌘M arrives without anybody asking, which is exactly why BINDINGS has no row for it and why this ticket did not write one. What the case holds is therefore Folio's own claim and only that: **a row of this product's prints the chord the plan gave it and nothing else**, and a row AppKit answers may also be a row AppKit keys. The pin on the Windows side is unchanged and unweakened, because it is a claim about menubar.rs.
+**⑦′ Mac 往其中两个菜单里加了什么,是量出来的不是假定的(2026-09-12)。** 那只用例第一趟红在一条断言上:编辑菜单里应该只有计划给它的那一行;它有**八**行。AppKit 会往一个**标题为 `Edit`** 的菜单里追加它自己的行——写作工具、自动填充、表情与符号、开始听写,以及它们之间的分隔线——也会往被当作 `windowsMenu` 交过去的那个菜单里追加,已开窗口的列表就在那里。这两半都是系统在那两个菜单里的那一半,而这个产品不去要求其中任何一个停下:能做到这件事的 Info.plist 键(`NSDisabledCharacterPaletteMenuItem`、`NSDisabledDictationMenuItem`)会把一个表情选择器和一个听写键从一个指望这个平台上每个应用都有它们的读者手里拿走。所以这份计划承诺的是它**自己的**行、按它自己的顺序、**排在最前面**,而那只用例断言这一点,并把 AppKit 加了什么打印出来,而不是假装它没加。`refresh` 一点都没被这些影响到,而这是它为什么去走这个模块留住的那些 item 而不是走活菜单的第二个理由:一个长度可能被系统改掉的菜单,是一个索引指不准的菜单。
 
-**⑧ The titles.** Every verb row wears its `BINDINGS` row's own `Text`, so twenty-odd menu rows added no strings at all. What the bar does add is twenty-one entries — the five menu names, the rows AppKit answers by itself, `Services`, `Quit Folio` and `Folio Help` — and their Chinese column is the English string, filed in `Text::CHINESE_PENDING` with the 2026-09-07 copy ruling behind it. A Mac's menu bar is read beside every other application's, which is a register the person who writes Chinese writes.
+**⑦″ 而 Mac 还给其中一行配了键。** 同一只用例随后红在「最小化印了一个键」上:计划在那一行上**没有**写任何键等价物,而栏回来时它带着 ⌘M。作为 `windowsMenu` 交过去的那个菜单归系统管,而 `performMiniaturize:` 是它管的选择子之一——所以 ⌘M 不用谁去要就来了,这正是 `BINDINGS` 里没有它那一行、本票也没写一行的原因。所以那只用例按住的是 Folio 自己的主张、而且只有这一条:**这个产品自己的一行印出计划给它的那个和弦,别的不印**,而一行由 AppKit 作答的行,也可以是一行由 AppKit 配键的行。Windows 那一侧那根钉没动也没有变弱,因为它是一个关于 `menubar.rs` 的主张。
 
-*(本节英文，待中文文案改写。)*
+**⑧ 标题。** 每一个动词行都穿它那条 `BINDINGS` 行自己的 `Text`,所以二十来行菜单一个字符串都没加。这条栏真正加的是二十一条——五个菜单名、AppKit 自己作答的那些行、`Services`、`Quit Folio` 和 `Folio Help`——而它们的中文列就是英文串,填在 `Text::CHINESE_PENDING` 里,背后是 2026-09-07 那条文案裁决。一条 Mac 的菜单栏是挨着别的每一个应用的菜单栏读的,而那是写中文的人写的语域。
 
 ### 13.27 M4-10: 更新检查走 NSURLSession,原地换包在 mac 上变成「打开发布页」(`crates/bt-platform/src/macos_http.rs`、`crates/bt-platform/src/{lib,http_portable}.rs`、`crates/bt-platform/Cargo.toml`、`crates/bt-app/src/{update,main}.rs`)
 
