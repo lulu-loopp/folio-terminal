@@ -9619,3 +9619,231 @@ certificate store, the proxy configuration and the ATS policy are all only
 exercised by a real request. The cost is stated rather than hidden: `cargo test
 -p bt-platform` on a macOS machine with no network has three red cases, and they
 are red for the reason a reader would guess.
+
+### 13.29 M4-2: WKWebView 宿主——一个委托类走 navigation_gate,子资源靠编译好的规则表,数据仓按 bundle id 存(`crates/bt-platform/src/macos_webview.rs`(新)、`crates/bt-platform/src/{webview,webview_portable,lib}.rs`、`crates/bt-platform/tests/macos_webview.rs`(新)、`crates/bt-platform/Cargo.toml`、`crates/bt-app/src/{webnav,webhost}.rs`)
+
+**① One host, three arms, and `bt-app` still names no platform.** `webview.rs`
+declares twelve plain data types and compiles them everywhere; under them sit
+three `WebHost`s — the WebView2 one behind `#[cfg(windows)]`, the new
+`macos_webview.rs`, and `webview_portable.rs` for the machine that has neither.
+`web_host_contract_tests` in `lib.rs` reads all three as text and holds them to
+**one set of doors, spelled the same way**, because no compiler on one machine
+can check more than one of them — the same instrument, and the same argument, as
+M4-10's `update_check_transport_tests`. Two doors moved to make that true: the
+portable arm gained `browser_process_id` and `dpi_ownership`, which the Windows
+arm has, and lost `guards`, which the Windows arm never had and no caller in
+`bt-app` ever asked for.
+
+**② `WKWebView` is handed to the composition, not made by it.** The two engines
+are hosted the opposite way round. WebView2 renders into a visual the host makes
+and takes it through `put_RootVisualTarget`; WebKit makes its **own** `NSView`
+and the host has to take *that*. M4-1 built the door for it —
+`Compositor::attach_page_view(page, NativeWindow)` (§13.24) — and `install`'s
+fifth step is the one call through it. The slot is what sizes the page, so
+`set_bounds`, `set_rasterization_scale` and `notify_parent_window_moved` are
+honestly empty here: a second writer of one rectangle is how two clocks come to
+disagree.
+
+**③ Creation is two steps here too, and the second one really is asynchronous.**
+`request_environment` establishes the only thing that is shared and does live in
+a folder — the `WKContentRuleListStore` — and queues `WebEvent::Environment` on
+the spot. `request_controller` makes the view, and then *waits*: the seat's rule
+list is compiled in a completion block, and a page whose third door is not yet on
+it is not a page this host will let anybody navigate, so `WebEvent::Controller`
+is queued from that block. A navigation that arrives ahead of its rules is
+**parked** and the same block performs it. That is the whole of the ordering, and
+it is what makes `WebGuards::resource_requests` true rather than hopeful at
+install time.
+
+**④ One Objective-C class is the entire policy**, conforming to both
+`WKNavigationDelegate` and `WKUIDelegate` — X-2 measured one object serving the
+whole matrix. `decidePolicyForNavigationAction:` is asked about the main frame,
+every subframe, every redirect hop, a script setting `location`, a `data:` link
+and a `mailto:`, so it is the one callback that has to tell the first door from
+the third: `targetFrame.isMainFrame` picks `navigation_gate` or `request_gate`,
+which is the split `NavigationStarting` and `FrameNavigationStarting` make on the
+other platform. `Decision::Navigate(target)` where the target differs becomes
+cancel-then-load, and the substitute is started **after** the decision handler has
+been called rather than inside it. `decidePolicyForNavigationResponse:` is the
+download refusal (`canShowMIMEType == false`), `shouldPerformDownload` is its
+other half on the action, `createWebViewWithConfiguration:` returns nil after
+routing the address through the gate, and the three JavaScript panel methods are
+implemented and answer immediately — being there and returning at once is what
+`AreDefaultScriptDialogsEnabled(false)` plus `ScriptDialogOpening` buys on
+Windows.
+
+**⑤ The third door is a compiled rule list, and it is generated rather than
+written twice.** WKWebView has no per-request callback at all: X-2 measured a
+picture, a stylesheet, a script and a `fetch` each reaching a second origin's
+socket with no delegate ever naming them. So `webnav.rs` grows one function and
+**no new policy** — `content_rules(&Mint) -> String`, emitting Safari
+content-blocker JSON out of the same four scheme tables `resource_request` now
+reads (`DOCUMENTS_OWN_BYTES`, `ENGINE_INTERNAL`, `DISK`, `NETWORK`). A browsing
+seat blocks `^file:`, the host's blank page blocks that and both network
+schemes, and a local seat blocks the network only — because the *folder* half is
+not a pattern at all.
+
+**One rule per scheme, and that is a measured requirement rather than a style.**
+The first spelling of this was `^(http|https)://`, one rule carrying the
+alternation, and `WKContentRuleListStore` refused to compile it — found on the
+machine by the `.app` proof below, because a content blocker's `url-filter` is a
+*subset* of regular expressions and a group is not in it. One rule per entry of
+the table is what compiles, and it is still generated rather than written: a
+scheme added to `NETWORK` becomes another rule rather than another branch
+somebody has to remember. `the_patterns_name_the_schemes_the_tables_do` refuses
+a pattern carrying `(` or `|` so that the finding cannot be lost again, and a
+compile that does fail now carries **WebKit's own sentence** into the seat's
+fault line: the first run of the proof spent a whole cycle establishing a fact
+the framework had already said out loud. It is `-[WKWebView loadFileURL:allowingReadAccessToURL:]` with
+the minted file's own folder, which X-2 measured enforcing it with no rule list
+in the room. `the_two_spellings_of_the_resource_rule_agree` asks every row of
+X-2's fixture set of **both** spellings and requires the pair — patterns plus
+read access — to refuse exactly what `resource_request` refuses. No mint compiles
+to an empty list, because `WKContentRuleListStore` refuses one and a seat whose
+compilation failed would have no third door at all.
+
+The rule moves when the mint does, so the seat says it again before every
+navigation. `WebHost::set_request_rules` is therefore a door on **every** arm —
+`bt-app` names no platform — and the two arms whose engine asks per request drop
+what they are handed in one line that says so. The identifier a list is compiled
+under is a hash of its own contents, because `WKContentRuleListStore` caches by
+identifier on disk and a name that meant "the file seat's" would go on answering
+with last week's compilation.
+
+**⑥ The website data store is the default, persistent one, keyed on the bundle
+identifier.** That is the same promise `%LOCALAPPDATA%\Folio\WebView2` makes on
+the other platform — a page a reader signed into is a page still signed in
+tomorrow — and it is why the plan builds the bundle from M1 rather than from M5
+(§4.5). X-2 recommended the non-persistent store; that would be a change to what
+the *product* promises rather than a question about how this platform is spelled,
+so the port keeps the behaviour and `SECURITY.md`'s web-preview paragraph records
+the cost on both machines. **There is no "clear web data" verb on either arm** to
+give an arm of: the Windows user data folder is a profile and is deliberately not
+deleted, and the macOS store is cleared the way any application's container is —
+`removeDataOfTypes:modifiedSince:completionHandler:` is where a later ticket would
+put one. What the folder `bt-app` still hands the host *is* used, and it is not
+the profile: `web_engine_folder` answers
+`~/Library/Application Support/Folio/WebKit` on a Mac, and what lives there is the
+compiled rule lists. It is asked of `bt_platform::host_platform` rather than of a
+`cfg`, which is what keeps `webhost.rs` off
+`only_the_named_files_decide_what_platform_this_is`' list.
+
+**⑦ A panic in a delegate callback is a refusal, not an abort.** X-2's second
+carry-forward: a panic unwinding out of a `#[unsafe(method(…))]` body crosses into
+Objective-C and ends the process, and a bundle started by `open` has no terminal
+to say so. Every entry point is wrapped, and the value a wrap falls back to is
+always the refusing one — cancel the navigation, deny the permission, open no
+window. A door that failed to decide has not decided.
+
+**⑧ X-2's first carry-forward did not need the hammer it was found with.** objc2
+verifies every selector against the receiver's **class** while debug assertions
+are on, and WebKit hands the authentication challenge over as
+`WKNSURLAuthenticationChallenge`, a forwarding wrapper whose `protectionSpace` is
+not a method on that class; the send works and only the verification refuses it.
+The probe turned the verification off, which a crate cannot do locally — objc2's
+`disable-encoding-assertions` is a Cargo feature and Cargo features unify across a
+build, so it would switch the checking off for every `msg_send!` in this
+workspace. The local answer is `performSelector:`, which *is* a method on every
+class descended from `NSObject`: the verification passes on it and the forwarding
+happens inside Objective-C, where it belongs. The challenge is read because it has
+to be — the same callback carries TLS server-trust challenges, and answering
+`RejectProtectionSpace` to those would break every `https` page. Server trust gets
+the system's own evaluation; every password box gets the refusal.
+
+**⑨ A page's process dying is the renderer's kind, not the browser's.**
+`webViewWebContentProcessDidTerminate:` is WebKit's only process notification and
+it names the one that draws. The `WKWebView` is still a live object with its
+delegates on it, and Apple's documented recovery is a reload — which is exactly
+what `WebMachine::on_render_process_failed` already answers a renderer death with.
+The browser-process kind would start a rebuild from an environment this platform
+does not have. There is likewise no `BrowserProcessExited`: a closing seat goes
+through `BROWSER_EXIT_DEADLINE`, which is the graceful path the Windows arm
+already measured — one shutdown in eight never said anything either.
+
+**⑩ What the port gives up, in plain words.** Seven sentences, and M4-3 is what
+says them in the product.
+
+* There is **no per-request door** for a document's own contents. A refusal is a
+  pattern that matched, not a question this program answered, so a rule that
+  cannot be written as a pattern cannot be enforced.
+* A request stopped that way is **dropped by the engine rather than answered**
+  with the empty 403 the Windows host mints, and Folio never learns it happened —
+  no `RequestRefused` line for the trace and no reason for a card to show.
+* Requests a **service worker or a shared worker** makes were not measured. The
+  Windows arm filters them on purpose; here they are unknown rather than covered.
+* **Permissions are refused one capability at a time**, so a capability a later
+  WebKit adds arrives with Apple's default rather than with Folio's refusal
+  already standing.
+* **A `javascript:` link is never offered to the gate.** X-2's matrix put it
+  beside `data:` and `blob:` in row 13 and it does not belong there: measured by
+  the `.app` proof, WebKit evaluates the URL in the page's own context and
+  raises no navigation action at all, where WebView2 raises `NavigationStarting`
+  and `webnav` refuses it as `ScriptOrInlineScheme`. What the claim reduces to
+  is what the *address* does, and the address does nothing — the seat does not
+  move, and a page can already run its own script with a `<script>` tag, so
+  nothing reaches an origin or a disk that could not before.
+* **The engine's own context menu stays.** `AreDefaultContextMenusEnabled` has no
+  counterpart in WKWebView's public API, so that row of `WEB_SETTINGS` is reported
+  unapplied rather than quietly assumed — one line on the diagnostics stream, and
+  nothing refuses a page over it.
+* **A page's icon and its match count never arrive.** WebKit announces neither in
+  any public form, so the seat wears the product's own mark and the search capsule
+  shows no number rather than a wrong one. The address also stands still for a
+  single-page application, because the history API moves it through key-value
+  observation rather than through a delegate.
+* **Nothing forwards the pointer, and nothing yet decides whether it arrives.** A
+  `WKWebView` is a real `NSView` in the window's own hierarchy, so AppKit delivers
+  to it directly and `send_mouse` has nothing to send — but the page's slot stands
+  *under* Folio's surface view (§13.24), and whether an event reaches the page at
+  all is a question about that view's hit testing. Neither M4-1 nor M4-2 settles
+  it; it is written down here and carried forward.
+
+**⑪ One package, and it is the web engine.** `objc2-web-kit` 0.3.2 — the same
+repository, the same release and the same `objc2` 0.6.4 as the seven crates
+already named. A `WKWebView` and its two delegate protocols are forty-odd
+selectors across a dozen classes, three of them taking completion blocks and two
+taking `NS_ENUM` returns; hand-declaring that is forty unchecked selectors and
+four hand-written struct layouts, which is the case §8 puts a dependency on the
+other side of. **`Cargo.lock` gains exactly one package and no other line moves**:
+every crate `objc2-web-kit` pulls in under the features named — `bitflags`,
+`block2`, `objc2`, `objc2-app-kit`, `objc2-core-foundation`, `objc2-foundation` —
+was already resolved, and `objc2-javascript-core` is an optional dependency no
+feature named here turns on.
+
+**⑫ The proof needs a bundle, and that is the finding worth carrying.**
+`tests/macos_webview.rs` is a fourth `harness = false` target, and its gate is not
+`BT_MAC_GUI` but *being inside a `.app`*: `defaultDataStore` is the application's
+store and the identifier is what makes it the application's, so a run out of
+`target/debug/deps` would prove something about a different store. It builds a
+window, a `Compositor`, a `WebHost` with the `Mint::File` policy written out, and
+drives every row of X-2's matrix that needs no network — the folder read and the
+folder refused, a `data:` link, a `javascript:` link, `window.open`, a download,
+`alert()`, a `file:` location outside the mint, and the view leaving the window
+when the seat closes. Two of those rows report a door rather than assert one,
+because that is what the run found: the `javascript:` link above, and the
+`file:` location outside the mint, which **the engine refuses before any
+callback** — `loadFileURL:allowingReadAccessToURL:`'s scope is X-2's row 9
+arriving one door earlier than the gate. The proof names which door refused
+instead of insisting on the one that did not have to. It reads `document.title` back off the page, which is the
+only channel a seat with no bridge has and is the one X-2 used; it photographs
+**its own** window with `CGWindowListCreateImage`, which needs no Screen Recording
+grant; and it drives nothing through System Events, so no privacy prompt can land
+on anybody's desk.
+
+**⑬ One defect the ticket did not name, found by writing the fixture down.**
+`Mint::file` composed `file:///` and then appended the path — which is right for
+`D:eport.html` and wrong for `/Users/somebody/report.html`, because the second
+already carries its own root. A Mac therefore minted `file:////Users/…`, four
+slashes, which every engine normalises back to three: the string the seat minted
+then matched neither the address the engine committed (`Mint::admits`) nor any
+candidate the folder rule was asked about, and **a local page refused itself**.
+The fix is two lines and it is a question about the string rather than about the
+machine, so `webnav.rs` still names no platform;
+`a_minted_file_url_has_one_root_however_the_path_spelled_it` pins both spellings
+and both doors. What is still owed is the *display* half —
+`Mint::path_and_tail_of_file_url` reads a URL back as a drive-absolute Windows
+path, so `local_path_form` answers `None` on a Mac and the surfaces that show a
+local file show its URL instead of its path. That is a ticket of its own and is
+carried forward here rather than smuggled in.
+
+*(本节英文,待中文文案改写。)*
