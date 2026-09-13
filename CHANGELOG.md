@@ -24,6 +24,14 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **Every picker in Settings that offers profiles now shows their marks.** The
+  summoned terminal's `Profile for new tabs` listed its profiles as bare words,
+  where the same profiles carry their marks on the tab strip, on the pane head
+  and in the new-tab `⌄` menu; and no picker showed a mark once it was closed.
+  Both now do, in the marks and at the size that menu draws. `Default profile`,
+  which is a deferral rather than a profile, keeps its word and borrows nobody's
+  mark.
+
 - Reuse unchanged Markdown prose measurements across caret moves and edits, and reset block scroll offsets after reparsing.
 
 - **While you type pinyin, the caret stands at the end of what you have typed.**
