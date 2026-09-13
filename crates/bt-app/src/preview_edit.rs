@@ -40,6 +40,10 @@ use crate::preview::{PREVIEW_TEXT_TAB_WIDTH, expand_tabs};
 /// and it is not a detail: the caret has to be able to stand on the line a file
 /// ends with, and `"a\n".lines()` claims that line does not exist.
 pub fn line_starts(content: &str) -> Vec<usize> {
+    #[cfg(test)]
+    let _clock = crate::preview_typing::Timer::new("line scan");
+    #[cfg(test)]
+    crate::preview_typing::count("indexed bytes", content.len());
     let mut starts = vec![0usize];
     for (index, byte) in content.bytes().enumerate() {
         if byte == b'\n' {
@@ -633,14 +637,18 @@ pub fn command(key: &Key, modifiers: ModifiersState) -> EditCommand {
 ///
 /// Reports whether the body actually changed, which is what the dirty bit is
 /// written from: an insert of nothing over nothing is not an edit.
-pub fn insert(content: &mut String, caret: &mut EditCaret, text: &str) -> bool {
+pub fn insert(
+    content: &mut impl crate::preview_text::EditTarget,
+    caret: &mut EditCaret,
+    text: &str,
+) -> bool {
     caret.heal(content);
     let range = caret.range();
     if range.is_empty() && text.is_empty() {
         return false;
     }
     let at = range.start;
-    content.replace_range(range, text);
+    content.replace(range, text);
     caret.collapse_to(at + text.len());
     true
 }
@@ -648,7 +656,10 @@ pub fn insert(content: &mut String, caret: &mut EditCaret, text: &str) -> bool {
 /// Delete backwards: the selection if there is one, otherwise one cluster —
 /// **or one whole line break**, `\r\n` included, because half a break is not a
 /// character and leaving the `\r` behind is how a file grows invisible bytes.
-pub fn backspace(content: &mut String, caret: &mut EditCaret) -> bool {
+pub fn backspace(
+    content: &mut impl crate::preview_text::EditTarget,
+    caret: &mut EditCaret,
+) -> bool {
     caret.heal(content);
     if !caret.is_empty() {
         return insert(content, caret, "");
@@ -657,13 +668,16 @@ pub fn backspace(content: &mut String, caret: &mut EditCaret) -> bool {
         return false;
     }
     let previous = previous_boundary(content, caret.caret);
-    content.replace_range(previous..caret.caret, "");
+    content.replace(previous..caret.caret, "");
     caret.collapse_to(previous);
     true
 }
 
 /// Delete forwards, on the same terms.
-pub fn delete_forward(content: &mut String, caret: &mut EditCaret) -> bool {
+pub fn delete_forward(
+    content: &mut impl crate::preview_text::EditTarget,
+    caret: &mut EditCaret,
+) -> bool {
     caret.heal(content);
     if !caret.is_empty() {
         return insert(content, caret, "");
@@ -673,7 +687,7 @@ pub fn delete_forward(content: &mut String, caret: &mut EditCaret) -> bool {
     }
     let next = next_boundary(content, caret.caret);
     let at = caret.caret;
-    content.replace_range(at..next, "");
+    content.replace(at..next, "");
     caret.collapse_to(at);
     true
 }
@@ -724,6 +738,7 @@ pub fn next_boundary(content: &str, offset: usize) -> usize {
 ///
 /// `page_rows` is how many lines the body can show, which only the geometry
 /// knows — a page is a *screenful*, so a taller pane pages further.
+#[cfg(test)]
 pub fn move_caret(
     content: &str,
     caret: &mut EditCaret,
@@ -731,9 +746,27 @@ pub fn move_caret(
     extend: bool,
     page_rows: usize,
 ) {
+    move_caret_indexed(
+        content,
+        &line_starts(content),
+        caret,
+        motion,
+        extend,
+        page_rows,
+    );
+}
+
+/// Move using the buffer's maintained logical line index.
+pub fn move_caret_indexed(
+    content: &str,
+    starts: &[usize],
+    caret: &mut EditCaret,
+    motion: Motion,
+    extend: bool,
+    page_rows: usize,
+) {
     caret.heal(content);
-    let starts = line_starts(content);
-    let line = line_index(&starts, caret.caret);
+    let line = line_index(starts, caret.caret);
     let vertical = matches!(
         motion,
         Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown
@@ -746,8 +779,8 @@ pub fn move_caret(
         Motion::Right if !extend && !caret.is_empty() => caret.range().end,
         Motion::Left => previous_boundary(content, caret.caret),
         Motion::Right => next_boundary(content, caret.caret),
-        Motion::LineStart => line_bounds(content, &starts, line).0,
-        Motion::LineEnd => line_bounds(content, &starts, line).1,
+        Motion::LineStart => line_bounds(content, starts, line).0,
+        Motion::LineEnd => line_bounds(content, starts, line).1,
         Motion::DocStart => 0,
         Motion::DocEnd => content.len(),
         Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown => {
@@ -760,9 +793,9 @@ pub fn move_caret(
             } else {
                 step
             };
-            let (start, _) = line_bounds(content, &starts, line);
+            let (start, _) = line_bounds(content, starts, line);
             let column = caret.desired_column.unwrap_or_else(|| {
-                column_of(line_text(content, &starts, line), caret.caret - start)
+                column_of(line_text(content, starts, line), caret.caret - start)
             });
             let wanted = line as isize + step;
             if wanted < 0 {
@@ -777,8 +810,8 @@ pub fn move_caret(
                 finish_move(content, caret, content.len(), extend, Some(column));
                 return;
             }
-            let (start, _) = line_bounds(content, &starts, wanted);
-            let text = line_text(content, &starts, wanted);
+            let (start, _) = line_bounds(content, starts, wanted);
+            let text = line_text(content, starts, wanted);
             let offset = start + byte_at_column(text, column);
             finish_move(content, caret, offset, extend, Some(column));
             return;

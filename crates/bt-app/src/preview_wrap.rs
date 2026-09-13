@@ -220,6 +220,8 @@ impl Measurement {
 }
 impl BlockWrapKey {
     fn measure(&self, measure: &mut WrapMeasure<'_>) -> Measurement {
+        #[cfg(test)]
+        crate::preview_typing::count("wrapped blocks", 1);
         let rows: Vec<f32> = self
             .paragraphs
             .iter()

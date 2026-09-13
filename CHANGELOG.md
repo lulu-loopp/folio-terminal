@@ -15,6 +15,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- Reduce typing and caret-movement delays in large Markdown documents.
+
 - **The card that appears when you rest on a file now fades in.** It used to
   arrive solid in a single frame; it now takes the same ninety milliseconds the
   small labels elsewhere in the window take, and arrives without moving or

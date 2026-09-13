@@ -2296,6 +2296,8 @@ pub fn parse_markdown_ranged(src: &str) -> (Vec<MarkdownBlock>, Vec<Range<usize>
 pub fn parse_markdown_mapped(
     src: &str,
 ) -> (Vec<MarkdownBlock>, Vec<Range<usize>>, Vec<BlockOrigins>) {
+    #[cfg(test)]
+    crate::preview_typing::count("parsed bytes", src.len());
     let lines: Vec<&str> = src.lines().collect();
     let mut out = RangedBlocks::new(src);
     // Both accumulators hold **source text**, not spans, because both of them
@@ -4031,7 +4033,12 @@ pub fn expand_tabs(line: &str) -> String {
 /// **Columns, not bytes and not characters.** It is what the horizontal
 /// scroller's extent is derived from, so a wide character measured as one column
 /// would leave the end of its own line permanently unreachable.
-fn widest_line_columns(text: &str) -> usize {
+#[cfg(test)]
+pub(super) fn widest_line_columns(text: &str) -> usize {
+    #[cfg(test)]
+    crate::preview_typing::count("width bytes", text.len());
+    #[cfg(test)]
+    let _clock = crate::preview_typing::Timer::new("width/index");
     text.lines()
         .map(|line| bt_unicode::text_width(&expand_tabs(line)))
         .max()
@@ -4643,7 +4650,8 @@ pub struct PreviewBuffer {
     pub name: String,
     pub ftype: PreviewFtype,
     /// The head of the file, once read.
-    pub content: Option<String>,
+    pub content: Option<crate::preview_text::Text>,
+    line_index: crate::preview_text::LineIndex,
     /// Whether [`PREVIEW_HEAD_BYTES`] cut the body short. The read-only
     /// degradation §7.1.3 asks for hangs off this; slice 1 carries the fact and
     /// the view that says so is slice 2's.
@@ -4765,10 +4773,8 @@ pub struct PreviewBuffer {
     stale: bool,
     /// The widest line of [`Self::content`], in drawn columns.
     ///
-    /// Derived once, when the body lands, rather than per frame: it is what the
-    /// horizontal scroller's extent is, a scroll happens sixty times a second,
-    /// and re-walking sixty-four kilobytes to answer it each time would put the
-    /// file's size into the frame budget the head read exists to keep it out of.
+    /// Initialized when the body lands and maintained from replacement deltas.
+    /// The horizontal scroller reads this maximum without scanning the body.
     pub max_columns: usize,
     /// **What the bytes said when this buffer was last read** (user ruling
     /// 2026-08-27; `docs/DESIGN.md` §7.32).
@@ -4965,6 +4971,7 @@ impl PreviewBuffer {
             name,
             ftype,
             content: None,
+            line_index: crate::preview_text::LineIndex::default(),
             truncated: false,
             dirty: false,
             revision: 0,
@@ -5501,8 +5508,14 @@ impl PreviewBuffer {
         let Some(content) = self.content.as_mut() else {
             return false;
         };
-        let was = content.clone();
-        if !edit(content) {
+        #[cfg(test)]
+        let copy_clock = crate::preview_typing::Timer::new("edit copy");
+        #[cfg(test)]
+        crate::preview_typing::count("edit copied bytes", content.len());
+        let was = content.to_string();
+        #[cfg(test)]
+        drop(copy_clock);
+        if !edit(content.make_mut()) {
             return false;
         }
         let change = crate::preview_undo::Change::implied(&was, content);
@@ -5528,29 +5541,35 @@ impl PreviewBuffer {
     /// an entry has to remember where the caret stood before the keystroke and
     /// where it ended up, or an undo can put the bytes back and not the hand.
     ///
-    /// **The change is worked out from the bytes** and not reported by the
-    /// closure. This door takes a closure precisely because a keystroke's effect
-    /// is the closure's to decide, so a closure that also described its own edit
-    /// would be a second account of it — and the two accounts would part company
-    /// the first time somebody wrote a third kind of edit. Comparing costs a copy
-    /// of the body per keystroke, which is a memory move next to the
-    /// whole-document re-parse already standing beside it.
+    /// The replacement records the undo delta at the same operation that changes
+    /// the bytes. Only the replaced text is compared and retained.
     pub fn edit_by_caret(
         &mut self,
         caret: &mut crate::preview_edit::EditCaret,
-        edit: impl FnOnce(&mut String, &mut crate::preview_edit::EditCaret) -> bool,
+        edit: impl FnOnce(
+            &mut crate::preview_text::EditText<'_>,
+            &mut crate::preview_edit::EditCaret,
+        ) -> bool,
     ) -> bool {
         let Some(content) = self.content.as_mut() else {
             return false;
         };
         let before = *caret;
-        let was = content.clone();
-        if !edit(content, caret) {
+        let mut target = crate::preview_text::EditText::new(content.make_mut());
+        if !edit(&mut target, caret) {
             return false;
         }
-        let change = crate::preview_undo::Change::between(&was, content, before, *caret);
+        let change = target.change.map(|mut change| {
+            change.before = before;
+            change.after = *caret;
+            change
+        });
         self.file_the_edit(change);
         true
+    }
+
+    pub fn line_starts(&self) -> &[usize] {
+        &self.line_index.starts
     }
 
     /// **Take back the buffer's last change**, and answer with the caret of
@@ -5561,7 +5580,11 @@ impl PreviewBuffer {
     /// keeps over a clean buffer.
     pub fn undo_edit(&mut self) -> Option<crate::preview_edit::EditCaret> {
         let content = self.content.as_mut()?;
-        let caret = self.undo.undo(content)?;
+        let mut target = crate::preview_text::EditText::new(content.make_mut());
+        let caret = self.undo.undo(&mut target)?;
+        if let Some(change) = target.change {
+            self.update_line_index(&change);
+        }
         self.settle_after_a_change();
         Some(caret)
     }
@@ -5569,7 +5592,11 @@ impl PreviewBuffer {
     /// The same, forwards.
     pub fn redo_edit(&mut self) -> Option<crate::preview_edit::EditCaret> {
         let content = self.content.as_mut()?;
-        let caret = self.undo.redo(content)?;
+        let mut target = crate::preview_text::EditText::new(content.make_mut());
+        let caret = self.undo.redo(&mut target)?;
+        if let Some(change) = target.change {
+            self.update_line_index(&change);
+        }
         self.settle_after_a_change();
         Some(caret)
     }
@@ -5583,9 +5610,19 @@ impl PreviewBuffer {
         // The revision still moves, because a cache keyed on it was invalidated
         // by the asking and re-deriving is cheap beside being wrong.
         if let Some(change) = change {
+            self.update_line_index(&change);
             self.undo.record(change);
         }
         self.settle_after_a_change();
+    }
+
+    fn update_line_index(&mut self, change: &crate::preview_undo::Change) {
+        self.line_index.replace(
+            self.content.as_deref().unwrap_or_default(),
+            change.at,
+            change.removed.len(),
+            &change.inserted,
+        );
     }
 
     /// What every move of the body owes, whichever direction it went in.
@@ -5595,7 +5632,7 @@ impl PreviewBuffer {
     /// cache is keyed on, and the dirty bit — and an undo owes exactly the same
     /// three, because an undo is a change to the body like any other.
     fn settle_after_a_change(&mut self) {
-        self.max_columns = widest_line_columns(self.content.as_deref().unwrap_or_default());
+        self.max_columns = self.line_index.max_columns();
         self.revision += 1;
         self.dirty = self.undo.is_dirty();
         // Every road into here is a hand on this window's keyboard — a
@@ -5811,6 +5848,7 @@ impl PreviewBuffer {
         // says, so nothing is left standing that claims the two have parted.
         self.disk = DiskNews::Level;
         self.content = None;
+        self.line_index = crate::preview_text::LineIndex::default();
         self.truncated = false;
         // [`Self::accept`]'s refusal arm's own line: a buffer with no body
         // decoded nothing, so it says nothing about how.
@@ -5927,6 +5965,7 @@ impl PreviewBuffer {
                         // kind of file. It is the same card, reached by
                         // evidence instead of by a table.
                         self.content = None;
+                        self.line_index = crate::preview_text::LineIndex::default();
                         self.truncated = false;
                         self.max_columns = 0;
                         self.disk_mtime = None;
@@ -5935,8 +5974,9 @@ impl PreviewBuffer {
                     }
                     self.ftype = PreviewFtype::Text;
                 }
-                self.max_columns = widest_line_columns(&text);
-                self.content = Some(text);
+                self.line_index = crate::preview_text::LineIndex::new(&text);
+                self.max_columns = self.line_index.max_columns();
+                self.content = Some(text.into());
                 self.truncated = truncated;
                 // **Both facts about the decode land with the body they are
                 // about** (T2, 2026-09-10). Re-filed rather than accumulated:
@@ -5969,6 +6009,7 @@ impl PreviewBuffer {
                     (_, refusal) => refusal,
                 };
                 self.content = None;
+                self.line_index = crate::preview_text::LineIndex::default();
                 self.truncated = false;
                 // A buffer with no body has nothing that was decoded, so it says
                 // nothing about an encoding either — `Utf8` is what a file with
@@ -10918,7 +10959,7 @@ mod tests {
 
         assert_eq!(
             buffer.content.as_deref(),
-            Some(head.as_str()),
+            Some(&*head),
             "what the reader is looking at is untouched"
         );
         assert!(buffer.truncated && !buffer.is_editable(false));
