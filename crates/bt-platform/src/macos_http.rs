@@ -474,7 +474,8 @@ fn address(host: &str, path: &str) -> Result<Retained<NSURL>, String> {
 /// Returns the reason as a sentence whenever the body of a `200` response did
 /// not arrive whole.
 pub fn https_get(request: &HttpsGet<'_>) -> Result<String, String> {
-    fetch(&address(request.host, request.path)?, request)
+    let url = address(request.host, request.path)?;
+    fetch(&url, request)
 }
 
 /// **The whole of the exchange, once the address is settled** — the session,
