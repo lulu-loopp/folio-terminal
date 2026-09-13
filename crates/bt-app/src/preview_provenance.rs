@@ -44,6 +44,7 @@
 //! | `[`, `](`, `)`, the destination, a title | a link | undrawn | the label is drawn and the destination rides in `Span::target`, which is beside the text and not in it |
 //! | `![`, `](`, the destination, `)` | a picture **cut out of prose** | drawn | the piece is `![alt](src)` (`preview_select::image_piece`) and every byte of it is read back out of the file — the title, if there was one, is the part that is undrawn |
 //! | `!`, `[`, `]`, `(`, `)` | a picture **inside** a heading, a cell, an item or a quote | undrawn | there the run is its own alt text and nothing else |
+//! | `![`, `](`, the destination, `)` | a picture **from the web, left in its line** as a chip (§7.1.3k ⑬) | undrawn | the chip draws its label and nothing else: the alt text, which is a copy like any other run's, or — where the document wrote no alt — the last segment of the address, which is drawn and spelled nowhere (7 below) |
 //! | `|`, and the whole separator row | a table | undrawn | a cell's piece is the cell trimmed |
 //! | ```` ``` ````, the info string | a fence | undrawn | a fence's pieces are its body lines |
 //! | `$$`, `\[`, `\]`, `\begin{…}` on their own lines | display mathematics | undrawn | the block dropped them (`MarkdownBlock::Math`) and the piece re-spells its own — see the synthesised list below |
@@ -62,7 +63,10 @@
 //!    own delimiters standing on lines of their own or being `\[`…`\]` or an
 //!    environment's `\begin`…`\end`;
 //! 6. the whole `![alt](src)` a picture written as `<img>` or `<picture>` copies
-//!    as — that spelling is markdown the file never contained.
+//!    as — that spelling is markdown the file never contained;
+//! 7. the label an inline chip takes off its address where the document wrote no
+//!    alt text (`preview::image_chip_label`) — the address is in the file, but
+//!    not where the label is drawn, so no byte of it is a copy.
 //!
 //! # Which way a caret rounds
 //!
@@ -476,7 +480,7 @@ fn place_in_block(file_offset: usize, block: usize, map: &BlockOrigins) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::preview::{MarkdownBlock, parse_markdown_mapped};
+    use crate::preview::{MarkdownBlock, Span, SpanStyle, parse_markdown_mapped};
     use crate::preview_select::{Piece, copy_text, pieces};
 
     /// The same bytes as a file written on this platform.
@@ -529,6 +533,16 @@ mod tests {
             (
                 "a picture in a link",
                 "[![alt](one.png)](where)\n".to_owned(),
+            ),
+            // A badge row (§7.1.3k ⑬): two pictures from the web on one line,
+            // which stay in their paragraph as chips — one saying an alt text
+            // that is a copy of the file, one saying a label taken off its own
+            // address, which is the whole of synthesis ⑦.
+            (
+                "a badge row with one alt missing",
+                "[![Build](https://img.example/b.svg)](one)\n\
+                 [![](https://img.example/logo.svg)](two)\n"
+                    .to_owned(),
             ),
             ("a tab in a fence", "```\n\tone\tstep\n```\n".to_owned()),
             ("nothing at all", String::new()),
@@ -641,9 +655,32 @@ mod tests {
                     || (0..map.len())
                         .all(|offset| matches!(map.origin_of(offset), Some(Origin::Drawn)))
             }
+            // ① and ② the space two joined source lines are joined on, and ⑦ a
+            // chip's label where it was taken off the address instead of out of
+            // an alt text (§7.1.3k ⑬).
+            MarkdownBlock::Paragraph(spans) => byte == b' ' || in_a_chip_label(spans, offset),
             // ① and ② the space two joined source lines are joined on.
             _ => byte == b' ',
         }
+    }
+
+    /// Whether `offset` into a paragraph's drawn text stands inside an inline
+    /// chip — ⑦ of the module's list.
+    ///
+    /// The runs concatenate into the piece (`preview_select::span_text`), so the
+    /// span a byte belongs to is a walk along them. Asked only of a byte the map
+    /// already called synthesised, so a chip whose label *is* its alt text — a
+    /// copy like any other run's — never reaches it.
+    fn in_a_chip_label(spans: &[Span], offset: usize) -> bool {
+        let mut at = 0usize;
+        for span in spans {
+            let end = at + span.text.len();
+            if offset < end {
+                return span.style == SpanStyle::ImageChip;
+            }
+            at = end;
+        }
+        false
     }
 
     /// **RED GATE** — every byte of every piece is a copy of a source byte

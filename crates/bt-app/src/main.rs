@@ -4378,6 +4378,26 @@ fn markdown_run(
             font_scale: 1.0,
             inline_box_px: None,
         },
+        // **A picture from the web, standing in the line it was written in**
+        // (user report 2026-09-14; §7.1.3k ⑬). The words are the label the
+        // parser settled ([`preview::image_chip_label`]) and nothing here
+        // re-decides them; the ground under them is laid after the shaper has
+        // said where this run came to rest ([`markdown_chip_ground`]), because
+        // a box measured any other way is a box somewhere else than the letters.
+        //
+        // The accent, because the chip answers a press: what it stands for is
+        // the *address*, which is the very run the block card already opened
+        // (§7.1.3k ④). The sentence that card printed beside it is on the chip's
+        // hover card ([`markdown_chip_tip`]).
+        preview::SpanStyle::ImageChip => bt_render::PreviewRun {
+            text: span.text.clone(),
+            color: palette.accent,
+            mono: false,
+            bold: false,
+            italic: false,
+            font_scale: 1.0,
+            inline_box_px: None,
+        },
         preview::SpanStyle::Bold => bt_render::PreviewRun {
             text: span.text.clone(),
             color: palette.preview_body_text,
@@ -4512,6 +4532,17 @@ struct PreviewLinkSite {
     paragraph: usize,
     run: usize,
     target: String,
+    /// **What a hover over this run says**, for the one run in a document that
+    /// says anything: a remote picture's chip ([`markdown_chip_tip`]).
+    ///
+    /// `None` for every ordinary link, and that is a ruling rather than an
+    /// omission — where a link points is not something this window puts on a
+    /// card, because the words of a link are the author's description of it and
+    /// a card repeating the address over them is the browser status bar moved
+    /// into the middle of the page. A chip has no author's description: the
+    /// document asked for a *picture* there, and the two facts standing in for
+    /// it have nowhere else to be said.
+    chip: Option<String>,
 }
 
 /// **A run of a paragraph whose shaped text is not the document's own.**
@@ -4677,9 +4708,38 @@ struct PreviewTextBox {
 /// A markdown link, boxed where it was actually drawn.
 #[derive(Clone, Debug, PartialEq)]
 struct PreviewLink {
+    /// Where a press lands on it — a run's own box, and for a chip the **pill**
+    /// that was drawn round that run ([`markdown_chip_ground`]), so the padding
+    /// a reader can see is padding a reader can hit.
     rect: [f32; 4],
     target: String,
+    /// The chip this link is, if it is one — see [`PreviewLinkSite::chip`].
+    chip: Option<PreviewChipTip>,
 }
+
+/// **A chip's hover card**: what it says, and which chip is saying it.
+#[derive(Clone, Debug, PartialEq)]
+struct PreviewChipTip {
+    at: PreviewChipAt,
+    text: String,
+}
+
+/// **Where a chip stands in a laid-out page** — `(block, paragraph, run)`, the
+/// identity its tip is held up by
+/// (`tooltip::TooltipAnchorId::PreviewImageChip`), with `block` the scrolling
+/// region it stands in or `None` for the page itself.
+///
+/// The run's own address in the page rather than its index among this frame's
+/// chips, for [`tooltip::TooltipAnchorId::PreviewHex`]'s stated reason one face
+/// over: an index renumbers under a hand that has not moved — a picture arriving
+/// above adds a block, a fold closes one — while "the third run of the second
+/// paragraph of that block" is the same run until the document itself changes,
+/// which is exactly when a tip about it should be taken down.
+///
+/// The same three numbers a [`PreviewLinkSite`] is addressed by, and an alias
+/// rather than a struct of its own because that is all it is: a subscript the
+/// tip host compares and nobody takes apart.
+pub(crate) type PreviewChipAt = (Option<usize>, usize, usize);
 
 /// Everything one pass over a rendered document produces.
 ///
@@ -4792,6 +4852,12 @@ fn note_link_sites(
         // making them answer a press would put an unmarked hotspot in the middle
         // of a sentence — a run drawn in the body's own ink that opens a file
         // when it is touched.
+        //
+        // **A chip is**, and that is the same ruling rather than an exception to
+        // it: what a chip stands for is an address this window will never fetch
+        // a picture from, drawn in the accent and boxed, and the press it
+        // answers is the press the block card's own address line has answered
+        // since §7.1.3k ④.
         if span.style == preview::SpanStyle::Image {
             return None;
         }
@@ -4800,8 +4866,22 @@ fn note_link_sites(
             paragraph,
             run: first_run + index,
             target: target.clone(),
+            chip: (span.style == preview::SpanStyle::ImageChip).then(|| markdown_chip_tip(target)),
         })
     }));
+}
+
+/// **What a chip's hover card says** — the sentence the block card prints, and
+/// the address under it (§7.1.3k ⑬).
+///
+/// One door for both faces of the same two facts: the card sets them into the
+/// page ([`markdown_image_card`]) because it has a page-wide box to set them in,
+/// and the chip hands them to the window's one tip host because it is the width
+/// of a word. The *sentence* is the same string in both, taken from the same
+/// [`i18n::Text`], so a document cannot be told two different things about why
+/// there is no picture.
+fn markdown_chip_tip(url: &str) -> String {
+    format!("{}\n{url}", i18n::Text::MarkdownImageRemote.text())
 }
 
 /// **Note the piece of the document a paragraph of spans is about to set.**
@@ -6342,6 +6422,9 @@ fn build_preview_markdown_body(
                                     paragraph: paragraphs.len(),
                                     run: card.note.len().saturating_sub(1),
                                     target,
+                                    // The card **prints** both facts, so it has
+                                    // nothing left to say on a hover.
+                                    chip: None,
                                 });
                             }
                             paragraphs.push(bt_render::PreviewParagraph {
@@ -7224,11 +7307,17 @@ fn preview_press_opens_its_link(latch: &DragLatch) -> bool {
 /// across two lines comes back as the two boxes it is drawn as — a hit test
 /// given one box spanning both would claim the margin between them, which is
 /// the empty half of the pane on the right of a short last line.
+///
+/// **A chip comes back as its pill rather than as its letters** (§7.1.3k ⑬):
+/// the ground drawn round it is what a reader sees and therefore what a reader
+/// aims at, and one rectangle answering the paint, the press and the hover card
+/// is the same discipline [`markdown_image_extent`] states for a picture.
 fn measure_preview_links(
     gpu: &mut GpuContext,
     renderer: &mut WindowRenderer,
     body: &bt_render::PreviewBody,
     sites: &[PreviewLinkSite],
+    scale: f32,
 ) -> Vec<PreviewLink> {
     let mut links = Vec::new();
     for site in sites {
@@ -7249,19 +7338,88 @@ fn measure_preview_links(
             Some(block) => body.blocks[block].clip,
             None => body.clip,
         };
+        // Every run's box and not only this site's, because a chip's pill is
+        // measured against what stands beside it on the same row — see
+        // [`markdown_chip_ground`].
+        let boxes = renderer.measure_preview_run_boxes(gpu, paragraph);
+        let at: PreviewChipAt = (site.block, site.paragraph, site.run);
         links.extend(
-            renderer
-                .measure_preview_run_boxes(gpu, paragraph)
-                .into_iter()
+            boxes
+                .iter()
                 .filter(|boxed| boxed.run == site.run)
-                .filter_map(|boxed| bt_render::crop_to(boxed.rect, window))
+                .map(|boxed| match &site.chip {
+                    Some(_) => markdown_chip_ground(boxed.rect, &boxes, scale),
+                    None => boxed.rect,
+                })
+                .filter_map(|rect| bt_render::crop_to(rect, window))
                 .map(|rect| PreviewLink {
                     rect,
                     target: site.target.clone(),
+                    chip: site.chip.as_ref().map(|text| PreviewChipTip {
+                        at,
+                        text: text.clone(),
+                    }),
                 }),
         );
     }
     links
+}
+
+/// **How much air a chip's pill takes on either side of its label**, and how
+/// much shorter than the line it is drawn (§7.1.3k ⑬).
+///
+/// Logical pixels, scaled where they are spent. Small numbers deliberately: a
+/// chip is a word with a ground under it, not a button, and the report is about
+/// four of them fitting on one line.
+const MARKDOWN_CHIP_PADDING_LOGICAL_PX: f32 = 4.0;
+const MARKDOWN_CHIP_INSET_LOGICAL_PX: f32 = 1.0;
+/// `border-radius` on that pill — the corner a chip is recognised by.
+const MARKDOWN_CHIP_RADIUS_LOGICAL_PX: f32 = 4.0;
+
+/// **The box a chip's ground is laid in**: the run's own line box, inset so the
+/// pill stands inside the leading rather than filling it, and grown sideways
+/// into at most a third of whatever the document left between this run and the
+/// run beside it.
+///
+/// **The third is what keeps four badges four badges.** A chip reserves no width
+/// of its own — it is a run of text, wrapped by the paragraph's own shaper, and
+/// the padding is painted round it afterwards rather than measured into it. So
+/// the only thing standing between two of them is the space the author wrote,
+/// and two pills each helping themselves to half of it would meet in the middle
+/// and read as one. A third leaves a third, at every size, in every face,
+/// without this function knowing how wide a space is in any of them.
+///
+/// Where nothing stands beside the chip at all — the beginning of a row, the end
+/// of one — there is nothing to share with and it takes the whole padding.
+fn markdown_chip_ground(
+    box_: [f32; 4],
+    boxes: &[bt_render::PreviewRunBox],
+    scale: f32,
+) -> [f32; 4] {
+    // The same half-pixel the shaper's own row test uses (`preview_run_boxes`),
+    // so "the same row" means the same thing on both sides of that call.
+    let same_row = |other: &bt_render::PreviewRunBox| (other.rect[1] - box_[1]).abs() < 0.5;
+    let gap_left = boxes
+        .iter()
+        .filter(|&other| same_row(other) && other.rect[2] <= box_[0] + 0.5)
+        .map(|other| box_[0] - other.rect[2])
+        .fold(f32::INFINITY, f32::min);
+    let gap_right = boxes
+        .iter()
+        .filter(|&other| same_row(other) && other.rect[0] >= box_[2] - 0.5)
+        .map(|other| other.rect[0] - box_[2])
+        .fold(f32::INFINITY, f32::min);
+    let padding = (MARKDOWN_CHIP_PADDING_LOGICAL_PX * scale)
+        .min(gap_left / 3.0)
+        .min(gap_right / 3.0)
+        .max(0.0);
+    let inset = MARKDOWN_CHIP_INSET_LOGICAL_PX * scale;
+    [
+        box_[0] - padding,
+        box_[1] + inset,
+        box_[2] + padding,
+        box_[3] - inset,
+    ]
 }
 
 /// Lay each inline formula's picture into the gap its paragraph left for it.
@@ -40305,10 +40463,12 @@ impl Runtime<'_> {
             anchors.push_faced(id, host, text, face);
         }
         // The colour under the pointer, on the pointer's own 380ms and the
-        // tip's own surface (§7.1.6c-4c). Pushed last of the content anchors and
-        // therefore outermost of them, which is right: it is the innermost thing
-        // on screen that is not a popup, and nothing else registers a box inside
-        // a preview's body.
+        // tip's own surface (§7.1.6c-4c). Pushed after every other content
+        // anchor, which is right: it is the innermost thing on screen that is
+        // not a popup. The chip below is the only other box registered inside a
+        // preview's body, and the two cannot overlap — this one is a token in a
+        // source file and that one is a run of a rendered page, which are two
+        // faces the same pane is never showing at once.
         if self.window.drag.is_none()
             && let Some(hover) = self.window.preview_hex_hover.as_ref()
         {
@@ -40317,6 +40477,27 @@ impl Runtime<'_> {
                 hover.host,
                 hover.text.clone(),
                 tooltip::TipFace::Swatch { rgba: hover.rgba },
+            );
+        }
+        // **A chip's hover card** (§7.1.3k ⑬), on the same host and the same
+        // clock as the colour card above it — the pointer is resting inside a
+        // document in both, and a second mechanism for the second one would be
+        // two ways for this window to say something about a run. In the plain
+        // tip face rather than the colour card's swatch: what it has to show is
+        // two lines of words.
+        //
+        // Read off the link the pointer is already over
+        // ([`Runtime::note_preview_link_hover`]) rather than hit-tested again
+        // here, so the pill that lights and the card that comes up cannot come
+        // to disagree about which chip the hand is on.
+        if self.window.drag.is_none()
+            && let Some((surface, link)) = self.preview_link_hover.as_ref()
+            && let Some(chip) = link.chip.as_ref()
+        {
+            anchors.push(
+                tooltip::TooltipAnchorId::PreviewImageChip(*surface, chip.at),
+                link.rect,
+                chip.text.clone(),
             );
         }
         // A tip whose subject has left the strip has nothing left to say — and a
@@ -62111,10 +62292,9 @@ impl Runtime<'_> {
         // which used to be excluded from this whole paragraph by name — now
         // takes exactly the same path through this function as the other two,
         // and hangs the same phrase on the same side of its own foot.
-        // The links last, because measuring one asks the shaper where a
-        // paragraph landed and that answer is only true of the body as it now
-        // stands. The hover's rule is drawn from the same boxes, so the line
-        // under a link cannot be anywhere but under it.
+        // The links after the body and never before it, because measuring one
+        // asks the shaper where a paragraph landed and that answer is only true
+        // of the body as it now stands.
         // The formulas ride with the links, and for the identical reason: both
         // are answers about where a run of an already-built body came to rest,
         // and both stop being true the moment the body is rebuilt.
@@ -62124,9 +62304,40 @@ impl Runtime<'_> {
             &mut built,
             &math_sites,
         );
-        // **The selection before the links, because it is under them**: the
-        // bands are fills and go out in the pass that draws every fill, and the
-        // one thing that must be over them is the rule under a hovered link.
+        // **The links are measured here, before the fills that stand under
+        // them** (§7.1.3k ⑬). They were measured at the foot of this function
+        // until a chip needed a ground: the *paragraphs* are final from the
+        // builder on and nothing below moves one, so a box measured here is the
+        // same box measured there — but a pill painted after the selection
+        // bands would be a pill painted **over** them, and a selected badge
+        // would lose its highlight to its own ground.
+        let links = measure_preview_links(
+            &mut self.app.gpu,
+            &mut self.window.renderer,
+            &built,
+            &sites,
+            scale,
+        );
+        // Every chip's pill, in the fence's own ground so that a chip reads as
+        // the card it replaced, composited into the body it stands on —
+        // `bt_render::rounded_preview_fill` says why a rounded fill in a body is
+        // spent as colour rather than as alpha.
+        let chip_grounds: Vec<bt_render::PreviewQuad> = links
+            .iter()
+            .filter(|link| link.chip.is_some())
+            .flat_map(|link| {
+                bt_render::rounded_preview_fill(
+                    link.rect,
+                    MARKDOWN_CHIP_RADIUS_LOGICAL_PX * scale,
+                    palette.preview_code_ground,
+                    palette.seat_body,
+                )
+            })
+            .collect();
+        built.quads.extend(chip_grounds);
+        // **The selection under the rule a hovered link wears**: the bands are
+        // fills and go out in the pass that draws every fill, and the one thing
+        // that must be over them is that rule — which is struck last, below.
         //
         // Pushed here rather than inside the builder for the reason the links
         // are measured here: which glass a range of a document covers is a
@@ -62238,8 +62449,9 @@ impl Runtime<'_> {
             }
         }
         self.preview_pane_mut(surface).md_prose = prose;
-        let links =
-            measure_preview_links(&mut self.app.gpu, &mut self.window.renderer, &built, &sites);
+        // The hover's rule is drawn from the boxes measured above, so the line
+        // under a link cannot be anywhere but under it — and it is struck here,
+        // last of the fills, so that nothing else is laid over it.
         if let Some((hovered_surface, hovered)) = self.preview_link_hover.as_ref()
             && *hovered_surface == surface
             && links.iter().any(|link| link.rect == hovered.rect)
@@ -142606,6 +142818,131 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["https://img.example/badge.svg"],
             "as a link, on this window's own terms",
+        );
+    }
+
+    /// RED GATE (user report 2026-09-14, the badge row; §7.1.3k ⑬) — **a chip
+    /// is drawn as a word and says the rest on a hover.**
+    ///
+    /// The card prints two facts beside the alt text — why there is no picture,
+    /// and the address — and both of them are why it is three lines tall. A chip
+    /// has one line and it is sharing it, so the two facts move to the window's
+    /// own tip host, which is where a fact about a run belongs once the run is
+    /// the size of a word. Both of them, and in the card's own words: a second
+    /// wording would be this window explaining the same policy twice.
+    ///
+    /// It is also the gate on the chip being *pressable*: a site with a target
+    /// is what makes the pointing finger, the underline and the press
+    /// ([`note_link_sites`]), and a chip that said its address on a card nobody
+    /// could act on would be worse than the card it replaced.
+    ///
+    /// MUTATIONS: leave the sentence out of [`markdown_chip_tip`] and the chip
+    /// says an address with no reason beside it; let [`note_link_sites`] refuse
+    /// a chip as it refuses a picture and there is no site to hang either on.
+    #[test]
+    fn a_chips_hover_card_carries_the_sentence_and_the_address() {
+        let blocks = preview::parse_markdown(
+            "[![Build](https://img.example/build.svg)](https://ci.example) \
+             [![Release](https://img.example/release.svg)](https://ci.example/releases)\n",
+        );
+        assert!(
+            matches!(blocks.as_slice(), [preview::MarkdownBlock::Paragraph(_)]),
+            "two badges on one line are one paragraph: {blocks:#?}",
+        );
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let rendered = build_preview_markdown_body(
+            [0.0, 0.0, 400.0, 400.0],
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            MarkdownPage {
+                blocks: &blocks,
+                intrinsic: &[],
+                layout: &[MarkdownBlockLayout::solid(metrics.line_height)],
+                live: MarkdownLive::default(),
+            },
+            &bt_render::chrome_palette(),
+            PageArt {
+                math: &DocumentMath::default(),
+                pictures: &DocumentPictures::default(),
+                theme: bt_render::Theme::Dark,
+            },
+        );
+        assert_eq!(
+            card_text(&rendered),
+            vec!["Build Release"],
+            "the page is one line of two words and no card at all",
+        );
+        let chips: Vec<(&str, &str)> = rendered
+            .links
+            .iter()
+            .filter_map(|site| Some((site.target.as_str(), site.chip.as_deref()?)))
+            .collect();
+        assert_eq!(
+            chips.len(),
+            2,
+            "both badges answer a press and both carry a card: {:#?}",
+            rendered.links,
+        );
+        let sentence = i18n::Text::MarkdownImageRemote.text();
+        for (target, tip) in chips {
+            assert!(
+                tip.starts_with(sentence) && tip.contains(target),
+                "the card says why, and then the address: {tip:?}",
+            );
+        }
+    }
+
+    /// RED GATE (same report; §7.1.3k ⑬) — **a chip's ground never takes more
+    /// than a third of the gap beside it.**
+    ///
+    /// A chip reserves no width of its own: it is a run of text wrapped by the
+    /// paragraph's own shaper, and its pill is painted round the box the shaper
+    /// reports. So the only thing between two badges is the space the document
+    /// wrote, and two pills each taking half of it would meet in the middle and
+    /// read as one segmented control. A third leaves a third standing, at every
+    /// size and in every face, without this arithmetic knowing how wide a space
+    /// is in any of them.
+    ///
+    /// MUTATION: pad unconditionally and the two grounds below overlap by two
+    /// pixels; pad by half the gap and they touch exactly.
+    #[test]
+    fn a_chips_ground_leaves_a_gap_between_two_badges() {
+        let boxed = |run: usize, left: f32, right: f32| bt_render::PreviewRunBox {
+            run,
+            rect: [left, 100.0, right, 120.0],
+            baseline_px: 115.0,
+        };
+        // Two labels nine pixels apart on one row, with the space between them a
+        // run of its own — which is exactly what the shaper reports for a badge
+        // row, the space being the join's own between two source lines.
+        let boxes = [
+            boxed(0, 10.0, 60.0),
+            boxed(1, 63.0, 66.0),
+            boxed(2, 69.0, 120.0),
+        ];
+        let first = markdown_chip_ground(boxes[0].rect, &boxes, 1.0);
+        let second = markdown_chip_ground(boxes[2].rect, &boxes, 1.0);
+        assert!(
+            first[2] < second[0],
+            "two badges keep a gap: {first:?} then {second:?}",
+        );
+        assert!(
+            (first[2] - 61.0).abs() < 0.01 && (second[0] - 68.0).abs() < 0.01,
+            "each takes a third of its own three pixels of space and leaves the \
+             rest: {first:?} then {second:?}",
+        );
+        assert!(
+            first[1] > boxes[0].rect[1] && first[3] < boxes[0].rect[3],
+            "the pill stands inside the line rather than filling it: {first:?}",
+        );
+        // With nothing beside it there is nothing to share with.
+        let lone = [boxed(0, 10.0, 60.0)];
+        let ground = markdown_chip_ground(lone[0].rect, &lone, 1.0);
+        assert!(
+            (ground[0] - (10.0 - MARKDOWN_CHIP_PADDING_LOGICAL_PX)).abs() < 0.01
+                && (ground[2] - (60.0 + MARKDOWN_CHIP_PADDING_LOGICAL_PX)).abs() < 0.01,
+            "a chip alone on its row takes the whole padding: {ground:?}",
         );
     }
 
