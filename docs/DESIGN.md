@@ -10959,6 +10959,12 @@ the disk as they were on the way out rather than as the reader left them. Nothin
 about it is macOS-specific in the source; what macOS supplies is a child that is
 reaped promptly enough for the loop to see it before the loop stops.
 
+**And the rule it breaks was already written down**, which is what makes this a
+defect rather than a new policy: the `Retire` arm's own comment says a child that
+refuses to die "changes nothing about the picture, **which is already on the
+disk**" (方案 ④, 「PTY teardown 任一报错不影响已写的照片」). It was true of the
+*error* path and false of the ordinary one.
+
 The fix is one question asked in one place. `Quit::document_is_written` is true
 from the moment the write lands and false for a quit that could not write — that
 one is abandoned, the application carries on, and its session still has everything
@@ -10986,8 +10992,9 @@ points, read out of `CGWindowListCopyWindowInfo` for this run's own pid.
 | 4 | `open` the bundle at another folder | B takes its own second tab: A is `[home, alpha]`, B is `[home, beta]` |
 | 5 | a press in B's strip at `1212,187`, twenty steps, release | B stands at `692,314 960×600` |
 | 6 | `osascript -e 'tell application id "…m34probe" to quit'` | the process ends; the document holds **window 0 `{515,167 960×600}` `[home, alpha]`** and **window 1 `{692,314 960×600}` `[home, beta]`** |
-| 7 | `terminal_font_size` 16 → 18 in `settings.json`, **with nothing running** | — |
-| 8 | relaunch | the window the process opens with stands at `515,167 960×600` — `BT_DPI stage=create … rect=1030,334,2950,1534`, that rectangle at scale 2 to the pixel — `terminal_font_size` reads 18, and the one restore card names all four tabs |
+| 7 | `terminal_font_size` changed in `settings.json` **with nothing running** (18 → 15 on the run transcribed here) | — |
+| 8 | relaunch | the window the process opens with stands at `515,167 960×600` — `BT_DPI stage=create … rect=1030,334,2950,1534`, that rectangle at scale 2 to the pixel — the changed `terminal_font_size` is the one in force, and the one restore card names all four tabs of both windows |
+| 9 | quit again | the document is what it was: the same two windows, the same two tab sets, the same two rectangles |
 
 **The menu row was pressed rather than keyed**, and how is worth writing down
 because the next Mac ticket that needs an application-level verb will want it:
@@ -11030,23 +11037,40 @@ the HID tap it moves the pointer and nothing else: with the Apple menu open, the
 pointer was walked the whole width of the bar and the same menu stayed up.
 Clicking each title is the gesture that switches menus.
 
-**(d) The desk is not empty, and a press goes to whatever is in front of the
-point it names — which is the reading that nearly became a bug report.** Aimed at
-the restore prompt's own primary answer, four presses produced **no
-`WindowEvent::MouseInput` at all** (`BT_MOUSE_TRACE` is the instrument: it prints
-one line per press, and there were none), while a press on the tab strip of the
-same window in the same run arrived and routed
-(`chrome_mouse_input taken=1 … target=NewTab`). What made it look like a defect in
-the product is that the pointer's *move* still reached the window: the button
-measured `122,153,255` with the pointer parked away and `131,164,255` with it
-standing on the button, which is `BUTTON_PRIMARY_HOVER_BRIGHTNESS` (1.07)
-exactly. Enumerating **every** on-screen window rather than this process's
-explains it: the owner's own Folio stands at `497,177 1189×794` and a stack of
-Finder windows over the middle of it, so presses at window-relative physical
-`y = 42, 60, 80, 100, 160, 260` and `1180` arrived and the ones at
-`460, 660, 860, 1060` went to somebody else's window. **The rule for the next
-agent: raise your own window before you aim at it** — `open -a <your bundle>`,
-which is M3-1's reopen — and read the whole window list, not your own, before
-concluding that a press was swallowed.
+**(d) The last step of the acceptance line — the restore prompt answered — is
+NOT-CHECKABLE by this agent's instruments, and what was measured is written down
+here rather than guessed at.** §2.7's ruling ① is that a window holding no pinned
+tab does not open until the one card is answered, so "both windows return *on the
+screen*" needs that press. It did not happen, through four attempts in each of
+five runs:
+
+* the prompt's primary answer is **found**, in the window's own capture, as the
+  one accent-filled run of pixels — `1202,807..1313,865` physical in the run
+  above, which is the button `restore.rs` draws hard against the dialog's
+  trailing edge;
+* the prompt **sees the pointer**: parked away, the button measures
+  `122,153,255`; with the pointer standing on it, `131,164,255`, which is
+  `BUTTON_PRIMARY_HOVER_BRIGHTNESS` (1.07) exactly, and the difference covers
+  that rectangle and nothing else. So `Runtime::restore_layout` is `Some`,
+  `restore::hit` answers `Restore`, and `pointer_position` is right;
+* the press at the same point produces **no `WindowEvent::MouseInput` at all** —
+  `BT_MOUSE_TRACE` prints one line per press and there is none — while a press on
+  the **tab strip** of the same window, in the same run, arrives and routes
+  (`mouse_input state=Pressed … pointer=602,42 … route=none`, then
+  `chrome_mouse_input taken=1 at=press-routed … target=NewTab`, and the tab count
+  in `session.json` goes 1 → 2);
+* it is **not occlusion**: the whole on-screen list, in the window server's own
+  front-to-back order, has this run's window at **z0** immediately before and
+  immediately after the press. (The desk is nonetheless busy — the owner's own
+  Folio at `497,177 1189×794` and a cascade of Finder windows — which is why the
+  list was read at all, and reading it is worth the next agent's minute.)
+
+So a press lands on that window's title bar and does not land on its content, the
+content is drawing and hit-testing correctly, and where the press goes instead was
+not established. **That is a finding about the pointer's route into a Folio window
+on this platform, not about multi-window restore**, and it wants its own ticket
+with `BT_MOUSE_TRACE` and the view hierarchy in hand. Everything the acceptance
+line asks about *this* ticket's subject is measured in ⑥ and none of it depends on
+that press.
 
 *(本节英文,待中文文案改写。)*
