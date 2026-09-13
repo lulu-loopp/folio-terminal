@@ -9820,15 +9820,7 @@ macOS 26.6.2,Apple M4,背衬缩放 2;本分支的 debug 构建装在一个一次
 
 **⑤ 没有覆盖到的,以及这就是被接受的缺口。** 一台从来没装过这个构建、Rust 工具链或 Xcode 的机器,由一个人驱动。跑器给了前半段但没有人;账户给了人但没有机器。唯一落在洞里的那条验收线是离线启动,并且只在网络没法在首次打开之前断开的情况下——检查单在那种情况下记下更弱的主张。机器更换时或者一个开发安装本会掩盖的缺陷到来时,重新审视。
 
-<<<<<<< HEAD
-`docs/RELEASING.md` ▸ macOS ▸ *Clean-machine coverage* is where all of this is
-one paragraph for a person making a release. It is written against that section
-as `main` has it; when M5-6's `feature/macos-docs` lands, it belongs between
-*What must be seen before the tag is published* — which ends on the clean-user
-pass — and *What is kept beside the artifact*, and a comment above it in the file
-says so.
-
-*(本节英文,待中文文案改写。)*
+`docs/RELEASING.md` ▸ macOS ▸ *Clean-machine coverage* 是上面这些对一个做 release 的人变成一段话的地方。它是对着 `main` 上的那一节写的;M5-6 的 `feature/macos-docs` 落地时,它应该放在 *What must be seen before the tag is published*——以干净用户通过为结尾——和 *What is kept beside the artifact* 之间,文件里它上面的一条注释这么说了。
 
 ### 13.47 T-MAC-FILEURI: 窗格里的 file: 引用在 POSIX 上也活了;那份分屏会话文档在第一个字段上就被拒了(`crates/bt-platform/src/lib.rs`)
 
@@ -10091,6 +10083,3 @@ body moved into a function of its own, byte for byte, and nothing a reader on
 that platform can press behaves differently.
 
 *(本节英文,待中文文案改写。)*
-=======
-`docs/RELEASING.md` ▸ macOS ▸ *Clean-machine coverage* 是上面这些对一个做 release 的人变成一段话的地方。它是对着 `main` 上的那一节写的;M5-6 的 `feature/macos-docs` 落地时,它应该放在 *What must be seen before the tag is published*——以干净用户通过为结尾——和 *What is kept beside the artifact* 之间,文件里它上面的一条注释这么说了。
->>>>>>> feature/zh-design-45-46
