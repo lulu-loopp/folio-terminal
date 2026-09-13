@@ -143141,7 +143141,9 @@ mod tests {
             MarkdownPage {
                 blocks: &blocks,
                 intrinsic: &[],
-                layout: &[MarkdownBlockLayout::solid(metrics.line_height)],
+                layout: &preview_viewport::Layout::from([MarkdownBlockLayout::solid(
+                    metrics.line_height,
+                )]),
                 live: MarkdownLive::default(),
             },
             &bt_render::chrome_palette(),
