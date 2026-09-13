@@ -151,6 +151,14 @@ cat > "$ISO/.zshrc" <<ZSHRC
 export PS1='m2-7 %1~ %# '
 print -r -- "M27-PANE-READY"
 print -r -- "M27-MD5-BEFORE \$(md5 -q "$PAGES/table-cjk.md")"
+# **The differential for the typeset row.** A terminal pane sets display maths
+# too, through the *same* worker thread the preview's formulas go to
+# (\`MathWorkerRequest::Math\` beside \`MathWorkerRequest::PreviewMath\`). If this
+# line arrives set and the preview's does not, the engine and the worker are
+# both alive and the defect is in the preview's road to them; if neither is set,
+# the worker is the suspect.
+print -r -- "M27-TERMINAL-FORMULA"
+print -r -- '\$\$\\int_0^1 x\\,dx\$\$'
 ZSHRC
 
 # ------------------------------------------------------------------ the bundle
@@ -443,6 +451,31 @@ echo "--- labels ---"
 last_labels | head -50
 echo "--- preview trace ---"
 tail -8 "$DUMP/preview.trace" 2>/dev/null
+# **Is the picture late, or is it never coming?** A page whose formula is still
+# pending stands on its source, and so does one whose formula was refused — the
+# two look identical on the glass (`PreviewMathArtifact`). Three readings tell
+# them apart: a long wait, a pointer that makes the window draw again, and the
+# worker thread's own stack.
+echo "--- the math worker's thread, thirty seconds in ---"
+sleep 30
+/usr/bin/sample "$PID" 1 -file "$OUT/sample-math.txt" > /dev/null 2>&1
+echo "sample rc=$?"
+grep -n "bt-math-worker" -A 12 "$OUT/sample-math.txt" 2>/dev/null | head -30
+echo "threads named in the sample: $(grep -c 'Thread_' "$OUT/sample-math.txt" 2>/dev/null)"
+shot 08-math-after-30s
+echo "--- a pointer over the document, then another frame ---"
+MOUSE_BEFORE=$(wc -l < "$DUMP/mouse.trace" 2>/dev/null || echo 0)
+"$OUT/click" 900 400
+sleep 4
+shot 09-math-after-a-press
+tail -n +$((MOUSE_BEFORE + 1)) "$DUMP/mouse.trace" 2>/dev/null | head -10
+echo "--- preview trace, the whole of it ---"
+tail -20 "$DUMP/preview.trace" 2>/dev/null
+echo "--- the terminal pane's own formula (the differential) ---"
+for d in "$DUMP"/pty.dump*; do
+  [ -f "$d" ] || continue
+  /usr/bin/strings "$d" | grep -E "M27-TERMINAL-FORMULA|int_0" | head -5
+done
 end_run
 
 # ------------------------------------------------------------------ the reads
@@ -517,7 +550,7 @@ def read(name):
 
 for name in ["00-clean-data-directory", "01-md-table-cjk", "02-md-replaced",
              "03-tree-subdir", "04-tree-root", "05-png-after-click",
-             "06-png", "07-math"]:
+             "06-png", "07-math", "08-math-after-30s", "09-math-after-a-press"]:
     read(name)
     print()
 
