@@ -8680,7 +8680,90 @@ fn input_line_needs_a_space_first(session: &bt_term::DualPlaneSession) -> bool {
 /// relative path, resolving them here would be this function inventing a place
 /// the reader never named, and every path this window actually shows a rail for
 /// arrived from the filesystem already absolute.
+///
+/// **Off Windows the row starts at `~` or at a name, never at `/`** (owner
+/// ruling 2026-09-12, §13.32 ③). This is the ambient reader; the rule itself is
+/// [`crumb_segments_on`], which takes the platform and the home directory as
+/// values so that either shape can be read on either machine.
 fn crumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
+    crumb_segments_on(
+        path,
+        bt_platform::host_platform(),
+        profiles::home_directory(&bt_pty::SystemShellEnvironment).as_deref(),
+    )
+}
+
+/// **The two shapes a breadcrumb row can have, chosen by the platform**
+/// (owner ruling 2026-09-12, §13.32 ③).
+///
+/// Windows is [`crumb_segments_rooted`] unchanged: `C: › Users › alice ›
+/// notes.md`, drive first, because a drive is a place a reader of that machine
+/// navigates to and `%USERPROFILE%` is not a word Explorer says.
+///
+/// Off Windows the owner's report was `/ › Users › alice › .zcompdump`, and
+/// a bare `/` is not what a Mac shows anybody. Two rules replace it, and they
+/// are Finder's path bar with the volume dropped:
+///
+/// * a path **under the reader's home** starts at one `~` crumb that stands for
+///   the whole run above it — `~ › .zcompdump`, `~ › folio-port › repo › …`;
+/// * a path **outside it** starts at its own first component, with no root
+///   crumb in front — `Applications › Utilities › …`.
+///
+/// **`~` is a crumb like any other**: the place it points at is the home
+/// directory itself, so a press on it stands the files column there and the
+/// tip under it prints the path in full. Nothing downstream learns a special
+/// case — the fold, the tips, the double-click and the width measurement all
+/// read the same `(name, target)` pairs they always did.
+///
+/// `home` is a value rather than a read inside this function for
+/// [`first_run::Capability`]'s reason: what a Mac's rail says is a claim a
+/// Windows runner is entitled to check. It is ignored unless it is **rooted** —
+/// an empty `HOME` is a prefix of every path, and a row that answered `~ › / ›
+/// Applications` to it would be worse than the row this ruling replaced.
+///
+/// Rooted and not [`Path::is_absolute`], which would undo the whole point of
+/// taking the platform as a value: that method answers by the *running* host's
+/// rules, so `/Users/…` is absolute on a Mac and not absolute on Windows, and
+/// the Mac shape would then be unreadable from here. Asking what the first
+/// component *is* is the same question asked of the path itself.
+fn crumb_segments_on(
+    path: &Path,
+    platform: bt_platform::HostPlatform,
+    home: Option<&Path>,
+) -> Vec<(String, PathBuf)> {
+    let mut segments = crumb_segments_rooted(path);
+    if platform == bt_platform::HostPlatform::Windows {
+        return segments;
+    }
+    let rooted = |home: &&Path| {
+        matches!(
+            home.components().next(),
+            Some(std::path::Component::RootDir | std::path::Component::Prefix(_))
+        )
+    };
+    match home.filter(|home| rooted(home) && path.starts_with(home)) {
+        Some(home) => {
+            segments.drain(..crumb_segments_rooted(home).len());
+            segments.insert(
+                0,
+                (seats::PREVIEW_CRUMB_HOME.to_owned(), home.to_path_buf()),
+            );
+        }
+        None => {
+            if segments
+                .first()
+                .is_some_and(|(name, _)| name == std::path::MAIN_SEPARATOR_STR)
+            {
+                segments.remove(0);
+            }
+        }
+    }
+    segments
+}
+
+/// The walk itself — every component a segment, the root folded into whatever
+/// stands at the top of the path.
+fn crumb_segments_rooted(path: &Path) -> Vec<(String, PathBuf)> {
     let mut segments: Vec<(String, PathBuf)> = Vec::new();
     let mut built = PathBuf::new();
     for component in path.components() {
@@ -147610,6 +147693,122 @@ mod tests {
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>(),
             vec![std::path::MAIN_SEPARATOR_STR, "srv", "share"]
+        );
+    }
+
+    /// RED — **off Windows a breadcrumb starts at `~` or at a name, and never
+    /// at `/`** (owner report and ruling 2026-09-12, §13.32 ③).
+    ///
+    /// What the owner saw on the built Mac was `/ › Users › alice ›
+    /// .zcompdump`: four crumbs, the first of them a folder called `/` that no
+    /// Mac shows anybody, and two more that every path on that machine repeats.
+    /// The ruling is Finder's path bar with the volume dropped, and it is two
+    /// shapes rather than one, so both are here.
+    ///
+    /// **The platform and the home directory are arguments**, which is what
+    /// makes this runnable at all: it asserts what a Mac draws and it is being
+    /// run on a Windows workstation. Unix paths are used throughout because
+    /// `Path::components` reads `/` as a separator on either host, so the walk
+    /// under test is the walk that machine performs.
+    ///
+    /// MUTATIONS:
+    /// ① return early for every platform — the first case keeps its `/` crumb
+    ///    and goes red;
+    /// ② insert `~` without draining the run it stands for — `~ › Users ›
+    ///    alice › .zcompdump`, and the first case goes red on its names;
+    /// ③ point `~` at the path instead of at the home directory — the click
+    ///    target assertion goes red, and a press on `~` would stand the files
+    ///    column on the file the reader is already reading;
+    /// ④ drop the rooted guard — the empty-`HOME` case grows a `~` in front of
+    ///    a path that is not under any home at all.
+    #[test]
+    fn a_mac_breadcrumb_starts_at_the_home_crumb_or_at_a_name() {
+        use bt_platform::HostPlatform::{MacOs, Windows};
+
+        let home = Path::new("/Users/alice");
+        let names = |segments: &[(String, PathBuf)]| -> Vec<String> {
+            segments.iter().map(|(name, _)| name.clone()).collect()
+        };
+
+        // ① Under home: one `~`, then what is left of the path.
+        let under = crumb_segments_on(Path::new("/Users/alice/.zcompdump"), MacOs, Some(home));
+        assert_eq!(
+            names(&under),
+            vec![seats::PREVIEW_CRUMB_HOME, ".zcompdump"],
+            "a path under the reader's home reads from `~`"
+        );
+        assert_eq!(
+            under[0].1, home,
+            "`~` points at the home directory, so a press on it goes there"
+        );
+        let deeper = crumb_segments_on(
+            Path::new("/Users/alice/folio-port/repo/README.md"),
+            MacOs,
+            Some(home),
+        );
+        assert_eq!(
+            names(&deeper),
+            vec![seats::PREVIEW_CRUMB_HOME, "folio-port", "repo", "README.md"]
+        );
+        assert_eq!(
+            deeper[1].1,
+            Path::new("/Users/alice/folio-port"),
+            "the crumbs after `~` still name the places they lead"
+        );
+        assert_eq!(
+            names(&crumb_segments_on(home, MacOs, Some(home))),
+            vec![seats::PREVIEW_CRUMB_HOME],
+            "the home directory itself is the one crumb `~`"
+        );
+
+        // ② Outside home: the first component, with no root crumb in front.
+        assert_eq!(
+            names(&crumb_segments_on(
+                Path::new("/Applications/Utilities/Terminal.app"),
+                MacOs,
+                Some(home),
+            )),
+            vec!["Applications", "Utilities", "Terminal.app"],
+            "a path outside home starts at its own first component"
+        );
+        // A machine that never said where home is reads the same way.
+        assert_eq!(
+            names(&crumb_segments_on(Path::new("/etc/hosts"), MacOs, None)),
+            vec!["etc", "hosts"]
+        );
+        // And an empty `HOME` is not a prefix of everything.
+        assert_eq!(
+            names(&crumb_segments_on(
+                Path::new("/etc/hosts"),
+                MacOs,
+                Some(Path::new("")),
+            )),
+            vec!["etc", "hosts"]
+        );
+        // A relative path has no root to drop and no home to be under.
+        assert_eq!(
+            names(&crumb_segments_on(
+                Path::new("../sibling/notes.md"),
+                MacOs,
+                Some(home),
+            )),
+            vec!["..", "sibling", "notes.md"]
+        );
+
+        // ③ Windows is the row it was, home or no home.
+        assert_eq!(
+            names(&crumb_segments_on(
+                Path::new("/Users/alice/.zcompdump"),
+                Windows,
+                Some(home),
+            )),
+            vec![
+                std::path::MAIN_SEPARATOR_STR.to_owned(),
+                "Users".to_owned(),
+                "alice".to_owned(),
+                ".zcompdump".to_owned(),
+            ],
+            "the Windows shape keeps its root crumb and knows no `~`"
         );
     }
 
