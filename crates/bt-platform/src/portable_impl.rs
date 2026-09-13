@@ -67,7 +67,11 @@ use std::path::Path;
 #[cfg(not(any(windows, target_os = "macos")))]
 use std::path::PathBuf;
 
-use crate::{ContextMenuShape, ContextMenuTree, NativeWindow, TaskbarProgress};
+use crate::{ContextMenuShape, ContextMenuTree, NativeWindow};
+// The one type only the Dock tile names, which on macOS is `macos_notify`'s and
+// not this module's (M4-6).
+#[cfg(not(any(windows, target_os = "macos")))]
+use crate::TaskbarProgress;
 // The one type only the composition names, which on macOS is `macos_compose`'s
 // and not this module's (M4-1).
 #[cfg(not(target_os = "macos"))]
@@ -402,11 +406,16 @@ fn adopt_platform_chrome(window: NativeWindow, bar_logical_px: f64) -> crate::Pl
 /// acceptance line"). So this one is allowed to refuse at construction: its
 /// caller is not a launch, it is a progress bar, and `bt_app`'s own
 /// `TaskbarProgressButton` writes one line of stderr and never asks again.
+///
+/// **Off on macOS since M4-6**, where `macos_notify::Taskbar` writes the badge
+/// on the real tile.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub struct Taskbar {
     /// Never constructed: [`Taskbar::new`] refuses.
     _never: std::convert::Infallible,
 }
 
+#[cfg(not(any(windows, target_os = "macos")))]
 impl Taskbar {
     /// Refused. The Dock tile is M4-6.
     pub fn new(window: NativeWindow) -> Result<Self, String> {
@@ -469,11 +478,17 @@ impl SystemSettingsWatch {
 /// no bundle identifier, which is why §4.5 of the plan builds the bundle from
 /// M1 rather than M5 — the refusal this arm gives today is the refusal that
 /// one would give to an unbundled binary anyway.
+///
+/// **Off on macOS since M4-6**, where `macos_notify::Notifier` really speaks to
+/// the notification centre — and where the unbundled refusal this arm describes
+/// is the one that arm now gives, in its own words and for the same reason.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub struct Notifier {
     /// Never constructed: [`Notifier::new`] refuses.
     _never: std::convert::Infallible,
 }
 
+#[cfg(not(any(windows, target_os = "macos")))]
 impl Notifier {
     /// Refused. Notifications are M4-6.
     pub fn new(wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
@@ -962,6 +977,10 @@ pub fn install_window_class_background(
 }
 
 /// Call the reader's eye to this window. `NSApp.requestUserAttention:`; M4-6.
+///
+/// **Off on macOS since M4-6**, where that is exactly what the arm in
+/// `macos_notify` calls.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn flash_window(window: NativeWindow) {
     let _ = window;
 }
@@ -980,6 +999,11 @@ pub fn hide_every_window_of_this_process() -> usize {
 /// `false` — the direction `taskbar_auto_hidden_from_state` argues for: a bar
 /// reported visible costs a Dock bounce nobody sees, and a bar reported hidden
 /// costs a notification in front of somebody who is looking at the pane.
+///
+/// **Off on macOS since M4-6**, where the arm in `macos_notify` reads the
+/// Dock's own `autohide` preference and keeps this same direction for the case
+/// where it cannot.
+#[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn taskbar_is_auto_hidden() -> bool {
     false

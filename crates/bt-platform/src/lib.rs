@@ -9752,6 +9752,50 @@ impl TaskbarProgress {
     };
 }
 
+/// **The same reading, in the only ink a Dock tile has** (M4-6).
+///
+/// A taskbar button is a coloured bar and a Dock tile is a short piece of text,
+/// so the crossing is lossy in one direction and must not invent anything in
+/// the other. Three rules, and each is what the button already draws:
+///
+/// * **no bar, no badge.** `TaskbarProgressState::None` is a window with
+///   nothing running.
+/// * **a bar with a number reads as that number.** `OSC 9;4` states a
+///   percentage and `bt_app`'s fold hands it over as `(percent, 100)`; the
+///   general form is written out anyway, because the type says `(completed,
+///   total)` and a door that only worked for one total would be a door with a
+///   fact about its caller inside it.
+/// * **a bar with no number reads as `…`.** `TBPF_INDETERMINATE` is a sweeping
+///   bar — something is running and nobody has said how far — and dropping it
+///   to no badge at all would make "a build is going" and "nothing is going"
+///   the same picture. The ellipsis is the shortest mark that says the first.
+///
+/// **What does not cross is the colour.** `TBPF_ERROR` and `TBPF_PAUSED` are a
+/// red and an amber bar at the value they carry; a badge has one appearance, so
+/// a failure at 40% and a pause at 40% both read `40%` here and the difference
+/// stays where it is also drawn — the tab's own marks. Inventing a second mark
+/// for it (`40%!`) would be putting a thing on the Dock that the Windows arm
+/// does not put on the taskbar.
+///
+/// A total of zero is nothing divided by nothing and answers `…` rather than a
+/// percentage: the state says a reading exists and the numbers do not say what
+/// it is. A `completed` past its `total` is clamped, for the reason the shell
+/// clamps it — the bar cannot be more than full.
+#[must_use]
+pub fn dock_badge_label(progress: TaskbarProgress) -> Option<String> {
+    if progress.state == TaskbarProgressState::None {
+        return None;
+    }
+    let Some((completed, total)) = progress.value.filter(|(_, total)| *total > 0) else {
+        return Some("…".to_owned());
+    };
+    // `u128` because `completed * 100` is a multiplication on numbers this door
+    // does not choose: the type admits `u64::MAX` and a debug build would panic
+    // on the overflow rather than answer.
+    let percent = u128::from(completed.min(total)) * 100 / u128::from(total);
+    Some(format!("{percent}%"))
+}
+
 #[cfg(windows)]
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirChange, DirWatch, FilePickKind, FolderPicker, ImagePicker,
@@ -9787,13 +9831,12 @@ mod portable_impl;
 
 #[cfg(not(windows))]
 pub use portable_impl::{
-    CustomWindowFrame, FilePickKind, ImeSystemCaret, Notifier, ShellPickKind, Taskbar,
-    adopt_parent_console, announce_explorer_menu_change, detach_console, directory_folds_case,
-    flash_window, hide_every_window_of_this_process, install_console_ctrl_handler,
-    install_context_menu, is_window_cloaked, leave_process, read_context_menu,
-    redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
-    set_system_backdrop, silence_std_streams, system_backdrop_available, taskbar_is_auto_hidden,
-    thread_mouse_capture, virtual_key_for_character, write_to_console,
+    CustomWindowFrame, FilePickKind, ImeSystemCaret, ShellPickKind, adopt_parent_console,
+    announce_explorer_menu_change, detach_console, directory_folds_case,
+    hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
+    is_window_cloaked, leave_process, read_context_menu, redirect_std_streams_to_file,
+    register_clipboard_owner, remove_context_menu, set_system_backdrop, silence_std_streams,
+    system_backdrop_available, thread_mouse_capture, virtual_key_for_character, write_to_console,
 };
 
 /// **The window's composition, on a platform that has none** (M4-1).
@@ -10400,6 +10443,26 @@ pub use macos_fonts::monospace_font_families;
 /// and `bt-app` therefore names them with no gate at all.
 #[cfg(target_os = "macos")]
 mod macos_menu;
+
+/// **The notification centre and the Dock tile, over AppKit and
+/// UserNotifications** (M4-6).
+///
+/// The four names [`macos_notify`] answers for a Mac and [`portable_impl`]
+/// still refuses for anything else off Windows. Same split as the watch and the
+/// trash groups above; what makes this one a file of its own rather than four
+/// more doors in [`macos_impl`] is that not one of the four is about a window —
+/// they are all about the **process**, which on this platform is one icon on
+/// the Dock. See the module's own header.
+#[cfg(target_os = "macos")]
+mod macos_notify;
+
+#[cfg(target_os = "macos")]
+pub use macos_notify::{Notifier, Taskbar, flash_window, taskbar_is_auto_hidden};
+
+/// **The same four, on a platform with neither a notification centre nor a
+/// Dock** (M1-1, M4-6).
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub use portable_impl::{Notifier, Taskbar, flash_window, taskbar_is_auto_hidden};
 
 /// **The application's own lifecycle**, on every platform (M3-1).
 ///
@@ -12242,6 +12305,340 @@ mod macos_dialog_backend_tests {
             dressing.contains("setTreatsFilePackagesAsDirectories(false)"),
             "a program row that descended into a `.app` would write something inside the bundle \
              into `profiles.json` rather than the bundle:\n{dressing}"
+        );
+    }
+}
+
+/// **The notification centre and the Dock tile, held to the shape the Windows
+/// arm already has** (ticket M4-6).
+///
+/// Source pins, for `macos_window_backend_tests`' reason and with one of its
+/// own: the arm they are about is the one this workstation does not compile,
+/// *and* the behavioural twin cannot be a `#[test]` anywhere — a real
+/// notification needs a bundle, a notification centre and a reader who has
+/// already answered a permission question. That proof is
+/// `tests/macos_notifications.rs`, run inside a throwaway `.app` on the Mac.
+/// What is left for a Windows runner is the half that is decidable from the
+/// text: that the three arms are the same three doors, that the macOS arm reads
+/// the bundle before it touches a framework which raises rather than answers,
+/// and that the two decisions with a product ruling behind them — a click is
+/// not a dismissal, an identifier is not a route — are still written down.
+#[cfg(test)]
+mod macos_notification_backend_tests {
+    /// The three arms' own text. The Windows arm is this file.
+    const WINDOWS: &str = include_str!("lib.rs");
+    const MACOS: &str = include_str!("macos_notify.rs");
+    const PORTABLE: &str = include_str!("portable_impl.rs");
+
+    /// The gate every door in the portable arm now stands behind.
+    const NEITHER: &str = "#[cfg(not(any(windows, target_os = \"macos\")))]";
+
+    /// **The two free functions M4-6 moved**, in the order the re-export lists
+    /// spell them.
+    const DOORS: [&str; 2] = ["flash_window", "taskbar_is_auto_hidden"];
+
+    /// **The two types**, and the doors each of them is.
+    ///
+    /// Written out as whole declarations rather than as names, because what has
+    /// to hold across three arms is the *signature* — the inventory's row for
+    /// `Notifier` is a signature, `bt-app` is written against it once, and a
+    /// port that quietly took a `&str` where another arm takes a `&mut self`
+    /// would compile on the platform it was edited on.
+    const TYPES: [(&str, [&str; 3]); 2] = [
+        (
+            "impl Notifier {",
+            [
+                "pub fn new(wake: Box<dyn Fn() + Send>) -> Result<Self, String>",
+                "pub fn show(&mut self, title: &str, body: &str, launch: &str) -> Result<(), String>",
+                "pub fn take_activations(&self) -> Vec<String>",
+            ],
+        ),
+        (
+            "impl Taskbar {",
+            [
+                "pub fn new(window: NativeWindow) -> Result<Self, String>",
+                "pub fn set_progress(&self, progress: TaskbarProgress) -> Result<(), String>",
+                // Two doors and a three-slot array: the third slot is the
+                // constructor's own name, asked for a second time so that the
+                // shape of this table is the same for both types.
+                "pub fn new(window: NativeWindow) -> Result<Self, String>",
+            ],
+        ),
+    ];
+
+    /// The text of one `impl` block, from its header to the brace that closes
+    /// it at the same indent.
+    ///
+    /// The indent is read off the header rather than assumed, because the
+    /// Windows arm lives inside `mod windows_impl` and is therefore four spaces
+    /// further in than the other two.
+    fn impl_block<'a>(source: &'a str, header: &str) -> &'a str {
+        let at = source
+            .find(header)
+            .unwrap_or_else(|| panic!("`{header}` is in this arm"));
+        let line_start = source[..at].rfind('\n').map_or(0, |newline| newline + 1);
+        let closing = format!("\n{}}}\n", &source[line_start..at]);
+        let rest = &source[at..];
+        let end = rest
+            .find(&closing)
+            .expect("an impl block closes at its own indent");
+        &rest[..end]
+    }
+
+    /// The text from the start of the line `pub fn NAME(` back to the end of
+    /// the doc comment above it — the attributes, and nothing else.
+    fn attributes_above(source: &str, name: &str) -> String {
+        let needle = format!("\npub fn {name}(");
+        let at = source
+            .find(&needle)
+            .unwrap_or_else(|| panic!("`{name}` is defined in this arm"));
+        let before = &source[..at];
+        let doc_ends = before
+            .rfind("///")
+            .expect("every door carries a doc comment");
+        let line_end = before[doc_ends..]
+            .find('\n')
+            .expect("a doc comment ends in a newline");
+        before[doc_ends + line_end..].to_owned()
+    }
+
+    /// RED — **every notification and Dock door in the portable arm is off on
+    /// macOS.**
+    ///
+    /// MUTATION: drop the `cfg` from any one of them and this names it; a macOS
+    /// build would then define the door twice.
+    #[test]
+    fn a_notification_or_dock_door_has_one_arm_per_platform() {
+        for door in DOORS {
+            let attributes = attributes_above(PORTABLE, door);
+            assert!(
+                attributes.contains(NEITHER),
+                "`{door}` is still the portable arm's on macOS, where `macos_notify` also defines \
+                 it:\n{attributes}"
+            );
+            assert!(
+                MACOS.contains(&format!("\npub fn {door}(")),
+                "`{door}` left the portable arm without arriving in the macOS one"
+            );
+        }
+        for type_name in ["Notifier", "Taskbar"] {
+            assert!(
+                PORTABLE.contains(&format!("{NEITHER}\npub struct {type_name}")),
+                "`{type_name}` is the group's type and it moves with the doors"
+            );
+            assert!(
+                MACOS.contains(&format!("pub struct {type_name} {{")),
+                "and the macOS arm is the one that really speaks to the machine"
+            );
+        }
+    }
+
+    /// RED — **the same three doors, spelled the same way, in all three arms.**
+    ///
+    /// MUTATION: change any parameter's type or any `&self` in any arm and this
+    /// names the arm and the declaration.
+    #[test]
+    fn the_notification_doors_have_one_signature_on_every_platform() {
+        for (header, doors) in TYPES {
+            for (arm, source) in [
+                ("windows", WINDOWS),
+                ("macos", MACOS),
+                ("portable", PORTABLE),
+            ] {
+                let block = impl_block(source, header);
+                for door in doors {
+                    assert!(
+                        block.contains(door),
+                        "the {arm} arm's `{header}` does not declare `{door}`",
+                    );
+                }
+            }
+        }
+    }
+
+    /// RED — **the bundle identifier is read before anything from the
+    /// notification framework is touched.**
+    ///
+    /// `+[UNUserNotificationCenter currentNotificationCenter]` raises an
+    /// Objective-C exception in a process with no bundle, and an exception
+    /// through a Rust frame ends the process rather than returning an `Err`. So
+    /// the order here is not a preference: it is the whole of what stands
+    /// between `cargo run` out of `target/debug` and a crash.
+    ///
+    /// MUTATION: move the bundle check below the centre and this goes red on
+    /// every platform.
+    #[test]
+    fn the_macos_notifier_reads_the_bundle_before_it_touches_the_centre() {
+        let block = impl_block(MACOS, "impl Notifier {");
+        let bundle = block
+            .find("NSBundle::mainBundle()")
+            .expect("the macOS arm reads the bundle identifier");
+        let centre = block
+            .find("currentNotificationCenter()")
+            .expect("the macOS arm fetches the notification centre");
+        assert!(
+            bundle < centre,
+            "the centre is fetched at {centre} and the bundle read at {bundle}, which is the one \
+             order that ends the process instead of refusing",
+        );
+    }
+
+    /// RED — **a click is told from a dismissal, and an identifier is not a
+    /// route.**
+    ///
+    /// Two rulings in one case because both are about the same method's
+    /// neighbourhood and both are invisible to a compiler. Treating a dismissal
+    /// as an activation would send somebody who swept a banner away to a pane
+    /// they did not ask for; making the route the request identifier would make
+    /// a second bell from one pane *replace* the first here and stack on
+    /// Windows, where `toast_xml` writes no `tag` and no `group`.
+    ///
+    /// MUTATION: drop the action-identifier comparison, or hand the launch
+    /// string to `requestWithIdentifier:`, and this names which.
+    #[test]
+    fn a_click_is_not_a_dismissal_and_an_identifier_is_not_a_route() {
+        let block = impl_block(MACOS, "impl Notifier {");
+        assert!(
+            MACOS.contains("UNNotificationDefaultActionIdentifier"),
+            "the macOS arm decides what an activation is by the action the reader took",
+        );
+        assert!(
+            block.contains("NEXT_NOTIFICATION.fetch_add"),
+            "every request carries an identifier of its own rather than the route",
+        );
+        assert!(
+            !WINDOWS.contains("<toast launch=\\\"{launch}\\\" tag="),
+            "the Windows arm writes no tag, which is why this one writes no route identifier",
+        );
+    }
+
+    /// RED — **the bounce is the one that lasts until the reader arrives.**
+    ///
+    /// `FLASHW_TIMERNOFG` flashes until the window comes to the foreground, and
+    /// `NSCriticalRequest` is the request type that bounces until the
+    /// application is activated. `NSInformationalRequest` bounces once, which is
+    /// a different promise about a reader who is not at the machine.
+    ///
+    /// MUTATION: swap the request type and this names it.
+    #[test]
+    fn the_dock_bounce_lasts_as_long_as_the_taskbar_flash_does() {
+        assert!(
+            MACOS.contains("NSRequestUserAttentionType::CriticalRequest"),
+            "the macOS flash is the critical request",
+        );
+        assert!(
+            WINDOWS.contains("FLASHW_TRAY | FLASHW_TIMERNOFG"),
+            "and the Windows one is the flash that does not stop on a timer",
+        );
+    }
+
+    /// RED — **every door in the macOS arm that touches AppKit asks its thread
+    /// first.**
+    ///
+    /// `macos_window_backend_tests`' rule, applied to this file's own three.
+    /// [`flash_window`] is the fourth and is exempt in the same way
+    /// `wheel_scroll_amount` is exempt over there: it answers nothing, so it
+    /// has nothing to refuse with, and what it does instead is check the marker
+    /// and return — which this pin reads directly.
+    ///
+    /// MUTATION: take the gate out of any of the three and this names it.
+    #[test]
+    fn every_macos_notification_door_proves_its_thread() {
+        for (header, door) in [
+            ("impl Notifier {", "new"),
+            ("impl Taskbar {", "new"),
+            ("impl Taskbar {", "set_progress"),
+        ] {
+            let block = impl_block(MACOS, header);
+            let at = block
+                .find(&format!("pub fn {door}("))
+                .unwrap_or_else(|| panic!("`{header}{door}` is in the macOS arm"));
+            let rest = &block[at..];
+            // No trailing newline in the needle: the last method of a block
+            // ends where `impl_block`'s own closing brace begins, and that
+            // newline has already been taken.
+            let end = rest
+                .find("\n    }")
+                .expect("a method closes at its own indent");
+            assert!(
+                rest[..end].contains("main_thread("),
+                "`{header} {door}` reaches AppKit without proving its thread",
+            );
+        }
+        assert!(
+            impl_block(MACOS, "pub fn flash_window(").contains("MainThreadMarker::new()"),
+            "the flash answers nothing, so it checks the marker and returns",
+        );
+    }
+}
+
+/// **The Dock tile's badge says what the taskbar button's bar says** (M4-6).
+#[cfg(test)]
+mod dock_badge_tests {
+    use super::{TaskbarProgress, TaskbarProgressState, dock_badge_label};
+
+    fn reading(state: TaskbarProgressState, value: Option<(u64, u64)>) -> Option<String> {
+        dock_badge_label(TaskbarProgress { state, value })
+    }
+
+    /// RED — the three rules, one row each.
+    ///
+    /// MUTATION: answer `None` for the indeterminate row and the Dock stops
+    /// telling a running build from a finished one; answer a percentage for the
+    /// cleared row and a window with nothing running carries a badge.
+    #[test]
+    fn a_badge_is_the_number_the_bar_would_have_shown() {
+        assert_eq!(dock_badge_label(TaskbarProgress::CLEARED), None);
+        assert_eq!(
+            reading(TaskbarProgressState::Normal, Some((40, 100))),
+            Some("40%".to_owned())
+        );
+        assert_eq!(
+            reading(TaskbarProgressState::Indeterminate, None),
+            Some("…".to_owned())
+        );
+        // The colour does not cross; the number does.
+        assert_eq!(
+            reading(TaskbarProgressState::Error, Some((40, 100))),
+            Some("40%".to_owned())
+        );
+        assert_eq!(
+            reading(TaskbarProgressState::Paused, Some((40, 100))),
+            Some("40%".to_owned())
+        );
+        // A state carrying no number is a reading without one, whichever state
+        // it is.
+        assert_eq!(
+            reading(TaskbarProgressState::Error, None),
+            Some("…".to_owned())
+        );
+    }
+
+    /// RED — **the arithmetic is general and it does not panic.**
+    ///
+    /// The product's own fold always says `(percent, 100)`, and a door written
+    /// to that fact would be a door with a fact about its caller inside it. The
+    /// two edges are the ones a `u64` really has: a total of zero, which is a
+    /// reading with no number rather than a division, and numbers large enough
+    /// that `completed * 100` leaves the type.
+    #[test]
+    fn a_badge_is_a_fraction_of_whatever_total_it_is_given() {
+        assert_eq!(
+            reading(TaskbarProgressState::Normal, Some((1, 3))),
+            Some("33%".to_owned())
+        );
+        assert_eq!(
+            reading(TaskbarProgressState::Normal, Some((0, 0))),
+            Some("…".to_owned())
+        );
+        assert_eq!(
+            reading(TaskbarProgressState::Normal, Some((u64::MAX, u64::MAX))),
+            Some("100%".to_owned())
+        );
+        // More than full is full, which is what the shell draws.
+        assert_eq!(
+            reading(TaskbarProgressState::Normal, Some((300, 100))),
+            Some("100%".to_owned())
         );
     }
 }

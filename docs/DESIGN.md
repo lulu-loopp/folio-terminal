@@ -9652,6 +9652,220 @@ exercised by a real request. The cost is stated rather than hidden: `cargo test
 -p bt-platform` on a macOS machine with no network has three red cases, and they
 are red for the reason a reader would guess.
 
+### 13.30 M4-6: 通知走 UNUserNotificationCenter,Dock 图标的注意标记(`crates/bt-platform/src/macos_notify.rs`(新)、`crates/bt-platform/src/{lib,portable_impl}.rs`、`crates/bt-platform/tests/macos_notifications.rs`(新)、`crates/bt-platform/Cargo.toml`)
+
+**① Four doors, one file, and the reason is that on this platform they are one
+object.** `Notifier`, `Taskbar`, `flash_window` and `taskbar_is_auto_hidden` are
+the four names the portable module refused with `M4-6` in the sentence, and on
+Windows they are four different subsystems — WinRT's notification platform,
+`ITaskbarList3` on an `HWND`, `FlashWindowEx` on an `HWND`, and
+`SHAppBarMessage` about the shell's bar. Here they are all the **Dock icon**: a
+notification is filed under the application's bundle identifier, the badge is
+drawn on the application's tile, the bounce is the application's, and the
+preference that decides whether any of it is on screen is the Dock's own. So the
+four are `macos_notify.rs` rather than four more doors in `macos_impl.rs`, whose
+subject is a window and not a process.
+
+That difference is visible in two signatures and is stated rather than papered
+over: **`Taskbar::new` takes a window and does not read it, and `flash_window`
+takes one and does not read it either.** The doors stay one door on both
+platforms because `bt-app` calls them per window on both; what changes is that
+two windows share one tile, so the last reading written is the one the reader
+sees — and `Taskbar` therefore remembers which object wrote the badge it is
+showing and takes it down on the way out only if it is still that one. Without
+that, a window closed mid-build leaves `40%` on the Dock for the life of the
+process.
+
+**② The bundle identifier is read first, and it is read because the framework
+raises rather than answers.** `+[UNUserNotificationCenter
+currentNotificationCenter]` throws an Objective-C exception in a process with no
+bundle, and an exception through a Rust frame is not an `Err`, it is the end of
+the process — X-2 measured that a panic inside an Objective-C frame ends the
+process before any hook of this program's is consulted, and a raise is worse.
+So `Notifier::new` asks `NSBundle` **before** it asks for the centre and before
+it even proves its thread, and a process without one is refused with a sentence
+naming the reason. That is the case of `cargo run` out of `target/debug/folio`,
+and it is why §4.5 of the port plan builds the bundle from M1 rather than from
+M5. `the_macos_notifier_reads_the_bundle_before_it_touches_the_centre` pins the
+order from a Windows runner, where neither call compiles.
+
+**③ Authorization is asked on the first notification and never at launch, and a
+denial is remembered by the desk that already remembers refusals.** The ask is a
+system prompt, so it happens where the Windows arm's registry write happens — on
+the first message this process actually raises, not on the first frame. What
+comes back arrives on the platform's own thread some time later and is recorded
+as one of three states; a **denied** answer is what turns the next `show` into
+an `Err`, which `bt_app`'s `NotificationDesk` latches exactly as it latches
+WinRT's refusal: one line of stderr, one card in the window, and nothing
+afterwards. The honest cost is stated where it lives: **on a fresh machine the
+very first notification may be lost**, because the prompt is in front of the
+reader at the moment it is posted. It happens once per machine, and the
+alternative is a permission prompt during the first run of a terminal that may
+never notify anybody.
+
+There is a second kind of refusal this platform has and Windows does not.
+`-[UNUserNotificationCenter addNotificationRequest:withCompletionHandler:]`
+reports its failure to a **block**, so the `show` that failed has already
+answered `Ok` by the time the sentence exists. It is parked and taken by the
+*next* `show`, which is one message late and is the whole of the difference: the
+desk still hears the sentence once and still costs one line.
+
+**④ The delegate presents, and it does not decide.** `willPresentNotification:`
+exists because the platform's own answer for a foreground application is *show
+nothing* — it assumes an application that is in front can say it in its own
+window. Folio can, and that is exactly what the tab's marks are; but the
+decision has already been taken before anything reaches this file.
+`bt_app::notify::desktop_reach` is the ladder, a pane whose tab is on screen in
+a focused window answers `Reach::Nothing`, and `show` is never called for it. So
+everything that arrives here has already been ruled owed and is presented
+(banner, list and the system sound). A second gate here would be the thing red
+line 12 forbids: a decision about one moment re-taken at a later one, from facts
+this side of the door cannot see.
+
+`didReceiveNotificationResponse:` turns a **click** into an activation and a
+dismissal into nothing — `UNNotificationDefaultActionIdentifier` against
+`UNNotificationDismissActionIdentifier`, which is the same split the Windows arm
+makes by listening to `Activated` and not to `Dismissed`. Sending somebody who
+swept a banner away to the pane it named would be answering a question they did
+not ask.
+
+**⑤ Where a cold click goes: nowhere, and that is the ruling.** M3-1's
+`AppDelegate` buffer holds a delivery that arrives before `resumed` and releases
+it when the application is up, and the obvious move was to route an activation
+through it as a fifth event kind. It is **not** routed there, for two reasons
+that agree:
+
+* the buffer exists for a cold `application:openURLs:`, which names a **path** —
+  a thing a launched application can still act on. A notification click names
+  `w=…&t=…&s=…`: a window, a tab and a pane **of the process that has exited**.
+  `notify::NotificationRoute` already says what happens to a route naming
+  something that is gone — it resolves to nothing and the click does nothing —
+  and the Windows arm gives cold activation up in the same words, because
+  without a COM server there is nothing for the click to launch;
+* this delegate is set at first need, which is after launch, so a response
+  delivered to a cold launch reaches no delegate at all. Nothing in the file
+  tries to catch it.
+
+What remains is a click while the process is alive, and it is parked in the
+notifier's own queue — one lock and one wake — until `take_activations` is
+called on the event loop's own turn. That is where the Windows arm parks it, and
+`NotificationDesk` above the door cannot tell the two platforms apart.
+
+**⑥ The identifier is a counter and not the route, and that is the opposite of
+the obvious.** An identifier is what the notification centre *replaces* by:
+posting a second request under an identifier that is already delivered removes
+the first. The launch string names a pane, so using it would give two bells from
+one pane one identifier — and a shell that rang twice would leave **one**
+notification here and **two** on Windows, where `toast_xml` writes no `tag` and
+no `group` and every toast is its own. A difference that large has to be a
+decision somebody took; the decision is that the two platforms say the same
+thing, so each request carries `folio.notification.{n}` and the route travels in
+`userInfo` under `folio.launch`.
+
+**⑦ The Dock tile's badge is the taskbar button's bar, in the only ink a tile
+has.** `dock_badge_label` is pure, lives in `lib.rs` beside `toast_xml` for the
+same reason, and is three rules: no bar, no badge; a bar with a number reads as
+that number (`40%`); a bar with **no** number reads as `…`, because
+`TBPF_INDETERMINATE` means something is running and nobody has said how far, and
+dropping it to no badge would make "a build is going" and "nothing is going" the
+same picture. **What does not cross is the colour**: `TBPF_ERROR` and
+`TBPF_PAUSED` are a red and an amber bar at the value they carry, a badge has
+one appearance, and so a failure at 40% and a pause at 40% both read `40%` here
+— the difference stays where it is also drawn, on the tab. Inventing a second
+mark for it would be putting a thing on the Dock that the Windows arm does not
+put on the taskbar. The arithmetic is general rather than written to the fold
+that feeds it (`(percent, 100)`), and `dock_badge_tests` walks a total of zero,
+a total of `u64::MAX` and a `completed` past its `total`.
+
+**⑧ The bounce is critical, and the Dock's own preference is read on every
+delivery.** `FLASHW_TRAY | FLASHW_TIMERNOFG` flashes until the window comes to
+the foreground; `NSCriticalRequest` bounces until the application is activated.
+`NSInformationalRequest` bounces once, which is a different promise about a
+reader who is away from the machine, so the critical one is the faithful
+translation and `the_dock_bounce_lasts_as_long_as_the_taskbar_flash_does` pins
+both halves. The request's own number is dropped: it is the handle
+`cancelUserAttentionRequest:` takes, and this door cancels nothing, exactly as
+the Windows arm acts on nothing `FlashWindowEx` returns.
+
+`taskbar_is_auto_hidden` is the fact `desktop_reach`'s fourth row reads, and it
+matters here for the reason §7.6 gives on the other platform: a bounce is "a mark
+you can glance at", and that sentence has a premise — the icon is on screen. With
+the Dock set to hide itself it is not, so the middle tier collapses and the
+desktop is what is left. There is no public API for "is the Dock hidden"; the
+preference is `com.apple.dock`'s `autohide`, read through
+`-[NSUserDefaults persistentDomainForName:]`, which is the supported way to read
+another domain of the same user. **Read on every delivery and never cached**, for
+§7.6's own reason: the reader can change it between one wait and the next and
+nothing tells this process when they do. A domain that cannot be read, or a key
+that is not there, answers `false` — the Dock's own default, and the direction
+`taskbar_auto_hidden_from_state` argues for.
+
+**⑨ One package, and it was already in the lock file.**
+`objc2-user-notifications` 0.3.2 is the same family and the same release as the
+crates this crate already names, and it is **already in `Cargo.lock`** as an
+optional dependency of `objc2-ui-kit` — so what this edge moves is one line in
+`THIRD-PARTY-NOTICES.md`: a crate that resolved into the lock file and into no
+build now resolves into this one. It pulls nothing new of its own
+(`objc2-core-location`, its other optional edge, stays off), and the AppKit half
+is free: `NSDockTile` is a feature of a crate that has been here since M1-9. The
+alternative was hand-declaring a class-level accessor, a protocol with two
+block-taking methods and a class built against it — unchecked selectors and two
+block signatures written by hand, for the one API in this port whose mistakes are
+raises rather than wrong answers.
+
+**⑩ What is proved where, and the one thing only a person can do.** Three
+venues, because the claims are of three kinds.
+
+* **A Windows runner** reads the three arms as text —
+  `macos_notification_backend_tests` — and pins that the portable arm is off on
+  macOS for all four names, that `Notifier`'s and `Taskbar`'s five doors have one
+  signature in all three arms, the bundle-before-centre order of ②, the click
+  against the dismissal and the counter against the route of ④ and ⑥, the
+  critical request of ⑧, and that every door in the macOS arm that touches AppKit
+  proves its thread first. `dock_badge_tests` runs the pure half everywhere.
+* **`cargo test -p bt-platform` on the Mac** runs out of `target/debug/deps`,
+  which is a process with no bundle, which is exactly the shape ② is about:
+  `a_process_with_no_bundle_is_refused_by_name` asks for a `Notifier` there and
+  reads the refusal back. **It raises no prompt of any kind**, because the
+  refusal happens before the framework is touched.
+* **`tests/macos_notifications.rs`**, `harness = false`, gated on being inside a
+  `.app` rather than on an environment variable (`open` passes none — M3-1's
+  finding). It proves the bundle identifier, that the Dock tile really carries
+  `40%`, then `…`, then nothing once the `Taskbar` is dropped, and — **only when
+  the authorization answer already exists** — that `Notifier::new` sets a
+  delegate, that `show` is accepted, and that the notification comes back out of
+  `getDeliveredNotifications` carrying the launch string under `folio.launch`,
+  after which it removes what it posted. If the status is `notDetermined` it
+  prints `SKIPPED` and asks nothing: a notification-authorization prompt is a
+  system prompt on the owner's screen, and an agent may not put one there. **On
+  2026-09-12 that is what it printed**, and the gap is worth stating rather than
+  hiding: the throwaway bundle had never asked, and a bundle that has never
+  asked is not listed in System Settings either, so there is no way to grant it
+  from the outside. Getting the notification half to run once is a person's —
+  open the probe app and answer the prompt, after which every later run of that
+  case is unattended. What did run that day, on the real machine, is the bundle
+  identifier and all three Dock-tile readings: `40%`, `…`, and nothing at all
+  once the `Taskbar` was dropped.
+
+**The click is NOT-CHECKABLE by an agent** — clicking a banner needs `System
+Events`, and therefore Accessibility *and* Automation, which X-4 measured as a
+TCC prompt nobody in an ssh session can reach. So §M4 acceptance ① is a person's,
+and the procedure is this:
+
+1. In Folio, open a second tab and leave the first one in view. In the
+   background tab run `sleep 5; printf '\a'`.
+2. **Put the window out of sight** — minimise it, or switch to another Space, or
+   set the Dock to hide itself and cover Folio with another application. This
+   step is the one the acceptance line under-specifies and it is worth saying
+   plainly: a window that is merely *covered* on a desktop whose Dock is visible
+   answers `Reach::Flash`, and a flash on this platform is a **Dock bounce** and
+   not a notification. That is `desktop_reach`'s ladder working, on both
+   platforms, and it is the same thing a covered window gets on Windows.
+3. A Folio notification arrives naming that tab. Click it: the window comes
+   forward and **that tab** is the one in view.
+4. Now bring the tab into view in a focused window and run the same command. No
+   notification arrives, and nothing bounces.
+
 ### 13.31 M4-11: 活性握手、panic 钩子在 Finder 启动下不再站住、系统崩溃报告被下一次启动点名(`crates/bt-platform/src/{hang,macos_dialogs,lib}.rs`、`crates/bt-platform/Cargo.toml`、`crates/bt-app/src/diagnostics.rs`)
 
 **The number is claimed, not counted.** §13.19–§13.27 are on `main`; §13.26,

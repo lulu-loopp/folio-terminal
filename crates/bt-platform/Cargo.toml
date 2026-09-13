@@ -113,6 +113,18 @@ name = "macos_menu_bar"
 path = "tests/macos_menu_bar.rs"
 harness = false
 
+# **The fourth target that owns the process's main thread** (M4-6), and its gate
+# is `macos_app_delegate`'s rather than `macos_sheet`'s: the notification centre
+# refuses a process with no bundle identifier, so the run that wants this one is
+# the run that is **inside a `.app`**, and an ordinary `cargo test -p
+# bt-platform` prints one line and exits on every platform. `harness = false`
+# for the reason above — the delegate is set from the main thread and the Dock
+# tile is written from it.
+[[test]]
+name = "macos_notifications"
+path = "tests/macos_notifications.rs"
+harness = false
+
 # **M2-2 adds no package either**, and it is worth saying because it looks like
 # it should: the process door (`src/handoff.rs`'s macOS arm) is `NSWorkspace`,
 # which is already on, and the trash (`src/macos_files.rs`) is `NSFileManager`,
@@ -179,6 +191,33 @@ harness = false
 # `THIRD-PARTY-NOTICES.md`, which therefore does not move at all. A blocking
 # Rust HTTP client is roughly forty packages once its TLS stack and its
 # certificate store are counted.
+#
+# **M4-6 adds one package, `objc2-user-notifications` 0.3.2, and turns one
+# AppKit feature on that costs nothing.**
+#
+# The package is the notification centre (`src/macos_notify.rs`):
+# `UNUserNotificationCenter` with its authorization request and its delegate
+# protocol, the mutable content a request is built out of, the request itself,
+# the response a click arrives as, and the default sound. It is the same family
+# and the same release as the crates above — generated from the same headers, in
+# the same repository, against the same `objc2` 0.6.4 — and it is **already in
+# `Cargo.lock`**, pulled in as an optional dependency of `objc2-ui-kit`, so what
+# this edge really moves is one line in `THIRD-PARTY-NOTICES.md`: a crate that
+# resolved into the lock file and into no build now resolves into this one.
+# `docs/DESIGN.md` §8's bar is that a dependency is a line somebody reads; this
+# is that line. The alternative was hand-declaring
+# `+[UNUserNotificationCenter currentNotificationCenter]`, a protocol with two
+# block-taking methods and a class built against it — unchecked selectors and
+# two block signatures written by hand, for the one API in this port whose
+# mistakes are Objective-C exceptions rather than wrong answers.
+#
+# It pulls **nothing new of its own**: `bitflags`, `block2` and
+# `objc2-foundation` are all here already, and `objc2-core-location` — its one
+# other optional dependency — stays off, because `default-features = false` and
+# no feature named below asks for it.
+#
+# The free half: `NSDockTile` is a feature of `objc2-app-kit`, a dependency of
+# long standing, and it is what `-[NSApplication dockTile]` answers with.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 # The completion handlers this crate passes to AppKit and to Foundation:
@@ -351,6 +390,9 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     # the picture chooser to the formats the decoder honours. **This one is a
     # package** — see the note above the table.
     "objc2-uniform-type-identifiers",
+    # M4-6: `-[NSApplication dockTile]` and the badge written on it. One class
+    # and no package.
+    "NSDockTile",
     # The appearance a window and the application wear — light or dark, read
     # for the theme and stated for the chrome (`set_window_dark_mode`,
     # `system_uses_light_apps`).
@@ -483,6 +525,44 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSURLSession",
     # M4-10: the two completion handlers the session delegate is handed. **Not a
     # package** — `block2` is already a dependency above.
+    "block2",
+    # M4-6 names three of the features above and adds none: `NSBundle` for the
+    # identifier the notification centre files every message under,
+    # `NSUserDefaults` for the Dock's own `autohide` preference — read as a
+    # persistent domain, which is the supported way to read another domain of
+    # the same user — and `NSValue` for the `NSNumber` that preference arrives
+    # as.
+    "std",
+] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    # M4-6: the centre itself — `currentNotificationCenter`, `setDelegate:`,
+    # `requestAuthorizationWithOptions:completionHandler:`,
+    # `addNotificationRequest:withCompletionHandler:` — and the delegate
+    # protocol whose two methods decide what is shown and where a click goes.
+    "UNUserNotificationCenter",
+    # M4-6: `UNMutableNotificationContent`, which is the title, the body and the
+    # `userInfo` one route travels in.
+    "UNNotificationContent",
+    # M4-6: the request those three are posted as.
+    "UNNotificationRequest",
+    # M4-6: `requestWithIdentifier:content:trigger:` is typed in one, and this
+    # product passes `None` — everything Folio notifies about has already
+    # happened.
+    "UNNotificationTrigger",
+    # M4-6: what a click arrives as, and `UNNotificationDefaultActionIdentifier`,
+    # which is how a click is told from a dismissal.
+    "UNNotificationResponse",
+    # M4-6: the delivered notification a response carries, and what the `.app`
+    # test reads back out of the centre.
+    "UNNotification",
+    # M4-6: the authorization status that test reads **before** it decides
+    # whether asking would put a prompt on somebody's screen.
+    "UNNotificationSettings",
+    # M4-6: the system's own notification sound, which is what a Windows toast
+    # plays.
+    "UNNotificationSound",
+    # M4-6: the four completion handlers above. **Not a package** — `block2` is
+    # already a dependency of this crate.
     "block2",
     "std",
 ] }
