@@ -8,6 +8,17 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **On a Mac, a pane started from the Dock or Finder can read what you type in
+  your own language.** A shell started that way is handed no language setting at
+  all by macOS, and one without it treats every byte as a character: `天下为公`
+  typed at the prompt came back as `天` followed by highlighted `<008b>`, and a
+  filename outside ASCII listed as question marks. Folio already passed on your
+  own regional setting when this machine has a matching locale installed; when it
+  has none — a Chinese interface in the United States is an ordinary example — it
+  now says what it does know, that this window reads UTF-8, in the same two
+  variables Terminal.app uses for it. It still never picks a country for you, and
+  a setting you already have — inherited, or written into a profile — is left
+  alone.
 - **A formula that took a moment to typeset now appears when it is ready.** A
   page holding `$$\int_0^1 x\,dx$$` shows the formula as you wrote it until the
   picture is set, which is right — but if the picture arrived after the page had
