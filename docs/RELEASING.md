@@ -627,8 +627,10 @@ rehearsal and the release page is made by a person from the signed machine.
 
 ## macOS
 
-Nothing here is a release lane yet — that is M5's, and this section is the one
-paragraph P-2 owes the version gate.
+**This section is written by M5-6 (`feature/macos-docs`).** M5-1 and M5-4
+put the signing sequence and the release lane's secrets in
+`packaging/macos/README.md`; they arrive here from there, in one document
+rather than two.
 
 `packaging/macos/Info.plist.in` is a **template**, not a plist. Its
 `CFBundleShortVersionString` and `CFBundleVersion` are both the literal
