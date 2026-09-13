@@ -55,6 +55,11 @@ pub(crate) const FOLIO_BAR: PlatformChrome = PlatformChrome::FOLIO_DRAWS_THE_WHO
 pub(crate) fn folio_band_device_px(scale_ppm: u32) -> u32 {
     chrome_band_device_px(scale_ppm, FOLIO_BAR)
 }
+// The gear's margin stopped being a runtime input of the strip once the hover
+// wash took shape F (T-MAC-GEAR-HOVER); the pins that measure the gear's
+// place still read it.
+#[cfg(test)]
+use bt_render::WINDOW_CAPTION_GEAR_MARGIN_LOGICAL_PX;
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, ChromePalette, ChromeQuad,
     DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX, FOCUS_CARD_BORDER_LOGICAL_PX,
