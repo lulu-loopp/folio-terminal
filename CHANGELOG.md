@@ -8,6 +8,14 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
+- **On a Mac, a key summons the terminal from anywhere.** Press `Ctrl` and the
+  backtick key — the one to the left of `1` — and the quick terminal comes down
+  over whatever you were doing, from any application; press it again and it
+  goes away and the keyboard goes back where it came from. It is an ordinary
+  row on the Shortcuts page: record a different key and it takes effect at once,
+  and `Restore all defaults` brings this one back. Folio asks macOS for no
+  permission to do it. Windows keeps `Win` and the backtick, unchanged.
+
 - **On a Mac, Folio's Dock icon offers a new window and a new tab.** Press and
   hold the icon — or right-click it — and `New window` and `New tab` stand above
   the rows macOS puts there for every app. They work from another app and from
@@ -18,6 +26,45 @@ All notable changes to Folio are recorded here. The format follows
 - Realize large Markdown documents around the viewport and preserve the reading position while estimated heights change.
 
 - Reduce typing and caret-movement delays in large Markdown documents.
+- **Badges in a Markdown preview now stand in a row instead of one under
+  another.** Folio does not fetch pictures from the web, and it used to say so
+  in a full-width card three lines tall for every one of them — so the four
+  badges at the top of a README became four cards and pushed the document itself
+  off the screen. A web picture written in a line with anything else on it is
+  now a small rounded chip on that line, carrying its alt text (or the last part
+  of its address where there is no alt), wrapping like a word among the words.
+  Resting on one says why there is no picture and shows the address; pressing it
+  opens the address, as before. A picture written alone in its own paragraph
+  still gets the card, and pictures on your disk are unchanged.
+- **On a Mac, the Appearance page no longer offers Acrylic.** Folio does not
+  blur what sits behind a window on macOS, and the row said so on a line of its
+  own while its picker stood greyed at `Off` — a row about something there is
+  nothing to decide. It is gone instead, and the rows under it close up. Nothing
+  changes on Windows, where the row still stands and still reports when a
+  version of Windows has no blur to offer; and your settings file keeps the
+  value either way, so a Windows machine sharing that file reads it as before.
+- **On a Mac, resting on the settings gear lights a rounded square that matches
+  the window's own corner.** The wash used to be a smaller pill; it is now the
+  same shape and the same curve as the corner it sits in, and the gear itself
+  has not moved.
+- **Moving the caret and typing in a very large Markdown document no longer
+  waits on the whole document.** Each keystroke used to copy the text, rescan
+  every line for the widest one and rebuild the caret's map of lines from
+  scratch; on a three-megabyte document that was a visible pause on every key.
+  The document is now shared rather than copied, undo is derived from the edit
+  itself, and the line index and widths are kept up to date incrementally. On
+  that same document a caret move inside a paragraph went from a few
+  milliseconds to nothing measurable; opening it is still slow, and that is the
+  next change.
+- **A changed file in the Git page says what happened to it in words.** Resting
+  on a row used to give you its path and the name of the group it stands in,
+  leaving git's two letters to be read off the badges: `UU` on a row meant
+  nothing unless you already knew it meant a merge conflict where both sides
+  changed the file. Every status git can report now has a phrase — `Modified`,
+  `Added, staged`, `Modified, staged — modified since`,
+  `Conflict (both modified)` — and git's own two letters stand beside it, so a
+  row and a `git status` in the pane next to it still read the same. The files
+  under an expanded commit say theirs too.
 
 - **The card that appears when you rest on a file now fades in.** It used to
   arrive solid in a single frame; it now takes the same ninety milliseconds the
@@ -28,7 +75,34 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- **A table on a focus card lines up again.** A card showing a box-drawing table whose cells hold Chinese text drew its borders in a different place on every row, while the same table in the pane beside it was square. A card's rows are now laid out column by column, as the pane's own grid is, so a wide character takes exactly two columns and a border stands in the same place on every row.
+- **On a Mac, `Edit ▸ Copy` and `Edit ▸ Paste` now act on the pane you are
+  looking at.** Over a terminal they did nothing at all — the selection never
+  reached the clipboard and the menu's Paste typed nothing — because macOS had
+  nothing to hand those rows to. They now copy the terminal's selection, or the
+  text you have selected in a file you are editing in a preview, and paste into
+  whichever of the two has the keyboard. A page in a web pane and a text field
+  in a dialog keep answering for themselves as before, and `⌘C` and `⌘V` are
+  unchanged.
+
+- **`REMOTES` on the Git page no longer sits under a highlight nobody put
+  there.** Opening the sub-group left a filled block behind the word that stayed
+  after the pointer had gone — it was the keyboard's own highlight, which a
+  header should never have worn, and the pointer's could land on the wrong row
+  besides, because the list is rebuilt as the repository changes while your hand
+  holds still. Group headers now say the same thing the `Files | Git` switch
+  above the column says: dim at rest, the word and its triangle brightening
+  under the pointer, and no block at any time. The whole row is still what you
+  press.
 - Keep focus cards on the same content when resizing, and make Alt+wheel respond immediately when reversing at the oldest content.
+- **On a Mac, tabs now take the whole width of the title bar.** The tab strip was setting aside room for four window buttons on a window that carries one — macOS draws minimise, zoom and close at the other end of the bar — so the tabs were squeezed to their profile marks, their names hidden, with a wide empty band before the settings gear. Seven tabs in a 934-point window now stand 91 points wide with their names showing instead of 72 without.
+- **Every picker in Settings that offers profiles now shows their marks.** The
+  summoned terminal's `Profile for new tabs` listed its profiles as bare words,
+  where the same profiles carry their marks on the tab strip, on the pane head
+  and in the new-tab `⌄` menu; and no picker showed a mark once it was closed.
+  Both now do, in the marks and at the size that menu draws. `Default profile`,
+  which is a deferral rather than a profile, keeps its word and borrows nobody's
+  mark.
 
 - Reuse unchanged Markdown prose measurements across caret moves and edits, and reset block scroll offsets after reparsing.
 

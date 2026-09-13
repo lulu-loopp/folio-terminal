@@ -203,6 +203,139 @@ const ROW_DESC_MARGIN_TOP_LOGICAL_PX: f32 = 1.0;
 /// test run rather than in a screenshot.
 const ROW_DESC_MAX_LINES: usize = 3;
 
+// ── the description column's copy budget (owner ruling 2026-09-13) ─────────
+//
+// [`ROW_DESC_MAX_LINES`] above is what the *layout* tolerates: three lines and
+// then an `…`. The constants below are what the *copy* is written to, and they
+// are a tighter line for a different reason: a settings row is scanned, not
+// read, and a sentence that needs three lines is a sentence that has stopped
+// saying one thing. Nothing draws them — they are `#[cfg(test)]` for
+// `SLIDER_TRACK_WIDTH_AT_THE_FLOOR_LOGICAL_PX`'s reason, that a constant the
+// product carried only so a pin could read it would be shipped weight.
+//
+// The seven rules the budget is the seventh of are written out in
+// `docs/plans/copy/user-facing-copy-guide.md` (English) and
+// `docs/plans/copy/zh-style-notes.md` (Chinese), and in `docs/DESIGN.md`
+// §7.1.6c-5.
+
+/// **How many lines of its column a row's sentence may fill** (owner ruling
+/// 2026-09-13).
+///
+/// Two, in either language. Held by
+/// [`tests::no_settings_sentence_needs_a_third_line`] over the English column
+/// and by [`tests::no_chinese_settings_sentence_needs_a_third_line_either`]
+/// over the Chinese one.
+#[cfg(test)]
+const SETTINGS_DESCRIPTION_MAX_LINES: usize = 2;
+
+// The budget is a *tighter* line than the layout's, and the compiler is what
+// says so: a relation between two constants is settled where they are written,
+// not in a test run that can only re-read what the file already says. The
+// arithmetic that is *not* constant — the column, the per-line character
+// budgets — stays in
+// `tests::the_description_budget_is_the_column_this_dialog_draws`.
+#[cfg(test)]
+const _: () = assert!(
+    SETTINGS_DESCRIPTION_MAX_LINES < ROW_DESC_MAX_LINES,
+    "the copy is written to a shorter line than the layout tolerates"
+);
+
+/// **The row band at 1×**, in logical pixels — 502, and the column a *stacked*
+/// row writes its sentence in.
+///
+/// The same arithmetic [`StackMetrics::row_span`] does at scale 1, written out
+/// so the budgets below can be read without running anything:
+///
+/// ```text
+///   720   DIALOG_MAX_WIDTH_LOGICAL_PX          the dialog
+/// −   2   2 × FLOAT_WINDOW_BORDER_LOGICAL_PX   its own border
+/// − 168   NAV_WIDTH_LOGICAL_PX                 the category rail
+/// −  44   2 × CONTENT_PADDING_X_LOGICAL_PX     the page's gutters
+/// −   4   2 × ROW_PADDING_X_LOGICAL_PX         the row's own inset
+/// = 502
+/// ```
+///
+/// The border term carries no `.max(1.0)`: `f32::max` is not a `const fn`, and
+/// at scale 1 the floor is a no-op because the constant *is* 1.0.
+#[cfg(test)]
+const SETTINGS_ROW_SPAN_LOGICAL_PX: f32 = DIALOG_MAX_WIDTH_LOGICAL_PX
+    - 2.0 * FLOAT_WINDOW_BORDER_LOGICAL_PX
+    - (NAV_WIDTH_LOGICAL_PX + 2.0 * CONTENT_PADDING_X_LOGICAL_PX + 2.0 * ROW_PADDING_X_LOGICAL_PX);
+
+/// **The narrowest column a sentence is ever set in**, in logical pixels — 235.
+///
+/// **There is no single description column, and that is the whole of this
+/// constant.** `page_combo_width` makes the control column *the widest answer
+/// on the page*, so the sentence beside it is the band less that — 368 on a
+/// page whose pickers all sit at the 118px floor, and less on every page whose
+/// pickers have a long word to print. The budget is therefore the **narrowest**
+/// such column, and the narrowest is not a page's measurement at all:
+///
+/// ```text
+///   502   SETTINGS_ROW_SPAN_LOGICAL_PX
+/// − 251   the widest a control may be — row_span × COMBO_MAX_ROW_SHARE
+/// −  16   ROW_GAP_LOGICAL_PX
+/// = 235
+/// ```
+///
+/// **Which page sets it, and why it cannot be beaten.** `combo_width` clamps
+/// every picker at [`COMBO_MAX_ROW_SHARE`] of the row, so 235 is not the
+/// tightest column this build happens to draw — it is the tightest column this
+/// dialog *can* draw, on any page, on any machine, whatever the reader's fonts,
+/// schemes and profile names are called. Two pages already stand on it with
+/// nothing but words this build owns: **Summoned terminal**, whose `Restore`
+/// row offers `Tabs, folders, and a pinned tab's last command typed at its
+/// prompt`, and **General**, whose `Opens on launch` row offers `A tab in the
+/// window you used last`. The Chinese column reaches it on the Summoned
+/// terminal page for the same reason.
+///
+/// That is also what makes the budget survive
+/// `T-SETTINGS-PROFILE-MARKS`: the mark box that ticket adds to a marked row's
+/// button is spent on `Default profile` and on the summoned terminal's profile
+/// row, both of which are on pages *already* at the ceiling, and a width that
+/// is already clamped cannot be widened.
+///
+/// [`tests::the_description_budget_is_the_column_this_dialog_draws`] asserts all
+/// of this against the live geometry, so the arithmetic above and the dialog's
+/// own cannot drift apart.
+#[cfg(test)]
+const SETTINGS_DESCRIPTION_COLUMN_LOGICAL_PX: f32 =
+    SETTINGS_ROW_SPAN_LOGICAL_PX * (1.0 - COMBO_MAX_ROW_SHARE) - ROW_GAP_LOGICAL_PX;
+
+/// **How many English characters fit one line of that column** — 39.
+///
+/// `floor(235 / (12 × 0.5)) = floor(235 / 6) = 39`, where 12 is
+/// [`ROW_DESC_FONT_LOGICAL_PX`] and 0.5 em is [`tests::TEST_ADVANCE_PER_EM`] —
+/// this repository's own documented stand-in for the shaper's average advance,
+/// and the same number every width claim in this file is stated against. It is
+/// an approximation and is named as one: a budget stated against Segoe UI's
+/// real metrics would be re-stating the metrics of whichever face the machine
+/// has.
+///
+/// **A writer's number, and the strictest one.** It is what a row on the
+/// Summoned terminal or General page gets; a row on Rendered blocks, where
+/// every picker sits at the floor, gets 61, and one on Appearance gets 54. The
+/// gate does not use this number: it wraps each sentence in the column *its own
+/// page* draws, with the product's own wrapper, because English breaks at
+/// spaces and a 78-character sentence can still want a third line. Write to 39
+/// and no page can refuse the sentence.
+#[cfg(test)]
+const SETTINGS_DESCRIPTION_MAX_CHARS_ENGLISH: usize = 39;
+
+/// **How many Chinese characters fit one line of that column** — 19.
+///
+/// `floor(235 / 12) = 19`. A CJK face's advance is one em by the definition of
+/// every CJK font, so the character is [`ROW_DESC_FONT_LOGICAL_PX`] wide and no
+/// approximation is involved — which is why this half of the budget is exact
+/// where the English half is an estimate.
+///
+/// The same caution applies twice over: a Chinese line breaks at every
+/// ideograph boundary but a run of Han between two Latin words is one token to
+/// a space-only wrapper, so 38 characters is a ceiling and not a promise. See
+/// [`tests::a_chinese_settings_line_is_filled_before_it_breaks`].
+#[cfg(test)]
+const SETTINGS_DESCRIPTION_MAX_CHARS_CHINESE: usize = 19;
+
 // ── `.combo` ───────────────────────────────────────────────────────────────
 /// `.combo > button { min-width: 118px }` — **a floor, and since §7.1.6c-5 only
 /// a floor.**
@@ -862,18 +995,37 @@ fn restore_all_label() -> &'static str {
     Text::ShortcutRestoreAll.text()
 }
 
-// ── the one picker whose items carry a mark (mock-up 7647) ─────────────────
+// ── the pickers whose items carry a mark (mock-up 7647) ───────────────────
 /// `.profile-item .ticon { width: 14px }` (mock-up 1023) — the same column the
 /// `˅` menu gives a profile mark, because it is the same `.ticon` class.
 const OPTION_ICON_COLUMN_LOGICAL_PX: f32 = 14.0;
-/// `.pmark { width: 15px }` (mock-up 246). Wider than its 14px column by one
-/// pixel, exactly as in the picker: a flex box centres a child that overflows it.
-const OPTION_MARK_LOGICAL_PX: f32 = 15.0;
+/// **How big a mark is struck in that column** — the `˅` menu's own answer,
+/// asked of the same function (`profiles::item_mark_box_logical_px`, which is
+/// [`crate::icons::MarkSlot::Menu`] read off the drawing).
+///
+/// It was a `15.0` written off `.pmark { width: 15px }` (mock-up 246) with a
+/// note saying it was "the same `.ticon` holding the same `.pmark`" as the `˅`
+/// menu. **That claim was a pixel out**: the icon block later derived a menu
+/// row's mark box from where each family's ink stops — the house's 14, the
+/// edge-to-edge family's 11.2 — and the `˅` menu moved onto the derivation
+/// while this picker kept the literal, so the same profile was struck 15 here
+/// and 14 one surface over. One drawing at two sizes in two menu columns is
+/// exactly what that block exists to prevent, so the literal goes and the
+/// derivation answers for both. See DESIGN §7.1.6c-9‴.
+fn option_mark_box_logical_px(mark: ChromeMark) -> [f32; 2] {
+    crate::profiles::item_mark_box_logical_px(mark)
+}
 /// What a `.ticon` costs an item that has one: the column, and the flex gap
 /// after it. Zero for every other row, which is what keeps their popups the
 /// width they have always been.
+///
+/// **Asked of the whole option list and not of item zero.** The question is
+/// whether this row's picker *has* a mark column, and the summoned terminal's
+/// profile row is the one whose first item has no mark and whose every other
+/// item does (see [`SettingsRow::option_mark`]) — a row sized off item zero
+/// would draw eight marks in a column nothing reserved.
 fn option_icon_advance(row: SettingsRow, scale: f32) -> f32 {
-    if row.option_mark(0).is_some() {
+    if row.options_are_marked() {
         (OPTION_ICON_COLUMN_LOGICAL_PX + ITEM_GAP_LOGICAL_PX) * scale
     } else {
         0.0
@@ -3027,30 +3179,42 @@ impl SettingsRow {
     ///
     /// `None` is the ordinary answer and it means what it says: the row is about
     /// Folio, or about a file, or about a shell that exists everywhere, and it
-    /// is on every machine's page. The four that answer `Some` are about a
+    /// is on every machine's page. The five that answer `Some` are about a
     /// mechanism one platform has and another has not — Explorer's folder menu,
     /// the `$PROFILE` of a shell with no other door, the readline module that
-    /// one edition of PowerShell ships, and a key called Option.
+    /// one edition of PowerShell ships, the blurred backdrop this build can ask
+    /// a window for, and a key called Option.
     ///
     /// **The same [`Capability`] the first-run card reads, and deliberately so.**
-    /// Two of these four are mechanisms that card already asks about, and a
+    /// Two of these five are mechanisms that card already asks about, and a
     /// second table would be a second place to remember which platforms have
-    /// them. The other two joined the table for this page and the card has no
-    /// row for either. What each surface owns is what it *does* with the
+    /// them. The other three joined the table for this page and the card has no
+    /// row for any of them. What each surface owns is what it *does* with the
     /// answer: the card drops the question, and this page drops the row.
     ///
     /// **A row the machine cannot honour is a different thing and is not here.**
-    /// `Acrylic` on a machine with no backdrop and a built-in profile's colour
-    /// are *greyed with a reason*, because the reason is what the reader came
-    /// for ([`Self::available`]); a facility the platform has not got leaves
-    /// nothing to explain, and a sentence explaining it would be this page
-    /// teaching a reader a Windows word on a Mac.
+    /// A Windows too old to know what a backdrop is, and a built-in profile's
+    /// colour, are *greyed with a reason*, because the reason is what the reader
+    /// came for ([`Self::available`]); a facility the platform has not got
+    /// leaves nothing to explain, and a sentence explaining it would be this
+    /// page teaching a reader a Windows word on a Mac.
+    ///
+    /// **`Acrylic` is both questions, and they are asked in this order** (owner
+    /// report and ruling 2026-09-13, §13.32 ⑥). The owner opened the Appearance
+    /// page on the built Mac and read `亚克力 — Folio 在 macOS 上不画这种模糊。`,
+    /// greyed, its picker held at `关`: a row explaining itself to a reader who
+    /// has nothing to decide. The ruling is the one above, applied to a row that
+    /// had been filed under the other rule — off Windows this build has no
+    /// backdrop door at all ([`Capability::WindowBackdrop`]), so the row is not
+    /// there; on Windows it is there, and whether *this* Windows has a backdrop
+    /// is still said on its own line.
     #[must_use]
     pub const fn needs(self) -> Option<Capability> {
         match self {
             Self::ContextMenu => Some(Capability::ExplorerMenu),
             Self::PowerShellOffer => Some(Capability::PowerShellProfile),
             Self::PsReadLine => Some(Capability::PsReadLineModule),
+            Self::Acrylic => Some(Capability::WindowBackdrop),
             Self::OptionSendsAlt => Some(Capability::OptionKey),
             _ => None,
         }
@@ -3603,6 +3767,12 @@ impl SettingsRow {
     /// hunting for a feature they had read about. A focus stop, because a ring
     /// is not an action: what the greying forbids is a control that *appears to
     /// act*, and both the hit test and `activate` refuse this one.
+    ///
+    /// **A reader who could never have read about it is the other case**, and
+    /// it is not this one: a facility the platform has not got takes the row off
+    /// the page before this is asked ([`Self::needs`], §13.32 ⑥), so `Acrylic`
+    /// reaches this line on Windows only and the answer here is about that
+    /// Windows.
     #[must_use]
     pub fn available(self, values: &SettingsValues) -> bool {
         match self {
@@ -4004,12 +4174,12 @@ impl SettingsRow {
         }
     }
 
-    /// The mark an item wears, for the one row whose items have one.
+    /// The mark an item wears, for the rows whose items have one.
     ///
     /// Mock-up 7647: `<span class="tick">✓</span><span class="ticon">${p.icon}</span>${p.title}`
-    /// — and it is the only combo item in the whole dialog with a `.ticon`, which
-    /// is why this returns `Option` from a row rather than being a field every
-    /// option list has to fill in with `None`.
+    /// — the `.ticon` no other kind of combo item has, which is why this returns
+    /// `Option` from a row rather than being a field every option list has to
+    /// fill in with `None`.
     ///
     /// It is the profile's own mark and not a generic shell glyph, for the reason
     /// `UI-UX.md:115` gives about every other surface: you recognise PowerShell by
@@ -4019,6 +4189,26 @@ impl SettingsRow {
     pub fn option_mark(self, index: usize) -> Option<ChromeMark> {
         match self {
             Self::DefaultProfile => (index < profiles::count()).then(|| profiles::mark(index)),
+            // **The same list one page down, so the same marks** (user report
+            // 2026-09-13: "内置的配置明明有图标"). It is the one row in the
+            // dialog whose items are profiles *and* something else, and the
+            // something else is item zero — the sentence "whatever the default
+            // profile is", which names no profile and therefore wears no mark.
+            //
+            // Borrowing the default profile's mark for it was the other
+            // candidate and it is refused twice over. The Profiles page has
+            // already ruled how default-ness is said — a `default` hint in the
+            // row's own trailing slot, beside the profile's own mark, reporting
+            // and never standing in for it (§7.1.6c-6c, ruling four) — so on
+            // this list the word is the whole of the item. And a mark here
+            // would be the one drawing in the menu that changes without anybody
+            // touching this page: it would duplicate whichever row below it is
+            // the default today, and the two would read as one profile listed
+            // twice.
+            Self::QuakeProfile => index
+                .checked_sub(1)
+                .filter(|profile| *profile < profiles::count())
+                .map(profiles::mark),
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS
                 .get(index)
                 .copied()
@@ -4035,6 +4225,44 @@ impl SettingsRow {
                 .map(|colour| ChromeMark::ProfileGeneric { colour }),
             _ => None,
         }
+    }
+
+    /// **Whether this row's picker has a mark column at all**, which is a fact
+    /// about the geometry rather than about any one item.
+    ///
+    /// Derived by asking [`option_mark`](Self::option_mark) of the row's own
+    /// options rather than kept as a second list of row names, because a second
+    /// list is how a row comes to draw a mark in a column nobody reserved — and
+    /// the row that would have found the old spelling out (item zero decides)
+    /// is the summoned terminal's, whose first item is the one unmarked entry
+    /// in a marked list.
+    #[must_use]
+    pub fn options_are_marked(self) -> bool {
+        (0..self.option_count()).any(|index| self.option_mark(index).is_some())
+    }
+
+    /// **The mark the closed control wears** — the mark of the item the tick is
+    /// on, or `None` when this row has no marks or is standing on no item.
+    ///
+    /// **The pane head's own sentence, said by a button** (`marks.rs`'s opening
+    /// line: "a tab head and a pane head wear the session's profile mark"). That
+    /// is the nearest precedent this product has for a shut surface that names
+    /// which profile is in force, and it names it the same way every time: the
+    /// mark, then the title, in the mark's own colours. A picker whose open list
+    /// shows eight marks and whose closed face shows none would be the one place
+    /// a profile is recognised by reading rather than by looking, which is the
+    /// report this row was filed on.
+    ///
+    /// One derivation and no per-row list, so a row that grows items with marks
+    /// grows a marked button on the same day. The two rows that answer with a
+    /// *sentence* instead of one of their items — a fixed starting folder's
+    /// path, a built-in's inherited colour — have no ticked item either, so they
+    /// draw no mark here, which is the truth: their value is not in the list.
+    /// See [`value_text`](Self::value_text).
+    #[must_use]
+    pub fn value_mark(self, values: &SettingsValues) -> Option<ChromeMark> {
+        self.selected_index(values)
+            .and_then(|index| self.option_mark(index))
     }
 
     /// Whether this item can be chosen on this machine.
@@ -4338,11 +4566,13 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
 /// the order impossible to read. [`SettingsRow::needs`] is where each row says
 /// what it is about; this is where the page acts on it.
 ///
-/// **Nothing here can empty a page.** Every category the four conditional rows
+/// **Nothing here can empty a page.** Every category the five conditional rows
 /// belong to keeps unconditional rows under the same heading — General keeps
-/// six, Terminal keeps four — so the heading derivation that walks this list
-/// never meets a run of nothing, and the disclosure above the advanced group is
-/// untouched. `no_page_is_left_with_a_heading_and_no_rows` is that claim.
+/// six, Terminal keeps four, and Appearance keeps the whole of its everyday
+/// group and seven of its eight advanced rows — so the heading derivation that
+/// walks this list never meets a run of nothing, and the disclosure above the
+/// advanced group is untouched.
+/// `no_page_is_left_with_a_heading_and_no_rows` is that claim.
 #[must_use]
 pub fn visible_rows_for(
     platform: bt_platform::HostPlatform,
@@ -4416,9 +4646,12 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // through, how much of the desktop comes through behind it, is that
     // blurred, and does the window stay in front.
     //
-    // Unconditional, unlike `Sidebar`: the two rows a machine may not be able
-    // to honour are greyed rather than dropped, because the reason is what a
-    // reader came for — see `SettingsRow::available`.
+    // Unconditional, unlike `Sidebar`: a row this *machine* may not be able to
+    // honour is greyed rather than dropped, because the reason is what a reader
+    // came for — see `SettingsRow::available`. `Acrylic` is pushed here with
+    // the rest and dropped by `visible_rows_for`'s one filter on a platform
+    // where this build has no backdrop to ask for at all (§13.32 ⑥), which is
+    // the other question and is asked in one place for every row.
     rows.push(SettingsRow::BackgroundImage);
     rows.push(SettingsRow::ImageFit);
     rows.push(SettingsRow::ImageOpacity);
@@ -5038,6 +5271,10 @@ pub struct SettingsValues {
     /// Whether this Windows knows what a system backdrop is
     /// (`bt_platform::system_backdrop_available`). `false` greys the Acrylic row
     /// whole and turns its sentence into the reason.
+    ///
+    /// **Read on Windows only**, because that is the only platform the row is on
+    /// (§13.32 ⑥). Off it the door has no arm, this field answers `false`
+    /// everywhere, and there is no row for the answer to grey.
     pub acrylic_available: bool,
     /// Whether this window's surface is composited with premultiplied alpha —
     /// the thing a translucent ground is made of (`docs/DESIGN.md` §2.3 A2).
@@ -10685,7 +10922,20 @@ fn combo_width(
         + px(COMBO_PADDING_LEFT_LOGICAL_PX)
         + px(COMBO_PADDING_RIGHT_LOGICAL_PX)
         + px(COMBO_GAP_LOGICAL_PX)
-        + px(COMBO_CHEVRON_FONT_LOGICAL_PX);
+        + px(COMBO_CHEVRON_FONT_LOGICAL_PX)
+        // **And the mark column on a marked row, reserved whether this
+        // particular value has a mark or not** — the popup's own rule one
+        // surface out (`the run of verbs is reserved in the width, revealed or
+        // not`). The summoned terminal's row is why it has to be the row's
+        // question and not the value's: its `Default profile` item wears no
+        // mark, and a button that gave the column back on that one answer would
+        // slide its own text sideways when the reader changed the value.
+        //
+        // Added to the *chrome* rather than taken out of the value box, because
+        // §7.1.6c-5's whole ruling is that a button is as wide as what it has to
+        // say. Squeezing the mark into the box the words already had would print
+        // `Windows PowerShe…` on a row that fits today.
+        + option_icon_advance(row, scale);
     let floor = px(COMBO_MIN_WIDTH_LOGICAL_PX);
     // The floor wins over the cap on a row too narrow to honour both, which is
     // the same precedence `menu_layout`'s clamp uses: a control is drawn at the
@@ -11627,11 +11877,12 @@ pub fn build(
                         })
                     };
                 push_combo(
-                    &mut content_stack.quads,
-                    &mut content_stack.labels,
+                    &mut content_stack,
                     placed.combo,
                     available && hover == Some(SettingsTarget::Combo(placed.row)),
                     value,
+                    placed.row.value_mark(values),
+                    option_icon_advance(placed.row, scale),
                     available,
                     scale,
                     border,
@@ -11918,16 +12169,22 @@ pub fn build(
             }
             let text_left = tick_right + px(ITEM_GAP_LOGICAL_PX) + icon_advance;
             if let Some(mark) = row.option_mark(index) {
-                // Centred on its own 14px column, one pixel narrower than the
-                // 15px mark in it — `profiles::push_row`'s arithmetic, because it
-                // is the same `.ticon` holding the same `.pmark`.
+                // Centred on its own 14px column and struck in the box that
+                // column gives this mark's family — `profiles::push_row`'s
+                // arithmetic to the digit, because it is the same `.ticon`
+                // holding the same `.pmark`.
                 let column_left = tick_right + px(ITEM_GAP_LOGICAL_PX);
                 let column_right = column_left + px(OPTION_ICON_COLUMN_LOGICAL_PX);
-                let side = px(OPTION_MARK_LOGICAL_PX).round();
-                let left = ((column_left + column_right - side) / 2.0).round();
-                let top = ((item[1] + item[3] - side) / 2.0).round();
-                let mut sprite =
-                    ChromeSprite::new(mark, [left, top, left + side, top + side], palette.accent);
+                let [box_width, box_height] = option_mark_box_logical_px(mark);
+                let mark_width = px(box_width).round();
+                let mark_height = px(box_height).round();
+                let left = ((column_left + column_right - mark_width) / 2.0).round();
+                let top = ((item[1] + item[3] - mark_height) / 2.0).round();
+                let mut sprite = ChromeSprite::new(
+                    mark,
+                    [left, top, left + mark_width, top + mark_height],
+                    palette.accent,
+                );
                 if !enabled {
                     sprite.opacity = UNAVAILABLE_MARK_OPACITY;
                     sprite.grayscale = true;
@@ -13553,13 +13810,22 @@ fn focus_ring(rect: [f32; 4], scale: f32, accent: [u8; 3]) -> Vec<OverlayQuad> {
     )
 }
 
+/// **The closed control** — its face, the value in force, and on a marked row
+/// the mark that value wears (user report 2026-09-13, DESIGN §7.1.6c-9‴).
+///
+/// `icon_advance` is the row's reserved `.ticon` column and is spent whether
+/// `mark` is `Some` or not; `mark` is what this particular value carries, which
+/// on the summoned terminal's row is nothing at all for its first item. The two
+/// are separate arguments for exactly that reason — see
+/// [`SettingsRow::value_mark`] and [`option_icon_advance`].
 #[allow(clippy::too_many_arguments)]
 fn push_combo(
-    quads: &mut Vec<OverlayQuad>,
-    labels: &mut Vec<ChromeLabel>,
+    stack: &mut OverlayLayer,
     rect: [f32; 4],
     hovered: bool,
     value: &str,
+    mark: Option<ChromeMark>,
+    icon_advance: f32,
     // `available`: whether this row can act. A greyed button keeps its border
     // and its face — it stays where it is, exactly as a disabled `.btn` does —
     // and only its ink steps back.
@@ -13571,13 +13837,13 @@ fn push_combo(
 ) {
     let px = |logical: f32| logical * scale;
     let radius = px(COMBO_RADIUS_LOGICAL_PX);
-    quads.extend(rounded_overlay_fill(
+    stack.quads.extend(rounded_overlay_fill(
         rect,
         radius,
         palette.menu_border,
         f32::from(palette.menu_border_alpha) / 255.0,
     ));
-    quads.extend(rounded_overlay_fill(
+    stack.quads.extend(rounded_overlay_fill(
         [
             rect[0] + border,
             rect[1] + border,
@@ -13599,14 +13865,31 @@ fn push_combo(
     // what a bare clip does and it reads as a rendering fault rather than as a
     // name too long — "Windows PowerShell 5.1" arriving as "Windows Pov" is the
     // report this exists to answer.
+    let content_left = rect[0] + border + px(COMBO_PADDING_LEFT_LOGICAL_PX);
+    if let Some(mark) = mark {
+        // Centred on the same 14px `.ticon` column the open list gives it, and
+        // struck at the same box — one drawing, one size, whichever of the two
+        // surfaces is up. See [`option_mark_box_logical_px`].
+        let column_right = content_left + px(OPTION_ICON_COLUMN_LOGICAL_PX);
+        let [box_width, box_height] = option_mark_box_logical_px(mark);
+        let mark_width = px(box_width).round();
+        let mark_height = px(box_height).round();
+        let left = ((content_left + column_right - mark_width) / 2.0).round();
+        let top = ((rect[1] + rect[3] - mark_height) / 2.0).round();
+        stack.sprites.push(ChromeSprite::new(
+            mark,
+            [left, top, left + mark_width, top + mark_height],
+            palette.accent,
+        ));
+    }
     let value_box = [
-        rect[0] + border + px(COMBO_PADDING_LEFT_LOGICAL_PX),
+        content_left + icon_advance,
         rect[1],
         rect[2] - border - px(COMBO_PADDING_RIGHT_LOGICAL_PX) - chevron_column,
         rect[3],
     ];
     let font_size_px = px(COMBO_FONT_LOGICAL_PX);
-    labels.push(ChromeLabel {
+    stack.labels.push(ChromeLabel {
         mono: false,
         text: ellipsized(value, value_box[2] - value_box[0], font_size_px, measure),
         rect: value_box,
@@ -13623,7 +13906,7 @@ fn push_combo(
         tabular_numerals: false,
         clip: None,
     });
-    labels.push(ChromeLabel {
+    stack.labels.push(ChromeLabel {
         mono: false,
         text: COMBO_CHEVRON.to_owned(),
         rect: [
@@ -14626,7 +14909,7 @@ mod tests {
         let labels = labels_of(&at_row, None, &values());
         let drawn = labels
             .iter()
-            .find(|label| label.rect == combo_value_box(split))
+            .find(|label| label.rect == combo_value_box(SettingsRow::SplitDirection, split))
             .expect("the button draws its value");
         assert!(
             !drawn.text.contains(ELLIPSIS),
@@ -14893,7 +15176,7 @@ mod tests {
     ///
     /// The walk above measures what `description` returns, and `description`
     /// reads the platform this process is running on — so a Mac column added to
-    /// [`Text`] is a sentence no length gate has ever seen. Three of the five
+    /// [`Text`] is a sentence no length gate has ever seen. Three of the four
     /// measured here are *longer* than the Windows sentence they replace
     /// (`Bounces the Dock icon` against `Flashes the taskbar`), which is exactly
     /// the shape of a fault that ships: correct words, one line too many, on a
@@ -14901,22 +15184,25 @@ mod tests {
     ///
     /// Not a sweep, because there is no map from a row to its `Text` and the
     /// Chinese gate below pays for guessing one. These are the rows whose
-    /// sentence has a Mac column, named; a sixth is a line added here.
+    /// sentence has a Mac column, named; a fifth is a line added here.
     ///
-    /// MUTATION: lengthen any of the five Mac sentences past its column and this
+    /// **`Acrylic` was the fifth and is not measured any more** (§13.32 ⑥): the
+    /// row is not on a Mac's page at all, so `DescAcrylicUnavailable` has one
+    /// column again and the sweep that reads it is the Windows one above.
+    ///
+    /// MUTATION: lengthen any of the four Mac sentences past its column and this
     /// names the row.
     #[test]
     fn no_sentence_a_mac_reads_needs_a_fourth_line() {
         use crate::i18n::{Lang, Text};
         use bt_platform::HostPlatform::MacOs;
 
-        const ON_A_MAC: [(SettingsRow, Text); 5] = [
+        const ON_A_MAC: [(SettingsRow, Text); 4] = [
             (SettingsRow::LaunchOpens, Text::DescLaunchOpens),
             (
                 SettingsRow::TurnEndNotifications,
                 Text::DescTurnEndNotifications,
             ),
-            (SettingsRow::Acrylic, Text::DescAcrylicUnavailable),
             (SettingsRow::QuakeHotkey, Text::DescQuakeHotkey),
             (SettingsRow::OptionSendsAlt, Text::DescOptionSendsAlt),
         ];
@@ -15039,6 +15325,633 @@ mod tests {
         );
         // **And the walk really found the entries.** Every skip above is silent,
         // so a change that broke the lookup would leave this passing on nothing.
+        assert!(
+            measured >= 30,
+            "only {measured} rows were matched to an entry — the lookup is \
+             broken, not the copy"
+        );
+    }
+
+    /// **Every sentence this dialog can put under a row that the fixture above
+    /// does not select**, paired with the row whose column it is set in and the
+    /// machine it is read on.
+    ///
+    /// The walks that measure copy build one dialog out of
+    /// [`SettingsValues::sample`] and ask each row what it says, which is one
+    /// answer per row: the wrapping half of `Line wrapping`, the available half
+    /// of `Acrylic`, the Windows half of `Opens on launch`. The other halves are
+    /// sentences the product draws on a real desk and no length rule has ever
+    /// seen — the exact shape of a fault that ships, which is why
+    /// [`no_sentence_a_mac_reads_needs_a_fourth_line`] exists at all. This list
+    /// is that argument carried to every condition rather than only to the
+    /// platform.
+    ///
+    /// Named by hand and not swept, for that pin's reason: there is no map from
+    /// a row to its [`Text`], and the one the Chinese walk improvises — find the
+    /// entry whose English is the string this row just said — cannot reach a
+    /// string the row did not say.
+    ///
+    /// **Two sentences are deliberately outside it**, and both for the same
+    /// reason the picker column is: `psreadline::row_description`'s four
+    /// composed lines and `update::row_description`'s carry a version string
+    /// read off this machine, so their length is a fact about the machine rather
+    /// than about the copy. What is held here instead is the entry each of them
+    /// falls back to when there is no version to name.
+    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 23] = {
+        use bt_platform::HostPlatform::{MacOs, Windows};
+        [
+            // The other end of a value the fixture had to pick one end of.
+            (
+                SettingsRow::LineWrapping,
+                Text::DescLineWrappingOff,
+                Windows,
+            ),
+            // **The conditional row the fixture does not hold at all.**
+            // `every_row_of_the_dialog` pushes `Sidebar` only under a vertical
+            // tab strip and `flat_rows` is the horizontal window, so this
+            // sentence is on nobody's page in every walk in this file — the same
+            // silence `EDITOR_ROWS` was in until 2026-08-28.
+            (SettingsRow::Sidebar, Text::DescSidebar, Windows),
+            // The three rows whose sentence becomes the reason they are grey.
+            (
+                SettingsRow::BackgroundOpacity,
+                Text::DescBackgroundOpacityUnavailable,
+                Windows,
+            ),
+            (SettingsRow::Acrylic, Text::DescAcrylicUnavailable, Windows),
+            (SettingsRow::Acrylic, Text::DescAcrylicUnavailable, MacOs),
+            (
+                SettingsRow::QuakeHeight,
+                Text::DescQuakeHotkeyTaken,
+                Windows,
+            ),
+            (
+                SettingsRow::QuakeHotkey,
+                Text::DescQuakeHotkeyTaken,
+                Windows,
+            ),
+            // An intent recorded on the card and not yet written to a $PROFILE.
+            (
+                SettingsRow::PowerShellOffer,
+                Text::ShellIntegrationPending,
+                Windows,
+            ),
+            // What `attention_copilot::row_description` says about a machine
+            // this one is not.
+            (
+                SettingsRow::CopilotHooks,
+                Text::DescCopilotHooksTooOld,
+                Windows,
+            ),
+            (
+                SettingsRow::CopilotHooks,
+                Text::DescCopilotHooksDisabled,
+                Windows,
+            ),
+            // All six of `explorer_menu::description_for`'s answers, because the
+            // machine running the suite reaches exactly one of them.
+            (SettingsRow::ContextMenu, Text::DescExplorerMenu, Windows),
+            (
+                SettingsRow::ContextMenu,
+                Text::DescExplorerMenuNoFirstPage,
+                Windows,
+            ),
+            (
+                SettingsRow::ContextMenu,
+                Text::DescExplorerMenuNoPackage,
+                Windows,
+            ),
+            (
+                SettingsRow::ContextMenu,
+                Text::DescExplorerFirstPageElsewhere,
+                Windows,
+            ),
+            (
+                SettingsRow::ContextMenu,
+                Text::DescExplorerFirstPageUnreadable,
+                Windows,
+            ),
+            (
+                SettingsRow::ContextMenu,
+                Text::DescExplorerFirstPageAwaitingShell,
+                Windows,
+            ),
+            // The two PSReadLine states that are an entry rather than a composed
+            // line. See this constant's own note for the four that are not.
+            (SettingsRow::PsReadLine, Text::PsReadLineProbing, Windows),
+            (SettingsRow::PsReadLine, Text::PsReadLineRowGone, Windows),
+            // The sentence with no version in it, for the row above's reason.
+            (SettingsRow::UpdateCheck, Text::DescUpdateCheck, Windows),
+            // The Mac columns. `LaunchOpens`, `TurnEndNotifications`,
+            // `QuakeHotkey` and `OptionSendsAlt` are the rows whose sentence has
+            // one; `Acrylic`'s stands with the other refusals above.
+            (SettingsRow::LaunchOpens, Text::DescLaunchOpens, MacOs),
+            (
+                SettingsRow::TurnEndNotifications,
+                Text::DescTurnEndNotifications,
+                MacOs,
+            ),
+            (SettingsRow::QuakeHotkey, Text::DescQuakeHotkey, MacOs),
+            (SettingsRow::OptionSendsAlt, Text::DescOptionSendsAlt, MacOs),
+        ]
+    };
+
+    /// The ten sentences `profiles::capability_of_parts` can put under the
+    /// `Shell integration` row, which is one row with ten answers.
+    ///
+    /// Separate from [`OTHERWISE`] only because they share one row and one
+    /// platform, so the triple would be nine repetitions of the same two
+    /// members. They are in the budget for the same reason everything else is:
+    /// the editor's fixture stands on one of them and the dialog draws all ten.
+    const CAPABILITY_SENTENCES: [Text; 10] = [
+        Text::CapFull,
+        Text::CapFullNoLinks,
+        Text::CapPowerShell,
+        Text::CapPowerShellNoLinks,
+        Text::CapWslBash,
+        Text::CapWslBashNoLinks,
+        Text::CapCmd,
+        Text::CapCmdNoLinks,
+        Text::CapNoneLong,
+        Text::CapNoneLongNoLinks,
+    ];
+
+    /// **The sentences the owner has ruled out of the two-line budget**, named
+    /// one at a time (owner ruling 2026-09-13, the same day the budget was set).
+    ///
+    /// A length rule that anybody may quietly opt out of is not a rule, so this
+    /// list exists to make the opting-out **loud**: an exemption is an entry
+    /// written here, under a ruling, and never a sentence that happens to be
+    /// long. The gates skip exactly what is on it, in both languages and on both
+    /// platform columns, and nothing else.
+    ///
+    /// **`DescOptionSendsAlt` is on it because the owner put the sentence
+    /// back.** The rewrite this ticket made of it — `On, Option is a terminal's
+    /// Alt key. Off, Option types accents.` — fitted the budget by dropping the
+    /// two halves that are the row's whole reason for existing: *which* programs
+    /// want Option to be Alt, and that the characters it types otherwise are the
+    /// ones every other Mac app types. A reader whose `⌥a` has just done the
+    /// wrong thing is the reader this row was written for, and neither half is
+    /// spare to them. The owner restored the longer sentence and ruled the
+    /// budget off it rather than the sentence off the page.
+    ///
+    /// It still obeys the *layout*: `no_settings_sentence_needs_a_fourth_line`
+    /// and `no_sentence_a_mac_reads_needs_a_fourth_line` measure it like every
+    /// other line, and it fits their three. What it is excused from is the
+    /// tighter copy rule, and only that.
+    ///
+    /// [`the_description_budget_is_the_column_this_dialog_draws`] holds the
+    /// other half of the bargain: an entry here that no longer *needs* the
+    /// exemption is an exemption to delete, and it says so by name.
+    const OWNER_RULED_EXCEPTIONS: [(SettingsRow, Text); 1] =
+        [(SettingsRow::OptionSendsAlt, Text::DescOptionSendsAlt)];
+
+    /// Whether this sentence is one of them — asked of the string rather than of
+    /// the entry, because the page walk has a row and its words and no map back
+    /// to a [`Text`]. Both platform columns, so a future exception with two
+    /// still matches on the one the reader is being shown.
+    fn owner_ruled_exception(sentence: &str, lang: crate::i18n::Lang) -> bool {
+        use bt_platform::HostPlatform::{MacOs, Windows};
+        OWNER_RULED_EXCEPTIONS.into_iter().any(|(_, entry)| {
+            entry.on(lang, Windows) == sentence || entry.on(lang, MacOs) == sentence
+        })
+    }
+
+    /// **The rows whose picker prints something read off the machine**, and so
+    /// the rows a deterministic column cannot be measured with.
+    ///
+    /// A font family list, the scheme folder's contents and the profile table
+    /// are three answers this build does not own: the Appearance page's control
+    /// column is one width on a desk with `Cascadia Mono` installed and another
+    /// on one with a 40-character family name. That is
+    /// [`no_settings_sentence_needs_a_fourth_line`]'s argument, unchanged — a
+    /// page whose pickers have outgrown their words is a **geometry** fact about
+    /// the machine, and `ROW_DESC_MAX_LINES`' third line with its `…` is what
+    /// the layout already provides for it. What the copy is held to is the
+    /// column the page draws out of words this build ships.
+    ///
+    /// Leaving them out costs nothing on the two pages that matter: `Default
+    /// profile` and the summoned terminal's profile row are on pages already
+    /// standing at [`COMBO_MAX_ROW_SHARE`], where no label can widen anything.
+    const MACHINE_READ_PICKERS: [SettingsRow; 5] = [
+        SettingsRow::TerminalFont,
+        SettingsRow::LightScheme,
+        SettingsRow::DarkScheme,
+        SettingsRow::DefaultProfile,
+        SettingsRow::QuakeProfile,
+    ];
+
+    /// **The column one page writes its sentences in**, from the words this
+    /// build owns.
+    ///
+    /// `page_combo_width` is the product's own answer to "how wide is every
+    /// picker on this page", so this is the dialog's arithmetic and not a second
+    /// copy of it; the only thing done to it is [`MACHINE_READ_PICKERS`]'
+    /// removal, and the constant says why.
+    fn page_description_column(page: &[SettingsRow], span: f32) -> f32 {
+        let owned: Vec<SettingsRow> = page
+            .iter()
+            .copied()
+            .filter(|row| !MACHINE_READ_PICKERS.contains(row))
+            .collect();
+        let button = page_combo_width(
+            &owned,
+            1.0,
+            FLOAT_WINDOW_BORDER_LOGICAL_PX.max(1.0),
+            span,
+            &mut measure,
+        );
+        span - button - ROW_GAP_LOGICAL_PX
+    }
+
+    /// The pages a dialog holds, each with the rows it draws — one place for the
+    /// three walks below to agree about what a page is.
+    fn pages(
+        held: SettingsContent<'_>,
+        editing: SettingsContent<'_>,
+    ) -> Vec<(SettingsCategory, Vec<SettingsRow>)> {
+        SettingsCategory::ALL
+            .into_iter()
+            .map(|category| {
+                // The Profiles *list* has no sentences of its own — it is a
+                // table — so the page with the editor standing in it is not a
+                // second fixture, it is the only one that has rows.
+                let rows = if category == SettingsCategory::Profiles {
+                    editing.category_rows(category)
+                } else {
+                    held.category_rows(category)
+                };
+                (category, rows)
+            })
+            .collect()
+    }
+
+    /// **The budget the copy is written to is the narrowest column this dialog
+    /// can draw** (owner ruling 2026-09-13).
+    ///
+    /// Three claims, and the first is the one that makes the other two mean
+    /// anything.
+    ///
+    /// ① **There is no single description column.** `page_combo_width` makes the
+    /// control column the widest answer on the page, so the sentence column is
+    /// 368 on a page of short answers and less on every other. The budget is the
+    /// narrowest, and this asserts that no page's column is under it.
+    ///
+    /// ② **The narrowest is the [`COMBO_MAX_ROW_SHARE`] ceiling itself**, not a
+    /// page's measurement — which is why no machine's fonts, schemes or profile
+    /// names can go under it, and why the mark box `T-SETTINGS-PROFILE-MARKS`
+    /// adds to a marked row's button changes nothing: both rows that grow one
+    /// stand on pages that are already clamped. Asserted by naming those two
+    /// pages and showing they are at the ceiling.
+    ///
+    /// ③ The two character counts are **derived** here rather than written down
+    /// a second time, and the copy's cap is the tighter of the two line rules.
+    ///
+    /// MUTATION: move the rail, the gutters, the row inset or the picker's share
+    /// of the row and this names the difference before any sentence is measured
+    /// against a column the dialog no longer has.
+    #[test]
+    fn the_description_budget_is_the_column_this_dialog_draws() {
+        let metrics = StackMetrics::new(1.0);
+        let span = metrics.row_span(dialog_width());
+        assert_eq!(
+            span, SETTINGS_ROW_SPAN_LOGICAL_PX,
+            "the budget's arithmetic and the dialog's own are one band"
+        );
+        let rows = flat_rows();
+        let held = content(&rows, &[]);
+        let editing = editing_content(&rows, &[], editor_subject(true));
+        let dialog_pages = pages(held, editing);
+
+        // ① No page is narrower than the budget, and the budget is somebody's
+        // actual column rather than a number chosen to be safe.
+        let mut narrowest: Vec<SettingsCategory> = Vec::new();
+        for (category, page) in &dialog_pages {
+            let column = page_description_column(page, span);
+            assert!(
+                column >= SETTINGS_DESCRIPTION_COLUMN_LOGICAL_PX,
+                "{category:?} writes its sentences in {column}px, under the \
+                 {SETTINGS_DESCRIPTION_COLUMN_LOGICAL_PX}px the copy is written \
+                 to"
+            );
+            if column == SETTINGS_DESCRIPTION_COLUMN_LOGICAL_PX {
+                narrowest.push(*category);
+            }
+        }
+        // ② And these are the pages that stand on it — named, because a budget
+        // no page reaches is a budget nobody has to obey, and because the reason
+        // it cannot be beaten is that these two are at the ceiling.
+        assert!(
+            narrowest.contains(&SettingsCategory::General)
+                && narrowest.contains(&SettingsCategory::SummonedTerminal),
+            "General and Summoned terminal are the pages whose pickers take \
+             their half of the row; the narrowest column is drawn by {narrowest:?}"
+        );
+        for category in [
+            SettingsCategory::General,
+            SettingsCategory::SummonedTerminal,
+        ] {
+            let page = &dialog_pages
+                .iter()
+                .find(|(held, _)| *held == category)
+                .expect("every category is a page")
+                .1;
+            let column = page_description_column(page, span);
+            assert_eq!(
+                span - column - ROW_GAP_LOGICAL_PX,
+                span * COMBO_MAX_ROW_SHARE,
+                "{category:?}'s control column is at the share a picker may \
+                 take, so nothing added to a button on it can narrow the \
+                 sentence beside it"
+            );
+        }
+
+        // ③
+        assert_eq!(
+            SETTINGS_DESCRIPTION_MAX_CHARS_ENGLISH,
+            (SETTINGS_DESCRIPTION_COLUMN_LOGICAL_PX
+                / (ROW_DESC_FONT_LOGICAL_PX * TEST_ADVANCE_PER_EM)) as usize,
+            "the English budget is the column over the description font's \
+             average advance"
+        );
+        assert_eq!(
+            SETTINGS_DESCRIPTION_MAX_CHARS_CHINESE,
+            (SETTINGS_DESCRIPTION_COLUMN_LOGICAL_PX / ROW_DESC_FONT_LOGICAL_PX) as usize,
+            "the Chinese budget is the column over the em, which is what a CJK \
+             face advances"
+        );
+        // That the copy's cap is under the layout's is settled where the two
+        // constants are written — see the `const _: () = assert!` beside
+        // `SETTINGS_DESCRIPTION_MAX_LINES`.
+
+        // **And every exemption is still earning its place.** An entry on
+        // [`OWNER_RULED_EXCEPTIONS`] that would now pass the budget on its own
+        // is a hole in the rule that nobody would ever notice, because a gate
+        // does not complain about the thing it was told to skip. Whoever
+        // shortens one of these sentences is told here to take it off the list;
+        // whoever shortens the *column* it stands in is told the same.
+        for (row, entry) in OWNER_RULED_EXCEPTIONS {
+            let page = &dialog_pages
+                .iter()
+                .find(|(held, _)| *held == row.category())
+                .expect("every row is on a page")
+                .1;
+            let column = if row.stacked() {
+                span
+            } else {
+                page_description_column(page, span)
+            };
+            let sentence = entry.in_lang(crate::i18n::Lang::English);
+            let lines =
+                wrapped_description(sentence, column, ROW_DESC_FONT_LOGICAL_PX, &mut measure).len();
+            assert!(
+                lines > SETTINGS_DESCRIPTION_MAX_LINES,
+                "{entry:?} takes {lines} lines of {row:?}'s {column}px column and \
+                 is excused a budget it now meets — take it off \
+                 OWNER_RULED_EXCEPTIONS rather than leave a rule with a hole in \
+                 it: {sentence:?}"
+            );
+        }
+    }
+
+    /// PIN (owner ruling 2026-09-13) — **no sentence in this dialog needs a
+    /// third line.**
+    ///
+    /// The seventh of the seven rules the owner set for these descriptions, and
+    /// the only one a machine can hold: *every description fits two lines of the
+    /// description column at 1× in its language, and the budget is enforced by a
+    /// test rather than by eye.* The other six are readings and live in
+    /// `docs/plans/copy/user-facing-copy-guide.md` beside the checklist they
+    /// came from.
+    ///
+    /// It does **not** replace [`no_settings_sentence_needs_a_fourth_line`]:
+    /// that one is about the *layout*, and three lines is still what a machine
+    /// whose pickers have outgrown the 118px floor is allowed to draw. This one
+    /// is about the *copy*, at the floor, where the sentence is the only
+    /// variable left.
+    ///
+    /// **Both platform columns and both ends of every condition**, through
+    /// [`OTHERWISE`] and [`CAPABILITY_SENTENCES`] — see those constants for why
+    /// the fixture walk alone is not the whole set and which two sentences are
+    /// deliberately outside it.
+    ///
+    /// **Except what [`OWNER_RULED_EXCEPTIONS`] names**, which is one sentence
+    /// and is skipped by the string it says rather than by its row — a row draws
+    /// several sentences and only one of them was ruled on. The list's own note
+    /// carries the ruling; the budget test refuses to let an entry sit on it
+    /// after it stops needing to.
+    ///
+    /// MUTATION: put the pre-2026-09-13 `DescLaunchOpens`, `DescSidebar` or
+    /// `DescQuakeRestore` back and this names the row and the line count. (Not
+    /// `DescOptionSendsAlt`: its old sentence is the one standing, by ruling.)
+    #[test]
+    fn no_settings_sentence_needs_a_third_line() {
+        use crate::i18n::Lang;
+
+        let metrics = StackMetrics::new(1.0);
+        let span = metrics.row_span(dialog_width());
+        let rows = flat_rows();
+        let held = content(&rows, &[]);
+        let editing = editing_content(&rows, &[], editor_subject(true));
+        let dialog_pages = pages(held, editing);
+        // Every offender, not the first one — `no_settings_sentence_needs_a_
+        // fourth_line`'s reason: what the reader of this failure wants is the
+        // list of sentences to shorten.
+        let mut over: Vec<(SettingsRow, usize, String)> = Vec::new();
+        let mut measured: Vec<SettingsRow> = Vec::new();
+        // **The column this row's own page draws**, not the narrowest and not
+        // the floor: the budget constant is what the *writer* aims at, and a
+        // gate that held every page to it would demand cuts the glass never asks
+        // for. A stacked row's control leaves the column, so it keeps the band.
+        //
+        // The page's own wrapper, so this gate and the glass break the sentence
+        // the same way. It is capped at `ROW_DESC_MAX_LINES`, so a sentence that
+        // wanted five lines is reported as three — which is why the offending
+        // sentence is printed beside the count rather than only the number.
+        let count = |row: SettingsRow, sentence: &str| {
+            let page = &dialog_pages
+                .iter()
+                .find(|(category, _)| *category == row.category())
+                .expect("every row is on a page")
+                .1;
+            let column = if row.stacked() {
+                span
+            } else {
+                page_description_column(page, span)
+            };
+            wrapped_description(sentence, column, ROW_DESC_FONT_LOGICAL_PX, &mut measure).len()
+        };
+        for (_, page) in &dialog_pages {
+            for row in page {
+                measured.push(*row);
+                let sentence = row.description(&values());
+                if owner_ruled_exception(sentence, Lang::English) {
+                    continue;
+                }
+                let lines = count(*row, sentence);
+                if lines > SETTINGS_DESCRIPTION_MAX_LINES {
+                    over.push((*row, lines, sentence.to_owned()));
+                }
+            }
+        }
+        for (row, entry, platform) in OTHERWISE {
+            let sentence = entry.on(Lang::English, platform);
+            if owner_ruled_exception(sentence, Lang::English) {
+                continue;
+            }
+            let lines = count(row, sentence);
+            if lines > SETTINGS_DESCRIPTION_MAX_LINES {
+                over.push((row, lines, sentence.to_owned()));
+            }
+        }
+        for entry in CAPABILITY_SENTENCES {
+            let row = SettingsRow::ProfileIntegration;
+            let sentence = entry.in_lang(Lang::English);
+            let lines = count(row, sentence);
+            if lines > SETTINGS_DESCRIPTION_MAX_LINES {
+                over.push((row, lines, sentence.to_owned()));
+            }
+        }
+        assert!(
+            over.is_empty(),
+            "these sentences do not fit {SETTINGS_DESCRIPTION_MAX_LINES} lines \
+             of their own page's column (the narrowest is \
+             {SETTINGS_DESCRIPTION_COLUMN_LOGICAL_PX}px, about \
+             {SETTINGS_DESCRIPTION_MAX_CHARS_ENGLISH} characters a line), which \
+             is copy to shorten rather than a rule to change: {over:#?}"
+        );
+        // **And the walk really reached the sub-page**, which is the hole
+        // `no_settings_sentence_needs_a_fourth_line` fell into in 2026-08-28:
+        // `category_rows` folds `EDITOR_ROWS` in only while `editor` is `Some`.
+        for row in EDITOR_ROWS {
+            assert!(
+                measured.contains(&row),
+                "{row:?} is a row this dialog draws and its sentence was never \
+                 measured"
+            );
+        }
+    }
+
+    /// PIN (owner ruling 2026-09-13) — **the same two lines, held over the
+    /// Chinese column.**
+    ///
+    /// `#[ignore]`d, and the reason is the ticket's own division of labour:
+    /// stage 1 rewrote the English against the seven rules and this budget;
+    /// **stage 2 is the Chinese rewrite, and un-ignoring this test is what
+    /// finishes it.** The budget is not weakened to let the present Chinese
+    /// pass — that would make the gate agree with the copy instead of the other
+    /// way round, which is the one failure a length rule cannot survive.
+    ///
+    /// The measure, the lookup and their two caveats are
+    /// [`no_chinese_settings_sentence_needs_a_fourth_line_either`]'s, quoted
+    /// rather than re-argued: a CJK face advances one em per cluster, the entry
+    /// is found by the English string the row drew, and an English string two
+    /// entries share is skipped rather than guessed at.
+    ///
+    /// [`OWNER_RULED_EXCEPTIONS`] is skipped here as well as in the English
+    /// walk, and it has to be: the ruling excused the *entry* from the budget,
+    /// so a Chinese column held to two lines would be stage 2 being asked to
+    /// cut a sentence the owner had just put back.
+    ///
+    /// Run it with `cargo test -p bt-app -- --ignored
+    /// no_chinese_settings_sentence_needs_a_third_line_either` to see the list
+    /// of sentences stage 2 has left to shorten.
+    #[test]
+    fn no_chinese_settings_sentence_needs_a_third_line_either() {
+        use crate::i18n::{Lang, Text};
+        fn measure_in_a_cjk_face(text: &str, font_size_px: f32) -> f32 {
+            bt_unicode::graphemes(text)
+                .map(|cluster| bt_unicode::cluster_width(cluster) as f32)
+                .sum::<f32>()
+                * font_size_px
+                * TEST_ADVANCE_PER_EM
+        }
+        let metrics = StackMetrics::new(1.0);
+        let span = metrics.row_span(dialog_width());
+        let rows = flat_rows();
+        let held = content(&rows, &[]);
+        let editing = editing_content(&rows, &[], editor_subject(true));
+        let dialog_pages = pages(held, editing);
+        let mut over: Vec<(SettingsRow, Text, usize, String)> = Vec::new();
+        let mut measured = 0_usize;
+        // The English gate's rule, said about the Chinese column: this row's own
+        // page, the band for a stacked row. The page's control column is
+        // measured in the flat face rather than the CJK one on purpose — a
+        // picker's width is decided by the widest *option*, and the option
+        // labels this dialog owns are what `page_description_column` already
+        // measures for the other gate. One page width, two sentence measures.
+        let count = |row: SettingsRow, sentence: &str| {
+            let page = &dialog_pages
+                .iter()
+                .find(|(category, _)| *category == row.category())
+                .expect("every row is on a page")
+                .1;
+            let column = if row.stacked() {
+                span
+            } else {
+                page_description_column(page, span)
+            };
+            wrapped_description(
+                sentence,
+                column,
+                ROW_DESC_FONT_LOGICAL_PX,
+                &mut measure_in_a_cjk_face,
+            )
+            .len()
+        };
+        let hold = |row: SettingsRow,
+                    entry: Text,
+                    lines: usize,
+                    sentence: &str,
+                    over: &mut Vec<(SettingsRow, Text, usize, String)>| {
+            if lines > SETTINGS_DESCRIPTION_MAX_LINES {
+                over.push((row, entry, lines, sentence.to_owned()));
+            }
+        };
+        for (_, page) in &dialog_pages {
+            for row in page {
+                let english = row.description(&values());
+                if english.is_empty() {
+                    continue;
+                }
+                let mut saying = Text::ALL
+                    .into_iter()
+                    .filter(|entry| entry.in_lang(Lang::English) == english);
+                let Some(entry) = saying.next() else { continue };
+                if saying.next().is_some() {
+                    continue;
+                }
+                measured += 1;
+                let chinese = entry.in_lang(Lang::Chinese);
+                if owner_ruled_exception(chinese, Lang::Chinese) {
+                    continue;
+                }
+                let lines = count(*row, chinese);
+                hold(*row, entry, lines, chinese, &mut over);
+            }
+        }
+        for (row, entry, platform) in OTHERWISE {
+            let chinese = entry.on(Lang::Chinese, platform);
+            if owner_ruled_exception(chinese, Lang::Chinese) {
+                continue;
+            }
+            let lines = count(row, chinese);
+            hold(row, entry, lines, chinese, &mut over);
+        }
+        for entry in CAPABILITY_SENTENCES {
+            let row = SettingsRow::ProfileIntegration;
+            let chinese = entry.in_lang(Lang::Chinese);
+            let lines = count(row, chinese);
+            hold(row, entry, lines, chinese, &mut over);
+        }
+        assert!(
+            over.is_empty(),
+            "these Chinese sentences do not fit \
+             {SETTINGS_DESCRIPTION_MAX_LINES} lines of their own page's column \
+             (the narrowest is {SETTINGS_DESCRIPTION_COLUMN_LOGICAL_PX}px, about \
+             {SETTINGS_DESCRIPTION_MAX_CHARS_CHINESE} characters a line), which \
+             is copy to shorten rather than a rule to change: {over:#?}"
+        );
         assert!(
             measured >= 30,
             "only {measured} rows were matched to an entry — the lookup is \
@@ -16013,11 +16926,17 @@ mod tests {
     /// `Background image` above `Cursor` in `visible_rows` and the last does.
     #[test]
     fn every_page_puts_its_everyday_rows_above_its_advanced_ones() {
+        // **The Windows page, named** (§13.32 ①, and §13.32 ⑥ for the blur row):
+        // this list holds a row a Mac is not offered, so it asks for the list by
+        // platform rather than for whatever list the runner happens to have.
         assert_eq!(
-            flat_rows()
-                .into_iter()
-                .filter(|row| row.advanced())
-                .collect::<Vec<_>>(),
+            visible_rows_for(
+                bt_platform::HostPlatform::Windows,
+                TabLayoutMode::Horizontal
+            )
+            .into_iter()
+            .filter(|row| row.advanced())
+            .collect::<Vec<_>>(),
             [
                 SettingsRow::BackgroundImage,
                 SettingsRow::ImageFit,
@@ -17686,13 +18605,14 @@ mod tests {
     }
 
     /// The box a button's value is laid out in at 1x — the button less its two
-    /// hairlines, its padding and the chevron's reserved column.
+    /// hairlines, its padding, the chevron's reserved column and, on a marked
+    /// row, the `.ticon` column in front of the words.
     ///
-    /// [`push_combo`]'s own arithmetic, written once here so the two pins that
-    /// read a drawn value find it the same way.
-    fn combo_value_box(combo: [f32; 4]) -> [f32; 4] {
+    /// [`push_combo`]'s own arithmetic, written once here so the pins that read
+    /// a drawn value find it the same way.
+    fn combo_value_box(row: SettingsRow, combo: [f32; 4]) -> [f32; 4] {
         [
-            combo[0] + 1.0 + COMBO_PADDING_LEFT_LOGICAL_PX,
+            combo[0] + 1.0 + COMBO_PADDING_LEFT_LOGICAL_PX + option_icon_advance(row, 1.0),
             combo[1],
             combo[2]
                 - 1.0
@@ -17791,14 +18711,14 @@ mod tests {
                     }
                     continue;
                 };
-                let mut whole_quads = Vec::new();
-                let mut whole_labels = Vec::new();
+                let mut whole = OverlayLayer::default();
                 push_combo(
-                    &mut whole_quads,
-                    &mut whole_labels,
+                    &mut whole,
                     row.combo,
                     false,
                     button_value,
+                    row.row.value_mark(&values()),
+                    option_icon_advance(row.row, 1.0),
                     true,
                     1.0,
                     border,
@@ -17808,7 +18728,7 @@ mod tests {
                 if clipped(row.combo, content).is_some_and(|seen| seen != row.combo) {
                     rows_cut += 1;
                 }
-                for whole in whole_quads {
+                for whole in whole.quads {
                     let Some(rect) = clipped(whole.rect, content) else {
                         continue;
                     };
@@ -17920,7 +18840,7 @@ mod tests {
             let Some(whole) = shown_value(row.row) else {
                 continue;
             };
-            let box_of = combo_value_box(row.combo);
+            let box_of = combo_value_box(row.row, row.combo);
             let drawn = labels
                 .iter()
                 .find(|label| label.rect == box_of)
@@ -19595,11 +20515,11 @@ mod tests {
     }
 
     /// PIN — the Startup row is the picker built from the `˅` menu's own list,
-    /// and the only one in this dialog whose items wear a mark.
+    /// and every profile on it wears that menu's own mark.
     ///
     /// Mock-up 7645: "the default-profile picker is built from the same list the
     /// ⌄ menu uses" — the *same* table, so a fifth profile appears in both
-    /// surfaces or in neither, and 7647 is the one `.ticon` in any combo item.
+    /// surfaces or in neither, and 7647 is the `.ticon` a combo item carries.
     #[test]
     fn the_startup_row_offers_the_pickers_own_profiles_each_under_its_own_mark() {
         assert_eq!(
@@ -19609,9 +20529,10 @@ mod tests {
         );
         assert_eq!(
             SettingsRow::DefaultProfile.description(&values()),
-            "Which profile a new tab opens, and which one Folio starts with.",
-            "the copy ruling of 2026-08-26, which supersedes mock-up 2468's own \
-             wording — see docs/plans/ui-style/copy-guide.md"
+            "The profile a new tab opens, and the one Folio starts with.",
+            "the copy ruling of 2026-09-13 (裁决八), which supersedes both the \
+             2026-08-26 ruling and mock-up 2468's own wording — see \
+             docs/plans/ui-style/copy-guide.md"
         );
         assert_eq!(
             SettingsRow::DefaultProfile
@@ -19638,18 +20559,27 @@ mod tests {
                  the table being reordered"
             );
         }
-        // **One of two**, and the second one arrived for this one's reason
-        // (user ruling, 2026-08-16): `Split direction` names two axes, and the
+        // **Three rows and no others.** `Split direction` arrived for this
+        // row's reason (user ruling, 2026-08-16): it names two axes, and the
         // difference between "beside" and "below" is a shape this build already
-        // draws. Every other picker's items are words, because every other
-        // picker's items *are* words — `Light`, `Bar`, `On` name no object.
+        // draws. The summoned terminal's profile row is the same list as this
+        // one (user report 2026-09-13). Every other picker's items are words,
+        // because every other picker's items *are* words — `Light`, `Bar`, `On`
+        // name no object.
         for row in visible_rows(TabLayoutMode::Vertical) {
             if matches!(
                 row,
-                SettingsRow::DefaultProfile | SettingsRow::SplitDirection
+                SettingsRow::DefaultProfile
+                    | SettingsRow::SplitDirection
+                    | SettingsRow::QuakeProfile
             ) {
+                assert!(row.options_are_marked(), "{row:?} reserves a mark column");
                 continue;
             }
+            assert!(
+                !row.options_are_marked(),
+                "{row:?} reserves a mark column it draws nothing in"
+            );
             for index in 0..row.option_count() {
                 assert_eq!(row.option_mark(index), None, "{row:?} draws no marks");
             }
@@ -19673,6 +20603,262 @@ mod tests {
                 .option_labels()
                 .collect::<Vec<_>>(),
             vec!["Auto (longer edge)", "Right", "Down"],
+        );
+    }
+
+    /// The page a row lives on with that row scrolled into view and no picker
+    /// open — what a claim about a *closed* control has to be read on.
+    fn open_shut_showing(row: SettingsRow) -> SettingsLayout {
+        let at_rest = open_showing(row);
+        open_page_scrolled(
+            1.0,
+            None,
+            TabLayoutMode::Vertical,
+            row.category(),
+            0.0,
+            scroll_to_row(&at_rest, row),
+        )
+    }
+
+    /// Every mark this picker draws in its open list, against the item it is
+    /// drawn on.
+    ///
+    /// By item rather than as a bare run, because a list of more than
+    /// [`MENU_MAX_VISIBLE_ITEMS`] scrolls and the items past the body's edge
+    /// draw nothing at all — a claim stated as "these marks, in this order"
+    /// would be a claim about how many profiles this build happens to ship.
+    fn item_marks(placed: &SettingsLayout, values: &SettingsValues) -> Vec<(usize, ChromeMark)> {
+        let sprites = sprites_of(placed, None, values);
+        placed
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                sprites
+                    .iter()
+                    .find(|sprite| within(sprite.rect, *item))
+                    .map(|sprite| (index, sprite.mark))
+            })
+            .collect()
+    }
+
+    /// The marks that same list *ought* to draw: every item the body shows,
+    /// under the mark its row reports.
+    fn item_marks_owed(placed: &SettingsLayout, row: SettingsRow) -> Vec<(usize, ChromeMark)> {
+        placed
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| placed.shows_item(**item))
+            .filter_map(|(index, _)| row.option_mark(index).map(|mark| (index, mark)))
+            .collect()
+    }
+
+    /// Every mark drawn inside one row's closed button.
+    fn button_marks(
+        placed: &SettingsLayout,
+        row: SettingsRow,
+        values: &SettingsValues,
+    ) -> Vec<ChromeSprite> {
+        let combo = combo_of(placed, row);
+        sprites_of(placed, None, values)
+            .into_iter()
+            .filter(|sprite| within(sprite.rect, combo))
+            .collect()
+    }
+
+    /// RED GATE — **every picker in this dialog whose options are profiles wears
+    /// the `˅` menu's own marks, open and shut** (user report 2026-09-13, on
+    /// `Settings ▸ 快捷终端 ▸ 新标签页的配置`: eight bare words, where the same
+    /// eight profiles carry their marks on the tab strip, on the pane head, in
+    /// the `˅` new-tab menu and on the Profiles page's own rows — "内置的配置明
+    /// 明有图标").
+    ///
+    /// **One derivation, asserted against `profiles::mark` itself**, which is
+    /// the mutation this pin is written for: a second table of row-to-mark
+    /// would satisfy a literal list and fail here the moment somebody's
+    /// `profiles.json` adds a ninth row, because the expectation is read out of
+    /// the same table the `˅` menu is built from. The closed control goes
+    /// through `option_mark` as well ([`SettingsRow::value_mark`]), so the
+    /// button and the item can never name two different drawings.
+    ///
+    /// The summoned terminal's first item is the one entry that names no
+    /// profile and it wears no mark — see [`SettingsRow::option_mark`] for the
+    /// two reasons, and `the_quake_rows_default_entry_is_a_word_not_a_borrowed_
+    /// mark` for the half of it a press can see.
+    #[test]
+    fn every_profile_picker_carries_the_menus_own_marks_open_and_shut() {
+        // `DefaultProfile`'s items are the table; `QuakeProfile`'s are the
+        // table one place along, behind the entry that names no profile.
+        for (row, offset) in [
+            (SettingsRow::DefaultProfile, 0_usize),
+            (SettingsRow::QuakeProfile, 1_usize),
+        ] {
+            assert!(
+                row.options_are_marked(),
+                "{row:?} reserves the `.ticon` column its items need"
+            );
+            for profile in 0..profiles::count() {
+                assert_eq!(
+                    row.option_mark(profile + offset),
+                    Some(profiles::mark(profile)),
+                    "{row:?} draws {} under the mark the ˅ menu gives it",
+                    profiles::id(profile)
+                );
+            }
+            assert_eq!(
+                row.option_mark(profiles::count() + offset),
+                None,
+                "{row:?} names nothing past the end of the table"
+            );
+
+            // **Drawn**: the sprites the open list actually pushes, read off
+            // the built stack rather than off the reader above it.
+            let open = open_rows(1.0, Some(row), TabLayoutMode::Horizontal);
+            let owed = item_marks_owed(&open, row);
+            assert!(
+                owed.len() >= 2,
+                "{row:?}: this fixture's list shows marked items, or the claim \
+                 below is about nothing"
+            );
+            assert_eq!(
+                item_marks(&open, &values()),
+                owed,
+                "{row:?}: every item the open list shows draws its own mark, and \
+                 nothing else draws one"
+            );
+        }
+
+        // **Shut.** The button under every reading of both rows, which is the
+        // half the report was about last: a control that opens onto eight marks
+        // and closes onto none is a profile named by reading rather than by
+        // looking.
+        let general_page = open_shut_showing(SettingsRow::DefaultProfile);
+        let quake_page = open_shut_showing(SettingsRow::QuakeProfile);
+        for chosen in 0..profiles::count() {
+            let general = SettingsValues {
+                default_profile: chosen,
+                ..values()
+            };
+            let drawn = button_marks(&general_page, SettingsRow::DefaultProfile, &general);
+            assert_eq!(
+                drawn.iter().map(|sprite| sprite.mark).collect::<Vec<_>>(),
+                vec![profiles::mark(chosen)],
+                "the Default profile button wears the mark of the profile it \
+                 says it will start"
+            );
+            // The `˅` menu's own box for this mark, struck in the `.ticon`
+            // column — the same two numbers the open item is given.
+            let [box_width, box_height] = option_mark_box_logical_px(profiles::mark(chosen));
+            assert_eq!(width(drawn[0].rect), box_width.round());
+            assert_eq!(height(drawn[0].rect), box_height.round());
+
+            let summoned = SettingsValues {
+                quake_profile: chosen + 1,
+                ..values()
+            };
+            assert_eq!(
+                button_marks(&quake_page, SettingsRow::QuakeProfile, &summoned)
+                    .iter()
+                    .map(|sprite| sprite.mark)
+                    .collect::<Vec<_>>(),
+                vec![profiles::mark(chosen)],
+                "and so does the summoned terminal's"
+            );
+        }
+
+        // **The marks fit the rows that already had room for them** — a 14px
+        // box in a 27.5px item and a 27.5px button. Stated here so that a mark
+        // family drawn bigger tomorrow reports itself in the test run rather
+        // than by growing a row.
+        for mark in (0..profiles::count()).map(profiles::mark) {
+            let [_, box_height] = option_mark_box_logical_px(mark);
+            assert!(
+                box_height <= ITEM_HEIGHT_LOGICAL_PX && box_height <= COMBO_HEIGHT_LOGICAL_PX,
+                "{mark:?} at {box_height} does not fit the row it stands in"
+            );
+        }
+    }
+
+    /// PIN — **the summoned terminal's `Default profile` entry is a word and
+    /// not a borrowed mark**, open or shut.
+    ///
+    /// The Profiles page has already ruled how default-ness is said: a `default`
+    /// hint in the row's own trailing slot, beside that profile's own mark,
+    /// reporting and never standing in for it (§7.1.6c-6c, ruling four). This
+    /// item is nothing *but* default-ness, so the word is the whole of it.
+    ///
+    /// The other half is what a borrowed mark would do: it would duplicate
+    /// whichever row below it is the default today — two items, one drawing, and
+    /// nothing on the list to say which of them the tick is on — and it would
+    /// change without anybody touching this page, because the row it defers to
+    /// is on another one.
+    ///
+    /// Red gate: answer item zero with `profiles::mark(values.default_profile)`
+    /// and the drawn list below comes back one mark longer, with the first two
+    /// equal.
+    #[test]
+    fn the_quake_rows_default_entry_is_a_word_not_a_borrowed_mark() {
+        assert_eq!(
+            SettingsRow::QuakeProfile.option_label(0),
+            Some(Text::OptionQuakeProfileDefault.text()),
+            "the item says so in words"
+        );
+        assert_eq!(
+            SettingsRow::QuakeProfile.option_mark(0),
+            None,
+            "and names no profile, so it wears no profile's mark"
+        );
+        assert_eq!(
+            quake_profile_requested(SettingsTarget::Choice(SettingsRow::QuakeProfile, 0)),
+            Some(None),
+            "pressing it stores the deferral and not a profile"
+        );
+
+        let open = open_rows(
+            1.0,
+            Some(SettingsRow::QuakeProfile),
+            TabLayoutMode::Horizontal,
+        );
+        let drawn = item_marks(&open, &values());
+        assert!(
+            open.shows_item(open.items[0]),
+            "the deferral is the first item and this fixture shows it, or the \
+             claim below is about an item nobody drew"
+        );
+        assert!(
+            drawn.iter().all(|(index, _)| *index > 0),
+            "the deferral draws no mark: {drawn:?}"
+        );
+
+        // Shut on that item, the button says the word and shows no mark — while
+        // still standing where a marked value stands, because the column is the
+        // row's and not the value's (`option_icon_advance`).
+        let deferring = SettingsValues {
+            quake_profile: 0,
+            ..values()
+        };
+        let placed = open_shut_showing(SettingsRow::QuakeProfile);
+        assert_eq!(
+            SettingsRow::QuakeProfile.value_mark(&deferring),
+            None,
+            "the closed control borrows nothing either"
+        );
+        assert!(
+            button_marks(&placed, SettingsRow::QuakeProfile, &deferring).is_empty(),
+            "and draws nothing in the column"
+        );
+        let box_of = combo_value_box(
+            SettingsRow::QuakeProfile,
+            combo_of(&placed, SettingsRow::QuakeProfile),
+        );
+        assert!(
+            labels_of(&placed, None, &deferring)
+                .into_iter()
+                .any(|label| label.rect == box_of),
+            "the word is laid out in the box a marked value would have used — \
+             a button whose text slid sideways when the reader changed the \
+             value would be a control that moves under the pointer"
         );
     }
 
@@ -19773,7 +20959,7 @@ mod tests {
                 .into_iter()
                 .find(|label| label.rect[1] >= combo[1] && label.rect[3] <= combo[3])
                 .expect("the closed combo shows its current value");
-            let box_of = combo_value_box(combo);
+            let box_of = combo_value_box(SettingsRow::DefaultProfile, combo);
             assert_eq!(
                 caption.text,
                 ellipsized(
@@ -19871,9 +21057,39 @@ mod tests {
     /// PIN — the marked picker makes room for its marks.
     ///
     /// `min-width: 100%` is a floor and the popup grows leftward to hold its
-    /// widest label; an item that also carries a 14px `.ticon` and its 10px gap
-    /// needs 24px more than that label, and a popup sized without them crops the
-    /// last glyph of every profile name.
+    /// widest label; an item that also carries a 14px `.ticon` and its 8px gap
+    /// ([`ITEM_GAP_LOGICAL_PX`]) needs 22px more than that label, and a popup
+    /// sized without them crops the last glyph of every profile name.
+    ///
+    /// **The plain half has to come off a page with no marked picker at all, and
+    /// that is not a detail of this fixture — it is the only way the claim can be
+    /// measured.** A popup is `max(its button, its own chrome + the widest
+    /// label)`, and the button is [`page_combo_width`]: the widest answer on the
+    /// *page*, shared so a column of controls keeps one left edge. Those two
+    /// chromes are 9.5 logical px apart and the gap does not move with the words:
+    ///
+    /// ```text
+    ///   button   2·border + 12 + 10 + 10 + 8.5            = 42.5   + label
+    ///   popup    2·border + 2·4 + 2·10 + 14 (tick) + 8     = 52.0   + label
+    /// ```
+    ///
+    /// So a popup clears its own button by 9.5 px — *unless some row on its page
+    /// is marked*, which puts `OPTION_ICON_COLUMN + ITEM_GAP` (22) into the
+    /// button and leaves the popup 12.5 px under the floor for every label width
+    /// there is. `Theme` stood here and is exactly that case: `Split direction`
+    /// is on Appearance and is marked, so at 1× Theme's popup sat on its 185px
+    /// button while `Default profile`'s was text-sized at 194 — a difference of
+    /// 9, which is the 9.5 px chrome gap and nothing to do with the mark column.
+    /// No value of `widest` could have fixed it, because both sides of that
+    /// comparison grow with the label at the same rate.
+    ///
+    /// `Scrollback` is on **Terminal**, none of whose rows is marked
+    /// ([`SettingsRow::options_are_marked`] is false for every one of them, on
+    /// either platform's reading of the page), so at 1× its button is 163 and
+    /// its popup 172 — over the floor by the structural 9.5, at every scale,
+    /// whatever `widest` is. The two `popup_width > combo` assertions below hold
+    /// that: the day a marked row lands on the Terminal page, this pin says so
+    /// instead of quietly measuring two floors against each other.
     #[test]
     fn the_marked_picker_reserves_its_icon_column_on_top_of_the_widest_label() {
         for scale in [1.0_f32, 1.5, 2.0] {
@@ -19886,16 +21102,28 @@ mod tests {
             );
             let plain = open_rows_measured(
                 scale,
-                Some(SettingsRow::Theme),
+                Some(SettingsRow::Scrollback),
                 TabLayoutMode::Horizontal,
                 widest,
             );
-            let width = |placed: &SettingsLayout| {
+            let popup_width = |placed: &SettingsLayout| {
                 let menu = placed.menu.expect("the picker is open");
                 menu[2] - menu[0]
             };
+            assert!(
+                popup_width(&marked) > width(combo_of(&marked, SettingsRow::DefaultProfile)),
+                "scale {scale}: the marked popup is on its button's floor, so \
+                 its width is not the one the marks are being read out of"
+            );
+            assert!(
+                popup_width(&plain) > width(combo_of(&plain, SettingsRow::Scrollback)),
+                "scale {scale}: the plain popup is on its button's floor — a \
+                 marked row has joined the Terminal page and put a mark column \
+                 into every button on it, so this comparison is between two \
+                 floors and not between two labels"
+            );
             assert_eq!(
-                width(&marked) - width(&plain),
+                popup_width(&marked) - popup_width(&plain),
                 ((OPTION_ICON_COLUMN_LOGICAL_PX + ITEM_GAP_LOGICAL_PX) * scale).ceil(),
                 "scale {scale}: exactly the column and its gap, and not a pixel \
                  of slack invented here"
@@ -20783,7 +22011,7 @@ mod tests {
         assert_eq!(SettingsRow::LineWrapping.selected_index(&off), Some(1));
         assert_eq!(
             SettingsRow::LineWrapping.description(&on),
-            "Lines longer than the pane fold at its edge."
+            "Lines longer than the pane fold at the pane's edge."
         );
         assert_eq!(
             SettingsRow::LineWrapping.description(&off),
@@ -21504,7 +22732,10 @@ mod tests {
             false,
             scroll_to_row(&base, SettingsRow::BackgroundImage),
         );
-        let box_of = combo_value_box(combo_of(&placed, SettingsRow::BackgroundImage));
+        let box_of = combo_value_box(
+            SettingsRow::BackgroundImage,
+            combo_of(&placed, SettingsRow::BackgroundImage),
+        );
 
         let empty = labels_of(&placed, None, &values());
         let drawn = empty
@@ -21646,7 +22877,15 @@ mod tests {
     /// gave them, immediately after the pair that says what colour the ground is.
     #[test]
     fn the_ground_rows_follow_the_schemes_in_the_order_they_are_decided() {
-        let rows = visible_rows(TabLayoutMode::Horizontal);
+        // **The Windows page, named** (§13.32 ①): `Acrylic` is one of the six
+        // and a Mac is not offered it (§13.32 ⑥), so this asks for the list by
+        // platform rather than for whatever list the runner happens to have.
+        // What a Mac's page does over the hole is
+        // `the_page_a_mac_reads_closes_up_over_the_blur_row`.
+        let rows = visible_rows_for(
+            bt_platform::HostPlatform::Windows,
+            TabLayoutMode::Horizontal,
+        );
         let ground = [
             SettingsRow::BackgroundImage,
             SettingsRow::ImageFit,
@@ -21700,19 +22939,32 @@ mod tests {
     /// checked by opening the window on a Mac is the build that shipped these
     /// three rows.
     ///
-    /// MUTATIONS: make any of the four facilities answer `true` everywhere and
+    /// **`Acrylic` is the fourth row on this list** (owner report and ruling
+    /// 2026-09-13, §13.32 ⑥). What the owner read on the same Mac, one page
+    /// along, was `亚克力` greyed whole with `Folio 在 macOS 上不画这种模糊。`
+    /// under it and its picker held at `关` — the row explaining itself to a
+    /// reader with nothing to decide. It had been filed under the *other* rule,
+    /// the one `available` answers, because off Windows
+    /// `bt_platform::system_backdrop_available` says `false` the way an old
+    /// Windows does; the ruling is that those are not the same `false`. A
+    /// machine that cannot honour a row keeps the row and gets the reason; a
+    /// platform this build has no backdrop door for has nothing for a reason to
+    /// be about. `Capability::WindowBackdrop` is where that is said once.
+    ///
+    /// MUTATIONS: make any of the five facilities answer `true` everywhere and
     /// the first assertion names it; return `None` from `SettingsRow::needs` for
-    /// one of the three Windows rows and the same assertion names it; take
+    /// one of the four Windows rows and the same assertion names it; take
     /// `OptionKey` off `OptionSendsAlt` and the Windows half goes red, because
     /// that row would then be offered to a keyboard that has no Option key.
     #[test]
     fn a_mac_is_not_offered_a_row_about_a_facility_it_has_not_got() {
         use bt_platform::HostPlatform::{MacOs, Windows};
 
-        const NOT_ON_A_MAC: [SettingsRow; 3] = [
+        const NOT_ON_A_MAC: [SettingsRow; 4] = [
             SettingsRow::ContextMenu,
             SettingsRow::PsReadLine,
             SettingsRow::PowerShellOffer,
+            SettingsRow::Acrylic,
         ];
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             let mac = visible_rows_for(MacOs, layout);
@@ -21737,7 +22989,7 @@ mod tests {
                 "{layout:?}: a Windows keyboard has no Option key"
             );
             // Everything else is on both pages, in the same order, which is what
-            // says the filter took the four rows and nothing else.
+            // says the filter took the five rows and nothing else.
             let expected: Vec<SettingsRow> = windows
                 .iter()
                 .copied()
@@ -21750,10 +23002,165 @@ mod tests {
             sorted_expected.sort_by_key(|row| format!("{row:?}"));
             assert_eq!(
                 sorted_mac, sorted_expected,
-                "{layout:?}: the two pages differ by more than the four rows \
+                "{layout:?}: the two pages differ by more than the five rows \
                  that declare a facility"
             );
         }
+    }
+
+    /// RED — **the page closes up over the row it is not offered** (owner ruling
+    /// 2026-09-13, §13.32 ⑥).
+    ///
+    /// The pin above says the row is off the list; this says the *page* is a
+    /// page without it. A filter that took a row out of the list and left its
+    /// height in the stack would draw a Mac's Appearance page with a hole in the
+    /// advanced group where the blur used to be — and nothing else in this file
+    /// would notice, because every other claim about that row asks what the list
+    /// holds and this one asks where the boxes are.
+    ///
+    /// **Stated as distances from the scrollport's own top edge**, because the
+    /// two layouts are two dialogs: raw coordinates would make this a claim about
+    /// the frame's height as well, which is §7.1.6c-5's business and not this
+    /// ruling's.
+    ///
+    /// MUTATIONS: return `None` from `SettingsRow::needs` for `Acrylic` and the
+    /// second assertion names it; advance the layout's cursor for a row the page
+    /// does not hold and both the row-below assertion and the contiguity walk go
+    /// red; drop the group's verb with the row and the `Reset to defaults`
+    /// assertion does.
+    #[test]
+    fn the_page_a_mac_reads_closes_up_over_the_blur_row() {
+        use bt_platform::HostPlatform::{MacOs, Windows};
+
+        // The Appearance page as this platform's reader meets it, with the
+        // advanced group open — which is where every row this claim is about
+        // stands.
+        fn appearance_on(platform: bt_platform::HostPlatform) -> SettingsLayout {
+            let rows = visible_rows_for(platform, TabLayoutMode::Horizontal);
+            let lines = shortcut_lines();
+            layout_for_menu(
+                SURFACE.0,
+                SURFACE.1,
+                1.0,
+                None,
+                None,
+                content(&rows, &lines),
+                SettingsCategory::Appearance,
+                UNSCROLLED,
+                MENU_UNSCROLLED,
+                &mut measure,
+            )
+            .expect("this window hosts the dialog")
+        }
+        // How far below the cut a row's band begins.
+        fn below_the_cut(placed: &SettingsLayout, row: SettingsRow) -> f32 {
+            placed.row(row).expect("the page holds this row").band[1] - placed.clip[1]
+        }
+        fn listed(placed: &SettingsLayout) -> Vec<SettingsRow> {
+            placed.rows.iter().map(|it| it.row).collect()
+        }
+
+        let windows = appearance_on(Windows);
+        let mac = appearance_on(MacOs);
+        let acrylic = windows
+            .row(SettingsRow::Acrylic)
+            .expect("a Windows reader is offered the blur row")
+            .band;
+        let shed = height(acrylic);
+        assert!(
+            shed > 0.0,
+            "the row the Mac page loses has a height to lose"
+        );
+        assert!(
+            mac.row(SettingsRow::Acrylic).is_none(),
+            "a Mac is being drawn a row about a blur this build does not paint \
+             there"
+        );
+
+        // The same rows in the same order, one shorter.
+        let on_windows = listed(&windows);
+        let expected: Vec<SettingsRow> = on_windows
+            .iter()
+            .copied()
+            .filter(|row| *row != SettingsRow::Acrylic)
+            .collect();
+        assert_eq!(
+            listed(&mac),
+            expected,
+            "the page lost more than the one row"
+        );
+        assert_eq!(mac.rows.len() + 1, windows.rows.len());
+
+        // Nothing above it moved, everything below it came up by exactly its
+        // height, and the row that follows it stands where it began.
+        let at = on_windows
+            .iter()
+            .position(|row| *row == SettingsRow::Acrylic)
+            .expect("the Windows page lists the row");
+        for row in &on_windows[..at] {
+            let moved = below_the_cut(&windows, *row) - below_the_cut(&mac, *row);
+            assert!(
+                moved.abs() < 0.5,
+                "{row:?} stands above the row that left and it moved by {moved}"
+            );
+        }
+        for row in &on_windows[at + 1..] {
+            let moved = below_the_cut(&windows, *row) - below_the_cut(&mac, *row);
+            assert!(
+                (moved - shed).abs() < 0.5,
+                "{row:?} stands below the row that left: it came up by {moved} \
+                 where the row was {shed} tall"
+            );
+        }
+        let began = acrylic[1] - windows.clip[1];
+        let follows = on_windows[at + 1];
+        assert!(
+            (below_the_cut(&mac, follows) - began).abs() < 0.5,
+            "{follows:?} does not begin where the blur row began, which is a \
+             gap the reader would see"
+        );
+
+        // And the stack is a stack on both pages: within one group every band's
+        // foot is the next band's head. The pair the ruling is about —
+        // `Background opacity` and `Always on top` — is one of these.
+        for (platform, placed) in [(Windows, &windows), (MacOs, &mac)] {
+            for pair in placed.rows.windows(2) {
+                if pair[0].row.advanced() != pair[1].row.advanced() {
+                    // The disclosure stands between the two groups and takes its
+                    // own height, which is §7.1.6c-5's and not this claim's.
+                    continue;
+                }
+                assert!(
+                    (pair[1].band[1] - pair[0].band[3]).abs() < 0.5,
+                    "{platform:?}: {:?} and {:?} have {} between them",
+                    pair[0].row,
+                    pair[1].row,
+                    pair[1].band[1] - pair[0].band[3]
+                );
+            }
+        }
+
+        // The group's own verb is still under the group, and it came up with it.
+        let reset = |placed: &SettingsLayout| {
+            placed
+                .reset_advanced()
+                .expect("the open advanced group carries its verb")
+        };
+        let verb_moved = (reset(&windows)[1] - windows.clip[1]) - (reset(&mac)[1] - mac.clip[1]);
+        assert!(
+            (verb_moved - shed).abs() < 0.5,
+            "`Reset to defaults` came up by {verb_moved} where the row it stands \
+             under was {shed} tall"
+        );
+        assert!(
+            (width(reset(&mac)) - width(reset(&windows))).abs() < 0.5,
+            "and it is the same button it was"
+        );
+        let last = mac.rows.last().expect("the page has rows").band;
+        assert!(
+            reset(&mac)[1] >= last[3],
+            "the group's verb has climbed into the rows it acts on"
+        );
     }
 
     /// RED — **no page is left with a heading and nothing under it** (§13.32
@@ -21764,8 +23171,9 @@ mod tests {
     /// facility one platform has not got would draw a heading over empty space
     /// on that platform — the same fault `first_run::Card::open` answers with
     /// "a card with nothing to ask is not shown", said about a page that cannot
-    /// be withheld. Today General keeps six unconditional rows and Terminal
-    /// keeps four, and this is what will notice when that stops being true.
+    /// be withheld. Today General keeps six unconditional rows, Terminal keeps
+    /// four and Appearance keeps all but one of its own (§13.32 ⑥), and this is
+    /// what will notice when that stops being true.
     ///
     /// MUTATION: give every remaining Terminal row a `Capability` that is
     /// Windows-only and the Mac half names the page.

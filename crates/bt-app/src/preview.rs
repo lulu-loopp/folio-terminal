@@ -793,7 +793,40 @@ pub enum SpanStyle {
     /// quote line — the run stands as its own alt text. That floor is the honest
     /// one: alt text is what a picture *says*, and it is what every reader that
     /// cannot show the picture has put in its place since there were pictures.
+    ///
+    /// **One picture is not cut out**: a web address standing in a line with
+    /// something else on it becomes a [`Self::ImageChip`] instead, because there
+    /// are no pixels coming for it and a block reserved for a picture that will
+    /// never arrive is a card where a word belongs (§7.1.3k ⑬).
     Image,
+    /// **A picture from the web, standing in the line it was written in** (user
+    /// report 2026-09-14; `docs/DESIGN.md` §7.1.3k ⑬).
+    ///
+    /// [`Span::text`] is the chip's **label** — the alt text, or the last
+    /// segment of the address where the document wrote no alt
+    /// ([`image_chip_label`]) — and [`Span::target`] is the address, exactly as
+    /// [`Self::Image`] carries it.
+    ///
+    /// **Why it is a style of its own and not a picture that happens to be
+    /// drawn small.** A picture is a *block* in this window ([`push_prose`]),
+    /// and the reason it is one is that it is drawn at the size of its own
+    /// pixels: a block is what a picture needs and a line is not a place for
+    /// one. A web address has no pixels here and never will — this program has
+    /// no network client (§7.1.3k ④) — so what stands in its place is not a
+    /// picture at all but a *name for one*, and a name belongs in the sentence
+    /// it was written in. Four badges at the top of a README are four names on
+    /// one line, and four full-width cards is what the report is about.
+    ///
+    /// The two facts the card printed — the sentence saying why there is no
+    /// picture, and the address — are on the chip's hover card
+    /// (`main::markdown_chip_tip`), which is where a fact about a run belongs
+    /// once the run is the size of a word.
+    ///
+    /// **It answers a press**, and that is not the ruling `note_link_sites`
+    /// states being overturned: a *picture* is still not a link. What answers
+    /// here is the **address**, which is precisely the run the block card
+    /// already made pressable (§7.1.3k ④ — 点=留窗内开、Ctrl+点=交出去).
+    ImageChip,
 }
 
 /// One run of inline text inside a markdown block.
@@ -886,6 +919,17 @@ impl Span {
         Self {
             text: alt.to_owned(),
             style: SpanStyle::Image,
+            target: Some(src.to_owned()),
+        }
+    }
+
+    /// **One picture from the web, standing in its line** — see
+    /// [`SpanStyle::ImageChip`]. `label` is what the chip is drawn with
+    /// ([`image_chip_label`]) and `src` is the address it stands for.
+    pub fn image_chip(label: &str, src: &str) -> Self {
+        Self {
+            text: label.to_owned(),
+            style: SpanStyle::ImageChip,
             target: Some(src.to_owned()),
         }
     }
@@ -3322,6 +3366,11 @@ fn math_origins(body: &[&str], out: &RangedBlocks) -> BlockOrigins {
 /// So a picture alone on its line owns that line, break and all, and a picture
 /// inside a sentence owns nothing but its spelling. Nothing between the
 /// paragraph's first byte and its last is left to no block at all.
+///
+/// **Except a picture from the web that is not alone** (§7.1.3k ⑬), which is
+/// not cut out at all: it stays a run of this paragraph, as a chip
+/// ([`SpanStyle::ImageChip`]), and its bytes are the prose's like any other
+/// run's. See [`paragraph_chips`] for which pictures those are.
 fn push_prose(
     spans: Vec<Span>,
     origins: Vec<TextOrigin>,
@@ -3330,24 +3379,46 @@ fn push_prose(
     out: &mut RangedBlocks,
 ) {
     let joined = source.origin();
+    let chips = paragraph_chips(&spans);
     let mut run: Vec<TextOrigin> = Vec::new();
     let mut prose: Vec<Span> = Vec::new();
     let mut marks = images.iter();
     let mut cursor = source.span.start;
     let first_block = out.blocks.len();
-    for (span, origin) in spans.into_iter().zip(origins) {
+    for (index, (span, origin)) in spans.into_iter().zip(origins).enumerate() {
         if span.style != SpanStyle::Image {
             prose.push(span);
             run.push(origin);
             continue;
         }
         // One mark per picture run, in the order they stand — see
-        // [`parse_inline_marked`], which is the pass that made both.
-        let marks = marks
+        // [`parse_inline_marked`], which is the pass that made both. Taken for
+        // a chip too, so that the marks and the pictures stay in step whatever
+        // becomes of them.
+        let mark = marks
             .next()
             .expect("every picture run was marked where the scan found it");
-        let start = source.source_start(marks.spelling.start);
-        let end = source.source_end(marks.spelling.end);
+        if chips[index] {
+            let target = span.target.clone().unwrap_or_default();
+            let label = image_chip_label(&span.text, &target);
+            // **Where the label came from.** An alt text is a copy of the
+            // document and keeps the map the scan made of it; a label taken off
+            // the address is not spelled where it is drawn — the address stands
+            // inside the `(…)` and this is between the brackets — so every byte
+            // of it is [`TextOrigin::drawn`], exactly as a join's space is.
+            let origin = if span.text.trim().is_empty() {
+                let mut origin = TextOrigin::new();
+                origin.drawn(label.len());
+                origin
+            } else {
+                origin
+            };
+            prose.push(Span::image_chip(&label, &target));
+            run.push(origin);
+            continue;
+        }
+        let start = source.source_start(mark.spelling.start);
+        let end = source.source_end(mark.spelling.end);
         if push_paragraph_run(&mut prose, &mut run, cursor..start, &joined, out) {
             cursor = start;
         }
@@ -3355,7 +3426,7 @@ fn push_prose(
         out.push(
             MarkdownBlock::Image(MarkdownImage::named(&span.text, &target)),
             cursor..end,
-            BlockOrigins::one(image_piece_origin(marks, &joined)),
+            BlockOrigins::one(image_piece_origin(mark, &joined)),
         );
         cursor = end;
     }
@@ -3366,6 +3437,77 @@ fn push_prose(
     {
         last.end = source.span.end;
     }
+}
+
+/// **Which of a paragraph's pictures are drawn as chips** — one answer per span,
+/// `false` for everything that is not a picture (§7.1.3k ⑬).
+///
+/// Two conditions, and both are the report's own sentence read carefully.
+///
+/// * **The address is a web address** ([`target_is_web`]). A picture on the disk
+///   has pixels and is drawn at the size of them, which is a block's business;
+///   only a picture this window will never fetch is a name with nothing behind
+///   it, and a name is what a chip is.
+/// * **It is not the whole of its paragraph.** A picture standing alone in a
+///   paragraph is the ordinary way a document shows one — the hero, the
+///   screenshot — and shrinking that to a chip would take a *figure* and leave
+///   a word in its place. So a lone remote picture keeps the block card it has
+///   had since §7.1.3k ⑩; what becomes a chip is a picture with something else
+///   on its line: another picture, or prose.
+///
+/// "Another picture" counts a local one too, deliberately: `![a](x.png)
+/// ![b](https://…)` is a line with two pictures on it, and what makes the
+/// second one inline is that it is not standing alone — not what the first one's
+/// address happens to be.
+fn paragraph_chips(spans: &[Span]) -> Vec<bool> {
+    let pictures = spans
+        .iter()
+        .filter(|span| span.style == SpanStyle::Image)
+        .count();
+    let prose = spans
+        .iter()
+        .any(|span| span.style != SpanStyle::Image && !span.text.trim().is_empty());
+    let inline = pictures > 1 || prose;
+    spans
+        .iter()
+        .map(|span| {
+            inline
+                && span.style == SpanStyle::Image
+                && span.target.as_deref().is_some_and(target_is_web)
+        })
+        .collect()
+}
+
+/// **What a chip says**: the alt text the document wrote, or — where it wrote
+/// none — the last segment of the address (§7.1.3k ⑬).
+///
+/// The same fallback the block card makes, one size down and with a reason of
+/// its own. The card has a whole line to spend and prints the address entire;
+/// a chip is a word wide, and `img.shields.io/badge/license-MIT…-green` on a
+/// text line is a chip as long as the sentence it stands in. The last segment is
+/// what a file name is, and a badge's last segment is what the badge is *of*.
+///
+/// The query and the fragment come off first — `badge.svg?branch=main` is a
+/// picture called `badge.svg` — and a trailing slash is not a segment, so an
+/// address that ends in one names the segment before it.
+#[must_use]
+pub fn image_chip_label(alt: &str, src: &str) -> String {
+    if !alt.trim().is_empty() {
+        // **Not trimmed**: the label is the alt text as the document spelled it,
+        // because [`push_prose`] hands the scan's own map of those bytes along
+        // with it and a trimmed copy would be a map one space out.
+        return alt.to_owned();
+    }
+    let address = src.trim();
+    let path = address
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(address)
+        .trim_end_matches('/');
+    path.rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(address)
+        .to_owned()
 }
 
 /// The prose on one side of a picture, dropped when it is nothing but the space
@@ -7351,10 +7493,10 @@ pub fn link_action(target: &str, document: &Path) -> LinkAction {
     if target.is_empty() || target.starts_with('#') {
         return LinkAction::Nowhere;
     }
-    let lower = target.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") {
+    if target_is_web(target) {
         return LinkAction::Web(target.to_owned());
     }
+    let lower = target.to_ascii_lowercase();
     let path = if lower.starts_with("file:") {
         let Some(path) = file_url_path(target) else {
             return LinkAction::Nowhere;
@@ -7382,6 +7524,21 @@ pub fn link_action(target: &str, document: &Path) -> LinkAction {
         // nowhere for the link to be relative *to*.
         None => LinkAction::Nowhere,
     }
+}
+
+/// **Whether a target is a web address**, which is the one thing about a target
+/// this window can answer without a document, a directory or a disk.
+///
+/// One function because two readers must not be able to disagree about it:
+/// [`link_action`], which spends a press on `http(s)` through the terminal's own
+/// row, and [`paragraph_chips`], which draws a picture at one as a chip
+/// precisely because there is nothing on any disk to draw instead (§7.1.3k ④).
+/// Written twice it would be two answers about `HTTPS://…` the day one of them
+/// forgot the case.
+#[must_use]
+pub fn target_is_web(target: &str) -> bool {
+    let lower = target.trim().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
 }
 
 /// The resolved path, sorted into the arm this window may act on.
@@ -12895,6 +13052,152 @@ mod tests {
                 MarkdownBlock::Image(MarkdownImage::named("this", "a.png")),
                 MarkdownBlock::Paragraph(vec![Span::plain(" here")]),
             ]
+        );
+    }
+
+    /// RED GATE (user report 2026-09-14, `README.zh-CN.md`'s badge row; §7.1.3k
+    /// ⑬) — **a line of badges is one paragraph of chips, not four cards.**
+    ///
+    /// The report's own document: four `[![alt](https://…)](href)` lines, which
+    /// CommonMark reads as **one** paragraph with four pictures on it. Every one
+    /// of them was cut out into a block of its own ([`push_prose`]), and a block
+    /// standing for a picture nobody will ever fetch is a full-width card three
+    /// lines tall — so the four badges at the top of a README pushed the README
+    /// below the fold.
+    ///
+    /// MUTATION: drop the `chips[index]` arm in [`push_prose`] and this comes
+    /// back as four [`MarkdownBlock::Image`] blocks with the spaces between them
+    /// dropped; make [`paragraph_chips`] answer `true` for a lone picture and
+    /// the sibling gate below goes red instead.
+    #[test]
+    fn a_line_of_remote_pictures_is_one_paragraph_of_chips() {
+        const BADGES: &str = "\
+[![License](https://img.shields.io/badge/license-MIT-green)](#licence)
+[![Build](https://github.com/o/p/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/o/p/actions)
+[![Release](https://img.shields.io/github/v/release/o/p)](https://github.com/o/p/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/o/p/total)](https://github.com/o/p/releases)
+";
+        let blocks = parse_markdown(BADGES);
+        let [MarkdownBlock::Paragraph(spans)] = blocks.as_slice() else {
+            panic!("four badges on one line are one paragraph: {blocks:#?}");
+        };
+        let chips: Vec<&Span> = spans
+            .iter()
+            .filter(|span| span.style == SpanStyle::ImageChip)
+            .collect();
+        assert_eq!(
+            chips
+                .iter()
+                .map(|chip| chip.text.as_str())
+                .collect::<Vec<_>>(),
+            ["License", "Build", "Release", "Downloads"],
+            "each badge says what its alt text says: {spans:#?}",
+        );
+        assert_eq!(
+            chips[0].target.as_deref(),
+            Some("https://img.shields.io/badge/license-MIT-green"),
+            "and carries the address it stands for",
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.style == SpanStyle::Plain && span.text == " "),
+            "with the space the join wrote between them left standing, which is \
+             what keeps them apart on the line: {spans:#?}",
+        );
+    }
+
+    /// RED GATE (same report; §7.1.3k ⑬) — **a picture standing alone in its
+    /// paragraph keeps its card, wherever its pixels are.**
+    ///
+    /// The other half of the ruling, and the half that keeps the first one from
+    /// eating the document: a hero, a screenshot, a plate is written as a
+    /// picture alone in a paragraph, and a remote one shrunk to a word would be
+    /// this window deciding a *figure* was an aside.
+    ///
+    /// MUTATION: make [`paragraph_chips`] ask only whether the address is a web
+    /// address and a lone badge becomes a chip in an empty paragraph.
+    #[test]
+    fn a_remote_picture_alone_in_a_paragraph_is_still_a_card() {
+        assert_eq!(
+            parse_markdown("![a badge](https://img.example/badge.svg)\n"),
+            vec![MarkdownBlock::Image(MarkdownImage::named(
+                "a badge",
+                "https://img.example/badge.svg"
+            ))],
+        );
+        // Linked, which is how every badge in this repository's own README is
+        // written — the link's markup is not content, so the picture is still
+        // the whole of the paragraph.
+        assert_eq!(
+            parse_markdown("[![a badge](https://img.example/badge.svg)](https://example.com)\n"),
+            vec![MarkdownBlock::Image(MarkdownImage::named(
+                "a badge",
+                "https://img.example/badge.svg"
+            ))],
+        );
+    }
+
+    /// RED GATE (same report; §7.1.3k ⑬) — **a chip says the alt text, or the
+    /// last segment of the address where the document wrote none.**
+    ///
+    /// A badge with no alt is a real thing — `![](https://…/badge.svg)` — and a
+    /// chip with nothing written on it would be a box the reader cannot tell
+    /// from the next box. The card's answer in that case is the whole address,
+    /// which is a line long; a chip is a word wide, so it takes the last segment
+    /// — the part that says what the picture is *of* — with the query and the
+    /// fragment off it.
+    ///
+    /// MUTATION: return the address whole and the badge row is four addresses
+    /// wide; keep the query and `badge.svg?branch=main` is drawn on a text line.
+    #[test]
+    fn a_chip_says_the_alt_or_the_last_segment_of_its_address() {
+        assert_eq!(
+            image_chip_label("Build", "https://x.example/b.svg"),
+            "Build"
+        );
+        assert_eq!(
+            image_chip_label("  ", "https://x.example/one/b.svg?branch=main#top"),
+            "b.svg",
+            "the query and the fragment are not part of what a picture is called",
+        );
+        assert_eq!(
+            image_chip_label("", "https://x.example/one/two/"),
+            "two",
+            "a trailing slash is not a segment",
+        );
+        let blocks = parse_markdown("see ![](https://x.example/logo.svg) here\n");
+        let [MarkdownBlock::Paragraph(spans)] = blocks.as_slice() else {
+            panic!("a picture in a sentence stays in it: {blocks:#?}");
+        };
+        assert_eq!(
+            spans.iter().find(|span| span.style == SpanStyle::ImageChip),
+            Some(&Span::image_chip("logo.svg", "https://x.example/logo.svg")),
+        );
+    }
+
+    /// RED GATE (same report; §7.1.3k ⑬) — **a picture on the disk is untouched
+    /// by any of this.**
+    ///
+    /// It has pixels, and pixels are drawn at the size of the pixels: the block
+    /// is what reserves that size, and a local picture in the middle of a
+    /// sentence still cuts the sentence in two exactly as it has since
+    /// §7.1.3k ⑪. What the chip changes is the case where there are no pixels
+    /// coming and never will be.
+    ///
+    /// MUTATION: drop the [`target_is_web`] test out of [`paragraph_chips`] and
+    /// every picture in a sentence becomes a word.
+    #[test]
+    fn a_local_picture_in_a_line_is_still_cut_out_of_it() {
+        assert_eq!(
+            parse_markdown("see ![this](a.png) and ![that](b.png) here\n"),
+            vec![
+                MarkdownBlock::Paragraph(vec![Span::plain("see ")]),
+                MarkdownBlock::Image(MarkdownImage::named("this", "a.png")),
+                MarkdownBlock::Paragraph(vec![Span::plain(" and ")]),
+                MarkdownBlock::Image(MarkdownImage::named("that", "b.png")),
+                MarkdownBlock::Paragraph(vec![Span::plain(" here")]),
+            ],
         );
     }
 

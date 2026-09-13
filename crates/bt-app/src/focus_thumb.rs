@@ -1407,6 +1407,143 @@ fn cut_to(text: &str, columns: usize) -> String {
     text.to_owned()
 }
 
+/// One piece of a grid row, and **the column it stands in** — never the running
+/// advance of the string it was cut out of.
+///
+/// See [`grid_runs`] for what decides where one ends and the next begins.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GridRun {
+    /// The column this run's first cluster occupies, counted from the row's own
+    /// column zero in [`bt_unicode`] columns — the same unit [`cut_to`] cuts in
+    /// and [`mini_columns`] counts in.
+    pub column: usize,
+    /// How many columns the run covers. A wide cluster counts two, so
+    /// `column + columns` is where the next run begins.
+    pub columns: usize,
+    /// What the run says.
+    pub text: String,
+}
+
+/// **A mini row broken into the pieces a grid can place** (owner's report,
+/// 2026-09-13; `docs/DESIGN.md` §7.1.6b′ ⑤).
+///
+/// # The report, and what was actually wrong
+///
+/// A box-drawing table whose cells hold Chinese text was projected onto a card
+/// with its `│` borders standing in a different place on every row: the header
+/// lined up, the rows under it did not, and the table came apart — while the
+/// very same table in the pane beside it was square, because a terminal is a
+/// grid and every cell of it is one column wide.
+///
+/// The card was not drawing a grid. It handed the painter one row of text and
+/// the painter handed the shaper one **string**, so every glyph landed at the
+/// running advance of the glyphs before it. That is faithful per *row* and
+/// wrong per *column*, and it only looks right while every glyph in the row
+/// comes off one monospaced face:
+///
+/// * A CJK ideograph is not in the terminal's Latin face at all. It is drawn by
+///   whatever face the fallback finds, and that face's advance at
+///   [`bt_render::FOCUS_MINI_TERM_FONT_LOGICAL_PX`] (7.5px) is its own — one em,
+///   as a rule, where two of the mono face's columns are two × 0.55em. Every
+///   ideograph in a row therefore shortens the rest of that row by the
+///   difference, and a row with more of them is shortened more. **That is the
+///   whole of the misalignment**: the header row had none, the body rows had
+///   several, and no two of them drifted by the same amount.
+/// * A box-drawing character may come off a third face for the same reason, and
+///   drift again — which is why the borders were the part of the picture that
+///   showed it.
+///
+/// Nothing about this is a font bug or a size to be tuned: shaping a row as a
+/// string asks for the *typographer's* answer, and a terminal row wants the
+/// **grid's**. The card asks the grid's question now.
+///
+/// # The answer the pane itself already gives
+///
+/// This is not a new rule, it is the pane's own rule reaching the card. A real
+/// row of the terminal is never shaped as a string either: `bt_render`'s
+/// `grid_text_areas` shapes **one buffer per cluster** and then places it at
+/// `frame_cell_bounds_px`'s `left = padding + column × cell_width_px` — the
+/// column decides the pixel, and the glyph before it has no say. It can afford a
+/// buffer per *cell* because the shaped buffers are cached by their text
+/// (`NarrowShapingCache`, `WideShapingCache`); the card has no such cache, so it
+/// takes the same rule at the coarsest grain that is still exact — a run, rather
+/// than a cell — and pays one label per run instead of one per column.
+///
+/// The pane's two other grid answers are deliberately **not** copied here,
+/// because this is about placement only: a wide glyph is not re-shaped to fill
+/// its slot (`wide_slot_em_scale`, `Buffer::set_monospace_width`) and a
+/// box-drawing character is not replaced by procedural rectangles
+/// (`bt_render::procedural`). The card keeps its font, its size and its row
+/// height exactly as they were; what it stops doing is letting one glyph decide
+/// where the next one goes.
+///
+/// # What one run is
+///
+/// A run is a piece of the row that may be shaped as a string **because its
+/// shaped advance is its grid width by construction**, and every run is placed
+/// by its `column` rather than by what came before it:
+///
+/// * A maximal stretch of printable ASCII is one run. The face is the
+///   terminal's, it is monospaced, and the cell the columns are counted in is
+///   that face's own advance — measured on `"0"`
+///   (`WindowRuntime::focus_mini_advance`), which is an ASCII character of that
+///   very face. *n* such clusters shape to exactly *n* cells, so splitting them
+///   would cost labels and change nothing.
+/// * **Every other cluster is a run of its own**, pinned to its own column. Not
+///   because non-ASCII is special, but because this module cannot know which
+///   face a cluster will be drawn by and therefore cannot vouch for its advance.
+///   A cluster that *is* in the mono face lands on the same pixel either way —
+///   pinning is never wrong, only sometimes redundant — and a cluster that is
+///   not can no longer push the rest of the row.
+///
+/// The painter turns each run into its own label at `left + column × cell` and
+/// clips it to the columns it owns, so an ideograph wider than its two columns
+/// is cut by the grid rather than allowed to shove the border after it. The
+/// grid wins; that is the rule this function exists to make sayable.
+///
+/// # What it costs
+///
+/// One label per run instead of one per row: unchanged for a row of ASCII —
+/// which is nearly every row of nearly every shell — and one per ideograph for a
+/// row of CJK. The rows themselves are already re-projected at most ten times a
+/// second per seat (gate 4), and the chrome list is compared before it is
+/// shaped, so a card that is not changing shapes nothing at all whichever shape
+/// its rows are in.
+#[must_use]
+pub fn grid_runs(text: &str) -> Vec<GridRun> {
+    let mut runs: Vec<GridRun> = Vec::new();
+    // Whether the run at the end of the list is one the next ASCII cluster may
+    // join. A cluster that was pinned is never joined onto, even by an ASCII
+    // cluster: the pinned run's own width is not this module's to guess.
+    let mut open = false;
+    let mut column = 0;
+    for cluster in bt_unicode::graphemes(text) {
+        let columns = bt_unicode::cluster_width(cluster);
+        let on_the_faces_own_advance = matches!(
+            cluster.as_bytes(),
+            [byte] if byte.is_ascii_graphic() || *byte == b' '
+        );
+        if !(open && on_the_faces_own_advance) {
+            runs.push(GridRun {
+                column,
+                columns: 0,
+                text: String::new(),
+            });
+        }
+        // Opened above or already standing, the run at the end of the list is
+        // the one this cluster belongs to — so a cluster is appended in one
+        // place rather than in two branches that have to agree.
+        let run = runs
+            .last_mut()
+            .expect("a run was opened for this cluster or was already open");
+        run.text.push_str(cluster);
+        run.columns += columns;
+        open = on_the_faces_own_advance;
+        column += columns;
+    }
+    runs
+}
+
 /// **What a column standing on its Git page says**: the place, and the page
 /// (`docs/DESIGN.md` §7.1.6b′ F2, 2026-08-20).
 ///
@@ -2245,6 +2382,152 @@ mod tests {
         // A row narrower than the seat is left entirely alone — no padding, and
         // nothing taken off either end.
         assert_eq!(cut_to("  ok", 40), "  ok");
+    }
+
+    /// The three rows of the owner's table (2026-09-13), written once because
+    /// four tests read them: a header of ASCII between borders, a body whose
+    /// second cell holds two ideographs, and the separator under them.
+    ///
+    /// Every one of them carries a vertical border at **columns 0, 5 and 12**,
+    /// which is the whole of what "the table is square" means and what the card
+    /// was not drawing.
+    const TABLE: [&str; 3] = ["│ ID │ Name │", "│ 42 │ 名字 │", "├────┼──────┤"];
+
+    /// Where a row's vertical borders stand, in columns — the fact the picture
+    /// is about, read out of the runs rather than off the screen.
+    fn border_columns(row: &str) -> Vec<usize> {
+        grid_runs(row)
+            .into_iter()
+            .filter(|run| matches!(run.text.as_str(), "│" | "├" | "┼" | "┤"))
+            .map(|run| run.column)
+            .collect()
+    }
+
+    /// **A row of Latin is still one run** — the half of [`grid_runs`] that says
+    /// this costs nothing where nothing was wrong.
+    ///
+    /// The face is monospaced and the cell is its own advance, so *n* ASCII
+    /// clusters shape to exactly *n* cells: splitting them would mint labels and
+    /// move no glyph. Nearly every row of nearly every shell is this row.
+    #[test]
+    fn a_row_of_latin_is_one_run_standing_in_column_zero() {
+        assert_eq!(
+            grid_runs("> cargo build"),
+            vec![GridRun {
+                column: 0,
+                columns: 13,
+                text: "> cargo build".to_owned(),
+            }]
+        );
+        // An indent is part of that run, not a run of its own: a space is on the
+        // face's own advance like every other ASCII cluster.
+        assert_eq!(
+            grid_runs("    indented"),
+            vec![GridRun {
+                column: 0,
+                columns: 12,
+                text: "    indented".to_owned(),
+            }]
+        );
+    }
+
+    /// **Every cluster the face cannot vouch for stands in its own column**
+    /// (owner's report, 2026-09-13).
+    ///
+    /// The body row of the owner's table, read out run by run: the borders and
+    /// the two ideographs are each pinned, the ASCII between them rides along,
+    /// and the columns are the grid's — an ideograph takes two.
+    ///
+    /// Red gate, and it is the mutation this ticket exists for: hand the row to
+    /// the painter as one string (one run covering every column) and the
+    /// borders no longer have a column of their own, so both this and
+    /// [`the_table_is_square_whatever_each_row_is_made_of`] go.
+    #[test]
+    fn every_cluster_the_face_cannot_vouch_for_stands_in_its_own_column() {
+        assert_eq!(
+            grid_runs(TABLE[1]),
+            vec![
+                GridRun {
+                    column: 0,
+                    columns: 1,
+                    text: "│".to_owned()
+                },
+                GridRun {
+                    column: 1,
+                    columns: 4,
+                    text: " 42 ".to_owned()
+                },
+                GridRun {
+                    column: 5,
+                    columns: 1,
+                    text: "│".to_owned()
+                },
+                GridRun {
+                    column: 6,
+                    columns: 1,
+                    text: " ".to_owned()
+                },
+                GridRun {
+                    column: 7,
+                    columns: 2,
+                    text: "名".to_owned()
+                },
+                GridRun {
+                    column: 9,
+                    columns: 2,
+                    text: "字".to_owned()
+                },
+                GridRun {
+                    column: 11,
+                    columns: 1,
+                    text: " ".to_owned()
+                },
+                GridRun {
+                    column: 12,
+                    columns: 1,
+                    text: "│".to_owned()
+                },
+            ]
+        );
+    }
+
+    /// **The table is square, whatever each row is made of** — the owner's
+    /// report, stated in the unit the misalignment was in.
+    ///
+    /// A header row of ASCII, a body row carrying two ideographs and a
+    /// separator row of box drawing: three different mixes of faces, one set of
+    /// border columns. Shaping each row as a string gave the three rows three
+    /// different answers, and that is what the card drew.
+    #[test]
+    fn the_table_is_square_whatever_each_row_is_made_of() {
+        for row in TABLE {
+            assert_eq!(
+                border_columns(row),
+                vec![0, 5, 12],
+                "every row of the table carries its borders in the same columns"
+            );
+        }
+    }
+
+    /// **A wide character does not push the border after it** — the case the
+    /// report was actually looking at, isolated.
+    ///
+    /// Two rows that differ only in what stands in the first two columns. The
+    /// border is in column two on both, because the grid says an ideograph is
+    /// two columns and the glyph's own advance is never asked.
+    #[test]
+    fn a_wide_character_before_a_border_does_not_move_it() {
+        assert_eq!(border_columns("ab│"), vec![2]);
+        assert_eq!(border_columns("名│"), vec![2]);
+        // And the runs tile the row without a gap or an overlap, which is what
+        // makes the border's column the border's pixel.
+        let runs = grid_runs("名│");
+        assert_eq!(
+            runs.iter()
+                .map(|run| (run.column, run.columns))
+                .collect::<Vec<_>>(),
+            vec![(0, 2), (2, 1)]
+        );
     }
 
     /// And through a real grid, which is where the indent actually comes from: a

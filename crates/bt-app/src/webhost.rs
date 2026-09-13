@@ -4461,6 +4461,90 @@ mod keyboard_tests {
         }
     }
 
+    /// RED (M4-8) — **the two tables that name a key by a number agree about
+    /// every key either of them knows.**
+    ///
+    /// M4-8 separated the summon's key code from a page's virtual key, because
+    /// they are answers in two currencies on two platforms — see
+    /// `quake::hotkey_for`'s note. On **this** platform they are the same
+    /// number, and that is a promise rather than a coincidence: the Windows arm
+    /// of `bt_platform::hotkey::summon_key_code` is `VkKeyScanW` and a named-key
+    /// table, which is what this function is. Two tables written down and one
+    /// checked against the other is this workspace's own shape for a number that
+    /// has to be stated twice.
+    ///
+    /// **Both directions**, because either gap is a real defect: a named key
+    /// this table knows and the summon's does not is a chord a reader can bind
+    /// to a page and not to the summon, and the reverse is a summon that claims
+    /// a key no page will ever be offered.
+    ///
+    /// MUTATION: change any one of the twenty-seven numbers in either table and
+    /// this fails naming the key.
+    #[test]
+    fn every_named_key_a_page_can_claim_is_a_key_a_summon_can_claim() {
+        // Every `NamedKey` either table has an opinion about. Written out rather
+        // than iterated, because `NamedKey` is `winit`'s and has hundreds of
+        // variants — what is being asserted is that these twenty-seven agree,
+        // not that the two tables are exhaustive over a library's enum.
+        const EVERY: [NamedKey; 27] = [
+            NamedKey::Tab,
+            NamedKey::Escape,
+            NamedKey::Enter,
+            NamedKey::Space,
+            NamedKey::Backspace,
+            NamedKey::Delete,
+            NamedKey::Insert,
+            NamedKey::Home,
+            NamedKey::End,
+            NamedKey::PageUp,
+            NamedKey::PageDown,
+            NamedKey::ArrowLeft,
+            NamedKey::ArrowUp,
+            NamedKey::ArrowRight,
+            NamedKey::ArrowDown,
+            NamedKey::F1,
+            NamedKey::F2,
+            NamedKey::F3,
+            NamedKey::F4,
+            NamedKey::F5,
+            NamedKey::F6,
+            NamedKey::F7,
+            NamedKey::F8,
+            NamedKey::F9,
+            NamedKey::F10,
+            NamedKey::F11,
+            NamedKey::F12,
+        ];
+        for named in EVERY {
+            let page = named_key_virtual_key(named);
+            let summon = crate::quake::summon_key(&ChordKey::Named(named));
+            assert!(
+                page.is_some() && summon.is_some(),
+                "{named:?} is known to one of the two tables and not the other"
+            );
+            // The numbers themselves can only be compared where one currency is
+            // in use, which is the platform whose numbers both tables hold —
+            // asked of the host at run time, bt-app's one platform decision.
+            if matches!(
+                bt_platform::host_platform(),
+                bt_platform::HostPlatform::Windows
+            ) {
+                assert_eq!(
+                    page,
+                    summon.and_then(bt_platform::hotkey::summon_key_code),
+                    "{named:?} is two different keys depending on which door asks"
+                );
+            }
+        }
+        // A key neither table has a number for is refused by both, and refused
+        // rather than guessed.
+        assert_eq!(named_key_virtual_key(NamedKey::PrintScreen), None);
+        assert_eq!(
+            crate::quake::summon_key(&ChordKey::Named(NamedKey::PrintScreen)),
+            None
+        );
+    }
+
     fn every_focus() -> Focus {
         Focus {
             preview: true,

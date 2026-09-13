@@ -99,17 +99,17 @@ pub use theme::{
     FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, FOCUS_MINI_SEAM_ALPHA, FOCUS_MINI_SEAM_LOGICAL_PX,
     FOCUS_MINI_TERM_FONT_LOGICAL_PX, FOCUS_MINI_TERM_LINE_HEIGHT, FloatTagInk, GRAPH_LANE_COUNT,
     HEAD_TITLE_FONT_LOGICAL_PX, HEAD_TITLE_TRACKING_EM, HEAD_TITLE_WEIGHT, LIGHT_BACKGROUND_RGB,
-    LIGHT_CHROME, PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
-    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, PREVIEW_BODY_INSET_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX,
-    RAIL_GAP_LOGICAL_PX, RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX,
-    RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX, RAIL_LABEL_PADDING_TOP_LOGICAL_PX,
-    RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM, RAIL_NEW_CHEVRON_BOX_LOGICAL_PX,
-    RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX, RAIL_NEW_MARGIN_TOP_LOGICAL_PX,
-    RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX, RAIL_PADDING_BOTTOM_LOGICAL_PX,
-    RAIL_PADDING_TOP_LOGICAL_PX, RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX,
-    RAIL_SEAM_INSET_X_LOGICAL_PX, RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX,
-    RAIL_SHADE_WIDTH_LOGICAL_PX, RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX,
-    RAIL_TAB_HEIGHT_LOGICAL_PX, RAIL_TAB_PADDING_LEFT_LOGICAL_PX,
+    LIGHT_CHROME, MAC_WINDOW_CORNER_RADIUS_LOGICAL_PX, PANE_HEAD_FILE_MARK_LOGICAL_PX,
+    PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX,
+    PREVIEW_BODY_INSET_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
+    RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX, RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX,
+    RAIL_LABEL_PADDING_TOP_LOGICAL_PX, RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM,
+    RAIL_NEW_CHEVRON_BOX_LOGICAL_PX, RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX,
+    RAIL_NEW_MARGIN_TOP_LOGICAL_PX, RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX,
+    RAIL_PADDING_BOTTOM_LOGICAL_PX, RAIL_PADDING_TOP_LOGICAL_PX, RAIL_PADDING_X_LOGICAL_PX,
+    RAIL_PARK_LOGICAL_PX, RAIL_SEAM_INSET_X_LOGICAL_PX, RAIL_SEAM_MARGIN_Y_LOGICAL_PX,
+    RAIL_SEAM_THICKNESS_LOGICAL_PX, RAIL_SHADE_WIDTH_LOGICAL_PX, RAIL_TAB_FONT_LOGICAL_PX,
+    RAIL_TAB_GAP_LOGICAL_PX, RAIL_TAB_HEIGHT_LOGICAL_PX, RAIL_TAB_PADDING_LEFT_LOGICAL_PX,
     RAIL_TAB_PADDING_RIGHT_LOGICAL_PX, RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX,
     RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX,
     SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX, SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX,
@@ -121,28 +121,29 @@ pub use theme::{
     SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX, TERMINAL_SCROLL_LANE_LOGICAL_PX, Theme, ThemeChange,
     WINDOW_CAPTION_BUTTON_LOGICAL_PX, WINDOW_CAPTION_GEAR_BOX_LOGICAL_PX,
     WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX, WINDOW_CAPTION_GEAR_INSET_LOGICAL_PX,
-    WINDOW_CAPTION_GLYPH_LOGICAL_PX, WINDOW_NEW_TAB_BOX_LOGICAL_PX,
-    WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX, WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX,
-    WINDOW_NEW_TAB_GLYPH_LOGICAL_PX, WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX,
-    WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX, WINDOW_NEW_TAB_RADIUS_LOGICAL_PX,
-    WINDOW_TAB_BADGE_FONT_LOGICAL_PX, WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX,
-    WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX, WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX,
-    WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX, WINDOW_TAB_BREATHE_MIN_OPACITY,
-    WINDOW_TAB_BREATHE_REDUCED_OPACITY, WINDOW_TAB_CLOSE_BOX_LOGICAL_PX,
-    WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX, WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX,
-    WINDOW_TAB_DEAD_MARK_OPACITY, WINDOW_TAB_FLOAT_HEIGHT_LOGICAL_PX,
-    WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX, WINDOW_TAB_FONT_LOGICAL_PX,
-    WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX, WINDOW_TAB_HEIGHT_LOGICAL_PX,
-    WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX, WINDOW_TAB_MIN_WIDTH_LOGICAL_PX,
-    WINDOW_TAB_PADDING_LEFT_LOGICAL_PX, WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX,
-    WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_RING_INDETERMINATE_TURNS,
-    WINDOW_TAB_RING_RADIUS_LOGICAL_PX, WINDOW_TAB_RING_STROKE_LOGICAL_PX,
-    WINDOW_TAB_SQUEEZED_LOGICAL_PX, WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX,
-    WINDOW_TAB_STATUS_DOT_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX,
-    WINDOW_TAB_STATUS_DOT_RING_STROKE_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX,
-    WINDOW_TAB_TIGHT_LOGICAL_PX, WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX,
-    WINDOW_TITLE_BAR_LOGICAL_PX, background_rgb, chrome_palette, current_cursor_style,
-    current_theme, foreground_rgb, ink_over, set_cursor_style, set_theme, theme_revision,
+    WINDOW_CAPTION_GEAR_MARGIN_LOGICAL_PX, WINDOW_CAPTION_GLYPH_LOGICAL_PX,
+    WINDOW_NEW_TAB_BOX_LOGICAL_PX, WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX,
+    WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX, WINDOW_NEW_TAB_GLYPH_LOGICAL_PX,
+    WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX, WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX,
+    WINDOW_NEW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_BADGE_FONT_LOGICAL_PX,
+    WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX, WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX,
+    WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX, WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX,
+    WINDOW_TAB_BREATHE_MIN_OPACITY, WINDOW_TAB_BREATHE_REDUCED_OPACITY,
+    WINDOW_TAB_CLOSE_BOX_LOGICAL_PX, WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX,
+    WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX, WINDOW_TAB_DEAD_MARK_OPACITY,
+    WINDOW_TAB_FLOAT_HEIGHT_LOGICAL_PX, WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX,
+    WINDOW_TAB_FONT_LOGICAL_PX, WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX,
+    WINDOW_TAB_HEIGHT_LOGICAL_PX, WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX,
+    WINDOW_TAB_MIN_WIDTH_LOGICAL_PX, WINDOW_TAB_PADDING_LEFT_LOGICAL_PX,
+    WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX, WINDOW_TAB_RADIUS_LOGICAL_PX,
+    WINDOW_TAB_RING_INDETERMINATE_TURNS, WINDOW_TAB_RING_RADIUS_LOGICAL_PX,
+    WINDOW_TAB_RING_STROKE_LOGICAL_PX, WINDOW_TAB_SQUEEZED_LOGICAL_PX,
+    WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_LOGICAL_PX,
+    WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_RING_STROKE_LOGICAL_PX,
+    WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX, WINDOW_TAB_TIGHT_LOGICAL_PX,
+    WINDOW_TITLE_BAR_DRAG_RESERVE_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, background_rgb,
+    chrome_palette, current_cursor_style, current_theme, foreground_rgb, ink_over,
+    set_cursor_style, set_theme, theme_revision,
 };
 use theme::{
     CURSOR_UNDERLINE_HEIGHT_LOGICAL_PX, DEFAULT_DIM_FOREGROUND_RGB, ansi_16_rgb, cursor_rgb,
@@ -4783,6 +4784,50 @@ pub fn rounded_overlay_fill(
             rect: entry.rect,
             color,
             alpha: entry.coverage * alpha,
+        })
+        .collect()
+}
+
+/// [`rounded_overlay_fill`]'s twin **inside a preview body**, where a fill has
+/// no alpha to carry: the same exact coverage, composited on the way out.
+///
+/// A [`PreviewQuad`] is opaque by construction — the body's fills are a code
+/// fence's ground, a table's grid and a diff's tints, and every one of them is a
+/// design token already mixed over the ground it stands on. So a rounded corner
+/// here cannot be spent as coverage; it is spent as *colour*, by mixing `color`
+/// into `under` by each pixel's coverage. That is available exactly because the
+/// flyout's own is not: the surface beneath a fill in a preview body is known —
+/// it is the body itself — where a floating window has no known surface under
+/// it at all (`peek_box_fills` says so where it mixes the flyout's own).
+///
+/// `under` must therefore be the colour actually behind `rect`, and a caller
+/// that hands it the wrong ground draws a halo rather than a curve.
+#[must_use]
+pub fn rounded_preview_fill(
+    rect: [f32; 4],
+    radius_px: f32,
+    color: [u8; 3],
+    under: [u8; 3],
+) -> Vec<PreviewQuad> {
+    rounded_rect_coverage(rect, radius_px)
+        .into_iter()
+        .map(|entry| {
+            // The mix lands between two `u8` ends and is rounded, so the cast is
+            // exact rather than merely narrow.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let mix = |over: u8, below: u8| {
+                let over = f32::from(over);
+                let below = f32::from(below);
+                (below + (over - below) * entry.coverage.clamp(0.0, 1.0)).round() as u8
+            };
+            PreviewQuad {
+                rect: entry.rect,
+                color: [
+                    mix(color[0], under[0]),
+                    mix(color[1], under[1]),
+                    mix(color[2], under[2]),
+                ],
+            }
         })
         .collect()
 }
@@ -14651,6 +14696,63 @@ fn draw_video_stage(
     }
 }
 
+/// The production font environment without a device, surface or window.
+pub fn preview_measure_font_system() -> FontSystem {
+    terminal_font_system()
+}
+
+/// CPU measurement shared by the renderer and non-GUI document probes.
+pub fn measure_preview_paragraph(
+    font_system: &mut FontSystem,
+    runs: &[PreviewRun],
+    width_px: f32,
+    font_size_px: f32,
+    line_height_px: f32,
+) -> f32 {
+    if runs.iter().all(|run| run.text.is_empty()) {
+        return line_height_px;
+    }
+    let mut buffer = Buffer::new(font_system, Metrics::new(font_size_px, line_height_px));
+    buffer.set_wrap(Wrap::WordOrGlyph);
+    buffer.set_size(Some(width_px.max(1.0)), None);
+    set_preview_runs(
+        font_system,
+        &mut buffer,
+        runs,
+        0.0,
+        Metrics::new(font_size_px, line_height_px),
+    );
+    buffer.shape_until_scroll(font_system, false);
+    buffer.layout_runs().count().max(1) as f32 * line_height_px
+}
+
+/// CPU measurement shared by the renderer and non-GUI document probes.
+pub fn measure_preview_paragraph_width(
+    font_system: &mut FontSystem,
+    runs: &[PreviewRun],
+    font_size_px: f32,
+    line_height_px: f32,
+) -> f32 {
+    if runs.iter().all(|run| run.text.is_empty()) {
+        return 0.0;
+    }
+    let mut buffer = Buffer::new(font_system, Metrics::new(font_size_px, line_height_px));
+    buffer.set_wrap(Wrap::None);
+    buffer.set_size(None, Some(line_height_px));
+    set_preview_runs(
+        font_system,
+        &mut buffer,
+        runs,
+        0.0,
+        Metrics::new(font_size_px, line_height_px),
+    );
+    buffer.shape_until_scroll(font_system, false);
+    buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0_f32, f32::max)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -22947,6 +23049,57 @@ mod tests {
         assert!(halo.iter().any(|quad| quad.rect[0] >= frame[2]), "right");
     }
 
+    /// RED GATE (§7.1.3k ⑬, the chip's pill) — **a rounded fill inside a preview
+    /// body is spent as colour, because a body's fill has no alpha to spend it
+    /// as.**
+    ///
+    /// The same analytic coverage the overlay's own corners are cut from, mixed
+    /// into the ground the caller says is behind it: a whole pixel comes out the
+    /// fill's own colour, a pixel the curve half covers comes out between the
+    /// two, and nothing comes out darker than the darker end or lighter than the
+    /// lighter one. That last clause is the one that matters on a live page —
+    /// a chip whose corners over-shot would wear a halo of some colour that is
+    /// in neither the palette nor the document.
+    ///
+    /// MUTATION: drop the `clamp` and a coverage the decomposition rounded a
+    /// hair over one comes back past the fill's own colour; hand it the wrong
+    /// ground and the corners fade to a colour that is not there.
+    #[test]
+    fn a_rounded_fill_in_a_preview_body_is_mixed_into_its_own_ground() {
+        let under = [0x10, 0x10, 0x10];
+        let color = [0xf0, 0xf0, 0xf0];
+        let quads = rounded_preview_fill([20.0, 10.0, 120.0, 34.0], 4.0, color, under);
+        assert!(!quads.is_empty());
+        assert!(
+            quads.iter().any(|quad| quad.color == color),
+            "the straight middle is the fill's own colour: {quads:?}"
+        );
+        assert!(
+            quads
+                .iter()
+                .any(|quad| quad.color[0] > under[0] && quad.color[0] < color[0]),
+            "and a corner's own pixels stand between the two: {quads:?}"
+        );
+        for quad in &quads {
+            assert!(
+                quad.color
+                    .iter()
+                    .all(|channel| (under[0]..=color[0]).contains(channel)),
+                "no pixel may leave the two ends it is mixed from: {quad:?}"
+            );
+        }
+        // A radius of nothing is the rectangle itself, undimmed — the caller's
+        // own ground never reaches a pixel the shape covers whole.
+        let square = rounded_preview_fill([20.0, 10.0, 120.0, 34.0], 0.0, color, under);
+        assert_eq!(
+            square,
+            vec![PreviewQuad {
+                rect: [20.0, 10.0, 120.0, 34.0],
+                color,
+            }]
+        );
+    }
+
     /// PIN — **a floating surface's lift is one soft shadow, not a set of rings**
     /// (user report + screenshot, 2026-08-13: three concentric squares around the
     /// glance card).
@@ -26682,6 +26835,7 @@ mod tests {
         }
     }
 }
+<<<<<<< HEAD
 
 /// The production font environment without a device, surface or window.
 pub fn preview_measure_font_system() -> FontSystem {
@@ -26751,3 +26905,5 @@ pub fn measure_preview_text_rows(
 ) -> Vec<PreviewTextRow> {
     preview_text_rows(fonts, paragraph)
 }
+=======
+>>>>>>> main
