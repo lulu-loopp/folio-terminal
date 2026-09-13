@@ -15,6 +15,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- **A changed file in the Git page says what happened to it in words.** Resting
+  on a row used to give you its path and the name of the group it stands in,
+  leaving git's two letters to be read off the badges: `UU` on a row meant
+  nothing unless you already knew it meant a merge conflict where both sides
+  changed the file. Every status git can report now has a phrase — `Modified`,
+  `Added, staged`, `Modified, staged — modified since`,
+  `Conflict (both modified)` — and git's own two letters stand beside it, so a
+  row and a `git status` in the pane next to it still read the same. The files
+  under an expanded commit say theirs too.
+
 - **The card that appears when you rest on a file now fades in.** It used to
   arrive solid in a single frame; it now takes the same ninety milliseconds the
   small labels elsewhere in the window take, and arrives without moving or
