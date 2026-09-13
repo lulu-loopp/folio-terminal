@@ -10235,9 +10235,9 @@ link until the aim had been proved.
 
 | # | posted at the link's cell | what the window wrote down |
 |---|---|---|
-| 1 | the pointer resting on the folder link | the status tag reads `file:///…/pages/sub · Ctrl+点击在访达中显示`, and the folder's glance card stands under it — `SUB`, `inside.txt`, `~/pages/sub` |
+| 1 | the pointer resting on the folder link | the status tag reads `file:///…/pages/sub · ⌘+click shows it in Finder`, and the folder's glance card stands under it — `SUB`, `inside.txt`, `~/pages/sub` |
 | 2 | a bare left press on it | `activate_hyperlink control=0 … arm=FilesColumn("/…/pages/sub") path=/…/pages/sub exists=1 dir=1`, then `show_folder_in_files_column leave=seated SeatId(2)` |
-| 3 | the same press with the hand-over chord held | `activate_hyperlink control=1 … arm=Reveal("/…/pages/sub") path=… exists=1 dir=1`, and **one** Finder window, named `sub`, at `933,115 920x464` (§13.33 D) |
+| 3 | the same press with `⌘` held | `activate_hyperlink control=1 … arm=Reveal("/…/pages/sub") path=… exists=1 dir=1`, and **one** Finder window, named `sub`, at `962,144 920x464` (§13.33 D) — closed again by this trip, and the desk ends with the one Finder window it began with |
 | 4 | the pointer resting on the file link | the file's glance card, headed `my notes 中文.txt`, carrying the file's own first line and `46 B` |
 | 5 | a bare left press on it | `activate_hyperlink control=0 uri="file:///…/my%20notes%20%E4%B8%AD%E6%96%87.txt" arm=Preview("/…/my notes 中文.txt", None) path=/…/my notes 中文.txt exists=1 dir=0`, then `open_preview_file leave=opened surface=Seat(… SeatId(2))` |
 
@@ -10260,22 +10260,31 @@ dropped whole. Both halves of that rule are on the glass in one trip.
 `row` split with a `term` leaf and a `preview` leaf — the very shape §13.45's
 seed was reaching for, written by the product rather than by hand. Quit through
 `osascript` on this bundle's own identifier, relaunched, and the document the
-second quit wrote is **byte for byte** the document the first one wrote, down to
-the rectangle; the photograph of the restored window is two panes with
-`my notes 中文.txt` open in the right one and a `2` on the tab. A second run of
-the same shape through the plain click of row 2 — a `row` split with a `files`
-leaf — round-tripped the same way.
+second quit wrote is **byte for byte** the document the first one wrote — the
+tree, the ratio, the leaves, the preview row, the pool and the size — with the
+rectangle's `x` the only field that ever differed between two quits, which is
+⑦'s own finding and not this one's. The photograph of the restored window is two
+panes with `my notes 中文.txt` open in the right one and a `2` on the tab. A
+second run of the same shape through the plain click of row 2 — a `row` split
+with a `files` leaf — round-tripped the same way, and on one pair of quits the
+whole document including the rectangle came back identical.
 
 **⑦ Two things this trip is entitled to say and one it is not.**
 
-* **The chord in a pane is still `Ctrl` on this branch, and that is `main`'s
-  state rather than a regression.** §13.45's *section* is on `main`; its **code**
-  is not, because `feature/macos-command-click` has not merged — so
-  `begin_local_selection` still reads `self.window.modifiers.control_key()` and
-  the macOS clause still says `Ctrl+点击`. Row 3 above was therefore driven with
-  `maskControl`. When that branch lands, the same row is `⌘` and the same clause
-  says `⌘`; nothing in this section has to move, because everything here is
-  downstream of the modifier and reads whatever `hyperlink_activation` is handed.
+* **§13.45's own clause reached the glass here, and only here.** That section
+  wrote ` · ⌘+click shows it in Finder` into the macOS column and recorded that
+  it *could not be photographed*, because the arm it is derived from was `None`
+  on a Mac — which is this ticket's defect, one surface up. Row 1 above is that
+  clause on the glass. It is the English string on a Chinese desk because both
+  macOS columns are in `Text::CHINESE_PENDING` (§13.45 ③), so what the copy pass
+  still owes is the same two clauses with `⌘` in them and 访达 in the second.
+  **The trip was driven twice for this reason.** `feature/macos-command-click`
+  merged into `main` in the middle of this ticket, so the first pass measured
+  `Ctrl`+click against the older pointer rule and every row above was then
+  re-measured on this branch **after** the merge, with `maskCommand`. Nothing in
+  this section moved between the two beyond the name of the key: everything here
+  is downstream of the modifier and reads whatever `hyperlink_activation` is
+  handed, which is exactly the shape §13.45 ① built.
 * **A restored window's x drifts by a few points while its y and its size do
   not.** Asked for `40,40 1180×740`, the process's own instrument reports
   `BT_DPI stage=create … rect=80,80,2440,1560` — logical `40,40 1180×740`, exact
