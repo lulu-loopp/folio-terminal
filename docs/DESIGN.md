@@ -8311,568 +8311,215 @@ over a composition without this window installing an event monitor of its own.
 
 ### 13.19 T-MAC-PILL: 水平布局的标签在 mac 上是 30 pt 的浮动药丸,红黄绿居中到 40 的条上 (`crates/bt-app/src/seats.rs`、`crates/bt-render/src/{theme,scheme}.rs`、`crates/bt-platform/src/{macos_impl,portable_impl}.rs`)
 
-**① One capability, two answers, and the second one is the tab's shape.** M3-3
-(§13.11 ②) left the strip's own drawing untouched on purpose: the owner had seen
-the window and was choosing the tab's new form on a mock. The choice, on
-2026-09-12, is 「就药丸」 — the strict mock's section 1 variant B. On a window
-whose title bar is the platform's (`PlatformChrome::buttons_are_the_platforms`)
-a horizontal tab is a **30-point pill centred on the 40-point strip**: top at 5,
-bottom at 35, `WINDOW_TAB_RADIUS` on all four corners, **no skirt and no seam**,
-so the strip's floor runs unbroken underneath it. On a window that draws its own
-whole bar the tab is what it has always been — 34 tall, standing on the bar's
-foot, flaring outward into the pane at both lower corners, *being* the pane's
-surface carried up into the strip.
+**① 一次能力读数,两个答案,而第二个答案是标签的形状。** M3-3(§13.11 ②)特意把 strip 自己的画法留着没动:用户看过那扇窗,正在一份小样上挑标签的新形态。2026-09-12 的裁决是「就药丸」——严格小样第 1 节的 B 式。在一扇标题栏归平台的窗上(`PlatformChrome::buttons_are_the_platforms`),一个水平标签是**居中在 40 点条上的 30 点药丸**:上沿 5,下沿 35,四个角都是 `WINDOW_TAB_RADIUS`,**没有裙边也没有接缝**,所以 strip 的地板在它底下整条不断。在一扇整条 bar 由 Folio 自己画的窗上,标签还是它一直以来的样子——高 34,站在 bar 的脚上,两个下角向外张进 pane,它**就是** pane 的表面被带上 strip。
 
-The capability therefore has two readers in `seats.rs` now rather than one, and
-that is the honest count rather than a relaxation: `caption_targets` decides
-which buttons stand in the caption run and `tab_strip_geometry` decides whether
-the tabs float, and neither answer is derivable from the other.
-`the_caption_run_is_decided_by_one_capability_read` was a *count* and is now a
-*list* — each occurrence is located inside the function that is entitled to it,
-which is strictly the stronger claim and still fails the day somebody reaches for
-a `cfg`.
+于是这次能力读数在 `seats.rs` 里有了两个读者而不是一个,而这是老实的数目而不是一次放松:`caption_targets` 决定哪些按钮站在 caption run 里,`tab_strip_geometry` 决定标签浮不浮,两个答案谁也推不出谁。`the_caption_run_is_decided_by_one_capability_read` 过去数的是**次数**,现在点的是**名单**——每一处都落在有资格读它的那个函数里面,这严格地更强,而且哪天有人伸手去拿一个 `cfg`,它照样会红。
 
-**② The geometry is the source of truth, so the shape is decided exactly once.**
-`tab_strip_geometry` already measured every box a tab has — the mark, the title,
-the badge, the pin, the `×`, the folder trigger — and it measured all of them
-against the tab's own body. Two numbers move: `tab_height` (30 instead of 34) and
-`tab_top` (`(title - height) / 2` instead of `title - height`), plus one that was
-never a tab's number at all — the folder trigger used to be centred between the
-tab's top and the *bar's* foot, which is the same line on an attached tab and a
-different one on a pill, so it is now centred on the tab like everything else.
-Everything else follows for free: `tab_mark_box`, `tab_title_box` (which is the
-rename editor's box — "same box, same metrics", mock-up 376-378), the hit test,
-`TabGeometry::shifted` and therefore the drag, the FLIP a landing tab flies, and
-the tooltip anchors. **Padding 12 / 6, mark 15, gap 8, font 13, close box 17 at
-radius 4, the badge, the progress ring, the width tiers: not one of them
-changes.** A pill that also moved its mark would be a second tab design rather
-than the same tab on a different bar, and the ruling is explicitly the latter —
-which is why `the_mac_tab_is_a_thirty_point_pill_centred_on_the_strip` asserts
-the two geometries side by side and holds every one of those boxes to the same
-number on both.
+**② 几何就是事实本身,所以形状只被决定一次。** `tab_strip_geometry` 本来就量过一个标签身上的每一个框——标记、标题、角标、图钉、`×`、文件夹触发点——而且量的都是标签自己的身子。动的是两个数:`tab_height`(30 而不是 34)与 `tab_top`(`(title - height) / 2` 而不是 `title - height`),再加一个从来就不是标签的数——文件夹触发点过去居中在标签上沿与 **bar** 的脚之间,那在一个贴着的标签上是同一条线、在一个药丸上是另一条线,所以它现在跟别的框一样居中在标签上。剩下的都是白送的:`tab_mark_box`、`tab_title_box`(也就是重命名框的那个框——「同一个框,同一套度量」,小样 376–378 行)、命中测试、`TabGeometry::shifted` 因而还有拖拽、一个落位标签飞的那次 FLIP,以及提示卡的锚点。**内边距 12 / 6、标记 15、间距 8、字号 13、关闭框 17 圆角 4、角标、进度环、宽度档:一个都没动。** 一个连标记也挪了的药丸就是第二套标签设计,而不是同一个标签站在另一条 bar 上,而裁决明写的正是后者——所以 `the_mac_tab_is_a_thirty_point_pill_centred_on_the_strip` 把两套几何并排按住,上面每一个框在两边都得是同一个数。
 
-**The lead-in is air now, and it was not air before.** An attached run leads in
-by `--tabr`: `.tabs-inline { padding-left: var(--tabr) }` exists so the first
-tab's outward skirt has somewhere to land, which is what puts the silhouette on
-the window's own edge. A pill has no skirt, so its lead-in is struck as what it
-is — `WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX`, the mock's `--after-lights`, twelve
-points after the band the platform's buttons occupy. 69 + 12 = 81, which is the
-mock's own number. It is taken out of the run at the top of the solver, where the
-traffic lights' band and the drag reserve are already taken out, and for their
-reason: everything the strip decides is decided against the run it is given, so a
-tab walks down its width tiers inside the smaller run first and the run begins to
-scroll only once the tabs are on their floor.
+**导入段现在是空气,而它从前不是空气。** 一条贴着的 run 用 `--tabr` 导入:`.tabs-inline { padding-left: var(--tabr) }` 的存在是为了让第一个标签向外的裙边有地方落,而那正是把剪影摆到窗口自己边缘上的东西。药丸没有裙边,于是它的导入段被按它本来的样子划下来——`WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX`,小样里的 `--after-lights`,平台按钮那条带子之后的十二点。69 + 12 = 81,就是小样自己的数。它在解算器的最前面从 run 里扣掉,红黄绿那条带子和拖拽留白也在那里扣掉,理由跟它们一样:strip 决定的每一件事都是对着交给它的那条 run 决定的,所以标签先在更小的 run 里走它的宽度档,踩到地板才开始滚。
 
-**③ Every ground a tab can wear is the same silhouette, and that is the whole of
-the paint.** The fill is the easy half. `window_tab_strip` lays five different
-grounds on a tab over its life — the hover fill, the active silhouette, the
-landing wash, the landing ring, and the shadow under a tab in flight — and if any
-one of them kept the attached tab's outline, a tab in *that state* would be
-wearing the other window's shape for exactly as long as the state lasted. So the
-shape is read off `TabStripGeometry::floating` once and every ground goes through
-the same two helpers: `ChromeMark::TabBody`/`TabBodyRing` (round on top, open at
-the foot) on an attached tab, `ControlPill`/`ControlPillRing` (closed, round on
-all four corners) on a pill. **No new mark was cut.** `ControlPillRing` already
-existed, and its own note says why: a landing ring has to follow whatever
-silhouette the row it lands in actually wears, and the rail's rows are closed
-boxes. A pill is the strip's row wearing the rail's silhouette, so the mark that
-was made for the rail is the mark for this.
+**③ 一个标签能穿的每一种底都是同一个剪影,而画上去的就这么多。** 填充是容易的那一半。`window_tab_strip` 在一个标签的一生里给它铺五种不同的底——悬停填充、活动剪影、落位漫染、落位环,以及一个飞行中的标签底下那片影——只要其中任何一种还留着贴着式标签的轮廓,处在**那个状态**里的标签就会在那个状态持续的整段时间里穿着另一种窗口的形状。所以形状从 `TabStripGeometry::floating` 上读一次,每一种底都走同样两个助手:贴着的标签走 `ChromeMark::TabBody`/`TabBodyRing`(上圆下开),药丸走 `ControlPill`/`ControlPillRing`(闭合,四角都圆)。**没有新刻任何一个 mark。** `ControlPillRing` 本来就在,它自己的注就写着理由:一个落位环必须跟着它落进去的那一行实际穿的剪影走,而竖栏的行是闭合的框。药丸就是 strip 的行穿上了竖栏的剪影,所以为竖栏刻的那个 mark 就是这里要的 mark。
 
-**④ The hairline this section struck is gone, and §13.32 ④ is where that was
-ruled.** It went in on one argument — an attached tab needs no edge because it is
-the pane's surface, while a pill floats, and on the light canvas its fill and the
-strip under it are three levels apart, so without a line the active tab is a
-smudge rather than a shape. The owner struck the value (`rgba(0,0,0,.14)`, half a
-point), night's was derived from it (`94 × 140 / 88`), it was carried as colour
-*and* alpha rather than pre-composited so the renderer could blend it over a fill
-still fading in, and it was drawn inside the pill's box rather than spread outside
-it so that the ink stayed 30 points tall.
+**④ 本节曾经划下的那条细线没有了,而这一条是 §13.32 ④ 裁的。** 它当初进来只有一条理由——一个贴着的标签不需要边,因为它就是 pane 的表面;而药丸是浮着的,在亮色画布上它的填充和它底下的 strip 只差三级,没有一条线的话活动标签就是一团污迹而不是一个形状。用户裁了亮色的那个值(`rgba(0,0,0,.14)`,半点),夜色的是从它推出来的(`94 × 140 / 88`),它是当作**颜色加 alpha** 带着而不是预先合成好的,好让渲染器能把它混在一块还在淡入的填充上,而且它画在药丸的框**里面**而不是摊到框外,好让这笔墨保持 30 点高。
 
-Then the window was built and the owner looked at it, and asked whether the tab
-needed the edging at all. **It does not, and the reason is one this product had
-already written down elsewhere**: the vertical rail's rows are this same pill, at
-this same radius, on a strip of the same panel shade, and they carry no ring on
-either canvas. A ring here would have made the horizontal tab the one pill in the
-window that is outlined — which is a difference a reader notices without being
-able to name, and none of it was ever about the platform. So the sprite, the
-palette pair (`tab_pill_edge` / `tab_pill_edge_alpha`), the `Canvas::pill_edge`
-thousandths both canvases carried and `WINDOW_TAB_FLOAT_EDGE_LOGICAL_PX` are all
-out; nothing else read any of them. The fill and the silhouette are untouched,
-and the pin that held the ring now holds its absence —
-`the_active_pill_is_a_closed_fill_with_no_ring_and_the_attached_tab_is_a_skirt`,
-which asserts it of both windows rather than of one.
+然后那扇窗被建出来,用户看了看,问这个标签到底需不需要这道边。**它不需要,而理由是这个产品早就在别处写下过的**:竖排那条栏的行就是同一个药丸、同一个圆角、同一种面板底色的条上,两种画布上都不带环。这里加一个环,会让水平标签成为整扇窗里唯一被描了边的药丸——那是一种读者能察觉却说不出名字的差别,而这里面没有一点是关于平台的。所以那个 sprite、那对调色项(`tab_pill_edge` / `tab_pill_edge_alpha`)、两种画布都带着的 `Canvas::pill_edge` 千分数,以及 `WINDOW_TAB_FLOAT_EDGE_LOGICAL_PX` 全部出局;再没有别的地方读过它们。填充与剪影一笔没动,而那根钉着环的钉子现在钉着它的不在——`the_active_pill_is_a_closed_fill_with_no_ring_and_the_attached_tab_is_a_skirt`,它是对两种窗口都断言,而不是只对一种。
 
-**⑤ The five points of strip above and below a pill are not the tab.** The hit
-test reads `tab.body` and the geometry moved, so this needed no code at all — but
-it is a consequence worth stating, because it is what "floating" means when you
-reach for one: a press at y 2 on a 40-point strip answers nothing, where on an
-attached tab it answered the tab. Those bands are also **not** the window's drag
-region: `title_bar_drag_point` divides the bar by `x` alone (`§13.11 ④`), and
-extending it to the `y` a pill leaves over is a ruling rather than a patch —
-noted here rather than taken.
+**⑤ 药丸上下各五点的 strip 不是标签。** 命中测试读的是 `tab.body`,而几何挪了,所以这件事一行代码都不用写——但它是一个值得说出口的后果,因为当有人去够一个标签时,「浮着」的含义就体现在这里:在一条 40 点的 strip 上按 y 2 什么也答不出,而在一个贴着的标签上那一按答的是这个标签。这两条带子同样**不是**窗口的拖拽区:`title_bar_drag_point` 只按 `x` 切这条 bar(§13.11 ④),把它扩到药丸让出来的那个 `y` 上是一件要有人裁的事而不是一个补丁——这里是点名,不是动手。
 
-**⑥ The lights move onto the strip's axis, and the notifications are what keeps
-them there.** macOS sizes its window buttons for a 32-point title bar: 14 points
-of button with nine of air above and below, centred at y 16. Folio's strip is 40
-tall and its pills are centred at y 20, and three buttons sitting four points
-high of everything beside them is the first thing a reader would see in that bar.
-So `centre_window_buttons` sets the three `standardWindowButton:` frames' origins
-— **`y` only**; the x rhythm is macOS's own and `strip_left_px` is measured off
-wherever the buttons actually are — to put the button's top at
-`(bar - button) / 2`, which is 13 at the standard metrics. The distance is
-computed against the view the button is *in*, and `isFlipped` is asked rather
-than assumed, because the whole of what this computes is a distance from the top
-and a flipped view measures it directly. At the standard metrics the button lands
-13..27 inside a 32-point title bar view, so it moves four points down and still
-stands wholly inside the view it is in — which is why this is a move and not
-`NSTitlebarContainerView` surgery.
+**⑥ 红黄绿挪到 strip 的轴线上,而让它们留在那里的是那几条通知。** macOS 是按一条 32 点的标题栏给窗控定尺寸的:14 点的按钮,上下各九点空气,中心在 y 16。Folio 的 strip 高 40,它的药丸中心在 y 20,而三个按钮比旁边的一切高出四点,是读者在那条 bar 里第一眼会看见的东西。所以 `centre_window_buttons` 去设那三个 `standardWindowButton:` 的 frame 原点——**只设 `y`**;x 的节奏是 macOS 自己的,而 `strip_left_px` 是照按钮实际所在的位置量出来的——把按钮的上沿放到 `(bar - button) / 2`,在标准度量下是 13。这个距离是对着按钮**所在**的那个 view 算的,而 `isFlipped` 是问出来的不是假定的,因为这里要算的全部就是一个从上沿起的距离,而一个翻转过的 view 直接就是这么量的。在标准度量下按钮落在一个 32 点高的标题栏 view 里的 13..27,也就是向下挪了四点而且整个身子仍在它所在的 view 里面——这正是这件事是一次挪动而不是一场 `NSTitlebarContainerView` 手术的原因。
 
-**A frame set on a standard window button is not a setting AppKit remembers.**
-It lays the title bar out again on its own schedule and the buttons go back to
-the 32-point bar's axis, so the placement is re-stated from a `WindowButtonsWatch`
-subscribed to the five notifications that are known to re-lay it — resize,
-entering and leaving full screen, and the key/resign pair, where AppKit swaps the
-buttons' own appearance. Notifications and **not a timer**: a timer would be a
-guess about when AppKit is done, restated for the life of the window, and a
-placement that still would not hold against these five is a fact about the
-platform worth reporting rather than papering over. The registration is scoped to
-its own window (`object:`) and the watch is held on `CustomWindowFrame` and
-nowhere else, so it is removed when the frame is — an observer outliving its
-window is the bug that shape makes unwritable.
+**设在一个标准窗控上的 frame 不是 AppKit 会记住的设置。** 它会按自己的节奏重排标题栏,按钮回到 32 点那条 bar 的轴上,所以这句话由一个 `WindowButtonsWatch` 重说一遍,它订的是已知会重排的那五条通知——缩放、进入与离开全屏,以及 key/resign 那一对,AppKit 在那里换按钮自己的外观。走**通知而不是定时器**:一个定时器是对「AppKit 什么时候弄完了」的一次猜测,而且要在这扇窗的整个一生里一直猜下去;而一次连这五条都顶不住的摆放,是一个值得报告出来的平台事实,不是一件该糊过去的事。注册是按窗口收口的(`object:`),这只表只挂在 `CustomWindowFrame` 上、别处一份都没有,所以 frame 走的时候它跟着走——一个活得比它那扇窗还久的观察者,正是这种形状让人写不出来的那个 bug。
 
-`CustomFrameGeometry` is read for the first time on this arm. It was taken and
-dropped while this platform had nothing in that band to agree with; the height of
-the bar the lights are centred on is the *caller's* fact — a number about Folio's
-design — and not something AppKit could be asked for.
+`CustomFrameGeometry` 是在这条臂上第一次被读。它当初被取下来又放下,是因为那时这个平台在那条带子里没有任何东西要跟它对齐;红黄绿居中所对的那条 bar 的高度是**调用方的**事实——一个关于 Folio 设计的数——而不是一件能向 AppKit 要的东西。
 
-And because it is the caller's fact, it is not a constant: T-MAC-LIGHTS
-(§13.20) gives every vertical layout a header of the platform's own 32 instead,
-where this same arithmetic puts the button back at 9 — the place macOS had it.
-A window changes between the two without relaunching, so the band is re-stated
-through `CustomWindowFrame::set_window_band`, which re-centres the buttons and
-writes the new number into this watch. §13.20 ⑧ is the two rulings as one
-sentence.
+也正因为它是调用方的事实,它不是一个常量:T-MAC-LIGHTS(§13.20)给每一种竖排布局的是平台自己的 32,同一套算术在那里把按钮放回 9——macOS 原本摆它的地方。一扇窗不重启就能在两者之间来回换,所以这条带子经 `CustomWindowFrame::set_window_band` 重说一遍,它把按钮重新居中,并把新的数写进这只表。§13.20 ⑧ 是这两条裁决合成一句话。
 
-**⑦ The window Folio draws the whole bar on is byte-for-byte what it was.**
-`the_windows_tab_strip_is_unchanged_by_the_pill` feeds
-`PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR` and pins struck numbers rather than
-relations — lead-in 7, body 6..40, the `×` at 6 from the trailing edge in a
-17-box on the tab's axis, the mark 12 in at 15 — which is the one place in this
-file that is the right way round: everything else derives from a capability so
-that a Windows machine can ask what a Mac does, and this pins the answer the
-reader at the keyboard is actually looking at. The vertical layouts and the focus
-column are not this section's and were not touched.
+**⑦ Folio 自己画整条 bar 的那扇窗逐字节还是原来的样子。** `the_windows_tab_strip_is_unchanged_by_the_pill` 喂进去的是 `PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR`,钉的是裁下来的数而不是关系——导入段 7、身子 6..40、`×` 在离后缘 6 的地方、17 的框、在标签的轴上,标记从 12 起、高 15——这是这个文件里唯一一处该反过来的地方:别的每一处都从一次能力读数推出来,好让一台 Windows 机器能问出一台 Mac 会怎么做;而这一处钉的是坐在键盘前的读者真正看着的那个答案。竖排布局和聚焦列不归本节,也一笔没动。
 
-**⑧ What the Mac measured** (macOS 26.6.2, M4, 2026-09-12).
+**⑧ Mac 上量到的**(macOS 26.6.2,M4,2026-09-12)。
 
-**The reset is real, and it is what the watch is for.** A probe with no Folio in
-it — a plain `NSWindow` wearing M3-3's four settings — reports the three buttons
-at `(9, 9, 14, 14)`, `(32, 9, …)`, `(55, 9, …)` in an **unflipped**
-`NSTitlebarView` 32 points tall, so nine points of air above each. Centring puts
-them at `y = 5`, which is a top gap of **13**. A `setFrame:` on the window and
-they are back at `y = 9` with no help from anybody; re-applying puts them at 5
-again. So the placement is not a setting AppKit keeps, and the notification the
-watch subscribes to is the event that undid it. (The probe's own full-screen leg
-is **NOT-CHECKABLE** from an ssh session: a process started there is in a
-background session and its `toggleFullScreen:` never completes, so that half is
-measured in the real window below instead.)
+**那次复位是真的,而这只表就是为它而存在的。** 一个里面没有 Folio 的探针——一扇穿着 M3-3 那四句设置的普通 `NSWindow`——在一个 32 点高、**未翻转**的 `NSTitlebarView` 里报告三个按钮在 `(9, 9, 14, 14)`、`(32, 9, …)`、`(55, 9, …)`,也就是每个上面九点空气。居中把它们放到 `y = 5`,即上沿间距 **13**。对窗口来一次 `setFrame:`,不用任何人帮忙它们就回到了 `y = 9`;再摆一次又回到 5。所以这个摆放不是 AppKit 会保留的设置,而这只表订的那条通知就是撤掉它的那个事件。(探针自己的全屏那一条在 ssh 会话里是 **NOT-CHECKABLE**:从那里起的进程在一个后台会话里,它的 `toggleFullScreen:` 永远不完成,所以那一半改在下面的真窗口里量。)
 
-**The window itself**, `screencapture -o` of one window, read in points at
-backing scale 2, with the lead-in at 81 and the first pill 200 wide:
+**窗口自己**,一扇窗的 `screencapture -o`,在 backing scale 2 下按点读,导入段 81,第一个药丸宽 200:
 
-| | lights (top..bottom) | pill (top..bottom) | strip floor at y 39 |
+| | 红黄绿(上..下) | 药丸(上..下) | y 39 处的 strip 地板 |
 |---|---|---|---|
-| at rest, 960×600 | 13..27 | 5..35 | `#F7F7F5` across the run |
-| after a resize to 1200×760 | 13..27 | 5..35 | `#F7F7F5` |
-| in full screen | *withdrawn* | 5..35 | `#F7F7F5` |
-| back out of full screen | 13..27 | 5..35 | `#F7F7F5` |
+| 静止,960×600 | 13..27 | 5..35 | 整条 run 上都是 `#F7F7F5` |
+| 缩放到 1200×760 之后 | 13..27 | 5..35 | `#F7F7F5` |
+| 全屏中 | *被收走* | 5..35 | `#F7F7F5` |
+| 退出全屏之后 | 13..27 | 5..35 | `#F7F7F5` |
 
-The lights' centre is therefore **20** in every state the window has one, which
-is the pill's own centre, and they come back to it across both round trips. That
-they are **withdrawn** in full screen is macOS's own behaviour and not this
-ticket's: the system takes the buttons away until the pointer reaches the top
-edge. The floor row is the strip's own panel colour at every x sampled inside
-the tab run, which is "no flare and no fusing seam" stated as a pixel.
+所以红黄绿的中心在这扇窗有窗控的每一种状态下都是 **20**,也就是药丸自己的中心,而且两趟往返之后它们都回到了那里。全屏中它们**被收走**是 macOS 自己的行为而不是这张票的:系统把按钮拿走,直到指针够到上边缘。地板那一行在标签 run 里采样的每一个 x 上都是 strip 自己的面板色,这就是「没有外张也没有融合的接缝」说成一个像素。
 
-*(本节英文,待中文文案改写。)*
 ### 13.20 T-MAC-LIGHTS: 红黄绿住在最左那一列,容不下时退到 32 pt 顶带(`crates/bt-platform/src/{lib,macos_impl,portable_impl}.rs`、`crates/bt-app/src/{seats,main}.rs`)
 
-**① The ruling, in the form it ended the day in — and the two it was given first.** The owner ruled three times on 2026-09-12, and only the third is in the tree. The first: *the traffic lights live in the window's leftmost column; a column that cannot hold them falls back to a 32-point band, and in a horizontal layout the strip is that band* — the column that held them took the band away entirely, and the gear went to that column's foot. The second put the band back over the content, content-side, so that every vertical layout had the same band, gear and drag; the gear came back to the band's right and the foot box was withdrawn. **The third, from the running build, is what this section describes: in every vertical layout there is one 32-point header running the whole width of the window.** The platform's own buttons stay exactly where the platform puts them — nothing is moved and no column is measured — the gear stands at the header's right in its 46-wide box, the header is what the window is dragged by (double click through `AppleActionOnDoubleClick`, M3-3's door), and **the column begins beneath the header**: its content — the "Tabs" heading, the rows, the first card — starts at the header's foot plus its own top padding, and its one-pixel right edge starts at the header's foot as well and never runs up into it. Header and column are one surface in one colour, and the reason the line matters is that it is the only thing that could have separated them.
+**① 裁决,按它收工时的样子写下来——以及先给出的那两版。** 用户 2026-09-12 裁了三次,进树的只有第三次。第一次:*红黄绿住在窗口最左那一列;一列容不下它们就退到一条 32 点的带子上,而在水平布局里 strip 就是那条带子*——装下它们的那一列把带子整个拿走了,齿轮去了那一列的脚上。第二次把带子放回内容之上、贴着内容那一侧,于是每一种竖排布局都有同一条带、同一个齿轮、同一块可拖区;齿轮回到带子的右边,脚上那个框撤掉。**第三次是从跑起来的构建上裁的,也就是本节描述的这一版:每一种竖排布局里都有一条横贯窗口整宽的 32 点顶栏。** 平台自己的按钮就留在平台摆它们的地方——一个都不挪,一列都不量——齿轮站在顶栏右端它那个 46 宽的框里,顶栏就是这扇窗被拖的地方(双击经 `AppleActionOnDoubleClick`,M3-3 的那扇门),而**那一列从顶栏底下开始**:它的内容——「Tabs」标题、各行、第一张卡——从顶栏的脚加上它自己的上内边距起算,它那条一像素的右边线也从顶栏的脚起算,绝不往上跑进顶栏。顶栏和那一列是同一块表面、同一个颜色,而这条线之所以要紧,是因为它是唯一一个能把两者分开的东西。
 
-The first two forms were written and removed the same day rather than left behind a flag. The heading is kept because the ticket is; the sentence it names is the one above.
+前两版是当天写下、当天删掉的,而不是留在一个 flag 后面。标题保留是因为票号保留;它点的那句话就是上面这一句。
 
-This section was written as 13.17 on a branch where that number was free, and renumbered to **13.20** when it was merged: M2-3 took 13.17 and T-MAC-PILL took 13.19 while it was running.
+本节最初是在一条那个号还空着的分支上作为 13.17 写的,合并时改号为 **13.20**:它跑着的时候 M2-3 占了 13.17,T-MAC-PILL 占了 13.19。
 
-**② `PlatformChrome` grew the second side of the rectangle.** M3-3 measured how much of the *leading edge* the platform's buttons take (`strip_left_px`); this measures how much of the *top* (`band_px`), in physical pixels at the window's own backing scale. The two are the two sides of one rectangle and are struck together in one place (`platform_chrome_of`), so `FOLIO_DRAWS_THE_WHOLE_BAR` is a run of no width *and* no height — and that is what makes the whole ruling safe on Windows without naming Windows: the one question `seats.rs` asks is whether this window's platform has a band at all, and a window whose whole bar is Folio's answers no.
+**② `PlatformChrome` 长出了那个矩形的第二条边。** M3-3 量的是平台按钮占掉多少**前缘**(`strip_left_px`);这一次量的是占掉多少**顶部**(`band_px`),单位是这扇窗自己的 backing scale 下的物理像素。两者是同一个矩形的两条边,在同一处一起裁下来(`platform_chrome_of`),所以 `FOLIO_DRAWS_THE_WHOLE_BAR` 是一条**既没有宽也没有高**的 run——而这正是整条裁决不点 Windows 的名字也能在 Windows 上安全的原因:`seats.rs` 问的唯一一个问题是这扇窗的平台到底有没有一条带子,而一扇整条 bar 都是 Folio 的窗答没有。
 
-**The height is measured, not assumed.** `title_bar_height` asks `NSWindow.frameRectForContentRect:styleMask:` with this window's own mask *less* `FullSizeContentView` — arithmetic on a style mask rather than a rectangle off the live window, because the live window's mask is the one the take-over just set, under which the content *is* the frame and the honest answer to "how tall is the title bar" would be zero. It is §13.11 ①'s own measurement generalised: 960×632 before the flag, 960×600 after, and the 32 points that left the outer rectangle are exactly this header.
+**高度是量出来的,不是假定的。** `title_bar_height` 拿这扇窗自己的 style mask **减去** `FullSizeContentView` 去问 `NSWindow.frameRectForContentRect:styleMask:`——在 style mask 上做算术,而不是从活着的窗上取一个矩形,因为活窗的 mask 正是接管刚刚设下的那一套,在那套下面内容**就是** frame,「标题栏有多高」的老实答案是零。这是 §13.11 ① 那次测量的一般化:挂 flag 之前 960×632,之后 960×600,离开外框的那 32 点正是这条顶栏。
 
-**③ One number, and everything else is measured off it.** `window_band_px(scale, chrome, rail)` is the header's height and has two arms:
+**③ 一个数,别的一切都照它量。** `window_band_px(scale, chrome, rail)` 就是顶栏的高度,它有两条臂:
 
-| this window | header |
+| 这扇窗 | 顶栏 |
 | --- | --- |
-| Folio draws the whole bar (every Windows window) | 40 — `WINDOW_TITLE_BAR_LOGICAL_PX`, unchanged |
-| the platform draws its buttons, horizontal layout | 40 — the strip stands in this bar and a 32-point header would crop it |
-| the platform draws its buttons, vertical: expanded sidebar, parked icon rail, card column | the platform's own 32 |
+| Folio 画整条 bar(每一扇 Windows 窗) | 40——`WINDOW_TITLE_BAR_LOGICAL_PX`,没动 |
+| 平台画它的按钮,水平布局 | 40——strip 站在这条 bar 里,一条 32 点的顶栏会把它裁掉 |
+| 平台画它的按钮,竖排:展开的侧栏、停靠的图标栏、卡片列 | 平台自己的 32 |
 
-It is a sentence about *what stands in the bar* rather than a table of layouts: `RailState::strip_stands_in_the_bar` is the horizontal layout's own condition (and focus mode's exclusion from it), and the three vertical postures come out of the same line because none of them puts a strip up here. The caption run's boxes are as tall as this, the rail's and the card column's panels begin at it, `chrome_band_device_px` converts it once for the seats, and `title_bar_drag_point` answers for its height and no more.
+它是一句关于**谁站在这条 bar 里**的话,而不是一张按布局排的表:`RailState::strip_stands_in_the_bar` 就是水平布局自己的条件(以及聚焦模式被排除在外这一条),三种竖排姿态从同一行里出来,因为它们没有一种把 strip 放到这上面。caption run 的那些框跟它一样高,竖栏和卡片列的面板从它开始,`chrome_band_device_px` 为 seats 换算一次,而 `title_bar_drag_point` 只答它这么高,不多答。
 
-**④ The seats' top edge is handed in, not derived.** `seats_top_device_px` used to convert the 40 itself; it now takes the header, and `chrome_band_device_px` is the one place that conversion happens — `rail_inset_device_px`'s twin on the other axis, with its note word for word: the row the solver starts the seats on and the row the pointer enters the layout on are one number, or the rim aims at a seam. `solve_seats` therefore takes the window's chrome beside its rail, for the rail's own reason: the stage's top edge is as much a fact about the window as its left edge is. `Runtime::drive_rail_zone` reads the same function rather than the constant, or the top eight points of a parked rail would refuse to open on a platform whose header is shorter than Folio's.
+**④ seats 的上沿是交进去的,不是推出来的。** `seats_top_device_px` 过去自己换算那个 40;现在它接收顶栏,而 `chrome_band_device_px` 是这次换算唯一发生的地方——它是另一根轴上 `rail_inset_device_px` 的孪生,连注都一字不差:解算器让 seats 起步的那一行和指针进入布局的那一行是同一个数,否则边框瞄的是一条缝。`solve_seats` 因此在竖栏旁边把窗口的 chrome 也收下,理由跟竖栏自己的一样:舞台的上沿和它的左沿一样,都是关于这扇窗的事实。`Runtime::drive_rail_zone` 读的是同一个函数而不是那个常量,否则在一个顶栏比 Folio 的短的平台上,一条停靠竖栏最上面那八点会拒绝打开。
 
-**And that is why the capability door is now read three times rather than once.** M3-3 needed the answer only where there was a window to ask, because all it decided was a run of buttons. This decides the stage's top edge, and the two window constructors solve a stage before there is a `Runtime` to put the question to — so each reads it off the frame it has just installed, at the one moment the measurement is taken, and binds it to `let platform_chrome`. It is still one answer per window: measured once at `install`, and every later reader asks the window. `the_caption_run_is_decided_by_one_capability_read` was widened to say exactly that and made stricter in the process — it now locates all three reads and requires the two outside the accessor to be that binding and nothing else.
+**而这就是那扇能力门现在被读三次而不是一次的原因。** M3-3 只需要在有一扇窗可问的地方拿到答案,因为它决定的只是一排按钮。这一次决定的是舞台的上沿,而两个窗口构造器在有 `Runtime` 可问之前就要解一次舞台——所以它们各自从刚装好的那个 frame 上读,就在测量被取下的那一刻,并把它绑进 `let platform_chrome`。每扇窗仍然只有一个答案:在 `install` 时量一次,之后每一个读者都问窗口。`the_caption_run_is_decided_by_one_capability_read` 被放宽成正好说这件事,而且在这个过程中变严了——它现在把三处读都定位出来,并要求访问器之外那两处就是那次绑定、不许是别的。
 
-**⑤ What did not change, and one of them is pinned.** Windows' chrome is byte for byte the chrome it was: `nothing_here_touches_the_window_whose_whole_bar_is_folios` walks all four layouts and asserts that every number this ruling introduced answers what the picture answered before it existed — a 40px bar across the whole width, the rail and its hairline under it, the seats under it, every caption box as tall as the bar, and the four-button run. Session persistence is untouched: no geometry or layout key changes shape. The horizontal layout is M3-3's, unmoved *by this ticket* — it re-centres nothing there, because the band it hands the buttons is the 40 they are already being centred on. Re-centring them on the 40px strip is T-MAC-PILL's change (§13.19), merged before this one, and ⑧ below is the two rulings read as one sentence. The icon rail's hover-open is untouched in every part: the width tween, the late label fade, the 14px shade and the 46 the terminal keeps clear are the ones Q180–Q183 ruled, and the header does not move when the rail opens under it.
+**⑤ 没动的那些,其中一样被钉住了。** Windows 的 chrome 逐字节还是原来的 chrome:`nothing_here_touches_the_window_whose_whole_bar_is_folios` 走遍四种布局,断言这条裁决引进的每一个数答的都是它还不存在时那张画答的东西——一条横贯整宽的 40px bar、它底下的竖栏和那条细线、再底下的 seats、每一个跟 bar 一样高的 caption 框,以及那四个按钮的 run。会话持久化一笔没动:没有一个几何或布局的 key 换了形状。水平布局是 M3-3 的,**本票**没挪它——这里不在那边重新居中任何东西,因为它交给按钮的那条带子就是它们已经在上面居中的那个 40。把它们重新居中到 40px 的 strip 上是 T-MAC-PILL 的改动(§13.19),在本票之前合入,而下面的 ⑧ 就是这两条裁决读成一句话。图标栏的悬停展开每一处都没动:宽度补间、标签的迟到淡入、14px 的阴影,以及终端一直让出的那 46,都是 Q180–Q183 裁的那些数,而竖栏在顶栏底下打开时顶栏不动。
 
-**One place the build and the owner-approved mock differ, said out loud.** The mock draws no `.apptitle` and no sidebar toggle in the header; Folio draws both, where it drew them before — the toggle at the lights' run plus the bar's own 12-point inset, the name after it. Removing either is a decision about what a macOS window carries rather than about where the header is, and this ticket moves only the header and what is measured from it. The toggle is also the only mouse affordance for folding the sidebar.
+**构建与用户认可的小样有一处不同,这里说出来。** 小样在顶栏里既不画 `.apptitle` 也不画侧栏开关;Folio 两个都画,画在它从前画的地方——开关在红黄绿那条 run 之后再加 bar 自己的 12 点内缩,名字跟在开关后面。去掉其中任何一个,是一个关于「一扇 macOS 的窗身上带什么」的决定,而不是一个关于顶栏在哪的决定,而本票只挪顶栏和照它量出来的东西。那个开关还是折起侧栏唯一的鼠标可及处。
 
-**⑥ The tests.** Four cases in `seats.rs` beside M3-3's: `every_vertical_layout_wears_the_platforms_own_header` (the 32 in all three vertical postures, the 40 the strip keeps, and the gear's box at the header's right at 1×/1.5×/2×), `the_column_begins_beneath_the_header_and_so_does_its_edge_line` (the panel's top, its content's top, and the hairline that must not run up into the header), `the_panes_begin_under_the_header_and_its_empty_part_is_the_handle` (the viewport and the drag region for all three), and the Windows pin above. M3-3's own `the_strips_empty_part_is_the_drag_region` is widened rather than copied: it now runs over all four layouts and gives both implementations *this window's* header instead of the constant. `bt-platform` adds `the_platforms_run_is_measured_on_both_axes_at_the_windows_own_scale` (macOS lane) and `folios_own_bar_is_a_run_of_no_width_and_no_height` (every lane).
+**⑥ 测试。** 在 M3-3 那些旁边,`seats.rs` 里新加四只:`every_vertical_layout_wears_the_platforms_own_header`(三种竖排姿态里的那个 32、strip 留着的那个 40,以及齿轮的框在 1×/1.5×/2× 下都在顶栏右端)、`the_column_begins_beneath_the_header_and_so_does_its_edge_line`(面板的顶、它内容的顶,以及那条不许往上跑进顶栏的细线)、`the_panes_begin_under_the_header_and_its_empty_part_is_the_handle`(三种布局各自的视口和可拖区),再加上面那根 Windows 钉。M3-3 自己的 `the_strips_empty_part_is_the_drag_region` 是被放宽而不是被复制:它现在跑遍四种布局,并且给两份实现的都是**这扇窗的**顶栏而不是那个常量。`bt-platform` 新增 `the_platforms_run_is_measured_on_both_axes_at_the_windows_own_scale`(macOS lane)和 `folios_own_bar_is_a_run_of_no_width_and_no_height`(每个 lane)。
 
-**⑦ The run on the Mac.** M4 / macOS 26.6.2, a 4K at backing scale 2, the debug bundle this ticket assembled, four launches out of four homes of their own — the layout written into each home's `session.json` between a warm-up launch **closed by a click on its own red button**, because the clean-exit path is what writes that file, and the launch that was photographed. Every number below is read out of the window's own capture in physical pixels at 2×, so halve for points.
+**⑦ Mac 上的那一趟。** M4 / macOS 26.6.2,一台 backing scale 2 的 4K,本票装出来的 debug bundle,四次启动各有各的家——每个家的 `session.json` 里那份布局,是在一次**用它自己的红按钮点关**的热身启动和那次被拍照的启动之间写下的,因为写这份文件的正是干净退出那条路。下面每一个数都是从窗口自己的截图里按 2× 的物理像素读的,折成点要除以二。
 
-* **The three buttons, in all four layouts: `18–45`, `64–91`, `110–137`** — 9 / 32 / 55 points at diameter 14, the run ending at 69. Exactly what §13.11 measured before this ticket, which is what the ruling asks: they do not move.
-* **The header**, read down a column inside the content: 80 physical in the horizontal layout (**40 points**, Folio's own, M3-3 unchanged) and **64 in all three vertical ones** (**32 points**, the platform's own) — expanded sidebar, parked icon rail and card column alike.
-* **The gear**: its glyph's ink at `1865–1883`, centred on x 937 of a 960-point window — the middle of the 46-wide box at the run's right edge (914–960).
-* **The column beneath it**: the sidebar's own hairline at `438–440` (**219–220 points**) at y 200, and **no edge at all at 438 in the header's own row** — the line starts at the header's foot and does not run up into it. The parked icon rail ends at `92` (**46 points**) with the pointer parked off it; the card column's edge at `558–560` (**280 points**).
-* **Folio's own content in the header** begins after the lights: the sidebar toggle's glyph from `180` (90 points, its 30-wide box at 81) and the name from `541` (270 points) in the expanded layout; the name straight after the lights at `163` (**81 = 69 + 12**) where there is no toggle to stand after.
-* **The hover-open, seen by accident and kept as evidence**: the first pass left the pointer where the close button had been, which is inside the parked rail's reach, and that capture shows the rail open at 220 over the terminal with its 14-point shade — while the header above it stayed 32 points and full width. The ruling's *"the header does not move when the rail opens"*, photographed.
+* **三个按钮,四种布局全一样:`18–45`、`64–91`、`110–137`**——直径 14 时的 9 / 32 / 55 点,run 到 69 结束。和 §13.11 在本票之前量到的分毫不差,而这正是裁决要的:它们不挪。
+* **顶栏**,沿内容里的一列往下读:水平布局里 80 物理像素(**40 点**,Folio 自己的,M3-3 没动),**三种竖排里都是 64**(**32 点**,平台自己的)——展开的侧栏、停靠的图标栏、卡片列都一样。
+* **齿轮**:它字形的墨在 `1865–1883`,在一扇 960 点宽的窗里居中于 x 937——也就是 run 右端那个 46 宽的框(914–960)的中点。
+* **它底下那一列**:侧栏自己的细线在 y 200 处位于 `438–440`(**219–220 点**),而在**顶栏自己那一行的 438 处根本没有边**——线从顶栏的脚开始,不往上跑进顶栏。指针停在外面时,停靠的图标栏结束于 `92`(**46 点**);卡片列的边在 `558–560`(**280 点**)。
+* **Folio 自己在顶栏里的内容**从红黄绿之后开始:展开布局里侧栏开关的字形从 `180` 起(90 点,它那个 30 宽的框在 81),名字从 `541` 起(270 点);没有开关可跟的时候,名字直接跟在红黄绿之后的 `163`(**81 = 69 + 12**)。
+* **悬停展开,是撞见的,留作证据**:第一趟把指针留在了关闭按钮原来的位置,那在停靠竖栏够得到的范围里面,于是那张截图里竖栏以 220 展开在终端之上、带着它 14 点的阴影——而它上面的顶栏仍然是 32 点、仍然横贯整宽。裁决里那句 *「竖栏在顶栏底下打开时顶栏不动」*,被拍了下来。
 
-`cargo test --locked -j 4 -p bt-platform -p bt-app` on the Mac: the four cases of ⑥ and M3-3's widened drag case all pass there as they do on Windows. The crate's suite as a whole does not — **3306 passed, 243 failed** — and none of the failures is in `seats` or in anything this ticket touches: they are the Windows-shaped tests M1-10's inventory names (`profiles`, `shortcuts`, `shell_integration`, `webhost`, `git`, `cli`, `input`), which fail the same way on the commit this branch left.
+Mac 上的 `cargo test --locked -j 4 -p bt-platform -p bt-app`:⑥ 的四只和 M3-3 那只放宽过的拖拽用例在那边全过,和在 Windows 上一样。整个 crate 的套子没有全过——**3306 passed, 243 failed**——而失败的没有一条在 `seats` 里,也没有一条在本票碰过的任何东西里:它们就是 M1-10 那份清单点过名的那些 Windows 形状的测试(`profiles`、`shortcuts`、`shell_integration`、`webhost`、`git`、`cli`、`input`),在这条分支离开的那个提交上它们以同样的方式失败。
 
-**⑧ Read with §13.19: the lights follow the band the window wears.** The two rulings of 2026-09-12 are one sentence, and the sentence is *the three buttons are centred on whatever band this window has across its top*. T-MAC-PILL gives a window whose tab strip stands in its bar a 40-point band and centres the buttons on it — `(40 - 14) / 2`, top **13**, the pill's own axis. This ticket gives every vertical layout the platform's own 32 instead, and the same arithmetic on 32 is `(32 - 14) / 2`, top **9** — which is exactly where macOS had them. So the vertical layouts need no exception and no second code path: `centre_window_buttons` is handed a different number and computes the place the platform would have used anyway.
+**⑧ 与 §13.19 连起来读:红黄绿跟着这扇窗穿的那条带子走。** 2026-09-12 那两条裁决是一句话,而这句话是*三个按钮居中在这扇窗顶上的那条带子上,不管那是哪条带子*。T-MAC-PILL 给一扇标签条站在它 bar 里的窗一条 40 点的带子,并把按钮居中到它上面——`(40 - 14) / 2`,上沿 **13**,也就是药丸自己的轴。本票改给每一种竖排布局平台自己的 32,同一套算术在 32 上是 `(32 - 14) / 2`,上沿 **9**——正是 macOS 原本摆它们的地方。所以竖排布局不需要例外,也不需要第二条代码路径:`centre_window_buttons` 收到的是另一个数,算出来的是平台本来也会用的那个位置。
 
-**And the band can change while the window is open**, because `Tab layout`, `Sidebar` and focus mode all move a window between the two without relaunching it. So the placement is a door rather than an argument to `install`: `CustomWindowFrame::set_window_band` re-centres the buttons for the new band **and** writes it into the watch of §13.19, which re-applies the placement every time AppKit re-lays the title bar — a watch left holding the band the window opened with would spend the rest of the session dragging the buttons back to a bar the window no longer has. `bt-app` says it in one place, `Runtime::follow_the_window_band`, off `window_band_px` and `rail_posture`: once in `dress_new_window`, before the window is ever shown, and again after each of the two writes of the posture (`set_rail_state`, `set_focus_mode`). `install` is still handed Folio's own 40, because a frame cannot know the platform's band before it has measured it; a window opening into a vertical layout is corrected by that first call, which runs before its first frame. Nothing here names a platform: `FILES_THAT_MAY_NAME_A_PLATFORM` is unchanged.
+**而带子可以在窗还开着的时候变**,因为 `Tab layout`、`Sidebar` 和聚焦模式都能不重启就把一扇窗在两者之间挪来挪去。所以这次摆放是一扇门而不是 `install` 的一个参数:`CustomWindowFrame::set_window_band` 按新带子把按钮重新居中,**并且**把它写进 §13.19 那只表,那只表在 AppKit 每次重排标题栏时把摆放重说一遍——一只还攥着这扇窗开窗时那条带子的表,会用剩下的整个会话把按钮往一条这扇窗已经没有了的 bar 上拖。`bt-app` 只在一处说这件事,`Runtime::follow_the_window_band`,读的是 `window_band_px` 与 `rail_posture`:一次在 `dress_new_window` 里、在这扇窗被显示出来之前,再在姿态那两次写入(`set_rail_state`、`set_focus_mode`)之后各一次。`install` 拿到的仍然是 Folio 自己的 40,因为一个 frame 在量到平台那条带子之前不可能知道它;一扇开进竖排布局的窗由那第一次调用纠正过来,而它跑在这扇窗的第一帧之前。这里没有一处点平台的名字:`FILES_THAT_MAY_NAME_A_PLATFORM` 没动。
 
-One number moved on merge that neither ticket had to change alone: `tab_strip_geometry` measured its pills off `WINDOW_TITLE_BAR_LOGICAL_PX` directly, and now reads `window_band_px`'s horizontal answer. The two agree on every band shorter than Folio's own — which is every band macOS has — so no pixel moves; what changes is that the pill's axis and the bar it is centred on can no longer be told two different numbers.
-**⑨ The merge's own run, and the one thing it found.** M4 / macOS 26.6.2, a 4K
-at backing scale 2, a debug bundle of the merge commit, four homes of their own,
-every number read out of the window's own capture and halved to points.
+合并时挪了一个数,而单看哪一张票都不必改它:`tab_strip_geometry` 过去直接照 `WINDOW_TITLE_BAR_LOGICAL_PX` 量它的药丸,现在读的是 `window_band_px` 给水平布局的那个答案。两者在每一条比 Folio 自己的还短的带子上都一致——而 macOS 的每一条带子都是这样——所以没有一个像素挪位;变的是药丸的轴和它所居中的那条 bar 再也不会被告知两个不同的数。
 
-| the window | the band over the content | the three buttons | the first tab |
+**⑨ 合并自己的那一趟,以及它查出来的那一件事。** M4 / macOS 26.6.2,一台 backing scale 2 的 4K,合并提交的 debug bundle,四个各自的家,每一个数都从窗口自己的截图里读出来再折成点。
+
+| 这扇窗 | 内容之上的那条带 | 三个按钮 | 第一个标签 |
 | --- | --- | --- | --- |
-| horizontal | **40** (80 physical) | **13..27** | pill **5..35** |
-| vertical, expanded sidebar | **32** (64) | **9..23** | — |
-| vertical, parked icon rail | **32** (64) | **9..23** | — |
-| focus column | **32** (64) | **9..23** | — |
+| 水平 | **40**(80 物理像素) | **13..27** | 药丸 **5..35** |
+| 竖排,展开的侧栏 | **32**(64) | **9..23** | — |
+| 竖排,停靠的图标栏 | **32**(64) | **9..23** | — |
+| 聚焦列 | **32**(64) | **9..23** | — |
 
-**And the switch was measured live rather than relaunched.** One window opened
-into the expanded sidebar — band 32, buttons at 9 — was driven by mouse clicks on
-its own surface through `设置 ▸ 外观 ▸ 标签布局` to `横向`, and without a relaunch the
-same window measured band **40**, buttons **13..27** and pills **5..35**. That is
-`set_window_band` doing the whole of what it is for.
+**而那次切换是现场量的,不是重启量的。** 一扇开进展开侧栏的窗——带 32,按钮在 9——被鼠标点击在它自己的表面上经 `设置 ▸ 外观 ▸ 标签布局` 换到 `横向`,不重启,同一扇窗量到带 **40**、按钮 **13..27**、药丸 **5..35**。那就是 `set_window_band` 把它存在的意义整个做了一遍。
 
-**The one thing the run found is that five notifications were not enough.**
-§13.19's watch held the placement through a resize and a full-screen round trip
-and did not hold it through a launch: the trace has the frames set to the strip's
-axis at `adopt`, read back at AppKit's own 9 a moment later, set again on
-`DidBecomeKey` — and the window photographed after all of that still wore them at
-9, so something in the display pass re-lays the title bar and posts none of the
-five. `NSWindowDidUpdate` is posted at the end of every pass in which the window
-was updated, which is *after* whatever did it, and with it the horizontal window
-reads 13..27. It is affordable because the placement is now written only when it
-is not already there — a frame set inside an update is a reason for another
-update, and without that guard the window would chase itself for as long as it
-was on screen. The first four layouts were photographed before this was found and
-read 9 in all four, which is why "the vertical answer is also what an unmoved
-button looks like" is worth saying out loud: three of those four pictures were
-right by accident.
+**这一趟查出来的那一件事是:五条通知不够。** §13.19 那只表把摆放顶过了一次缩放和一趟全屏往返,却没顶过一次启动:追踪里 frame 在 `adopt` 时被设到 strip 的轴上,片刻之后读回来是 AppKit 自己的 9,在 `DidBecomeKey` 上又设了一次——而这一切之后拍到的那扇窗身上它们还是 9,所以显示那一趟里有什么东西重排了标题栏,而那五条一条也没发。`NSWindowDidUpdate` 在每一趟更新过这扇窗的 pass 的末尾发出,也就是在干这件事的那个东西**之后**,带上它以后水平的那扇窗读到的是 13..27。这一条付得起,是因为现在只有在摆放还没到位时才去写它——一个在 update 里面设下的 frame 本身就是又一次 update 的理由,没有这道守卫,这扇窗会在屏幕上待多久就追自己多久。前面四种布局是在查出这件事之前拍的,四张全读到 9,所以「竖排的那个答案同时也是一个没被挪过的按钮长的样子」这句话值得说出口:那四张里有三张是碰巧对的。
 
-**A note for the next Mac ticket that needs a session file.** The layout a run
-opens with lives in `session.json`, which is written on the clean-exit path, and
-since M3-1 (§13.21) closing the last window is no longer that path — the
-application outlives its window, and a click on the red button leaves a live
-process with no windows and no session behind it. The other door a reader has is
-the quit itself, and `osascript -e 'tell application id "io.github.lulu-loopp.folio" to quit'`
-is it: addressed to this bundle identifier and no other, it ends the run and the
-session lands.
-
-*(本节英文,待中文文案改写。)*
+**给下一张需要一份会话文件的 macOS 票留一句。** 一趟运行开起来的那份布局住在 `session.json` 里,它是在干净退出那条路上写的;而自 M3-1(§13.21)起,关掉最后一扇窗已经不是那条路了——应用活得比它的窗久,点一下红按钮留下的是一个没有窗也没有留下会话的活进程。读者手上另有一扇门就是退出本身,而 `osascript -e 'tell application id "io.github.lulu-loopp.folio" to quit'` 就是它:只对这个 bundle 标识符说、不对别的说,它结束这趟运行,会话落地。
 
 ### 13.21 M3-1: 应用代理——四个选择子加给 winit 的私有代理,回答走 winit 的手,终止绝不在回调里(`crates/bt-platform/src/app_delegate.rs`、`crates/bt-platform/src/macos_app.rs`、`crates/bt-platform/src/lib.rs`、`crates/bt-platform/tests/macos_app_delegate.rs`、`crates/bt-app/src/{app_delegate_wire,main}.rs`)
 
-**① The route is the finding, and winit's own documentation is wrong about it.** winit 0.30.13's `src/platform/macos.rs` says "Winit guarantees that it will not register an application delegate, so the solution is to register your own". It registers one: `platform_impl/macos/event_loop.rs:240` hands a private `WinitApplicationDelegate` to `setDelegate:`, and `app_state.rs`'s `ApplicationDelegate::get` reads `NSApp.delegate` back, checks `is_kind_of` and **panics** on anything else — from the CFRunLoop observers, on every turn of the loop. So the documented route takes winit down on the first iteration and a forwarding proxy fails the same check. What this ticket does instead is what X-4 measured: after `EventLoop::new` — which is what registers the class — look it up by name and `class_addMethod` the four selectors winit does *not* implement onto it. Nothing of winit's is displaced, `NSApp.delegate` is still winit's own object, and every `ApplicationHandler` callback keeps arriving. `-[NSApplication setDelegate:]` is then handed the very same object back once, because AppKit caches which delegate methods exist at the moment that call is made and winit made it before these four existed; X-4 measured macOS 26.6 delivering everything without that round trip, so it is one message against an undocumented cache rather than a fix for a symptom anybody saw. **It cannot be undone**: the Objective-C runtime has no `class_removeMethod`, which is why `AppDelegate::install` is once per process and why `bt-app` holds the door for the life of the run.
+**① 路线本身就是这次的发现,而 winit 自己的文档在这件事上写错了。** winit 0.30.13 的 `src/platform/macos.rs` 写着「winit 保证它不会注册一个应用代理,所以办法是注册你自己的」。它注册了一个:`platform_impl/macos/event_loop.rs:240` 把一个私有的 `WinitApplicationDelegate` 交给 `setDelegate:`,而 `app_state.rs` 的 `ApplicationDelegate::get` 把 `NSApp.delegate` 读回来、查 `is_kind_of`、对别的任何东西**panic**——从 CFRunLoop 的观察者里,循环每转一圈查一次。所以照文档那条路走,winit 在第一轮就倒了,而一个转发用的代理挂在同一道检查上。这张票做的是 X-4 量出来的那件事:在 `EventLoop::new` 之后——注册那个类的正是它——按名字把类找出来,用 `class_addMethod` 把 winit **没有**实现的那四个选择子加上去。winit 的东西一样没被顶掉,`NSApp.delegate` 仍然是 winit 自己那个对象,每一个 `ApplicationHandler` 回调照旧到达。随后 `-[NSApplication setDelegate:]` 被原样交回同一个对象一次,因为 AppKit 会在那次调用发生的那一刻缓存这个代理有哪些方法,而 winit 是在这四个还不存在的时候调的;X-4 量到 macOS 26.6 不走这一趟也照样全送,所以这是对着一份没有文档的缓存发的一条消息,而不是对谁见过的某个症状打的补丁。**它撤不掉**:Objective-C 运行时没有 `class_removeMethod`,这正是 `AppDelegate::install` 每个进程只来一次、而 `bt-app` 把这扇门握到这趟运行结束的原因。
 
-**② One door, not three arms, and the split is the interesting half.** Every other macOS backend in this crate is a *platform* arm of a name `portable_impl` also defines — the window group, the watches, the trash, the font list, the four dialogs. This one is written **once**, in `app_delegate.rs`, and only the hook into AppKit is per-machine (`macos_app.rs`). The reason is that the split here is not between platforms at all: the buffer that holds a cold delivery until the application is up, the rule that one termination request gets exactly one answer, and the decoding of a `file:` URL are facts about **Folio's lifecycle**, they are identical on every machine, and they are where a defect would live. What changes per machine is four lines of `class_addMethod`, and off macOS there is nothing for them to change into — Windows has no application delegate and neither has a Linux desktop. `ShellPickKind` is the precedent for the direction (§13.17 ⑦): a fact about the product is written once and read by whichever backend needs it. The consequence is the one §4.3 asks for — `bt-app` calls `bt_platform::AppDelegate::install` with **no `cfg` at all**, and `only_the_named_files_decide_what_platform_this_is` has nothing new to say about `main.rs`.
+**② 一扇门,不是三条臂,而这一刀切在哪里才是有意思的那一半。** 这个 crate 里别的每一个 macOS 后端都是一个 `portable_impl` 也定义了的名字的**平台**臂——窗口那一组、监视、废纸篓、字体名单、四个对话框。这一份**只写一遍**,写在 `app_delegate.rs` 里,只有挂进 AppKit 的那一钩是按机器分的(`macos_app.rs`)。理由是这里的分界根本不在平台之间:把一次冷投递存到应用起来为止的那个缓冲、一次终止请求恰好得到一个回答这条规矩,以及一个 `file:` URL 的解码,都是关于 **Folio 生命周期**的事实,在每台机器上一模一样,而缺陷会长在那里。按机器变的是四行 `class_addMethod`,而在 macOS 之外它们没有第二种可变的样子——Windows 没有应用代理,Linux 桌面也没有。方向上的先例是 `ShellPickKind`(§13.17 ⑦):一个关于产品的事实写一遍,谁需要谁读。后果正是 §4.3 要的那一条——`bt-app` 调 `bt_platform::AppDelegate::install` 时**一个 `cfg` 都没有**,而 `only_the_named_files_decide_what_platform_this_is` 对 `main.rs` 没有任何新话可说。
 
-**③ A channel, not a trait, and the sender is called on AppKit's stack.** The four implementations are C functions on a class this program does not own: they have no `self` of ours to borrow, cannot hold a `&mut dyn` anything, and `applicationShouldTerminate:` has to return a value from its own stack. So what crosses is a value — `AppDelegateEvent { origin, kind }` — handed to the closure `install` was given. **The origin is kept separate from the kind even though they are one-to-one today**, because the place they are not is the one this ticket deliberately left open: M4-9's Services deliver `OpenPaths` too, through `setServicesProvider:`, which never touches the delegate at all, and an application that wants to say *opened from Finder* and *opened from the Services menu* differently needs to be able to.
+**③ 一条通道,不是一个 trait,而发送方是在 AppKit 的栈上被调的。** 那四个实现是加在一个本程序并不拥有的类上的 C 函数:它们手里没有我们的 `self` 可借,握不住任何 `&mut dyn`,而 `applicationShouldTerminate:` 还得从它自己的栈上返回一个值。所以跨过去的是一个值——`AppDelegateEvent { origin, kind }`——交给 `install` 收到的那个闭包。**来源和种类今天是一一对应的,却仍然分开带着**,因为它们不对应的那个地方正是本票特意留着的:M4-9 的 Services 也投 `OpenPaths`,经 `setServicesProvider:`,那条路根本不碰代理;而一个想把*从访达打开*和*从服务菜单打开*说成两句话的应用,得有本事说得出来。
 
-`bt-app`'s closure does two things and no more: push into `app_delegate_wire`'s inbox, and post one `AppEvent::AppDelegateSpoke`. That is `attention_wire`'s and `launch_wire`'s shape, and the reason it is mandatory here rather than idiomatic is that this closure runs **inside the delegate method**, with AppKit's frame underneath it and — for a termination — AppKit spinning a nested run loop on the answer. Anything that turned the event loop from there would be the re-entrance X-4 ended as a live process at 100% CPU, one panic per turn, forever. It is also why the payload does not travel on the channel: `AppEvent` is `Copy`, a `Vec<PathBuf>` is not, and the family this variant joins already parks its payload and sends a nudge.
+`bt-app` 那个闭包只做两件事、不多做:往 `app_delegate_wire` 的收件箱里塞,再发一条 `AppEvent::AppDelegateSpoke`。那是 `attention_wire` 和 `launch_wire` 的形状,而它在这里是必须而不是顺手,是因为这个闭包跑在**代理方法里面**,底下垫着 AppKit 的栈帧——如果是一次终止,AppKit 还在这个回答上转着一个嵌套 run loop。任何从那里去转事件循环的东西,就是 X-4 拿一个 100% CPU、每转一圈 panic 一次、永不停息的活进程收场的那次重入。这也是载荷不走通道的原因:`AppEvent` 是 `Copy`,`Vec<PathBuf>` 不是,而这个变体加入的这一族本来就是把载荷停下、只发一下捅。
 
-**④ The buffer exists because the first thing a cold launch is asked is `application:openURLs:`.** X-4 timed a cold delivery at t=222 ms against a `resumed` at t=247 ms, with no window in the process. `bt-app` cannot act on a path then: it has not yet decided whether the restored session opens windows of its own, so a tab opened at that moment is a tab the restore is about to open a second time. So the door **holds** every event until `AppDelegate::ready`, which `resumed` calls after `honour_command_line`, and then releases them in arrival order. One rule for all four kinds rather than one for the paths: a quit asked for during launch is honoured the moment launch is up, which is the same sentence. `nothing_is_delivered_until_the_application_is_ready_and_then_in_order` is the case, and the `.app` test's `delivered_before_ready` is the same claim made against a real LaunchServices delivery.
+**④ 这个缓冲存在,是因为一次冷启动被问的第一件事就是 `application:openURLs:`。** X-4 量到一次冷投递在 t=222 ms,而 `resumed` 在 t=247 ms,那时进程里一扇窗都没有。`bt-app` 那时没法对一条路径动手:它还没决定恢复出来的会话要不要开它自己的窗,所以那一刻开出来的标签,是恢复马上要再开一遍的那个标签。于是这扇门把每一个事件**存着**,存到 `AppDelegate::ready`——`resumed` 在 `honour_command_line` 之后调它——然后按到达顺序放行。四种事件一条规矩,而不是给路径单配一条:一次在启动过程中被要求的退出,在启动起来的那一刻兑现,是同一句话。`nothing_is_delivered_until_the_application_is_ready_and_then_in_order` 是那只用例,而 `.app` 那只测试里的 `delivered_before_ready` 是同一句主张,对着一次真的 LaunchServices 投递说的。
 
-**⑤ Termination: `NSTerminateLater` on the delegate's stack, and the real answer from winit's handler.** Folio's quit is a transaction that spans turns of the loop — ask about unsaved names, save, photograph every window, write the session, retire the panes, release `session.lock`. None of that can happen on the stack `applicationShouldTerminate:` arrives on, so the door answers `NSTerminateLater` and returns on the line it was called on. `NSTerminateNow` there would be a quit with the session unwritten; `NSTerminateCancel` would be a Dock *Quit* that did nothing.
+**⑤ 终止:在代理的栈上答 `NSTerminateLater`,真正的答案从 winit 的 handler 里出来。** Folio 的退出是一笔跨越若干轮循环的事务——问没存的名字、保存、给每一扇窗拍照、写会话、退役各个 pane、放掉 `session.lock`。这些没有一件能在 `applicationShouldTerminate:` 到达的那个栈上发生,所以这扇门答 `NSTerminateLater`,就在它被调的那一行上返回。在那里答 `NSTerminateNow` 就是一次会话没写出去的退出;答 `NSTerminateCancel` 就是 Dock 上一次什么也没做的 *Quit*。
 
-What completes it is `TerminationAnswer::answer`, called from `settle_quit` — `NSTerminateNow` at `QuitStep::Exit`, after `App::finish` has flushed the document and dropped the sentinel, and `NSTerminateCancel` at `QuitStep::Abandon`, which is the reader pressing *Cancel* on the card or a session that could not be written. **It has to come from winit's handler and cannot be posted to the main dispatch queue**, which is X-4's second measurement and the one that reads like a detail until it costs a day: AppKit's deferred-termination loop does *not* drain the main queue — neither a queued answer nor a later `dispatch_async` ran, and the application hung — while winit's own observers, being in `kCFRunLoopCommonModes`, are driven inside it and unwound it in 1 ms. The same warning is §13.17 ②'s about `NSAlert` and `NSOpenPanel`, read from the other end. One request gets one answer and a second is refused with a reason rather than sent, because `replyToApplicationShouldTerminate:` twice is a message to an AppKit that has stopped listening and the second answer is always the one that is wrong about something.
+把它做完的是 `TerminationAnswer::answer`,由 `settle_quit` 调用——`QuitStep::Exit` 上答 `NSTerminateNow`,那时 `App::finish` 已经把文档刷出去、把哨兵丢掉;`QuitStep::Abandon` 上答 `NSTerminateCancel`,那是读者在卡片上按了 *Cancel*,或者会话根本写不出来。**它必须从 winit 的 handler 里来,不能往主派发队列上发**,这是 X-4 的第二次测量,也是那种读起来像细节、直到它花掉你一天的东西:AppKit 的延迟终止循环**不**排空主队列——排进去的回答没跑,后来一次 `dispatch_async` 也没跑,应用挂住了——而 winit 自己那些观察者因为挂在 `kCFRunLoopCommonModes` 上,是在它里面被驱动的,1 ms 就把它退了出来。同一条警告就是 §13.17 ② 对 `NSAlert` 和 `NSOpenPanel` 说的那一条,从另一头读。一次请求得到一个回答,第二个回答是被带着理由拒绝而不是被发出去,因为 `replyToApplicationShouldTerminate:` 调两次,是给一个已经不再听的 AppKit 发消息,而第二个回答总有一处是错的。
 
-**⑥ `hasVisibleWindows` is not the signal it reads as, so nothing reads it.** X-4 measured that AppKit answers YES for a *minimised* window and YES for one hidden with `-[NSApplication hide:]`, and NO only for an application with no windows at all. So the door carries the flag verbatim and decides nothing from it, and `bt-app` consults its own list — `most_recently_active_window`, the same one a launch request lands against. The *return* value is NO unconditionally, which is AppKit's "this application has handled it": YES would let AppKit un-miniaturise whatever it thinks the front window is, which is a second actor answering a question from a flag that does not mean what it says. X-4 returned YES-when-visible and both delivered; one answer decided in one place is the better of two working arrangements.
+**⑥ `hasVisibleWindows` 不是它读起来的那个信号,所以没有人读它。** X-4 量到 AppKit 对一扇**最小化**的窗答 YES,对一扇被 `-[NSApplication hide:]` 藏起来的窗也答 YES,只有对一个一扇窗都没有的应用才答 NO。所以这扇门把这个标志原样带过去、不拿它决定任何事,而 `bt-app` 去问它自己那份名单——`most_recently_active_window`,也就是一次启动请求落位时对着的那一份。**返回值**无条件是 NO,那是 AppKit 的「这个应用自己处理了」:答 YES 会让 AppKit 去把它认为是前台的那扇窗从最小化里拉出来,那就是第二个角色照着一个名不副实的标志答一个问题。X-4 试过「可见时答 YES」,两种都送得到;而两种都能用的安排里,在一处决定的那个答案是更好的那个。
 
-**⑦ Where the four land, and it is four verbs this program already had.** A **reopen** raises the window the reader was last in, or opens a fresh one when the run has none. **Paths** land one per path through `land_one_launch_request`, which is `settle_launch_requests`' own body split out rather than copied — a Finder launch is the same sentence arriving through a different door, and a second copy of "where a request lands" is a second rule waiting to disagree with the first; a folder is a place and opens a tab standing in it, a file is a document and opens on a preview pane, and which of the two a name is comes from `cli::machine_path_kind`, the function `cli::resolve` already asks. A **termination request** opens Folio's own quit and parks AppKit's handle. The **last window closing** is already answered by the door and the arm says so.
+**⑦ 那四件事落在哪里,而它们是这个程序本来就有的四个动词。** 一次**重开**把读者最后待过的那扇窗抬起来,这趟运行一扇窗都没有时就开一扇新的。**路径**一条一条经 `land_one_launch_request` 落位,而那是 `settle_launch_requests` 自己的函数体拆出来的、不是抄的——一次访达启动就是同一句话经另一扇门到达,而「一个请求落在哪里」的第二份拷贝,就是一条等着跟第一条闹翻的第二规矩;一个文件夹是一个地方,开出一个站在那里的标签,一个文件是一份文档,开在预览 pane 上,而一个名字属于哪一种,来自 `cli::machine_path_kind`,也就是 `cli::resolve` 本来就问的那个函数。一次**终止请求**开出 Folio 自己的退出,并把 AppKit 的那个句柄停下。**最后一扇窗关掉**已经由这扇门答过,那条臂把这件事说出来。
 
-`--tab <file>` reaching a running window is deliberately **not** extended here: `launch_wire::LaunchRequest` carries no positional and that is its own ruling, so a document handed over by Finder takes `open_preview` directly rather than growing the wire a field this ticket does not need.
+`--tab <file>` 够到一扇跑着的窗这件事,这里**特意不**扩:`launch_wire::LaunchRequest` 不带位置参数,那是它自己的裁决,所以一份由访达交过来的文档直接走 `open_preview`,而不是给这条线加一个本票并不需要的字段。
 
-**⑧ The last window closing stopped being one fact and became a value.** `a_run_ends_with_its_last_visible_window` was §7.54e ①'s rule written down once: a `folio.exe` in the task list with nothing on any screen and no taskbar button is not a program a person can get back to. On a Mac they can — the application is in the Dock whether or not it has a window, the icon is the way back in, and `applicationShouldTerminateAfterLastWindowClosed:` exists precisely because AppKit expects to be told. The door answers NO there (plan §8 Q10, ruled 2026-09-12), so the rule has to answer the same thing, or the process keeps its `session.lock` and exits anyway — or AppKit is told to keep an application that then takes itself away. The term is `bt_platform::host_platform().an_application_outlives_its_last_window()`, a **value** and not a `cfg!`, which is §4.3's whole design and which means the Mac's answer is a claim a Windows runner can check: `only_a_mac_keeps_an_application_standing_with_no_window_left` is that check, and it also holds the rule to reading the value rather than asking the question a second way.
+**⑧ 「最后一扇窗关掉」从一条事实变成了一个值。** `a_run_ends_with_its_last_visible_window` 是 §7.54e ① 那条规矩写下来的一遍:任务列表里一个 `folio.exe`,任何屏幕上都没有东西、任务栏上也没有按钮,那不是一个人回得去的程序。在 Mac 上人回得去——不管有没有窗,应用都在程序坞里,那个图标就是回去的路,而 `applicationShouldTerminateAfterLastWindowClosed:` 存在的意义正是 AppKit 指望有人告诉它。这扇门在那里答 NO(计划 §8 Q10,2026-09-12 用户裁),所以那条规矩必须答同一句话,否则进程攥着它的 `session.lock` 照样退出——或者 AppKit 被告知留住一个随后自己走掉的应用。用的词是 `bt_platform::host_platform().an_application_outlives_its_last_window()`,一个**值**而不是一个 `cfg!`,这正是 §4.3 的整套设计,也意味着 Mac 那个答案是一台 Windows 跑器能核的主张:`only_a_mac_keeps_an_application_standing_with_no_window_left` 就是这次核验,它同时还把那条规矩按在「读这个值」上,不许换第二种问法。
 
-**⑨ A `file:` URL is decoded to bytes, and that is M2-2's argument run backwards.** `application:openURLs:` hands over `NSURL`s and `bt-app` wants paths. The AppKit answer is `-[NSURL path]` and this is not it, for §13.18 ①'s reason in the other direction: that method answers an `NSString`, and a path is not required to be text — a name on an SMB or exFAT mount can be bytes that are not UTF-8, the file column can be rooted on one, and a round trip through a Rust `String` hands back a different file. The percent escapes in the URL *are* those bytes, so `path_from_file_url` decodes `-[NSURL absoluteString]` escape by escape into a `Vec<u8>` and makes the path out of it. Everything it refuses carries its own sentence: another scheme, another host, a relative path (`handoff`'s own ruling — the directory that would be relative to is where the launch stood, not where the reader was looking), and an embedded NUL, which is the terminator of the C string the kernel is handed. It is also the half of the door a machine with no AppKit can run, which is why the space and the CJK in this ticket's acceptance are checked on the Windows workstation **and** confirmed against AppKit's own URLs on the Mac.
+**⑨ 一个 `file:` URL 被解成字节,而这是 M2-2 那条论证倒着跑一遍。** `application:openURLs:` 交过来的是 `NSURL`,而 `bt-app` 要的是路径。AppKit 的答案是 `-[NSURL path]`,而这里不用它,理由是 §13.18 ① 那一条反过来:那个方法答的是 `NSString`,而一条路径并不必须是文本——一个 SMB 或 exFAT 挂载上的名字可以是不是 UTF-8 的字节,文件列可以扎根在上面,而经一趟 Rust `String` 往返回来的是另一个文件。URL 里那些百分号转义**就是**那些字节,所以 `path_from_file_url` 把 `-[NSURL absoluteString]` 一个转义一个转义地解成一个 `Vec<u8>`,再拿它造路径。它拒绝的每一样都带着自己那句话:另一个 scheme、另一个 host、一条相对路径(`handoff` 自己的裁决——相对所对的那个目录是启动所站的地方,不是读者正看着的地方),以及一个嵌进去的 NUL,那是交给内核的 C 字符串的终止符。这也是这扇门里一台没有 AppKit 的机器跑得动的那一半,所以本票验收里的空格和中文在 Windows 工作站上核过,**并且**在 Mac 上对着 AppKit 自己给的 URL 再确认过。
 
-**⑩ The proof needs winit, so the test target has it — and it is the one dev-dependency this crate has ever had.** `tests/macos_app_delegate.rs` is `harness = false` for §13.17 ②'s reason (AppKit is the main thread's and libtest does not hand a case that thread) and for one of its own: the class under test is winit's, so a proof that did not build a winit event loop would be a proof about a class that is not in the process. `winit` at the version the workspace already pins adds **no package** to `Cargo.lock` or `THIRD-PARTY-NOTICES.md`, and being a dev-dependency it is not in the shipped graph, so §4.6's promise to a Linux server is untouched.
+**⑩ 证明需要 winit,所以测试目标里有它——而这是这个 crate 有史以来唯一一个 dev-dependency。** `tests/macos_app_delegate.rs` 是 `harness = false`,理由是 §13.17 ② 那一条(AppKit 是主线程的,而 libtest 不把那条线程交给任何一个用例),外加它自己的一条:被测的那个类是 winit 的,所以一个不建 winit 事件循环的证明,证的是一个根本不在这个进程里的类。工作区已经钉着的那个版本的 `winit` 给 `Cargo.lock` 和 `THIRD-PARTY-NOTICES.md` 都**不加任何包**,而且它是 dev-dependency、不在发货的依赖图里,所以 §4.6 对一台 Linux 服务器的承诺一点没动。
 
-**The gate is not an environment variable, and that is not a style choice.** `open` launches through LaunchServices, which passes none of the shell's environment, so a variable cannot reach the process that matters — `macos_sheet`'s `BT_MAC_GUI` works because that binary is started directly. What this file gates on is the thing that is already true of a run that wants it: the binary is **inside a `.app` bundle**. An ordinary `cargo test -p bt-platform` runs it out of `target/debug/deps`, where there is none, so it prints one line and exits on every platform. The exercise drives itself from inside its own run loop by spawning `open` and `osascript` at its own bundle and at nothing else, and the report is written beside the bundle because a process `open` started has no working directory of the launcher's either.
+**这道闸不是一个环境变量,而这不是一个风格选择。** `open` 是经 LaunchServices 启动的,它一点 shell 的环境都不传,所以变量够不到那个要紧的进程——`macos_sheet` 的 `BT_MAC_GUI` 管用,是因为那个二进制是被直接起的。这个文件闸在一件想要它的那趟运行本来就成立的事上:这个二进制**在一个 `.app` 包里面**。一次普通的 `cargo test -p bt-platform` 是从 `target/debug/deps` 里跑它,那里没有包,于是它在每个平台上都打一行就退出。这次演练在它自己的 run loop 里面自驱,办法是对着它自己的包、不对着别的任何东西起 `open` 与 `osascript`;报告写在包旁边,因为一个由 `open` 起来的进程同样没有启动者的工作目录。
 
-**Two measurements the exercise itself produced, and the first is the kind of thing that makes a check pass by finding nothing.** ① `pgrep -x <name>` answers **nothing** for a process LaunchServices started out of a bundle on macOS 26.6.2, so the first run of "no second executable started" passed the wrong way round — it counted zero copies of a binary that was running. It counts with `ps -axo comm=` and a file-name comparison instead, which depends on nothing any tool calls a "process name"; the pid list is read and no pid in it is ever signalled. ② **`osascript -e 'tell application id … to quit'` aimed at the process's own bundle needs no TCC grant** — it delivered `applicationShouldTerminate:` in 125 ms, twice, from inside the app itself. X-4's `-1712` was `System Events`, a *different* application, which is what the Automation prompt is about.
+**演练自己产出的两次测量,而第一个是那种「靠什么都没找到而通过」的检查。** ① 对一个 LaunchServices 从包里起来的进程,macOS 26.6.2 上 `pgrep -x <name>` 答的是**什么都没有**,所以「没有第二个可执行文件被起来」这条头一趟是反着通过的——它数的是一个正在跑的二进制的零份拷贝。现在它改用 `ps -axo comm=` 加一次文件名比较来数,不依赖任何工具口中的「进程名」;那份 pid 名单只被读,里面没有一个 pid 被发过信号。② **对着进程自己的包发的 `osascript -e 'tell application id … to quit'` 不需要任何 TCC 授权**——它在 125 ms 内投到了 `applicationShouldTerminate:`,两次都是,而且是从应用自己里面发的。X-4 那个 `-1712` 是 `System Events`,那是**另一个**应用,自动化那道提问问的就是它。
 
-**⑪ The Dock click is NOT-CHECKABLE and is covered rather than missing.** X-4 measured that clicking the Dock needs `System Events`, and therefore Accessibility *and* Automation, and that `osascript` from ssh answered `-1712` behind a TCC prompt no agent can reach. A Dock click delivers exactly the `applicationShouldHandleReopen:hasVisibleWindows:` that `open -a` delivers — which is how the same event is reached here, with windows and without — so what is untested is the gesture and not the path. The owner's own acceptance line is the one that closes it.
+**⑪ 程序坞上那一点是 NOT-CHECKABLE,而它是被覆盖到了而不是缺着。** X-4 量到点程序坞需要 `System Events`,因而既要辅助功能**又**要自动化,而从 ssh 发的 `osascript` 在一道 agent 够不到的 TCC 提问后面答了 `-1712`。点一下程序坞投的正是 `open -a` 投的那条 `applicationShouldHandleReopen:hasVisibleWindows:`——这里就是这么够到同一个事件的,有窗的和没窗的各来一次——所以没被测到的是那个手势而不是那条路。合上它的是用户自己那条验收。
 
 ### 13.22 M2-5: Metal 路上的字形是量出来的(`crates/bt-render/src/glyph_probe.rs`、`crates/bt-render/tests/glyph_output.rs`、`crates/bt-app/tests/macos_glyph_surface.rs`、`crates/bt-render/src/lib.rs`)
 
-**① One page, one builder, two surfaces — and that is the whole design.** The
-port's glyph question is not CoreText against DirectWrite. Folio shapes and
-rasterizes through Swash via glyphon on both machines, so the rasterizer does
-not change at all (`docs/plans/port/macos-plan-2026-09-12.md` §R4); what changes
-is the presentation path around it — a `CAMetalLayer` on a view Folio owns,
-declared `PostMultiplied` and carrying premultiplied pixels (§13.14, X-1). A
-difference between the two paths is therefore a defect **in the path**, and the
-only way to make that sentence mean anything is for the two paths to be handed
-the same frame *by construction* rather than by two call sites that look alike.
-`bt_render::glyph_probe::GlyphFixture` is that construction: one builder, one
-`present`, two targets — the offscreen texture `read_back` can map, and a real
-Metal swapchain, which cannot be mapped at all and is read as a photograph of
-the window.
+**① 一页、一个构造器、两块 surface——设计就这么多。** 这次移植的字形问题不是 CoreText 对 DirectWrite。两台机器上 Folio 都经 glyphon 走 Swash 排版和光栅化,所以光栅器根本不变(`docs/plans/port/macos-plan-2026-09-12.md` §R4);变的是它周围那条呈现路径——一块 `CAMetalLayer`,贴在一个 Folio 自己拥有的 view 上,声明 `PostMultiplied` 并且装着预乘像素(§13.14、X-1)。所以两条路之间的差别就是**这条路上**的缺陷,而要让这句话有意义,唯一的办法是两条路拿到的是**构造上就同一份**的那一帧,而不是两个长得很像的调用点。`bt_render::glyph_probe::GlyphFixture` 就是这个构造:一个构造器、一次 `present`、两个目标——`read_back` 映射得了的那块离屏纹理,和一条真的 Metal 交换链,后者根本映射不了,是当成一张窗口的照片读的。
 
-**② What is on the page, and why the box-drawing row is the control.** Eight
-grid rows — Latin, Chinese, box drawing, braille, a bold run, an italic run, an
-underlined hyperlink wearing its dotted underline, and a row of narrow stems —
-and under them four rows of prose. Two of those rows are there to be *compared*
-with the others: **box drawing is not rasterized in this renderer at all**, it
-is cell geometry (`procedural.rs`) coming out of the rectangle pipeline, while
-braille beside it is an ordinary glyph. So a difference that appears in both is
-the surface, and one that appears only in the glyph rows is the rasterizer —
-which is the question this ticket exists to be able to answer rather than guess.
-Every cell declares white ink on an explicit black ground, so no number below
-depends on which theme the process happened to be holding.
+**② 页面上有什么,以及为什么制表符那一行是对照组。** 八行网格——拉丁、中文、制表符、盲文、一段粗体、一段斜体、一条带点状下划线的超链接,以及一行细竖干——底下四行正文。其中两行在那里就是为了给别的行**做比较**:**制表符在这个渲染器里根本不走光栅化**,它是格子几何(`procedural.rs`),从矩形管线里出来;而挨着它的盲文是普通字形。所以两边都出现的差别是 surface 的,只在字形那几行出现的差别是光栅器的——这张票存在的意义就是能回答这个问题而不是猜。每一格都声明白墨压在一个写明的黑底上,所以下面没有一个数取决于这个进程当时正攥着哪套主题。
 
-**③ Why numbers and not a committed picture.** A PNG would pin the bytes of one
-machine's font: the grid is `Consolas` on Windows and `Menlo` on a Mac (§13.18
-⑤), so a byte comparison across the two would fail for the one reason that is
-not a defect. What is the same on both, because the rasterizer is, is the
-*shape of the coverage* — the peak, the mean, and the share of inked pixels
-lying strictly between nearly clear and nearly solid. Coverage is read off the
-**encoded byte**, because that is what a reader's eye meets; every centroid is
-weighted by **linear light**, because that is what ink is (see ⑤).
+**③ 为什么是数而不是一张提交进来的图。** 一张 PNG 会把某一台机器的字体钉成字节:网格在 Windows 上是 `Consolas`,在 Mac 上是 `Menlo`(§13.18 ⑤),所以跨两台机器的字节比对会因为唯一一个不是缺陷的理由而失败。两边一样的东西——因为光栅器一样——是**覆盖度的形状**:峰值、均值,以及落在「几乎全空」与「几乎全实」严格之间的墨点占比。覆盖度是从**编码后的字节**上读的,因为那正是读者眼睛碰到的东西;每一个质心按**线性光**加权,因为墨就是那个(见 ⑤)。
 
-**Measured at backing scale 2, one page of 900x760 physical pixels.** Windows:
-Consolas at 32 px, cell 18 px wide, padding 16. Mac (M4, macOS 26.6.2): Menlo at
-32 px, cell 20 px wide, padding 16. `peak` is 1.0000 in all sixteen readings and
-is left out of the table.
+**在 backing scale 2 下量的一页 900x760 物理像素。** Windows:Consolas 32 px,格宽 18 px,内边距 16。Mac(M4,macOS 26.6.2):Menlo 32 px,格宽 20 px,内边距 16。十六次读数的 `peak` 全是 1.0000,表里略去。
 
-| band | rasterized | Windows ink / mean / aa | Mac ink / mean / aa |
+| 行 | 走光栅化 | Windows 墨点 / 均值 / 抗锯齿 | Mac 墨点 / 均值 / 抗锯齿 |
 |---|---|---|---|
-| latin | yes | 3976 / 0.8201 / 0.4799 | 4646 / 0.8404 / 0.4090 |
-| cjk | yes | 2730 / 0.7338 / 0.7473 | 4040 / 0.7942 / 0.5223 |
-| box | **no** | 1212 / 1.0000 / **0.0000** | 1260 / 1.0000 / **0.0000** |
-| braille | yes | 873 / 0.7475 / 0.6541 | 783 / 0.6853 / 0.7152 |
-| bold | yes | 3434 / 0.8695 / 0.3480 | 4381 / 0.8819 / 0.3079 |
-| italic | yes | 2727 / 0.8132 / 0.4895 | 3275 / 0.8337 / 0.4192 |
-| link | yes | 3612 / 0.8498 / 0.3829 | 4144 / 0.8588 / 0.3451 |
-| stems | yes | 4420 / 0.8337 / 0.4462 | 3944 / 0.8494 / 0.4397 |
+| latin | 是 | 3976 / 0.8201 / 0.4799 | 4646 / 0.8404 / 0.4090 |
+| cjk | 是 | 2730 / 0.7338 / 0.7473 | 4040 / 0.7942 / 0.5223 |
+| box | **否** | 1212 / 1.0000 / **0.0000** | 1260 / 1.0000 / **0.0000** |
+| braille | 是 | 873 / 0.7475 / 0.6541 | 783 / 0.6853 / 0.7152 |
+| bold | 是 | 3434 / 0.8695 / 0.3480 | 4381 / 0.8819 / 0.3079 |
+| italic | 是 | 2727 / 0.8132 / 0.4895 | 3275 / 0.8337 / 0.4192 |
+| link | 是 | 3612 / 0.8498 / 0.3829 | 4144 / 0.8588 / 0.3451 |
+| stems | 是 | 4420 / 0.8337 / 0.4462 | 3944 / 0.8494 / 0.4397 |
 
-Every rasterized band on both machines reaches **full coverage** somewhere — a
-stem's interior is solid ink — and carries a partial-coverage skirt of between a
-third and three quarters of its pixels. The mean coverages agree to within 0.06
-band for band, on two different faces. The box-drawing row is 1.0000 mean and
-**zero** antialiasing on both, which is the control saying what it is there to
-say: that row never goes near the rasterizer, and the rows around it do.
+两台机器上每一行走光栅化的都在某处到达**满覆盖**——一条竖干的内部是实墨——并带着一圈占它三分之一到四分之三像素的半覆盖裙边。均值覆盖度逐行相差不超过 0.06,而这是两套不同的字脸。制表符那一行两边都是均值 1.0000、抗锯齿**为零**,这就是对照组把它该说的话说了出来:那一行从不靠近光栅器,它周围的行都靠近。
 
-**④ §13.14 ⑥'s open question, answered: the blend is in linear light and the
-stored bytes are not.** M1-4 left one thing deliberately unanswered — whether
-the premultiplied arithmetic this renderer writes holds on the *encoded* bytes
-or in linear light — and said it belonged here, "where an antialiased edge is
-the thing someone actually looks at". It is both, and they are different
-numbers:
+**④ §13.14 ⑥ 留的那个问题,答案在这里:混合在线性光里,而存下来的字节不在。** M1-4 特意留了一件事没答——这个渲染器写下的预乘算术,成立在**编码后的**字节上还是在线性光里——并说它属于这里,「一条抗锯齿边沿的算术才是有人看的东西」。答案是两者都有,而且是两个不同的数:
 
-* **In linear light the contract is exact.** Over a translucent ground, at every
-  alpha measured, on both machines, **not one pixel** of the frame carries a
-  colour its own alpha cannot account for once the colour byte is decoded.
-  `a_translucent_page_holds_no_pixel_brighter_than_its_own_alpha` pins that at
-  zero.
-* **As stored bytes it does not hold, and cannot.** `Bgra8UnormSrgb` encodes the
-  three colour channels and leaves alpha linear, so an antialiased edge stores a
-  colour byte *above* its alpha byte by construction. At a ground worth 0.30,
-  **9822** pixels of this page are in that state on Windows and **9688** on the
-  Mac; at 0.60, none are on either, because by then the ground's own
-  contribution has risen past what the encoding adds. Pinning that count to zero
-  would be pinning the absence of antialiasing, so it is reported and not
-  asserted.
+* **在线性光里这份契约是精确的。** 压在一块半透明底上,量过的每一个 alpha 上、两台机器上,把颜色字节解码之后,这一帧**没有一个像素**带着它自己的 alpha 解释不了的颜色。`a_translucent_page_holds_no_pixel_brighter_than_its_own_alpha` 把这个数钉在零。
+* **按存下来的字节它不成立,而且不可能成立。** `Bgra8UnormSrgb` 对三个颜色通道编码、让 alpha 保持线性,所以一条抗锯齿边沿在构造上就会把颜色字节存得**高于**它的 alpha 字节。底值 0.30 时,这一页上处在这种状态的像素在 Windows 上有 **9822** 个、在 Mac 上有 **9688** 个;到 0.60 时两边都是零,因为到那时底自己的贡献已经涨过了编码加上去的那一点。把这个计数钉成零就是把抗锯齿的不存在钉下来,所以它是被报告而不是被断言。
 
-**One unit of that alpha is the hardware's and not this renderer's**, and it is
-worth a line because a gate written any tighter would have pinned it: a clear
-colour is a float and the surface stores eight bits, so at a ground worth 0.30 —
-which is 0.300000012 as an `f32` — the bare corner of the page reads **76**
-through D3D12 and **77** through Metal. Two backends rounding the same exact
-half the two ways it can be rounded; the gate reads the corner within one, and
-says why.
+**那个 alpha 里有一个单位是硬件的而不是这个渲染器的**,值得写一行,因为一道再紧一点的门就会把它钉进去:clear colour 是一个浮点数而 surface 存的是八位,所以在底值 0.30——按 `f32` 是 0.300000012——时,这一页光秃的那个角经 D3D12 读到 **76**、经 Metal 读到 **77**。两个后端把同一个精确的一半按两种可能的方式各舍入了一次;那道门读这个角时允许差一,并且写明了为什么。
 
-What it costs is stated rather than hidden. X-1 measured that CoreAnimation
-composites these bytes **premultiplied without decoding them**, so a Folio window
-at a low ground opacity draws the antialiased skirt of its letters brighter than
-the arithmetic says — most at a third opacity, none at two thirds. That is a
-colour-management question about a translucent window and belongs to whoever
-takes translucency further; it is not a rasterization defect, and no arm of this
-ticket touches the rasterizer to hide it.
+代价是写出来的而不是藏起来的。X-1 量到 CoreAnimation 合成这些字节时**按预乘算术、不解码**,所以一扇底不透明度很低的 Folio 窗,画出来的字母抗锯齿裙边比算术说的要亮——三分之一不透明度时最明显,三分之二时没有。那是一个关于半透明窗口的色彩管理问题,归把半透明再往前推的那个人;它不是一次光栅化缺陷,而本票没有一条臂为了把它遮住去动光栅器。
 
-**⑤ Subpixel positioning: the terminal never asks, and the prose lane does.**
-The ticket's question was "subpixel positioning at fractional advances", and the
-first half of the answer is that **a terminal grid has no fractional advances**:
-`CellMetrics::measure` takes `primary_advance_px.ceil()` for the cell width and
-`(8 x scale).ceil()` for the padding, so `padding + column x cell_width_px` is a
-whole number in every column. Measured: thirty-four copies of one character,
-each read against its own cell origin, land on the same phase to the last
-fraction of a pixel — spread **0.0000** on both machines (8.7522 px on Windows,
-10.1097 px on the Mac, which is each face's own left side bearing).
-`every_column_of_the_grid_draws_its_stem_in_the_same_place` pins it there,
-because a spread that was not zero is a caret that no longer stands on the
-character it edits (§7.1.3q's own illness).
+**⑤ 次像素定位:终端从来不问,正文那条道要问。** 这张票的问题是「分数步进下的次像素定位」,而答案的前一半是**一张终端网格里没有分数步进**:`CellMetrics::measure` 取 `primary_advance_px.ceil()` 作格宽、取 `(8 x scale).ceil()` 作内边距,所以 `padding + column x cell_width_px` 在每一列上都是整数。量到的:同一个字符的三十四份拷贝,各自对着自己那格的原点读,落在同一个相位上、精确到最后一个像素分数——两台机器上的散布都是 **0.0000**(Windows 上 8.7522 px,Mac 上 10.1097 px,那是各自字脸自己的左边距)。`every_column_of_the_grid_draws_its_stem_in_the_same_place` 把它钉在那里,因为一个不为零的散布就是一根不再站在它所编辑的那个字符上的光标(§7.1.3q 自己那场病)。
 
-So the question is asked where it exists. A prose paragraph's rectangle is
-wherever the document solver put it, and the fixture draws four rows of one
-string at origins a quarter of a pixel apart. The ink moves with them:
+所以这个问题问在它真实存在的地方。一段正文的矩形在文档解算器把它放下的地方,而夹具把同一个字符串画成四行,原点相差四分之一像素。墨跟着它们走:
 
-| origin | Windows | Mac |
+| 原点 | Windows | Mac |
 |---|---|---|
 | +0.00 px | +0.0000 | +0.0000 |
 | +0.25 px | +0.2348 | +0.2382 |
 | +0.50 px | +0.4941 | +0.4819 |
 | +0.75 px | +0.7288 | +0.7463 |
 
-Twenty-two thousandths of a pixel is the worst error on either machine, against
-a quarter being asked for. **One measurement trap is written down here because
-it cost a wrong answer first:** an ink centroid weighted by the *stored byte* is
-not an ink centroid — sRGB encoding is convex, so it over-weights the faint
-skirt, and the same four rows first came back at +0.31 / +0.52 / +1.32, a
-placement that looked quantized and was not.
+对着要的那四分之一,两台机器上最差的误差是千分之二十二个像素。**这里写下一个测量陷阱,因为它先骗出过一个错答案:**按**存下来的字节**加权的墨质心不是墨质心——sRGB 编码是凸的,于是它给那圈浅淡的裙边加了太多权重,同样这四行第一次回来的是 +0.31 / +0.52 / +1.32,一个看着像被量化过、实际不是的摆位。
 
-**⑥ The CJK case that failed on the Mac, and it was not the fallback table.**
-M1-4 recorded `every_cluster_of_a_grid_paragraph_stands_on_its_own_column`
-failing on the Mac and put it down to the CJK fallback lists being Windows font
-file names, "dead code on macOS". **That diagnosis was wrong.** The macOS arm
-has had its own chain (`MACOS_CJK_FALLBACK_FAMILIES`) and its own `Fallback`
-implementation since `026d765`, and PingFang SC is installed on that machine.
-What the case actually reported was `the cluster "页" at byte 3 is drawn at NaN`.
+**⑥ Mac 上那条失败的 CJK 用例,而祸首不是回退表。** M1-4 记下过 `every_cluster_of_a_grid_paragraph_stands_on_its_own_column` 在 Mac 上红,并归因为 CJK 回退名单写的是 Windows 的字体文件名,「在 macOS 上是死代码」。**那个诊断是错的。** 自 `026d765` 起 macOS 那条臂就有自己的链(`MACOS_CJK_FALLBACK_FAMILIES`)和自己的 `Fallback` 实现,而那台机器上装着 PingFang SC。那只用例实际报的是 `the cluster "页" at byte 3 is drawn at NaN`。
 
-Read back glyph by glyph, the run says why: the `M` came from Menlo advancing
-19.265625 px, and every Han cluster came from **`GB18030 Bitmap`** advancing
-`inf`. Two facts make that happen and neither is about the fallback table.
+一个字形一个字形读回来,这一段自己说出了原因:`M` 来自 Menlo,步进 19.265625 px,而每一个汉字 cluster 都来自 **`GB18030 Bitmap`**,步进 `inf`。让这件事发生的是两个事实,没有一个跟回退表有关。
 
-- **The face has no scalable em.** It is one of Apple's bitmap-only faces and
-  carries `bhed` where a scalable face carries `head`, so swash reports zero
-  units per em — and cosmic-text scales every advance by that number without
-  guarding the division (`shape.rs`, `let font_scale =
-  font.metrics().units_per_em as f32`; `decoration_metrics` next door *does*
-  guard its own). Every advance is `inf`, the line's width is `inf`, and the
-  grid's tracking — `(target − natural) / font_size / glyphs` — is `NaN`, which
-  is the letter spacing the second shaping pass is then given. Hence a cluster
-  drawn at `NaN`, and a caret, a band and a click all pointing nowhere, with no
-  error anywhere.
-- **Nothing asked for it.** The face is flagged *monospaced* and covers Han, and
-  cosmic-text's fallback iterator, for a `Family::Monospace` request, gathers
-  every monospaced face in the database that covers the word and takes the best
-  of them **before** it reaches `script_fallback`
-  (`font/fallback/mod.rs`, the `monospace_fallbacks_buffer` stage).
-  `forbidden_fallback` cannot stop it either: that list filters only the
-  last-resort "any other font" walk at the bottom of the iterator.
+- **这个字脸没有可缩放的 em。** 它是苹果那些只有位图的字脸之一,带的是 `bhed` 而不是可缩放字脸带的 `head`,于是 swash 报 units per em 为零——而 cosmic-text 拿这个数去缩放每一个步进,除法上没有守卫(`shape.rs`,`let font_scale = font.metrics().units_per_em as f32`;隔壁的 `decoration_metrics` **有**它自己的守卫)。每一个步进都是 `inf`,这行的宽度是 `inf`,而网格的字距——`(target − natural) / font_size / glyphs`——是 `NaN`,那正是第二趟排版拿到的字间距。于是一个 cluster 被画在 `NaN` 上,而光标、色带和点击全都指向不知何处,一路上没有任何报错。
+- **没有人要过它。** 这个字脸被标成*等宽*而且覆盖汉字,而 cosmic-text 的回退迭代器对一次 `Family::Monospace` 请求,会把数据库里覆盖这个词的每一个等宽字脸都收起来取其中最好的,而这发生在它走到 `script_fallback` **之前**(`font/fallback/mod.rs`,`monospace_fallbacks_buffer` 那一段)。`forbidden_fallback` 也拦不住它:那份名单只过滤迭代器最底下那趟「随便哪个别的字体」的兜底。
 
-So the decision this crate writes down could not be in force, and the only place
-left to make it is the **database**. The Windows loader names seven files and
-never asks the directory, so its database is a list somebody wrote; the macOS
-loader has to call `load_system_fonts`, because PingFang lives behind a
-content-hashed `AssetsV2` path that cannot be named (§13.18's own lesson), which
-puts the whole machine's library in.
+所以这个 crate 写下的那个决定根本没机会生效,而剩下唯一能做这个决定的地方是**数据库**。Windows 那个加载器点名七个文件、从不问目录,所以它的数据库是一份有人写下来的名单;macOS 那个加载器必须调 `load_system_fonts`,因为 PingFang 住在一条按内容哈希的 `AssetsV2` 路径后面、点不出名字来(§13.18 自己那条教训),于是整台机器的字体库都进来了。
 
-The fix is therefore a capability and not a name. `drop_faces_with_no_scalable_em`
-removes every face with no `head` em, in **every** arm, before any family is
-chosen, and `set_terminal_font` puts a file a reader picked through the same
-door. Naming `GB18030 Bitmap` would have fixed one machine and said nothing
-about the next. The number it reads is two bytes out of one table through
-`ttf_parser::RawFace`, which parses the table directory and nothing else;
-`ttf-parser` becomes a named dependency of `bt-render` and adds **no package** —
-`fontdb` is built on it. **Measured on the Mac: one face out of 917 goes**, and
-it is that one; on Windows none of the sixteen does, which is the seven-file list
-saying what it always said.
-`no_face_in_the_font_database_has_an_em_this_renderer_cannot_divide_by` runs on
-both machines and pins it, and asserts in the same breath that the embedded emoji
-face survives — the rule is about the em, not about outlines.
+所以修法是一次能力判断而不是一个名字。`drop_faces_with_no_scalable_em` 在任何家族被选中之前,在**每一条**臂上,把每一个没有 `head` em 的字脸剔掉,而 `set_terminal_font` 放进来的读者挑的文件走的是同一扇门。点名 `GB18030 Bitmap` 只会修好一台机器,对下一台一句话也说不出。它读的那个数是经 `ttf_parser::RawFace` 从一张表里取的两个字节,那东西只解析表目录、别的什么都不解析;`ttf-parser` 成为 `bt-render` 的一个具名依赖,**不多加任何包**——`fontdb` 就建在它上面。**Mac 上量到:917 个字脸里走了一个**,就是那一个;Windows 上十六个一个也没走,那正是那份七个文件的名单一直以来说的话。`no_face_in_the_font_database_has_an_em_this_renderer_cannot_divide_by` 在两台机器上都跑并把它钉住,而且在同一口气里断言内嵌的那个 emoji 字脸活着——这条规矩管的是 em,不是轮廓。
 
-**⑦ One more thing the measurement found: drawing this page is a critical
-section.** The window's ground is process-global (`ground::set_window_ground`)
-and the frame path reads its alpha **more than once** — the clear has a read of
-its own. Two concurrent draws are therefore a race with a very quiet failure: a
-frame that straddles somebody else's set and restore comes back *mixed*, cell
-grounds at one alpha and the clear at another, and every number taken off it is
-about no window at all. Measured, under libtest's default parallelism on the
-Mac: 212 887 pixels of cell ground at `round(0.3 x 255)` beside 458 717 pixels
-of clear at 255, in one frame. `GlyphFixture::present` holds a lock across the
-whole call, which is the fixture being honest about what it is doing rather than
-a rule written in a test's comment.
+**⑦ 测量还查出一件事:画这一页是一段临界区。** 窗口的底是进程全局的(`ground::set_window_ground`),而画帧那条路读它的 alpha **不止一次**——clear 自己有一次读。所以两次并发的绘制是一场失败非常安静的竞态:一帧横跨了别人的一次设与一次还原,回来就是**混的**,格底是一个 alpha 而 clear 是另一个,从它身上取的每一个数说的都不是任何一扇窗。量到的:Mac 上按 libtest 默认的并行度,一帧里有 212 887 个格底像素在 `round(0.3 x 255)` 上,旁边 458 717 个 clear 像素在 255 上。`GlyphFixture::present` 在整次调用上握着一把锁,那是这个夹具对自己在干什么的老实交代,而不是写在某条测试注释里的一条规矩。
 
-**⑧ The gate.** `crates/bt-render/tests/glyph_output.rs` runs on either machine
-and pins seven facts about the offscreen frame: the page fits the surface it is
-measured on and the window really is at backing scale 2; two draws of one
-fixture are byte for byte the same frame; **every band has ink of its own** —
-which is what makes a font stack that cannot answer a row a red line here rather
-than a surprise in a screenshot; every rasterized band carries an antialiased
-skirt while the geometric one carries none; the grid's stems agree; the prose
-lane moves with its fraction; and a translucent frame is premultiplied in linear
-light with the clear's own alpha in its bare corner.
+**⑧ 那道门。** `crates/bt-render/tests/glyph_output.rs` 在哪台机器上都跑,钉住关于离屏那一帧的七条事实:这一页装得进它被量的那块 surface、而且这扇窗确实在 backing scale 2 上;同一个夹具画两遍是逐字节相同的一帧;**每一行都有自己的墨**——正是这一条让一套答不出某一行的字体栈在这里变成一条红线,而不是截图里的一次意外;每一行走光栅化的都带着抗锯齿裙边,而那一行几何的一点都没有;网格的竖干彼此一致;正文那条道跟着它的分数走;以及一帧半透明在线性光里是预乘的,而光秃那个角上是 clear 自己的 alpha。
 
-`crates/bt-app/tests/macos_glyph_surface.rs` is the Mac half and is a
-`harness = false` target for M2-3's reason, said again: it runs an event loop,
-an event loop is the main thread's, and libtest does not hand a case that
-thread. Without `BT_MAC_GUI` it prints one line and exits, so an ordinary
-`cargo test -p bt-app` on the Mac costs nothing; off macOS the file has no body
-at all. It opens **winit's** window — the product's window — undecorated at the
-drawable's size on the monitor winit says is at backing scale 2 (asked rather
-than assumed, because X-1 and X-2 both recorded a window landing on the owner's
-other screen), puts Folio's own surface view under it through
-`bt_platform::surface_view`, and redraws the same fixture the way a window
-redraws.
+`crates/bt-app/tests/macos_glyph_surface.rs` 是 Mac 那一半,是一个 `harness = false` 的目标,理由是 M2-3 那一条再说一遍:它要跑一个事件循环,事件循环是主线程的,而 libtest 不把那条线程交给任何一个用例。没有 `BT_MAC_GUI` 时它打一行就退出,所以 Mac 上一次普通的 `cargo test -p bt-app` 一分钱不花;在 macOS 之外这个文件根本没有函数体。它开的是 **winit 的**窗——产品自己的那扇窗——无边框、按 drawable 的尺寸,开在 winit 说 backing scale 是 2 的那台显示器上(问出来的而不是假定的,因为 X-1 和 X-2 都记过一扇窗落到了用户另一块屏上),经 `bt_platform::surface_view` 把 Folio 自己的 surface view 放到它下面,然后按一扇窗重绘的方式重绘同一个夹具。
 
-**A hand-made `NSWindow` was tried first and is not a swapchain host on this
-machine**, which is worth the sentence because `macos_sheet.rs` makes one and it
-is the obvious pattern to copy: `visible=true` at `scale=2`, a content view of
-exactly the right bounds, sixty turns of the run loop before the surface and four
-presents after it — and every present answered `Skipped`, `nextDrawable` handing
-back nothing, with the photograph coming out as the flat colour painted behind
-the layer. A `CAMetalLayer` wants the window an application of its own is
-running. **The photograph is the readback**: a swapchain
-cannot be mapped, so the pixels the window server holds are reached from outside
-the surface or not at all. M2-3 measured that a throwaway bundle is refused the
-Screen Recording grant while the session that started it holds it, so the probe
-publishes its window number and waits for the session's picture one redraw at a
-time — a window that stops drawing is a window the server stops compositing.
-`objc2` and `objc2-app-kit` become **dev**-dependencies of `bt-app` for the one
-name winit does not expose, `-[NSWindow windowNumber]`, and add no package to
-`Cargo.lock`: both are already there through `bt-platform`.
+**先试过一扇手搓的 `NSWindow`,而它在这台机器上不是一个交换链宿主**,这句话值得写,因为 `macos_sheet.rs` 就搓了一扇,那是最顺手要照抄的模式:`visible=true`、`scale=2`、内容 view 的 bounds 分毫不差,surface 之前转六十轮 run loop、之后 present 四次——而每一次 present 都答 `Skipped`,`nextDrawable` 什么也不给,照片拍出来是 layer 背后刷的那块纯色。一块 `CAMetalLayer` 要的是一扇有自己应用在跑的窗。**照片就是那次读回**:一条交换链映射不了,所以窗口服务器攥着的那些像素要么从 surface 外面够到,要么就够不到。M2-3 量过,一个用完即弃的 bundle 在起它的那个会话攥着屏幕录制授权时拿不到这个授权,所以探针把它的窗口号发布出去,然后一次重绘一次重绘地等那个会话的照片——一扇停止绘制的窗,就是服务器停止合成的那扇窗。`objc2` 与 `objc2-app-kit` 成为 `bt-app` 的 **dev** 依赖,为的是 winit 没有露出来的那一个名字 `-[NSWindow windowNumber]`,而且给 `Cargo.lock` 不加包:两者都已经经 `bt-platform` 在里面了。
 
-**⑨ The answer.** M4, macOS 26.6.2, a winit window at backing scale 2 on the
-2x display, drawable 900x760, `target=MetalLayerOnOwnedView
-offered=[Opaque, PostMultiplied] chosen=PostMultiplied`, `cleared=0` — a
-window's first surface clears nothing (§13.14 ③). The page drawn into that
-swapchain and photographed, and the same page drawn into a texture on the same
-device and mapped, are **identical: 684 000 pixels, not one byte between them,
-digest `b29b55b160aa8c47` twice.** Every band's ink count, peak, mean and
-antialiased share is the same number on both sides of the comparison, and so is
-every prose row's centroid.
+**⑨ 答案。** M4,macOS 26.6.2,一扇 winit 的窗,在那台 2x 显示器上 backing scale 2,drawable 900x760,`target=MetalLayerOnOwnedView offered=[Opaque, PostMultiplied] chosen=PostMultiplied`,`cleared=0`——一扇窗的第一块 surface 什么也不清(§13.14 ③)。画进那条交换链再拍下来的那一页,和在同一台设备上画进一块纹理再映射出来的同一页,**完全相同:684 000 个像素,中间一个字节都不差,摘要 `b29b55b160aa8c47`,两次都是。** 每一行的墨点数、峰值、均值和抗锯齿占比在比较两边都是同一个数,每一行正文的质心也是。
 
-So the presentation path does not change the picture, and M2-5's question is
-answered in the direction §R4 predicted: the rasterizer is the same rasterizer,
-the surface is the surface, and the letters a Mac shows are the letters this
-renderer drew.
+所以呈现路径不改变这张画,而 M2-5 的问题按 §R4 预计的方向答完了:光栅器还是那个光栅器,surface 就是 surface,而一台 Mac 显出来的字母就是这个渲染器画下的字母。
 
-**Two things that run only said by measuring them.** The **first two presents on
-a freshly created layer come back `Skipped`** — `nextDrawable` has nothing until
-the layer has been through a display cycle — which is why the probe draws the
-page the way a window draws it rather than once. And `screencapture` **from
-inside the bundle** answers `could not create image from window`, which is M2-3's
-TCC finding measured a second time and the reason the photographer is the session
-outside.
+**那一趟里有两件事是量了才说得出来的。** **一块刚建出来的 layer 上,头两次 present 回来都是 `Skipped`**——在这块 layer 走过一个显示周期之前,`nextDrawable` 什么也没有——这正是探针按一扇窗重绘的方式画这一页而不是只画一次的原因。还有,**从 bundle 里面**发的 `screencapture` 答的是 `could not create image from window`,那是 M2-3 那条 TCC 发现被第二次量到,也是那个拍照的人在外面那个会话里的原因。
+
 ### 13.23 M3-7: 标准流——终端启动留在 tty 上,Finder 启动进日志,leave_process 真的退出(`crates/bt-platform/src/portable_impl.rs`、`crates/bt-platform/src/{lib.rs,Cargo.toml}`、`crates/bt-app/src/diagnostics.rs`)
 
 **① Five doors, and they split two ways — on who reads the answer, not on how
