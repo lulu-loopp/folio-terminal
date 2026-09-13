@@ -11801,6 +11801,16 @@ struct WindowRuntime {
     /// column has no opinion about what `⌥a` types. See [`column_notch`], which
     /// is the one reader, and §13.33 ① for why there is exactly one.
     modifiers_held: ModifiersState,
+    /// **Whether the press under the hand was taken as the secondary one**
+    /// (T-MAC-CMDCLICK, §13.45 ②).
+    ///
+    /// One `bool`, written and read at the one door every button event comes
+    /// through, because Control is a key and a button is a button: a hand can
+    /// let go of one before the other, and a release spelled differently from
+    /// its own press is a release a mouse-tracking program cannot pair. See
+    /// [`input::pressed_button_of_gesture`], which is the only reader and the
+    /// only writer. `false` on Windows always.
+    secondary_press: bool,
     math_context_menu: bt_platform::MathContextMenu,
     /// The system folder chooser behind the root menu's `Browse…` (E55).
     folder_picker: bt_platform::FolderPicker,
@@ -22512,18 +22522,28 @@ impl FrameImageReferences {
 /// two clickable kinds of reference and two rules for them is this product
 /// disagreeing with itself, so the modifier is read into an intent **here**,
 /// once, and both kinds ask this one function what a press means.
+///
+/// **The `bool` is "the hand-over modifier", and which key that is belongs to
+/// the platform** (T-MAC-CMDCLICK, §13.45 ①). `Ctrl` here and `⌘` on a Mac,
+/// answered by [`input::pointer_chord_held`] at each press and never spelled
+/// out again below this line: the rulings of 2026-08-20 are about *a* modifier
+/// spent on handing a reference over, and the one they cannot have meant on a
+/// Mac is the one that desk already spends on the secondary click. The prose
+/// through this file still writes the gesture `Ctrl+click`, which is what a
+/// reader of this file is holding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ClickIntent {
     /// A plain click asks for whatever happens **in this window** — and asks for
     /// nothing at all where this window has no answer of its own.
     Here,
-    /// `Ctrl` asks for the same reference to be **handed to the system**.
+    /// `Ctrl` — `⌘` on a Mac — asks for the same reference to be **handed to
+    /// the system**.
     System,
 }
 
 impl ClickIntent {
-    fn of(control: bool) -> Self {
-        if control { Self::System } else { Self::Here }
+    fn of(hand_over: bool) -> Self {
+        if hand_over { Self::System } else { Self::Here }
     }
 }
 
@@ -35561,6 +35581,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         pending_frames: LatestFrameSlot::default(),
         modifiers: ModifiersState::default(),
         modifiers_held: ModifiersState::default(),
+        secondary_press: false,
         math_context_menu,
         folder_picker,
         folder_pick: None,
@@ -57795,7 +57816,9 @@ impl Runtime<'_> {
             // answers, and a shift-click on one is not asking for the link.
             latch: DragLatch::new(position),
             link: link.filter(|_| standing.is_none() && placing.is_none()),
-            control: self.window.modifiers.control_key(),
+            // **The hand-over modifier, not `Ctrl` by name** (§13.45 ①): `Ctrl`
+            // here, `⌘` on a Mac, read off what the hand is holding.
+            control: input::pointer_chord_held(self.window.modifiers_held),
             // A press that placed a caret drags the caret's own selection, in
             // the file's bytes; a press on a link that did not place one becomes
             // one the moment it travels, because a drag across a page with a
@@ -65748,7 +65771,12 @@ impl Runtime<'_> {
         // over. Without a row open it is not a comparison at all and falls
         // through to the ordinary press, because there is no first end for it to
         // be the second end of.
-        if self.window.modifiers.control_key() {
+        //
+        // **`⌘` is the compare gesture on a Mac** (§13.45 ①), through the one
+        // function that knows which key hands a pointer gesture over. Control
+        // could not stay: it is the secondary click on that desk, so the same
+        // press would have been asking for a context menu.
+        if input::pointer_chord_held(self.window.modifiers_held) {
             let hash = match &row {
                 git_graph::GraphViewRow::Uncommitted(_) => {
                     Some(git_graph::GRAPH_UNCOMMITTED_HASH.to_owned())
@@ -83967,12 +83995,13 @@ impl Runtime<'_> {
             return Ok(());
         };
         let hyperlink = frame.hyperlink_at(hit.row, hit.column);
-        let hyperlink_control = self.window.modifiers.control_key();
-        let local_image_activation = local_image_activation(
-            self.window.modifiers.control_key(),
-            true,
-            local_image_path.as_deref(),
-        );
+        // **Both references read the one hand-over modifier** (§13.45 ①) — the
+        // link's and the picture's, which is `ClickIntent`'s own argument said
+        // one level out: `Ctrl` here, `⌘` on a Mac, and never twice.
+        let hand_over = input::pointer_chord_held(self.window.modifiers_held);
+        let hyperlink_control = hand_over;
+        let local_image_activation =
+            local_image_activation(hand_over, true, local_image_path.as_deref());
         // Local hits are clamped to a continuous frame, which supplies anchors for every grid cell.
         let (mode, origin, initial) = match count {
             2 => {
@@ -85514,7 +85543,9 @@ impl Runtime<'_> {
         let namespace = self.hovered_pane_path_namespace();
         let namer = bt_transcript::paths::PathNamer::Pane(&namespace);
         terminal_link_answers_a_press(
-            self.window.modifiers.control_key(),
+            // The finger is a promise about *this* press, so it is struck
+            // against the same modifier the press will read (§13.45 ①).
+            input::pointer_chord_held(self.window.modifiers_held),
             self.window
                 .hyperlink_hover
                 .underline_target()
@@ -85547,7 +85578,12 @@ impl Runtime<'_> {
         else {
             return false;
         };
-        preview_link_answers_a_press(self.window.modifiers.control_key(), &link.target, document)
+        // [`Self::terminal_link_grasp`]'s modifier, one surface along (§13.45 ①).
+        preview_link_answers_a_press(
+            input::pointer_chord_held(self.window.modifiers_held),
+            &link.target,
+            document,
+        )
     }
 
     /// What the pointer is being offered over a picture, if anything (ticket
@@ -89282,6 +89318,30 @@ impl Runtime<'_> {
                 self.mouse_route_name(),
             )
         });
+        // **On a Mac, Control+click is the secondary click** (§13.45 ②), and it
+        // is made into one here — above every router, below the station that
+        // records what the platform actually said. AppKit does not do it for us:
+        // a control-click arrives as `mouseDown:` with `buttonNumber` 0, so
+        // winit reports a plain left press and the desk's oldest gesture would
+        // otherwise begin a selection. One translation at the one door every
+        // button event comes through, so that the two ways a Mac makes a
+        // secondary press are one press from here on and this window's rule for
+        // it is written down once (`right_press_raises_terminal_menu`).
+        //
+        // Off macOS this is the identity and nothing below it can tell.
+        let reported = button;
+        let button = input::pressed_button_of_gesture(
+            &mut self.window.secondary_press,
+            button,
+            state,
+            self.window.modifiers_held,
+            bt_platform::host_platform(),
+        );
+        if button != reported {
+            self.mouse_trace(|| {
+                format!("secondary_click state={state:?} reported={reported:?} taken_as={button:?}")
+            });
+        }
         // M142, and ahead of everything: any press at all takes the tip down.
         // Unconditional — not "a press that hits something", not "a left press" —
         // because a tooltip answers "what is this?" and the act of pressing is
@@ -97018,7 +97078,14 @@ impl Runtime<'_> {
         //
         // The notch is not forwarded as well. A page that received both would
         // scroll while it zoomed, which is the one combination no browser does.
-        if self.window.modifiers.control_key() && y != 0.0 {
+        //
+        // **And it is `⌘`+wheel on a Mac** (§13.45 ①), asked of the same
+        // function a click on a link asks: the gesture is "this notch is for
+        // Folio", and the key that says so is the platform's. Control could not
+        // stay there either — on that desk it is the system's own screen-zoom
+        // modifier, and it is the one this window has just handed the secondary
+        // click.
+        if input::pointer_chord_held(self.window.modifiers_held) && y != 0.0 {
             // The page under the pointer, which is the page the notch was aimed
             // at — the same question every other wheel event on this path asks.
             if let Some(leaf) = self.web_page_at(position)
@@ -100548,6 +100615,189 @@ mod focus_column_notch_tests {
             writes,
             vec![format!("leaf.{needle}aimed;")],
             "a card's window is aimed from one place and no other"
+        );
+    }
+}
+
+/// **Every pointer gesture that spends a modifier spends the platform's**
+/// (T-MAC-CMDCLICK, §13.45 ①).
+///
+/// The ruling of 2026-08-20 gives this window one clicking rule — 点=留窗内,
+/// `Ctrl`+点=交出去 — and 方案 §0 gives the wheel over a page its own. Both name
+/// a modifier, and on a Mac the modifier they cannot mean is Control: that desk
+/// spends Control on the secondary click, so a build that read `control_key()`
+/// there answered one press with two verbs.
+///
+/// These are read as text because the repair is *which question six doors ask*,
+/// and every one of those doors needs a live `WindowRuntime` — a compositor, a
+/// renderer and a shell — to be asked at run time. What a machine can hold
+/// without a screen is the call each door makes, and that no seventh door grows
+/// back the raw reading beside them.
+#[cfg(test)]
+mod pointer_chord_site_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method or free function, from its signature to the next.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// The six doors a pointer gesture's modifier is read at, by the signature
+    /// each one is declared with.
+    ///
+    /// **The list is the test.** A seventh gesture that reads the modifier and
+    /// is not named here is exactly the defect this ticket repaired — a reading
+    /// nobody had a reason to revisit when the port landed — so a door added
+    /// below without a line added here is caught by
+    /// [`no_other_door_reads_the_raw_control_key_for_a_gesture`], which sweeps
+    /// the whole file rather than this list.
+    const POINTER_DOORS: [&str; 6] = [
+        // A press on a rendered page: the drag carries what the press meant, and
+        // the link is answered when the press turns out not to have travelled.
+        "    fn press_preview_text(",
+        // A press on a commit row: the compare gesture (D6).
+        "    fn press_graph_row(",
+        // A press in a pane: an OSC 8 hyperlink and an inline picture, both.
+        "    fn begin_local_selection(",
+        // The pointing finger, on each of the two surfaces a link is drawn on.
+        "    fn terminal_link_grasp(",
+        "    fn preview_link_grasp(",
+        // A notch over a hosted page: zoom (方案 §0's five extras).
+        "    fn scroll_web_page(",
+    ];
+
+    /// RED GATE — **each of the six asks the one function that knows which key
+    /// the platform spends on a gesture, and asks it of the hand.**
+    ///
+    /// Put `self.window.modifiers.control_key()` back into any one of them and
+    /// it goes red, while every other test in this workspace stays green: a
+    /// Windows machine cannot feel the difference, which is the shape of the
+    /// defect.
+    #[test]
+    fn every_pointer_door_reads_the_platforms_hand_over_modifier() {
+        // Assembled at run time so that this pin cannot match its own text.
+        let door = ["input", "::", "pointer_chord_held", "("].concat();
+        let hand = ["window", ".", "modifiers_held"].concat();
+        for signature in POINTER_DOORS {
+            let text = body(signature);
+            assert!(
+                text.contains(door.as_str()),
+                "{signature} decides a pointer gesture and must ask \
+                 `{door})` which key this platform spends on one"
+            );
+            assert!(
+                text.contains(hand.as_str()),
+                "{signature} must strike the ruling against what the hand is \
+                 holding and not against what the keyboard means (§13.33 ①)"
+            );
+        }
+    }
+
+    /// RED GATE — **and none of them reads the key by name any more.**
+    ///
+    /// Separate from the assert above because the two failure modes are
+    /// different: a door can gain the call and keep the old reading beside it,
+    /// which is a door that answers twice.
+    #[test]
+    fn no_pointer_door_still_reads_control_by_name() {
+        let raw = ["modifiers", ".", "control_key", "()"].concat();
+        for signature in POINTER_DOORS {
+            let text = body(signature);
+            assert!(
+                !text.contains(raw.as_str()),
+                "{signature} still reads `{raw}` for a gesture — on a Mac that is \
+                 the secondary click and not this window's modifier"
+            );
+        }
+    }
+
+    /// RED GATE — **a seventh gesture cannot grow back the raw reading.**
+    ///
+    /// The whole file is swept for `window.modifiers.control_key()`, which is
+    /// the exact spelling a pointer path used before this ticket, and the
+    /// survivors are named one by one with the reason each is a keyboard's
+    /// question rather than a hand's. A new pointer door written the old way
+    /// lands in this list and fails.
+    #[test]
+    fn no_other_door_reads_the_raw_control_key_for_a_gesture() {
+        let raw = ["self", ".window", ".modifiers", ".", "control_key", "()"].concat();
+        let readers: Vec<&str> = SOURCE
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//") && line.contains(raw.as_str()))
+            .collect();
+        // The one survivor, spelled at run time for the reason the needle is:
+        // a keyboard's question in `preview_browse_key`, asking whether the
+        // player's five transport keys arrived bare.
+        let keyboards = format!("&& !{raw}");
+        assert_eq!(
+            readers,
+            vec![keyboards.as_str()],
+            "every other reading of `{raw}` is a keyboard's; a pointer's reads \
+             `input::pointer_chord_held(self.window.modifiers_held)`"
+        );
+    }
+
+    /// RED GATE (§13.45 ②) — **the secondary click is settled at the one door
+    /// every button event comes through, and above every router.**
+    ///
+    /// A translation made further down would be a second opinion about what a
+    /// press is — `effective_modifiers`' own argument, one device along. It
+    /// stands *below* the trace's first station on purpose: the forensics have
+    /// to record what the platform said, not what this window made of it.
+    #[test]
+    fn the_secondary_click_is_settled_once_and_above_every_router() {
+        let text = body(
+            "    fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
+        );
+        let needle = ["input", "::", "pressed_button_of_gesture", "("].concat();
+        let settle = text
+            .find(needle.as_str())
+            .unwrap_or_else(|| panic!("`mouse_input` asks `{needle})` what button this press is"));
+        let first_return = text.find("return ").unwrap_or(text.len());
+        assert!(
+            settle < first_return,
+            "the button is settled before any surface can take the gesture home"
+        );
+        let trace = text
+            .find("mouse_input state=")
+            .expect("the trace's first station records what the platform reported");
+        assert!(
+            trace < settle,
+            "the station records the platform's own reading, which a translation \
+             made above it would erase"
+        );
+        let calls = SOURCE.matches(needle.as_str()).count();
+        assert_eq!(
+            calls, 1,
+            "one door decides what button a press is, as one door decides what \
+             modifiers are held"
+        );
+    }
+
+    /// PIN (§13.45 ②) — **the gesture's latch has one writer and one reader,
+    /// and both of them are that door.**
+    ///
+    /// The field is a `bool` that travels with the hand; a second place that
+    /// set it would be a second opinion about which press is still down.
+    #[test]
+    fn one_field_remembers_which_press_is_under_the_hand() {
+        let needle = ["window", ".", "secondary_press"].concat();
+        let uses: Vec<&str> = SOURCE
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//") && line.contains(needle.as_str()))
+            .collect();
+        assert_eq!(
+            uses,
+            vec![format!("&mut self.{needle},")],
+            "the latch is touched at the one door and nowhere else: {uses:?}"
         );
     }
 }
