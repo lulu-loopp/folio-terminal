@@ -9100,6 +9100,16 @@ modifiers reported=ModifiersState(ALT) effective=ModifiersState(0x0) option_send
 
 所以一次按下落在那扇窗的标题栏上、落不到它的内容上,而内容在画、命中测试也是对的,至于那次按下跑到哪里去了没有查清。**那是一条关于指针在这个平台上进入一扇 Folio 窗的路线的发现,而不是关于多窗恢复的**,它要一张自己的票,手里拿着 `BT_MOUSE_TRACE` 和视图层级。验收那句话里关于**本票**主题的每一样东西都在 ⑥ 里量到了,而其中没有一样依赖那一按。
 
+**Superseded by §13.39, and the sentence that is wrong is the one about
+occlusion.** T-MAC-POINTER put a local `NSEvent` monitor on the same press and
+found that the application never received it: another process's floating windows
+— `kCGWindowLayer` 8, above every ordinary window — were standing over that patch
+of the desk. The check above could not see them because it read the on-screen
+list and skipped every row whose layer was not zero. The hover is real and proves
+nothing about the press: while an application is active AppKit hands it
+`mouseMoved` for the whole screen, occluder or not. Nothing was wrong with the
+route, and nothing in the product changed.
+
 ### 13.35 M4-5: 视频播放走 AVPlayer——帧从 AVPlayerItemVideoOutput 拉、声音走它自己的口、结束留最后一帧(`crates/bt-platform/src/macos_player.rs`(新)、`crates/bt-platform/src/{video_portable,macos_video,lib}.rs`、`crates/bt-platform/tests/video_playback.rs`(新)、`crates/bt-platform/Cargo.toml`、`tests/assets/folio-video-sound-test.mp4`(新)、`tests/assets/PROVENANCE.md`)
 
 **① 这张票不是「播一个视频」,是「一直答同一个问题」。** §13.25 给了 Mac 一份文件里的一**帧**;而在 Windows 之外 `Engine::open` 仍然答 `EngineError::Unsupported`,所以一个在一份录像上按下 ▶ 的读者拿到的是 §7.44 画在一个黑矩形底下的那一行字。取代它的是 `AVPlayer`,而其中每一个决定都由 §7.42 早就为 Media Foundation 写下的一句话定下,而不是由 AVFoundation 碰巧让什么变得容易来定:同样的动词、同样的 `EngineState`、同样的直通 BGRA8 `Frame`、同样两个轮询间隔、同样的打开预算、同样有界的停机、同样那本进程账。`bt-app` 点 `Engine`、`EngineError`、`EngineState` 和那三扇账门的名时一个 `cfg` 都没有,而本票也不加。
@@ -9550,5 +9560,244 @@ proof and not the product.
   point is asked of AppKit — `convertPoint:toView:` twice and `isFlipped` once —
   rather than assumed, because a test window's content view is not winit's and
   does not share its origin.
+
+*(本节英文,待中文文案改写。)*
+### 13.39 T-MAC-POINTER: 按下根本没到 Folio——另一个进程的浮动面板盖在那片桌面上,悬停跟得住不等于按下落得下,标题栏视图是冤枉的(`crates/bt-platform/tests/macos_pointer_route.rs`(新)、`crates/bt-platform/Cargo.toml`)
+
+**This is 13.39 and not 13.38.** 13.38 is M4-3's and was in flight while this
+ran; the numbers are taken in the order the tickets started, not in the order
+they land.
+
+**① The finding this ticket was given, and the one sentence of it that was
+wrong.** §13.34 ⑦(d) reported a press on the restore card's accent button that
+produced **no `WindowEvent::MouseInput` at all**, while the same button hovered
+correctly — its accent lifted by exactly the brightness the card draws a hovered
+primary with — and while a press on the same window's tab strip, in the same run,
+arrived and routed. It recorded that the window was `z0` in the window server's
+front-to-back order immediately before and immediately after the press, and
+concluded: *"it is **not** occlusion … a press lands on that window's title bar
+and does not land on its content"*.
+
+**It was occlusion.** The press was never delivered to the application at all —
+not to the title bar, not to any view, not to the process. What stood over the
+button was another application's floating window, and the instrument that
+reported `z0` could not see it because it had been written to skip exactly the
+kind of window it was.
+
+**② Two roads, and they are not the same road.** This is the whole of why the
+picture was so convincing, and it is worth writing down for every later ticket
+that drives this product with a pointer.
+
+* **`mouseDown:` is routed by the window server** to the frontmost window at that
+  point, whichever application owns it. A window in front takes the press and the
+  one behind never hears of it.
+* **`mouseMoved:` is delivered to the application that is *active*,** for the
+  whole screen, and AppKit sends it on through the window's responder chain. It
+  is not gated by who is frontmost under the cursor.
+
+So an active Folio with something parked over its middle **still tracks the
+pointer across the occluder** — `pointer_position` follows, `first_run::hit`
+answers, the button lifts, the picture is right — and every press in that patch
+goes somewhere else. Hovering is not evidence that a press can land there, and
+after this ticket nothing in this repository may treat it as such.
+
+The measurement that says it in one line is the probe's, taken on the move that
+preceded the failing press:
+
+```
+event kind=NSEventType(5) at=1163.5,548.0 window=none app_active=true
+```
+
+(`5` is the raw discriminant of `NSEventTypeMouseMoved`; the probe prints what
+`-[NSEvent type]` answered rather than a name it looked up.)
+
+`window=none` is `-[NSEvent window]` answering `nil`, and a mouse event with no
+window carries its location in **screen** coordinates rather than window ones —
+`1163.5,548` is AppKit's bottom-left reading of the same point on this 1080-point
+screen that the window-relative moves report as `648.5,235`. The application was
+handed a move over a point that belongs to none of its windows. The
+`NSEventTypeLeftMouseDown` that followed it was never handed over at all.
+
+**③ What was standing there.** Read with `CGWindowListCopyWindowInfo` over the
+whole on-screen list at **every** layer, at the moment of the press:
+
+| | | |
+|---|---|---|
+| `CoreServicesUIAgent` | `kCGWindowLayer` **8** | `1129,509 260×192` |
+| `CoreServicesUIAgent` | 8 | `1063,443 260×192` |
+| `CoreServicesUIAgent` | 8 | `997,377 260×192` |
+| Folio's own window | **0** | `515,167 960×600` |
+
+The accent button stood at `1163,532`, which is inside **all three** of those —
+they cascade and therefore overlap — and the press went to the first. The card's
+own body, 80 points higher, is clear of the lowest of them and under the other
+two. Sixteen of these windows were on the desk, all `260×192`, cascading in steps
+of 66 points across the middle of the screen and then piling up against its
+trailing edge. **What they are was not established and does not have to be**:
+they belong to another process, they stand above every ordinary window, and they
+take the press. (`CoreServicesUIAgent` is the agent the system puts its own small
+windows up through, and this port has launched a throwaway bundle several dozen
+times; that is a plausible account of where sixteen of them came from and not a
+measurement.) Above them again, and over everything, the Dock's own full-screen
+window (layer 20) and the menu bar (24) — which stood over every press of this
+run, the ones that arrived included.
+
+**④ One window, one card, two presses — the controlled experiment.** macOS
+26.6.2, Apple M4, one 4K at backing scale 2, a debug bundle of this branch with a
+bundle identifier of its own and a `HOME` of its own under the worktree, driven by
+the pointer only. Every number is in points unless it says otherwise.
+
+**The card is the first-run one and not §13.34's restore prompt**, because a
+`HOME` with nothing in it is the cheaper way to get one of §2.7's cards centred
+on a fresh window — and it is the same question, one accent-filled primary drawn
+by Folio on the Metal layer in the middle of the surface, answered by a press or
+not at all.
+
+| # | what was done | what was measured |
+| --- | --- | --- |
+| 1 | launch on an empty data directory | one window at `515,167 960×600`, the first-run card up; its accent button at `1242,701..1353,759` in the window's own capture — `648.5,365` in the window's points, `1163.5,532` on the screen |
+| 2 | the pointer parked off the card, then standing on the button | the button reads `122,165,255`, then `132,175,255` — the hover lift, over that rectangle and nothing else (§13.34 measured the restore card's own pair, `122,153,255` → `131,164,255`) |
+| 3 | **press the button** | one `mouseMoved` with `window=none`; **no `LeftMouseDown` in the application**; no `mouse_input` line; the card still up |
+| 4 | press-and-drag the header's empty part at `1015,183` | `LeftMouseDown` at `500,584` in window coordinates → `WinitView` → `mouse_input … pointer=1000,32 route=none` → `press_title_bar` → twenty `LeftMouseDragged` → the window stands at **`40,430 960×600`**, the rectangle the hand asked for |
+| 5 | **press the same button again**, now at `688.5,795` with nothing over it but the Dock's own window | `LeftMouseDown` → `WinitView` → `mouse_input state=Pressed … pointer=1297,730`; the card is **answered** — no accent-filled run left in the window's capture, and `settings.json` on the disk |
+
+Steps 3 and 5 are the same button of the same card in the same process, a few
+seconds apart, pressed by the same three posted events. The only thing that
+changed between them is which patch of desk the button was standing on.
+
+**⑤ And the title bar never took a press.** The hierarchy, read inside the press
+rather than reasoned about:
+
+```
+frame_view      = NSKVONotifying_NSThemeFrame[0,0 960x600 flipped=false]
+frame_subviews  = [WinitView[0,0 960x600 flipped=true],
+                   NSTitlebarContainerView[0,568 960x32 flipped=false]]
+content         = WinitView[0,0 960x600 flipped=true]
+content_subviews= [FolioSurfaceView[0,0 960x600 flipped=false]]
+```
+
+`subviews` runs back to front, so `NSTitlebarContainerView` is the **frontmost**
+subview of the frame view and it stands over the whole 32-point band M3-3 and
+T-MAC-LIGHTS put Folio's header in. It would be entirely within AppKit's rights
+to claim that band, and if it did, the sidebar toggle, the tab strip, the gear
+and the drag rule of §13.20 would all be dead letters. **It does not.** At
+`500,584` — inside the container's own rectangle — the frame view's own
+`hitTest:` answers `WinitView`, and the press arrives at winit's `mouseDown:`
+like any other. `titlebarAppearsTransparent` is a fact about hit testing and not
+only about paint.
+
+So the door M3-3 already holds is the right one and there was nothing to open:
+the application decides inside the press whether that point is the band's empty
+part (`title_bar_drag_point`) and says so through `press_title_bar`, and AppKit
+has already handed it the press to decide with. **Nothing in the product moves
+for this ticket, on either platform.**
+
+**⑥ The instrument that missed it, named so that nobody writes it twice.** The
+z-order check that §13.34 ⑦(d) rests on read the on-screen list and dropped
+every row whose `kCGWindowLayer` was not zero:
+
+```swift
+let layer = w[kCGWindowLayer as String] as? Int ?? -1
+if layer != 0 { continue }
+```
+
+Every window that can stand over an ordinary window *without being an ordinary
+window* — a floating panel, a menu, a sheet of another process, an agent's alert
+— lives above layer 0. The filter removed the entire class of answers and left a
+list in which Folio's window was, truthfully and uselessly, first. Reading the
+list at every layer is not an extra check; it is the check.
+
+The second half of the instrument is the one this ticket had to write: **an
+`NSEvent` local monitor**, which is the only place from which "did the
+application receive this press at all" can be answered.
+`addLocalMonitorForEventsMatchingMask:handler:` sees every event `NSApp` is about
+to dispatch, before any window or view has had it, and reporting four things off
+each one settles the question in a single line — the event's type, its
+`window` (nil is the whole answer), whether the application is active, and what
+the frame view's own `hitTest:` claims that point for. `BT_MOUSE_TRACE`'s first
+station is `Runtime::mouse_input`, which is *after* winit has decided there is an
+event to hand over; an absent line there means only that nothing arrived, never
+that something was swallowed.
+
+**⑦ What is in the tree, and why it is three cases and not a fix.**
+`crates/bt-platform/tests/macos_pointer_route.rs` is a `harness = false` target
+for `macos_sheet`'s reason — AppKit is the main thread's and libtest does not
+hand a case that thread.
+
+* `the_transparent_title_bar_does_not_take_a_press_for_the_content_view` builds a
+  window shaped like Folio's — titled, `FullSizeContentView`, and a content view
+  that takes `mouseDown:` itself, which is what makes winit's answer `NO` to
+  `mouseDownCanMoveWindow` and what `press_title_bar`'s note is written against
+  — installs the real `CustomWindowFrame`, and then puts the band to the frame
+  view's own `hitTest:`. It asserts the claim is **not vacuous** first: that the
+  frontmost subview of the frame view really is the title bar's, and that its
+  rectangle really is as tall as the band this window wears. Then the three
+  traffic lights, at their own centres, must be claimed by something that is not
+  the content view; and every other point of the band, and everything below it,
+  must be the content view's. A later SDK that changes this is caught here
+  rather than by a reader whose header stopped answering.
+* `the_windows_own_drag_door_refuses_when_there_is_no_press_in_hand` holds the
+  other half of the same rule: `press_title_bar` reads `NSApp.currentEvent` and
+  refuses anything that is not a left mouse down, so a drag can only ever begin
+  inside a press the reader made, and a refused one leaves the window where it
+  was.
+* `a_press_that_never_arrived_is_named_by_what_stands_over_it_at_every_layer` is
+  arithmetic and runs on **every** platform, always — `stands_over` walks the
+  window server's own front-to-back order, stops at the window that wanted the
+  press, and answers every row ahead of it that covers the point. It is pinned
+  against the desk of 2026-09-13 above: the two occluded points answer the panels
+  that took them, the point after the move answers nothing, and the layer-0-only
+  reading is pinned too, as the mistake — it reports a clear desk over an
+  occluded press and makes the occluded window `z0`. **It fired before it was
+  trusted**, which is the only way a case like this earns its place: written with
+  one occluder expected where the desk had three, it went red and named them —
+  `left: [4852, 4459, 4425]`, `right: [4852]` — because the panels cascade in
+  steps of 66 and a `260×192` window therefore overlaps the two behind it.
+
+**The three on the venue machine**, `BT_MAC_GUI=1` against a real window, the
+same M4 and the same 4K at backing scale 2:
+
+```
+a_press_that_never_arrived_is_named_by_what_stands_over_it_at_every_layer: ok
+  — three points, and the layer-0 reading that missed two of them
+the_transparent_title_bar_does_not_take_a_press_for_the_content_view: ok
+  — band 32 pt over `NSTitlebarContainerView`, lights to 69 pt,
+    110 points walked and every one of them the content view's
+the_windows_own_drag_door_refuses_when_there_is_no_press_in_hand: ok
+  — a press on the window's own title bar: there is no event in hand to answer
+```
+
+The **32** and the **69** are §13.20 ⑦'s own numbers arrived at from the other
+end — that ticket read them off a capture of the pixels, and this one reads them
+off the window's views — and the 110 points are where a press would have gone if
+the pixels and the hit test had disagreed.
+
+**Nothing else changes, and one thing deliberately does not.** No `BT_…` name is
+added: the monitor of ⑥ is a diagnostic a reader writes in eight lines when they
+need it, and a permanent door in the product for a defect the product does not
+have would be surface bought with nothing. `Cargo.lock`,
+`THIRD-PARTY-NOTICES.md` and the crate's dependency features are untouched — the
+new target names no class this crate did not already name. **Windows is byte for
+byte what it was**, and not by a pin — no file under `crates/*/src/` is touched
+at all. The one new file is a test, the only `cfg` this ticket writes is in it,
+and what a Windows runner executes there is the arithmetic case.
+
+**⑧ The venue rule this leaves behind**, for the next ticket that drives Folio
+with a posted pointer:
+
+1. **Read the whole on-screen list, at every layer**, before believing anything
+   about a press — and after it, because a press that activated somebody else
+   rearranges the list.
+2. **A press that produced no `mouse_input` line is not a swallowed press** until
+   a local monitor has said the application received the event. Until then the
+   likelier reading is that it went to another window.
+3. **A window capture proves nothing about occlusion.**
+   `CGWindowListCreateImage` over a single window composites that window alone,
+   so every picture this port has taken of Folio is a picture of a Folio with
+   nothing in front of it, whatever is really there. That is why nothing in the
+   whole of this port had seen these panels.
+4. **Park the window on clear ground before driving it.** Sixteen floating
+   windows of another process were standing across the middle of this desk, and
+   the shape they cover is the shape a centred card is drawn in.
 
 *(本节英文,待中文文案改写。)*
