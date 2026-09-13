@@ -89,6 +89,22 @@ kept is `app-icon/` here.
 | `app-icon/make-ico.py`, `app-icon/make-candidates-board.py` | **own** | The two build scripts: one SVG to one `.ico`, and the five SVGs to the contact sheet. Both need Pillow and a Chromium-family browser at run time; neither vendors anything. |
 | `assets/app-icon/README.md`, `app-icon/README.md` | **own** | The shipped mark and how it reaches the binary; and the written brief for the round, the ruling that closed it, and what each candidate cost at 16 pixels. |
 
+### The macOS bundle's icon is the same drawing, resampled
+
+`Folio.app/Contents/Resources/Folio.icns` is **generated**, and it is not a
+second drawing: `scripts/release/macos/bundle.sh` builds it at bundle time from
+`assets/app-icon/folio.ico` with `sips` and `iconutil`, both of which are in
+`/usr/bin` on a stock Mac. It is not tracked, because it is a function of a file
+that is.
+
+Two consequences of the `.ico` container, recorded here rather than left to be
+rediscovered in the result: `sips` addresses only that file's **largest** entry,
+so the small slots of the icon set are resampled from the 256 rather than taken
+from the entries hand-drawn at 16, 20, 24, 32, 40, 48 and 64; and the source has
+no pixels above 256, so the three slots above it are left absent rather than
+filled with an upscale, and macOS scales the 256 for every reader instead. Both
+are the icon source's to fix, not the packaging's.
+
 ## Nothing here is undetermined
 
 Every tracked file was accounted for by reading it, by inspecting PNG chunks and

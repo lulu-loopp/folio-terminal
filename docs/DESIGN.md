@@ -10449,3 +10449,111 @@ FAILURES 0
 **agent 会话无法验证的是物理按键,理由是实测而非猜测。** `CGEventPost` 发送一个**键盘**事件是 macOS 门控在 Accessibility 授权后面的调用之一;被拒时它什么也不答,所以改读信任位——`AXIsProcessTrusted()`,这个永不弹窗的调用——结果是 `false`。请求那个授权恰好是本单的机制被选中就是为了避免的弹窗,所以验证拒绝请求并说明理由。**本条纠正的更早的读数是 X-3 的**,其注记说键是用 `CGEventPost` 从一个 Swift helper 发出的:那个 helper 跑在一个持有授权的进程下,§12 自己关于 `.app` 矩阵的注记也已记录往 session tap 里 post「在当前 macOS 上被辅助功能授权卡着」。两者吻合;只有第一句话对「谁的授权」含糊。
 
 **人应该按的:** `` ⌃` ``,前台是任何其他应用。快捷终端应该降下来盖在上面,再按一次应该把它收起来、把键盘放回原处。
+### 13.44 M5-6: 文档长出 mac 的那一半——一份文档两个平台,不是两份文档
+
+**This is 13.44 and not 13.40.** 13.40 to 13.43 were in flight while this ran;
+the numbers are taken in the order the tickets started, not in the order they
+land.
+
+**① The rule is one document, and the rule is what made every other decision
+here.** The plan's §4.7 says the documents get twins and not forks, and the
+temptation it forecloses is a `README-macos.md`. Two files would have been
+easier to write and each would have been right on the day it was written: what
+they cannot do is stay the same product. A reader of one never learns what the
+other says, a sentence fixed in one is wrong in the other for as long as nobody
+notices, and the count of documents that must agree goes from one to two for
+every claim the program makes. So `README.md`, `README.zh-CN.md`,
+`docs/BUILDING.md`, `docs/RELEASING.md` and `docs/PRIVACY.md` each grew a macOS
+half in place, and every Windows-only sentence that was standing unlabelled was
+labelled where it stood.
+
+**Labelled, and not deleted.** A sentence about the Explorer context menu, the
+PowerShell integration or the PSReadLine repair is still true, and still the
+answer for most readers. What it was missing was the word *Windows* and, beside
+it, either the macOS counterpart or the fact that there is none. The Download
+and First-run sections are the only two that split into named platform blocks;
+everywhere else the platform is a clause in the sentence it belongs to, because
+a heading for every difference would have turned a page a reader skims into a
+matrix they have to look themselves up in.
+
+**② What the documents could not be made to say.** Three claims were wanted and
+three were refused, and the refusals are the useful part of this section.
+
+- **The summoned terminal is not on a Mac, so the README says so.** `hotkey::register`'s
+  non-Windows arm answers *the global summon key is not on this platform yet*,
+  and §13.7's carry-forward is still open: the macOS way of grabbing a key
+  globally asks for the Accessibility permission and hands the grant back every
+  time the application is signed again. The README now heads that section
+  *Windows only so far* and says why, rather than describing a window a Mac
+  reader cannot summon.
+- **`Ctrl`+click still hands a path to the machine, on both platforms.** The
+  keyboard's application modifier became Command on a Mac in M1-7
+  (`input::is_command_chord`), but the pointer's did not: the two call sites
+  that decide whether a click hands a link over, and whether a wheel notch zooms
+  a page, both read `modifiers.control_key()` raw. So the README says `Ctrl` and
+  says *on both platforms*, which is the truth, rather than the tidier sentence
+  that would have been a documentation-shaped bug report. **Control-click is
+  also the secondary click on a Mac**, so this is a real collision and not only
+  an inconsistency; it wants a ticket, and it does not want a document that
+  pretends it was already fixed.
+- **The hero picture said "The Windows terminal that renders math".** A picture
+  is a sentence too. `assets/readme/hero-{light,dark}.svg` now read *The
+  terminal that renders math*, the eyebrow is `WINDOWS · macOS · TERMINAL`, and
+  the footnote carries both floors. This is the one asset change in the ticket,
+  and it is here because leaving it would have put a platform claim above the
+  paragraph that corrects it.
+
+**③ The shortcut table already had two columns; the gate over it had one
+opinion.** M1-7 grew `shortcuts_document` to walk `BINDINGS` on both named
+platforms, so `docs/shortcuts.md` has carried a `Windows` and a `macOS` column
+since. What `scripts/check-shortcuts-table.ps1` did was compare the file against
+whatever the renderer emits — which cannot, on its own, say that the renderer
+still emits two columns. A renderer that lost the macOS arm, followed by a
+`generate-shortcuts-table.ps1`, leaves a file that agrees with itself perfectly.
+So the gate grew a second half that reads the checked-in file on its own terms
+and refuses three things: a language section whose table is not five columns
+headed `Windows` and `macOS`, a surfaced row with an empty macOS cell, and a
+table whose two dialects are equal on every row — which is what a macOS column
+filled from the Windows one looks like. Only the lead paragraph of that document
+changed here, to name the settings directory on both machines.
+
+**④ Gestures are not keys, and they live where the gestures are described.**
+`docs/shortcuts.md` is the `BINDINGS` table and nothing else; `Alt`+wheel is not
+in `BINDINGS` and putting it there would have made the document a second opinion
+about what a binding is. It is stated where the picture of a card is, in both
+READMEs, as *Alt — Option on a Mac*. §13.33 is why it is worth stating at all:
+the gesture was dead on every Mac until that ticket separated the modifiers a
+hand is holding from the modifiers a platform says they mean.
+
+**⑤ The Chinese half is owed, and it is marked rather than guessed.** New and
+changed paragraphs in `README.zh-CN.md` and the Chinese half of
+`docs/PRIVACY.md` are in English with `<!-- zh pending opus46 -->` on the line
+before them, which is the same marker M4-3 left in that file. A translation
+written by the ticket that wrote the English would be a second draft of the
+English, in the wrong language; the copy pass is a pass, and it is somebody
+else's. Three places take a marker without English instead, because what has to
+change there is a word inside a sentence that is otherwise still right: the
+hero's alt text, the cards picture's alt text, and the Recycle Bin line.
+
+**⑥ Where this document stops and `packaging/macos/README.md` starts.**
+`docs/RELEASING.md` owns the release: who unlocks the key, which four secrets
+the lane reads, what is kept beside the artifact, and what the owner must see
+before the tag goes up. The file beside the scripts owns the flags and the exact
+output of each step, because that is the copy that cannot drift from the scripts
+it sits next to. This document names that one; the pointer the other way is
+M5-1's, whose ticket owns that file.
+
+**⑦ Provenance was two questions wearing one word.** The ticket asked for the
+signing chain in `PROVENANCE.md`, and there is no such file: `docs/design/PROVENANCE.md`
+is about where the design files came from, and §4.7's sentence about provenance
+entries is about test fixtures. So the two answers went to the two places they
+belong. The chain — what is signed on each platform, by what, and what is
+stapled — is a table at the head of `docs/RELEASING.md`'s signing section,
+because that is the document where each chain is operated. And
+`docs/design/PROVENANCE.md` gained the one provenance fact the port actually
+created: `Folio.icns` is **generated** at bundle time from
+`assets/app-icon/folio.ico`, is not a second drawing, and is not tracked —
+together with the two things the `.ico` container decides about it that are
+invisible in the result.
+
+*(本节英文,待中文文案改写。)*
