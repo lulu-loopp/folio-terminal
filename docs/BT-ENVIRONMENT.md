@@ -119,8 +119,11 @@ check above; their switches are documented where they are read.
 
 The macOS sheet probe (`crates/bt-platform/tests/macos_sheet.rs`) is outside the
 check for the same reason — the walk excludes `tests/` — and reads two of its
-own. `BT_MAC_GUI=1` is consent: without it that target prints one line and exits
-rather than opening real windows on somebody's desk. `BT_MAC_GUI_SHOT=<dir>`
+own. `BT_MAC_GUI` set to `1` is consent: without it that target prints one line and exits
+rather than opening real windows on somebody's desk. The same consent gates the two
+`bt-platform` handoff cases that put a Finder window or an editor on the desk
+(`crates/bt-platform/src/handoff.rs`): without it they print one line and pass.
+`BT_MAC_GUI_SHOT=<dir>`
 names a directory, and when it is set the probe writes each sheet's window number
 into it and then holds that sheet up for two and a half seconds, so that the
 session which started the probe can photograph it — the grant that lets a
