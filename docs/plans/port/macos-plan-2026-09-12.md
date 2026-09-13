@@ -620,6 +620,8 @@ acceptance.
 | **M5-3** | Build, sign, notarize and staple the DMG | M | Mac | M5-2 |
 | **M5-4** | `release.yml` macOS lane | M | check | M5-3 |
 | **M5-5** | `the_version_is_the_manifests_and_nothing_elses` grows the plist's two version fields | S | check | P-2 |
+
+> **Result 2026-09-13:** landed with P-2 (`6a14f3fb`, gate `the_plist_carries_the_workspace_version_twice_and_no_literal` in `version.rs`); the gate names the field it caught since `9bc01f9d`. The table's "check" column is a venue, not a status.
 | **M5-6** | `README` ×2, `docs/shortcuts.md`, `BUILDING`, `RELEASING`, `PROVENANCE` | M | check | M5-4, M3-2 |
 | **M6-1** | Clean-user acceptance of the downloaded artifact, including refusal paths and the offline ticket | M | Mac | M5-4 |
 | **M6-2** | Clean-machine coverage: a VM or snapshot, or the gap written down and accepted | S | Mac | M6-1, §8 Q11 |
