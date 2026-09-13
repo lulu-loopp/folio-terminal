@@ -2735,8 +2735,19 @@ mod tests {
             geometry.frame[3] - border,
             "a window that owes its reader a sentence is still shortening its document for it"
         );
-        // ② Over the body's bottom edge and inside it.
-        let pill = crate::seats::news_pill_box(geometry.body, SCALE).expect("a window this size");
+        // ② Over the body's bottom edge and inside it, as wide as what it says.
+        let showing = crate::notice::Notice::DiskChanged;
+        let widths: Vec<f32> = showing.verbs().iter().map(|_| 60.0).collect();
+        let content = crate::notice::pill_content_width(90.0, &widths, SCALE);
+        let pill =
+            crate::seats::news_pill_box(geometry.body, SCALE, content).expect("a window this size");
+        assert!(
+            pill[0] == (geometry.body[0] + 12.0 * SCALE).round()
+                && pill[2] < geometry.body[2] - 12.0 * SCALE,
+            "the window's pill is drawn across the body instead of hugging its \
+             sentence at the left: {pill:?} in {:?}",
+            geometry.body
+        );
         assert!(
             pill[1] > geometry.body[1] && pill[3] < geometry.body[3],
             "the pill stands outside the body it floats over: {pill:?} in {:?}",
@@ -2749,8 +2760,6 @@ mod tests {
         );
         // ③ The word inside it is where the shared layout put it — one
         // `notice::lay_out` for both hosts.
-        let showing = crate::notice::Notice::DiskChanged;
-        let widths: Vec<f32> = showing.verbs().iter().map(|_| 60.0).collect();
         let bar = crate::notice::lay_out(
             pill,
             crate::notice::NoticeSay::pill(showing.text(), showing.verbs()),

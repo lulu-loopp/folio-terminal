@@ -16941,31 +16941,56 @@ pub const NEWS_PILL_PAD_X_LOGICAL_PX: f32 = 10.0;
 /// a blur where the renderer has one; opaque enough to read where it has not.
 pub const NEWS_PILL_GROUND_ALPHA: f32 = 0.92;
 
-/// **Where one surface's news pill stands** — over the bottom edge of the body,
-/// inside it (owner's ruling 2026-09-12).
+/// **Where one surface's news pill stands** — at the left of the body's bottom
+/// edge, inside it, as wide as what it says and no wider (owner's ruling
+/// 2026-09-12, from the first Mac acceptance pass: the pill hugs its content and
+/// sits at the left of the body's bottom edge; it does not span the body).
 ///
-/// [`page_hover_tag_box`]'s neighbour and deliberately its shape: a bubble that
+/// [`page_hover_tag_box`]'s neighbour and now its shape entire: a bubble that
 /// costs the layout nothing, so that a message arriving and leaving moves no
-/// pixel of the document under it. It differs in spanning the body's width
-/// rather than hugging its words, because this one carries verbs at its right
-/// hand and a pill that grew and shrank around a sentence would move the button
-/// under the pointer.
+/// pixel of the document under it, and that hugs its words, so that a two-word
+/// confirmation is not a bar drawn across somebody's paragraph.
+///
+/// `content` is how much room the words need — [`crate::notice::pill_content_width`],
+/// which is [`crate::notice::lay_out`]'s own arithmetic measured against the
+/// caller's font, so the box this answers and the run laid out inside it are one
+/// measurement and not two. Add [`NEWS_PILL_PAD_X_LOGICAL_PX`] on each side and
+/// that is the width, **clamped to the body less its two insets**: a long
+/// `Changed on disk` sentence in a narrow pane stops at the inset and the prose
+/// gives way inside it exactly as it does in a narrow band (`notice::lay_out`
+/// drops the sentence before it drops a word, §7.43).
+///
+/// The full width this answered until now was never ruled: it was this door's
+/// first author reading the mock's `left: 12px; right: 12px` as a decision, and
+/// the reason written over it — that a pill growing around a sentence would move
+/// the button under the pointer — does not hold. A standing pill's sentence does
+/// not change. `Saved` and `Revealed` are two notices and not one changing its
+/// mind; each is up for two seconds and has no verb to press at all; and the one
+/// pill that does carry verbs carries the same two words for as long as it
+/// stands, because it stands until they are answered.
 ///
 /// `None` when the body has no room for it — half a pill is worse than none,
 /// which is the rule every control in a head follows.
 #[must_use]
-pub fn news_pill_box(body: [f32; 4], scale: f32) -> Option<[f32; 4]> {
+pub fn news_pill_box(body: [f32; 4], scale: f32, content: f32) -> Option<[f32; 4]> {
     let inset = (NEWS_PILL_INSET_X_LOGICAL_PX * scale).round();
     let lift = (NEWS_PILL_LIFT_LOGICAL_PX * scale).round();
     let height = (NEWS_PILL_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
     let pad = (NEWS_PILL_PAD_X_LOGICAL_PX * scale).round();
-    let left = body[0] + inset;
-    let right = body[2] - inset;
-    let bottom = body[3] - lift;
-    if right - left <= pad * 2.0 || bottom - height < body[1] {
+    // Snapped before the width is decided rather than after, because the width
+    // is what is measured against: an edge that moved half a pixel on the way
+    // out would take that half pixel off the run laid out inside it.
+    let left = (body[0] + inset).round();
+    let limit = (body[2] - inset).round();
+    let bottom = (body[3] - lift).round();
+    if limit - left <= pad * 2.0 || bottom - height < body[1] {
         return None;
     }
-    Some(pixel_snapped([left, bottom - height, right, bottom]))
+    // A whole number of pixels, and rounded **up**: the words are laid out in
+    // what is left after two paddings, and a box short by a third of a pixel is
+    // a box whose last word does not fit and is therefore not offered.
+    let width = (content.max(0.0).ceil() + pad * 2.0).min(limit - left);
+    Some(pixel_snapped([left, bottom - height, left + width, bottom]))
 }
 
 /// `.page-hover-tag { height: 20px }` — the floating status bubble a page raises
@@ -24418,9 +24443,13 @@ mod tests {
     fn news_floats_over_the_bottom_edge_and_does_not_move_the_body() {
         let rect = [100.0, 60.0, 900.0, 700.0];
         let body = preview_pane_geometry(rect, 1.0, Some(PreviewRailKind::Crumbs)).body;
-        let pill = news_pill_box(body, 1.0).expect("a pane this size holds a pill");
+        let pill = news_pill_box(body, 1.0, 40.0).expect("a pane this size holds a pill");
         assert_eq!(pill[0], body[0] + 12.0, "12px off the left edge");
-        assert_eq!(pill[2], body[2] - 12.0, "and 12px off the right");
+        assert!(
+            pill[2] < body[2] - 12.0,
+            "the pill runs to the body's right inset instead of stopping at its \
+             own words: {pill:?} in {body:?}"
+        );
         assert_eq!(
             pill[3],
             body[3] - 10.0,
@@ -24432,49 +24461,202 @@ mod tests {
             "the pill stands inside the body it floats over: {pill:?} in {body:?}"
         );
         // A body with no room for one says so rather than drawing half a pill,
-        // which is the rule every control in a head follows.
-        assert_eq!(news_pill_box([0.0, 0.0, 400.0, 20.0], 1.0), None);
-        assert_eq!(news_pill_box([0.0, 0.0, 8.0, 400.0], 1.0), None);
+        // which is the rule every control in a head follows. Room is asked of
+        // the *body* and not of the sentence: a pill with nowhere to stand is
+        // nothing, and a pill whose sentence is too long for the room is a pill
+        // with a shorter sentence in it.
+        assert_eq!(news_pill_box([0.0, 0.0, 400.0, 20.0], 1.0, 40.0), None);
+        assert_eq!(news_pill_box([0.0, 0.0, 8.0, 400.0], 1.0, 40.0), None);
     }
 
-    /// **The pill's width is the body's, at every scale and for every
-    /// sentence** (T-MAC-LIVE §13.33 ③, owner's report 2026-09-12 from the Mac:
-    /// "saving shows a popup").
+    /// RED — **the pill hugs its content and stands at the left of the body's
+    /// bottom edge** (owner's ruling 2026-09-12, first Mac acceptance pass;
+    /// §7.1.3x ②, §13.33 ③).
     ///
-    /// What that report saw is this rectangle, and it is the same rectangle on
-    /// both machines: the door takes a body and a scale and **nothing else** —
-    /// no string, no font, no measurement that could answer differently where a
-    /// different font list is installed. So `Saved` gets the width of a pane
-    /// rather than the width of the word, and the reason is written above the
-    /// door: this pill carries verbs at its right hand, and a box that grew and
-    /// shrank around a sentence would move the button under the pointer.
+    /// The owner photographed `Saved` after `⌘S` and read it as a popup, which
+    /// is what a two-word confirmation drawn across the whole width of a
+    /// document is. The first answer — that the box takes a body and a scale and
+    /// nothing else — was never the ruling: it was the mock's `left: 12px;
+    /// right: 12px` read as a decision, with a reason (a pill that grew around
+    /// its sentence would move the button under the pointer) that does not hold,
+    /// because a standing pill's sentence does not change. So the width is the
+    /// sentence's, and the only thing anchored is the left edge.
     ///
-    /// The scale is the part worth pinning, because scale 2 is where a mistake
-    /// would show first and the port's Mac runs at it: every number doubles and
-    /// the relation does not. One machine cannot photograph the other, so this
-    /// is how a Windows workstation holds what a Mac draws.
+    /// Four claims, the first two of them at scale 2 as well — the scale where a
+    /// unit mistake shows first, and the one the port's Mac runs at:
     ///
-    /// RED GATE: give the door a `text_width` and use it, the way
-    /// [`page_hover_tag_box`] legitimately does, and the second half goes red.
+    /// ① the left edge is the body's plus the inset, whatever is said;
+    /// ② the width is the content plus the pill's two paddings, so a long
+    ///    sentence is wider than a short one by exactly the difference between
+    ///    them, and neither reaches the body's right inset;
+    /// ③ verbs widen it by their own boxes and the gaps `notice::lay_out` puts
+    ///    around them — the same arithmetic, asked once;
+    /// ④ in a body too narrow to hold the sentence it stops at the inset and
+    ///    the prose gives way inside it, which is `lay_out`'s own rule for a
+    ///    narrow row.
+    ///
+    /// RED GATE: go back to `body[2] - inset` for the right edge and ①② stay
+    /// green while the rest go red; drop the `content` argument's two paddings
+    /// and ② goes red at both scales.
     #[test]
-    fn the_news_pill_takes_the_bodys_width_and_not_the_sentences() {
-        let body = [100.0, 60.0, 900.0, 700.0];
-        let one = news_pill_box(body, 1.0).expect("a pane this size holds a pill");
-        assert_eq!(one[2] - one[0], (body[2] - body[0]) - 24.0);
+    fn the_news_pill_hugs_its_content_and_stands_at_the_left() {
+        use crate::notice::{NoticeSay, NoticeVerb, lay_out, pill_content_width};
 
-        // The same body measured on a scale-2 machine: the insets, the lift and
-        // the line all double, and the pill still spans what is left of the body.
+        let body = [100.0, 60.0, 900.0, 700.0];
+        // `Saved`: one short word and nothing to press.
+        let short = pill_content_width(40.0, &[], 1.0);
+        let one = news_pill_box(body, 1.0, short).expect("a pane this size holds a pill");
+        assert_eq!(one[0], body[0] + 12.0, "① 12px off the body's left edge");
+        assert_eq!(
+            one[2] - one[0],
+            40.0 + 20.0,
+            "② the word and its two paddings"
+        );
+        assert!(
+            one[2] < body[2] - 12.0,
+            "② a two-word confirmation is drawn across the document: {one:?}"
+        );
+
+        // A longer sentence in the same body: wider by the difference and not by
+        // anything else.
+        let long = pill_content_width(300.0, &[], 1.0);
+        let wide = news_pill_box(body, 1.0, long).expect("a pane this size holds a pill");
+        assert_eq!(wide[0], one[0], "① the left edge is the one anchored edge");
+        assert_eq!(
+            wide[2] - one[2],
+            260.0,
+            "② the box grew by something other than the sentence did"
+        );
+
+        // The same two on a scale-2 machine, where the caller measures the same
+        // words against a doubled font: every number doubles and the relation
+        // does not.
         let doubled = [200.0, 120.0, 1800.0, 1400.0];
-        let two = news_pill_box(doubled, 2.0).expect("a pane this size holds a pill");
-        assert_eq!(two[0], doubled[0] + 24.0, "12 logical px, at scale 2");
-        assert_eq!(two[2], doubled[2] - 24.0, "and 12 logical px on the right");
+        let two = news_pill_box(doubled, 2.0, pill_content_width(80.0, &[], 2.0))
+            .expect("a pane this size holds a pill");
+        assert_eq!(two[0], doubled[0] + 24.0, "① 12 logical px, at scale 2");
         assert_eq!(two[3], doubled[3] - 20.0, "10 logical px off the floor");
         assert_eq!(two[3] - two[1], 56.0, "one 28 logical px line");
         assert_eq!(
             two[2] - two[0],
-            (doubled[2] - doubled[0]) - 48.0,
-            "the pill is as wide as the body it floats over, less its two insets \
-             — which is what `Saved` is drawn in, and why it reads as a bar"
+            80.0 + 40.0,
+            "② the word and its two 10 logical px paddings, at scale 2"
+        );
+
+        // ③ `Changed on disk · Keep my edits · Reload`: the verbs' own boxes and
+        // the gaps around them, measured by the one door that lays them out.
+        let verbs = &[NoticeVerb::KeepMyEdits, NoticeVerb::ReloadFromDisk];
+        let widths = [60.0, 60.0];
+        let asking = news_pill_box(body, 1.0, pill_content_width(90.0, &widths, 1.0))
+            .expect("a pane this size holds a pill");
+        assert_eq!(asking[0], one[0], "① even the pill with verbs starts here");
+        let bar = lay_out(
+            asking,
+            NoticeSay::pill("Changed on disk", verbs),
+            &widths,
+            1.0,
+        );
+        assert_eq!(
+            bar.verbs.len(),
+            verbs.len(),
+            "③ the pill was sized for two words and holds one: {:?}",
+            bar.verbs
+        );
+        assert_eq!(
+            bar.text[2] - bar.text[0],
+            90.0,
+            "③ the sentence was given more or less room than it was measured at"
+        );
+        // A longer sentence (90 against 40), two 60px words in their 7px
+        // paddings, and the three gaps `lay_out` leaves — one between the words
+        // and two between the run and the sentence.
+        assert_eq!(
+            (asking[2] - asking[0]) - (one[2] - one[0]),
+            (90.0 - 40.0) + 2.0 * (60.0 + 14.0) + 3.0 * 8.0,
+            "③ the verbs cost the pill something other than their own boxes"
+        );
+
+        // ④ The same sentence in a pane too narrow for it: the pill stops at the
+        // body's other inset and the prose is what gives way inside it.
+        let narrow = [0.0, 0.0, 200.0, 300.0];
+        let squeezed = news_pill_box(narrow, 1.0, pill_content_width(90.0, &widths, 1.0))
+            .expect("a body this size still holds a pill");
+        assert_eq!(squeezed[0], narrow[0] + 12.0);
+        assert_eq!(
+            squeezed[2],
+            narrow[2] - 12.0,
+            "④ a pill wider than the body it floats over"
+        );
+        let tight = lay_out(
+            squeezed,
+            NoticeSay::pill("Changed on disk", verbs),
+            &widths,
+            1.0,
+        );
+        assert!(
+            tight.text[2] - tight.text[0] < 90.0,
+            "④ the sentence kept its whole width in a pill that could not hold it"
+        );
+    }
+
+    /// RED — **a press lands on the pill it can see and on nothing beside it**
+    /// (owner's ruling 2026-09-12; §7.1.3x ②).
+    ///
+    /// The box you can press is the box you can see, which is why the pass that
+    /// draws the pill is the pass that writes the rectangle the press is tested
+    /// against. Now that the rectangle stops at the sentence, the stretch of
+    /// document to the right of it belongs to the document again: a pill that
+    /// hugged its words while `notice::hit` went on answering for the whole
+    /// width would be a strip of dead page under everyone's pointer.
+    ///
+    /// RED GATE: hit-test against the body's width rather than the pill's and
+    /// the last assertion goes red.
+    #[test]
+    fn a_press_beside_a_hugged_pill_reaches_the_document_under_it() {
+        use crate::notice::{
+            NoticeElement, NoticeSay, NoticeVerb, hit, lay_out, pill_content_width,
+        };
+
+        let body = [100.0, 60.0, 900.0, 700.0];
+        let verbs = &[NoticeVerb::KeepMyEdits, NoticeVerb::ReloadFromDisk];
+        let widths = [60.0, 60.0];
+        let pill = news_pill_box(body, 1.0, pill_content_width(90.0, &widths, 1.0))
+            .expect("a pane this size holds a pill");
+        let bar = lay_out(
+            pill,
+            NoticeSay::pill("Changed on disk", verbs),
+            &widths,
+            1.0,
+        );
+        let middle = (pill[1] + pill[3]) / 2.0;
+
+        let (verb, box_) = *bar
+            .verbs
+            .iter()
+            .find(|(verb, _)| *verb == NoticeVerb::ReloadFromDisk)
+            .expect("the disk's copy is on offer");
+        assert_eq!(
+            hit(&bar, (box_[0] + box_[2]) / 2.0, middle),
+            Some(NoticeElement::Verb(verb)),
+            "the word drawn on the pill cannot be pressed"
+        );
+        assert_eq!(
+            hit(&bar, pill[0] + 2.0, middle),
+            Some(NoticeElement::Body),
+            "the pill's own ground lets a press through onto the page under it"
+        );
+        // The stretch the full-width pill used to cover: inside the body's right
+        // inset, and well outside anything this one says. It belongs to the
+        // document, and a press there has to reach it.
+        assert!(
+            pill[2] < body[2] - 12.0,
+            "the pill still runs to the body's inset: {pill:?}"
+        );
+        assert_eq!(
+            hit(&bar, body[2] - 13.0, middle),
+            None,
+            "the page beside the pill is still being taken by it, so a press \
+             lands on a bubble that is not drawn there"
         );
     }
 
