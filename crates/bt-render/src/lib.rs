@@ -3280,6 +3280,8 @@ pub struct GpuContext {
     format: wgpu::TextureFormat,
     max_texture_dimension_2d: u32,
     font_system: FontSystem,
+    /// Changes when fonts or family mappings change; scopes measurement reuse.
+    font_environment_epoch: u64,
     swash_cache: SwashCache,
     /// Kept so a window — or a seat that appears mid-session (a split) — can
     /// mint its own viewport without rebuilding anything.
@@ -5483,6 +5485,7 @@ impl GpuContext {
             format,
             max_texture_dimension_2d,
             font_system,
+            font_environment_epoch: 1,
             swash_cache,
             glyphon_cache,
             atlas,
@@ -5552,6 +5555,10 @@ impl GpuContext {
         files: &[std::path::PathBuf],
         size_logical_px: f32,
     ) {
+        self.font_environment_epoch = self
+            .font_environment_epoch
+            .checked_add(1)
+            .expect("font epoch exhausted");
         for file in files {
             let _ = self.font_system.db_mut().load_font_file(file);
         }
@@ -5569,6 +5576,13 @@ impl GpuContext {
         };
         self.font_system.db_mut().set_monospace_family(family);
         self.terminal_font_size_logical_px = size_logical_px;
+    }
+
+    /// Identity of the font database, family mapping and fallback environment.
+    /// Any future locale/fallback mutation must advance this epoch too.
+    #[must_use]
+    pub fn font_environment_epoch(&self) -> u64 {
+        self.font_environment_epoch
     }
 
     /// The grid's face size in logical pixels, as last set.

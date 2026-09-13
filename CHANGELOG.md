@@ -15,6 +15,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- Reuse unchanged Markdown prose measurements across caret moves and edits, and reset block scroll offsets after reparsing.
+
 - **On a Mac, a pane started from the Dock or Finder can read what you type in
   your own language.** A shell started that way is handed no language setting at
   all by macOS, and one without it treats every byte as a character: `天下为公`
