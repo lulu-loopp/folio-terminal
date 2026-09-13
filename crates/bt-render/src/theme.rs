@@ -829,26 +829,6 @@ pub struct ChromePalette {
     pub caption_close_text: [u8; 3],
     /// The active horizontal tab, which joins the terminal surface.
     pub active_tab: [u8; 3],
-    /// **The floating pill's hairline** — `--pill-edge`, the ring around the
-    /// active tab on a window whose tabs do not join the pane
-    /// (`mock-mac-strict.html` section 1 variant B; owner ruling 2026-09-12).
-    ///
-    /// An attached tab needs no edge: it *is* the pane's surface, carried up
-    /// into the bar, and the join is the whole silhouette. A pill floats on the
-    /// strip, and on the light canvas its fill (`#FFFFFF`) and the strip under
-    /// it (`#F7F7F5`) are three levels apart — without a hairline the active
-    /// tab is a smudge rather than a shape.
-    ///
-    /// Kept as colour *and* alpha rather than pre-composited, which is
-    /// [`Self::menu_border`]'s reason said about a different surface: this ring
-    /// is drawn over the pill's own fill while it is still fading in
-    /// (`TAB_ACTIVATION`), so the ground under it is a mix rather than a known
-    /// colour, and the honest hairline is the one the renderer blends at draw
-    /// time.
-    pub tab_pill_edge: [u8; 3],
-    /// `--pill-edge`'s alpha, in 1/255ths: `.14` black on paper — the owner's
-    /// own number — and its counterpart on night.
-    pub tab_pill_edge_alpha: u8,
     /// The pane-head surface: exactly `--termbg`, not panel chrome.
     pub pane_head: [u8; 3],
     // ── the pane head's `×`, mixed over the one ground a pane head has ──
@@ -1654,11 +1634,6 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     caption_close_hover: [0xe5, 0x48, 0x4d],
     caption_close_text: [0xff, 0xff, 0xff],
     active_tab: [0x1b, 0x1b, 0x1b],
-    // `--pill-edge` on night: the canvas's own hairline shade (white), at .150
-    // — see `scheme::NIGHT::pill_edge` for where that number comes from.
-    // 255 × .150 = 38.25.
-    tab_pill_edge: [0xff, 0xff, 0xff],
-    tab_pill_edge_alpha: 38,
     pane_head: [0x1b, 0x1b, 0x1b],
     // `--ink3` (white .38) over `--termbg` #1B1B1B: 27 + 228×.38 = 113.6.
     pane_close_glyph: [0x72, 0x72, 0x72],
@@ -1931,9 +1906,6 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     caption_close_hover: [0xe5, 0x48, 0x4d],
     caption_close_text: [0xff, 0xff, 0xff],
     active_tab: [0xff, 0xff, 0xff],
-    // `--pill-edge` as the owner struck it: black at .14. 255 × .14 = 35.7.
-    tab_pill_edge: [0x00, 0x00, 0x00],
-    tab_pill_edge_alpha: 36,
     pane_head: [0xff, 0xff, 0xff],
     // `--ink3` (rgb(55,53,47) at .45) over `--termbg` #FFFFFF.
     pane_close_glyph: [0xa5, 0xa4, 0xa1],
@@ -2318,14 +2290,6 @@ pub const WINDOW_TAB_FLOAT_HEIGHT_LOGICAL_PX: f32 = 30.0;
 /// and is struck as air — twelve points after the band the platform's buttons
 /// occupy, which in the mock is 69 + 12 = 81.
 pub const WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX: f32 = 12.0;
-/// **The hairline around the active pill** (`box-shadow: 0 0 0 .5px
-/// var(--pill-edge)`, owner-specified).
-///
-/// Half a point, which is one device pixel at the backing scale this window is
-/// drawn at on the platform that has pills and rounds up to one at scale 1 —
-/// the thinnest line this rasterizer can strike, and the thinnest line the
-/// design asks for.
-pub const WINDOW_TAB_FLOAT_EDGE_LOGICAL_PX: f32 = 0.5;
 /// `--tabr`, shared by the active tab's two top corners *and* by the two
 /// outward skirt corners that join it to the content plane
 /// (`.tab.active::before/::after`).

@@ -88,6 +88,8 @@
 
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
+use bt_platform::HostPlatform;
+
 /// The language the window is drawn in — the *resolved* answer.
 ///
 /// Two variants and not a locale string, because the table has two columns. A
@@ -284,6 +286,45 @@ const fn pick(lang: Lang, english: &'static str, chinese: &'static str) -> &'sta
     match lang {
         Lang::English => english,
         Lang::Chinese => chinese,
+    }
+}
+
+/// **One arm of the table that names something only one platform has** (owner
+/// ruling 2026-09-12, §13.32 ②): four strings instead of two, and the
+/// platform picks the pair before the language picks the string.
+///
+/// The strings this exists for are the ones the owner found by opening the
+/// window on a Mac: `Reveal in Explorer` over a folder, a line about the
+/// taskbar, `folio.exe` in a sentence about starting the program again. Each of
+/// them is *correct* on Windows — they name programs and surfaces that machine
+/// really has — and each of them sends a Mac reader looking for something that
+/// is not there.
+///
+/// **One mechanism and not an `if` at the call site.** A window whose wording
+/// branched wherever somebody noticed would have as many answers to "which
+/// platform am I on" as it has sentences, and the ones nobody noticed would keep
+/// the Windows word forever. Here the branch is in the table, beside the words,
+/// where the completeness tests walk it: [`Text::on`] is asked for both columns
+/// and every assertion about the Chinese, the copy guide and the sentence
+/// lengths is made about both.
+///
+/// **`OtherUnix` reads the Mac column**, which is the same choice
+/// [`crate::profiles::home_variable`] already makes for the same reason: there
+/// is no third build and no third vocabulary, and of the two columns the one
+/// written for a machine with `$HOME`, no drive letters and no Explorer is the
+/// one that is less wrong there. Pinned by
+/// `the_platform_table_has_exactly_two_columns`, over [`Text::PLATFORM_COLUMNS`].
+const fn pick_platform(
+    lang: Lang,
+    platform: HostPlatform,
+    english_windows: &'static str,
+    chinese_windows: &'static str,
+    english_mac: &'static str,
+    chinese_mac: &'static str,
+) -> &'static str {
+    match platform {
+        HostPlatform::Windows => pick(lang, english_windows, chinese_windows),
+        HostPlatform::MacOs | HostPlatform::OtherUnix => pick(lang, english_mac, chinese_mac),
     }
 }
 
@@ -2522,10 +2563,21 @@ impl Text {
         self.in_lang(current())
     }
 
-    /// The words in a named language — the whole table, and the entry point for
-    /// every test that has to read both columns at once.
+    /// The words in a named language, **on the machine this process is running
+    /// on** — what every surface in the window reads.
+    ///
+    /// The platform is asked here, once, rather than at any of the call sites:
+    /// see [`pick_platform`] for why the handful of strings that differ differ
+    /// inside the table.
     #[must_use]
     pub fn in_lang(self, lang: Lang) -> &'static str {
+        self.on(lang, bt_platform::host_platform())
+    }
+
+    /// The whole table — a language and a platform, and the entry point for
+    /// every test that has to read more than one of its columns at once.
+    #[must_use]
+    pub fn on(self, lang: Lang, platform: HostPlatform) -> &'static str {
         match self {
             // ── window chrome ──────────────────────────────────────────────
             Self::Settings => pick(lang, "Settings", "设置"),
@@ -2797,10 +2849,19 @@ impl Text {
                 "This window stays above every other window.",
                 "窗口始终在其他窗口之上。",
             ),
-            Self::DescAcrylicUnavailable => pick(
+            // **Two different reasons, not one sentence with a name swapped**
+            // (§13.32 ②). On Windows the row is grey because an older build of
+            // that system has no backdrop to ask for. On a Mac the system has
+            // one and Folio does not draw it yet, and a line reading “this
+            // version of macOS does not offer the blur” would be this window
+            // blaming the machine for its own omission.
+            Self::DescAcrylicUnavailable => pick_platform(
                 lang,
+                platform,
                 "This version of Windows does not offer the blur.",
                 "这个版本的 Windows 不提供这种模糊。",
+                "Folio does not draw this blur on macOS.",
+                "Folio does not draw this blur on macOS.", // zh: pending opus46
             ),
             Self::DescBackgroundOpacityUnavailable => pick(
                 lang,
@@ -2962,10 +3023,13 @@ impl Text {
             // "File Explorer" is a Windows product and has a Chinese name of its
             // own; using the English one here would send the reader looking for
             // something their Start menu does not have.
-            Self::FilesRevealed => pick(
+            Self::FilesRevealed => pick_platform(
                 lang,
+                platform,
                 "Revealed in File Explorer",
                 "已在文件资源管理器中显示",
+                "Revealed in Finder",
+                "Revealed in Finder", // zh: pending opus46
             ),
 
             // ── the preview pane ───────────────────────────────────────────
@@ -3481,10 +3545,17 @@ impl Text {
                 "Ctrl+letter belongs to the shell",
                 "Ctrl+字母属于 shell",
             ),
-            Self::ShortcutHintGlobalNeedsModifier => pick(
+            // **The three keys are named, so they have to be the ones on the
+            // reader’s own keyboard** (§13.32 ②). `Win` is a keycap that does
+            // not exist on a Mac, and the two that do are spelled the way that
+            // platform spells them.
+            Self::ShortcutHintGlobalNeedsModifier => pick_platform(
                 lang,
+                platform,
                 "A desktop-wide key needs Ctrl, Alt or Win",
                 "全局快捷键需要 Ctrl、Alt 或 Win",
+                "A desktop-wide key needs Control, Option or Command",
+                "A desktop-wide key needs Control, Option or Command", // zh: pending opus46
             ),
 
             // ── the Git page ───────────────────────────────────────────────
@@ -3546,10 +3617,17 @@ impl Text {
                 "Git reading stopped. The terminal is unaffected",
                 "git 读取已停止，终端输入输出不受影响。",
             ),
-            Self::GitNotFound => pick(
+            // **The file that is missing and the thing that installs it are
+            // both platform facts** (§13.32 ②): the program is `git.exe` on one
+            // machine and `git` on the other, and what a reader installs to get
+            // it is a separate download there and the command line tools here.
+            Self::GitNotFound => pick_platform(
                 lang,
+                platform,
                 "git.exe was not found. Install Git for Windows to use this page",
                 "这台机器上找不到 git.exe —— 装上 Git for Windows 才能用这个页面",
+                "git was not found. Install the Xcode command line tools to use this page",
+                "git was not found. Install the Xcode command line tools to use this page", // zh: pending opus46
             ),
 
             // ── the commit graph ───────────────────────────────────────────
@@ -3642,7 +3720,19 @@ impl Text {
                 pick(lang, "Checkout as local branch", "检出为本地分支")
             }
             Self::GitMenuOpenDiff => pick(lang, "Open diff", "打开差异"),
-            Self::MenuRevealInExplorer => pick(lang, "Reveal in Explorer", "在资源管理器中显示"),
+            // **Finder off Windows** (§13.32 ②). `Explorer` is the name of a
+            // program on this machine and `Finder` is the name of the program on
+            // that one; a verb naming the wrong one sends the reader looking for
+            // something their machine has not got, which is the reason this
+            // entry already gives for keeping the Latin name at all.
+            Self::MenuRevealInExplorer => pick_platform(
+                lang,
+                platform,
+                "Reveal in Explorer",
+                "在资源管理器中显示",
+                "Reveal in Finder",
+                "Reveal in Finder", // zh: pending opus46
+            ),
             Self::GitMenuCopyHash => pick(lang, "Copy hash", "复制哈希"),
             Self::GitMenuCopySubject => pick(lang, "Copy subject", "复制标题"),
             Self::GitMenuCopyName => pick(lang, "Copy name", "复制名称"),
@@ -3788,11 +3878,15 @@ impl Text {
             // (2026-09-07 copy ruling; the pair is filed in `CHINESE_PENDING`).
             // A machine translation of a sentence about two keycaps is the kind
             // of line that reads as a product nobody proofread.
-            Self::RowOptionSendsAlt => pick(lang, "Option key sends Alt", "Option key sends Alt"),
+            Self::RowOptionSendsAlt => pick(
+                lang,
+                "Option key sends Alt",
+                "Option key sends Alt", // zh: pending opus46
+            ),
             Self::DescOptionSendsAlt => pick(
                 lang,
                 "Off, Option composes characters: ⌥a types å. On, it is the Alt a terminal means: ⌥a sends ESC a.",
-                "Off, Option composes characters: ⌥a types å. On, it is the Alt a terminal means: ⌥a sends ESC a.",
+                "Off, Option composes characters: ⌥a types å. On, it is the Alt a terminal means: ⌥a sends ESC a.", // zh: pending opus46
             ),
             // ── the tree row's menu, completed (user ruling 2026-08-25) ────
             //
@@ -3963,10 +4057,21 @@ impl Text {
             // for it by shortening「this window's」to「its」and「the window is
             // minimised」to「it is minimised」— the row's sentence has three
             // lines and no fourth (`no_settings_sentence_needs_a_fourth_line`).
-            Self::DescTurnEndNotifications => pick(
+            //
+            // **The Mac column names the Dock** (§13.32 ②). It is the same
+            // sentence about the same two routes to the desktop — the platform’s
+            // own way of calling a reader back to an application, then a
+            // notification when there is nothing to call them back to — and on
+            // that platform the first of the two is a Dock icon bouncing rather
+            // than a taskbar button flashing. What performs it is
+            // `bt_platform::flash_window`, whose macOS arm is M4-6.
+            Self::DescTurnEndNotifications => pick_platform(
                 lang,
+                platform,
                 "Flashes the taskbar when an agent finishes a turn and the window is out of sight, or sends a desktop message if it is minimised.",
                 "回合结束时同样提醒，即使 agent 并非在等待输入：窗口不在你看得见的地方时闪烁任务栏按钮；窗口最小化或任务栏自动隐藏时发送系统通知。关闭后仅在等待输入时提醒。",
+                "Bounces the Dock icon when an agent finishes a turn and the window is out of sight, or sends a desktop message if it is minimised.",
+                "Bounces the Dock icon when an agent finishes a turn and the window is out of sight, or sends a desktop message if it is minimised.", // zh: pending opus46
             ),
             Self::ToastTurnFinished => pick(lang, "Turn finished", "回合结束"),
             Self::ToastWaitingForYou => pick(lang, "Waiting for you", "正在等你回答"),
@@ -3975,10 +4080,13 @@ impl Text {
             }
             // What was lost, then what was not. No advice: there is nothing here
             // a reader can press, and the platform's own sentence follows.
-            Self::NotifyRefusedBody => pick(
+            Self::NotifyRefusedBody => pick_platform(
                 lang,
+                platform,
                 "Windows would not take it. Tab marks still work.",
                 "Windows 没有接收这条通知。窗内的记号不受影响。",
+                "macOS would not take it. Tab marks still work.",
+                "macOS would not take it. Tab marks still work.", // zh: pending opus46
             ),
             // ── the PowerShell integration notice ──────────────────────────
             // Two sentences and no third: what is missing, and what it is used
@@ -4285,20 +4393,31 @@ impl Text {
                 "That combination cannot be saved",
                 "这个组合键无法保存",
             ),
-            Self::ShortcutUndelivered => pick(
+            Self::ShortcutUndelivered => pick_platform(
                 lang,
+                platform,
                 "Windows keeps some combinations for itself. One that never reaches Folio cannot be recorded.",
                 "Windows 会自己截走一部分组合键；始终到不了框里的，这里录不到",
+                "macOS keeps some combinations for itself. One that never reaches Folio cannot be recorded.",
+                "macOS keeps some combinations for itself. One that never reaches Folio cannot be recorded.", // zh: pending opus46
             ),
             Self::HyperlinkControlOpensExternally => pick(
                 lang,
                 " · Ctrl+click opens in default app",
                 " · Ctrl+点击用默认程序打开",
             ),
-            Self::HyperlinkControlReveals => pick(
+            // **`Ctrl` on both, and only the program name moves** (§13.32 ②):
+            // the modifier this clause promises is the one the press actually
+            // reads (`window.modifiers.control_key()`), which is the same key on
+            // either keyboard. A clause that said ⌘ would be this window
+            // describing a press it does not answer.
+            Self::HyperlinkControlReveals => pick_platform(
                 lang,
+                platform,
                 " · Ctrl+click shows it in Explorer",
                 " · Ctrl+点击在资源管理器中显示",
+                " · Ctrl+click shows it in Finder",
+                " · Ctrl+click shows it in Finder", // zh: pending opus46
             ),
             Self::RowCopyOnSelect => pick(lang, "Copy on select", "选中即复制"),
 
@@ -4337,10 +4456,20 @@ impl Text {
                 "在网页预览的地址栏里输入的不是地址时，交给哪个搜索引擎去搜。",
             ),
             Self::RowLaunchOpens => pick(lang, "Opening Folio again", "再次启动 Folio"),
-            Self::DescLaunchOpens => pick(
+            // **Two sentences on Windows and one on a Mac** (§13.32 ②). The
+            // second sentence names the two launches this setting does *not*
+            // govern, and both of them are Windows shell extensions — the
+            // folder menu’s verb and the `.cmd` beside the executable. Neither
+            // has a counterpart on a Mac, so the sentence is dropped rather than
+            // translated into something that would have to be invented; a Mac
+            // reader is told the three ways they actually start this program.
+            Self::DescLaunchOpens => pick_platform(
                 lang,
+                platform,
                 "What starting Folio opens while one is already running — from the taskbar, a shortcut or folio.exe. Explorer's menu and folio-here.cmd always open a tab.",
                 "Folio 已在运行时，从任务栏、快捷方式或 folio.exe 启动会打开什么。资源管理器菜单和 folio-here.cmd 始终打开标签页。",
+                "What starting Folio opens while one is already running — from the Dock, from Spotlight, or from the Applications folder.",
+                "What starting Folio opens while one is already running — from the Dock, from Spotlight, or from the Applications folder.", // zh: pending opus46
             ),
             Self::OptionLaunchNewWindow => pick(lang, "A new window", "新窗口"),
             Self::OptionLaunchTabInLastWindow => pick(
@@ -4369,10 +4498,17 @@ impl Text {
                 "唤出它的按键已被另一个程序占用。",
             ),
             Self::RowQuakeHotkey => pick(lang, "Summon key", "唤出按键"),
-            Self::DescQuakeHotkey => pick(
+            // **The English is one sentence on both machines and the Chinese
+            // is not** (§13.32 ②): the Chinese says which system the key is
+            // registered with, which is a fact the English never carried, and
+            // that name is wrong off Windows.
+            Self::DescQuakeHotkey => pick_platform(
                 lang,
+                platform,
                 "Shows and hides the summoned terminal, from inside any other program.",
                 "唤出终端的快捷键。向 Windows 注册为全局快捷键，其他程序拿着焦点时也生效。",
+                "Shows and hides the summoned terminal, from inside any other program.",
+                "Shows and hides the summoned terminal, from inside any other program.", // zh: pending opus46
             ),
             Self::RowQuakeProfile => pick(lang, "Profile", "新标签页的配置"),
             Self::DescQuakeProfile => pick(
@@ -5117,6 +5253,24 @@ impl Text {
         Self::ShellIntegrationPending,
     ];
 
+    /// **The two columns of the platform table** — every string
+    /// [`pick_platform`] holds has exactly these two readings, and `OtherUnix`
+    /// is the second one.
+    ///
+    /// The tests walk this rather than all three [`HostPlatform`] values, so
+    /// that [`Self::CHINESE_PENDING`] can name a column instead of naming a
+    /// platform twice.
+    ///
+    /// **Down here and not beside `pick_platform`**, where it reads better, for
+    /// a reason worth knowing before moving it back:
+    /// [`no_profile_title_has_been_pulled_into_the_language_table`] reads this
+    /// file's own source as far as the *first* `#[cfg(test)]`, so a test-only
+    /// item written above the table moves that cut. (The cut is already in the
+    /// wrong place — see that test's own note — and this constant is not going
+    /// to be what moves it further.)
+    #[cfg(test)]
+    const PLATFORM_COLUMNS: [HostPlatform; 2] = [HostPlatform::Windows, HostPlatform::MacOs];
+
     /// The entries whose two columns are allowed to be the same string.
     ///
     /// Listed by hand, one line per reason, which is what the two pins below
@@ -5158,18 +5312,100 @@ impl Text {
     /// **It has to empty before a release**, and what enforces that is that it is short enough to
     /// read and named for exactly what it is. `docs/DESIGN.md` §7.59 names the ruling that
     /// created it.
+    ///
+    /// **An entry is a pair, because the debt is owed on one column of one
+    /// platform** (§13.32 ②). `Reveal in Explorer` has had its Chinese since the
+    /// file tree was written and `Reveal in Finder` has not; a list that named
+    /// the *entry* would take the Windows half out of every completeness check
+    /// to excuse the Mac half, which is how a translated sentence quietly stops
+    /// being checked. The source marker beside each of these is `// zh: pending
+    /// opus46` on the literal itself — grep is how the copywriter finds them,
+    /// and this list is how the build refuses to forget them.
+    /// **The entries no Mac ever draws** — the exemption list of
+    /// `no_string_a_mac_reader_meets_names_a_windows_program` (§13.32 ②).
+    ///
+    /// Each of these belongs to a surface that does not exist off Windows, so
+    /// its wording is byte for byte what it was and naming Explorer, PSReadLine
+    /// or a `.msix` in it is the entry being *correct*. The list is by hand and
+    /// grouped by surface, for [`Self::UNTRANSLATED`]'s reason: an entry that
+    /// slips onto it silently is an English sentence in a Chinese window, and an
+    /// entry that slips onto *this* one is a Windows word on a Mac screen.
+    ///
+    /// **Coming off it is the event this list exists for.** The day one of these
+    /// surfaces grows a macOS arm — a Finder extension, a `zsh` integration
+    /// offer, a repair for something else — the entry leaves this list and the
+    /// gate starts asking about it, which is how the wording gets looked at
+    /// before the feature ships rather than after somebody opens the window.
     #[cfg(test)]
-    const CHINESE_PENDING: [Self; 2] = [
-        // zh: pending — the two refusals a picture file raises on its own size,
-        // and the word that joins a reduced picture's two sizes (owner's ruling
-        // 2026-09-12).
-        //
+    const WINDOWS_ONLY_SURFACES: &'static [Self] = &[
+        // — the Settings row that registers a verb in Explorer's folder menu,
+        //   which `settings::visible_rows_for` does not offer off Windows
+        Self::RowContextMenu,
+        Self::DescExplorerMenu,
+        Self::DescExplorerMenuNoFirstPage,
+        Self::DescExplorerMenuNoPackage,
+        Self::DescExplorerFirstPageUnreadable,
+        Self::DescExplorerFirstPageAwaitingShell,
+        // — and the toasts that row's press raises
+        Self::ContextMenuAddedToast,
+        Self::ContextMenuRemovedToast,
+        Self::ContextMenuNoExecutable,
+        Self::ExplorerFirstPageAddedToast,
+        Self::ExplorerFirstPageAddedRestartToast,
+        Self::ExplorerFirstPageUnreadable,
+        Self::ExplorerFirstPageNoPackage,
+        // — the PSReadLine repair: one edition of one shell, and a module
+        //   written under that account's `Documents`
+        Self::RowPsReadLine,
+        Self::PsReadLineProbing,
+        Self::PsReadLineRemovedToast,
+        // — the `$PROFILE` integration: the row, the strip a pane raises, and
+        //   the line an outstanding first-run intent leaves on the row. The
+        //   strip cannot rise off Windows at all — `shell_integration`'s profile
+        //   probe answers `None` there — and the row is not on the page.
+        Self::RowPowerShellOffer,
+        Self::DescPowerShellOffer,
+        Self::PowerShellNoticeBody,
+        Self::ShellIntegrationPending,
+        // — the Profiles page's integration value for a PowerShell profile.
+        //   M1-5 seeds a Mac `bash` and `zsh` and no edition of PowerShell, so
+        //   the value is never read into a row there.
+        Self::ProfilesIntegrationPowerShell,
+        // — two first-run rows whose capabilities `first_run::rows_for` answers
+        //   `false` for off Windows (M3-6): a Mac's card has one row, and it is
+        //   the update check.
+        Self::FirstRunRowPowerShell,
+        Self::FirstRunTipExplorer,
+    ];
+
+    #[cfg(test)]
+    const CHINESE_PENDING: [(Self, HostPlatform); 15] = [
         // zh: pending — the General page's macOS row and its sentence (M1-7,
-        // 2026-09-12). English both, because the row is about a key on a
-        // keyboard this product does not ship to yet and the copy ruling of
-        // 2026-09-07 says who writes the Chinese.
-        Self::RowOptionSendsAlt,
-        Self::DescOptionSendsAlt,
+        // 2026-09-12). English in both columns of both platforms, because the
+        // row is about a key on a keyboard and the copy ruling of 2026-09-07
+        // says who writes the Chinese. Listed on Windows too because the table
+        // answers for a platform that never shows the row.
+        (Self::RowOptionSendsAlt, HostPlatform::Windows),
+        (Self::RowOptionSendsAlt, HostPlatform::MacOs),
+        (Self::DescOptionSendsAlt, HostPlatform::Windows),
+        (Self::DescOptionSendsAlt, HostPlatform::MacOs),
+        // zh: pending — the eleven Mac columns this port's first acceptance pass
+        // produced (owner ruling 2026-09-12, §13.32 ②). Every one of them has a
+        // written, checked Chinese sentence on the Windows column beside it;
+        // what is owed is the same sentence about Finder, the Dock, a Mac
+        // keyboard's three modifier keys, and the two ways this product is not
+        // installed the way it is on Windows.
+        (Self::MenuRevealInExplorer, HostPlatform::MacOs),
+        (Self::FilesRevealed, HostPlatform::MacOs),
+        (Self::HyperlinkControlReveals, HostPlatform::MacOs),
+        (Self::DescLaunchOpens, HostPlatform::MacOs),
+        (Self::DescTurnEndNotifications, HostPlatform::MacOs),
+        (Self::NotifyRefusedBody, HostPlatform::MacOs),
+        (Self::ShortcutUndelivered, HostPlatform::MacOs),
+        (Self::ShortcutHintGlobalNeedsModifier, HostPlatform::MacOs),
+        (Self::GitNotFound, HostPlatform::MacOs),
+        (Self::DescAcrylicUnavailable, HostPlatform::MacOs),
+        (Self::DescQuakeHotkey, HostPlatform::MacOs),
     ];
 }
 
@@ -7729,28 +7965,39 @@ mod tests {
         }
     }
 
-    /// PIN — the two columns are actually two.
+    /// PIN — the two columns are actually two, **on both platforms**.
     ///
     /// A `pick(lang, "Saved", "Saved")` compiles, passes the test above and
     /// leaves an English word standing in a Chinese dialog. The exceptions are
     /// listed by hand and each one has a reason: a technical token, a quantity,
     /// or a Windows product name that is the same word in both.
+    ///
+    /// **Both platform columns since §13.32 ②.** A [`pick_platform`] entry has
+    /// four strings, and before this walked the platform axis the Mac half of
+    /// every one of them was unchecked — which is the state the eleven entries
+    /// this ruling added would have shipped in.
     #[test]
     fn no_entry_ships_the_english_word_as_its_own_translation() {
         for entry in Text::ALL {
-            if Text::UNTRANSLATED.contains(&entry) || Text::CHINESE_PENDING.contains(&entry) {
+            if Text::UNTRANSLATED.contains(&entry) {
                 continue;
             }
-            let english = entry.in_lang(Lang::English);
-            let chinese = entry.in_lang(Lang::Chinese);
-            assert_ne!(
-                english, chinese,
-                "{entry:?} was never translated — it says {english:?} in both columns"
-            );
+            for platform in Text::PLATFORM_COLUMNS {
+                if Text::CHINESE_PENDING.contains(&(entry, platform)) {
+                    continue;
+                }
+                let english = entry.on(Lang::English, platform);
+                let chinese = entry.on(Lang::Chinese, platform);
+                assert_ne!(
+                    english, chinese,
+                    "{entry:?} was never translated on {platform:?} — it says \
+                     {english:?} in both columns"
+                );
+            }
         }
     }
 
-    /// PIN — every Chinese entry actually contains Chinese.
+    /// PIN — every Chinese entry actually contains Chinese, on both platforms.
     ///
     /// The failure this catches is the half-translation: a sentence whose
     /// technical tokens were kept and whose words were forgotten still differs
@@ -7758,17 +8005,100 @@ mod tests {
     #[test]
     fn every_chinese_entry_carries_at_least_one_han_character() {
         for entry in Text::ALL {
-            if Text::UNTRANSLATED.contains(&entry) || Text::CHINESE_PENDING.contains(&entry) {
+            if Text::UNTRANSLATED.contains(&entry) {
                 continue;
             }
-            let chinese = entry.in_lang(Lang::Chinese);
-            assert!(
-                chinese
-                    .chars()
-                    .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
-                "{entry:?} reads {chinese:?}, which has no Chinese in it"
-            );
+            for platform in Text::PLATFORM_COLUMNS {
+                if Text::CHINESE_PENDING.contains(&(entry, platform)) {
+                    continue;
+                }
+                let chinese = entry.on(Lang::Chinese, platform);
+                assert!(
+                    chinese
+                        .chars()
+                        .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+                    "{entry:?} reads {chinese:?} on {platform:?}, which has no Chinese in it"
+                );
+            }
         }
+    }
+
+    /// PIN — **the platform table has exactly two columns, and `OtherUnix`
+    /// reads the second one** (§13.32 ②).
+    ///
+    /// Everything else in this module walks [`Text::PLATFORM_COLUMNS`], which is two
+    /// values where [`HostPlatform`] has three. That is only sound while the
+    /// third answers what the second does, and this is what says so — add a
+    /// `HostPlatform::OtherUnix => …` arm to any [`pick_platform`] call and the
+    /// rest of the file stops covering it, silently, unless this is here.
+    #[test]
+    fn the_platform_table_has_exactly_two_columns() {
+        for entry in Text::ALL {
+            for lang in Lang::ALL {
+                assert_eq!(
+                    entry.on(lang, HostPlatform::OtherUnix),
+                    entry.on(lang, HostPlatform::MacOs),
+                    "{entry:?} in {lang:?} has a third reading on a Unix that is not a Mac"
+                );
+            }
+        }
+    }
+
+    /// RED — **no string a Mac reader can meet names a Windows program, file
+    /// or surface** (owner report and ruling 2026-09-12, §13.32 ②).
+    ///
+    /// The owner opened the built Mac and read `Explorer context menu`,
+    /// `PSReadLine 补丁` and a sentence about the taskbar and `folio.exe`. Two
+    /// different repairs came out of that — rows that are not offered at all
+    /// ([`crate::settings::visible_rows_for`]) and words that differ by platform
+    /// — and this is the half that can be walked: every entry in the table, in
+    /// both languages, read on the Mac column, against the vocabulary of the
+    /// other machine.
+    ///
+    /// **The exemption list is the other half of the claim.** An entry on it is
+    /// one no Mac ever draws, because the surface it belongs to does not exist
+    /// there: Explorer's own menu, the registration toasts behind a row that is
+    /// not on the page, the PSReadLine repair, the `$PROFILE` offer whose probe
+    /// answers `None` off Windows, the first-run rows that card never lists. Its
+    /// Windows wording is therefore byte for byte what it was, which is this
+    /// ruling's other half. A string that leaves one of those surfaces and lands
+    /// somewhere a Mac reader can see it has to come off this list, and taking
+    /// it off is what makes this test ask about it.
+    ///
+    /// MUTATION: put `Explorer` back into any of the eleven entries §13.32 ②
+    /// moved, or take one name off the exemption list, and this names it.
+    #[test]
+    fn no_string_a_mac_reader_meets_names_a_windows_program() {
+        const WINDOWS_WORDS: [&str; 10] = [
+            "Explorer",
+            "资源管理器",
+            "taskbar",
+            "任务栏",
+            "folio.exe",
+            "folio-here",
+            ".msix",
+            "PSReadLine",
+            "PowerShell",
+            "Windows",
+        ];
+        let mut wrong: Vec<String> = Vec::new();
+        for entry in Text::ALL {
+            if Text::WINDOWS_ONLY_SURFACES.contains(&entry) {
+                continue;
+            }
+            for lang in Lang::ALL {
+                let said = entry.on(lang, HostPlatform::MacOs);
+                for word in WINDOWS_WORDS {
+                    if said.contains(word) {
+                        wrong.push(format!("{entry:?} ({lang:?}) says {word:?}: {said:?}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "these strings reach a Mac reader and name the other machine: {wrong:#?}"
+        );
     }
 
     /// PIN (user report 2026-08-18) — **a refused background picture names the
@@ -8123,6 +8453,20 @@ mod tests {
     /// itself.
     /// It reads only the half above `mod tests`, because the needles it is
     /// hunting for have to be written out down here to be hunted for.
+    ///
+    /// **The cut does not land where that sentence says, and this gate is
+    /// therefore reading almost nothing** — found by T-MAC-FIT while moving a
+    /// test-only constant around this file, and left for its own ticket
+    /// (§13.32 ⑤). The split is on the first `#[cfg(test)]`, which is
+    /// `Lang::ALL`'s, inside the first `impl` of the file, so the scanned half
+    /// is the module header and none of the table. Widening it to the real half
+    /// is a two-line change and it goes **red** on two strings that are
+    /// arguably fine: `ProfilesIntegrationCmd` says `"Command Prompt"` as the
+    /// name of an *integration* rather than as a profile title, and a `CliText`
+    /// fixture spells `"WSL"` as a sample value. Whether the needles or those
+    /// two strings are the wrong ones is a ruling about this gate's own
+    /// subject, which a port ticket is not entitled to take — so what changed
+    /// here is that this comment now says what the code does.
     #[test]
     fn no_profile_title_has_been_pulled_into_the_language_table() {
         let source = include_str!("i18n.rs")

@@ -44,6 +44,7 @@ use bt_render::{
 };
 
 use crate::explorer_menu::ExplorerPlace;
+use crate::first_run::Capability;
 use crate::i18n::Text;
 use crate::marks::{ChromeMark, ChromeSprite, MarkColour, OverlayLayer};
 use crate::profiles::{self, Integration, IntegrationChoice};
@@ -3021,6 +3022,40 @@ impl SettingsRow {
         )
     }
 
+    /// **What this row needs of the operating system before it is a row at all**
+    /// (owner ruling 2026-09-12, §13.32 ①; `first_run`'s M3-6 pattern).
+    ///
+    /// `None` is the ordinary answer and it means what it says: the row is about
+    /// Folio, or about a file, or about a shell that exists everywhere, and it
+    /// is on every machine's page. The four that answer `Some` are about a
+    /// mechanism one platform has and another has not — Explorer's folder menu,
+    /// the `$PROFILE` of a shell with no other door, the readline module that
+    /// one edition of PowerShell ships, and a key called Option.
+    ///
+    /// **The same [`Capability`] the first-run card reads, and deliberately so.**
+    /// Two of these four are mechanisms that card already asks about, and a
+    /// second table would be a second place to remember which platforms have
+    /// them. The other two joined the table for this page and the card has no
+    /// row for either. What each surface owns is what it *does* with the
+    /// answer: the card drops the question, and this page drops the row.
+    ///
+    /// **A row the machine cannot honour is a different thing and is not here.**
+    /// `Acrylic` on a machine with no backdrop and a built-in profile's colour
+    /// are *greyed with a reason*, because the reason is what the reader came
+    /// for ([`Self::available`]); a facility the platform has not got leaves
+    /// nothing to explain, and a sentence explaining it would be this page
+    /// teaching a reader a Windows word on a Mac.
+    #[must_use]
+    pub const fn needs(self) -> Option<Capability> {
+        match self {
+            Self::ContextMenu => Some(Capability::ExplorerMenu),
+            Self::PowerShellOffer => Some(Capability::PowerShellProfile),
+            Self::PsReadLine => Some(Capability::PsReadLineModule),
+            Self::OptionSendsAlt => Some(Capability::OptionKey),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub fn title(self) -> &'static str {
         match self {
@@ -4278,8 +4313,48 @@ impl SettingsRow {
 /// decides is how much its `On` buys — said in the row's own line rather than by
 /// an absence, so a reader who went looking for the first page meets a sentence
 /// instead of a row that is not there.
+///
+/// **It does vary with the platform, and that is a different sentence**
+/// ([`visible_rows_for`], owner ruling 2026-09-12): a machine that cannot honour
+/// a row still knows what the row is about, and a platform that has not got the
+/// mechanism has nothing for the sentence to be about.
 #[must_use]
 pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
+    visible_rows_for(bt_platform::host_platform(), tab_layout)
+}
+
+/// The same list, asked of a named platform.
+///
+/// **Platform as a value and not as a `cfg`**, which is `first_run::rows_for`'s
+/// own arrangement one surface along (M3-6) and the rule this file is already
+/// under: a Windows workstation has to be able to read out what a Mac's General
+/// page contains, or "a Mac is not offered a PSReadLine row" is a claim nobody
+/// can check until somebody opens the window on a Mac — which is exactly how
+/// this ticket's three rows got onto that page.
+///
+/// The filter is one line at the end rather than a condition at each push,
+/// because the order of this list is a ruling in its own right (every comment
+/// below is part of it) and a row that came and went inside the run would make
+/// the order impossible to read. [`SettingsRow::needs`] is where each row says
+/// what it is about; this is where the page acts on it.
+///
+/// **Nothing here can empty a page.** Every category the four conditional rows
+/// belong to keeps unconditional rows under the same heading — General keeps
+/// six, Terminal keeps four — so the heading derivation that walks this list
+/// never meets a run of nothing, and the disclosure above the advanced group is
+/// untouched. `no_page_is_left_with_a_heading_and_no_rows` is that claim.
+#[must_use]
+pub fn visible_rows_for(
+    platform: bt_platform::HostPlatform,
+    tab_layout: TabLayoutMode,
+) -> Vec<SettingsRow> {
+    let mut rows = every_row_of_the_dialog(tab_layout);
+    rows.retain(|row| row.needs().is_none_or(|needed| needed.on(platform)));
+    rows
+}
+
+/// The order, with no platform question asked of it.
+fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // ── Appearance, everyday ──
     //
     // The order is the user's own (2026-08-17), and it is the order of a
@@ -4369,14 +4444,11 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // my hand do", and the rows after them are about what this product does with
     // the machine.
     //
-    // `host_platform()` and not `cfg!`, which is the rule this whole file is
-    // already under (`only_the_named_files_decide_what_platform_this_is` keeps
-    // `settings.rs` on its list for exactly these questions): a row that decided
-    // for itself what platform it was on would be a row a Windows agent could
-    // not read out loud.
-    if bt_platform::host_platform() == bt_platform::HostPlatform::MacOs {
-        rows.push(SettingsRow::OptionSendsAlt);
-    }
+    // Pushed unconditionally and dropped by `visible_rows_for`'s one filter
+    // (§13.32 ①): the `if bt_platform::host_platform() == …` that stood here was
+    // the same question this page now asks of four rows, and one rule with one
+    // exception in it is a rule somebody will read past.
+    rows.push(SettingsRow::OptionSendsAlt);
     rows.push(SettingsRow::GitPanel);
     // Above `Default profile` and below `Git panel`, which keeps the last two
     // rows of this page where every keyboard walk in this file already expects
@@ -14816,6 +14888,69 @@ mod tests {
         }
     }
 
+    /// RED — **the same cap, held over the sentences a Mac reads** (§13.32
+    /// ②).
+    ///
+    /// The walk above measures what `description` returns, and `description`
+    /// reads the platform this process is running on — so a Mac column added to
+    /// [`Text`] is a sentence no length gate has ever seen. Three of the five
+    /// measured here are *longer* than the Windows sentence they replace
+    /// (`Bounces the Dock icon` against `Flashes the taskbar`), which is exactly
+    /// the shape of a fault that ships: correct words, one line too many, on a
+    /// screen nobody on this side of the port opens.
+    ///
+    /// Not a sweep, because there is no map from a row to its `Text` and the
+    /// Chinese gate below pays for guessing one. These are the rows whose
+    /// sentence has a Mac column, named; a sixth is a line added here.
+    ///
+    /// MUTATION: lengthen any of the five Mac sentences past its column and this
+    /// names the row.
+    #[test]
+    fn no_sentence_a_mac_reads_needs_a_fourth_line() {
+        use crate::i18n::{Lang, Text};
+        use bt_platform::HostPlatform::MacOs;
+
+        const ON_A_MAC: [(SettingsRow, Text); 5] = [
+            (SettingsRow::LaunchOpens, Text::DescLaunchOpens),
+            (
+                SettingsRow::TurnEndNotifications,
+                Text::DescTurnEndNotifications,
+            ),
+            (SettingsRow::Acrylic, Text::DescAcrylicUnavailable),
+            (SettingsRow::QuakeHotkey, Text::DescQuakeHotkey),
+            (SettingsRow::OptionSendsAlt, Text::DescOptionSendsAlt),
+        ];
+        let metrics = StackMetrics::new(1.0);
+        let span = metrics.row_span(dialog_width());
+        let button = COMBO_MIN_WIDTH_LOGICAL_PX;
+        let mut over: Vec<(SettingsRow, usize)> = Vec::new();
+        for (row, entry) in ON_A_MAC {
+            for lang in Lang::ALL {
+                let sentence = entry.on(lang, MacOs);
+                let lines = wrapped_description(
+                    sentence,
+                    metrics.desc_width(row, span, button),
+                    ROW_DESC_FONT_LOGICAL_PX,
+                    &mut measure,
+                );
+                assert!(
+                    lines.len() <= ROW_DESC_MAX_LINES,
+                    "{row:?} in {lang:?} on a Mac: the cap is \
+                     {ROW_DESC_MAX_LINES} and the wrap returned {}",
+                    lines.len()
+                );
+                if lines.last().is_some_and(|last| last.ends_with(ELLIPSIS)) {
+                    over.push((row, sentence.chars().count()));
+                }
+            }
+        }
+        assert!(
+            over.is_empty(),
+            "these Mac sentences do not fit three lines, which is copy to \
+             shorten rather than a rule to change: {over:?}"
+        );
+    }
+
     /// PIN (user ruling 2026-08-29) — **the same cap, held over the Chinese
     /// column.**
     ///
@@ -19410,7 +19545,13 @@ mod tests {
     /// red; return `true` for every page and the loop does.
     #[test]
     fn showing_the_page_the_probe_answers_on_is_what_starts_the_probe() {
-        let rows = visible_rows(TabLayoutMode::Horizontal);
+        // **The Windows page, named** (§13.32 ①): this claim is about rows a
+        // Mac is no longer offered, so it asks for the list by platform rather
+        // than for whatever list the runner happens to have.
+        let rows = visible_rows_for(
+            bt_platform::HostPlatform::Windows,
+            TabLayoutMode::Horizontal,
+        );
         let lines = shortcut_lines();
         let content = content(&rows, &lines);
         assert!(
@@ -20230,11 +20371,17 @@ mod tests {
             !SettingsRow::Scrollback.advanced(),
             "the Terminal page has no Advanced group and this row does not open one"
         );
+        // **The Windows page, named** (§13.32 ①): this claim is about rows a
+        // Mac is no longer offered, so it asks for the list by platform rather
+        // than for whatever list the runner happens to have.
         assert_eq!(
-            visible_rows(TabLayoutMode::Horizontal)
-                .into_iter()
-                .filter(|row| row.category() == SettingsCategory::Terminal)
-                .collect::<Vec<_>>(),
+            visible_rows_for(
+                bt_platform::HostPlatform::Windows,
+                TabLayoutMode::Horizontal
+            )
+            .into_iter()
+            .filter(|row| row.category() == SettingsCategory::Terminal)
+            .collect::<Vec<_>>(),
             vec![
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
@@ -20316,10 +20463,16 @@ mod tests {
     /// move it past `Notifications` and the adjacency assertion goes with it.
     #[test]
     fn the_line_wrapping_row_stands_directly_under_scrollback_on_the_terminal_page() {
-        let terminal = visible_rows(TabLayoutMode::Horizontal)
-            .into_iter()
-            .filter(|row| row.category() == SettingsCategory::Terminal)
-            .collect::<Vec<_>>();
+        // **The Windows page, named** (§13.32 ①): this claim is about rows a
+        // Mac is no longer offered, so it asks for the list by platform rather
+        // than for whatever list the runner happens to have.
+        let terminal = visible_rows_for(
+            bt_platform::HostPlatform::Windows,
+            TabLayoutMode::Horizontal,
+        )
+        .into_iter()
+        .filter(|row| row.category() == SettingsCategory::Terminal)
+        .collect::<Vec<_>>();
         assert_eq!(
             terminal,
             vec![
@@ -21532,6 +21685,120 @@ mod tests {
         );
     }
 
+    /// RED — **a Mac is not offered a row about a mechanism macOS has not got**
+    /// (owner report and ruling 2026-09-12, §13.32 ①).
+    ///
+    /// What the owner read on the built Mac was `Explorer context menu` on
+    /// General and `PSReadLine 补丁` and `PowerShell 整合提示` on Terminal —
+    /// three switches over a Windows shell extension, a Windows PowerShell
+    /// module and a Windows startup file. This is the M3-6 rule one surface
+    /// along: the row says what facility it is about, the facility says which
+    /// platforms have it, and the page filters once.
+    ///
+    /// **It runs on a Windows workstation and asks what a Mac shows**, which is
+    /// the whole reason the platform is an argument. A build that could only be
+    /// checked by opening the window on a Mac is the build that shipped these
+    /// three rows.
+    ///
+    /// MUTATIONS: make any of the four facilities answer `true` everywhere and
+    /// the first assertion names it; return `None` from `SettingsRow::needs` for
+    /// one of the three Windows rows and the same assertion names it; take
+    /// `OptionKey` off `OptionSendsAlt` and the Windows half goes red, because
+    /// that row would then be offered to a keyboard that has no Option key.
+    #[test]
+    fn a_mac_is_not_offered_a_row_about_a_facility_it_has_not_got() {
+        use bt_platform::HostPlatform::{MacOs, Windows};
+
+        const NOT_ON_A_MAC: [SettingsRow; 3] = [
+            SettingsRow::ContextMenu,
+            SettingsRow::PsReadLine,
+            SettingsRow::PowerShellOffer,
+        ];
+        for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
+            let mac = visible_rows_for(MacOs, layout);
+            let windows = visible_rows_for(Windows, layout);
+            for row in NOT_ON_A_MAC {
+                assert!(
+                    !mac.contains(&row),
+                    "{layout:?}: {row:?} is about a facility macOS has not got \
+                     and a Mac is being offered it"
+                );
+                assert!(
+                    windows.contains(&row),
+                    "{layout:?}: {row:?} left the Windows page"
+                );
+            }
+            assert!(
+                mac.contains(&SettingsRow::OptionSendsAlt),
+                "{layout:?}: the Option row is the one that goes the other way"
+            );
+            assert!(
+                !windows.contains(&SettingsRow::OptionSendsAlt),
+                "{layout:?}: a Windows keyboard has no Option key"
+            );
+            // Everything else is on both pages, in the same order, which is what
+            // says the filter took the four rows and nothing else.
+            let expected: Vec<SettingsRow> = windows
+                .iter()
+                .copied()
+                .filter(|row| !NOT_ON_A_MAC.contains(row))
+                .chain(std::iter::once(SettingsRow::OptionSendsAlt))
+                .collect();
+            let mut sorted_mac = mac.clone();
+            sorted_mac.sort_by_key(|row| format!("{row:?}"));
+            let mut sorted_expected = expected;
+            sorted_expected.sort_by_key(|row| format!("{row:?}"));
+            assert_eq!(
+                sorted_mac, sorted_expected,
+                "{layout:?}: the two pages differ by more than the four rows \
+                 that declare a facility"
+            );
+        }
+    }
+
+    /// RED — **no page is left with a heading and nothing under it** (§13.32
+    /// ①).
+    ///
+    /// The headings are derived by walking the list and noticing where
+    /// [`SettingsRow::category`] changes, so a category whose every row named a
+    /// facility one platform has not got would draw a heading over empty space
+    /// on that platform — the same fault `first_run::Card::open` answers with
+    /// "a card with nothing to ask is not shown", said about a page that cannot
+    /// be withheld. Today General keeps six unconditional rows and Terminal
+    /// keeps four, and this is what will notice when that stops being true.
+    ///
+    /// MUTATION: give every remaining Terminal row a `Capability` that is
+    /// Windows-only and the Mac half names the page.
+    #[test]
+    fn no_page_is_left_with_a_heading_and_no_rows() {
+        for platform in [
+            bt_platform::HostPlatform::Windows,
+            bt_platform::HostPlatform::MacOs,
+            bt_platform::HostPlatform::OtherUnix,
+        ] {
+            for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
+                let rows = visible_rows_for(platform, layout);
+                for category in SettingsCategory::ALL {
+                    // Two pages are not built out of this list at all and never
+                    // were: the shortcut table draws its own lines, and the
+                    // Profiles page draws `PROFILE_ROWS` as a second view of one
+                    // profile rather than as rows of the dialog.
+                    if matches!(
+                        category,
+                        SettingsCategory::Shortcuts | SettingsCategory::Profiles
+                    ) {
+                        continue;
+                    }
+                    assert!(
+                        rows.iter().any(|row| row.category() == category),
+                        "{platform:?}/{layout:?}: {category:?} would draw a \
+                         heading over nothing"
+                    );
+                }
+            }
+        }
+    }
+
     /// RED (§7.4b, user ruling 2026-09-07 — the second of that day) — **the
     /// Explorer row is a switch of two states, and it is the same row on every
     /// Windows.**
@@ -21544,9 +21811,11 @@ mod tests {
     /// two words of the picker of places are gone from the window's whole
     /// vocabulary — which the loop over [`Text::ALL`] is what says.
     ///
-    /// The row still stands where it stood, on every machine: the ruling before
-    /// this one retired `visible_rows_for`'s conditional row, and a switch
-    /// retires nothing further.
+    /// The row still stands where it stood, on every Windows machine: the ruling
+    /// before this one retired the conditional row the list used to carry, and a
+    /// switch retires nothing further. Which platforms see it at all is a later
+    /// question and a different one — §13.32 ①, and
+    /// [`a_mac_is_not_offered_a_row_about_a_facility_it_has_not_got`].
     ///
     /// **Nothing on it can be refused.** `option_enabled` used to grey the top
     /// rung on a Windows 10 or a folder with no `folio.msix`; a switch has
@@ -21558,8 +21827,11 @@ mod tests {
     /// loop goes red, which is a word for an answer nobody can choose any more.
     #[test]
     fn the_explorer_row_is_one_switch_and_it_is_the_same_row_on_every_windows() {
+        // **The Windows page, named** (§13.32 ①): this claim is about rows a
+        // Mac is no longer offered, so it asks for the list by platform rather
+        // than for whatever list the runner happens to have.
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
-            let rows = visible_rows(layout);
+            let rows = visible_rows_for(bt_platform::HostPlatform::Windows, layout);
             let at = rows
                 .iter()
                 .position(|row| *row == SettingsRow::ContextMenu)
@@ -21861,8 +22133,14 @@ mod tests {
     /// the top.
     #[test]
     fn the_sidebar_row_is_only_in_the_dialog_while_the_tabs_run_down_the_side() {
+        // **The Windows page, named** (§13.32 ①): this claim is about rows a
+        // Mac is no longer offered, so it asks for the list by platform rather
+        // than for whatever list the runner happens to have.
         assert_eq!(
-            visible_rows(TabLayoutMode::Horizontal),
+            visible_rows_for(
+                bt_platform::HostPlatform::Windows,
+                TabLayoutMode::Horizontal
+            ),
             [
                 SettingsRow::Theme,
                 SettingsRow::LightScheme,
@@ -21928,7 +22206,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            visible_rows(TabLayoutMode::Vertical),
+            visible_rows_for(bt_platform::HostPlatform::Windows, TabLayoutMode::Vertical),
             [
                 SettingsRow::Theme,
                 SettingsRow::LightScheme,
