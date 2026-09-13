@@ -1,51 +1,26 @@
-<!-- zh pending opus46 -->
+# M6-1 — 全新用户验收步骤
 
-# M6-1 — the clean-user walk, in order
+`docs/plans/port/macos-plan-2026-09-12.md` § M6 的验收是一个人坐在 Mac 前，拿到的是陌生人能下载到的那份文件。这份文档把那份验收拆成了不需要回头看计划就能逐步执行的步骤，每一步的正确结果旁边都写上了错误结果，因为只有先说清排除了哪种失败，"它能用"才算一个结果。
 
-The acceptance in `docs/plans/port/macos-plan-2026-09-12.md` § M6 is a person at
-the Mac with the download a stranger gets. This file is that acceptance turned
-into steps that can be followed without re-reading the plan, with the wrong
-answer written beside each right one, because "it worked" is not a result unless
-the failure it excludes was named first.
+**谁来执行。** 项目负责人，在同一台 Mac 上登录第二个 macOS 账户，人在机器前。不能由 agent 执行：这轮验收要看的每个面板都由窗口服务器绘制，`ssh` 会话没有窗口服务器。
 
-**Who runs it.** The owner, logged into a second macOS account on the Mac, at
-the machine. Not an agent: every panel this walk exists to see is drawn by the
-window server, and a session over `ssh` has none.
+**覆盖了什么、没覆盖什么**在 `docs/RELEASING.md` ▸ macOS ▸ *Clean-machine coverage* 里。先读那一节——下面两条前提条件只有在明白 Gatekeeper 哪些状态属于账户、哪些属于整机之后才说得通。
 
-**What it covers and what it does not** is `docs/RELEASING.md` ▸ macOS ▸
-*Clean-machine coverage*. Read that first — two of the preconditions below are
-only sensible once you know which parts of Gatekeeper belong to the account and
-which belong to the machine.
-
-**How long.** Under an hour, of which the M1–M4 re-runs are most of it.
+**耗时。** 一小时以内，其中大部分是重跑 M1–M4。
 
 ---
 
-## 0. Before the walk
+## 0. 验收之前
 
-**0.1 — The build under test must not have been opened on this machine.** Not on
-the everyday account, not "just to check it starts". What this machine has
-already assessed and approved is recorded once for the whole machine, in
-`/var/db/SystemPolicyConfiguration/ExecPolicy`, and a build that is in there gets
-no first-open panel on any account. A release build carries a signature nobody
-has seen before, so this costs nothing — it only has to be kept true.
+**0.1 — 待测构建不能在这台机器上打开过。** 日常账户也不行，"只是看看能不能启动"也不行。这台机器评估并批准过什么记录在 `/var/db/SystemPolicyConfiguration/ExecPolicy` 里，对整机生效；一个已经在里面的构建在任何账户上都不会弹出首次打开面板。正式发布构建携带的签名没人见过，所以这条不需要额外操作——只需保持不被打破。
 
-**0.2 — The second account exists and is an administrator.** Created in System
-Settings ▸ Users & Groups, or with `sysadminctl -addUser`; FileVault is off on
-this machine, so there is no secure-token step. An administrator, because the
-person downloading Folio is nearly always the administrator of their own Mac. (A
-standard account additionally proves that the drag to `/Applications` asks for
-credentials. That is a different test and not this one.)
+**0.2 — 第二个账户已创建，且是管理员。** 在系统设置 ▸ 用户与群组中创建，或用 `sysadminctl -addUser`；这台机器关闭了 FileVault，没有安全令牌步骤。用管理员账户，因为下载 Folio 的人几乎总是自己 Mac 的管理员。（标准账户还能额外验证拖入 `/Applications` 时会索要凭据。那是另一项测试，不是这一项。）
 
-**0.3 — The account has never run Folio.** In the new account,
-`ls ~/Library/Application\ Support/Folio` must say the directory does not exist.
-It is M1's and M2's precondition as much as this one's.
+**0.3 — 该账户从未运行过 Folio。** 在新账户中，`ls ~/Library/Application\ Support/Folio` 应当报告目录不存在。这同时是 M1 和 M2 的前提条件。
 
-**0.4 — The two refusal artifacts are ready, and not opened.** Made on the
-everyday account, handed to the clean account as files:
+**0.4 — 两份拒绝用的制品已就绪且未被打开过。** 在日常账户上制作，以文件形式交给新账户：
 
-- **A damaged image.** Copy the disk image, flip one byte well inside it, and put
-  the quarantine attribute back on the copy, because copying drops it:
+- **损坏的镜像。** 复制磁盘镜像，在镜像内部翻转一个字节，然后把隔离属性写回副本（复制会丢掉它）：
 
   ```sh
   cp Folio-<version>-macos-arm64.dmg damaged.dmg
@@ -54,21 +29,15 @@ everyday account, handed to the clean account as files:
     "$(xattr -p com.apple.quarantine Folio-<version>-macos-arm64.dmg)" damaged.dmg
   ```
 
-- **An unnotarized bundle.** `Folio-unsigned.app.zip`, out of the
-  `folio-macos-<version>-unsigned` artifact the release lane produces when it is
-  run without the signing secrets: a real ad-hoc signature over the real bytes,
-  with nobody behind it.
+- **未公证的应用包。** `Folio-unsigned.app.zip`，来自发布流水线在没有签名密钥时产出的 `folio-macos-<version>-unsigned` 构建产物：一份真正的 ad-hoc 签名覆盖真实字节，但背后没有任何身份。
 
 ---
 
-## 1. The download, and the attribute that makes it one
+## 1. 下载，以及让它成为"下载"的那个属性
 
-In **Safari**, in the clean account, from the release page:
-`Folio-<version>-macos-arm64.dmg`.
+在新账户中用 **Safari** 从发布页面下载 `Folio-<version>-macos-arm64.dmg`。
 
-Not `curl`, not AirDrop from the other account, not a copy over the network out
-of a build directory. The quarantine attribute is the subject of this whole walk
-and only a browser sets it. Then, in a Terminal window in that account:
+不要用 `curl`，不要从另一个账户隔空投送，不要从网络上的构建目录复制。隔离属性是整轮验收的主题，只有浏览器才会设置它。然后在该账户的终端窗口中：
 
 ```sh
 cd ~/Downloads
@@ -76,194 +45,134 @@ xattr -p com.apple.quarantine Folio-<version>-macos-arm64.dmg
 shasum -a 256 Folio-<version>-macos-arm64.dmg
 ```
 
-**Right:** the first prints a semicolon-separated value naming Safari; the second
-matches this release's line in the published `SHA256SUMS.txt`.
+**正确：** 第一条命令打印出以分号分隔的值并标明来自 Safari；第二条的结果与已发布的 `SHA256SUMS.txt` 中此版本的那一行一致。
 
-**Wrong:** `No such xattr` — the file did not arrive the way a reader's does, and
-everything after this would be about a different file; download it again in
-Safari. A hash that does not match the published one is a release that stops
-here.
+**错误：** `No such xattr`——文件不是以读者的方式到达的，后面所有步骤测的都是另一个文件；在 Safari 中重新下载。哈希值与已发布值不匹配则此发布到此为止。
 
-## 2. Pull the network **before** the first open
+## 2. 首次打开**之前**断网
 
-Wi-Fi off, or the cable out.
+关闭 Wi-Fi，或拔掉网线。
 
-The reason, in one sentence: this Mac keeps one notarization ticket cache for
-every account on it (`/var/db/SystemPolicyConfiguration/Tickets`), so once
-anything here has assessed this build while online, an offline launch can no
-longer tell a stapled ticket from that cache — and *the stapled ticket is used*
-is one of the things M6 asks to see. A first open with no network is the only
-ordering in which the staple is what answers.
+原因一句话说完：这台 Mac 为所有账户维护一份公证票据缓存（`/var/db/SystemPolicyConfiguration/Tickets`），一旦任何步骤在联网状态下评估了这个构建，离线启动就无法区分装订票据和缓存票据——而*装订票据确实被使用了*正是 M6 要看到的结果之一。首次打开时没有网络是唯一能让装订票据来回答的顺序。
 
-If the network cannot be pulled at this point the walk still runs; what changes
-is step 11, which then makes a weaker claim and says so.
+如果此时无法断网，验收仍然继续；变化在第 11 步，那里会给出一个较弱的断言并说明原因。
 
-## 3. Open the image
+## 3. 打开镜像
 
-Double-click it in Finder.
+在访达中双击。
 
-**Right:** it mounts, and a window shows Folio beside a link to `/Applications`.
+**正确：** 镜像挂载，弹出窗口显示 Folio 和指向 `/Applications` 的替身。
 
-**Wrong:** **"Folio-<version>-macos-arm64.dmg" is damaged and can't be opened.**
-That sentence on the real download is a release that does not go out. It is also
-the sentence step 12 wants to see on a deliberately damaged copy, which is why it
-is worth being able to say which file produced it.
+**错误：** **"Folio-<version>-macos-arm64.dmg"已损坏，无法打开。** 正式下载出现这条消息意味着此发布不发出。这同时也是第 12 步希望在故意损坏的副本上看到的消息，因此能说清它出自哪个文件很重要。
 
-## 4. Drag Folio to Applications
+## 4. 将 Folio 拖入应用程序
 
-In the image's window, drag onto the link.
+在镜像窗口中拖到替身上。
 
-**Right:** it copies.
+**正确：** 复制完成。
 
-**Wrong:** a permission refusal — the account is not an administrator, and
-precondition 0.2 was not met.
+**错误：** 权限拒绝——该账户不是管理员，前提条件 0.2 未满足。
 
-## 5. The first open
+## 5. 首次打开
 
-Double-click `Folio` in `/Applications`. **Never Control-click ▸ Open**: that is
-the reader's escape hatch, it approves the build for the whole machine, and using
-it here destroys the rest of the walk.
+双击 `/Applications` 中的 `Folio`。**绝对不要按住 Control 键点按 ▸ 打开**：那是读者的绕行通道，它会为整台机器批准这个构建，在这里使用会毁掉后续所有步骤。
 
-**Right:** the ordinary identified-developer confirmation — *"Folio" is an app
-downloaded from the Internet. Are you sure you want to open it?* — naming the
-developer the certificate carries, which is the same name
-`codesign -dv --verbose=4` prints on its `Authority=Developer ID Application:`
-line, and the date it was downloaded. Click Open; a window appears.
+**正确：** 常规的已识别开发者确认——*"Folio"是从互联网下载的 App。你确定要打开它吗？*——面板上标明证书所载开发者名称（与 `codesign -dv --verbose=4` 的 `Authority=Developer ID Application:` 行打印的同一个名字）以及下载日期。点按**打开**；窗口出现。
 
-**Wrong**, and each of these is a release that does not go out:
+**错误**，以下每一种都意味着此发布不发出：
 
-- an **unidentified developer** refusal;
-- *Apple could not verify … is free of malware*;
-- **damaged and can't be opened**;
-- **no panel at all** — which is not a defect in the build but a broken walk:
-  the machine had already assessed this build, precondition 0.1 did not hold, and
-  the step proves nothing. Redo it with a build this machine has not seen.
+- **身份不明的开发者**拒绝；
+- *Apple 无法验证"Folio"是否包含恶意软件*；
+- **已损坏，无法打开**；
+- **没有出现任何面板**——这不是构建的缺陷，而是验收流程的失误：机器已经评估过这个构建，前提条件 0.1 不成立，此步骤什么也没有证明。用一个这台机器没见过的构建重新来过。
 
-Screenshot the panel. It is the evidence this milestone exists to produce.
+截屏保存该面板。它是此里程碑要交出的证据。
 
-## 6. Still offline: the M1 line
+## 6. 仍处于离线状态：M1 验收线
 
-`docs/plans/port/macos-plan-2026-09-12.md` § 2 ▸ M1, run from this account
-against this bundle rather than restated here: a `zsh` prompt; `echo $0` and
-`pwd`; `ls`; a mouse selection with `Cmd+C` and `Cmd+V`; `sleep 30` interrupted
-with `Ctrl+C`; Pinyin 你好; `Cmd+T` and `Cmd+W`.
+`docs/plans/port/macos-plan-2026-09-12.md` § 2 ▸ M1，从此账户对此应用包执行，不在这里重复：一个 `zsh` 提示符；`echo $0` 和 `pwd`；`ls`；鼠标选中文字后 `Cmd+C` 和 `Cmd+V`；`sleep 30` 用 `Ctrl+C` 中断；拼音输入你好；`Cmd+T` 和 `Cmd+W`。
 
-Two things are different on a downloaded build, and they are the reason this is
-re-run at all rather than taken from the development machine: the bundle is
-read-only inside `/Applications`, and the data directory is being created for the
-first time.
+在下载的构建上有两点不同，也是重跑而非直接沿用开发机结果的原因：应用包在 `/Applications` 内是只读的，且数据目录是首次创建。
 
-## 7. The M2 and M3 lines
+## 7. M2 和 M3 验收线
 
-§ 2 ▸ M2 — the files column, the preview, editing in place, the watch contracts,
-the image, the typeset integral. Then § 2 ▸ M3 — two windows, `Cmd+Q`, relaunch
-from Finder, the Dock icon with every window closed, a second launch handing over
-rather than writing, and `~/Library/Application Support/Folio` holding
-`session.json` and `settings.json`.
+§ 2 ▸ M2——文件列、预览窗格、就地编辑、watch 契约、图片、排版积分符号。然后 § 2 ▸ M3——两个窗口、`Cmd+Q`、从访达重新启动、所有窗口关闭后的程序坞图标、第二次启动交接而非重写、`~/Library/Application Support/Folio` 中有 `session.json` 和 `settings.json`。
 
-M3's relaunch is also the `⌘Q`-and-relaunch step M6 asks for on its own; it is
-run once, here.
+M3 的重新启动同时也是 M6 单独列出的 `⌘Q` 再启动步骤；只执行一次，在这里。
 
-## 8. Reconnect, then the M4 lines
+## 8. 恢复网络，然后执行 M4 验收线
 
-§ 2 ▸ M4 ① to ⑦. Two of them are the refusal paths this walk owes, and they are
-spelled out because a denial that is silently ignored looks exactly like a
-feature that works:
+§ 2 ▸ M4 ① 至 ⑦。其中两项是此轮验收应交付的拒绝路径，在此展开说明，因为一个被静默忽略的拒绝看起来和一个正常工作的功能完全一样：
 
-- **Notifications.** At the first notification Folio posts, macOS asks. **Deny
-  it.** *Right:* the settings row says the grant was refused. *Wrong:* the row
-  still offers the feature and nothing ever arrives — a denial the product does
-  not admit to. Then grant it in System Settings and run ① again.
-- **Accessibility.** With the global shortcut disabled the settings row reads
-  *not authorized*. Use the in-app *Enable global shortcut* action and **deny**
-  the grant: the row must still read *not authorized*. Then grant it and run ④.
+- **通知。** Folio 首次发送通知时 macOS 会询问。**选择拒绝。** *正确：* 设置行显示授权已被拒绝。*错误：* 行上仍然提供该功能但永远收不到通知——一个产品不承认的拒绝。之后在系统设置中允许，再重跑 ①。
+- **辅助功能。** 全局快捷键禁用时设置行显示 *not authorized*。使用应用内的 *Enable global shortcut* 操作并**拒绝**授权：行上仍应显示 *not authorized*。之后授权，再重跑 ④。
 
-## 9. Services, which is per-account, and is why this account runs it
+## 9. 服务——按账户注册，所以必须在这个账户上执行
 
-Right-click a folder in Finder ▸ *Services ▸ Open in Folio*, and again on a
-folder whose name contains a space and a CJK character.
+在访达中右键点按一个文件夹 ▸ *服务 ▸ 在 Folio 中打开*，再对一个名称包含空格和 CJK 字符的文件夹重复一次。
 
-**Right:** a tab opens in that folder.
+**正确：** 在该文件夹下打开了一个标签页。
 
-**Wrong:** there is no *Open in Folio* entry. Before calling that a defect:
-Services registration is per-account (`~/Library/Preferences/pbs.plist`), and a
-freshly installed bundle is sometimes not picked up until the database is
-prodded —
+**错误：** 没有 *在 Folio 中打开* 条目。在判定为缺陷之前：服务注册按账户生效（`~/Library/Preferences/pbs.plist`），刚安装的应用包有时不会被立即识别，需要手动刷新数据库——
 
 ```sh
 /System/Library/CoreServices/pbs -flush
 ```
 
-— and the account logged out and back in. Still absent after that is the defect.
+——然后注销该账户再重新登录。刷新后仍然没有才是缺陷。
 
-## 10. `⌘Q` and relaunch
+## 10. `⌘Q` 再启动
 
-Step 7's M3 line. It is listed here because § M6 lists it; it is not run twice.
+第 7 步的 M3 验收线。列在这里是因为 § M6 列了它；不重复执行。
 
-## 11. The stapled ticket
+## 11. 装订票据
 
-If step 2 succeeded — the first open in step 5 happened with no network — then
-that open **is** this step, and the ticket inside the file is what answered.
-Record it that way.
+如果第 2 步成功——第 5 步的首次打开发生在无网络状态下——则那次打开**就是**此步骤，回答的是文件内部的票据。如此记录。
 
-If the network could not be pulled, what is left is
+如果当时无法断网，剩下的验证手段是
 
 ```sh
 xcrun stapler validate /Applications/Folio.app
 xcrun stapler validate ~/Downloads/Folio-<version>-macos-arm64.dmg
 ```
 
-which says the ticket is in both files, plus an offline relaunch that cannot tell
-that ticket from this machine's cache. Record the weaker claim rather than the
-stronger one.
+它只能说明票据存在于两个文件中，再加上一次离线重启——此时无法区分该票据和机器缓存。记录较弱的断言，不记录较强的。
 
-## 12. Refusal: the damaged copy
+## 12. 拒绝：损坏的副本
 
-Open `damaged.dmg` from step 0.4 in this account.
+在此账户中打开第 0.4 步的 `damaged.dmg`。
 
-**Right:** a refusal, either wording — **"damaged.dmg" is damaged and can't be
-opened**, or an attach failure naming a checksum or an invalid image. And from a
-terminal:
+**正确：** 拒绝弹窗，以下两种措辞均可——**"damaged.dmg"已损坏，无法打开**，或挂载失败并提及校验和或无效镜像。在终端中：
 
 ```sh
 spctl -a -vvv -t open --context context:primary-signature damaged.dmg
 ```
 
-exits non-zero and says `rejected`.
+退出码非零并输出 `rejected`。
 
-**Wrong:** it mounts and the application inside launches. That is a signature
-that does not cover the bytes it is supposed to cover — the one result in this
-walk that means the packaging is wrong rather than the build.
+**错误：** 镜像挂载且其中的应用程序启动。那是一个签名没有覆盖它应覆盖的字节——此轮验收中唯一意味着打包流程有误而非构建有误的结果。
 
-## 13. Refusal: the unnotarized copy
+## 13. 拒绝：未公证的副本
 
-Unzip `Folio-unsigned.app.zip` from step 0.4 — downloaded in Safari in this
-account, so that it carries the attribute too — and try to open the bundle.
+解压第 0.4 步的 `Folio-unsigned.app.zip`——在此账户的 Safari 中下载过，因此也带有隔离属性——然后尝试打开该应用包。
 
-**Right:** macOS refuses it, and
+**正确：** macOS 拒绝打开，且
 
 ```sh
 spctl -a -vvv Folio-unsigned.app
 ```
 
-exits non-zero and says `rejected`. **Write down the reason line it prints rather
-than checking it against one written here.** The exact wording of an ad-hoc
-refusal has moved between macOS releases; what is being asserted is the refusal,
-and the release lane asserts exactly that and no more.
+退出码非零并输出 `rejected`。**记下它打印的拒绝原因行，不要与这里预写的措辞核对。** ad-hoc 签名的拒绝措辞在不同 macOS 版本之间有过变动；被断言的是拒绝本身，发布流水线断言的也只是这一点。
 
-**Wrong:** `accepted`. A Mac that accepts a bundle anybody could have made is a
-Mac with Gatekeeper switched off — check `spctl --status`, and if that is what
-happened then nothing earlier in this walk means anything either, and it is run
-again from step 1.
+**错误：** `accepted`。一台接受任何人都能制作的应用包的 Mac 是一台关闭了 Gatekeeper 的 Mac——检查 `spctl --status`；如果确实如此，此前所有步骤都没有意义，从第 1 步重新来过。
 
 ---
 
-## What is kept
+## 保留的记录
 
-With the notarization logs, beside the release, not published:
+连同公证日志，放在发布旁边，不对外发布：
 
-- the screenshot of step 5's panel and of step 12's refusal;
-- the terminal transcript of steps 1, 11, 12 and 13 — the `xattr`, `shasum`,
-  `spctl` and `stapler` lines with their output;
-- one line per acceptance item in steps 6 to 9: what was run, and what happened;
-- and, if step 2 could not be done, the sentence saying so.
+- 第 5 步面板和第 12 步拒绝弹窗的截屏；
+- 第 1、11、12 和 13 步的终端记录——`xattr`、`shasum`、`spctl` 和 `stapler` 命令及其输出；
+- 第 6 至 9 步每项验收条目一行：做了什么，结果如何；
+- 如果第 2 步无法执行，写一句说明。
