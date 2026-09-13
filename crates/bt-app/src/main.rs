@@ -97948,7 +97948,20 @@ impl App {
     }
 
     /// Hand the store the document as it now stands.
+    ///
+    /// **Unless the quit has already written one** ([`quit::Quit::document_is_written`],
+    /// M3-4). The transaction's `Photograph` and `Write` steps are the last word
+    /// about what this run leaves behind; the teardown that follows them closes
+    /// every pane, and a pane closing is an edit like any other. One door for
+    /// every writer, so one place to say it.
     fn record_session(&mut self, now: Instant) {
+        if self
+            .quit
+            .as_ref()
+            .is_some_and(quit::Quit::document_is_written)
+        {
+            return;
+        }
         let document = self.session_document();
         self.session_store.record(document, now);
     }
@@ -109006,6 +109019,93 @@ mod floated_page_tests {
         );
     }
 
+    /// RED (M3-4) — **every window this process opens is dressed before it is
+    /// shown, and the band the platform's own buttons are centred on is part of
+    /// the dressing.**
+    ///
+    /// A **restored** window is the case this exists for. The launch reads two,
+    /// three, five windows out of the session document and each one opens
+    /// through one of the two constructors; a window whose band were put on
+    /// after it reached the glass would show one frame with the traffic lights
+    /// standing on the wrong axis (§13.20 ⑧, where the band is a door precisely
+    /// because a window can change it while it is open). On Windows there is
+    /// nothing to get wrong — `FOLIO_DRAWS_THE_WHOLE_BAR` is a run of no width
+    /// and no height — so the claim cannot be an assertion about a value on this
+    /// machine, and the thing that can go wrong is a line moving. Hence the
+    /// text.
+    ///
+    /// Three claims: **both** doors that open a window go through the same
+    /// dressing step, that step is where the band is said, and the step that
+    /// puts a window on the glass is a *different function* — so the order is
+    /// structural rather than two lines that could be swapped.
+    ///
+    /// MUTATIONS: open a second window without `dress_new_window` and the count
+    /// goes to one; take `follow_the_window_band` out of the dressing and the
+    /// second claim names it; move the show into the dressing and the third
+    /// does.
+    #[test]
+    fn every_window_this_process_opens_wears_its_band_before_it_is_shown() {
+        assert_eq!(
+            SOURCE
+                .matches(concat!("dress_new_window", "(native)?;"))
+                .count(),
+            2,
+            "the two doors that open a window are not both dressing it"
+        );
+        let dressing = fn_body(concat!("    fn ", "dress_new_window("));
+        assert!(
+            dressing.contains(concat!("self.follow_the_window_band", "()?;")),
+            "a window is dressed without being given the band its layout asks \
+             for:\n{dressing}"
+        );
+        let showing = fn_body(concat!("    fn ", "show_new_window("));
+        assert!(
+            showing.contains(concat!("put_the_window_on_the_glass", "(")),
+            "the door that shows a window no longer shows it:\n{showing}"
+        );
+        assert!(
+            !showing.contains("follow_the_window_band"),
+            "the band is said by the door that puts the window on the glass, so \
+             there is a frame in which it was not:\n{showing}"
+        );
+    }
+
+    /// RED (M3-4) — **the one door onto the session document asks whether the
+    /// quit has already written one.**
+    ///
+    /// `quit::Quit::document_is_written` is where the rule lives and where it is
+    /// tested; what this holds is that the rule is *asked* — at the one place
+    /// every writer goes through (§2.7: 整份文件只在 `App::session_document`
+    /// 一处被组装), rather than at the forty call sites of
+    /// `mark_session_dirty`, any one of which could be added tomorrow without
+    /// the author ever learning that a quit is in progress.
+    ///
+    /// MUTATION: drop the guard and the teardown writes a second document over
+    /// the one the transaction wrote — measured on the Mac 2026-09-12 as a
+    /// three-tab window coming back with none of them.
+    #[test]
+    fn the_document_a_quit_wrote_is_not_written_over_by_the_teardown() {
+        let door = fn_body(concat!("    fn ", "record_session("));
+        assert!(
+            door.contains(concat!("quit::Quit::document_is", "_written")),
+            "the one door onto the document does not ask whether the quit has \
+             already written one:\n{door}"
+        );
+        // Assembled rather than written out, for
+        // `only_one_line_in_this_file_hands_the_store_a_document`'s reason: this
+        // case's own prose must not be one of the call sites that pin counts.
+        let session = door
+            .find(["self.session_store", ".record("].concat().as_str())
+            .expect("the door still hands the store a document");
+        let guard = door
+            .find("return;")
+            .expect("the door still has somewhere to stop");
+        assert!(
+            guard < session,
+            "the guard stands after the write it is supposed to prevent:\n{door}"
+        );
+    }
+
     /// RED (§7.54) — **the two Win32 orders a summon depends on cannot be
     /// reversed.**
     ///
@@ -111012,11 +111112,11 @@ fn restore_monitors(event_loop: &ActiveEventLoop) -> Vec<RestoreMonitor> {
             };
             // The centre, because that is the one point of a monitor that is certainly on it —
             // `MonitorFromPoint` resolves a shared edge to whichever neighbour it likes.
-            let work = bt_platform::work_area_at(
+            let asked = bt_platform::work_area_at(
                 full.left + (full.right - full.left) / 2,
                 full.top + (full.bottom - full.top) / 2,
-            )
-            .unwrap_or(full);
+            );
+            let work = monitor_work_area(full, asked.ok());
             RestoreMonitor {
                 left: f64::from(work.left) / scale,
                 top: f64::from(work.top) / scale,
@@ -111025,6 +111125,48 @@ fn restore_monitors(event_loop: &ActiveEventLoop) -> Vec<RestoreMonitor> {
             }
         })
         .collect()
+}
+
+/// **One monitor's work area, held to the one thing a work area always is: a
+/// part of its own monitor** (M3-4).
+///
+/// `work_area_at` is asked for a *point*, and a point is enough to name a
+/// display only in a space where no two displays claim the same coordinate.
+/// Windows' is such a space and always has been, so on Windows this function
+/// hands back what it was given, every time, and nothing about a restore moves.
+///
+/// **macOS's is not** (`macos_impl`'s module header says so out loud): every
+/// rectangle in that space is a display's own points multiplied by *that*
+/// display's backing scale, so a 1× panel standing beside a 2× panel occupies
+/// physical coordinates the 2× panel also occupies, and a point inside the small
+/// one resolves — legitimately, first match wins — to the large one. What comes
+/// back is then another display's work area, and dividing it by *this* monitor's
+/// scale produces a rectangle that is neither: on the desk this ticket is
+/// written for it is twice the size of the panel and parked over its neighbour,
+/// and every window restored onto that panel is fitted and clamped against it.
+///
+/// The invariant that catches it is the definition: the work area is the
+/// monitor minus the strips the system reserves, so it lies **inside** the
+/// monitor. An answer that does not is an answer about a different display, and
+/// the honest rectangle for this one is then the monitor itself — the same
+/// rectangle the refusal path has always used, and a conservative one: it costs
+/// a restored window the menu bar's own strip on a display that is not the one
+/// the menu bar is on.
+fn monitor_work_area(
+    full: bt_platform::WindowRect,
+    asked: Option<bt_platform::WindowRect>,
+) -> bt_platform::WindowRect {
+    match asked {
+        Some(work)
+            if work.left >= full.left
+                && work.top >= full.top
+                && work.right <= full.right
+                && work.bottom <= full.bottom =>
+        {
+            work
+        }
+        _ => full,
+    }
 }
 
 /// Where a restored window should open, or `None` on a first run.
@@ -120248,6 +120390,61 @@ mod tests {
             .expect("a window with a tab in it has a placement");
         assert_eq!(placement.position, None);
         assert_eq!(placement.size, LogicalSize::new(926.0, 1080.0));
+    }
+
+    /// **RED (M3-4) — a monitor's work area is never another monitor's.**
+    ///
+    /// The first two rows are Windows, and they are here to say that nothing
+    /// about a Windows restore moves: a taskbar strip off the bottom and a
+    /// display with no strip at all both come back exactly as the platform said
+    /// them. The third is the desk this ticket is written for — a 1× panel
+    /// standing to the right of a 4K at 2×, in the physical space `bt-platform`
+    /// and winit share, where the panel's own coordinates are **inside** the 4K's
+    /// — and the answer that comes back for a point in the middle of the panel is
+    /// the 4K's work area. Divided by the panel's scale of 1 that is a rectangle
+    /// 3840 logical pixels wide on a panel 1280 wide, and every window restored
+    /// there is fitted to it.
+    ///
+    /// MUTATION: return `asked` whenever it is `Some` and the third row comes
+    /// back as the 4K's rectangle; drop the `full` arm and a display whose work
+    /// area the platform will not say loses its rectangle altogether.
+    #[test]
+    fn a_monitors_work_area_is_never_another_monitors() {
+        let rect = |left, top, right, bottom| bt_platform::WindowRect {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        let primary = rect(0, 0, 3840, 2160);
+        let with_taskbar = rect(0, 0, 3840, 2064);
+        assert_eq!(
+            monitor_work_area(primary, Some(with_taskbar)),
+            with_taskbar,
+            "a strip the system reserves on this monitor is this monitor's"
+        );
+        assert_eq!(
+            monitor_work_area(primary, Some(primary)),
+            primary,
+            "a display with nothing reserved on it keeps its whole rectangle"
+        );
+        let panel = rect(1920, 0, 3200, 720);
+        assert_eq!(
+            monitor_work_area(panel, Some(rect(0, 64, 3840, 2160))),
+            panel,
+            "the 4K's work area is not the panel's, however far inside the 4K the \
+             panel's own coordinates fall"
+        );
+        assert_eq!(
+            monitor_work_area(panel, None),
+            panel,
+            "a display the platform will not describe is still standing where it stands"
+        );
+        assert_eq!(
+            monitor_work_area(panel, Some(rect(1920, 0, 3201, 720))),
+            panel,
+            "and an answer that hangs off one edge is an answer about something else"
+        );
     }
 
     /// A window with nothing in it is not a window, whatever its rectangle says.

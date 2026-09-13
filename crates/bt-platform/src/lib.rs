@@ -11630,6 +11630,88 @@ mod macos_window_backend_tests {
         );
     }
 
+    /// The body of one function, from its signature to the brace that closes it
+    /// at the indent it was opened at.
+    fn body_of(source: &str, signature: &str) -> String {
+        let at = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("`{signature}` is in this file"));
+        // The signature's own indent, which is what its closing brace wears:
+        // the leading newline is the needle's, and the spaces after it are the
+        // function's.
+        let after_newline = signature.trim_start_matches('\n');
+        let indent = after_newline.len() - after_newline.trim_start().len();
+        let closer = format!("\n{}}}\n", " ".repeat(indent));
+        let rest = &source[at..];
+        let end = rest
+            .find(&closer)
+            .expect("a function is closed at the indent it was opened at");
+        rest[..end].to_owned()
+    }
+
+    /// RED (M3-4) — **a display is named by its UUID on macOS and by its
+    /// adapter name on Windows, and neither arm answers a number.**
+    ///
+    /// The failure this guards is invisible on both platforms on the day it is
+    /// made: a `CGDirectDisplayID` spells fine, files fine and reads back fine —
+    /// for as long as nobody unplugs a display. What breaks a month later is a
+    /// reader's arrangement, filed under a number the window server has since
+    /// reissued to a different panel, and the only place that can be caught
+    /// before it ships is here, in the text.
+    ///
+    /// Three claims:
+    ///
+    /// ① macOS's `monitor_id_at` answers the **UUID door** and does not spell a
+    ///    number — `display_number` is the handle it hands *to* that door, never
+    ///    the answer;
+    /// ② the UUID door really is CoreGraphics' stable key and CoreFoundation's
+    ///    canonical spelling of it, linked against the umbrella framework that
+    ///    has always carried `ColorSync`;
+    /// ③ **the Windows arm is untouched**: still `MONITORINFOEXW.szDevice`, and
+    ///    with no UUID anywhere in it. The ids in a Windows reader's session
+    ///    file mean today what they meant before this ticket, which is what
+    ///    makes the change a macOS change.
+    ///
+    /// MUTATION: go back to `display_number(&screen).map(|id| id.to_string())`
+    /// and ① names it; link `CoreGraphics` instead and ② does; spell a Windows
+    /// display's name any other way and ③ does.
+    #[test]
+    fn a_display_is_named_by_its_uuid_on_macos_and_by_its_adapter_on_windows() {
+        let door = body_of(MACOS, "\npub fn monitor_id_at(");
+        assert!(
+            door.contains("display_uuid("),
+            "macOS names a display by something other than its UUID:\n{door}"
+        );
+        assert!(
+            !door.contains("to_string()"),
+            "macOS spells a display number where its name belongs:\n{door}"
+        );
+        let uuid_door = body_of(MACOS, "\nfn display_uuid(");
+        assert!(
+            uuid_door.contains("CGDisplayCreateUUIDFromDisplayID(")
+                && uuid_door.contains("CFUUID::new_string("),
+            "the UUID door is not CoreGraphics' key in CoreFoundation's own \
+             spelling:\n{uuid_door}"
+        );
+        assert!(
+            MACOS.contains("#[link(name = \"ApplicationServices\", kind = \"framework\")]"),
+            "the symbol is taken from a framework that has not always carried ColorSync"
+        );
+        let windows = body_of(
+            include_str!("lib.rs"),
+            "\n    pub fn monitor_id_at(x: i32, y: i32) -> Option<String> {",
+        );
+        assert!(
+            windows.contains("MONITORINFOEXW") && windows.contains("szDevice"),
+            "a Windows display stopped being named by its adapter:\n{windows}"
+        );
+        assert!(
+            !windows.to_lowercase().contains("uuid"),
+            "the macOS key reached the Windows arm, where no reader's file has \
+             ever held one:\n{windows}"
+        );
+    }
+
     /// RED — **every door in the macOS arm asks its thread first.**
     ///
     /// AppKit from any thread but the main one is undefined behaviour, not a

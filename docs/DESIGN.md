@@ -10123,3 +10123,240 @@ each other, because the attention endpoint that arranges that on Windows has no
 macOS arm yet.
 
 *(本节英文,待中文文案改写。)*
+
+### 13.34 M3-4: 多窗恢复——显示器按 UUID 认,frame 往返恒等,缺屏落主屏(`crates/bt-platform/src/{macos_impl,lib}.rs`、`crates/bt-platform/Cargo.toml`、`crates/bt-platform/tests/macos_window_restore.rs`、`crates/bt-app/src/{main,quit}.rs`)
+
+**① A `CGDirectDisplayID` is a handle, and M1-3 filed a reader's arrangement
+under one.** The door that names a display for the session document answered the
+display number's decimal spelling, on the ground — written into its own doc
+comment — that Apple derives that number from the panel's own vendor, model and
+serial and that it therefore survives a reboot and a replug. That is true of the
+*ingredients* and not of the number. Apple's header says what a
+`CGDirectDisplayID` names: **"a framebuffer, a colour correction table, and
+possibly an attached monitor"**. The window server hands them out per session, and
+unplugging a display and plugging it back in can return a different one for the
+same panel. A file keyed on it is a file whose rows stop matching the day a cable
+is moved — and the rows in question are §7.54's, the rectangle a reader arranged
+the summoned terminal at *on that screen*.
+
+**The stable key is the display's UUID**, `CGDisplayCreateUUIDFromDisplayID`, and
+it is the key **winit already identifies its own monitors by**: its macOS
+`MonitorHandle` *is* a `CFUUID`, with a comment that says the same thing this
+ticket arrived at from the other end. So `monitor_id_at` now answers `CFUUID`'s
+canonical spelling — `8-4-4-4-12` upper-case hexadecimal, measured on the Mac as
+`3AFA8068-B697-47BB-9923-BE510A7D9EA4` — which cannot be read as a display number
+and cannot be confused with the other platform's `\\.\DISPLAY1` either. Nothing
+about the promise moves: it is still §3.1's best effort, still stable across a
+restart, still not guaranteed across a driver change, and every reader still
+degrades to a computed answer rather than trusting it.
+
+**Two facts that make the change cost nothing.** The symbol is taken from
+`ApplicationServices` and not from `CoreGraphics`, which is winit's own choice for
+its own reason — it lives in `ColorSync`, a framework of its own only since macOS
+10.13 and a sub-framework of the umbrella since always. And it adds **no
+package**: `objc2-core-graphics` and `objc2-core-foundation` are direct
+dependencies of this crate already, and what is new is two features
+(`CGDirectDisplay`, `CFUUID`) and one declared symbol, because
+`objc2-core-graphics` 0.3.2 does not generate this call. `Cargo.lock` and
+`THIRD-PARTY-NOTICES.md` do not move.
+
+**The Windows arm is untouched, and that is pinned rather than promised.**
+`a_display_is_named_by_its_uuid_on_macos_and_by_its_adapter_on_windows` reads both
+arms' text: macOS's door must reach the UUID door and must not spell a number, the
+UUID door must be CoreGraphics' key in CoreFoundation's spelling against the
+umbrella framework, and the Windows door must still be `MONITORINFOEXW.szDevice`
+with no UUID anywhere in it. The ids in a Windows reader's `session.json` mean
+today exactly what they meant before this ticket.
+
+**② The store → load round trip is the identity, and the unit is the point.**
+§13.10 ① said the round trip is exact; this ticket measured it on a real *titled*
+window — Folio's shape on this platform, and the shape AppKit has opinions about
+— at backing scale 2, and found the one thing it had not said. **A window's frame
+is integral in points.** Asked for `343,260 961x600` physical, the window came
+back at `342,260 962x600`: AppKit floored the origin to the whole point and grew
+the size to keep the far edge. At scale 2 that means no window can stand at an odd
+physical coordinate.
+
+That is not a defect and nothing in this product can ask for it. The session
+document's unit is the **logical** pixel, which on this platform is the point:
+`persisted_window_bounds` divides by the window's scale and records whole logical
+pixels, `startup_window_rect` multiplies them back, and a summon's rectangle comes
+off a work area, which is a display's own points. So the round trip is the
+identity for every rectangle the file can hold, at both parities of the logical
+coordinate — measured at scale 2 on 2026-09-12, and stated and read back through
+the same two doors `bt-app` uses.
+
+**What the half-point rectangle does prove is the division of labour between
+those doors**, and it is why the case is kept. `set_window_outer_rect` stated it
+and answered `Ok` while the window stood somewhere else; `stand_window_at` read
+it back and answered `Err` naming where the window really is. A restore that
+believed the first door would write a rectangle back into the file that no window
+was ever standing at.
+
+**The other rectangle no window may have is one whose title bar would stand under
+the menu bar**, and `constrainFrameRect:toScreen:` moves a titled window before
+it places it. Asked for a top of `-140` physical, the window stood at **60** — the
+work area's own top, to the pixel. **And the restore rule already produces exactly
+that rectangle**: `reachable_top` clamps a restored top into
+`[work.top, work.bottom − title bar]` of the monitor the window lands on, and that
+work area is `NSScreen.visibleFrame`, which begins under the menu bar. The
+Windows rule and AppKit's constraint agree, so the restore path never hands AppKit
+a rectangle it will move. Sideways there is no constraint at all: a window parked
+half off the right edge is taken verbatim, which is the shape
+`choose_restored_placement` deliberately preserves.
+
+**And the backing-scale seam costs this path nothing, which is worth saying
+because on Windows it costs the summon three statements.** `startup_window_rect`
+multiplies a logical rectangle by the window's current scale and
+`set_window_outer_rect` divides by that same number, so what reaches AppKit is the
+rectangle in points — and a point is the same length on every display. The seam
+`stand_window_at` exists for is the *other* direction, where a rectangle is
+computed in physical pixels off one display's work area and stated on another.
+
+**③ A monitor's work area is never another monitor's.** `restore_monitors` asks
+`work_area_at` for a **point** — the centre of each monitor winit reports — and a
+point names a display only in a space where no two displays claim the same
+coordinate. Windows' space is such a space and always has been. **macOS's is
+not**, and `macos_impl`'s own module header says so: every rectangle there is a
+display's points multiplied by *that* display's backing scale, so a 1× panel
+standing beside a 2× panel occupies physical coordinates the 2× panel also
+occupies, and a point inside the small one resolves — legitimately, first match
+wins — to the large one. What comes back is then another display's work area, and
+dividing it by *this* monitor's scale gives a rectangle that is neither: on a desk
+with a 1280-point panel beside a 4K at 2× it is 3840 logical pixels wide, parked
+over its neighbour, and every window restored onto that panel is fitted and
+clamped against it.
+
+The invariant that catches it is the definition: a work area is the monitor minus
+the strips the system reserves, so it lies **inside** the monitor. An answer that
+does not is an answer about a different display, and the honest rectangle for this
+one is then the monitor itself — which is the rectangle the refusal path has
+always used. `monitor_work_area` is that one question, and it is a pure function
+with a case of its own (`a_monitors_work_area_is_never_another_monitors`) whose
+first two rows are Windows: a taskbar strip and a display with no strip both come
+back exactly as the platform said them, so **nothing about a Windows restore
+moves**. The guard cannot fire there: winit's monitor rectangle on Windows is
+`rcMonitor` and the answer is that monitor's `rcWork`, which is inside it by
+construction.
+
+**④ The band is put on before the window is on the glass, and both doors do it.**
+A restored window opens through one of the two constructors, and a window whose
+band were set after it reached the glass would show one frame with the traffic
+lights on the wrong axis (§13.20 ⑧). Both constructors go through
+`dress_new_window`, `dress_new_window` is where `follow_the_window_band` is said,
+and `show_new_window` is a *different function* — so the order is structural
+rather than two lines that could be swapped.
+`every_window_this_process_opens_wears_its_band_before_it_is_shown` holds all
+three. It is a source pin because on Windows there is nothing to get wrong —
+`FOLIO_DRAWS_THE_WHOLE_BAR` is a run of no width and no height — so what can fail
+is a line moving rather than a value changing.
+
+**⑤ What the acceptance run found, and it was not about monitors at all: the
+teardown wrote a second document over the one the quit had just written.**
+
+The quit is a four-phase transaction (§2.9): photograph every window, write the
+document, retire the windows, leave. Measured on the Mac with three tabs standing
+on the screen — `home`, `alpha`, `beta` — `session.json` held all three **while
+the run was alive**, and held **one** after the quit: the unanswered restore row
+folded back, and not one live tab. The two that had a place of their own were in
+`recent`, filed there one at a time.
+
+The teardown is what did it. `Retire` tells every page and every child to go, the
+loop keeps turning while it waits for the pages, each pane whose child has gone
+closes its tab, and **every one of those closes is an ordinary edit that records
+the document again** — so `SessionStore::close`'s final flush put the windows on
+the disk as they were on the way out rather than as the reader left them. Nothing
+about it is macOS-specific in the source; what macOS supplies is a child that is
+reaped promptly enough for the loop to see it before the loop stops.
+
+The fix is one question asked in one place. `Quit::document_is_written` is true
+from the moment the write lands and false for a quit that could not write — that
+one is abandoned, the application carries on, and its session still has everything
+to say — and `App::record_session`, the single door every writer goes through
+(§2.7: 整份文件只在一处被组装), returns without recording when it is true. Not at
+the forty call sites of `mark_session_dirty`, any one of which could be added
+tomorrow by an author who never learns that a quit is in progress.
+`once_the_document_has_landed_the_teardown_cannot_write_over_it` walks the phases,
+and `the_document_a_quit_wrote_is_not_written_over_by_the_teardown` holds the
+guard at the door and ahead of the write it prevents.
+
+**⑥ The run.** macOS 26.6.2, Apple M4, one 4K at backing scale 2 (see ⑦ for why
+one), a debug bundle of this branch with a bundle identifier of its own
+(`io.github.lulu-loopp.folio.m34probe`) and a `HOME` of its own under the
+worktree, exported by a `CFBundleExecutable` wrapper because `LSEnvironment`
+cannot set it (§13.31 ⑧(d)). **Driven by the pointer only** — no key was posted
+and nothing was written to the pasteboard — and every rectangle below is in
+points, read out of `CGWindowListCopyWindowInfo` for this run's own pid.
+
+| # | what was done | what was measured |
+| --- | --- | --- |
+| 1 | a launch on an empty session | window **A** at `515,167 960×600` |
+| 2 | `open` the bundle at a folder | `application:openURLs:` lands, A takes a second tab standing in it |
+| 3 | **File ▸ New Window, by the pointer** | window **B** at `512,167 960×600` |
+| 4 | `open` the bundle at another folder | B takes its own second tab: A is `[home, alpha]`, B is `[home, beta]` |
+| 5 | a press in B's strip at `1212,187`, twenty steps, release | B stands at `692,314 960×600` |
+| 6 | `osascript -e 'tell application id "…m34probe" to quit'` | the process ends; the document holds **window 0 `{515,167 960×600}` `[home, alpha]`** and **window 1 `{692,314 960×600}` `[home, beta]`** |
+| 7 | `terminal_font_size` 16 → 18 in `settings.json`, **with nothing running** | — |
+| 8 | relaunch | the window the process opens with stands at `515,167 960×600` — `BT_DPI stage=create … rect=1030,334,2950,1534`, that rectangle at scale 2 to the pixel — `terminal_font_size` reads 18, and the one restore card names all four tabs |
+
+**The menu row was pressed rather than keyed**, and how is worth writing down
+because the next Mac ticket that needs an application-level verb will want it:
+the bar is walked by **clicking** each title, the menu that opens is captured
+(it is this process's own window, so no grant is involved), and the File menu is
+recognised by its own shape — `menubar.rs`'s `BAR` read back off the screen.
+Apple's menu reads as twelve bands and seven rules, the application's as seven
+and nine, and **File as seven and two**, which is its five rows plus the menu's
+own rounded top and bottom edges; the Help menu corroborates the +2 (one row of
+ours, AppKit's search field, its rule → four and one). Row index 2 is then
+*New Window*, pressed at `161,72`.
+
+**Step 6 is the one that was red before ⑤.** On the same procedure against the
+commit this branch started from, the file the quit wrote held **one** tab and
+window B's move had not landed; with the guard it holds both windows, both tab
+sets and the rectangle the hand left B at.
+
+**⑦ What could not be checked, and the venue facts the next Mac ticket needs.**
+
+**(a) The mixed-scale desk does not exist yet.** The plan's §9 note says the
+owner will attach a second display for M3 and that *it must run at a different
+backing scale, or it proves nothing*. Both displays on the machine today are
+3840×2160 presented as 1920×1080 and **mirrored**, so `NSScreen.screens` has one
+entry and the desk has exactly one backing scale. ②'s scale-1 arm and the whole
+of ③ are therefore argued and unit-tested against a screen list a test writes
+down, not measured. What is owed is one action by the owner: un-mirror them and
+give them different scales.
+
+**(b) `CGWindowListCreateImage` is obsoleted in macOS 15, and the Xcode 26.6 SDK
+refuses to compile a call to it.** The venue's existing Swift probes
+(`launchers/m18shot.swift`, `launchers/pill_shot.swift`) therefore no longer
+build. The symbol is still exported and still answers for a window of a process
+this session started, so `@_silgen_name("CGWindowListCreateImage")` is the
+declaration that gets past the SDK — ScreenCaptureKit would want a Screen
+Recording grant no agent can ask for. `objc2`'s Rust bindings never enforced the
+availability, which is why `tests/macos_compose.rs` is untouched by this.
+
+**(c) A synthetic `mouseMoved` does not drive AppKit's menu tracking.** Posted to
+the HID tap it moves the pointer and nothing else: with the Apple menu open, the
+pointer was walked the whole width of the bar and the same menu stayed up.
+Clicking each title is the gesture that switches menus.
+
+**(d) The desk is not empty, and a press goes to whatever is in front of the
+point it names — which is the reading that nearly became a bug report.** Aimed at
+the restore prompt's own primary answer, four presses produced **no
+`WindowEvent::MouseInput` at all** (`BT_MOUSE_TRACE` is the instrument: it prints
+one line per press, and there were none), while a press on the tab strip of the
+same window in the same run arrived and routed
+(`chrome_mouse_input taken=1 … target=NewTab`). What made it look like a defect in
+the product is that the pointer's *move* still reached the window: the button
+measured `122,153,255` with the pointer parked away and `131,164,255` with it
+standing on the button, which is `BUTTON_PRIMARY_HOVER_BRIGHTNESS` (1.07)
+exactly. Enumerating **every** on-screen window rather than this process's
+explains it: the owner's own Folio stands at `497,177 1189×794` and a stack of
+Finder windows over the middle of it, so presses at window-relative physical
+`y = 42, 60, 80, 100, 160, 260` and `1180` arrived and the ones at
+`460, 660, 860, 1060` went to somebody else's window. **The rule for the next
+agent: raise your own window before you aim at it** — `open -a <your bundle>`,
+which is M3-1's reopen — and read the whole window list, not your own, before
+concluding that a press was swallowed.
+
+*(本节英文,待中文文案改写。)*

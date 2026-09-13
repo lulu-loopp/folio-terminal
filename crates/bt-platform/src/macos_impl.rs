@@ -108,6 +108,8 @@ use objc2_app_kit::{
     NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
 };
+use objc2_core_foundation::{CFRetained, CFUUID};
+use objc2_core_graphics::CGDirectDisplayID;
 use objc2_foundation::{
     NSArray, NSDictionary, NSKeyValueObservingOptions, NSLocale, NSNotification,
     NSNotificationCenter, NSNumber, NSObjectNSKeyValueObserverRegistration, NSPoint, NSRect,
@@ -520,33 +522,82 @@ fn dpi_for_scale(scale: f64) -> u32 {
     }
 }
 
-/// **Which display a point is on, as a name that survives a reboot.**
+/// **Which display a point is on, as a name that survives a reboot and a
+/// replug** (M3-4).
 ///
-/// `NSScreenNumber` out of the screen's device description — the
-/// `CGDirectDisplayID`, which Apple derives from the display's own vendor, model
-/// and serial and which therefore keeps its value across a reboot and across the
-/// same displays being plugged in again. That is exactly the promise the
-/// persistence plan's §3.1 asks of this door and no more: best-effort, stable
-/// across a restart, *not* guaranteed across a driver change or a rearrangement
-/// — which is why every reader of it degrades to a computed answer rather than
+/// The **display's UUID**, not its `CGDirectDisplayID`. M1-3 answered with the
+/// display number's decimal spelling on the ground that Apple derives it from
+/// the panel's own vendor, model and serial; that is true of the *ingredients*
+/// and not of the number. A `CGDirectDisplayID` names "a framebuffer, a colour
+/// correction table, and possibly an attached monitor" — the window server hands
+/// them out per session, and unplugging a display and plugging it back in can
+/// return a different one for the same panel. A session file keyed on it is a
+/// file whose rows stop matching the day a cable is moved, which is the one
+/// failure the key exists to prevent.
+///
+/// `CGDisplayCreateUUIDFromDisplayID` is the stable key — the same one winit
+/// identifies its own `MonitorHandle`s by, for the same reason — and its
+/// canonical `CFUUID` spelling is what this door answers: eight-four-four-four-
+/// twelve upper-case hexadecimal, which **cannot be confused with a display
+/// number** and cannot be confused with the other platform's
+/// `\\.\DISPLAY1` either. The promise to the reader is unchanged and is still
+/// §3.1's: best effort, stable across a restart, *not* guaranteed across a
+/// driver change — every reader degrades to a computed answer rather than
 /// trusting it.
 ///
-/// Its decimal spelling, because the number is the identity and a prefix would
-/// be this crate inventing a namespace the other platform does not have.
+/// The Windows arm is untouched: its ids are `DISPLAY_DEVICE.DeviceName`, they
+/// mean what they always meant, and nothing here invents a namespace for them.
 #[must_use]
 pub fn monitor_id_at(x: i32, y: i32) -> Option<String> {
     let mtm = window_thread("naming a display").ok()?;
     let (screen, _, _) = screen_at(mtm, x, y)?;
-    display_id(&screen).map(|id| id.to_string())
+    display_uuid(display_number(&screen)?)
 }
 
-/// The `CGDirectDisplayID` behind one `NSScreen`.
-fn display_id(screen: &NSScreen) -> Option<u32> {
+/// The `CGDirectDisplayID` behind one `NSScreen` — the handle, which is the
+/// thing [`display_uuid`] turns into a name.
+fn display_number(screen: &NSScreen) -> Option<CGDirectDisplayID> {
     let description = screen.deviceDescription();
     let number = description.objectForKey(ns_string!("NSScreenNumber"))?;
     number
         .downcast_ref::<NSNumber>()
         .map(NSNumber::unsignedIntValue)
+}
+
+/// **One display's UUID, in `CFUUID`'s own canonical spelling.**
+///
+/// Two Create-rule handles and both are released here: the `CFUUID` the first
+/// call makes, and the `CFString` the second does. `CFRetained` is what owns
+/// them, so the release happens on every path out including the `None` one.
+fn display_uuid(display: CGDirectDisplayID) -> Option<String> {
+    // SAFETY: `CGDisplayCreateUUIDFromDisplayID` takes a display number by
+    // value, is documented to answer `NULL` for a number that names no display
+    // (`kCGNullDirectDisplay` included, which it checks itself), and follows the
+    // Create rule — so the non-null answer is an owned `CFUUID` and `from_raw`
+    // is the right way to take it.
+    let uuid = unsafe { CGDisplayCreateUUIDFromDisplayID(display) }?;
+    let uuid = unsafe { CFRetained::from_raw(uuid) };
+    CFUUID::new_string(None, Some(&uuid)).map(|spelling| spelling.to_string())
+}
+
+// SAFETY: one CoreGraphics function, declared with the signature
+// `CGDirectDisplay.h` gives it.
+//
+// **`ApplicationServices` and not `CoreGraphics`**, which is winit's own choice
+// in `platform_impl/macos/ffi.rs` and is made here for its reason: the symbol
+// lives in `ColorSync`, which has only been a framework of its own since macOS
+// 10.13 and has always been a sub-framework of `ApplicationServices`. Linking
+// the umbrella is what links on every version this product could be asked to
+// run on, and it adds no package to `Cargo.lock` — a framework is not a crate.
+//
+// `objc2-core-graphics` 0.3.2 does not generate this one (its `CGDirectDisplay`
+// module stops at the configuration calls), so it is declared rather than
+// imported; the type it answers is `objc2-core-foundation`'s `CFUUID`, which is
+// the same type `CFUUIDCreateString` above takes, so nothing here invents a
+// second spelling of a CoreFoundation type.
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C-unwind" {
+    fn CGDisplayCreateUUIDFromDisplayID(display: CGDirectDisplayID) -> Option<NonNull<CFUUID>>;
 }
 
 /// Where the pointer is.
@@ -1773,6 +1824,61 @@ mod tests {
                 "a rectangle stated at scale {scale} reads back as itself"
             );
         }
+    }
+
+    /// **RED (M3-4) — a display is named by its UUID, and that name is not its
+    /// display number.**
+    ///
+    /// The one door in this file that needs no window and no main thread:
+    /// CoreGraphics answers a display number from anywhere, which is what lets
+    /// the identity half of `monitor_id_at` be a unit case rather than only a
+    /// line in an `.app` run. Every Mac has a main display, so the case has a
+    /// subject on any machine this suite runs on.
+    ///
+    /// Four claims, and the third is the ticket's own:
+    ///
+    /// ① the main display **has** a name — a machine whose displays cannot be
+    ///    named is a machine where every quake arrangement is forgotten;
+    /// ② the name is `CFUUID`'s canonical spelling, 8-4-4-4-12 upper-case hex,
+    ///    which is what makes it recognisable in a session file by eye;
+    /// ③ it is **not** the decimal display number and cannot be read as one —
+    ///    M1-3's answer was that number, and a build that fell back to it would
+    ///    key the file on a handle the window server reissues;
+    /// ④ asking twice in one process gives one answer, because a key that is not
+    ///    a function of the display is not a key.
+    ///
+    /// MUTATION: answer `display_number(&screen).to_string()` again and ② and ③
+    /// both go red.
+    #[test]
+    fn a_display_is_named_by_its_uuid_and_never_by_its_display_number() {
+        let display = objc2_core_graphics::CGMainDisplayID();
+        let name = display_uuid(display).expect("the main display has a UUID");
+        let groups: Vec<&str> = name.split('-').collect();
+        assert_eq!(
+            groups.iter().map(|group| group.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12],
+            "a display's name is a UUID in its canonical spelling: {name}"
+        );
+        assert!(
+            groups.iter().all(|group| group
+                .chars()
+                .all(|c| c.is_ascii_digit() || c.is_ascii_uppercase() && c.is_ascii_hexdigit())),
+            "and it is upper-case hexadecimal: {name}"
+        );
+        assert_ne!(
+            name,
+            display.to_string(),
+            "the name is not the display number"
+        );
+        assert!(
+            name.parse::<u32>().is_err(),
+            "and nothing can read it as one: {name}"
+        );
+        assert_eq!(
+            display_uuid(display).as_deref(),
+            Some(name.as_str()),
+            "one display has one name"
+        );
     }
 
     /// The work area is the one of the display the window is on, and the point
