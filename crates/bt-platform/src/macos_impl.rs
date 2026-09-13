@@ -1562,8 +1562,8 @@ pub fn wheel_scroll_amount() -> Result<WheelScrollAmount, String> {
 /// `zh-Hans-CN`, which is the shape `i18n::resolve` reads a primary subtag out
 /// of. The reader's *language*, which is the fact this door is about, and
 /// deliberately not `AppleLocale`: that one is the formatting locale
-/// `system_posix_locale` already reads for a child process's `LANG`, and the two
-/// are allowed to differ.
+/// `system_locale_declaration` already reads for a child process's locale, and
+/// the two are allowed to differ.
 ///
 /// `en` when the system names none, which is the portable arm's answer and the
 /// product's own default.

@@ -1047,51 +1047,145 @@ mod web_security_tests {
 
 #[cfg(test)]
 mod locale_tests {
-    use super::{choose_posix_locale, posix_locale_candidates};
+    use super::{LocaleDeclaration, choose_locale_declaration, posix_locale_candidates};
 
     /// The locales a stock macOS has, abbreviated to the ones these cases are
     /// about — read off `locale -a` on the Mac this ticket ran on, where there
-    /// are 288 of them.
-    const INSTALLED: [&str; 5] = [
+    /// are 288 of them. `C.UTF-8` is among them, on that machine and in this
+    /// list. **`UTF-8` is deliberately not**: that list does not carry it on any
+    /// macOS, which is why its presence is a separate argument.
+    const INSTALLED: [&str; 6] = [
         "C",
+        "C.UTF-8",
         "en_US.UTF-8",
         "zh_CN.UTF-8",
         "zh_TW.UTF-8",
         "ja_JP.UTF-8",
     ];
 
-    fn chosen(apple_locale: &str) -> Option<String> {
-        choose_posix_locale(apple_locale, INSTALLED.into_iter())
+    fn chosen(apple_locale: &str) -> Option<LocaleDeclaration> {
+        choose_locale_declaration(apple_locale, INSTALLED.into_iter(), true)
+    }
+
+    fn lang(locale: &str) -> Option<LocaleDeclaration> {
+        Some(LocaleDeclaration::lang(locale))
+    }
+
+    /// What a declaration says, flattened for a comparison that reads like the
+    /// child's environment.
+    fn said(declaration: &Option<LocaleDeclaration>) -> Vec<(&str, &str)> {
+        declaration.as_ref().map_or_else(Vec::new, |declaration| {
+            declaration
+                .variables()
+                .iter()
+                .map(|(name, value)| (*name, value.as_str()))
+                .collect()
+        })
     }
 
     /// PIN — **the system's own setting, turned into POSIX's spelling, and only
     /// if this machine has that locale** (M1-5, plan §8 Q8).
     ///
     /// RED GATE: default to `en_US.UTF-8` when the setting does not map — the
-    /// obvious repair, and the one the ticket forbids — and the last two cases
-    /// go green with a language and a country this product chose for somebody.
+    /// obvious repair, and the one the ticket forbids — and the `zh-Hans_US` and
+    /// `de_DE` cases below go green with a language and a country this product
+    /// chose for somebody.
     #[test]
     fn a_locale_is_the_systems_own_or_it_is_nothing() {
-        assert_eq!(chosen("en_US"), Some("en_US.UTF-8".to_owned()));
-        assert_eq!(chosen("ja_JP"), Some("ja_JP.UTF-8".to_owned()));
+        assert_eq!(chosen("en_US"), lang("en_US.UTF-8"));
+        assert_eq!(chosen("ja_JP"), lang("ja_JP.UTF-8"));
         // CLDR writes the script when a language has more than one; POSIX has no
         // such concept and the machine's own name for it drops it.
-        assert_eq!(chosen("zh-Hans_CN"), Some("zh_CN.UTF-8".to_owned()));
-        assert_eq!(chosen("zh-Hant_TW"), Some("zh_TW.UTF-8".to_owned()));
+        assert_eq!(chosen("zh-Hans_CN"), lang("zh_CN.UTF-8"));
+        assert_eq!(chosen("zh-Hant_TW"), lang("zh_TW.UTF-8"));
         // CLDR keywords are about calendars and numbering, and no POSIX locale
         // name carries them.
-        assert_eq!(
-            chosen("ja_JP@calendar=japanese"),
-            Some("ja_JP.UTF-8".to_owned())
-        );
+        assert_eq!(chosen("ja_JP@calendar=japanese"), lang("ja_JP.UTF-8"));
         // **The real case this ticket met**: a Chinese interface in the United
         // States. Neither `zh-Hans_US.UTF-8` nor `zh_US.UTF-8` is a locale any
-        // machine has, and there is no third answer that is not this product
-        // picking a country.
-        assert_eq!(chosen("zh-Hans_US"), None);
-        assert_eq!(chosen("de_DE"), None, "a locale this machine has not got");
-        assert_eq!(chosen(""), None);
-        assert_eq!(chosen("   "), None);
+        // machine has, and the answer names no country — see the next test for
+        // what it does name.
+        for miss in ["zh-Hans_US", "de_DE", "", "   "] {
+            let chosen = chosen(miss);
+            let said = said(&chosen);
+            assert!(
+                !said.iter().any(|(_, value)| value.contains('_')),
+                "{miss} was answered with somebody's country: {said:?}"
+            );
+        }
+    }
+
+    /// PIN — **a language and region no installed locale names gets Apple's own
+    /// fallback, both halves of it** (T-MAC-LOCALE).
+    ///
+    /// Terminal.app on the reported machine — `AppleLocale` `zh-Hans_US`, no
+    /// `zh_US` locale installed — starts its shells with `LANG=C.UTF-8` and
+    /// `LC_CTYPE=UTF-8`, and this is that pair. `LANG` alone would not do: it
+    /// cannot carry `UTF-8` (`LANG=UTF-8 locale charmap` answers `US-ASCII`,
+    /// measured on macOS 26), and `C.UTF-8` under an inherited `LC_CTYPE` of some
+    /// other encoding would be overruled for the one category a pane cares about.
+    ///
+    /// RED GATE: declare only one of the two and the length assertion fails;
+    /// order them the other way and the child reads `LC_CTYPE` before the `LANG`
+    /// it overrules.
+    #[test]
+    fn a_language_with_no_installed_locale_gets_apples_own_fallback() {
+        assert_eq!(
+            said(&chosen("zh-Hans_US")),
+            [("LANG", "C.UTF-8"), ("LC_CTYPE", "UTF-8")]
+        );
+        assert_eq!(
+            said(&chosen("de_DE")),
+            [("LANG", "C.UTF-8"), ("LC_CTYPE", "UTF-8")],
+            "a locale this machine has not got is still not this product's to pick"
+        );
+        assert_eq!(
+            said(&chosen("")),
+            [("LANG", "C.UTF-8"), ("LC_CTYPE", "UTF-8")]
+        );
+    }
+
+    /// PIN — **each half of the fallback is declared only where that locale
+    /// exists, and a machine with neither is told nothing** (T-MAC-LOCALE).
+    ///
+    /// The whole of the old rule was that a declaration names something
+    /// `setlocale` can look up, and the fallback is held to it too: `C.UTF-8` is
+    /// looked for in `locale -a`, `UTF-8` in the file the C library reads.
+    ///
+    /// RED GATE: declare the pair unconditionally and the last case goes green on
+    /// a machine that would refuse both names.
+    #[test]
+    fn the_fallback_is_only_what_this_machine_really_has() {
+        let has_neither: [&str; 2] = ["C", "en_US.UTF-8"];
+        assert_eq!(
+            said(&choose_locale_declaration(
+                "zh-Hans_US",
+                INSTALLED.into_iter(),
+                false
+            )),
+            [("LANG", "C.UTF-8")],
+            "no `UTF-8` locale file, so that half is not declared"
+        );
+        assert_eq!(
+            said(&choose_locale_declaration(
+                "zh-Hans_US",
+                has_neither.into_iter(),
+                true
+            )),
+            [("LC_CTYPE", "UTF-8")],
+            "no `C.UTF-8` in `locale -a`, so that half is not declared"
+        );
+        assert_eq!(
+            choose_locale_declaration("zh-Hans_US", has_neither.into_iter(), false),
+            None,
+            "a machine with neither is told nothing rather than a name it refuses"
+        );
+        // A machine that *has* the system's own locale never reaches the
+        // fallback, so none of this changes that answer.
+        assert_eq!(
+            choose_locale_declaration("en_US", has_neither.into_iter(), false),
+            lang("en_US.UTF-8")
+        );
     }
 
     /// PIN — the candidates are the setting itself and the setting without its
@@ -2491,9 +2585,66 @@ pub fn quiet_command_named(name: &std::path::Path) -> Option<std::process::Comma
     Some(quiet_command(handoff::program_on_path(name)?))
 }
 
-/// **The POSIX locale this account's system settings name, when this machine has
-/// one installed to match** — or `None`, which is a whole answer and not a
-/// failure (M1-5, plan §8 Q8).
+/// **What a child is told about its locale** — the variables and the values that
+/// go in them, in the order a reader of the child's environment would read them
+/// (M1-5; the second half is T-MAC-LOCALE).
+///
+/// **One or two entries, because Apple's own answer is two.** Terminal.app on
+/// the machine this ticket was reported from — `AppleLocale` is `zh-Hans_US`, a
+/// Chinese interface in the United States, and no installed locale is named
+/// `zh_US` — starts its shells with `LANG=C.UTF-8` *and* `LC_CTYPE=UTF-8`
+/// (`LC_ALL` empty), and that pair is what [`choose_locale_declaration`] mirrors
+/// when the system's own locale is not installed. Neither half is redundant:
+/// `LC_CTYPE` is the category a terminal cares about and it outranks `LANG`,
+/// while `LANG` is what the remaining categories fall back to, and each of the
+/// two names a locale the other variable cannot carry —
+/// `LANG=UTF-8 locale charmap` answers `US-ASCII` (Darwin's `UTF-8` defines the
+/// one category, so `setlocale` refuses it for the others) while
+/// `LC_CTYPE=UTF-8 locale charmap` answers `UTF-8`, both measured on macOS 26.
+///
+/// Whichever half this machine has not got is simply not there: a declaration
+/// only ever names a locale `setlocale` can look up, which is the rule the
+/// system's own locale has always been held to.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocaleDeclaration(Vec<(&'static str, String)>);
+
+/// Darwin's encoding-only locale, as `setlocale` looks it up. `LC_CTYPE`'s.
+pub const UTF8_CTYPE_LOCALE: &str = "UTF-8";
+
+/// The POSIX locale with UTF-8 as its encoding — a whole locale, so `LANG`'s.
+pub const C_UTF8_LOCALE: &str = "C.UTF-8";
+
+impl LocaleDeclaration {
+    /// The variables to set, and what to set them to.
+    #[must_use]
+    pub fn variables(&self) -> &[(&'static str, String)] {
+        &self.0
+    }
+
+    /// **The system's own locale**, which this machine has.
+    #[must_use]
+    pub fn lang(locale: impl Into<String>) -> Self {
+        Self(vec![("LANG", locale.into())])
+    }
+
+    /// **Apple's own fallback**, reduced to the halves this machine has — and
+    /// `None` when it has neither, which is the answer that declares nothing.
+    #[must_use]
+    pub fn apple_fallback(c_utf8_installed: bool, utf8_ctype_installed: bool) -> Option<Self> {
+        let mut variables = Vec::with_capacity(2);
+        if c_utf8_installed {
+            variables.push(("LANG", C_UTF8_LOCALE.to_owned()));
+        }
+        if utf8_ctype_installed {
+            variables.push(("LC_CTYPE", UTF8_CTYPE_LOCALE.to_owned()));
+        }
+        (!variables.is_empty()).then_some(Self(variables))
+    }
+}
+
+/// **The locale declaration this account's system settings earn on this
+/// machine** — or `None`, which is a whole answer and not a failure (M1-5, plan
+/// §8 Q8; T-MAC-LOCALE).
 ///
 /// # What this is for
 ///
@@ -2511,11 +2662,36 @@ pub fn quiet_command_named(name: &std::path::Path) -> Option<std::process::Comma
 /// The system setting is `AppleLocale`, which is written in CLDR's spelling
 /// (`en_US`, `zh-Hans_CN`) and not in POSIX's. [`posix_locale_candidates`] turns
 /// one into the other and **every candidate is checked against the locales this
-/// machine actually has** (`locale -a`) before it is used. Nothing is invented to
-/// fill a miss: a reader whose region is a combination no installed locale names
-/// — `zh-Hans_US`, a Chinese interface in the United States, which is a real and
-/// ordinary setting — gets `None`, and the pane is left with the environment it
-/// inherited rather than with a locale that does not exist on this machine.
+/// machine actually has** (`locale -a`) before it is used. Nothing about the
+/// reader's language or region is invented to fill a miss — that rule is
+/// unchanged, and `zh-Hans_US`, a Chinese interface in the United States, is
+/// still not answered with a country.
+///
+/// **What a miss gets instead is the one fact this product does know about
+/// itself: the encoding.** A pane decodes UTF-8 and nothing else, so a child that
+/// is told nothing at all is not left neutral — it is left in `C`, which on
+/// Darwin maps every byte to a wide character of its own value, and the three
+/// bytes of a Chinese character come back out of the line editor as three
+/// separate Latin-1 and C1 characters (T-MAC-LOCALE's report: `天下为公` typed,
+/// `天` and then `<008b>` shown).
+///
+/// So a miss is answered **the way Apple answers it**, and the evidence is the
+/// machine itself: Terminal.app on the reported Mac, whose `AppleLocale` is
+/// `zh-Hans_US` and which has no `zh_US` locale, starts its shells with
+/// `LANG=C.UTF-8` and `LC_CTYPE=UTF-8` and an empty `LC_ALL`. That is the same
+/// sentence this function makes — the encoding stated, the language and the
+/// region left unsaid — in the two variables Apple states it in, and it is the
+/// `setlocale: LC_CTYPE: cannot change locale (UTF-8)` a Linux host prints when a
+/// Mac sshs into it. Terminal's own binary carries `LANG`, `UTF-8` and `LC_CTYPE`
+/// as three adjacent strings.
+///
+/// **Both halves are checked for, in the way each can be found.** `C.UTF-8` is a
+/// whole locale and `locale -a` lists it. `UTF-8` is not a whole locale — it
+/// defines the one category — and that list does **not** name it on any macOS
+/// (288 names on the machine this was measured on, none of them `UTF-8`), so what
+/// is checked for it is the file the C library reads,
+/// [`UTF8_CTYPE_LOCALE_FILE`]. A machine with neither is told nothing, which is
+/// the answer this door has always been able to give.
 ///
 /// # Windows, and every other platform
 ///
@@ -2528,20 +2704,36 @@ pub fn quiet_command_named(name: &std::path::Path) -> Option<std::process::Comma
 /// Read once per process: it costs two child processes, and the answer is a
 /// system setting that a running app does not watch.
 #[must_use]
-pub fn system_posix_locale() -> Option<&'static str> {
-    static LOCALE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    LOCALE.get_or_init(read_system_posix_locale).as_deref()
+pub fn system_locale_declaration() -> Option<&'static LocaleDeclaration> {
+    static LOCALE: std::sync::OnceLock<Option<LocaleDeclaration>> = std::sync::OnceLock::new();
+    LOCALE.get_or_init(read_system_locale_declaration).as_ref()
 }
 
+/// Where Darwin keeps the one category its encoding-only locale defines.
+///
+/// A path rather than a `locale -a` line because `locale -a` lists *locales* and
+/// this is not one; the C library looks the name up as a directory under
+/// `/usr/share/locale` either way.
 #[cfg(target_os = "macos")]
-fn read_system_posix_locale() -> Option<String> {
-    let apple_locale = quiet_command_text("defaults", &["read", "-g", "AppleLocale"])?;
-    let installed = quiet_command_text("locale", &["-a"])?;
-    choose_posix_locale(&apple_locale, installed.lines())
+pub const UTF8_CTYPE_LOCALE_FILE: &str = "/usr/share/locale/UTF-8/LC_CTYPE";
+
+#[cfg(target_os = "macos")]
+fn read_system_locale_declaration() -> Option<LocaleDeclaration> {
+    // Each of the two readings is allowed to fail on its own: a machine that
+    // will not say what its region is still has an encoding, and the fallback
+    // below is about the encoding alone.
+    let apple_locale =
+        quiet_command_text("defaults", &["read", "-g", "AppleLocale"]).unwrap_or_default();
+    let installed = quiet_command_text("locale", &["-a"]).unwrap_or_default();
+    choose_locale_declaration(
+        &apple_locale,
+        installed.lines(),
+        std::path::Path::new(UTF8_CTYPE_LOCALE_FILE).exists(),
+    )
 }
 
 #[cfg(not(target_os = "macos"))]
-fn read_system_posix_locale() -> Option<String> {
+fn read_system_locale_declaration() -> Option<LocaleDeclaration> {
     None
 }
 
@@ -2561,7 +2753,7 @@ fn quiet_command_text(program: &str, arguments: &[&str]) -> Option<String> {
 }
 
 /// `AppleLocale` as POSIX would spell it, most specific first — the candidates
-/// [`system_posix_locale`] looks for among the locales a machine has.
+/// [`system_locale_declaration`] looks for among the locales a machine has.
 ///
 /// Two forms and no more, because a third would be a guess:
 ///
@@ -2610,19 +2802,32 @@ pub fn posix_locale_candidates(apple_locale: &str) -> Vec<String> {
 }
 
 /// The first of [`posix_locale_candidates`] that `installed` — the lines of
-/// `locale -a` — actually names.
+/// `locale -a` — actually names, and failing that Apple's own fallback, reduced
+/// to the halves this machine has.
 ///
 /// The match is exact on the name, because that is what `setlocale` will look up
-/// and a near-miss is a locale that is not there.
+/// and a near-miss is a locale that is not there. `C.UTF-8` is looked for in the
+/// same list and by the same rule; `utf8_ctype_installed` is a separate argument
+/// rather than a line of it for the reason [`system_locale_declaration`] gives —
+/// `UTF-8` is one category rather than a locale, `locale -a` does not list it,
+/// and the fact is read off the file system instead.
 #[must_use]
-pub fn choose_posix_locale<'a>(
+pub fn choose_locale_declaration<'a>(
     apple_locale: &str,
     installed: impl Iterator<Item = &'a str>,
-) -> Option<String> {
+    utf8_ctype_installed: bool,
+) -> Option<LocaleDeclaration> {
     let installed: Vec<&str> = installed.map(str::trim).collect();
     posix_locale_candidates(apple_locale)
         .into_iter()
         .find(|candidate| installed.contains(&candidate.as_str()))
+        .map(LocaleDeclaration::lang)
+        .or_else(|| {
+            LocaleDeclaration::apple_fallback(
+                installed.contains(&C_UTF8_LOCALE),
+                utf8_ctype_installed,
+            )
+        })
 }
 
 /// The family the renderer draws when a settings file names none.
