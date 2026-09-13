@@ -116,6 +116,37 @@ Why: Google emphasizes a global audience, and Apple calls for language that work
 
 For Chinese, work from a short behavior brief and the actual surface. Review naturalness without the English first, then compare facts against the source. The specific Chinese checks are in section 4.
 
+## 1b. Settings descriptions
+
+Owner ruling, 13 September 2026: the line under a setting reads as spoken explanation rather than as a settings page. These seven rules govern that line and nothing else — the muted sentence a row draws under its title in the Settings dialog, in every state a row can be in. They are stated here for English; the same seven, stated for Chinese, are in [`zh-style-notes.md`](zh-style-notes.md). Section 1's principles still apply; where the two disagree, these win, because they are about one surface and section 1 is about all of them.
+
+1. **Declarative sentences.** Never a question used as a description: "How much of the picture shows" becomes a noun phrase or a statement. No conversational particles.
+2. **Two sentences at most.** The first says what the setting controls. The second, if there is one, says the boundary case — the other level, the unavailable state, the one prerequisite. Nothing else; a third sentence is a fact that belongs somewhere other than this row.
+3. **The reader's view, not the implementation's.** "The picture is not shown", never "the window does not draw it". Name the thing every time it is referred to — "the picture", "the strip", "the entry" — and never "it". A possessive on the noun just named ("the pane's edge") is naming, not a pronoun.
+4. **A level is called what its control calls it.** When a description names one of the row's own options, it uses that option's label text in the case the control shows it: `Off`, `On`, `Expanded`, `Icons`, `Above Off`. When it names another row, it uses that row's printed title: `Background opacity`, not "the opacity setting".
+5. **One term per thing across the whole table.** pane, window, terminal, tab, preview each mean exactly one thing everywhere they appear. Pick the term already in the glossary of section 1.6 and use it in every row; do not let one row say "folder" where its neighbour says "directory".
+6. **Facts only.** No editorial asides, no reassurance about what is left untouched, no defence of the design. (The 17 August 2026 rule, restated here because settings copy is where it was broken.)
+7. **Two lines, and a test says so.** Every description fits **two lines** of the description column at 1× in its language. The budget is enforced by `settings.rs`'s `no_settings_sentence_needs_a_third_line`, not by eye.
+
+### The line budget
+
+A settings row is a title and a sentence beside a control, and the control column is **the widest answer on that page** — so there is no single description column. Write to the narrowest one:
+
+| | English | Chinese |
+| --- | --- | --- |
+| **Narrowest column (235px) — write to this** | **39 characters a line, 2 lines** | **19 characters a line, 2 lines** |
+| General, Summoned terminal | 39 | 19 |
+| Appearance | 54 | 27 |
+| Profiles (editor) | 46 | 23 |
+| Terminal, Agents, Rendered blocks | 61 | 30 |
+| A stacked row (its control sits below the sentence) | 83 | 41 |
+
+235px is not the tightest column this build happens to draw; it is the tightest column the dialog **can** draw, because a picker is clamped at half its row. Two pages already stand on it with words this build owns — Summoned terminal, whose `Restore` row offers `Tabs, folders, and a pinned tab's last command typed at its prompt`, and General, whose `Opens on launch` row offers `A tab in the window you used last`. A machine with long font names or profile titles narrows other pages towards 235 and can never go under it.
+
+The character counts are `column ÷ advance`: 6px per English character (the description font's 12px at the repository's documented half-em stand-in for the shaper) and 12px per Chinese character (a CJK face advances one em). They are a writing target, not the gate: the gate wraps the real sentence in the column its own page draws, and a 78-character English sentence can still want a third line if the words break badly. Check it with the test, not with a character count.
+
+**One sentence is exempt, by ruling and by name.** `Option sends Alt` takes three lines and keeps them (owner ruling, 13 September 2026): the two-line rewrite bought its length by dropping which programs want Option to be Alt, and that the characters it types otherwise are the ones every other Mac app types — and the reader this row exists for is one whose `⌥a` has just done the wrong thing. Exemptions are entries on `OWNER_RULED_EXCEPTIONS` in `settings.rs`, one per ruling; there is no other way to be excused, and an entry that stops needing the exemption fails the budget test by name. Do not add one without a ruling.
+
 ## 2. Per-surface checklist
 
 Lengths below are Folio editing targets, not limits attributed to the sources or verified layout constraints. English counts are words. Chinese counts are approximate Han characters, with Latin names and paths consuming additional width. Test actual wrapping before shipping. Never remove a necessary condition to hit a count.

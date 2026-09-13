@@ -46,6 +46,13 @@ All notable changes to Folio are recorded here. The format follows
 
 - Keep focus cards on the same content when resizing, and make Alt+wheel respond immediately when reversing at the oldest content.
 - **On a Mac, tabs now take the whole width of the title bar.** The tab strip was setting aside room for four window buttons on a window that carries one — macOS draws minimise, zoom and close at the other end of the bar — so the tabs were squeezed to their profile marks, their names hidden, with a wide empty band before the settings gear. Seven tabs in a 934-point window now stand 91 points wide with their names showing instead of 72 without.
+- **Every picker in Settings that offers profiles now shows their marks.** The
+  summoned terminal's `Profile for new tabs` listed its profiles as bare words,
+  where the same profiles carry their marks on the tab strip, on the pane head
+  and in the new-tab `⌄` menu; and no picker showed a mark once it was closed.
+  Both now do, in the marks and at the size that menu draws. `Default profile`,
+  which is a deferral rather than a profile, keeps its word and borrows nobody's
+  mark.
 
 - Reuse unchanged Markdown prose measurements across caret moves and edits, and reset block scroll offsets after reparsing.
 
