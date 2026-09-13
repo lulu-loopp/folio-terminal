@@ -42047,12 +42047,31 @@ impl Runtime<'_> {
                 (None, None) => continue,
             };
             let verbs = saying.verbs;
+            // Measured against the font that will draw them, which is what keeps
+            // a Chinese verb from being given an English word's box. **Before
+            // the rectangle and not after it since the owner's ruling of
+            // 2026-09-12**: a pill is as wide as what it says, so what it says
+            // has to be measured before there is anywhere to say it.
+            let widths: Vec<f32> = verbs
+                .iter()
+                .map(|verb| {
+                    self.window
+                        .renderer
+                        .measure_chrome_text(&mut self.app.gpu, verb.text(), font)
+                })
+                .collect();
             // Each host's own rectangle: a terminal's is the complement of the
             // subtraction that made room for it, and a preview's is cut out of
-            // the body it floats over and takes nothing from it.
+            // the body it floats over, takes nothing from it, and is no wider
+            // than the sentence and the words inside it.
             let strip = if floats {
+                let sentence =
+                    self.window
+                        .renderer
+                        .measure_chrome_text(&mut self.app.gpu, saying.text, font);
+                let content = notice::pill_content_width(sentence, &widths, scale);
                 self.preview_surface_body_rect(self.notice_surface(host), scale)
-                    .and_then(|body| seats::news_pill_box(body, scale))
+                    .and_then(|body| seats::news_pill_box(body, scale, content))
             } else {
                 match host {
                     NoticeHost::Seat(seat) => {
@@ -42067,16 +42086,6 @@ impl Runtime<'_> {
             let Some(strip) = strip else {
                 continue;
             };
-            // Measured against the font that will draw them, which is what keeps
-            // a Chinese verb from being given an English word's box.
-            let widths: Vec<f32> = verbs
-                .iter()
-                .map(|verb| {
-                    self.window
-                        .renderer
-                        .measure_chrome_text(&mut self.app.gpu, verb.text(), font)
-                })
-                .collect();
             let bar = notice::lay_out(strip, saying, &widths, scale);
             // **And the sentence, cut to the row it was left** (§7.43). The
             // words keep their whole boxes and the prose is what gives way, so
@@ -99181,7 +99190,7 @@ mod files_locate_door_tests {
         // row that does not exist.
         let layers = body("    fn notice_layers(");
         assert!(
-            layers.contains("seats::news_pill_box(body, scale)"),
+            layers.contains("seats::news_pill_box(body, scale, content)"),
             "the pass that lays the news out does not cut a pill out of the body it floats over, so a torn-off document has nowhere to say what the disk did:\n{layers}"
         );
         // And the chassis reserves nothing for it, which is that ruling's other
@@ -148422,7 +148431,8 @@ mod tests {
             "something other than the path row is being taken off the top of the document"
         );
         // And the news it may owe is cut out of that body rather than off it.
-        let pill = seats::news_pill_box(geometry.body, scale).expect("a pane this size holds one");
+        let pill =
+            seats::news_pill_box(geometry.body, scale, 120.0).expect("a pane this size holds one");
         assert!(pill[1] > geometry.body[1] && pill[3] < geometry.body[3]);
         // The band is the terminal's alone now: a preview seat that somehow wore
         // one would be a row standing on a document whose news is elsewhere.

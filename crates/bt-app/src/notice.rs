@@ -259,6 +259,66 @@ pub struct NoticeBar {
     pub close: Option<[f32; 4]>,
 }
 
+/// The gap between two things on a notice, in physical pixels — a whole number,
+/// because a run of boxes laid out from one end of a strip must land on the same
+/// pixel however many of them there are.
+fn gap_px(scale: f32) -> f32 {
+    (GAP_LOGICAL_PX * scale).round()
+}
+
+/// The box one verb is drawn in, around its measured word.
+///
+/// One function rather than one expression in [`lay_out`], because
+/// [`pill_content_width`] has to know the same number: a pill is sized to the
+/// run before the run is laid out in it, and a box measured by one rounding and
+/// filled by another is a button that falls off the end of its own pill.
+fn verb_box_width(width: f32, scale: f32) -> f32 {
+    (width + 2.0 * (VERB_PADDING_X_LOGICAL_PX * scale).round()).round()
+}
+
+/// **The pill's own horizontal padding**, in physical pixels and a whole number
+/// of them — [`crate::seats::NEWS_PILL_PAD_X_LOGICAL_PX`] at this scale.
+///
+/// Rounded here and rounded there ([`crate::seats::news_pill_box`] rounds the
+/// same constant the same way), which is the whole of why it is a function: the
+/// pill is as wide as its content plus these two paddings, and a padding that
+/// was 12.6 px when the box was sized and 13 px when the words were placed would
+/// take that half pixel out of the last word.
+#[must_use]
+pub fn pill_pad_x(scale: f32) -> f32 {
+    (crate::seats::NEWS_PILL_PAD_X_LOGICAL_PX * scale).round()
+}
+
+/// **How wide the inside of a pill has to be to hold what it says** — the
+/// sentence, the boxes of the verbs beside it, and the gaps [`lay_out`] leaves
+/// between them, in physical pixels (owner's ruling 2026-09-12).
+///
+/// `text_width` and `widths` are measured by the caller against the font that
+/// will draw them, for [`lay_out`]'s own reason: this module has no font, and a
+/// width guessed from a character count fits in English and clips in Chinese.
+///
+/// Add [`pill_pad_x`] twice and you have the pill's width, which is what
+/// [`crate::seats::news_pill_box`] does with this number. It is not a second
+/// measurement of the row: the boxes are [`verb_box_width`]'s, the gaps are
+/// [`gap_px`]'s, and there are `n + 1` of them because [`lay_out`] leaves one
+/// between each pair of words and **two** between the sentence and the first of
+/// them — the sentence's own right margin and the run's own left one, which the
+/// band has always had and which a pill that hugs its content must pay for
+/// rather than absorb.
+#[must_use]
+pub fn pill_content_width(text_width: f32, widths: &[f32], scale: f32) -> f32 {
+    let gap = gap_px(scale);
+    let run: f32 = widths
+        .iter()
+        .map(|width| verb_box_width(*width, scale) + gap)
+        .sum();
+    if widths.is_empty() {
+        text_width.max(0.0)
+    } else {
+        text_width.max(0.0) + run + gap
+    }
+}
+
 /// Lay the strip out in `strip`, the row [`crate::seats::pane_notice_strip`]
 /// took from the pane's body.
 ///
@@ -271,6 +331,14 @@ pub struct NoticeBar {
 /// and the sentence takes what is left — which can be nothing, and a sentence
 /// with no room is a sentence that is not drawn rather than one that overruns
 /// the words beside it.
+///
+/// **On a pill, "what is left" is usually exactly what was asked for**, because
+/// the box was cut to this arithmetic before this ran: [`pill_content_width`] is
+/// the same three numbers ([`verb_box_width`], [`gap_px`], [`pill_pad_x`]) added
+/// up rather than placed, and [`crate::seats::news_pill_box`] hands their sum
+/// back as a rectangle. The order above is still the one that decides, and it
+/// still decides something, because that rectangle is clamped to the body: a
+/// pill in a narrow pane is a row that ran out of room like any other.
 ///
 /// # What gives way, in what order (user ruling 2026-08-28, §7.43)
 ///
@@ -316,21 +384,20 @@ pub fn lay_out(strip: [f32; 4], say: NoticeSay<'_>, widths: &[f32], scale: f32) 
 
     let verb_height = px(VERB_HEIGHT_LOGICAL_PX).round();
     let (verb_top, verb_bottom) = centred_box(verb_height);
-    let verb_padding = px(VERB_PADDING_X_LOGICAL_PX).round();
-    let gap = px(GAP_LOGICAL_PX).round();
+    let gap = gap_px(scale);
     let pad_left = if pill {
-        px(crate::seats::NEWS_PILL_PAD_X_LOGICAL_PX)
+        pill_pad_x(scale)
     } else {
         px(PADDING_LEFT_LOGICAL_PX)
     };
     let text_left = (strip[0] + pad_left).round();
     let mut right = match close {
         Some(close) => close[0] - px(VERB_TRAILING_GAP_LOGICAL_PX).round(),
-        None => (strip[2] - px(crate::seats::NEWS_PILL_PAD_X_LOGICAL_PX)).round(),
+        None => strip[2] - pill_pad_x(scale),
     };
     let mut verbs: Vec<(NoticeVerb, [f32; 4])> = Vec::new();
     for (verb, width) in say.verbs.iter().rev().zip(widths.iter().rev()) {
-        let box_width = (width + 2.0 * verb_padding).round();
+        let box_width = verb_box_width(*width, scale);
         let left = right - box_width;
         // **A word that does not fit is a word that is not offered**, and every
         // word to the left of it goes with it: they are laid out right to left,
@@ -352,10 +419,18 @@ pub fn lay_out(strip: [f32; 4], say: NoticeSay<'_>, widths: &[f32], scale: f32) 
     // caller's `widths` are in and the order a hit test walks.
     verbs.reverse();
 
-    let text_right = if all_offered {
-        (right - gap).max(text_left)
-    } else {
+    let text_right = if !all_offered {
         text_left
+    } else if pill && verbs.is_empty() {
+        // **A gap is the space between two things**, and on a bare `Saved` there
+        // is nothing to the sentence's right but the pill's own padding. Keeping
+        // one here would take a gap's worth off a pill that was sized to the
+        // word exactly ([`pill_content_width`]) and elide the last letter of the
+        // one word it is up to say. A band always has its `×` out there, so a
+        // band always keeps the gap.
+        right.max(text_left)
+    } else {
+        (right - gap).max(text_left)
     };
     NoticeBar {
         frame: strip,
@@ -657,6 +732,60 @@ mod tests {
         let band = lay_out(STRIP, NoticeSay::band(Notice::Offer), &[90.0, 100.0], 1.0);
         assert!(band.close.is_some(), "the terminal's band lost its way out");
         assert!(band.edge[3] > band.edge[1]);
+    }
+
+    /// PIN — **a pill sized for its words holds them**, at every scale the
+    /// product is drawn at and for every shape of news it carries (owner's
+    /// ruling 2026-09-12; §7.1.3x ②).
+    ///
+    /// [`pill_content_width`] and [`lay_out`] are two readings of one row, and
+    /// the pill is the one surface in this window whose *box* is decided by the
+    /// first and whose *contents* are placed by the second. A third of a pixel
+    /// of disagreement between them is not a hairline: it is the leftmost verb
+    /// failing the `left < text_left` test and not being offered at all, or the
+    /// sentence coming back with a `…` on a pill that was sized for the whole of
+    /// it. Fractional scales are where that would happen — 1.25 and 1.5 are what
+    /// a Windows laptop reports — so they are the ones pinned here.
+    ///
+    /// RED GATE: round the pill's padding one way in [`pill_pad_x`] and the
+    /// other way in [`crate::seats::news_pill_box`], or drop the `.ceil()` that
+    /// makes the box a whole pixel wider than its words, and the verbs start
+    /// falling off at some scale in this table.
+    #[test]
+    fn a_pill_sized_for_its_words_holds_every_one_of_them() {
+        // Wide enough that nothing here is ever clamped: this test is about the
+        // hug, and the clamp has its own.
+        let body = [0.0, 0.0, 4000.0, 900.0];
+        let offered: &[NoticeVerb] = &[NoticeVerb::KeepMyEdits, NoticeVerb::ReloadFromDisk];
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5] {
+            for text in [0.0, 37.0, 216.4, 511.25] {
+                for count in 0..=2 {
+                    let widths = [61.5, 44.25][..count].to_vec();
+                    let verbs = &offered[..count];
+                    let content = pill_content_width(text, &widths, scale);
+                    let pill = crate::seats::news_pill_box(body, scale, content)
+                        .expect("a body this size holds a pill at any scale");
+                    let bar = lay_out(
+                        pill,
+                        NoticeSay::pill("Changed on disk", verbs),
+                        &widths,
+                        scale,
+                    );
+                    assert_eq!(
+                        bar.verbs.len(),
+                        verbs.len(),
+                        "a pill sized for {count} words at scale {scale} offers {} of them",
+                        bar.verbs.len()
+                    );
+                    assert!(
+                        bar.text[2] - bar.text[0] >= text,
+                        "the sentence was measured at {text} and given \
+                         {} of the pill it was sized for, at scale {scale} with {count} words",
+                        bar.text[2] - bar.text[0]
+                    );
+                }
+            }
+        }
     }
 
     /// The `×` keeps the trailing column, the verbs keep theirs in the order
