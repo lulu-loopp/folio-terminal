@@ -2730,13 +2730,13 @@ impl Text {
             ),
             Self::DescFormulas => pick(
                 lang,
-                "Typesets $$…$$ blocks in command output. Off, the LaTeX source is shown as it was printed.",
+                "Typesets $$…$$ blocks in command output. Off, the LaTeX source is shown as printed.",
                 "排版命令输出里的 $$…$$ 块。关闭时显示 LaTeX 源码原文。",
             ),
             Self::DescInlineFormulas => pick(
                 lang,
-                "Typesets $…$ in command output. Off, the source is shown as it was printed.",
-                "排版命令输出里的 $…$。关闭时显示源码原文。",
+                "Typesets $…$ in command output. Off, the LaTeX source is shown as printed.",
+                "排版命令输出里的 $…$。关闭时显示 LaTeX 源码原文。",
             ),
             // **What it does, then the bound on what it can do.** The second
             // sentence is the one a reader of a terminal's settings actually
@@ -2745,8 +2745,8 @@ impl Text {
             Self::RowUpdateCheck => pick(lang, "Update check", "检查新版"),
             Self::DescUpdateCheck => pick(
                 lang,
-                "Checks once a day for a new version and names it here.",
-                "每天查一次有没有新版本，有的话在设置中提示。",
+                "Checks once a day for a newer Folio. The new version is named on this row.",
+                "每天查一次。新版本显示在这一行。",
             ),
             Self::DescGitPanel => pick(
                 lang,
@@ -2771,8 +2771,8 @@ impl Text {
             // holds again on the Chinese.
             Self::DescExplorerMenu => pick(
                 lang,
-                "Puts Folio in Explorer's right-click menu, on the first page and under Show more options. The first page registers folio.msix for this account.",
-                "在资源管理器右键菜单的第一页和「显示更多选项」页都加入「在 Folio 中打开」。第一页需要注册 folio.msix（与 folio.exe 同文件夹）到当前账户。",
+                "Adds Folio to Explorer's menu, and registers folio.msix for this account.",
+                "将 Folio 加入资源管理器菜单，为当前账户注册 folio.msix。",
             ),
             // **One menu, and the sentence names no page.** Not `Show more
             // options` with a footnote: that item is a Windows 11 item, and a
@@ -2781,18 +2781,18 @@ impl Text {
             // whole of what On can do on it, so nothing is left to explain.
             Self::DescExplorerMenuNoFirstPage => pick(
                 lang,
-                "Puts Folio in Explorer's right-click menu.",
-                "在资源管理器右键菜单中加入「在 Folio 中打开」。",
+                "Adds Folio to Explorer's menu.",
+                "将 Folio 加入资源管理器菜单。",
             ),
             Self::DescExplorerMenuNoPackage => pick(
                 lang,
-                "Puts Folio under Show more options in Explorer's menu. folio.msix is not in this folder. It ships in the archive beside folio.exe, and the first page needs it.",
-                "在资源管理器右键菜单的「显示更多选项」页加入「在 Folio 中打开」。本文件夹中缺少 folio.msix，该文件随压缩包放在 folio.exe 旁，第一页需要它。",
+                "Adds Folio under Show more options. folio.msix is missing from this folder.",
+                "将 Folio 加入「显示更多选项」。本文件夹缺少 folio.msix。",
             ),
             Self::DescExplorerFirstPageElsewhere => pick(
                 lang,
-                "That entry points at another folder. Folio takes it back at the next launch.",
-                "那一页上的条目指向另一个文件夹。下次启动时 Folio 会改回来。",
+                "That entry points at another folder. Folio takes the entry back next launch.",
+                "条目指向另一个文件夹。下次启动时 Folio 改回来。",
             ),
             // **Advice, and the only line here that is.** Explorer was told the
             // moment the package was registered; what it does with that is not
@@ -2800,33 +2800,33 @@ impl Text {
             // Folio in it needs the one thing that always works.
             Self::DescExplorerFirstPageUnreadable => pick(
                 lang,
-                "Windows would not say what is registered. Folio asks again at the next launch.",
-                "向 Windows 查询时没有得到回应。下次启动时 Folio 会重新查询。",
+                "Windows did not say what is registered. Folio asks again next launch.",
+                "Windows 未告知注册状态。下次启动时 Folio 重新查询。",
             ),
             Self::DescExplorerFirstPageAwaitingShell => pick(
                 lang,
-                "Folio is registered for the first page. Explorer reads that list when it starts, so sign out and back in if the entry is not there yet.",
-                "Folio 已注册到右键菜单的第一页。资源管理器只在启动时读取这份列表，如果条目尚未出现，注销当前账户并重新登录。",
+                "Folio is registered, so sign out and back in if the entry is missing.",
+                "Folio 已注册。条目未出现时，注销后重新登录。",
             ),
             Self::DescTabLayout => pick(
                 lang,
-                "Whether tabs run along the top of the window or down its side.",
-                "标签是横排在窗口顶部，还是竖排在侧边。",
+                "Tabs run along the top of the window or down one side.",
+                "标签横排在窗口顶部，或竖排在侧边。",
             ),
             Self::DescSidebar => pick(
                 lang,
-                "Expanded keeps the vertical tab strip open beside the terminal. Icons narrows it to a strip that opens over the terminal.",
-                "「展开」让竖排标签栏一直开在终端旁边；「图标」把它收成一条窄条，需要时覆盖在终端上打开。",
+                "Expanded keeps the vertical tab strip beside the terminal. Icons narrows the strip.",
+                "「展开」让竖排标签栏保持在终端旁边。「图标」将标签栏收窄。",
             ),
             Self::DescSplitDirection => pick(
                 lang,
-                "Which way a pane splits when the action you used names no direction.",
-                "拆分时没有指明方向的话，新窗格落在哪一边。",
+                "A pane splits this way when the action you used names no direction.",
+                "拆分操作未指明方向时，新窗格的默认朝向。",
             ),
             Self::DescDefaultProfile => pick(
                 lang,
-                "Which profile a new tab opens, and which one Folio starts with.",
-                "新建标签时打开哪个配置，以及 Folio 启动时用哪个。",
+                "The profile a new tab opens, and the one Folio starts with.",
+                "新标签页打开的配置，也是 Folio 的启动配置。",
             ),
             // **It used to say when it took effect** — "Applies the next time
             // Folio starts" — because that was the one surprising thing about
@@ -2851,7 +2851,7 @@ impl Text {
             ),
             Self::DescFontSize => pick(
                 lang,
-                "How large terminal text is, before your display's scaling is applied.",
+                "The size of terminal text, before your display's scaling is applied.",
                 "终端文字的大小，不含显示器缩放。",
             ),
             Self::RowLightScheme => pick(lang, "Light scheme", "浅色配色"),
@@ -2862,7 +2862,7 @@ impl Text {
             // reads as two paths.
             Self::DescLightScheme => pick(
                 lang,
-                "The palette a light window uses, for terminal text and for the window around it.",
+                "The palette a light window uses for terminal text and for the window itself.",
                 "浅色窗口用的配色，终端与窗口本身共用一套。",
             ),
             Self::DescDarkScheme => pick(
@@ -2886,22 +2886,22 @@ impl Text {
             ),
             Self::DescImageFit => pick(
                 lang,
-                "How the picture meets a window that is not its shape: stretched, filled or tiled.",
-                "图片与窗口形状不同时怎么铺开：拉伸、填充或平铺。",
+                "The picture is stretched, filled or tiled to meet a window of another shape.",
+                "图片与窗口形状不同时的铺开方式：拉伸、填充或平铺。",
             ),
             Self::DescImageOpacity => pick(
                 lang,
-                "How much of the picture you see. At 0 the window is drawn without it.",
-                "图片显示出多少。为 0 时窗口不画它。",
+                "A lower value fades the picture into the window. At 0 the picture is not shown.",
+                "数值越低图片越淡。为 0 时图片不显示。",
             ),
             Self::DescBackgroundOpacity => pick(
                 lang,
-                "How much of the desktop shows through panes and the window behind them. Text and menus stay solid.",
-                "桌面透过窗格和它们背后的窗口显出多少。文字与菜单保持不透明。",
+                "A lower value lets more of the desktop show through the window. Text and menus stay solid.",
+                "数值越低桌面透过窗口越多。文字与菜单保持不透明。",
             ),
             Self::DescAcrylic => pick(
                 lang,
-                "Blurs whatever sits behind the window. Visible only when background opacity is below 100%.",
+                "Blurs whatever sits behind the window. Visible only when Background opacity is below 100%.",
                 "把窗口背后的东西模糊掉。仅在背景不透明度低于 100% 时可见。",
             ),
             Self::DescAlwaysOnTop => pick(
@@ -2920,13 +2920,13 @@ impl Text {
                 platform,
                 "This version of Windows does not offer the blur.",
                 "这个版本的 Windows 不提供这种模糊。",
-                "Folio does not draw this blur on macOS.",
-                "Folio 在 macOS 上不画这种模糊。",
+                "This blur is not available on macOS.",
+                "macOS 上不提供这种模糊。",
             ),
             Self::DescBackgroundOpacityUnavailable => pick(
                 lang,
-                "This window is drawn opaque and cannot let the desktop through.",
-                "窗口以不透明方式绘制，桌面无法透过来。",
+                "This window is opaque, so the desktop cannot show through.",
+                "窗口不透明，桌面无法透过来。",
             ),
             Self::OptionImageNone => pick(lang, "None", "无"),
             Self::OptionImageChoose => pick(lang, "Choose…", "选择…"),
@@ -3346,7 +3346,7 @@ impl Text {
             // printed as.
             Self::DescTables => pick(
                 lang,
-                "Draws markdown tables in command output. Off, the pipe characters are shown as they were printed.",
+                "Draws markdown tables in command output. Off, the pipe characters are shown as printed.",
                 "画出命令输出里的 markdown 表格。关闭时显示管道符原文。",
             ),
             // 「最大高度」is the row, and the sentence is the mock-up's own
@@ -3377,7 +3377,7 @@ impl Text {
             Self::ProfilesRowName => pick(lang, "Name", "名称"),
             Self::ProfilesRowNameDesc => pick(
                 lang,
-                "What this profile is called on tabs, in the profile picker and in this list.",
+                "The name this profile shows on tabs, in the profile picker and in this list.",
                 "这个配置在标签、选择器和这份列表中显示的名称。",
             ),
             Self::ProfilesRowProgram => pick(lang, "Program", "程序"),
@@ -3414,8 +3414,8 @@ impl Text {
             Self::ProfilesRowArgs => pick(lang, "Arguments", "参数"),
             Self::ProfilesRowArgsDesc => pick(
                 lang,
-                "Passed to the program when it starts. Spaces separate; double quotes group. e.g. -NoExit -File D:\\me\\start.ps1",
-                "在程序读取自己的任何内容之前传给它。空格分词，双引号成组。例：-NoExit -File D:\\me\\start.ps1",
+                "Passed to the program when the session starts. Spaces separate arguments; double quotes group them. e.g. -NoExit -File D:\\me\\start.ps1",
+                "会话启动时传给程序。空格分隔参数，双引号成组。例：-NoExit -File D:\\me\\start.ps1",
             ),
             Self::ProfilesRowEnv => pick(lang, "Environment", "环境变量"),
             Self::ProfilesRowEnvDesc => pick(
@@ -3426,8 +3426,8 @@ impl Text {
             Self::ProfilesRowHyperlink => pick(lang, "Force hyperlinks", "强制链接"),
             Self::ProfilesRowHyperlinkDesc => pick(
                 lang,
-                "Sets FORCE_HYPERLINK, which programs read before deciding to emit a link.",
-                "设置 FORCE_HYPERLINK，程序在决定是否输出链接前会读取它。",
+                "Sets FORCE_HYPERLINK, which programs read before printing a link.",
+                "设置 FORCE_HYPERLINK，程序在输出链接前会读取。",
             ),
             Self::ProfilesRowIntegration => pick(lang, "Shell integration", "Shell 整合"),
             Self::ProfilesEnvAdd => pick(lang, "Add", "添加"),
@@ -3931,8 +3931,8 @@ impl Text {
             Self::RowKeyHints => pick(lang, "Shortcut hints", "快捷键提示"),
             Self::DescKeyHints => pick(
                 lang,
-                "Hold a modifier for a moment and this window lists the shortcuts that start with it.",
-                "按住修饰键片刻，窗口列出以该键开头的快捷键。列表不截走按键。",
+                "Hold a modifier a moment and this window lists the shortcuts on that key.",
+                "按住修饰键片刻，窗口列出以该键开头的快捷键。",
             ),
             // **The two keycaps stand in both columns** (2026-09-07 copy
             // ruling). `Option` and `Alt` are the letters printed on the keys
@@ -3983,8 +3983,8 @@ impl Text {
             // beside it do not.
             Self::DescScrollback => pick(
                 lang,
-                "How many lines each pane keeps. Past that, the oldest lines are dropped.",
-                "每个窗格保留多少行。超出之后，最旧的行会被丢掉。",
+                "The number of lines each pane keeps. Past that, the oldest lines are dropped.",
+                "每个窗格保留的行数。超出后最旧的行丢弃。",
             ),
             // 「自动折行」and not 「换行」: 「换行」is what a newline in the
             // output is, and this row is about what the pane does to a line the
@@ -3997,8 +3997,8 @@ impl Text {
             // (2561, 7897) and this is that.
             Self::DescLineWrappingOn => pick(
                 lang,
-                "Lines longer than the pane fold at its edge.",
-                "比窗格宽的行在边缘折行。",
+                "Lines longer than the pane fold at the pane's edge.",
+                "比窗格宽的行在窗格边缘折行。",
             ),
             // Two clauses: what happens to the line, and how to follow it. The
             // second is the row's whole reason for varying — see the variant.
@@ -4053,8 +4053,8 @@ impl Text {
             // that says less.
             Self::DescFocusMode => pick(
                 lang,
-                "The tab strip becomes a column of cards, one per tab, and the tab you pick fills the window. Ctrl+Shift+Z does the same.",
-                "标签条变成一列卡片，一张卡一个标签；选中的标签占满整个窗口。Ctrl+Shift+Z 拨的是同一个开关。",
+                "The tab strip becomes a column of cards, one per tab. Ctrl+Shift+Z does the same.",
+                "标签条变成一列卡片，每个标签一张。Ctrl+Shift+Z 同样可切换。",
             ),
             // 「最小对比度」is the term of art both WCAG's Chinese translations
             // and VS Code's own Chinese locale use for this quantity, so the row
@@ -4072,8 +4072,8 @@ impl Text {
             // wearing.
             Self::DescMinimumContrast => pick(
                 lang,
-                "Lightens or darkens terminal text until it meets this ratio against its background. Above Off, it overrides the colours a program asked for.",
-                "把终端文字提亮或压暗，直到与它背后的单元格达到这个对比度。背景一律不动；Off 以上的档位会覆盖程序指定的颜色。",
+                "Lightens or darkens terminal text to this ratio. Above Off, program colours give way.",
+                "终端文字提亮或压暗到这个对比度。关以上会覆盖程序指定的颜色。",
             ),
             // 「通知」and not 「桌面通知」: Windows itself calls the surface
             // 「通知」in its own Settings, and the row's sentence says where it
@@ -4086,8 +4086,8 @@ impl Text {
             // question is no while the pane is in front of you.
             Self::DescNotifications => pick(
                 lang,
-                "Lets a program put a message on your desktop. Nothing appears while its pane is on screen in the focused window.",
-                "程序请求时可在桌面弹出通知。窗格正显示在当前窗口中时不弹出。",
+                "Lets a program put a message on your desktop. Nothing appears while that program's pane is on screen in the focused window.",
+                "程序可在桌面弹出通知。程序的窗格正显示在当前窗口时不弹出。",
             ),
             // ── the turn-end lane ──────────────────────────────────────────
             // 「回合结束也提醒」and not 「回合结束」(user ruling 2026-08-29): the
@@ -4130,10 +4130,10 @@ impl Text {
             Self::DescTurnEndNotifications => pick_platform(
                 lang,
                 platform,
-                "Flashes the taskbar when an agent finishes a turn and the window is out of sight, or sends a desktop message if it is minimised.",
-                "回合结束时同样提醒，即使 agent 并非在等待输入：窗口不在你看得见的地方时闪烁任务栏按钮；窗口最小化或任务栏自动隐藏时发送系统通知。关闭后仅在等待输入时提醒。",
-                "Bounces the Dock icon when an agent finishes a turn and the window is out of sight, or sends a desktop message if it is minimised.",
-                "回合结束时同样提醒，即使 agent 并非在等待输入：窗口不在你看得见的地方时让程序坞图标跳动；窗口最小化时发送系统通知。关闭后仅在等待输入时提醒。",
+                "Flashes the taskbar when an agent finishes a turn in a window out of sight. Minimised windows get a desktop message.",
+                "agent 回合结束且窗口不在视野内时闪烁任务栏。最小化时发送桌面通知。",
+                "Bounces the Dock icon when an agent finishes a turn in a window out of sight. Minimised windows get a desktop message.",
+                "agent 回合结束且窗口不在视野内时跳动程序坞图标。最小化时发送桌面通知。",
             ),
             Self::ToastTurnFinished => pick(lang, "Turn finished", "回合结束"),
             Self::ToastWaitingForYou => pick(lang, "Waiting for you", "正在等你回答"),
@@ -4204,8 +4204,8 @@ impl Text {
             // twice rather than two lists once.
             Self::DescPowerShellOffer => pick(
                 lang,
-                "A PowerShell pane that has no integration offers to add it. Integration marks commands, follows the directory and typesets inline $…$ formulas.",
-                "PowerShell 窗格的 $PROFILE 未加载 folio.ps1 时，提示将其加入。整合提供命令标记、当前目录跟随，以及输出中行内公式 $…$ 的渲染。关闭后不再提示。",
+                "A PowerShell pane without integration offers to add one. Integration marks commands, follows the folder, typesets $…$.",
+                "未整合的 PowerShell 窗格提示加入整合。整合提供命令标记、目录跟随和 $…$ 排版。",
             ),
             // **The three installer rows are 「通知」 rows** (user ruling
             // 2026-08-29). 「钩子」 and 「通知程序」 named the mechanism this window
@@ -4281,8 +4281,8 @@ impl Text {
             // picture a row at a time — said in fewer words.
             Self::DescFocusCardHeight => pick(
                 lang,
-                "How tall the picture of a tab is inside its card. Alt+wheel over a pane scrolls it a row at a time.",
-                "每张卡片里那幅标签缩图有多高。在卡片中某个窗格上 Alt+滚轮，可以一行一行地滚动那幅图。",
+                "The height of a tab's picture inside its card. Alt+wheel scrolls that picture.",
+                "卡片中标签缩图的高度。Alt+滚轮可滚动缩图。",
             ),
             // The verb alone. The chord is drawn beside it — a cap and a wheel
             // — and a phrase that spelled `Alt` out again would be the one
@@ -4523,8 +4523,8 @@ impl Text {
             Self::TabMenuClose => pick(lang, "Close tab", "关闭标签"),
             Self::DescCopyOnSelect => pick(
                 lang,
-                "Copy selected text to the clipboard when you release the mouse button.",
-                "松开选区即复制到剪贴板，不另作提示。",
+                "Copies selected text to the clipboard when you release the mouse button.",
+                "松开鼠标后将选中的文字复制到剪贴板。",
             ),
             Self::ShortcutRecord => pick(lang, "Record", "录制"),
             // 「按键…」and not 「录制中…」: the ellipsis already says a clock is
@@ -4538,8 +4538,8 @@ impl Text {
             // better — the three names are on the picker beside this line.
             Self::DescSearchEngine => pick(
                 lang,
-                "Which search engine a web preview uses when what you type is not an address.",
-                "在网页预览的地址栏里输入的不是地址时，交给哪个搜索引擎去搜。",
+                "The search engine a web preview uses when what you type is not an address.",
+                "输入的不是地址时，网页预览使用的搜索引擎。",
             ),
             Self::RowLaunchOpens => pick(lang, "Opening Folio again", "再次启动 Folio"),
             // **Two sentences on Windows and one on a Mac** (§13.32 ②). The
@@ -4552,10 +4552,10 @@ impl Text {
             Self::DescLaunchOpens => pick_platform(
                 lang,
                 platform,
-                "What starting Folio opens while one is already running — from the taskbar, a shortcut or folio.exe. Explorer's menu and folio-here.cmd always open a tab.",
-                "Folio 已在运行时，从任务栏、快捷方式或 folio.exe 启动会打开什么。资源管理器菜单和 folio-here.cmd 始终打开标签页。",
-                "What starting Folio opens while one is already running — from the Dock, from Spotlight, or from the Applications folder.",
-                "Folio 已在运行时，从程序坞、聚焦或应用程序文件夹启动会打开什么。",
+                "What starting Folio again opens, from the taskbar, a shortcut or folio.exe.",
+                "从任务栏、快捷方式或 folio.exe 启动时打开的内容。",
+                "What starting Folio again opens, from the Dock, Spotlight or Applications.",
+                "从程序坞、聚焦或应用程序文件夹启动时打开的内容。",
             ),
             Self::OptionLaunchNewWindow => pick(lang, "A new window", "新窗口"),
             Self::OptionLaunchTabInLastWindow => pick(
@@ -4569,14 +4569,14 @@ impl Text {
             Self::RowQuakeHeight => pick(lang, "Summoned terminal height", "快捷终端高度"),
             Self::DescQuakeHeight => pick(
                 lang,
-                "How much of the screen's height the summoned terminal covers. It hangs from the top of the screen the pointer is on.",
-                "唤出的终端占鼠标所在屏幕高度的多少，从屏幕顶端向下展开。",
+                "This share of the screen's height, from the top of the pointer's screen.",
+                "终端占鼠标所在屏幕高度的比例，从顶端展开。",
             ),
             Self::RowQuakeWidth => pick(lang, "Summoned terminal width", "快捷终端宽度"),
             Self::DescQuakeWidth => pick(
                 lang,
-                "How much of the screen's width the summoned terminal covers. It stays centred.",
-                "唤出的终端占该屏幕宽度的多少，居中显示。",
+                "This share of the screen's width, centred.",
+                "终端占屏幕宽度的比例，居中显示。",
             ),
             Self::DescQuakeHotkeyTaken => pick(
                 lang,
@@ -4599,8 +4599,8 @@ impl Text {
             Self::RowQuakeProfile => pick(lang, "Profile", "新标签页的配置"),
             Self::DescQuakeProfile => pick(
                 lang,
-                "Which shell a new tab in the summoned terminal starts.",
-                "唤出的终端里新标签页用哪个 shell。",
+                "The shell a new tab in the summoned terminal starts.",
+                "快捷终端新标签页启动的 shell。",
             ),
             Self::OptionQuakeProfileDefault => pick(lang, "Default profile", "默认配置"),
             Self::RowQuakeCommand => pick(lang, "Command on first summon", "首次唤出时运行"),
@@ -4612,14 +4612,14 @@ impl Text {
             Self::RowQuakeTopGap => pick(lang, "Gap above it", "顶端留距"),
             Self::DescQuakeTopGap => pick(
                 lang,
-                "How far below the top of the screen the summoned terminal hangs, in pixels.",
+                "The gap between the top of the screen and the summoned terminal, in pixels.",
                 "终端顶部与屏幕顶端的间距，单位为像素。",
             ),
             Self::RowQuakeRestore => pick(lang, "What comes back", "恢复内容"),
             Self::DescQuakeRestore => pick(
                 lang,
-                "What a new run of Folio puts back into the summoned terminal. A restored command is typed at the prompt, not run, and needs shell integration.",
-                "Folio 重新启动后唤出的终端恢复哪些内容。恢复的命令只填入输入行，不运行；只有支持 shell 整合的配置才有命令可恢复。",
+                "What a new run of Folio puts back. A restored command is typed, not run.",
+                "Folio 重新启动时恢复的内容。恢复的命令只填入输入行，不运行。",
             ),
             Self::OptionQuakeRestoreNothing => pick(lang, "Nothing", "不恢复"),
             Self::OptionQuakeRestoreFolders => pick(lang, "Tabs and folders", "标签页与目录"),
@@ -5746,7 +5746,7 @@ pub fn psreadline_row_update_in(lang: Lang, installed: &str, available: &str) ->
 pub fn update_row_available_in(lang: Lang, version: &str) -> String {
     match lang {
         Lang::English => {
-            format!("{version} is available. Open releases page opens it in your browser.")
+            format!("{version} is available. Open releases page shows the new version in your browser.")
         }
         Lang::Chinese => format!("{version} 已发布。点击「打开发布页」可在浏览器中查看。"),
     }
