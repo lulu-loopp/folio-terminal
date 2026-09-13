@@ -124,6 +124,17 @@ impl NativeWindow {
         windows::Win32::Foundation::HWND(self.handle.get() as *mut std::ffi::c_void)
     }
 
+    /// The number behind the handle, for this crate and nothing above it.
+    ///
+    /// `pub(crate)` for [`NativeWindow::as_hwnd`]'s reason: what the door exists
+    /// to hide is the number, and a public reader would hand it back. Its one
+    /// caller is [`hotkey::Foreground`], which on this platform remembers a
+    /// window and on macOS remembers a process — one field, two currencies, and
+    /// this is how the Windows one gets in.
+    pub(crate) const fn as_handle(self) -> NonZeroIsize {
+        self.handle
+    }
+
     /// The window an `HWND` this crate received from Win32 names, or `None` for
     /// the null handle every failing Win32 call answers with.
     pub(crate) fn from_hwnd(hwnd: windows::Win32::Foundation::HWND) -> Option<Self> {

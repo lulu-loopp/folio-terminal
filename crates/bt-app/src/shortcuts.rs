@@ -1628,24 +1628,47 @@ pub(crate) const BINDINGS: &[Binding] = &[
         // free in both dialects here.
         mac(CMD_SHIFT, character("i")),
     ),
-    // **The row whose key Windows reads and this window usually does not** (0.2
-    // shortcut terminal, §7.54). `Win+\`` since next29 — see
-    // [`Action::SummonQuake`] for why the shipped-with-nothing answer was
-    // overturned, and for where the chord is actually read.
+    // **The row whose key the system reads and this window usually does not**
+    // (0.2 shortcut terminal, §7.54; both platforms since M4-8, §13.51).
+    // `Win+\`` since next29 — see [`Action::SummonQuake`] for why the
+    // shipped-with-nothing answer was overturned, and for where the chord is
+    // actually read.
     Binding::window(
         "summon-quake",
         Text::ShortcutSummonQuake,
         Action::SummonQuake,
         Chord::new(WIN, character("`")),
-        // **No macOS chord, and that is the answer rather than a gap.** This row
-        // is the one whose key never reaches a window at all: `RegisterHotKey`
-        // takes it out of the input stream process-wide
-        // ([`Action::is_claimed_from_windows`]), and the door that does the same
-        // thing here is a different one that no ticket has opened yet. A chord
-        // written in this column today would be a key that quietly did nothing
-        // on a Mac — the exact shape [`Binding::unbuilt`] exists to refuse —
-        // and, worse, one this window would take from whatever *had* claimed it.
-        None,
+        // **`` ⌃` `` , and it is the one row in this table where the macOS
+        // column does not simply read `Cmd` for `Ctrl`** (M4-8, `docs/DESIGN.md`
+        // §13.51 ②). The door is open now — Carbon's `RegisterEventHotKey` is
+        // the claim, and it takes the chord out of the input stream
+        // process-wide exactly as `RegisterHotKey` does
+        // ([`Action::is_claimed_from_windows`] is true on both).
+        //
+        // The Windows default is `Win+\`` because the desktop reserves that
+        // modifier for its own resident tools and this is one. Neither of the
+        // two keys that sentence names survives the crossing:
+        //
+        // * **`` ⌘` `` is the system's.** It cycles the frontmost application's
+        //   windows, on every Mac, in every application — a default that took it
+        //   would break a key the reader uses in every *other* program, which is
+        //   the exact harm `Win+\`` was chosen to avoid.
+        // * **`` ⌥` `` is a dead key.** On ABC Extended, US International and
+        //   several European layouts `⌥` + backtick begins a grave accent, so a
+        //   claim on it would eat the first half of `à` desktop-wide.
+        //
+        // `` ⌃` `` is left, and it is left for a reason rather than by
+        // elimination: the shortcuts audit's own rule (`docs/DESIGN.md` §7.44,
+        // 「A 案」) is that **Control belongs to the terminal on both platforms**
+        // and an application verb wears `Cmd` — which makes the Control column
+        // the crowded one *inside a window* and the empty one *outside* it. This
+        // chord is never read inside a window, so it takes nothing from the
+        // shell: a registered claim never reaches a pane at all. What it has to
+        // be free of is other applications, and macOS itself binds no `` ⌃` ``.
+        //
+        // It is still an ordinary row: the recorder moves it, *Restore all
+        // defaults* brings it back.
+        mac(CTRL, character("`")),
     ),
     // **The first rows in this table that exist in order to be configured**
     // (mock-up 6104-6106, §7.1.5e), and the first that ship with nothing in
@@ -6206,12 +6229,19 @@ mod tests {
     /// **The two rows that answer differently are named here**, because each is
     /// a decision rather than an omission: `close-search` is a bare `Escape` in
     /// force only while a capsule of ours is up, and `summon-quake`'s key is
-    /// claimed process-wide by an API that has no macOS counterpart yet.
+    /// claimed process-wide and never offered to a window at all.
+    ///
+    /// **That second row changed hands in M4-8 and the exception stayed**
+    /// (§13.51 ②). It used to be *unbound* here, because the API that claims it
+    /// had no macOS counterpart; it is now `` ⌃` ``, which is still not Command
+    /// and still right. The rule this gate states is about **application verbs**,
+    /// and a chord taken out of the input stream before any window sees it is not
+    /// one — [`Action::is_claimed_from_windows`] is the predicate that says so,
+    /// and it is asked here rather than a second id list being kept.
     ///
     /// MUTATION: drop any row's `mac(…)` and this names it.
     #[test]
     fn the_mac_dialect_maps_every_application_verb_to_command() {
-        let unbound_on_purpose = ["summon-quake"];
         let bare_on_purpose = ["close-search"];
         for row in BINDINGS.iter().filter(|row| row.surfaced) {
             let Some(windows) = row.chord.as_ref() else {
@@ -6224,18 +6254,20 @@ mod tests {
                 continue;
             };
             let _ = windows;
-            if unbound_on_purpose.contains(&row.id) {
-                assert!(
-                    row.mac.is_none(),
-                    "{} is unbound on macOS on purpose",
-                    row.id
-                );
-                continue;
-            }
             let mac = row
                 .mac
                 .as_ref()
                 .unwrap_or_else(|| panic!("{} has no macOS chord", row.id));
+            if row.action.is_claimed_from_windows() {
+                assert!(
+                    !mac.modifiers.is_empty(),
+                    "{} is claimed from the system, so it must still wear a \
+                     modifier — a bare key claimed desktop-wide is a key no \
+                     program on the machine sees again",
+                    row.id
+                );
+                continue;
+            }
             if bare_on_purpose.contains(&row.id) {
                 assert!(
                     mac.modifiers.is_empty(),
@@ -6265,13 +6297,29 @@ mod tests {
     /// and carrying that shape across would have fired a verb *and* typed a `–`
     /// on one press.
     ///
-    /// MUTATION: give any row `CTRL` or an `ALT` on the macOS side.
+    /// **The one row this rule does not reach, and why the exception is not a
+    /// hole in it** (M4-8, §13.51 ②). `summon-quake` wears `` ⌃` `` on macOS.
+    /// Every word of the paragraph above is about a chord that is *offered to a
+    /// window* and therefore competes with the child for a byte — and that is the
+    /// one thing this chord never is: `RegisterEventHotKey` takes it out of the
+    /// input stream process-wide, so no pane is ever handed it and no `^\``
+    /// reaches a shell. The cost the rule exists to prevent is not on this row's
+    /// road at all. It is asked of [`Action::is_claimed_from_windows`] rather
+    /// than of the row's id, because the fact belongs to the row's verb.
+    ///
+    /// MUTATION: give any other row `CTRL` or an `ALT` on the macOS side. Drop
+    /// the predicate and this gate names `summon-quake` — which is the useful
+    /// failure, because a row that stopped being claimed from the system and kept
+    /// this chord really would be taking a key from the shell.
     #[test]
     fn every_mac_chord_wears_command_and_nothing_it_may_not() {
         for row in BINDINGS {
             let Some(mac) = row.mac.as_ref() else {
                 continue;
             };
+            if row.action.is_claimed_from_windows() {
+                continue;
+            }
             assert!(
                 !mac.modifiers.control_key(),
                 "{} takes Control from the child on macOS",
@@ -6485,7 +6533,13 @@ mod tests {
         ("web-address", "Cmd+L"),
         ("window-address", "Shift+Cmd+L"),
         ("web-devtools", "Shift+Cmd+I"),
-        ("summon-quake", ""),
+        // **The one row of this column that is not `Cmd` and is not blank**
+        // (M4-8, `docs/DESIGN.md` §13.51 ③). It was `""` while the door that
+        // claims a chord process-wide had no macOS arm. `⌘` is the system's own
+        // window cycle and `⌥` is a dead key on several layouts, and Control is
+        // free here precisely *because* this chord never reaches a window — see
+        // the row's own note in `BINDINGS`.
+        ("summon-quake", "Ctrl+`"),
         ("summon-pip-1", ""),
         ("summon-pip-2", ""),
         ("summon-pip-3", ""),
