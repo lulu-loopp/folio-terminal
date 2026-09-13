@@ -2,24 +2,29 @@
   <source media="(prefers-color-scheme: dark)"
           srcset="assets/readme/hero-dark.svg">
   <img src="assets/readme/hero-light.svg" width="100%"
-       alt="Folio, a Windows terminal that typesets LaTeX and marks the tab of an
-       agent waiting for you. Beside the name, a terminal pane shows a display
-       formula typeset in a command's output, above the next prompt.">
+       alt="Folio, a terminal for Windows and macOS that typesets LaTeX and
+       marks the tab of an agent waiting for you. Beside the name, a terminal
+       pane shows a display formula typeset in a command's output, above the
+       next prompt.">
 </picture>
 
-Folio is an open-source Windows terminal. It typesets LaTeX where a command
-prints it, previews files beside the prompt, and marks the tab of an agent that
-is waiting for you.
+Folio is an open-source terminal for Windows and macOS. It typesets LaTeX where
+a command prints it, previews files beside the prompt, and marks the tab of an
+agent that is waiting for you.
 
 [中文说明](README.zh-CN.md) · [Shortcuts](docs/shortcuts.md) ·
 [Security](SECURITY.md) · [Changes](CHANGELOG.md)
 
-> **Preview.** 0.3.0 is a preview build, signed by Weiyi Shi — see
-> [Download](#download) below.
+> **Preview.** 0.3.0 is a preview build, signed by Weiyi Shi — on Windows with
+> a certificate from Microsoft's Artifact Signing service, on macOS with a
+> Developer ID certificate and notarized by Apple. See [Download](#download)
+> below.
 
 ---
 
 ## Download
+
+### Windows
 
 Take [`folio-0.3.0-windows-x64.zip`](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.3.0-preview/folio-0.3.0-windows-x64.zip)
 from the [releases page](https://github.com/lulu-loopp/folio-terminal/releases),
@@ -43,6 +48,35 @@ usually does, and if it does not, the Evergreen Runtime is
 [here](https://developer.microsoft.com/microsoft-edge/webview2/). Without it
 everything except the web preview works, and the preview says what is missing.
 
+### macOS
+
+Take [`Folio-0.4.0-macos-arm64.dmg`](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.4.0-preview/Folio-0.4.0-macos-arm64.dmg)
+from the same [releases page](https://github.com/lulu-loopp/folio-terminal/releases),
+open it, and drag **Folio** to Applications. Needs an **Apple silicon Mac
+running macOS 14 or newer**; there is no Intel build in this preview.
+`SHA256SUMS.txt` is the hash of what you downloaded.
+
+`Folio.app` is signed by **Weiyi Shi** with a **Developer ID** certificate, and
+notarized by Apple; the notarization ticket is stapled to the disk image and to
+the application inside it, so the check is made on your own machine and works
+with the network switched off.
+
+The first open is the ordinary one macOS gives anything downloaded from the
+internet: a panel that names the developer and has **Open** in it. Check that
+the panel names **Weiyi Shi** as the signer, open it, and it does not ask again.
+There is no step where you have to reach for a right-click menu or allow
+something afterwards.
+
+What must **not** appear is a panel saying the developer **cannot be verified**,
+or that Folio is **damaged and can't be opened**. Either means what you have is
+not what was published here — an interrupted download, or a copy altered after
+it was signed. Check it against `SHA256SUMS.txt` and take it from the releases
+page again. A build you made yourself and signed ad-hoc for your own machine is
+refused in the same words; `docs/BUILDING.md` says what to do with one.
+
+The web preview uses the WebKit already on the machine. There is nothing to
+install.
+
 ## First run
 
 A machine that has never run Folio gets one card, once. It says **Welcome to
@@ -51,6 +85,10 @@ right-click menu, enable the PowerShell integration, and mark the tab for each
 of Claude Code, Codex and Copilot CLI this machine has. Update checks arrive on;
 the rest arrive off. Nothing about theme, font, size, language or layout — those
 are one click away and cost nothing while they are wrong.
+
+**The card offers only the rows the machine can honour.** The folder right-click
+menu and the PowerShell integration are Windows facilities, so a Mac is asked
+about the update check and the agents and nothing else.
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
@@ -75,19 +113,22 @@ chance. **Done** applies the rows that are on. **Not now** and `Esc` keep the
 shipped values: the update check on, the rest off. Either way the card does not
 come back, and if you were already using Folio you never see it.
 
-The first tab opens the first shell your machine actually has. The five shipped
-profiles are looked for in order — PowerShell 7, Windows PowerShell, WSL, Git
-Bash, Command Prompt — and one whose program is not installed does not appear in
-the menus that start a shell; it stays on the Profiles page in Settings, greyed
-out and naming the program that was looked for. The seven agent profiles are
-found the same way, on the Windows path, and that is the same lookup the card's
-agent rows use.
+The first tab opens the first shell your machine actually has. On Windows the
+five shipped profiles are looked for in order — PowerShell 7, Windows
+PowerShell, WSL, Git Bash, Command Prompt; on a Mac it is the shell your account
+already uses, then zsh, then bash, then `/bin/sh`. One whose program is not
+installed does not appear in the menus that start a shell; it stays on the
+Profiles page in Settings, greyed out and naming the program that was looked
+for. The seven agent profiles are found the same way, on the `PATH`, and that is
+the same lookup the card's agent rows use.
 
-The PowerShell integration adds one line —
+**On Windows**, the PowerShell integration adds one line —
 `. "$env:APPDATA\Folio\shell-integration\folio.ps1"` — to the `$PROFILE` a
 PowerShell names for itself, after copying the file as it stood to a dated backup
 beside it; delete that line to undo it. Command marks and inline `$…$` formulas
-run on that integration. Git Bash and WSL need none of it.
+run on that integration. Git Bash and WSL need none of it, and neither do zsh
+and bash on a Mac: Folio hands those their own integration as it starts them,
+out of its own directory, and writes nothing of yours.
 
 Where that file is comes from the shell, so a row left on when the card is
 answered takes effect in the next PowerShell session, and Settings > Terminal
@@ -98,6 +139,21 @@ a PowerShell pane prints something: **Add to `$PROFILE`** does it, **Don't show
 again** ends the asking, and closing the strip decides nothing, so the next
 PowerShell asks once more.
 
+**On a Mac**, what Folio remembers lives in
+`~/Library/Application Support/Folio`.
+
+The first time a waiting agent's mark has to leave the window, macOS asks
+whether Folio may send notifications. Answer it once. Say no and the Agent page
+in Settings says so rather than going quiet, the dot on the tab and the Dock
+icon go on working, and Folio does not ask again.
+
+Finder's right-click menu gets **Open in Folio**, under **Services** — Folio
+registers it the first time it runs, so there is nothing to switch on and no
+need to sign out. On a folder it opens a tab standing in that folder; on a file,
+a tab standing in the folder the file is in. Folio also has a menu bar of its
+own, and every item in it carries the same key as the row it has in
+[Shortcuts](docs/shortcuts.md).
+
 The three rows on the Agent page read the tool's own configuration file and
 report what is in it. On a new machine all three files are absent, so all three
 read Off.
@@ -105,6 +161,10 @@ read Off.
 ---
 
 ## Features
+
+The keys named below are the Windows ones. [Shortcuts](docs/shortcuts.md) has
+both columns: on a Mac an application verb wears **Command** where Windows wears
+**Ctrl**, which is what leaves **Control** to the terminal on both.
 
 ### LaTeX rendering in the terminal
 
@@ -125,7 +185,8 @@ The LaTeX a command prints is typeset where it was printed.
 - The preview pane takes those, plus `\(…\)`, `\[…\]` and the bare `amsmath`
   environments.
 - Unsupported LaTeX remains visible as source text.
-- Inline `$…$` is told from a shell variable by the PowerShell integration below.
+- Inline `$…$` is told from a shell variable by the shell integration below —
+  PowerShell on Windows, zsh or bash on a Mac.
   Without it inline formulas stay as source, and `$$…$$` blocks still typeset.
 
 ### Made for agents
@@ -142,9 +203,12 @@ The agent that is waiting for you is marked on its tab, so there is nothing to g
        row for notifications at the end of a turn.">
 </picture>
 
-- A waiting agent lights a dot on its tab, flashes the taskbar if another program
-  has the focus, and raises a Windows notification if the window is minimised or
-  on another desktop.
+- A waiting agent lights a dot on its tab. If another program has the focus,
+  Windows flashes the taskbar and macOS bounces the Dock icon until you come
+  back; if the window is minimised or on another desktop, the machine's own
+  notification is raised. On a Mac the first of those is where macOS asks
+  whether Folio may send notifications — answer it once, and a refusal is
+  reported on the Agent page rather than swallowed.
 - One request interrupts at most once, and the dot clears when you answer in that
   pane or the program withdraws the request. `Ctrl+Shift+A` jumps to the longest
   wait.
@@ -152,8 +216,8 @@ The agent that is waiting for you is marked on its tab, so there is nothing to g
   in Settings that writes one notification hook into that tool's own configuration
   file and takes it back out again. Nothing is installed by default.
 - Seven profiles start an agent — Claude Code, Codex, Copilot CLI, Kimi Code, pi,
-  Hermes, OpenCode — found on the Windows path; one installed inside WSL is run
-  from the WSL profile. Any program that writes `OSC 1337;RequestAttention=yes`
+  Hermes, OpenCode — found on the `PATH`; on Windows, one installed inside WSL is
+  run from the WSL profile. Any program that writes `OSC 1337;RequestAttention=yes`
   raises the mark, with nothing installed at all.
 
 ### Preview beside the prompt: files, PDF, video, web
@@ -176,8 +240,9 @@ application.
 - The preview pane opens the file beside the prompt — markdown typeset, PDF page
   by page, video playing, a web page with an address field and Back.
 - A path the terminal printed opens in the preview pane on a click, and goes to
-  the machine's own application on `Ctrl`+click. Paths nobody marked up are found
-  too, once the file is confirmed to exist.
+  the machine's own application on `Ctrl`+click — that one is `Ctrl` on both
+  platforms, and not Command on a Mac. Paths nobody marked up are found too,
+  once the file is confirmed to exist.
 - A web address follows the same rule: a click opens it in the preview pane,
   `Ctrl`+click hands it to the browser.
 - A window holds as many pages as it has preview panes. A second page opens on a
@@ -229,8 +294,8 @@ were reading it in.
   `New file…` and `New folder…` put the name field in the tree where the new row
   will appear, `Enter` creates it and `Esc` cancels. A name the folder will not
   take turns red in the field rather than being explained somewhere else.
-  `Delete` sends a file, or a whole folder, to the Recycle Bin and asks nothing
-  first, because the Recycle Bin is where it goes.
+  `Delete` sends a file, or a whole folder, to the Recycle Bin on Windows and to
+  the Trash on a Mac, and asks nothing first, because that is where it goes.
 - Right-clicking the empty space in a files column opens the menu of the folder
   the column is standing in, so a folder with nothing in it can still be given
   its first file.
@@ -258,8 +323,8 @@ be seen at once.
           srcset="docs/screenshots/cards-dark.png">
   <img src="docs/screenshots/cards-light.png" width="100%"
        alt="The tab strip has become a column of cards. The single card stands for
-       a tab of eight panes and draws all eight in miniature; Alt and the wheel
-       scroll the picture inside a card a row at a time.">
+       a tab of eight panes and draws all eight in miniature; Alt — Option on a
+       Mac — and the wheel scroll the picture inside a card a row at a time.">
 </picture>
 
 - `Alt+Shift+-` splits a pane across, `Alt+Shift+=` splits it down. A tab or a
@@ -284,6 +349,11 @@ be seen at once.
 
 One key brings a terminal down over whatever is on the screen, and the same key
 takes it away again.
+
+**Windows only so far.** The key is registered with the system, and the macOS
+way of doing that asks for the Accessibility permission and then loses the grant
+every time the application is signed again — so there is no summoned terminal on
+a Mac yet, and `docs/shortcuts.md` shows the row unbound in the macOS column.
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
@@ -367,9 +437,36 @@ One box answers five questions at once, and `Enter` goes straight there.
   stock `Restricted`, the switch says so and hands you the `Set-ExecutionPolicy`
   command that lets the module load.
 
+### macOS integration
+
+- **Finder's right-click menu** carries **Open in Folio** under **Services**.
+  Folio registers it the first time it runs, so it is there without a sign-out
+  and with nothing to enable. A folder opens as a tab standing in it; a file, as
+  a tab standing in the folder it is in. Either arrives in the window you used
+  last rather than starting a second Folio.
+- **The menu bar is the shortcut table.** Every item takes its key from the same
+  row of [Shortcuts](docs/shortcuts.md) the keyboard does, so a verb has one
+  name and one key wherever you meet it.
+- **The Dock icon is the attention channel.** A waiting agent bounces it until
+  you come back; a command that reports how far along it is puts that on the
+  icon as a badge.
+- **Paths are written from your home directory.** A file under it reads
+  `~ › …` in the files column, and the `~` is a step you can click like any
+  other.
+- **Three Settings rows are not on a Mac at all** — the Explorer context menu,
+  the PowerShell integration and the PSReadLine repair. None of the three has a
+  macOS counterpart, and a greyed row explaining a mechanism the machine does
+  not have only teaches a Windows word. One row is a Mac's alone: **Option key
+  sends Alt**, off by default, so that Option keeps typing the character it is
+  printed with.
+- **Not on macOS:** the summoned terminal, the sparse-package route to the
+  first page of a right-click menu, and the Store video extensions. macOS is
+  **arm64 only** in this preview.
+
 ### Visual Studio Code
 
-`folio-here.cmd` ships in the archive, beside `folio.exe`, and is one line:
+**On Windows**, `folio-here.cmd` ships in the archive, beside `folio.exe`, and
+is one line:
 
 ```bat
 @"%~dp0folio.exe" --from-here --cwd "%CD%"
@@ -388,6 +485,10 @@ command with no arguments, and `--cwd` is how Folio is told where to start;
 Folio, so it arrives as a tab in the window you used last whatever
 **Settings > General > Opening Folio again** says.
 
+On macOS that setting names an application rather than a command, so there is no
+`folio-here` for it to run. Finder's **Open in Folio** above is the way to put a
+folder in front of a shell.
+
 ---
 
 ## Privacy
@@ -399,18 +500,27 @@ network: a page you open in the web preview, and the update check.
 The update check is one `GET` of
 `https://api.github.com/repos/lulu-loopp/folio-terminal/releases`, at most
 once a day across every window, carrying a `User-Agent` of `Folio` and nothing
-else: no version, no identifier, no query string. What it can do with the answer
-is draw a mark on the settings gear and a line in Settings; it downloads nothing
-and replaces nothing. Switch it off at Settings > General > **Update check**, or
+else: no version, no identifier, no query string. It goes out through the
+machine's own HTTP stack on both platforms, so it follows the proxy settings and
+the certificate store you already have. What it can do with the answer is draw a
+mark on the settings gear and a line in Settings; it downloads nothing and
+replaces nothing. Switch it off at Settings > General > **Update check**, or
 with `"update_check": false` in `settings.json`.
 
-What it remembers lives in two directories: `%APPDATA%\Folio` for settings,
-profiles, schemes and the session, and `%LOCALAPPDATA%\Folio\WebView2` for the web
-preview's cookies and cache. Delete the first and Folio starts as it did new.
+What it remembers lives in two directories. On Windows: `%APPDATA%\Folio` for
+settings, profiles, schemes and the session, and `%LOCALAPPDATA%\Folio\WebView2`
+for the web preview's cookies and cache. On a Mac:
+`~/Library/Application Support/Folio` for the first, and the place WebKit keeps
+every application's website data for the second. Delete the first and Folio
+starts as it did new.
 
 ```powershell
 Remove-Item -Recurse -Force "$env:APPDATA\Folio"
 Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Folio\WebView2"
+```
+
+```sh
+rm -rf ~/Library/Application\ Support/Folio
 ```
 
 What is in each file, and why a full address ends up in `session.json`, is in
@@ -419,10 +529,16 @@ What is in each file, and why a full address ends up in `session.json`, is in
 ## Known issues
 
 - **A window was once reported drawing its top half black** after a move to a
-  second monitor, unreproduced. Attach `%APPDATA%\Folio\diagnostics.log` if you
-  hit it.
-- **`.webm` needs the VP9 or AV1 Video Extension** from the Microsoft Store. A
-  stock Windows has neither, and without one there is no still and no playback.
+  second monitor, unreproduced. Attach `%APPDATA%\Folio\diagnostics.log` — or
+  `~/Library/Application Support/Folio/diagnostics.log` on a Mac — if you hit
+  it.
+- **Windows: `.webm` needs the VP9 or AV1 Video Extension** from the Microsoft
+  Store. A stock Windows has neither, and without one there is no still and no
+  playback.
+- **macOS: there is no summoned terminal yet**, and a run that ends in a crash
+  leaves its report where the system puts every one,
+  `~/Library/Logs/DiagnosticReports`; the next Folio names the file in its own
+  log rather than copying it anywhere.
 - The rest are in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Licence
@@ -442,7 +558,8 @@ go through the private channel in [`SECURITY.md`](SECURITY.md), not an issue.
 
 ## What's next
 
-- macOS, then Linux.
+- Linux.
+- One build for both kinds of Mac.
 - The terminal from a phone.
 
 These are directions, not dates.

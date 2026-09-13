@@ -6527,10 +6527,11 @@ mod tests {
                     "## English",
                     "Every key here can be changed on the Shortcuts page in Settings. \
                      Changing one writes `keybindings.json` in Folio's settings folder \
-                     (`%APPDATA%\\Folio` on Windows); the last column is the name a row \
-                     has in that file. The first two columns are one row in the two \
-                     dialects Folio speaks: an application verb wears Ctrl on Windows and \
-                     Command on macOS, so that Control is left to the terminal on both.",
+                     (`%APPDATA%\\Folio` on Windows, `~/Library/Application Support/Folio` \
+                     on macOS); the last column is the name a row has in that file. The \
+                     first two columns are one row in the two dialects Folio speaks: an \
+                     application verb wears Ctrl on Windows and Command on macOS, so that \
+                     Control is left to the terminal on both.",
                     [
                         "Windows",
                         "macOS",
@@ -6542,9 +6543,10 @@ mod tests {
                 Lang::Chinese => (
                     "## 中文",
                     "下面每一组键都能在设置的快捷键页里改。改过之后写进 Folio 设置目录里的 \
-                     `keybindings.json`（Windows 上是 `%APPDATA%\\Folio`），最后一列就是这一行\
-                     在那个文件里的名字。前两列是同一行的两种说法：窗口自己的动作在 Windows 上\
-                     按 Ctrl，在 macOS 上按 Command，两边都把 Control 留给终端。",
+                     `keybindings.json`（Windows 上是 `%APPDATA%\\Folio`，macOS 上是 \
+                     `~/Library/Application Support/Folio`），最后一列就是这一行在那个文件里\
+                     的名字。前两列是同一行的两种说法：窗口自己的动作在 Windows 上按 Ctrl，在 \
+                     macOS 上按 Command，两边都把 Control 留给终端。",
                     ["Windows", "macOS", "作用", "在哪里生效", "文件里的名字"],
                 ),
             };
