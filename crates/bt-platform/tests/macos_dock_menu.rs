@@ -348,7 +348,8 @@ mod mac {
                 .say(&format!("MEASURED ⌘N on the bar: {from_the_bar:?}"));
             self.report.claim(
                 "the bar's own row sends one choice, from the bar",
-                answered && from_the_bar == vec![(MenuSurface::Bar, MenuChoice::Verb("new-window"))],
+                answered
+                    && from_the_bar == vec![(MenuSurface::Bar, MenuChoice::Verb("new-window"))],
                 "the bar did not answer ⌘N with exactly one Bar/new-window",
             );
             let sent = self.press_the_dock_row(mtm, 0);
@@ -373,7 +374,9 @@ mod mac {
             // ④ the language switch, with no door of its own.
             match bt_platform::menu::refresh(&a_plan(CHINESE, true)) {
                 Ok(()) => self.report.pass("the bar took the second language"),
-                Err(reason) => self.report.fail("the bar took the second language", &reason),
+                Err(reason) => self
+                    .report
+                    .fail("the bar took the second language", &reason),
             }
             let after = ask_the_delegate_for_the_dock_menu(mtm)
                 .map(|menu| titles_of(&menu))
@@ -389,7 +392,9 @@ mod mac {
             // ⑥ no rows, no menu.
             match bt_platform::menu::install(&a_plan(ENGLISH, false), Box::new(keep)) {
                 Ok(()) => {}
-                Err(reason) => self.report.fail("a plan with no Dock rows installed", &reason),
+                Err(reason) => self
+                    .report
+                    .fail("a plan with no Dock rows installed", &reason),
             }
             let bare = ask_the_delegate_for_the_dock_menu(mtm);
             self.report.claim(
@@ -408,8 +413,10 @@ mod mac {
         /// wired to it.
         fn press_the_dock_row(&mut self, mtm: MainThreadMarker, at: isize) -> bool {
             let Some(menu) = ask_the_delegate_for_the_dock_menu(mtm) else {
-                self.report
-                    .fail("a Dock row could be pressed", "there is no menu to press it on");
+                self.report.fail(
+                    "a Dock row could be pressed",
+                    "there is no menu to press it on",
+                );
                 return false;
             };
             let Some(item) = menu.itemAtIndex(at) else {

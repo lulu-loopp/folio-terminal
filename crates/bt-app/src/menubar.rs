@@ -591,10 +591,7 @@ mod tests {
         let rows = dock_rows(&table);
         assert_eq!(
             rows.iter().map(|row| row.choice).collect::<Vec<_>>(),
-            vec![
-                MenuChoice::Verb("new-window"),
-                MenuChoice::Verb("new-tab")
-            ]
+            vec![MenuChoice::Verb("new-window"), MenuChoice::Verb("new-tab")]
         );
     }
 
