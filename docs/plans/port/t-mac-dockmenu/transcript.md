@@ -79,6 +79,10 @@ cannot reach the window server a winit event loop needs.
 [    119ms] ALL_DONE
 ```
 
+Run a third time on `e7a21286` — the branch's head, whose only change since is
+a clippy repair in the walk that builds the rows — with the same twelve `PASS`
+lines, the same four `MEASURED` readings and `0 failed`, in 451 ms.
+
 The two readings worth keeping out of that list:
 
 * `None` then `Some(false)` — `WinitApplicationDelegate` is not in the runtime
