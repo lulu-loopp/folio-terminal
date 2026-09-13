@@ -147,6 +147,24 @@ pub enum AppDelegateOrigin {
     /// turn. A second channel beside this one would be a second answer to the
     /// same question about the same stack.
     Menu,
+    /// **A row of the Dock tile's own menu** (T-MAC-DOCKMENU), whose action is
+    /// `folioDockChosen:` on the same target [`crate::macos_menu`] owns.
+    ///
+    /// The same channel, the same sender and the same
+    /// [`AppDelegateEventKind::MenuChosen`] as [`Self::Menu`] — and an origin of
+    /// its own, because **what the application may assume around the press is
+    /// not the same**. A bar press comes from a reader who is *in* Folio,
+    /// against a bar that greyed its verb rows when there was no window. A Dock
+    /// press comes from a reader who is usually in another application, there
+    /// may be no key window, and there may be no window at all: M3-1 keeps this
+    /// application in the Dock after its last one closes, and that state is
+    /// precisely where this menu earns its place. So a Dock row lands on the
+    /// window the reader was last in, and makes one where there is none.
+    ///
+    /// `applicationDockMenu:` is the selector the *menu* came from; the press
+    /// itself arrives on `folioDockChosen:`, exactly as a bar press arrives on
+    /// `folioMenuChosen:` rather than on a selector of the bar's.
+    Dock,
 }
 
 impl AppDelegateOrigin {
@@ -160,6 +178,7 @@ impl AppDelegateOrigin {
             Self::LastWindowClosed => "applicationShouldTerminateAfterLastWindowClosed:",
             Self::Services => "openInFolio:userData:error:",
             Self::Menu => "folioMenuChosen:",
+            Self::Dock => "folioDockChosen:",
         }
     }
 }
@@ -203,6 +222,11 @@ pub enum AppDelegateEventKind {
     /// reaches — see `docs/DESIGN.md` §13.26 ③. Rows AppKit answers by
     /// itself never arrive here at all; they have no choice behind them, which
     /// is what "standard" means in [`crate::menu::MenuAction`].
+    ///
+    /// **A row of the Dock tile's menu arrives here too** (T-MAC-DOCKMENU),
+    /// carrying the same kind of choice and separated only by
+    /// [`AppDelegateOrigin::Dock`] — which is what says the press came from
+    /// outside the application and may have no window to land on.
     MenuChosen(MenuChoice),
 }
 
@@ -450,7 +474,7 @@ impl AppDelegate {
         }
         let outbox = Arc::new(Outbox::new(Box::new(send)));
         #[cfg(target_os = "macos")]
-        if let Err(reason) = crate::macos_app::add_the_four_selectors(Arc::clone(&outbox)) {
+        if let Err(reason) = crate::macos_app::add_the_delegate_selectors(Arc::clone(&outbox)) {
             INSTALLED.store(false, Ordering::SeqCst);
             return Err(reason);
         }

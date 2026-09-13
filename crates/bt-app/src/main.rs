@@ -99493,6 +99493,64 @@ mod launch_landing_tests {
              pane:\n{document}"
         );
     }
+
+    /// **RED (T-MAC-DOCKMENU) — a row of the Dock tile's menu does not need the
+    /// keyboard to be in Folio, and does not need a window to exist.**
+    ///
+    /// Two presses carry the same choice on the same channel and are answered
+    /// differently, which is the shape the case above holds one kind along. A
+    /// **bar** row is answered on the window with the keyboard, because the bar
+    /// greyed itself when there was none. A **Dock** row is read from outside
+    /// this application, in the state the bar greys itself *for*, so it is
+    /// answered on the window the reader was last in — and by opening one when
+    /// this run has none left, which is the whole reason M3-1 keeps Folio in the
+    /// Dock with no window open.
+    ///
+    /// A source pin for this module's own reason: what the landing does is a
+    /// window, a tab and a shell, none of which exists in a test process. What a
+    /// machine can hold is which door it reaches for, and in what order.
+    ///
+    /// MUTATIONS: answer a Dock row through `frontmost_window` and every press
+    /// made from another application does nothing; raise the window *after* the
+    /// verb and `New window` opens a window and then has the keyboard taken
+    /// straight back off it.
+    #[test]
+    fn a_dock_row_lands_where_the_reader_was_and_makes_a_window_when_there_is_none() {
+        let landing = body(concat!("    fn ", "answer_a_menu_row("));
+        assert!(
+            landing.contains("origin == bt_platform::AppDelegateOrigin::Dock"),
+            "the two surfaces are answered the same way:\n{landing}"
+        );
+        assert!(
+            landing.contains("self.the_window_the_reader_was_last_in()")
+                && landing.contains("self.a_window_for_the_delegate(event_loop)?"),
+            "a Dock row does not reach the window list that remembers, or does \
+             not open a window where this run has none:\n{landing}"
+        );
+        assert!(
+            landing.contains("self.frontmost_window()"),
+            "a bar row no longer lands on the window with the keyboard:\n{landing}"
+        );
+        let raised = landing
+            .find("self.raise_for_a_launch(id);")
+            .expect("a Dock row brings its window forward");
+        let ran = landing
+            .find("runtime.run_shortcut(action)?")
+            .expect("a menu row runs the verb the chord runs");
+        assert!(
+            raised < ran,
+            "the window is raised after the verb, which takes the keyboard off \
+             whatever the verb has just opened:\n{landing}"
+        );
+        // And which surface a press came from is decided in one place: the one
+        // sender the bar and the Dock share.
+        let install = body(concat!("    fn ", "install_main_menu("));
+        assert!(
+            install.contains("MenuSurface::Bar => bt_platform::AppDelegateOrigin::Menu")
+                && install.contains("MenuSurface::Dock => bt_platform::AppDelegateOrigin::Dock"),
+            "the two menus do not stamp their own origin onto one channel:\n{install}"
+        );
+    }
 }
 
 /// **Every answer the hand gives spends a raised hint card** (§7.1.5e′, user
@@ -105257,8 +105315,14 @@ impl FolioApp {
                 // Dock with every window closed, and the bar says so meanwhile
                 // by greying every verb row (`menubar::plan`). The door that
                 // opens a window again is the reopen three arms up.
+                //
+                // **A row of the Dock tile's menu lands here too**
+                // (T-MAC-DOCKMENU, §13.50 ③), carrying the same choice and
+                // separated by the origin alone — which is what makes the
+                // paragraph above *not* true of it: that menu is read from
+                // outside Folio, in the very state the bar greys itself for.
                 bt_platform::AppDelegateEventKind::MenuChosen(choice) => {
-                    self.answer_a_menu_row(choice)?;
+                    self.answer_a_menu_row(event_loop, origin, choice)?;
                 }
             }
         }
@@ -105270,14 +105334,49 @@ impl FolioApp {
     ///
     /// Beside [`Self::open_one_path_for_the_delegate`] because it is the same
     /// kind of thing: a gesture that arrived at AppKit rather than at a window,
-    /// spent on the loop's own turn. It is **not** routed through
+    /// spent on the loop's own turn. A **bar** row is not routed through
     /// [`Self::a_window_for_the_delegate`], and that is the difference between
-    /// the two: a document handed over from Finder is a request for a window if
-    /// there is none, and a menu row is not — the rows are greyed with no window
-    /// open, so a choice arriving there is a race rather than a request.
-    fn answer_a_menu_row(&mut self, choice: bt_platform::menu::MenuChoice) -> Result<()> {
-        let Some(id) = self.frontmost_window() else {
-            return Ok(());
+    /// it and a document: a document handed over from Finder is a request for a
+    /// window if there is none, and a bar row is not — the rows are greyed with
+    /// no window open, so a choice arriving there is a race rather than a
+    /// request.
+    ///
+    /// **A row of the Dock tile's menu is the other way round** (T-MAC-DOCKMENU,
+    /// §13.50 ③), and the origin is the whole of what says so:
+    ///
+    /// * the window is the one the reader was **last in** rather than the one
+    ///   with the keyboard. A Dock menu is opened from another application, so
+    ///   there is usually no key window at all, and `frontmost_window` would
+    ///   answer `None` for a press that is perfectly well aimed;
+    /// * **with no window, both rows mean a window.** Folio stays in the Dock
+    ///   after its last one closes (M3-1); `New window` there is a window, and
+    ///   `New tab` there is one too, because a tab needs somewhere to be. That
+    ///   is one call to [`Self::a_window_for_the_delegate`] and no verb after
+    ///   it: a fresh window already holds the tab the verb would have made;
+    /// * the window comes **forward first** and the verb runs on it after. A
+    ///   Dock press does not activate this application by itself, and raising
+    ///   afterwards would pull the keyboard back off whatever `New window` had
+    ///   just opened.
+    fn answer_a_menu_row(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        origin: bt_platform::AppDelegateOrigin,
+        choice: bt_platform::menu::MenuChoice,
+    ) -> Result<()> {
+        let id = if origin == bt_platform::AppDelegateOrigin::Dock {
+            let Some(id) = self.the_window_the_reader_was_last_in() else {
+                if let Some(opened) = self.a_window_for_the_delegate(event_loop)? {
+                    self.raise_for_a_launch(opened);
+                }
+                return Ok(());
+            };
+            self.raise_for_a_launch(id);
+            id
+        } else {
+            let Some(id) = self.frontmost_window() else {
+                return Ok(());
+            };
+            id
         };
         match choice {
             bt_platform::menu::MenuChoice::Verb(row) => {
@@ -105310,6 +105409,28 @@ impl FolioApp {
         Ok(())
     }
 
+    /// **The window the reader was last in**, or `None` when this run has none
+    /// left standing.
+    ///
+    /// The reading [`Self::frontmost_window`] is not: that one asks which window
+    /// has the keyboard *now*, and answers `None` whenever Folio is not the
+    /// front application — which is the ordinary state of a gesture that
+    /// arrived at AppKit from outside, a Finder hand-over or a press on the Dock
+    /// tile's menu (T-MAC-DOCKMENU). This one asks the window list, which
+    /// remembers.
+    fn the_window_the_reader_was_last_in(&self) -> Option<WindowId> {
+        self.app.as_ref().and_then(|app| {
+            most_recently_active_window(
+                &app.activated,
+                &app.windows_open
+                    .iter()
+                    .map(|open| open.id)
+                    .collect::<Vec<_>>(),
+                app.quake.window(),
+            )
+        })
+    }
+
     /// The window a delegate event lands in: the one the reader was last in, or
     /// a fresh one when this run has none left.
     ///
@@ -105319,17 +105440,7 @@ impl FolioApp {
         &mut self,
         event_loop: &ActiveEventLoop,
     ) -> Result<Option<WindowId>> {
-        let standing = self.app.as_ref().and_then(|app| {
-            most_recently_active_window(
-                &app.activated,
-                &app.windows_open
-                    .iter()
-                    .map(|open| open.id)
-                    .collect::<Vec<_>>(),
-                app.quake.window(),
-            )
-        });
-        let id = match standing {
+        let id = match self.the_window_the_reader_was_last_in() {
             Some(id) => id,
             // A request that names no place: the window opens holding the
             // default profile's one tab and nothing is retired behind it, which
@@ -105671,9 +105782,17 @@ impl FolioApp {
         let Some(send) = self.delegate.as_ref().map(bt_platform::AppDelegate::sender) else {
             return;
         };
-        let send = Box::new(move |choice| {
+        // **One sender, two surfaces** (T-MAC-DOCKMENU). A row of the Dock
+        // tile's menu crosses on this very closure; what the surface decides is
+        // the origin stamped on the event, which is what tells the landing
+        // whether the press came from a reader who is in Folio or from one who
+        // is not — and, on this platform, may be looking at no window at all.
+        let send = Box::new(move |surface, choice| {
             send(bt_platform::AppDelegateEvent {
-                origin: bt_platform::AppDelegateOrigin::Menu,
+                origin: match surface {
+                    bt_platform::menu::MenuSurface::Bar => bt_platform::AppDelegateOrigin::Menu,
+                    bt_platform::menu::MenuSurface::Dock => bt_platform::AppDelegateOrigin::Dock,
+                },
                 kind: bt_platform::AppDelegateEventKind::MenuChosen(choice),
             });
         });

@@ -10090,3 +10090,168 @@ echo  e5 a4 a9 e4 b8 8b e4 b8 ba e5 85 ac
 ```
 
 *(本节英文,待中文文案改写。)*
+
+### 13.50 T-MAC-DOCKMENU: Dock 图标上的右键菜单——上面两行是 Folio 自己的,底下那些照旧归 AppKit(`crates/bt-platform/src/{menu,macos_menu,macos_app,app_delegate,lib}.rs`、`crates/bt-app/src/{menubar,main}.rs`、`crates/bt-platform/tests/{macos_dock_menu,macos_menu_bar}.rs`)
+
+**This is 13.50 and not 13.49.** 13.48 (T-MAC-STRIP-ENDS) reached `main` while
+this ticket was being written, and 13.49 (T-MAC-LOCALE) is in flight on a branch
+of its own. This section takes the next number no branch has claimed.
+
+**① What the owner saw.** Right-clicking Folio's Dock tile showed the window
+list, *Options*, *Show All Windows*, *Hide* and *Quit* — every one of them
+AppKit's, offered to every application on the platform whether it asks or not.
+Terminal.app's tile offers three rows of its own above them (新建窗口, 新建命令…,
+新建远程连接…). Folio offered none, because an application's own rows come from
+one place and one place only: `-[NSApplicationDelegate applicationDockMenu:]`,
+which Folio's delegate did not answer.
+
+**It is a menu the reader opens from outside this application.** That sentence
+decides almost everything below. A Dock menu is read while the reader is in
+another application, or looking at a desk with nothing of Folio's on it at all —
+because M3-1 ruled that Folio stays in the Dock after its last window closes
+(§13.21). So the state in which this menu is most useful is exactly the state in
+which the menu **bar** greys every verb row it has.
+
+**② What is on it, and what the ticket refused.** Two rows, `New window` and
+`New tab`, in that order, named by the shortcut table's own ids (`bt_app::menubar`'s
+`DOCK`). Nothing else:
+
+| offered | not offered | why not |
+|---|---|---|
+| `New window` | `New command…` | Terminal's verb; Folio has none |
+| `New tab` | `New remote connection…` | the same |
+| | `Settings` | it needs Folio frontmost, which is the one thing a reader opening this menu has said they are not |
+| | the window list, *Hide*, *Quit* | **AppKit's own**, added under these two without being asked — a second list would be a second answer to a question the system has already answered, which is `MenuRole::Windows`' own ruling |
+
+Every row of it is **enabled**, **prints no key equivalent**, and is not an
+`NSMenuItem` of AppKit's own selectors — so `DockRow` has three fewer fields
+than `MenuItem` and each absence is that ruling written into the type. A row
+that greyed itself here would be a row that looks like an offer and is not one,
+in the very state it exists for; a key equivalent here would be a second claim
+on a chord `keyDown:` and the bar have already settled between them (§13.26 ②);
+and a `Copy` row would be sent down a responder chain that a reader in another
+application does not have.
+
+**③ One plan, one target, one sender, one channel — and one field that says
+which menu.** The Dock rows travel inside `MenuPlan` beside the bar's menus,
+`install` and `refresh` carry them with no door of their own, the items are
+targeted at the very object the bar's rows are targeted at, and a press crosses
+on the same `MenuSender` — which now takes a `MenuSurface` beside the choice.
+`bt-app` stamps `AppDelegateOrigin::Menu` or `AppDelegateOrigin::Dock` onto the
+one `AppDelegateEvent` and hands it to the one delegate sender (§13.21's
+channel, §13.26 ③'s reason). Two plans would be two places deciding what
+`New window` is called; two senders would be two inboxes with no order between
+them for two presses a millisecond apart.
+
+**What the surface buys is a different landing, and it is not bookkeeping:**
+
+| | a row of the bar | a row of the Dock tile |
+|---|---|---|
+| which window | `frontmost_window` — the one with the keyboard | `the_window_the_reader_was_last_in` — the window list, which remembers |
+| no window with the keyboard | cannot happen for a row that is not greyed | **ordinary**: the reader is in another application |
+| no window at all | the row is greyed; a choice arriving is a race and is dropped | **both rows mean a window**, and that is one `a_window_for_the_delegate` and no verb after it — a fresh window already holds the tab the verb would have made |
+| raising | nothing to raise; Folio is frontmost | the window comes forward **first**, and the verb runs on it after |
+
+The raise is before the verb rather than after it, and that is the one ordering
+in this ticket that a test can get wrong quietly: raising afterwards would take
+the keyboard off whatever `New window` had just opened.
+
+**④ The fifth selector, and the one of the five that answers with an object.**
+`applicationDockMenu:` is added to winit's private `WinitApplicationDelegate` by
+X-4's route, unchanged (§13.21): look the class up by name after `EventLoop::new`,
+`class_addMethod`, hand winit's own delegate back to `setDelegate:` once.
+Measured on the machine before anything was added, which is the reading the
+route depends on:
+
+```text
+MEASURED class_getInstanceMethod(WinitApplicationDelegate, applicationDockMenu:) before the event loop: None
+MEASURED the same reading after EventLoop::new: Some(false)
+```
+
+`None` is "the class is not in the runtime yet", which is every moment before
+winit builds its loop; `Some(false)` is winit not implementing it, so Folio's
+implementation displaces nothing and `NSApp.delegate` stays winit's own object —
+the whole reason its `is_kind_of` assertion never fires.
+
+Two things are this selector's own rather than the four's:
+
+* **the type encoding is `@@:@`** — an object returned, then `self`, `_cmd` and
+  the `NSApplication *` argument. The plausible mistake here is the mirror of
+  the one §13.21 pinned: `v@:@`, the encoding of a method that answers nothing,
+  on the one method that answers something. `each_selector_carries_the_encoding_of_its_own_implementation`
+  now covers all five;
+* **the menu is handed over autoreleased.** `applicationDockMenu:` is not
+  `alloc`, `new`, `copy` or `mutableCopy`, so by Cocoa's memory rule the caller
+  does not own what it is given: `Retained::autorelease_return` is the one
+  spelling that is neither a leak (one menu per right-click, kept by this
+  module) nor a crash in the Dock (a freed object, released here and retained
+  there). It is pinned in the source text, because both wrong answers compile.
+
+**The method posts nothing.** Every other implementation in `macos_app` parks an
+event and answers AppKit from the stack it was called on; this one is a question
+about what is on a menu rather than news about something a reader did, and the
+answer must be given before the menu is drawn. What it reads is the plan
+`bt-app` last refreshed, a value this crate is already holding — no window is
+asked, no lock outside the crate is taken, and nothing of the application's
+runs. X-4's first rule is untouched: the **press** is the news, and it goes
+through `folioDockChosen:` onto the one channel, spent a turn later.
+
+**⑤ Nothing is rebuilt when the language changes, because nothing is kept.**
+AppKit asks for this menu on every right-click, so the `NSMenu` is built from
+the plan on the spot and dropped when the reader lets go. There is no item list
+to carry a new title onto and no shape to compare — which is why
+`MenuPlan::same_shape_as` deliberately does not read `dock`: a plan that changed
+only its Dock rows is *not equal* (so `refresh` does not return early) and *is*
+the same shape (so the bar's own items are dressed in place rather than
+rebuilt), and the next right-click reads the new words. The bar's own language
+switch was already reconciled on every turn of the loop (§13.26 ④); the Dock
+inherits that and adds nothing.
+
+**⑥ The trip, and what only a human can see.** `applicationDockMenu:` is
+answered by the application delegate, which is a class winit registers when its
+event loop is built, and an ssh session cannot reach the window server a winit
+event loop needs (X-1). So the proof is `tests/macos_dock_menu.rs`,
+`harness = false` — a libtest case never runs on the main thread, and AppKit is
+the main thread's — inside a throwaway ad-hoc-signed bundle with an identifier
+of its own (`io.github.lulu-loopp.folio.dockmenu`) and an isolated `HOME`
+exported by a `CFBundleExecutable` wrapper script, because `LSEnvironment`
+cannot set `HOME` (§13.31 ⑧(d)). The launcher is
+`docs/plans/port/t-mac-dockmenu/dock-menu-proof.sh` and the transcript is beside
+it.
+
+What it drives is the whole of what the Dock does when a tile is right-clicked —
+send the delegate `applicationDockMenu:`, then send the chosen item's own action
+through `-[NSApplication sendAction:to:from:]` — asked of this process's own
+delegate and this process's own items, with no window server gesture at all:
+
+```text
+PASS the delegate AppKit holds answers applicationDockMenu:
+PASS and it still answers M3-1's four
+MEASURED the Dock menu carries ["New window", "New tab"]
+MEASURED ⌘N on the bar: [(Bar, Verb("new-window"))]
+MEASURED the first Dock row: [(Dock, Verb("new-window"))]
+MEASURED after the language switch: ["新建窗口", "新建标签"]
+```
+
+The trip: macOS 26.6.2 (25G83), Apple M4, a debug build of this branch;
+`cargo test --locked -p bt-platform -j 2` beside it, and every claim above
+answered in 119 ms with **0 failed**. One unit test of this ticket's own was
+measured failing first and is worth the line: `the_dock_menu_is_handed_over_autoreleased`
+reads this module's source text for the spelling that hands the menu over, and
+its needles were written as plain literals — which are in the test itself, so the
+first assertion passed on its own text and the second failed on it. Both are
+spelled through `concat!` now, and the `MUTATION:` line above them no longer
+names the wrong spelling in full, which is `launch_landing_tests`' own device for
+a module that reads the file it is written in.
+
+**The right-click itself is NOT-CHECKABLE by an agent**, for §13.21's reason:
+driving the Dock needs `System Events`, and therefore Accessibility *and*
+Automation, behind a TCC prompt an ssh session cannot reach. What a human should
+look for, on a real build: press and hold Folio's Dock tile, and the top of the
+menu reads `New window` / `New tab` (or 新建窗口 / 新建标签 with the language
+switched), above a separator and above AppKit's own rows; choosing `New tab`
+with Folio in the background brings the window the reader was last in forward and
+opens a tab in it; choosing either with **no** window open — Folio alive in the
+Dock after its last window closed — opens exactly one window and no more.
+
+*(本节英文,待中文文案改写。)*

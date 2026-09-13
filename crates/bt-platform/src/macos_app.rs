@@ -1,9 +1,17 @@
-//! **The four selectors winit's own application delegate does not implement**
-//! (ticket M3-1, probe X-4).
+//! **The delegate selectors winit's own application delegate does not
+//! implement** (ticket M3-1, probe X-4; the fifth is T-MAC-DOCKMENU's).
 //!
 //! The AppKit half of [`app_delegate`](crate::app_delegate): everything here is
-//! the route into the four delegate methods, and everything about what Folio
-//! *does* with them is next door.
+//! the route into the delegate methods, and everything about what Folio *does*
+//! with them is next door.
+//!
+//! **Four of them are M3-1's and the fifth is the Dock tile's menu**
+//! (`applicationDockMenu:`, `docs/DESIGN.md` §13.50). It is added by the very
+//! same route, on the same measurement — `class_getInstanceMethod` answers null
+//! for it on winit 0.30.13, so nothing of winit's is displaced — and it is the
+//! one of the five that **answers with an object** rather than with a flag or
+//! with nothing. What it answers with is [`crate::macos_menu::dock_menu`]'s,
+//! which is where the menu and its ownership rule live.
 //!
 //! # The finding, and winit's own documentation is wrong about it
 //!
@@ -23,7 +31,7 @@
 //! 1. **After `EventLoop::new`** — which is what registers the class with the
 //!    Objective-C runtime — look it up by name,
 //!    `AnyClass::get(c"WinitApplicationDelegate")`;
-//! 2. `class_addMethod` the four selectors winit does not implement onto that
+//! 2. `class_addMethod` the selectors winit does not implement onto that
 //!    class. X-4 measured `class_getInstanceMethod` as null and `class_addMethod`
 //!    as true for every one of them: nothing of winit's is displaced, and
 //!    `NSApp.delegate` stays winit's own object, so its assertion never fires;
@@ -31,7 +39,7 @@
 //!    42 `window_event`, 9 `user_event` by the end of the run;
 //! 3. **Hand winit's delegate back to `setDelegate:` once**, immediately after.
 //!    AppKit caches which delegate methods exist at the moment that is called,
-//!    and winit called it before these four existed. X-4 measured that macOS 26.6
+//!    and winit called it before Folio's own existed. X-4 measured that macOS 26.6
 //!    delivers every event even without it (run `r1` skipped it), so this is one
 //!    message against a cache whose behaviour is not contracted anywhere.
 //!
@@ -42,7 +50,7 @@
 //!
 //! # Services are M4-9's, and they never touch the delegate
 //!
-//! A Service is *not* a fifth selector here. `-[NSApplication
+//! A Service is *not* a selector on this class at all. `-[NSApplication
 //! setServicesProvider:]` takes an object of the application's own, AppKit calls
 //! the method `NSServices`' `NSMessage` key names **on that object**, and the
 //! delegate is not consulted at all — X-4 registered one and read
@@ -51,13 +59,13 @@
 //! Service delivery is [`AppDelegateEventKind::OpenPaths`] with an origin of its
 //! own, and the cold-delivery buffer next door is what makes a Service that
 //! arrives before `resumed` reach a window. Nothing in this module needs to
-//! change for it: the provider object is registered beside `add_the_four_selectors`,
+//! change for it: the provider object is registered beside `add_the_delegate_selectors`,
 //! and it posts into the same [`Outbox`].
 //!
 //! # The thread
 //!
 //! Every one of these is called by AppKit on the main thread, which is the only
-//! thread `NSApplication` may be touched from. The four implementations
+//! thread `NSApplication` may be touched from. These implementations
 //! therefore do not gate: they are *called* by the platform rather than asked by
 //! this program, and a check that cannot fail is a check that proves nothing —
 //! `macos_impl`'s own note about the two doors that touch no AppKit.
@@ -96,12 +104,12 @@ unsafe extern "C" {
     fn class_getInstanceMethod(cls: *const AnyClass, name: Sel) -> *const c_void;
 }
 
-/// The channel the four C functions below post into.
+/// The channel the C functions below post into.
 ///
 /// A `static` because a method implementation is a C function with no `self` of
 /// this program's — the whole reason [`crate::AppDelegate`]'s shape is a channel
-/// and not a trait. Written once, by `add_the_four_selectors`, before any of the
-/// four can be called: AppKit cannot send a message to a selector that has not
+/// and not a trait. Written once, by `add_the_delegate_selectors`, before any of
+/// them can be called: AppKit cannot send a message to a selector that has not
 /// been added yet.
 static OUTBOX: OnceLock<Arc<Outbox>> = OnceLock::new();
 
@@ -124,7 +132,7 @@ pub(crate) fn post(origin: AppDelegateOrigin, kind: AppDelegateEventKind) {
     }
 }
 
-// ── the four implementations ───────────────────────────────────────────────
+// ── the implementations ────────────────────────────────────────────────────
 
 /// `applicationShouldHandleReopen:hasVisibleWindows:`
 ///
@@ -230,6 +238,30 @@ extern "C-unwind" fn open_urls(
     );
 }
 
+/// `applicationDockMenu:` (T-MAC-DOCKMENU, `docs/DESIGN.md` §13.50)
+///
+/// **The one of these that answers with an object**, and therefore the one with
+/// an ownership rule: the method's name is not `alloc`, `new`, `copy` or
+/// `mutableCopy`, so what it answers with is **not owned by AppKit** and is
+/// handed over autoreleased. [`crate::macos_menu::dock_menu`] does that and this
+/// carries the pointer out unchanged.
+///
+/// **It posts nothing.** Every other implementation in this file parks an event
+/// and answers AppKit from the stack it was called on; this one is a *question*
+/// about what is on a menu rather than news about something a reader did, and
+/// the answer has to be given before the menu is drawn. What it reads is the
+/// plan `bt-app` last refreshed onto the bar, which is a value this crate is
+/// already holding — no window is asked, no lock outside this crate is taken,
+/// and nothing of the application's runs. The press that follows *is* news, and
+/// that goes through `folioDockChosen:` onto the one channel, a turn later.
+extern "C-unwind" fn dock_menu(
+    _this: &AnyObject,
+    _cmd: Sel,
+    _app: &AnyObject,
+) -> *mut objc2_app_kit::NSMenu {
+    crate::macos_menu::dock_menu()
+}
+
 // ── the injection ──────────────────────────────────────────────────────────
 
 /// One selector, its implementation and the type encoding AppKit reads it by.
@@ -244,7 +276,7 @@ struct Injection {
     encoding: &'static CStr,
 }
 
-/// **Add the four selectors to the class winit already registered.**
+/// **Add Folio's selectors to the class winit already registered.**
 ///
 /// # Errors
 ///
@@ -252,7 +284,7 @@ struct Injection {
 /// before the event loop was built — or if the runtime refuses a method, which
 /// on this route means winit has grown an implementation of its own and the
 /// two would now be fighting over the same selector.
-pub(crate) fn add_the_four_selectors(outbox: Arc<Outbox>) -> Result<(), String> {
+pub(crate) fn add_the_delegate_selectors(outbox: Arc<Outbox>) -> Result<(), String> {
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| off_the_window_thread("installing the application delegate"))?;
     let Some(class) = AnyClass::get(c"WinitApplicationDelegate") else {
@@ -262,7 +294,7 @@ pub(crate) fn add_the_four_selectors(outbox: Arc<Outbox>) -> Result<(), String> 
                 .to_owned(),
         );
     };
-    let four = [
+    let selectors = [
         Injection {
             selector: sel!(applicationShouldHandleReopen:hasVisibleWindows:),
             imp: should_handle_reopen as *const c_void,
@@ -283,10 +315,18 @@ pub(crate) fn add_the_four_selectors(outbox: Arc<Outbox>) -> Result<(), String> 
             imp: open_urls as *const c_void,
             encoding: c"v@:@@",
         },
+        // T-MAC-DOCKMENU's, and the only one whose return is an object: `@` for
+        // the `NSMenu *` it answers with, then the object and the selector every
+        // method is called with, then the `NSApplication *` it is handed.
+        Injection {
+            selector: sel!(applicationDockMenu:),
+            imp: dock_menu as *const c_void,
+            encoding: c"@@:@",
+        },
     ];
     // The channel before the methods, or a delivery could land in the gap.
     let _ = OUTBOX.set(outbox);
-    for injection in four {
+    for injection in selectors {
         // SAFETY: the class is a live registered class, and reading whether it
         // already answers a selector mutates nothing.
         let already = unsafe { class_getInstanceMethod(class, injection.selector) };
@@ -359,6 +399,49 @@ pub(crate) fn reply_to_should_terminate(proceed: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// **Whether winit's own class already implements `applicationDockMenu:`** —
+/// X-4's measurement, made again for the fifth selector (T-MAC-DOCKMENU).
+///
+/// `None` when `WinitApplicationDelegate` is not in the runtime yet, which is
+/// every moment before `EventLoop::new`. `Some(false)` is the answer this
+/// ticket's route depends on and the one the `.app` proof prints before it
+/// installs anything: winit does not implement it, so adding it displaces
+/// nothing and `NSApp.delegate` stays winit's own object.
+///
+/// It reads the runtime and changes nothing. Nothing in the product calls it;
+/// [`add_the_delegate_selectors`] makes the same reading for itself, and refuses
+/// rather than reports.
+#[doc(hidden)]
+#[must_use]
+pub fn winit_delegate_already_answers_the_dock_menu() -> Option<bool> {
+    let class = AnyClass::get(c"WinitApplicationDelegate")?;
+    // SAFETY: the class is a live registered class, and reading whether it
+    // already answers a selector mutates nothing.
+    let already = unsafe { class_getInstanceMethod(class, sel!(applicationDockMenu:)) };
+    Some(!already.is_null())
+}
+
+/// Whether the delegate object AppKit holds answers `applicationDockMenu:`
+/// (T-MAC-DOCKMENU).
+///
+/// Beside [`delegate_answers_the_four_selectors`] rather than folded into it,
+/// and the split is M3-1's own: those four are one ticket's claim about one
+/// lifecycle channel, and this is a second ticket adding a fifth method for a
+/// second reason. A caller that wants both asks both.
+#[must_use]
+pub fn delegate_answers_the_dock_menu() -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let Some(delegate) = NSApplication::sharedApplication(mtm).delegate() else {
+        return false;
+    };
+    // SAFETY: `respondsToSelector:` is `NSObject`'s and takes a selector.
+    let answers: bool =
+        unsafe { msg_send![&*delegate, respondsToSelector: sel!(applicationDockMenu:)] };
+    answers
+}
+
 /// Whether the delegate object AppKit holds answers all four selectors.
 ///
 /// The `.app` test's own question, asked of AppKit rather than of this module's
@@ -405,6 +488,10 @@ mod tests {
             ("applicationShouldTerminate:", "Q@:@"),
             ("applicationShouldTerminateAfterLastWindowClosed:", "B@:@"),
             ("application:openURLs:", "v@:@@"),
+            // T-MAC-DOCKMENU's, and the plausible mistake here is the other
+            // way round from the one above: `v@:@`, the encoding of a method
+            // that answers nothing, on the one method that answers an object.
+            ("applicationDockMenu:", "@@:@"),
         ] {
             let at = SOURCE
                 .find(&format!("selector: sel!({selector})"))
