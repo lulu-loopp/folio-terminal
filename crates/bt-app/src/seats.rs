@@ -47311,6 +47311,88 @@ mod tests {",
         );
     }
 
+    /// PIN (user report, 2026-09-14) — **the Git page's hover is a question
+    /// about a point, and it answers `None` off the list.**
+    ///
+    /// This is the function [`crate::Runtime::heal_git_hover`] re-asks when the
+    /// rows have been rebuilt under a pointer that did not move, so the healing
+    /// is only as good as the two answers pinned here: the row a point is really
+    /// in, and *nothing* for a point the list does not reach. Without the second
+    /// one, "the pointer left the panel" would have no way to be said and the
+    /// last row the hand touched would stay lit.
+    #[test]
+    fn the_git_pages_hover_is_asked_of_the_page_that_is_drawn() {
+        let seats = term_beside_files();
+        let column = seats.files().first().copied().expect("a files column");
+        let metrics = seat_metrics(1_000);
+        let layout = solved(&seats, viewport_of(1_600, 900, 1_000), &metrics);
+        let rect = files_pane_rect(&layout, column).expect("the column is placed");
+        let body = files_pane_geometry(rect, 1.0, true).body;
+        let page = crate::git_panel::sample_page_for_tests();
+        let mut pages = BTreeMap::new();
+        pages.insert(column, page.clone());
+        let geometry = crate::git_panel::git_panel_geometry(body, &page, 1.0);
+
+        // Two different rows, each asked at its own leading edge — away from the
+        // verbs in the trailing corner, which are a question of their own.
+        let rows: Vec<usize> = (0..page.rows.len())
+            .filter(|index| {
+                let row = geometry.row_rect(*index);
+                row[3] > row[1] && row[3] <= body[3]
+            })
+            .take(2)
+            .collect();
+        assert_eq!(rows.len(), 2, "the fixture page has rows on screen");
+        for index in rows {
+            let row = geometry.row_rect(index);
+            assert_eq!(
+                hit_git_panel(
+                    &layout,
+                    &pages,
+                    1.0,
+                    f64::from(row[0] + 1.0),
+                    f64::from((row[1] + row[3]) / 2.0),
+                ),
+                Some(ChromeTarget::GitRow {
+                    seat: column,
+                    index,
+                }),
+                "the point inside row {index} names row {index}"
+            );
+        }
+
+        // And a point the list does not reach is on no row at all — which is how
+        // a hover that has left the panel comes back `None` rather than staying
+        // on whatever it last touched.
+        let last = geometry.row_rect(page.rows.len() - 1);
+        assert!(
+            last[3] + 2.0 < body[3],
+            "the fixture page is shorter than the column it is drawn in"
+        );
+        assert_eq!(
+            hit_git_panel(
+                &layout,
+                &pages,
+                1.0,
+                f64::from(last[0] + 1.0),
+                f64::from(last[3] + 2.0),
+            ),
+            None,
+            "below the last row the page answers nothing"
+        );
+        assert_eq!(
+            hit_git_panel(
+                &layout,
+                &pages,
+                1.0,
+                f64::from(body[0] - 4.0),
+                f64::from((last[1] + last[3]) / 2.0)
+            ),
+            None,
+            "and so does a point outside the column"
+        );
+    }
+
     /// PIN (R1) — which page a column was on crosses the disk.
     ///
     /// The mock-up keeps this in a lazy JavaScript property that dies with the

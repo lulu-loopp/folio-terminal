@@ -39269,6 +39269,11 @@ impl Runtime<'_> {
         // press then lands on the row that was drawn, because it *is* the row
         // that was drawn.
         self.window.git_pages_shown = git_pages.clone();
+        // And the hover healed against that very list, before anything is drawn
+        // from it: the map above has just been rebuilt under a pointer that did
+        // not move, and the hover is an index into it. See
+        // [`Self::heal_git_hover`] — `heal_files_scroll`'s twin, one state along.
+        self.heal_git_hover(scale);
         let git_graphs = self.git_graphs(scale);
         // Kept for the hit test, for `git_pages_shown`'s reason exactly.
         //
@@ -80604,6 +80609,62 @@ impl Runtime<'_> {
         }
     }
 
+    /// Ask again what the pointer is on, when the Git page it was on has been
+    /// rebuilt under it (user report, 2026-09-14).
+    ///
+    /// [`Self::heal_files_scroll`]'s twin, and it is owed for the same reason
+    /// one state along: **a number that was true when it was written stops being
+    /// true when the list changes under it.** The hover this window keeps is a
+    /// [`seats::ChromeTarget::GitRow`], and a `GitRow` is an *index* — the very
+    /// thing [`git_panel::GitRowPeek`] refuses to be keyed by, in a doc that
+    /// says why: an index is stale the moment a group above it grows a file.
+    /// Nothing but a pointer event wrote the hover, so a wheel notch over the
+    /// column, a `git add` the watcher picked up, or a commit turning over all
+    /// moved the rows under a hand that never moved — and whatever row inherited
+    /// the old number lit up under a pointer that was somewhere else. The
+    /// reported picture was `REMOTES (5)` wearing a hover it had never been
+    /// given (`git_panel::GitRow::wears_ground` has the other half of that
+    /// report, the half a wash on a *header* was).
+    ///
+    /// **Re-derived, not cleared.** The state's law is "the hover is what the
+    /// pointer is on", and clearing it would be a second, weaker law — the row
+    /// genuinely under the hand would go dark for as long as the reader held
+    /// still. This asks [`seats::hit_git_panel`] the question the pointer's own
+    /// handler asks, against the pages this pass is about to draw, so the answer
+    /// is right whether the rows moved, changed or went away entirely. `None` is
+    /// then a fact and not a reset: the pointer is over no row of this page.
+    ///
+    /// **Only when the stored hover is already this page's.** Everything else
+    /// the pointer can be on is chrome whose geometry this pass did not rebuild,
+    /// and re-running the whole router here would be this function answering for
+    /// surfaces it knows nothing about — including a float's, which is opaque to
+    /// the docked hit test and is what the 2026-09-12 ruling put in
+    /// [`Self::pointer_target_at`].
+    ///
+    /// The floating host has the same two wheels and already re-asks on both
+    /// (`scroll_float_tree`, `scroll_float_git_page`); its pages are rebuilt in
+    /// `float_layer`, which runs after this and does its own asking.
+    fn heal_git_hover(&mut self, scale: f32) {
+        let Some(seats::ChromeTarget::GitRow { .. } | seats::ChromeTarget::GitAct { .. }) =
+            self.window.seat_pointer.hover
+        else {
+            return;
+        };
+        // No pointer in this window at all: `pointer_left` has already taken the
+        // hover with it, and a page rebuilt after that has nothing to heal.
+        let Some(position) = self.window.pointer_position else {
+            return;
+        };
+        let healed = seats::hit_git_panel(
+            &self.seat_layout,
+            &self.window.git_pages_shown,
+            scale,
+            position.x,
+            position.y,
+        );
+        self.window.seat_pointer.hover = healed;
+    }
+
     /// **Measure the open name editor into the tree row it is drawn in** (0.3).
     ///
     /// `dress_preview_name_editor`'s job one surface over, and the same
@@ -100140,6 +100201,82 @@ mod key_hint_spend_tests {
         assert!(
             text.contains("if let Some(position) = router_position"),
             "and routes from that answer and from nothing else:\n{text}"
+        );
+    }
+}
+
+/// **The Git page's hover is healed against the page that is drawn** (user
+/// report, 2026-09-14).
+///
+/// A source pin, and for [`key_hint_spend_tests`]' reason: the defect is a
+/// *wiring* one — the hover is a row index, the rows are rebuilt every pass, and
+/// nothing but a pointer event was re-asking — and what a machine can hold about
+/// a fix like that is that the re-asking happens in the one funnel every rebuild
+/// goes through, and that it re-derives rather than resets. Whether the answer
+/// is right is [`crate::seats`]' own pin,
+/// `the_git_pages_hover_is_asked_of_the_page_that_is_drawn`; whether the picture
+/// is right is `git_panel`'s.
+///
+/// RED GATE: it was red the day it was written. `refresh_chrome` published the
+/// new pages and said nothing about the hover, and `scroll_git_panel` — alone
+/// among the three wheels that move a list under a still pointer — re-asked
+/// nothing either.
+#[cfg(test)]
+mod git_hover_heal_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// The heal stands in `refresh_chrome`, **after** the pages it heals against
+    /// have been published and before anything is drawn from them.
+    #[test]
+    fn the_git_pages_hover_is_healed_against_the_page_it_is_drawn_from() {
+        let text = body("    fn refresh_chrome(&mut self) -> bool {");
+        let published = text
+            .find("self.window.git_pages_shown = git_pages.clone();")
+            .expect("`refresh_chrome` publishes the pages the hit test reads");
+        let healed = text
+            .find("self.heal_git_hover(scale);")
+            .expect("`refresh_chrome` heals the Git page's hover");
+        assert!(
+            published < healed,
+            "the hover is healed against last pass's rows:\n{text}"
+        );
+    }
+
+    /// And it heals by **asking the page again**, never by blanking the state:
+    /// a reader holding still over a row that is still there must keep it.
+    #[test]
+    fn the_heal_re_derives_the_hover_and_does_not_clear_it() {
+        let text = body("    fn heal_git_hover(&mut self, scale: f32) {");
+        assert!(
+            text.contains("seats::hit_git_panel("),
+            "the heal asks the same question the pointer's own handler asks:\n{text}"
+        );
+        assert!(
+            text.contains("self.window.seat_pointer.hover = healed;"),
+            "and writes that answer back:\n{text}"
+        );
+        assert!(
+            !text.contains("hover = None"),
+            "a heal that clears is a second, weaker law:\n{text}"
+        );
+        // And it only speaks for this page: every other surface's geometry is
+        // somebody else's to answer for — a float's above all, which is opaque
+        // to the docked hit test (2026-09-12).
+        assert!(
+            text.contains("seats::ChromeTarget::GitRow { .. }")
+                && text.contains("seats::ChromeTarget::GitAct { .. }"),
+            "the heal is entered only for a hover that is already this page's:\n{text}"
         );
     }
 }
