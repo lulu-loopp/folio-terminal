@@ -27,7 +27,7 @@ export CARGO_TARGET_DIR="$HOME/folio-port/target-dock"
 export CARGO_INCREMENTAL=0
 CARGO="$HOME/.cargo/bin/cargo"
 
-REPO="$HOME/folio-port/repo"
+REPO="$HOME/folio-port/wt/dockmenu"
 OUT="$HOME/folio-port/out-dockmenu"
 APP="$OUT/FolioDockMenu.app"
 ISO="$OUT/home"

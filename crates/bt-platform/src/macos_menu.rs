@@ -613,16 +613,25 @@ mod tests {
     /// `Retained::autorelease_return`, and it is asserted in the source text
     /// because the two wrong answers both compile.
     ///
-    /// MUTATION: swap it for `Retained::into_raw` and this goes red.
+    /// MUTATION: hand the menu over with its retain count still this module's —
+    /// `into_raw` in place of the call below — and this goes red.
+    ///
+    /// **Both needles are spelled through `concat!`, and the mutation above is
+    /// not spelled in full**, for `main.rs`' `launch_landing_tests`' reason and
+    /// it is not a style: a needle written as one literal is in this file too,
+    /// so the first assertion would pass on its own text however the menu is
+    /// actually returned, and the second would fail on its own text however
+    /// careful the code is. Both were measured doing exactly that on 2026-09-13,
+    /// which is why they are written this way.
     #[test]
     fn the_dock_menu_is_handed_over_autoreleased() {
         let source = include_str!("macos_menu.rs");
         assert!(
-            source.contains("Retained::autorelease_return(menu)"),
+            source.contains(concat!("Retained::", "autorelease_return(menu)")),
             "the Dock menu is not handed over autoreleased"
         );
         assert!(
-            !source.contains("Retained::into_raw"),
+            !source.contains(concat!("Retained::", "into_raw")),
             "a menu whose retain count is still this module's leaks once per right-click"
         );
     }
