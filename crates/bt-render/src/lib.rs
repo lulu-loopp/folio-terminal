@@ -830,14 +830,17 @@ fn release_half_covered_wide_cells(
 /// row*, a spacer's is the wide lead immediately before it. A cell whose partner has already been
 /// released — or one the horizontal scroll cut in half at the viewport's edge — has none.
 fn wide_partner_of(cells: &[CapturedCell], columns: usize, index: usize) -> Option<usize> {
+    // A cell sitting in a row's first column — `is_multiple_of(columns)` — has no neighbour to
+    // its left, and a cell whose neighbour to the right is a first column has none to its right.
     let cell = cells.get(index)?;
     if cell.style.flags.contains(CellFlags::WIDE_CHAR) {
         let spacer = index + 1;
-        if spacer % columns != 0 && cells.get(spacer).is_some_and(|cell| cell.wide_spacer) {
+        if !spacer.is_multiple_of(columns) && cells.get(spacer).is_some_and(|cell| cell.wide_spacer)
+        {
             return Some(spacer);
         }
     } else if cell.wide_spacer
-        && index % columns != 0
+        && !index.is_multiple_of(columns)
         && cells[index - 1].style.flags.contains(CellFlags::WIDE_CHAR)
     {
         return Some(index - 1);
@@ -19109,12 +19112,8 @@ mod tests {
                     "the caret of {text:?} belongs one column past its last letter"
                 );
 
-                let bar = cursor_pixel_bounds_for_style(
-                    metrics,
-                    &composed.frame,
-                    true,
-                    CursorStyle::Bar,
-                );
+                let bar =
+                    cursor_pixel_bounds_for_style(metrics, &composed.frame, true, CursorStyle::Bar);
                 let last_letter = frame_cell_bounds_px(metrics, &composed.frame, 0, last);
                 assert_eq!(bar.len(), 1);
                 assert_eq!(
@@ -19152,7 +19151,10 @@ mod tests {
             "the spacer of a wide character the composition wrote over is not a spacer any more"
         );
         assert_eq!(composed.frame.cells[3].text, "");
-        assert!(frame.cells[3].wide_spacer, "source terminal frame untouched");
+        assert!(
+            frame.cells[3].wide_spacer,
+            "source terminal frame untouched"
+        );
 
         // A narrow letter lands on the spacer: the lead before the composition goes.
         let mut frame = blank_row_cursor_frame(metrics, 16);
@@ -19168,8 +19170,7 @@ mod tests {
         .unwrap();
         assert_eq!(composed.frame.cells[1].text, "b");
         assert_eq!(
-            composed.frame.cells[0].text,
-            "",
+            composed.frame.cells[0].text, "",
             "half a glyph is not a glyph"
         );
         assert!(
