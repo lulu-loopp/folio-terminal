@@ -5243,6 +5243,94 @@ quad  [18.0, 920.0, 614.0, 922.0]            ← 脚的横线
 
 **⑦ 没做的。** 文本卡的行数(理由见 ③);网络路径的卡仍旧一个字不说(不为一张卡去 stat 一个可能拨不通的共享,§7.1.3 的老规矩),文件已经不在的卡也一样——它们连带都不留,而不是留一条空带。
 
+
+#### ⑭ T-PEEK-FADE: the card appears the way the tip does — a fade, and nothing else (owner's ruling 2026-09-13; `crates/bt-app/src/{main,tooltip}.rs`, `crates/bt-render/src/lib.rs`)
+
+**The ruling.** The glance card had always arrived at full strength in a single
+frame: the pointer rests on a row, `file_peek::PEEK_INTENT_MS` (350 ms) runs out,
+and the card is simply *there*. Four candidates were mocked against each other —
+(A) leave it instant, (B) fade only, (C) fade plus a 4 px drop, (D) fade plus a
+scale — and the owner took **B**: `opacity 0 -> 1` over `tooltip::TOOLTIP_FADE`
+(= `bt_render::MOTION_FAST`, 90 ms) on the tip's own `ease`, **no travel, no
+scale**; leaving stays **instant**, with no fade-out at all; and under reduced
+motion it is instant both ways.
+
+**Why B and not C or D.** Two sentences, and they are the whole of it. First:
+**the card is summoned by holding still, so it must never look launched.** A
+drop and a scale are both entrance verbs — they say *opened*, which is the wrong
+word for a card that appeared because the reader stopped moving. What actually
+happened is that a thing already under the pointer became legible, and the only
+honest picture of that is ink arriving. Second: **everything this window raises
+on hover should obey one rule**, and the tooltip already did (§7.1.3, `.tip
+{ transition: opacity .09s ease }`). A card that arrived on a different curve, or
+on none, was the window speaking with two voices about one gesture.
+
+**The 350 ms is untouched.** The wait is the *question* — has this hand stopped?
+— and the fade is the *answer* arriving. Folding the two together (a shorter wait
+plus a longer fade, say) would trade a clean intent test for a card that starts
+appearing over rows the reader is only passing.
+
+**One rule, two epochs.** The curve is now a free function,
+`tooltip::hover_fade_opacity(since, motion)`, with `hover_fade_owes_frames` beside
+it; `TooltipHost::opacity` reads it and so does `Runtime::file_peek_opacity`. The
+two surfaces keep their **own** epochs — a tip and a card can be on screen at the
+same instant and neither is the other's clock — but there is exactly one curve
+and one span, so the day either moves, both move. No new constant was minted and
+none was needed: the span is `TOOLTIP_FADE`, already registered on the motion
+archive's fast rung (`archived("tooltip::TOOLTIP_FADE", …)`), and a second
+constant equal to it would have been precisely the drift that register exists to
+end.
+
+**The card's clock became one thing.** `FilePeek` carried `due: Option<Instant>`,
+where `None` meant "on screen". A fade needs the instant the card *appeared*, and
+a second `Option<Instant>` beside the first would have made two unrepresentable
+states representable — a card settling with a fade epoch, a card on screen
+without one. It is now `PeekClock`, `Settling(Instant) | Shown(Instant)`: "is it
+up?" and "when did it arrive?" are one question asked of one value, and there is
+deliberately **no third arm** for a card on its way out, which is what "leaving is
+instant" means in the type rather than in a comment.
+
+**The fade reaches every layer the card put down.** It is folded in
+`Runtime::file_peek_layer`, over the whole vector, rather than inside
+`file_peek::build`: the card's face, the scroll bar beside its document, the ▶ on
+a recording and that recording's control bar are one surface arriving, and a fade
+that reached only the face would have left a solid bar hanging in the air over a
+card that was not there yet. It is *multiplied* into whatever each layer already
+carried, never assigned over it.
+
+**And the document fades with the card**, which needed a fix one level down. A
+`bt_render::PreviewBody` has three channels — its fills, its letters and its
+pictures — and the layer's own `opacity` reached only the pictures
+(`faded_document_rasters`, mended 2026-08-26). A glance card is mostly document,
+so a fade that left the text solid would have been a frame arriving over ninety
+milliseconds around words that were already there. `preview_body_rect_instances`
+and `shape_preview_body` now take the carrier's alpha; the seat lane passes `1.0`,
+because a pane is the window rather than a thing laid over it, and the overlay
+lane passes its layer's. The undocked preview float's entrance is mended by the
+same line.
+
+**Frames.** The card owes the next frame exactly while its opacity is climbing —
+`Runtime::file_peek_deadline` reports the settle while one is armed and the fade's
+frames while one is running, and `advance_file_peek` asks the strip's own
+frame-debt question (`file_peek_drawn_opacity` against what should be painted) so
+that the frame the fade *lands* on is drawn. Once it has landed the card asks for
+nothing, which keeps §7.29's promise that a card standing still under a still
+pointer costs no wake-ups. Under reduced motion it owes none at any point.
+
+**Red gates.** `the_card_fades_in_over_the_tips_own_ninety_milliseconds`,
+`the_fade_owes_frames_while_it_climbs_and_the_card_leaves_at_once`,
+`stillness_skips_the_fade_and_owes_no_frames`,
+`a_settling_card_has_no_epoch_and_a_shown_card_waits_for_nothing`,
+`the_cards_fade_is_the_tips_rule_read_once_and_reaches_every_layer` (bt-app
+`file_peek_fade_tests`); `the_tip_and_the_glance_card_read_one_fade_and_not_two`
+(`tooltip`); `a_faded_layers_document_fills_are_faded_too` (bt-render). The
+mutations each one catches are written above it.
+
+**Both platforms**, because none of it is platform code: the clock, the curve and
+the fold are the same three functions on Windows and on macOS.
+
+*(本节英文,待中文文案改写。)*
+
 ### 7.30 半角标点后面紧跟一个汉字,那个标点就是名字的尽头:一个候选词的几种读法,从长到短问磁盘(裸路径不识别缺陷,2026-08-27 用户实证;**2026-08-28 复议:接缝从一张表改成一个类,反引号成为终止符,应用折断的下半截先切接缝再拼**;**2026-09-03 再补:接缝还有另一头——一个冒号前面站着别的文字,名字可以在它后面开口**;**2026-09-04 再补:`~` 是路径字符(8.3 短名里到处是它),只有名字开头那一个才是 home 展开**;**2026-09-05 再补:接缝的证人也可以是「后面什么都没有了」——token 尽头的 ASCII 句尾标点(句点在内)是接缝,第 16 行就地推翻**;**2026-09-07 再补:一格 pane 的壳不止一种绝对拼法——`/d/…`(MSYS)与 `/mnt/d/…`(WSL)按命名空间翻译后识别**;`crates/bt-transcript/src/paths.rs`、`crates/bt-term/src/session.rs`、`crates/bt-app/src/profiles.rs`、`crates/bt-app/src/main.rs`)
 
 **由头。** Claude Code 往终端里印这一行:
@@ -8127,7 +8215,7 @@ spike 量到的是「这个 workspace 今天已经有约 90% 能在 macOS 上编
 
 **④ 亮暗那条通知,以及 winit 会闭嘴的那一刻。** `set_window_dark_mode` 是 `NSWindow.appearance`,`DWMWA_USE_IMMERSIVE_DARK_MODE` 的孪生。发现是这样的:**一扇窗自己的外观一旦被设过,winit 就不再为它发 `WindowEvent::ThemeChanged`**(它的 `observe_value` 对定制过的窗口提前返回,理由是这种变化本来就是应用自己弄出来的)— 而 Folio 在主题落地的那一刻就把它设了。于是桌面的底色现在改经 `SystemSettingsWatch` 到达循环:对**应用的** `effectiveAppearance` 做 KVO(没有任何窗口覆盖会碰到它),外加 `NSWorkspace` 那条无障碍显示通知管 Reduce Motion,两者在 AppKit 自己的派发里什么也不做,只捅一下 winit 的用户事件通道 — X-4 的规矩。`bt-app` 的 `SystemPreferencesChanged` 分支多了第二个读者(`adopt_system_canvas`),它是幂等的,在 Windows 上无害,那里 `WM_THEMECHANGED` 本来就是唤醒它的两条消息之一。**核不到的那件事,直说**:`defaults write -g AppleInterfaceStyle Dark` 什么也没触到 — 没触到 Folio,也没触到我们自己那个持有同样两份订阅的探针,正是靠后者才知道是系统根本没发,而不是 Folio 没动。那台机器上没有授予自动化权限(`osascript` 会需要它),所以现场切换这件事对 agent 来说是 NOT-CHECKABLE,由单元测试代管。
 
-### 13.11 M3-3: 一扇窗一套窗控——原生标题栏被接管而不是被拿掉(`crates/bt-platform/src/macos_impl.rs`、`crates/bt-platform/src/portable_impl.rs`、`crates/bt-app/src/seats.rs`、`crates/bt-app/src/main.rs`)
+### 13.11 M3-3: 一扇窗一套窗控——原生标题栏被接管而不是被拿掉(`crates/bt-platform/src/macos_impl.rs`、`crates/bt-platform/src/portable_impl.rs`、`crates/bt-app/src/seats.rs`、`crates/bt-app/src/main.rs`、`crates/bt-platform/src/lib.rs`)
 
 **① 裁决是接管,而且它是 Windows 那一手的反面。** 用户 2026-09-12 从 Mac 上第一扇窗里裁的一句话:一扇窗不能带两套窗控。Windows 上的做法是把系统窗框**拿掉**——`WM_NCCALCSIZE` 把整块外框交给应用,四个 caption 槽全由 Folio 自己画。macOS 上反过来:标题栏**留着**,被四句话改成 Folio 自己的一部分——`NSFullSizeContentView`、`titlebarAppearsTransparent = true`、`titleVisibility = .hidden`(标签名由 Folio 自己画)、`isMovableByWindowBackground = false`;于是那条 bar 里 AppKit 还在画的只剩三盏红绿灯,在 macOS 自己摆的位置上,而 Folio 的最小化、缩放、关闭一个都不画。齿轮留着,因为没有别人画它。窗口的 `title` 照旧设——Mission Control、窗口菜单和 Dock 都读它——只是不显示。
 
@@ -8158,6 +8246,28 @@ spike 量到的是「这个 workspace 今天已经有约 90% 能在 macOS 上编
 判定本身是 Windows 那条规矩原样搬过来的,不是第二条规矩:`title_bar_drag_point` = `[title_bar_app_run_right_px, caption_run_left)` × bar 的高度,再把红绿灯那条带子整块让出去——那些像素既不是 Folio 的也不是拖拽的,AppKit 的按钮在 winit 之前就把按下拿走了,而从一个按钮矩形**里面**开始的拖拽是一个按不动的按钮。红测试 `the_strips_empty_part_is_the_drag_region` 把这个谓词按在 `custom_frame_hit_test` 对同一条 bar 给出的独立答案上,两个平台一条规矩。
 
 **⑤ 在 Mac 上跑出来的那一趟。** 4K(1920×1080 点,缩放 2)上,本票自己的 bundle:截图里红绿灯、标签、`×`、`+`、`˅` 和最右的齿轮在同一行上,没有第二套窗控。`CGEvent` 在 strip 空处按下、二十步拖动、抬起:窗口从 `515,167` 走到 `675,277`,正好是要求的 `+160,+110`,而窗口自己的那条路上写着 `chrome_mouse_input taken=1 at=press-title-bar`,那扇门一声没吭。同一处双击:窗口从 `675,277 960×600` 变成 `71,30 1849×1050`——正是这台桌子的可用区,也就是 `AppleActionOnDoubleClick = Maximize` 对应的 `zoom:`;再双击一次,回到 `675,277 960×600`。会话往返:开在 `515,167`,拖到 `735,257`,会话写下 `{735, 257, 960, 600}`,再开回到 `735,257`(物理 `1470,514,3390,1714`)——同一个外框矩形。第一趟两个手势都没动,原因写在这里免得下一个人再撞:一份全新的数据目录必然升起首启卡(`first_run::due` 就是「设置文件不在」),而那张卡吞掉每一次按下;所以每一趟现在都从一次热身启动写出的 `settings.json` 上开始。
+
+**⑥ On the header, every pixel that is not one of Folio's own boxes is a window-drag handle** (owner ruling 2026-09-13, 「改」).
+
+The ruling was made on the band §13.48 ③ had just left behind. The gear moved *within* its slot — a 28-point square centred 20 in from the trailing edge, inside the 46 the strip still reserves — so sixteen points of bar stood in front of it and six behind it, answering to nobody: not the gear's, because the gear's box is the square, and not the window's, because the handle was a pair of edges. §13.19 ⑤ had already met the same thing on the other axis (the five points of strip above and below a pill) and named it rather than touching it: 「这里是点名,不是动手」. This is the ruling both were waiting for, it is one sentence, and it is the same sentence on both hosts.
+
+**The predicate is a complement now, not an interval.** `title_bar_drag_point` used to answer `[title_bar_app_run_right_px, caption_run_left)` × the bar's height: after where Folio's content stops, before where the gear's run begins. That describes a bar whose controls are packed against its two ends, which this product's bar is not. It now answers: **on the band, at or after the platform's own run, and inside none of `title_bar_folio_boxes`**. That list is the tabs (pills or attached, whichever this window wears), the `+` and the `˅`, the panel toggle, the gear, and on the window that draws them minimise, maximise and close — **each taken from the function that lays it out** (`tab_strip_geometry`, `panel_toggle_box`, `window_caption_boxes` through `window_chrome_boxes`), never restated. A second table of these rectangles is the failure §13.48 ③ named in the paint, written into the hit test instead.
+
+**What is deliberately not on the list.** The program's own name in the vertical layouts — `.apptitle` is inside `.drag` in the mock-up, and a title has always been part of the handle. The air between two tabs, the strip above and below a pill, the band under a toggle that is 26 points tall in a 40-point bar: none of them is a box, and all of them drag. And **the platform's own three buttons are not Folio's to list**, so the leading band is left out whole for the reason it always was — AppKit's buttons take those presses before winit sees them, and a drag begun inside a button's rectangle is a button that cannot be pressed. And the active tab's **skirt** — the radius of outward corner an attached tab paints past its own body — is not on it either, deliberately: the list is the one `hit_tab_chrome` answers from, and a pixel that is neither a control's nor the window's is the third category this ruling exists to abolish. A press on those seven points at the bar's foot picks the window up.
+
+**The strip's boxes are cropped to the strip's viewport**, which is where the drag reserve (user ruling 2026-09-09) keeps its meaning: a tab scrolled out of the run is not on the glass, and the band the reserve holds open is what makes the handle a *band* on a crowded bar rather than a seam. Without it the only handles left under thirty tabs would be the gaps between them.
+
+**Windows changes, and it is the ruling that changes it.** On that host the press never reaches the application: the frame answers `WM_NCHITTEST`, and it was told one number — where the app's run ended — plus the caption run's width and count. A number cannot describe a bar with holes in it, so `CustomFrameMetrics` now carries `app_boxes`, the same list, in physical pixels; `custom_frame_hit_test` answers `Client` inside any of them and `Caption` everywhere else on the bar. `CustomFrameGeometry` loses `caption_button_logical_px` with the arithmetic that read it, and `CustomFrameState` holds the list in a `RefCell` restated on every rebuild of the bar — a `Cell`'s argument for its reason (`TaskbarState`): the setter and the subclass procedure are the same thread. `seats::title_bar_app_run_right_px` and `seats::tab_strip_right_px` are **gone**; what they knew — that a scrolling strip owns its whole run and a resting one ends at the `˅` — is the crop, and `TabStripGeometry::viewport` is where it is said.
+
+**The conversion is a ceiling and not a rounding**, because the frame asks with whole pixels: for an integer `x`, `x >= left && x < right` on the solved rectangle is exactly `x >= left.ceil() && x < right.ceil()`. So the boxes the frame holds claim precisely the pixel columns the solver's boxes do, and `the_strips_empty_part_is_the_drag_region` can go on holding the two implementations to the same answer pixel by pixel.
+
+**The double click is untouched on both hosts, which is what "only what qualifies changes" means.** Windows: the widened band answers `HTCAPTION`, so the system does what it has always done there — maximise or restore, by the reader's own setting, with snap and the system menu along with it. macOS: the press still goes to `CustomWindowFrame::press_title_bar`, which is `performWindowDragWithEvent:` on one click and `AppleActionOnDoubleClick` on two (④ above). Neither mechanism moved; what moved is which pixels reach it.
+
+**One cost is named so it can be overruled in one line.** On Windows a region that answers `HTCAPTION` reports no `CursorMoved` to the application at all — winit's backend handles `WM_MOUSEMOVE` and not `WM_NCMOUSEMOVE`, which is §7.1.6e′'s report found the hard way. The gaps between tabs are eight points wide, so a pointer crossing the strip slowly now leaves and re-enters the client area once per gap. Nothing depends on that which a leave does not already handle — `Runtime::pointer_left` is the door that report added — but it is a behaviour of the ruling and not an accident of it.
+
+**Pinned by** `the_band_beside_a_box_drags_and_the_box_itself_never_does` (the two strips beside the gear, a pill's own body against the strip above it, the air between two tabs, the `+`, the `˅`, the toggle and the band under it, and all four Windows caption boxes, at three scales on both geometries), and by `the_strips_empty_part_is_the_drag_region`, which walks the whole bar three pixels at a time and holds `bt_platform`'s answer and `seats`' to each other.
+
+*(本节英文,待中文文案改写。)*
 ### 13.12 M2-1: 目录监视走 FSEvents、三份契约一份不折、溢出与根消失(`crates/bt-platform/src/macos_watch.rs`、`crates/bt-platform/src/portable_impl.rs`、`crates/bt-platform/src/lib.rs`)
 
 **① 三扇门就是三份契约,而不是一个可以合并的深度参数。** 后端清单 §6 ⑤ 早就点过:`WatchDepth` 从来不在 crate 根的导出表里,`bt-app` 是靠三个构造器(`DirWatch::start` / `start_shallow` / `start_shallow_named`)拿到三份契约的。所以这一片的第一条规矩是**不许把三扇门收成一扇再多一个参数**:`Tree` 是 git 面要的(一次提交能动到树的任何深度),`HereOnly` 是 files 列和预览座要的(仓库根上递归监听 = 为 `target/debug` 里每一个 .obj 醒一次),带名字的 `HereOnly` 是缺陷 #186 那一扇(名字的过滤跑在监视线程上,比它挡掉的那次唤醒便宜几个数量级)。macOS 这一侧的 `WatchDepth` 因此是**私有**的,与 Windows 那一侧同形;`the_three_constructors_keep_their_contracts_on_every_platform` 是一根源码钉,同时读两个 arm 的三个函数体,谁的深度被换掉它就点谁的名。
@@ -9958,7 +10068,7 @@ BT_PERSIST session.json fell back to defaults: ParseError("unknown variant `Url`
 
 **28 方块在头带仍然保留的 46 里面。** `caption_run_left` 和 `tab_strip_geometry` 的四槽保留区没有变——头带的右端边缘、拖拽带和 `title_bar_app_run_right_px` 回答的跟这一节不存在之前完全一样。齿轮在自己的槽*里面*移动了。这就是「齿轮的其他部分没有变」在几何上的含义。
 
-**剩下的是 18 点头带什么都不回答,这是点名而不是修补。** 拖拽区域是 `[title_bar_app_run_right_px, caption_run_left)`——从标题栏按钮排是满宽的那个窗口继承下来的规矩——所以保留槽左端到齿轮盒子之间的 16 点和齿轮右侧的 2 点,现在既不属于齿轮也不属于窗口的拖拽把手。§13.19 ⑤ 在另一个轴上遇到过同样的事(药丸上下各 5 点的头带),做法也一样:*「这里是点名,不是动手」*。把拖拽把手扩展到「头带上不是 Folio 的盒子也不是平台的按钮排的每一个像素」是比现有规矩更好的规矩,而它是裁决而不是修复——它改变的是 Windows 窗口上一次按下做什么。
+**剩下的是 18 点头带什么都不回答,这是点名而不是修补。** 拖拽区域是 `[title_bar_app_run_right_px, caption_run_left)`——从标题栏按钮排是满宽的那个窗口继承下来的规矩——所以保留槽左端到齿轮盒子之间的 16 点和齿轮右侧的 2 点,现在既不属于齿轮也不属于窗口的拖拽把手。§13.19 ⑤ 在另一个轴上遇到过同样的事(药丸上下各 5 点的头带),做法也一样:*「这里是点名,不是动手」*。把拖拽把手扩展到「头带上不是 Folio 的盒子也不是平台的按钮排的每一个像素」是比现有规矩更好的规矩,而它是裁决而不是修复——它改变的是 Windows 窗口上一次按下做什么。**同日已裁,就是 §13.11 ⑥。** 所有者读了这一段,回的是一个「改」,于是把手就是那个补集:头带上凡不是 Folio 自己盒子的像素都是窗口的拖拽把手,两个平台同一条,这 18 点现在归窗口。
 
 **绘制现在遍历盒子而不是重述它们。** `window_chrome` 的标题栏循环以前重新算 `caption_left + index * button`;现在直接读 `window_caption_boxes`。在这条裁决之前两者是同一套算术,而一个在槽里画、在方块里响应点击的齿轮恰恰是旧注释声称不可能的那种失败。
 

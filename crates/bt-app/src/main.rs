@@ -13340,6 +13340,10 @@ struct WindowRuntime {
     /// `None` when there is no card up, which is a video with nowhere to be
     /// drawn and is therefore not drawn.
     file_peek_level: Option<usize>,
+    /// The opacity the glance card was last *painted* at, or `None` when none
+    /// was — [`Self::tooltip_drawn_opacity`]'s own frame-debt question, asked
+    /// about the card's fade (owner's ruling 2026-09-13).
+    file_peek_drawn_opacity: Option<f32>,
     /// **Which surface's control bar has a track in hand** (route B slice ②,
     /// 2026-08-28; §7.44 ②).
     ///
@@ -30039,6 +30043,51 @@ struct RowPress {
     latch: DragLatch,
 }
 
+/// **The card's one clock**, and which of its two lives the card is in.
+///
+/// [`tooltip::TooltipHost`]'s own shape (`settling`/`showing`, each a subject
+/// paired with the instant that governs it), taken at its word once the card
+/// grew a fade of its own (owner's ruling 2026-09-13): a card waiting out its
+/// [`file_peek::PEEK_INTENT_MS`] and a card on screen fading in are two states
+/// with two different instants, and **one enum is what makes "on screen" and
+/// "has a fade epoch" the same statement**. Two `Option<Instant>`s side by side
+/// would let a card be neither — on screen with no epoch, so no opacity to
+/// paint at — or both, and an invariant that has to be remembered is one that
+/// will not be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeekClock {
+    /// When [`file_peek::PEEK_INTENT_MS`] is up. The card is not on screen and
+    /// nothing about it can be touched.
+    Settling(Instant),
+    /// When the card first appeared — **the fade's own epoch**, and the reason
+    /// this arm carries an instant at all. Before 2026-09-13 the card arrived at
+    /// full strength in one frame and "is it up?" was the whole question.
+    Shown(Instant),
+}
+
+impl PeekClock {
+    /// When the intent matures, or `None` once the card is up.
+    fn due(self) -> Option<Instant> {
+        match self {
+            Self::Settling(at) => Some(at),
+            Self::Shown(_) => None,
+        }
+    }
+
+    /// When the card appeared, or `None` while it is still settling.
+    fn shown_at(self) -> Option<Instant> {
+        match self {
+            Self::Shown(at) => Some(at),
+            Self::Settling(_) => None,
+        }
+    }
+
+    /// Whether the card is on screen — the question every hit test asks.
+    fn is_shown(self) -> bool {
+        matches!(self, Self::Shown(_))
+    }
+}
+
 /// The glance card's state: which row it is about, and whether the intent has
 /// matured yet (P145/P146).
 #[derive(Clone, Debug)]
@@ -30063,8 +30112,9 @@ struct FilePeek {
     name: String,
     /// The row's box, which is what the card is placed against.
     rect: [f32; 4],
-    /// When the 350ms is up; `None` once the card is on screen.
-    due: Option<Instant>,
+    /// **The card's clock** — the 350ms while it is settling, and the instant it
+    /// appeared once it is up. See [`PeekClock`].
+    clock: PeekClock,
     /// **Where the card came to rest, as last drawn** — the rectangle the
     /// pointer may enter and the far end of [`file_peek::corridor`].
     ///
@@ -35958,6 +36008,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         float_hole_level: BTreeMap::new(),
         float_video_level: BTreeMap::new(),
         file_peek_level: None,
+        file_peek_drawn_opacity: None,
         video_bar_drag: None,
         video_carried_off_the_card: false,
         git_graphs_shown: BTreeMap::new(),
@@ -36498,16 +36549,16 @@ impl Runtime<'_> {
         // `bt_platform::clipboard_text`, `set_clipboard_text` and
         // `cancel_composition` ask it rather than their callers.
         bt_platform::register_clipboard_owner(native);
-        // The frame's two measurements travel with the install, from the crate
-        // that paints them (spike Q5 item 2): the title bar the pointer is
-        // tested against and the title bar the renderer draws are now literally
-        // the same number instead of two constants in two crates that happened
-        // to agree.
+        // The frame's own measurement travels with the install, from the crate
+        // that paints it (spike Q5 item 2): the title bar the pointer is tested
+        // against and the title bar the renderer draws are literally the same
+        // number instead of two constants in two crates that happened to agree.
+        // The caption run's width left this pair with the drag boundary
+        // (§13.11 ⑥): what is clicked in that bar arrives as boxes now.
         let custom_window_frame = bt_platform::CustomWindowFrame::install(
             native,
             bt_platform::CustomFrameGeometry {
                 title_bar_logical_px: bt_render::WINDOW_TITLE_BAR_LOGICAL_PX as u32,
-                caption_button_logical_px: bt_render::WINDOW_CAPTION_BUTTON_LOGICAL_PX as u32,
             },
             // **And how the frame asks for a turn when what it measured moves**
             // (§13.48) — the shape `SystemSettingsWatch` already has, for its
@@ -37148,7 +37199,6 @@ impl Runtime<'_> {
             native,
             bt_platform::CustomFrameGeometry {
                 title_bar_logical_px: bt_render::WINDOW_TITLE_BAR_LOGICAL_PX as u32,
-                caption_button_logical_px: bt_render::WINDOW_CAPTION_BUTTON_LOGICAL_PX as u32,
             },
             // A second window asks for its turn the way the first one does —
             // see that constructor's note (§13.48).
@@ -38867,25 +38917,40 @@ impl Runtime<'_> {
     fn refresh_chrome(&mut self) -> bool {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, _) = self.window.renderer.presentation_geometry().swapchain_size;
-        // **The window's own drag handler is told what the bar is wearing now.**
-        // With the rail out, the tabs are not in the title bar at all and almost
-        // none of it belongs to the app — asking the horizontal strip's geometry
-        // regardless is what left the whole top bar answering `HTCLIENT`, so the
-        // window could not be dragged by it (R3).
+        // **The window's own drag handler is told what the bar is wearing now**
+        // (§13.11 ⑥). It is handed the boxes Folio draws up there, not a
+        // boundary: on the title bar every pixel that is not one of those boxes
+        // is a place the window may be picked up by, and a single `x` cannot say
+        // that about a bar whose controls do not fill the space in front of
+        // them. The same list answers the press on the host where the press
+        // reaches this application instead of the frame.
         //
-        // The posture and not the preference, for the same reason one layout
-        // further on: focus mode takes the strip away in *either* tab layout, so
-        // a bar asked about the stored preference would go on reserving the run
-        // of a strip nobody is drawing.
+        // The posture and not the preference, for the reason R3 left behind:
+        // focus mode takes the strip away in *either* tab layout and the
+        // vertical layouts put the tab list down the side, so a bar asked about
+        // the stored preference would go on reserving the boxes of a strip
+        // nobody is drawing — which is how the whole top bar came to answer
+        // `HTCLIENT` and the window could not be dragged at all.
+        //
+        // **Ceiled and not rounded**, because the frame asks with whole pixels:
+        // for an integer `x`, `x >= left && x < right` on the solved rectangle is
+        // `x >= left.ceil() && x < right.ceil()` exactly, so the boxes the frame
+        // holds claim precisely the pixel columns the boxes here do.
+        let folio_boxes: Vec<[i32; 4]> = seats::title_bar_folio_boxes(
+            width as f32,
+            scale,
+            self.platform_chrome(),
+            self.window.tabs.len(),
+            self.window.tab_scroll,
+            self.rail_posture(),
+            self.is_quake_window(),
+        )
+        .into_iter()
+        .map(|rect| rect.map(|edge| edge.ceil() as i32))
+        .collect();
         self.window
             .custom_window_frame
-            .set_tab_strip_right_px(seats::title_bar_app_run_right_px(
-                width as f32,
-                scale,
-                self.platform_chrome(),
-                self.window.tabs.len(),
-                self.rail_posture(),
-            ));
+            .set_title_bar_boxes(&folio_boxes);
         // The badge's box is a function of the number in it, and only the font
         // knows how wide a number is — so the measuring happens here, where the
         // renderer is, and the strip is handed the answer rather than a font.
@@ -44458,7 +44523,7 @@ impl Runtime<'_> {
         // `float_layer`, and the group writes its own index because only the
         // group knows where inside itself the slot went.
         let below_peek = stack.below_the_file_peek();
-        stack.file_peek = self.file_peek_layer(below_peek);
+        stack.file_peek = self.file_peek_layer(below_peek, now);
         stack.drag_ghost = self.drag_ghost_layer();
         stack.window_ring = self.window_ring_layer();
         let flattened = stack.flattened();
@@ -45938,7 +46003,7 @@ impl Runtime<'_> {
                 .window
                 .file_peek
                 .as_ref()
-                .is_some_and(|peek| peek.due.is_none()),
+                .is_some_and(|peek| peek.clock.is_shown()),
             HoverFloat::LayoutPeek => self.window.layout_peek.active().is_some(),
         }
     }
@@ -56380,7 +56445,7 @@ impl Runtime<'_> {
     fn preview_document_box(&self, surface: PreviewSurface, scale: f32) -> Option<[f32; 4]> {
         if surface == PreviewSurface::Peek {
             let peek = self.window.file_peek.as_ref()?;
-            return peek.body.filter(|_| peek.due.is_none());
+            return peek.body.filter(|_| peek.clock.is_shown());
         }
         self.preview_surface_body_rect(surface, scale)
     }
@@ -56412,7 +56477,7 @@ impl Runtime<'_> {
             .window
             .file_peek
             .as_ref()
-            .filter(|peek| peek.due.is_none())
+            .filter(|peek| peek.clock.is_shown())
             && let Some((frame, body)) = peek.frame.zip(peek.body)
             && let Some(body) = file_peek::body_at(frame, body, at)
         {
@@ -67878,7 +67943,7 @@ impl Runtime<'_> {
             key,
             name,
             rect,
-            due: Some(now + Duration::from_millis(file_peek::PEEK_INTENT_MS)),
+            clock: PeekClock::Settling(now + Duration::from_millis(file_peek::PEEK_INTENT_MS)),
             frame: None,
             body: None,
             head: None,
@@ -68143,7 +68208,7 @@ impl Runtime<'_> {
             .file_peek
             .as_ref()
             .and_then(|peek| peek.dwell.as_ref())
-            .and_then(|dwell| dwell.due);
+            .and_then(|dwell| dwell.clock.due());
         if due.is_none_or(|due| due > now) {
             return false;
         }
@@ -68170,7 +68235,7 @@ impl Runtime<'_> {
     /// the rectangle a previous one left behind is not a place to stand.
     fn file_peek_holds(&self, at: [f32; 2]) -> bool {
         self.window.file_peek.as_ref().is_some_and(|peek| {
-            peek.due.is_none()
+            peek.clock.is_shown()
                 && peek
                     .frame
                     .is_some_and(|frame| file_peek::contains(frame, at))
@@ -68201,7 +68266,7 @@ impl Runtime<'_> {
     /// would fire it over a row the pointer left long ago.
     fn file_peek_life(&self, at: Option<[f32; 2]>) -> Option<file_peek::Life> {
         let peek = self.window.file_peek.as_ref()?;
-        let frame = peek.frame.filter(|_| peek.due.is_none())?;
+        let frame = peek.frame.filter(|_| peek.clock.is_shown())?;
         Some(file_peek::life(
             peek.rect,
             frame,
@@ -68221,7 +68286,7 @@ impl Runtime<'_> {
         let Some(peek) = self.window.file_peek.as_ref() else {
             return false;
         };
-        if peek.due.is_some() || peek.frame.is_none() {
+        if !peek.clock.is_shown() || peek.frame.is_none() {
             return self.hide_file_peek();
         }
         let peek = self.window.file_peek.as_mut().expect("just borrowed");
@@ -68262,7 +68327,7 @@ impl Runtime<'_> {
         let Some(peek) = self.window.file_peek.as_ref() else {
             return false;
         };
-        if peek.due.is_none_or(|due| due > now) {
+        if peek.clock.due().is_none_or(|due| due > now) {
             return false;
         }
         let (source, name) = (peek.source.clone(), peek.name.clone());
@@ -68270,8 +68335,12 @@ impl Runtime<'_> {
             RowHost::Git(seat) => Some(seat),
             RowHost::Column(_) | RowHost::Float(_) | RowHost::Terminal(_) => None,
         };
+        // **The fade's epoch is set here and nowhere else** (owner's ruling
+        // 2026-09-13): this is the one line in the window that puts a card on
+        // screen, so it is the one line that can say when the card appeared.
+        // The 350ms wait is unchanged and the fade starts where it ends.
         if let Some(peek) = self.window.file_peek.as_mut() {
-            peek.due = None;
+            peek.clock = PeekClock::Shown(now);
         }
         // The card's surface is pointed at the file here, once, rather than on
         // every frame that draws it: [`PreviewSurface::Peek`]'s pane is what
@@ -68360,7 +68429,7 @@ impl Runtime<'_> {
             .window
             .file_peek
             .as_ref()
-            .is_some_and(|peek| peek.due.is_none());
+            .is_some_and(|peek| peek.clock.is_shown());
         // **The card's recording stops with the card** (route B slice ②; §7.44
         // ③) — the pointer left, the card is collapsing, and an engine left
         // behind would be a decoder, a work queue and a Direct3D device
@@ -68425,7 +68494,7 @@ impl Runtime<'_> {
     /// buffer, never a copy of one.
     fn file_peek_subject(&self) -> Option<FilePeekSubject> {
         let peek = self.window.file_peek.as_ref()?;
-        if peek.due.is_some() {
+        if !peek.clock.is_shown() {
             return None;
         }
         // The pool's copy wins whenever there is one — the glance shows the file
@@ -68818,6 +68887,59 @@ impl Runtime<'_> {
         }
     }
 
+    /// **The opacity the glance card should be painted at this instant**, or
+    /// `None` when there is no card on screen (owner's ruling 2026-09-13).
+    ///
+    /// [`Self::tooltip_opacity`]'s twin, and pointedly the *same rule* rather
+    /// than the same shape: both read [`tooltip::hover_fade_opacity`], because
+    /// the card and the tip are two surfaces summoned by holding still and the
+    /// owner's ruling is that everything summoned that way behaves alike. The
+    /// card is summoned by *stopping*, so it must never look launched — which is
+    /// why the ruling took a bare fade over the mock's other two candidates (a
+    /// 4px drop, a scale), both of which say "opened".
+    ///
+    /// The epoch is the card's own, filed by [`Self::mature_file_peek`] the
+    /// instant the 350ms wait ends. That wait is untouched: this is what happens
+    /// in the 90ms *after* it.
+    fn file_peek_opacity(&self, now: Instant) -> Option<f32> {
+        let shown = self.window.file_peek.as_ref()?.clock.shown_at()?;
+        Some(tooltip::hover_fade_opacity(
+            now.duration_since(shown),
+            self.app.motion,
+        ))
+    }
+
+    /// Whether the card on screen differs from the card last painted — the
+    /// strip's own frame-debt question ([`Self::tooltip_owes_frame`]), asked
+    /// about this fade.
+    ///
+    /// This and not "is it still fading" is what schedules the **landing**
+    /// frame: the moment the fade ends there is one more frame owed, carrying
+    /// the opacity from wherever the last wake left it up to a solid 1.
+    fn file_peek_owes_frame(&self, now: Instant) -> bool {
+        self.window.file_peek_drawn_opacity != self.file_peek_opacity(now)
+    }
+
+    /// When this window next has glance-card work: the settle deadline while one
+    /// is armed, or the next frame of a fade that has not landed.
+    ///
+    /// [`Self::tooltip_deadline`]'s twin, down to the frame interval — a fade
+    /// that owes frames owes them at the window's animation rate, and a card
+    /// whose fade has landed owes nothing at all. **Hiding owes nothing either**:
+    /// the card leaves in one frame, so there is no exit to schedule.
+    fn file_peek_deadline(&self, now: Instant) -> Option<Instant> {
+        if self.file_peek_owes_frame(now) {
+            return Some(now);
+        }
+        let clock = self.window.file_peek.as_ref()?.clock;
+        if let Some(due) = clock.due() {
+            return Some(due);
+        }
+        let shown = clock.shown_at()?;
+        tooltip::hover_fade_owes_frames(now.duration_since(shown), self.app.motion)
+            .then(|| now + STRIP_ANIMATION_FRAME)
+    }
+
     /// The 350ms is up — put the card on screen (P145).
     fn advance_file_peek(&mut self, now: Instant) -> Result<()> {
         // The card's three clocks, in the order they can fire: the dwell that
@@ -68828,7 +68950,14 @@ impl Runtime<'_> {
         // The switch is first because it *is* an arm-and-mature: it puts a fresh
         // card up on the same beat, and asking the maturity clock afterwards is
         // what lets the two share the one frame this owes.
-        if !(self.switch_file_peek(now) | self.mature_file_peek(now) | self.expire_file_peek(now)) {
+        //
+        // **And the fade's own frames**, beside the three clocks and for the
+        // tip's reason ([`Self::advance_tooltip_if_due`]): nothing else in this
+        // window would wake the loop to finish a 90ms a still hand started, and
+        // the frame the fade *lands* on is owed by this question and by no other.
+        if !(self.switch_file_peek(now) | self.mature_file_peek(now) | self.expire_file_peek(now))
+            && !self.file_peek_owes_frame(now)
+        {
             return Ok(());
         }
         if self.refresh_overlay() {
@@ -68859,11 +68988,16 @@ impl Runtime<'_> {
     /// goes **after** the card's own layers for the reason a float's does: the
     /// video is drawn over the card's face and under everything the card draws
     /// on top of it, and the bar is the topmost of those.
-    fn file_peek_layer(&mut self, below: usize) -> Vec<marks::OverlayLayer> {
+    fn file_peek_layer(&mut self, below: usize, now: Instant) -> Vec<marks::OverlayLayer> {
         // Rebuilt from nothing on every pass, exactly as the float group's two
         // ledgers are: it is a record of what *this* frame drew, and a stale
         // index in it is a picture drawn into somebody else's layer.
         self.window.file_peek_level = None;
+        // And so is the fade's receipt, for the same reason and the tip's
+        // ([`Self::tooltip_layer`]): a frame that drew no card painted no
+        // opacity, and a number left behind is a frame debt owed for a card that
+        // is not there.
+        self.window.file_peek_drawn_opacity = None;
         let mut layers = self.file_peek_card_layers();
         if layers.is_empty() {
             return layers;
@@ -68900,6 +69034,31 @@ impl Runtime<'_> {
         // video drawn over the slot's own (empty) ground.
         layers.extend(self.video_play_mark_layer(PreviewSurface::Peek));
         layers.extend(self.video_bar_layer(PreviewSurface::Peek));
+        // **The card fades in as one thing** (owner's ruling 2026-09-13, option
+        // B of the four-way motion mock): `opacity 0 -> 1` over
+        // [`tooltip::TOOLTIP_FADE`] on the tip's own `ease`, no travel and no
+        // scale, and instant on the way out.
+        //
+        // Folded here, over **every** layer the card put down, rather than
+        // handed to `file_peek::build` for the card's face alone: the face, the
+        // scroll bar beside its document, the ▶ on a recording and that
+        // recording's control bar are one surface arriving, and a fade that
+        // reached the face would have left a solid bar hanging in the air over a
+        // card that was not there yet. It is the argument
+        // `bt_render::OverlayLayer::opacity` is a layer's and not a fill's, made
+        // once more one level up — and the reason this is the wrapper's line and
+        // not `file_peek_card_layers`', which returns from five places.
+        //
+        // Multiplied into whatever each layer already carries, never assigned
+        // over it: a layer that is faded for a reason of its own is faded for
+        // that reason *and* for this one.
+        let opacity = self.file_peek_opacity(now).expect(
+            "a card with layers is a card on screen, and PeekClock::Shown carries its epoch",
+        );
+        self.window.file_peek_drawn_opacity = Some(opacity);
+        for layer in &mut layers {
+            layer.opacity *= opacity;
+        }
         layers
     }
 
@@ -69560,7 +69719,7 @@ impl Runtime<'_> {
             return Ok(());
         };
         let (Some(frame), Some(path)) = (
-            peek.frame.filter(|_| peek.due.is_none()),
+            peek.frame.filter(|_| peek.clock.is_shown()),
             peek.source.file_path().map(Path::to_path_buf),
         ) else {
             return Ok(());
@@ -69688,7 +69847,7 @@ impl Runtime<'_> {
     /// thing moved.
     fn file_peek_bar(&self) -> Option<preview::ScrollBar> {
         let peek = self.window.file_peek.as_ref()?;
-        let body = peek.body.filter(|_| peek.due.is_none())?;
+        let body = peek.body.filter(|_| peek.clock.is_shown())?;
         // The same door the seat's bar and the float's go through, asked with
         // the one thing the card has to hand in: the box its own layout
         // produced. The document's height is read off the card's pane exactly as
@@ -85877,7 +86036,7 @@ impl Runtime<'_> {
         }
         let at = self.window.pointer_position?;
         let peek = self.window.file_peek.as_ref()?;
-        let head = peek.head.filter(|_| peek.due.is_none())?;
+        let head = peek.head.filter(|_| peek.clock.is_shown())?;
         file_peek::contains(head, [at.x as f32, at.y as f32]).then_some(FloatGrasp::Head)
     }
 
@@ -88998,10 +89157,10 @@ impl Runtime<'_> {
             // for the primary-seat version this replaced and what it cost.
             self.window.tab_clicks.interrupt();
             // **The window's own drag handle, before anything under it** (M3-3,
-            // owner ruling 2026-09-12). The empty part of the title bar is the
-            // band between where Folio's own content stops and where the gear's
-            // run begins, and picking the window up by it is what every title
-            // bar on every platform does.
+            // owner ruling 2026-09-12, widened 2026-09-13 — §13.11 ⑥). The
+            // handle is every pixel of the title bar that is not one of Folio's
+            // own boxes, and picking the window up by it is what every title bar
+            // on every platform does.
             //
             // It is answered here, in the arm for a press that named no chrome,
             // because that is precisely what it is: the complement of every box
@@ -89027,6 +89186,7 @@ impl Runtime<'_> {
                 self.window.renderer.metrics().scale_factor as f32,
                 self.platform_chrome(),
                 self.window.tabs.len(),
+                self.window.tab_scroll,
                 self.rail_posture(),
                 self.is_quake_window(),
                 position.x,
@@ -98384,13 +98544,14 @@ impl Runtime<'_> {
             // it has no fade, so a schematic on screen is finished and asks for
             // no frames at all.
             self.window.layout_peek.deadline(),
-            // The glance's 350ms while one is settling, and — since it became a
+            // The glance's 350ms while one is settling, the fade's own frames
+            // until it lands (owner's ruling 2026-09-13) and — since it became a
             // card a hand can walk into (2026-08-14) — the grace that takes it
             // down again once the pointer has left its corridor. A card standing
-            // still under a pointer that is inside it has neither clock running
-            // and asks for no wake-ups at all, which is the same silence it kept
-            // when it could not be touched.
-            self.window.file_peek.as_ref().and_then(|peek| peek.due),
+            // still under a pointer that is inside it has no clock running at
+            // all once its 90ms has landed, and asks for no wake-ups, which is
+            // the same silence it kept when it could not be touched.
+            self.file_peek_deadline(now),
             self.window
                 .file_peek
                 .as_ref()
@@ -98403,7 +98564,7 @@ impl Runtime<'_> {
                 .file_peek
                 .as_ref()
                 .and_then(|peek| peek.dwell.as_ref())
-                .and_then(|dwell| dwell.due),
+                .and_then(|dwell| dwell.clock.due()),
             // The intent's 180ms, the grace's 220/420, and the entrance's own
             // frames until it lands. A window with no float and no hovered
             // trigger reports nothing and costs no wake-ups at all.
@@ -100793,6 +100954,253 @@ mod files_locate_door_tests {
             2,
             "and both of them are inside the verb that asks whether the folder \
              is inside the tree first"
+        );
+    }
+}
+
+/// **The glance card arrives the way the tip does** (owner's ruling 2026-09-13;
+/// `docs/DESIGN.md` §7.29 ⑭).
+///
+/// The card is summoned by *holding still*, so it must never look launched: the
+/// owner took a bare fade over the mock's other two candidates — a fade plus a
+/// 4px drop, and a fade plus a scale — because both of those say **opened**,
+/// which is the wrong word for a card that appears because the reader stopped
+/// moving. And everything this window raises on hover obeys one rule, which the
+/// tip already did.
+///
+/// Two kinds of pin, because the ruling has two halves that fail differently.
+/// The **curve** is arithmetic and is checked as arithmetic. The **wiring** —
+/// that the card reads the tip's rule rather than a second copy of it, that the
+/// fade reaches every layer the card puts down, and that something wakes the
+/// loop to finish a 90ms a motionless hand started — has no value to assert, so
+/// it is read off this file as text, for [`mouse_trace_station_tests`]' reason.
+#[cfg(test)]
+mod file_peek_fade_tests {
+    use super::*;
+
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    ///
+    /// Signatures are handed in **split** (`["    fn file_peek", "_opacity("]`)
+    /// for the reason [`files_locate_door_tests`] splits its own: an unbroken
+    /// literal here is a second occurrence of the very string being searched
+    /// for, and `find` would answer with this test instead of with the method.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// The opacity the card would be painted at, read exactly as
+    /// `Runtime::file_peek_opacity` reads it: the card's own epoch, through the
+    /// tip's rule. `None` is "there is nothing to paint".
+    fn opacity(clock: PeekClock, now: Instant, motion: Motion) -> Option<f32> {
+        let shown = clock.shown_at()?;
+        Some(tooltip::hover_fade_opacity(
+            now.duration_since(shown),
+            motion,
+        ))
+    }
+
+    /// RED — **the card fades in over the tip's own 90ms and starts at
+    /// nothing.**
+    ///
+    /// MUTATION: paint the card at `1.0` from the frame it appears — which is
+    /// what every build before this one did — and the first assertion fails. Put
+    /// a span of the card's own here instead of [`tooltip::TOOLTIP_FADE`] and
+    /// the last pair fails: the window would draw two speeds of one arrival, a
+    /// tip filling at 90 beside a card filling at something else, which is the
+    /// drift the motion archive exists to end.
+    #[test]
+    fn the_card_fades_in_over_the_tips_own_ninety_milliseconds() {
+        let shown = Instant::now();
+        let clock = PeekClock::Shown(shown);
+        let at = |ms: u64| {
+            opacity(clock, shown + Duration::from_millis(ms), Motion::Full)
+                .expect("a card on screen carries the epoch its fade is read from")
+        };
+
+        assert!(at(0).abs() < 0.001, "the card starts at nothing: {}", at(0));
+        for (earlier, later) in [(0, 20), (20, 45), (45, 70), (70, 89)] {
+            assert!(
+                at(earlier) < at(later),
+                "and climbs from {earlier}ms to {later}ms: {} is not below {}",
+                at(earlier),
+                at(later)
+            );
+        }
+        assert!((at(90) - 1.0).abs() < 0.001, "and lands: {}", at(90));
+        assert!((at(9_000) - 1.0).abs() < 0.001, "and stays landed");
+
+        // The span is the tip's constant, off the archive's fast rung, and never
+        // a number of the card's own.
+        assert_eq!(tooltip::TOOLTIP_FADE, bt_render::MOTION_FAST);
+        assert_eq!(
+            at(90),
+            tooltip::hover_fade_opacity(tooltip::TOOLTIP_FADE, Motion::Full)
+        );
+    }
+
+    /// RED — **the fade owes frames exactly while it is climbing**, and the card
+    /// leaves in one frame with no clock of any kind.
+    ///
+    /// MUTATION: let the fade owe frames after it has landed and a card standing
+    /// still under a still pointer wakes the loop sixty times a second for ever,
+    /// which is the silence §7.29 promises broken. MUTATION the other way: owe
+    /// none at all and the card is stuck at whatever opacity the frame it
+    /// appeared on happened to catch, because nothing else in this window would
+    /// wake the loop to finish it.
+    ///
+    /// MUTATION on the second half: give the card an exit fade and the last
+    /// assertion fails — leaving is instant, and a card that lingered after the
+    /// pointer left would be answering a question nobody is asking.
+    #[test]
+    fn the_fade_owes_frames_while_it_climbs_and_the_card_leaves_at_once() {
+        let owes =
+            |ms: u64, motion| tooltip::hover_fade_owes_frames(Duration::from_millis(ms), motion);
+        assert!(
+            owes(0, Motion::Full),
+            "the frame it appears on owes the next"
+        );
+        assert!(owes(45, Motion::Full));
+        assert!(owes(89, Motion::Full));
+        assert!(
+            !owes(90, Motion::Full),
+            "the landing frame owes nothing more"
+        );
+        assert!(!owes(9_000, Motion::Full));
+
+        // The card's wake-ups while it is up are the fade's own rule and nothing
+        // else.
+        assert!(
+            body(&["    fn file_peek", "_deadline("].concat()).contains("hover_fade_owes_frames("),
+            "the card's wake-ups while it is up are the fade's own rule"
+        );
+        // And the way out drops the card whole on the frame it is asked to —
+        // there is no third state for a card on its way off the glass, and
+        // therefore nothing to schedule.
+        let hidden = body(&["    fn hide_file", "_peek("].concat());
+        assert!(
+            hidden.contains("self.window.file_peek = None;"),
+            "hiding takes the card down whole"
+        );
+        assert!(
+            !hidden.contains("opacity") && !hidden.contains("fade"),
+            "and does it in one frame: there is no exit fade"
+        );
+    }
+
+    /// RED — **stillness gets the end state on the frame the card appears, both
+    /// ways.**
+    ///
+    /// MUTATION: drop the `Motion::Reduced` arm and a reader who asked the
+    /// system for stillness is given a 90ms ramp on every file row they rest on
+    /// — and a window that wakes five times to draw it.
+    #[test]
+    fn stillness_skips_the_fade_and_owes_no_frames() {
+        let shown = Instant::now();
+        let clock = PeekClock::Shown(shown);
+        assert_eq!(
+            opacity(clock, shown, Motion::Reduced),
+            Some(1.0),
+            "solid on the frame it appears"
+        );
+        assert_eq!(
+            opacity(clock, shown + Duration::from_millis(45), Motion::Reduced),
+            Some(1.0),
+            "and never anything else"
+        );
+        for ms in [0, 45, 89, 90] {
+            assert!(
+                !tooltip::hover_fade_owes_frames(Duration::from_millis(ms), Motion::Reduced),
+                "a still card asks for no animation frames at {ms}ms"
+            );
+        }
+    }
+
+    /// RED — **one clock, and it says which of the card's two lives it is in.**
+    ///
+    /// MUTATION: keep the fade's epoch as a second `Option<Instant>` beside the
+    /// old `due` and the state "settling, *and* fading" becomes representable —
+    /// a card painted at a rising opacity 350ms before it is allowed to exist,
+    /// and a hit test that answers for a card nobody can see. The enum is what
+    /// makes "on screen" and "has a fade epoch" one statement instead of two
+    /// that have to be kept in step by hand.
+    #[test]
+    fn a_settling_card_has_no_epoch_and_a_shown_card_waits_for_nothing() {
+        let now = Instant::now();
+        let due = now + Duration::from_millis(file_peek::PEEK_INTENT_MS);
+
+        let settling = PeekClock::Settling(due);
+        assert!(!settling.is_shown());
+        assert_eq!(settling.due(), Some(due));
+        assert_eq!(
+            settling.shown_at(),
+            None,
+            "a card that is not up cannot be fading"
+        );
+        assert_eq!(
+            opacity(settling, now, Motion::Full),
+            None,
+            "and has no opacity to be painted at"
+        );
+
+        let shown = PeekClock::Shown(now);
+        assert!(shown.is_shown());
+        assert_eq!(shown.due(), None, "a card on screen is waiting for nothing");
+        assert_eq!(shown.shown_at(), Some(now));
+
+        // And the 350ms wait itself is untouched by any of this: the fade begins
+        // where the intent ends.
+        assert_eq!(file_peek::PEEK_INTENT_MS, 350);
+    }
+
+    /// RED GATE — **the card reads the tip's rule, and the fade reaches every
+    /// layer the card put down.**
+    ///
+    /// MUTATIONS: write the curve out again inside `file_peek_opacity` and the
+    /// first pair fails — that is the second fade this ruling exists to prevent,
+    /// and it is the copy nobody edits the day the span changes. Hand the
+    /// opacity to `file_peek::build` alone and the third fails: the card's face
+    /// would fade while the scroll bar beside its document, the ▶ on a recording
+    /// and that recording's control bar stood at full strength over a card that
+    /// is not there yet. Assign the opacity instead of multiplying it in and a
+    /// layer faded for a reason of its own loses that reason. Drop the frame-debt
+    /// question from `advance_file_peek` and nothing wakes the loop to finish the
+    /// 90ms a motionless hand started.
+    #[test]
+    fn the_cards_fade_is_the_tips_rule_read_once_and_reaches_every_layer() {
+        let reads = body(&["    fn file_peek", "_opacity("].concat());
+        assert!(
+            reads.contains("tooltip::hover_fade_opacity("),
+            "the card asks the tip's rule"
+        );
+        for second_copy in ["cubic_bezier", "TOOLTIP_FADE", "MOTION_FAST"] {
+            assert!(
+                !reads.contains(second_copy),
+                "and keeps no {second_copy} of its own"
+            );
+        }
+
+        let layer = body(&["    fn file_peek", "_layer("].concat());
+        assert!(
+            layer.contains("for layer in &mut layers {"),
+            "the fade is folded over every layer the card put down"
+        );
+        assert!(
+            layer.contains("layer.opacity *= opacity;"),
+            "and multiplied into whatever each layer already carried"
+        );
+
+        assert!(
+            body(&["    fn advance_file", "_peek("].concat())
+                .contains("self.file_peek_owes_frame(now)"),
+            "and the card's own turn is what wakes the loop while it climbs"
         );
     }
 }
@@ -155023,9 +155431,16 @@ mod tests {
     /// tabs, because that is the case that made a strip claim the whole bar — and
     /// with the tabs in the rail there is no strip in the bar to claim it.
     ///
-    /// Red gate: feed `seats::tab_strip_right_px` to the vertical row and the
-    /// caption assertions fail — which is precisely the bug, a title bar that
-    /// answers `Client` everywhere and a window that will not move.
+    /// Red gate: hand the frame an empty list and the toggle and the gear stop
+    /// being the application's; hand it the whole bar as one box and the window
+    /// will not move — which is precisely the bug R3 was, a title bar that
+    /// answers `Client` everywhere.
+    ///
+    /// **And the second half of it is the owner's ruling of 2026-09-13**
+    /// (§13.11 ⑥): the frame is no longer told where the application's run
+    /// *ends*, it is told the application's own boxes, so the air between two
+    /// tabs and the band above a control shorter than the bar drag like the rest
+    /// of it.
     #[test]
     fn the_top_bar_drags_beside_the_toggle_when_the_tabs_are_in_the_rail() {
         use bt_platform::CustomFrameHit;
@@ -155036,64 +155451,109 @@ mod tests {
             ..seats::RailState::default()
         };
         let horizontal = seats::RailState::default();
-        let frame = |rail| bt_platform::CustomFrameMetrics {
-            width: width as i32,
-            height: 600,
-            title_bar_height: 40,
-            tab_strip_right_px: seats::title_bar_app_run_right_px(
+        // The very list `refresh_chrome` hands the frame, built the way it
+        // builds it — the boxes this window draws in its bar, on whole pixels.
+        let boxes = |rail| -> Vec<[i32; 4]> {
+            seats::title_bar_folio_boxes(
                 width,
                 scale,
                 crate::seats::FOLIO_BAR,
                 tabs,
+                0.0,
                 rail,
-            ),
-            caption_button_width: 46,
-            caption_button_count: 4,
-            resize_border: 8,
-            resizable: true,
+                false,
+            )
+            .into_iter()
+            .map(|rect| rect.map(|edge| edge.ceil() as i32))
+            .collect()
         };
-        let hit = |rail, x| bt_platform::custom_frame_hit_test(frame(rail), x, 20);
+        let hit = |rail, x, y| {
+            let app_boxes = boxes(rail);
+            bt_platform::custom_frame_hit_test(
+                bt_platform::CustomFrameMetrics {
+                    width: width as i32,
+                    height: 600,
+                    title_bar_height: 40,
+                    app_boxes: &app_boxes,
+                    resize_border: 8,
+                    resizable: true,
+                },
+                x,
+                y,
+            )
+        };
 
-        // The rail's bar: one button, then handle all the way to the caption run.
+        // The rail's bar: one button, then handle all the way to the gear.
         assert_eq!(
-            hit(vertical, 20),
+            hit(vertical, 20, 20),
             CustomFrameHit::Client,
             "the toggle itself"
         );
         assert_eq!(
-            hit(vertical, 60),
+            hit(vertical, 20, 36),
+            CustomFrameHit::Caption,
+            "and the band under it, which the toggle is too short to reach \
+             (above it is the window's resize edge, which outranks the bar)"
+        );
+        assert_eq!(
+            hit(vertical, 60, 20),
             CustomFrameHit::Caption,
             "the name is inside `.drag`, so it drags"
         );
         assert_eq!(
-            hit(vertical, 400),
+            hit(vertical, 400, 20),
             CustomFrameHit::Caption,
             "R3: the empty middle of the bar is what the hand reaches for"
         );
         assert_eq!(
-            hit(vertical, 770),
+            hit(vertical, 770, 20),
             CustomFrameHit::Caption,
-            "right up to the caption run"
+            "right up to the gear"
         );
-        assert_eq!(hit(vertical, 800), CustomFrameHit::Client, "the gear's run");
         assert_eq!(
-            bt_platform::custom_frame_hit_test(frame(vertical), 400, 60),
+            hit(vertical, 800, 20),
+            CustomFrameHit::Client,
+            "the gear's own box"
+        );
+        assert_eq!(
+            hit(vertical, 400, 60),
             CustomFrameHit::Client,
             "below the bar is the terminal's, in either layout"
         );
 
-        // The strip's bar: the tabs are app-owned and must not be draggable, which
-        // is the promise the vertical fix may not break.
+        // The strip's bar: every box in it is the application's and must not be
+        // draggable, which is the promise the vertical fix may not break.
+        let strip = boxes(horizontal);
+        for rect in &strip {
+            assert_eq!(
+                hit(horizontal, (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2),
+                CustomFrameHit::Client,
+                "a box this window draws at {rect:?} is not the window's to be \
+                 dragged by — handing the tabs to the drag handler is the bug \
+                 this boundary exists to prevent"
+            );
+        }
+        // And what is left of the bar is the window's — including, since the
+        // ruling, the air between two tabs.
+        let held = |x: i32, y: i32| {
+            strip
+                .iter()
+                .any(|rect| x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3])
+        };
+        let first_tab = strip
+            .iter()
+            .map(|rect| rect[0])
+            .filter(|left| *left > 0)
+            .min()
+            .expect("a thirty-tab strip has tabs in it");
+        let gap = (first_tab..700)
+            .find(|x| !held(*x, 20))
+            .expect("thirty tabs at their floor stand apart, and the gaps are air");
         assert_eq!(
-            hit(horizontal, 400),
-            CustomFrameHit::Client,
-            "a thirty-tab strip owns its whole run — handing it to the window's \
-             drag handler is the bug this boundary exists to prevent"
-        );
-        assert_eq!(
-            hit(horizontal, 800),
-            CustomFrameHit::Client,
-            "the gear's run"
+            hit(horizontal, gap, 20),
+            CustomFrameHit::Caption,
+            "x={gap} is inside the strip's own run and inside none of its boxes, \
+             so it is the window's"
         );
     }
 

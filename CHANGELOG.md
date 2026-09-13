@@ -13,6 +13,15 @@ All notable changes to Folio are recorded here. The format follows
   the rows macOS puts there for every app. They work from another app and from
   an empty desk: with every window closed, either one opens a window.
 
+### Changed
+
+- **The card that appears when you rest on a file now fades in.** It used to
+  arrive solid in a single frame; it now takes the same ninety milliseconds the
+  small labels elsewhere in the window take, and arrives without moving or
+  growing. The wait before it appears is unchanged, it still leaves the instant
+  you move away, and if you have asked your system for reduced motion it appears
+  and leaves instantly as before.
+
 ### Fixed
 
 - **While you type pinyin, the caret stands at the end of what you have typed.**
@@ -68,6 +77,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- **The top bar takes the hand anywhere it is not a button.** Dragging the window
+  by its top bar used to work only in the stretch between the last tab and the
+  buttons in the corner; the space between two tabs, the strip above them and the
+  gaps around the settings button did nothing at all. Every part of that bar that
+  is not one of this window's own buttons now picks the window up, and
+  double-clicking it still does what it did.
 - **A quit keeps every tab a window was holding.** Quitting with a page still
   closing down could write the session out again on the way out, with the tabs
   that had already gone missing from it; the document a quit writes is the one

@@ -316,7 +316,6 @@ mod mac {
             native,
             CustomFrameGeometry {
                 title_bar_logical_px: 40,
-                caption_button_logical_px: 46,
             },
             // The wake this window will never fire: nothing here takes it into
             // full screen, which is the one transition the frame asks a turn for.
@@ -431,7 +430,6 @@ mod mac {
             handle_of(&window),
             CustomFrameGeometry {
                 title_bar_logical_px: 40,
-                caption_button_logical_px: 46,
             },
             // The wake this window will never fire: nothing here takes it into
             // full screen, which is the one transition the frame asks a turn for.
