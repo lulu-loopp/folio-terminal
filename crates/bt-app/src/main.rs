@@ -107416,7 +107416,7 @@ fn cwd_leaf(directory: &Path) -> Option<String> {
 /// reading sweep photographed a window in which the breadcrumbs said `~ ›
 /// pages`, the files column's foot said `~/pages`, and this head — a hundred
 /// physical pixels below both — said
-/// `/Users/<owner>/folio-port/wt/m2-7/out-acc/home/pages`. That ruling's own
+/// `/Users/<owner>/folio-port/wt/m2-7/out-acc/<the run’s own home>/pages`. That ruling's own
 /// words are that `~` "is the character the shell in the pane below prints for
 /// the same folder", and the pane below this head is that shell: its prompt
 /// says `~` while its head says the long form of the same place. One question
@@ -148399,7 +148399,7 @@ mod tests {
     /// surfaces named one place: the rail said `~ › pages`, the files column's
     /// foot said `~/pages`, and the terminal pane's head, a hundred physical
     /// pixels under both, said
-    /// `/Users/<owner>/folio-port/wt/m2-7/out-acc/home/pages` — while the shell
+    /// `/Users/<owner>/folio-port/wt/m2-7/out-acc/<the run’s own home>/pages` — while the shell
     /// in that very pane printed `~` in its own prompt. §13.32 ③'s words for
     /// `~` are "the character the shell in the pane below prints for the same
     /// folder", and this head is the one directly above that shell.
