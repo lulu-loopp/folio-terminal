@@ -8,6 +8,12 @@
 !docs/design/file-icons-r2/*.png
 !docs/design/file-icons-r3/*.png
 !docs/design/app-icon/*.png
+# The macOS bundle's icon source: the mark drawn at 1024, which is the size
+# `Folio.icns` is resampled from and the one size no `.ico` entry reaches
+# (`assets/app-icon/README.md`). Checked in for the reason the logos below are —
+# a release must not need a Python — and `make-folio-ico.py --png` is how it can
+# be checked rather than how it is obtained.
+!assets/app-icon/*.png
 # The three logos `packaging/msix/AppxManifest.xml` names. Checked in, and
 # not generated at packaging time, because a release must not need a Python
 # to build; `assets/app-icon/make-msix-logos.py` is how they can be

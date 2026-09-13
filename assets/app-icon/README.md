@@ -3,8 +3,10 @@
 What `folio.exe` wears in the taskbar, in Alt-Tab, on the desktop and in the
 Start menu — and, since the first-run card was built, the mark at the top of the
 first thing a new reader ever sees (`docs/DESIGN.md` §7.56 ⑦). One file is
-shipped — `folio.ico` — and the two scripts beside it are how it and the
-package logos are drawn.
+what Windows links — `folio.ico` — one is what the macOS bundle is built from
+— `folio-1024.png` — and the two scripts beside them are how those and the
+package logos are drawn. All of it is one drawing: the generator states the mark
+in units of the square, and every file here is that statement resolved at a size.
 
 **`folio.ico` is the icon** (user ruling, 2026-09-06). It was drawn as a
 placeholder, it was put on a contact sheet against five hand-set candidates, and
@@ -26,7 +28,8 @@ for a file this small:
 | File | What it is |
 | --- | --- |
 | `folio.ico` | **The icon.** A sheet folded once, which is what a folio is. Drawn by the script below, kept by the ruling of 2026-09-06. |
-| `make-folio-ico.py` | How it is drawn — geometry in code, no input file. It is the source of record for the mark. |
+| `folio-1024.png` | **The macOS icon source.** The same drawing at 1024, which is `icon_512x512@2x` — the largest slot an icon set has. `scripts/release/macos/bundle.sh` resamples all ten slots of `Folio.icns` from it. |
+| `make-folio-ico.py` | How they are drawn — geometry in code, no input file. It is the source of record for the mark. |
 | `make-msix-logos.py` | The same drawing at the three sizes `packaging/msix/AppxManifest.xml` names. It owns no geometry; it imports the file above. |
 
 ## What the colours are, and why there are so few
@@ -52,6 +55,22 @@ replacing the file is the whole change:
 python assets/app-icon/make-folio-ico.py
 cargo build -p bt-app
 ```
+
+The macOS source is the same script with one flag, and it is the only file here
+`build.rs` does not read:
+
+```
+python assets/app-icon/make-folio-ico.py --png
+```
+
+`--png` takes a size and defaults to 1024. Nothing about it is an upscale of the
+`.ico`: `render` is called at 1024, on the same geometry every `.ico` entry is
+drawn from — size reaches that drawing at two points only, widening the fold
+below 84 pixels and withholding the page dot below 48, so from 84 up the 1024 and
+the 256 are one drawing at two resolutions. **Why a PNG and not a tenth `.ico`
+entry:** `sips`, the only converter a stock Mac has, reads an `.ico` as its
+largest entry alone, so a bundle built from the `.ico` gets every icon-set slot
+resampled from the 256 and the three slots above 256 not at all.
 
 Two things to know about a swap:
 

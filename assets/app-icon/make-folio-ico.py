@@ -14,17 +14,26 @@ pixel column the line lands in. A generator states the geometry once, in units
 of the square, and every size is that geometry resolved — so the 16 and the 256
 are the same drawing rather than two drawings that resemble each other.
 
-Depends on nothing outside the standard library (`zlib` for the two PNG
-entries). Run it from anywhere:
+It also writes the one file the macOS bundle needs, which is the same drawing
+solved once more at a size no `.ico` entry reaches:
+
+    python assets/app-icon/make-folio-ico.py --png
+
+and `folio-1024.png` appears beside it. See `ICNS_SOURCE_SIZE` for why 1024 and
+why a PNG.
+
+Depends on nothing outside the standard library (`zlib` for the PNG entries).
+Run it from anywhere:
 
     python assets/app-icon/make-folio-ico.py
 
-and it rewrites `folio.ico` beside itself. The `.ico` is checked in; this file
-is how it can be checked.
+and it rewrites `folio.ico` beside itself. Both files are checked in; this file
+is how they can be checked.
 """
 
 from __future__ import annotations
 
+import argparse
 import struct
 import zlib
 from pathlib import Path
@@ -58,6 +67,17 @@ SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 #: 20KB one; below it the classic DIB is what every consumer reads without
 #: question.
 PNG_FROM_SIZE = 128
+
+#: The size the macOS icon source is drawn at, and the reason it is a lone PNG
+#: rather than a tenth entry in the `.ico`. `sips` — the only converter a stock
+#: Mac has — reads an `.ico` as its *largest entry only*, so every slot
+#: `iconutil` names would come out of the 256 and the three above it would not
+#: come out at all. 1024 is `icon_512x512@2x`, the largest slot an icon set has,
+#: and every smaller slot is a downscale of it. The drawing is the same geometry
+#: as every `.ico` entry, resolved on a finer grid: `sample` reads the size only
+#: to widen the fold below 84 pixels and to withhold the page dot below 48, so
+#: from 84 upwards the 1024 and the 256 are one drawing at two resolutions.
+ICNS_SOURCE_SIZE = 1024
 
 #: The grid each pixel is sampled on. Sixteen samples is enough that a fold line
 #: landing between two columns comes out as two half-lit columns rather than as
@@ -208,7 +228,8 @@ def ico(entries) -> bytes:
     return bytes(out)
 
 
-def main() -> None:
+def write_ico(here: Path) -> Path:
+    """`folio.ico`, the nine entries Windows asks for."""
     entries = []
     for size in SIZES:
         rgba = render(size)
@@ -216,10 +237,43 @@ def main() -> None:
             entries.append((size, png(size, rgba), True))
         else:
             entries.append((size, dib(size, rgba), False))
-    target = Path(__file__).resolve().parent / "folio.ico"
+    target = here / "folio.ico"
     with open(target, "wb") as handle:
         handle.write(ico(entries))
     print(f"{target} — {len(entries)} entries, {target.stat().st_size} bytes")
+    return target
+
+
+def write_png(here: Path, size: int) -> Path:
+    """`folio-<size>.png`, the square the macOS icon set is resampled from."""
+    target = here / f"folio-{size}.png"
+    with open(target, "wb") as handle:
+        handle.write(png(size, render(size)))
+    print(f"{target} — {size}x{size} RGBA, {target.stat().st_size} bytes")
+    return target
+
+
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Draw the Folio mark: the .ico by default, a square PNG on request."
+    )
+    parser.add_argument(
+        "--png",
+        type=int,
+        nargs="?",
+        const=ICNS_SOURCE_SIZE,
+        metavar="SIZE",
+        help=(
+            "write folio-<SIZE>.png instead of the .ico, drawn at SIZE and not "
+            f"resampled from anything (default {ICNS_SOURCE_SIZE})"
+        ),
+    )
+    arguments = parser.parse_args(argv)
+    here = Path(__file__).resolve().parent
+    if arguments.png is None:
+        write_ico(here)
+    else:
+        write_png(here, arguments.png)
 
 
 if __name__ == "__main__":

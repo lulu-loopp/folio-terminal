@@ -4,6 +4,7 @@
 # debug information beside it rather than inside it.
 #
 # usage: bundle.sh --out <dir> [--binary <path>] [--icon <path>] [--no-dsym]
+#        bundle.sh --icons-only <path.icns> [--icon <path>] [--icon-fallback]
 #
 # `--out` is the directory the bundle is written into; `Folio.app` and
 # `Folio.app.dSYM` are created there and anything already at those two names is
@@ -13,6 +14,11 @@
 # have to repeat the path here. `--icon` overrides the icon source resolved
 # below. `--no-dsym` skips `dsymutil` for a local run where the debug
 # information is not wanted; a release must never pass it (see 4).
+#
+# `--icons-only` writes the `.icns` at the given path and stops there — no
+# binary, no plist, no `cargo`. It is how the icon can be proved on a machine
+# that has not built anything, and with `--icon-fallback` it is how the `.ico`
+# route stays exercised (see 3).
 #
 # 1. **The version is not read here, and that is the point.** It comes from
 # `cargo run -p bt-winres --bin render-info-plist`, which fills
@@ -34,33 +40,38 @@
 # property of the compiler and the profile, not of the packaging — so the tree
 # and the sizes are printed at the end for a reader to compare two runs with.
 #
-# 3. **The icon.** macOS wants an `.icns`; this repository's icon is
-# `assets/app-icon/folio.ico`, drawn by `make-folio-ico.py` from geometry in
-# code (`assets/app-icon/README.md`). The tools a stock Mac has for that
-# conversion are `sips` and `iconutil`, both in `/usr/bin`, and neither needs
-# Xcode. Two facts about `sips` and the `.ico` container decide what comes out,
-# and both are recorded here because they are invisible in the result:
+# 3. **The icon.** macOS wants an `.icns`; this repository's mark is drawn by
+# `assets/app-icon/make-folio-ico.py` out of geometry in code
+# (`assets/app-icon/README.md`), and that script writes it twice: nine entries
+# into `folio.ico`, which is what Windows links, and one square at 1024 into
+# `folio-1024.png`, which is what this script reads. The tools a stock Mac has
+# for the conversion are `sips` and `iconutil`, both in `/usr/bin`, and neither
+# needs Xcode.
+#
+# 1024 is `icon_512x512@2x`, the largest slot an icon set has, so from that one
+# source every slot `iconutil` names is generated and not one of them is an
+# upscale. `build_icns` below is the whole of it, and it is a function so that
+# `--icons-only` can run the icon and nothing else.
+#
+# The `.ico` remains a source this script can read, because the day the PNG is
+# missing is not the day to discover the fallback stopped working;
+# `--icon-fallback` takes it deliberately, which is how that route is kept
+# exercised. What it produces is the reason the PNG exists, and both halves are
+# invisible in the result:
 #
 #   * `sips` reads an `.ico` as **its largest entry only** — 256x256 for this
 #     file. The hand-drawn 16, 20, 24, 32, 40, 48 and 64 entries inside it are
 #     DIB payloads that `sips` will not address individually, so the small
-#     iconset slots are resampled from the 256 rather than taken from the
-#     drawings made for them. On this mark — a fold, two papers and a graphite
-#     tile, with no hairline a downscale could lose — that is a visible
-#     difference nowhere, but it is a difference, and the honest place to fix it
-#     is the icon source rather than this script.
-#   * The source has **no pixels above 256**, so `icon_256x256@2x`,
-#     `icon_512x512` and `icon_512x512@2x` are not generated. Upscaling to fill
-#     them would put a blurred 256 where Finder's largest preview looks, which
-#     is worse than the absence: with the slot missing, macOS scales the 256
-#     itself and every reader gets the same result. A 1024 PNG drawn from the
-#     same geometry would fill all three, and that is an icon-source ticket —
-#     `make-folio-ico.py` can already render any size, but it needs Pillow,
-#     which a stock Mac does not have.
+#     iconset slots come out resampled from the 256 rather than taken from the
+#     drawings made for them.
+#   * That source has **no pixels above 256**, so `icon_256x256@2x`,
+#     `icon_512x512` and `icon_512x512@2x` are not generated at all — the slot
+#     loop skips a slot wider than its source rather than upscaling into it,
+#     because a blurred 256 exactly where Finder's largest preview looks is
+#     worse than an absent slot, which macOS fills by scaling the 256 itself.
 #
-# If a PNG is ever added under `assets/app-icon/`, the largest one wins over the
-# `.ico` without this script changing: that is the `--icon` default's own rule
-# below, not a special case.
+# The default source is the largest PNG under `assets/app-icon/`, and the `.ico`
+# only when there is none; `--icon` overrides both.
 #
 # 4. **`dsymutil` runs, and its output does not go in the bundle.** The release
 # profile sets `debug = "line-tables-only"`, and on Apple targets that debug
@@ -88,12 +99,15 @@ set -eu
 
 usage() {
 	echo "usage: bundle.sh --out <dir> [--binary <path>] [--icon <path>] [--no-dsym]" >&2
+	echo "       bundle.sh --icons-only <path.icns> [--icon <path>] [--icon-fallback]" >&2
 	exit 2
 }
 
 out=""
 binary=""
 icon=""
+icons_only=""
+icon_fallback=0
 dsym=1
 
 while [ $# -gt 0 ]; do
@@ -113,6 +127,15 @@ while [ $# -gt 0 ]; do
 		icon="$2"
 		shift 2
 		;;
+	--icons-only)
+		[ $# -ge 2 ] || usage
+		icons_only="$2"
+		shift 2
+		;;
+	--icon-fallback)
+		icon_fallback=1
+		shift
+		;;
 	--no-dsym)
 		dsym=0
 		shift
@@ -125,7 +148,14 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-[ -n "$out" ] || usage
+if [ -n "$icons_only" ]; then
+	if [ -n "$out" ]; then
+		echo "bundle.sh: --icons-only writes one file and --out assembles a bundle; pick one" >&2
+		usage
+	fi
+else
+	[ -n "$out" ] || usage
+fi
 
 # This script is `<repo>/scripts/release/macos/bundle.sh`; the repository is
 # three directories up from it, however the caller spelled the invocation.
@@ -140,26 +170,85 @@ Darwin) ;;
 	;;
 esac
 
-if [ -z "$binary" ]; then
-	binary="${CARGO_TARGET_DIR:-$repo/target}/release/folio"
-fi
-if [ ! -f "$binary" ]; then
-	echo "bundle.sh: no release executable at $binary" >&2
-	echo "           build one first: cargo build --release --locked -p bt-app" >&2
-	exit 1
+if [ -z "$icons_only" ]; then
+	if [ -z "$binary" ]; then
+		binary="${CARGO_TARGET_DIR:-$repo/target}/release/folio"
+	fi
+	if [ ! -f "$binary" ]; then
+		echo "bundle.sh: no release executable at $binary" >&2
+		echo "           build one first: cargo build --release --locked -p bt-app" >&2
+		exit 1
+	fi
 fi
 
 # The icon source: the largest PNG in the icon directory if there is one, and
 # the `.ico` otherwise. `ls -S` sorts by size, which for a set of renderings of
 # one drawing is the same order as by pixels, and this is a fall back to a
-# single known file rather than a search.
+# single known file rather than a search. `--icon-fallback` skips the look, so
+# that the `.ico` route can be run on a tree where the PNG is present — which is
+# every tree, which is why it would otherwise never be run again.
 if [ -z "$icon" ]; then
-	icon=$(ls -S "$repo/assets/app-icon/"*.png 2>/dev/null | head -1 || true)
+	if [ "$icon_fallback" = "0" ]; then
+		icon=$(ls -S "$repo/assets/app-icon/"*.png 2>/dev/null | head -1 || true)
+	fi
 	[ -n "$icon" ] || icon="$repo/assets/app-icon/folio.ico"
 fi
 if [ ! -f "$icon" ]; then
 	echo "bundle.sh: no icon source at $icon" >&2
 	exit 1
+fi
+
+# The icon step, on its own. Everything it needs is one source file, `sips` and
+# `iconutil`; nothing else this script does is an input to it, and a proof that
+# a source fills every slot should not have to be bought with a release build.
+build_icns() {
+	icns_source=$1
+	icns_destination=$2
+
+	iconset=$(mktemp -d "${TMPDIR:-/tmp}/folio-iconset.XXXXXX")
+	trap 'rm -rf "$iconset"' EXIT INT TERM
+	mkdir -p "$iconset/Folio.iconset"
+
+	native=$(sips -g pixelWidth "$icns_source" | awk '/pixelWidth:/ { print $2 }')
+	if [ -z "$native" ]; then
+		echo "bundle.sh: sips could not read a pixel width out of $icns_source" >&2
+		exit 1
+	fi
+	echo "  icon source is ${native}px wide"
+
+	# Every slot Apple's iconset names, as `<point size>:<scale>:<pixels>`. A slot
+	# wider than the source is skipped rather than upscaled.
+	for slot in 16:1:16 16:2:32 32:1:32 32:2:64 128:1:128 128:2:256 256:1:256 256:2:512 512:1:512 512:2:1024; do
+		points=${slot%%:*}
+		rest=${slot#*:}
+		scale=${rest%%:*}
+		pixels=${rest##*:}
+		if [ "$pixels" -gt "$native" ]; then
+			echo "  no ${points}x${points}@${scale}x (${pixels}px): the source has ${native}px"
+			continue
+		fi
+		if [ "$scale" = "1" ]; then
+			name="icon_${points}x${points}.png"
+		else
+			name="icon_${points}x${points}@${scale}x.png"
+		fi
+		sips -s format png -z "$pixels" "$pixels" "$icns_source" --out "$iconset/Folio.iconset/$name" >/dev/null
+		echo "  $name (${pixels}px)"
+	done
+
+	iconutil -c icns "$iconset/Folio.iconset" -o "$icns_destination"
+	rm -rf "$iconset"
+	trap - EXIT INT TERM
+}
+
+if [ -n "$icons_only" ]; then
+	echo "bundle.sh: the icon and nothing else"
+	echo "  icon   $icon"
+	mkdir -p "$(dirname "$icons_only")"
+	build_icns "$icon" "$icons_only"
+	printf '  %12s  %s
+' "$(wc -c <"$icons_only" | tr -d ' ')" "$icons_only"
+	exit 0
 fi
 
 mkdir -p "$out"
@@ -189,41 +278,9 @@ chmod 755 "$app/Contents/MacOS/folio"
 # creator code, which since Mac OS X is every application.
 printf 'APPL????' >"$app/Contents/PkgInfo"
 
-# `Contents/Resources/Folio.icns` — 3 above. Built in a temporary iconset that
-# is removed whether or not `iconutil` succeeds.
-iconset=$(mktemp -d "${TMPDIR:-/tmp}/folio-iconset.XXXXXX")
-trap 'rm -rf "$iconset"' EXIT INT TERM
-mkdir -p "$iconset/Folio.iconset"
-
-native=$(sips -g pixelWidth "$icon" | awk '/pixelWidth:/ { print $2 }')
-if [ -z "$native" ]; then
-	echo "bundle.sh: sips could not read a pixel width out of $icon" >&2
-	exit 1
-fi
-echo "  icon source is ${native}px wide"
-
-# Every slot Apple's iconset names, as `<point size>:<scale>:<pixels>`. A slot
-# wider than the source is skipped rather than upscaled.
-for slot in 16:1:16 16:2:32 32:1:32 32:2:64 128:1:128 128:2:256 256:1:256 256:2:512 512:1:512 512:2:1024; do
-	points=${slot%%:*}
-	rest=${slot#*:}
-	scale=${rest%%:*}
-	pixels=${rest##*:}
-	if [ "$pixels" -gt "$native" ]; then
-		echo "  no ${points}x${points}@${scale}x (${pixels}px): the source has ${native}px"
-		continue
-	fi
-	if [ "$scale" = "1" ]; then
-		name="icon_${points}x${points}.png"
-	else
-		name="icon_${points}x${points}@${scale}x.png"
-	fi
-	sips -s format png -z "$pixels" "$pixels" "$icon" --out "$iconset/Folio.iconset/$name" >/dev/null
-done
-
-iconutil -c icns "$iconset/Folio.iconset" -o "$app/Contents/Resources/Folio.icns"
-rm -rf "$iconset"
-trap - EXIT INT TERM
+# `Contents/Resources/Folio.icns` — 3 above, in a temporary iconset that is
+# removed whether or not `iconutil` succeeds.
+build_icns "$icon" "$app/Contents/Resources/Folio.icns"
 
 # `Folio.app.dSYM` — 4 above. Read off the copy that ships, so that the UUID in
 # the archived debug information is the UUID of the image a reader's crash

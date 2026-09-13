@@ -794,4 +794,92 @@ mod tests {
             "and so is one that points back at the directory"
         );
     }
+
+    /// PIN — **the macOS icon source is a 1024-pixel RGBA square, and it is the
+    /// file `bundle.sh` picks up** (`docs/DESIGN.md` §13.41).
+    ///
+    /// The mark reaches two containers out of one drawing: `folio.ico`, which
+    /// this crate packs into `folio.exe`, and `folio-1024.png`, which
+    /// `scripts/release/macos/bundle.sh` resamples into every slot of an icon
+    /// set. The second is held here for the same reason [`crate::plist`] is:
+    /// this is the crate where the icon and the version meet the containers
+    /// that carry them, and the alternative is a claim about a macOS artifact
+    /// that only a Mac can check — which means it is checked at a release.
+    ///
+    /// Three things are pinned, and the third is the one a reader would not
+    /// think of. 1024 is `icon_512x512@2x`, the largest slot an icon set has,
+    /// so a source any smaller silently leaves the top slots out of the bundle
+    /// — that is the whole reason this file exists rather than the `.ico`
+    /// alone. Colour type 6 is RGBA: the mark is a rounded tile on
+    /// transparency, and an opaque source would put a black square behind it in
+    /// every Finder row. And `bundle.sh` names no file — it takes the *largest*
+    /// PNG in that directory, by bytes, which is what `ls -S` sorts on — so
+    /// what proves the two agree is that this one is that PNG.
+    ///
+    /// MUTATION: render the PNG at 512, or add a larger one beside it, and this
+    /// fails; so does deleting the `512:2:1024` slot from the script.
+    #[test]
+    fn the_macos_icon_source_is_the_1024_square_the_bundle_script_picks() {
+        let icons = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/app-icon"
+        ));
+        let png = std::fs::read(icons.join("folio-1024.png"))
+            .expect("the macOS icon source is at assets/app-icon/folio-1024.png");
+
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "it is a PNG");
+        assert_eq!(&png[12..16], b"IHDR", "whose first chunk is the header");
+        let number =
+            |at: usize| u32::from_be_bytes([png[at], png[at + 1], png[at + 2], png[at + 3]]);
+        assert_eq!(
+            (number(16), number(20)),
+            (1024, 1024),
+            "1024 square: the largest slot an icon set has is icon_512x512@2x"
+        );
+        assert_eq!(png[24], 8, "eight bits a channel");
+        assert_eq!(
+            png[25], 6,
+            "colour type 6 is RGBA; the tile is drawn on transparency"
+        );
+
+        let mut candidates: Vec<(u64, String)> = std::fs::read_dir(icons)
+            .expect("the icon directory is readable")
+            .map(|entry| entry.expect("a directory entry"))
+            .filter(|entry| entry.path().extension().is_some_and(|kind| kind == "png"))
+            .map(|entry| {
+                (
+                    entry.metadata().expect("a file size").len(),
+                    entry.file_name().to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        candidates.sort();
+        let largest = candidates.pop().expect("at least the one PNG");
+        assert_eq!(
+            largest.1, "folio-1024.png",
+            "bundle.sh takes the largest PNG here, and it has to be this one"
+        );
+        if let Some(runner_up) = candidates.pop() {
+            assert!(
+                runner_up.0 < largest.0,
+                "{} is the same size in bytes as {}, so which one `ls -S` puts first is not decided",
+                runner_up.1,
+                largest.1
+            );
+        }
+
+        let script = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/release/macos/bundle.sh"
+        ))
+        .expect("the bundle script is at scripts/release/macos/bundle.sh");
+        assert!(
+            script.contains("ls -S \"$repo/assets/app-icon/\"*.png"),
+            "bundle.sh no longer reads the largest PNG out of assets/app-icon/"
+        );
+        assert!(
+            script.contains("512:2:1024"),
+            "bundle.sh no longer generates the 1024-pixel slot this file is for"
+        );
+    }
 }
