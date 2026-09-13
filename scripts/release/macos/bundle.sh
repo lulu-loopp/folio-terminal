@@ -271,7 +271,7 @@ echo "  icon   $icon"
 # the toolchain every Mac lane here already exports; derive it once when the
 # caller has not.
 if [ -z "${RUSTUP_TOOLCHAIN:-}" ] && [ "$(uname -s)" = Darwin ]; then
-	version=$(sed -n 's/^channel = "\([0-9][0-9.]*\)-.*//p' "$repo/rust-toolchain.toml")
+	version=$(sed -n 's/^channel = "\([0-9][0-9.]*\)-.*/\1/p' "$repo/rust-toolchain.toml")
 	arch=$(uname -m)
 	[ "$arch" = arm64 ] && arch=aarch64
 	RUSTUP_TOOLCHAIN="$version-$arch-apple-darwin"
