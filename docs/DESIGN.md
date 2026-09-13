@@ -9801,3 +9801,262 @@ with a posted pointer:
    the shape they cover is the shape a centred card is drawn in.
 
 *(本节英文,待中文文案改写。)*
+
+### 13.41 M5-1: 包由脚本装、签名按嵌套顺序、公证与 DMG 的脚本备好——真身份那一步留给用户开着的会话(`scripts/release/macos/{bundle,sign,notarize,dmg}.sh`(新)、`crates/bt-winres/src/plist.rs`、`packaging/macos/README.md`、`docs/RELEASING.md`)
+
+**This is 13.41 and not 13.40.** 13.40 is M2-7's and was in flight while this
+ran; the numbers are taken in the order the tickets started, not in the order
+they land.
+
+**① What this ticket could prove and what it could not, decided by a keychain.**
+Everything M5 is about splits cleanly along one line: whether a step needs the
+Developer ID *private key*. Assembling a bundle does not. Signing with the
+hardened runtime, a secure time stamp and an entitlements file does not need a
+*particular* key — `codesign -s -` makes an ad-hoc signature with no certificate
+behind it and every flag behaves the same way. Notarization does not need a
+keychain at all; it authenticates with an App Store Connect API key file.
+**Exactly one thing needs the owner:** a signature a stranger's Mac will accept,
+because that is the thing a certificate *is*. Measured at P-3 and again here: an
+ssh session does not have the login keychain open, and `codesign -s "Developer
+ID Application: …"` from one answers `errSecInternalComponent`. So this ticket
+wrote four scripts and proved three of them on the Mac with `-`, and wrote the
+fourth step out as a command sequence for a session the owner opens.
+
+That division is not a compromise — it is what the scripts are shaped around.
+`--identity` is a flag with a default rather than a constant; `sign.sh` exits 0
+when Gatekeeper rejects an *ad-hoc* signature and non-zero when it rejects a real
+one, because those are two different facts wearing the same word; `notarize.sh`
+and `dmg.sh` take `--dry-run` and print every command with the real paths filled
+in. The one thing none of them does is pretend: an ad-hoc run says out loud that
+it proves the shape of a signature and not its publisher.
+
+**② The bundle is assembled by `bundle.sh`, and the version is not read in it.**
+`Contents/Info.plist` comes from `cargo run -q -p bt-winres --bin
+render-info-plist` — P-2's renderer, filling `@VERSION@` from the crate's own
+`CARGO_PKG_VERSION`, which is the `[workspace.package]` line. A `grep` of
+`Cargo.toml` in a shell script would have been the fifth reader of that line and
+therefore the fifth thing to be wrong at a release; M5-5 extends
+`the_version_is_the_manifests_and_nothing_elses` over the two generated fields
+and this script is what that gate is about. `set -e` plus the renderer's non-zero
+exit is what stands between an unfilled placeholder and a signed bundle carrying
+it.
+
+The rest is `Contents/MacOS/folio`, `Contents/Resources/Folio.icns`, and a
+`PkgInfo` of eight constant bytes. Nothing else — in particular no
+`Resources/<lang>.lproj/`, which is §13.36 ⑩'s statement read from the packaging
+side: this bundle has no localized resources, the Finder Services row is
+therefore English, and the first `.lproj` to arrive is its own ticket and will
+have to bring that row with it.
+
+**③ The icon, and the two things `sips` decides that are invisible in the
+result.** The mark is `assets/app-icon/folio.ico`, drawn from geometry in code.
+The tools a stock Mac has are `sips` and `iconutil`, both in `/usr/bin` and
+neither needing Xcode. `sips` reads an `.ico` as **its largest entry only** —
+256×256 here — so the iconset's small slots are resampled from the 256 rather
+than taken from the hand-drawn 16, 20, 24, 32, 40, 48 and 64 entries that are
+also in that file (they are DIB payloads, which `sips` will not address one by
+one). And because the source has no pixels above 256, `icon_256x256@2x`,
+`icon_512x512` and `icon_512x512@2x` are **not generated**: upscaling to fill
+them would put a blurred 256 exactly where Finder's largest preview looks, and
+with the slot absent the system scales the 256 itself and every reader gets the
+same picture. A 1024 PNG drawn from the same geometry closes both, and that is an
+icon-source ticket rather than a packaging one — `make-folio-ico.py` renders any
+size and needs Pillow, which a stock Mac does not have. The script already
+prefers the largest PNG under `assets/app-icon/` over the `.ico`, so the day that
+file exists nothing here changes.
+
+**④ `dsymutil` runs and its output stays outside the bundle.** §13.31 ⑥ put this
+on account: the release profile is `debug = "line-tables-only"`, on Apple targets
+that leaves the debug information in the object files with a debug map in the
+image, and the `.dSYM` is the only artifact that turns a report from a shipped
+build back into file names and line numbers. It is built here into
+`Folio.app.dSYM` **beside** `Folio.app` — archived with the notarization log, not
+carried in the DMG, where it would be three times the download and signed for
+nothing. Measured on the ad-hoc run: the bundle is 70 000 640 bytes and the
+`.dSYM` is 211 173 376, which is the whole of the argument. `dwarfdump --uuid`
+prints `4355C6E3-D0DE-3177-9263-4CBEB98FF17A (arm64)`, which is the pairing a
+crash report is matched by.
+
+One expected warning: `dsymutil` reports one object of the `psm` crate as
+missing, because rustc leaves that hand-written assembly stub in the temporary
+link directory, which is gone by then. An assembly stub carries no line tables,
+so what the warning names is debug information that never existed; every Rust
+object is found.
+
+**⑤ The nested-code order, written down before there is any nested code.**
+`codesign` seals a bundle by hashing what is inside it, so anything inside that
+carries its own signature must already carry its **final** one when the bundle is
+sealed — otherwise the seal covers a signature about to be replaced and
+`--verify --deep` reports the bundle as modified. The order is therefore fixed
+and inside out: nested code deepest path first (frameworks, XPC services,
+plug-ins, login items, helper applications, and any loose Mach-O that is not the
+main executable); then the main executable; then the bundle, which receives the
+entitlements.
+
+**Folio has no nested code today** — one executable with every Rust crate linked
+into it, an `.icns`, an `Info.plist` and a `PkgInfo`, and an `otool -L` naming
+only `/System/Library/Frameworks` and `/usr/lib` — and `sign.sh` prints that at
+every run rather than staying
+silent, because the day it stops being true is the day this order starts
+mattering and nobody would otherwise notice. Two consequences of the rule are
+worth separating from it. The middle step is not a separate command *here*:
+`Contents/MacOS/folio` is what `CFBundleExecutable` names and signing the bundle
+is what signs it; the step exists for the case that makes it one, a **second**
+binary in `Contents/MacOS/`, which is nested code by the first clause whatever it
+is called. And nested code is signed **without this bundle's entitlements**:
+entitlements are a property of a process, a framework is not one, and a helper
+that *is* one brings its own file. Guessing that the application's entitlements
+are also a helper's is how a helper ends up holding something nobody reviewed for
+it.
+
+That is also why `--deep` appears only in the verification. `codesign --deep -s`
+signs everything it finds with one set of options and one set of entitlements,
+which is precisely that guess; Apple's own guidance is that it is for repairing
+somebody else's bundle. For *verification* it is the right flag and the plan's
+acceptance line names it.
+
+**⑥ The entitlements audit, against what M1–M4 actually built.** P-2's file is a
+hardened-runtime baseline with every exception spelled `false` rather than left
+absent, so that the answer is on the page. Re-asked here, feature by feature, and
+nothing moved:
+
+* **`com.apple.security.cs.disable-library-validation` — false.** Everything in
+  this process is either the statically linked executable or a system framework
+  loaded by name: AppKit, Metal, WebKit, AVFoundation, CoreText,
+  UserNotifications (§13.10 through §13.35). Nothing loads a plug-in, a scripting
+  addition or a user-supplied dylib. Turning validation off is how a signed
+  application becomes a host for code nobody signed, and there is no loader here
+  to need it.
+* **`com.apple.security.cs.allow-jit` and
+  `…allow-unsigned-executable-memory` — false.** Folio has no interpreter. The
+  one thing that looks like a JIT is WebKit's, and it is not in this process:
+  `WKWebView` runs JavaScript in its own `com.apple.WebKit.WebContent` process
+  with Apple's entitlements, which is exactly why §13.29 hosts a view rather than
+  linking an engine. wgpu's Metal path compiles shaders through the system
+  compiler and does not map executable pages itself.
+* **`com.apple.security.cs.allow-dyld-environment-variables` — false, and the
+  question was asked rather than inherited.** It is wanted by a process that has
+  to be launched with `DYLD_INSERT_LIBRARIES` or `DYLD_LIBRARY_PATH` set, and
+  nothing in this product is: the shell integration writes *shell* startup files
+  (§13.10's `ZDOTDIR` arrangement), and a child's environment is the child's, not
+  this process's.
+* **`com.apple.security.get-task-allow` and `…cs.debugger` — false.** A shipped
+  build is not attached to and does not attach. `get-task-allow` true is also a
+  notarization refusal in its own right.
+* **`com.apple.security.cs.disable-executable-page-protection` — false.**
+  Nothing rewrites its own text.
+* **`com.apple.security.network.client` — absent, and absent is correct.**
+  Network entitlements are an **App Sandbox** vocabulary: they are what a
+  sandboxed process asks for in order to be allowed out. This application is not
+  sandboxed — `com.apple.security.app-sandbox` is false, which is the Developer
+  ID distribution decision P-2 recorded — so the update check's `NSURLSession`
+  (§13.27) and `WKWebView`'s own traffic (§13.29) reach the network with no
+  entitlement at all. Adding the key would be a line that grants nothing and
+  implies a sandbox that is not there.
+* **No `NS…UsageDescription` of any kind**, which is §13.38's constraint arriving
+  as a packaging rule. M4-3 measured that WebKit on this system exposes **no**
+  delegate method for geolocation, under either the public or the private
+  spelling, so the web host cannot refuse that capability — what refuses it is
+  the bundle, because an application with no location purpose string cannot be
+  authorised and the request therefore cannot be granted. The camera and the
+  microphone the delegate *does* refuse, and this is the second lock on them.
+
+That last one is now a test rather than a paragraph:
+`bt_winres::plist::tests::the_rendered_bundle_asks_the_reader_for_nothing`
+renders the shipped template and asserts that **no key it declares ends in
+`UsageDescription`** — a rule about every key rather than a list of three,
+because the key a future feature would add is one nobody has typed yet. It reads
+declared keys only, so the template's own comment can go on explaining at length
+why these keys are absent; a test that refused the explanation along with the key
+would be a test against writing it down.
+
+**⑦ What the ad-hoc run on the Mac actually said.** A release build of `bt-app`
+at `e1d2f070` (394.6 s wall, 5.55 GB peak, alone on the machine as the venue
+requires), then the three scripts:
+
+```
+Folio.app/Contents/Info.plist                  7250
+Folio.app/Contents/MacOS/folio             69964040
+Folio.app/Contents/PkgInfo                        8
+Folio.app/Contents/Resources/Folio.icns       18304
+io.github.lulu-loopp.folio 0.3.0
+```
+
+`codesign --verify --deep --strict --verbose=2` → `valid on disk`, `satisfies its
+Designated Requirement`. `codesign -dv --verbose=4` →
+`flags=0x10002(adhoc,runtime)`, `Runtime Version=26.5.0`, `Sealed Resources
+version=2 rules=13 files=1`, `Info.plist entries=15`, `TeamIdentifier=not set`.
+The entitlements read back off the signature are the eight false keys, in order.
+`spctl -a -vvv` → `rejected`, exit 3, and `sign.sh` exits **0** on that, which is
+①'s rule about two facts wearing one word.
+
+Two smaller measurements came out of the same run. `codesign -d --entitlements
+:-` — the spelling the plan's acceptance line uses — still works on Xcode 26 and
+prints `warning: Specifying ':' in the path is deprecated and will not work in a
+future release`; `sign.sh` runs `--entitlements - --xml`, which is the same
+document with no colon and no warning. And the Mach-O's own `VersionMin` is 11.0,
+the Rust target's floor, while `LSMinimumSystemVersion` says 14.0: Launch
+Services enforces the plist and the plist is the product's claim, so the two
+disagreeing is not a defect — but the binary would run on 11.0 if anything ever
+started it without going through Launch Services, and 14.0 is the number every
+macOS decision in §13 was measured against.
+
+**⑧ `notarize.sh` and `dmg.sh` are M5-2's and M5-3's, written here and not run
+against Apple.** Both dry-ran end to end on the Mac, printing the real command
+lines with the real paths. Four decisions in them are worth having in this
+section rather than only in the scripts:
+
+* **The application goes up inside a `ditto` zip and the disk image does not.**
+  `notarytool submit` takes one *file* and a `.app` is a directory. `ditto -c -k
+  --sequesterRsrc --keepParent` rather than `zip`, because a signed bundle is its
+  contents *and* their extended attributes. The zip is a transport: the ticket
+  comes back stapled to the bundle, and the zip is deleted.
+* **The log is an artifact, not a diagnostic.** `notarytool log` is the only
+  place the service says *why*, and it is fetched on acceptance as well as on
+  rejection and written beside the artifact. A log fetched only when something
+  went wrong is a log nobody has when the question is asked a month later. The
+  plan's M5 acceptance asks for exactly this.
+* **The disk image is two entries and no Finder scripting.** `Folio.app` and a
+  symbolic link to `/Applications`; the drag is the whole interface. No
+  background picture and no window layout, because those are set by mounting the
+  image read-write and driving the Finder through Apple events — Automation
+  permission, a window server, a logged-in session — which on a release machine
+  is a step that fails into an image that merely looks unfinished. `UDZO`, so the
+  image is compressed and **read-only**: a read-write image can be changed after
+  it is signed while the signature stays valid for the container it was made of.
+  The image gets `--timestamp` and does **not** get `--options runtime` or
+  entitlements: those describe how a process runs and a disk image is not one.
+* **The last Gatekeeper question is a different question.** `spctl -a -vvv` on
+  the application asks whether it may execute; `spctl -a -vvv -t open --context
+  context:primary-signature` on the image asks whether this *document* may be
+  opened, which is the assessment a double-clicked download actually gets.
+
+**⑨ The owner's sequence, and the two ways it goes wrong quietly.** It lives in
+`packaging/macos/README.md` — one place, beside the scripts — and
+`docs/RELEASING.md`'s macOS section points at it rather than repeating it. In
+order: `security find-identity -v -p codesigning`; `cargo build --release
+--locked -p bt-app`; `bundle.sh --out dist/macos`; `sign.sh --app
+dist/macos/Folio.app --identity "Developer ID Application: <name> (<TEAMID>)"`;
+`notarize.sh --path dist/macos/Folio.app`; `spctl -a -vvv dist/macos/Folio.app`,
+which is where `accepted` and `source=Notarized Developer ID` are supposed to
+appear; `dmg.sh --app dist/macos/Folio.app --out dist/macos --identity "…"`.
+
+The two quiet failures: **the session must have the login keychain open**, or
+`codesign` answers `errSecInternalComponent` and retrying changes nothing; and
+**nothing is re-signed after stapling**, because the ticket lives inside the
+signed artifact and a second `codesign` throws it away, so `stapler validate`
+fails on a build that was notarized ten minutes earlier. Three of the four files
+that come out of `dist/macos/` are archived rather than published: the `.dSYM`
+and the two notarization logs.
+
+**⑩ Runnable from a runner, which is M5-4's half of this.** No path is assumed
+except `~/.appstoreconnect`, which is where Apple's own documentation puts the
+notarization credential and which `--notary-dir` moves. Everything else is
+`--out`, `--app`, `--binary`, `--identity`, `--entitlements`, or is resolved from
+the script's own location, so a checkout at any path works. The `.p8` and the
+`.env` are read **only if present** and their absence is a clean refusal naming
+the file, rather than an upload that fails three network hops away.
+`packaging/macos/.gitignore` refuses `*.p8` and `*.p12` at the place they would
+land; nothing in this tree ever opens the key, it hands `notarytool` the path.
+
+*(本节英文,待中文文案改写。)*

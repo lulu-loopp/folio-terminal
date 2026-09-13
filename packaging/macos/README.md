@@ -89,3 +89,87 @@ Q6 of the plan, where they are also recorded.
   minimal entitlements in `entitlements.plist` — no exceptions.
 - Category `public.app-category.developer-tools`; display name `Folio`;
   executable `folio`.
+
+## The four scripts that read this directory
+
+They live in `scripts/release/macos/`, they are POSIX `sh`, and they take every
+path on the command line — nothing under a home directory is assumed except the
+notarization credentials, which is the one place Apple's own tools put theirs.
+That is what makes them runnable from a GitHub macOS runner as well as from the
+owner's Terminal.
+
+| Script | What it does |
+|---|---|
+| `bundle.sh` | Assembles `Folio.app` from a `cargo build --release` output: the plist from the renderer, the executable, `Folio.icns` built out of `assets/app-icon/` with `sips` and `iconutil`, `PkgInfo`. Then `dsymutil` into `Folio.app.dSYM` **beside** the bundle. Prints the tree and the sizes. |
+| `sign.sh` | `codesign --options runtime --timestamp --entitlements` in nested-code order, then `--verify --deep --strict`, the signature, the entitlements as signed, and what Gatekeeper says. `--identity` defaults to `-` (ad-hoc). |
+| `notarize.sh` | `notarytool submit --wait`, keeps the log beside the artifact, `stapler staple` and `stapler validate`. `--dry-run` prints the commands and uploads nothing. |
+| `dmg.sh` | Staging folder with the application and a link to `/Applications`, `hdiutil create`, sign, notarize, staple, and the `-t open` Gatekeeper assessment a download actually gets. `--dry-run` likewise. |
+
+**There is no nested code in this bundle today** — one executable with every
+Rust crate linked into it, an `.icns`, an `Info.plist` and a `PkgInfo`, and an
+`otool -L` naming only `/System/Library/Frameworks` and `/usr/lib` — and
+`sign.sh` prints that fact at every run. The
+order it would use when there is any is inside out: nested code deepest first,
+then the main executable, then the bundle, because sealing a bundle hashes the
+signatures inside it and a signature replaced afterwards breaks the seal.
+
+### The signing session is the owner's, and why
+
+`codesign` needs the Developer ID private key out of a keychain, and an ssh
+session does not have the login keychain open — it answers
+`errSecInternalComponent`. So steps 3 to 6 below run in `Terminal.app` at the
+machine (or in any session where that keychain is unlocked). Notarization is the
+other half and it *is* headless: it authenticates with an App Store Connect API
+key file, which is why `notarize.sh` never asks for a keychain.
+
+### The release sequence, in order
+
+```sh
+# 0. Which identity, spelled the way codesign wants it.
+security find-identity -v -p codesigning
+
+# 1. Build. One release build at a time — fat LTO, about 5.3 GB.
+cargo build --release --locked -p bt-app
+
+# 2. Assemble the bundle and the debug information beside it.
+scripts/release/macos/bundle.sh --out dist/macos
+
+# 3. Sign. spctl says `rejected` with `source=Unnotarized Developer ID` here,
+#    which is the expected answer before step 4 and the reason this step's own
+#    exit code is the one to read rather than that line.
+scripts/release/macos/sign.sh --app dist/macos/Folio.app \
+  --identity "Developer ID Application: <name> (<TEAMID>)"
+
+# 4. Notarize the application and staple its ticket.
+scripts/release/macos/notarize.sh --path dist/macos/Folio.app
+
+# 5. Ask Gatekeeper again. Now: accepted, source=Notarized Developer ID.
+spctl -a -vvv dist/macos/Folio.app
+
+# 6. The disk image, from the stapled application — it is signed, notarized and
+#    stapled in its own right, and the last line is the assessment a downloaded
+#    image gets.
+scripts/release/macos/dmg.sh --app dist/macos/Folio.app --out dist/macos \
+  --identity "Developer ID Application: <name> (<TEAMID>)"
+```
+
+Five things are in `dist/macos/` at the end. **`Folio.dmg` is the one that is
+published.** `Folio.app.dSYM`, `Folio.app.notarylog.json` and
+`Folio.dmg.notarylog.json` are archived with the tag and never published —
+the `.dSYM` because it is the only thing that turns a crash report from that
+build back into file names and line numbers and it exists only on the machine
+that linked it, the two logs because they are the service's own statement about
+each submission. `Folio.app` itself is inside the image and does not go up
+separately.
+
+**Never re-sign after stapling.** The ticket is written into the signed
+artifact; signing again throws it away and `stapler validate` then fails on a
+build that was notarized ten minutes earlier.
+
+### What is never in this repository
+
+The `.p8` App Store Connect key and any exported `.p12` identity. `.gitignore`
+beside this file refuses both at the place they would land. `notarize.sh` reads
+`~/.appstoreconnect/folio-notary.env` for the key id and the issuer id — which
+are identifiers and not secrets — and hands `notarytool` the *path* of the key;
+nothing in this tree opens it.

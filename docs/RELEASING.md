@@ -627,8 +627,14 @@ rehearsal and the release page is made by a person from the signed machine.
 
 ## macOS
 
-Nothing here is a release lane yet — that is M5's, and this section is the one
-paragraph P-2 owes the version gate.
+There is no macOS lane in `release.yml` yet — that is M5-4's. What exists is the
+four scripts a lane would call, which M5-1 wrote and proved on the Mac with an
+ad-hoc signature; the steps that need the Developer ID private key or Apple's
+notary service are the owner's, from a session with the login keychain open.
+They are written out in order in **`packaging/macos/README.md`**, which is the
+one place that sequence lives so that it cannot drift from the scripts beside
+it. The rest of this section is the version rule, which is P-2's and is what the
+bundle step rests on.
 
 `packaging/macos/Info.plist.in` is a **template**, not a plist. Its
 `CFBundleShortVersionString` and `CFBundleVersion` are both the literal
@@ -675,3 +681,54 @@ The gate over it is
 beside the one named above: it renders `packaging/macos/Info.plist.in`, checks
 both version fields against the manifest's line, and checks that the template
 itself still carries no version at all.
+
+### Assembling, signing, notarizing
+
+`scripts/release/macos/` holds four POSIX `sh` scripts, and the order they run in
+is the order of this list:
+
+- **`bundle.sh --out <dir>`** assembles `Folio.app` — the rendered plist, the
+  release executable as `Contents/MacOS/folio`, `Contents/Resources/Folio.icns`
+  built from `assets/app-icon/folio.ico` with `sips` and `iconutil`, and
+  `PkgInfo`. It then runs `dsymutil` into `Folio.app.dSYM` **beside** the bundle
+  and prints the tree with sizes. The `.dSYM` is archived with the tag and never
+  published: it is what turns a crash report from that build back into file names
+  and line numbers, it pairs with the image by UUID, and it exists only on the
+  machine that linked the binary.
+- **`sign.sh --app <bundle> --identity <id>`** signs with `--options runtime`,
+  `--timestamp` and `packaging/macos/entitlements.plist`, in nested-code order,
+  then reads the signature back: `codesign --verify --deep --strict --verbose=2`,
+  `codesign -dv --verbose=4`, the entitlements as signed, and `spctl -a -vvv`.
+  `--identity` defaults to `-`, which is ad-hoc and which Gatekeeper correctly
+  rejects; that is how the script is exercised without the owner's certificate,
+  and on a real identity a Gatekeeper refusal is a non-zero exit.
+- **`notarize.sh --path <bundle or image>`** submits, waits, keeps
+  `notarytool log` beside the artifact as `<artifact>.notarylog.json`, and
+  staples. A `.app` goes up inside a `ditto` zip because `notarytool` takes one
+  file; the ticket comes back stapled to the bundle and the zip is thrown away.
+- **`dmg.sh --app <bundle> --out <dir> --identity <id>`** stages the application
+  beside a link to `/Applications`, writes a compressed read-only image with
+  `hdiutil create`, signs it, notarizes it, staples it, and ends with
+  `spctl -a -vvv -t open --context context:primary-signature`, which is the
+  assessment a downloaded image actually gets.
+
+Both of the last two take `--dry-run`, which prints every command with the real
+paths filled in and touches nothing.
+
+The exact sequence, with the flags and what each step's output should say, is in
+`packaging/macos/README.md`. Two rules from it are worth repeating here because
+they are the two ways a release goes wrong quietly:
+
+- **The signing session must have the login keychain open.** Over ssh,
+  `codesign` answers `errSecInternalComponent` and no amount of retrying changes
+  it. Notarization is not affected — it authenticates with an App Store Connect
+  API key file rather than a keychain.
+- **Never re-sign after stapling.** The ticket lives inside the signed artifact,
+  and a second `codesign` throws it away; `stapler validate` then fails on a
+  build that was notarized minutes earlier.
+
+The credentials are not in this repository and `packaging/macos/.gitignore`
+refuses them at the place they would land: the `.p8` App Store Connect key and
+any exported `.p12` identity. The key id and issuer id are identifiers rather
+than secrets and live in `~/.appstoreconnect/folio-notary.env`, which is the one
+home-directory path any of these scripts reads.
