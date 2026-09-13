@@ -85,6 +85,23 @@ harness = false
 [[test]]
 name = "macos_app_delegate"
 path = "tests/macos_app_delegate.rs"
+harness = false
+
+# **The sixth target that owns the process's main thread** (M4-9), and it needs
+# two things none of the others does: a **registered bundle**, because
+# LaunchServices reads `NSServices` out of one and will not deliver to a binary
+# it has never seen, and a **second bundle**, because X-4 measured that a
+# Service sent from the receiving application's own executable is refused as a
+# self-collision. This one file is both halves — `--send-service` makes it the
+# sender — and the launcher puts it inside two `.app`s with two identifiers.
+#
+# `harness = false` for the reason above, and the gate is `macos_app_delegate`'s:
+# the run that wants this is the run that is inside a `.app`, so a plain `cargo
+# test -p bt-platform` prints one line and exits, on every platform.
+[[test]]
+name = "macos_services"
+path = "tests/macos_services.rs"
+harness = false
 
 # **The second target that owns the process's main thread** (M4-1), and it is a
 # second one rather than two more functions in the first because the two ask

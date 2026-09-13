@@ -10523,6 +10523,29 @@ mod macos_app;
 #[cfg(target_os = "macos")]
 pub use macos_app::delegate_answers_the_four_selectors;
 
+/// **The Services provider object — Finder's *Services ▸ Open in Folio***
+/// (M4-9).
+///
+/// The third AppKit door into [`app_delegate`]'s channel and the one furthest
+/// from the delegate: a Service never reaches the delegate at all, it reaches an
+/// object of this application's own that `-[NSApplication setServicesProvider:]`
+/// handed over. It has no portable twin and needs none, on [`macos_menu`]'s
+/// footing exactly — the door is [`AppDelegate::offer_open_in_folio`], it
+/// answers `Ok(())` off macOS, and `bt-app` names no platform to call it. The
+/// same verb reaches this program on Windows through [`explorer_command`], which
+/// is a different mechanism rather than this one ported (plan §8 Q3, ruled
+/// 2026-09-12: `NSServices` only).
+#[cfg(target_os = "macos")]
+mod macos_services;
+
+/// **Whether AppKit is holding a provider that answers the Service** (M4-9).
+///
+/// A macOS-only name on [`delegate_answers_the_four_selectors`]' footing, and
+/// the same reading: `respondsToSelector:` asked of the object AppKit itself
+/// would send the message to.
+#[cfg(target_os = "macos")]
+pub use macos_services::services_provider_answers_open_in_folio;
+
 /// **The tail of a command-line argument, split at an ASCII offset, in the
 /// operating system's own encoding** (M1-1, for M1-10).
 ///

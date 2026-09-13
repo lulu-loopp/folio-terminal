@@ -112,7 +112,13 @@ static OUTBOX: OnceLock<Arc<Outbox>> = OnceLock::new();
 /// because a panic inside an Objective-C frame unwinds into AppKit, which X-2
 /// measured as a process that ends before any hook of this program's is
 /// consulted.
-fn post(origin: AppDelegateOrigin, kind: AppDelegateEventKind) {
+///
+/// `pub(crate)` for [`macos_services`](crate::macos_services), which is the
+/// second AppKit object in this crate that is called with nothing of this
+/// program's in its hand and has to find the channel the same way — a Service
+/// posts into this very cell, which is what puts a cold delivery behind the same
+/// buffer as a cold `application:openURLs:`.
+pub(crate) fn post(origin: AppDelegateOrigin, kind: AppDelegateEventKind) {
     if let Some(outbox) = OUTBOX.get() {
         outbox.post(AppDelegateEvent { origin, kind });
     }

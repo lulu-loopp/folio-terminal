@@ -190,6 +190,55 @@ mod tests {
         );
     }
 
+    /// PIN — **the shipped template's Services declaration survives the
+    /// render, whole** (M4-9).
+    ///
+    /// The three tests above are about the substitution; this one is about the
+    /// **file**, and it is here rather than in a fixture because what a reader
+    /// right-clicks a folder into is the rendered text and not the template.
+    /// `NSServices` is the one key in this document whose value is a nested
+    /// structure — a dictionary inside an array inside a dictionary — and it is
+    /// also the only one a renderer could plausibly damage, because it is the
+    /// only place where a `<dict>` is closed before the document's own is.
+    ///
+    /// The pairing between `NSMessage` and the selector the provider object
+    /// answers is `bt_platform::app_delegate`'s pin
+    /// (`the_service_this_bundle_declares_is_the_one_the_provider_answers`):
+    /// that claim is about two files, and this one is about one.
+    ///
+    /// MUTATION: make `render` return the text up to the last placeholder and
+    /// this fails, where the version pins do not — every `@VERSION@` is above
+    /// this array.
+    #[test]
+    fn the_rendered_bundle_declares_the_finder_service() {
+        let template = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/macos/Info.plist.in"
+        ))
+        .expect("the bundle template is at packaging/macos/Info.plist.in");
+        let plist = render(&template, "0.3.0").expect("the shipped template renders");
+
+        for expected in [
+            "<key>NSServices</key>",
+            "<key>NSMenuItem</key>",
+            "<string>Open in Folio</string>",
+            "<key>NSMessage</key>",
+            "<string>openInFolio</string>",
+            "<key>NSPortName</key>",
+            "<key>NSSendTypes</key>",
+            "<string>public.file-url</string>",
+        ] {
+            assert!(
+                plist.contains(expected),
+                "the rendered bundle is missing {expected}"
+            );
+        }
+        assert!(
+            plist.trim_end().ends_with("</plist>"),
+            "the document is closed"
+        );
+    }
+
     /// Every `@VERSION@` is filled, and the rest of the file is handed back
     /// byte for byte — including the parts that look like versions and are not.
     #[test]
