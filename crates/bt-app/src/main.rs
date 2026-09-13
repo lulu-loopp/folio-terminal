@@ -92777,56 +92777,133 @@ impl Runtime<'_> {
     /// target, and the ruling that says so ("clicking a card is clicking that
     /// tab") is about presses, not about notches.
     fn aim_focus_card_window(&mut self, now: Instant, delta: MouseScrollDelta) -> Result<bool> {
+        // **This window's id, read before any borrow** (`BT_MOUSE_TRACE`,
+        // §7.60). Every station past the card walk stands inside a live `&mut`
+        // of this window's own tabs, where `Runtime::mouse_trace`'s `&self`
+        // cannot be taken; `mouse_trace::window_line` is the same door reached
+        // with a number instead.
+        let window = u64::from(self.window.window.id());
         // A report with no vertical travel in it is not an aim and has nothing
         // to carry — a horizontal wheel over a card is still the column's.
-        if wheel_zoom_notches(delta) == 0.0 {
+        let notches = wheel_zoom_notches(delta);
+        if notches == 0.0 {
+            mouse_trace::window_line(window, || {
+                format!("wheel_aim leave=no-travel notches={notches}")
+            });
             return Ok(false);
         }
         let Some(position) = self.window.pointer_position else {
+            mouse_trace::window_line(window, || {
+                format!("wheel_aim leave=no-pointer notches={notches}")
+            });
             return Ok(false);
         };
         let Some(geometry) = self.focus_rail_geometry_now(now) else {
+            mouse_trace::window_line(window, || {
+                format!("wheel_aim leave=no-column notches={notches}")
+            });
             return Ok(false);
         };
         let [list_top, list_bottom] = geometry.viewport;
         let point = [position.x as f32, position.y as f32];
         if point[1] < list_top || point[1] >= list_bottom {
+            mouse_trace::window_line(window, || {
+                format!(
+                    "wheel_aim leave=outside-viewport point={},{} viewport={list_top},{list_bottom}",
+                    point[0], point[1]
+                )
+            });
             return Ok(false);
         }
         let scale = self.window.renderer.metrics().scale_factor as f32;
+        // Read before the walk rather than inside its `else`: what the refusal
+        // has to say is how many cards it looked at, and a count is a number
+        // where the list itself would be a borrow held across a trace line.
+        let cards = geometry.cards.len();
         let Some((index, card)) = geometry
             .cards
             .iter()
             .enumerate()
             .find(|(_, card)| seats::rect_holds(card.body, point[0], point[1]))
         else {
+            mouse_trace::window_line(window, || {
+                format!(
+                    "wheel_aim leave=no-card point={},{} cards={cards}",
+                    point[0], point[1]
+                )
+            });
             return Ok(false);
         };
+        let mini = card.mini;
+        let tabs = self.window.tabs.len();
         let Some(tab) = self.window.tabs.get_mut(index) else {
+            mouse_trace::window_line(window, || {
+                format!("wheel_aim leave=no-tab index={index} cards={cards} tabs={tabs}")
+            });
             return Ok(false);
         };
         let tab_id = tab.id;
-        let Some(seat) = seats::focus_mini_seats(tab.seats.tree(), card.mini, scale)
+        let Some(seat) = seats::focus_mini_seats(tab.seats.tree(), mini, scale)
             .into_iter()
             .find(|seat| {
                 seat.kind == SeatKind::Terminal && seats::rect_holds(seat.rect, point[0], point[1])
             })
         else {
+            mouse_trace::window_line(window, || {
+                format!(
+                    "wheel_aim leave=no-mini-seat index={index} tab={tab_id:?} mini={} point={},{}",
+                    mouse_trace::rect_word(mini),
+                    point[0],
+                    point[1]
+                )
+            });
             return Ok(false);
         };
-        let Some(leaf) = tab.sessions.get_mut(&seat.id) else {
+        let seat_id = seat.id;
+        let Some(leaf) = tab.sessions.get_mut(&seat_id) else {
+            mouse_trace::window_line(window, || {
+                format!("wheel_aim leave=no-session index={index} tab={tab_id:?} seat={seat_id:?}")
+            });
             return Ok(false);
         };
         let target = LeafId {
             tab: tab_id,
-            seat: seat.id,
+            seat: seat_id,
         };
+        // **Read before the spend consumes it** (`BT_MOUSE_TRACE`, §7.60): the
+        // identity a carry is filed under, and the fraction filed there, are
+        // exactly what tells a notch that was carried from one that was aimed at
+        // a target the window had stopped recognising.
+        let carried_before = self.window.card_aim;
+        let skip_before = leaf.card_skip;
         // Whole detents, once whatever this seat is already holding is added in.
         // A report that does not complete one is **spent here anyway** — it is
         // being carried, and handing it on to the column as well would scroll
         // the list with the same turn of the wheel that is aiming a window in it.
         let steps = CardAim::spend(&mut self.window.card_aim, target, delta);
+        let carried_after = self.window.card_aim;
+        // One builder, three exits: what a reader needs is the same ten fields
+        // whether the notch moved the window or was carried, and the two
+        // `card_skip` numbers on the line are what say which.
+        let aim_line = |skip_after: usize| {
+            mouse_trace::WheelAim {
+                index,
+                tab: format!("{tab_id:?}"),
+                seat: format!("{seat_id:?}"),
+                // Spelled `TabId(n)/SeatId(n)` rather than `LeafId`'s own
+                // `Debug`, whose braces and spaces would put a value with blanks
+                // in it on a key=value line.
+                at_before: carried_before.map(|aim| format!("{:?}/{:?}", aim.at.tab, aim.at.seat)),
+                carried_before: carried_before.map(|aim| aim.carried.delta()),
+                steps,
+                carried_after: carried_after.map(|aim| aim.carried.delta()),
+                skip_before,
+                skip_after,
+            }
+            .line()
+        };
         if steps == 0 {
+            mouse_trace::window_line(window, || aim_line(skip_before));
             return Ok(true);
         }
         // Wheel-up is a positive notch and lifts the window; wheel-down lowers
@@ -92837,9 +92914,11 @@ impl Runtime<'_> {
             leaf.card_skip.saturating_sub(steps.unsigned_abs() as usize)
         };
         if aimed == leaf.card_skip {
+            mouse_trace::window_line(window, || aim_line(aimed));
             return Ok(true);
         }
         leaf.card_skip = aimed;
+        mouse_trace::window_line(window, || aim_line(aimed));
         // **The gesture channel** (`focus_thumb`, 2026-08-21): the hand moved
         // this seat's window, so this seat re-projects on the pass below
         // whatever the 10Hz clock would otherwise have said. The credit is one
@@ -92873,6 +92952,9 @@ impl Runtime<'_> {
         // a notch composes no text, so this reads what is actually held.
         let notch = column_notch(self.window.modifiers_held);
         if notch == ColumnNotch::Aim && self.aim_focus_card_window(now, delta)? {
+            // The one route word that says the aim answered (`BT_MOUSE_TRACE`,
+            // §7.60). `wheel_aim` one line above says what it did with it.
+            self.mouse_trace(|| "wheel_route taken=rail-aim".to_owned());
             return Ok(());
         }
         // The two lists share `rail_scroll` because they share the panel; what
@@ -92886,14 +92968,29 @@ impl Runtime<'_> {
                     .map(|geometry| (geometry.viewport, geometry.max_scroll))
             })
         else {
+            self.mouse_trace(|| "wheel_route taken=rail-scroll at=no-geometry".to_owned());
             return Ok(());
         };
         let travel = self.vertical_wheel_travel(delta, viewport[1] - viewport[0]);
         // Wheel-up reveals what lies above, which is a smaller offset.
         let scrolled = (self.window.rail_scroll - travel).clamp(0.0, max_scroll);
         if scrolled == self.window.rail_scroll {
+            let held = self.window.rail_scroll;
+            self.mouse_trace(|| {
+                format!(
+                    "wheel_route taken=rail-scroll at=clamped rail_scroll={held} \
+                     travel={travel} max_scroll={max_scroll}"
+                )
+            });
             return Ok(());
         }
+        let was = self.window.rail_scroll;
+        self.mouse_trace(|| {
+            format!(
+                "wheel_route taken=rail-scroll at=scrolled rail_scroll={was} to={scrolled} \
+                 max_scroll={max_scroll}"
+            )
+        });
         self.window.rail_scroll = scrolled;
         // The list moved under a stationary pointer, so what it is over changed
         // without the pointer having done anything.
@@ -93105,6 +93202,56 @@ impl Runtime<'_> {
             .is_some_and(|run| run.contains(position.x, position.y))
     }
 
+    /// **The rail's own gate, with the column as it is *painted* beside the
+    /// column the aim *walks*** (`BT_MOUSE_TRACE`, §7.60).
+    ///
+    /// Two heights reach [`seats::focus_rail_geometry`] in this program and
+    /// nothing had ever compared them: the chrome is built against the bottom of
+    /// the lowest pane the solver placed ([`seats::chrome_surface_height`]) and
+    /// [`Self::focus_rail_geometry_now`] — which is what `rail_contains` and
+    /// [`Self::aim_focus_card_window`] both read — is solved against the
+    /// swapchain's. While they agree, a card is where it is drawn; if they ever
+    /// part, every card in the column is offset from its own picture and a
+    /// gesture aimed at what the reader can see misses. So both are solved here
+    /// and printed on one line, with `agree` as the answer.
+    ///
+    /// **Inside the closure**, so the second solve happens only for a reader who
+    /// asked for the file: a diagnostic nobody turned on must cost one atomic
+    /// load and nothing else.
+    fn wheel_rail_trace(&self, now: Instant, position: PhysicalPosition<f64>, contains: bool) {
+        self.mouse_trace(|| {
+            let scale = self.window.renderer.metrics().scale_factor as f32;
+            let aim_height = self
+                .window
+                .renderer
+                .presentation_geometry()
+                .swapchain_size
+                .1 as f32;
+            let paint_height = seats::chrome_surface_height(&self.seat_layout);
+            let aim = self.focus_rail_geometry_now(now);
+            let paint = seats::focus_rail_geometry(
+                paint_height,
+                scale,
+                self.platform_chrome(),
+                self.window.tabs.len(),
+                self.strip_guests(),
+                self.window.rail_scroll,
+                self.sampled_rail(now),
+            );
+            mouse_trace::WheelRail {
+                contains,
+                point: (position.x, position.y),
+                rail_scroll: self.window.rail_scroll,
+                strip_rail: self.rail_geometry_now(now).map(|geometry| geometry.body),
+                aim_height,
+                aim: aim.as_ref(),
+                paint_height,
+                paint: paint.as_ref(),
+            }
+            .line()
+        });
+    }
+
     /// A wheel notch over the tab strip, turned into horizontal motion (A7/A8).
     fn scroll_tab_strip(&mut self, delta: MouseScrollDelta) -> Result<()> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
@@ -93171,6 +93318,24 @@ impl Runtime<'_> {
     /// [`Self::mouse_wheel`].
     fn queue_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
         self.window.wheel_events = self.window.wheel_events.saturating_add(1);
+        // **The wheel road's own first station** (`BT_MOUSE_TRACE`, §7.60): the
+        // *raw* report, as the driver sent it, before [`WheelBurst`] merges it
+        // into whatever is already held. `mouse_wheel` prints the merged one, so
+        // both currencies of the same gesture are in the file; the `events`
+        // counter on both lines is what pairs a flush with the reports that fed
+        // it, and `carried` is what was already held when this one arrived.
+        let carried = self.window.wheel_burst;
+        let events = self.window.wheel_events;
+        self.mouse_trace(|| {
+            format!(
+                "wheel_queue raw_delta={} carried={} events={events}",
+                mouse_trace::delta_word(delta),
+                carried.map_or_else(
+                    || "none".to_owned(),
+                    |burst| mouse_trace::delta_word(burst.delta())
+                ),
+            )
+        });
         match self.window.wheel_burst {
             Some(burst) => match burst.plus(delta) {
                 Some(merged) => self.window.wheel_burst = Some(merged),
@@ -93200,6 +93365,34 @@ impl Runtime<'_> {
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
+        // **The wheel road's opening station** (`BT_MOUSE_TRACE`, §7.60), which
+        // is `mouse_input`'s own opening station said in the wheel's words and
+        // for its reason exactly: everything a report about a *resized* window
+        // needs settled about the frame this notch landed in is read here, once,
+        // before any router has had the chance to move it. The pointer is read
+        // twice — the live one and the remembered one — because "the hand has
+        // not moved since the resize" is a state those two tell apart and
+        // nothing else does.
+        self.mouse_trace(|| {
+            let presentation = self.window.renderer.presentation_geometry();
+            let inner = self.window.window.inner_size();
+            mouse_trace::WheelEntry {
+                pointer: self.window.pointer_position.map(|at| (at.x, at.y)),
+                pointer_last_seen: self.window.pointer_last_seen.map(|at| (at.x, at.y)),
+                swapchain: presentation.swapchain_size,
+                inner: (inner.width, inner.height),
+                metrics_scale: self.window.renderer.metrics().scale_factor,
+                flushed: delta,
+                notches: wheel_zoom_notches(delta),
+                events: self.window.wheel_events,
+                routings: self.window.wheel_routings,
+                alt: self.window.modifiers_held.alt_key(),
+                shift: self.window.modifiers_held.shift_key(),
+                ctrl: self.window.modifiers_held.control_key(),
+                focus_mode: self.window.focus_mode,
+            }
+            .line()
+        });
         // **A notch spends a raised hint card** (§7.1.5e′, user ruling
         // 2026-08-25), and at the very top for `keyboard_input`'s reason: every
         // branch below this line is a surface taking the gesture home, and a
@@ -93226,6 +93419,7 @@ impl Runtime<'_> {
             && self.file_peek_holds([position.x as f32, position.y as f32])
             && let Some(body) = self.window.file_peek.as_ref().and_then(|peek| peek.body)
         {
+            self.mouse_trace(|| "wheel_route taken=overlay at=hover-card".to_owned());
             return self.scroll_preview_body(PreviewSurface::Peek, body, delta);
         }
         // **P149's `document scroll`, capture: true** — "including the tree's
@@ -93247,9 +93441,11 @@ impl Runtime<'_> {
         if self.window.first_run.is_open() {
             let page = self.first_run_page();
             let travel = self.vertical_wheel_travel(delta, page);
+            self.mouse_trace(|| "wheel_route taken=overlay at=first-run".to_owned());
             return self.scroll_first_run(travel);
         }
         if let Some(layout) = self.settings_layout() {
+            self.mouse_trace(|| "wheel_route taken=overlay at=settings".to_owned());
             return self.scroll_settings(&layout, delta);
         }
         // **A notch over a notice is nobody's** (user ruling, 2026-08-16). The
@@ -93265,6 +93461,7 @@ impl Runtime<'_> {
             )
             .is_some()
         {
+            self.mouse_trace(|| "wheel_route taken=overlay at=toast".to_owned());
             return Ok(());
         }
         // **A notch over the palette is the palette's** (DESIGN.md §7.55 ⑧,
@@ -93287,6 +93484,7 @@ impl Runtime<'_> {
             && let Some(layout) = self.window.palette_layout.clone()
             && let Some(part) = palette::wheel_part(&layout, position.x, position.y)
         {
+            self.mouse_trace(|| format!("wheel_route taken=overlay at=palette part={part:?}"));
             return match part {
                 palette::WheelPart::List => self.scroll_palette_list(&layout, delta),
                 // The input line is not a scroller, and the box is not
@@ -93310,6 +93508,7 @@ impl Runtime<'_> {
                     (position.x as f32 / 120.0, position.y as f32 / 120.0)
                 }
             };
+            self.mouse_trace(|| "wheel_route taken=page".to_owned());
             self.scroll_web_page(position, x, y);
             return Ok(());
         }
@@ -93330,6 +93529,7 @@ impl Runtime<'_> {
                 .drawn()
                 .any(|win| win.epoch == id && win.files().is_some())
         {
+            self.mouse_trace(|| format!("wheel_route taken=overlay at=files-float part={part:?}"));
             return match part {
                 // `.git-view { overflow-y: auto }` in a window: the second page
                 // is a scroller too, and it is the *same* rectangle — which of
@@ -93360,7 +93560,12 @@ impl Runtime<'_> {
             // layouts, so the panel is asked first and the strip only when there
             // is no panel to have been over.
             if self.window.focus_mode || self.window.rail.layout == seats::TabLayoutMode::Vertical {
-                if self.rail_contains(position) {
+                // **Asked once and kept** (`BT_MOUSE_TRACE`, §7.60): the line
+                // and the branch must read the same answer, and two calls a
+                // fraction of a frame apart are two answers.
+                let over_the_rail = self.rail_contains(position);
+                self.wheel_rail_trace(Instant::now(), position, over_the_rail);
+                if over_the_rail {
                     return self.scroll_rail(delta);
                 }
             } else if seats::tab_strip_contains(
@@ -93375,6 +93580,7 @@ impl Runtime<'_> {
                 position.x,
                 position.y,
             ) {
+                self.mouse_trace(|| "wheel_route taken=tab-strip".to_owned());
                 return self.scroll_tab_strip(delta);
             }
         }
@@ -93396,8 +93602,10 @@ impl Runtime<'_> {
             // too, and it is the *same* body: which of the two answers a notch
             // depends only on which page the column is on.
             if self.window.git_pages_shown.contains_key(&seat) {
+                self.mouse_trace(|| format!("wheel_route taken=pane at=git-panel seat={seat:?}"));
                 return self.scroll_git_panel(seat, body, delta);
             }
+            self.mouse_trace(|| format!("wheel_route taken=pane at=files-tree seat={seat:?}"));
             return self.scroll_files_tree(seat, body, delta);
         }
         // A graph is a list before it is a document, and it scrolls like one.
@@ -93413,6 +93621,7 @@ impl Runtime<'_> {
             && let Some((surface, body)) = self.preview_surface_at(position)
             && self.window.git_graphs_shown.contains_key(&surface)
         {
+            self.mouse_trace(|| format!("wheel_route taken=pane at=git-graph surface={surface:?}"));
             return self.scroll_git_graph(surface, body, delta);
         }
         // **A notch over a picture is a zoom** (user ruling 2026-08-16, ticket
@@ -93437,6 +93646,7 @@ impl Runtime<'_> {
                 image_px,
                 [position.x as f32, position.y as f32],
             );
+            self.mouse_trace(|| format!("wheel_route taken=pane at=image-zoom surface={surface:?}"));
             self.set_preview_image_zoom(surface, zoom)?;
             return Ok(());
         }
@@ -93450,6 +93660,9 @@ impl Runtime<'_> {
                 .preview_buffer_on(surface)
                 .is_some_and(|buffer| buffer.content.is_some())
         {
+            self.mouse_trace(|| {
+                format!("wheel_route taken=pane at=preview-body surface={surface:?}")
+            });
             return self.scroll_preview_body(surface, body, delta);
         }
         // A notch belongs to the pane it is over. With one terminal that is the
@@ -93462,17 +93675,40 @@ impl Runtime<'_> {
         // desktop does, and it is the only reading that lets you read a build
         // log in one pane while typing in the other — which is the reason to
         // have two panes at all.
-        let target_seat = match self.window.pointer_position {
+        //
+        // **The seat comes back with the story of how it was chosen**
+        // (`BT_MOUSE_TRACE`, §7.60). Which of the three ways it was is exactly
+        // what separates `terminal-pane` from `focused-leaf-fallback` on the
+        // route line below, and it is a fact only this match knows.
+        let (target_seat, seat_from) = match self.window.pointer_position {
             Some(position) => match seats::pane_at(&self.seat_layout, position.x, position.y) {
-                Some(seat) if self.sessions.contains_key(&seat) => seat,
+                Some(seat) if self.sessions.contains_key(&seat) => (seat, "pointer"),
                 // Over a pane that is not a terminal: nobody's notch.
-                Some(_) => return Ok(()),
+                Some(seat) => {
+                    self.mouse_trace(|| {
+                        format!("wheel_route taken=nobody at=not-a-terminal seat={seat:?}")
+                    });
+                    return Ok(());
+                }
                 // Off every pane — before the pointer has ever moved, a lone
                 // leaf still scrolls exactly as it always has.
-                None if self.seats.is_lone_terminal() => self.focused_leaf,
-                None => return Ok(()),
+                None if self.seats.is_lone_terminal() => (self.focused_leaf, "lone-terminal"),
+                None => {
+                    self.mouse_trace(|| "wheel_route taken=nobody at=off-every-pane".to_owned());
+                    return Ok(());
+                }
             },
-            None => self.focused_leaf,
+            None => (self.focused_leaf, "no-pointer"),
+        };
+        // What a notch that stays in this window is called. The pointer having
+        // chosen the pane and the window having fallen back to the leaf it is
+        // focused on are the same scroll and two different findings — candidate
+        // (c) of the resize report is precisely the second one happening where
+        // the first was meant to.
+        let local_route = if seat_from == "pointer" {
+            "terminal-pane"
+        } else {
+            "focused-leaf-fallback"
         };
         // **Nobody's notch**, which is the sentence three arms above already
         // write about a pane that is not a terminal — reached here by the two
@@ -93483,6 +93719,12 @@ impl Runtime<'_> {
         // floating tree, a preview body — has already had its turn above this,
         // so what is being declined here is only the terminal's own.
         let Some(target_leaf) = self.sessions.get(&target_seat) else {
+            self.mouse_trace(|| {
+                format!(
+                    "wheel_route taken=nobody at=no-shell seat={target_seat:?} \
+                     seat_from={seat_from}"
+                )
+            });
             return Ok(());
         };
         let (cell_subpixels, target_rows) = (
@@ -93523,6 +93765,12 @@ impl Runtime<'_> {
             let delta_px = i32::try_from(-take_px).unwrap_or(0);
             if delta_px == 0 {
                 self.window.local_wheel_subpixel_remainder = tentative;
+                self.mouse_trace(|| {
+                    format!(
+                        "wheel_route taken={local_route} at=math-block-carried \
+                         seat={target_seat:?} seat_from={seat_from}"
+                    )
+                });
                 return Ok(());
             }
             let horizontal = if self.window.modifiers.shift_key() {
@@ -93549,12 +93797,35 @@ impl Runtime<'_> {
                 })
             {
                 self.window.local_wheel_subpixel_remainder = tentative;
+                self.mouse_trace(|| {
+                    format!(
+                        "wheel_route taken={local_route} at=math-block seat={target_seat:?} \
+                         seat_from={seat_from}"
+                    )
+                });
                 return self.publish_interaction_frame();
             }
         }
         let modes = self.leaf_terminal_modes(target_seat);
         let target_is_scrolled = self.leaf(target_seat).projection.is_scrolled();
-        match wheel_route(self.window.modifiers.shift_key(), modes, target_is_scrolled) {
+        let route = wheel_route(self.window.modifiers.shift_key(), modes, target_is_scrolled);
+        // **The last word on this notch** (`BT_MOUSE_TRACE`, §7.60), written
+        // above the four arms rather than inside them: what a reader is asking
+        // by this point is which *surface* took the gesture home, and all four
+        // arms are the terminal's — they differ only in the currency it is
+        // spent in, which `route` says on the same line.
+        self.mouse_trace(|| {
+            let taken = match route {
+                WheelRoute::MouseReport | WheelRoute::ArrowKeys => "pty",
+                WheelRoute::Local => local_route,
+                WheelRoute::Nothing => "nobody",
+            };
+            format!(
+                "wheel_route taken={taken} at=terminal route={route:?} seat={target_seat:?} \
+                 seat_from={seat_from}"
+            )
+        });
+        match route {
             WheelRoute::MouseReport => {
                 // Mouse-protocol wheel reports are per-notch, never per-system-scroll-line: the
                 // application applies its own lines-per-event step, so multiplying by the Windows
@@ -93562,12 +93833,16 @@ impl Runtime<'_> {
                 // three times too far per notch.
                 let notches = self.take_forward_wheel_notches(delta);
                 if notches == 0 {
+                    self.mouse_trace(|| "wheel_pty leave=no-whole-notch".to_owned());
                     return Ok(());
                 }
                 // The cell under the pointer *in the pane being addressed*. A hit
                 // taken from anywhere else would be a row and a column measured in
                 // one grid and delivered to another.
                 let Some(hit) = self.forwarded_mouse_hit_in(target_seat) else {
+                    self.mouse_trace(|| {
+                        format!("wheel_pty leave=no-cell-under-the-pointer seat={target_seat:?}")
+                    });
                     return Ok(());
                 };
                 let button = if notches > 0 {
@@ -93597,6 +93872,7 @@ impl Runtime<'_> {
             WheelRoute::ArrowKeys => {
                 let lines = self.take_forward_wheel_lines(target_seat, delta);
                 if lines == 0 {
+                    self.mouse_trace(|| "wheel_pty leave=no-whole-line".to_owned());
                     return Ok(());
                 }
                 // The addressed shell's own cursor mode. `ESC O A` and `ESC [ A`
@@ -99693,6 +99969,117 @@ mod mouse_trace_station_tests {
                 before.contains("self.mouse_trace("),
                 "{signature}: `{}` has no BT_MOUSE_TRACE line within {LOOKBACK} lines above it:\n{before}",
                 line.trim(),
+            );
+        }
+    }
+
+    /// **The doors a station may write through**, and there are three.
+    ///
+    /// `Runtime::mouse_trace` is the ordinary one. `mouse_trace::window_line` is
+    /// the same door reached with a window id instead of `&self`, for a station
+    /// standing inside a live `&mut` of this window's own tabs — which is where
+    /// the aim spends its notch. `Runtime::wheel_rail_trace` is a station of its
+    /// own: it solves the painted column a second time, so it lives behind the
+    /// gate rather than in front of a `format!`.
+    const DOORS: [&str; 3] = [
+        "self.mouse_trace(",
+        "mouse_trace::window_line(",
+        "self.wheel_rail_trace(",
+    ];
+
+    /// [`assert_every_return_is_traced`] over **every** exit of a function
+    /// rather than one exact spelling of one.
+    ///
+    /// The wheel's exits are not one spelling: they hand the notch to eleven
+    /// different scrollers, and `return self.scroll_files_tree(…)` is as much a
+    /// surface taking the gesture home as a bare `return Ok(());` is. Written as
+    /// a second helper rather than as a widening of the first, because the
+    /// chrome's pin counts one shape on purpose and a looser needle there would
+    /// stop it counting.
+    fn assert_every_exit_is_traced(signature: &str, expected: usize) {
+        let text = body(signature);
+        let lines: Vec<&str> = text.lines().collect();
+        let exits: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.trim_start().starts_with("return "))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            exits.len(),
+            expected,
+            "{signature} has {} exits, the pin was written for {expected} — \
+             count them again and trace the new one",
+            exits.len()
+        );
+        for at in exits {
+            let before = lines[at.saturating_sub(LOOKBACK)..at].join("\n");
+            assert!(
+                DOORS.iter().any(|door| before.contains(door)),
+                "{signature}: `{}` has no BT_MOUSE_TRACE line within {LOOKBACK} lines above it:\n{before}",
+                lines[at].trim(),
+            );
+        }
+    }
+
+    /// **Every exit of the wheel's road writes a line** (T-WHEEL-TRACE, §7.60).
+    ///
+    /// RED the day it was written: all three of these functions had *no* trace
+    /// call in them at all, which is why a reader whose `Alt`+wheel had stopped
+    /// aiming after a resize could hand back a `BT_MOUSE_TRACE` file naming
+    /// every click they had made and not one notch. The counts are the same
+    /// tripwire the chrome's pin is: a surface added below without a word beside
+    /// it puts the silence back one arm at a time and nothing else fails.
+    #[test]
+    fn every_exit_of_the_wheels_road_writes_a_line() {
+        assert_every_exit_is_traced("    fn mouse_wheel(", 22);
+        assert_every_exit_is_traced("    fn scroll_rail(", 3);
+        assert_every_exit_is_traced("    fn aim_focus_card_window(", 10);
+    }
+
+    /// **The route words are the declared ones** (T-WHEEL-TRACE, §7.60).
+    ///
+    /// The value of one word per notch is that the set of words is closed: a
+    /// reader who finds a word they cannot look up has learnt nothing, and a
+    /// surface that answered with an undeclared one is a surface nobody thought
+    /// about. `crate::mouse_trace::WHEEL_ROUTES` is the list, and the two words this
+    /// file picks indirectly — the local route, and the terminal's own arms —
+    /// are asserted to be on it as literals, since a placeholder is not a word.
+    #[test]
+    fn the_wheel_route_words_are_the_declared_ones() {
+        let needle = concat!("wheel_route ", "taken", "=");
+        let mut seen = 0;
+        for at in SOURCE.match_indices(needle).map(|(at, _)| at + needle.len()) {
+            let word: String = SOURCE[at..]
+                .chars()
+                .take_while(|char| char.is_ascii_alphanumeric() || *char == '-')
+                .collect();
+            // A `{…}` placeholder is not a word; the two of them are held below.
+            if word.is_empty() {
+                continue;
+            }
+            seen += 1;
+            assert!(
+                crate::mouse_trace::WHEEL_ROUTES.contains(&word.as_str()),
+                "`{word}` is not one of the declared wheel routes: {:?}",
+                crate::mouse_trace::WHEEL_ROUTES
+            );
+        }
+        assert!(seen > 0, "the route line is written somewhere in this file");
+        let wheel = body("    fn mouse_wheel(");
+        for word in [
+            "terminal-pane",
+            "focused-leaf-fallback",
+            "pty",
+            "nobody",
+        ] {
+            assert!(
+                crate::mouse_trace::WHEEL_ROUTES.contains(&word),
+                "`{word}` is declared"
+            );
+            assert!(
+                wheel.contains(&format!("\"{word}\"")),
+                "and `{word}` is the literal the wheel's own match picks:\n{wheel}"
             );
         }
     }
@@ -121385,6 +121772,267 @@ mod tests {
                 .any(|seat| seats::rect_holds(seat.rect, point[0], point[1])),
             "and over that card's terminal seat, which is what the notch aims"
         );
+    }
+
+    /// **RED — one `Alt`+wheel over a card writes its entry, its rail decision,
+    /// its aim and its route into `BT_MOUSE_TRACE`** (T-WHEEL-TRACE, §7.60).
+    ///
+    /// The gap this closes is the whole of why the resize report could not be
+    /// settled by reading: `mouse_wheel`, `rail_contains`, `scroll_rail` and
+    /// `aim_focus_card_window` wrote **nothing at all**, so a reader whose
+    /// `Alt`+wheel had stopped aiming could hand back a trace naming every click
+    /// they had made and not one notch.
+    ///
+    /// **What a test in this file can hold, and what it cannot.** A `Runtime` is
+    /// a live window and a real GPU device — `WindowRenderer::new` is called at
+    /// exactly one place in this program, on the window-creation path — and
+    /// nothing in this workspace builds one headlessly. So this drives the
+    /// road's *arithmetic*: the burst two half reports merge into, `column_notch`
+    /// on a held `Alt`, the column the aim walks, the mini seat under the point,
+    /// and `CardAim::spend` — and writes what they produced through the very
+    /// builders the stations call, into a real trace at a temporary path. That
+    /// the stations call them **at every exit** is
+    /// [`super::mouse_trace_station_tests`]' half of the pair, and it is a pin
+    /// on this file's own text because no value in the program can answer "is
+    /// there a `return` here with nothing written beside it".
+    ///
+    /// MUTATION: take any `key=` out of a builder and the assertion naming it
+    /// fails; give `CardAim::spend` `round` where it has `trunc` and the first
+    /// half detent stops being carried — `steps=0` becomes `steps=1` and the two
+    /// `card_skip` numbers on the first `wheel_aim` line part company.
+    #[test]
+    fn one_alt_wheel_over_a_card_writes_its_entry_its_rail_its_aim_and_its_route() {
+        const HEADER: &str = "# BT_MOUSE_TRACE_V1 elapsed_ms event field=value…";
+
+        let path = std::env::temp_dir().join(format!(
+            "bt-wheel-trace-{}-alt-wheel.log",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let trace = trace::Trace::create(&path, HEADER).expect("open a trace at a temporary path");
+        let write = |message: String| mouse_trace::emit(Some(&trace), || message);
+
+        // A driver that speaks half a detent at a time — the shape a
+        // high-resolution wheel and a precision touchpad both have. Two reports
+        // merge into one burst exactly as `queue_wheel` merges them, and
+        // `flush_wheel` spends the merged one.
+        let half = MouseScrollDelta::LineDelta(0.0, 0.5);
+        let flushed = WheelBurst::of(half)
+            .plus(half)
+            .expect("two reports in one currency merge")
+            .delta();
+
+        // The window it lands on: three cards on a 200% display, run to the end
+        // of the list, the pointer on the last card's terminal mini — the very
+        // fixture the scale test above aims with.
+        let (_, scale) = CARDS_AT_200;
+        let column = cards_column(CARDS_AT_200, 3, 0.0);
+        let column = cards_column(CARDS_AT_200, 3, column.max_scroll);
+        let mini = column.cards[2].mini;
+        let point = [(mini[0] + mini[2]) / 2.0, mini[3] - 8.0 * scale];
+        let tree = LayoutNode::seat(bt_layout::Seat::new(SeatId(1), SeatKind::Terminal));
+        let seat = seats::focus_mini_seats(&tree, mini, scale)
+            .into_iter()
+            .find(|seat| {
+                seat.kind == SeatKind::Terminal && seats::rect_holds(seat.rect, point[0], point[1])
+            })
+            .expect("the fixture aims at a terminal mini");
+        let at = (f64::from(point[0]), f64::from(point[1]));
+
+        // ① The entry: every number a resize can put out of step, read once.
+        write(
+            mouse_trace::WheelEntry {
+                pointer: Some(at),
+                pointer_last_seen: Some(at),
+                swapchain: (560, 1000),
+                inner: (560, 1000),
+                metrics_scale: f64::from(scale),
+                flushed,
+                notches: wheel_zoom_notches(flushed),
+                events: 2,
+                routings: 1,
+                alt: true,
+                shift: false,
+                ctrl: false,
+                focus_mode: true,
+            }
+            .line(),
+        );
+
+        // ② The rail's decision, with the column as it is *painted* beside the
+        // column the aim *walks*. The two heights differ here on purpose: this
+        // is the exact shape of the disagreement §7.60 exists to make visible,
+        // and `agree=0` is the one field that says so at a glance.
+        let painted = cards_column((960.0, scale), 3, column.max_scroll);
+        assert_ne!(
+            column, painted,
+            "the fixture's two heights really do solve two different columns, \
+             which is what makes the `agree` assertion below mean anything"
+        );
+        write(
+            mouse_trace::WheelRail {
+                contains: true,
+                point: at,
+                rail_scroll: column.max_scroll,
+                strip_rail: None,
+                aim_height: CARDS_AT_200.0,
+                aim: Some(&column),
+                paint_height: 960.0,
+                paint: Some(&painted),
+            }
+            .line(),
+        );
+
+        // ③ The aim. `Alt` under the hand is what makes the notch an aim at all.
+        assert_eq!(
+            column_notch(ModifiersState::ALT),
+            ColumnNotch::Aim,
+            "the fixture holds the modifier the column reads"
+        );
+        let target = LeafId {
+            tab: TabId(1),
+            seat: seat.id,
+        };
+        let mut carried: Option<CardAim> = None;
+        let aim_line = |index: usize,
+                        before: Option<CardAim>,
+                        after: Option<CardAim>,
+                        steps: i32,
+                        skip_before: usize,
+                        skip_after: usize| {
+            mouse_trace::WheelAim {
+                index,
+                tab: format!("{:?}", TabId(1)),
+                seat: format!("{:?}", seat.id),
+                at_before: before.map(|held| format!("{:?}/{:?}", held.at.tab, held.at.seat)),
+                carried_before: before.map(|held| held.carried.delta()),
+                steps,
+                carried_after: after.map(|held| held.carried.delta()),
+                skip_before,
+                skip_after,
+            }
+            .line()
+        };
+
+        // Half a detent is half a row, and half a row is not a row: it is
+        // carried, and the window under the pointer does not move.
+        let before = carried;
+        let steps = CardAim::spend(&mut carried, target, half);
+        assert_eq!(steps, 0, "half a detent moves no row");
+        write(aim_line(2, before, carried, steps, 0, 0));
+
+        // The other half completes it, **because the carry is filed under this
+        // seat's own identity** — which is the fact the stale-target reading of
+        // the report turns on.
+        let before = carried;
+        let steps = CardAim::spend(&mut carried, target, half);
+        assert_eq!(steps, 1, "two halves at the same seat are one whole detent");
+        write(aim_line(2, before, carried, steps, 0, 1));
+
+        // ④ And the one word that says which surface took it home.
+        write("wheel_route taken=rail-aim".to_owned());
+
+        let written = std::fs::read_to_string(&path).expect("the trace was written");
+        let lines: Vec<&str> = written.lines().collect();
+        assert_eq!(lines[0], HEADER, "the run names its own format first");
+        // A `fn` and not a closure: what it hands back is borrowed from the file
+        // and not from its own argument, which is the one shape a closure's
+        // inferred signature cannot spell.
+        fn only<'a>(lines: &[&'a str], written: &str, event: &str) -> &'a str {
+            let mut found = lines.iter().filter(|line| line.contains(event));
+            let first = found
+                .next()
+                .unwrap_or_else(|| panic!("`{event}` is in the trace:\n{written}"));
+            assert!(
+                found.next().is_none(),
+                "`{event}` is written once:\n{written}"
+            );
+            first
+        }
+
+        let entry = only(&lines, &written, "mouse_wheel ");
+        for key in [
+            "flushed_delta=lines:0,1",
+            "notches=1",
+            "metrics_scale=2",
+            "swapchain_size=560x1000",
+            "inner_size=560x1000",
+            "alt=1",
+            "shift=0",
+            "ctrl=0",
+            "focus_mode=1",
+            "events=2",
+            "routings=1",
+        ] {
+            assert!(entry.contains(key), "the entry carries `{key}`: {entry}");
+        }
+        assert!(
+            !entry.contains("pointer=none") && !entry.contains("pointer_last_seen=none"),
+            "and both readings of the pointer, because a window whose hand has \
+             not moved since a resize is told apart by exactly those two: {entry}"
+        );
+
+        let rail = only(&lines, &written, "wheel_rail ");
+        for key in [
+            "contains=1",
+            "rail_run=none",
+            "aim_height=1000",
+            "aim_cards=3",
+            "aim_viewport=",
+            "aim_body=",
+            "aim_max_scroll=",
+            "paint_height=960",
+            "paint_cards=3",
+            "paint_viewport=",
+            "agree=0",
+        ] {
+            assert!(rail.contains(key), "the rail line carries `{key}`: {rail}");
+        }
+
+        let aims: Vec<&str> = lines
+            .iter()
+            .copied()
+            .filter(|line| line.contains("wheel_aim "))
+            .collect();
+        assert_eq!(aims.len(), 2, "one line per spend:\n{written}");
+        for key in [
+            "leave=carried",
+            "index=2",
+            "tab=TabId(1)",
+            "at_before=none",
+            "carried_before=none",
+            "steps=0",
+            "carried_after=lines:0,0.5",
+            "card_skip_before=0",
+            "card_skip_after=0",
+        ] {
+            assert!(
+                aims[0].contains(key),
+                "the carried notch carries `{key}`: {}",
+                aims[0]
+            );
+        }
+        for key in [
+            "leave=aimed",
+            "at_before=TabId(1)/",
+            "carried_before=lines:0,0.5",
+            "steps=1",
+            "carried_after=lines:0,0",
+            "card_skip_before=0",
+            "card_skip_after=1",
+        ] {
+            assert!(
+                aims[1].contains(key),
+                "the notch that completed a detent carries `{key}`: {}",
+                aims[1]
+            );
+        }
+        assert!(
+            only(&lines, &written, "wheel_route ").ends_with("taken=rail-aim"),
+            "and the road ends in one word:\n{written}"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 
     /// **RED (shape) — the scale change's own arm says the panel's scroll out
