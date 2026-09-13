@@ -3027,30 +3027,42 @@ impl SettingsRow {
     ///
     /// `None` is the ordinary answer and it means what it says: the row is about
     /// Folio, or about a file, or about a shell that exists everywhere, and it
-    /// is on every machine's page. The four that answer `Some` are about a
+    /// is on every machine's page. The five that answer `Some` are about a
     /// mechanism one platform has and another has not — Explorer's folder menu,
     /// the `$PROFILE` of a shell with no other door, the readline module that
-    /// one edition of PowerShell ships, and a key called Option.
+    /// one edition of PowerShell ships, the blurred backdrop this build can ask
+    /// a window for, and a key called Option.
     ///
     /// **The same [`Capability`] the first-run card reads, and deliberately so.**
-    /// Two of these four are mechanisms that card already asks about, and a
+    /// Two of these five are mechanisms that card already asks about, and a
     /// second table would be a second place to remember which platforms have
-    /// them. The other two joined the table for this page and the card has no
-    /// row for either. What each surface owns is what it *does* with the
+    /// them. The other three joined the table for this page and the card has no
+    /// row for any of them. What each surface owns is what it *does* with the
     /// answer: the card drops the question, and this page drops the row.
     ///
     /// **A row the machine cannot honour is a different thing and is not here.**
-    /// `Acrylic` on a machine with no backdrop and a built-in profile's colour
-    /// are *greyed with a reason*, because the reason is what the reader came
-    /// for ([`Self::available`]); a facility the platform has not got leaves
-    /// nothing to explain, and a sentence explaining it would be this page
-    /// teaching a reader a Windows word on a Mac.
+    /// A Windows too old to know what a backdrop is, and a built-in profile's
+    /// colour, are *greyed with a reason*, because the reason is what the reader
+    /// came for ([`Self::available`]); a facility the platform has not got
+    /// leaves nothing to explain, and a sentence explaining it would be this
+    /// page teaching a reader a Windows word on a Mac.
+    ///
+    /// **`Acrylic` is both questions, and they are asked in this order** (owner
+    /// report and ruling 2026-09-13, §13.32 ⑥). The owner opened the Appearance
+    /// page on the built Mac and read `亚克力 — Folio 在 macOS 上不画这种模糊。`,
+    /// greyed, its picker held at `关`: a row explaining itself to a reader who
+    /// has nothing to decide. The ruling is the one above, applied to a row that
+    /// had been filed under the other rule — off Windows this build has no
+    /// backdrop door at all ([`Capability::WindowBackdrop`]), so the row is not
+    /// there; on Windows it is there, and whether *this* Windows has a backdrop
+    /// is still said on its own line.
     #[must_use]
     pub const fn needs(self) -> Option<Capability> {
         match self {
             Self::ContextMenu => Some(Capability::ExplorerMenu),
             Self::PowerShellOffer => Some(Capability::PowerShellProfile),
             Self::PsReadLine => Some(Capability::PsReadLineModule),
+            Self::Acrylic => Some(Capability::WindowBackdrop),
             Self::OptionSendsAlt => Some(Capability::OptionKey),
             _ => None,
         }
@@ -3603,6 +3615,12 @@ impl SettingsRow {
     /// hunting for a feature they had read about. A focus stop, because a ring
     /// is not an action: what the greying forbids is a control that *appears to
     /// act*, and both the hit test and `activate` refuse this one.
+    ///
+    /// **A reader who could never have read about it is the other case**, and
+    /// it is not this one: a facility the platform has not got takes the row off
+    /// the page before this is asked ([`Self::needs`], §13.32 ⑥), so `Acrylic`
+    /// reaches this line on Windows only and the answer here is about that
+    /// Windows.
     #[must_use]
     pub fn available(self, values: &SettingsValues) -> bool {
         match self {
@@ -4338,11 +4356,13 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
 /// the order impossible to read. [`SettingsRow::needs`] is where each row says
 /// what it is about; this is where the page acts on it.
 ///
-/// **Nothing here can empty a page.** Every category the four conditional rows
+/// **Nothing here can empty a page.** Every category the five conditional rows
 /// belong to keeps unconditional rows under the same heading — General keeps
-/// six, Terminal keeps four — so the heading derivation that walks this list
-/// never meets a run of nothing, and the disclosure above the advanced group is
-/// untouched. `no_page_is_left_with_a_heading_and_no_rows` is that claim.
+/// six, Terminal keeps four, and Appearance keeps the whole of its everyday
+/// group and seven of its eight advanced rows — so the heading derivation that
+/// walks this list never meets a run of nothing, and the disclosure above the
+/// advanced group is untouched.
+/// `no_page_is_left_with_a_heading_and_no_rows` is that claim.
 #[must_use]
 pub fn visible_rows_for(
     platform: bt_platform::HostPlatform,
@@ -4416,9 +4436,12 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // through, how much of the desktop comes through behind it, is that
     // blurred, and does the window stay in front.
     //
-    // Unconditional, unlike `Sidebar`: the two rows a machine may not be able
-    // to honour are greyed rather than dropped, because the reason is what a
-    // reader came for — see `SettingsRow::available`.
+    // Unconditional, unlike `Sidebar`: a row this *machine* may not be able to
+    // honour is greyed rather than dropped, because the reason is what a reader
+    // came for — see `SettingsRow::available`. `Acrylic` is pushed here with
+    // the rest and dropped by `visible_rows_for`'s one filter on a platform
+    // where this build has no backdrop to ask for at all (§13.32 ⑥), which is
+    // the other question and is asked in one place for every row.
     rows.push(SettingsRow::BackgroundImage);
     rows.push(SettingsRow::ImageFit);
     rows.push(SettingsRow::ImageOpacity);
@@ -5038,6 +5061,10 @@ pub struct SettingsValues {
     /// Whether this Windows knows what a system backdrop is
     /// (`bt_platform::system_backdrop_available`). `false` greys the Acrylic row
     /// whole and turns its sentence into the reason.
+    ///
+    /// **Read on Windows only**, because that is the only platform the row is on
+    /// (§13.32 ⑥). Off it the door has no arm, this field answers `false`
+    /// everywhere, and there is no row for the answer to grey.
     pub acrylic_available: bool,
     /// Whether this window's surface is composited with premultiplied alpha —
     /// the thing a translucent ground is made of (`docs/DESIGN.md` §2.3 A2).
@@ -14893,7 +14920,7 @@ mod tests {
     ///
     /// The walk above measures what `description` returns, and `description`
     /// reads the platform this process is running on — so a Mac column added to
-    /// [`Text`] is a sentence no length gate has ever seen. Three of the five
+    /// [`Text`] is a sentence no length gate has ever seen. Three of the four
     /// measured here are *longer* than the Windows sentence they replace
     /// (`Bounces the Dock icon` against `Flashes the taskbar`), which is exactly
     /// the shape of a fault that ships: correct words, one line too many, on a
@@ -14901,22 +14928,25 @@ mod tests {
     ///
     /// Not a sweep, because there is no map from a row to its `Text` and the
     /// Chinese gate below pays for guessing one. These are the rows whose
-    /// sentence has a Mac column, named; a sixth is a line added here.
+    /// sentence has a Mac column, named; a fifth is a line added here.
     ///
-    /// MUTATION: lengthen any of the five Mac sentences past its column and this
+    /// **`Acrylic` was the fifth and is not measured any more** (§13.32 ⑥): the
+    /// row is not on a Mac's page at all, so `DescAcrylicUnavailable` has one
+    /// column again and the sweep that reads it is the Windows one above.
+    ///
+    /// MUTATION: lengthen any of the four Mac sentences past its column and this
     /// names the row.
     #[test]
     fn no_sentence_a_mac_reads_needs_a_fourth_line() {
         use crate::i18n::{Lang, Text};
         use bt_platform::HostPlatform::MacOs;
 
-        const ON_A_MAC: [(SettingsRow, Text); 5] = [
+        const ON_A_MAC: [(SettingsRow, Text); 4] = [
             (SettingsRow::LaunchOpens, Text::DescLaunchOpens),
             (
                 SettingsRow::TurnEndNotifications,
                 Text::DescTurnEndNotifications,
             ),
-            (SettingsRow::Acrylic, Text::DescAcrylicUnavailable),
             (SettingsRow::QuakeHotkey, Text::DescQuakeHotkey),
             (SettingsRow::OptionSendsAlt, Text::DescOptionSendsAlt),
         ];
@@ -16013,11 +16043,17 @@ mod tests {
     /// `Background image` above `Cursor` in `visible_rows` and the last does.
     #[test]
     fn every_page_puts_its_everyday_rows_above_its_advanced_ones() {
+        // **The Windows page, named** (§13.32 ①, and §13.32 ⑥ for the blur row):
+        // this list holds a row a Mac is not offered, so it asks for the list by
+        // platform rather than for whatever list the runner happens to have.
         assert_eq!(
-            flat_rows()
-                .into_iter()
-                .filter(|row| row.advanced())
-                .collect::<Vec<_>>(),
+            visible_rows_for(
+                bt_platform::HostPlatform::Windows,
+                TabLayoutMode::Horizontal
+            )
+            .into_iter()
+            .filter(|row| row.advanced())
+            .collect::<Vec<_>>(),
             [
                 SettingsRow::BackgroundImage,
                 SettingsRow::ImageFit,
@@ -21646,7 +21682,15 @@ mod tests {
     /// gave them, immediately after the pair that says what colour the ground is.
     #[test]
     fn the_ground_rows_follow_the_schemes_in_the_order_they_are_decided() {
-        let rows = visible_rows(TabLayoutMode::Horizontal);
+        // **The Windows page, named** (§13.32 ①): `Acrylic` is one of the six
+        // and a Mac is not offered it (§13.32 ⑥), so this asks for the list by
+        // platform rather than for whatever list the runner happens to have.
+        // What a Mac's page does over the hole is
+        // `the_page_a_mac_reads_closes_up_over_the_blur_row`.
+        let rows = visible_rows_for(
+            bt_platform::HostPlatform::Windows,
+            TabLayoutMode::Horizontal,
+        );
         let ground = [
             SettingsRow::BackgroundImage,
             SettingsRow::ImageFit,
@@ -21700,19 +21744,32 @@ mod tests {
     /// checked by opening the window on a Mac is the build that shipped these
     /// three rows.
     ///
-    /// MUTATIONS: make any of the four facilities answer `true` everywhere and
+    /// **`Acrylic` is the fourth row on this list** (owner report and ruling
+    /// 2026-09-13, §13.32 ⑥). What the owner read on the same Mac, one page
+    /// along, was `亚克力` greyed whole with `Folio 在 macOS 上不画这种模糊。`
+    /// under it and its picker held at `关` — the row explaining itself to a
+    /// reader with nothing to decide. It had been filed under the *other* rule,
+    /// the one `available` answers, because off Windows
+    /// `bt_platform::system_backdrop_available` says `false` the way an old
+    /// Windows does; the ruling is that those are not the same `false`. A
+    /// machine that cannot honour a row keeps the row and gets the reason; a
+    /// platform this build has no backdrop door for has nothing for a reason to
+    /// be about. `Capability::WindowBackdrop` is where that is said once.
+    ///
+    /// MUTATIONS: make any of the five facilities answer `true` everywhere and
     /// the first assertion names it; return `None` from `SettingsRow::needs` for
-    /// one of the three Windows rows and the same assertion names it; take
+    /// one of the four Windows rows and the same assertion names it; take
     /// `OptionKey` off `OptionSendsAlt` and the Windows half goes red, because
     /// that row would then be offered to a keyboard that has no Option key.
     #[test]
     fn a_mac_is_not_offered_a_row_about_a_facility_it_has_not_got() {
         use bt_platform::HostPlatform::{MacOs, Windows};
 
-        const NOT_ON_A_MAC: [SettingsRow; 3] = [
+        const NOT_ON_A_MAC: [SettingsRow; 4] = [
             SettingsRow::ContextMenu,
             SettingsRow::PsReadLine,
             SettingsRow::PowerShellOffer,
+            SettingsRow::Acrylic,
         ];
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             let mac = visible_rows_for(MacOs, layout);
@@ -21737,7 +21794,7 @@ mod tests {
                 "{layout:?}: a Windows keyboard has no Option key"
             );
             // Everything else is on both pages, in the same order, which is what
-            // says the filter took the four rows and nothing else.
+            // says the filter took the five rows and nothing else.
             let expected: Vec<SettingsRow> = windows
                 .iter()
                 .copied()
@@ -21750,10 +21807,165 @@ mod tests {
             sorted_expected.sort_by_key(|row| format!("{row:?}"));
             assert_eq!(
                 sorted_mac, sorted_expected,
-                "{layout:?}: the two pages differ by more than the four rows \
+                "{layout:?}: the two pages differ by more than the five rows \
                  that declare a facility"
             );
         }
+    }
+
+    /// RED — **the page closes up over the row it is not offered** (owner ruling
+    /// 2026-09-13, §13.32 ⑥).
+    ///
+    /// The pin above says the row is off the list; this says the *page* is a
+    /// page without it. A filter that took a row out of the list and left its
+    /// height in the stack would draw a Mac's Appearance page with a hole in the
+    /// advanced group where the blur used to be — and nothing else in this file
+    /// would notice, because every other claim about that row asks what the list
+    /// holds and this one asks where the boxes are.
+    ///
+    /// **Stated as distances from the scrollport's own top edge**, because the
+    /// two layouts are two dialogs: raw coordinates would make this a claim about
+    /// the frame's height as well, which is §7.1.6c-5's business and not this
+    /// ruling's.
+    ///
+    /// MUTATIONS: return `None` from `SettingsRow::needs` for `Acrylic` and the
+    /// second assertion names it; advance the layout's cursor for a row the page
+    /// does not hold and both the row-below assertion and the contiguity walk go
+    /// red; drop the group's verb with the row and the `Reset to defaults`
+    /// assertion does.
+    #[test]
+    fn the_page_a_mac_reads_closes_up_over_the_blur_row() {
+        use bt_platform::HostPlatform::{MacOs, Windows};
+
+        // The Appearance page as this platform's reader meets it, with the
+        // advanced group open — which is where every row this claim is about
+        // stands.
+        fn appearance_on(platform: bt_platform::HostPlatform) -> SettingsLayout {
+            let rows = visible_rows_for(platform, TabLayoutMode::Horizontal);
+            let lines = shortcut_lines();
+            layout_for_menu(
+                SURFACE.0,
+                SURFACE.1,
+                1.0,
+                None,
+                None,
+                content(&rows, &lines),
+                SettingsCategory::Appearance,
+                UNSCROLLED,
+                MENU_UNSCROLLED,
+                &mut measure,
+            )
+            .expect("this window hosts the dialog")
+        }
+        // How far below the cut a row's band begins.
+        fn below_the_cut(placed: &SettingsLayout, row: SettingsRow) -> f32 {
+            placed.row(row).expect("the page holds this row").band[1] - placed.clip[1]
+        }
+        fn listed(placed: &SettingsLayout) -> Vec<SettingsRow> {
+            placed.rows.iter().map(|it| it.row).collect()
+        }
+
+        let windows = appearance_on(Windows);
+        let mac = appearance_on(MacOs);
+        let acrylic = windows
+            .row(SettingsRow::Acrylic)
+            .expect("a Windows reader is offered the blur row")
+            .band;
+        let shed = height(acrylic);
+        assert!(
+            shed > 0.0,
+            "the row the Mac page loses has a height to lose"
+        );
+        assert!(
+            mac.row(SettingsRow::Acrylic).is_none(),
+            "a Mac is being drawn a row about a blur this build does not paint \
+             there"
+        );
+
+        // The same rows in the same order, one shorter.
+        let on_windows = listed(&windows);
+        let expected: Vec<SettingsRow> = on_windows
+            .iter()
+            .copied()
+            .filter(|row| *row != SettingsRow::Acrylic)
+            .collect();
+        assert_eq!(
+            listed(&mac),
+            expected,
+            "the page lost more than the one row"
+        );
+        assert_eq!(mac.rows.len() + 1, windows.rows.len());
+
+        // Nothing above it moved, everything below it came up by exactly its
+        // height, and the row that follows it stands where it began.
+        let at = on_windows
+            .iter()
+            .position(|row| *row == SettingsRow::Acrylic)
+            .expect("the Windows page lists the row");
+        for row in &on_windows[..at] {
+            let moved = below_the_cut(&windows, *row) - below_the_cut(&mac, *row);
+            assert!(
+                moved.abs() < 0.5,
+                "{row:?} stands above the row that left and it moved by {moved}"
+            );
+        }
+        for row in &on_windows[at + 1..] {
+            let moved = below_the_cut(&windows, *row) - below_the_cut(&mac, *row);
+            assert!(
+                (moved - shed).abs() < 0.5,
+                "{row:?} stands below the row that left: it came up by {moved} \
+                 where the row was {shed} tall"
+            );
+        }
+        let began = acrylic[1] - windows.clip[1];
+        let follows = on_windows[at + 1];
+        assert!(
+            (below_the_cut(&mac, follows) - began).abs() < 0.5,
+            "{follows:?} does not begin where the blur row began, which is a \
+             gap the reader would see"
+        );
+
+        // And the stack is a stack on both pages: within one group every band's
+        // foot is the next band's head. The pair the ruling is about —
+        // `Background opacity` and `Always on top` — is one of these.
+        for (platform, placed) in [(Windows, &windows), (MacOs, &mac)] {
+            for pair in placed.rows.windows(2) {
+                if pair[0].row.advanced() != pair[1].row.advanced() {
+                    // The disclosure stands between the two groups and takes its
+                    // own height, which is §7.1.6c-5's and not this claim's.
+                    continue;
+                }
+                assert!(
+                    (pair[1].band[1] - pair[0].band[3]).abs() < 0.5,
+                    "{platform:?}: {:?} and {:?} have {} between them",
+                    pair[0].row,
+                    pair[1].row,
+                    pair[1].band[1] - pair[0].band[3]
+                );
+            }
+        }
+
+        // The group's own verb is still under the group, and it came up with it.
+        let reset = |placed: &SettingsLayout| {
+            placed
+                .reset_advanced()
+                .expect("the open advanced group carries its verb")
+        };
+        let verb_moved = (reset(&windows)[1] - windows.clip[1]) - (reset(&mac)[1] - mac.clip[1]);
+        assert!(
+            (verb_moved - shed).abs() < 0.5,
+            "`Reset to defaults` came up by {verb_moved} where the row it stands \
+             under was {shed} tall"
+        );
+        assert!(
+            (width(reset(&mac)) - width(reset(&windows))).abs() < 0.5,
+            "and it is the same button it was"
+        );
+        let last = mac.rows.last().expect("the page has rows").band;
+        assert!(
+            reset(&mac)[1] >= last[3],
+            "the group's verb has climbed into the rows it acts on"
+        );
     }
 
     /// RED — **no page is left with a heading and nothing under it** (§13.32
@@ -21764,8 +21976,9 @@ mod tests {
     /// facility one platform has not got would draw a heading over empty space
     /// on that platform — the same fault `first_run::Card::open` answers with
     /// "a card with nothing to ask is not shown", said about a page that cannot
-    /// be withheld. Today General keeps six unconditional rows and Terminal
-    /// keeps four, and this is what will notice when that stops being true.
+    /// be withheld. Today General keeps six unconditional rows, Terminal keeps
+    /// four and Appearance keeps all but one of its own (§13.32 ⑥), and this is
+    /// what will notice when that stops being true.
     ///
     /// MUTATION: give every remaining Terminal row a `Capability` that is
     /// Windows-only and the Mac half names the page.
