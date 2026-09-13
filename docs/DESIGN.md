@@ -10310,4 +10310,36 @@ the file, rather than an upload that fails three network hops away.
 `packaging/macos/.gitignore` refuses `*.p8` and `*.p12` at the place they would
 land; nothing in this tree ever opens the key, it hands `notarytool` the path.
 
+**⑪ The icon source — ③'s two facts closed, by drawing the mark at 1024 rather
+than enlarging it.** `make-folio-ico.py` states the mark in units of the square,
+which is why the 16 and the 256 in `folio.ico` are one drawing and not two that
+resemble each other, so the size an icon set wants was never a new picture — only
+that statement resolved once more: `--png` calls the same `render` at 1024 and
+writes `assets/app-icon/folio-1024.png`, and the `.ico` is left alone (rebuilt
+from the edited generator it comes back byte for byte, all 46 316 of them). Size
+reaches the drawing at exactly two points — the fold is widened below 84 pixels
+so a coarse grid cannot swallow it, and the page dot is withheld below 48 — so
+from 84 upwards the 1024 and the 256 are one drawing at two resolutions, and
+box-averaging the 1024 back down to 256 puts 1 524 of 65 536 pixels a level or
+more away from the `.ico`'s own 256, every one of them on an edge (the tile's
+corner arc, the sheet border, the fold, the dot rim) and not one in a flat field
+— which is what a finer coverage estimate looks like and not what a moved
+geometry looks like. `bundle.sh` reads that file because it is the largest PNG in
+the directory, which was already ③'s rule, and 1024 being `icon_512x512@2x`
+every one of the ten slots `iconutil` names is now generated and none is an
+upscale: on the Mac the icon set came out ten files, `Folio.icns` 85 562 bytes
+against the 18 304 of ⑦, and the `icon_512x512@2x` extracted back out of it
+reads 1024 × 1024 with alpha. The `.ico` route is kept rather than deleted,
+because the day the PNG is missing is not the day to find out it stopped working
+— `--icon-fallback` takes it on a tree where the PNG is present, which is the
+only way it will ever be run again, and it still produces the seven slots and
+exactly the 18 304 bytes ⑦ recorded. Both were measured without building
+anything, because the icon step is now a function and `--icons-only <path.icns>`
+is the whole of it: no binary, no plist, no cargo. What holds the file to what
+the script expects is a Windows test —
+`bt_winres::tests::the_macos_icon_source_is_the_1024_square_the_bundle_script_picks`,
+which reads the PNG's own header for 1024 × 1024 and colour type 6, reads the
+directory to check this is the largest PNG in it, and reads the script for the
+glob that finds it.
+
 *(本节英文,待中文文案改写。)*

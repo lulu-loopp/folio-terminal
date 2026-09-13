@@ -1,6 +1,6 @@
 # Where the design files came from
 
-43 tracked files in `docs/design/`, plus the four in `assets/app-icon/` that the
+43 tracked files in `docs/design/`, plus the five in `assets/app-icon/` that the
 build reads — the mark and the scripts that draw it left this directory when the
 tree was rearranged, and their provenance is the same question, so it is answered
 here rather than in a second document. Each file is one of three things — **own**
@@ -73,14 +73,16 @@ wordmark round.
 
 ## The application icon
 
-The shipped mark and the two scripts that draw it live in `assets/app-icon/`,
-which is the directory the build reads; the round that was run before it was
+The shipped mark, the second rendering of it that the macOS bundle reads, and
+the two scripts that draw them live in `assets/app-icon/`, which is the
+directory the build reads; the round that was run before it was
 kept is `app-icon/` here.
 
 | File | | |
 |---|---|---|
 | `assets/app-icon/folio.ico` | **generated** | **The icon in the binary** (user ruling, 2026-09-06 — kept over the five candidates below), written by the script beside it out of geometry it holds itself. No input file, no traced artwork. `crates/bt-app/build.rs` links it into `folio.exe`, and `crates/bt-app/src/first_run.rs` embeds the same file for the first-run card's header. |
-| `assets/app-icon/make-folio-ico.py` | **own** | Draws it, and is the source of record for the mark. Standard library only. |
+| `assets/app-icon/folio-1024.png` | **generated** | **The icon source the macOS bundle is built from**, written by the script above out of the same geometry, at a size no `.ico` entry reaches: `python assets/app-icon/make-folio-ico.py --png`. Not an upscale of anything and not a second drawing — the generator states the mark in units of the square and this is that statement resolved at 1024. `scripts/release/macos/bundle.sh` resamples every slot of `Folio.icns` from it, 1024 being `icon_512x512@2x`, the largest slot an icon set has. |
+| `assets/app-icon/make-folio-ico.py` | **own** | Draws both of the files above, and is the source of record for the mark. Standard library only. |
 | `assets/app-icon/make-msix-logos.py` | **own** | Draws the three PNGs `packaging/msix/AppxManifest.xml` names, at the sizes it names, by importing the script above. It owns no geometry of its own. Standard library only. |
 | `app-icon/candidates/{a..e}.svg` | **own** | **Retired 2026-09-06**, none chosen. Five directions for a replacement mark, hand-set in plain SVG. Nothing traced, no font outlines converted, no external resources — the `∫` in `b.svg` is stroked geometry and not a glyph. |
 | `app-icon/candidates/{a..e}.ico` | **generated** | **Retired 2026-09-06.** Each of those five at nine sizes, written by `make-ico.py` from the SVG beside it. |
