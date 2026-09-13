@@ -627,14 +627,10 @@ rehearsal and the release page is made by a person from the signed machine.
 
 ## macOS
 
-There is no macOS lane in `release.yml` yet — that is M5-4's. What exists is the
-four scripts a lane would call, which M5-1 wrote and proved on the Mac with an
-ad-hoc signature; the steps that need the Developer ID private key or Apple's
-notary service are the owner's, from a session with the login keychain open.
-They are written out in order in **`packaging/macos/README.md`**, which is the
-one place that sequence lives so that it cannot drift from the scripts beside
-it. The rest of this section is the version rule, which is P-2's and is what the
-bundle step rests on.
+**This section is written by M5-6 (`feature/macos-docs`).** M5-1 and M5-4
+put the signing sequence and the release lane's secrets in
+`packaging/macos/README.md`; they arrive here from there, in one document
+rather than two.
 
 `packaging/macos/Info.plist.in` is a **template**, not a plist. Its
 `CFBundleShortVersionString` and `CFBundleVersion` are both the literal
