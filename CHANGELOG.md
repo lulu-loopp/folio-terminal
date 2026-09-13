@@ -72,6 +72,15 @@ All notable changes to Folio are recorded here. The format follows
   in a dialog keep answering for themselves as before, and `⌘C` and `⌘V` are
   unchanged.
 
+- **`REMOTES` on the Git page no longer sits under a highlight nobody put
+  there.** Opening the sub-group left a filled block behind the word that stayed
+  after the pointer had gone — it was the keyboard's own highlight, which a
+  header should never have worn, and the pointer's could land on the wrong row
+  besides, because the list is rebuilt as the repository changes while your hand
+  holds still. Group headers now say the same thing the `Files | Git` switch
+  above the column says: dim at rest, the word and its triangle brightening
+  under the pointer, and no block at any time. The whole row is still what you
+  press.
 - Keep focus cards on the same content when resizing, and make Alt+wheel respond immediately when reversing at the oldest content.
 - **On a Mac, tabs now take the whole width of the title bar.** The tab strip was setting aside room for four window buttons on a window that carries one — macOS draws minimise, zoom and close at the other end of the bar — so the tabs were squeezed to their profile marks, their names hidden, with a wide empty band before the settings gear. Seven tabs in a 934-point window now stand 91 points wide with their names showing instead of 72 without.
 - **Every picker in Settings that offers profiles now shows their marks.** The
