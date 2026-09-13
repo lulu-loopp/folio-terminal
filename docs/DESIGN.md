@@ -9670,6 +9670,287 @@ io.github.lulu-loopp.folio 0.3.0
 
 **⑬ `ci.yml` 每次推送都解析这四个脚本。** `core-macos` 是那个文件里唯一在它们所跑的那个平台上的 job,`sh -n` 读语法、什么都不跑,而它花一秒钟。没有它,一个发布脚本里的语法错误就要由一个 tag 来发现——而那正是 `release.yml` 顶上那条注释所针对的失败方式。
 
+### 13.45 T-MAC-CMDCLICK: 指针上的 Ctrl 在 mac 上是 ⌘——Control+点留给右键(`crates/bt-app/src/{input,main,i18n}.rs`)
+
+**This is 13.45 and not 13.42.** 13.40 (M2-7) and 13.41 (M5-1) are on `main`;
+13.42, 13.43 and 13.44 are held by tickets of this port that were in flight
+beside this one. This section takes the next number no branch has claimed.
+
+**① One key, one function, six doors.** The clicking rule of this product is a
+user ruling of 2026-08-20 and it is one sentence: **点=留窗内,Ctrl+点=交出去** —
+a plain click asks for whatever this window can do with a reference, and the
+modified click hands the same reference to the system. `ClickIntent` is that
+sentence as a type, and the wheel over a hosted page borrows the same modifier
+for zoom (方案 §0's five extras). What none of those rulings says is *which* key
+it is, because on the machine they were written on there was only one candidate.
+
+On a Mac there are two, and Control is not the one. That desk spends Control on
+the **secondary click**: it is how a trackpad and a one-button mouse raise a
+context menu, and it has been since before this product's oldest ruling. A build
+that also spent Control on "hand this reference over" would answer one press
+with two verbs, and the reader would get whichever arm of this file happened to
+be asked first. M5-6's sweep found the readings still standing — `Ctrl`+click and
+`Ctrl`+wheel were raw `control_key()` on that machine — and called it a live
+collision, which it is.
+
+So there is one function and the six doors ask it:
+
+```rust
+pub(crate) fn pointer_chord_held_on(modifiers: ModifiersState, platform: HostPlatform) -> bool {
+    is_command_chord_on(modifiers, platform)
+}
+```
+
+**It delegates rather than matching `HostPlatform` a second time**, and that is
+the design and not a shortcut. The modifier these rulings spend is *this
+application's* — the one that means "I am talking to Folio and not to the
+program in the pane" — and M1-7 already decided which key that is on each
+keyboard (§13.13 ①). Two matches for one dialect is how a dialect comes to be
+two: a later ticket that moved one of them would leave a window whose clicks and
+whose chords disagreed about what Command means.
+
+The six, and what each spends the key on:
+
+| door | the gesture |
+|---|---|
+| `press_preview_text` | a press on a rendered page — the drag carries what the press meant, and the link is answered when the press turns out not to have travelled |
+| `press_graph_row` | the compare gesture on a commit row (D6) |
+| `begin_local_selection` | a press in a pane, on an OSC 8 hyperlink **and** on an inline picture — two readings, now one |
+| `terminal_link_grasp` | the pointing finger over a terminal link |
+| `preview_link_grasp` | the same finger, on the other surface links are drawn on (§7.1.5g ⑦) |
+| `scroll_web_page` | `Ctrl`/`⌘`+wheel zooms a hosted page |
+
+**And they are struck against the hand.** What each is handed is
+`WindowRuntime::modifiers_held` and not `modifiers` — §13.33 ①'s ruling, said
+again one device along: a gesture composes no character, so a policy about what
+a key *types* has no business deciding what a click *does*. Today the two states
+carry the same Control and the same Command bit, because `effective_modifiers`
+takes out `Alt` and nothing else; this is written down as the reading rather
+than as a repair, so that the next key a text policy speaks for does not
+silently take six gestures with it.
+
+**Windows is unchanged byte for byte.** `pointer_chord_held_on` answers
+`control_key()` there, which is what each of the six read before. There is no
+CHANGELOG line, and that is the pin: nothing a reader on this platform can
+press behaves differently.
+
+**② Control+click is the secondary click, and AppKit does not make it one for
+you.** The ticket asked whether winit reports a control-click as a right button.
+It does not, and the reason is in one line of the backend: winit reads the
+button off `NSEvent`'s `buttonNumber` (`macos/view.rs:1090`), a control-click is
+delivered to `mouseDown:` with `buttonNumber` 0, and so the window sees a plain
+left press with Control in the flags. AppKit's own contextual-menu machinery
+runs beside that, through `menuForEvent:` on a view that has a menu — and
+winit's view has none, and M1-7 took the default menu away besides (§13.13 ⑤).
+
+Measured on the machine, on this branch's own window (macOS 26.6.2, Apple M4,
+backing scale 2), by posting one `CGEvent` left press carrying `maskControl` at
+a pane:
+
+```
+mouse_input state=Pressed button=Left pointer=1200,1040 metrics_scale=2 ... route=none
+secondary_click state=Pressed reported=Left taken_as=Right
+```
+
+The first line is winit's reading and the second is this window's, and the
+pane's own menu came up on the glass behind them — `复制` / `粘贴` / `全选` /
+`查找… Cmd+F` / `清屏` / `清除回滚…` / `重启 shell…` / `拆分并运行` /
+`在文件夹里新建终端…` / `复制窗格 Shift+Cmd+U` / `把窗格移到新窗口`, read out of
+the frame the window itself dumped. The release carried the flag too and was
+translated with it.
+
+So the translation is this window's to make, and it is made **once**:
+
+```rust
+pub(crate) fn pressed_button(reported, modifiers, platform) -> MouseButton
+```
+
+— the platform's rule, held for the length of the gesture by
+`pressed_button_of_gesture` (below) — at `mouse_input`, above every router and
+below the trace's first station. Above every router because a second place that
+decided what a press was would be a second answer — `effective_modifiers`' argument, one device along. Below the
+station because the forensics have to record what the platform said, not what
+this window made of it; a line is written beside the translation whenever it
+fires, so `BT_MOUSE_TRACE` carries both readings.
+
+**Nothing downstream is asked and nothing downstream changes.** The pane's menu,
+the tab's menu, the page's menu and the mouse-forwarding table all go on reading
+`MouseButton::Right`, which is the whole point: the two ways a Mac makes a
+secondary press become one press here, and this window's rule for it is written
+down once. That rule is `right_press_raises_terminal_menu` — the program's while
+it is tracking the mouse, ours otherwise — so **a control-click inside a `vim`
+is forwarded to `vim` as a right button**, where before this ticket it was
+forwarded as a left button with the Control bit set. That is a change and it is
+the intended one: a Mac makes its secondary press two ways and a terminal that
+told a child they were different presses would be telling it something no other
+application on the desk says.
+
+**The release is latched, because Control is a key and a button is a button.**
+Nothing makes a reader lift them in order, and a hand that lets Control go first
+sends a plain `Left` release after a press this window took as `Right`. Most of
+the window does not care — every arm that answers a secondary press asks
+`state == Pressed`, and the one release arm that latches, a local selection
+drag, was never armed because the press that would have armed it was a right
+press. **The forwarding path does care.** `route_forwarded_mouse_button`'s
+release arm already states the rule — *the release is owed to the press that was
+forwarded, so it is spelled the way that press was spelled* — and spells the
+*encoding* off its own latch for exactly that reason; the button came from the
+argument, so a mouse-tracking program would have been handed a right press and a
+left release it could pair with nothing.
+
+So one `bool` travels with the hand — `WindowRuntime::secondary_press`, written
+and read only by `input::pressed_button_of_gesture` at the same one door — and
+it is this window's smallest statement of the sentence `MouseRoute` and
+`DragLatch` already make: a gesture belongs to the press that began it. Only the
+left button is ever latched, because it is the only one the platform rule can
+rewrite, so a middle-click in the middle of anything cannot disturb it; and on
+Windows every press writes `false` and every release reads `false`, which is
+what the whole function is on that platform: the identity.
+
+**③ The strings.** Two clauses ride on the hovered link's status tag and both
+name the gesture:
+
+| | Windows | macOS |
+|---|---|---|
+| `HyperlinkControlOpensExternally` | ` · Ctrl+click opens in default app` | ` · ⌘+click opens in default app` |
+| `HyperlinkControlReveals` | ` · Ctrl+click shows it in Explorer` | ` · ⌘+click shows it in Finder` |
+
+The first had no platform column at all and takes one here. The second had one
+for the **program name only**, and §13.32 ② wrote down why the modifier stayed
+put: *a clause that said ⌘ would be this window describing a press it does not
+answer*. That reasoning is not overturned, it is satisfied — the press now
+answers ⌘, so the clause says ⌘. The rule was always "name the key the press
+reads", and this ticket moved the press.
+
+`no_macos_column_promises_a_control_pointer_gesture` sweeps the whole table for
+`Ctrl+click`, `Ctrl+点击`, `Ctrl+wheel` and `Ctrl+滚轮` in either macOS column, so
+a third clause written later cannot arrive with the Windows spelling copied into
+it. There is no settings description to change: the one setting row that names a
+wheel gesture names `Alt+wheel` (§7.21, §13.33 ①), which is `⌥` on that keyboard
+and a different ticket's sentence.
+
+**Chinese.** Both macOS columns carry the English and are listed in
+`Text::CHINESE_PENDING`, per the copy ruling of 2026-09-07. What is owed is the
+same two clauses with `⌘` in them and 访达 in the second.
+
+**④ What the ticket was told that is not so.** It named "the terminal's
+`Ctrl`+wheel zoom". There is no such gesture and there never has been: the only
+`Ctrl`+wheel in this window is `scroll_web_page`'s, which zooms a **hosted
+page**, and the comment standing over it says why it was free to take —
+*this product has no type-size zoom bound to a wheel at all; a picture zooms on
+the bare wheel*. The terminal's own type size is a settings row —
+`Appearance ▸ Font size` — with no chord and no gesture at all. Nothing was
+changed to make that true; it already was.
+
+**⑤ Two readings of Control that stay.** Neither is a pointer's.
+
+* **The mouse report's modifier bits** (`input::sgr_mouse_bytes`,
+  `input::mouse_bytes`). A forwarded press carries `4·shift + 8·alt +
+  16·control`, and that `control` is the **child's** Control — the same key
+  M1-7 ruled belongs to the program in the pane (§13.13 ①). A program that
+  draws a menu on `Ctrl`+click of its own must go on seeing Control there.
+* **The player's five transport keys** (`preview_browse_key`'s guard). It asks
+  whether Space and the arrows arrive bare, which is a question about a
+  keyboard.
+
+`no_other_door_reads_the_raw_control_key_for_a_gesture` names the survivors in
+`main.rs` one by one, so a seventh pointer door written the old way lands in that
+list and fails on a Windows workstation.
+
+**⑥ The trip.**
+
+macOS 26.6.2, Apple M4, a backing-scale-2 display; a debug build of this
+branch inside a throwaway bundle with an identifier of its own
+(`io.github.lulu-loopp.folio.cmdclick`) and an isolated `HOME` exported by a
+`CFBundleExecutable` wrapper script, because `LSEnvironment` cannot set `HOME`
+(§13.31 ⑧(d)). **Pointer only** — no key was posted and nothing was written to
+the pasteboard — and the fixture, an OSC 8 hyperlink naming a folder, was
+written to the pane's own tty by the shell's rc file for the same reason. The
+window was stood at `40,40 1180x740` through the seeded session, away from the
+panels §13.39 found in the middle of that desk, and the desk was asked what
+covered the point before anything was posted at it: `OVER … owner=FolioCC …
+rect=40,40 1180x740`, and nothing else.
+
+The link's cell was solved out of the window's own grid: two plain presses each
+name a row and a column in the trace, which gives the cell — 20 × 10 points at
+this font — and the link's own row was then read off the window's photograph,
+because the origin the two presses implied was one row out.
+
+| # | posted at the link's cell | what the window wrote down |
+|---|---|---|
+| 1 | a bare left press | `begin_local_selection … origin=1,7 control=0 hyperlink=Some(HyperlinkHit { uri: "file:///…/pages/sub", … })`, then `activate_hyperlink control=0 … arm=None` |
+| 2 | the same press with `⌘` held | `begin_local_selection … origin=1,7 control=1 hyperlink=Some(…)`, then `activate_hyperlink control=1 … arm=Blocked` |
+| 3 | a left press on the pane with Control held | `secondary_click … reported=Left taken_as=Right` on the press **and on the release**, and the pane's own menu on the glass at the pointer — thirteen rows, `复制` through `把窗格移到新窗口`, with `Cmd+F` and `Shift+Cmd+U` beside two of them |
+| 4 | a bare left press off the menu | no `secondary_click` line, and the frame's labels are back to the tab's name alone |
+
+**Rows 1 and 2 are the ticket, and they are one thing apart from nothing.** The
+same link, the same cell, and the only difference is the key under the hand:
+`control=0` bare and `control=1` under `⌘`. Before this ticket both of those
+read `0`, because the field they read is Control and no Mac keyboard was putting
+Control there.
+
+**Row 3 is the collision, closed.** Before it, that press began a selection.
+
+**What rows 1 and 2 do not show is a folder arriving in the Finder, and the
+reason is a defect this trip found rather than one it made.**
+`arm=Blocked` and `arm=None` are the two halves of §7.1.5g's table being taken —
+`Blocked` is what the System half answers about a target it will not hand over,
+`None` is the Here half's silence — so the modifier reached the table and split
+it, which is the whole of what changed here. Neither half then reached a disk:
+`path=unparsed` on both lines is `bt_platform::file_uri_to_path` answering
+`None`. That function is a **Windows path parser on every host**, and says so in
+its own comment; it admits a drive-rooted path or a UNC share and nothing else,
+so a `file:///Users/…` URI is refused. **Every `file:` reference in a pane is
+therefore inert on a Mac today, under both modifiers** — a plain click opens
+nothing, and the hovered tag draws the URI with no clause after it, which is the
+same fact one surface up (③'s strings could not be photographed for that
+reason). It is named here and not repaired here: what a POSIX `file:` URI may
+become, and what `may_read_unasked` and `validate_openable_path` should then say
+about it, is a port ticket of its own and not a line in a pointer's modifier.
+
+**Two smaller things the trip is entitled to say.** The `⌘`-held hover raised
+the key-hint card (§7.1.5e′) with the **Mac** column on it — `Cmd T 新建标签`,
+`Cmd Q 退出`, `Cmd , 设置` — so M1-7's dialect is on the glass beside this
+ticket's gesture. And the Finder window count was `0` before the trip, `0` after
+every press and `0` at the end: nothing was left standing on the owner's desk,
+and every process ended was one this trip started, by the pid it wrote down.
+
+**And `⌘`+wheel was not driven.** The one wheel gesture this modifier has is the
+hosted page's zoom, and the session document that would have put a page under
+the pointer — a split with a preview pane in it — was not restored: the window
+came up with its default single pane and its default rectangle instead. That is
+a second thing this trip found and did not chase. So that door is held by the
+Windows red gates and by its source pin, and by nothing on the machine.
+
+**⑦ The red gates, and which machine each runs on.** All of them run on Windows,
+which is `host_platform()`'s whole argument for being a value.
+
+* `the_pointer_chord_is_control_here_and_command_on_a_mac` — both platforms,
+  both modifier states, and the bare and Shift readings beside them. Mutation:
+  answer `control_key()` unconditionally.
+* `the_pointer_and_the_keyboard_spell_the_applications_modifier_the_same_way` —
+  six modifier states on two platforms, holding the delegation.
+* `control_click_is_the_secondary_click_only_on_a_mac` — the translation on both
+  platforms, on the left button and on the four that are never rewritten.
+  Mutation: drop the platform guard and a Windows `Ctrl`+click stops handing a
+  link over and raises the pane's menu instead.
+* `a_release_is_spelled_the_way_its_own_press_was` — the latch, with Control
+  gone by the time the button comes up. Mutation: answer the platform rule again
+  on the release arm instead of reading the latch.
+* `one_field_remembers_which_press_is_under_the_hand` — one writer, one reader,
+  and both at the one door.
+* `every_pointer_door_reads_the_platforms_hand_over_modifier` and
+  `no_pointer_door_still_reads_control_by_name` — the six doors by signature,
+  read as text. Two asserts and not one, because a door can gain the call and
+  keep the old reading beside it, which is a door that answers twice.
+* `no_other_door_reads_the_raw_control_key_for_a_gesture` — the sweep ⑤ names.
+* `the_secondary_click_is_settled_once_and_above_every_router` — one call, above
+  the first `return`, below the trace station.
+* `the_hovered_links_clauses_name_the_platforms_own_modifier` and
+  `no_macos_column_promises_a_control_pointer_gesture` — ③.
+
+*(本节英文,待中文文案改写。)*
+
 ### 13.46 M6-2: 干净机怎么来——一个新用户账户加一台 GitHub 的跑器,虚拟机写明不取(`docs/RELEASING.md`、`docs/plans/port/m6-1-checklist.md`(新)、`.github/workflows/release.yml`)
 
 **取 13.46。** §13.44 由在飞的 M5-6 占着,§13.45 归在飞的 T-MAC-CMDCLICK;本节取下一个

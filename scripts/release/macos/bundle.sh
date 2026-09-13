@@ -265,6 +265,19 @@ echo "  icon   $icon"
 
 # `Contents/Info.plist` — 1 above. `-q` so that cargo's progress does not reach
 # the file; the renderer prints the document on stdout and nothing else.
+# `rust-toolchain.toml` pins the Windows triple (docs/DESIGN.md §13.5: the pin
+# is the version, not the host), and rustup refuses a channel whose triple is
+# not this machine's. Off Windows the same version on this host's own triple is
+# the toolchain every Mac lane here already exports; derive it once when the
+# caller has not.
+if [ -z "${RUSTUP_TOOLCHAIN:-}" ] && [ "$(uname -s)" = Darwin ]; then
+	version=$(sed -n 's/^channel = "\([0-9][0-9.]*\)-.*/\1/p' "$repo/rust-toolchain.toml")
+	arch=$(uname -m)
+	[ "$arch" = arm64 ] && arch=aarch64
+	RUSTUP_TOOLCHAIN="$version-$arch-apple-darwin"
+	export RUSTUP_TOOLCHAIN
+	echo "bundle.sh: toolchain $RUSTUP_TOOLCHAIN (this host's triple at the pinned version)"
+fi
 (cd "$repo" && cargo run -q --locked -p bt-winres --bin render-info-plist) >"$app/Contents/Info.plist"
 
 # `Contents/MacOS/folio` — the name `CFBundleExecutable` in the template gives.

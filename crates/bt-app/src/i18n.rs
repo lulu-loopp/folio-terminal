@@ -4469,23 +4469,35 @@ impl Text {
                 "macOS keeps some combinations for itself. One that never reaches Folio cannot be recorded.",
                 "macOS 会自己截走一部分组合键；始终到不了框里的，这里录不到",
             ),
-            Self::HyperlinkControlOpensExternally => pick(
+            // **The modifier moves too, now that the press moved**
+            // (T-MAC-CMDCLICK, §13.45 ②). This clause names the gesture that
+            // hands a hovered reference to the system, and the key that gesture
+            // reads is `input::pointer_chord_held` — `Ctrl` here, `⌘` on a Mac.
+            // So the string takes a platform column it did not need before.
+            Self::HyperlinkControlOpensExternally => pick_platform(
                 lang,
+                platform,
                 " · Ctrl+click opens in default app",
                 " · Ctrl+点击用默认程序打开",
+                " · ⌘+click opens in default app",
+                // zh: pending opus46
+                " · ⌘+click opens in default app",
             ),
-            // **`Ctrl` on both, and only the program name moves** (§13.32 ②):
-            // the modifier this clause promises is the one the press actually
-            // reads (`window.modifiers.control_key()`), which is the same key on
-            // either keyboard. A clause that said ⌘ would be this window
-            // describing a press it does not answer.
+            // **`Ctrl` on Windows and `⌘` on a Mac** (§13.45 ②), which is the
+            // reverse of what §13.32 ② ruled here — and for the reason §13.32 ②
+            // gave: the modifier this clause promises must be the one the press
+            // actually reads. When it was written the press read
+            // `window.modifiers.control_key()` on both machines, so `Ctrl` was
+            // the true clause. The press now reads the platform's own hand-over
+            // modifier, so `⌘` is.
             Self::HyperlinkControlReveals => pick_platform(
                 lang,
                 platform,
                 " · Ctrl+click shows it in Explorer",
                 " · Ctrl+点击在资源管理器中显示",
-                " · Ctrl+click shows it in Finder",
-                " · Ctrl+点击在访达中显示",
+                " · ⌘+click shows it in Finder",
+                // zh: pending opus46
+                " · ⌘+click shows it in Finder",
             ),
             Self::RowCopyOnSelect => pick(lang, "Copy on select", "选中即复制"),
 
@@ -5511,13 +5523,20 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 1] = [
+    const CHINESE_PENDING: [(Self, HostPlatform); 3] = [
         // zh: pending opus46 — the macOS column of the card a local file raises
         // when the engine would not take this window's rules (M4-3, §13.38 ②).
         // The Windows column beside it has had its Chinese since W2; what is
         // owed is the same sentence about an engine that has no version to be
         // behind.
         (Self::WebFailGuardsSay, HostPlatform::MacOs),
+        // zh: pending opus46 — the macOS columns of the hovered link's two
+        // clauses (T-MAC-CMDCLICK, §13.45 ②). Both Windows columns keep the
+        // Chinese they have had since the overlay was written; what is owed is
+        // the same two clauses with `⌘` in them, and the Finder's own name in
+        // the second.
+        (Self::HyperlinkControlOpensExternally, HostPlatform::MacOs),
+        (Self::HyperlinkControlReveals, HostPlatform::MacOs),
     ];
 }
 
@@ -8105,6 +8124,77 @@ mod tests {
                     "{entry:?} was never translated on {platform:?} — it says \
                      {english:?} in both columns"
                 );
+            }
+        }
+    }
+
+    /// RED GATE (T-MAC-CMDCLICK, §13.45 ②) — **the hovered link's two clauses
+    /// name the key the press actually reads, on each platform.**
+    ///
+    /// §13.32 ② put these clauses on `Ctrl` for both machines and gave the
+    /// reason: a clause that said `⌘` would have been this window describing a
+    /// press it did not answer. The press moved, so the clause does — and the
+    /// reason is the same one, which is why this pin is written as the two
+    /// halves of it rather than as two string comparisons.
+    ///
+    /// MUTATION: leave either macOS column on `Ctrl+click` and this goes red.
+    #[test]
+    fn the_hovered_links_clauses_name_the_platforms_own_modifier() {
+        for entry in [
+            Text::HyperlinkControlOpensExternally,
+            Text::HyperlinkControlReveals,
+        ] {
+            let windows = entry.on(Lang::English, HostPlatform::Windows);
+            assert!(
+                windows.contains("Ctrl+click") && !windows.contains('⌘'),
+                "{entry:?} on Windows spends Control, which is what the press \
+                 reads there: {windows:?}"
+            );
+            for lang in [Lang::English, Lang::Chinese] {
+                let mac = entry.on(lang, HostPlatform::MacOs);
+                assert!(
+                    mac.contains("⌘+click"),
+                    "{entry:?} on macOS must name the key `pointer_chord_held` \
+                     answers there: {mac:?}"
+                );
+                assert!(
+                    !mac.contains("Ctrl"),
+                    "{entry:?} on macOS still promises Control, which that desk \
+                     spends on the secondary click: {mac:?}"
+                );
+            }
+        }
+        // And the program each clause names is still the platform's own.
+        assert!(
+            Text::HyperlinkControlReveals
+                .on(Lang::English, HostPlatform::Windows)
+                .contains("Explorer")
+        );
+        assert!(
+            Text::HyperlinkControlReveals
+                .on(Lang::English, HostPlatform::MacOs)
+                .contains("Finder")
+        );
+    }
+
+    /// PIN (§13.45 ②) — **no shipped string promises `Ctrl`+click or
+    /// `Ctrl`+wheel on a Mac.**
+    ///
+    /// The sweep the two asserts above cannot make: a third clause written
+    /// later, in a settings description or a tip, with the Windows spelling
+    /// copied into its macOS column.
+    #[test]
+    fn no_macos_column_promises_a_control_pointer_gesture() {
+        for entry in Text::ALL {
+            for lang in [Lang::English, Lang::Chinese] {
+                let mac = entry.on(lang, HostPlatform::MacOs);
+                for gesture in ["Ctrl+click", "Ctrl+点击", "Ctrl+wheel", "Ctrl+滚轮"] {
+                    assert!(
+                        !mac.contains(gesture),
+                        "{entry:?} promises {gesture:?} on a Mac, where the pointer \
+                         spends ⌘ and Control is the secondary click: {mac:?}"
+                    );
+                }
             }
         }
     }
